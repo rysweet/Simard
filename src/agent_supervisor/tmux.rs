@@ -131,7 +131,7 @@ fn default_cargo_target_for_worktree(
 /// 1. Always-set vars seeded from `config`:
 ///    - `SIMARD_AGENT_NAME`        = `config.agent_name`
 ///    - `SIMARD_SUBORDINATE_DEPTH` = `config.current_depth + 1`
-///    - `CARGO_BUILD_JOBS`         = `"4"` (issue #373 OOM guard)
+///    - `CARGO_BUILD_JOBS`         = `cargo_jobs_from(SIMARD_CARGO_JOBS)` (issues #373, #2199 OOM guard)
 /// 2. `CARGO_TARGET_DIR` honors a `parent_env` override; otherwise defaults
 ///    to a **per-worktree** path so concurrent engineers never share one
 ///    cargo target dir (which would deadlock cargo's file lock or corrupt
@@ -159,16 +159,23 @@ pub fn compute_tmux_env<I>(config: &SubordinateConfig, parent_env: I) -> Vec<(St
 where
     I: IntoIterator<Item = (String, String)>,
 {
+    let parent_pairs: Vec<(String, String)> = parent_env.into_iter().collect();
+
+    // Resolve CARGO_BUILD_JOBS from SIMARD_CARGO_JOBS in parent env (issues #373, #2199).
+    let simard_jobs_override = parent_pairs
+        .iter()
+        .find(|(k, _)| k == "SIMARD_CARGO_JOBS")
+        .map(|(_, v)| v.as_str());
+    let cargo_jobs = crate::cargo_jobs::cargo_jobs_from(simard_jobs_override);
+
     let mut tmux_env: Vec<(String, String)> = vec![
         ("SIMARD_AGENT_NAME".to_string(), config.agent_name.clone()),
         (
             "SIMARD_SUBORDINATE_DEPTH".to_string(),
             (config.current_depth + 1).to_string(),
         ),
-        ("CARGO_BUILD_JOBS".to_string(), "4".to_string()),
+        ("CARGO_BUILD_JOBS".to_string(), cargo_jobs),
     ];
-
-    let parent_pairs: Vec<(String, String)> = parent_env.into_iter().collect();
 
     let cargo_target = parent_pairs
         .iter()

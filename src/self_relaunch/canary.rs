@@ -23,6 +23,7 @@ pub fn build_canary(config: &RelaunchConfig) -> SimardResult<PathBuf> {
         .arg(target_dir)
         .arg("--manifest-path")
         .arg(config.manifest_dir.join("Cargo.toml"))
+        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs())
         .output()
         .map_err(|e| SimardError::BridgeSpawnFailed {
             bridge: "canary-build".to_string(),

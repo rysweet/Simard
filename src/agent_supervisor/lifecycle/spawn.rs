@@ -45,8 +45,8 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
             "SIMARD_SUBORDINATE_DEPTH",
             (config.current_depth + 1).to_string(),
         )
-        // Limit concurrent cargo parallelism per agent to prevent OOM (issue #373).
-        .env("CARGO_BUILD_JOBS", "4")
+        // Limit concurrent cargo parallelism per agent to prevent OOM (issues #373, #2199).
+        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs())
         .current_dir(&config.worktree_path);
     // Issue #1197: per-engineer git worktrees would otherwise force a
     // cold cargo rebuild (incl. lbug, ~40min) every spawn. Share one

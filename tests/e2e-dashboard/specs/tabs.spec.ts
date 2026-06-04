@@ -11,6 +11,9 @@ const ALL_TABS = [
   'thinking',
   'workboard',
   'chat',
+  'brain-failures',
+  'merge-decisions',
+  'pr-readiness',
 ] as const;
 
 // Mock all API endpoints so tabs render without a live backend
@@ -148,6 +151,27 @@ async function mockAllApis(page: import('@playwright/test').Page) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({ nodes: [], edges: [] }),
+    }),
+  );
+  await page.route('**/api/merge-judge', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ decisions: [], persistence_available: false, persistence_reason: 'mock', summary: 'No decisions', timestamp: new Date().toISOString() }),
+    }),
+  );
+  await page.route('**/api/prs', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ prs: [], summary: 'No open PRs', timestamp: new Date().toISOString() }),
+    }),
+  );
+  await page.route('**/api/brain-failures', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ failures: [], summary: 'No failures', timestamp: new Date().toISOString() }),
     }),
   );
 }
