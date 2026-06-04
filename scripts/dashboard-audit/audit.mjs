@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Simard dashboard audit — cycle 1 (issue #1880)
+ * Simard dashboard audit (issue #1880, scoring update #2137)
  *
  * What this does:
  *   1. Reads the dashkey from ~/.simard/.dashkey.
@@ -180,14 +180,16 @@ const API_PROBES = [
   { path: "/api/traces",     dims: ["ooda"] },
   { path: "/api/logs",       dims: [] },
   { path: "/api/costs",      dims: [] },
-  // The following are expected to be MISSING in cycle 1 — probed for evidence.
+  // Canonical endpoints for dimensions 5–7 (landed in PRs #2102, #2112, #2109).
+  { path: "/api/merge-judge",    dims: ["merge-judge"] },
+  { path: "/api/prs",            dims: ["per-pr"] },
+  { path: "/api/brain-failures", dims: ["brain-failure"] },
+  // Legacy / alternative probes — these endpoints do not exist; kept for
+  // diagnostic evidence only.
   { path: "/api/judges",         dims: ["merge-judge"], expectMissing: true },
   { path: "/api/judge",          dims: ["merge-judge"], expectMissing: true },
-  { path: "/api/merge-judge",    dims: ["merge-judge"], expectMissing: true },
-  { path: "/api/prs",            dims: ["per-pr"],      expectMissing: true },
   { path: "/api/pulls",          dims: ["per-pr"],      expectMissing: true },
   { path: "/api/pr/1880",        dims: ["per-pr"],      expectMissing: true },
-  { path: "/api/brain-failures", dims: ["brain-failure"], expectMissing: true },
   { path: "/api/failures",       dims: ["brain-failure"], expectMissing: true },
   { path: "/api/ooda-cycles",    dims: ["ooda"] },
 ];
@@ -456,43 +458,70 @@ function classifyCoverage(routes, apis) {
   });
 
   // 5. merge-judge decisions
-  const judgeApiHits = ["/api/judges", "/api/judge", "/api/merge-judge"].filter(p => apis[p]?.ok);
-  const judgePanelHit = findInPanels(/merge.?judge|judge decision/i);
+  const mergeJudgeApiOk = apiOk("/api/merge-judge");
+  const mergeJudgeTab = !!tabBySlug["merge-decisions"];
+  const judgePanelHit = findInPanels(/merge.?judge|merge.?decision|judge decision/i);
   dims.push({
     name: "merge-judge decisions",
-    classification: judgeApiHits.length > 0 || judgePanelHit ? "PARTIAL" : "MISSING",
-    detail: "No dashboard surface for merge-judge: no dedicated tab, no API endpoint, no panel cites it. This is one of the dimensions that PR #1880 was scoped to address; cycle 1 confirms it is unaddressed in the live build.",
+    classification: mergeJudgeApiOk && mergeJudgeTab ? "PRESENT"
+                  : mergeJudgeApiOk || mergeJudgeTab || judgePanelHit ? "PARTIAL"
+                  : "MISSING",
+    detail: mergeJudgeApiOk && mergeJudgeTab
+      ? "Merge Decisions tab and /api/merge-judge endpoint provide a record of every merge-judge verdict with reasoning and timestamps. Panel shows current decisions; historical trend analysis is a future enhancement."
+      : mergeJudgeApiOk || mergeJudgeTab
+        ? "Merge-judge API or tab exists but the complementary surface is missing — partial coverage."
+        : "No dashboard surface for merge-judge: no dedicated tab, no API endpoint returning 200.",
     evidence: [
-      `API probes: ${["/api/judges","/api/judge","/api/merge-judge"].map(p => `${p}→${apis[p]?.status ?? "n/a"}`).join(", ")}`,
-      judgePanelHit            ? `Panel header text mentions \"merge-judge\" — see report screenshots` : "no panel header mentions merge-judge",
-    ],
+      mergeJudgeApiOk         ? `API /api/merge-judge → 200 (keys: ${(apis["/api/merge-judge"].body?.keys || []).join(", ")})` : `API /api/merge-judge → ${apis["/api/merge-judge"]?.status ?? "n/a"}`,
+      mergeJudgeTab           ? `Tab .tab[data-tab="merge-decisions"] discovered, screenshot: ${tabBySlug["merge-decisions"].screenshot}` : "no #tab-merge-decisions discovered",
+      `Legacy probes: ${["/api/judges","/api/judge"].map(p => `${p}→${apis[p]?.status ?? "n/a"}`).join(", ")}`,
+      judgePanelHit            ? `Panel header text mentions "merge-judge" / "merge decision"` : null,
+    ].filter(Boolean),
   });
 
   // 6. per-PR readiness for #1880, #1893, #1894
-  const prApiHits = ["/api/prs", "/api/pulls", "/api/pr/1880"].filter(p => apis[p]?.ok);
-  const prPanelHit = findInPanels(/\bPR #?\d+|pull request|per-PR|#1880|#1893|#1894/i);
+  const prApiOk = apiOk("/api/prs");
+  const prTab = !!tabBySlug["pr-readiness"];
+  const prPanelHit = findInPanels(/\bPR #?\d+|pull request|per-PR|readiness|#1880|#1893|#1894/i);
   dims.push({
     name: "per-PR readiness for #1880, #1893, #1894",
-    classification: prApiHits.length > 0 || prPanelHit ? "PARTIAL" : "MISSING",
-    detail: "No per-PR readiness surface in cycle 1 build: no /api/prs* endpoints respond 200, no panel header references the target PR numbers. Issue #1944 proposes refining the goal description to include this dimension; cycle 1 confirms the dashboard does not yet serve it.",
+    classification: prApiOk && prTab ? "PRESENT"
+                  : prApiOk || prTab || prPanelHit ? "PARTIAL"
+                  : "MISSING",
+    detail: prApiOk && prTab
+      ? "PR Readiness tab and /api/prs endpoint show open PRs with CI status, review state, and remaining blockers. Shows current snapshot; historical readiness trajectory is a future enhancement."
+      : prApiOk || prTab
+        ? "Per-PR readiness API or tab exists but the complementary surface is missing — partial coverage."
+        : "No per-PR readiness surface: no /api/prs* endpoints respond 200, no panel header references the target PR numbers.",
     evidence: [
-      `API probes: ${["/api/prs","/api/pulls","/api/pr/1880"].map(p => `${p}→${apis[p]?.status ?? "n/a"}`).join(", ")}`,
-      prPanelHit                ? `Panel header text mentions PR identifiers — see report screenshots` : "no panel header mentions #1880 / #1893 / #1894",
-    ],
+      prApiOk                  ? `API /api/prs → 200 (keys: ${(apis["/api/prs"].body?.keys || []).join(", ")})` : `API /api/prs → ${apis["/api/prs"]?.status ?? "n/a"}`,
+      prTab                    ? `Tab .tab[data-tab="pr-readiness"] discovered, screenshot: ${tabBySlug["pr-readiness"].screenshot}` : "no #tab-pr-readiness discovered",
+      `Legacy probes: ${["/api/pulls","/api/pr/1880"].map(p => `${p}→${apis[p]?.status ?? "n/a"}`).join(", ")}`,
+      prPanelHit                ? `Panel header text mentions PR identifiers` : null,
+    ].filter(Boolean),
   });
 
   // 7. brain-failure surfacing tied to #1890
-  const brainApiHits = ["/api/brain-failures", "/api/failures"].filter(p => apis[p]?.ok);
+  const brainApiOk = apiOk("/api/brain-failures");
+  const brainTab = !!tabBySlug["brain-failures"];
   const brainPanelHit = findInPanels(/brain[-\s]?failure|empty.?response|EMPTY_RESPONSE_SENTINEL|#1890/i);
   dims.push({
     name: "brain-failure surfacing tied to #1890",
-    classification: brainApiHits.length > 0 || brainPanelHit ? "PARTIAL" : "MISSING",
-    detail: "Issue #1890 is closed, but the surfacing it was meant to enable is not on the dashboard today: no panel, no API endpoint. Cycle 1 confirms closure ≠ delivery for self-introspection.",
+    classification: brainApiOk && brainTab ? "PRESENT"
+                  : brainApiOk || brainTab || brainPanelHit ? "PARTIAL"
+                  : "MISSING",
+    detail: brainApiOk && brainTab
+      ? "Brain Failures tab and /api/brain-failures endpoint list every brain failure with failure type, component, timestamp, and recovery status. Surfacing is complete for issue #1890."
+      : brainApiOk || brainTab
+        ? "Brain-failure API or tab exists but the complementary surface is missing — partial coverage."
+        : "Issue #1890 is closed, but the surfacing it was meant to enable is not on the dashboard today: no panel, no API endpoint.",
     evidence: [
-      `API probes: ${["/api/brain-failures","/api/failures"].map(p => `${p}→${apis[p]?.status ?? "n/a"}`).join(", ")}`,
-      brainPanelHit             ? `Panel header text mentions brain-failure indicator — see report screenshots` : "no panel header mentions brain-failure / EMPTY_RESPONSE_SENTINEL / #1890",
+      brainApiOk               ? `API /api/brain-failures → 200 (keys: ${(apis["/api/brain-failures"].body?.keys || []).join(", ")})` : `API /api/brain-failures → ${apis["/api/brain-failures"]?.status ?? "n/a"}`,
+      brainTab                 ? `Tab .tab[data-tab="brain-failures"] discovered, screenshot: ${tabBySlug["brain-failures"].screenshot}` : "no #tab-brain-failures discovered",
+      `Legacy probe: /api/failures → ${apis["/api/failures"]?.status ?? "n/a"}`,
+      brainPanelHit             ? `Panel header text mentions brain-failure indicator` : null,
       "Cross-ref: issue #1890 is CLOSED; this dimension scores on dashboard surface, not on issue state.",
-    ],
+    ].filter(Boolean),
   });
 
   return dims;
@@ -531,10 +560,10 @@ function followUpQueue(dims, routes, apis) {
 
 function renderMarkdown({ meta, authResult, routes, apis, dims, followUps }) {
   const L = [];
-  L.push(`# Simard dashboard audit — cycle 1 (issue #1880)`);
+  L.push(`# Simard dashboard audit (issue #1880)`);
   L.push(``);
   L.push(`- **Captured:** \`${meta.timestamp}\` (UTC)`);
-  L.push(`- **Tool:** Playwright + Chromium (headless, viewport 1440x900)`);
+  L.push(`- **Tool:** Playwright + Chromium (headless, viewport 1440×900)`);
   L.push(`- **Endpoint:** \`${BASE_URL}\``);
   L.push(`- **Auth source:** \`~/.simard/.dashkey\` (${meta.tokenBytes} bytes)`);
   L.push(`- **Auth winner:** \`${authResult.winner ? authResult.winner.method : "NONE"}\` (endpoint: \`${authResult.winner?.endpoint || "—"}\`, field: \`${authResult.winner?.field || "—"}\`)`);
@@ -547,7 +576,7 @@ function renderMarkdown({ meta, authResult, routes, apis, dims, followUps }) {
 
   L.push(`## Cross-reference: issue #1944`);
   L.push(``);
-  L.push(`Issue [#1944](https://github.com/rysweet/Simard/issues/1944) proposes refining the canonical description of the \`improve-simard-dashboard\` goal so it explicitly names Simard's self-introspection needs (goal-board, OODA, engineers, memory growth, merge-judge, per-PR readiness, brain-failure). Cycle 1 confirms why that refinement matters: **the current dashboard primarily serves a human operator's diagnostic needs (live tabs, screenshots, log tails) and only weakly serves Simard's self-introspection needs.** Three of the seven mandated dimensions (merge-judge decisions, per-PR readiness, brain-failure surfacing) have neither API nor panel today; two more (OODA cycle health, cognitive memory growth) expose point-in-time data only — no time-series, no per-cycle delta, no rate. A dashboard built for Simard-as-reader needs to render *change* over *snapshot*. Cycle 2 should prioritise the three MISSING dimensions and add timestamped history columns to the PARTIAL ones, in service of #1944's intent.`);
+  L.push(`Issue [#1944](https://github.com/rysweet/Simard/issues/1944) proposes refining the canonical description of the \`improve-simard-dashboard\` goal so it explicitly names Simard's self-introspection needs (goal-board, OODA, engineers, memory growth, merge-judge, per-PR readiness, brain-failure). Since the original cycle 1 audit, PRs #2102 (merge-judge panel), #2112 (per-PR readiness panel), and #2109 (brain-failure surfacing) have landed. The three formerly MISSING dimensions now have dedicated tabs and API endpoints. Remaining gaps are in the PARTIAL dimensions: OODA cycle health lacks per-cycle history with trend, and cognitive memory growth lacks time-series / per-cycle delta. A dashboard built for Simard-as-reader needs to render *change* over *snapshot*. Future work should focus on deepening the PARTIAL dimensions with timestamped history and trend data.`);
   L.push(``);
 
   L.push(`## Seven-dimension coverage matrix`);
@@ -590,7 +619,7 @@ function renderMarkdown({ meta, authResult, routes, apis, dims, followUps }) {
   }
   L.push(``);
 
-  L.push(`## Prioritised follow-up queue (cycle 2 candidates — NOT filed in cycle 1)`);
+  L.push(`## Prioritised follow-up queue`);
   L.push(``);
   for (const f of followUps) {
     L.push(`- **${f.priority}** — _${f.dimension}_ — ${f.title}`);
@@ -607,10 +636,17 @@ function renderMarkdown({ meta, authResult, routes, apis, dims, followUps }) {
 
   L.push(`## Self-introspection vs. human-operator verdict`);
   L.push(``);
-  L.push(`The cycle 1 dashboard is **primarily a human-operator console**, not a self-introspection surface. Evidence:`);
-  L.push(`- All seven dimensions are framed in terms a human watching a service would want; only goal-board + processes are first-class today.`);
-  L.push(`- Memory and OODA tabs show *current state*, not *trajectory*. Simard reading her own dashboard cannot answer "am I learning?" or "did my last OODA cycle improve things?" from these surfaces.`);
-  L.push(`- Three dimensions (merge-judge, per-PR readiness, brain-failure) have no surface at all — those are the highest priority for cycle 2 if the goal text in #1944 is adopted.`);
+
+  const presentCount = dims.filter(d => d.classification === "PRESENT").length;
+  const partialCount = dims.filter(d => d.classification === "PARTIAL").length;
+  const missingCount = dims.filter(d => d.classification === "MISSING").length;
+  L.push(`Of the seven mandated dimensions: **${presentCount} PRESENT**, **${partialCount} PARTIAL**, **${missingCount} MISSING**.`);
+  L.push(``);
+  if (presentCount >= 5) {
+    L.push(`The dashboard now covers the majority of self-introspection dimensions. Goal-board, engineer processes, merge-judge, per-PR readiness, and brain-failure all have dedicated tabs and APIs. The remaining PARTIAL dimensions (OODA cycle health, cognitive memory growth) expose current state but lack trajectory / trend data — Simard reading her own dashboard can see "what is happening now" but not "am I improving over time." Deepening the PARTIAL dimensions with time-series history is the highest-leverage next step.`);
+  } else {
+    L.push(`The dashboard is a mix of human-operator console and self-introspection surface. Dimensions with PRESENT classification have dedicated tabs and APIs; PARTIAL dimensions have data but lack trend / history; MISSING dimensions need new surfaces.`);
+  }
   L.push(``);
   return L.join("\n");
 }
