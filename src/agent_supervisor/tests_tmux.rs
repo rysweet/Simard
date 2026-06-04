@@ -207,8 +207,20 @@ fn compute_tmux_env_seeds_required_simard_vars_from_config() {
     );
     assert_eq!(
         env_value(&env, "CARGO_BUILD_JOBS"),
-        Some("4"),
-        "CARGO_BUILD_JOBS must be capped at 4 (issue #373 OOM guard)"
+        Some("2"),
+        "CARGO_BUILD_JOBS must default to 2 (issues #373, #2199 OOM guard)"
+    );
+}
+
+#[test]
+fn compute_tmux_env_respects_simard_cargo_jobs_override() {
+    let config = make_test_config("e1", 0);
+    let parent = vec![("SIMARD_CARGO_JOBS".to_string(), "6".to_string())];
+    let env = compute_tmux_env(&config, parent);
+    assert_eq!(
+        env_value(&env, "CARGO_BUILD_JOBS"),
+        Some("6"),
+        "CARGO_BUILD_JOBS must honor SIMARD_CARGO_JOBS from parent env"
     );
 }
 

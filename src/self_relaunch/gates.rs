@@ -67,7 +67,7 @@ fn run_unit_test_gate(config: &RelaunchConfig) -> GateResult {
         .arg(config.manifest_dir.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(&config.canary_target_dir)
-        .env("CARGO_BUILD_JOBS", "2")
+        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs())
         .output()
     {
         Ok(output) if output.status.success() => GateResult {
