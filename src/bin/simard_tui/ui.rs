@@ -1,19 +1,23 @@
-//! Tab bar layout and dispatch to tab renderers.
+//! Tab bar layout, footer, and dispatch to tab renderers.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Tabs};
+use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
 
 use crate::app::{ALL_TABS, App, Tab};
 use crate::tabs;
 
-/// Render the full TUI frame: tab bar + active tab content.
+/// Render the full TUI frame: tab bar + active tab content + footer.
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(f.area());
 
     let titles: Vec<Line> = ALL_TABS
@@ -46,4 +50,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::Meeting => tabs::meeting::draw(f, app, chunks[1]),
         Tab::Stats => tabs::stats::draw(f, app, chunks[1]),
     }
+
+    let footer = Paragraph::new("Alt+1\u{2025}6: tabs | \u{2190}/\u{2192}: cycle | q: quit")
+        .style(Style::default().fg(Color::DarkGray));
+    f.render_widget(footer, chunks[2]);
 }

@@ -21,13 +21,15 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let header = Row::new(vec!["PID", "Command", "CPU%", "Memory", "Runtime"])
-        .style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-        .bottom_margin(1);
+    let header = Row::new(vec![
+        "PID", "Command", "CPU%", "Memory", "Runtime", "Category",
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )
+    .bottom_margin(1);
 
     let rows: Vec<Row> = app
         .child_processes
@@ -40,6 +42,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                     .map_or_else(|| "—".to_string(), |c| format!("{c:.1}%")),
                 format_memory(p.memory_kb),
                 format_runtime(p.runtime_secs),
+                p.category.clone().unwrap_or_else(|| "—".to_string()),
             ])
         })
         .collect();
@@ -50,6 +53,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(8),
         Constraint::Length(12),
         Constraint::Length(12),
+        Constraint::Length(16),
     ];
 
     let title = format!("Engineers ({} processes)", app.child_processes.len());

@@ -1,7 +1,7 @@
 ---
 title: "simard-tui: Terminal monitoring dashboard"
 description: "Reference for the standalone TUI binary that monitors the Simard daemon, goals, engineers, and activity from a single terminal pane."
-last_updated: 2026-06-03
+last_updated: 2026-06-04
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -61,7 +61,8 @@ SIMARD_TUI_SERVICE=simard-staging.service simard-tui
 ```
 
 The TUI opens in full-screen mode with the **Overview** tab selected.
-Press number keys `1`–`6` to switch tabs, `q` to quit.
+Press `Alt+1`–`Alt+6` to switch tabs directly, `←`/`→` arrow keys to
+cycle through tabs, or `q` to quit.
 
 ---
 
@@ -122,6 +123,7 @@ subprocesses spawned by the OODA loop to advance goals:
 |---|---|---|
 | PID | `/proc` scan or `pgrep --parent <daemon_pid>` | Child process ID |
 | Command | `/proc/<PID>/cmdline` | Executable and arguments, truncated to 64 chars |
+| Category | `<state-root>/state/subagent_sessions.json` | `agent_id` from subagent registry for matching PID; `—` if PID not in registry or file missing |
 | CPU % | `/proc/<PID>/stat` delta sampling | Percentage of one CPU core; `–` until second sample |
 | Memory | `/proc/<PID>/status` `VmRSS` line | Resident memory in KiB |
 | Runtime | `/proc/<PID>/stat` field 22 (`starttime`) | Time since process started, as `HhMmSs` |
@@ -245,11 +247,13 @@ The top region shows meeting process stdout (scrollable, capped at
    meeting child process is killed via SIGKILL and waited on. This is
    enforced by a `Drop` implementation on the `App` struct.
 
-**Key routing precedence:** Tab-switch keys (`1`–`6`) always switch
-tabs, even when the meeting process is active. This means digits 1–6
-cannot be typed as meeting input. All other printable characters go to
-the meeting input buffer. When the meeting process is not active, `q`
-quits the TUI normally.
+**Key routing precedence:** Tab-switch keys (`Alt+1`–`Alt+6` and
+`←`/`→` arrows) always switch tabs, even when the meeting process is
+active. All printable characters — including digits 0–9 — go to the
+meeting input buffer when the meeting process is running. This means
+digits can be typed in meeting mode without conflict with tab
+switching. When the meeting process is not active, `q` quits the TUI
+normally.
 
 ### Tab 6: Stats
 
@@ -330,9 +334,11 @@ so `gh` values appear as soon as the commands complete — typically
 
 | Key | Context | Action |
 |---|---|---|
-| `1`–`6` | Any tab | Switch to tab 1–6 |
+| `Alt+1`–`Alt+6` | Any tab | Switch to tab 1–6 |
+| `←` (Left arrow) | Any tab | Cycle to previous tab (wraps: tab 1 → tab 6) |
+| `→` (Right arrow) | Any tab | Cycle to next tab (wraps: tab 6 → tab 1) |
 | `q` / `Q` | Any tab (meeting not active) | Quit and restore terminal |
-| Printable chars | Meeting tab, process active | Append to meeting input buffer |
+| Printable chars | Meeting tab, process active | Append to meeting input buffer (all chars including digits) |
 | `Enter` | Meeting tab, process active | Send input buffer to meeting process |
 | `Backspace` | Meeting tab, process active | Delete last character from input buffer |
 | `Escape` | Meeting tab, process active | Kill meeting process |
@@ -341,8 +347,45 @@ All keys are processed on `KeyEvent` with `kind == Press` to avoid
 double-firing on terminals that emit both press and release events.
 
 The `handle_key` method accepts a full `crossterm::event::KeyEvent`
-(not just a `char`) to support Enter, Backspace, and Escape for the
-meeting REPL.
+(not just a `char`) to support modifier detection (Alt) and special
+keys (arrows, Enter, Backspace, Escape) for the meeting REPL and tab
+navigation.
+
+**`Tab::from_key()` signature.** The `from_key` method takes a
+`&KeyEvent` and matches `KeyCode::Char('1'..='6')` only when the
+`ALT` modifier is present (`key.modifiers.contains(KeyModifiers::ALT)`).
+Bare digit presses without Alt are ignored by the tab-switching logic
+and fall through to meeting input or are discarded on non-meeting tabs.
+
+**Arrow key wrapping.** Left arrow on the first tab (index 0) wraps
+to the last tab (index 5). Right arrow on the last tab wraps to the
+first. The wrapping uses modular arithmetic on `ALL_TABS.len()`.
+
+**Terminal compatibility note.** Some terminals (especially over SSH,
+in screen/tmux, or on macOS Terminal.app) may not send `Alt+digit`
+as a `KeyModifiers::ALT` modifier — they may encode it as an escape
+sequence that crossterm handles differently. The `←`/`→` arrow keys
+provide a universal fallback for tab cycling in those environments.
+
+### Layout
+
+The TUI frame uses a 3-chunk vertical layout:
+
+```
+┌──────────────────────────────────────────────┐
+│ [1:Overview] [2:Goals] ... [6:Stats]         │ ← Tab bar (3 rows)
+├──────────────────────────────────────────────┤
+│                                              │
+│         Active tab content                   │ ← Content (flexible)
+│                                              │
+├──────────────────────────────────────────────┤
+│ Alt+1‥6: tabs | ←/→: cycle | q: quit        │ ← Footer (1 row)
+└──────────────────────────────────────────────┘
+```
+
+The footer is a `Paragraph` widget rendered in a 1-row bottom chunk,
+showing a compact keybinding reference. The constraints are
+`[Length(3), Min(0), Length(1)]`.
 
 ---
 
@@ -407,6 +450,7 @@ matching the daemon's behavior documented in
 | `<state-root>/cognitive_memory.ladybug` | LadybugDB (SQLite) | `goal-board:snapshot` fact → `GoalBoard` JSON |
 | `<state-root>/state/` | Directory tree | Recursive file count for stats |
 | `<state-root>/sessions/` | Directory listing | Session directory count for stats |
+| `<state-root>/state/subagent_sessions.json` | JSON file | PID → `agent_id` mapping for engineer category enrichment |
 | `<state-root>/bin/simard` | Executable | Meeting process binary (spawned, not read) |
 | `/proc/<PID>/stat` | Kernel pseudo-file | CPU time fields (utime, stime, starttime) |
 | `/proc/<PID>/status` | Kernel pseudo-file | `VmRSS:` line for memory |
@@ -424,6 +468,13 @@ The TUI defines its own serde DTOs (`GoalBoard`, `ActiveGoal`,
 `None` or empty when absent. Unknown fields are silently ignored. This
 tolerates schema additions in the daemon without requiring a
 synchronized TUI release.
+
+For the subagent session registry, the TUI defines lightweight local
+structs matching the `Registry` / `SubagentSession` shapes from
+`simard::subagent_sessions`. Only the fields needed for PID → category
+lookup are deserialized (`agent_id`, `pid`, `ended_at`). No new crate
+dependencies are required — `serde` and `serde_json` are already in the
+workspace. Corrupt or missing JSON produces an empty map (no error).
 
 ### Goal board JSON schema (as consumed)
 
@@ -594,9 +645,17 @@ restoration on any exit path:
   persist a counter file. The Overview tab shows `N/A`. This can be
   extracted from journal logs in a future iteration.
 
-- **Digits 1–6 cannot be typed in meeting input** because they are
-  reserved for tab switching. This is a deliberate tradeoff to keep
-  navigation consistent. The meeting help footer notes this.
+- **Alt+digit may not work on all terminals.** Some terminals
+  (especially over SSH, in screen/tmux, or macOS Terminal.app) encode
+  Alt+digit as escape sequences that crossterm may not recognize as
+  an ALT modifier. The `←`/`→` arrow keys provide a universal fallback
+  for tab cycling in those environments.
+
+- **Category column depends on tmux tracking.** The Engineers tab
+  Category column requires the daemon to use tmux-wrapped engineer
+  spawning (which writes `subagent_sessions.json`). If tmux is not
+  installed or the daemon predates the tracking feature, all categories
+  show `—`. This is cosmetic — process monitoring works normally.
 
 - **Non-systemd hosts** (containers, macOS, WSL without systemd) show
   daemon status as `unavailable`. Process-level monitoring still works

@@ -1,7 +1,7 @@
 ---
 title: Monitor Simard with the TUI dashboard
 description: "How to launch simard-tui, navigate tabs, monitor engineers, read logs, run meetings, and check stats — all from a single terminal pane."
-last_updated: 2026-06-03
+last_updated: 2026-06-04
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -40,8 +40,14 @@ The screen clears and the TUI opens in full-screen mode on the
 [1:Overview] [2:Goals] [3:Engineers] [4:Activity] [5:Meeting] [6:Stats]
 ```
 
-The active tab is highlighted. Press `q` at any time to quit and
-restore your terminal.
+The active tab is highlighted. A footer bar at the bottom shows the
+available keybindings:
+
+```
+Alt+1‥6: tabs | ←/→: cycle | q: quit
+```
+
+Press `q` at any time to quit and restore your terminal.
 
 ## 2. Read the Overview tab
 
@@ -75,7 +81,7 @@ The Overview tab shows a summary panel:
 
 ## 3. Switch to the Goals tab
 
-Press `2` to switch to the Goals tab. It displays a table of active
+Press `Alt+2` (or `→` to cycle) to switch to the Goals tab. It displays a table of active
 goals loaded from cognitive memory (`<state-root>/cognitive_memory.ladybug`):
 
 ```
@@ -106,28 +112,42 @@ lock), you see the last cached snapshot with `(stale)` in the header.
 
 ## 4. Monitor engineers
 
-Press `3` to switch to the Engineers tab. It displays a table of
-child processes spawned by the daemon:
+Press `Alt+3` to switch to the Engineers tab. It displays a table of
+child processes spawned by the daemon, enriched with category
+information from the subagent session registry:
 
 ```
-┌ Engineers ─────────────────────────────────────────────────────────┐
-│ PID    Command                              CPU%   Memory  Runtime│
-│ ──────────────────────────────────────────────────────────────────│
-│ 48312  simard engineer run --goal=goal-c…   12.4%  256 KiB 0h4m  │
-│ 48345  simard engineer run --goal=goal-a…    3.1%  128 KiB 0h1m  │
-│ 48398  simard engineer terminal --workt…     0.2%   64 KiB 0h0m  │
-└───────────────────────────────────────────────────────────────────┘
+┌ Engineers (3 processes) ─────────────────────────────────────────────────────┐
+│ PID    Command                              Category    CPU%   Memory  Runtime│
+│ ────────────────────────────────────────────────────────────────────────────│
+│ 48312  simard engineer run --goal=goal-c…   engineer-…  12.4%  256 KiB 0h4m  │
+│ 48345  simard engineer run --goal=goal-a…   engineer-…   3.1%  128 KiB 0h1m  │
+│ 48398  simard engineer terminal --workt…    —            0.2%   64 KiB 0h0m  │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **What each column means:**
 
 - **PID** — the child process ID.
 - **Command** — the process command line, truncated to 64 characters.
+- **Category** — the `agent_id` from the subagent session registry
+  (`<state-root>/state/subagent_sessions.json`), if the PID matches
+  a live registry entry. Shows `—` for processes not tracked in the
+  registry (e.g., utility subprocesses or processes spawned without
+  tmux tracking).
 - **CPU%** — percentage of one CPU core, delta-sampled. Shows `–`
   until the second sample (2 seconds after the child first appears).
 - **Memory** — resident set size (VmRSS) from `/proc/<PID>/status`.
 - **Runtime** — time since the process started, derived from
   `/proc/<PID>/stat` starttime.
+
+**Category data source.** The TUI reads
+`<state-root>/state/subagent_sessions.json` on each engineer refresh
+cycle (every 2 seconds). It filters out ended sessions
+(`ended_at != null`) and entries with `pid == 0`, then builds a
+PID → `agent_id` lookup map. Each discovered child process is matched
+against this map. If the JSON file is missing or corrupt, all
+categories default to `—` with no error displayed.
 
 If the daemon is not running, you see:
 
@@ -142,7 +162,7 @@ exited) are removed on the next refresh.
 
 ## 5. Read activity logs
 
-Press `4` to switch to the Activity tab. It shows the 50 most recent
+Press `Alt+4` to switch to the Activity tab. It shows the 50 most recent
 log entries from the Simard systemd journal:
 
 ```
@@ -170,7 +190,7 @@ If `journalctl` is unavailable or returns no entries, you see:
 
 ## 6. Run a meeting
 
-Press `5` to switch to the Meeting tab. The TUI automatically spawns
+Press `Alt+5` to switch to the Meeting tab. The TUI automatically spawns
 a `simard meeting start` process:
 
 ```
@@ -184,16 +204,19 @@ a `simard meeting start` process:
 
 **How to interact:**
 
-1. **Type** your message — printable characters appear at the prompt.
+1. **Type** your message — all printable characters (including digits)
+   appear at the prompt.
 2. **Press Enter** to send the line to the meeting process.
 3. **Press Backspace** to delete the last character.
 4. **Press Escape** to kill the meeting process and return to idle.
-5. **Switch tabs** with `1`–`6` at any time — the meeting process
-   continues running in the background. Return to Tab 5 to resume.
+5. **Switch tabs** with `Alt+1`–`Alt+6` or `←`/`→` arrow keys at any
+   time — the meeting process continues running in the background.
+   Return to Tab 5 to resume.
 
-**Important:** Digits 1–6 are always tab-switch keys and cannot be
-typed into the meeting input. This keeps navigation consistent across
-all tabs.
+**Digits are typeable in meetings.** Tab switching uses `Alt+digit`
+(not bare digits), so all printable characters including `0`–`9` go
+directly to the meeting input buffer. This resolves a previous
+limitation where digits 1–6 could not be typed in meeting mode.
 
 **Meeting lifecycle:**
 
@@ -206,7 +229,7 @@ all tabs.
 
 ## 7. Check statistics
 
-Press `6` to switch to the Stats tab:
+Press `Alt+6` to switch to the Stats tab:
 
 ```
 ┌ Stats ────────────────────────────────────────────────────────────┐
@@ -281,12 +304,19 @@ not recommended (two meeting processes would compete for state).
 
 | Key | Context | Action |
 |---|---|---|
-| `1`–`6` | Any tab | Switch to that tab |
+| `Alt+1`–`Alt+6` | Any tab | Switch to that tab |
+| `←` (Left arrow) | Any tab | Cycle to previous tab (wraps around) |
+| `→` (Right arrow) | Any tab | Cycle to next tab (wraps around) |
 | `q` / `Q` | Any tab (no active meeting) | Quit |
-| Printable chars | Meeting tab, process active | Type into input |
+| Printable chars | Meeting tab, process active | Type into input (all chars including digits) |
 | `Enter` | Meeting tab, process active | Send input |
 | `Backspace` | Meeting tab, process active | Delete last char |
 | `Escape` | Meeting tab, process active | Kill meeting process |
+
+> **Note on terminal compatibility:** Some terminals (especially over
+> SSH or in screen/tmux) may not send `Alt+digit` as a modifier.
+> `crossterm` handles the common encodings, but if Alt+digit does not
+> work in your terminal, use `←`/`→` arrow keys as a fallback.
 
 ## Troubleshooting
 
