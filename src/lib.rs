@@ -17,6 +17,7 @@ pub mod bridge_circuit;
 pub mod bridge_launcher;
 pub mod bridge_subprocess;
 pub mod build_lock;
+pub mod cargo_jobs;
 pub mod cmd_cleanup;
 pub mod cmd_ensure_deps;
 pub mod cmd_install;
