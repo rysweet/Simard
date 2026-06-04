@@ -1,7 +1,7 @@
 ---
 title: "simard-tui: Terminal monitoring dashboard"
 description: "Reference for the standalone TUI binary that monitors the Simard daemon, goals, engineers, and activity from a single terminal pane."
-last_updated: 2026-06-03
+last_updated: 2026-06-04
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -58,10 +58,17 @@ SIMARD_STATE_ROOT=/srv/simard simard-tui
 
 # Monitor a non-default systemd service
 SIMARD_TUI_SERVICE=simard-staging.service simard-tui
+
+# Run over SSH (allocate a PTY with -t)
+ssh -t host simard-tui
 ```
 
 The TUI opens in full-screen mode with the **Overview** tab selected.
 Press number keys `1`–`6` to switch tabs, `q` to quit.
+
+If stdout is not a terminal (e.g., piped or redirected), `simard-tui`
+automatically falls back to `/dev/tty`. If no terminal is available at
+all, it exits with: `simard-tui requires a terminal.`
 
 ---
 
@@ -521,9 +528,11 @@ and `/proc/<PID>/status` for `VmRSS`.
 `simard-tui` uses a `TerminalGuard` pattern to guarantee terminal
 restoration on any exit path:
 
-1. **`TerminalGuard` struct** — enables raw mode and enters the
-   alternate screen in its constructor; disables raw mode and leaves
-   the alternate screen in its `Drop` implementation.
+1. **`TerminalGuard` struct** — a zero-sized RAII guard created by
+   `setup_terminal()` after it enables raw mode and enters the
+   alternate screen. The guard's only job is cleanup: its `Drop`
+   implementation disables raw mode and leaves the alternate screen
+   (delegating to `restore_terminal()`).
 
 2. **Chained panic hook** — installs a panic hook that restores the
    terminal before delegating to the default handler. This prevents
@@ -536,6 +545,61 @@ restoration on any exit path:
 4. **RAII meeting cleanup** — The `App` struct implements `Drop` to
    kill and wait on the meeting child process. This handles panics,
    early returns, and any exit path that bypasses explicit cleanup.
+
+### TTY detection and `/dev/tty` fallback
+
+`setup_terminal()` detects whether stdout is connected to a real
+terminal before enabling raw mode. This prevents the `ENXIO` ("No
+such device or address", OS error 6) crash that occurred when
+`simard-tui` was launched from a non-interactive context (e.g., a
+Copilot agent session, a subprocess pipeline, SSH without `-t`, or
+`nohup`).
+
+**Detection flow:**
+
+1. `std::io::stdout().is_terminal()` — checks via the `IsTerminal`
+   trait (which calls `isatty(1)` on Unix).
+2. If stdout **is** a TTY → use `io::stdout()` as the terminal
+   backend writer. This is the normal interactive case.
+3. If stdout is **not** a TTY → attempt to open `/dev/tty` with
+   read+write access as the backend writer instead.
+4. If `/dev/tty` also fails (no controlling terminal at all — e.g.,
+   inside a container with no TTY, or a detached `nohup` session) →
+   exit immediately with a clear error message:
+
+   ```
+   simard-tui requires a terminal. Run from an interactive shell or use: ssh -t host simard-tui
+   ```
+
+**Backend type.** `setup_terminal()` returns
+`Terminal<CrosstermBackend<Box<dyn Write>>>`. Both `io::Stdout` and
+`fs::File` implement `Write`, so the backend is polymorphic over the
+underlying writer. This has no effect on downstream code — ratatui
+0.29's `Frame` type is not generic over the backend, so all `draw()`
+call sites are unchanged.
+
+**Cleanup routing.** A static `AtomicBool` flag (`USING_DEV_TTY`) is
+set to `true` when the `/dev/tty` fallback path is taken. Both
+`TerminalGuard::drop()` and the panic hook consult this flag to
+determine where to write the `LeaveAlternateScreen` escape sequence:
+
+- `USING_DEV_TTY == false` → write to `io::stdout()` (normal path).
+- `USING_DEV_TTY == true` → open `/dev/tty` and write there.
+
+The flag uses `Ordering::Relaxed` because it is set once during
+`setup_terminal()` (before the event loop starts) and only read
+during cleanup. There is no dependent memory ordering.
+
+**`restore_terminal()` helper.** A shared `fn restore_terminal()`
+encapsulates the cleanup logic (disable raw mode + leave alternate
+screen on the correct writer). Both `TerminalGuard::drop()` and the
+panic hook delegate to this function, eliminating duplicated cleanup
+code.
+
+**`enable_raw_mode()` / `disable_raw_mode()`.** These crossterm
+functions are process-global — they operate on fd 0 (stdin) or
+`/dev/tty` internally, independent of which writer the backend uses.
+They work correctly in both the stdout and `/dev/tty` paths.
 
 ---
 
@@ -590,6 +654,15 @@ restoration on any exit path:
 
 ## Limitations
 
+- **Requires a terminal.** `simard-tui` needs either a TTY-connected
+  stdout or an accessible `/dev/tty`. When neither is available (fully
+  headless environments like CI, cron, or `nohup`), the TUI exits with
+  a descriptive error. Use the web dashboard for headless monitoring.
+
+- **`/dev/tty` fallback is Unix-only.** The `/dev/tty` fallback path
+  uses a Unix-specific device file. On non-Unix platforms (if ever
+  supported), only the stdout-is-a-TTY path would work.
+
 - **OODA cycle count** is not available on disk — the daemon does not
   persist a counter file. The Overview tab shows `N/A`. This can be
   extracted from journal logs in a future iteration.
@@ -628,6 +701,34 @@ restoration on any exit path:
 ---
 
 ## Troubleshooting
+
+### "No such device or address (os error 6)" crash
+
+**This issue is fixed.** Prior to the TTY detection feature,
+`simard-tui` would crash with `ENXIO` (OS error 6) when stdout was
+not connected to a terminal — for example, when launched from a
+Copilot agent session, piped into another process, run via `nohup`,
+or over SSH without the `-t` flag.
+
+`setup_terminal()` now detects non-TTY stdout and falls back to
+`/dev/tty`. If you still see this error, it means no controlling
+terminal exists at all. Solutions:
+
+- **SSH:** Use `ssh -t host simard-tui` to allocate a pseudo-TTY.
+- **Subprocess/agent:** Launch `simard-tui` inside `script -qc
+  'simard-tui' /dev/null` to allocate a PTY, or use `tmux`/`screen`.
+- **Container:** Ensure the container has a TTY allocated (`docker
+  run -it ...`).
+- **`nohup`/`cron`:** TUI applications are inherently interactive.
+  Use the web dashboard instead for headless monitoring.
+
+### "simard-tui requires a terminal" error
+
+This message appears when `simard-tui` detects that neither stdout
+nor `/dev/tty` provides a usable terminal. The TUI requires an
+interactive terminal for raw mode input and alternate screen output.
+See the solutions above for "No such device or address" — they apply
+to this case as well.
 
 ### "Service unavailable" on Overview tab
 

@@ -1,7 +1,7 @@
 ---
 title: Monitor Simard with the TUI dashboard
 description: "How to launch simard-tui, navigate tabs, monitor engineers, read logs, run meetings, and check stats — all from a single terminal pane."
-last_updated: 2026-06-03
+last_updated: 2026-06-04
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -22,6 +22,12 @@ conduct meetings, and review statistics.
 
 - Simard daemon running via `simard ooda run` or the systemd service.
 - `simard-tui` binary built (`cargo build --bin simard-tui`).
+- **An interactive terminal** — stdout must be a TTY, or a controlling
+  terminal (`/dev/tty`) must be available. If running over SSH, use
+  `ssh -t` to allocate a pseudo-TTY. If running in a container, use
+  `docker run -it`. The TUI detects non-TTY stdout and falls back to
+  `/dev/tty` automatically; if neither is available, it exits with a
+  clear error message.
 - A terminal that supports 256-color output (most modern terminals).
 - For the Activity tab: `journalctl` available (systemd host).
 - For the Stats tab: `gh` CLI installed and authenticated (optional — metrics show `–` without it).
@@ -277,6 +283,40 @@ The only resource the TUI locks is the meeting process stdin/stdout —
 running two TUI instances with active Meeting tabs simultaneously is
 not recommended (two meeting processes would compete for state).
 
+## 11. Running from non-interactive environments
+
+`simard-tui` automatically detects when stdout is not a terminal and
+falls back to `/dev/tty` (the process's controlling terminal). This
+means it works in most environments where a human is at a keyboard,
+even if stdout has been redirected:
+
+```bash
+# These all work — /dev/tty fallback kicks in automatically:
+simard-tui | tee tui.log          # stdout piped, /dev/tty used
+simard-tui > /dev/null            # stdout redirected, /dev/tty used
+ssh -t host simard-tui            # SSH with PTY allocation
+docker run -it image simard-tui   # Container with TTY
+tmux new-session simard-tui       # Inside tmux
+```
+
+**Environments without any terminal** (no stdout TTY and no
+`/dev/tty`) are not supported — the TUI exits immediately with:
+
+```
+simard-tui requires a terminal. Run from an interactive shell or use: ssh -t host simard-tui
+```
+
+Examples of no-terminal environments:
+
+- `ssh host simard-tui` (without `-t`)
+- `nohup simard-tui &`
+- Cron jobs
+- CI/CD pipelines
+- Agent sessions without PTY allocation
+
+For headless monitoring in these environments, use the web dashboard
+or `simard` CLI commands instead.
+
 ## Keyboard reference
 
 | Key | Context | Action |
@@ -292,6 +332,7 @@ not recommended (two meeting processes would compete for state).
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| `simard-tui requires a terminal` | No TTY available (stdout is not a terminal and `/dev/tty` cannot be opened) | Run from an interactive shell, use `ssh -t host simard-tui`, or allocate a PTY with `docker run -it` |
 | All fields show `–` or `unavailable` | Daemon not running or systemctl not available | Start the daemon: `simard ooda run` |
 | Goals tab is empty | `cognitive_memory.ladybug` missing or no snapshot fact | Use `simard goal-curation read` to inspect goals via IPC |
 | Terminal looks broken after exit | Rare: panic before `TerminalGuard` drop | Run `reset` to restore terminal |
