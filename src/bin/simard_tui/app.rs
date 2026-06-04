@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::mpsc;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::goals;
 use crate::system::{self, CpuSample, DaemonInfo};
@@ -47,15 +47,19 @@ impl Tab {
         }
     }
 
-    /// Map a key character to a tab. '1' → Overview, '2' → Goals, etc.
-    pub fn from_key(c: char) -> Option<Tab> {
-        match c {
-            '1' => Some(Tab::Overview),
-            '2' => Some(Tab::Goals),
-            '3' => Some(Tab::Engineers),
-            '4' => Some(Tab::Activity),
-            '5' => Some(Tab::Meeting),
-            '6' => Some(Tab::Stats),
+    /// Map an Alt+digit key event to a tab. Alt+1 → Overview, Alt+2 → Goals, etc.
+    /// Bare digits (without ALT) are ignored to avoid stealing input on the Meeting tab.
+    pub fn from_key(key: &KeyEvent) -> Option<Tab> {
+        if !key.modifiers.contains(KeyModifiers::ALT) {
+            return None;
+        }
+        match key.code {
+            KeyCode::Char('1') => Some(Tab::Overview),
+            KeyCode::Char('2') => Some(Tab::Goals),
+            KeyCode::Char('3') => Some(Tab::Engineers),
+            KeyCode::Char('4') => Some(Tab::Activity),
+            KeyCode::Char('5') => Some(Tab::Meeting),
+            KeyCode::Char('6') => Some(Tab::Stats),
             _ => None,
         }
     }
@@ -90,6 +94,7 @@ pub struct ChildProcessInfo {
     pub cpu_percent: Option<f64>,
     pub memory_kb: Option<u64>,
     pub runtime_secs: Option<u64>,
+    pub category: Option<String>,
 }
 
 /// Cached stats for the Stats tab (refreshed on slow cycle).
@@ -160,19 +165,36 @@ impl App {
 
     /// Handle a key press event.
     ///
-    /// - `1`–`6`: switch tabs (always, even in meeting mode)
+    /// - `Alt+1`–`Alt+6`: switch tabs (always, even in meeting mode)
+    /// - `←`/`→`: cycle tabs with wrapping (always)
     /// - On Meeting tab with Running: chars → input, Enter → send,
     ///   Backspace → delete, Esc → stop meeting
     /// - `q`/`Q`: quit (unless meeting is Running on Meeting tab)
     pub fn handle_key(&mut self, key: KeyEvent) {
         let code = key.code;
 
-        // Tab switch keys always work regardless of mode
-        if let KeyCode::Char(c) = code
-            && let Some(tab) = Tab::from_key(c)
-        {
+        // Alt+digit tab switch always works regardless of mode
+        if let Some(tab) = Tab::from_key(&key) {
             self.active_tab = tab;
             return;
+        }
+
+        // Left/Right arrow tab cycling always works
+        let tab_count = ALL_TABS.len();
+        let current_idx = ALL_TABS
+            .iter()
+            .position(|t| *t == self.active_tab)
+            .unwrap_or(0);
+        match code {
+            KeyCode::Right => {
+                self.active_tab = ALL_TABS[(current_idx + 1) % tab_count];
+                return;
+            }
+            KeyCode::Left => {
+                self.active_tab = ALL_TABS[(current_idx + tab_count - 1) % tab_count];
+                return;
+            }
+            _ => {}
         }
 
         // Meeting-specific input routing
@@ -326,6 +348,8 @@ impl App {
             }
         };
 
+        let pid_categories = load_pid_categories(&self.state_root);
+
         // Try pgrep first, fall back to /proc scan
         let child_pids = std::process::Command::new("pgrep")
             .arg("--parent")
@@ -407,6 +431,7 @@ impl App {
                 cpu_percent,
                 memory_kb,
                 runtime_secs,
+                category: pid_categories.get(&child_pid).cloned(),
             });
         }
 
@@ -685,14 +710,61 @@ fn count_files_with_depth(path: &std::path::Path, max_depth: u32) -> usize {
     count
 }
 
+/// Lightweight DTOs for deserializing subagent_sessions.json.
+/// Mirrors the subset of fields from `subagent_sessions::Registry` that
+/// we need, without coupling to that module's types.
+mod pid_category_dto {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    pub struct Registry {
+        #[serde(default)]
+        pub sessions: Vec<Session>,
+    }
+
+    #[derive(Deserialize)]
+    pub struct Session {
+        pub agent_id: String,
+        pub pid: u32,
+        #[serde(default)]
+        pub ended_at: Option<i64>,
+    }
+}
+
+/// Read `<state_root>/state/subagent_sessions.json` and return a map of
+/// `pid → agent_id` for active (non-ended, non-zero-pid) sessions.
+/// Returns an empty map on missing file, corrupt JSON, or I/O errors.
+pub fn load_pid_categories(state_root: &std::path::Path) -> HashMap<u32, String> {
+    let path = state_root.join("state").join("subagent_sessions.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return HashMap::new(),
+    };
+    let registry: pid_category_dto::Registry = match serde_json::from_slice(&bytes) {
+        Ok(r) => r,
+        Err(_) => return HashMap::new(),
+    };
+    registry
+        .sessions
+        .into_iter()
+        .filter(|s| s.pid != 0 && s.ended_at.is_none())
+        .map(|s| (s.pid, s.agent_id))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    /// Helper: construct a KeyEvent from a character.
+    /// Helper: construct a KeyEvent from a character (no modifiers).
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// Helper: construct an Alt+char KeyEvent.
+    fn alt_key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
     }
 
     /// Helper: construct a KeyEvent from a KeyCode.
@@ -726,20 +798,26 @@ mod tests {
 
     #[test]
     fn tab_from_key_valid() {
-        assert_eq!(Tab::from_key('1'), Some(Tab::Overview));
-        assert_eq!(Tab::from_key('2'), Some(Tab::Goals));
-        assert_eq!(Tab::from_key('3'), Some(Tab::Engineers));
-        assert_eq!(Tab::from_key('4'), Some(Tab::Activity));
-        assert_eq!(Tab::from_key('5'), Some(Tab::Meeting));
-        assert_eq!(Tab::from_key('6'), Some(Tab::Stats));
+        // BUG1: from_key now takes &KeyEvent and requires ALT modifier
+        assert_eq!(Tab::from_key(&alt_key('1')), Some(Tab::Overview));
+        assert_eq!(Tab::from_key(&alt_key('2')), Some(Tab::Goals));
+        assert_eq!(Tab::from_key(&alt_key('3')), Some(Tab::Engineers));
+        assert_eq!(Tab::from_key(&alt_key('4')), Some(Tab::Activity));
+        assert_eq!(Tab::from_key(&alt_key('5')), Some(Tab::Meeting));
+        assert_eq!(Tab::from_key(&alt_key('6')), Some(Tab::Stats));
     }
 
     #[test]
     fn tab_from_key_invalid() {
-        assert_eq!(Tab::from_key('0'), None);
-        assert_eq!(Tab::from_key('7'), None);
-        assert_eq!(Tab::from_key('q'), None);
-        assert_eq!(Tab::from_key('a'), None);
+        // BUG1: bare digits without ALT should NOT match
+        assert_eq!(Tab::from_key(&key('0')), None);
+        assert_eq!(Tab::from_key(&key('7')), None);
+        assert_eq!(Tab::from_key(&key('q')), None);
+        assert_eq!(Tab::from_key(&key('a')), None);
+        // Bare digits (no ALT) are also invalid now
+        assert_eq!(Tab::from_key(&key('1')), None);
+        assert_eq!(Tab::from_key(&key('2')), None);
+        assert_eq!(Tab::from_key(&key('6')), None);
     }
 
     #[test]
@@ -753,7 +831,7 @@ mod tests {
     fn tab_from_key_roundtrips_with_number() {
         for tab in &ALL_TABS {
             let c = char::from(b'0' + tab.number());
-            assert_eq!(Tab::from_key(c), Some(*tab));
+            assert_eq!(Tab::from_key(&alt_key(c)), Some(*tab));
         }
     }
 
@@ -832,28 +910,30 @@ mod tests {
 
     #[test]
     fn handle_key_tab_switch() {
+        // BUG1: Tab switching now requires Alt+digit
         let mut app = App::new("simard-ooda.service".to_string());
         assert_eq!(app.active_tab, Tab::Overview);
 
-        app.handle_key(key('2'));
+        app.handle_key(alt_key('2'));
         assert_eq!(app.active_tab, Tab::Goals);
 
-        app.handle_key(key('5'));
+        app.handle_key(alt_key('5'));
         assert_eq!(app.active_tab, Tab::Meeting);
 
-        app.handle_key(key('1'));
+        app.handle_key(alt_key('1'));
         assert_eq!(app.active_tab, Tab::Overview);
     }
 
     #[test]
     fn handle_key_all_tabs_reachable() {
+        // BUG1: All tabs reachable via Alt+digit
         let mut app = App::new("simard-ooda.service".to_string());
         for (i, expected) in ALL_TABS.iter().enumerate() {
             let c = char::from(b'1' + i as u8);
-            app.handle_key(key(c));
+            app.handle_key(alt_key(c));
             assert_eq!(
                 app.active_tab, *expected,
-                "key '{c}' should reach {expected:?}"
+                "Alt+'{c}' should reach {expected:?}"
             );
         }
     }
@@ -954,11 +1034,11 @@ mod tests {
 
     #[test]
     fn meeting_tab_switch_always_works() {
-        // Digit keys (1-6) switch tabs even when meeting is running
+        // BUG1: Alt+digit switches tabs even when meeting is running
         let mut app = App::new("simard-ooda.service".to_string());
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
-        app.handle_key(key('1'));
+        app.handle_key(alt_key('1'));
         assert_eq!(app.active_tab, Tab::Overview);
     }
 
@@ -1013,12 +1093,14 @@ mod tests {
             cpu_percent: Some(5.5),
             memory_kb: Some(10240),
             runtime_secs: Some(3600),
+            category: Some("code-writer".to_string()),
         };
         assert_eq!(info.pid, 1234);
         assert_eq!(info.command, "simard");
         assert_eq!(info.cpu_percent, Some(5.5));
         assert_eq!(info.memory_kb, Some(10240));
         assert_eq!(info.runtime_secs, Some(3600));
+        assert_eq!(info.category.as_deref(), Some("code-writer"));
     }
 
     #[test]
@@ -1029,11 +1111,13 @@ mod tests {
             cpu_percent: None,
             memory_kb: None,
             runtime_secs: None,
+            category: None,
         };
         assert_eq!(info.pid, 99);
         assert!(info.cpu_percent.is_none());
         assert!(info.memory_kb.is_none());
         assert!(info.runtime_secs.is_none());
+        assert!(info.category.is_none());
     }
 
     // ── StatsCache ─────────────────────────────────────────────────
@@ -1349,5 +1433,207 @@ mod tests {
             app.gh_receiver.is_some(),
             "should have a receiver after spawning thread"
         );
+    }
+
+    // ── BUG1: Left/Right arrow tab cycling ─────────────────────────
+
+    #[test]
+    fn handle_key_right_arrow_cycles_forward() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        assert_eq!(app.active_tab, Tab::Overview); // index 0
+
+        app.handle_key(key_code(KeyCode::Right));
+        assert_eq!(app.active_tab, Tab::Goals); // index 1
+
+        app.handle_key(key_code(KeyCode::Right));
+        assert_eq!(app.active_tab, Tab::Engineers); // index 2
+    }
+
+    #[test]
+    fn handle_key_left_arrow_cycles_backward() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Engineers; // index 2
+
+        app.handle_key(key_code(KeyCode::Left));
+        assert_eq!(app.active_tab, Tab::Goals); // index 1
+
+        app.handle_key(key_code(KeyCode::Left));
+        assert_eq!(app.active_tab, Tab::Overview); // index 0
+    }
+
+    #[test]
+    fn handle_key_right_arrow_wraps_at_end() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Stats; // index 5 (last)
+
+        app.handle_key(key_code(KeyCode::Right));
+        assert_eq!(app.active_tab, Tab::Overview); // wraps to index 0
+    }
+
+    #[test]
+    fn handle_key_left_arrow_wraps_at_start() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        assert_eq!(app.active_tab, Tab::Overview); // index 0
+
+        app.handle_key(key_code(KeyCode::Left));
+        assert_eq!(app.active_tab, Tab::Stats); // wraps to index 5
+    }
+
+    #[test]
+    fn handle_key_left_right_cycling_full_loop() {
+        // Right arrow 6 times should come back to Overview
+        let mut app = App::new("simard-ooda.service".to_string());
+        assert_eq!(app.active_tab, Tab::Overview);
+
+        for _ in 0..ALL_TABS.len() {
+            app.handle_key(key_code(KeyCode::Right));
+        }
+        assert_eq!(app.active_tab, Tab::Overview, "full loop returns to start");
+    }
+
+    #[test]
+    fn handle_key_arrows_work_during_meeting_running() {
+        // Arrow keys should cycle tabs even when meeting is running
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting; // index 4
+        app.meeting_status = MeetingStatus::Running;
+
+        app.handle_key(key_code(KeyCode::Right));
+        assert_eq!(app.active_tab, Tab::Stats); // index 5
+    }
+
+    // ── BUG1: Bare digit regression ────────────────────────────────
+
+    #[test]
+    fn meeting_bare_digit_goes_to_input_when_running() {
+        // BUG1 regression: bare '1' in meeting mode should go to input, NOT switch tabs
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+
+        app.handle_key(key('1'));
+        assert_eq!(
+            app.active_tab,
+            Tab::Meeting,
+            "bare digit should NOT switch tabs"
+        );
+        assert_eq!(app.meeting_input, "1", "bare digit should go to input");
+    }
+
+    #[test]
+    fn bare_digit_is_noop_outside_meeting() {
+        // Bare digits should be ignored outside meeting mode (no tab switch)
+        let mut app = App::new("simard-ooda.service".to_string());
+        assert_eq!(app.active_tab, Tab::Overview);
+
+        app.handle_key(key('2'));
+        assert_eq!(
+            app.active_tab,
+            Tab::Overview,
+            "bare digit should NOT switch tabs outside meeting"
+        );
+    }
+
+    // ── BUG2: load_pid_categories ──────────────────────────────────
+
+    #[test]
+    fn load_pid_categories_valid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let json = r#"{
+            "sessions": [
+                {"agent_id": "code-writer", "session_name": "s1", "host": "h",
+                 "pid": 1234, "created_at": 100, "goal_id": "g1"},
+                {"agent_id": "reviewer", "session_name": "s2", "host": "h",
+                 "pid": 5678, "created_at": 200, "goal_id": "g2"}
+            ]
+        }"#;
+        std::fs::write(state_dir.join("subagent_sessions.json"), json).unwrap();
+
+        let map = load_pid_categories(tmp.path());
+        assert_eq!(map.get(&1234), Some(&"code-writer".to_string()));
+        assert_eq!(map.get(&5678), Some(&"reviewer".to_string()));
+    }
+
+    #[test]
+    fn load_pid_categories_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No state/ dir or JSON file
+
+        let map = load_pid_categories(tmp.path());
+        assert!(map.is_empty(), "missing file should return empty map");
+    }
+
+    #[test]
+    fn load_pid_categories_corrupt_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("subagent_sessions.json"), "NOT JSON!!!").unwrap();
+
+        let map = load_pid_categories(tmp.path());
+        assert!(map.is_empty(), "corrupt JSON should return empty map");
+    }
+
+    #[test]
+    fn load_pid_categories_filters_ended_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let json = r#"{
+            "sessions": [
+                {"agent_id": "live-agent", "session_name": "s1", "host": "h",
+                 "pid": 1000, "created_at": 100, "goal_id": "g1"},
+                {"agent_id": "dead-agent", "session_name": "s2", "host": "h",
+                 "pid": 2000, "created_at": 200, "ended_at": 300, "goal_id": "g2"}
+            ]
+        }"#;
+        std::fs::write(state_dir.join("subagent_sessions.json"), json).unwrap();
+
+        let map = load_pid_categories(tmp.path());
+        assert_eq!(map.get(&1000), Some(&"live-agent".to_string()));
+        assert!(
+            !map.contains_key(&2000),
+            "ended sessions should be filtered out"
+        );
+    }
+
+    #[test]
+    fn load_pid_categories_filters_pid_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let json = r#"{
+            "sessions": [
+                {"agent_id": "no-pid", "session_name": "s1", "host": "h",
+                 "pid": 0, "created_at": 100, "goal_id": "g1"},
+                {"agent_id": "has-pid", "session_name": "s2", "host": "h",
+                 "pid": 999, "created_at": 200, "goal_id": "g2"}
+            ]
+        }"#;
+        std::fs::write(state_dir.join("subagent_sessions.json"), json).unwrap();
+
+        let map = load_pid_categories(tmp.path());
+        assert!(!map.contains_key(&0), "pid 0 should be filtered out");
+        assert_eq!(map.get(&999), Some(&"has-pid".to_string()));
+    }
+
+    #[test]
+    fn load_pid_categories_empty_sessions_array() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("subagent_sessions.json"),
+            r#"{"sessions": []}"#,
+        )
+        .unwrap();
+
+        let map = load_pid_categories(tmp.path());
+        assert!(map.is_empty());
     }
 }
