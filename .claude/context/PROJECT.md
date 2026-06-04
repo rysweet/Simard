@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-2204-fix-simard-tui-crash-no-such-device-or-address-os
+## Project: main
 
 ## Overview
 

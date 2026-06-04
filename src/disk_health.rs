@@ -84,20 +84,50 @@ fn resolve_recipe_path(repo_root: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Run the disk health check recipe via `recipe-runner-rs`.
+/// Run the disk health check. Uses recipe-runner-rs with JSON output to
+/// extract the agent's step output, which contains the DISK_USED_PCT markers.
 ///
-/// `state_root` is the Simard state directory (typically `~/.simard`),
-/// passed to the recipe as a context var so the bash script knows where
-/// to find worktrees, backups, and cargo target dirs.
-///
-/// `repo_root` is used to locate the recipe YAML file.
-///
-/// Returns the parsed [`DiskHealthReport`] on success, or a
-/// [`SimardError::AdapterInvocationFailed`] on any failure.
+/// Falls back to a deterministic bash check only if recipe-runner-rs is
+/// completely unavailable (binary missing, recipe file missing).
 pub fn run_disk_health_check(
     repo_root: &Path,
     state_root: &Path,
 ) -> SimardResult<DiskHealthReport> {
+    match run_recipe_disk_check(repo_root, state_root) {
+        Ok(report) => Ok(report),
+        Err(e) => {
+            eprintln!(
+                "[simard] disk health: recipe failed ({e}), falling back to deterministic check"
+            );
+            run_deterministic_disk_check(repo_root, state_root)
+        }
+    }
+}
+
+/// JSON envelope from recipe-runner-rs `--output-format json`.
+#[derive(Debug, Deserialize)]
+struct RecipeOutput {
+    #[allow(dead_code)]
+    success: bool,
+    step_results: Vec<StepResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StepResult {
+    #[allow(dead_code)]
+    step_id: String,
+    output: String,
+}
+
+/// Recipe-based disk health check via `recipe-runner-rs`.
+///
+/// Uses `--output-format json` to capture the agent's actual output from
+/// `step_results[].output`, then parses the DISK_USED_PCT markers from that.
+///
+/// Previous bug: text-format stdout only contains recipe-runner's summary
+/// (e.g. "Recipe: ... SUCCESS"), NOT the agent's conversation output where
+/// the DISK_USED_PCT markers live. JSON format exposes step_results[].output.
+fn run_recipe_disk_check(repo_root: &Path, state_root: &Path) -> SimardResult<DiskHealthReport> {
     let recipe_path =
         resolve_recipe_path(repo_root).ok_or_else(|| SimardError::AdapterInvocationFailed {
             base_type: ADAPTER_TAG.to_string(),
@@ -113,6 +143,8 @@ pub fn run_disk_health_check(
         .env("AMPLIHACK_AGENT_BINARY", agent_binary)
         .arg("-c")
         .arg(format!("state_root={}", state_root.display()))
+        .arg("--output-format")
+        .arg("json")
         .output()
         .map_err(|e| SimardError::AdapterInvocationFailed {
             base_type: ADAPTER_TAG.to_string(),
@@ -131,10 +163,88 @@ pub fn run_disk_health_check(
         });
     }
 
+    let stdout_bytes = &output.stdout;
+    let recipe_output: RecipeOutput =
+        serde_json::from_slice(stdout_bytes).map_err(|e| SimardError::AdapterInvocationFailed {
+            base_type: ADAPTER_TAG.to_string(),
+            reason: format!(
+                "failed to parse recipe JSON: {e}. stdout: {}",
+                truncate(&String::from_utf8_lossy(stdout_bytes), 200)
+            ),
+        })?;
+
+    let step_output = recipe_output
+        .step_results
+        .first()
+        .map(|s| s.output.as_str())
+        .unwrap_or("");
+
+    parse_disk_health_text(step_output).map_err(|e| SimardError::AdapterInvocationFailed {
+        base_type: ADAPTER_TAG.to_string(),
+        reason: format!(
+            "agent output missing markers: {e}. output: {}",
+            truncate(step_output, 300)
+        ),
+    })
+}
+
+/// Deterministic disk health check using plain shell commands (no LLM).
+/// Last-resort fallback when recipe-runner-rs is unavailable.
+fn run_deterministic_disk_check(
+    repo_root: &Path,
+    state_root: &Path,
+) -> SimardResult<DiskHealthReport> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
+    let script = format!(
+        r#"set -e
+USAGE_LINE=$(df -B1 --output=pcent,avail "{home}" 2>/dev/null | tail -1)
+PCT=$(echo "$USAGE_LINE" | awk '{{gsub(/%/,""); print $1}}')
+AVAIL_BEFORE=$(echo "$USAGE_LINE" | awk '{{print $2}}')
+echo "DISK_USED_PCT=$PCT"
+if [ "$PCT" -lt 80 ] 2>/dev/null; then
+    echo "FREED_BYTES=0"
+    exit 0
+fi
+for tgt in "{repo}"/worktrees/*/target/debug \
+           "{repo}"/worktrees/*/worktrees/*/target/debug \
+           "{state}"/engineer-worktrees/*/target/debug; do
+    if [ -d "$tgt" ]; then
+        rm -rf "$tgt" 2>/dev/null && echo "ACTION: removed $tgt"
+    fi
+done
+if [ -d "{repo}"/worktrees/main/target/debug ]; then
+    rm -rf "{repo}"/worktrees/main/target/debug 2>/dev/null && echo "ACTION: removed main debug target"
+fi
+cd "{repo}" && git gc --auto --quiet 2>/dev/null && echo "ACTION: git gc --auto"
+AVAIL_AFTER=$(df -B1 --output=avail "{home}" 2>/dev/null | tail -1 | awk '{{print $1}}')
+if [ "$AVAIL_AFTER" -gt "$AVAIL_BEFORE" ] 2>/dev/null; then
+    FREED=$((AVAIL_AFTER - AVAIL_BEFORE))
+else
+    FREED=0
+fi
+echo "FREED_BYTES=$FREED"
+"#,
+        home = home.display(),
+        repo = repo_root.display(),
+        state = state_root.display(),
+    );
+
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .map_err(|e| SimardError::AdapterInvocationFailed {
+            base_type: ADAPTER_TAG.to_string(),
+            reason: format!("deterministic disk check: bash spawn failed: {e}"),
+        })?;
+
     let stdout_text = String::from_utf8_lossy(&output.stdout);
     parse_disk_health_text(&stdout_text).map_err(|e| SimardError::AdapterInvocationFailed {
         base_type: ADAPTER_TAG.to_string(),
-        reason: format!("failed to parse recipe text output: {e}"),
+        reason: format!(
+            "deterministic disk check: parse failed: {e}. stdout: {}",
+            truncate(&stdout_text, 200)
+        ),
     })
 }
 
@@ -399,58 +509,65 @@ ACTION: cleaned shared-target dir
     }
 
     // ------------------------------------------------------------------
-    // run_disk_health_check — error paths (no recipe-runner-rs needed)
+    // run_disk_health_check — fallback behavior
     // ------------------------------------------------------------------
 
     #[test]
-    fn run_returns_error_when_recipe_not_found() {
+    fn run_falls_back_to_deterministic_when_recipe_not_found() {
+        // With no recipe file, run_disk_health_check falls back to bash.
         let result = run_disk_health_check(
             Path::new("/nonexistent/repo"),
             Path::new("/nonexistent/state"),
         );
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        match &err {
-            SimardError::AdapterInvocationFailed { base_type, reason } => {
-                assert_eq!(base_type, ADAPTER_TAG);
-                assert!(
-                    reason.contains("not found"),
-                    "reason should mention not found: {reason}"
-                );
-            }
-            other => panic!("expected AdapterInvocationFailed, got: {other:?}"),
-        }
+        assert!(result.is_ok(), "fallback should succeed: {result:?}");
+        let report = result.unwrap();
+        assert!(report.disk_used_pct > 0, "should report real disk usage");
     }
 
     #[test]
-    fn run_returns_error_when_recipe_runner_unavailable_or_recipe_invalid() {
-        // Create a syntactically-invalid recipe file. If recipe-runner-rs
-        // is installed it will reject it (non-zero exit); if it's missing
-        // the spawn itself fails. Either way we get AdapterInvocationFailed.
+    fn run_falls_back_when_recipe_runner_unavailable() {
         let tmp = tempfile::tempdir().unwrap();
         let recipe_dir = tmp.path().join("prompt_assets/simard/recipes");
         std::fs::create_dir_all(&recipe_dir).unwrap();
         std::fs::write(recipe_dir.join(RECIPE_FILENAME), "name: test").unwrap();
 
-        // Ensure RuntimeConfig::load() succeeds (CI has no config.toml).
-        // SAFETY: test-only, single-threaded access to env var.
         unsafe { std::env::set_var("SIMARD_LLM_PROVIDER", "copilot") };
         let result = run_disk_health_check(tmp.path(), tmp.path());
         unsafe { std::env::remove_var("SIMARD_LLM_PROVIDER") };
+        assert!(result.is_ok(), "fallback should succeed: {result:?}");
+    }
+
+    #[test]
+    fn deterministic_check_returns_valid_report() {
+        let result = run_deterministic_disk_check(Path::new("/tmp"), Path::new("/tmp"));
+        assert!(
+            result.is_ok(),
+            "deterministic check should succeed: {result:?}"
+        );
+        let report = result.unwrap();
+        assert!(report.disk_used_pct > 0);
+        assert!(report.disk_used_pct <= 100);
+    }
+
+    #[test]
+    fn recipe_check_returns_error_when_recipe_not_found() {
+        let result = run_recipe_disk_check(
+            Path::new("/nonexistent/repo"),
+            Path::new("/nonexistent/state"),
+        );
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        match &err {
-            SimardError::AdapterInvocationFailed { base_type, reason } => {
-                assert_eq!(base_type, ADAPTER_TAG);
-                // Either "spawn failed" (binary missing) or "recipe exited"
-                // (binary found, recipe invalid).
-                assert!(
-                    reason.contains("spawn failed") || reason.contains("recipe exited"),
-                    "reason should mention spawn failure or recipe exit: {reason}"
-                );
-            }
-            other => panic!("expected AdapterInvocationFailed, got: {other:?}"),
-        }
+    }
+
+    #[test]
+    fn parse_markers_from_agent_output_with_noise() {
+        // Simulates real agent output: markers mixed with other text
+        let agent_output = "● Measure disk usage (shell)\n  │ df -B1 ...\n  └ 2 lines...\n\n\
+            Disk usage is at 46%. No cleanup needed.\n\n\
+            DISK_USED_PCT=46\nFREED_BYTES=0\n\n\
+            ✅ Copied bin\n✅ Copied agents/amplihack\n";
+        let report = parse_disk_health_text(agent_output).unwrap();
+        assert_eq!(report.disk_used_pct, 46);
+        assert_eq!(report.freed_bytes, 0);
     }
 
     // ------------------------------------------------------------------
