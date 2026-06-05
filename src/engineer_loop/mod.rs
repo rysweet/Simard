@@ -437,12 +437,11 @@ fn extract_referenced_numbers(objective: &str) -> Vec<u64> {
             while end < bytes.len() && bytes[end].is_ascii_digit() {
                 end += 1;
             }
-            if end > start {
-                if let Ok(n) = objective[start..end].parse::<u64>() {
-                    if !numbers.contains(&n) {
-                        numbers.push(n);
-                    }
-                }
+            if end > start
+                && let Ok(n) = objective[start..end].parse::<u64>()
+                && !numbers.contains(&n)
+            {
+                numbers.push(n);
             }
             i = end;
         } else {
