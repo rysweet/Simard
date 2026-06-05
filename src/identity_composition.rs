@@ -147,6 +147,10 @@ pub fn compose_identity(
 }
 
 #[cfg(test)]
+#[path = "identity_composition_tests.rs"]
+mod coverage_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent_roles::identity_for_role;
