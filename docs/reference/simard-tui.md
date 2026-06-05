@@ -1,7 +1,7 @@
 ---
 title: "simard-tui: Terminal monitoring dashboard"
 description: "Reference for the standalone TUI binary that monitors the Simard daemon, goals, engineers, and activity from a single terminal pane."
-last_updated: 2026-06-04
+last_updated: 2026-06-05
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -64,8 +64,9 @@ ssh -t host simard-tui
 ```
 
 The TUI opens in full-screen mode with the **Overview** tab selected.
-Press `Alt+1`–`Alt+6` to switch tabs directly, `←`/`→` arrow keys to
-cycle through tabs, or `q` to quit.
+Press `Alt+1`–`Alt+6` or `Ctrl+1`–`Ctrl+6` to switch tabs directly,
+`Tab`/`Shift+Tab` to cycle through tabs, or `q` to quit. When not in
+an active meeting, `←`/`→` arrow keys also cycle tabs.
 
 If stdout is not a terminal (e.g., piped or redirected), `simard-tui`
 automatically falls back to `/dev/tty`. If no terminal is available at
@@ -211,19 +212,33 @@ process's stdin).
 **Layout:**
 
 ```
-┌ Meeting ──────────────────────────────────────┐
+┌ Meeting — Running ────────────────────────────┐
 │ [meeting output scrolls here]                 │
 │                                               │
 │ simard> Welcome to Simard meeting mode.       │
 │ simard> What would you like to discuss?       │
-│                                               │
+├───────────────────────────────────────────────┤
+┌ Input ────────────────────────────────────────┐
 │ > Let's review the goal board priorities_     │
+│                                               │
+│                                               │
 └───────────────────────────────────────────────┘
 ```
 
 The top region shows meeting process stdout (scrollable, capped at
-1000 lines to prevent OOM). The bottom line shows the input prompt
-`> ` with the current input buffer and a cursor.
+1000 lines to prevent OOM). The bottom region is a 5-row input area
+(3 visible lines plus borders) showing the input prompt `> ` with
+the current input buffer and a cursor. The input `Paragraph` uses
+`Wrap { trim: false }` so long input text wraps visually without
+being truncated.
+
+**Output filtering.** Lines read from the meeting subprocess stdout
+are filtered before display: any line that contains ` INFO `
+(space-padded on both sides) is discarded. This removes
+noisy INFO-level log messages from the subprocess (typically 3 per
+user message) while preserving all conversation content. The filter
+runs before the 1000-line output cap is applied, so filtered lines
+do not count against the cap.
 
 **Meeting process lifecycle:**
 
@@ -239,12 +254,18 @@ The top region shows meeting process stdout (scrollable, capped at
    blocking. This keeps the event loop responsive.
 
 3. **Input handling.** When on the Meeting tab with an active process:
-   - Printable characters append to the input buffer (capped at 4096
-     bytes)
-   - `Enter` sends the buffer contents + newline to the process stdin
-     and clears the buffer
-   - `Backspace` deletes the last character from the buffer
-   - `Escape` kills the meeting process and returns to idle state
+   - Printable characters are inserted at the cursor position in the
+     input buffer (capped at 4096 bytes). The cursor advances after
+     each insertion.
+   - `←`/`→` arrow keys move the cursor left/right within the input
+     buffer without modifying text.
+   - `Home` moves the cursor to the start of the input buffer.
+   - `End` moves the cursor to the end of the input buffer.
+   - `Enter` sends the buffer contents + newline to the process stdin,
+     clears the buffer, and resets the cursor to position 0.
+   - `Backspace` deletes the character before the cursor and moves
+     the cursor back one position. No-op when cursor is at position 0.
+   - `Escape` kills the meeting process and returns to idle state.
 
 4. **Process exit.** If the meeting process exits on its own, the tab
    shows: `Meeting ended (exit code: N)`. Navigating away and back
@@ -254,12 +275,24 @@ The top region shows meeting process stdout (scrollable, capped at
    meeting child process is killed via SIGKILL and waited on. This is
    enforced by a `Drop` implementation on the `App` struct.
 
-**Key routing precedence:** Tab-switch keys (`Alt+1`–`Alt+6` and
-`←`/`→` arrows) always switch tabs, even when the meeting process is
-active. All printable characters — including digits 0–9 — go to the
-meeting input buffer when the meeting process is running. This means
-digits can be typed in meeting mode without conflict with tab
-switching. When the meeting process is not active, `q` quits the TUI
+**Key routing precedence:** The meeting tab changes how keys are
+routed when a meeting process is active:
+
+1. `Alt+1`–`Alt+6` and `Ctrl+1`–`Ctrl+6` always switch tabs
+   (highest priority, regardless of meeting state).
+2. When the meeting process is **running** and the Meeting tab is
+   **active**: `←`/`→` arrows move the input cursor (not cycle tabs),
+   `Home`/`End` jump to input boundaries, and all printable characters
+   — including digits 0–9 — are inserted at the cursor position.
+   `Tab` and `Shift+Tab` still cycle tabs.
+3. When the meeting process is **not running** (NotStarted, Exited,
+   Error): `←`/`→` arrows cycle tabs as on all other tabs.
+
+This means digits can always be typed in meeting mode without
+conflict with tab switching. Arrow keys provide natural cursor
+movement during message composition. `Tab`/`Shift+Tab` and
+`Alt+digit`/`Ctrl+digit` remain available for tab navigation at all
+times. When the meeting process is not active, `q` quits the TUI
 normally.
 
 ### Tab 6: Stats
@@ -342,27 +375,51 @@ so `gh` values appear as soon as the commands complete — typically
 | Key | Context | Action |
 |---|---|---|
 | `Alt+1`–`Alt+6` | Any tab | Switch to tab 1–6 |
-| `←` (Left arrow) | Any tab | Cycle to previous tab (wraps: tab 1 → tab 6) |
-| `→` (Right arrow) | Any tab | Cycle to next tab (wraps: tab 6 → tab 1) |
+| `Ctrl+1`–`Ctrl+6` | Any tab | Switch to tab 1–6 (alternative) |
+| `←` (Left arrow) | Not in active meeting | Cycle to previous tab (wraps: tab 1 → tab 6) |
+| `→` (Right arrow) | Not in active meeting | Cycle to next tab (wraps: tab 6 → tab 1) |
+| `←` (Left arrow) | Meeting tab, process active | Move cursor left in input |
+| `→` (Right arrow) | Meeting tab, process active | Move cursor right in input |
+| `Home` | Meeting tab, process active | Move cursor to start of input |
+| `End` | Meeting tab, process active | Move cursor to end of input |
+| `Tab` | Any tab | Cycle to next tab (wraps: tab 6 → tab 1) |
+| `Shift+Tab` | Any tab | Cycle to previous tab (wraps: tab 1 → tab 6) |
 | `q` / `Q` | Any tab (meeting not active) | Quit and restore terminal |
-| Printable chars | Meeting tab, process active | Append to meeting input buffer (all chars including digits) |
+| Printable chars | Meeting tab, process active | Insert at cursor position in meeting input buffer (all chars including digits) |
 | `Enter` | Meeting tab, process active | Send input buffer to meeting process |
-| `Backspace` | Meeting tab, process active | Delete last character from input buffer |
+| `Backspace` | Meeting tab, process active | Delete character before cursor |
 | `Escape` | Meeting tab, process active | Kill meeting process |
 
 All keys are processed on `KeyEvent` with `kind == Press` to avoid
 double-firing on terminals that emit both press and release events.
 
 The `handle_key` method accepts a full `crossterm::event::KeyEvent`
-(not just a `char`) to support modifier detection (Alt) and special
-keys (arrows, Enter, Backspace, Escape) for the meeting REPL and tab
-navigation.
+(not just a `char`) to support modifier detection (Alt, Ctrl) and
+special keys (arrows, Enter, Backspace, Escape, Home, End, Tab) for
+the meeting REPL and tab navigation.
 
 **`Tab::from_key()` signature.** The `from_key` method takes a
-`&KeyEvent` and matches `KeyCode::Char('1'..='6')` only when the
-`ALT` modifier is present (`key.modifiers.contains(KeyModifiers::ALT)`).
-Bare digit presses without Alt are ignored by the tab-switching logic
-and fall through to meeting input or are discarded on non-meeting tabs.
+`&KeyEvent` and matches `KeyCode::Char('1'..='6')` when the `ALT` or
+`CONTROL` modifier is present. Bare digit presses without a modifier
+are ignored by the tab-switching logic and fall through to meeting
+input or are discarded on non-meeting tabs.
+
+**Arrow key behavior.** Arrow keys are context-sensitive:
+- When the Meeting tab is active and the meeting process is running,
+  `←`/`→` move the cursor within the input buffer (no tab cycling).
+- In all other contexts (non-meeting tabs, or meeting tab with no
+  active process), `←`/`→` cycle tabs with wrapping.
+
+The cursor position (`cursor_position: usize`) is tracked on the
+`App` struct. It is clamped to `meeting_input.len()` after every
+mutation (insert, delete, clear, move) to prevent out-of-bounds
+access. It resets to 0 when input is sent (`Enter`) or the meeting
+process stops (`Escape`).
+
+**Tab/Shift+Tab cycling.** `Tab` and `Shift+Tab` always cycle tabs
+forward and backward respectively, regardless of whether a meeting is
+active. This provides a reliable tab-cycling alternative when arrow
+keys are captured by the meeting input.
 
 **Arrow key wrapping.** Left arrow on the first tab (index 0) wraps
 to the last tab (index 5). Right arrow on the last tab wraps to the
@@ -371,8 +428,9 @@ first. The wrapping uses modular arithmetic on `ALL_TABS.len()`.
 **Terminal compatibility note.** Some terminals (especially over SSH,
 in screen/tmux, or on macOS Terminal.app) may not send `Alt+digit`
 as a `KeyModifiers::ALT` modifier — they may encode it as an escape
-sequence that crossterm handles differently. The `←`/`→` arrow keys
-provide a universal fallback for tab cycling in those environments.
+sequence that crossterm handles differently. `Ctrl+digit` and
+`Tab`/`Shift+Tab` provide universal fallbacks for tab navigation in
+those environments.
 
 ### Layout
 
@@ -386,7 +444,7 @@ The TUI frame uses a 3-chunk vertical layout:
 │         Active tab content                   │ ← Content (flexible)
 │                                              │
 ├──────────────────────────────────────────────┤
-│ Alt+1‥6: tabs | ←/→: cycle | q: quit        │ ← Footer (1 row)
+│ Alt+1‥6: tabs | Tab/Shift+Tab: cycle | q: quit │ ← Footer (1 row)
 └──────────────────────────────────────────────┘
 ```
 
@@ -721,8 +779,8 @@ They work correctly in both the stdout and `/dev/tty` paths.
 - **Alt+digit may not work on all terminals.** Some terminals
   (especially over SSH, in screen/tmux, or macOS Terminal.app) encode
   Alt+digit as escape sequences that crossterm may not recognize as
-  an ALT modifier. The `←`/`→` arrow keys provide a universal fallback
-  for tab cycling in those environments.
+  an ALT modifier. `Ctrl+digit` and `Tab`/`Shift+Tab` provide
+  universal fallbacks for tab navigation in those environments.
 
 - **Category column depends on tmux tracking.** The Engineers tab
   Category column requires the daemon to use tmux-wrapped engineer

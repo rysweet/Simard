@@ -1,7 +1,7 @@
 ---
 title: Monitor Simard with the TUI dashboard
 description: "How to launch simard-tui, navigate tabs, monitor engineers, read logs, run meetings, and check stats — all from a single terminal pane."
-last_updated: 2026-06-04
+last_updated: 2026-06-05
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -50,7 +50,7 @@ The active tab is highlighted. A footer bar at the bottom shows the
 available keybindings:
 
 ```
-Alt+1‥6: tabs | ←/→: cycle | q: quit
+Alt+1‥6: tabs | Tab/Shift+Tab: cycle | q: quit
 ```
 
 Press `q` at any time to quit and restore your terminal.
@@ -87,7 +87,7 @@ The Overview tab shows a summary panel:
 
 ## 3. Switch to the Goals tab
 
-Press `Alt+2` (or `→` to cycle) to switch to the Goals tab. It displays a table of active
+Press `Alt+2` (or `Tab` to cycle) to switch to the Goals tab. It displays a table of active
 goals loaded from cognitive memory (`<state-root>/cognitive_memory.ladybug`):
 
 ```
@@ -200,29 +200,47 @@ Press `Alt+5` to switch to the Meeting tab. The TUI automatically spawns
 a `simard meeting start` process:
 
 ```
-┌ Meeting ──────────────────────────────────────────────────────────┐
+┌ Meeting — Running ────────────────────────────────────────────────┐
+│ Meeting started. Type your input below. Press Esc to stop.        │
 │ simard> Welcome to Simard meeting mode.                           │
 │ simard> What would you like to discuss?                           │
-│                                                                   │
+├───────────────────────────────────────────────────────────────────┤
+┌ Input ────────────────────────────────────────────────────────────┐
 │ > Let's review the goal board priorities_                         │
+│                                                                   │
+│                                                                   │
 └───────────────────────────────────────────────────────────────────┘
 ```
+
+The input area is 5 rows tall (3 visible lines plus borders) and wraps
+long input text automatically, so you can see what you're typing even
+on multi-line messages.
 
 **How to interact:**
 
 1. **Type** your message — all printable characters (including digits)
-   appear at the prompt.
+   appear at the cursor position.
 2. **Press Enter** to send the line to the meeting process.
-3. **Press Backspace** to delete the last character.
-4. **Press Escape** to kill the meeting process and return to idle.
-5. **Switch tabs** with `Alt+1`–`Alt+6` or `←`/`→` arrow keys at any
-   time — the meeting process continues running in the background.
-   Return to Tab 5 to resume.
+3. **Press Backspace** to delete the character before the cursor.
+4. **Use `←`/`→` arrow keys** to move the cursor within your input text.
+5. **Use `Home`/`End`** to jump to the start or end of the input.
+6. **Press Escape** to kill the meeting process and return to idle.
+7. **Switch tabs** with `Alt+1`–`Alt+6`, `Ctrl+1`–`Ctrl+6`, or
+   `Tab`/`Shift+Tab` — the meeting process continues running in the
+   background. Return to Tab 5 to resume.
 
 **Digits are typeable in meetings.** Tab switching uses `Alt+digit`
-(not bare digits), so all printable characters including `0`–`9` go
-directly to the meeting input buffer. This resolves a previous
-limitation where digits 1–6 could not be typed in meeting mode.
+or `Ctrl+digit` (not bare digits), so all printable characters
+including `0`–`9` go directly to the meeting input buffer.
+
+**Arrow keys move the cursor in meetings.** When a meeting is active,
+`←`/`→` move the cursor within your input text instead of cycling
+tabs. Use `Tab`/`Shift+Tab` or `Alt+digit`/`Ctrl+digit` to change
+tabs while in a meeting.
+
+**Clean output.** The meeting output area automatically filters out
+noisy INFO-level log lines from the meeting subprocess, so you only
+see conversation content (your input echoes and Simard's responses).
 
 **Meeting lifecycle:**
 
@@ -345,18 +363,26 @@ or `simard` CLI commands instead.
 | Key | Context | Action |
 |---|---|---|
 | `Alt+1`–`Alt+6` | Any tab | Switch to that tab |
-| `←` (Left arrow) | Any tab | Cycle to previous tab (wraps around) |
-| `→` (Right arrow) | Any tab | Cycle to next tab (wraps around) |
+| `Ctrl+1`–`Ctrl+6` | Any tab | Switch to that tab (alternative) |
+| `←` (Left arrow) | Not in active meeting | Cycle to previous tab (wraps around) |
+| `→` (Right arrow) | Not in active meeting | Cycle to next tab (wraps around) |
+| `←` (Left arrow) | Meeting tab, process active | Move cursor left in input |
+| `→` (Right arrow) | Meeting tab, process active | Move cursor right in input |
+| `Home` | Meeting tab, process active | Move cursor to start of input |
+| `End` | Meeting tab, process active | Move cursor to end of input |
+| `Tab` | Any tab | Cycle to next tab (wraps around) |
+| `Shift+Tab` | Any tab | Cycle to previous tab (wraps around) |
 | `q` / `Q` | Any tab (no active meeting) | Quit |
-| Printable chars | Meeting tab, process active | Type into input (all chars including digits) |
+| Printable chars | Meeting tab, process active | Insert at cursor position (all chars including digits) |
 | `Enter` | Meeting tab, process active | Send input |
-| `Backspace` | Meeting tab, process active | Delete last char |
+| `Backspace` | Meeting tab, process active | Delete character before cursor |
 | `Escape` | Meeting tab, process active | Kill meeting process |
 
 > **Note on terminal compatibility:** Some terminals (especially over
 > SSH or in screen/tmux) may not send `Alt+digit` as a modifier.
 > `crossterm` handles the common encodings, but if Alt+digit does not
-> work in your terminal, use `←`/`→` arrow keys as a fallback.
+> work in your terminal, use `Ctrl+digit` or `Tab`/`Shift+Tab` to
+> cycle tabs.
 
 ## Troubleshooting
 
