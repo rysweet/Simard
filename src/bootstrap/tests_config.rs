@@ -158,6 +158,7 @@ fn resolve_full_explicit_config_succeeds() {
 // ── BootstrapConfig path methods ──
 
 #[test]
+#[allow(deprecated)]
 fn config_path_methods_use_state_root() {
     let temp_dir = TestDir::new("simard-paths-test");
     let inputs = BootstrapInputs {

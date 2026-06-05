@@ -1026,15 +1026,22 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
 ///
 /// Shared by `close()` and `finalize_partial()` so goals are always
 /// persisted regardless of whether the summary phase timed out.
+///
+/// Since issue #1668, writes flow through `CognitiveMemoryGoalStore`
+/// instead of the legacy `FileBackedGoalStore`. A one-time migration
+/// reads any existing `state/goal_store.json` into cognitive memory
+/// before writing new records.
 fn write_goals_from_decisions(decisions: &[crate::meeting_facilitator::MeetingDecision]) {
     if decisions.is_empty() {
         return;
     }
-    let goal_path = crate::state_root::goal_store_path();
-    if let Some(parent) = goal_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match crate::goals::FileBackedGoalStore::try_new(&goal_path) {
+    let state_root = crate::state_root::simard_state_root();
+
+    // One-time migration: if a legacy goal_store.json exists, import it
+    // into cognitive memory before writing new records (issue #1668).
+    crate::goals::migrate_file_backed_goal_store_if_present(&state_root);
+
+    match crate::goals::CognitiveMemoryGoalStore::new(state_root) {
         Ok(goal_store) => {
             use crate::goals::{GoalRecord as GR, GoalStatus as GS, GoalStore, GoalUpdate};
             let session_id = crate::session::SessionId::from_uuid(uuid::Uuid::now_v7());

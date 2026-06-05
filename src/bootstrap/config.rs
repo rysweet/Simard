@@ -161,6 +161,16 @@ impl BootstrapConfig {
         self.state_root.value.join("evidence_records.json")
     }
 
+    /// Legacy file-backed goal store path.
+    ///
+    /// Since issue #1668 all goal reads/writes flow through
+    /// `CognitiveMemoryGoalStore`. This method is retained only for
+    /// backward-compatible path assertions in tests and should not be
+    /// used in new production code.
+    #[deprecated(
+        since = "0.20.0",
+        note = "Goal storage now uses CognitiveMemoryGoalStore; see issue #1668"
+    )]
     pub fn goal_store_path(&self) -> PathBuf {
         self.state_root.value.join("state").join("goal_store.json")
     }
@@ -290,6 +300,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_goal_store_path() {
         let config = BootstrapConfig::resolve(builtin_defaults_inputs()).unwrap();
         let path = config.goal_store_path();
