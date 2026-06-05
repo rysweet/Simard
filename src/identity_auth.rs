@@ -220,6 +220,10 @@ pub fn identity_for_operation(operation: &str) -> Option<AuthIdentity> {
 }
 
 #[cfg(test)]
+#[path = "identity_auth_tests.rs"]
+mod coverage_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

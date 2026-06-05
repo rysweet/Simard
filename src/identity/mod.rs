@@ -4,6 +4,10 @@ mod loader;
 mod manifest;
 mod types;
 
+#[cfg(test)]
+#[path = "coverage_tests.rs"]
+mod coverage_tests;
+
 // Re-export all public items so `crate::identity::X` still works.
 pub use contract::ManifestContract;
 pub use loader::{BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader};
