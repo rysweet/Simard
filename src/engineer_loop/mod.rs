@@ -39,7 +39,10 @@ use crate::runtime::RuntimeTopology;
 use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
 use crate::terminal_engineer_bridge::{SHARED_EXPLICIT_STATE_ROOT_SOURCE, TerminalBridgeContext};
 
-use execution::{parse_status_paths, run_command, trimmed_stdout, trimmed_stdout_allow_empty};
+use execution::{
+    parse_status_paths, run_command, run_command_allow_failure, trimmed_stdout,
+    trimmed_stdout_allow_empty,
+};
 
 // Re-export all public items so `crate::engineer_loop::X` still works.
 pub use types::{
@@ -305,11 +308,7 @@ pub fn run_local_engineer_loop(
         }
     };
 
-    let verification = VerificationReport {
-        status: "agent-completed".to_string(),
-        summary: action.stdout.clone(),
-        checks: vec![],
-    };
+    let verification = verify_agent_spawn_artifacts(&inspection, objective);
 
     // --- SessionPhase::Reflection ---
     // Compare results against the objective and capture what succeeded/failed.
@@ -422,6 +421,164 @@ pub fn run_local_engineer_loop(
         phase_traces,
         session_record: Some(session),
     })
+}
+
+/// Extract issue/PR numbers referenced in an objective string.
+/// Matches patterns like `#1234`, `issue #1234`, `PR #1234`.
+fn extract_referenced_numbers(objective: &str) -> Vec<u64> {
+    let mut numbers = Vec::new();
+    // Simple byte scan for `#` followed by digits.
+    let bytes = objective.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if end > start
+                && let Ok(n) = objective[start..end].parse::<u64>()
+                && !numbers.contains(&n)
+            {
+                numbers.push(n);
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    numbers
+}
+
+/// Count status paths that are new relative to a pre-spawn baseline.
+fn count_new_status_paths(before: &[String], after: &[String]) -> Vec<String> {
+    after
+        .iter()
+        .filter(|p| !before.contains(p))
+        .cloned()
+        .collect()
+}
+
+/// Synthesize a [`VerificationReport`] from observable side-effects after an
+/// agent session completes (issue #1670). Replaces the previous hardcoded
+/// `"agent-completed"` status with post-hoc verification that checks:
+///
+/// 1. New commits since `inspection.head` (via `git rev-list --count`).
+/// 2. New/changed files in the worktree (via `git status --short`).
+/// 3. Referenced issue/PR metadata (best-effort via `gh`, non-blocking).
+///
+/// Status is `"verified"` when at least one check finds a measurable artifact;
+/// `"unverified"` otherwise.
+fn verify_agent_spawn_artifacts(
+    inspection: &RepoInspection,
+    objective: &str,
+) -> VerificationReport {
+    let repo_root = &inspection.repo_root;
+    let pre_head = &inspection.head;
+    let mut checks: Vec<String> = Vec::new();
+
+    // 1. Count new commits since the pre-spawn HEAD.
+    let new_commit_count = run_command_allow_failure(
+        repo_root,
+        &["git", "rev-list", "--count", &format!("{pre_head}..HEAD")],
+    )
+    .ok()
+    .and_then(|out| out.stdout.trim().parse::<u64>().ok())
+    .unwrap_or(0);
+
+    if new_commit_count > 0 {
+        // Also grab the one-line summaries for the checks list.
+        let log_lines = run_command_allow_failure(
+            repo_root,
+            &["git", "log", "--oneline", &format!("{pre_head}..HEAD")],
+        )
+        .ok()
+        .map(|out| out.stdout.trim().to_string())
+        .unwrap_or_default();
+        checks.push(format!(
+            "git: {new_commit_count} new commit(s) since {pre_head}"
+        ));
+        if !log_lines.is_empty() {
+            // Cap at first 5 lines to keep the report bounded.
+            let capped: String = log_lines.lines().take(5).collect::<Vec<_>>().join("; ");
+            checks.push(format!("git-log: {capped}"));
+        }
+    }
+
+    // 2. Detect new/changed files in the worktree.
+    let post_status = run_command_allow_failure(
+        repo_root,
+        &["git", "status", "--short", "--untracked-files=all"],
+    )
+    .ok()
+    .map(|out| parse_status_paths(&out.stdout))
+    .unwrap_or_default();
+
+    let new_files = count_new_status_paths(&inspection.changed_files, &post_status);
+    if !new_files.is_empty() {
+        checks.push(format!(
+            "git-status: {} new changed file(s): {}",
+            new_files.len(),
+            new_files
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    // 3. Best-effort GH metadata probe for referenced issues/PRs.
+    let referenced = extract_referenced_numbers(objective);
+    for num in referenced.iter().take(3) {
+        // Try PR first, then issue. Both are non-blocking.
+        if let Some(info) = gh_resource_info(repo_root, "pr", *num) {
+            checks.push(format!("gh: PR #{num} {info}"));
+        } else if let Some(info) = gh_resource_info(repo_root, "issue", *num) {
+            checks.push(format!("gh: issue #{num} {info}"));
+        }
+    }
+
+    // Determine status: verified if at least one check found a measurable
+    // artifact from git (commits or file changes). GH metadata alone is
+    // informational and does not flip the status.
+    let has_git_evidence = new_commit_count > 0 || !new_files.is_empty();
+    let status = if has_git_evidence {
+        "verified"
+    } else {
+        "unverified"
+    }
+    .to_string();
+
+    let summary = if checks.is_empty() {
+        "No observable artifacts detected after agent session".to_string()
+    } else {
+        checks.join("; ")
+    };
+
+    VerificationReport {
+        status,
+        summary,
+        checks,
+    }
+}
+
+/// Best-effort query of a GH PR or issue. Returns a short info string on
+/// success, `None` on any failure (missing `gh` CLI, auth issues, etc.).
+fn gh_resource_info(repo_root: &Path, kind: &str, number: u64) -> Option<String> {
+    let num_str = number.to_string();
+    let result = run_command_allow_failure(
+        repo_root,
+        &["gh", kind, "view", &num_str, "--json", "state,title"],
+    );
+    match result {
+        Ok(out) => {
+            let text = out.stdout.trim().to_string();
+            if text.is_empty() { None } else { Some(text) }
+        }
+        Err(_) => None,
+    }
 }
 
 /// Form a structured execution plan from the objective and inspection data
