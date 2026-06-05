@@ -15,7 +15,7 @@ use crate::ooda_brain::{
     DeterministicFallbackDecideBrain, OodaDecideBrain, push_brain_judgment,
 };
 
-use super::{OodaConfig, PlannedAction, Priority, is_synthetic_id};
+use super::{ActionKind, OodaConfig, PlannedAction, Priority, is_synthetic_id};
 
 /// Decide using the deterministic fallback brain. This is the entrypoint
 /// the daemon's Act phase calls today; it preserves the pre-#1458 routing
@@ -100,7 +100,7 @@ pub fn decide_with_brain(
                 j
             }
         };
-        actions.push(PlannedAction {
+        let planned = PlannedAction {
             kind: judgment.action_kind(),
             goal_id: if is_synthetic_id(&priority.goal_id) {
                 None
@@ -108,7 +108,18 @@ pub fn decide_with_brain(
                 Some(priority.goal_id.clone())
             },
             description: priority.reason.clone(),
-        });
+        };
+        // Defense-in-depth: AdvanceGoal without goal_id is unroutable at
+        // dispatch (issue #2227). Skip rather than push an action that will
+        // always fail.
+        if planned.kind == ActionKind::AdvanceGoal && planned.goal_id.is_none() {
+            tracing::warn!(
+                priority_goal_id = %priority.goal_id,
+                "skipping AdvanceGoal with goal_id=None (synthetic priority mis-routed)"
+            );
+            continue;
+        }
+        actions.push(planned);
     }
     Ok(actions)
 }
@@ -553,5 +564,66 @@ mod tests {
             1,
             "without scaler, max_concurrent_actions=1 should cap to 1"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #2227: eval-watchdog routing and defense-in-depth guard
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decide_maps_eval_watchdog_to_run_gym_eval() {
+        let priorities = vec![Priority {
+            goal_id: "__eval_watchdog__".to_string(),
+            urgency: 1.0,
+            reason: "eval signal stale".to_string(),
+        }];
+        let config = OodaConfig::default();
+        let actions = decide(&priorities, &config).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].kind,
+            ActionKind::RunGymEval,
+            "EvalWatchdog must route to RunGymEval, not AdvanceGoal (issue #2227)"
+        );
+        assert!(actions[0].goal_id.is_none());
+    }
+
+    #[test]
+    fn decide_guard_skips_advance_goal_with_no_goal_id() {
+        // A mis-routing brain that always returns AdvanceGoal, even for
+        // synthetic priorities. The defense-in-depth guard must skip.
+        struct AlwaysAdvanceBrain;
+        impl OodaDecideBrain for AlwaysAdvanceBrain {
+            fn judge_decision(
+                &self,
+                _ctx: &DecideContext,
+            ) -> crate::error::SimardResult<DecideJudgment> {
+                Ok(DecideJudgment::AdvanceGoal {
+                    rationale: "mis-routed".to_string(),
+                })
+            }
+        }
+        let priorities = vec![
+            Priority {
+                goal_id: "__memory__".to_string(),
+                urgency: 0.8,
+                reason: "synthetic".to_string(),
+            },
+            Priority {
+                goal_id: "real-goal".to_string(),
+                urgency: 0.7,
+                reason: "real".to_string(),
+            },
+        ];
+        let config = OodaConfig::default();
+        let actions = decide_with_brain(&priorities, &config, &AlwaysAdvanceBrain).unwrap();
+        // The synthetic priority should be skipped, the real goal should pass.
+        assert_eq!(
+            actions.len(),
+            1,
+            "guard must skip synthetic AdvanceGoal+None"
+        );
+        assert_eq!(actions[0].goal_id, Some("real-goal".to_string()));
+        assert_eq!(actions[0].kind, ActionKind::AdvanceGoal);
     }
 }
