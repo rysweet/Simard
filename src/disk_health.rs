@@ -1,16 +1,18 @@
-//! Recipe-runner-backed disk health check (issue #2020).
+//! Recipe-runner-backed disk health check (issue #2020, fix #2212).
 //!
-//! Invokes `recipe-runner-rs` executing
+//! Invokes `recipe-runner-rs --output-format json` executing
 //! `prompt_assets/simard/recipes/disk-health-check.yaml` as a subprocess,
 //! checks disk usage, triggers cleanup when usage exceeds 80%, and returns
-//! a structured JSON report.
+//! a structured [`DiskHealthReport`].
 //!
 //! The recipe YAML contains the deterministic bash cleanup logic; this
 //! module is a thin Rust shim that:
 //!   1. Resolves the recipe path (hot-reload → in-tree fallback)
-//!   2. Spawns `recipe-runner-rs` with `-c` context vars
-//!   3. Parses stdout JSON into [`DiskHealthReport`]
-//!   4. Logs results to daemon.log
+//!   2. Spawns `recipe-runner-rs` with `--output-format json` and `-c` context vars
+//!   3. Deserializes the JSON envelope into [`RecipeOutput`]
+//!   4. Extracts `step_results[0].output` (the agent's text output)
+//!   5. Parses `DISK_USED_PCT`/`FREED_BYTES`/`ACTION:` markers into [`DiskHealthReport`]
+//!   6. Logs results to daemon.log
 //!
 //! Follows the same pattern as `stewardship::recipe_merge_judge`.
 
@@ -25,10 +27,26 @@ use crate::runtime_config::RuntimeConfig;
 const ADAPTER_TAG: &str = "disk-health-check";
 const RECIPE_FILENAME: &str = "disk-health-check.yaml";
 
+/// JSON envelope returned by `recipe-runner-rs --output-format json`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RecipeOutput {
+    pub success: bool,
+    pub step_results: Vec<StepResult>,
+}
+
+/// A single step's result inside the [`RecipeOutput`] envelope.
+#[derive(Debug, Deserialize)]
+pub(crate) struct StepResult {
+    #[allow(dead_code)] // Part of JSON contract; used in tests.
+    pub step_id: String,
+    pub output: String,
+}
+
 /// Structured report returned by the disk-health-check recipe.
 ///
-/// The recipe's bash step outputs this as JSON to stdout.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+/// Built by parsing text markers (`DISK_USED_PCT=`, `FREED_BYTES=`,
+/// `ACTION:`) from the agent step output extracted from the JSON envelope.
+#[derive(Debug, Clone, PartialEq)]
 pub struct DiskHealthReport {
     /// Current disk usage percentage (0–100).
     pub disk_used_pct: u8,
@@ -110,6 +128,8 @@ pub fn run_disk_health_check(
 
     let output = Command::new("recipe-runner-rs")
         .arg(recipe_path.as_os_str())
+        .arg("--output-format")
+        .arg("json")
         .env("AMPLIHACK_AGENT_BINARY", agent_binary)
         .arg("-c")
         .arg(format!("state_root={}", state_root.display()))
@@ -131,8 +151,30 @@ pub fn run_disk_health_check(
         });
     }
 
-    let stdout_text = String::from_utf8_lossy(&output.stdout);
-    parse_disk_health_text(&stdout_text).map_err(|e| SimardError::AdapterInvocationFailed {
+    let envelope: RecipeOutput = serde_json::from_slice(&output.stdout).map_err(|e| {
+        SimardError::AdapterInvocationFailed {
+            base_type: ADAPTER_TAG.to_string(),
+            reason: format!("failed to deserialize recipe JSON output: {e}"),
+        }
+    })?;
+
+    if !envelope.success {
+        return Err(SimardError::AdapterInvocationFailed {
+            base_type: ADAPTER_TAG.to_string(),
+            reason: "recipe reported success=false in JSON output".to_string(),
+        });
+    }
+
+    let step_output = envelope
+        .step_results
+        .first()
+        .map(|s| s.output.as_str())
+        .ok_or_else(|| SimardError::AdapterInvocationFailed {
+            base_type: ADAPTER_TAG.to_string(),
+            reason: "no step results in recipe JSON output".to_string(),
+        })?;
+
+    parse_disk_health_text(step_output).map_err(|e| SimardError::AdapterInvocationFailed {
         base_type: ADAPTER_TAG.to_string(),
         reason: format!("failed to parse recipe text output: {e}"),
     })
@@ -451,6 +493,113 @@ ACTION: cleaned shared-target dir
             }
             other => panic!("expected AdapterInvocationFailed, got: {other:?}"),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // JSON envelope deserialization (issue #2212 — TDD: tests written first)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn json_envelope_deserialization() {
+        // Full pipeline: JSON envelope → RecipeOutput → step_results[0].output → parse_disk_health_text → DiskHealthReport
+        let json = r#"{
+            "success": true,
+            "step_results": [{
+                "step_id": "disk-health-step",
+                "output": "DISK_USED_PCT=72\nFREED_BYTES=1024\nACTION: cleaned worktrees\n"
+            }]
+        }"#;
+        let envelope: RecipeOutput = serde_json::from_str(json).unwrap();
+        assert!(envelope.success);
+        assert_eq!(envelope.step_results.len(), 1);
+        assert_eq!(envelope.step_results[0].step_id, "disk-health-step");
+
+        let report = parse_disk_health_text(&envelope.step_results[0].output).unwrap();
+        assert_eq!(report.disk_used_pct, 72);
+        assert_eq!(report.freed_bytes, 1024);
+        assert_eq!(report.actions_taken, vec!["cleaned worktrees"]);
+    }
+
+    #[test]
+    fn json_envelope_empty_step_results() {
+        // When step_results is empty, extracting step output should fail gracefully.
+        let json = r#"{"success": true, "step_results": []}"#;
+        let envelope: RecipeOutput = serde_json::from_str(json).unwrap();
+        assert!(envelope.step_results.is_empty());
+    }
+
+    #[test]
+    fn json_envelope_multiple_steps_uses_first() {
+        // Only step_results[0].output is used for parsing.
+        let json = r#"{
+            "success": true,
+            "step_results": [
+                {"step_id": "step-1", "output": "DISK_USED_PCT=55\nFREED_BYTES=0\n"},
+                {"step_id": "step-2", "output": "some other output"}
+            ]
+        }"#;
+        let envelope: RecipeOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(envelope.step_results.len(), 2);
+
+        let report = parse_disk_health_text(&envelope.step_results[0].output).unwrap();
+        assert_eq!(report.disk_used_pct, 55);
+    }
+
+    // ------------------------------------------------------------------
+    // Noisy agent output (issue #2212 — markers in LLM conversation text)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parse_markers_from_agent_output_with_noise() {
+        // The agent's step output contains LLM reasoning, df output, and
+        // bash prompts — the parser must extract markers from this noise.
+        let noisy_output = "\
+I'll check the disk usage now.
+
+Running df -h to check disk space...
+
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1       100G   72G   28G  72% /
+
+The disk is at 72% usage, which is below the 80% threshold.
+No cleanup actions are needed.
+
+DISK_USED_PCT=72
+FREED_BYTES=0
+";
+        let report = parse_disk_health_text(noisy_output).unwrap();
+        assert_eq!(report.disk_used_pct, 72);
+        assert_eq!(report.freed_bytes, 0);
+        assert!(report.actions_taken.is_empty());
+    }
+
+    #[test]
+    fn parse_markers_from_noisy_output_with_cleanup() {
+        let noisy_output = "\
+Checking disk usage...
+
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1       100G   87G   13G  87% /
+
+Disk usage is at 87%, exceeding 80% threshold. Performing cleanup.
+
+Removing stale worktrees...
+Done. Removed 12 worktrees.
+
+Cleaning cargo target directories...
+Done.
+
+DISK_USED_PCT=87
+FREED_BYTES=53687091200
+ACTION: removed 12 stale engineer worktrees
+ACTION: cleaned cargo target dirs
+";
+        let report = parse_disk_health_text(noisy_output).unwrap();
+        assert_eq!(report.disk_used_pct, 87);
+        assert_eq!(report.freed_bytes, 53_687_091_200);
+        assert_eq!(report.actions_taken.len(), 2);
+        assert!(report.actions_taken[0].contains("worktrees"));
+        assert!(report.actions_taken[1].contains("cargo"));
     }
 
     // ------------------------------------------------------------------

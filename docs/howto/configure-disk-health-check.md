@@ -1,12 +1,13 @@
 ---
 title: Configure and monitor the disk health check
 description: Operator guide for Simard's per-cycle disk health check — tuning thresholds, reading reports, and recovering from disk exhaustion.
-last_updated: 2026-05-24
+last_updated: 2026-06-05
 review_schedule: as-needed
 owner: simard
 doc_type: howto
 related:
   - ../concepts/automated-disk-health.md
+  - ../reference/disk-health-api.md
   - ./inspect-and-clean-engineer-worktrees.md
   - ./reclaim-disk-space-and-run-low-space-rust-builds.md
 ---
@@ -79,8 +80,34 @@ YAML each time.
 
 ## Read a full disk health report
 
-The recipe outputs a key=value text report to stdout, which the daemon captures
-and logs. To run the check manually outside the daemon:
+The recipe outputs key=value text markers inside the agent step's output.
+The Rust shim accesses this via the `--output-format json` envelope from
+`recipe-runner-rs`. To run the check manually and see the raw JSON envelope:
+
+```bash
+recipe-runner-rs prompt_assets/simard/recipes/disk-health-check.yaml \
+  --output-format json \
+  -c STATE_ROOT="$HOME/.simard" \
+  -c REPO_ROOT="/home/azureuser/src/Simard"
+```
+
+This prints a JSON envelope containing the step output:
+
+```json
+{
+  "success": true,
+  "step_results": [
+    {
+      "step_id": "check-disk-usage",
+      "output": "DISK_USED_PCT=72\nFREED_BYTES=53687091200\nACTION: Removed 48 stale worktrees (50.1G)\nACTION: Removed cargo target dirs from 3 worktrees (1.2G)\nACTION: Pruned 19 LadybugDB backups (512M)\nACTION: Cleaned cargo-target/ (12.0G) and shared-target/ (2.8G)\n"
+    }
+  ]
+}
+```
+
+The Rust shim extracts `step_results[0].output` and parses the key=value
+markers from that string. To see only the text-format summary (without the
+JSON envelope), omit `--output-format json`:
 
 ```bash
 recipe-runner-rs prompt_assets/simard/recipes/disk-health-check.yaml \
@@ -88,16 +115,10 @@ recipe-runner-rs prompt_assets/simard/recipes/disk-health-check.yaml \
   -c REPO_ROOT="/home/azureuser/src/Simard"
 ```
 
-This prints the text report to stdout:
-
-```
-DISK_USED_PCT=72
-FREED_BYTES=53687091200
-ACTION: Removed 48 stale worktrees (50.1G)
-ACTION: Removed cargo target dirs from 3 worktrees (1.2G)
-ACTION: Pruned 19 LadybugDB backups (512M)
-ACTION: Cleaned cargo-target/ (12.0G) and shared-target/ (2.8G)
-```
+> **Note:** The text-format output only contains the recipe summary line
+> (e.g., `Recipe: disk-health-check SUCCESS`), not the step output. This is
+> why the daemon uses `--output-format json` — to access the actual agent
+> output containing the `DISK_USED_PCT` markers.
 
 You can also run just the disk usage check (no cleanup) by looking at the
 partition directly:
@@ -148,11 +169,34 @@ Common causes:
 
 ### 4. Text parse shows unexpected values
 
-The Rust shim parses key=value lines from stdout. If the agent
-outputs lines with unexpected formats, the parser silently ignores them
-and defaults to zero. Check for typos in key names (`DISK_USED_PCT`, not
-`DISK_USED_PERCENT`) and ensure values are plain integers (no units, no
-commas).
+The Rust shim extracts the agent step output from the `--output-format json`
+envelope and parses key=value lines from it. The agent's output may include
+conversational text, `df` output, and other noise alongside the markers —
+the parser ignores lines it doesn't recognize.
+
+If values are wrong, check the JSON envelope to see the raw agent output:
+
+```bash
+recipe-runner-rs prompt_assets/simard/recipes/disk-health-check.yaml \
+  --output-format json \
+  -c STATE_ROOT="$HOME/.simard" \
+  -c REPO_ROOT="/home/azureuser/src/Simard" | python3 -m json.tool
+```
+
+Look at `step_results[0].output` — the markers (`DISK_USED_PCT`, `FREED_BYTES`,
+`ACTION:`) must appear on their own lines. Check for typos in key names and
+ensure values are plain integers (no units, no commas).
+
+### 5. JSON deserialization failed
+
+If the daemon logs a parse error mentioning JSON or serde, this means
+`recipe-runner-rs --output-format json` returned malformed output. Check:
+
+- `recipe-runner-rs` version supports `--output-format json` (introduced in
+  the same version as the JSON envelope)
+- The recipe YAML is syntactically valid
+- There is no shell wrapper around `recipe-runner-rs` that strips or modifies
+  stdout
 
 ## Handle persistent disk pressure
 
@@ -235,8 +279,9 @@ You should see one `disk health:` line per OODA cycle (default: every 60s).
 To run cleanup outside the daemon without waiting for a cycle:
 
 ```bash
-# Run the recipe directly
+# Run the recipe directly (JSON envelope mode, same as daemon)
 recipe-runner-rs prompt_assets/simard/recipes/disk-health-check.yaml \
+  --output-format json \
   -c STATE_ROOT="$HOME/.simard" \
   -c REPO_ROOT="/home/azureuser/src/Simard"
 ```
@@ -259,5 +304,6 @@ rm -rf ~/.simard/cargo-target/* ~/.simard/shared-target/*
 ## Related
 
 - [Automated disk health (concept)](../concepts/automated-disk-health.md) — design rationale
+- [Disk health API (reference)](../reference/disk-health-api.md) — module API, structs, data flow
 - [Inspect and clean engineer worktrees](./inspect-and-clean-engineer-worktrees.md) — manual worktree operations
 - [Reclaim disk space and run low-space Rust builds](./reclaim-disk-space-and-run-low-space-rust-builds.md) — build artifact scripts
