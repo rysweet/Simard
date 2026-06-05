@@ -5,7 +5,7 @@ use crate::test_support::HermeticState;
 use serial_test::serial;
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_sends_message_and_closes() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -33,7 +33,7 @@ fn repl_sends_message_and_closes() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_shows_help() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -64,7 +64,7 @@ fn repl_shows_help() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_shows_status() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -91,7 +91,7 @@ fn repl_shows_status() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_eof_closes() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -114,7 +114,7 @@ fn repl_eof_closes() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_no_agent_returns_error() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -131,7 +131,7 @@ fn repl_no_agent_returns_error() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_theme_command_records_theme() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -158,7 +158,7 @@ fn repl_theme_command_records_theme() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_recap_shows_session_info() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -189,7 +189,7 @@ fn repl_recap_shows_session_info() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_preview_shows_handoff_preview() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -216,7 +216,7 @@ fn repl_preview_shows_handoff_preview() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_live_output_uses_colored_prompt_and_assistant_label() {
     let _state = HermeticState::new();
     // Ensure NO_COLOR is unset so ANSI escapes are emitted.
@@ -263,7 +263,7 @@ fn repl_live_output_uses_colored_prompt_and_assistant_label() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_no_color_env_strips_prompt_and_label_escapes() {
     let _state = HermeticState::new();
     // SAFETY: serial_test guards against parallel access to env vars.
@@ -312,7 +312,7 @@ fn repl_no_color_env_strips_prompt_and_label_escapes() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_help_includes_theme_recap_preview() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -347,7 +347,7 @@ fn repl_help_includes_theme_recap_preview() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_close_prints_one_line_headline_summary() {
     let _state = HermeticState::new();
     // Suppress ANSI color codes so substring assertions are robust.
@@ -404,7 +404,7 @@ fn repl_close_prints_one_line_headline_summary() {
 /// `_(none)_` placeholders so the operator gets a predictable, complete UI
 /// instead of a blank screen. Headings are always present.
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_state_empty_renders_all_section_headings_with_none_placeholders() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -456,7 +456,7 @@ fn repl_state_empty_renders_all_section_headings_with_none_placeholders() {
 /// questions, and action items derived from the in-memory history via the
 /// existing `meeting_backend::persist::extract` helpers.
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_state_populated_renders_extracted_decisions_action_items_open_questions() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -517,7 +517,7 @@ fn repl_state_populated_renders_extracted_decisions_action_items_open_questions(
 /// task: Decisions → Open Questions → Action Items. This is intentionally
 /// different from the /close summary order; verify the ordering directly.
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_state_renders_sections_in_canonical_order_decisions_then_questions_then_actions() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -581,7 +581,7 @@ fn repl_state_renders_sections_in_canonical_order_decisions_then_questions_then_
 /// controlling the LLM could reposition the cursor, clear the screen,
 /// or hijack the operator's terminal session.
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_state_strips_ansi_escapes_from_llm_sourced_content_before_rendering() {
     let _state = HermeticState::new();
     // Force NO_COLOR off so the REPL itself emits ANSI for headings — but
@@ -634,7 +634,7 @@ fn repl_state_strips_ansi_escapes_from_llm_sourced_content_before_rendering() {
 
 /// /help text must mention the new /state command so operators discover it.
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_help_mentions_state_command() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -663,7 +663,7 @@ fn repl_help_mentions_state_command() {
 // ── Inline /decision /action /question (issue #1730 seam (b)) ─────────
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_help_mentions_inline_recording_commands() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -692,7 +692,7 @@ fn repl_help_mentions_inline_recording_commands() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_decision_command_records_and_confirms() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -723,7 +723,7 @@ fn repl_decision_command_records_and_confirms() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_action_command_records_and_confirms() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -754,7 +754,7 @@ fn repl_action_command_records_and_confirms() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_question_command_records_and_confirms() {
     let _state = HermeticState::new();
     let bridge = mock_bridge();
@@ -785,7 +785,7 @@ fn repl_question_command_records_and_confirms() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn repl_state_shows_explicit_items_immediately() {
     let _state = HermeticState::new();
     // /decision, /action, /question add items that don't enter the
@@ -834,7 +834,7 @@ fn repl_state_shows_explicit_items_immediately() {
 // session should report the orphan-turn count.
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn renders_structured_banner_on_agent_error() {
     let _state = HermeticState::new();
     // SAFETY: serial_test guards against parallel env mutations.
