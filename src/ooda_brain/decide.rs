@@ -138,9 +138,8 @@ impl OodaDecideBrain for DeterministicFallbackDecideBrain {
             }
             Some(SyntheticPriorityKind::ExtractIdeas) => DecideJudgment::ExtractIdeas { rationale },
             Some(SyntheticPriorityKind::SafeUpdate) => DecideJudgment::SafeUpdate { rationale },
-            Some(SyntheticPriorityKind::EvalWatchdog) | None => {
-                DecideJudgment::AdvanceGoal { rationale }
-            }
+            Some(SyntheticPriorityKind::EvalWatchdog) => DecideJudgment::RunGymEval { rationale },
+            None => DecideJudgment::AdvanceGoal { rationale },
         };
         Ok(judgment)
     }

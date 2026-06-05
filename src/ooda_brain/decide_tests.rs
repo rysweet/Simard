@@ -5,7 +5,7 @@
 //! DeterministicFallbackDecideBrain routing table.
 
 use super::{DecideContext, DecideJudgment, DeterministicFallbackDecideBrain, OodaDecideBrain};
-use crate::ooda_loop::ActionKind;
+use crate::ooda_loop::{ActionKind, SyntheticPriorityKind};
 
 fn ctx(goal_id: &str) -> DecideContext {
     DecideContext {
@@ -102,3 +102,33 @@ fn fallback_routes_ordinary_goal_to_advance_goal() {
 // (Wire-in tests live in `src/ooda_loop/decide.rs` since `decide_with_brain`
 // is a private module item; co-locating tests with the function avoids
 // adding a public re-export just for tests.)
+
+// ---------------------------------------------------------------------------
+// Issue #2227: EvalWatchdog must NOT produce AdvanceGoal
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fallback_routes_eval_watchdog_to_run_gym_eval() {
+    let brain = DeterministicFallbackDecideBrain;
+    let j = brain.judge_decision(&ctx("__eval_watchdog__")).unwrap();
+    assert_eq!(
+        j.action_kind(),
+        ActionKind::RunGymEval,
+        "EvalWatchdog must route to RunGymEval, not AdvanceGoal (issue #2227)"
+    );
+}
+
+#[test]
+fn all_synthetic_priorities_produce_non_advance_goal_actions() {
+    // Every synthetic priority gets goal_id=None in decide_with_brain.
+    // AdvanceGoal requires goal_id, so no synthetic must route there.
+    let brain = DeterministicFallbackDecideBrain;
+    for kind in SyntheticPriorityKind::all() {
+        let j = brain.judge_decision(&ctx(kind.synthetic_id())).unwrap();
+        assert_ne!(
+            j.action_kind(),
+            ActionKind::AdvanceGoal,
+            "synthetic priority {kind:?} must not route to AdvanceGoal (would fail at dispatch with goal_id=None)"
+        );
+    }
+}
