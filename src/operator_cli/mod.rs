@@ -63,6 +63,9 @@ Product modes:
   meeting resume             — resume an interrupted meeting from the last WIP checkpoint
   meeting resume --discard   — discard the saved WIP checkpoint without resuming
   goal list                — print active + backlog snapshot to stdout
+  goal add <p> <desc>      — add a new active goal at priority p (1-7)
+  goal demote <goal-id>    — move an active goal to the backlog
+  goal set-priority <id> <p> — change an active goal's priority
   goal unblock <goal-id>   — operator escape hatch: clear any Blocked
                              status (unconditional) and restore to
                              NotStarted (issue #1911)
