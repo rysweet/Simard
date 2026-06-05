@@ -47,10 +47,13 @@ impl Tab {
         }
     }
 
-    /// Map an Alt+digit key event to a tab. Alt+1 → Overview, Alt+2 → Goals, etc.
-    /// Bare digits (without ALT) are ignored to avoid stealing input on the Meeting tab.
+    /// Map an Alt+digit or Ctrl+digit key event to a tab.
+    /// Alt+1 / Ctrl+1 → Overview, Alt+2 / Ctrl+2 → Goals, etc.
+    /// Bare digits (without ALT or CONTROL) are ignored to avoid stealing input on the Meeting tab.
     pub fn from_key(key: &KeyEvent) -> Option<Tab> {
-        if !key.modifiers.contains(KeyModifiers::ALT) {
+        let has_modifier = key.modifiers.contains(KeyModifiers::ALT)
+            || key.modifiers.contains(KeyModifiers::CONTROL);
+        if !has_modifier {
             return None;
         }
         match key.code {
@@ -123,6 +126,7 @@ pub struct App {
     pub meeting_status: MeetingStatus,
     pub meeting_input: String,
     pub meeting_output: Vec<String>,
+    pub cursor_position: usize,
     meeting_child: Option<std::process::Child>,
     meeting_stdin: Option<std::process::ChildStdin>,
     meeting_stdout: Option<std::io::BufReader<std::process::ChildStdout>>,
@@ -153,6 +157,7 @@ impl App {
             meeting_status: MeetingStatus::NotStarted,
             meeting_input: String::new(),
             meeting_output: Vec::new(),
+            cursor_position: 0,
             meeting_child: None,
             meeting_stdin: None,
             meeting_stdout: None,
@@ -165,26 +170,89 @@ impl App {
 
     /// Handle a key press event.
     ///
-    /// - `Alt+1`–`Alt+6`: switch tabs (always, even in meeting mode)
-    /// - `←`/`→`: cycle tabs with wrapping (always)
-    /// - On Meeting tab with Running: chars → input, Enter → send,
-    ///   Backspace → delete, Esc → stop meeting
+    /// - `Alt+1`–`Alt+6` / `Ctrl+1`–`Ctrl+6`: switch tabs (always, even in meeting mode)
+    /// - `Tab` / `Shift+Tab`: cycle tabs forward/backward (always)
+    /// - On Meeting tab with Running: chars → input at cursor, Enter → send,
+    ///   Backspace → delete before cursor, Left/Right → move cursor,
+    ///   Home/End → jump cursor, Esc → stop meeting
+    /// - `←`/`→`: cycle tabs with wrapping (when not in running meeting)
     /// - `q`/`Q`: quit (unless meeting is Running on Meeting tab)
     pub fn handle_key(&mut self, key: KeyEvent) {
         let code = key.code;
 
-        // Alt+digit tab switch always works regardless of mode
+        // Alt+digit or Ctrl+digit tab switch always works regardless of mode
         if let Some(tab) = Tab::from_key(&key) {
             self.active_tab = tab;
             return;
         }
 
-        // Left/Right arrow tab cycling always works
+        // Tab/Shift+Tab for tab cycling always works
         let tab_count = ALL_TABS.len();
         let current_idx = ALL_TABS
             .iter()
             .position(|t| *t == self.active_tab)
             .unwrap_or(0);
+        match code {
+            KeyCode::Tab => {
+                self.active_tab = ALL_TABS[(current_idx + 1) % tab_count];
+                return;
+            }
+            KeyCode::BackTab => {
+                self.active_tab = ALL_TABS[(current_idx + tab_count - 1) % tab_count];
+                return;
+            }
+            _ => {}
+        }
+
+        // Meeting-specific input routing (BEFORE arrow tab cycling)
+        if self.active_tab == Tab::Meeting && self.meeting_status == MeetingStatus::Running {
+            match code {
+                KeyCode::Enter => self.send_meeting_input(),
+                KeyCode::Backspace if self.cursor_position > 0 => {
+                    // Find the byte index of the char at cursor_position - 1
+                    let byte_idx = self
+                        .meeting_input
+                        .char_indices()
+                        .nth(self.cursor_position - 1)
+                        .map(|(i, _)| i);
+                    if let Some(idx) = byte_idx {
+                        self.meeting_input.remove(idx);
+                        self.cursor_position -= 1;
+                    }
+                }
+                KeyCode::Left if self.cursor_position > 0 => {
+                    self.cursor_position -= 1;
+                }
+                KeyCode::Right => {
+                    let char_len = self.meeting_input.chars().count();
+                    if self.cursor_position < char_len {
+                        self.cursor_position += 1;
+                    }
+                }
+                KeyCode::Home => {
+                    self.cursor_position = 0;
+                }
+                KeyCode::End => {
+                    self.cursor_position = self.meeting_input.chars().count();
+                }
+                KeyCode::Esc => self.stop_meeting(),
+                KeyCode::Char(c) if self.meeting_input.len() < 4096 => {
+                    // Insert at cursor position (char-indexed)
+                    let byte_idx = self
+                        .meeting_input
+                        .char_indices()
+                        .nth(self.cursor_position)
+                        .map(|(i, _)| i)
+                        .unwrap_or(self.meeting_input.len());
+                    self.meeting_input.insert(byte_idx, c);
+                    self.cursor_position += 1;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Left/Right arrow tab cycling (only when not in running meeting)
         match code {
             KeyCode::Right => {
                 self.active_tab = ALL_TABS[(current_idx + 1) % tab_count];
@@ -195,22 +263,6 @@ impl App {
                 return;
             }
             _ => {}
-        }
-
-        // Meeting-specific input routing
-        if self.active_tab == Tab::Meeting && self.meeting_status == MeetingStatus::Running {
-            match code {
-                KeyCode::Enter => self.send_meeting_input(),
-                KeyCode::Backspace => {
-                    self.meeting_input.pop();
-                }
-                KeyCode::Esc => self.stop_meeting(),
-                KeyCode::Char(c) if self.meeting_input.len() < 4096 => {
-                    self.meeting_input.push(c);
-                }
-                _ => {}
-            }
-            return;
         }
 
         // Default key handling
@@ -243,6 +295,7 @@ impl App {
             }
         }
         self.meeting_input.clear();
+        self.cursor_position = 0;
     }
 
     /// Stop the meeting process.
@@ -255,6 +308,7 @@ impl App {
         self.meeting_stdin = None;
         self.meeting_stdout = None;
         self.meeting_status = MeetingStatus::Exited(0);
+        self.cursor_position = 0;
     }
 
     /// Spawn the meeting child process.
@@ -322,7 +376,10 @@ impl App {
                 match reader.read_line(&mut line) {
                     Ok(0) => break,
                     Ok(_) => {
-                        self.meeting_output.push(line.trim_end().to_string());
+                        let trimmed = line.trim_end().to_string();
+                        if !trimmed.contains(" INFO ") {
+                            self.meeting_output.push(trimmed);
+                        }
                         if self.meeting_output.len() > 1000 {
                             let excess = self.meeting_output.len() - 1000;
                             self.meeting_output.drain(..excess);
@@ -772,6 +829,11 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    /// Helper: construct a Ctrl+char KeyEvent.
+    fn ctrl_key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
     // ── Tab enum ────────────────────────────────────────────────────
 
     #[test]
@@ -988,6 +1050,7 @@ mod tests {
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
+        app.cursor_position = 5; // cursor at end for backspace to remove last char
         app.handle_key(key_code(KeyCode::Backspace));
         assert_eq!(app.meeting_input, "hell");
     }
@@ -1493,13 +1556,17 @@ mod tests {
 
     #[test]
     fn handle_key_arrows_work_during_meeting_running() {
-        // Arrow keys should cycle tabs even when meeting is running
+        // BUG C fix: Arrow keys should move cursor, NOT cycle tabs, when meeting is running
         let mut app = App::new("simard-ooda.service".to_string());
         app.active_tab = Tab::Meeting; // index 4
         app.meeting_status = MeetingStatus::Running;
 
         app.handle_key(key_code(KeyCode::Right));
-        assert_eq!(app.active_tab, Tab::Stats); // index 5
+        assert_eq!(
+            app.active_tab,
+            Tab::Meeting,
+            "Right arrow should NOT change tab when meeting is running"
+        );
     }
 
     // ── BUG1: Bare digit regression ────────────────────────────────
@@ -1635,5 +1702,351 @@ mod tests {
 
         let map = load_pid_categories(tmp.path());
         assert!(map.is_empty());
+    }
+
+    // ── BUG A: INFO log line filtering ─────────────────────────────
+
+    #[test]
+    fn drain_meeting_output_filters_info_lines() {
+        use std::process::{Command, Stdio};
+
+        let mut app = App::new("simard-ooda.service".to_string());
+
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                concat!(
+                    "printf 'normal line\\n",
+                    "2024-01-01T10:00:00 INFO server started\\n",
+                    "another line\\n'; sleep 5"
+                ),
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let stdout = child.stdout.take().unwrap();
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = stdout.as_raw_fd();
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+
+        app.meeting_stdout = Some(std::io::BufReader::new(stdout));
+        app.meeting_child = Some(child);
+        app.meeting_status = MeetingStatus::Running;
+
+        // Poll until we get output (max 2 seconds)
+        for _ in 0..200 {
+            app.drain_meeting_output();
+            if app.meeting_output.len() >= 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Cleanup
+        if let Some(ref mut c) = app.meeting_child {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+
+        assert!(
+            app.meeting_output.iter().any(|l| l.contains("normal line")),
+            "non-INFO lines should pass through, got: {:?}",
+            app.meeting_output
+        );
+        assert!(
+            app.meeting_output
+                .iter()
+                .any(|l| l.contains("another line")),
+            "non-INFO lines should pass through"
+        );
+        assert!(
+            !app.meeting_output.iter().any(|l| l.contains(" INFO ")),
+            "lines containing ' INFO ' should be filtered out, got: {:?}",
+            app.meeting_output
+        );
+    }
+
+    #[test]
+    fn drain_meeting_output_preserves_non_info_words() {
+        use std::process::{Command, Stdio};
+
+        let mut app = App::new("simard-ooda.service".to_string());
+
+        let mut child = Command::new("sh")
+            .args(["-c", "printf 'INFORMATION about meeting\\n'; sleep 5"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let stdout = child.stdout.take().unwrap();
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = stdout.as_raw_fd();
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+
+        app.meeting_stdout = Some(std::io::BufReader::new(stdout));
+        app.meeting_child = Some(child);
+        app.meeting_status = MeetingStatus::Running;
+
+        for _ in 0..200 {
+            app.drain_meeting_output();
+            if !app.meeting_output.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        if let Some(ref mut c) = app.meeting_child {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+
+        assert!(
+            app.meeting_output.iter().any(|l| l.contains("INFORMATION")),
+            "'INFORMATION' (without space padding) should NOT be filtered"
+        );
+    }
+
+    // ── BUG C: Cursor position basics ──────────────────────────────
+
+    #[test]
+    fn cursor_position_starts_at_zero() {
+        let app = App::new("simard-ooda.service".to_string());
+        assert_eq!(app.cursor_position, 0);
+    }
+
+    // ── BUG C: Cursor movement in meeting mode ─────────────────────
+
+    #[test]
+    fn arrow_right_moves_cursor_in_meeting() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+        app.meeting_input = "hello".to_string();
+        app.cursor_position = 2;
+
+        app.handle_key(key_code(KeyCode::Right));
+
+        assert_eq!(app.active_tab, Tab::Meeting, "tab should not change");
+        assert_eq!(app.cursor_position, 3, "cursor should move right");
+    }
+
+    #[test]
+    fn arrow_left_moves_cursor_in_meeting() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+        app.meeting_input = "hello".to_string();
+        app.cursor_position = 3;
+
+        app.handle_key(key_code(KeyCode::Left));
+
+        assert_eq!(app.active_tab, Tab::Meeting, "tab should not change");
+        assert_eq!(app.cursor_position, 2, "cursor should move left");
+    }
+
+    #[test]
+    fn cursor_left_at_zero_stays() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+        app.meeting_input = "hi".to_string();
+        app.cursor_position = 0;
+
+        app.handle_key(key_code(KeyCode::Left));
+
+        assert_eq!(app.cursor_position, 0, "cursor should not underflow");
+        assert_eq!(app.active_tab, Tab::Meeting);
+    }
+
+    #[test]
+    fn cursor_right_at_end_stays() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+        app.meeting_input = "hi".to_string();
+        app.cursor_position = 2;
+
+        app.handle_key(key_code(KeyCode::Right));
+
+        assert_eq!(
+            app.cursor_position, 2,
+            "cursor should not exceed input length"
+        );
+    }
+
+    // ── BUG C: Cursor-aware insert and delete ──────────────────────
+
+    #[test]
+    fn cursor_insert_at_position() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+        app.meeting_input = "hllo".to_string();
+        app.cursor_position = 1;
+
+        app.handle_key(key('e'));
+
+        assert_eq!(
+            app.meeting_input, "hello",
+            "char should insert at cursor position"
+        );
+        assert_eq!(app.cursor_position, 2, "cursor should advance after insert");
+    }
+
+    #[test]
+    fn cursor_backspace_at_position() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+        app.meeting_input = "hello".to_string();
+        app.cursor_position = 3;
+
+        app.handle_key(key_code(KeyCode::Backspace));
+
+        assert_eq!(
+            app.meeting_input, "helo",
+            "backspace should remove char before cursor"
+        );
+        assert_eq!(
+            app.cursor_position, 2,
+            "cursor should decrement after backspace"
+        );
+    }
+
+    #[test]
+    fn cursor_insert_unicode_char() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+        app.meeting_input = "hllo".to_string();
+        app.cursor_position = 1;
+
+        app.handle_key(key('é'));
+
+        assert_eq!(
+            app.meeting_input, "héllo",
+            "unicode insert should work correctly"
+        );
+        assert_eq!(
+            app.cursor_position, 2,
+            "cursor should advance by 1 char position"
+        );
+    }
+
+    // ── BUG C: Cursor reset on send/stop ───────────────────────────
+
+    #[test]
+    fn cursor_resets_on_send() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+        app.meeting_input = "test".to_string();
+        app.cursor_position = 3;
+
+        app.handle_key(key_code(KeyCode::Enter));
+
+        assert_eq!(app.cursor_position, 0, "cursor should reset after send");
+        assert!(app.meeting_input.is_empty());
+    }
+
+    #[test]
+    fn cursor_resets_on_stop() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+        app.cursor_position = 5;
+
+        app.handle_key(key_code(KeyCode::Esc));
+
+        assert_eq!(
+            app.cursor_position, 0,
+            "cursor should reset on meeting stop"
+        );
+    }
+
+    // ── BUG C: Home/End cursor movement ────────────────────────────
+
+    #[test]
+    fn home_end_move_cursor() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+        app.meeting_input = "hello".to_string();
+        app.cursor_position = 3;
+
+        app.handle_key(key_code(KeyCode::Home));
+        assert_eq!(app.cursor_position, 0, "Home should move cursor to start");
+
+        app.cursor_position = 0;
+        app.handle_key(key_code(KeyCode::End));
+        assert_eq!(
+            app.cursor_position, 5,
+            "End should move cursor to end of input"
+        );
+    }
+
+    // ── BUG C: Tab/Shift+Tab navigation ────────────────────────────
+
+    #[test]
+    fn tab_key_cycles_forward() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        assert_eq!(app.active_tab, Tab::Overview);
+
+        app.handle_key(key_code(KeyCode::Tab));
+        assert_eq!(app.active_tab, Tab::Goals, "Tab should cycle forward");
+    }
+
+    #[test]
+    fn shift_tab_cycles_backward() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Goals;
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(
+            app.active_tab,
+            Tab::Overview,
+            "Shift+Tab should cycle backward"
+        );
+    }
+
+    #[test]
+    fn tab_key_cycles_during_meeting_running() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+
+        app.handle_key(key_code(KeyCode::Tab));
+        assert_eq!(
+            app.active_tab,
+            Tab::Stats,
+            "Tab should cycle forward even when meeting is running"
+        );
+    }
+
+    // ── BUG C: Ctrl+digit tab switching ────────────────────────────
+
+    #[test]
+    fn tab_from_key_ctrl_digit() {
+        assert_eq!(
+            Tab::from_key(&ctrl_key('1')),
+            Some(Tab::Overview),
+            "Ctrl+1 should switch to Overview"
+        );
+        assert_eq!(
+            Tab::from_key(&ctrl_key('5')),
+            Some(Tab::Meeting),
+            "Ctrl+5 should switch to Meeting"
+        );
     }
 }
