@@ -284,15 +284,15 @@ fn engineer_loop_probe_reports_repo_state_runs_verified_action_and_persists_trut
         rendered.contains("Changed files after action: <none>"),
         "non-mutating engineer-loop runs should say when they changed nothing:\n{rendered}"
     );
-    // The agent-spawn pipeline reports `agent-completed` because the
-    // verification work is performed by the spawned agent inside its own
-    // session, not by deterministic post-hoc checks owned by the engineer
-    // loop. Both `verified` (deterministic) and `agent-completed` (delegated)
-    // are honest verification outcomes; the loop must surface one of them.
+    // Post-hoc verification (issue #1670) synthesizes checks from observable
+    // side-effects. In CI the engineer probe runs against the real repo, so
+    // git artifacts may or may not be present depending on whether the agent
+    // made commits. Either `verified` or `unverified` is an honest outcome;
+    // the retired `agent-completed` status is no longer accepted.
     assert!(
         rendered.contains("Verification status: verified")
-            || rendered.contains("Verification status: agent-completed"),
-        "engineer-loop probe should only claim verified or agent-completed outcomes after explicit checks:\n{rendered}"
+            || rendered.contains("Verification status: unverified"),
+        "engineer-loop probe must report verified or unverified (not agent-completed):\n{rendered}"
     );
     assert!(
         !rendered.contains("Azlin"),
@@ -342,8 +342,8 @@ fn engineer_loop_probe_reports_repo_state_runs_verified_action_and_persists_trut
     );
     assert!(
         evidence_payload.contains("verification-status=verified")
-            || evidence_payload.contains("verification-status=agent-completed"),
-        "evidence payload should preserve verification status:\n{evidence_payload}"
+            || evidence_payload.contains("verification-status=unverified"),
+        "evidence payload should preserve verification status (verified or unverified):\n{evidence_payload}"
     );
     assert!(
         memory_payload.contains("engineer-loop-summary"),
@@ -351,8 +351,8 @@ fn engineer_loop_probe_reports_repo_state_runs_verified_action_and_persists_trut
     );
     assert!(
         handoff_payload.contains("verification-status=verified")
-            || handoff_payload.contains("verification-status=agent-completed"),
-        "handoff payload should preserve verified or agent-completed outcome status for truthful resume behavior:\n{handoff_payload}"
+            || handoff_payload.contains("verification-status=unverified"),
+        "handoff payload should preserve verified or unverified outcome status for truthful resume behavior:\n{handoff_payload}"
     );
     assert!(
         evidence_payload.contains("carried-meeting-decisions=<none>"),

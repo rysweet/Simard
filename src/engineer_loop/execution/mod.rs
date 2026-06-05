@@ -23,6 +23,13 @@ pub(crate) fn run_command(cwd: &Path, argv: &[&str]) -> SimardResult<CommandOutp
     run_command_inner(cwd, argv, /* allow_nonzero_exit = */ false)
 }
 
+/// Like [`run_command`] but tolerates non-zero exit codes. Returns `Ok` with
+/// whatever stdout was captured even when the child exits non-zero. Still
+/// returns `Err` for spawn failures, empty argv, or timeout.
+pub(crate) fn run_command_allow_failure(cwd: &Path, argv: &[&str]) -> SimardResult<CommandOutput> {
+    run_command_inner(cwd, argv, /* allow_nonzero_exit = */ true)
+}
+
 fn run_command_inner(
     cwd: &Path,
     argv: &[&str],
