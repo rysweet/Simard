@@ -3,11 +3,14 @@
 //! and existing `state/goal_store.json` files are migrated on first access.
 
 use std::path::Path;
+use std::sync::Arc;
 
+use crate::cognitive_memory::NativeCognitiveMemory;
 use crate::goals::{
     CognitiveMemoryGoalStore, GoalRecord, GoalStatus, GoalStore, GoalUpdate,
     migrate_file_backed_goal_store_if_present,
 };
+use crate::memory_ipc::{clear_in_process_writer, register_in_process_writer};
 use crate::session::{SessionId, SessionPhase};
 use crate::test_support::HermeticState;
 
@@ -76,6 +79,15 @@ fn migration_skips_slugs_already_in_cognitive_memory() {
     let state = HermeticState::new();
     let root = state.state_root().to_path_buf();
 
+    // Register an in-process writer so that put(), migration, and list()
+    // share a single NativeCognitiveMemory handle.  Without this, each
+    // launch_writer_bridge / open_reader_bridge opens a separate DB
+    // instance, and LadybugDB's WAL may not be visible across sequential
+    // open/close cycles under CI (coverage instrumentation, GitHub Actions
+    // runners).
+    let mem = Arc::new(NativeCognitiveMemory::open(&root).expect("open cognitive memory"));
+    register_in_process_writer(root.clone(), mem.clone());
+
     // Pre-populate cognitive memory with one record
     let store = CognitiveMemoryGoalStore::new(root.clone()).expect("store");
     store
@@ -108,6 +120,8 @@ fn migration_skips_slugs_already_in_cognitive_memory() {
         listed.iter().any(|r| r.title == "New legacy goal"),
         "new legacy records must be migrated"
     );
+
+    clear_in_process_writer();
 }
 
 #[test]
@@ -174,6 +188,12 @@ fn write_goals_from_decisions_does_not_produce_legacy_file() {
     let state = HermeticState::new();
     let root = state.state_root().to_path_buf();
 
+    // Register an in-process writer so put() and list() share a single
+    // NativeCognitiveMemory handle — avoids WAL visibility issues across
+    // sequential DB open/close cycles under CI.
+    let mem = Arc::new(NativeCognitiveMemory::open(&root).expect("open cognitive memory"));
+    register_in_process_writer(root.clone(), mem.clone());
+
     // Write a goal directly through CognitiveMemoryGoalStore (matching
     // the new code path in write_goals_from_decisions)
     let store = CognitiveMemoryGoalStore::new(root.clone()).expect("store");
@@ -196,6 +216,8 @@ fn write_goals_from_decisions_does_not_produce_legacy_file() {
         listed.iter().any(|r| r.title == "Meeting decision goal"),
         "goal written via CognitiveMemoryGoalStore must be readable"
     );
+
+    clear_in_process_writer();
 }
 
 #[test]
