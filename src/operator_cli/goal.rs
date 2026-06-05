@@ -45,6 +45,9 @@ Usage: simard goal <command> [args]
 
 Commands:
   list                        Print active + backlog goal snapshot.
+  add <priority> <description>  Add a new active goal at given priority (1-7).
+  demote <goal-id>            Move an active goal to the backlog.
+  set-priority <goal-id> <p>  Change an active goal's priority.
   unblock <goal-id>           Clear Blocked status (unconditional).
   unblock-all                 Bulk-clear brain-failure-marker blocks only.
   remove <id>...              Drop one or more goal ids (variadic, idempotent).
@@ -76,6 +79,25 @@ pub(super) fn dispatch_goal_command(
         "unblock-all" => {
             reject_extra_args(args)?;
             handle_unblock_all()
+        }
+        "add" => {
+            let priority_str = next_required(&mut args, "priority (1-7)")?;
+            let description: String = args.collect::<Vec<_>>().join(" ");
+            if description.is_empty() {
+                return Err("usage: simard goal add <priority> <description>".into());
+            }
+            handle_add(&priority_str, &description)
+        }
+        "demote" => {
+            let goal_id = next_required(&mut args, "goal id")?;
+            reject_extra_args(args)?;
+            handle_demote(&goal_id)
+        }
+        "set-priority" => {
+            let goal_id = next_required(&mut args, "goal id")?;
+            let priority_str = next_required(&mut args, "priority (1-7)")?;
+            reject_extra_args(args)?;
+            handle_set_priority(&goal_id, &priority_str)
         }
         "remove" => {
             let ids: Vec<String> = args.collect();
@@ -197,6 +219,82 @@ fn handle_unblock_all() -> Result<(), Box<dyn Error>> {
     for id in &cleared {
         eprintln!("[simard] goal unblock-all: '{id}' restored to NotStarted");
     }
+    Ok(())
+}
+
+/// `simard goal add <priority> <description>` — add a new active goal.
+fn handle_add(priority_str: &str, description: &str) -> Result<(), Box<dyn Error>> {
+    let priority: u32 = priority_str
+        .parse()
+        .map_err(|_| format!("invalid priority '{priority_str}': must be 1-7"))?;
+    if priority == 0 || priority > 7 {
+        return Err(format!("priority must be 1-7, got {priority}").into());
+    }
+    let id = crate::goals::goal_slug(description);
+    let mut board = load_board()?;
+    if board.active.iter().any(|g| g.id == id) {
+        return Err(format!("goal '{id}' is already active").into());
+    }
+    if board.active.len() >= crate::goal_curation::MAX_ACTIVE_GOALS {
+        return Err(format!(
+            "board is at capacity ({}); demote or remove a goal first",
+            crate::goal_curation::MAX_ACTIVE_GOALS
+        )
+        .into());
+    }
+    board.active.push(crate::goal_curation::ActiveGoal {
+        id: id.clone(),
+        description: description.to_string(),
+        priority,
+        status: GoalProgress::NotStarted,
+        assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
+        last_progress_update_at: None,
+    });
+    save_board(&board)?;
+    eprintln!("[simard] goal add: '{id}' added at p{priority}");
+    Ok(())
+}
+
+/// `simard goal demote <goal-id>` — move an active goal to the backlog.
+fn handle_demote(goal_id: &str) -> Result<(), Box<dyn Error>> {
+    let mut board = load_board()?;
+    let position = board
+        .active
+        .iter()
+        .position(|g| g.id == goal_id)
+        .ok_or_else(|| format!("goal '{goal_id}' not found on active board"))?;
+    let goal = board.active.remove(position);
+    board.backlog.push(crate::goal_curation::BacklogItem {
+        id: goal.id.clone(),
+        description: goal.description,
+        source: "operator:demote".to_string(),
+        score: 0.5,
+    });
+    save_board(&board)?;
+    eprintln!("[simard] goal demote: '{goal_id}' moved to backlog");
+    Ok(())
+}
+
+/// `simard goal set-priority <goal-id> <priority>` — change priority.
+fn handle_set_priority(goal_id: &str, priority_str: &str) -> Result<(), Box<dyn Error>> {
+    let priority: u32 = priority_str
+        .parse()
+        .map_err(|_| format!("invalid priority '{priority_str}': must be 1-7"))?;
+    if priority == 0 || priority > 7 {
+        return Err(format!("priority must be 1-7, got {priority}").into());
+    }
+    let mut board = load_board()?;
+    let goal = board
+        .active
+        .iter_mut()
+        .find(|g| g.id == goal_id)
+        .ok_or_else(|| format!("goal '{goal_id}' not found on active board"))?;
+    let old = goal.priority;
+    goal.priority = priority;
+    save_board(&board)?;
+    eprintln!("[simard] goal set-priority: '{goal_id}' changed from p{old} to p{priority}");
     Ok(())
 }
 
@@ -331,6 +429,9 @@ mod tests {
     #[test]
     fn goal_help_contains_all_subcommands() {
         assert!(GOAL_HELP.contains("list"));
+        assert!(GOAL_HELP.contains("add"));
+        assert!(GOAL_HELP.contains("demote"));
+        assert!(GOAL_HELP.contains("set-priority"));
         assert!(GOAL_HELP.contains("unblock"));
         assert!(GOAL_HELP.contains("unblock-all"));
         assert!(GOAL_HELP.contains("remove"));
@@ -438,6 +539,65 @@ mod tests {
     fn cleanup_rejects_partial_flag() {
         let flags = vec!["--placeholder".to_string()];
         let result = handle_cleanup(&flags);
+        assert!(result.is_err());
+    }
+
+    // ---- handle_add -------------------------------------------------------
+
+    #[test]
+    fn add_rejects_zero_priority() {
+        let result = handle_add("0", "test goal");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("1-7"));
+    }
+
+    #[test]
+    fn add_rejects_priority_above_7() {
+        let result = handle_add("8", "test goal");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("1-7"));
+    }
+
+    #[test]
+    fn add_rejects_non_numeric_priority() {
+        let result = handle_add("high", "test goal");
+        assert!(result.is_err());
+    }
+
+    // ---- dispatch new commands ------------------------------------------------
+
+    #[test]
+    fn dispatch_add_requires_priority() {
+        let args = vec!["add".to_string()];
+        let result = dispatch_goal_command(args.into_iter());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dispatch_add_requires_description() {
+        let args = vec!["add".to_string(), "1".to_string()];
+        let result = dispatch_goal_command(args.into_iter());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dispatch_demote_requires_goal_id() {
+        let args = vec!["demote".to_string()];
+        let result = dispatch_goal_command(args.into_iter());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dispatch_set_priority_requires_goal_id() {
+        let args = vec!["set-priority".to_string()];
+        let result = dispatch_goal_command(args.into_iter());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dispatch_set_priority_requires_priority() {
+        let args = vec!["set-priority".to_string(), "some-goal".to_string()];
+        let result = dispatch_goal_command(args.into_iter());
         assert!(result.is_err());
     }
 }
