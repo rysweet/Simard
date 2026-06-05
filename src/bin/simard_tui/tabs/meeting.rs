@@ -3,7 +3,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::app::{App, MeetingStatus};
 
@@ -11,7 +11,7 @@ use crate::app::{App, MeetingStatus};
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(3)])
+        .constraints([Constraint::Min(3), Constraint::Length(5)])
         .split(area);
 
     // Title shows meeting status
@@ -38,7 +38,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
     // Input prompt
     let input_text = format!("> {}", app.meeting_input);
-    let input =
-        Paragraph::new(input_text).block(Block::default().borders(Borders::ALL).title("Input"));
+    let input = Paragraph::new(input_text)
+        .block(Block::default().borders(Borders::ALL).title("Input"))
+        .wrap(Wrap { trim: false });
     f.render_widget(input, chunks[1]);
 }
