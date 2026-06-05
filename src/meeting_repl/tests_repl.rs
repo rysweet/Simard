@@ -1,11 +1,13 @@
 use super::repl::*;
 use super::test_support::{FailingThenOkMockAgent, MockAgentSession, mock_bridge};
 use crate::meeting_facilitator::MeetingSessionStatus;
+use crate::test_support::HermeticState;
 use serial_test::serial;
 
 #[test]
 #[serial]
 fn repl_sends_message_and_closes() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let agent = MockAgentSession::new("I understand the concern.");
     let input = b"Let's discuss testing\n/close\n";
@@ -33,6 +35,7 @@ fn repl_sends_message_and_closes() {
 #[test]
 #[serial]
 fn repl_shows_help() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let agent = MockAgentSession::new("ok");
     let input = b"/help\n/close\n";
@@ -63,6 +66,7 @@ fn repl_shows_help() {
 #[test]
 #[serial]
 fn repl_shows_status() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let agent = MockAgentSession::new("noted");
     let input = b"First message\n/status\n/close\n";
@@ -89,6 +93,7 @@ fn repl_shows_status() {
 #[test]
 #[serial]
 fn repl_eof_closes() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let agent = MockAgentSession::new("ok");
     let input = b"just one line\n";
@@ -111,6 +116,7 @@ fn repl_eof_closes() {
 #[test]
 #[serial]
 fn repl_no_agent_returns_error() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let input = b"some note\n/close\n";
     let mut reader = &input[..];
@@ -127,6 +133,7 @@ fn repl_no_agent_returns_error() {
 #[test]
 #[serial]
 fn repl_theme_command_records_theme() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let agent = MockAgentSession::new("noted");
     let input = b"/theme performance\n/close\n";
@@ -153,6 +160,7 @@ fn repl_theme_command_records_theme() {
 #[test]
 #[serial]
 fn repl_recap_shows_session_info() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let agent = MockAgentSession::new("ok");
     let input = b"/theme scalability\n/recap\n/close\n";
@@ -183,6 +191,7 @@ fn repl_recap_shows_session_info() {
 #[test]
 #[serial]
 fn repl_preview_shows_handoff_preview() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let agent = MockAgentSession::new("ok");
     let input = b"/preview\n/close\n";
@@ -209,6 +218,7 @@ fn repl_preview_shows_handoff_preview() {
 #[test]
 #[serial]
 fn repl_live_output_uses_colored_prompt_and_assistant_label() {
+    let _state = HermeticState::new();
     // Ensure NO_COLOR is unset so ANSI escapes are emitted.
     // SAFETY: serial_test guards against parallel access to env vars.
     unsafe { std::env::remove_var("NO_COLOR") };
@@ -255,6 +265,7 @@ fn repl_live_output_uses_colored_prompt_and_assistant_label() {
 #[test]
 #[serial]
 fn repl_no_color_env_strips_prompt_and_label_escapes() {
+    let _state = HermeticState::new();
     // SAFETY: serial_test guards against parallel access to env vars.
     unsafe { std::env::set_var("NO_COLOR", "1") };
 
@@ -303,6 +314,7 @@ fn repl_no_color_env_strips_prompt_and_label_escapes() {
 #[test]
 #[serial]
 fn repl_help_includes_theme_recap_preview() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let agent = MockAgentSession::new("ok");
     let input = b"/help\n/close\n";
@@ -337,6 +349,7 @@ fn repl_help_includes_theme_recap_preview() {
 #[test]
 #[serial]
 fn repl_close_prints_one_line_headline_summary() {
+    let _state = HermeticState::new();
     // Suppress ANSI color codes so substring assertions are robust.
     // SAFETY: serial_test guards against parallel env mutations.
     unsafe { std::env::set_var("NO_COLOR", "1") };
@@ -393,6 +406,7 @@ fn repl_close_prints_one_line_headline_summary() {
 #[test]
 #[serial]
 fn repl_state_empty_renders_all_section_headings_with_none_placeholders() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     // Use a benign canned response so any history entries don't accidentally
     // trip the heuristic extractors.
@@ -444,6 +458,7 @@ fn repl_state_empty_renders_all_section_headings_with_none_placeholders() {
 #[test]
 #[serial]
 fn repl_state_populated_renders_extracted_decisions_action_items_open_questions() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     // Agent response embeds explicit signals the extractors recognize:
     //   - "Decision:" → extract_decisions
@@ -504,6 +519,7 @@ fn repl_state_populated_renders_extracted_decisions_action_items_open_questions(
 #[test]
 #[serial]
 fn repl_state_renders_sections_in_canonical_order_decisions_then_questions_then_actions() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let agent = MockAgentSession::new(
         "Decision: Use Rust. TODO: Write the migration script. OPEN: What is the rollback strategy here?",
@@ -567,6 +583,7 @@ fn repl_state_renders_sections_in_canonical_order_decisions_then_questions_then_
 #[test]
 #[serial]
 fn repl_state_strips_ansi_escapes_from_llm_sourced_content_before_rendering() {
+    let _state = HermeticState::new();
     // Force NO_COLOR off so the REPL itself emits ANSI for headings — but
     // any ANSI in the LLM content must still be stripped.
     unsafe { std::env::remove_var("NO_COLOR") };
@@ -619,6 +636,7 @@ fn repl_state_strips_ansi_escapes_from_llm_sourced_content_before_rendering() {
 #[test]
 #[serial]
 fn repl_help_mentions_state_command() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let agent = MockAgentSession::new("ok");
     let input = b"/help\n/close\n";
@@ -647,6 +665,7 @@ fn repl_help_mentions_state_command() {
 #[test]
 #[serial]
 fn repl_help_mentions_inline_recording_commands() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let agent = MockAgentSession::new("ok");
     let input = b"/help\n/close\n";
@@ -675,6 +694,7 @@ fn repl_help_mentions_inline_recording_commands() {
 #[test]
 #[serial]
 fn repl_decision_command_records_and_confirms() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let agent = MockAgentSession::new("ok");
     let input = b"/decision Adopt TDD for new modules\n/close\n";
@@ -705,6 +725,7 @@ fn repl_decision_command_records_and_confirms() {
 #[test]
 #[serial]
 fn repl_action_command_records_and_confirms() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let agent = MockAgentSession::new("ok");
     let input = b"/action Bob will write tests by friday\n/close\n";
@@ -735,6 +756,7 @@ fn repl_action_command_records_and_confirms() {
 #[test]
 #[serial]
 fn repl_question_command_records_and_confirms() {
+    let _state = HermeticState::new();
     let bridge = mock_bridge();
     let agent = MockAgentSession::new("ok");
     let input = b"/question What is our SLO target?\n/close\n";
@@ -765,6 +787,7 @@ fn repl_question_command_records_and_confirms() {
 #[test]
 #[serial]
 fn repl_state_shows_explicit_items_immediately() {
+    let _state = HermeticState::new();
     // /decision, /action, /question add items that don't enter the
     // conversation history; /state must still surface them so the operator
     // sees the running list.
@@ -813,6 +836,7 @@ fn repl_state_shows_explicit_items_immediately() {
 #[test]
 #[serial]
 fn renders_structured_banner_on_agent_error() {
+    let _state = HermeticState::new();
     // SAFETY: serial_test guards against parallel env mutations.
     unsafe { std::env::set_var("NO_COLOR", "1") };
 

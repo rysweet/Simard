@@ -239,13 +239,16 @@ pub fn migrate_file_backed_goal_store_if_present(state_root: &std::path::Path) {
         return;
     }
 
-    // Open a CognitiveMemoryGoalStore to read existing slugs and write
-    // migrated records through a single bridge session.
-    let store = match CognitiveMemoryGoalStore::new(state_root.to_path_buf()) {
-        Ok(s) => s,
+    // Open a single writer bridge for both reading existing slugs and
+    // writing migrated records.  Using the writer bridge (not the
+    // read-only reader bridge) is deliberate: write-mode opens replay
+    // the WAL, handling the edge case where a prior writer left an
+    // un-checkpointed WAL that read-only mode cannot recover.
+    let writer = match launch_writer_bridge(state_root) {
+        Ok(w) => w,
         Err(e) => {
             eprintln!(
-                "[simard] goal_store migration: CognitiveMemoryGoalStore::new failed ({e}) — \
+                "[simard] goal_store migration: launch_writer_bridge failed ({e}) — \
                  leaving file in place for next retry"
             );
             return;
@@ -253,9 +256,33 @@ pub fn migrate_file_backed_goal_store_if_present(state_root: &std::path::Path) {
     };
 
     // Read existing slugs from cognitive memory to skip duplicates.
-    let existing_slugs: std::collections::HashSet<String> = match store.list() {
-        Ok(existing) => existing.into_iter().map(|r| r.slug).collect(),
-        Err(_) => std::collections::HashSet::new(),
+    // If the DB file exists but we cannot read it, abort the migration
+    // to avoid overwriting newer cognitive-memory records with stale
+    // legacy data.
+    let db_file = state_root.join("cognitive_memory.ladybug");
+    let existing_slugs: std::collections::HashSet<String> = if db_file.exists() {
+        match writer
+            .ops()
+            .search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)
+        {
+            Ok(facts) => facts
+                .into_iter()
+                .filter_map(|f| {
+                    serde_json::from_str::<GoalRecord>(&f.content)
+                        .ok()
+                        .map(|r| r.slug)
+                })
+                .collect(),
+            Err(e) => {
+                eprintln!(
+                    "[simard] goal_store migration: cannot read existing records ({e}) — \
+                     leaving file in place for safety"
+                );
+                return;
+            }
+        }
+    } else {
+        std::collections::HashSet::new()
     };
 
     let mut all_ok = true;
@@ -266,7 +293,25 @@ pub fn migrate_file_backed_goal_store_if_present(state_root: &std::path::Path) {
             skipped_count += 1;
             continue;
         }
-        if let Err(e) = store.put(record.clone()) {
+        let content = match serde_json::to_string(record) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "[simard] goal_store migration: serialise failed for slug={} ({e}) — \
+                     aborting migration, leaving file in place",
+                    record.slug
+                );
+                all_ok = false;
+                break;
+            }
+        };
+        if let Err(e) = writer.ops().store_fact(
+            GOAL_STORE_FACT_CONCEPT,
+            &content,
+            1.0,
+            &[GOAL_STORE_TAG.to_string()],
+            GOAL_STORE_SOURCE,
+        ) {
             eprintln!(
                 "[simard] goal_store migration: put failed for slug={} ({e}) — \
                  aborting migration, leaving file in place",
