@@ -3,6 +3,10 @@ mod seed;
 mod store;
 mod types;
 
+#[cfg(test)]
+#[path = "tests.rs"]
+mod coverage_tests;
+
 // Re-export all public items so `crate::goals::X` still works.
 pub use cognitive_memory_store::CognitiveMemoryGoalStore;
 pub use seed::seed_default_goals;
