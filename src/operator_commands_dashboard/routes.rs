@@ -16,7 +16,7 @@ use super::goals::{
 };
 use super::hosts::{add_host, get_hosts, remove_host};
 use super::logs::{logs, processes};
-use super::memory::{memory_graph, memory_recent, memory_search};
+use super::memory::{memory_graph, memory_history, memory_recent, memory_search};
 use super::merge_judge::merge_judge_decisions;
 use super::merge_readiness::merge_readiness;
 use super::metrics::{memory_metrics, ooda_thinking};
@@ -64,6 +64,7 @@ pub fn build_router() -> Router {
         .route("/api/build-lock/release", post(build_lock_force_release))
         .route("/api/memory", get(memory_metrics))
         .route("/api/memory/recent", get(memory_recent))
+        .route("/api/memory/history", get(memory_history))
         .route("/api/memory/search", post(memory_search))
         .route("/api/memory/graph", get(memory_graph))
         .route("/api/merge-judge", get(merge_judge_decisions))

@@ -176,6 +176,7 @@ const API_PROBES = [
   { path: "/api/goals",      dims: ["goal-board"] },
   { path: "/api/processes",  dims: ["engineers"] },
   { path: "/api/memory",     dims: ["memory"] },
+  { path: "/api/memory/history", dims: ["memory"] },
   { path: "/api/workboard",  dims: ["goal-board", "ooda", "memory"] },
   { path: "/api/traces",     dims: ["ooda"] },
   { path: "/api/logs",       dims: [] },
@@ -443,17 +444,31 @@ function classifyCoverage(routes, apis) {
   const memApi = apis["/api/memory"];
   const memKeys = memApi?.body?.keys || [];
   const hasNativeMemoryGrowth = memKeys.includes("native_memory") || (apis["/api/workboard"]?.body?.keys || []).includes("cognitive_statistics");
+  const memHistoryApi = apis["/api/memory/history"];
+  const memHistoryKeys = memHistoryApi?.body?.keys || [];
+  const hasMemoryHistory = memHistoryApi?.ok
+    && memHistoryKeys.includes("snapshots")
+    && memHistoryKeys.includes("deltas")
+    && memHistoryKeys.includes("rate_per_hour")
+    && memHistoryKeys.includes("trend");
+  const hasGrowthCard = findInPanels(/memory.growth|mem-growth|growth.card/i);
   dims.push({
     name: "cognitive memory growth",
-    classification: memApi?.ok && tabBySlug["memory"] && hasNativeMemoryGrowth ? "PARTIAL"
+    classification: hasMemoryHistory && tabBySlug["memory"] && hasGrowthCard ? "PRESENT"
+                  : hasMemoryHistory && tabBySlug["memory"] ? "PRESENT"
+                  : memApi?.ok && tabBySlug["memory"] && hasNativeMemoryGrowth ? "PARTIAL"
                   : memApi?.ok && tabBySlug["memory"] ? "PARTIAL"
                   : memApi?.ok ? "PARTIAL"
                   : "MISSING",
-    detail: "Current totals (episodic / semantic / procedural / prospective / sensory / working) are exposed, but there is no time-series of GROWTH — no per-cycle delta, no rate, no chart. Dashboard answers \"how much memory is there NOW\" but not \"is it growing\".",
+    detail: hasMemoryHistory
+      ? "Time-series history with per-snapshot deltas, growth rates, trend direction, and sparkline visualization are exposed via /api/memory/history and rendered in the Memory tab growth card."
+      : "Current totals (episodic / semantic / procedural / prospective / sensory / working) are exposed, but there is no time-series of GROWTH — no per-cycle delta, no rate, no chart. Dashboard answers \"how much memory is there NOW\" but not \"is it growing\".",
     evidence: [
       memApi?.ok                        ? `API /api/memory → 200 (keys: ${memKeys.join(", ")}); includes native_memory.episodic/semantic counts` : "API /api/memory → not 200",
+      memHistoryApi?.ok                 ? `API /api/memory/history → 200 (keys: ${memHistoryKeys.join(", ")}); provides snapshots, deltas, rate_per_hour, trend` : "API /api/memory/history → not 200 or missing",
       apis["/api/workboard"]?.ok        ? `API /api/workboard → 200 also surfaces cognitive_statistics block (point-in-time snapshot only)` : null,
       tabBySlug["memory"]               ? `Tab .tab[data-tab="memory"] (#tab-memory) screenshot: ${tabBySlug["memory"].screenshot}` : "no #tab-memory discovered",
+      hasGrowthCard                     ? `Memory growth card detected in Memory tab` : null,
     ].filter(Boolean),
   });
 

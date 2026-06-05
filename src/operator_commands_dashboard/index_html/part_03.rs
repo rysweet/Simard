@@ -146,6 +146,84 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
       }catch(e){document.getElementById('trace-list').innerHTML='<span class="err">Failed to load traces — check /api/traces</span>';}
     }
 
+    /* --- Memory Growth History (#2136) --- */
+    async function fetchMemoryHistory(){
+      const deltasEl=document.getElementById('mem-growth-deltas');
+      const trendEl=document.getElementById('mem-growth-trend');
+      const rateEl=document.getElementById('mem-growth-rate');
+      const sparkEl=document.getElementById('mem-growth-sparkline');
+      try{
+        const d=await apiFetch('/api/memory/history');
+        if(d.error){
+          deltasEl.innerHTML='<span class="err" style="font-size:.85rem">'+esc(d.error)+'</span>';
+          trendEl.textContent='';
+          return;
+        }
+        // Trend badge
+        const trendIcons={growing:'↑ Growing',shrinking:'↓ Shrinking',stable:'→ Stable',unknown:'—'};
+        const trendColors={growing:'#3fb950',shrinking:'#f85149',stable:'#d29922',unknown:'#8b949e'};
+        const trend=d.trend||'unknown';
+        trendEl.textContent=trendIcons[trend]||'—';
+        trendEl.style.color=trendColors[trend]||'#8b949e';
+
+        // Delta badges
+        if(d.deltas){
+          const dl=d.deltas;
+          const cats=[
+            {key:'episodic',label:'Episodic',color:'#3fb950'},
+            {key:'semantic',label:'Semantic',color:'#58a6ff'},
+            {key:'procedural',label:'Procedural',color:'#a371f7'},
+            {key:'prospective',label:'Prospective',color:'#d29922'},
+            {key:'working',label:'Working',color:'#f0883e'},
+            {key:'sensory',label:'Sensory',color:'#8b949e'},
+          ];
+          const intervalMin=Math.round((dl.interval_secs||0)/60);
+          const intervalLabel=intervalMin>0?' ('+intervalMin+'m)':'';
+          deltasEl.innerHTML=cats.map(c=>{
+            const v=dl[c.key]||0;
+            const sign=v>0?'+':'';
+            const bg=v!==0?c.color+'22':'#21262d';
+            const fg=v!==0?c.color:'#484f58';
+            return '<span data-testid="mem-delta-'+c.key+'" style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:.8rem;font-weight:600;background:'+bg+';color:'+fg+'">'+c.label+' '+sign+v+'</span>';
+          }).join('')+'<span style="font-size:.7rem;color:#484f58;align-self:center">since prev sample'+intervalLabel+'</span>';
+        }else{
+          deltasEl.innerHTML='<span style="color:#8b949e;font-size:.85rem">Not enough samples yet — growth data appears after two snapshots</span>';
+        }
+
+        // Growth rate
+        if(d.rate_per_hour){
+          const r=d.rate_per_hour.long_term_total||0;
+          const rDisp=Math.abs(r)<0.1?'0':r.toFixed(1);
+          rateEl.innerHTML='<div style="font-size:1.5rem;font-weight:700;color:#58a6ff;line-height:1">'+rDisp+'</div><div style="font-size:.75rem;color:#8b949e;margin-top:.15rem">long-term mem/hr</div>';
+        }
+
+        // SVG sparkline from snapshots
+        const snaps=d.snapshots||[];
+        if(snaps.length>=2){
+          const vals=snaps.map(s=>s.long_term_total||0);
+          const minV=Math.min(...vals);
+          const maxV=Math.max(...vals);
+          const range=maxV-minV||1;
+          const w=400,h=48,pad=2;
+          const accentColor='#58a6ff';
+          const pts=vals.map((v,i)=>{
+            const x=(i/(vals.length-1))*w;
+            const y=h-pad-((v-minV)/range)*(h-2*pad);
+            return x.toFixed(1)+','+y.toFixed(1);
+          });
+          const polyPts=pts.join(' ');
+          const fillPts=polyPts+','+w+','+(h-pad)+' 0,'+(h-pad);
+          sparkEl.innerHTML='<defs><linearGradient id=\'mem-spark-grad\' x1=\'0\' y1=\'0\' x2=\'0\' y2=\'1\'><stop offset=\'0%\' stop-color=\''+accentColor+'\' stop-opacity=\'0.3\'/><stop offset=\'100%\' stop-color=\''+accentColor+'\' stop-opacity=\'0.02\'/></linearGradient></defs>'
+            +'<polyline points=\''+polyPts+'\' fill=\'none\' stroke=\''+accentColor+'\' stroke-width=\'1.5\' vector-effect=\'non-scaling-stroke\'/>'
+            +'<polyline points=\''+fillPts+'\' fill=\'url(#mem-spark-grad)\' stroke=\'none\'/>';
+        }else{
+          sparkEl.innerHTML='<text x=\'200\' y=\'28\' text-anchor=\'middle\' fill=\'#484f58\' font-size=\'12\'>Collecting samples…</text>';
+        }
+      }catch(e){
+        deltasEl.innerHTML='<span class="err" style="font-size:.85rem">Failed to load growth data</span>';
+      }
+    }
+
     /* --- Recent Memories (plain-English view, #1997) --- */
     async function fetchRecentMemories(){
       const countEl=document.getElementById('mem-recent-count');
