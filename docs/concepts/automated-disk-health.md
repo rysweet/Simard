@@ -1,12 +1,13 @@
 ---
 title: Automated disk health management
 description: Design rationale for Simard's per-cycle disk health check — why it exists, what it cleans, and how it interacts with existing subsystems.
-last_updated: 2026-05-24
+last_updated: 2026-06-05
 review_schedule: as-needed
 owner: simard
 doc_type: concept
 related:
   - ../howto/configure-disk-health-check.md
+  - ../reference/disk-health-api.md
   - ../reference/engineer-worktree-isolation.md
   - ./goal-board-persistence.md
 ---
@@ -210,12 +211,50 @@ The Rust code is a thin shim. The cleanup prompt lives in the recipe YAML as
 a readable agent step, not compiled into the binary. Operators can `cat` it,
 `diff` it, or review the agent's decisions in logs.
 
-The recipe outputs key=value lines to stdout (`DISK_USED_PCT=N`,
-`FREED_BYTES=N`, `ACTION: ...`) — the Rust shim parses these with simple
-string splitting. No JSON, no serde deserialization of recipe output.
+### Two-layer output: JSON envelope → text markers
+
+The agent step outputs key=value text markers to stdout (`DISK_USED_PCT=N`,
+`FREED_BYTES=N`, `ACTION: ...`). However, these markers are embedded in the
+agent's conversational output — the step may also contain LLM reasoning,
+`df` output, and other noise.
+
+The Rust shim does not read `recipe-runner-rs` text-format stdout directly.
+Text-format stdout only contains the recipe summary line (e.g.,
+`Recipe: disk-health-check SUCCESS`), not the agent step output where the
+markers live.
+
+Instead, the shim passes `--output-format json` to `recipe-runner-rs`, which
+wraps each step's output in a structured JSON envelope:
+
+```json
+{
+  "success": true,
+  "step_results": [
+    {
+      "step_id": "check-disk-usage",
+      "output": "Running df -h /home...\nDISK_USED_PCT=72\nFREED_BYTES=0\n..."
+    }
+  ]
+}
+```
+
+The shim deserializes the envelope into `RecipeOutput` / `StepResult` structs
+via serde, extracts `step_results[0].output`, and feeds that string to
+`parse_disk_health_text()` — the same simple key=value line parser. This
+two-layer approach keeps the recipe output format simple (text markers from
+bash/agent) while giving the Rust shim reliable access to each step's actual
+output.
+
+> **Historical note (issue #2212):** Prior to this fix, the shim read
+> `recipe-runner-rs` text-format stdout directly. That stream only contained
+> the summary line, not the step output. `parse_disk_health_text()` never found
+> `DISK_USED_PCT` in the summary line, causing 946 consecutive false failures
+> and allowing the disk to fill to 100%. The fix was surgical: add
+> `--output-format json`, deserialize the envelope, extract step output.
 
 ## Related
 
 - [Configure disk health check (how-to)](../howto/configure-disk-health-check.md) — operator guide
+- [Disk health API (reference)](../reference/disk-health-api.md) — module API, structs, data flow
 - [Per-Engineer Worktree Isolation](../reference/engineer-worktree-isolation.md) — worktree lifecycle
 - [Daemon mode](../daemon-mode.md) — OODA cycle overview
