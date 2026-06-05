@@ -17,6 +17,10 @@ pub(crate) const PART_01: &str = r#"      </div>
   <div class="tab-content" id="tab-merge-decisions">
     <h1 class="page-h1">Merge Decisions</h1>
     <p class="page-lede">A record of every pull request the merge judge has evaluated — which PRs were approved, rejected, or deferred, along with the reasoning and timestamp for each decision.</p>
+    <div class="card" style="max-width:980px;margin-bottom:1rem">
+      <h2>Decision Trend</h2>
+      <div id="merge-judge-trend"><span style="color:#8b949e;font-size:.85rem">Trend chart will appear once decision data is available.</span></div>
+    </div>
     <div class="card" style="max-width:980px">
       <h2>Decision History <button class="btn" onclick="fetchMergeJudge()" style="font-size:.75rem">Refresh</button></h2>
       <div id="merge-judge-panel"><span class="loading">Loading…</span></div>
