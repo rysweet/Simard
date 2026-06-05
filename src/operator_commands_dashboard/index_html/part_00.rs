@@ -266,6 +266,27 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       </div>
     </div>
 
+    <div class="card" id="mem-growth-card" data-testid="memory-growth-card" style="margin-bottom:1rem;border:1px solid #1f6feb;background:linear-gradient(135deg,#0d1117,#0d1520)">
+      <div style="display:flex;align-items:center;gap:1rem;margin-bottom:.75rem">
+        <h2 style="margin:0;color:#58a6ff;font-size:1rem">Memory Growth</h2>
+        <span id="mem-growth-trend" style="font-size:.85rem;font-weight:600;color:#8b949e" data-testid="memory-growth-trend"></span>
+        <button class="btn" onclick="fetchMemoryHistory()" style="font-size:.75rem;margin-left:auto">Refresh</button>
+      </div>
+      <div id="mem-growth-deltas" data-testid="memory-growth-deltas" style="display:flex;gap:.75rem;flex-wrap:wrap;margin-bottom:.75rem">
+        <span class="loading" style="font-size:.85rem">Loading growth data…</span>
+      </div>
+      <div style="display:flex;gap:1rem;align-items:flex-end;flex-wrap:wrap">
+        <div style="flex:1;min-width:200px">
+          <div style="font-size:.75rem;color:#8b949e;margin-bottom:.25rem">Long-term memory trend (last observed samples)</div>
+          <svg id="mem-growth-sparkline" data-testid="memory-growth-sparkline" width="100%" height="48" viewBox="0 0 400 48" preserveAspectRatio="none" style="background:#161b22;border-radius:4px;border:1px solid #21262d"></svg>
+        </div>
+        <div id="mem-growth-rate" data-testid="memory-growth-rate" style="text-align:center;min-width:100px">
+          <div style="font-size:1.5rem;font-weight:700;color:#58a6ff;line-height:1">—</div>
+          <div style="font-size:.75rem;color:#8b949e;margin-top:.15rem">memories/hour</div>
+        </div>
+      </div>
+    </div>
+
     <details id="mem-advanced-toggle">
       <summary style="cursor:pointer;color:var(--accent);font-size:.85rem;margin-bottom:1rem;user-select:none">▸ Show advanced memory view (graph, search, raw data)</summary>
 
