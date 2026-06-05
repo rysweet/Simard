@@ -188,7 +188,7 @@ pub use goal_curation::{
 };
 pub use goals::{
     FileBackedGoalStore, GoalRecord, GoalStatus, GoalStore, GoalUpdate, InMemoryGoalStore,
-    seed_default_goals,
+    migrate_file_backed_goal_store_if_present, seed_default_goals,
 };
 pub use gym::{
     BenchmarkArtifactPaths, BenchmarkCheckResult, BenchmarkComparisonArtifactPaths,

@@ -2,12 +2,12 @@
 //!
 //! See `docs/reference/cognitive-memory-goal-store.md` for the design.
 //!
-//! `bootstrap::assembly` is the production caller: every per-record write
-//! flows through cognitive memory via the bridge helpers
-//! (`launch_writer_bridge` / `open_reader_bridge`). The legacy on-disk
-//! `goal_records.json` file is no longer produced — closing the
-//! half-migration gap that PR #1593 / PR #1600 left behind for the
-//! bootstrap-assembled local sessions.
+//! `bootstrap::assembly` and `meeting_backend` are the production callers:
+//! every per-record write flows through cognitive memory via the bridge
+//! helpers (`launch_writer_bridge` / `open_reader_bridge`). The legacy
+//! on-disk `goal_records.json` and `state/goal_store.json` files are no
+//! longer produced — closing the half-migration gap that PR #1593 /
+//! PR #1600 / issue #1668 left behind.
 //!
 //! Storage encoding: each [`GoalRecord`] is serialised as a
 //! `goal-store:record` fact whose content is the JSON record. Reads
@@ -186,6 +186,163 @@ fn compare_goal_records(left: &GoalRecord, right: &GoalRecord) -> Ordering {
         .then(left.priority.cmp(&right.priority))
         .then(left.title.cmp(&right.title))
         .then(left.slug.cmp(&right.slug))
+}
+
+/// One-time migration: if a legacy `state/goal_store.json` exists on disk
+/// (from the `FileBackedGoalStore` era), read its records, write them into
+/// cognitive memory, and rename the file to `state/goal_store.json.migrated`.
+///
+/// The migration is idempotent: once the file is renamed the `exists()` gate
+/// short-circuits. Records whose slug already exists in cognitive memory are
+/// skipped to avoid overwriting newer writes with stale file data.
+///
+/// All failures are logged and non-fatal — a corrupt or unreadable file is
+/// left in place for operator inspection and the caller proceeds to the
+/// cognitive-memory code path. The file is only renamed after ALL records
+/// are successfully written so a partial failure leaves the file intact for
+/// retry on next startup.
+pub fn migrate_file_backed_goal_store_if_present(state_root: &std::path::Path) {
+    let goal_store_path = state_root.join("state").join("goal_store.json");
+    if !goal_store_path.exists() {
+        return;
+    }
+
+    // Read the raw file to avoid `FileBackedGoalStore::try_new` side
+    // effects (it copies `goal_records.json` → `goal_store.json`).
+    let content = match std::fs::read_to_string(&goal_store_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "[simard] goal_store migration: failed to read {} ({e}) — \
+                 leaving file in place for next retry",
+                goal_store_path.display()
+            );
+            return;
+        }
+    };
+
+    let records: Vec<GoalRecord> = match serde_json::from_str(&content) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "[simard] goal_store migration: failed to parse {} ({e}) — \
+                 leaving corrupt file in place for operator inspection",
+                goal_store_path.display()
+            );
+            return;
+        }
+    };
+
+    if records.is_empty() {
+        // Nothing to migrate — rename and move on.
+        rename_to_migrated(&goal_store_path);
+        return;
+    }
+
+    // Open a single writer bridge for both reading existing slugs and
+    // writing migrated records.  Using the writer bridge (not the
+    // read-only reader bridge) is deliberate: write-mode opens replay
+    // the WAL, handling the edge case where a prior writer left an
+    // un-checkpointed WAL that read-only mode cannot recover.
+    let writer = match launch_writer_bridge(state_root) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!(
+                "[simard] goal_store migration: launch_writer_bridge failed ({e}) — \
+                 leaving file in place for next retry"
+            );
+            return;
+        }
+    };
+
+    // Read existing slugs from cognitive memory to skip duplicates.
+    // If the DB file exists but we cannot read it, abort the migration
+    // to avoid overwriting newer cognitive-memory records with stale
+    // legacy data.
+    let db_file = state_root.join("cognitive_memory.ladybug");
+    let existing_slugs: std::collections::HashSet<String> = if db_file.exists() {
+        match writer
+            .ops()
+            .search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)
+        {
+            Ok(facts) => facts
+                .into_iter()
+                .filter_map(|f| {
+                    serde_json::from_str::<GoalRecord>(&f.content)
+                        .ok()
+                        .map(|r| r.slug)
+                })
+                .collect(),
+            Err(e) => {
+                eprintln!(
+                    "[simard] goal_store migration: cannot read existing records ({e}) — \
+                     leaving file in place for safety"
+                );
+                return;
+            }
+        }
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let mut all_ok = true;
+    let mut migrated_count = 0usize;
+    let mut skipped_count = 0usize;
+    for record in &records {
+        if existing_slugs.contains(&record.slug) {
+            skipped_count += 1;
+            continue;
+        }
+        let content = match serde_json::to_string(record) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "[simard] goal_store migration: serialise failed for slug={} ({e}) — \
+                     aborting migration, leaving file in place",
+                    record.slug
+                );
+                all_ok = false;
+                break;
+            }
+        };
+        if let Err(e) = writer.ops().store_fact(
+            GOAL_STORE_FACT_CONCEPT,
+            &content,
+            1.0,
+            &[GOAL_STORE_TAG.to_string()],
+            GOAL_STORE_SOURCE,
+        ) {
+            eprintln!(
+                "[simard] goal_store migration: put failed for slug={} ({e}) — \
+                 aborting migration, leaving file in place",
+                record.slug
+            );
+            all_ok = false;
+            break;
+        }
+        migrated_count += 1;
+    }
+
+    if all_ok {
+        eprintln!(
+            "[simard] goal_store migration: migrated {migrated_count} records, \
+             skipped {skipped_count} already-present slugs from {}",
+            goal_store_path.display()
+        );
+        rename_to_migrated(&goal_store_path);
+    }
+}
+
+fn rename_to_migrated(path: &std::path::Path) {
+    let migrated_path = path.with_extension("json.migrated");
+    if let Err(e) = std::fs::rename(path, &migrated_path) {
+        eprintln!(
+            "[simard] goal_store migration: rename failed ({e}) — \
+             data is in cognitive memory but {} remains on disk; \
+             next startup will retry (idempotent)",
+            path.display()
+        );
+    }
 }
 
 #[cfg(test)]

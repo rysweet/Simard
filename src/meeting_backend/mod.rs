@@ -10,6 +10,8 @@ pub mod command;
 pub mod lightweight;
 pub mod persist;
 #[cfg(test)]
+mod tests_goal_records_migration;
+#[cfg(test)]
 mod tests_persist;
 #[cfg(test)]
 mod tests_persist_extra;
@@ -522,20 +524,23 @@ impl MeetingBackend {
 
     // --- Private helpers ---
 
-    /// Load active goal (slug, title) pairs from the default file-backed store.
+    /// Load active goal (slug, title) pairs from cognitive memory.
     ///
-    /// Returns an empty vec if the goals file doesn't exist or can't be read.
+    /// Returns an empty vec if the goal store can't be reached or has no goals.
     /// This is best-effort — goal linkage is optional enrichment.
+    ///
+    /// Since issue #1668, reads flow through `CognitiveMemoryGoalStore`
+    /// instead of the legacy `FileBackedGoalStore`.
     fn load_active_goal_titles(&self) -> Vec<(String, String)> {
-        use crate::goals::{FileBackedGoalStore, GoalStore};
+        use crate::goals::{CognitiveMemoryGoalStore, GoalStore};
 
-        let goals_path = crate::state_root::goal_store_path();
+        let state_root = crate::state_root::simard_state_root();
 
-        if !goals_path.exists() {
-            return Vec::new();
-        }
+        // One-time migration: if a legacy goal_store.json exists, import it
+        // into cognitive memory before reading (issue #1668).
+        crate::goals::migrate_file_backed_goal_store_if_present(&state_root);
 
-        match FileBackedGoalStore::try_new(&goals_path) {
+        match CognitiveMemoryGoalStore::new(state_root) {
             Ok(store) => match store.active_top_goals(50) {
                 Ok(goals) => goals.into_iter().map(|g| (g.slug, g.title)).collect(),
                 Err(e) => {
@@ -544,7 +549,7 @@ impl MeetingBackend {
                 }
             },
             Err(e) => {
-                debug!("Could not open goal store for linkage: {e}");
+                debug!("Could not open cognitive memory goal store for linkage: {e}");
                 Vec::new()
             }
         }
