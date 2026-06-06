@@ -273,10 +273,26 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         limit: u32,
         min_confidence: f64,
     ) -> SimardResult<Vec<CognitiveFact>> {
-        let q = escape_cypher(query);
-        let rows = self.query(&format!(
-            "MATCH (f:Fact) WHERE (f.concept CONTAINS '{q}' OR f.content CONTAINS '{q}') AND f.confidence >= {min_confidence} RETURN f.id, f.concept, f.content, f.confidence, f.source_id, f.tags ORDER BY f.id DESC LIMIT {limit}"
-        ))?;
+        // Treat `"*"` as "match everything" — `CONTAINS '*'` would search for
+        // the literal asterisk character, producing zero results when the
+        // caller intended a wildcard export (e.g. `export_memory_snapshot`).
+        // Issue #1710: this was the root cause of empty snapshot exports that
+        // made the corruption-recovery path lose all data.
+        let rows = if query == "*" {
+            self.query(&format!(
+                "MATCH (f:Fact) WHERE f.confidence >= {min_confidence} \
+                 RETURN f.id, f.concept, f.content, f.confidence, f.source_id, f.tags \
+                 ORDER BY f.id DESC LIMIT {limit}"
+            ))?
+        } else {
+            let q = escape_cypher(query);
+            self.query(&format!(
+                "MATCH (f:Fact) WHERE (f.concept CONTAINS '{q}' OR f.content CONTAINS '{q}') \
+                 AND f.confidence >= {min_confidence} \
+                 RETURN f.id, f.concept, f.content, f.confidence, f.source_id, f.tags \
+                 ORDER BY f.id DESC LIMIT {limit}"
+            ))?
+        };
         Ok(rows
             .iter()
             .map(|row| {
@@ -342,10 +358,22 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
     }
 
     fn recall_procedure(&self, query: &str, limit: u32) -> SimardResult<Vec<CognitiveProcedure>> {
-        let q = escape_cypher(query);
-        let rows = self.query(&format!(
-            "MATCH (p:Procedure) WHERE p.name CONTAINS '{q}' OR p.steps CONTAINS '{q}' RETURN p.id, p.name, p.steps, p.prerequisites, p.usage_count LIMIT {limit}"
-        ))?;
+        // Same wildcard treatment as `search_facts` — `"*"` means "return all"
+        // so `export_memory_snapshot` actually captures every procedure.
+        let rows = if query == "*" {
+            self.query(&format!(
+                "MATCH (p:Procedure) \
+                 RETURN p.id, p.name, p.steps, p.prerequisites, p.usage_count \
+                 LIMIT {limit}"
+            ))?
+        } else {
+            let q = escape_cypher(query);
+            self.query(&format!(
+                "MATCH (p:Procedure) WHERE p.name CONTAINS '{q}' OR p.steps CONTAINS '{q}' \
+                 RETURN p.id, p.name, p.steps, p.prerequisites, p.usage_count \
+                 LIMIT {limit}"
+            ))?
+        };
         // Each row is decoded with **loud** failure on schema drift or
         // corrupt JSON in `steps` / `prerequisites`.  The previous
         // implementation called `unwrap_or_default()` on the JSON parse
@@ -758,6 +786,36 @@ mod tests {
         mem.store_fact("rust", "fast", 0.9, &[], "src").unwrap();
         let results = mem.search_facts("python", 10, 0.0).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_facts_wildcard_returns_all() {
+        let mem = test_mem();
+        mem.store_fact("alpha", "first", 0.9, &[], "src").unwrap();
+        mem.store_fact("bravo", "second", 0.8, &[], "src").unwrap();
+        mem.store_fact("charlie", "third", 0.7, &[], "src").unwrap();
+        let results = mem.search_facts("*", 100, 0.0).unwrap();
+        assert_eq!(
+            results.len(),
+            3,
+            "wildcard '*' must return all facts, got {}",
+            results.len()
+        );
+    }
+
+    #[test]
+    fn recall_procedure_wildcard_returns_all() {
+        let mem = test_mem();
+        mem.store_procedure("deploy", &["build".into()], &[])
+            .unwrap();
+        mem.store_procedure("test", &["lint".into()], &[]).unwrap();
+        let results = mem.recall_procedure("*", 100).unwrap();
+        assert_eq!(
+            results.len(),
+            2,
+            "wildcard '*' must return all procedures, got {}",
+            results.len()
+        );
     }
 
     // ── store_procedure / recall_procedure ─────────────────────────────

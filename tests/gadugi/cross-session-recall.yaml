@@ -1,0 +1,60 @@
+name: "Cross-Session Cognitive Memory Recall"
+description: >
+  Outside-in gate for issue #1916: verifies that cognitive memory written by
+  Session A survives process exit and is fully recallable by Session B via the
+  snapshot recovery ladder. Also covers the corruption-recovery path from
+  issue #1710 (backup-restore ordering fix).
+version: "1.0.0"
+
+config:
+  timeout: 120000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 120000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Cross-session recall — clean path (session A writes, session B reads)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cognitive_memory_cross_session_recall
+        cognitive_memory_cross_session_recall
+        -- --nocapture --test-threads=1
+    timeout: 120000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test cognitive_memory_cross_session_recall ... ok"
+
+  - name: "Cross-session recall — corruption-recovery path (#1710 + #1916)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cognitive_memory_cross_session_recall
+        cross_session_recall_survives_db_corruption_via_snapshot
+        -- --nocapture --test-threads=1
+    timeout: 120000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test cross_session_recall_survives_db_corruption_via_snapshot ... ok"
