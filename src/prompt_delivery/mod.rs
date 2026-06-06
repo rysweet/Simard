@@ -870,4 +870,486 @@ mod tests {
         // session security-review-1897.md.
         assert_eq!(ENV_VALUE_LOG_BUDGET, 64);
     }
+
+    // -----------------------------------------------------------------------
+    // args_contain_flag_terminator
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn flag_terminator_found_when_present() {
+        let args: Vec<std::ffi::OsString> = vec!["--flag".into(), "--".into(), "prompt".into()];
+        let refs: Vec<&std::ffi::OsStr> = args.iter().map(|s| s.as_ref()).collect();
+        assert!(args_contain_flag_terminator(refs));
+    }
+
+    #[test]
+    fn flag_terminator_not_found_when_absent() {
+        let args: Vec<std::ffi::OsString> = vec!["--flag".into(), "prompt".into()];
+        let refs: Vec<&std::ffi::OsStr> = args.iter().map(|s| s.as_ref()).collect();
+        assert!(!args_contain_flag_terminator(refs));
+    }
+
+    #[test]
+    fn flag_terminator_empty_args() {
+        let args: Vec<&std::ffi::OsStr> = vec![];
+        assert!(!args_contain_flag_terminator(args));
+    }
+
+    #[test]
+    fn flag_terminator_only_double_dash() {
+        let args: Vec<std::ffi::OsString> = vec!["--".into()];
+        let refs: Vec<&std::ffi::OsStr> = args.iter().map(|s| s.as_ref()).collect();
+        assert!(args_contain_flag_terminator(refs));
+    }
+
+    #[test]
+    fn flag_terminator_triple_dash_is_not_terminator() {
+        let args: Vec<std::ffi::OsString> = vec!["---".into()];
+        let refs: Vec<&std::ffi::OsStr> = args.iter().map(|s| s.as_ref()).collect();
+        assert!(
+            !args_contain_flag_terminator(refs),
+            "--- is not a flag terminator"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_postmortem_tempfile
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_postmortem_tempfile_creates_readable_file() {
+        let prompt = b"hello postmortem";
+        let file = build_postmortem_tempfile(prompt).unwrap();
+        let contents = std::fs::read(file.path()).unwrap();
+        assert_eq!(contents, prompt);
+    }
+
+    #[test]
+    fn build_postmortem_tempfile_prefix_and_suffix() {
+        let file = build_postmortem_tempfile(b"x").unwrap();
+        let name = file
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            name.starts_with("amplihack-prompt-"),
+            "temp file should have amplihack-prompt- prefix: {name}"
+        );
+        assert!(
+            name.ends_with(".txt"),
+            "temp file should have .txt suffix: {name}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn build_postmortem_tempfile_has_owner_only_perms() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = build_postmortem_tempfile(b"secret").unwrap();
+        let perms = std::fs::metadata(file.path()).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "temp file should have 0o600 permissions"
+        );
+    }
+
+    #[test]
+    fn build_postmortem_tempfile_empty_prompt() {
+        let file = build_postmortem_tempfile(b"").unwrap();
+        let contents = std::fs::read(file.path()).unwrap();
+        assert!(contents.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_std — mode resolution + command mutation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[serial(prompt_delivery_env)]
+    fn apply_std_inline_appends_terminator_and_prompt() {
+        let mut cmd = Command::new("echo");
+        let prompt = b"hello";
+        let guard = apply_std(&mut cmd, prompt, PromptDelivery::Inline).unwrap();
+        assert_eq!(guard.mode(), PromptDelivery::Inline);
+        assert!(guard.temp_path().is_none());
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args[0], "--", "should inject flag terminator");
+        assert_eq!(args[1], "hello", "should append prompt as arg");
+    }
+
+    #[test]
+    #[serial(prompt_delivery_env)]
+    fn apply_std_inline_does_not_duplicate_terminator() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("--");
+        let _guard = apply_std(&mut cmd, b"x", PromptDelivery::Inline).unwrap();
+        let args: Vec<_> = cmd.get_args().collect();
+        let dash_count = args.iter().filter(|a| **a == "--").count();
+        assert_eq!(
+            dash_count, 1,
+            "should not add second -- when already present"
+        );
+    }
+
+    #[test]
+    #[serial(prompt_delivery_env)]
+    fn apply_std_stdin_mode_captures_prompt() {
+        let mut cmd = Command::new("echo");
+        let prompt = b"stdin payload";
+        let guard = apply_std(&mut cmd, prompt, PromptDelivery::Stdin).unwrap();
+        assert_eq!(guard.mode(), PromptDelivery::Stdin);
+        assert!(guard.temp_path().is_none());
+    }
+
+    #[test]
+    #[serial(prompt_delivery_env)]
+    fn apply_std_tempfile_mode_creates_temp_file() {
+        let mut cmd = Command::new("echo");
+        let prompt = b"tempfile payload";
+        let guard = apply_std(&mut cmd, prompt, PromptDelivery::TempFile).unwrap();
+        assert_eq!(guard.mode(), PromptDelivery::TempFile);
+        assert!(
+            guard.temp_path().is_some(),
+            "TempFile mode should have a temp path"
+        );
+        let contents = std::fs::read(guard.temp_path().unwrap()).unwrap();
+        assert_eq!(contents, prompt);
+    }
+
+    #[test]
+    #[serial(prompt_delivery_env)]
+    fn apply_std_auto_resolves_inline_for_small_prompt() {
+        let mut cmd = Command::new("echo");
+        let prompt = b"small";
+        let guard = apply_std(&mut cmd, prompt, PromptDelivery::Auto).unwrap();
+        assert_eq!(guard.mode(), PromptDelivery::Inline);
+    }
+
+    #[test]
+    #[serial(prompt_delivery_env)]
+    fn apply_std_rejects_too_large_prompt() {
+        let mut cmd = Command::new("echo");
+        let too_big = vec![b'x'; HARD_CAP_BYTES + 1];
+        let result = apply_std(&mut cmd, &too_big, PromptDelivery::Auto);
+        assert!(
+            matches!(result, Err(PromptDeliveryError::TooLarge(_))),
+            "should reject prompt exceeding hard cap"
+        );
+    }
+
+    #[test]
+    #[serial(prompt_delivery_env)]
+    fn apply_std_inline_with_nul_byte_errors() {
+        let mut cmd = Command::new("echo");
+        let result = apply_std(&mut cmd, b"hello\0world", PromptDelivery::Inline);
+        assert!(
+            matches!(result, Err(PromptDeliveryError::NulInInlineMode)),
+            "should reject NUL byte in Inline mode"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AppliedPromptStd: feed and retain_temp_file
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn applied_prompt_std_feed_noop_for_inline() {
+        let guard = AppliedPromptStd {
+            mode: PromptDelivery::Inline,
+            prompt: None,
+            temp_file: None,
+        };
+        // feed with no stdin is OK for Inline mode — it's a no-op
+        guard.feed(None).unwrap();
+    }
+
+    #[test]
+    fn applied_prompt_std_feed_errors_when_stdin_missing() {
+        let guard = AppliedPromptStd {
+            mode: PromptDelivery::Stdin,
+            prompt: Some(b"data".to_vec()),
+            temp_file: None,
+        };
+        let err = guard.feed(None);
+        assert!(
+            err.is_err(),
+            "feed should error when stdin pipe is None for Stdin mode"
+        );
+    }
+
+    #[test]
+    fn applied_prompt_std_retain_temp_file_returns_none_for_non_tempfile() {
+        let guard = AppliedPromptStd {
+            mode: PromptDelivery::Stdin,
+            prompt: Some(b"data".to_vec()),
+            temp_file: None,
+        };
+        assert!(
+            guard.retain_temp_file().is_none(),
+            "retain_temp_file should return None for non-TempFile mode"
+        );
+    }
+
+    #[test]
+    fn applied_prompt_std_retain_temp_file_returns_path_for_tempfile() {
+        let file = build_postmortem_tempfile(b"retain me").unwrap();
+        let expected_path = file.path().to_path_buf();
+        let guard = AppliedPromptStd {
+            mode: PromptDelivery::TempFile,
+            prompt: Some(b"retain me".to_vec()),
+            temp_file: Some(file),
+        };
+        let retained = guard.retain_temp_file();
+        assert!(retained.is_some(), "should return the retained path");
+        // After retain, the file should still exist on disk
+        assert!(
+            retained.as_ref().unwrap().exists(),
+            "retained temp file should still exist on disk"
+        );
+        // Clean up the retained file
+        let _ = std::fs::remove_file(retained.unwrap());
+        // Verify the original path is gone (it was moved)
+        assert!(
+            !expected_path.exists(),
+            "original temp file should be cleaned up by keep()"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ParsePromptDeliveryError Display
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_error_display_includes_value() {
+        let err = ParsePromptDeliveryError("bogus".to_string());
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("bogus"),
+            "Display should include the invalid value: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_error_is_std_error() {
+        let err = ParsePromptDeliveryError("x".to_string());
+        let _: &dyn std::error::Error = &err;
+    }
+
+    // -----------------------------------------------------------------------
+    // PromptDeliveryError Display — specific variant messages
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn error_too_large_includes_byte_count() {
+        let err = PromptDeliveryError::TooLarge(999);
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("999"),
+            "TooLarge should include the actual size: {msg}"
+        );
+        assert!(
+            msg.contains(&HARD_CAP_BYTES.to_string()),
+            "TooLarge should include the cap: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_nul_in_inline_mode_message() {
+        let err = PromptDeliveryError::NulInInlineMode;
+        let msg = format!("{err}");
+        assert!(msg.contains("NUL"), "should mention NUL: {msg}");
+        assert!(msg.contains("Inline"), "should mention Inline: {msg}");
+    }
+
+    #[test]
+    fn error_temp_file_wraps_io_error() {
+        let inner = std::io::Error::other("disk full");
+        let err = PromptDeliveryError::TempFile(inner);
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("disk full"),
+            "should include inner error: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_write_wraps_io_error() {
+        let inner = std::io::Error::other("broken pipe");
+        let err = PromptDeliveryError::Write(inner);
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("broken pipe"),
+            "should include inner error: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_permissions_wraps_io_error() {
+        let inner = std::io::Error::other("access denied");
+        let err = PromptDeliveryError::Permissions(inner);
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("access denied"),
+            "should include inner error: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PromptDelivery trait impls
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prompt_delivery_clone_and_eq() {
+        let a = PromptDelivery::Auto;
+        let b = a;
+        assert_eq!(a, b);
+        assert_ne!(PromptDelivery::Inline, PromptDelivery::Stdin);
+    }
+
+    #[test]
+    fn prompt_delivery_debug_format() {
+        let dbg = format!("{:?}", PromptDelivery::TempFile);
+        assert!(
+            dbg.contains("TempFile"),
+            "Debug should include variant name: {dbg}"
+        );
+    }
+
+    #[test]
+    fn prompt_delivery_hash_works() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(PromptDelivery::Inline);
+        set.insert(PromptDelivery::Stdin);
+        set.insert(PromptDelivery::Inline);
+        assert_eq!(
+            set.len(),
+            2,
+            "Hash + Eq should deduplicate identical variants"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // from_str: additional alias coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn from_str_accepts_temp_underscore_alias() {
+        assert_eq!(
+            "temp_file".parse::<PromptDelivery>().unwrap(),
+            PromptDelivery::TempFile
+        );
+        assert_eq!(
+            "TEMP_FILE".parse::<PromptDelivery>().unwrap(),
+            PromptDelivery::TempFile
+        );
+    }
+
+    #[test]
+    fn from_str_whitespace_only_is_error() {
+        assert!("  \t  ".parse::<PromptDelivery>().is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // select_mode: env override "auto" falls through to heuristic
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[serial(prompt_delivery_env)]
+    fn select_mode_env_auto_falls_through_to_heuristic() {
+        unsafe {
+            std::env::set_var(ENV_OVERRIDE, "auto");
+        }
+        let short = b"hi";
+        assert_eq!(
+            select_mode(short, PromptDelivery::Auto).unwrap(),
+            PromptDelivery::Inline,
+            "env=auto should fall through to size-based heuristic (Inline for short prompt)"
+        );
+        unsafe {
+            std::env::remove_var(ENV_OVERRIDE);
+        }
+    }
+
+    #[test]
+    #[serial(prompt_delivery_env)]
+    fn select_mode_env_inline_with_nul_errors() {
+        unsafe {
+            std::env::set_var(ENV_OVERRIDE, "inline");
+        }
+        let prompt = b"hello\0world";
+        let err = select_mode(prompt, PromptDelivery::Auto).unwrap_err();
+        assert!(
+            matches!(err, PromptDeliveryError::NulInInlineMode),
+            "env=inline + NUL byte should error"
+        );
+        unsafe {
+            std::env::remove_var(ENV_OVERRIDE);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // prompt_as_osstr
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prompt_as_osstr_preserves_bytes() {
+        let prompt = b"hello world";
+        let os = prompt_as_osstr(prompt);
+        assert_eq!(os, "hello world");
+    }
+
+    #[test]
+    fn prompt_as_osstr_empty_input() {
+        let os = prompt_as_osstr(b"");
+        assert_eq!(os, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // AppliedPromptTokio accessors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn applied_prompt_tokio_mode_accessor() {
+        let guard = AppliedPromptTokio {
+            mode: PromptDelivery::Stdin,
+            prompt: Some(b"data".to_vec()),
+            temp_file: None,
+        };
+        assert_eq!(guard.mode(), PromptDelivery::Stdin);
+    }
+
+    #[test]
+    fn applied_prompt_tokio_temp_path_none_for_stdin() {
+        let guard = AppliedPromptTokio {
+            mode: PromptDelivery::Stdin,
+            prompt: Some(b"data".to_vec()),
+            temp_file: None,
+        };
+        assert!(guard.temp_path().is_none());
+    }
+
+    #[test]
+    fn applied_prompt_tokio_temp_path_some_for_tempfile() {
+        let file = build_postmortem_tempfile(b"async").unwrap();
+        let guard = AppliedPromptTokio {
+            mode: PromptDelivery::TempFile,
+            prompt: Some(b"async".to_vec()),
+            temp_file: Some(file),
+        };
+        assert!(guard.temp_path().is_some());
+    }
+
+    #[test]
+    fn applied_prompt_tokio_retain_temp_file_none_for_stdin() {
+        let guard = AppliedPromptTokio {
+            mode: PromptDelivery::Stdin,
+            prompt: Some(b"data".to_vec()),
+            temp_file: None,
+        };
+        assert!(guard.retain_temp_file().is_none());
+    }
 }
