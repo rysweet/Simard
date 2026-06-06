@@ -303,7 +303,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
         if(trend.detail){trendHtml+=`<div style="color:#8b949e;font-size:.8rem">${esc(trend.detail)}</div>`;}
         trendHtml+='</div>';
         trendEl.innerHTML=trendHtml;
-        // Duration bar chart (inline SVG)
+        // Duration trend line chart (inline SVG) — #2223
         if(cycles.length){
           const durations=cycles.map(c=>c.duration_secs||0).reverse();
           const nums=cycles.map(c=>c.cycle_number).reverse();
@@ -315,10 +315,26 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             const h=Math.max(2,(d/maxD)*chartH);
             const x=i*(barW+2);
             const color=d===0?borderClr:'var(--accent)';
-            return `<rect x="${x}" y="${chartH-h}" width="${barW}" height="${h}" fill="${color}" rx="1"><title>Cycle ${nums[i]}: ${d}s</title></rect>`;
+            return `<rect x="${x}" y="${chartH-h}" width="${barW}" height="${h}" fill="${color}" rx="1" opacity="0.4"><title>Cycle ${nums[i]}: ${d}s</title></rect>`;
           }).join('');
           const svgW=durations.length*(barW+2);
-          trendEl.innerHTML+=`<div style="margin-top:.5rem;overflow-x:auto"><svg width="${svgW}" height="${chartH+16}" style="display:block"><g>${bars}</g><line x1="0" y1="${chartH}" x2="${svgW}" y2="${chartH}" stroke="${borderClr}" stroke-width="1"/></svg></div>`;
+          // Compute trend line points
+          const linePoints=durations.map((d,i)=>{
+            const x=i*(barW+2)+barW/2;
+            const y=chartH-Math.max(2,(d/maxD)*chartH)+1;
+            return `${x},${y}`;
+          }).join(' ');
+          // Moving average line (window=3) for smoothed trend
+          const maWindow=Math.min(3,Math.max(1,Math.floor(durations.length/3)));
+          const maPoints=durations.map((d,i)=>{
+            const start=Math.max(0,i-maWindow+1);
+            const slice=durations.slice(start,i+1);
+            const avg=slice.reduce((a,b)=>a+b,0)/slice.length;
+            const x=i*(barW+2)+barW/2;
+            const y=chartH-Math.max(2,(avg/maxD)*chartH)+1;
+            return `${x},${y}`;
+          }).join(' ');
+          trendEl.innerHTML+=`<div style="margin-top:.5rem;overflow-x:auto" data-testid="ooda-cycle-trend-chart"><svg width="${svgW}" height="${chartH+16}" style="display:block"><g>${bars}</g><polyline points="${linePoints}" fill="none" stroke="var(--accent)" stroke-width="1.5" opacity="0.7"/><polyline points="${maPoints}" fill="none" stroke="var(--green)" stroke-width="2" stroke-dasharray="4,2" data-testid="ooda-trend-line"><title>Moving average trend</title></polyline><line x1="0" y1="${chartH}" x2="${svgW}" y2="${chartH}" stroke="${borderClr}" stroke-width="1"/></svg><div style="display:flex;gap:1rem;font-size:.75rem;color:#8b949e;margin-top:.3rem"><span><span style="color:var(--accent)">━</span> Duration per cycle</span><span><span style="color:var(--green)">╌</span> Moving average</span></div></div>`;
         }
         // History table
         if(!cycles.length){histEl.innerHTML='<span style="color:#8b949e">No cycle history available. Run the agent daemon to generate cycle data.</span>';return;}

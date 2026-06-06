@@ -111,12 +111,58 @@ pub(crate) const PART_05: &str = r#"      try {
     /* --- Merge Judge Decisions (#2041) --- */
     async function fetchMergeJudge(){
       const el=document.getElementById('merge-judge-panel');
+      const trendEl=document.getElementById('merge-judge-trend');
       if(!el) return;
       try {
         const d = await apiFetch('/api/merge-judge');
         const persistenceAvailable = !!d.persistence_available;
         const decisions = Array.isArray(d.decisions) ? d.decisions : [];
         const summary = d.summary || {};
+
+        // Render approval-rate-over-time trend chart (#2223)
+        if(trendEl){
+          if(decisions.length>=2){
+            const sorted=decisions.slice().sort(function(a,b){return (a.evaluated_at||'').localeCompare(b.evaluated_at||'');});
+            const chartW=Math.min(600,Math.max(200,sorted.length*30));
+            const chartH=80;
+            const pad=2;
+            let cumApproved=0,cumTotal=0;
+            const rates=sorted.map(function(dec){
+              cumTotal++;
+              if(dec.verdict==='ready') cumApproved++;
+              return {rate:cumTotal>0?cumApproved/cumTotal:0,label:'PR #'+(dec.pr_number||'?'),time:dec.evaluated_at||''};
+            });
+            const stepX=rates.length>1?(chartW-pad*2)/(rates.length-1):0;
+            const points=rates.map(function(r,i){
+              const x=pad+i*stepX;
+              const y=chartH-pad-(r.rate*(chartH-pad*2));
+              return x+','+y;
+            }).join(' ');
+            const dots=rates.map(function(r,i){
+              const x=pad+i*stepX;
+              const y=chartH-pad-(r.rate*(chartH-pad*2));
+              const pct=Math.round(r.rate*100);
+              return '<circle cx="'+x+'" cy="'+y+'" r="3" fill="var(--green)" stroke="var(--bg)" stroke-width="1"><title>'+esc(r.label)+': '+pct+'% approved ('+r.time+')</title></circle>';
+            }).join('');
+            const finalRate=rates.length?Math.round(rates[rates.length-1].rate*100):0;
+            trendEl.innerHTML='<div style="display:flex;align-items:center;gap:1rem;margin-bottom:.5rem">'
+              +'<span style="font-size:.85rem;color:#8b949e">Cumulative approval rate over time</span>'
+              +'<strong style="color:var(--green)">'+finalRate+'%</strong>'
+              +'</div>'
+              +'<div style="overflow-x:auto" data-testid="merge-judge-trend-chart">'
+              +'<svg width="'+chartW+'" height="'+(chartH+4)+'" style="display:block">'
+              +'<line x1="'+pad+'" y1="'+(chartH/2)+'" x2="'+(chartW-pad)+'" y2="'+(chartH/2)+'" stroke="var(--border)" stroke-width="1" stroke-dasharray="4,4"/>'
+              +'<polyline points="'+points+'" fill="none" stroke="var(--green)" stroke-width="2" data-testid="merge-trend-line"/>'
+              +dots
+              +'<line x1="'+pad+'" y1="'+chartH+'" x2="'+(chartW-pad)+'" y2="'+chartH+'" stroke="var(--border)" stroke-width="1"/>'
+              +'</svg>'
+              +'<div style="display:flex;justify-content:space-between;font-size:.7rem;color:#8b949e;margin-top:.2rem"><span>0%</span><span>50%</span><span>100%</span></div></div>';
+          }else if(!persistenceAvailable){
+            trendEl.innerHTML='<span style="color:#8b949e;font-size:.85rem">Trend chart will appear once decision data is available.</span>';
+          }else{
+            trendEl.innerHTML='<span style="color:#8b949e;font-size:.85rem">Need at least 2 decisions to render a trend chart.</span>';
+          }
+        }
 
         if(!persistenceAvailable && decisions.length === 0){
           el.innerHTML =
@@ -349,6 +395,8 @@ pub(crate) const PART_05: &str = r#"      try {
       'daemon':'The background process that runs Simard\u2019s autonomous decision-making loop continuously.',
       'cycle':'One complete pass through the decision loop — observe the environment, orient priorities, decide on an action, and act on it.',
       'gym':'A training environment where Simard practices and improves its skills on synthetic scenarios.',
+      'OTEL':'OpenTelemetry — an open standard for collecting distributed traces, metrics, and logs from software systems.',
+      'OpenTelemetry':'An open-source observability framework for generating, collecting, and exporting telemetry data (traces, metrics, logs) from distributed systems.',
     };
     function toggleGlossary(){
       const p=document.getElementById('glossary-panel');
