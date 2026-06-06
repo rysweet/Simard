@@ -48,44 +48,44 @@ path = "src/bin/simard_tui/main.rs"
 amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git" }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git" }
-lbug = "0.15"
-rusqlite = { version = "0.31", features = ["bundled"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "process", "io-util", "time", "net", "macros", "sync"] }
-axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["cors", "auth"] }
-uuid = { version = "1.18.1", features = ["v4", "v7"] }
-chrono = "0.4"
-dirs = "6"
-crc32fast = "1"
-sha2 = "0.10"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-ctrlc = { version = "3.4", features = ["termination"] }
-nix = { version = "0.29", features = ["signal", "fs"] }
-opentelemetry = "0.27"
-opentelemetry-otlp = "0.27"
-tracing-opentelemetry = "0.28"
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
-tempfile = "3"
-ratatui = "0.29"
-crossterm = "0.28"
-headless_chrome = { version = "1", optional = true, default-features = false }
-regex = { version = "1", optional = true }
-url = { version = "2", optional = true }
+lbug = "=0.15.3"
+rusqlite = { version = "=0.31.0", features = ["bundled"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+tokio = { version = "=1.52.1", features = ["rt", "rt-multi-thread", "process", "io-util", "time", "net", "macros", "sync"] }
+axum = { version = "=0.8.9", features = ["ws"] }
+tower-http = { version = "=0.6.8", features = ["cors", "auth"] }
+uuid = { version = "=1.23.1", features = ["v4", "v7"] }
+chrono = "=0.4.44"
+dirs = "=6.0.0"
+crc32fast = "=1.5.0"
+sha2 = "=0.10.9"
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["json", "env-filter"] }
+ctrlc = { version = "=3.5.2", features = ["termination"] }
+nix = { version = "=0.29.0", features = ["signal", "fs"] }
+opentelemetry = "=0.27.1"
+opentelemetry-otlp = "=0.27.0"
+tracing-opentelemetry = "=0.28.0"
+opentelemetry_sdk = { version = "=0.27.1", features = ["rt-tokio"] }
+tempfile = "=3.27.0"
+ratatui = "=0.29.0"
+crossterm = "=0.28.1"
+headless_chrome = { version = "=1.0.21", optional = true, default-features = false }
+regex = { version = "=1.12.3", optional = true }
+url = { version = "=2.5.8", optional = true }
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = "=0.2.185"
 
 [features]
 slow-tests = []
 dashboard-audit = ["dep:headless_chrome", "dep:regex", "dep:url"]
 
 [dev-dependencies]
-assert_cmd = "2"
-proptest = "1"
-serial_test = "3.4.0"
+assert_cmd = "=2.2.1"
+proptest = "=1.11.0"
+serial_test = "=3.4.0"
 
 [profile.release]
 lto = "thin"
