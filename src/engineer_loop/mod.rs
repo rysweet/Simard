@@ -223,6 +223,98 @@ pub fn run_local_engineer_loop(
         }
     };
 
+    // Goal carryover verification (issue #2092, spec line 665).
+    //
+    // If a meeting wrote a carryover record to cognitive memory, verify
+    // that the engineer session's goal board matches. A drift means
+    // goals curated in the meeting may have silently vanished.
+    let phase_start = Instant::now();
+    match crate::memory_ipc::launch_writer_bridge(&state_root) {
+        Ok(bridge) => match crate::goal_curation::load_goal_board(bridge.ops()) {
+            Ok(board) => match crate::goal_curation::verify_goal_carryover(&board, bridge.ops()) {
+                Ok(crate::goal_curation::CarryoverVerification::Drifted {
+                    meeting_id,
+                    missing_goal_ids,
+                    ..
+                }) => {
+                    let msg = format!(
+                        "goal carryover drift detected (meeting {meeting_id}): \
+                                 goals missing from board: {missing_goal_ids:?}. \
+                                 Meeting goals may have been lost due to state-root divergence."
+                    );
+                    tracing::warn!(
+                        meeting_id = %meeting_id,
+                        missing = ?missing_goal_ids,
+                        "engineer loop: {msg}"
+                    );
+                    phase_traces.push(PhaseTrace {
+                        name: "goal-carryover-verify".to_string(),
+                        duration: phase_start.elapsed(),
+                        outcome: PhaseOutcome::Failed(msg),
+                    });
+                }
+                Ok(crate::goal_curation::CarryoverVerification::Verified {
+                    meeting_id,
+                    active_goal_count,
+                }) => {
+                    tracing::info!(
+                        meeting_id = %meeting_id,
+                        active_goals = active_goal_count,
+                        "engineer loop: goal carryover verified"
+                    );
+                    phase_traces.push(PhaseTrace {
+                        name: "goal-carryover-verify".to_string(),
+                        duration: phase_start.elapsed(),
+                        outcome: PhaseOutcome::Success,
+                    });
+                }
+                Ok(crate::goal_curation::CarryoverVerification::NoRecord) => {
+                    tracing::debug!(
+                        "engineer loop: no goal carryover record found (first run or no meetings)"
+                    );
+                    phase_traces.push(PhaseTrace {
+                        name: "goal-carryover-verify".to_string(),
+                        duration: phase_start.elapsed(),
+                        outcome: PhaseOutcome::Success,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "engineer loop: goal carryover verification failed"
+                    );
+                    phase_traces.push(PhaseTrace {
+                        name: "goal-carryover-verify".to_string(),
+                        duration: phase_start.elapsed(),
+                        outcome: PhaseOutcome::Failed(e.to_string()),
+                    });
+                }
+            },
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "engineer loop: could not load goal board for carryover check"
+                );
+                phase_traces.push(PhaseTrace {
+                    name: "goal-carryover-verify".to_string(),
+                    duration: phase_start.elapsed(),
+                    outcome: PhaseOutcome::Failed(e.to_string()),
+                });
+            }
+        },
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                "engineer loop: could not launch bridge for carryover check"
+            );
+            phase_traces.push(PhaseTrace {
+                name: "goal-carryover-verify".to_string(),
+                duration: phase_start.elapsed(),
+                outcome: PhaseOutcome::Failed(e.to_string()),
+            });
+        }
+    }
+
     // --- SessionPhase::Planning ---
     // Produce a bounded plan sized to the task (spec step 3).
     session.advance(SessionPhase::Planning)?;
