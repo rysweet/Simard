@@ -6,8 +6,8 @@ use crate::error::SimardResult;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
 use crate::ooda_brain::parse_failure::{record_parse_failure, reset_consecutive_count};
 use crate::ooda_brain::{
-    BrainJudgmentRecord, BrainPhase, DeterministicFallbackOrientBrain, ORIENT_PROMPT_NAME,
-    OodaOrientBrain, OrientContext, push_brain_judgment,
+    BrainJudgmentRecord, BrainPhase, DeterministicOrientBrain, ORIENT_PROMPT_NAME, OodaOrientBrain,
+    OrientContext, push_brain_judgment,
 };
 
 use super::{Observation, Priority, SyntheticPriorityKind, is_synthetic_id};
@@ -18,7 +18,7 @@ use super::{Observation, Priority, SyntheticPriorityKind, is_synthetic_id};
 /// brain ([`crate::ooda_brain::FAILURE_PENALTY_PER_CONSECUTIVE`]) so prompt
 /// + code stay in sync.
 ///
-/// Default entrypoint: wires in [`DeterministicFallbackOrientBrain`] for
+/// Default entrypoint: wires in [`DeterministicOrientBrain`] for
 /// the failure-penalty demotion judgment so the daemon never depends on
 /// LLM availability for Orient. Callers with an LLM-backed brain can use
 /// [`orient_with_brain`].
@@ -27,7 +27,7 @@ pub fn orient(
     goals: &GoalBoard,
     failure_counts: &HashMap<String, u32>,
 ) -> SimardResult<Vec<Priority>> {
-    let brain = DeterministicFallbackOrientBrain;
+    let brain = DeterministicOrientBrain;
     orient_with_brain(observation, goals, failure_counts, &brain)
 }
 
@@ -87,13 +87,9 @@ pub fn orient_with_brain(
             // Demote chronically failing goals — prompt-driven judgment via
             // the OodaOrientBrain (PR #1469's third-of-three OODA brain).
             //
-            // Issue #1890: the previous `_ => (compute, true)` arm collapsed
-            // both LLM `Err(_)` and `Ok(j) if validate.is_err()` into the
-            // same silent deterministic-floor record. The Err case must
-            // now fire all four parse-failure visibility channels; the
-            // validate-failure case (semantic-judgment-out-of-bounds) is
-            // out of #1890 scope and keeps the legacy silent fallback —
-            // tracked separately so this PR stays focused.
+            // Brain-driven urgency adjustment for goals with failures.
+            // On brain error: use base urgency unchanged (no silent fallback
+            // to a different brain).
             if let Some(&count) = failure_counts.get(&g.id)
                 && count > 0
             {
@@ -103,25 +99,42 @@ pub fn orient_with_brain(
                     base_reason: reason.clone(),
                     failure_count: count,
                 };
-                let (judgment, fallback_used, parse_failure) = match brain.judge_orientation(&ctx) {
+                match brain.judge_orientation(&ctx) {
                     Ok(j) if j.validate(ctx.base_urgency).is_ok() => {
                         // Healthy parse — reset the (Orient, goal_id)
                         // counter so a recovery cancels any pending
                         // gh-issue escalation.
                         reset_consecutive_count(BrainPhase::Orient, &g.id);
-                        (j, false, None)
+                        push_brain_judgment(BrainJudgmentRecord::from_orient(
+                            &g.id,
+                            ctx.base_urgency,
+                            count,
+                            &j,
+                            false,
+                            crate::ooda_brain::prompt_store::current_version(ORIENT_PROMPT_NAME),
+                        ));
+                        reason = format!("{reason}; {}", j.rationale);
+                        urgency = j.adjusted_urgency;
                     }
-                    Ok(_) => {
+                    Ok(invalid_j) => {
                         // Brain produced JSON that parsed but failed
-                        // semantic validation (e.g. adjusted_urgency
-                        // out of range). Out of #1890 scope: keep the
-                        // legacy silent deterministic fallback.
-                        (DeterministicFallbackOrientBrain::compute(&ctx), true, None)
+                        // semantic validation. Use base urgency — no
+                        // silent fallback.
+                        tracing::error!(
+                            goal_id = %g.id,
+                            adjusted_urgency = invalid_j.adjusted_urgency,
+                            "orient brain returned invalid judgment — using base urgency (no fallback)"
+                        );
+                        let rec = BrainJudgmentRecord::from_orient_error(
+                            &g.id,
+                            ctx.base_urgency,
+                            count,
+                        );
+                        push_brain_judgment(rec);
+                        // urgency unchanged — use base
                     }
                     Err(e) => {
-                        // Issue #1890: parse failure — fire all four
-                        // visibility channels and embed the record
-                        // on the BrainJudgmentRecord.
+                        // Parse failure — record loudly, use base urgency.
                         let raw_response = extract_raw_response(&e);
                         let pf = record_parse_failure(
                             BrainPhase::Orient,
@@ -131,29 +144,21 @@ pub fn orient_with_brain(
                             ORIENT_PROMPT_NAME,
                             crate::ooda_brain::prompt_store::current_version(ORIENT_PROMPT_NAME),
                         );
-                        (
-                            DeterministicFallbackOrientBrain::compute(&ctx),
-                            true,
-                            Some(pf),
-                        )
+                        tracing::error!(
+                            goal_id = %g.id,
+                            error = %e,
+                            "orient brain failed — using base urgency (no fallback)"
+                        );
+                        let mut rec = BrainJudgmentRecord::from_orient_error(
+                            &g.id,
+                            ctx.base_urgency,
+                            count,
+                        );
+                        rec.parse_failure = Some(pf);
+                        push_brain_judgment(rec);
+                        // urgency unchanged — use base
                     }
                 };
-                let mut rec = BrainJudgmentRecord::from_orient(
-                    &g.id,
-                    ctx.base_urgency,
-                    count,
-                    &judgment,
-                    fallback_used,
-                    if fallback_used {
-                        String::new()
-                    } else {
-                        crate::ooda_brain::prompt_store::current_version(ORIENT_PROMPT_NAME)
-                    },
-                );
-                rec.parse_failure = parse_failure;
-                push_brain_judgment(rec);
-                reason = format!("{reason}; {}", judgment.rationale);
-                urgency = judgment.adjusted_urgency;
             }
 
             Priority {
@@ -350,7 +355,7 @@ mod wire_in_tests {
     //       adapter failure must not invert priorities).
     // -----------------------------------------------------------------------
     #[test]
-    fn orient_with_brain_records_parse_failure_and_falls_back_on_brain_error() {
+    fn orient_with_brain_records_parse_failure_and_skips_adjustment_on_brain_error() {
         use crate::error::SimardError;
         use crate::ooda_brain::parse_failure::{
             peek_consecutive_count, reset_consecutive_count_for_tests, test_serial_guard,
@@ -399,22 +404,28 @@ mod wire_in_tests {
             (prios, crate::ooda_brain::take_brain_judgments())
         });
 
-        // (3) Deterministic floor still emits the priority — never stall.
+        // Priority still appears but with base urgency (no fallback adjustment).
+        let p = priorities
+            .iter()
+            .find(|p| p.goal_id == goal_id)
+            .expect("priority must still appear on brain error");
         assert!(
-            priorities.iter().any(|p| p.goal_id == goal_id),
-            "deterministic floor must still emit priority for the failed goal"
+            (p.urgency - 0.8).abs() < 1e-9,
+            "base urgency unchanged on brain error (no fallback); got {}",
+            p.urgency,
         );
 
         // (1) counters() observed the (Orient, goal_id) bump.
         let count = peek_consecutive_count(BrainPhase::Orient, goal_id);
         assert_eq!(count, 1, "expected consecutive_count == 1, got {count}");
 
-        // (2) BrainJudgmentRecord embeds ParseFailureRecord with fallback=true.
+        // (2) BrainJudgmentRecord embeds ParseFailureRecord.
         let rec = records
             .iter()
             .find(|r| r.phase == BrainPhase::Orient)
             .expect("orient record must be present");
-        assert!(rec.fallback, "record must be flagged as fallback");
+        assert!(!rec.fallback, "no fallback used");
+        assert_eq!(rec.decision, "brain_error");
         let pf = rec
             .parse_failure
             .as_ref()
@@ -424,7 +435,7 @@ mod wire_in_tests {
         assert_eq!(pf.consecutive_count, 1);
         assert!(
             pf.raw_response_truncated.contains("junk"),
-            "raw_response must be salvaged from the brain error (issue #1711 contract): {:?}",
+            "raw_response must be salvaged from the brain error: {:?}",
             pf.raw_response_truncated,
         );
 

@@ -4,8 +4,8 @@
 use std::sync::Mutex;
 
 use super::{
-    DeterministicFallbackOrientBrain, FAILURE_PENALTY_PER_CONSECUTIVE, LlmSubmitter,
-    OodaOrientBrain, OrientContext, OrientJudgment, RustyClawdOrientBrain,
+    DeterministicOrientBrain, FAILURE_PENALTY_PER_CONSECUTIVE, LlmSubmitter, OodaOrientBrain,
+    OrientContext, OrientJudgment, RustyClawdOrientBrain,
 };
 use crate::error::SimardResult;
 
@@ -116,12 +116,12 @@ fn validate_rejects_non_finite() {
 }
 
 // ---------------------------------------------------------------------------
-// DeterministicFallbackOrientBrain — preserves pre-#1469 formula bit-for-bit
+// DeterministicOrientBrain — preserves pre-#1469 formula bit-for-bit
 // ---------------------------------------------------------------------------
 
 #[test]
 fn fallback_one_failure_applies_standard_penalty() {
-    let brain = DeterministicFallbackOrientBrain;
+    let brain = DeterministicOrientBrain;
     let j = brain.judge_orientation(&ctx(1, 0.8)).unwrap();
     let expected = 0.8 - FAILURE_PENALTY_PER_CONSECUTIVE;
     assert!((j.adjusted_urgency - expected).abs() < 1e-9);
@@ -129,7 +129,7 @@ fn fallback_one_failure_applies_standard_penalty() {
 
 #[test]
 fn fallback_five_failures_clamps_to_zero() {
-    let brain = DeterministicFallbackOrientBrain;
+    let brain = DeterministicOrientBrain;
     let j = brain.judge_orientation(&ctx(5, 0.8)).unwrap();
     assert!(j.adjusted_urgency.abs() < 1e-9);
 }
@@ -137,7 +137,7 @@ fn fallback_five_failures_clamps_to_zero() {
 #[test]
 fn fallback_two_failures_matches_legacy_formula() {
     // Pre-#1469: urgency = (urgency - 0.2 * count).max(0.0)
-    let brain = DeterministicFallbackOrientBrain;
+    let brain = DeterministicOrientBrain;
     let j = brain.judge_orientation(&ctx(2, 0.6)).unwrap();
     let expected = (0.6_f64 - 0.4_f64).max(0.0);
     assert!((j.adjusted_urgency - expected).abs() < 1e-9);
@@ -145,7 +145,7 @@ fn fallback_two_failures_matches_legacy_formula() {
 
 #[test]
 fn fallback_rationale_matches_legacy_format() {
-    let brain = DeterministicFallbackOrientBrain;
+    let brain = DeterministicOrientBrain;
     let j = brain.judge_orientation(&ctx(2, 0.6)).unwrap();
     // Legacy format from src/ooda_loop/orient.rs: "{count} consecutive failure(s) → urgency {urgency:.2} − {penalty:.2}"
     assert_eq!(
@@ -157,7 +157,7 @@ fn fallback_rationale_matches_legacy_format() {
 #[test]
 fn fallback_judgment_passes_validate() {
     let context = ctx(3, 0.9);
-    let j = DeterministicFallbackOrientBrain::compute(&context);
+    let j = DeterministicOrientBrain::compute(&context);
     j.validate(context.base_urgency).expect("must validate");
 }
 
@@ -278,7 +278,7 @@ fn trait_object_compiles_for_both_impls() {
     let stub =
         StubSubmitter::new(r#"{"adjusted_urgency": 0.5, "rationale": "x", "confidence": 1.0}"#);
     let brains: Vec<Box<dyn OodaOrientBrain>> = vec![
-        Box::new(DeterministicFallbackOrientBrain),
+        Box::new(DeterministicOrientBrain),
         Box::new(RustyClawdOrientBrain::new(stub)),
     ];
     for b in &brains {

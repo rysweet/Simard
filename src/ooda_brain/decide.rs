@@ -8,7 +8,7 @@
 //! configured.
 //!
 //! Per the standing architectural mandate, the daemon never depends on LLM
-//! availability for Decide: [`DeterministicFallbackDecideBrain`] preserves the
+//! availability for Decide: [`DeterministicDecideBrain`] preserves the
 //! pre-#1458 mapping bit-for-bit and is the floor when no LLM is configured.
 
 use crate::error::SimardResult;
@@ -110,19 +110,19 @@ pub trait OodaDecideBrain: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Deterministic fallback — preserves pre-#1458 behaviour bit-for-bit
+// Deterministic brain — prefix-based routing, no LLM dependency
 // ---------------------------------------------------------------------------
 
-/// Fallback impl that mirrors the deterministic match-arm previously inlined
-/// in `src/ooda_loop/decide.rs`. This is the safety floor: when no LLM is
-/// configured, the daemon's Decide phase behaves identically to its
-/// pre-prompt-driven self.
+/// Deterministic routing brain: maps priorities to action kinds via the
+/// typed [`SyntheticPriorityKind`] enum. Used when no LLM brain is
+/// configured. This is NOT a fallback — it is the explicit deterministic
+/// implementation.
 #[derive(Debug, Default)]
-pub struct DeterministicFallbackDecideBrain;
+pub struct DeterministicDecideBrain;
 
-impl OodaDecideBrain for DeterministicFallbackDecideBrain {
+impl OodaDecideBrain for DeterministicDecideBrain {
     fn judge_decision(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment> {
-        let rationale = "fallback-brain: prefix-routed".to_string();
+        let rationale = "deterministic-brain: prefix-routed".to_string();
         // Route synthetic priorities via the typed enum (single source of
         // truth in `ooda_loop::priority_kind`). Real goal_ids — and any
         // unrecognized synthetic — fall through to AdvanceGoal.

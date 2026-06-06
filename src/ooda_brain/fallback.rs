@@ -1,23 +1,22 @@
-//! Deterministic fallback brain — preserves today's behaviour bit-for-bit
+//! Deterministic lifecycle brain — preserves today's behaviour bit-for-bit
 //! when no LLM is configured (no API key, subprocess unavailable, etc.).
 
 use super::{EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain};
 use crate::error::SimardResult;
 
 /// Always returns `ContinueSkipping`. This is exactly what the unconditional
-/// skip branch in `dispatch_spawn_engineer` did before issue #1266, so a
-/// daemon falling back to this brain behaves identically to the pre-#1266
-/// daemon: no panics, no escalation, no surprises.
+/// skip branch in `dispatch_spawn_engineer` did before issue #1266. When no
+/// LLM brain is configured, the daemon uses this deterministic implementation.
 #[derive(Debug, Default)]
-pub struct DeterministicFallbackBrain;
+pub struct DeterministicLifecycleBrain;
 
-impl OodaBrain for DeterministicFallbackBrain {
+impl OodaBrain for DeterministicLifecycleBrain {
     fn decide_engineer_lifecycle(
         &self,
         _ctx: &EngineerLifecycleCtx,
     ) -> SimardResult<EngineerLifecycleDecision> {
         Ok(EngineerLifecycleDecision::ContinueSkipping {
-            rationale: "fallback-brain: rustyclawd unavailable".to_string(),
+            rationale: "deterministic-brain: no LLM configured".to_string(),
         })
     }
 }
@@ -53,13 +52,13 @@ mod tests {
 
     #[test]
     fn fallback_always_returns_continue_skipping() {
-        let brain = DeterministicFallbackBrain;
+        let brain = DeterministicLifecycleBrain;
         let decision = brain.decide_engineer_lifecycle(&sample_ctx()).unwrap();
         match decision {
             EngineerLifecycleDecision::ContinueSkipping { rationale } => {
                 assert!(
-                    rationale.contains("fallback-brain"),
-                    "rationale must mark itself as fallback for diagnostics, got: {rationale}"
+                    rationale.contains("deterministic-brain"),
+                    "rationale must identify as deterministic brain, got: {rationale}"
                 );
             }
             other => panic!("fallback must never escalate; got {other:?}"),
@@ -72,7 +71,7 @@ mod tests {
         // never returns anything other than ContinueSkipping, regardless of
         // context (the consumer relies on this exact shape after a
         // JSON-parse failure in the LLM bridge).
-        let brain = DeterministicFallbackBrain;
+        let brain = DeterministicLifecycleBrain;
         let contexts = [
             EngineerLifecycleCtx {
                 failure_count: 0,
@@ -107,7 +106,7 @@ mod tests {
     fn fallback_rationale_is_stable_across_calls() {
         // Determinism guard: downstream judgment-record comparisons rely on
         // a stable rationale (no current time, no random data).
-        let brain = DeterministicFallbackBrain;
+        let brain = DeterministicLifecycleBrain;
         let a = brain.decide_engineer_lifecycle(&sample_ctx()).unwrap();
         let b = brain.decide_engineer_lifecycle(&sample_ctx()).unwrap();
         assert_eq!(a, b, "fallback brain must be deterministic");
@@ -118,7 +117,7 @@ mod tests {
         // The fallback brain is the safety floor: it must never surface an
         // Err that could bubble up and stall the OODA loop. This is the
         // entire reason it exists.
-        let brain = DeterministicFallbackBrain;
+        let brain = DeterministicLifecycleBrain;
         let r = brain.decide_engineer_lifecycle(&sample_ctx());
         assert!(r.is_ok(), "fallback brain must never return Err");
     }

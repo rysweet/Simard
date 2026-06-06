@@ -68,7 +68,7 @@ fn record_fallback(state_root: &Path, phase: &str, reason: &str) {
 }
 
 /// Construct the engineer-lifecycle brain. Always returns an Arc — falls
-/// back to [`crate::ooda_brain::DeterministicFallbackBrain`] on Err,
+/// back to [`crate::ooda_brain::DeterministicLifecycleBrain`] on Err,
 /// loudly per [`record_fallback`].
 pub(super) fn build_act_brain(
     state_root: &Path,
@@ -97,14 +97,14 @@ pub(super) fn build_act_brain(
         }
         Err(e) => {
             record_fallback(state_root, "act", &e.to_string());
-            Arc::new(crate::ooda_brain::DeterministicFallbackBrain)
+            Arc::new(crate::ooda_brain::DeterministicLifecycleBrain)
         }
     }
 }
 
 /// Construct the Decide brain (issue #2111 — recipe-runner-rs backed).
 /// Returns `None` when recipe-runner-rs is unavailable so
-/// `cycle::run_ooda_cycle` falls back to [`crate::ooda_brain::DeterministicFallbackDecideBrain`].
+/// `cycle::run_ooda_cycle` falls back to [`crate::ooda_brain::DeterministicDecideBrain`].
 pub(super) fn build_decide_brain(
     state_root: &Path,
     repo_root: &Path,

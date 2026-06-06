@@ -7,7 +7,7 @@
 //!
 //! Module split (per #1266 400-LOC cap):
 //!   - `mod.rs`     — public surface: trait, types, re-exports, `apply_decision_to_state`.
-//!   - `fallback.rs`— `DeterministicFallbackBrain` (preserves today's behavior).
+//!   - `fallback.rs`— `DeterministicLifecycleBrain` (preserves today's behavior).
 //!   - `rustyclawd.rs` — `RustyClawdBrain` + `LlmSubmitter` + `build_rustyclawd_brain`.
 //!   - `context.rs` — `gather_engineer_lifecycle_ctx` + `redact_secrets`.
 
@@ -37,17 +37,17 @@ mod tests;
 
 pub use context::{count_live_engineer_claims, gather_engineer_lifecycle_ctx, redact_secrets};
 pub use decide::{
-    DecideContext, DecideJudgment, DeterministicFallbackDecideBrain, OodaDecideBrain,
+    DecideContext, DecideJudgment, DeterministicDecideBrain, OodaDecideBrain,
     PROMPT_NAME as DECIDE_PROMPT_NAME,
 };
-pub use fallback::DeterministicFallbackBrain;
+pub use fallback::DeterministicLifecycleBrain;
 pub use judgment_record::{
     BrainJudgmentRecord, BrainPhase, clear as clear_brain_judgments, push as push_brain_judgment,
     take_all as take_brain_judgments, with_cycle_scope as with_brain_judgment_scope,
 };
 pub use orient::{
-    DeterministicFallbackOrientBrain, FAILURE_PENALTY_PER_CONSECUTIVE, OodaOrientBrain,
-    OrientContext, OrientJudgment, PROMPT_NAME as ORIENT_PROMPT_NAME, RustyClawdOrientBrain,
+    DeterministicOrientBrain, FAILURE_PENALTY_PER_CONSECUTIVE, OodaOrientBrain, OrientContext,
+    OrientJudgment, PROMPT_NAME as ORIENT_PROMPT_NAME, RustyClawdOrientBrain,
     build_rustyclawd_orient_brain,
 };
 pub use parse_failure::ParseFailureRecord;

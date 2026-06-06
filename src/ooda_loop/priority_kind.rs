@@ -8,7 +8,7 @@
 //! across ~30 sites in 6 files. The strings were the implicit "type" of a
 //! priority: `priority.goal_id.starts_with("__")` was the test for
 //! "is this a synthetic kind?" and a 4-arm string `match` in the
-//! [`DeterministicFallbackDecideBrain`] was the routing table.
+//! [`DeterministicDecideBrain`] was the routing table.
 //!
 //! Adding a new synthetic priority (e.g. issue #1868's `MergePr`) meant
 //! touching every site, hoping nobody mistyped the underscore count, and

@@ -23,7 +23,7 @@ use super::{EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain};
 use crate::error::{SimardError, SimardResult};
 
 #[cfg(test)]
-use super::orient::DeterministicFallbackOrientBrain;
+use super::orient::DeterministicOrientBrain;
 
 // Phase-specific adapter tags used in parse function error/fallback messages.
 const DECIDE_ADAPTER_TAG: &str = "recipe-decide-brain";
@@ -1455,14 +1455,14 @@ mod tests {
         #[test]
         fn floor_matches_deterministic_fallback_brain() {
             use super::super::super::orient::OrientContext;
-            use super::super::DeterministicFallbackOrientBrain;
+            use super::super::DeterministicOrientBrain;
             let ctx = OrientContext {
                 goal_id: "g1".into(),
                 base_urgency: 0.8,
                 base_reason: "test".into(),
                 failure_count: 3,
             };
-            let fallback = DeterministicFallbackOrientBrain::compute(&ctx);
+            let fallback = DeterministicOrientBrain::compute(&ctx);
             let recipe_floor = parse_orient_from_text("nothing", 0.8, 3);
             assert!((recipe_floor.adjusted_urgency - fallback.adjusted_urgency).abs() < 1e-9);
         }

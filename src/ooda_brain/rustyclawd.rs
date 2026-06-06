@@ -411,7 +411,7 @@ impl LlmSubmitter for SessionLlmSubmitter {
 /// Returns `Err` if no LLM provider is configured (no env var, no
 /// `~/.simard/config.toml`, no API credentials). Callers — currently
 /// `operator_commands_ooda::daemon` — must fall back to
-/// `DeterministicFallbackBrain` so the daemon behaves identically to the
+/// `DeterministicLifecycleBrain` so the daemon behaves identically to the
 /// pre-#1266 daemon when LLM access is unavailable.
 ///
 /// Provider resolution does **not** open a session here: the
