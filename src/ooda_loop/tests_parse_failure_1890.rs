@@ -255,10 +255,9 @@ fn decide_with_brain_errored_parse_failure_carries_error_and_raw_response() {
 }
 
 #[test]
-fn decide_with_brain_errored_still_emits_planned_action() {
-    // Cycle must NOT stall on a brain failure — the deterministic fallback
-    // floor still produces a PlannedAction so the loop continues, while
-    // the parse_failure record makes the degradation visible.
+fn decide_with_brain_errored_skips_priority() {
+    // Brain error must skip the priority (no action produced).
+    // No silent fallback — the error is visible in cycle reports.
     let priorities = one_priority("ship-v1");
     let config = OodaConfig::default();
     let brain = AlwaysErrDecideBrain::new("OK");
@@ -267,21 +266,14 @@ fn decide_with_brain_errored_still_emits_planned_action() {
 
     assert_eq!(
         actions.len(),
-        1,
-        "deterministic fallback must still emit an action so the cycle doesn't stall",
-    );
-    assert_eq!(
-        actions[0].kind,
-        crate::ooda_loop::ActionKind::AdvanceGoal,
-        "deterministic fallback for a non-synthetic goal_id routes to AdvanceGoal",
+        0,
+        "brain error must skip the priority — no fallback action",
     );
 }
 
 #[test]
-fn decide_with_brain_errored_record_keeps_fallback_true_for_dashboard_back_compat() {
-    // Dashboards key on `fallback == true`. The deterministic floor still
-    // fires, so the field stays true. The discriminator for "forced by
-    // failure" vs "operator chose deterministic" is parse_failure.is_some().
+fn decide_with_brain_errored_record_marks_brain_error() {
+    // The judgment record must indicate brain_error (not fallback).
     let priorities = one_priority("g1");
     let config = OodaConfig::default();
     let brain = AlwaysErrDecideBrain::new("OK");
@@ -291,13 +283,11 @@ fn decide_with_brain_errored_record_keeps_fallback_true_for_dashboard_back_compa
         crate::ooda_brain::take_brain_judgments()
     });
 
-    assert!(
-        records[0].fallback,
-        "fallback must stay true for dashboard back-compat"
-    );
+    assert_eq!(records[0].decision, "brain_error");
+    assert!(!records[0].fallback, "no fallback was used");
     assert!(
         records[0].parse_failure.is_some(),
-        "discriminator: parse_failure Some"
+        "parse_failure must be present"
     );
 }
 
@@ -458,12 +448,18 @@ fn decide_with_brain_errored_continues_to_next_priority() {
         (actions, crate::ooda_brain::take_brain_judgments())
     });
 
-    assert_eq!(actions.len(), 2, "both priorities must be processed");
+    assert_eq!(
+        actions.len(),
+        1,
+        "first priority skipped, second must succeed"
+    );
+    assert_eq!(actions[0].goal_id.as_deref(), Some("good-goal"));
     assert_eq!(records.len(), 2);
     assert!(
         records[0].parse_failure.is_some(),
         "bad-goal logged a parse_failure"
     );
+    assert_eq!(records[0].decision, "brain_error");
     assert!(
         records[1].parse_failure.is_none(),
         "good-goal must be a clean record (no spurious parse_failure)",
@@ -540,8 +536,8 @@ fn orient_with_brain_errored_parse_failure_carries_error_and_raw_response() {
 
 #[test]
 fn orient_with_brain_errored_still_produces_priority() {
-    // The deterministic floor's demotion still applies — the goal stays on
-    // the priorities list (visible to decide) and gets the legacy penalty.
+    // The goal stays on the priorities list but with base urgency unchanged
+    // (no fallback adjustment). The error is visible in cycle reports.
     let board = board_with_one_goal("g1");
     let obs = observation_with_no_signals();
     let mut failures = HashMap::new();
@@ -554,10 +550,10 @@ fn orient_with_brain_errored_still_produces_priority() {
         .iter()
         .find(|p| p.goal_id == "g1")
         .expect("g1 priority must still appear (cycle does not stall)");
-    // Deterministic-floor demotion: 0.8 (NotStarted) - 0.2 (1 failure) = 0.6
+    // No fallback: urgency stays at base (0.8 for NotStarted), not demoted.
     assert!(
-        (g1.urgency - 0.6).abs() < 1e-9,
-        "deterministic-floor demotion still applies; got urgency {}",
+        (g1.urgency - 0.8).abs() < 1e-9,
+        "base urgency must be used unchanged on brain error (no fallback); got {}",
         g1.urgency,
     );
 }

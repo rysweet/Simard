@@ -854,7 +854,7 @@ mod tests {
             knowledge: mock_knowledge(),
             gym: mock_gym(),
             session: None,
-            brain: Arc::new(crate::ooda_brain::DeterministicFallbackBrain),
+            brain: Arc::new(crate::ooda_brain::DeterministicLifecycleBrain),
             decide_brain: None,
             orient_brain: None,
             repo_root: std::path::PathBuf::from("."),

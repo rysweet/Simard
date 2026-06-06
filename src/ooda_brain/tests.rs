@@ -23,7 +23,7 @@
 use std::sync::Mutex;
 
 use super::{
-    DeterministicFallbackBrain, EngineerLifecycleCtx, EngineerLifecycleDecision, LlmSubmitter,
+    DeterministicLifecycleBrain, EngineerLifecycleCtx, EngineerLifecycleDecision, LlmSubmitter,
     OodaBrain, RustyClawdBrain, gather_engineer_lifecycle_ctx, redact_secrets,
 };
 use crate::error::SimardResult;
@@ -554,7 +554,7 @@ fn apply_decision_open_tracking_issue_returns_descriptive_detail() {
 
 #[test]
 fn fallback_brain_always_continues() {
-    let brain = DeterministicFallbackBrain;
+    let brain = DeterministicLifecycleBrain;
     let decision = brain
         .decide_engineer_lifecycle(&sample_ctx())
         .expect("fallback must never return Err");
@@ -566,7 +566,7 @@ fn fallback_brain_always_continues() {
 
 #[test]
 fn fallback_brain_continues_for_any_context() {
-    let brain = DeterministicFallbackBrain;
+    let brain = DeterministicLifecycleBrain;
     let mut ctx = sample_ctx();
     // No matter how dire the context, fallback never escalates — that is the
     // safety guarantee that makes it safe to use when no LLM is configured.

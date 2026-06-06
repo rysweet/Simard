@@ -3,35 +3,35 @@
 //! The action-kind selection (which kind of [`ActionKind`] each priority maps
 //! to) is delegated to a prompt-driven brain — see
 //! `prompt_assets/simard/ooda_decide.md`. The default entrypoint
-//! ([`decide`]) wires in [`DeterministicFallbackDecideBrain`], which preserves
-//! the pre-#1458 prefix-mapping bit-for-bit so the daemon never depends on
-//! LLM availability for Decide. Callers that have an LLM-backed brain can
-//! invoke [`decide_with_brain`] directly.
+//! ([`decide`]) wires in [`DeterministicDecideBrain`], the deterministic
+//! prefix-based routing used when no LLM brain is configured. Callers that
+//! have an LLM-backed brain invoke [`decide_with_brain`] directly.
+//!
+//! **No fallback**: if the brain errors for a priority, that priority is
+//! skipped with a loud error — never silently re-routed through a different
+//! brain.
 
 use crate::error::SimardResult;
 use crate::ooda_brain::parse_failure::{record_parse_failure, reset_consecutive_count};
 use crate::ooda_brain::{
-    BrainJudgmentRecord, BrainPhase, DECIDE_PROMPT_NAME, DecideContext,
-    DeterministicFallbackDecideBrain, OodaDecideBrain, push_brain_judgment,
+    BrainJudgmentRecord, BrainPhase, DECIDE_PROMPT_NAME, DecideContext, DeterministicDecideBrain,
+    OodaDecideBrain, push_brain_judgment,
 };
 
 use super::{ActionKind, OodaConfig, PlannedAction, Priority, is_synthetic_id};
 
-/// Decide using the deterministic fallback brain. This is the entrypoint
-/// the daemon's Act phase calls today; it preserves the pre-#1458 routing
-/// bit-for-bit (no LLM dependency).
+/// Decide using the deterministic brain (no LLM dependency). This is the
+/// entrypoint used when no LLM brain is configured.
 #[tracing::instrument(skip_all)]
 pub fn decide(priorities: &[Priority], config: &OodaConfig) -> SimardResult<Vec<PlannedAction>> {
-    let brain = DeterministicFallbackDecideBrain;
+    let brain = DeterministicDecideBrain;
     decide_with_brain(priorities, config, &brain)
 }
 
-/// Decide using a caller-supplied brain. Used by tests and (in a future
-/// wire-in) by the daemon when an LLM-backed brain is configured. On any
-/// brain error for an individual priority, falls back to the deterministic
-/// mapping for that priority so a transient adapter failure cannot stall
-/// the cycle — but the failure is recorded LOUDLY (issue #1890) via
-/// `ParseFailureRecord` so the silent-fallback regression cannot recur.
+/// Decide using a caller-supplied brain. On brain error for an individual
+/// priority, the priority is **skipped** (no action produced) and the failure
+/// is recorded on all visibility channels (tracing, metric, cycle JSON,
+/// throttled gh-issue). No silent fallback to a different brain.
 #[tracing::instrument(skip_all)]
 pub fn decide_with_brain(
     priorities: &[Priority],
@@ -44,7 +44,6 @@ pub fn decide_with_brain(
     } else {
         base_limit
     };
-    let fallback = DeterministicFallbackDecideBrain;
     let mut actions = Vec::with_capacity(limit);
     for priority in priorities {
         if actions.len() >= limit {
@@ -73,11 +72,8 @@ pub fn decide_with_brain(
                 j
             }
             Err(e) => {
-                // Issue #1890: surface the parse failure on all four
-                // visibility channels (tracing, metric, cycle JSON,
-                // throttled gh issue at >= 3 consecutive). Cycle still
-                // continues via the deterministic fallback action so a
-                // transient adapter hiccup cannot stall the loop.
+                // Brain error — record the failure loudly and skip this
+                // priority. No fallback to a different brain.
                 let raw_response = extract_raw_response(&e);
                 let pf = record_parse_failure(
                     BrainPhase::Decide,
@@ -87,17 +83,18 @@ pub fn decide_with_brain(
                     DECIDE_PROMPT_NAME,
                     crate::ooda_brain::prompt_store::current_version(DECIDE_PROMPT_NAME),
                 );
-                let j = fallback.judge_decision(&ctx)?;
-                let mut rec = BrainJudgmentRecord::from_decide(
-                    &priority.goal_id,
-                    priority.urgency,
-                    &j,
-                    true,
-                    String::new(),
+                tracing::error!(
+                    priority_goal_id = %priority.goal_id,
+                    error = %e,
+                    "decide brain failed for priority — skipping (no fallback)"
                 );
+                // Record the failure on the cycle judgment log so it shows
+                // up in cycle reports and dashboard.
+                let mut rec =
+                    BrainJudgmentRecord::from_decide_error(&priority.goal_id, priority.urgency);
                 rec.parse_failure = Some(pf);
                 push_brain_judgment(rec);
-                j
+                continue;
             }
         };
         let planned = PlannedAction {
@@ -363,16 +360,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Issue #1979 / #1933 anti-regression: when the LLM-backed brain returns
+    // Issue #1979 / #1933 / no-fallback: when the LLM-backed brain returns
     // Err for a priority, decide_with_brain must
     //   (1) record the parse failure in parse_failure::counters(),
-    //   (2) embed a ParseFailureRecord on the per-cycle BrainJudgmentRecord
-    //       with fallback=true, and
-    //   (3) still emit a PlannedAction (deterministic fallback fired —
-    //       transient adapter failure must not stall the loop).
+    //   (2) embed a ParseFailureRecord on the per-cycle BrainJudgmentRecord,
+    //   (3) SKIP the priority (no action produced — no fallback).
     // -----------------------------------------------------------------------
     #[test]
-    fn decide_with_brain_records_parse_failure_and_falls_back_on_brain_error() {
+    fn decide_with_brain_skips_priority_on_brain_error() {
         use crate::error::SimardError;
         use crate::ooda_brain::BrainPhase;
         use crate::ooda_brain::parse_failure::{
@@ -411,24 +406,21 @@ mod tests {
             (acts, crate::ooda_brain::take_brain_judgments())
         });
 
-        // (3) Deterministic fallback still emits a PlannedAction so the
-        //     OODA loop never stalls on transient brain failures.
-        assert_eq!(actions.len(), 1, "fallback action must still be emitted");
+        // (3) Priority is SKIPPED — no fallback action produced.
         assert_eq!(
-            actions[0].goal_id.as_deref(),
-            Some(goal_id),
-            "fallback must preserve goal_id"
+            actions.len(),
+            0,
+            "brain error must skip the priority, not fallback"
         );
 
         // (1) parse_failure::counters() observed the (Decide, goal_id) bump.
         let count = peek_consecutive_count(BrainPhase::Decide, goal_id);
         assert_eq!(count, 1, "expected consecutive_count == 1, got {count}");
 
-        // (2) The per-cycle BrainJudgmentRecord embeds the ParseFailureRecord
-        //     and is flagged as a fallback.
+        // (2) The per-cycle BrainJudgmentRecord embeds the ParseFailureRecord.
         assert_eq!(records.len(), 1);
         let rec = &records[0];
-        assert!(rec.fallback, "record must be flagged as fallback");
+        assert_eq!(rec.decision, "brain_error");
         let pf = rec
             .parse_failure
             .as_ref()

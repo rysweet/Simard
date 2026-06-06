@@ -92,7 +92,7 @@ fn test_bridges() -> OodaBridges {
         knowledge: mock_knowledge(),
         gym: mock_gym(),
         session: None,
-        brain: std::sync::Arc::new(simard::ooda_brain::DeterministicFallbackBrain),
+        brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
         decide_brain: None,
         orient_brain: None,
         repo_root: std::path::PathBuf::from("."),

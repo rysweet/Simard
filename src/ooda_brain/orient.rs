@@ -13,7 +13,7 @@
 //! changes.
 //!
 //! Per the standing architectural mandate, the daemon never depends on LLM
-//! availability for Orient: [`DeterministicFallbackOrientBrain`] preserves
+//! availability for Orient: [`DeterministicOrientBrain`] preserves
 //! the pre-#1469 formula bit-for-bit and is the floor when no LLM is
 //! configured *or* when the LLM-backed brain returns an invalid judgment
 //! (e.g. attempts to escalate above `base_urgency`).
@@ -132,9 +132,9 @@ pub trait OodaOrientBrain: Send + Sync {
 /// invalid judgment) the daemon's Orient phase behaves identically to its
 /// pre-prompt-driven self.
 #[derive(Debug, Default)]
-pub struct DeterministicFallbackOrientBrain;
+pub struct DeterministicOrientBrain;
 
-impl DeterministicFallbackOrientBrain {
+impl DeterministicOrientBrain {
     /// Pure helper exposed so the wire-in code path can reuse the exact
     /// formula on per-call brain errors without re-instantiating the
     /// brain.
@@ -155,7 +155,7 @@ impl DeterministicFallbackOrientBrain {
     }
 }
 
-impl OodaOrientBrain for DeterministicFallbackOrientBrain {
+impl OodaOrientBrain for DeterministicOrientBrain {
     fn judge_orientation(&self, ctx: &OrientContext) -> SimardResult<OrientJudgment> {
         Ok(Self::compute(ctx))
     }
@@ -266,7 +266,7 @@ fn parse_judgment_from_response(raw: &str) -> Result<OrientJudgment, String> {
 
 /// Production constructor mirroring [`super::build_rustyclawd_decide_brain`].
 /// Returns `Err` if no LLM provider is configured; callers must fall back
-/// to [`DeterministicFallbackOrientBrain`] so the daemon's Orient phase
+/// to [`DeterministicOrientBrain`] so the daemon's Orient phase
 /// behaves identically to its pre-prompt-driven self when LLM access is
 /// unavailable.
 pub fn build_rustyclawd_orient_brain() -> SimardResult<Box<dyn OodaOrientBrain>> {

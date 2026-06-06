@@ -120,6 +120,38 @@ impl BrainJudgmentRecord {
         }
     }
 
+    /// Build a Decide-phase record for a brain error where no judgment was
+    /// produced (priority was skipped, no fallback).
+    pub fn from_decide_error(goal_id: &str, urgency: f64) -> Self {
+        Self {
+            phase: BrainPhase::Decide,
+            context_summary: truncate(&format!("goal_id={goal_id} urgency={urgency:.3}")),
+            decision: "brain_error".to_string(),
+            rationale: "brain failed — priority skipped (no fallback)".to_string(),
+            confidence: 0.0,
+            fallback: false,
+            prompt_version: String::new(),
+            parse_failure: None,
+        }
+    }
+
+    /// Build an Orient-phase record for a brain error where the base urgency
+    /// was used unchanged (no fallback adjustment).
+    pub fn from_orient_error(goal_id: &str, base_urgency: f64, failure_count: u32) -> Self {
+        Self {
+            phase: BrainPhase::Orient,
+            context_summary: truncate(&format!(
+                "goal_id={goal_id} base_urgency={base_urgency:.3} failures={failure_count}"
+            )),
+            decision: "brain_error".to_string(),
+            rationale: "brain failed — using base urgency unchanged (no fallback)".to_string(),
+            confidence: 0.0,
+            fallback: false,
+            prompt_version: String::new(),
+            parse_failure: None,
+        }
+    }
+
     /// Build a Decide-phase record from the action-kind judgment + the
     /// priority that drove it.
     pub fn from_decide(

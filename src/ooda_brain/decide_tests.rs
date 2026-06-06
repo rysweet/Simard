@@ -2,9 +2,9 @@
 //!
 //! The recipe-based keyword scanner tests live in `recipe_decide.rs`.
 //! This file covers: DecideJudgment serde round-trip and the
-//! DeterministicFallbackDecideBrain routing table.
+//! DeterministicDecideBrain routing table.
 
-use super::{DecideContext, DecideJudgment, DeterministicFallbackDecideBrain, OodaDecideBrain};
+use super::{DecideContext, DecideJudgment, DeterministicDecideBrain, OodaDecideBrain};
 use crate::ooda_loop::{ActionKind, SyntheticPriorityKind};
 
 fn ctx(goal_id: &str) -> DecideContext {
@@ -50,47 +50,47 @@ fn judgment_safe_update_roundtrips() {
 }
 
 // ---------------------------------------------------------------------------
-// DeterministicFallbackDecideBrain — preserves pre-#1458 mapping
+// DeterministicDecideBrain — preserves pre-#1458 mapping
 // ---------------------------------------------------------------------------
 
 #[test]
 fn fallback_routes_memory_synthetic_to_consolidate_memory() {
-    let brain = DeterministicFallbackDecideBrain;
+    let brain = DeterministicDecideBrain;
     let j = brain.judge_decision(&ctx("__memory__")).unwrap();
     assert_eq!(j.action_kind(), ActionKind::ConsolidateMemory);
 }
 
 #[test]
 fn fallback_routes_improvement_synthetic_to_run_improvement() {
-    let brain = DeterministicFallbackDecideBrain;
+    let brain = DeterministicDecideBrain;
     let j = brain.judge_decision(&ctx("__improvement__")).unwrap();
     assert_eq!(j.action_kind(), ActionKind::RunImprovement);
 }
 
 #[test]
 fn fallback_routes_poll_activity_synthetic_to_poll_developer_activity() {
-    let brain = DeterministicFallbackDecideBrain;
+    let brain = DeterministicDecideBrain;
     let j = brain.judge_decision(&ctx("__poll_activity__")).unwrap();
     assert_eq!(j.action_kind(), ActionKind::PollDeveloperActivity);
 }
 
 #[test]
 fn fallback_routes_extract_ideas_synthetic_to_extract_ideas() {
-    let brain = DeterministicFallbackDecideBrain;
+    let brain = DeterministicDecideBrain;
     let j = brain.judge_decision(&ctx("__extract_ideas__")).unwrap();
     assert_eq!(j.action_kind(), ActionKind::ExtractIdeas);
 }
 
 #[test]
 fn fallback_routes_safe_update_synthetic_to_safe_update() {
-    let brain = DeterministicFallbackDecideBrain;
+    let brain = DeterministicDecideBrain;
     let j = brain.judge_decision(&ctx("__safe_update__")).unwrap();
     assert_eq!(j.action_kind(), ActionKind::SafeUpdate);
 }
 
 #[test]
 fn fallback_routes_ordinary_goal_to_advance_goal() {
-    let brain = DeterministicFallbackDecideBrain;
+    let brain = DeterministicDecideBrain;
     let j = brain.judge_decision(&ctx("ship-v1")).unwrap();
     assert_eq!(j.action_kind(), ActionKind::AdvanceGoal);
 }
@@ -109,7 +109,7 @@ fn fallback_routes_ordinary_goal_to_advance_goal() {
 
 #[test]
 fn fallback_routes_eval_watchdog_to_run_gym_eval() {
-    let brain = DeterministicFallbackDecideBrain;
+    let brain = DeterministicDecideBrain;
     let j = brain.judge_decision(&ctx("__eval_watchdog__")).unwrap();
     assert_eq!(
         j.action_kind(),
@@ -122,7 +122,7 @@ fn fallback_routes_eval_watchdog_to_run_gym_eval() {
 fn all_synthetic_priorities_produce_non_advance_goal_actions() {
     // Every synthetic priority gets goal_id=None in decide_with_brain.
     // AdvanceGoal requires goal_id, so no synthetic must route there.
-    let brain = DeterministicFallbackDecideBrain;
+    let brain = DeterministicDecideBrain;
     for kind in SyntheticPriorityKind::all() {
         let j = brain.judge_decision(&ctx(kind.synthetic_id())).unwrap();
         assert_ne!(
