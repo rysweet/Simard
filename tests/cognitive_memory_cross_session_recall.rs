@@ -13,9 +13,13 @@
 //!   via `PersistedEnvelope` (#1917), enabling forward-compatible
 //!   migration (#1941).
 //! * `ImprovementHistory` round-trips across sessions (already hermetic).
+//! * Corruption-recovery: when the DB is corrupted between sessions,
+//!   `open_with_recovery` restores from the snapshot ladder and Session B
+//!   recalls Session A's writes (#1710 + #1916 acceptance criterion 4).
 //!
 //! **References.**
 //! * Parent task: #1916 (hermetic cross-session recall test gating every PR).
+//! * Backup-restore ordering fix: #1710 (dead-code elimination in recovery).
 //! * Schema envelope: #1917 (`PersistedEnvelope { schema_version }`).
 //! * Recovery ladder wiring: #1919 (`load_latest_snapshot` → public ctor).
 //! * Migration policy: #1941 (forward-compat decision).
@@ -535,4 +539,155 @@ fn cross_session_recall_accumulates_across_cycles() {
         "expected 6 sensory records after 2 write cycles, got {}",
         stats2.sensory_count
     );
+}
+
+// ============================================================================
+// Corruption-recovery cross-session recall (#1710 + #1916 criterion 4)
+//
+// Validates workstreams C + D together: session A writes a fact and takes
+// a snapshot, the DB is corrupted out-of-band, and session B MUST recall
+// the fact via the snapshot recovery ladder. This is the integration-level
+// complement to the unit-level `recovery_uses_backup_when_main_corrupt`
+// test in `src/cognitive_memory/tests_mod.rs`.
+// ============================================================================
+
+/// Corrupt a file by overwriting it with garbage bytes so LadybugDB
+/// refuses to open it.
+fn corrupt_file(path: &std::path::Path) {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .unwrap_or_else(|e| panic!("open {} for corruption: {e}", path.display()));
+    let garbage = vec![0xABu8; 4096];
+    f.write_all(&garbage).expect("write garbage");
+    f.sync_all().expect("fsync garbage");
+}
+
+/// Session A writes a fact and takes a snapshot; the main DB is corrupted
+/// out-of-band; Session B opens via `open_with_recovery` and MUST recall
+/// Session A's fact through the snapshot ladder.
+///
+/// This is #1916 acceptance criterion 4 and the integration-level proof
+/// that the #1710 fix (backup-before-empty-DB ordering) works end-to-end
+/// across the snapshot recovery path, not just the backup recovery path.
+#[test]
+#[serial(cognitive_memory)]
+fn cross_session_recall_survives_db_corruption_via_snapshot() {
+    let temp = TempDir::new().expect("tempdir for hermetic state root");
+    let _guard = EnvGuard::pin(temp.path());
+
+    let snapshot_dir = temp.path().join("snapshots");
+    std::fs::create_dir_all(&snapshot_dir).expect("create hermetic snapshot dir");
+
+    let db_path = temp.path().join("cognitive_memory.ladybug");
+
+    // ─── Session A ──────────────────────────────────────────────────────
+    {
+        let mem =
+            NativeCognitiveMemory::open(temp.path()).expect("Session A: open cognitive memory");
+
+        mem.store_fact(
+            "corruption_canary",
+            "must survive DB corruption via snapshot ladder",
+            0.95,
+            &["issue-1710".to_string(), "issue-1916".to_string()],
+            "test::corruption_recovery",
+        )
+        .expect("Session A: store canary fact");
+
+        mem.store_episode(
+            "corruption-recovery-episode: session A wrote this",
+            "test::corruption_recovery",
+            None,
+        )
+        .expect("Session A: store canary episode");
+
+        mem.checkpoint()
+            .expect("Session A: WAL checkpoint before snapshot");
+
+        save_session_snapshot(&mem, "corruption-recovery-agent", &snapshot_dir)
+            .expect("Session A: save session snapshot");
+
+        // `mem` drops here, releasing the DB lock.
+    }
+
+    // Verify the snapshot was written.
+    let snapshot_count = std::fs::read_dir(&snapshot_dir)
+        .expect("list snapshot dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+        .count();
+    assert!(
+        snapshot_count > 0,
+        "Session A must have produced at least one snapshot file"
+    );
+
+    // ─── Corrupt the DB out-of-band ─────────────────────────────────────
+    assert!(db_path.exists(), "DB file must exist before corruption");
+    corrupt_file(&db_path);
+
+    // Also remove WAL files to simulate a clean corruption scenario where
+    // the WAL can't save us.
+    for entry in std::fs::read_dir(temp.path())
+        .expect("read state root")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.contains(".wal") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+
+    // ─── Session B ──────────────────────────────────────────────────────
+    // `open_with_recovery` must:
+    //  1. Detect the corrupt DB via `open_db_with_recovery`
+    //  2. Fall through to creating a fresh empty DB (no backups/ dir exists,
+    //     only snapshots/)
+    //  3. Load the latest snapshot from snapshots/ and restore it
+    //  4. Return a functional memory with Session A's fact recallable
+    {
+        let mem = NativeCognitiveMemory::open_with_recovery(temp.path()).expect(
+            "Session B: open_with_recovery must succeed despite DB corruption \
+             by restoring from the snapshot ladder",
+        );
+
+        let facts = mem
+            .search_facts("corruption_canary", 16, 0.0)
+            .expect("Session B: search_facts after corruption recovery");
+
+        let recalled = facts
+            .iter()
+            .find(|f| f.concept == "corruption_canary")
+            .unwrap_or_else(|| {
+                panic!(
+                    "Session B failed to recall 'corruption_canary' after \
+                     DB corruption + snapshot recovery. Got {} facts: {:?}. \
+                     This means the snapshot ladder did not restore Session A's \
+                     writes after DB corruption (#1710 + #1916).",
+                    facts.len(),
+                    facts.iter().map(|f| &f.concept).collect::<Vec<_>>(),
+                )
+            });
+
+        assert_eq!(
+            recalled.content, "must survive DB corruption via snapshot ladder",
+            "Session B: recalled content must match Session A's write"
+        );
+        assert!(
+            (recalled.confidence - 0.95).abs() < 1e-6,
+            "Session B: recalled confidence ({}) must match Session A's (0.95)",
+            recalled.confidence
+        );
+
+        // Verify statistics show recovered data.
+        let stats = mem.get_statistics().expect("Session B: get_statistics");
+        assert!(
+            stats.semantic_count >= 1,
+            "Session B: at least 1 fact must be recovered, got {}",
+            stats.semantic_count
+        );
+    }
 }
