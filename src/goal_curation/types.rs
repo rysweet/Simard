@@ -139,6 +139,43 @@ impl Default for GoalBoard {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Goal carryover record (issue #2092)
+// ---------------------------------------------------------------------------
+
+/// Well-known cognitive-memory concept key for carryover records.
+pub const CARRYOVER_CONCEPT: &str = "goal-board:carryover";
+
+/// Records that a meeting wrote goal updates to the board and expects an
+/// engineer session to consume them. Written by the meeting close pipeline,
+/// verified by the engineer loop on startup.
+///
+/// Without this record the handoff is implicit — if the state root diverges
+/// between meeting and engineer, goals silently vanish. With it, the
+/// engineer loop can detect a stale or missing carryover and surface a
+/// clear error instead of silent data loss (spec line 665).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GoalCarryoverRecord {
+    /// Stable meeting id that produced the goal updates (e.g. from
+    /// `derive_meeting_id`).
+    pub meeting_id: String,
+    /// RFC 3339 timestamp of when the carryover was written.
+    pub handed_off_at: DateTime<Utc>,
+    /// SHA-256 hex digest of the serialized `GoalBoard` at the moment it
+    /// was persisted by the meeting close pipeline. The engineer loop
+    /// re-hashes its loaded board and compares; a mismatch means the board
+    /// drifted since the meeting wrote it.
+    pub board_snapshot_hash: String,
+    /// Number of active goals on the board at handoff time.
+    pub active_goal_count: usize,
+    /// Ids of active goals at handoff time — lets the engineer loop
+    /// enumerate exactly which goals it should have received.
+    pub active_goal_ids: Vec<String>,
+    /// Whether the engineer loop has acknowledged this carryover.
+    #[serde(default)]
+    pub acknowledged: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

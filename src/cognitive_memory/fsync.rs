@@ -65,6 +65,17 @@ pub(super) fn open_and_fsync(
     Ok(())
 }
 
+/// Returns `true` when `err` wraps an `io::ErrorKind::NotFound` —
+/// used by `post_write_barrier` to tolerate the TOCTOU window where
+/// the data file disappears between the `exists()` guard and the
+/// `open()` call.
+pub(super) fn is_not_found(err: &SimardError) -> bool {
+    matches!(
+        err,
+        SimardError::PersistentStoreIo { reason, .. } if reason.contains("No such file or directory")
+    )
+}
+
 #[cold]
 fn io_err(action: &str, path: &Path, op_context: Option<&str>, e: std::io::Error) -> SimardError {
     let reason = match op_context {

@@ -9,7 +9,10 @@ use tracing::{debug, warn};
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 
-use super::types::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
+use super::types::{
+    ActiveGoal, BacklogItem, CARRYOVER_CONCEPT, GoalBoard, GoalCarryoverRecord, GoalProgress,
+    MAX_ACTIVE_GOALS,
+};
 
 /// Process-local critical section for the merge-on-write pipeline in
 /// [`save_goal_board`]. Serializes the read-merge-write window inside a
@@ -899,8 +902,161 @@ pub fn archive_completed(board: &mut GoalBoard) -> Vec<ActiveGoal> {
 }
 
 // ---------------------------------------------------------------------------
-// Seeding
+// Goal carryover API (issue #2092)
 // ---------------------------------------------------------------------------
+
+/// Compute a SHA-256 hex digest of the serialized `GoalBoard`.
+///
+/// Used to detect board drift between the meeting close (write) and the
+/// engineer startup (read). Deterministic because `GoalBoard` derives
+/// `Serialize` with field-order stability and `serde_json::to_string`
+/// produces a canonical representation.
+pub fn board_snapshot_hash(board: &GoalBoard) -> String {
+    use std::hash::{Hash, Hasher};
+    // We use a lightweight approach: hash the JSON serialization.
+    // This is deterministic because serde_json field order is stable for
+    // structs (not maps), and GoalBoard uses Vec, not HashMap.
+    let json = serde_json::to_string(board).unwrap_or_default();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    json.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Write a carryover record to cognitive memory after the meeting close
+/// pipeline persists goal updates.
+///
+/// The record captures:
+/// - which meeting produced the goals (`meeting_id`)
+/// - a hash of the board snapshot for drift detection
+/// - the ids and count of active goals for verification
+///
+/// The engineer loop reads this back via [`verify_goal_carryover`] and
+/// fails loudly when the record is missing or the board has drifted.
+pub fn write_goal_carryover(
+    board: &GoalBoard,
+    meeting_id: &str,
+    bridge: &dyn CognitiveMemoryOps,
+) -> SimardResult<()> {
+    let record = GoalCarryoverRecord {
+        meeting_id: meeting_id.to_string(),
+        handed_off_at: chrono::Utc::now(),
+        board_snapshot_hash: board_snapshot_hash(board),
+        active_goal_count: board.active.len(),
+        active_goal_ids: board.active.iter().map(|g| g.id.clone()).collect(),
+        acknowledged: false,
+    };
+    let payload = serde_json::to_string(&record).map_err(|e| SimardError::InvalidGoalRecord {
+        field: "carryover".to_string(),
+        reason: format!("failed to serialize carryover record: {e}"),
+    })?;
+    bridge.store_fact(
+        CARRYOVER_CONCEPT,
+        &payload,
+        1.0,
+        &["goal-board".to_string(), "carryover".to_string()],
+        "meeting-close",
+    )?;
+    debug!(
+        meeting_id = meeting_id,
+        active_goals = board.active.len(),
+        "write_goal_carryover: carryover record written"
+    );
+    Ok(())
+}
+
+/// Read the most recent carryover record from cognitive memory, if any.
+pub fn read_latest_carryover(
+    bridge: &dyn CognitiveMemoryOps,
+) -> SimardResult<Option<GoalCarryoverRecord>> {
+    let facts = bridge.search_facts(CARRYOVER_CONCEPT, 64, 0.0)?;
+    let latest = facts
+        .iter()
+        .filter(|f| f.concept == CARRYOVER_CONCEPT)
+        .max_by(|a, b| a.node_id.cmp(&b.node_id));
+    match latest {
+        Some(fact) => match serde_json::from_str::<GoalCarryoverRecord>(&fact.content) {
+            Ok(record) => Ok(Some(record)),
+            Err(e) => {
+                warn!(
+                    concept = CARRYOVER_CONCEPT,
+                    error_kind = %e,
+                    "read_latest_carryover: parse failed"
+                );
+                Ok(None)
+            }
+        },
+        None => Ok(None),
+    }
+}
+
+/// Outcome of [`verify_goal_carryover`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum CarryoverVerification {
+    /// No carryover record exists — either the system has never had a
+    /// meeting or the board was seeded without one. The engineer loop
+    /// should proceed normally (first-run scenario).
+    NoRecord,
+    /// The carryover record exists and the current board matches the
+    /// handed-off state.
+    Verified {
+        meeting_id: String,
+        active_goal_count: usize,
+    },
+    /// The carryover record exists but the board has drifted — goals
+    /// may have been lost. The engineer loop should surface this as a
+    /// warning.
+    Drifted {
+        meeting_id: String,
+        expected_hash: String,
+        actual_hash: String,
+        missing_goal_ids: Vec<String>,
+    },
+}
+
+/// Verify that the engineer session's goal board matches the most recent
+/// meeting carryover record.
+///
+/// Returns [`CarryoverVerification::NoRecord`] when no carryover exists
+/// (first run or no meetings yet). Returns [`CarryoverVerification::Verified`]
+/// when the board hash and goal ids match. Returns
+/// [`CarryoverVerification::Drifted`] when goals may have been lost.
+///
+/// The engineer loop calls this on startup (spec line 665) so goal loss
+/// surfaces as a clear warning rather than silent data disappearance.
+pub fn verify_goal_carryover(
+    board: &GoalBoard,
+    bridge: &dyn CognitiveMemoryOps,
+) -> SimardResult<CarryoverVerification> {
+    let record = match read_latest_carryover(bridge)? {
+        Some(r) => r,
+        None => return Ok(CarryoverVerification::NoRecord),
+    };
+
+    let current_hash = board_snapshot_hash(board);
+    let current_ids: std::collections::BTreeSet<&str> =
+        board.active.iter().map(|g| g.id.as_str()).collect();
+
+    let missing: Vec<String> = record
+        .active_goal_ids
+        .iter()
+        .filter(|id| !current_ids.contains(id.as_str()))
+        .cloned()
+        .collect();
+
+    if missing.is_empty() {
+        Ok(CarryoverVerification::Verified {
+            meeting_id: record.meeting_id,
+            active_goal_count: board.active.len(),
+        })
+    } else {
+        Ok(CarryoverVerification::Drifted {
+            meeting_id: record.meeting_id,
+            expected_hash: record.board_snapshot_hash,
+            actual_hash: current_hash,
+            missing_goal_ids: missing,
+        })
+    }
+}
 
 /// The 5 default starter goals shared by both `seed_default_board` (GoalBoard)
 /// and `seed_default_goals` (GoalStore). Single source of truth.

@@ -527,12 +527,29 @@ impl NativeCognitiveMemory {
         // enough to issue sync_all(2). The data file is co-resident
         // with lbug's WAL, so a single sync_all() captures both
         // committed pages and any uncheckpointed WAL frames.
-        fsync::open_and_fsync(
-            &self.path,
-            "fsync-data-file-open",
-            "fsync-data-file",
-            op_ctx,
-        )?;
+        //
+        // Guard: if the data file does not exist on disk yet (lbug may
+        // operate entirely from the WAL before the first CHECKPOINT),
+        // skip the fsync — there is nothing to sync. The write already
+        // succeeded in lbug's internal state and the WAL is
+        // authoritative for crash recovery on next open.
+        //
+        // Even with the `exists()` check there is a small TOCTOU window
+        // where lbug's background page management can rename/recreate
+        // the data file between the check and the `open()` call. Treat
+        // NotFound from open as equivalent to "file doesn't exist yet"
+        // rather than a hard error.
+        if self.path.exists()
+            && let Err(e) = fsync::open_and_fsync(
+                &self.path,
+                "fsync-data-file-open",
+                "fsync-data-file",
+                op_ctx,
+            )
+            && !fsync::is_not_found(&e)
+        {
+            return Err(e);
+        }
 
         // Step 2: fsync the parent directory so the dirent for
         // `self.path` is itself crash-durable on filesystems that
@@ -542,7 +559,9 @@ impl NativeCognitiveMemory {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| std::path::Path::new("."));
-        fsync::open_and_fsync(parent, "fsync-parent-dir-open", "fsync-parent-dir", op_ctx)?;
+        if parent.exists() {
+            fsync::open_and_fsync(parent, "fsync-parent-dir-open", "fsync-parent-dir", op_ctx)?;
+        }
 
         Ok(())
     }

@@ -524,6 +524,82 @@ impl MeetingBackend {
             write_goals_from_decisions(&structured_decisions);
         }
 
+        // ── Goal carryover record (issue #2092, spec line 665) ──
+        // Write an explicit carryover record to cognitive memory so the
+        // engineer loop can verify it received the goal state the meeting
+        // produced. Without this, the handoff is implicit and goals can
+        // silently vanish if the state root diverges.
+        if let Some(ref bridge) = self.bridge {
+            match crate::goal_curation::load_goal_board(&**bridge) {
+                Ok(board) => {
+                    if let Err(e) =
+                        crate::goal_curation::write_goal_carryover(&board, &meeting_id, &**bridge)
+                    {
+                        warn!(
+                            target: "simard::meeting_backend::closing",
+                            phase = "goal_carryover",
+                            outcome = "error",
+                            error = %e,
+                            "Failed to write goal carryover record"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        target: "simard::meeting_backend::closing",
+                        phase = "goal_carryover",
+                        outcome = "error",
+                        error = %e,
+                        "Failed to load goal board for carryover record"
+                    );
+                }
+            }
+        } else {
+            // When no bridge is available (most current deployments), try
+            // to launch one from the default state root for this write.
+            // Compiled out of test builds: `default_state_root()` returns
+            // `$HOME/.simard` which trips the hermetic guard (#2092).
+            #[cfg(not(test))]
+            {
+                let state_root = crate::memory_ipc::default_state_root();
+                match crate::memory_ipc::launch_writer_bridge(&state_root) {
+                    Ok(bridge) => match crate::goal_curation::load_goal_board(bridge.ops()) {
+                        Ok(board) => {
+                            if let Err(e) = crate::goal_curation::write_goal_carryover(
+                                &board,
+                                &meeting_id,
+                                bridge.ops(),
+                            ) {
+                                warn!(
+                                    target: "simard::meeting_backend::closing",
+                                    phase = "goal_carryover",
+                                    outcome = "error",
+                                    error = %e,
+                                    "Failed to write goal carryover record (fallback bridge)"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                target: "simard::meeting_backend::closing",
+                                phase = "goal_carryover",
+                                outcome = "error",
+                                error = %e,
+                                "Failed to load goal board for carryover (fallback bridge)"
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        tracing::debug!(
+                            target: "simard::meeting_backend::closing",
+                            error = %e,
+                            "Could not launch bridge for goal carryover write"
+                        );
+                    }
+                }
+            }
+        }
+
         // ── Final partial-reason gate ──
         // If we have spent past the master budget by this point but
         // every phase still succeeded, that's still a partial close.
@@ -1035,6 +1111,16 @@ fn write_goals_from_decisions(decisions: &[crate::meeting_facilitator::MeetingDe
     if decisions.is_empty() {
         return;
     }
+    // `CognitiveMemoryGoalStore::put` calls `launch_writer_bridge` with
+    // `simard_state_root()` (`$HOME/.simard`), which trips the hermetic
+    // guard in test builds. Skip the real write in tests — goal persistence
+    // is validated via dedicated integration tests with HermeticState.
+    #[cfg(test)]
+    {
+        let _ = decisions;
+        return;
+    }
+    #[allow(unreachable_code)]
     let state_root = crate::state_root::simard_state_root();
 
     // One-time migration: if a legacy goal_store.json exists, import it
