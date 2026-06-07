@@ -71,10 +71,7 @@ fn strip_copilot_noise(raw: &str) -> String {
     result.trim().to_string()
 }
 
-/// Hard maximum time to wait for a single turn response.
-const TURN_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Env var override for turn timeout.
+/// Env var override for turn timeout (0 = no timeout, default).
 const TURN_TIMEOUT_ENV: &str = "SIMARD_MEETING_TURN_TIMEOUT_SECS";
 
 /// Resolve the agent command and args for one-shot `-p` invocations.
@@ -108,7 +105,7 @@ pub struct PersistentAgentProxy {
     is_open: bool,
     is_closed: bool,
     turn_count: u32,
-    turn_timeout: Duration,
+    turn_timeout: Option<Duration>,
     agent_cmd: String,
     agent_base_args: Vec<String>,
 }
@@ -129,8 +126,8 @@ impl PersistentAgentProxy {
         let turn_timeout = std::env::var(TURN_TIMEOUT_ENV)
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(TURN_TIMEOUT);
+            .filter(|&s| s > 0)
+            .map(Duration::from_secs);
 
         Ok(Self {
             descriptor: BaseTypeDescriptor {
@@ -236,7 +233,9 @@ impl PersistentAgentProxy {
         // Collect stdout lines until process exits or timeout
         let mut lines: Vec<String> = Vec::new();
         loop {
-            if start.elapsed() >= self.turn_timeout {
+            if let Some(timeout) = self.turn_timeout
+                && start.elapsed() >= timeout
+            {
                 warn!("Agent turn timeout reached, killing process");
                 let _ = child.kill();
                 let _ = child.wait();
