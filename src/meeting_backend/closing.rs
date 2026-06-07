@@ -1111,6 +1111,16 @@ fn write_goals_from_decisions(decisions: &[crate::meeting_facilitator::MeetingDe
     if decisions.is_empty() {
         return;
     }
+    // `CognitiveMemoryGoalStore::put` calls `launch_writer_bridge` with
+    // `simard_state_root()` (`$HOME/.simard`), which trips the hermetic
+    // guard in test builds. Skip the real write in tests — goal persistence
+    // is validated via dedicated integration tests with HermeticState.
+    #[cfg(test)]
+    {
+        let _ = decisions;
+        return;
+    }
+    #[allow(unreachable_code)]
     let state_root = crate::state_root::simard_state_root();
 
     // One-time migration: if a legacy goal_store.json exists, import it
