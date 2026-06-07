@@ -533,13 +533,22 @@ impl NativeCognitiveMemory {
         // skip the fsync — there is nothing to sync. The write already
         // succeeded in lbug's internal state and the WAL is
         // authoritative for crash recovery on next open.
-        if self.path.exists() {
-            fsync::open_and_fsync(
+        //
+        // Even with the `exists()` check there is a small TOCTOU window
+        // where lbug's background page management can rename/recreate
+        // the data file between the check and the `open()` call. Treat
+        // NotFound from open as equivalent to "file doesn't exist yet"
+        // rather than a hard error.
+        if self.path.exists()
+            && let Err(e) = fsync::open_and_fsync(
                 &self.path,
                 "fsync-data-file-open",
                 "fsync-data-file",
                 op_ctx,
-            )?;
+            )
+            && !fsync::is_not_found(&e)
+        {
+            return Err(e);
         }
 
         // Step 2: fsync the parent directory so the dirent for

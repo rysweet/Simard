@@ -557,40 +557,45 @@ impl MeetingBackend {
         } else {
             // When no bridge is available (most current deployments), try
             // to launch one from the default state root for this write.
-            let state_root = crate::memory_ipc::default_state_root();
-            match crate::memory_ipc::launch_writer_bridge(&state_root) {
-                Ok(bridge) => match crate::goal_curation::load_goal_board(bridge.ops()) {
-                    Ok(board) => {
-                        if let Err(e) = crate::goal_curation::write_goal_carryover(
-                            &board,
-                            &meeting_id,
-                            bridge.ops(),
-                        ) {
+            // Compiled out of test builds: `default_state_root()` returns
+            // `$HOME/.simard` which trips the hermetic guard (#2092).
+            #[cfg(not(test))]
+            {
+                let state_root = crate::memory_ipc::default_state_root();
+                match crate::memory_ipc::launch_writer_bridge(&state_root) {
+                    Ok(bridge) => match crate::goal_curation::load_goal_board(bridge.ops()) {
+                        Ok(board) => {
+                            if let Err(e) = crate::goal_curation::write_goal_carryover(
+                                &board,
+                                &meeting_id,
+                                bridge.ops(),
+                            ) {
+                                warn!(
+                                    target: "simard::meeting_backend::closing",
+                                    phase = "goal_carryover",
+                                    outcome = "error",
+                                    error = %e,
+                                    "Failed to write goal carryover record (fallback bridge)"
+                                );
+                            }
+                        }
+                        Err(e) => {
                             warn!(
                                 target: "simard::meeting_backend::closing",
                                 phase = "goal_carryover",
                                 outcome = "error",
                                 error = %e,
-                                "Failed to write goal carryover record (fallback bridge)"
+                                "Failed to load goal board for carryover (fallback bridge)"
                             );
                         }
-                    }
+                    },
                     Err(e) => {
-                        warn!(
+                        tracing::debug!(
                             target: "simard::meeting_backend::closing",
-                            phase = "goal_carryover",
-                            outcome = "error",
                             error = %e,
-                            "Failed to load goal board for carryover (fallback bridge)"
+                            "Could not launch bridge for goal carryover write"
                         );
                     }
-                },
-                Err(e) => {
-                    tracing::debug!(
-                        target: "simard::meeting_backend::closing",
-                        error = %e,
-                        "Could not launch bridge for goal carryover write"
-                    );
                 }
             }
         }
