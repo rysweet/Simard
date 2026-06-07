@@ -80,18 +80,29 @@ const TURN_TIMEOUT_ENV: &str = "SIMARD_MEETING_TURN_TIMEOUT_SECS";
 /// Resolve the agent command and args for one-shot `-p` invocations.
 fn resolve_agent_command() -> SimardResult<(String, Vec<String>)> {
     let config = crate::runtime_config::RuntimeConfig::load()?;
+
+    // Add --add-dir for the Simard source tree so the agent has codebase context
+    let simard_src = "/home/azureuser/src/Simard/worktrees/main";
+    let add_dir_args: Vec<String> = if std::path::Path::new(simard_src).exists() {
+        vec!["--add-dir".to_string(), simard_src.to_string()]
+    } else {
+        vec![]
+    };
+
     match config.llm_provider {
-        crate::session_builder::LlmProvider::Copilot => Ok((
-            "copilot".to_string(),
-            vec![
+        crate::session_builder::LlmProvider::Copilot => {
+            let mut args = vec![
                 "--allow-all-tools".to_string(),
                 "--allow-all-paths".to_string(),
-            ],
-        )),
-        crate::session_builder::LlmProvider::RustyClawd => Ok((
-            "claude".to_string(),
-            vec!["--allowedTools".to_string(), "all".to_string()],
-        )),
+            ];
+            args.extend(add_dir_args);
+            Ok(("copilot".to_string(), args))
+        }
+        crate::session_builder::LlmProvider::RustyClawd => {
+            let mut args = vec!["--allowedTools".to_string(), "all".to_string()];
+            args.extend(add_dir_args);
+            Ok(("claude".to_string(), args))
+        }
     }
 }
 
