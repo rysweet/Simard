@@ -4,6 +4,8 @@ on:
   push:
   pull_request:
 
+permissions: {}
+
 env:
   # ubuntu-latest runners have 4 vCPUs and 16GB RAM. With line-tables-only
   # debug info + 4GB swap, we can compile with all 4 cores instead of 2,
@@ -26,10 +28,12 @@ jobs:
   pre-commit:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    permissions:
+      contents: read
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Rust-only gate (no new .py / .js / .ts)
         run: scripts/check-rust-only-gate.sh
@@ -40,7 +44,7 @@ jobs:
           rust-components: rustfmt,clippy
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # Bumped 2026-05-10: previous `simard-ci` cache held stale test
           # binaries from before tests were renamed/deleted (notably
@@ -57,7 +61,7 @@ jobs:
           cache-on-failure: true
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.x"
 
@@ -98,7 +102,7 @@ jobs:
         run: cargo build --bin simard --locked
 
       - name: Upload simard binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: simard-bin-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/debug/simard
@@ -107,7 +111,7 @@ jobs:
 
       - name: Upload cargo-test log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cargo-test-log-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/ci-logs/cargo-test.log
@@ -117,21 +121,19 @@ jobs:
   install-real:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    # Wait for pre-commit so the Swatinem cache is warm (single-writer model)
-    # and the cargo registry / git deps don't have to be re-fetched. The
-    # actual `cargo install --path .` still runs in its own isolated target
-    # dir, but the dep download cost drops from minutes to seconds.
     needs: pre-commit
+    permissions:
+      contents: read
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Prepare Rust runner (free disk, swap, mold, rust)
         uses: ./.github/actions/rust-runner-prep
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: simard-ci-v2
           # Read-only on PRs and non-pre-commit jobs; pre-commit on main is
@@ -159,10 +161,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
 
@@ -173,7 +175,7 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Download simard binary from pre-commit job
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: simard-bin-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/debug
@@ -204,7 +206,7 @@ jobs:
       # launched here on a dedicated port so we don't race the TS suite's
       # webServer lifecycle.
       - name: Set up Python for tab-identity smoke test
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.x"
 
@@ -247,7 +249,7 @@ jobs:
 
       - name: Upload Playwright report on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: playwright-report-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
