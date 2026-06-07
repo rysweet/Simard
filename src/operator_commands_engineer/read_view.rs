@@ -598,4 +598,267 @@ mod tests {
             "Next-step guidance (section 7) must come before durable record counts (section 8)"
         );
     }
+
+    // --- render_lines: terminal bridge context branches ---
+
+    fn make_view_with_bridge(
+        bridge: Option<TerminalBridgeContext>,
+        goals: Vec<String>,
+        decisions: Vec<String>,
+        memory_count: usize,
+        evidence_count: usize,
+    ) -> EngineerReadView {
+        EngineerReadView {
+            state_root: PathBuf::from("/test/state"),
+            handoff_source: "test-source.json".to_string(),
+            identity: "simard-engineer".to_string(),
+            selected_base_type: "terminal-shell".to_string(),
+            topology: "single-process".to_string(),
+            session_phase: "Complete".to_string(),
+            objective_metadata: "objective-metadata(chars=42, words=8, lines=2)".to_string(),
+            repo_root: PathBuf::from("/home/user/project"),
+            repo_branch: "main".to_string(),
+            repo_head: "abc123".to_string(),
+            worktree_dirty: "false".to_string(),
+            changed_files: "<none>".to_string(),
+            active_goals: goals,
+            carried_meeting_decisions: decisions,
+            selected_action: "cargo-check".to_string(),
+            action_plan: "run cargo check".to_string(),
+            verification_steps: "verify clean build".to_string(),
+            action_status: "success".to_string(),
+            changed_files_after_action: "<none>".to_string(),
+            verification_status: "passed".to_string(),
+            verification_summary: "all checks passed".to_string(),
+            terminal_bridge_context: bridge,
+            memory_record_count: memory_count,
+            evidence_record_count: evidence_count,
+        }
+    }
+
+    #[test]
+    fn render_lines_terminal_bridge_some_with_last_output() {
+        let bridge = TerminalBridgeContext {
+            continuity_source: "state-root".to_string(),
+            handoff_file_name: "terminal-handoff.json".to_string(),
+            working_directory: "/home/user/project".to_string(),
+            command_count: "5".to_string(),
+            wait_count: "2".to_string(),
+            last_output_line: Some("Build succeeded".to_string()),
+        };
+        let view = make_view_with_bridge(Some(bridge), vec![], vec![], 0, 0);
+        let output = view.render_lines().join("\n");
+
+        assert!(
+            output.contains("Terminal continuity available: yes"),
+            "should indicate terminal continuity is available"
+        );
+        assert!(
+            output.contains("Terminal continuity source: state-root"),
+            "should show continuity source"
+        );
+        assert!(
+            output.contains("Terminal continuity handoff: terminal-handoff.json"),
+            "should show handoff file name"
+        );
+        assert!(
+            output.contains("Terminal continuity working directory: /home/user/project"),
+            "should show working directory"
+        );
+        assert!(
+            output.contains("Terminal continuity command count: 5"),
+            "should show command count"
+        );
+        assert!(
+            output.contains("Terminal continuity wait count: 2"),
+            "should show wait count"
+        );
+        assert!(
+            output.contains("Terminal continuity last output line: Build succeeded"),
+            "should show last output line when present"
+        );
+    }
+
+    #[test]
+    fn render_lines_terminal_bridge_some_without_last_output() {
+        let bridge = TerminalBridgeContext {
+            continuity_source: "state-root".to_string(),
+            handoff_file_name: "terminal-handoff.json".to_string(),
+            working_directory: "/home/user/project".to_string(),
+            command_count: "3".to_string(),
+            wait_count: "0".to_string(),
+            last_output_line: None,
+        };
+        let view = make_view_with_bridge(Some(bridge), vec![], vec![], 0, 0);
+        let output = view.render_lines().join("\n");
+
+        assert!(
+            output.contains("Terminal continuity available: yes"),
+            "should indicate terminal continuity is available"
+        );
+        assert!(
+            output.contains("Terminal continuity last output line: <none>"),
+            "should show <none> when last_output_line is None"
+        );
+    }
+
+    #[test]
+    fn render_lines_terminal_bridge_none_shows_not_available() {
+        let view = make_view_with_bridge(None, vec![], vec![], 0, 0);
+        let output = view.render_lines().join("\n");
+
+        assert!(
+            output.contains("Terminal continuity available: no"),
+            "should indicate terminal continuity is not available"
+        );
+        assert!(
+            !output.contains("Terminal continuity handoff:"),
+            "should not show handoff details when bridge is None"
+        );
+    }
+
+    // --- render_lines: multiple active goals ---
+
+    #[test]
+    fn render_lines_multiple_active_goals() {
+        let goals = vec![
+            "goal-alpha".to_string(),
+            "goal-beta".to_string(),
+            "goal-gamma".to_string(),
+        ];
+        let view = make_view_with_bridge(None, goals, vec![], 0, 0);
+        let output = view.render_lines().join("\n");
+
+        assert!(
+            output.contains("Active goals count: 3"),
+            "should report correct goal count"
+        );
+        assert!(
+            output.contains("Active goal 1: goal-alpha"),
+            "should list first goal"
+        );
+        assert!(
+            output.contains("Active goal 2: goal-beta"),
+            "should list second goal"
+        );
+        assert!(
+            output.contains("Active goal 3: goal-gamma"),
+            "should list third goal"
+        );
+    }
+
+    #[test]
+    fn render_lines_zero_active_goals() {
+        let view = make_view_with_bridge(None, vec![], vec![], 0, 0);
+        let output = view.render_lines().join("\n");
+
+        assert!(
+            output.contains("Active goals count: 0"),
+            "should report zero goals"
+        );
+        assert!(
+            !output.contains("Active goal 1:"),
+            "should not list any goals when count is zero"
+        );
+    }
+
+    // --- render_lines: multiple carried meeting decisions ---
+
+    #[test]
+    fn render_lines_multiple_carried_decisions() {
+        let decisions = vec![
+            "Use strategy X".to_string(),
+            "Defer Y to next sprint".to_string(),
+        ];
+        let view = make_view_with_bridge(None, vec![], decisions, 0, 0);
+        let output = view.render_lines().join("\n");
+
+        assert!(
+            output.contains("Carried meeting decisions: 2"),
+            "should report correct decision count"
+        );
+        assert!(
+            output.contains("Carried meeting decision 1: Use strategy X"),
+            "should list first decision"
+        );
+        assert!(
+            output.contains("Carried meeting decision 2: Defer Y to next sprint"),
+            "should list second decision"
+        );
+    }
+
+    #[test]
+    fn render_lines_zero_carried_decisions() {
+        let view = make_view_with_bridge(None, vec![], vec![], 0, 0);
+        let output = view.render_lines().join("\n");
+
+        assert!(
+            output.contains("Carried meeting decisions: 0"),
+            "should report zero decisions"
+        );
+    }
+
+    // --- render_lines: durable record counts ---
+
+    #[test]
+    fn render_lines_shows_memory_and_evidence_counts() {
+        let view = make_view_with_bridge(None, vec![], vec![], 7, 14);
+        let output = view.render_lines().join("\n");
+
+        assert!(
+            output.contains("Memory records: 7"),
+            "should show correct memory record count"
+        );
+        assert!(
+            output.contains("Evidence records: 14"),
+            "should show correct evidence record count"
+        );
+    }
+
+    // --- render_lines: next-step guidance includes state_root ---
+
+    #[test]
+    fn render_lines_next_step_includes_state_root_path() {
+        let view = make_view_with_bridge(None, vec![], vec![], 0, 0);
+        let output = view.render_lines().join("\n");
+
+        assert!(
+            output.contains("simard engineer read /test/state"),
+            "next step should include the state root path"
+        );
+    }
+
+    // --- render_lines: section 6 mode boundary appears for bridge context ---
+
+    #[test]
+    fn render_lines_bridge_context_emits_terminal_mode_boundary() {
+        let bridge = TerminalBridgeContext {
+            continuity_source: "src".to_string(),
+            handoff_file_name: "h.json".to_string(),
+            working_directory: "/wd".to_string(),
+            command_count: "1".to_string(),
+            wait_count: "0".to_string(),
+            last_output_line: None,
+        };
+        let view = make_view_with_bridge(Some(bridge), vec![], vec![], 0, 0);
+        let lines = view.render_lines();
+        let output = lines.join("\n");
+
+        // The terminal mode boundary should appear in section 6
+        let terminal_boundary_count = lines
+            .iter()
+            .filter(|l| l.contains(TERMINAL_MODE_BOUNDARY))
+            .count();
+        assert_eq!(
+            terminal_boundary_count, 1,
+            "terminal mode boundary should appear exactly once in bridge context section"
+        );
+        // And it should appear after action audit (section 5)
+        let action_pos = output.find("Verification summary:").unwrap();
+        let terminal_pos = output.find(TERMINAL_MODE_BOUNDARY).unwrap();
+        assert!(
+            terminal_pos > action_pos,
+            "terminal mode boundary (section 6) must come after verification summary (section 5)"
+        );
+    }
 }
