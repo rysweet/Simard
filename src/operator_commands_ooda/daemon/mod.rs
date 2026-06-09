@@ -519,6 +519,26 @@ pub fn run_ooda_daemon(
         }
         // ── Disk health check (before spawning engineers) ────────────────
         if last_disk_health.elapsed() >= Duration::from_secs(disk_health_interval_secs) {
+            // Tier 1: deterministic emergency cleanup (no LLM, no recipe)
+            if let Some(emergency_report) =
+                crate::disk_health::emergency_cleanup(&bridges.repo_root, &state_root)
+            {
+                daemon_log(
+                    &state_root,
+                    &format!(
+                        "[simard] EMERGENCY disk cleanup: {}% -> freed {} bytes",
+                        emergency_report.disk_used_pct, emergency_report.freed_bytes
+                    ),
+                );
+                daemon_log(
+                    &state_root,
+                    &format!(
+                        "[simard] emergency actions: {:?}",
+                        emergency_report.actions_taken
+                    ),
+                );
+            }
+            // Tier 2: recipe-based LLM cleanup (moderate pressure, nuanced decisions)
             match crate::disk_health::run_disk_health_check(&bridges.repo_root, &state_root) {
                 Ok(report) => {
                     daemon_log(&state_root, &format!("[simard] {}", report.summary()));
