@@ -133,6 +133,8 @@ pub fn run_disk_health_check(
         .env("AMPLIHACK_AGENT_BINARY", agent_binary)
         .arg("-c")
         .arg(format!("state_root={}", state_root.display()))
+        .arg("-c")
+        .arg(format!("repo_path={}", repo_root.display()))
         .output()
         .map_err(|e| SimardError::AdapterInvocationFailed {
             base_type: ADAPTER_TAG.to_string(),
