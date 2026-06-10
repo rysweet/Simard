@@ -189,7 +189,7 @@ impl CognitiveMemoryGoalStore {
             } else {
                 // Non-Active goal: resolve any stale prospective entries.
                 if has_goal_prospective {
-                    resolve_goal_prospectives(&goal.slug, writer.ops())?;
+                    resolve_goal_prospectives(&trigger, writer.ops())?;
                 }
             }
         }
@@ -216,16 +216,19 @@ impl GoalStore for CognitiveMemoryGoalStore {
             GOAL_STORE_SOURCE,
         )?;
 
+        // Compute the trigger string once — reused by both resolve and
+        // store_prospective to avoid a redundant String allocation.
+        let trigger_condition = prospective_trigger_for(&record);
+
         // Resolve any previous prospective memory for this goal so stale
         // entries don't accumulate. Part of put()'s success contract (#2207):
         // if the mirror update fails, the caller must know.
-        resolve_goal_prospectives(&record.slug, writer.ops())?;
+        resolve_goal_prospectives(&trigger_condition, writer.ops())?;
 
         // Dual-write: store Active goals as prospective memories so they
         // surface via `check_triggers` during OODA preparation (#2207).
         if record.status == GoalStatus::Active {
             let description = format!("{}{}", GOAL_PROSPECTIVE_PREFIX, record.title);
-            let trigger_condition = prospective_trigger_for(&record);
             let action_on_trigger = format!(
                 "Pursue goal: {} (p{}, {})",
                 record.title, record.priority, record.rationale,
@@ -282,21 +285,16 @@ fn prospective_trigger_for(record: &GoalRecord) -> String {
 }
 
 /// Resolve (mark as `"resolved"`) any pending prospective memories whose
-/// description starts with the `GOAL_PROSPECTIVE_PREFIX` and matches the
-/// given goal slug. This prevents accumulation of stale prospective entries
-/// when a goal is re-put or transitions to Completed/Paused.
+/// description starts with the `GOAL_PROSPECTIVE_PREFIX` and whose
+/// trigger_condition matches the precomputed `trigger` string.
 ///
-/// Uses `check_triggers` with the slug-derived trigger phrase, then filters
-/// by the `goal:` description prefix and matching trigger_condition.
+/// Callers pass the already-computed trigger (from `prospective_trigger_for`)
+/// to avoid a redundant `slug.replace('-', " ")` allocation per call.
 fn resolve_goal_prospectives(
-    slug: &str,
+    trigger: &str,
     ops: &dyn crate::cognitive_memory::CognitiveMemoryOps,
 ) -> crate::error::SimardResult<()> {
-    let trigger = slug.replace('-', " ");
-    // check_triggers returns pending entries whose trigger_condition is a
-    // substring of the probe string. We probe with the trigger itself so
-    // an exact-match will surface the old entry.
-    let candidates = ops.check_triggers(&trigger)?;
+    let candidates = ops.check_triggers(trigger)?;
     for p in candidates {
         if p.description.starts_with(GOAL_PROSPECTIVE_PREFIX) && p.trigger_condition == trigger {
             ops.resolve_prospective(&p.node_id)?;
