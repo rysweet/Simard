@@ -575,7 +575,12 @@ ACTION: cleaned shared-target dir
 
     #[test]
     fn resolve_recipe_path_returns_none_for_nonexistent_dir() {
+        // Override HOME so the home-dir fallback in resolve_recipe_path
+        // doesn't accidentally find a real recipe (e.g. ~/.simard/...).
+        let guard = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("HOME", guard.path()) };
         let result = resolve_recipe_path(Path::new("/nonexistent/repo"));
+        unsafe { std::env::remove_var("HOME") };
         assert!(result.is_none());
     }
 
@@ -597,10 +602,14 @@ ACTION: cleaned shared-target dir
 
     #[test]
     fn run_returns_error_when_recipe_not_found() {
+        // Isolate from home-dir recipe fallback.
+        let guard = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("HOME", guard.path()) };
         let result = run_disk_health_check(
             Path::new("/nonexistent/repo"),
             Path::new("/nonexistent/state"),
         );
+        unsafe { std::env::remove_var("HOME") };
         assert!(result.is_err());
         let err = result.unwrap_err();
         match &err {
@@ -625,11 +634,15 @@ ACTION: cleaned shared-target dir
         std::fs::create_dir_all(&recipe_dir).unwrap();
         std::fs::write(recipe_dir.join(RECIPE_FILENAME), "name: test").unwrap();
 
+        // Isolate from home-dir recipe fallback so resolve_recipe_path
+        // finds the intentionally-invalid recipe in tmp, not ~/.simard/.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
         // Ensure RuntimeConfig::load() succeeds (CI has no config.toml).
         // SAFETY: test-only, single-threaded access to env var.
         unsafe { std::env::set_var("SIMARD_LLM_PROVIDER", "copilot") };
         let result = run_disk_health_check(tmp.path(), tmp.path());
         unsafe { std::env::remove_var("SIMARD_LLM_PROVIDER") };
+        unsafe { std::env::remove_var("HOME") };
         assert!(result.is_err());
         let err = result.unwrap_err();
         match &err {

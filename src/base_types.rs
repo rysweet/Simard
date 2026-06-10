@@ -48,7 +48,8 @@ impl Display for BaseTypeId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum BaseTypeCapability {
     PromptAssets,
     SessionLifecycle,
@@ -269,5 +270,64 @@ mod tests {
         assert_eq!(input.objective, "test objective");
         assert!(input.identity_context.is_empty());
         assert!(input.prompt_preamble.is_empty());
+    }
+
+    // ── BaseTypeCapability serde ────────────────────────────────────
+
+    #[test]
+    fn base_type_capability_serializes_to_kebab_case() {
+        let json = serde_json::to_string(&BaseTypeCapability::PromptAssets).unwrap();
+        assert_eq!(json, "\"prompt-assets\"");
+        let json = serde_json::to_string(&BaseTypeCapability::SessionLifecycle).unwrap();
+        assert_eq!(json, "\"session-lifecycle\"");
+        let json = serde_json::to_string(&BaseTypeCapability::TerminalSession).unwrap();
+        assert_eq!(json, "\"terminal-session\"");
+    }
+
+    #[test]
+    fn base_type_capability_deserializes_from_kebab_case() {
+        let cap: BaseTypeCapability = serde_json::from_str("\"prompt-assets\"").unwrap();
+        assert_eq!(cap, BaseTypeCapability::PromptAssets);
+        let cap: BaseTypeCapability = serde_json::from_str("\"memory\"").unwrap();
+        assert_eq!(cap, BaseTypeCapability::Memory);
+    }
+
+    #[test]
+    fn base_type_capability_roundtrips_through_serde() {
+        let caps = [
+            BaseTypeCapability::PromptAssets,
+            BaseTypeCapability::SessionLifecycle,
+            BaseTypeCapability::Memory,
+            BaseTypeCapability::Evidence,
+            BaseTypeCapability::Reflection,
+            BaseTypeCapability::TerminalSession,
+        ];
+        for cap in caps {
+            let json = serde_json::to_string(&cap).unwrap();
+            let back: BaseTypeCapability = serde_json::from_str(&json).unwrap();
+            assert_eq!(cap, back);
+        }
+    }
+
+    #[test]
+    fn base_type_capability_display_matches_serde_names() {
+        let caps = [
+            (BaseTypeCapability::PromptAssets, "prompt-assets"),
+            (BaseTypeCapability::SessionLifecycle, "session-lifecycle"),
+            (BaseTypeCapability::Memory, "memory"),
+            (BaseTypeCapability::Evidence, "evidence"),
+            (BaseTypeCapability::Reflection, "reflection"),
+            (BaseTypeCapability::TerminalSession, "terminal-session"),
+        ];
+        for (cap, expected) in caps {
+            let display_str = cap.to_string();
+            let serde_str = serde_json::to_string(&cap).unwrap();
+            assert_eq!(display_str, expected, "Display mismatch for {cap:?}");
+            assert_eq!(
+                serde_str,
+                format!("\"{expected}\""),
+                "serde mismatch for {cap:?}"
+            );
+        }
     }
 }
