@@ -377,7 +377,6 @@ impl App {
                             continue;
                         }
                         self.meeting_output.push(line.trim_end().to_string());
-                        Self::cap_output(&mut self.meeting_output);
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         break;
@@ -385,6 +384,7 @@ impl App {
                     Err(_) => break,
                 }
             }
+            Self::cap_output(&mut self.meeting_output);
         }
     }
 
@@ -419,9 +419,7 @@ impl App {
         let boot_uptime = std::fs::read_to_string("/proc/uptime")
             .ok()
             .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok());
-        let clk_tck: u64 = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }
-            .try_into()
-            .unwrap_or(100);
+        let clk_tck = clock_ticks_per_sec();
 
         let mut new_processes = Vec::new();
         let mut new_samples = HashMap::new();
@@ -675,7 +673,12 @@ impl App {
                             .as_secs_f64();
                         let du = sample.utime.saturating_sub(prev.utime);
                         let ds = sample.stime.saturating_sub(prev.stime);
-                        Some(system::compute_cpu_percent(du, ds, elapsed, 100))
+                        Some(system::compute_cpu_percent(
+                            du,
+                            ds,
+                            elapsed,
+                            clock_ticks_per_sec(),
+                        ))
                     });
                     self.prev_cpu_sample = Some(sample);
                     pct
@@ -687,24 +690,25 @@ impl App {
             (None, None)
         };
 
-        self.daemon_info = DaemonInfo {
-            state,
-            pid,
-            uptime_secs,
-            cpu_percent,
-            memory_rss_kb,
-            service_name: self.daemon_info.service_name.clone(),
-        };
+        self.daemon_info.state = state;
+        self.daemon_info.pid = pid;
+        self.daemon_info.uptime_secs = uptime_secs;
+        self.daemon_info.cpu_percent = cpu_percent;
+        self.daemon_info.memory_rss_kb = memory_rss_kb;
 
-        self.goal_board = goals::read_goal_board(&self.state_root);
+        // Tab-specific expensive I/O (skip for inactive tabs after first tick)
+        let first_tick = self.tick_count <= 1;
+        if first_tick || self.active_tab == Tab::Goals || self.active_tab == Tab::Stats {
+            self.goal_board = goals::read_goal_board(&self.state_root);
+        }
+        if first_tick || self.active_tab == Tab::Engineers {
+            self.refresh_engineers();
+        }
+        if first_tick || self.active_tab == Tab::Activity {
+            self.refresh_logs();
+        }
 
-        // Engineers tab: refresh child processes
-        self.refresh_engineers();
-
-        // Activity tab: refresh log lines
-        self.refresh_logs();
-
-        // Stats tab: drain background gh CLI results every tick
+        // Always: drain async gh CLI results (non-blocking)
         self.drain_gh_results();
 
         // Stats tab: slow cycle (every 5 ticks ≈ 10s)
@@ -721,6 +725,16 @@ impl App {
         }
         self.drain_meeting_output();
     }
+}
+
+/// Cached clock ticks per second (from `sysconf(_SC_CLK_TCK)`).
+fn clock_ticks_per_sec() -> u64 {
+    static CLK_TCK: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CLK_TCK.get_or_init(|| {
+        unsafe { libc::sysconf(libc::_SC_CLK_TCK) }
+            .try_into()
+            .unwrap_or(100)
+    })
 }
 
 fn compute_uptime_from_timestamp(ts: &str) -> Option<u64> {

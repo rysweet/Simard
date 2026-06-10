@@ -17,9 +17,13 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    // Auto-scroll: skip non-visible lines before allocating Line objects
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let skip = app.log_lines.len().saturating_sub(visible_height);
     let lines: Vec<Line> = app
         .log_lines
         .iter()
+        .skip(skip)
         .map(|l| {
             let color = if l.contains("ERROR") || l.contains("error") {
                 Color::Red
@@ -32,12 +36,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    // Auto-scroll: show the last lines that fit in the visible area
-    let visible_height = area.height.saturating_sub(2) as usize;
-    let skip = lines.len().saturating_sub(visible_height);
-    let visible_lines: Vec<Line> = lines.into_iter().skip(skip).collect();
-
-    let paragraph = Paragraph::new(visible_lines)
-        .block(Block::default().borders(Borders::ALL).title("Activity"));
+    let paragraph =
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Activity"));
     f.render_widget(paragraph, area);
 }
