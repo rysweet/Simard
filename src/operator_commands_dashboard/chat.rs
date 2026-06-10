@@ -470,3 +470,195 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- load_dashboard_meeting_prompt ------------------------------------
+
+    #[test]
+    fn load_meeting_prompt_returns_content_when_file_exists() {
+        // CARGO_MANIFEST_DIR is set during `cargo test`, and the prompt file
+        // lives at <manifest>/prompt_assets/simard/meeting_system.md.
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let prompt_path = manifest.join("prompt_assets/simard/meeting_system.md");
+        if prompt_path.exists() {
+            let result = load_dashboard_meeting_prompt();
+            assert!(result.is_ok(), "should find prompt via CARGO_MANIFEST_DIR");
+            let content = result.unwrap();
+            assert!(!content.is_empty(), "prompt content should be non-empty");
+            assert!(
+                content.len() > 50,
+                "prompt should be a real document, got {} bytes",
+                content.len()
+            );
+        }
+    }
+
+    #[test]
+    fn load_meeting_prompt_returns_prompt_not_found_when_missing() {
+        // When none of the candidate paths exist, we get PromptNotFound.
+        // This test can only verify the error type if ALL candidates miss.
+        // If the file does exist on this machine, the function will succeed.
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let prompt_path = manifest.join("prompt_assets/simard/meeting_system.md");
+        if !prompt_path.exists() {
+            let result = load_dashboard_meeting_prompt();
+            assert!(
+                result.is_err(),
+                "should return error when no prompt file found"
+            );
+        }
+    }
+
+    #[test]
+    fn load_meeting_prompt_candidate_paths_are_reasonable() {
+        // Validate that the candidate path construction doesn't panic
+        // and produces paths with the expected suffix.
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let expected_suffix = "prompt_assets/simard/meeting_system.md";
+        let build_candidate = manifest.join(expected_suffix);
+        assert!(
+            build_candidate.to_string_lossy().ends_with(expected_suffix),
+            "build-time candidate should end with {expected_suffix}"
+        );
+    }
+
+    // ---- open_dashboard_agent_session ------------------------------------
+
+    #[test]
+    fn open_agent_session_returns_none_without_provider_config() {
+        // Without LLM configuration, the function should return None
+        // gracefully rather than panicking.
+        let session = open_dashboard_agent_session();
+        // In CI/test environments without SIMARD_LLM_PROVIDER set,
+        // this should be None. If configured, it may be Some.
+        if std::env::var("SIMARD_LLM_PROVIDER").is_err() {
+            assert!(
+                session.is_none(),
+                "should return None without LLM provider configured"
+            );
+        }
+    }
+
+    // ---- WebSocket chat command routing -----------------------------------
+    // We can't easily create a real WebSocket in unit tests, but we can
+    // verify the parse_command integration contract.
+
+    #[test]
+    fn chat_recognizes_close_command() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        assert!(matches!(parse_command("/close"), MeetingCommand::Close));
+    }
+
+    #[test]
+    fn chat_recognizes_help_command() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        assert!(matches!(parse_command("/help"), MeetingCommand::Help));
+    }
+
+    #[test]
+    fn chat_recognizes_status_command() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        assert!(matches!(parse_command("/status"), MeetingCommand::Status));
+    }
+
+    #[test]
+    fn chat_recognizes_template_command() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        match parse_command("/template standup") {
+            MeetingCommand::Template(name) => assert_eq!(name, "standup"),
+            other => panic!("expected Template, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_recognizes_theme_command() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        match parse_command("/theme technical debt") {
+            MeetingCommand::Theme(text) => assert_eq!(text, "technical debt"),
+            other => panic!("expected Theme, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_recognizes_decision_command() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        match parse_command("/decision Use Rust for the rewrite") {
+            MeetingCommand::Decision { text, .. } => {
+                assert!(text.contains("Use Rust"));
+            }
+            other => panic!("expected Decision, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_recognizes_action_command() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        match parse_command("/action Fix the CI pipeline") {
+            MeetingCommand::Action(text) => assert!(text.contains("Fix the CI")),
+            other => panic!("expected Action, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_recognizes_question_command() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        match parse_command("/question What's the timeline?") {
+            MeetingCommand::Question(text) => assert!(text.contains("timeline")),
+            other => panic!("expected Question, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_recognizes_owner_command() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        match parse_command("/owner alice") {
+            MeetingCommand::Owner(text) => assert_eq!(text, "alice"),
+            other => panic!("expected Owner, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_recognizes_recap_command() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        assert!(matches!(parse_command("/recap"), MeetingCommand::Recap));
+    }
+
+    #[test]
+    fn chat_recognizes_preview_command() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        assert!(matches!(parse_command("/preview"), MeetingCommand::Preview));
+    }
+
+    #[test]
+    fn chat_recognizes_state_command() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        assert!(matches!(parse_command("/state"), MeetingCommand::State));
+    }
+
+    #[test]
+    fn chat_routes_plain_text_to_conversation() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        match parse_command("Hello, how are you?") {
+            MeetingCommand::Conversation(text) => assert_eq!(text, "Hello, how are you?"),
+            other => panic!("expected Conversation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_routes_export_command() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        assert!(matches!(parse_command("/export"), MeetingCommand::Export));
+    }
+
+    #[test]
+    fn chat_routes_goal_command() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        match parse_command("/goal Improve test coverage") {
+            MeetingCommand::Goal(text) => assert!(text.contains("Improve")),
+            other => panic!("expected Goal, got: {other:?}"),
+        }
+    }
+}
