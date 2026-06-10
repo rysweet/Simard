@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt::{self, Display, Formatter};
+use std::str::FromStr;
 
 use crate::session::{SessionId, SessionPhase};
 
@@ -16,6 +18,36 @@ pub enum MemoryScope {
     /// Explicit marker for records recovered from cognitive memory where the
     /// original scope tag was missing or unparseable.
     Untagged,
+}
+
+impl Display for MemoryScope {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::SessionScratch => "session-scratch",
+            Self::SessionSummary => "session-summary",
+            Self::Decision => "decision",
+            Self::Project => "project",
+            Self::Benchmark => "benchmark",
+            Self::Untagged => "untagged",
+        };
+        f.write_str(label)
+    }
+}
+
+impl FromStr for MemoryScope {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "session-scratch" => Ok(Self::SessionScratch),
+            "session-summary" => Ok(Self::SessionSummary),
+            "decision" => Ok(Self::Decision),
+            "project" => Ok(Self::Project),
+            "benchmark" => Ok(Self::Benchmark),
+            "untagged" => Ok(Self::Untagged),
+            other => Err(format!("unknown memory scope: '{other}'")),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -94,5 +126,50 @@ mod tests {
     #[test]
     fn memory_store_name_constant() {
         assert_eq!(MEMORY_STORE_NAME, "memory");
+    }
+
+    #[test]
+    fn memory_scope_display() {
+        assert_eq!(MemoryScope::SessionScratch.to_string(), "session-scratch");
+        assert_eq!(MemoryScope::SessionSummary.to_string(), "session-summary");
+        assert_eq!(MemoryScope::Decision.to_string(), "decision");
+        assert_eq!(MemoryScope::Project.to_string(), "project");
+        assert_eq!(MemoryScope::Benchmark.to_string(), "benchmark");
+        assert_eq!(MemoryScope::Untagged.to_string(), "untagged");
+    }
+
+    #[test]
+    fn memory_scope_fromstr_valid() {
+        assert_eq!(
+            "session-scratch".parse::<MemoryScope>().unwrap(),
+            MemoryScope::SessionScratch
+        );
+        assert_eq!(
+            "session-summary".parse::<MemoryScope>().unwrap(),
+            MemoryScope::SessionSummary
+        );
+        assert_eq!(
+            "decision".parse::<MemoryScope>().unwrap(),
+            MemoryScope::Decision
+        );
+        assert_eq!(
+            "project".parse::<MemoryScope>().unwrap(),
+            MemoryScope::Project
+        );
+        assert_eq!(
+            "benchmark".parse::<MemoryScope>().unwrap(),
+            MemoryScope::Benchmark
+        );
+        assert_eq!(
+            "untagged".parse::<MemoryScope>().unwrap(),
+            MemoryScope::Untagged
+        );
+    }
+
+    #[test]
+    fn memory_scope_fromstr_invalid() {
+        assert!("unknown".parse::<MemoryScope>().is_err());
+        assert!("SessionSummary".parse::<MemoryScope>().is_err());
+        assert!("".parse::<MemoryScope>().is_err());
     }
 }

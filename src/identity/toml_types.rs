@@ -8,7 +8,6 @@ use serde::Deserialize;
 
 /// Top-level structure of an identity.toml file.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct TomlIdentityFile {
     #[allow(dead_code)]
     pub package: TomlPackage,
@@ -29,7 +28,6 @@ pub(crate) struct TomlPackage {
 
 /// A single `[[identities]]` entry in identity.toml.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct TomlIdentity {
     pub name: String,
     pub default_mode: String,
@@ -47,7 +45,6 @@ pub(crate) struct TomlIdentity {
 
 /// A `[[identities.prompt_assets]]` entry.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct TomlPromptAsset {
     pub id: String,
     pub path: String,
@@ -157,7 +154,7 @@ unknown_field = "bad"
     }
 
     #[test]
-    fn parse_rejects_unknown_identity_field() {
+    fn parse_accepts_unknown_identity_field() {
         let toml_str = r#"
 [package]
 name = "test"
@@ -170,13 +167,13 @@ flavor = "vanilla"
 "#;
         let result: Result<TomlIdentityFile, _> = toml::from_str(toml_str);
         assert!(
-            result.is_err(),
-            "unknown field in [[identities]] should be rejected"
+            result.is_ok(),
+            "unknown field in [[identities]] should be accepted for forward compatibility"
         );
     }
 
     #[test]
-    fn parse_rejects_unknown_prompt_asset_field() {
+    fn parse_accepts_unknown_prompt_asset_field() {
         let toml_str = r#"
 [package]
 name = "test"
@@ -193,8 +190,8 @@ weight = 5
 "#;
         let result: Result<TomlIdentityFile, _> = toml::from_str(toml_str);
         assert!(
-            result.is_err(),
-            "unknown field in prompt_assets should be rejected"
+            result.is_ok(),
+            "unknown field in prompt_assets should be accepted for forward compatibility"
         );
     }
 

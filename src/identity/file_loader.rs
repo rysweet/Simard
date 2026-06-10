@@ -10,6 +10,8 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
 
+use tracing::warn;
+
 use super::loader::BuiltinIdentityLoader;
 use super::toml_types::{TomlIdentity, TomlIdentityFile};
 use super::{IdentityLoadRequest, IdentityLoader, IdentityManifest, MemoryPolicy, OperatingMode};
@@ -56,13 +58,12 @@ impl FileIdentityLoader {
         visited: &mut HashSet<String>,
         depth: usize,
     ) -> SimardResult<IdentityManifest> {
-        let default_mode: OperatingMode =
-            serde_json::from_str(&format!("\"{}\"", identity.default_mode)).map_err(|e| {
-                SimardError::IdentityTomlParseError {
-                    path: toml_path.to_path_buf(),
-                    reason: format!("invalid default_mode '{}': {e}", identity.default_mode),
-                }
-            })?;
+        let default_mode: OperatingMode = identity.default_mode.parse().map_err(|e: String| {
+            SimardError::IdentityTomlParseError {
+                path: toml_path.to_path_buf(),
+                reason: format!("invalid default_mode '{}': {e}", identity.default_mode),
+            }
+        })?;
 
         if !identity.components.is_empty() {
             if depth >= MAX_COMPOSITION_DEPTH {
@@ -121,12 +122,11 @@ impl FileIdentityLoader {
             .required_capabilities
             .iter()
             .map(|s| {
-                serde_json::from_str::<BaseTypeCapability>(&format!("\"{s}\"")).map_err(|e| {
-                    SimardError::IdentityTomlParseError {
+                s.parse::<BaseTypeCapability>()
+                    .map_err(|e| SimardError::IdentityTomlParseError {
                         path: toml_path.to_path_buf(),
                         reason: format!("invalid capability '{s}': {e}"),
-                    }
-                })
+                    })
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
 
@@ -135,19 +135,61 @@ impl FileIdentityLoader {
             .iter()
             .map(|a| {
                 validate_prompt_asset_path(&a.path, toml_path)?;
+                let identity_dir = toml_path.parent().unwrap_or(toml_path);
+                let resolved = identity_dir.join(&a.path);
+                if !resolved.is_file() {
+                    return Err(SimardError::IdentityTomlParseError {
+                        path: toml_path.to_path_buf(),
+                        reason: format!(
+                            "prompt asset file '{}' not found (resolved to '{}')",
+                            a.path,
+                            resolved.display()
+                        ),
+                    });
+                }
+                // Symlink containment: canonicalize the resolved path and
+                // verify it still lives under the identity directory.
+                let canonical_resolved =
+                    resolved
+                        .canonicalize()
+                        .map_err(|e| SimardError::IdentityTomlParseError {
+                            path: toml_path.to_path_buf(),
+                            reason: format!(
+                                "cannot canonicalize prompt asset '{}': {e}",
+                                resolved.display()
+                            ),
+                        })?;
+                let canonical_identity_dir = identity_dir.canonicalize().map_err(|e| {
+                    SimardError::IdentityTomlParseError {
+                        path: toml_path.to_path_buf(),
+                        reason: format!(
+                            "cannot canonicalize identity directory '{}': {e}",
+                            identity_dir.display()
+                        ),
+                    }
+                })?;
+                if !canonical_resolved.starts_with(&canonical_identity_dir) {
+                    return Err(SimardError::IdentityTomlParseError {
+                        path: toml_path.to_path_buf(),
+                        reason: format!(
+                            "prompt asset path '{}' escapes identity directory \
+                             (possible symlink attack)",
+                            a.path,
+                        ),
+                    });
+                }
                 Ok(PromptAssetRef::new(&a.id, &a.path))
             })
             .collect::<SimardResult<Vec<_>>>()?;
 
         let memory_policy = match &identity.memory_policy {
             Some(p) => {
-                let summary_scope: MemoryScope =
-                    serde_json::from_str(&format!("\"{}\"", p.summary_scope)).map_err(|e| {
-                        SimardError::IdentityTomlParseError {
-                            path: toml_path.to_path_buf(),
-                            reason: format!("invalid summary_scope '{}': {e}", p.summary_scope),
-                        }
-                    })?;
+                let summary_scope: MemoryScope = p.summary_scope.parse().map_err(|e: String| {
+                    SimardError::IdentityTomlParseError {
+                        path: toml_path.to_path_buf(),
+                        reason: format!("invalid summary_scope '{}': {e}", p.summary_scope),
+                    }
+                })?;
                 MemoryPolicy {
                     allow_project_writes: p.allow_project_writes,
                     summary_scope,
@@ -241,6 +283,43 @@ impl IdentityLoader for FileIdentityLoader {
             _ => {
                 // Canonicalize failed (path doesn't exist yet) — fall back
                 // to lexical prefix check on raw paths.
+                warn!(
+                    identity_path = %self.identity_path.display(),
+                    prompt_root = %self.prompt_root.display(),
+                    "canonicalize failed for identity or prompt root path; falling back to lexical prefix check"
+                );
+
+                // Reject symlinks in identity_path that could escape prompt_root.
+                if let Ok(meta) = std::fs::symlink_metadata(&self.identity_path)
+                    && meta.is_symlink()
+                {
+                    // Attempt to resolve the symlink target and check containment.
+                    match std::fs::read_link(&self.identity_path) {
+                        Ok(target) => {
+                            let resolved = if target.is_absolute() {
+                                target
+                            } else {
+                                self.identity_path
+                                    .parent()
+                                    .unwrap_or(Path::new("."))
+                                    .join(&target)
+                            };
+                            if !resolved.starts_with(&self.prompt_root) {
+                                return Err(SimardError::IdentityPathNotUnderPromptRoot {
+                                    identity_path: self.identity_path.clone(),
+                                    prompt_root: self.prompt_root.clone(),
+                                });
+                            }
+                        }
+                        Err(_) => {
+                            return Err(SimardError::IdentityPathNotUnderPromptRoot {
+                                identity_path: self.identity_path.clone(),
+                                prompt_root: self.prompt_root.clone(),
+                            });
+                        }
+                    }
+                }
+
                 if !self.identity_path.starts_with(&self.prompt_root) {
                     return Err(SimardError::IdentityPathNotUnderPromptRoot {
                         identity_path: self.identity_path.clone(),
@@ -250,28 +329,9 @@ impl IdentityLoader for FileIdentityLoader {
             }
         }
 
-        // Check file size BEFORE reading to avoid allocating for huge files.
-        match std::fs::metadata(&toml_path) {
-            Ok(meta) if meta.len() > MAX_IDENTITY_FILE_SIZE => {
-                return Err(SimardError::IdentityTomlParseError {
-                    path: toml_path,
-                    reason: format!("file exceeds maximum size of {MAX_IDENTITY_FILE_SIZE} bytes"),
-                });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return self.fallback.load(request);
-            }
-            Err(e) => {
-                return Err(SimardError::IdentityTomlParseError {
-                    path: toml_path,
-                    reason: e.to_string(),
-                });
-            }
-            Ok(_) => {}
-        }
-
-        let content = match std::fs::read_to_string(&toml_path) {
-            Ok(c) => c,
+        // Single fs::read() call — no TOCTOU race between size check and read.
+        let bytes = match std::fs::read(&toml_path) {
+            Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return self.fallback.load(request);
             }
@@ -282,6 +342,19 @@ impl IdentityLoader for FileIdentityLoader {
                 });
             }
         };
+
+        if bytes.len() as u64 > MAX_IDENTITY_FILE_SIZE {
+            return Err(SimardError::IdentityTomlParseError {
+                path: toml_path,
+                reason: format!("file exceeds maximum size of {MAX_IDENTITY_FILE_SIZE} bytes"),
+            });
+        }
+
+        let content =
+            String::from_utf8(bytes).map_err(|e| SimardError::IdentityTomlParseError {
+                path: toml_path.clone(),
+                reason: format!("file is not valid UTF-8: {e}"),
+            })?;
 
         let file: TomlIdentityFile =
             toml::from_str(&content).map_err(|e| SimardError::IdentityTomlParseError {
@@ -733,5 +806,126 @@ components = ["comp-a", "comp-b"]
         let path = PathBuf::from("/some/identity/path");
         let loader = FileIdentityLoader::new(&path, "/some/root");
         assert_eq!(loader.identity_path(), path);
+    }
+
+    // ── Finding 7: nonexistent identity.toml → fallback ─────────────
+
+    #[test]
+    fn file_loader_falls_back_for_nonexistent_identity_path() {
+        let prompt_root = TempDir::new().unwrap();
+        let identity_dir = prompt_root.path().join("does-not-exist");
+        // identity_dir is never created — identity.toml will be NotFound.
+
+        let loader = FileIdentityLoader::new(&identity_dir, prompt_root.path());
+        let manifest = loader.load(&test_request("simard-engineer")).unwrap();
+        assert_eq!(manifest.name, "simard-engineer");
+        assert_eq!(manifest.default_mode, OperatingMode::Engineer);
+    }
+
+    // ── Finding 5: prompt asset path resolution & existence ─────────
+
+    #[test]
+    fn file_loader_rejects_missing_prompt_asset_file() {
+        let prompt_root = TempDir::new().unwrap();
+        let identity_dir = prompt_root.path().join("missing-asset");
+        fs::create_dir_all(&identity_dir).unwrap();
+        // Write TOML referencing a prompt asset file that does NOT exist.
+        let toml_content = r#"
+[package]
+name = "test"
+version = "0.1.0"
+
+[[identities]]
+name = "test-missing"
+default_mode = "engineer"
+supported_base_types = ["local-harness"]
+
+[[identities.prompt_assets]]
+id = "system"
+path = "does_not_exist.md"
+"#;
+        write_identity_toml(&identity_dir, toml_content);
+
+        let loader = FileIdentityLoader::new(&identity_dir, prompt_root.path());
+        let err = loader.load(&test_request("test-missing")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found") || msg.contains("does_not_exist.md"),
+            "missing prompt asset file should be rejected, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn file_loader_resolves_prompt_asset_relative_to_identity_dir() {
+        let prompt_root = TempDir::new().unwrap();
+        let identity_dir = prompt_root.path().join("relative-test");
+        let sub_dir = identity_dir.join("prompts");
+        fs::create_dir_all(&sub_dir).unwrap();
+        // Create the prompt asset in a subdirectory.
+        fs::write(sub_dir.join("system.md"), "# System prompt").unwrap();
+        let toml_content = r#"
+[package]
+name = "test"
+version = "0.1.0"
+
+[[identities]]
+name = "test-relative"
+default_mode = "engineer"
+supported_base_types = ["local-harness"]
+
+[[identities.prompt_assets]]
+id = "system"
+path = "prompts/system.md"
+"#;
+        write_identity_toml(&identity_dir, toml_content);
+
+        let loader = FileIdentityLoader::new(&identity_dir, prompt_root.path());
+        let manifest = loader.load(&test_request("test-relative")).unwrap();
+        assert_eq!(manifest.prompt_assets.len(), 1);
+        assert_eq!(manifest.prompt_assets[0].id.as_str(), "system");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_loader_rejects_symlink_escaping_identity_dir() {
+        use std::os::unix::fs as unix_fs;
+
+        let prompt_root = TempDir::new().unwrap();
+        let identity_dir = prompt_root.path().join("symlink-escape");
+        let prompts_dir = identity_dir.join("prompts");
+        fs::create_dir_all(&prompts_dir).unwrap();
+
+        // Create a file outside the identity directory to be the symlink target.
+        let outside_file = prompt_root.path().join("secret.txt");
+        fs::write(&outside_file, "secret content").unwrap();
+
+        // Create a symlink inside prompts/ that points outside the identity dir.
+        unix_fs::symlink(&outside_file, prompts_dir.join("evil.md")).unwrap();
+
+        let toml_content = r#"
+[package]
+name = "test"
+version = "0.1.0"
+
+[[identities]]
+name = "test-symlink"
+default_mode = "engineer"
+supported_base_types = ["local-harness"]
+
+[[identities.prompt_assets]]
+id = "evil"
+path = "prompts/evil.md"
+"#;
+        write_identity_toml(&identity_dir, toml_content);
+
+        let loader = FileIdentityLoader::new(&identity_dir, prompt_root.path());
+        let err = loader
+            .load(&test_request("test-symlink"))
+            .expect_err("symlink escaping identity dir should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("escapes identity directory"),
+            "error should mention directory escape, got: {msg}"
+        );
     }
 }
