@@ -14,17 +14,22 @@ related:
 
 # Configure and monitor the disk health check
 
-Simard runs an automated disk health check at the start of every OODA cycle.
-When the home partition exceeds 80% usage, it cleans stale engineer worktrees,
-cargo build artifacts, and old LadybugDB backups — then reports what it freed.
+Simard runs a two-tier automated disk health check at the start of every OODA
+cycle:
 
-This guide shows how to observe the check in action, tune its thresholds, and
-handle the edge cases.
+1. **Tier 1 (≥95%):** Deterministic Rust cleanup — immediately deletes
+   known-safe build artifacts. No LLM, no recipe, no external dependencies.
+2. **Tier 2 (≥80%):** Recipe-based LLM cleanup — an agent makes nuanced
+   decisions about what to clean based on current disk pressure.
+
+This guide shows how to observe both tiers, tune their thresholds, and
+handle edge cases.
 
 ## When to use this
 
 Use this guide when:
 
+- The daemon logged `EMERGENCY disk cleanup` and you want to understand what happened
 - The daemon logged `disk health: N% used` and you want to understand what happened
 - You want to change the 80% trigger threshold or 24h worktree age limit
 - You want to change how many LadybugDB backups are retained
@@ -32,6 +37,26 @@ Use this guide when:
 - Disk is critically low despite the automated check
 
 ## Observe the disk health check
+
+### Tier 1 (emergency cleanup)
+
+The daemon logs emergency cleanup with `EMERGENCY` prefix:
+
+```bash
+grep "EMERGENCY" ~/.simard/ooda.log | tail -5
+```
+
+Typical output:
+
+```
+[2026-05-24T15:42:01Z] [simard] EMERGENCY disk cleanup: 97% -> freed 53687091200 bytes
+[2026-05-24T15:42:01Z] [simard] emergency actions: ["Removed target/debug/ (48123 MB)", ...]
+```
+
+Emergency cleanup only fires when disk is ≥95%. If you never see these logs,
+disk pressure hasn't reached critical levels — Tier 2 is handling it.
+
+### Tier 2 (recipe-based cleanup)
 
 The daemon logs a one-liner per cycle:
 
@@ -56,7 +81,23 @@ journalctl --user -u simard-ooda --since '1 hour ago' \
 
 ## Tune cleanup thresholds
 
-All thresholds live in the recipe YAML — no Rust recompile needed:
+### Tier 1 (emergency cleanup) — compiled Rust
+
+The 95% threshold is hardcoded in `src/disk_health.rs`:
+
+```rust
+if pct < 95 {
+    return None;
+}
+```
+
+Changing this requires editing the Rust source and recompiling. This is
+intentional — the emergency path should not be accidentally misconfigured.
+The backup retention count (keep 2) is also hardcoded.
+
+### Tier 2 (recipe-based cleanup) — editable YAML
+
+All Tier 2 thresholds live in the recipe YAML — no Rust recompile needed:
 
 ```bash
 $EDITOR prompt_assets/simard/recipes/disk-health-check.yaml
@@ -200,14 +241,14 @@ If the daemon logs a parse error mentioning JSON or serde, this means
 
 ## Handle persistent disk pressure
 
-If the automated check cleans everything it can and disk is still above 90%,
-the daemon logs:
+If both tiers run and disk is still above 90%, the daemon logs:
 
 ```
 disk still above 90% after cleanup — builds may fail
 ```
 
-At this point:
+This means Tier 1 (emergency) deleted what it could and Tier 2 (recipe)
+either also cleaned or failed. At this point:
 
 1. **Check the main worktree's target dir:**
    ```bash
@@ -276,7 +317,17 @@ You should see one `disk health:` line per OODA cycle (default: every 60s).
 
 ## Manually trigger cleanup
 
-To run cleanup outside the daemon without waiting for a cycle:
+### Tier 1 only (Rust binary — must rebuild to change behavior)
+
+Tier 1 (`emergency_cleanup`) runs as part of the daemon loop and cannot be
+invoked standalone from the CLI. It triggers automatically when disk ≥95%.
+
+To simulate emergency conditions for testing, fill the disk to ≥95% and
+restart the daemon — Tier 1 will fire on the first cycle.
+
+### Tier 2 only (recipe — no rebuild needed)
+
+To run the recipe cleanup outside the daemon without waiting for a cycle:
 
 ```bash
 # Run the recipe directly (JSON envelope mode, same as daemon)

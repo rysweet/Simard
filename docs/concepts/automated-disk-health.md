@@ -97,6 +97,52 @@ The tradeoff is that a persistently broken health check degrades silently to
 the `disk_pressure` hard-stop behavior. The warning in `ooda.log` (under
 `$SIMARD_STATE_ROOT`) is the operator's signal to investigate.
 
+### Two-tier cleanup: deterministic first, then intelligent
+
+The disk health module runs two tiers of cleanup, in strict order, each
+OODA cycle:
+
+**Tier 1 — Deterministic emergency cleanup (≥95% disk)**
+
+Pure Rust. No LLM, no recipe, no external process beyond `df`/`du`. When
+disk usage is critically high (≥95%), `emergency_cleanup()` immediately
+deletes known-safe regenerable artifacts:
+
+| Target                              | Why safe to delete                                 |
+| ----------------------------------- | -------------------------------------------------- |
+| `repo_root/target/debug/`           | Main build cache — `cargo build` regenerates       |
+| `repo_root/target/llvm-cov-target/` | Coverage artifacts — `cargo llvm-cov` regenerates  |
+| `worktrees/*/target/`               | Engineer worktree build caches — all regenerable   |
+| `state_root/cargo-target/`          | Legacy shared target — cold rebuild on next build  |
+| `state_root/shared-target/`         | Current shared target — cold rebuild on next build |
+| `state_root/backups/*` (beyond 2)   | Stale LadybugDB backups — keeps 2 most recent      |
+
+This tier exists because the recipe tier (Tier 2) needs disk space to spawn
+an LLM agent process. At 100% disk, the recipe deadlocks — it can't write
+a temp file or spawn a process. The deterministic Rust cleanup runs first
+to ensure there's enough headroom for the agent to start.
+
+Failures in Tier 1 are silent per-item (`is_ok()` guards) — if one
+`remove_dir_all` fails, the rest still attempt. The function returns a
+`DiskHealthReport` with what was actually freed.
+
+**Tier 2 — Recipe-based LLM cleanup (≥80% disk)**
+
+After Tier 1 runs (or skips because disk is below 95%), the daemon invokes
+the recipe-based cleanup (`run_disk_health_check()`). This tier uses an LLM
+agent that can make nuanced decisions — for example, selectively removing
+only the oldest worktrees, or prioritizing by size.
+
+The recipe tier is more capable but less reliable:
+- Requires `recipe-runner-rs` on PATH
+- Requires the recipe YAML to exist
+- Depends on LLM availability and correct output parsing
+- Needs disk space to spawn the agent process
+
+This is why Tier 1 is the *primary* defense: it always works (it's compiled
+Rust with no external dependencies beyond basic coreutils), and it creates
+the headroom Tier 2 needs to function.
+
 ### Layered defense
 
 The disk health system does not replace existing mechanisms — it layers on
@@ -105,13 +151,15 @@ top of them:
 ```
 Layer 0: .cargo/config.toml shared target dir
          ↓ Prevents per-worktree target dir creation
-Layer 1: disk_health recipe (per-cycle)
-         ↓ Proactive cleanup at 80% usage
-Layer 2: disk_pressure module (per-cycle)
+Layer 1: emergency_cleanup() — deterministic Rust (≥95%, per-cycle)
+         ↓ Hard-coded artifact deletion, no LLM needed
+Layer 2: disk_health recipe — LLM agent (≥80%, per-cycle)
+         ↓ Intelligent, adaptive cleanup with nuanced decisions
+Layer 3: disk_pressure module (per-cycle)
          ↓ Hard stop at critical thresholds, prevents engineer spawn
-Layer 3: sweep_orphaned_worktrees (boot-time)
+Layer 4: sweep_orphaned_worktrees (boot-time)
          ↓ Catches orphans from prior crashes
-Layer 4: EngineerWorktree RAII cleanup (per-engineer)
+Layer 5: EngineerWorktree RAII cleanup (per-engineer)
          ↓ Deterministic cleanup on normal exit
 ```
 
@@ -185,9 +233,13 @@ a newly-started engineer writes the claim before touching the worktree. The
 residual TOCTOU window (between claim creation and the health check's stat)
 is sub-second and matches the accepted risk in `sweep_orphaned_worktrees`.
 
-## Why a recipe and not pure Rust
+## Why both Rust and a recipe
 
-The cleanup logic could be written entirely in Rust. We chose a recipe
+The critical-path cleanup (≥95%) is pure Rust — no external dependencies,
+no failure modes beyond filesystem errors. This is the deterministic
+backstop that prevents ENOSPC deadlock.
+
+The moderate-pressure cleanup (≥80%) uses a recipe with an LLM agent
 because:
 
 1. **Thresholds change.** The 80% trigger, 24h age, and 5-backup retention
@@ -207,9 +259,11 @@ because:
    judgement, progress checking, and other policy decisions. Disk health
    follows the same pattern.
 
-The Rust code is a thin shim. The cleanup prompt lives in the recipe YAML as
-a readable agent step, not compiled into the binary. Operators can `cat` it,
-`diff` it, or review the agent's decisions in logs.
+The Rust code serves two roles: the `emergency_cleanup()` function is a
+full cleanup implementation (not a shim), while `run_disk_health_check()`
+is a thin shim that delegates to the recipe. The recipe's cleanup prompt
+lives in the YAML as a readable agent step, not compiled into the binary.
+Operators can `cat` it, `diff` it, or review the agent's decisions in logs.
 
 ### Two-layer output: JSON envelope → text markers
 

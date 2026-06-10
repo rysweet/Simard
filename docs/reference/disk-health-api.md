@@ -15,14 +15,39 @@ related:
 
 **Module:** `src/disk_health.rs`
 
-The `disk_health` module is a thin Rust shim that invokes `recipe-runner-rs`
-to run the disk health check recipe, deserializes the JSON envelope, extracts
-the agent step output, and parses text markers into a structured
-`DiskHealthReport`.
+The `disk_health` module provides two-tier disk health management:
+
+1. **`emergency_cleanup()`** — deterministic Rust cleanup at critical disk
+   levels (≥95%). No LLM, no recipe, no external dependencies.
+2. **`run_disk_health_check()`** — recipe-based LLM cleanup at moderate
+   disk levels (≥80%). Invokes `recipe-runner-rs` with JSON envelope parsing.
 
 ## Data flow
 
+### Tier 1: Emergency cleanup (deterministic)
+
 ```
+emergency_cleanup(repo_root, state_root)
+       │
+       ▼
+get_disk_usage_pct(repo_root)  →  df --output=pcent
+       │
+       ├─ < 95%  →  return None (no action needed)
+       │
+       └─ ≥ 95%  →  delete known-safe artifacts:
+              │        target/debug/, target/llvm-cov-target/,
+              │        worktrees/*/target/, cargo-target/, shared-target/,
+              │        stale backups (keep 2)
+              ▼
+       Some(DiskHealthReport { disk_used_pct, freed_bytes, actions_taken })
+```
+
+### Tier 2: Recipe-based cleanup (LLM agent)
+
+```
+run_disk_health_check(repo_root, state_root)
+       │
+       ▼
 recipe-runner-rs --output-format json
        │
        ▼
@@ -43,6 +68,42 @@ DiskHealthReport { disk_used_pct, freed_bytes, actions_taken }
 ```
 
 ## Public API
+
+### `emergency_cleanup(repo_root, state_root) → Option<DiskHealthReport>`
+
+Tier 1 deterministic cleanup. Runs when disk usage is critically high (≥95%).
+
+**Parameters:**
+
+| Parameter    | Type     | Description                                                  |
+| ------------ | -------- | ------------------------------------------------------------ |
+| `repo_root`  | `&Path`  | Repository root — used to find `target/` and `worktrees/`    |
+| `state_root` | `&Path`  | Simard state directory (`~/.simard`) — cargo caches, backups |
+
+**Returns:** `Option<DiskHealthReport>`
+
+- `None` — disk usage is below 95%, no action taken
+- `Some(report)` — cleanup was performed; report contains what was freed
+
+**Deletion targets (all regenerable):**
+
+| Target                              | Condition     | Regeneration cost         |
+| ----------------------------------- | ------------- | ------------------------- |
+| `repo_root/target/debug/`           | Always        | Full rebuild (~10 min)    |
+| `repo_root/target/llvm-cov-target/` | Always        | `cargo llvm-cov` rerun    |
+| `repo_root/worktrees/*/target/`     | Always        | Per-worktree rebuild      |
+| `state_root/cargo-target/`          | Always        | Cold build                |
+| `state_root/shared-target/`         | Always        | Cold build                |
+| `state_root/backups/*` beyond 2     | Always        | Reduced rollback window   |
+
+**Error handling:** Per-item. Each `remove_dir_all()`/`remove_file()` is
+guarded by `.is_ok()` — if one deletion fails (permissions, busy file), the
+rest still attempt. The function never returns `Err`; it returns `None` (below
+threshold) or `Some(report)` (attempted cleanup with whatever succeeded).
+
+**Security:** All paths are constructed from `repo_root`/`state_root` with
+hardcoded path segments. No user-controlled input reaches `remove_dir_all()`.
+`Command::new("df")`/`Command::new("du")` use `.arg()` — no shell injection.
 
 ### `run_disk_health_check(repo_root, state_root) → SimardResult<DiskHealthReport>`
 
@@ -157,6 +218,19 @@ prompts — because it only matches lines starting with the exact marker
 prefixes. This is why the agent can freely reason and run commands as long as
 it emits the markers somewhere in its output.
 
+### `get_disk_usage_pct(path) → Option<u8>` (private)
+
+Returns the disk usage percentage for the filesystem containing `path`.
+Runs `df --output=pcent <path>`, parses the second line, strips the `%`
+suffix. Returns `None` on any failure (command not found, parse error).
+
+Used by `emergency_cleanup()` to check thresholds.
+
+### `dir_size_bytes(path) → u64` (private)
+
+Estimates directory size in bytes using `du -sb <path>`. Returns `0` on
+any failure. Used by `emergency_cleanup()` to report freed space.
+
 ### `resolve_recipe_path(repo_root) → Option<PathBuf>`
 
 Resolves the recipe YAML path. Checks in order:
@@ -180,6 +254,34 @@ recipe-runner-rs <recipe_path> --output-format json -c state_root=<state_root>
 - `AMPLIHACK_AGENT_BINARY` env var — set from `RuntimeConfig` so the recipe
   uses the correct agent binary.
 
+## Daemon integration
+
+The OODA daemon calls both tiers in sequence each cycle
+(`src/operator_commands_ooda/daemon/mod.rs`):
+
+```rust
+// Tier 1: deterministic emergency cleanup (no LLM, no recipe)
+if let Some(emergency_report) =
+    crate::disk_health::emergency_cleanup(&bridges.repo_root, &state_root)
+{
+    daemon_log(&state_root, &format!(
+        "[simard] EMERGENCY disk cleanup: {}% -> freed {} bytes",
+        emergency_report.disk_used_pct, emergency_report.freed_bytes
+    ));
+}
+
+// Tier 2: recipe-based LLM cleanup (moderate pressure, nuanced decisions)
+match crate::disk_health::run_disk_health_check(&bridges.repo_root, &state_root) {
+    Ok(report) => { /* log summary */ }
+    Err(e) => { /* WARN and continue — never blocks OODA cycle */ }
+}
+```
+
+**Key invariant:** Tier 1 always runs before Tier 2. If Tier 1 fires (≥95%),
+it frees space so Tier 2's agent can spawn. If Tier 1 doesn't fire (<95%),
+Tier 2 handles moderate pressure (≥80%). Both tiers return `DiskHealthReport`
+with the same struct, so the daemon logging is uniform.
+
 ## Test coverage
 
 The module has comprehensive inline tests:
@@ -193,6 +295,10 @@ The module has comprehensive inline tests:
 | JSON envelope deserialization | 1   | Full pipeline: JSON → RecipeOutput → parse → report       |
 | Noisy agent output          | 1     | Markers embedded in LLM conversation text                 |
 | `truncate` helper           | 5     | Short, exact, long, empty, zero-max                       |
+
+> **Note:** `emergency_cleanup()` is not unit-tested because it requires
+> real filesystem state (`df`, `du`, `remove_dir_all`). It is exercised by
+> the daemon's integration test suite and manual ENOSPC recovery scenarios.
 
 ## Why `--output-format json` and not text
 
@@ -213,16 +319,8 @@ making it accessible to the calling process. This is the same pattern used by
 `stewardship::recipe_merge_judge`, which also needs to read structured data
 from recipe step output.
 
-## Implementation notes
-
-When implementing the fix (issue #2212), update the module doc comment at the
-top of `src/disk_health.rs`. The current `//!` comment says "Parses stdout
-JSON into `DiskHealthReport`", which reflects the pre-fix behavior. After the
-fix, update it to describe the two-layer pipeline: deserialize the JSON
-envelope, extract step output, parse text markers into `DiskHealthReport`.
-
 ## Related
 
-- [Automated disk health (concept)](../concepts/automated-disk-health.md) — design rationale
+- [Automated disk health (concept)](../concepts/automated-disk-health.md) — design rationale and two-tier architecture
 - [Configure disk health check (how-to)](../howto/configure-disk-health-check.md) — operator guide
 - [Base type adapters](./base-type-adapters.md) — adapter pattern context
