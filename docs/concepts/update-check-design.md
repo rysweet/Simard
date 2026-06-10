@@ -57,8 +57,10 @@ This means:
 
 `run_update_check_background()` returns an `Option<mpsc::Receiver<String>>`.
 The TUI stores the receiver in the `App` struct and calls `try_recv()`
-on each refresh cycle (every 2 seconds). When the notice arrives, it
-is stored in `App.update_notice` and rendered in the footer.
+on each event-loop tick (the poll timeout is 2 seconds, but this is not
+a dedicated timer — any input event also triggers a tick). When the
+notice arrives, it is stored in `App.update_notice`, the receiver is
+set to `None` (one-shot), and the notice is rendered in the footer.
 
 This follows the same pattern already used for GitHub stats in the
 Stats tab — a background thread sends data through a channel, and the

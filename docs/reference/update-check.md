@@ -23,7 +23,7 @@ never delays CLI startup or freezes the TUI.
 | Context | Function | Behavior |
 |---------|----------|----------|
 | CLI (`simard`) | `run_update_check()` | Fire-and-forget: spawns a detached thread that prints to stderr. The thread is **not** joined — the CLI proceeds immediately. |
-| TUI (`simard-tui`) | `run_update_check_background()` | Channel-based: spawns a thread that sends the notice string through an `mpsc::Receiver<String>`. The TUI polls `try_recv()` in its refresh cycle and renders the notice in-band. No direct stderr writes. |
+| TUI (`simard-tui`) | `run_update_check_background()` | Channel-based: spawns a thread that sends the notice string through an `mpsc::Receiver<String>`. The TUI polls `try_recv()` in its event loop; after receiving the notice, the receiver is set to `None` (one-shot). No direct stderr writes. |
 
 The distinction matters because the TUI runs in raw mode on an
 alternate screen — any uncoordinated stderr write would corrupt the
@@ -34,7 +34,11 @@ display.
 | Variable | Effect |
 |----------|--------|
 | `SIMARD_NO_UPDATE_CHECK=1` | Skip the check entirely. Both `run_update_check()` and `run_update_check_background()` return immediately (the latter returns `None`). |
-| `SIMARD_NONINTERACTIVE=1` | The notice is printed but the "run `simard self-update`" hint is still shown. No interactive prompt. |
+
+> **Note:** `SIMARD_NONINTERACTIVE=1` is a project-wide env var but is *not*
+> checked by the update module. The update notice is always non-interactive
+> (informational only, no prompt), so `SIMARD_NONINTERACTIVE` has no effect
+> on update check behavior.
 
 ## Network behavior
 
@@ -44,7 +48,9 @@ display.
 2. **`curl` fallback** — on *any* `gh` failure (missing binary, auth
    failure, timeout, non-zero exit), falls back to a direct
    `curl -sS` request to the GitHub REST API. Connect timeout 3 seconds,
-   total timeout 5 seconds.
+   total timeout 5 seconds. Hard kill at 6 seconds if curl hasn't
+   exited (deliberately 1 second longer than `--max-time` to allow
+   graceful shutdown).
 3. **No caching** — every launch makes one HTTP request. The cost is
    negligible (one small JSON response) and avoids stale-cache bugs.
 
@@ -55,8 +61,10 @@ produces an error message — it fails silently.
 
 ### Semver parsing
 
-`parse_semver(v)` parses a `"major.minor.patch[-prerelease][+build]"`
-string into a 4-tuple `(major, minor, patch, is_release)`:
+`parse_semver(v)` is an internal (private) function that parses a
+`"major.minor.patch[-prerelease][+build]"` string into a 4-tuple
+`(major, minor, patch, is_release)`. It is not part of the public
+crate API — it is tested via `#[cfg(test)]` but not exported:
 
 | Input | Parsed |
 |-------|--------|
@@ -64,6 +72,7 @@ string into a 4-tuple `(major, minor, patch, is_release)`:
 | `"1.0.0-rc1"` | `(1, 0, 0, false)` |
 | `"1.0.0-beta.1"` | `(1, 0, 0, false)` |
 | `"1.2.3+build.456"` | `(1, 2, 3, true)` |
+| `"1.2.3+build-456"` | `None` — **known limitation**: the parser finds `-` inside the build metadata before checking for `+`. Versions with hyphens in build metadata are rejected. GitHub Releases tags do not use this format, so this does not affect real-world checks. |
 | `"bad"` | `None` |
 
 The `is_release` flag (`true` for releases, `false` for prereleases)
@@ -79,8 +88,9 @@ version. Since Rust tuple comparison evaluates left-to-right and
 
 ### `is_newer(latest, current)`
 
-Returns `true` if `latest` is strictly greater than `current` by
-4-tuple comparison. Returns `false` if either string fails to parse.
+Internal (private) function. Returns `true` if `latest` is strictly
+greater than `current` by 4-tuple comparison. Returns `false` if
+either string fails to parse.
 
 ## Platform asset detection
 

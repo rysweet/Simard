@@ -93,10 +93,12 @@ request is made.
 
 ## 4. Verify the check works
 
-Run any command and look for the notice on stderr:
+Run a command that takes at least a few seconds and look for the
+notice on stderr. Fast commands like `simard --version` may exit
+before the background check completes — use a longer-running command:
 
 ```bash
-simard --version 2>&1 | head -5
+simard status 2>&1 | head -10
 ```
 
 If you are already on the latest version, no notice appears. To

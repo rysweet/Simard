@@ -335,8 +335,8 @@ mod tests {
     #[test]
     fn run_update_check_background_returns_receiver() {
         // With check disabled, returns None
-        std::env::set_var("SIMARD_NO_UPDATE_CHECK", "1");
+        unsafe { std::env::set_var("SIMARD_NO_UPDATE_CHECK", "1") };
         assert!(run_update_check_background().is_none());
-        std::env::remove_var("SIMARD_NO_UPDATE_CHECK");
+        unsafe { std::env::remove_var("SIMARD_NO_UPDATE_CHECK") };
     }
 }
