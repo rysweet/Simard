@@ -393,6 +393,117 @@ pub fn extract_decision_participants_pub(
     extract_decision_participants(decision, messages)
 }
 
+// ── Risk extraction (issue #2084, spec line 637) ───────────────────────
+
+/// Signal phrases that indicate a risk is being discussed.
+const RISK_SIGNALS: &[&str] = &[
+    "risk:",
+    "risk is",
+    "risky",
+    "at risk",
+    "risks include",
+    "concern:",
+    "concern is",
+    "worried about",
+    "worry about",
+    "danger",
+    "blocker",
+    "blocking",
+    "could fail",
+    "might fail",
+    "may fail",
+    "could break",
+    "might break",
+    "threat",
+    "vulnerability",
+    "dependency risk",
+    "single point of failure",
+];
+
+/// Extract identified risks from transcript messages.
+///
+/// Uses heuristic signal phrases to identify risk statements from both user
+/// and assistant messages. Required by spec line 637 ("identified risks").
+/// Added in issue #2084.
+pub fn extract_risks(messages: &[ConversationMessage]) -> Vec<String> {
+    let mut risks = Vec::new();
+    for msg in messages {
+        for sentence in split_sentences(&msg.content) {
+            let lower = sentence.trim().to_lowercase();
+            if lower.len() < 10 {
+                continue;
+            }
+            let has_signal = RISK_SIGNALS.iter().any(|s| lower.contains(s));
+            if has_signal {
+                let text = sentence.trim().to_string();
+                if !risks.iter().any(|r: &String| r.to_lowercase() == lower) {
+                    risks.push(text);
+                }
+            }
+        }
+    }
+    risks
+}
+
+// ── Disagreement extraction (issue #2084, spec line 645) ────────────────
+
+/// Signal phrases that indicate disagreement or dissent.
+const DISAGREEMENT_SIGNALS: &[&str] = &[
+    "disagree",
+    "i disagree",
+    "i don't agree",
+    "i don\u{2019}t agree",
+    "i'm not sure",
+    "i\u{2019}m not sure",
+    "not convinced",
+    "pushback",
+    "push back",
+    "on the other hand",
+    "alternative view",
+    "counterpoint",
+    "counter-point",
+    "dissent",
+    "objection",
+    "i object",
+    "however, i think",
+    "but i think",
+    "i'd argue",
+    "i\u{2019}d argue",
+    "devil's advocate",
+    "devil\u{2019}s advocate",
+    "concern about this",
+    "not aligned",
+    "strongly opposed",
+];
+
+/// Extract disagreements and dissenting views from transcript messages.
+///
+/// Uses heuristic signal phrases to identify disagreement or uncertainty
+/// statements. Required by spec line 645 ("surface disagreement and
+/// uncertainty instead of smoothing over them"). Added in issue #2084.
+pub fn extract_disagreements(messages: &[ConversationMessage]) -> Vec<String> {
+    let mut disagreements = Vec::new();
+    for msg in messages {
+        for sentence in split_sentences(&msg.content) {
+            let lower = sentence.trim().to_lowercase();
+            if lower.len() < 10 {
+                continue;
+            }
+            let has_signal = DISAGREEMENT_SIGNALS.iter().any(|s| lower.contains(s));
+            if has_signal {
+                let text = sentence.trim().to_string();
+                if !disagreements
+                    .iter()
+                    .any(|d: &String| d.to_lowercase() == lower)
+                {
+                    disagreements.push(text);
+                }
+            }
+        }
+    }
+    disagreements
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

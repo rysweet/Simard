@@ -314,6 +314,28 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                             ))
                             .await;
                     }
+                    MeetingCommand::Risk(text) => {
+                        backend.push_explicit_risk(&text);
+                        let content = format!("Risk recorded: {text}");
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": content})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Disagree(text) => {
+                        backend.push_explicit_disagreement(&text);
+                        let content = format!("Disagreement recorded: {text}");
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": content})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                    }
                     MeetingCommand::Recap => {
                         let status = backend.status();
                         let themes = backend.explicit_themes();

@@ -9,7 +9,8 @@ use crate::base_types::BaseTypeSession;
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_backend::persist::{
-    extract_action_items, extract_decisions, extract_open_questions,
+    extract_action_items, extract_decisions, extract_disagreements, extract_open_questions,
+    extract_risks,
 };
 use crate::meeting_backend::{
     MeetingBackend, MeetingCommand, Role, parse_command, strip_ansi_escapes,
@@ -80,6 +81,62 @@ fn render_backend_error<W: Write>(output: &mut W, source: &str, err: &dyn std::f
     writeln!(output, "{}", yellow(&format!("  ↳ {hint}"))).ok();
 }
 
+/// Heuristic: detect messages that look like implementation work rather than
+/// planning/alignment discussion. Used by the drift guard (issue #2084,
+/// spec line 643: "Meeting mode should not edit code unless the user
+/// explicitly transitions to engineer mode").
+///
+/// Returns `true` when the message contains strong implementation signals
+/// (code fences, build commands, file-edit directives). Discussion *about*
+/// code (e.g. "we should use Rust") does not trigger a warning.
+fn looks_like_implementation(text: &str) -> bool {
+    let lower = text.to_lowercase();
+
+    // Code fences (```rust, ```python, etc.)
+    if text.contains("```") && text.len() > 10 {
+        return true;
+    }
+
+    // Build / test / deploy commands
+    const IMPL_COMMANDS: &[&str] = &[
+        "cargo build",
+        "cargo test",
+        "cargo run",
+        "npm install",
+        "npm run",
+        "pip install",
+        "git commit",
+        "git push",
+        "make build",
+        "make test",
+        "docker build",
+        "docker run",
+        "kubectl apply",
+    ];
+    if IMPL_COMMANDS.iter().any(|cmd| lower.contains(cmd)) {
+        return true;
+    }
+
+    // File-edit directives
+    const EDIT_SIGNALS: &[&str] = &[
+        "edit src/",
+        "edit lib/",
+        "modify src/",
+        "modify lib/",
+        "change the file",
+        "update the file",
+        "write to src/",
+        "write to lib/",
+        "create src/",
+        "create lib/",
+    ];
+    if EDIT_SIGNALS.iter().any(|sig| lower.contains(sig)) {
+        return true;
+    }
+
+    false
+}
+
 /// Run the interactive meeting REPL.
 ///
 /// Creates a `MeetingBackend` and loops on stdin. Returns a `MeetingSession`
@@ -141,7 +198,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             MeetingCommand::Help => {
                 writeln!(
                     output,
-                    "Commands:\n  /status    — show session info\n  /state     — show current decisions, open questions, action items\n  /template  — list meeting templates\n  /template <name> — apply a template (standup, 1on1, retro, planning)\n  /theme <text>    — record a theme for this meeting\n  /decision <text> [--rationale <why>] — record a decision (optional rationale)\n  /action <text>   — record an action item (assignee/deadline parsed inline)\n  /question <text> — record an open question deterministically\n  /owner <name>    — name the next agent/persona/human expected to action this handoff\n  /goal <text>     — set the meeting's overarching objective\n  /recap     — show color-coded session recap\n  /preview   — preview the handoff artifact\n  /export    — export meeting as markdown\n  /close     — end meeting and persist\n  /help      — this message\n\nEverything else is natural conversation with Simard."
+                    "Commands:\n  /status    — show session info\n  /state     — show current decisions, open questions, action items, risks, disagreements\n  /template  — list meeting templates\n  /template <name> — apply a template (standup, 1on1, retro, planning)\n  /theme <text>    — record a theme for this meeting\n  /decision <text> [--rationale <why>] — record a decision (optional rationale)\n  /action <text>   — record an action item (assignee/deadline parsed inline)\n  /question <text> — record an open question deterministically\n  /risk <text>     — record an identified risk\n  /disagree <text> — record a disagreement or dissenting view\n  /owner <name>    — name the next agent/persona/human expected to action this handoff\n  /goal <text>     — set the meeting's overarching objective\n  /recap     — show color-coded session recap\n  /preview   — preview the handoff artifact\n  /export    — export meeting as markdown\n  /close     — end meeting and persist\n  /help      — this message\n\nEverything else is natural conversation with Simard."
                 )
                 .ok();
             }
@@ -165,6 +222,8 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 let inferred_decisions = extract_decisions(messages);
                 let inferred_questions = extract_open_questions(messages);
                 let inferred_actions = extract_action_items(messages);
+                let inferred_risks = extract_risks(messages);
+                let inferred_disagreements = extract_disagreements(messages);
 
                 let mut decisions: Vec<String> = backend
                     .explicit_decisions()
@@ -255,6 +314,49 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                     }
                 }
                 writeln!(output).ok();
+
+                // ── Risks (issue #2084, spec line 637) ──
+                let mut state_risks: Vec<String> = backend.explicit_risks().to_vec();
+                for r in inferred_risks {
+                    let lower = r.to_lowercase();
+                    if !state_risks.iter().any(|e| e.to_lowercase() == lower) {
+                        state_risks.push(r);
+                    }
+                }
+
+                writeln!(output, "{}", yellow("── Risks ──")).ok();
+                if state_risks.is_empty() {
+                    writeln!(output, "  _(none)_").ok();
+                } else {
+                    for (i, r) in state_risks.iter().enumerate() {
+                        let safe = strip_ansi_escapes(r);
+                        writeln!(output, "  {}. {safe}", i + 1).ok();
+                    }
+                }
+
+                // ── Disagreements (issue #2084, spec line 645) ──
+                let mut state_disagreements: Vec<String> =
+                    backend.explicit_disagreements().to_vec();
+                for d in inferred_disagreements {
+                    let lower = d.to_lowercase();
+                    if !state_disagreements
+                        .iter()
+                        .any(|e| e.to_lowercase() == lower)
+                    {
+                        state_disagreements.push(d);
+                    }
+                }
+
+                writeln!(output, "\n{}", yellow("── Disagreements ──")).ok();
+                if state_disagreements.is_empty() {
+                    writeln!(output, "  _(none)_").ok();
+                } else {
+                    for (i, d) in state_disagreements.iter().enumerate() {
+                        let safe = strip_ansi_escapes(d);
+                        writeln!(output, "  {}. {safe}", i + 1).ok();
+                    }
+                }
+                writeln!(output).ok();
             }
             MeetingCommand::Theme(text) => {
                 backend.push_theme(text.clone());
@@ -289,6 +391,21 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             MeetingCommand::Goal(text) => {
                 backend.set_goal(&text);
                 writeln!(output, "{}", cyan(&format!("Goal recorded: {text}"))).ok();
+                checkpoint_wip(&backend);
+            }
+            MeetingCommand::Risk(text) => {
+                backend.push_explicit_risk(&text);
+                writeln!(output, "{}", yellow(&format!("Risk recorded: {text}"))).ok();
+                checkpoint_wip(&backend);
+            }
+            MeetingCommand::Disagree(text) => {
+                backend.push_explicit_disagreement(&text);
+                writeln!(
+                    output,
+                    "{}",
+                    yellow(&format!("Disagreement recorded: {text}"))
+                )
+                .ok();
                 checkpoint_wip(&backend);
             }
             MeetingCommand::Recap => {
@@ -397,6 +514,25 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 if text.is_empty() {
                     continue;
                 }
+
+                // ── Drift guard (issue #2084, spec line 643) ──
+                // Meeting mode "should not edit code unless the user
+                // explicitly transitions to engineer mode." Warn when
+                // the operator's message looks like implementation work.
+                if looks_like_implementation(&text) {
+                    writeln!(
+                        output,
+                        "{}",
+                        yellow(
+                            "[drift guard] This looks like implementation work. \
+                             Meeting mode is for planning and alignment — use /close \
+                             to transition to engineer mode, or continue if this is \
+                             intentional discussion about implementation details."
+                        )
+                    )
+                    .ok();
+                }
+
                 // Show user turn prefix
                 let user_prefix = format_turn_prefix_now(&Role::User);
                 writeln!(output, "{} {}", cyan(&user_prefix), text).ok();
@@ -481,6 +617,22 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 writeln!(output, "\n── Themes ──").ok();
                 for t in &summary.themes {
                     writeln!(output, "  - {t}").ok();
+                }
+            }
+
+            // Display risks (issue #2084, spec line 637)
+            if !summary.risks.is_empty() {
+                writeln!(output, "\n{}", yellow("── Risks ──")).ok();
+                for (i, r) in summary.risks.iter().enumerate() {
+                    writeln!(output, "  {}. {r}", i + 1).ok();
+                }
+            }
+
+            // Display disagreements (issue #2084, spec line 645)
+            if !summary.disagreements.is_empty() {
+                writeln!(output, "\n{}", yellow("── Disagreements ──")).ok();
+                for (i, d) in summary.disagreements.iter().enumerate() {
+                    writeln!(output, "  {}. {d}", i + 1).ok();
                 }
             }
 
@@ -601,5 +753,7 @@ fn empty_closed_session(topic: &str) -> MeetingSession {
         themes: Vec::new(),
         next_owner: None,
         goal: None,
+        risks: Vec::new(),
+        disagreements: Vec::new(),
     }
 }
