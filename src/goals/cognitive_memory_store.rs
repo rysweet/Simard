@@ -32,6 +32,10 @@ const GOAL_STORE_FACT_CONCEPT: &str = "goal-store:record";
 const GOAL_STORE_SOURCE: &str = "goal-store";
 /// Tag recorded with every fact.
 const GOAL_STORE_TAG: &str = "goal-store";
+/// Description prefix for goal-related prospective memories, used to
+/// distinguish them from non-goal prospective entries (e.g. meeting
+/// action items).
+const GOAL_PROSPECTIVE_PREFIX: &str = "goal:";
 /// Pull window for `list()` reads. The board enforces
 /// `MAX_ACTIVE_GOALS = 5`; even with status churn the per-process record
 /// count stays modest, so 256 covers realistic deployments without
@@ -148,6 +152,8 @@ impl GoalStore for CognitiveMemoryGoalStore {
     fn put(&self, record: GoalRecord) -> SimardResult<()> {
         let content = Self::encode(&record)?;
         let writer = launch_writer_bridge(&self.state_root)?;
+
+        // Primary storage: semantic fact (authoritative record).
         writer.ops().store_fact(
             GOAL_STORE_FACT_CONCEPT,
             &content,
@@ -155,6 +161,40 @@ impl GoalStore for CognitiveMemoryGoalStore {
             &[GOAL_STORE_TAG.to_string()],
             GOAL_STORE_SOURCE,
         )?;
+
+        // Resolve any previous prospective memory for this goal so stale
+        // entries don't accumulate. Best-effort: failures are logged, not fatal.
+        if let Err(e) = resolve_goal_prospectives(&record.slug, writer.ops()) {
+            eprintln!(
+                "[simard] CognitiveMemoryGoalStore::put: resolve_goal_prospectives \
+                 failed for slug={} ({e})",
+                record.slug,
+            );
+        }
+
+        // Dual-write: store Active goals as prospective memories so they
+        // surface via `check_triggers` during OODA preparation (#2207).
+        if record.status == GoalStatus::Active {
+            let description = format!("{}{}", GOAL_PROSPECTIVE_PREFIX, record.title);
+            let trigger_condition = prospective_trigger_for(&record);
+            let action_on_trigger = format!(
+                "Pursue goal: {} (p{}, {})",
+                record.title, record.priority, record.rationale,
+            );
+            if let Err(e) = writer.ops().store_prospective(
+                &description,
+                &trigger_condition,
+                &action_on_trigger,
+                i64::from(record.priority),
+            ) {
+                eprintln!(
+                    "[simard] CognitiveMemoryGoalStore::put: store_prospective \
+                     failed for slug={} ({e})",
+                    record.slug,
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -186,6 +226,40 @@ fn compare_goal_records(left: &GoalRecord, right: &GoalRecord) -> Ordering {
         .then(left.priority.cmp(&right.priority))
         .then(left.title.cmp(&right.title))
         .then(left.slug.cmp(&right.slug))
+}
+
+/// Build a trigger condition string for a goal's prospective memory.
+///
+/// Uses the goal slug with dashes replaced by spaces so that substring
+/// matching in `check_triggers` fires when the OODA objective summary
+/// mentions similar terms. For example, slug `"fix-broken-features"`
+/// produces trigger `"fix broken features"`.
+fn prospective_trigger_for(record: &GoalRecord) -> String {
+    record.slug.replace('-', " ")
+}
+
+/// Resolve (mark as `"resolved"`) any pending prospective memories whose
+/// description starts with the `GOAL_PROSPECTIVE_PREFIX` and matches the
+/// given goal slug. This prevents accumulation of stale prospective entries
+/// when a goal is re-put or transitions to Completed/Paused.
+///
+/// Uses `check_triggers` with the slug-derived trigger phrase, then filters
+/// by the `goal:` description prefix and matching trigger_condition.
+fn resolve_goal_prospectives(
+    slug: &str,
+    ops: &dyn crate::cognitive_memory::CognitiveMemoryOps,
+) -> crate::error::SimardResult<()> {
+    let trigger = slug.replace('-', " ");
+    // check_triggers returns pending entries whose trigger_condition is a
+    // substring of the probe string. We probe with the trigger itself so
+    // an exact-match will surface the old entry.
+    let candidates = ops.check_triggers(&trigger)?;
+    for p in candidates {
+        if p.description.starts_with(GOAL_PROSPECTIVE_PREFIX) && p.trigger_condition == trigger {
+            ops.resolve_prospective(&p.node_id)?;
+        }
+    }
+    Ok(())
 }
 
 /// One-time migration: if a legacy `state/goal_store.json` exists on disk

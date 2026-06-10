@@ -263,6 +263,15 @@ impl CognitiveMemoryOps for RemoteCognitiveMemory {
         }
     }
 
+    fn resolve_prospective(&self, node_id: &str) -> SimardResult<()> {
+        match self.call(MemoryRequest::ResolveProspective {
+            node_id: node_id.into(),
+        })? {
+            MemoryResponse::Ack => Ok(()),
+            other => Err(Self::unexpected("resolve_prospective", other)),
+        }
+    }
+
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
         match self.call(MemoryRequest::GetStatistics)? {
             MemoryResponse::Statistics(s) => Ok(s),
