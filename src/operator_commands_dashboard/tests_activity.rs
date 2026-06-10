@@ -65,7 +65,7 @@ async fn traces_timestamp_is_valid_rfc3339() {
 }
 
 #[tokio::test]
-#[serial_test::serial(dashboard_state)]
+#[serial_test::serial(cognitive_memory)]
 async fn traces_reads_cost_ledger_when_present() {
     // HermeticState sets SIMARD_STATE_ROOT to a tempdir and cleans up on Drop,
     // so tests never touch $HOME/.simard and panics cannot leave state residue.
@@ -187,7 +187,7 @@ impl EnvGuard {
     fn set(key: &'static str, value: &std::path::Path) -> Self {
         let prev = std::env::var_os(key);
         // SAFETY: tests using this guard are serialised via
-        // #[serial(dashboard_state)].
+        // #[serial(cognitive_memory)].
         unsafe { std::env::set_var(key, value.as_os_str()) };
         Self { key, prev }
     }
@@ -205,7 +205,7 @@ impl Drop for EnvGuard {
 }
 
 #[tokio::test]
-#[serial_test::serial(dashboard_state)]
+#[serial_test::serial(cognitive_memory)]
 async fn activity_reads_daemon_health_when_present() {
     // HermeticState isolates SIMARD_STATE_ROOT. We also redirect
     // XDG_DATA_HOME so dirs::data_local_dir() resolves inside the tempdir.
