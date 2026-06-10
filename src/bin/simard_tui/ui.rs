@@ -51,7 +51,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::Stats => tabs::stats::draw(f, app, chunks[1]),
     }
 
-    let footer = Paragraph::new("Alt+1\u{2025}6: tabs | \u{2190}/\u{2192}: cycle | q: quit")
-        .style(Style::default().fg(Color::DarkGray));
+    let footer = Paragraph::new(
+        "Alt+1\u{2025}6: tabs | Tab/Shift+Tab: cycle | \u{2190}/\u{2192}: cycle | q: quit",
+    )
+    .style(Style::default().fg(Color::DarkGray));
     f.render_widget(footer, chunks[2]);
 }

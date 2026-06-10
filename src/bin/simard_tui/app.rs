@@ -1736,6 +1736,28 @@ mod tests {
         assert_eq!(app.cursor_position, 1);
     }
 
+    #[test]
+    fn meeting_home_moves_cursor_to_start() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+        app.meeting_input = "hello".to_string();
+        app.cursor_position = 3;
+        app.handle_key(key_code(KeyCode::Home));
+        assert_eq!(app.cursor_position, 0);
+    }
+
+    #[test]
+    fn meeting_end_moves_cursor_to_end() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+        app.meeting_input = "hello".to_string();
+        app.cursor_position = 1;
+        app.handle_key(key_code(KeyCode::End));
+        assert_eq!(app.cursor_position, 5);
+    }
+
     // ── Tab/BackTab cycling ────────────────────────────────────────
 
     #[test]
