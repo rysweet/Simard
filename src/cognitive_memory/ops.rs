@@ -517,6 +517,18 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             .collect())
     }
 
+    fn resolve_prospective(&self, node_id: &str) -> SimardResult<()> {
+        #[cfg(test)]
+        self.assert_hermetic_for("NativeCognitiveMemory::resolve_prospective");
+
+        let id = escape_cypher(node_id);
+        self.execute(&format!(
+            "MATCH (p:Prospective) WHERE p.id = '{id}' SET p.status = 'resolved'"
+        ))?;
+        self.post_write_barrier("resolve_prospective")?;
+        Ok(())
+    }
+
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
         let count_query = |table: &str| -> SimardResult<u64> {
             let rows = self.query(&format!("MATCH (n:{table}) RETURN count(n)"))?;
@@ -895,6 +907,34 @@ mod tests {
             triggered.is_empty(),
             "non-pending prospectives must not trigger"
         );
+    }
+
+    #[test]
+    fn resolve_prospective_sets_status_to_resolved() {
+        let mem = test_mem();
+        let id = mem
+            .store_prospective("goal:fix tests", "fix tests", "pursue", 2)
+            .unwrap();
+        // Before resolve, should trigger.
+        let before = mem.check_triggers("fix tests").unwrap();
+        assert_eq!(before.len(), 1);
+
+        mem.resolve_prospective(&id).unwrap();
+
+        // After resolve, pending-only filter excludes it.
+        let after = mem.check_triggers("fix tests").unwrap();
+        assert!(after.is_empty(), "resolved prospective must not trigger");
+    }
+
+    #[test]
+    fn resolve_prospective_is_idempotent() {
+        let mem = test_mem();
+        let id = mem
+            .store_prospective("goal:idempotent", "idem", "act", 1)
+            .unwrap();
+        mem.resolve_prospective(&id).unwrap();
+        // Resolving again should not error.
+        mem.resolve_prospective(&id).unwrap();
     }
 
     // ── get_statistics ─────────────────────────────────────────────────

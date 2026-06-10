@@ -70,7 +70,9 @@ pub fn intake_memory_operations(
 ///
 /// Searches semantic memory for facts related to the objective, checks
 /// prospective memories for any triggered actions, and recalls relevant
-/// procedures. The assembled context is returned for use during execution.
+/// procedures. Also explicitly loads active goal records from semantic
+/// memory so goals are always available in the prepared context regardless
+/// of whether the objective text happens to match (issue #2207).
 #[tracing::instrument(skip_all)]
 pub fn preparation_memory_operations(
     objective: &str,
@@ -78,7 +80,18 @@ pub fn preparation_memory_operations(
     bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<PreparedContext> {
     // Search for facts related to the objective.
-    let relevant_facts = bridge.search_facts(objective, 10, 0.0)?;
+    let mut relevant_facts = bridge.search_facts(objective, 10, 0.0)?;
+
+    // Always load goal facts so goals are accessible from memory even when
+    // the objective text doesn't substring-match "goal-store:record".
+    let goal_facts = bridge.search_facts("goal-store:record", 20, 0.0)?;
+    let existing_ids: std::collections::HashSet<String> =
+        relevant_facts.iter().map(|f| f.node_id.clone()).collect();
+    for fact in goal_facts {
+        if !existing_ids.contains(&fact.node_id) {
+            relevant_facts.push(fact);
+        }
+    }
 
     // Check if any prospective memories are triggered by the objective.
     let triggered_prospectives = bridge.check_triggers(objective)?;
