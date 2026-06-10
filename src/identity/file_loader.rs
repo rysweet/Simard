@@ -73,6 +73,9 @@ impl FileIdentityLoader {
                 });
             }
 
+            // Track the current DFS path (not a global visited set) so
+            // diamond graphs (A→B, A→C, B→D, C→D) are allowed while true
+            // cycles (A→B→A) are still detected.
             if !visited.insert(identity.name.clone()) {
                 return Err(SimardError::IdentityTomlParseError {
                     path: toml_path.to_path_buf(),
@@ -102,6 +105,10 @@ impl FileIdentityLoader {
                     depth + 1,
                 )?);
             }
+
+            // Remove from path on unwind so sibling branches can revisit
+            // the same node (diamond pattern).
+            visited.remove(&identity.name);
 
             return IdentityManifest::compose(
                 &identity.name,
@@ -178,7 +185,29 @@ impl FileIdentityLoader {
                         ),
                     });
                 }
-                Ok(PromptAssetRef::new(&a.id, &a.path))
+                // Store the path relative to prompt_root (not identity dir)
+                // so FilePromptAssetStore can resolve it correctly via
+                // prompt_root.join(relative_path).
+                let canonical_prompt_root = self.prompt_root.canonicalize().map_err(|e| {
+                    SimardError::IdentityTomlParseError {
+                        path: toml_path.to_path_buf(),
+                        reason: format!(
+                            "cannot canonicalize prompt root '{}': {e}",
+                            self.prompt_root.display()
+                        ),
+                    }
+                })?;
+                let relative_to_prompt_root = canonical_resolved
+                    .strip_prefix(&canonical_prompt_root)
+                    .map_err(|_| SimardError::IdentityTomlParseError {
+                        path: toml_path.to_path_buf(),
+                        reason: format!(
+                            "prompt asset '{}' is not under prompt root '{}'",
+                            a.path,
+                            self.prompt_root.display()
+                        ),
+                    })?;
+                Ok(PromptAssetRef::new(&a.id, relative_to_prompt_root))
             })
             .collect::<SimardResult<Vec<_>>>()?;
 
@@ -329,7 +358,58 @@ impl IdentityLoader for FileIdentityLoader {
             }
         }
 
-        // Single fs::read() call — no TOCTOU race between size check and read.
+        // Symlink containment: ensure identity.toml itself does not
+        // escape the identity directory via symlink.
+        if toml_path.exists() {
+            let canonical_toml =
+                toml_path
+                    .canonicalize()
+                    .map_err(|e| SimardError::IdentityTomlParseError {
+                        path: toml_path.clone(),
+                        reason: format!("cannot canonicalize identity.toml: {e}"),
+                    })?;
+            let canonical_identity_dir = self.identity_path.canonicalize().map_err(|e| {
+                SimardError::IdentityTomlParseError {
+                    path: toml_path.clone(),
+                    reason: format!(
+                        "cannot canonicalize identity directory '{}': {e}",
+                        self.identity_path.display()
+                    ),
+                }
+            })?;
+            if !canonical_toml.starts_with(&canonical_identity_dir) {
+                return Err(SimardError::IdentityTomlParseError {
+                    path: toml_path,
+                    reason: "identity.toml escapes identity directory (possible symlink attack)"
+                        .to_string(),
+                });
+            }
+        }
+
+        // Check file size via metadata BEFORE reading to avoid loading
+        // an oversized file into memory.
+        match std::fs::metadata(&toml_path) {
+            Ok(meta) => {
+                if meta.len() > MAX_IDENTITY_FILE_SIZE {
+                    return Err(SimardError::IdentityTomlParseError {
+                        path: toml_path,
+                        reason: format!(
+                            "file exceeds maximum size of {MAX_IDENTITY_FILE_SIZE} bytes"
+                        ),
+                    });
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return self.fallback.load(request);
+            }
+            Err(e) => {
+                return Err(SimardError::IdentityTomlParseError {
+                    path: toml_path,
+                    reason: e.to_string(),
+                });
+            }
+        }
+
         let bytes = match std::fs::read(&toml_path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -342,13 +422,6 @@ impl IdentityLoader for FileIdentityLoader {
                 });
             }
         };
-
-        if bytes.len() as u64 > MAX_IDENTITY_FILE_SIZE {
-            return Err(SimardError::IdentityTomlParseError {
-                path: toml_path,
-                reason: format!("file exceeds maximum size of {MAX_IDENTITY_FILE_SIZE} bytes"),
-            });
-        }
 
         let content =
             String::from_utf8(bytes).map_err(|e| SimardError::IdentityTomlParseError {

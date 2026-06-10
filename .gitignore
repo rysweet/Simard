@@ -23,3 +23,5 @@ gym-wave*-tmp/
 
 # Per-script audit output (issue #1990 / epic). Belt-and-suspenders with scripts/dashboard_audit/.gitignore.
 scripts/dashboard_audit/out/
+.simard/bin/simard.bak.*
+.local/

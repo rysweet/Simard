@@ -16,8 +16,8 @@ use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
 use crate::goals::{CognitiveMemoryGoalStore, GoalStore};
 use crate::handoff::{FileBackedHandoffStore, RuntimeHandoffSnapshot, RuntimeHandoffStore};
 use crate::identity::{
-    BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
-    OperatingMode,
+    BuiltinIdentityLoader, FileIdentityLoader, IdentityLoadRequest, IdentityLoader,
+    IdentityManifest, ManifestContract, OperatingMode,
 };
 use crate::memory::{FileBackedMemoryStore, MemoryStore};
 use crate::memory_bridge_adapter::CognitiveBridgeMemoryStore;
@@ -133,11 +133,11 @@ fn assemble_parts(config: &BootstrapConfig) -> SimardResult<AssembledParts> {
         Freshness::now()?,
     )?;
 
-    let manifest = BuiltinIdentityLoader.load(&IdentityLoadRequest::new(
-        config.identity.clone(),
-        env!("CARGO_PKG_VERSION"),
-        contract,
-    ))?;
+    let manifest = load_identity(
+        config.identity_path.as_ref().map(|cv| &cv.value),
+        &config.prompt_root.value,
+        &IdentityLoadRequest::new(config.identity.clone(), env!("CARGO_PKG_VERSION"), contract),
+    )?;
     let base_types = builtin_base_type_registry_for_manifest(&manifest)?;
     let request = RuntimeRequest::new(
         manifest,
@@ -316,5 +316,18 @@ pub(super) fn register_builtin_base_type(
             Ok(())
         }
         _ => Ok(()),
+    }
+}
+
+/// Load an identity manifest using FileIdentityLoader when an identity_path
+/// is configured, otherwise fall back to BuiltinIdentityLoader.
+pub(crate) fn load_identity(
+    identity_path: Option<&std::path::PathBuf>,
+    prompt_root: &std::path::Path,
+    request: &IdentityLoadRequest,
+) -> SimardResult<IdentityManifest> {
+    match identity_path {
+        Some(path) => FileIdentityLoader::new(path, prompt_root).load(request),
+        None => BuiltinIdentityLoader.load(request),
     }
 }

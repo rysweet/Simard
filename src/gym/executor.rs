@@ -1,12 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::bootstrap::builtin_base_type_registry_for_manifest;
+use crate::bootstrap::{assembly::load_identity, builtin_base_type_registry_for_manifest};
 use crate::error::SimardResult;
 use crate::evidence::{EvidenceRecord, EvidenceSource, EvidenceStore, InMemoryEvidenceStore};
-use crate::identity::{
-    BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, ManifestContract,
-};
+use crate::identity::{IdentityLoadRequest, ManifestContract};
 use crate::memory::{InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
 use crate::metadata::{Freshness, Provenance};
 use crate::prompt_assets::FilePromptAssetStore;
@@ -61,7 +59,7 @@ fn run_scenario_runtime(
     suite_id: &str,
 ) -> SimardResult<(RuntimeArtifacts, BenchmarkMetricFacts)> {
     let prompt_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompt_assets");
-    let prompt_store = Arc::new(FilePromptAssetStore::new(prompt_root));
+    let prompt_store = Arc::new(FilePromptAssetStore::new(prompt_root.clone()));
     let memory_store = Arc::new(InMemoryMemoryStore::try_default()?);
     let evidence_store = Arc::new(InMemoryEvidenceStore::try_default()?);
     let mut metric_facts = BenchmarkMetricFacts::default();
@@ -79,11 +77,12 @@ fn run_scenario_runtime(
         Provenance::new("benchmark-gym", format!("simard-gym:{}", scenario.id)),
         Freshness::now()?,
     )?;
-    let manifest = BuiltinIdentityLoader.load(&IdentityLoadRequest::new(
-        scenario.identity,
-        env!("CARGO_PKG_VERSION"),
-        contract,
-    ))?;
+    let identity_path = std::env::var_os("SIMARD_IDENTITY_PATH").map(PathBuf::from);
+    let manifest = load_identity(
+        identity_path.as_ref(),
+        &prompt_root,
+        &IdentityLoadRequest::new(scenario.identity, env!("CARGO_PKG_VERSION"), contract),
+    )?;
     let request = RuntimeRequest::new(
         manifest.clone(),
         crate::BaseTypeId::new(scenario.base_type),

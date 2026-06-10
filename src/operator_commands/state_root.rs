@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
 use crate::base_types::BaseTypeId;
+use crate::bootstrap::assembly::load_identity;
 use crate::{
-    BuiltinIdentityLoader, Freshness, IdentityLoadRequest, IdentityLoader, ManifestContract,
-    Provenance, RuntimeTopology, builtin_base_type_registry_for_manifest,
+    Freshness, IdentityLoadRequest, ManifestContract, Provenance, RuntimeTopology,
+    builtin_base_type_registry_for_manifest,
 };
 
 use super::validation::{
@@ -44,11 +45,12 @@ pub(crate) fn validated_runtime_segments(
         Provenance::runtime(format!("operator-cli/default-state-root/{identity}")),
         Freshness::now()?,
     )?;
-    let manifest = BuiltinIdentityLoader.load(&IdentityLoadRequest::new(
-        identity,
-        env!("CARGO_PKG_VERSION"),
-        contract,
-    ))?;
+    let identity_path = std::env::var_os("SIMARD_IDENTITY_PATH").map(PathBuf::from);
+    let manifest = load_identity(
+        identity_path.as_ref(),
+        &prompt_root(),
+        &IdentityLoadRequest::new(identity, env!("CARGO_PKG_VERSION"), contract),
+    )?;
     let base_types = builtin_base_type_registry_for_manifest(&manifest)?;
     let requested_base_type = BaseTypeId::new(base_type);
     let factory = base_types.get(&requested_base_type).ok_or_else(|| {
