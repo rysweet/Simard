@@ -539,7 +539,7 @@ pub fn run_ooda_daemon(
                 );
             }
             // Tier 2: recipe-based LLM cleanup (moderate pressure, nuanced decisions)
-            match crate::disk_health::run_disk_health_check(&bridges.repo_root, &state_root) {
+            match crate::disk_health::run_disk_health_check(&bridges.repo_root, &state_root, None) {
                 Ok(report) => {
                     daemon_log(&state_root, &format!("[simard] {}", report.summary()));
                     if report.cleanup_performed() {

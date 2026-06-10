@@ -499,9 +499,14 @@ mod tests {
 
     #[test]
     fn default_handoff_dir_returns_path() {
+        // Pin SIMARD_HANDOFF_DIR so parallel tests that unsafely set env vars
+        // don't race against the env reads inside default_handoff_dir().
+        let tmp = tempfile::tempdir().unwrap();
+        let pinned = tmp.path().join("meeting_handoffs");
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", &pinned) };
         let dir = default_handoff_dir();
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
         let dir_str = dir.to_string_lossy();
-        // May resolve via SIMARD_STATE_ROOT or SIMARD_HANDOFF_DIR env override.
         assert!(
             dir_str.contains("meeting_handoffs") || dir_str.contains("simard"),
             "default dir should be under simard state: {dir_str}"
