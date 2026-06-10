@@ -5,7 +5,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use crate::app::{App, MeetingStatus};
+use crate::app::{App, MeetingStatus, SPINNER_FRAMES};
 
 /// Render the Meeting tab content within the given area.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
@@ -24,13 +24,28 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
     // Output area (auto-scroll to bottom)
     let visible_height = chunks[0].height.saturating_sub(2) as usize;
-    let skip = app.meeting_output.len().saturating_sub(visible_height);
-    let output_lines: Vec<Line> = app
+
+    // Build display lines: meeting output + optional spinner
+    let spinner_line = if app.waiting_for_response {
+        let frame = SPINNER_FRAMES[app.tick_count as usize % SPINNER_FRAMES.len()];
+        Some(format!("{frame} Thinking..."))
+    } else {
+        None
+    };
+    let total_lines = app.meeting_output.len() + usize::from(spinner_line.is_some());
+    let skip = total_lines.saturating_sub(visible_height);
+
+    let mut output_lines: Vec<Line> = app
         .meeting_output
         .iter()
         .skip(skip)
         .map(|l| Line::from(l.as_str()))
         .collect();
+    if let Some(ref spinner) = spinner_line
+        && skip <= app.meeting_output.len()
+    {
+        output_lines.push(Line::from(spinner.as_str()));
+    }
 
     let output =
         Paragraph::new(output_lines).block(Block::default().borders(Borders::ALL).title(title));

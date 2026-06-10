@@ -207,6 +207,7 @@ mod tests {
     // ──────────────────────────────────────────────────────────────────────
 
     /// Helper: extract `N` from a banner line shaped like `"  Active goals (N):"`.
+    #[cfg(feature = "slow-tests")]
     fn banner_active_goal_count(lines: &[String]) -> Option<usize> {
         lines.iter().find_map(|l| {
             l.trim_start()

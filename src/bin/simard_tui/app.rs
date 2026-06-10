@@ -135,6 +135,7 @@ pub struct App {
     pub gh_receiver: Option<mpsc::Receiver<(Option<usize>, Option<usize>)>>,
     pub gh_in_flight: bool,
     pub tick_count: u32,
+    pub waiting_for_response: bool,
 }
 
 impl App {
@@ -165,6 +166,7 @@ impl App {
             gh_receiver: None,
             gh_in_flight: false,
             tick_count: 0,
+            waiting_for_response: false,
         }
     }
 
@@ -290,6 +292,7 @@ impl App {
         }
         self.meeting_input.clear();
         self.cursor_position = 0;
+        self.waiting_for_response = true;
     }
     fn stop_meeting(&mut self) {
         if let Some(ref mut child) = self.meeting_child {
@@ -301,6 +304,7 @@ impl App {
         self.meeting_stdout = None;
         self.meeting_status = MeetingStatus::Exited(0);
         self.cursor_position = 0;
+        self.waiting_for_response = false;
     }
 
     /// Spawn the meeting child process.
@@ -312,6 +316,7 @@ impl App {
         }
         match std::process::Command::new(&simard_bin)
             .args(["meeting", "start"])
+            .env("RUST_LOG", "error")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -358,6 +363,7 @@ impl App {
             self.meeting_child = None;
             self.meeting_stdin = None;
             self.meeting_stdout = None;
+            self.waiting_for_response = false;
             return;
         }
         // Read available lines without blocking
@@ -368,10 +374,11 @@ impl App {
                 match reader.read_line(&mut line) {
                     Ok(0) => break,
                     Ok(_) => {
-                        // Filter noisy INFO log lines from meeting subprocess
-                        if line.contains(" INFO ") {
+                        // Filter tracing/log output from meeting subprocess
+                        if is_tracing_line(&line) {
                             continue;
                         }
+                        self.waiting_for_response = false;
                         self.meeting_output.push(line.trim_end().to_string());
                         if self.meeting_output.len() > 1000 {
                             let excess = self.meeting_output.len() - 1000;
@@ -720,6 +727,38 @@ impl App {
         }
         self.drain_meeting_output();
     }
+}
+
+/// Braille spinner frames for the "Thinking..." indicator.
+pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Returns `true` if the line looks like Rust tracing/log output that should
+/// be filtered from meeting conversation display. Matches space-padded level
+/// markers (` INFO `, ` DEBUG `, ` WARN `, ` TRACE `, ` ERROR `) as produced
+/// by `tracing_subscriber` and `env_logger`, plus timestamp-prefixed spans.
+fn is_tracing_line(line: &str) -> bool {
+    // Standard tracing format: "2024-01-01T10:00:00 INFO target: msg"
+    // or "  INFO target: msg" — level keyword surrounded by spaces
+    for marker in [" INFO ", " DEBUG ", " WARN ", " TRACE ", " ERROR "] {
+        if line.contains(marker) {
+            return true;
+        }
+    }
+    let trimmed = line.trim();
+    // Diagnostic prefixes from eprintln! calls (e.g., "[simard] ...")
+    if trimmed.starts_with("[simard]") {
+        return true;
+    }
+    // Tracing span output: lines starting with a timestamp and containing
+    // typical span markers like `{` after a colon, or `close` / `new`
+    if trimmed.starts_with("20") && trimmed.len() > 10 && trimmed.as_bytes()[4] == b'-' {
+        // Looks like it starts with a date (20XX-...)
+        // Check for span-style patterns
+        if trimmed.contains("}: ") || trimmed.contains("{") {
+            return true;
+        }
+    }
+    false
 }
 
 fn compute_uptime_from_timestamp(ts: &str) -> Option<u64> {
