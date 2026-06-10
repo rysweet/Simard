@@ -339,4 +339,113 @@ mod tests {
         assert!(run_update_check_background().is_none());
         unsafe { std::env::remove_var("SIMARD_NO_UPDATE_CHECK") };
     }
+
+    // ── F1: fire-and-forget (no join) ──────────────────────────────
+
+    #[test]
+    fn run_update_check_returns_immediately_when_disabled() {
+        unsafe { std::env::set_var("SIMARD_NO_UPDATE_CHECK", "1") };
+        let start = std::time::Instant::now();
+        run_update_check();
+        let elapsed = start.elapsed();
+        unsafe { std::env::remove_var("SIMARD_NO_UPDATE_CHECK") };
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "run_update_check() should return immediately when disabled, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn run_update_check_is_fire_and_forget() {
+        // Even when enabled, run_update_check() must return immediately
+        // because it spawns a detached thread (no join). If someone
+        // reintroduces handle.join(), this test will take ~5s and fail.
+        let start = std::time::Instant::now();
+        run_update_check();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "run_update_check() must be fire-and-forget (no join), took {elapsed:?}"
+        );
+    }
+
+    // ── F2: background channel returns Some when enabled ───────────
+
+    #[test]
+    fn run_update_check_background_returns_some_when_enabled() {
+        unsafe { std::env::remove_var("SIMARD_NO_UPDATE_CHECK") };
+        let rx = run_update_check_background();
+        assert!(
+            rx.is_some(),
+            "run_update_check_background() should return Some(Receiver) when enabled"
+        );
+    }
+
+    // ── F3: platform suffix uses "macos" not "darwin" ──────────────
+
+    #[test]
+    fn platform_suffix_never_contains_darwin() {
+        // F3: old code used "darwin-*" but actual GitHub releases use "macos-*".
+        // platform_suffix() must return "macos-*" on macOS, never "darwin-*".
+        let suffix = crate::cmd_self_update::platform::platform_suffix();
+        if let Some(s) = suffix {
+            assert!(
+                !s.contains("darwin"),
+                "platform suffix must use 'macos' not 'darwin', got: {s}"
+            );
+        }
+    }
+
+    // ── F4: prerelease-aware semver ────────────────────────────────
+
+    #[test]
+    fn parse_semver_prerelease_with_build_metadata() {
+        // "1.2.3-beta.1+build.456" has both prerelease and build metadata.
+        // The '-' before '+' makes it a prerelease → is_release = false.
+        assert_eq!(
+            parse_semver("1.2.3-beta.1+build.456"),
+            Some((1, 2, 3, false))
+        );
+    }
+
+    #[test]
+    fn parse_semver_build_metadata_with_dash_is_none() {
+        // Known limitation: "1.2.3+build-456" — the '-' inside build metadata
+        // is incorrectly detected as a prerelease separator, causing the
+        // numeric portion to include "+build" which fails to parse.
+        assert_eq!(parse_semver("1.2.3+build-456"), None);
+    }
+
+    #[test]
+    fn is_newer_release_beats_same_version_prerelease() {
+        // Core F4 contract: release 1.0.0 is strictly newer than prerelease 1.0.0-rc1
+        assert!(
+            is_newer("1.0.0", "1.0.0-rc1"),
+            "release 1.0.0 must be newer than prerelease 1.0.0-rc1"
+        );
+        // Reverse: prerelease is NOT newer than the corresponding release
+        assert!(
+            !is_newer("1.0.0-rc1", "1.0.0"),
+            "prerelease 1.0.0-rc1 must NOT be newer than release 1.0.0"
+        );
+    }
+
+    #[test]
+    fn is_newer_prerelease_of_higher_version_beats_lower_release() {
+        // 2.0.0-beta.1 is newer than 1.0.0 even though it's a prerelease
+        assert!(
+            is_newer("2.0.0-beta.1", "1.0.0"),
+            "prerelease of higher version should still be newer"
+        );
+    }
+
+    #[test]
+    fn parse_semver_4tuple_contract() {
+        // Explicit contract: 4th element is is_release (true = release, false = prerelease)
+        assert_eq!(parse_semver("1.0.0"), Some((1, 0, 0, true)));
+        assert_eq!(parse_semver("1.0.0-rc1"), Some((1, 0, 0, false)));
+        assert_eq!(parse_semver("1.0.0-beta.1"), Some((1, 0, 0, false)));
+        // Build metadata without prerelease is still a release
+        assert_eq!(parse_semver("1.0.0+build.123"), Some((1, 0, 0, true)));
+    }
 }
