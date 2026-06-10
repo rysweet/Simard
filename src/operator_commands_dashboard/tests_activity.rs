@@ -5,6 +5,7 @@
 //! roots and ensure the JSON shape is always well-formed.
 
 use crate::operator_commands_dashboard::activity::{activity, traces};
+use crate::test_support::HermeticState;
 
 // ---------------------------------------------------------------------------
 // traces()
@@ -64,44 +65,22 @@ async fn traces_timestamp_is_valid_rfc3339() {
 }
 
 #[tokio::test]
+#[serial_test::serial(dashboard_state)]
 async fn traces_reads_cost_ledger_when_present() {
-    // Write a fake cost ledger line and verify traces picks it up
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
-    let ledger_path = std::path::PathBuf::from(&home).join(".simard/costs/ledger.jsonl");
-    let existed = ledger_path.exists();
+    // HermeticState sets SIMARD_STATE_ROOT to a tempdir and cleans up on Drop,
+    // so tests never touch $HOME/.simard and panics cannot leave state residue.
+    let state = HermeticState::new();
+    let ledger_dir = state.state_root().join("costs");
+    std::fs::create_dir_all(&ledger_dir).unwrap();
 
-    // Only test if the file exists or we can create the dir
-    if let Some(parent) = ledger_path.parent()
-        && (parent.exists() || std::fs::create_dir_all(parent).is_ok())
-    {
-        let test_line = r#"{"model":"test","cost_usd":0.001,"timestamp":"2025-01-01T00:00:00Z"}"#;
-        let had_content = std::fs::read_to_string(&ledger_path)
-            .ok()
-            .unwrap_or_default();
+    let ledger_path = ledger_dir.join("ledger.jsonl");
+    let test_line = r#"{"model":"test","cost_usd":0.001,"timestamp":"2025-01-01T00:00:00Z"}"#;
+    std::fs::write(&ledger_path, format!("{test_line}\n")).unwrap();
 
-        // Append a test line
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&ledger_path)
-            .unwrap();
-        writeln!(f, "{test_line}").unwrap();
-        drop(f);
-
-        let result = traces().await;
-        let spans = result.0["spans"].as_array().unwrap();
-        let has_cost = spans.iter().any(|s| s["source"] == "cost");
-        assert!(has_cost, "should have at least one cost span from ledger");
-
-        // Restore original content if file didn't exist before
-        if !existed {
-            let _ = std::fs::remove_file(&ledger_path);
-        } else {
-            // Restore original content
-            std::fs::write(&ledger_path, had_content).unwrap();
-        }
-    }
+    let result = traces().await;
+    let spans = result.0["spans"].as_array().unwrap();
+    let has_cost = spans.iter().any(|s| s["source"] == "cost");
+    assert!(has_cost, "should have at least one cost span from ledger");
 }
 
 // ---------------------------------------------------------------------------
@@ -196,21 +175,47 @@ async fn activity_daemon_status_is_string() {
     assert!(!s.is_empty(), "daemon status should be a non-empty string");
 }
 
-#[tokio::test]
-async fn activity_reads_daemon_health_when_present() {
-    // Write a fake daemon_health.json and verify activity() reads it.
-    let health_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/var/tmp"))
-        .join("simard");
-    let health_path = health_dir.join("daemon_health.json");
-    let existed = health_path.exists();
-    let backup = if existed {
-        std::fs::read_to_string(&health_path).ok()
-    } else {
-        None
-    };
+/// RAII guard that sets an env var for its lifetime and restores on Drop.
+/// Used to redirect XDG_DATA_HOME so `dirs::data_local_dir()` resolves
+/// inside the hermetic tempdir.
+struct EnvGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
 
+impl EnvGuard {
+    fn set(key: &'static str, value: &std::path::Path) -> Self {
+        let prev = std::env::var_os(key);
+        // SAFETY: tests using this guard are serialised via
+        // #[serial(dashboard_state)].
+        unsafe { std::env::set_var(key, value.as_os_str()) };
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial(dashboard_state)]
+async fn activity_reads_daemon_health_when_present() {
+    // HermeticState isolates SIMARD_STATE_ROOT. We also redirect
+    // XDG_DATA_HOME so dirs::data_local_dir() resolves inside the tempdir.
+    let state = HermeticState::new();
+    let xdg_root = state.state_root().join("xdg_data");
+    let _xdg_guard = EnvGuard::set("XDG_DATA_HOME", &xdg_root);
+
+    let health_dir = xdg_root.join("simard");
     std::fs::create_dir_all(&health_dir).unwrap();
+
     let now = chrono::Utc::now().to_rfc3339();
     let fake_health = serde_json::json!({
         "status": "running",
@@ -218,17 +223,14 @@ async fn activity_reads_daemon_health_when_present() {
         "timestamp": now,
         "actions_taken": ["advance-goal", "consolidate-memory"]
     });
-    std::fs::write(&health_path, fake_health.to_string()).unwrap();
+    std::fs::write(
+        health_dir.join("daemon_health.json"),
+        fake_health.to_string(),
+    )
+    .unwrap();
 
     let result = activity().await;
     let daemon = &result.0["daemon"];
     assert_eq!(daemon["current_cycle"], 42);
     assert_eq!(daemon["status"], "running");
-
-    // Restore
-    if let Some(content) = backup {
-        std::fs::write(&health_path, content).unwrap();
-    } else {
-        let _ = std::fs::remove_file(&health_path);
-    }
 }
