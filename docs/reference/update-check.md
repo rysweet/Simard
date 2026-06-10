@@ -72,7 +72,7 @@ crate API — it is tested via `#[cfg(test)]` but not exported:
 | `"1.0.0-rc1"` | `(1, 0, 0, false)` |
 | `"1.0.0-beta.1"` | `(1, 0, 0, false)` |
 | `"1.2.3+build.456"` | `(1, 2, 3, true)` |
-| `"1.2.3+build-456"` | `None` — **known limitation**: the parser finds `-` inside the build metadata before checking for `+`. Versions with hyphens in build metadata are rejected. GitHub Releases tags do not use this format, so this does not affect real-world checks. |
+| `"1.2.3+build-456"` | `(1, 2, 3, true)` — build metadata (after `+`) is stripped before checking for prerelease (`-`), so hyphens inside build metadata are handled correctly. |
 | `"bad"` | `None` |
 
 The `is_release` flag (`true` for releases, `false` for prereleases)
