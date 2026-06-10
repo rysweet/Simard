@@ -23,6 +23,7 @@ tags: ["simard", "disk", "maintenance", "ops"]
 
 context:
   state_root: "~/.simard"
+  repo_path: "/home/azureuser/src/Simard/worktrees/main"
 
 steps:
   - id: "check-and-clean"
@@ -63,23 +64,23 @@ steps:
 
       ## Cleanup Targets (ordered by typical yield)
 
-      All cleanup targets live under `{{state_root}}`. Do NOT delete anything
-      outside this directory tree.
+      Cleanup targets span both `{{state_root}}` and the source worktree.
 
-      1. **`{{state_root}}/cargo-target/`** and **`{{state_root}}/shared-target/`** —
-         Shared Cargo build caches. Remove `incremental/` and `debug/` subdirectories
-         first (use `find <dir> -maxdepth 1 -name incremental -o -name debug` then
-         `rm -rf`). Under extreme pressure, remove the entire directories.
+      1. **Cargo `target/` directories** — the single biggest disk consumer.
+         These accumulate incremental build artifacts that grow without bound.
+         Scan ALL of these paths for `target/` directories:
+         - `{{repo_path}}/target/` (main worktree build cache)
+         - `{{repo_path}}/worktrees/*/target/` (engineer worktree build caches)
+         - `{{state_root}}/cargo-target/` and `{{state_root}}/shared-target/`
+         For each found `target/` dir: remove `incremental/` and `debug/` subdirs
+         first. Under extreme pressure (>90%), remove the entire `target/` dir.
+         These are always safe to delete — cargo rebuilds them automatically.
 
-      2. **`{{state_root}}/engineer-worktrees/`** — Enumerate once with a single
-         `find` pass. For each subdirectory, check modification time and the
-         `.simard-engineer-claim` file in one go:
-         - If the worktree is older than 24 hours AND (the `.simard-engineer-claim`
-           file is missing OR the PID on its first line is dead per `kill -0`),
+      2. **`{{repo_path}}/worktrees/`** (inner engineer worktrees) — For each
+         subdirectory, check modification time and `.simard-engineer-claim` file:
+         - If older than 24h AND (claim file missing OR PID is dead per `kill -0`),
            remove the entire worktree.
-         - For worktrees that are kept (still active or <24h old), remove only
-           their `target/` subdirectory if it exists — these Cargo build dirs are
-           large and always safe to delete.
+         - For kept worktrees, still remove their `target/` subdirectory.
 
       3. **`{{state_root}}/backups/`** — Database backup files. List by modification
          time (`ls -1t`), keep approximately 5 most recent, remove the rest. Under

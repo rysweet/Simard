@@ -117,6 +117,7 @@ incremental = false
 [profile.dev]
 debug = "line-tables-only"
 incremental = false
+strip = "debuginfo"
 
 [profile.dev.package."*"]
 debug = false
@@ -124,6 +125,7 @@ debug = false
 [profile.test]
 debug = "line-tables-only"
 incremental = false
+strip = "debuginfo"
 
 [profile.test.package."*"]
 debug = false
