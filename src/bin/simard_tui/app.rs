@@ -1755,7 +1755,7 @@ mod tests {
 
     #[test]
     fn meeting_home_moves_cursor_to_start() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
@@ -1766,7 +1766,7 @@ mod tests {
 
     #[test]
     fn meeting_end_moves_cursor_to_end() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
@@ -2092,7 +2092,7 @@ mod tests {
     fn spinner_survives_user_echo_line() {
         use std::process::{Command, Stdio};
 
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
 
         // Simulate: user sends input, then REPL echoes + later responds
         let mut child = Command::new("sh")
