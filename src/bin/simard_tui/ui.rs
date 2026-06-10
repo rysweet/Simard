@@ -37,8 +37,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         .highlight_style(
             Style::default()
                 .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )
+        .divider("|");
 
     f.render_widget(tabs_widget, chunks[0]);
 
@@ -51,7 +52,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::Stats => tabs::stats::draw(f, app, chunks[1]),
     }
 
-    let footer = Paragraph::new("Alt+1\u{2025}6: tabs | \u{2190}/\u{2192}: cycle | q: quit")
-        .style(Style::default().fg(Color::DarkGray));
+    let footer = Paragraph::new(
+        "Alt+1\u{2013}6: tabs | Tab/Shift+Tab: cycle | \u{2190}/\u{2192}: prev/next | q: quit",
+    )
+    .style(Style::default().fg(Color::DarkGray));
     f.render_widget(footer, chunks[2]);
 }

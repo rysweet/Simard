@@ -36,8 +36,29 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(output_lines).block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(output, chunks[0]);
 
-    // Input prompt
-    let input_text = format!("> {}", app.meeting_input);
+    // Input prompt with visible cursor
+    let (before_cursor, after_cursor) = app.meeting_input.split_at(app.cursor_position);
+    let input_text = if app.meeting_status == MeetingStatus::Running {
+        use ratatui::style::{Modifier, Style};
+        use ratatui::text::Span;
+        // Show cursor as reversed char (or block at end)
+        let cursor_char = after_cursor.chars().next().unwrap_or(' ');
+        let after_skip = if after_cursor.is_empty() {
+            ""
+        } else {
+            &after_cursor[cursor_char.len_utf8()..]
+        };
+        Line::from(vec![
+            Span::raw(format!("> {before_cursor}")),
+            Span::styled(
+                cursor_char.to_string(),
+                Style::default().add_modifier(Modifier::REVERSED),
+            ),
+            Span::raw(after_skip.to_string()),
+        ])
+    } else {
+        Line::from(format!("> {}", app.meeting_input))
+    };
     let input = Paragraph::new(input_text)
         .block(Block::default().borders(Borders::ALL).title("Input"))
         .wrap(Wrap { trim: false });
