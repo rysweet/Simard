@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn input_area_uses_length_5() {
-        let app = App::new("simard-ooda.service".to_string());
+        let app = App::new("simard-ooda.service".to_string(), None);
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
 
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn long_input_wraps_to_second_line() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         // "> " prefix (2 chars) + 120 'a's = 122 chars, exceeds 78 inner width
         app.meeting_input = "a".repeat(120);
 

@@ -3,6 +3,7 @@ use tracing_subscriber::prelude::*;
 
 fn main() -> std::process::ExitCode {
     init_tracing();
+    simard::update_check::run_update_check();
 
     let result = match dispatch_operator_cli(std::env::args().skip(1)) {
         Ok(()) => std::process::ExitCode::SUCCESS,

@@ -1,7 +1,7 @@
 //! Self-update command: downloads the latest simard binary from GitHub Releases.
 
 mod download;
-mod platform;
+pub(crate) mod platform;
 mod release;
 mod update;
 
