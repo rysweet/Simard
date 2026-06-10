@@ -50,41 +50,46 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    /// Render meeting tab into an 80×24 test terminal and return the buffer.
+    fn render(app: &App) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| draw(f, app, Rect::new(0, 0, 80, 24)))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// Read a row of inner text (cols 1..79) from the buffer.
+    fn row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        (1..79u16)
+            .map(|x| {
+                buf.cell((x, y))
+                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                    .unwrap_or(' ')
+            })
+            .collect()
+    }
+
     #[test]
     fn input_area_uses_length_5() {
         let app = App::new("simard-ooda.service".to_string());
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|f| {
-                draw(f, &app, Rect::new(0, 0, 80, 24));
-            })
-            .unwrap();
-
-        let buf = terminal.backend().buffer();
+        let buf = render(&app);
 
         // Find the "Input" title row dynamically
-        let mut input_title_y = None;
-        for y in 0..24u16 {
-            let row_text: String = (0..80u16)
-                .map(|x| {
-                    buf.cell((x, y))
-                        .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                        .unwrap_or(' ')
-                })
-                .collect();
-            if row_text.contains("Input") {
-                input_title_y = Some(y);
-                break;
-            }
-        }
-        let title_y = input_title_y.expect("Input title not found in rendered buffer");
+        let title_y = (0..24u16)
+            .find(|&y| {
+                let text: String = (0..80u16)
+                    .map(|x| {
+                        buf.cell((x, y))
+                            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                            .unwrap_or(' ')
+                    })
+                    .collect();
+                text.contains("Input")
+            })
+            .expect("Input title not found in rendered buffer");
 
-        // With Length(5) constraint in a 24-row area:
-        // Output area = rows 0..19 (Min(3) gets 19 rows)
-        // Input area  = rows 19..24 (Length(5) gets 5 rows)
-        // Title should appear at row 19
         assert_eq!(
             title_y, 19,
             "Input block should start at row 19 (Length(5) constraint), found at row {title_y}"
@@ -94,57 +99,22 @@ mod tests {
     #[test]
     fn long_input_wraps_to_second_line() {
         let mut app = App::new("simard-ooda.service".to_string());
-        // "> " prefix (2 chars) + 120 'a's = 122 chars, exceeds 78 inner width
         app.meeting_input = "a".repeat(120);
 
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let buf = render(&app);
 
-        terminal
-            .draw(|f| {
-                draw(f, &app, Rect::new(0, 0, 80, 24));
-            })
-            .unwrap();
-
-        let buf = terminal.backend().buffer();
-
-        // With Length(5), input block spans rows 19–23:
-        //   Row 19: top border ("Input" title)
-        //   Row 20: first content line ("> aaa...")
-        //   Row 21: second content line (wrapped text should appear here)
-        //   Row 22: third content line
-        //   Row 23: bottom border
-        let second_content_row = 21u16;
-        let row_text: String = (1..79u16)
-            .map(|x| {
-                buf.cell((x, second_content_row))
-                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                    .unwrap_or(' ')
-            })
-            .collect();
+        let text = row_text(&buf, 21);
         assert!(
-            row_text.contains('a'),
-            "with Wrap enabled, long input should wrap to second content row, got: {row_text:?}"
+            text.contains('a'),
+            "with Wrap enabled, long input should wrap to second content row, got: {text:?}"
         );
     }
 
     #[test]
     fn input_area_has_at_least_3_content_lines() {
-        // Length(5) = 1 top border + 3 content lines + 1 bottom border
         let app = App::new("simard-ooda.service".to_string());
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let buf = render(&app);
 
-        terminal
-            .draw(|f| {
-                draw(f, &app, Rect::new(0, 0, 80, 24));
-            })
-            .unwrap();
-
-        let buf = terminal.backend().buffer();
-
-        // Input block starts at row 19 (top border), content rows 20-22, bottom border 23
-        // Verify row 22 (third content line) is within the input block (has border chars)
         let left_border = buf
             .cell((0u16, 22u16))
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
@@ -160,34 +130,15 @@ mod tests {
     #[test]
     fn very_long_input_fills_three_content_lines() {
         let mut app = App::new("simard-ooda.service".to_string());
-        // Use spaced text so the Paragraph wrapping distributes across lines
-        // "> " prefix (2 chars) + repeated "abcd " (5-char words) fills multiple lines
-        app.meeting_input = "abcd ".repeat(50); // 250 chars
+        app.meeting_input = "abcd ".repeat(50);
 
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let buf = render(&app);
 
-        terminal
-            .draw(|f| {
-                draw(f, &app, Rect::new(0, 0, 80, 24));
-            })
-            .unwrap();
-
-        let buf = terminal.backend().buffer();
-
-        // Content rows 20-22: each should have visible text (not all spaces)
-        // Row 20 has "> " prompt, rows 21-22 have wrapped text
         for row in [21u16, 22u16] {
-            let row_text: String = (1..79u16)
-                .map(|x| {
-                    buf.cell((x, row))
-                        .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                        .unwrap_or(' ')
-                })
-                .collect();
+            let text = row_text(&buf, row);
             assert!(
-                row_text.contains('a'),
-                "content row {row} should contain wrapped text, got: {row_text:?}"
+                text.contains('a'),
+                "content row {row} should contain wrapped text, got: {text:?}"
             );
         }
     }
@@ -195,61 +146,27 @@ mod tests {
     #[test]
     fn empty_input_renders_prompt_only() {
         let app = App::new("simard-ooda.service".to_string());
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let buf = render(&app);
 
-        terminal
-            .draw(|f| {
-                draw(f, &app, Rect::new(0, 0, 80, 24));
-            })
-            .unwrap();
-
-        let buf = terminal.backend().buffer();
-
-        // First content row (20) should contain "> " prompt
-        let row_text: String = (1..79u16)
-            .map(|x| {
-                buf.cell((x, 20u16))
-                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                    .unwrap_or(' ')
-            })
-            .collect();
+        let text = row_text(&buf, 20);
         assert!(
-            row_text.contains('>'),
-            "empty input should still show '>' prompt, got: {row_text:?}"
+            text.contains('>'),
+            "empty input should still show '>' prompt, got: {text:?}"
         );
     }
 
     #[test]
     fn wrap_preserves_spaces_with_trim_false() {
         let mut app = App::new("simard-ooda.service".to_string());
-        // Input with deliberate leading spaces after a wrap point
         app.meeting_input = format!("{}   trailing spaces", "x".repeat(76));
 
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let buf = render(&app);
 
-        terminal
-            .draw(|f| {
-                draw(f, &app, Rect::new(0, 0, 80, 24));
-            })
-            .unwrap();
-
-        let buf = terminal.backend().buffer();
-
-        // Second content row should have content (wrapped text with spaces)
-        let row_text: String = (1..79u16)
-            .map(|x| {
-                buf.cell((x, 21u16))
-                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
-                    .unwrap_or(' ')
-            })
-            .collect();
-        // With trim: false, spaces should be preserved on wrapped lines
-        let has_content = row_text.contains('x') || row_text.contains("trailing");
+        let text = row_text(&buf, 21);
+        let has_content = text.contains('x') || text.contains("trailing");
         assert!(
             has_content,
-            "wrapped line should contain text (trim: false preserves spaces), got: {row_text:?}"
+            "wrapped line should contain text (trim: false preserves spaces), got: {text:?}"
         );
     }
 }

@@ -272,11 +272,7 @@ impl App {
         }
         let line = format!("> {}", self.meeting_input);
         self.meeting_output.push(line);
-        // Cap output at 1000 lines
-        if self.meeting_output.len() > 1000 {
-            let excess = self.meeting_output.len() - 1000;
-            self.meeting_output.drain(..excess);
-        }
+        Self::cap_output(&mut self.meeting_output);
         // Write to child process stdin if available
         if let Some(ref mut stdin) = self.meeting_stdin {
             use std::io::Write;
@@ -301,6 +297,14 @@ impl App {
         self.meeting_stdout = None;
         self.meeting_status = MeetingStatus::Exited(0);
         self.cursor_position = 0;
+    }
+
+    /// Trim output buffer to at most 1000 lines, dropping the oldest.
+    fn cap_output(output: &mut Vec<String>) {
+        if output.len() > 1000 {
+            let excess = output.len() - 1000;
+            output.drain(..excess);
+        }
     }
 
     /// Spawn the meeting child process.
@@ -373,10 +377,7 @@ impl App {
                             continue;
                         }
                         self.meeting_output.push(line.trim_end().to_string());
-                        if self.meeting_output.len() > 1000 {
-                            let excess = self.meeting_output.len() - 1000;
-                            self.meeting_output.drain(..excess);
-                        }
+                        Self::cap_output(&mut self.meeting_output);
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         break;
