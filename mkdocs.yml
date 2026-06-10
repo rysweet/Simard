@@ -75,6 +75,8 @@ nav:
     - Troubleshoot Goal Store: howto/troubleshoot-goal-store.md
     - Recover from Meeting Close Timeout: howto/recover-from-meeting-close-timeout.md
     - Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
+    - Monitor with TUI: howto/monitor-simard-with-tui.md
+    - Start a Meeting: howto/start-a-meeting.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Runtime Contracts: reference/runtime-contracts.md
@@ -85,6 +87,7 @@ nav:
     - File-backed Goal Store: reference/file-backed-goal-store.md
     - Adaptive Scaling API: reference/adaptive-scaling-api.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
+    - TUI Dashboard: reference/simard-tui.md
     # Hidden from nav until issue #1590 implementation lands:
     #   - reference/cognitive-memory-bridge-helpers.md
     #   - reference/goal-board-api.md

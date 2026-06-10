@@ -50,8 +50,12 @@ The active tab is highlighted. A footer bar at the bottom shows the
 available keybindings:
 
 ```
-Alt+1‥6: tabs | Tab/Shift+Tab: cycle | q: quit
+Alt+1‥6: tabs | ←/→: cycle | q: quit
 ```
+
+In addition to arrow keys and `Alt+digit`, you can use `Tab`/`Shift+Tab`
+to cycle through tabs, or `Ctrl+1`–`Ctrl+6` as an alternative direct
+switch. See the full [keyboard reference](#keyboard-reference) below.
 
 Press `q` at any time to quit and restore your terminal.
 

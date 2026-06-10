@@ -444,13 +444,16 @@ The TUI frame uses a 3-chunk vertical layout:
 │         Active tab content                   │ ← Content (flexible)
 │                                              │
 ├──────────────────────────────────────────────┤
-│ Alt+1‥6: tabs | Tab/Shift+Tab: cycle | q: quit │ ← Footer (1 row)
+│ Alt+1‥6: tabs | ←/→: cycle | q: quit    │ ← Footer (1 row)
 └──────────────────────────────────────────────┘
 ```
 
 The footer is a `Paragraph` widget rendered in a 1-row bottom chunk,
 showing a compact keybinding reference. The constraints are
-`[Length(3), Min(0), Length(1)]`.
+`[Length(3), Min(0), Length(1)]`. The footer text shows a subset of
+available keys for brevity — `Tab`/`Shift+Tab` and `Ctrl+digit` are
+not shown in the footer but are fully functional. See the
+[keyboard controls](#keyboard-controls) table for the complete map.
 
 ---
 

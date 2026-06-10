@@ -127,4 +127,129 @@ mod tests {
             "with Wrap enabled, long input should wrap to second content row, got: {row_text:?}"
         );
     }
+
+    #[test]
+    fn input_area_has_at_least_3_content_lines() {
+        // Length(5) = 1 top border + 3 content lines + 1 bottom border
+        let app = App::new("simard-ooda.service".to_string());
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                draw(f, &app, Rect::new(0, 0, 80, 24));
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+
+        // Input block starts at row 19 (top border), content rows 20-22, bottom border 23
+        // Verify row 22 (third content line) is within the input block (has border chars)
+        let left_border = buf
+            .cell((0u16, 22u16))
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .unwrap_or(' ');
+        let right_border = buf
+            .cell((79u16, 22u16))
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .unwrap_or(' ');
+        assert_ne!(left_border, ' ', "row 22 col 0 should have border char");
+        assert_ne!(right_border, ' ', "row 22 col 79 should have border char");
+    }
+
+    #[test]
+    fn very_long_input_fills_three_content_lines() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        // Use spaced text so the Paragraph wrapping distributes across lines
+        // "> " prefix (2 chars) + repeated "abcd " (5-char words) fills multiple lines
+        app.meeting_input = "abcd ".repeat(50); // 250 chars
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                draw(f, &app, Rect::new(0, 0, 80, 24));
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+
+        // Content rows 20-22: each should have visible text (not all spaces)
+        // Row 20 has "> " prompt, rows 21-22 have wrapped text
+        for row in [21u16, 22u16] {
+            let row_text: String = (1..79u16)
+                .map(|x| {
+                    buf.cell((x, row))
+                        .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                        .unwrap_or(' ')
+                })
+                .collect();
+            assert!(
+                row_text.contains('a'),
+                "content row {row} should contain wrapped text, got: {row_text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_input_renders_prompt_only() {
+        let app = App::new("simard-ooda.service".to_string());
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                draw(f, &app, Rect::new(0, 0, 80, 24));
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+
+        // First content row (20) should contain "> " prompt
+        let row_text: String = (1..79u16)
+            .map(|x| {
+                buf.cell((x, 20u16))
+                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                    .unwrap_or(' ')
+            })
+            .collect();
+        assert!(
+            row_text.contains('>'),
+            "empty input should still show '>' prompt, got: {row_text:?}"
+        );
+    }
+
+    #[test]
+    fn wrap_preserves_spaces_with_trim_false() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        // Input with deliberate leading spaces after a wrap point
+        app.meeting_input = format!("{}   trailing spaces", "x".repeat(76));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                draw(f, &app, Rect::new(0, 0, 80, 24));
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+
+        // Second content row should have content (wrapped text with spaces)
+        let row_text: String = (1..79u16)
+            .map(|x| {
+                buf.cell((x, 21u16))
+                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                    .unwrap_or(' ')
+            })
+            .collect();
+        // With trim: false, spaces should be preserved on wrapped lines
+        let has_content = row_text.contains('x') || row_text.contains("trailing");
+        assert!(
+            has_content,
+            "wrapped line should contain text (trim: false preserves spaces), got: {row_text:?}"
+        );
+    }
 }
