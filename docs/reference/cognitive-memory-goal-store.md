@@ -14,18 +14,26 @@ related:
 
 # Cognitive-memory goal store adapter (superseded)
 
-> **Status: superseded by issue
+> **Status: partially superseded by issue
 > [#2182](https://github.com/rysweet/Simard/issues/2182).** The
-> `CognitiveMemoryGoalStore` design described below was replaced by
-> `FileBackedGoalStore` with advisory flock locking. See
+> original `CognitiveMemoryGoalStore` design as the `GoalStore` trait
+> implementation was replaced by `FileBackedGoalStore` with advisory
+> flock locking. See
 > [File-backed goal store reference](./file-backed-goal-store.md) for
-> the current production implementation and
+> the current production `GoalStore` and
 > [File-backed goal store simplification](../concepts/file-backed-goal-store-simplification.md)
 > for the rationale.
 >
-> This document is retained for historical context. The code in
-> `src/goals/cognitive_memory_store.rs` remains in the codebase for
-> test use but is no longer wired into `bootstrap::assembly`.
+> **Issue [#2207](https://github.com/rysweet/Simard/issues/2207)
+> revives `CognitiveMemoryGoalStore`** for a narrower role: maintaining
+> a prospective-memory mirror of Active goals so they surface via
+> `check_triggers` during OODA preparation. The store is not re-wired
+> as the `GoalStore` in `bootstrap::assembly` — `FileBackedGoalStore`
+> remains production. See
+> [Goal–prospective memory mirror](./goal-prospective-memory-mirror.md)
+> for the new prospective features.
+>
+> The historical design context below is retained for reference.
 
 `CognitiveMemoryGoalStore` was designed to implement the `GoalStore`
 trait against the goal-board snapshot in cognitive memory. It would have
