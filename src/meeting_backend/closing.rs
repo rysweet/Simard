@@ -257,6 +257,26 @@ impl MeetingBackend {
             }
         }
 
+        // ── Risks (issue #2084, spec line 637) ──
+        let inferred_risks = persist::extract_risks(&self.history);
+        let mut risks: Vec<String> = self.explicit_risks.clone();
+        for r in inferred_risks {
+            let lower = r.to_lowercase();
+            if !risks.iter().any(|e| e.to_lowercase() == lower) {
+                risks.push(r);
+            }
+        }
+
+        // ── Disagreements (issue #2084, spec line 645) ──
+        let inferred_disagreements = persist::extract_disagreements(&self.history);
+        let mut disagreements: Vec<String> = self.explicit_disagreements.clone();
+        for d in inferred_disagreements {
+            let lower = d.to_lowercase();
+            if !disagreements.iter().any(|e| e.to_lowercase() == lower) {
+                disagreements.push(d);
+            }
+        }
+
         let mut participants: Vec<String> = Vec::new();
         for msg in &self.history {
             let role_name = match msg.role {
@@ -387,6 +407,8 @@ impl MeetingBackend {
             applied_templates: self.applied_templates.clone(),
             history_truncated_count: self.history_truncated_count,
             partial_reason: partial_reason.map(|r| r.as_wire_str().to_string()),
+            risks: risks.clone(),
+            disagreements: disagreements.clone(),
         };
 
         // Write MeetingHandoff artifact for OODA integration.
@@ -647,6 +669,8 @@ impl MeetingBackend {
             bundle_dir,
             partial_reason,
             orphan_turn_count: self.orphan_turn_count,
+            risks,
+            disagreements,
         })
     }
 
@@ -828,6 +852,8 @@ impl MeetingBackend {
             applied_templates: self.applied_templates.clone(),
             history_truncated_count: self.history_truncated_count,
             partial_reason: partial_reason.map(|r| r.as_wire_str().to_string()),
+            risks: self.explicit_risks.clone(),
+            disagreements: self.explicit_disagreements.clone(),
         };
 
         if let Err(e) = persist::write_handoff_with_explicit(
@@ -949,6 +975,8 @@ impl MeetingBackend {
             bundle_dir,
             partial_reason,
             orphan_turn_count: self.orphan_turn_count,
+            risks: self.explicit_risks.clone(),
+            disagreements: self.explicit_disagreements.clone(),
         })
     }
 }

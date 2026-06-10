@@ -147,6 +147,8 @@ mod tests {
             themes: vec![],
             next_owner: None,
             goal: None,
+            risks: vec![],
+            disagreements: vec![],
         };
         let summary = session.durable_summary();
         assert!(summary.contains("Planning"));

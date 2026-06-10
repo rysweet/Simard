@@ -99,6 +99,17 @@ pub struct MeetingSession {
     /// user message. Added in issue #1987.
     #[serde(default)]
     pub goal: Option<String>,
+    /// Identified risks recorded via `/risk <text>` or extracted from the
+    /// conversation. Required by spec line 637 ("identified risks").
+    /// Added in issue #2084.
+    #[serde(default)]
+    pub risks: Vec<String>,
+    /// Disagreements or dissenting views recorded via `/disagree <text>` or
+    /// extracted from the conversation. Required by spec line 645
+    /// ("surface disagreement and uncertainty instead of smoothing over
+    /// them"). Added in issue #2084.
+    #[serde(default)]
+    pub disagreements: Vec<String>,
 }
 
 impl MeetingSession {
@@ -137,9 +148,14 @@ impl MeetingSession {
         } else {
             "unknown".to_string()
         };
+        let risks = if self.risks.is_empty() {
+            "none".to_string()
+        } else {
+            self.risks.join("; ")
+        };
         format!(
-            "meeting topic={}; duration={}; participants=[{}]; decisions=[{}]; action_items=[{}]",
-            self.topic, duration, participants, decisions, action_items,
+            "meeting topic={}; duration={}; participants=[{}]; decisions=[{}]; action_items=[{}]; risks=[{}]",
+            self.topic, duration, participants, decisions, action_items, risks,
         )
     }
 }
@@ -286,6 +302,8 @@ mod tests {
             themes: vec!["performance".to_string()],
             next_owner: None,
             goal: None,
+            risks: vec![],
+            disagreements: vec![],
         }
     }
 
@@ -299,7 +317,7 @@ mod tests {
 
     #[test]
     fn session_explicit_questions_default() {
-        // explicit_questions and themes have #[serde(default)], so missing fields default to empty vec
+        // explicit_questions, themes, risks, disagreements have #[serde(default)], so missing fields default to empty vec
         let json = r#"{
             "topic": "test",
             "decisions": [],
@@ -312,6 +330,8 @@ mod tests {
         let s: MeetingSession = serde_json::from_str(json).unwrap();
         assert!(s.explicit_questions.is_empty());
         assert!(s.themes.is_empty());
+        assert!(s.risks.is_empty());
+        assert!(s.disagreements.is_empty());
     }
 
     #[test]
@@ -358,12 +378,15 @@ mod tests {
             themes: vec![],
             next_owner: None,
             goal: None,
+            risks: vec![],
+            disagreements: vec![],
         };
         let summary = s.durable_summary();
         assert!(summary.contains("decisions=[none]"));
         assert!(summary.contains("action_items=[none]"));
         assert!(summary.contains("participants=[none]"));
         assert!(summary.contains("duration=unknown"));
+        assert!(summary.contains("risks=[none]"));
     }
 
     #[test]
@@ -380,6 +403,8 @@ mod tests {
             themes: vec![],
             next_owner: None,
             goal: None,
+            risks: vec![],
+            disagreements: vec![],
         };
         let summary = s.durable_summary();
         assert!(summary.contains("duration=unknown"));

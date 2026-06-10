@@ -713,6 +713,8 @@ mod bundle_tests {
             applied_templates: Vec::new(),
             history_truncated_count: 0,
             partial_reason: None,
+            risks: vec![],
+            disagreements: vec![],
         }
     }
 

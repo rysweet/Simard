@@ -181,6 +181,8 @@ fn scan_unprocessed_handoffs_returns_true_for_unprocessed() {
         applied_templates: Vec::new(),
         history_truncated_count: 0,
         partial_reason: None,
+        risks: vec![],
+        disagreements: vec![],
     };
     write_meeting_handoff(dir.path(), &handoff).unwrap();
 
@@ -218,6 +220,8 @@ fn scan_unprocessed_handoffs_returns_false_when_processed() {
         applied_templates: Vec::new(),
         history_truncated_count: 0,
         partial_reason: None,
+        risks: vec![],
+        disagreements: vec![],
     };
     write_meeting_handoff(dir.path(), &handoff).unwrap();
 
