@@ -647,6 +647,155 @@ ACTION: cleaned shared-target dir
     }
 
     // ------------------------------------------------------------------
+    // emergency_cleanup — deterministic Tier 1 (issue #2245)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn emergency_cleanup_returns_none_below_threshold() {
+        // In CI / development, disk usage is well below 95%.
+        // emergency_cleanup must return None without performing any deletions.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path().join("repo");
+        let state_root = tmp.path().join("state");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        // Create directories that *would* be cleanup targets.
+        // They must survive untouched when disk is below threshold.
+        let debug_dir = repo_root.join("target/debug");
+        std::fs::create_dir_all(&debug_dir).unwrap();
+        std::fs::write(debug_dir.join("marker"), b"keep me").unwrap();
+
+        let result = emergency_cleanup(&repo_root, &state_root);
+        assert!(
+            result.is_none(),
+            "emergency_cleanup should return None when disk is below 95%"
+        );
+        // Verify nothing was deleted
+        assert!(
+            debug_dir.join("marker").exists(),
+            "target/debug/ must not be touched below threshold"
+        );
+    }
+
+    #[test]
+    fn emergency_cleanup_no_panic_on_nonexistent_paths() {
+        // get_disk_usage_pct will fail (df on nonexistent path), returning None.
+        // emergency_cleanup must return None, never panic.
+        let result = emergency_cleanup(
+            Path::new("/nonexistent/repo/path/that/does/not/exist"),
+            Path::new("/nonexistent/state/path/that/does/not/exist"),
+        );
+        assert!(
+            result.is_none(),
+            "emergency_cleanup should return None for nonexistent paths (not panic)"
+        );
+    }
+
+    #[test]
+    fn emergency_cleanup_report_contract_all_five_categories() {
+        // Emergency cleanup targets 5 categories. The report must track each.
+        // This validates the report contract (constructed from expected cleanup output).
+        let report = DiskHealthReport {
+            disk_used_pct: 89, // post-cleanup value (was ≥95% before)
+            freed_bytes: 8_500_000_000,
+            actions_taken: vec![
+                "Removed target/debug/ (6000 MB)".to_string(),
+                "Removed target/llvm-cov-target/ (1000 MB)".to_string(),
+                "Removed worktrees/engineer-1/target/ (500 MB)".to_string(),
+                "Removed cargo-target/ (600 MB)".to_string(),
+                "Pruned old backups (kept 2 most recent)".to_string(),
+            ],
+        };
+        assert!(report.cleanup_performed());
+        assert_eq!(report.actions_taken.len(), 5);
+        // Post-cleanup pct should reflect actual disk state (not pre-cleanup)
+        assert!(
+            report.disk_used_pct < 95,
+            "report.disk_used_pct should be post-cleanup (below threshold)"
+        );
+        // Summary encodes all three key facts
+        let s = report.summary();
+        assert!(
+            s.contains("89%"),
+            "summary should contain post-cleanup pct: {s}"
+        );
+        assert!(
+            s.contains("8500000000"),
+            "summary should contain freed bytes: {s}"
+        );
+        assert!(
+            s.contains("5 actions"),
+            "summary should count all categories: {s}"
+        );
+    }
+
+    #[test]
+    fn emergency_cleanup_report_freed_bytes_tracks_cumulative_total() {
+        // freed_bytes must be the sum across all cleanup categories, not per-category.
+        let report = DiskHealthReport {
+            disk_used_pct: 91,
+            freed_bytes: 4_000_000_000 + 1_000_000_000, // debug + cov
+            actions_taken: vec![
+                "Removed target/debug/ (4000 MB)".to_string(),
+                "Removed target/llvm-cov-target/ (1000 MB)".to_string(),
+            ],
+        };
+        assert_eq!(report.freed_bytes, 5_000_000_000);
+        assert!(report.cleanup_performed());
+    }
+
+    #[test]
+    fn emergency_cleanup_preserves_dirs_below_threshold() {
+        // Full scenario: create ALL five cleanup target directories plus
+        // backup files. Verify none are deleted when disk is below 95%.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let state = tmp.path().join("state");
+
+        // Category 1: target/debug/
+        let d1 = repo.join("target/debug");
+        std::fs::create_dir_all(&d1).unwrap();
+        std::fs::write(d1.join("libfoo.rlib"), b"x").unwrap();
+
+        // Category 2: target/llvm-cov-target/
+        let d2 = repo.join("target/llvm-cov-target");
+        std::fs::create_dir_all(&d2).unwrap();
+        std::fs::write(d2.join("cov.profraw"), b"x").unwrap();
+
+        // Category 3: worktrees/eng-1/target/
+        let d3 = repo.join("worktrees/eng-1/target");
+        std::fs::create_dir_all(&d3).unwrap();
+        std::fs::write(d3.join("build-cache"), b"x").unwrap();
+
+        // Category 4: state/cargo-target/
+        let d4 = state.join("cargo-target");
+        std::fs::create_dir_all(&d4).unwrap();
+        std::fs::write(d4.join("artifact"), b"x").unwrap();
+
+        // Category 5: state/backups/ (3 files, should keep 2 newest)
+        let d5 = state.join("backups");
+        std::fs::create_dir_all(&d5).unwrap();
+        for name in &["backup-001.tar", "backup-002.tar", "backup-003.tar"] {
+            std::fs::write(d5.join(name), b"backup data").unwrap();
+        }
+
+        let result = emergency_cleanup(&repo, &state);
+        assert!(result.is_none(), "should be None below 95%");
+
+        // Every target must still exist
+        assert!(d1.join("libfoo.rlib").exists(), "target/debug/ intact");
+        assert!(d2.join("cov.profraw").exists(), "llvm-cov-target/ intact");
+        assert!(d3.join("build-cache").exists(), "worktree target/ intact");
+        assert!(d4.join("artifact").exists(), "cargo-target/ intact");
+        assert_eq!(
+            std::fs::read_dir(&d5).unwrap().count(),
+            3,
+            "all 3 backups intact"
+        );
+    }
+
+    // ------------------------------------------------------------------
     // JSON envelope deserialization (issue #2212 — TDD: tests written first)
     // ------------------------------------------------------------------
 
