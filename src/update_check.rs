@@ -209,13 +209,16 @@ fn wait_with_timeout(
 /// "-rc1"). This ensures pre-releases sort *before* the corresponding release:
 /// `1.0.0-rc1 < 1.0.0`.
 fn parse_semver(v: &str) -> Option<(u64, u64, u64, bool)> {
-    // Split off pre-release suffix ("-beta.1") and build metadata ("+build")
-    let (numeric, has_prerelease) = if let Some(idx) = v.find('-') {
-        (&v[..idx], true)
-    } else if let Some(idx) = v.find('+') {
-        (&v[..idx], false)
-    } else {
-        (v, false)
+    // Strip build metadata first (everything after '+'), then check for
+    // pre-release ('-'). This order matters because build metadata can
+    // contain hyphens (e.g. "1.2.3+build-456" is a valid release).
+    let (without_build, _build_meta) = match v.find('+') {
+        Some(idx) => (&v[..idx], Some(&v[idx + 1..])),
+        None => (v, None),
+    };
+    let (numeric, has_prerelease) = match without_build.find('-') {
+        Some(idx) => (&without_build[..idx], true),
+        None => (without_build, false),
     };
     let parts: Vec<&str> = numeric.split('.').collect();
     if parts.len() != 3 {
@@ -409,11 +412,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_semver_build_metadata_with_dash_is_none() {
-        // Known limitation: "1.2.3+build-456" — the '-' inside build metadata
-        // is incorrectly detected as a prerelease separator, causing the
-        // numeric portion to include "+build" which fails to parse.
-        assert_eq!(parse_semver("1.2.3+build-456"), None);
+    fn parse_semver_build_metadata_with_dash_is_valid() {
+        // "1.2.3+build-456" — the '-' is inside build metadata (after '+'),
+        // so it is NOT a prerelease separator. This is a valid release.
+        assert_eq!(parse_semver("1.2.3+build-456"), Some((1, 2, 3, true)));
     }
 
     #[test]
