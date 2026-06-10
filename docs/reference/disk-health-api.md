@@ -173,14 +173,13 @@ envelope. Not public — used internally by `run_disk_health_check()`.
 ```rust
 #[derive(Deserialize)]
 struct RecipeOutput {
-    #[allow(dead_code)]
-    success: bool,
+    success: bool,           // actively used (envelope success check)
     step_results: Vec<StepResult>,
 }
 
 #[derive(Deserialize)]
 struct StepResult {
-    #[allow(dead_code)]
+    #[allow(dead_code)]      // part of JSON contract; used in tests
     step_id: String,
     output: String,
 }

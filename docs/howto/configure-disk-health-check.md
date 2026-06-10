@@ -49,9 +49,14 @@ grep "EMERGENCY" ~/.simard/ooda.log | tail -5
 Typical output:
 
 ```
-[2026-05-24T15:42:01Z] [simard] EMERGENCY disk cleanup: 97% -> freed 53687091200 bytes
+[2026-05-24T15:42:01Z] [simard] EMERGENCY disk cleanup: 89% -> freed 53687091200 bytes
 [2026-05-24T15:42:01Z] [simard] emergency actions: ["Removed target/debug/ (48123 MB)", ...]
 ```
+
+> **Note:** The percentage shown is the **post-cleanup** value (not pre-cleanup).
+> In this example, disk was ≥95% before cleanup and dropped to 89% after freeing
+> ~50 GB. If the percentage is still high (e.g., 94%), cleanup freed some space
+> but not enough — check that deletion targets exist and have significant size.
 
 Emergency cleanup only fires when disk is ≥95%. If you never see these logs,
 disk pressure hasn't reached critical levels — Tier 2 is handling it.

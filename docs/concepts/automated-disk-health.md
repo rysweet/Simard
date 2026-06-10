@@ -182,7 +182,7 @@ sufficient alone.
 
 | Target                        | Why not                                                         |
 | ----------------------------- | --------------------------------------------------------------- |
-| Main repo `target/`           | May be actively used by operator; manual `reclaim-build-space`  |
+| Main repo `target/` (full)    | Tier 1 cleans `target/debug/` and `target/llvm-cov-target/` subdirs, but does not wipe the entire `target/` directory — release artifacts may be in use. For a full wipe, use manual `reclaim-build-space`. |
 | Active engineer worktrees     | Still running; claim file present                               |
 | Worktrees < 24h old           | May be in use; conservative age threshold                       |
 | Git objects (`.git/objects/`)  | Shared across all worktrees via git's alternates                |
