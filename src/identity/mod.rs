@@ -1,7 +1,9 @@
 mod compose;
 mod contract;
+mod file_loader;
 mod loader;
 mod manifest;
+mod toml_types;
 mod types;
 
 #[cfg(test)]
@@ -10,6 +12,7 @@ mod coverage_tests;
 
 // Re-export all public items so `crate::identity::X` still works.
 pub use contract::ManifestContract;
+pub use file_loader::FileIdentityLoader;
 pub use loader::{BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader};
 pub use manifest::{IdentityManifest, compose_with_precedence};
 pub use types::{MemoryPolicy, OperatingMode};

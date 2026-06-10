@@ -313,6 +313,24 @@ impl Display for SimardError {
                     path.display()
                 )
             }
+            Self::IdentityTomlParseError { path, reason } => {
+                write!(
+                    f,
+                    "failed to parse identity TOML at '{}': {reason}",
+                    path.display()
+                )
+            }
+            Self::IdentityPathNotUnderPromptRoot {
+                identity_path,
+                prompt_root,
+            } => {
+                write!(
+                    f,
+                    "identity path '{}' is not under prompt root '{}'",
+                    identity_path.display(),
+                    prompt_root.display()
+                )
+            }
         }
     }
 }
@@ -342,6 +360,7 @@ fn fmt_field_reason(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn gym_history_db_display() {
@@ -397,5 +416,34 @@ mod tests {
         };
         assert!(err.to_string().contains("subprocess"));
         assert!(err.to_string().contains("child missing"));
+    }
+
+    // ── New identity error variants ─────────────────────────────────
+
+    #[test]
+    fn identity_toml_parse_error_display() {
+        let err = SimardError::IdentityTomlParseError {
+            path: PathBuf::from("/tmp/identity.toml"),
+            reason: "unexpected key 'flavor'".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("identity.toml"), "should mention path");
+        assert!(msg.contains("unexpected key"), "should mention reason");
+        assert!(
+            msg.contains("failed to parse"),
+            "should indicate parse failure"
+        );
+    }
+
+    #[test]
+    fn identity_path_not_under_prompt_root_display() {
+        let err = SimardError::IdentityPathNotUnderPromptRoot {
+            identity_path: PathBuf::from("/rogue/identity"),
+            prompt_root: PathBuf::from("/expected/root"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/rogue/identity"));
+        assert!(msg.contains("/expected/root"));
+        assert!(msg.contains("not under prompt root"));
     }
 }
