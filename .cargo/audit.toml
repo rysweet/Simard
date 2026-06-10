@@ -1,0 +1,11 @@
+# Supply-chain audit configuration
+# https://github.com/rustsec/rustsec/tree/main/cargo-audit
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071: Marvin Attack (timing side-channel) in `rsa` crate.
+    # No fixed version available upstream. Transitive dep via
+    # rustyclawd-tools → octocrab → jsonwebtoken → rsa.
+    # Tracked upstream: https://github.com/RustCrypto/RSA/issues/19
+    "RUSTSEC-2023-0071",
+]
