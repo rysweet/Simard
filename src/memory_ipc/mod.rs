@@ -185,6 +185,9 @@ pub enum MemoryRequest {
     CheckTriggers {
         content: String,
     },
+    ResolveProspective {
+        node_id: String,
+    },
     GetStatistics,
 }
 
@@ -201,6 +204,7 @@ pub enum MemoryResponse {
     Procedures(Vec<CognitiveProcedure>),
     Prospectives(Vec<CognitiveProspective>),
     Statistics(CognitiveStatistics),
+    Ack,
     Error(String),
 }
 
@@ -329,6 +333,9 @@ impl CognitiveMemoryOps for SharedMemory {
     }
     fn check_triggers(&self, content: &str) -> SimardResult<Vec<CognitiveProspective>> {
         self.0.check_triggers(content)
+    }
+    fn resolve_prospective(&self, node_id: &str) -> SimardResult<()> {
+        self.0.resolve_prospective(node_id)
     }
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
         self.0.get_statistics()

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardResult;
+use crate::goals::{GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, GoalRecord};
 use crate::memory_cognitive::{CognitiveFact, CognitiveProcedure, CognitiveProspective};
 use crate::session::SessionId;
 
@@ -70,7 +71,9 @@ pub fn intake_memory_operations(
 ///
 /// Searches semantic memory for facts related to the objective, checks
 /// prospective memories for any triggered actions, and recalls relevant
-/// procedures. The assembled context is returned for use during execution.
+/// procedures. Also explicitly loads active goal records from semantic
+/// memory so goals are always available in the prepared context regardless
+/// of whether the objective text happens to match (issue #2207).
 #[tracing::instrument(skip_all)]
 pub fn preparation_memory_operations(
     objective: &str,
@@ -78,7 +81,51 @@ pub fn preparation_memory_operations(
     bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<PreparedContext> {
     // Search for facts related to the objective.
-    let relevant_facts = bridge.search_facts(objective, 10, 0.0)?;
+    let mut relevant_facts = bridge.search_facts(objective, 10, 0.0)?;
+
+    // Always load goal facts so goals are accessible from memory even when
+    // the objective text doesn't substring-match "goal-store:record".
+    // Uses the same limit as CognitiveMemoryGoalStore::list_via_reader()
+    // so status churn doesn't cause current goals to fall off (#2207).
+    let goal_facts = bridge.search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)?;
+
+    // Dedup goal facts by slug, keeping only the latest revision per slug
+    // (highest node_id, which is UUID-v7 time-ordered). This mirrors the
+    // dedup logic in CognitiveMemoryGoalStore::list_via_reader() and
+    // prevents historical revisions from crowding out current goals (#2207).
+    let mut latest_by_slug: std::collections::HashMap<String, CognitiveFact> =
+        std::collections::HashMap::new();
+    for fact in goal_facts {
+        if fact.concept != GOAL_STORE_FACT_CONCEPT {
+            continue;
+        }
+        let record: GoalRecord = match serde_json::from_str(&fact.content) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "[simard] preparation: skipping unparseable goal fact \
+                     (node_id={}): {e}",
+                    fact.node_id
+                );
+                continue;
+            }
+        };
+        let slug = record.slug;
+        match latest_by_slug.get(&slug) {
+            Some(existing) if existing.node_id >= fact.node_id => {}
+            _ => {
+                latest_by_slug.insert(slug, fact);
+            }
+        }
+    }
+
+    let existing_ids: std::collections::HashSet<String> =
+        relevant_facts.iter().map(|f| f.node_id.clone()).collect();
+    for fact in latest_by_slug.into_values() {
+        if !existing_ids.contains(&fact.node_id) {
+            relevant_facts.push(fact);
+        }
+    }
 
     // Check if any prospective memories are triggered by the objective.
     let triggered_prospectives = bridge.check_triggers(objective)?;

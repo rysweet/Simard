@@ -90,6 +90,15 @@ pub trait CognitiveMemoryOps: Send + Sync {
 
     fn check_triggers(&self, content: &str) -> SimardResult<Vec<CognitiveProspective>>;
 
+    /// Mark a prospective memory as resolved so it no longer fires from
+    /// `check_triggers`. Used when a goal is completed or paused.
+    ///
+    /// Default implementation is a no-op for backends that do not support
+    /// status transitions (legacy Python bridge, test stubs).
+    fn resolve_prospective(&self, _node_id: &str) -> SimardResult<()> {
+        Ok(())
+    }
+
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics>;
 
     /// Search recent episodes by content prefix.

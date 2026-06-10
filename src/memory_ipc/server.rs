@@ -212,6 +212,12 @@ fn dispatch(memory: &dyn CognitiveMemoryOps, req: MemoryRequest) -> MemoryRespon
             Ok(v) => MemoryResponse::Prospectives(v),
             Err(e) => MemoryResponse::Error(e.to_string()),
         },
+        MemoryRequest::ResolveProspective { node_id } => {
+            match memory.resolve_prospective(&node_id) {
+                Ok(()) => MemoryResponse::Ack,
+                Err(e) => MemoryResponse::Error(e.to_string()),
+            }
+        }
         MemoryRequest::GetStatistics => match memory.get_statistics() {
             Ok(s) => MemoryResponse::Statistics(s),
             Err(e) => MemoryResponse::Error(e.to_string()),
