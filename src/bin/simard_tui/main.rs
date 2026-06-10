@@ -74,6 +74,7 @@ fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Box<dyn Write>>>> {
 }
 
 fn main() {
+    simard::update_check::run_update_check();
     if let Err(e) = run() {
         eprintln!("simard-tui: {e}");
         std::process::exit(1);

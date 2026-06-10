@@ -119,6 +119,7 @@ mod tests_hermetic_guard;
 #[cfg(test)]
 mod tests_memory_ipc;
 pub mod trace_collector;
+pub mod update_check;
 pub mod util;
 pub mod worktree_gc;
 
