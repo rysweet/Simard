@@ -118,6 +118,22 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  cargo-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@754bf4dbae00ad1b16b244717154b96ba27d2416 # cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit
+
   install-real:
     runs-on: ubuntu-latest
     timeout-minutes: 120
