@@ -46,6 +46,16 @@ pub enum MeetingCommand {
     /// `/goal Agree on the release plan for v2`). Empty payload falls
     /// through to conversation. Added in issue #1987.
     Goal(String),
+    /// Operator records an identified risk (e.g.
+    /// `/risk Dependency on unstable API may delay launch`). Empty payload
+    /// falls through to conversation. Required by spec line 637
+    /// ("identified risks"). Added in issue #2084.
+    Risk(String),
+    /// Operator records a disagreement or dissenting view (e.g.
+    /// `/disagree I think we should use Python instead`). Empty payload
+    /// falls through to conversation. Required by spec line 645
+    /// ("surface disagreement and uncertainty"). Added in issue #2084.
+    Disagree(String),
     /// Natural language — forwarded to the LLM.
     Conversation(String),
 }
@@ -125,6 +135,22 @@ pub fn parse_command(input: &str) -> MeetingCommand {
                 MeetingCommand::Conversation(trimmed.to_string())
             } else {
                 MeetingCommand::Goal(arg)
+            }
+        }
+        _ if lower.starts_with("/risk ") => {
+            let arg = trimmed["/risk ".len()..].trim().to_string();
+            if arg.is_empty() {
+                MeetingCommand::Conversation(trimmed.to_string())
+            } else {
+                MeetingCommand::Risk(arg)
+            }
+        }
+        _ if lower.starts_with("/disagree ") => {
+            let arg = trimmed["/disagree ".len()..].trim().to_string();
+            if arg.is_empty() {
+                MeetingCommand::Conversation(trimmed.to_string())
+            } else {
+                MeetingCommand::Disagree(arg)
             }
         }
         _ => MeetingCommand::Conversation(trimmed.to_string()),
@@ -499,5 +525,65 @@ mod tests {
         let (text, rationale) = parse_rationale_flag("No flag here");
         assert_eq!(text, "No flag here");
         assert_eq!(rationale, None);
+    }
+
+    // ── /risk (issue #2084) ──────────────────────────────────────────
+
+    #[test]
+    fn parse_risk_with_arg() {
+        assert_eq!(
+            parse_command("/risk Dependency on unstable API may delay launch"),
+            MeetingCommand::Risk("Dependency on unstable API may delay launch".to_string()),
+        );
+        assert_eq!(
+            parse_command("  /Risk  Single point of failure  "),
+            MeetingCommand::Risk("Single point of failure".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_risk_empty_arg_is_conversation() {
+        assert_eq!(
+            parse_command("/risk"),
+            MeetingCommand::Conversation("/risk".to_string()),
+        );
+        assert_eq!(
+            parse_command("/risk    "),
+            MeetingCommand::Conversation("/risk".to_string()),
+        );
+    }
+
+    // ── /disagree (issue #2084) ──────────────────────────────────────
+
+    #[test]
+    fn parse_disagree_with_arg() {
+        assert_eq!(
+            parse_command("/disagree I think we should use Python instead"),
+            MeetingCommand::Disagree("I think we should use Python instead".to_string()),
+        );
+        assert_eq!(
+            parse_command("  /Disagree  This approach is too risky  "),
+            MeetingCommand::Disagree("This approach is too risky".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_disagree_preserves_case() {
+        assert_eq!(
+            parse_command("/disagree Alice thinks we need more testing"),
+            MeetingCommand::Disagree("Alice thinks we need more testing".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_disagree_empty_arg_is_conversation() {
+        assert_eq!(
+            parse_command("/disagree"),
+            MeetingCommand::Conversation("/disagree".to_string()),
+        );
+        assert_eq!(
+            parse_command("/disagree    "),
+            MeetingCommand::Conversation("/disagree".to_string()),
+        );
     }
 }

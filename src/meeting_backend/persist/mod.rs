@@ -192,6 +192,10 @@ pub struct HandoffEnrichment<'a> {
     pub history_truncated_count: usize,
     /// Wire-string form of `PartialReason` from the close pipeline. Added in #1987.
     pub partial_reason: Option<String>,
+    /// Identified risks. Added in issue #2084.
+    pub risks: Vec<String>,
+    /// Disagreements or dissenting views. Added in issue #2084.
+    pub disagreements: Vec<String>,
 }
 
 /// Write a `MeetingHandoff` artifact for OODA integration.
@@ -350,6 +354,8 @@ pub fn write_handoff_with_explicit(
         applied_templates: enrichment.applied_templates.clone(),
         history_truncated_count: enrichment.history_truncated_count,
         partial_reason: enrichment.partial_reason.clone(),
+        risks: enrichment.risks.clone(),
+        disagreements: enrichment.disagreements.clone(),
     };
 
     let dir = default_handoff_dir();
@@ -453,6 +459,8 @@ pub fn write_handoff_bundle(
         applied_templates: enrichment.applied_templates.clone(),
         history_truncated_count: enrichment.history_truncated_count,
         partial_reason: enrichment.partial_reason.clone(),
+        risks: enrichment.risks.clone(),
+        disagreements: enrichment.disagreements.clone(),
     };
 
     let lines: Vec<crate::meeting_facilitator::BundleTranscriptLine> = messages
@@ -501,7 +509,8 @@ pub(crate) use extract::{
 };
 pub use extract::{
     extract_action_items, extract_decision_participants_pub, extract_decision_rationale_pub,
-    extract_decisions, extract_open_questions, extract_themes, link_action_items_to_goals,
+    extract_decisions, extract_disagreements, extract_open_questions, extract_risks,
+    extract_themes, link_action_items_to_goals,
 };
 pub use json_sibling::{JsonHandoffActionItem, JsonHandoffSibling};
 pub use templates::{MeetingTemplate, TEMPLATES, find_template};

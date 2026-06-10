@@ -45,6 +45,8 @@ fn test_handoff(topic: &str, started_at: &str) -> MeetingHandoff {
         applied_templates: vec![],
         history_truncated_count: 0,
         partial_reason: None,
+        risks: vec![],
+        disagreements: vec![],
     }
 }
 

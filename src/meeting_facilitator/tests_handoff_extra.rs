@@ -24,6 +24,8 @@ fn make_session(
         themes: Vec::new(),
         next_owner: None,
         goal: None,
+        risks: Vec::new(),
+        disagreements: Vec::new(),
     }
 }
 

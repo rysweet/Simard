@@ -188,6 +188,13 @@ pub struct MeetingBackend {
     /// user message was already pushed to history. These are "orphan" turns
     /// with no assistant reply. Surfaced on `MeetingSummary` (issue #1983).
     orphan_turn_count: usize,
+    /// Risks recorded inline by the operator via `/risk <text>`. Required by
+    /// spec line 637 ("identified risks"). Added in issue #2084.
+    explicit_risks: Vec<String>,
+    /// Disagreements recorded inline by the operator via `/disagree <text>`.
+    /// Required by spec line 645 ("surface disagreement and uncertainty").
+    /// Added in issue #2084.
+    explicit_disagreements: Vec<String>,
 }
 
 impl MeetingBackend {
@@ -230,6 +237,8 @@ impl MeetingBackend {
             explicit_goal: None,
             history_truncated_count: 0,
             orphan_turn_count: 0,
+            explicit_risks: Vec::new(),
+            explicit_disagreements: Vec::new(),
         }
     }
 
@@ -464,6 +473,55 @@ impl MeetingBackend {
         self.explicit_goal.as_deref()
     }
 
+    /// Record an identified risk the operator flagged with `/risk <text>`.
+    /// Trailing/leading whitespace is trimmed; empty values are ignored.
+    /// Duplicates (case-insensitive) are deduplicated. Added in issue #2084.
+    pub fn push_explicit_risk(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let lower = trimmed.to_lowercase();
+        if self
+            .explicit_risks
+            .iter()
+            .any(|r| r.to_lowercase() == lower)
+        {
+            return;
+        }
+        self.explicit_risks.push(trimmed.to_string());
+    }
+
+    /// Read the risks the operator recorded inline so far.
+    pub fn explicit_risks(&self) -> &[String] {
+        &self.explicit_risks
+    }
+
+    /// Record a disagreement or dissenting view the operator flagged with
+    /// `/disagree <text>`. Trailing/leading whitespace is trimmed; empty
+    /// values are ignored. Duplicates (case-insensitive) are deduplicated.
+    /// Added in issue #2084.
+    pub fn push_explicit_disagreement(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let lower = trimmed.to_lowercase();
+        if self
+            .explicit_disagreements
+            .iter()
+            .any(|d| d.to_lowercase() == lower)
+        {
+            return;
+        }
+        self.explicit_disagreements.push(trimmed.to_string());
+    }
+
+    /// Read the disagreements the operator recorded inline so far.
+    pub fn explicit_disagreements(&self) -> &[String] {
+        &self.explicit_disagreements
+    }
+
     /// Compute the effective goal for the handoff: explicit `/goal` text
     /// if set, otherwise fall back to the first user message.
     pub fn effective_goal(&self) -> Option<String> {
@@ -519,6 +577,8 @@ impl MeetingBackend {
             themes: self.themes.clone(),
             next_owner: self.explicit_next_owner.clone(),
             goal: self.explicit_goal.clone(),
+            risks: self.explicit_risks.clone(),
+            disagreements: self.explicit_disagreements.clone(),
         }
     }
 
