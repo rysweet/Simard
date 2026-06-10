@@ -52,7 +52,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            " Press 1-6 to switch tabs, q to quit",
+            " Alt+1\u{2013}6 / Tab / \u{2190}\u{2192} to switch tabs, q to quit",
             Style::default().fg(Color::DarkGray),
         )),
     ];
