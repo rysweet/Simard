@@ -7,11 +7,8 @@ use super::routes::{resolve_state_root, run_gh_json};
 
 pub(crate) async fn traces() -> Json<Value> {
     // Read recent spans from the trace log file
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
-    let trace_sources = vec![(
-        std::path::PathBuf::from(&home).join(".simard/costs/ledger.jsonl"),
-        "cost",
-    )];
+    let state_root = resolve_state_root();
+    let trace_sources = vec![(state_root.join("costs").join("ledger.jsonl"), "cost")];
 
     let mut spans: Vec<Value> = Vec::new();
 

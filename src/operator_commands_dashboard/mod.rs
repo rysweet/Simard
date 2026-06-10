@@ -24,9 +24,13 @@ mod tmux;
 mod workboard;
 
 #[cfg(test)]
+mod tests_activity;
+#[cfg(test)]
 mod tests_attach;
 #[cfg(test)]
 mod tests_goal_records_migration;
+#[cfg(test)]
+mod tests_goals_crud;
 #[cfg(test)]
 mod tests_routes_a;
 #[cfg(test)]
