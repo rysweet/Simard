@@ -8,6 +8,8 @@
 //! - `SIMARD_NO_UPDATE_CHECK=1` — skip the check entirely
 //! - `SIMARD_NONINTERACTIVE=1`  — print the notice but suppress the upgrade prompt
 
+use std::sync::mpsc;
+
 use crate::cmd_self_update::platform::{CURRENT_VERSION, GITHUB_REPO};
 
 /// Information about an available update.
@@ -19,28 +21,10 @@ pub struct UpdateInfo {
     pub has_platform_asset: bool,
 }
 
-/// Run the full update check: query GitHub → notify user if newer version exists.
-///
-/// Spawns in a background thread with a hard 5-second timeout so it never
-/// blocks startup. Silently returns on any error (network, parse, timeout).
+/// Run the update check as fire-and-forget: spawns a detached thread that
+/// prints an upgrade notice to stderr if a newer version is available.
+/// Never blocks the caller — the thread is not joined.
 pub fn run_update_check() {
-    if std::env::var("SIMARD_NO_UPDATE_CHECK")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
-        return;
-    }
-
-    // Run in a background thread with a hard timeout so startup is never blocked.
-    let handle = std::thread::spawn(check_for_update);
-    if let Ok(Some(info)) = handle.join() {
-        print_upgrade_notice(&info);
-    }
-}
-
-/// Non-blocking variant: spawn the check in background, print if update found.
-/// Returns immediately. Used when even the 5s timeout is too much.
-pub fn run_update_check_background() {
     if std::env::var("SIMARD_NO_UPDATE_CHECK")
         .map(|v| v == "1")
         .unwrap_or(false)
@@ -53,6 +37,40 @@ pub fn run_update_check_background() {
             print_upgrade_notice(&info);
         }
     });
+}
+
+/// Non-blocking variant for TUI: spawns the check in background and returns
+/// a channel receiver. The TUI polls `try_recv()` to get the update notice
+/// string (if any) and renders it in its own draw cycle — no direct stderr
+/// writes that would corrupt the alternate screen.
+///
+/// Returns `None` if the check is disabled via env var.
+pub fn run_update_check_background() -> Option<mpsc::Receiver<String>> {
+    if std::env::var("SIMARD_NO_UPDATE_CHECK")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        if let Some(info) = check_for_update() {
+            let notice = format!(
+                "Update available: v{} → v{}  {}{}",
+                info.current_version,
+                info.latest_version,
+                info.release_url,
+                if info.has_platform_asset {
+                    "  Run `simard self-update` to upgrade."
+                } else {
+                    ""
+                },
+            );
+            let _ = tx.send(notice);
+        }
+    });
+    Some(rx)
 }
 
 /// Check GitHub for a newer release.
@@ -99,16 +117,19 @@ fn fetch_latest_version() -> Option<(String, String, bool)> {
     let url = release["html_url"].as_str().unwrap_or("").to_string();
 
     // Check if there's an asset for the current platform
-    let platform_suffix = current_platform_asset_suffix();
-    let has_platform_asset = release["assets"]
-        .as_array()
-        .map(|assets| {
-            assets.iter().any(|a| {
-                a["name"]
-                    .as_str()
-                    .map(|n| n.contains(&platform_suffix))
-                    .unwrap_or(false)
-            })
+    let has_platform_asset = crate::cmd_self_update::platform::platform_suffix()
+        .map(|suffix| {
+            release["assets"]
+                .as_array()
+                .map(|assets| {
+                    assets.iter().any(|a| {
+                        a["name"]
+                            .as_str()
+                            .map(|n| n.contains(suffix))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
         })
         .unwrap_or(false);
 
@@ -181,33 +202,21 @@ fn wait_with_timeout(
     }
 }
 
-/// Returns the expected asset name suffix for the current platform.
-fn current_platform_asset_suffix() -> String {
-    let os = if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "macos") {
-        "darwin"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        "unknown"
-    };
-    let arch = if cfg!(target_arch = "x86_64") {
-        "x86_64"
-    } else if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        "unknown"
-    };
-    format!("{os}-{arch}")
-}
-
 /// Parse a semver string "major.minor.patch[-prerelease]" into a comparable tuple.
-/// Pre-release versions (e.g., "1.2.3-beta.1") are stripped to their numeric
-/// core for comparison, since any release is newer than its pre-release.
-fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
-    // Strip pre-release suffix (e.g., "-beta.1") and build metadata ("+build")
-    let numeric = v.split(['-', '+']).next()?;
+///
+/// Returns `(major, minor, patch, is_release)` where `is_release` is `true`
+/// for plain releases and `false` for pre-release versions (e.g. "-beta.1",
+/// "-rc1"). This ensures pre-releases sort *before* the corresponding release:
+/// `1.0.0-rc1 < 1.0.0`.
+fn parse_semver(v: &str) -> Option<(u64, u64, u64, bool)> {
+    // Split off pre-release suffix ("-beta.1") and build metadata ("+build")
+    let (numeric, has_prerelease) = if let Some(idx) = v.find('-') {
+        (&v[..idx], true)
+    } else if let Some(idx) = v.find('+') {
+        (&v[..idx], false)
+    } else {
+        (v, false)
+    };
     let parts: Vec<&str> = numeric.split('.').collect();
     if parts.len() != 3 {
         return None;
@@ -216,6 +225,7 @@ fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
         parts[0].parse().ok()?,
         parts[1].parse().ok()?,
         parts[2].parse().ok()?,
+        !has_prerelease,
     ))
 }
 
@@ -233,19 +243,20 @@ mod tests {
 
     #[test]
     fn parse_semver_valid() {
-        assert_eq!(parse_semver("1.2.3"), Some((1, 2, 3)));
-        assert_eq!(parse_semver("0.19.0"), Some((0, 19, 0)));
+        assert_eq!(parse_semver("1.2.3"), Some((1, 2, 3, true)));
+        assert_eq!(parse_semver("0.19.0"), Some((0, 19, 0, true)));
     }
 
     #[test]
     fn parse_semver_with_prerelease() {
-        assert_eq!(parse_semver("1.2.3-beta.1"), Some((1, 2, 3)));
-        assert_eq!(parse_semver("1.0.0-rc1"), Some((1, 0, 0)));
+        assert_eq!(parse_semver("1.2.3-beta.1"), Some((1, 2, 3, false)));
+        assert_eq!(parse_semver("1.0.0-rc1"), Some((1, 0, 0, false)));
     }
 
     #[test]
     fn parse_semver_with_build_metadata() {
-        assert_eq!(parse_semver("1.2.3+build.456"), Some((1, 2, 3)));
+        // Build metadata without prerelease → still a release
+        assert_eq!(parse_semver("1.2.3+build.456"), Some((1, 2, 3, true)));
     }
 
     #[test]
@@ -278,8 +289,11 @@ mod tests {
 
     #[test]
     fn is_newer_handles_prerelease() {
-        // Pre-release strips to numeric core, so 1.0.0-beta == 1.0.0 for comparison
+        // Pre-release is older than the same release version
         assert!(!is_newer("1.0.0-beta.1", "1.0.0"));
+        // Release is newer than its own pre-release
+        assert!(is_newer("1.0.0", "1.0.0-rc1"));
+        // Higher version pre-release is still newer than lower release
         assert!(is_newer("1.0.1-beta.1", "1.0.0"));
     }
 
@@ -293,11 +307,16 @@ mod tests {
     }
 
     #[test]
-    fn platform_asset_suffix_is_not_unknown() {
-        let suffix = current_platform_asset_suffix();
+    fn platform_suffix_is_not_unknown() {
+        let suffix = crate::cmd_self_update::platform::platform_suffix();
         assert!(
-            !suffix.contains("unknown"),
-            "platform suffix should be resolved: {suffix}"
+            suffix.is_some(),
+            "platform_suffix() should return Some on supported platforms"
+        );
+        let s = suffix.unwrap();
+        assert!(
+            !s.contains("unknown"),
+            "platform suffix should be resolved: {s}"
         );
     }
 
@@ -311,5 +330,13 @@ mod tests {
             let _ = fetch_via_gh();
         });
         assert!(result.is_ok(), "fetch_via_gh should not panic");
+    }
+
+    #[test]
+    fn run_update_check_background_returns_receiver() {
+        // With check disabled, returns None
+        std::env::set_var("SIMARD_NO_UPDATE_CHECK", "1");
+        assert!(run_update_check_background().is_none());
+        std::env::remove_var("SIMARD_NO_UPDATE_CHECK");
     }
 }

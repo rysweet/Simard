@@ -74,14 +74,16 @@ fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Box<dyn Write>>>> {
 }
 
 fn main() {
-    simard::update_check::run_update_check_background();
-    if let Err(e) = run() {
+    let update_rx = simard::update_check::run_update_check_background();
+    if let Err(e) = run(update_rx) {
         eprintln!("simard-tui: {e}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run(
+    update_rx: Option<std::sync::mpsc::Receiver<String>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Chain panic hook to restore terminal before default panic output.
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -96,7 +98,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = setup_terminal()?;
     let _guard = TerminalGuard;
 
-    let mut app = app::App::new(service_name);
+    let mut app = app::App::new(service_name, update_rx);
     app.refresh();
 
     loop {

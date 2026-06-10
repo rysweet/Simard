@@ -135,6 +135,9 @@ pub struct App {
     pub gh_receiver: Option<mpsc::Receiver<(Option<usize>, Option<usize>)>>,
     pub gh_in_flight: bool,
     pub tick_count: u32,
+    // Update notice (polled from background check)
+    update_rx: Option<mpsc::Receiver<String>>,
+    pub update_notice: Option<String>,
 }
 
 impl App {
@@ -142,7 +145,10 @@ impl App {
     ///
     /// Starts on the Overview tab with unavailable daemon info and empty goals.
     /// Call `refresh()` after construction to populate.
-    pub fn new(service_name: String) -> Self {
+    ///
+    /// `update_rx`: optional channel from `run_update_check_background()` —
+    /// polled on each refresh to pick up update notices without eprintln.
+    pub fn new(service_name: String, update_rx: Option<mpsc::Receiver<String>>) -> Self {
         let state_root = goals::resolve_state_root();
         Self {
             active_tab: Tab::Overview,
@@ -165,6 +171,8 @@ impl App {
             gh_receiver: None,
             gh_in_flight: false,
             tick_count: 0,
+            update_rx,
+            update_notice: None,
         }
     }
 
@@ -625,6 +633,15 @@ impl App {
     pub fn refresh(&mut self) {
         self.tick_count = self.tick_count.wrapping_add(1);
 
+        // Poll for update notice from background check
+        if self.update_notice.is_none()
+            && let Some(ref rx) = self.update_rx
+            && let Ok(notice) = rx.try_recv()
+        {
+            self.update_notice = Some(notice);
+            self.update_rx = None; // one-shot: done with the channel
+        }
+
         let service = &self.daemon_info.service_name;
 
         let systemctl_output = std::process::Command::new("systemctl")
@@ -894,52 +911,52 @@ mod tests {
 
     #[test]
     fn app_new_starts_on_overview() {
-        let app = App::new("simard-ooda.service".to_string());
+        let app = App::new("simard-ooda.service".to_string(), None);
         assert_eq!(app.active_tab, Tab::Overview);
         assert!(!app.should_quit);
     }
 
     #[test]
     fn app_new_starts_with_empty_goals() {
-        let app = App::new("simard-ooda.service".to_string());
+        let app = App::new("simard-ooda.service".to_string(), None);
         assert!(app.goal_board.active.is_empty());
         assert!(app.goal_board.backlog.is_empty());
     }
 
     #[test]
     fn app_new_has_empty_log_lines() {
-        let app = App::new("simard-ooda.service".to_string());
+        let app = App::new("simard-ooda.service".to_string(), None);
         assert!(app.log_lines.is_empty());
     }
 
     #[test]
     fn app_new_has_empty_child_processes() {
-        let app = App::new("simard-ooda.service".to_string());
+        let app = App::new("simard-ooda.service".to_string(), None);
         assert!(app.child_processes.is_empty());
     }
 
     #[test]
     fn app_new_meeting_not_started() {
-        let app = App::new("simard-ooda.service".to_string());
+        let app = App::new("simard-ooda.service".to_string(), None);
         assert!(matches!(app.meeting_status, MeetingStatus::NotStarted));
     }
 
     #[test]
     fn app_new_has_empty_meeting_buffers() {
-        let app = App::new("simard-ooda.service".to_string());
+        let app = App::new("simard-ooda.service".to_string(), None);
         assert!(app.meeting_input.is_empty());
         assert!(app.meeting_output.is_empty());
     }
 
     #[test]
     fn app_new_tick_count_zero() {
-        let app = App::new("simard-ooda.service".to_string());
+        let app = App::new("simard-ooda.service".to_string(), None);
         assert_eq!(app.tick_count, 0);
     }
 
     #[test]
     fn app_new_stats_cache_all_none() {
-        let app = App::new("simard-ooda.service".to_string());
+        let app = App::new("simard-ooda.service".to_string(), None);
         assert!(app.stats_cache.state_files.is_none());
         assert!(app.stats_cache.session_dirs.is_none());
         assert!(app.stats_cache.open_issues.is_none());
@@ -950,7 +967,7 @@ mod tests {
 
     #[test]
     fn handle_key_quit() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         assert!(!app.should_quit);
         app.handle_key(key('q'));
         assert!(app.should_quit);
@@ -958,7 +975,7 @@ mod tests {
 
     #[test]
     fn handle_key_quit_uppercase() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.handle_key(key('Q'));
         assert!(app.should_quit);
     }
@@ -966,7 +983,7 @@ mod tests {
     #[test]
     fn handle_key_tab_switch() {
         // BUG1: Tab switching now requires Alt+digit
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         assert_eq!(app.active_tab, Tab::Overview);
 
         app.handle_key(alt_key('2'));
@@ -982,7 +999,7 @@ mod tests {
     #[test]
     fn handle_key_all_tabs_reachable() {
         // BUG1: All tabs reachable via Alt+digit
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         for (i, expected) in ALL_TABS.iter().enumerate() {
             let c = char::from(b'1' + i as u8);
             app.handle_key(alt_key(c));
@@ -995,7 +1012,7 @@ mod tests {
 
     #[test]
     fn handle_key_unknown_char_is_noop() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         let tab_before = app.active_tab;
         let quit_before = app.should_quit;
         app.handle_key(key('z'));
@@ -1005,7 +1022,7 @@ mod tests {
 
     #[test]
     fn handle_key_enter_is_noop_outside_meeting() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.handle_key(key_code(KeyCode::Enter));
         assert!(!app.should_quit);
         assert_eq!(app.active_tab, Tab::Overview);
@@ -1013,14 +1030,14 @@ mod tests {
 
     #[test]
     fn handle_key_escape_is_noop_outside_meeting() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.handle_key(key_code(KeyCode::Esc));
         assert!(!app.should_quit);
     }
 
     #[test]
     fn handle_key_backspace_is_noop_outside_meeting() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.handle_key(key_code(KeyCode::Backspace));
         assert!(!app.should_quit);
     }
@@ -1029,7 +1046,7 @@ mod tests {
 
     #[test]
     fn meeting_char_appends_to_input() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.handle_key(key('h'));
@@ -1039,7 +1056,7 @@ mod tests {
 
     #[test]
     fn meeting_backspace_removes_last_char() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
@@ -1050,7 +1067,7 @@ mod tests {
 
     #[test]
     fn meeting_backspace_on_empty_is_noop() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.handle_key(key_code(KeyCode::Backspace));
@@ -1059,7 +1076,7 @@ mod tests {
 
     #[test]
     fn meeting_enter_clears_input() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello world".to_string();
@@ -1070,7 +1087,7 @@ mod tests {
 
     #[test]
     fn meeting_enter_echoes_to_output() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "test input".to_string();
@@ -1083,7 +1100,7 @@ mod tests {
 
     #[test]
     fn meeting_escape_stops_meeting() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.handle_key(key_code(KeyCode::Esc));
@@ -1093,7 +1110,7 @@ mod tests {
     #[test]
     fn meeting_tab_switch_always_works() {
         // BUG1: Alt+digit switches tabs even when meeting is running
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.handle_key(alt_key('1'));
@@ -1103,7 +1120,7 @@ mod tests {
     #[test]
     fn meeting_q_goes_to_input_when_running() {
         // 'q' should NOT quit when meeting is active — it's meeting input
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.handle_key(key('q'));
@@ -1113,7 +1130,7 @@ mod tests {
 
     #[test]
     fn meeting_q_quits_when_not_running() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         // meeting_status defaults to NotStarted
         app.handle_key(key('q'));
@@ -1122,7 +1139,7 @@ mod tests {
 
     #[test]
     fn meeting_input_capped_at_4096_bytes() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "x".repeat(4096);
@@ -1133,7 +1150,7 @@ mod tests {
 
     #[test]
     fn meeting_output_capped_at_1000_lines() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.meeting_output = (0..1000).map(|i| format!("line {i}")).collect();
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
@@ -1214,7 +1231,7 @@ mod tests {
 
     #[test]
     fn app_new_gh_not_in_flight() {
-        let app = App::new("simard-ooda.service".to_string());
+        let app = App::new("simard-ooda.service".to_string(), None);
         assert!(
             !app.gh_in_flight,
             "gh_in_flight should be false on construction"
@@ -1223,7 +1240,7 @@ mod tests {
 
     #[test]
     fn app_new_gh_receiver_is_none() {
-        let app = App::new("simard-ooda.service".to_string());
+        let app = App::new("simard-ooda.service".to_string(), None);
         assert!(
             app.gh_receiver.is_none(),
             "gh_receiver should be None on construction"
@@ -1234,7 +1251,7 @@ mod tests {
 
     #[test]
     fn drain_gh_results_updates_stats_from_channel() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         let (tx, rx) = std::sync::mpsc::channel();
         app.gh_receiver = Some(rx);
         app.gh_in_flight = true;
@@ -1249,7 +1266,7 @@ mod tests {
     #[test]
     fn drain_gh_results_handles_none_values() {
         // gh CLI failure sends (None, None) — stats stay as dashes
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         let (tx, rx) = std::sync::mpsc::channel();
         app.gh_receiver = Some(rx);
         app.gh_in_flight = true;
@@ -1263,7 +1280,7 @@ mod tests {
 
     #[test]
     fn drain_gh_results_clears_in_flight_on_disconnect() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         let (tx, rx) = std::sync::mpsc::channel::<(Option<usize>, Option<usize>)>();
         app.gh_receiver = Some(rx);
         app.gh_in_flight = true;
@@ -1281,7 +1298,7 @@ mod tests {
 
     #[test]
     fn drain_gh_results_noop_when_no_receiver() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         assert!(app.gh_receiver.is_none());
 
         // Should not panic or change anything
@@ -1294,7 +1311,7 @@ mod tests {
 
     #[test]
     fn drain_gh_results_keeps_in_flight_while_channel_open() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         let (_tx, rx) = std::sync::mpsc::channel::<(Option<usize>, Option<usize>)>();
         app.gh_receiver = Some(rx);
         app.gh_in_flight = true;
@@ -1316,7 +1333,7 @@ mod tests {
     fn drain_gh_results_takes_last_value_when_multiple_sent() {
         // If the thread sends multiple times (unlikely but possible),
         // drain should process all and keep the last value.
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         let (tx, rx) = std::sync::mpsc::channel();
         app.gh_receiver = Some(rx);
         app.gh_in_flight = true;
@@ -1349,7 +1366,7 @@ mod tests {
         std::fs::write(state_dir.join("cycle_report.json"), "{}").unwrap();
         std::fs::write(state_dir.join("memory.json"), "{}").unwrap();
 
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.state_root = tmp.path().to_path_buf();
         app.refresh_stats();
 
@@ -1372,7 +1389,7 @@ mod tests {
         // A regular file should NOT be counted
         std::fs::write(sessions_dir.join("index.json"), "[]").unwrap();
 
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.state_root = tmp.path().to_path_buf();
         app.refresh_stats();
 
@@ -1388,7 +1405,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // Don't create state/ dir — it doesn't exist
 
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.state_root = tmp.path().to_path_buf();
         app.refresh_stats();
 
@@ -1402,7 +1419,7 @@ mod tests {
     fn refresh_stats_session_dirs_none_when_dir_missing() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.state_root = tmp.path().to_path_buf();
         app.refresh_stats();
 
@@ -1418,7 +1435,7 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("state")).unwrap();
         std::fs::create_dir_all(tmp.path().join("sessions")).unwrap();
 
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.state_root = tmp.path().to_path_buf();
         app.refresh_stats();
 
@@ -1437,7 +1454,7 @@ mod tests {
         std::fs::write(sub_dir.join("cycle1.json"), "{}").unwrap();
         std::fs::write(sub_dir.join("cycle2.json"), "{}").unwrap();
 
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.state_root = tmp.path().to_path_buf();
         app.refresh_stats();
 
@@ -1455,7 +1472,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("state")).unwrap();
 
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.state_root = tmp.path().to_path_buf();
         app.gh_in_flight = true;
 
@@ -1478,7 +1495,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("state")).unwrap();
 
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.state_root = tmp.path().to_path_buf();
         assert!(!app.gh_in_flight);
 
@@ -1499,7 +1516,7 @@ mod tests {
 
     #[test]
     fn handle_key_right_arrow_cycles_forward() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         assert_eq!(app.active_tab, Tab::Overview); // index 0
 
         app.handle_key(key_code(KeyCode::Right));
@@ -1511,7 +1528,7 @@ mod tests {
 
     #[test]
     fn handle_key_left_arrow_cycles_backward() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Engineers; // index 2
 
         app.handle_key(key_code(KeyCode::Left));
@@ -1523,7 +1540,7 @@ mod tests {
 
     #[test]
     fn handle_key_right_arrow_wraps_at_end() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Stats; // index 5 (last)
 
         app.handle_key(key_code(KeyCode::Right));
@@ -1532,7 +1549,7 @@ mod tests {
 
     #[test]
     fn handle_key_left_arrow_wraps_at_start() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         assert_eq!(app.active_tab, Tab::Overview); // index 0
 
         app.handle_key(key_code(KeyCode::Left));
@@ -1542,7 +1559,7 @@ mod tests {
     #[test]
     fn handle_key_left_right_cycling_full_loop() {
         // Right arrow 6 times should come back to Overview
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         assert_eq!(app.active_tab, Tab::Overview);
 
         for _ in 0..ALL_TABS.len() {
@@ -1554,7 +1571,7 @@ mod tests {
     #[test]
     fn handle_key_arrows_work_during_meeting_running() {
         // Arrow keys should move cursor in input, NOT cycle tabs, when meeting is running
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting; // index 4
         app.meeting_status = MeetingStatus::Running;
 
@@ -1571,7 +1588,7 @@ mod tests {
     #[test]
     fn meeting_bare_digit_goes_to_input_when_running() {
         // BUG1 regression: bare '1' in meeting mode should go to input, NOT switch tabs
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
 
@@ -1587,7 +1604,7 @@ mod tests {
     #[test]
     fn bare_digit_is_noop_outside_meeting() {
         // Bare digits should be ignored outside meeting mode (no tab switch)
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         assert_eq!(app.active_tab, Tab::Overview);
 
         app.handle_key(key('2'));
@@ -1604,7 +1621,7 @@ mod tests {
 
     #[test]
     fn meeting_cursor_left_right_movement() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         // Type "abc"
@@ -1631,7 +1648,7 @@ mod tests {
 
     #[test]
     fn meeting_cursor_left_at_start_is_noop() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         assert_eq!(app.cursor_position, 0);
@@ -1641,7 +1658,7 @@ mod tests {
 
     #[test]
     fn meeting_cursor_right_at_end_is_noop() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.handle_key(key('a'));
@@ -1652,7 +1669,7 @@ mod tests {
 
     #[test]
     fn meeting_backspace_at_cursor_middle() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "abcd".to_string();
@@ -1666,7 +1683,7 @@ mod tests {
 
     #[test]
     fn backtab_cycles_backward() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Goals;
         app.handle_key(key_code(KeyCode::BackTab));
         assert_eq!(app.active_tab, Tab::Overview);
@@ -1675,7 +1692,7 @@ mod tests {
     #[test]
     fn tab_key_works_during_meeting_running() {
         // Tab key should still cycle tabs even when meeting is active
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.handle_key(key_code(KeyCode::Tab));
@@ -1686,7 +1703,7 @@ mod tests {
 
     #[test]
     fn ctrl_digit_switches_tab() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         assert_eq!(app.active_tab, Tab::Overview);
         let ctrl_3 = KeyEvent::new(KeyCode::Char('3'), KeyModifiers::CONTROL);
         app.handle_key(ctrl_3);
@@ -1697,7 +1714,7 @@ mod tests {
 
     #[test]
     fn arrows_cycle_tabs_when_meeting_not_running() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         // meeting_status defaults to NotStarted
         app.handle_key(key_code(KeyCode::Right));
@@ -1815,7 +1832,7 @@ mod tests {
     fn drain_meeting_output_filters_info_lines() {
         use std::process::{Command, Stdio};
 
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
 
         let mut child = Command::new("sh")
             .args([
@@ -1881,7 +1898,7 @@ mod tests {
     fn drain_meeting_output_preserves_non_info_words() {
         use std::process::{Command, Stdio};
 
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
 
         let mut child = Command::new("sh")
             .args(["-c", "printf 'INFORMATION about meeting\\n'; sleep 5"])
@@ -1926,7 +1943,7 @@ mod tests {
 
     #[test]
     fn cursor_position_starts_at_zero() {
-        let app = App::new("simard-ooda.service".to_string());
+        let app = App::new("simard-ooda.service".to_string(), None);
         assert_eq!(app.cursor_position, 0);
     }
 
@@ -1934,7 +1951,7 @@ mod tests {
 
     #[test]
     fn arrow_right_moves_cursor_in_meeting() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
@@ -1948,7 +1965,7 @@ mod tests {
 
     #[test]
     fn arrow_left_moves_cursor_in_meeting() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
@@ -1962,7 +1979,7 @@ mod tests {
 
     #[test]
     fn cursor_left_at_zero_stays() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hi".to_string();
@@ -1976,7 +1993,7 @@ mod tests {
 
     #[test]
     fn cursor_right_at_end_stays() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hi".to_string();
@@ -1994,7 +2011,7 @@ mod tests {
 
     #[test]
     fn cursor_insert_at_position() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hllo".to_string();
@@ -2011,7 +2028,7 @@ mod tests {
 
     #[test]
     fn cursor_backspace_at_position() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
@@ -2031,7 +2048,7 @@ mod tests {
 
     #[test]
     fn cursor_insert_unicode_char() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hllo".to_string();
@@ -2053,7 +2070,7 @@ mod tests {
 
     #[test]
     fn cursor_resets_on_send() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "test".to_string();
@@ -2067,7 +2084,7 @@ mod tests {
 
     #[test]
     fn cursor_resets_on_stop() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.cursor_position = 5;
@@ -2084,7 +2101,7 @@ mod tests {
 
     #[test]
     fn home_end_move_cursor() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
@@ -2105,7 +2122,7 @@ mod tests {
 
     #[test]
     fn tab_key_cycles_forward() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         assert_eq!(app.active_tab, Tab::Overview);
 
         app.handle_key(key_code(KeyCode::Tab));
@@ -2114,7 +2131,7 @@ mod tests {
 
     #[test]
     fn shift_tab_cycles_backward() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Goals;
 
         app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
@@ -2127,7 +2144,7 @@ mod tests {
 
     #[test]
     fn tab_key_cycles_during_meeting_running() {
-        let mut app = App::new("simard-ooda.service".to_string());
+        let mut app = App::new("simard-ooda.service".to_string(), None);
         app.active_tab = Tab::Meeting;
         app.meeting_status = MeetingStatus::Running;
 
