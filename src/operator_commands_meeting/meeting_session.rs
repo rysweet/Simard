@@ -59,7 +59,7 @@ fn open_meeting_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSes
 /// Entry point for the `simard meeting` CLI command.
 pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::Error>> {
     let bridge = launch_real_meeting_bridge()?;
-    eprintln!("  Memory: cognitive bridge active (LadybugDB backend)");
+    tracing::info!("Cognitive memory bridge active");
 
     print_greeting_banner(Some(&*bridge));
 
@@ -69,7 +69,7 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
     let meeting_system_prompt = format!("{base_prompt}\n\n{live_context}");
 
     if agent_session.is_some() {
-        eprintln!("  Agent: ready");
+        tracing::info!("Meeting agent ready");
     } else {
         return Err("No agent backend available. Check SIMARD_LLM_PROVIDER and auth config (gh auth status / ANTHROPIC_API_KEY).".into());
     }
