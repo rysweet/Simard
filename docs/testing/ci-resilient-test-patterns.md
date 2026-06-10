@@ -264,6 +264,38 @@ Every iteration should report `test result: ok`.
 | Constant-relative     | Hardcoded capacity limits   | Use `MAX_ACTIVE_GOALS + N`       | `src/ooda_loop/curate.rs`   |
 | Lazy config resolution| Constructor reads config    | Defer to `open()`                | `src/meeting_backend/agent_proxy.rs` |
 | Serial env-var tests  | Parallel env-var races      | `#[serial]` annotation           | `src/native_gym.rs`         |
+| Dashboard state isolation | Tests write to live paths | `HermeticState` + `EnvGuard` + `#[serial(dashboard_state)]` | `src/operator_commands_dashboard/tests_activity.rs` |
 
 All three patterns are enforced by CI: the affected tests run on every
 PR and will fail if the pattern is violated.
+
+---
+
+## Pattern 4: Hermetic state isolation for dashboard activity tests
+
+### Problem
+
+Tests for the dashboard `traces()` and `activity()` handlers wrote to
+the operator's live paths (`~/.simard/costs/ledger.jsonl` and
+`<XDG_DATA_HOME>/simard/daemon_health.json`) instead of isolated temp
+directories. Cleanup was not panic-safe and concurrent test runs raced
+on the same global paths.
+
+### Rule
+
+**Use `HermeticState` + `EnvGuard` with `#[serial(dashboard_state)]`
+for any test that writes fixture files read by dashboard handlers.**
+
+The cost ledger path routes through `resolve_state_root()` and is
+isolated by `HermeticState`. The daemon health path routes through
+`dirs::data_local_dir()` and is isolated by an `EnvGuard` on
+`XDG_DATA_HOME`.
+
+### Where this applies
+
+All mutating tests in `src/operator_commands_dashboard/tests_activity.rs`.
+
+### Full documentation
+
+See [Hermetic dashboard activity tests](./dashboard-activity-hermetic-tests.md)
+for the complete pattern, code examples, and anti-patterns.

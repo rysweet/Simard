@@ -260,3 +260,6 @@ list.
 - [Cognitive memory bridge helpers](../reference/cognitive-memory-bridge-helpers.md)
   — the `launch_writer_bridge` tier table now reflects the
   per-state-root socket path.
+- [Hermetic dashboard activity tests](./dashboard-activity-hermetic-tests.md)
+  — extends the `HermeticState` pattern to dashboard handlers that also
+  read from `dirs::data_local_dir()` via `XDG_DATA_HOME` redirection.

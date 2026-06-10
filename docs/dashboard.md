@@ -189,4 +189,5 @@ The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (def
 - [Daemon mode (autonomous OODA loop)](daemon-mode.md)
 - [Memory architecture](memory.md)
 - [Run the OODA daemon](howto/run-ooda-daemon.md)
+- [Hermetic dashboard activity tests](testing/dashboard-activity-hermetic-tests.md)
 - [Dashboard E2E tests](reference/dashboard-e2e-tests.md)

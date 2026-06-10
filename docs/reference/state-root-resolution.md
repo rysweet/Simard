@@ -93,6 +93,7 @@ locking protocol and wiring.
 | `<root>/meeting_handoffs/` | Flat handoff drop directory consumed by OODA + engineer-loop | `~/.simard/meeting_handoffs/` |
 | `<root>/state/` | Durable state files (goal store, scaling state) | `~/.simard/state/` |
 | `<root>/state/goal_store.json` | File-backed goal records (flock-protected) | `~/.simard/state/goal_store.json` |
+| `<root>/costs/` | Per-provider cost ledger (JSONL) — read by the dashboard Traces tab | `~/.simard/costs/` |
 | `<root>/goals/` | Legacy durable goal board snapshots (superseded by cognitive memory) | `~/.simard/goals/` |
 
 > Setting `SIMARD_STATE_ROOT=/x` relocates **all** of the above
@@ -281,3 +282,6 @@ meeting_handoff_dir=/tmp/this-session-handoffs
   consults the state root.
 - [Carry meeting decisions into engineer sessions](../howto/carry-meeting-decisions-into-engineer-sessions.md)
   — end-to-end flow that depends on shared state-root resolution.
+- [Hermetic dashboard activity tests](../testing/dashboard-activity-hermetic-tests.md)
+  — how `traces()` and `activity()` tests use state-root redirection
+  for tempdir isolation.
