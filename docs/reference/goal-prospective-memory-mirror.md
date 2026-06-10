@@ -14,11 +14,8 @@ related:
 
 # Goal–prospective memory mirror
 
-> **Implementation status:** This document describes the target design
-> being built in issue
-> [#2207](https://github.com/rysweet/Simard/issues/2207). It must be
-> merged alongside the implementation code — not before. Until the PR
-> lands, the source code does not yet match the API described here.
+> **Implemented** in issue
+> [#2207](https://github.com/rysweet/Simard/issues/2207).
 
 When `CognitiveMemoryGoalStore::put()` writes a goal record to semantic
 memory, it also maintains a **mirror** in prospective memory so that

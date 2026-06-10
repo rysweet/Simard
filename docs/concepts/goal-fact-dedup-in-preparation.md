@@ -13,10 +13,8 @@ related:
 
 # Goal fact dedup in memory consolidation preparation
 
-> **Implementation status:** This document describes the target design
-> being built in issue
-> [#2207](https://github.com/rysweet/Simard/issues/2207). It must be
-> merged alongside the implementation code — not before.
+> **Implemented** in issue
+> [#2207](https://github.com/rysweet/Simard/issues/2207).
 
 The `preparation_memory_operations()` function in
 `src/memory_consolidation/mod.rs` assembles a `PreparedContext` for each
