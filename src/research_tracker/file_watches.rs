@@ -14,6 +14,7 @@ use crate::error::{SimardError, SimardResult};
 
 /// TOML wrapper for the watches file.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlWatchesFile {
     #[serde(default)]
     watches: Vec<TomlWatch>,
@@ -21,6 +22,7 @@ struct TomlWatchesFile {
 
 /// A single watch entry in watches.toml.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlWatch {
     github_id: String,
     focus_areas: Vec<String>,

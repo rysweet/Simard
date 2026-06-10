@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 /// Top-level structure of an identity.toml file.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct TomlIdentityFile {
     #[allow(dead_code)]
     pub package: TomlPackage,
@@ -139,6 +140,21 @@ summary_scope = "session-summary"
     }
 
     // --- deny_unknown_fields ---
+
+    #[test]
+    fn parse_rejects_unknown_top_level_field() {
+        let toml_str = r#"
+[package]
+name = "test"
+version = "0.1.0"
+bogus_top_level = true
+"#;
+        let result: Result<TomlIdentityFile, _> = toml::from_str(toml_str);
+        assert!(
+            result.is_err(),
+            "unknown top-level field should be rejected by deny_unknown_fields on TomlIdentityFile"
+        );
+    }
 
     #[test]
     fn parse_rejects_unknown_package_field() {
