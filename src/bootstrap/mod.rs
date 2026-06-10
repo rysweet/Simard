@@ -1,4 +1,4 @@
-mod assembly;
+pub(crate) mod assembly;
 mod config;
 mod types;
 mod validation;

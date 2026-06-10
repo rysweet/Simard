@@ -138,6 +138,12 @@ pub struct App {
     // Update notice (polled from background check)
     update_rx: Option<mpsc::Receiver<String>>,
     pub update_notice: Option<String>,
+    pub waiting_for_response: bool,
+    /// When true, the next non-filtered stdout line is the user's own echo
+    /// (the REPL prints the user message back before sending to the LLM).
+    /// We skip clearing `waiting_for_response` on the echo line so the
+    /// spinner stays visible during the actual LLM wait.
+    echo_pending: bool,
 }
 
 impl App {
@@ -173,6 +179,8 @@ impl App {
             tick_count: 0,
             update_rx,
             update_notice: None,
+            waiting_for_response: false,
+            echo_pending: false,
         }
     }
 
@@ -298,6 +306,8 @@ impl App {
         }
         self.meeting_input.clear();
         self.cursor_position = 0;
+        self.waiting_for_response = true;
+        self.echo_pending = true;
     }
     fn stop_meeting(&mut self) {
         if let Some(ref mut child) = self.meeting_child {
@@ -309,6 +319,8 @@ impl App {
         self.meeting_stdout = None;
         self.meeting_status = MeetingStatus::Exited(0);
         self.cursor_position = 0;
+        self.waiting_for_response = false;
+        self.echo_pending = false;
     }
 
     /// Spawn the meeting child process.
@@ -366,6 +378,8 @@ impl App {
             self.meeting_child = None;
             self.meeting_stdin = None;
             self.meeting_stdout = None;
+            self.waiting_for_response = false;
+            self.echo_pending = false;
             return;
         }
         // Read available lines without blocking
@@ -376,9 +390,17 @@ impl App {
                 match reader.read_line(&mut line) {
                     Ok(0) => break,
                     Ok(_) => {
-                        // Filter noisy INFO log lines from meeting subprocess
-                        if line.contains(" INFO ") {
+                        // Filter tracing/log output from meeting subprocess
+                        if is_tracing_line(&line) {
                             continue;
+                        }
+                        // The REPL echoes the user's input before sending to
+                        // the LLM. Skip clearing the spinner on that echo so
+                        // it stays visible during the actual LLM wait.
+                        if self.echo_pending {
+                            self.echo_pending = false;
+                        } else {
+                            self.waiting_for_response = false;
                         }
                         self.meeting_output.push(line.trim_end().to_string());
                         if self.meeting_output.len() > 1000 {
@@ -737,6 +759,58 @@ impl App {
         }
         self.drain_meeting_output();
     }
+}
+
+/// Braille spinner frames for the "Thinking..." indicator.
+pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Returns `true` if the line looks like Rust tracing/log output that should
+/// be filtered from meeting conversation display. Uses positional matching
+/// to avoid false positives on legitimate content (e.g., user typing "INFO").
+///
+/// Matches:
+/// - Lines starting with a timestamp (`20XX-`) followed by a level keyword
+/// - Lines starting with leading whitespace then a level keyword (tracing spans)
+/// - Lines starting with `[simard]` diagnostic prefix
+fn is_tracing_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Diagnostic prefixes from eprintln! / tracing calls
+    if trimmed.starts_with("[simard]") {
+        return true;
+    }
+    // Timestamp-prefixed tracing: "2024-01-01T10:00:00.123Z  INFO target: msg"
+    // Must start with 4-digit year, dash, to avoid matching user content.
+    if trimmed.len() > 25
+        && trimmed.starts_with("20")
+        && trimmed.as_bytes()[4] == b'-'
+        && trimmed.as_bytes()[7] == b'-'
+    {
+        // After the timestamp, look for a level keyword
+        for marker in [" INFO ", " DEBUG ", " WARN ", " TRACE ", " ERROR "] {
+            if trimmed[10..].contains(marker) {
+                return true;
+            }
+        }
+        // Tracing span output: timestamp + `{` or `}:`
+        if trimmed.contains("}: ") || trimmed.contains("{ ") {
+            return true;
+        }
+    }
+    // Lines that are ONLY a level keyword with a target (no timestamp) —
+    // these appear in env_logger default format: "INFO target::module: msg"
+    // Require a colon after the level+target to avoid false positives on
+    // user content like "ERROR in judgment is human".
+    for marker in ["INFO ", "DEBUG ", "WARN ", "TRACE ", "ERROR "] {
+        if let Some(rest) = trimmed.strip_prefix(marker)
+            && rest.contains(':')
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn compute_uptime_from_timestamp(ts: &str) -> Option<u64> {
@@ -1679,6 +1753,28 @@ mod tests {
         assert_eq!(app.cursor_position, 1);
     }
 
+    #[test]
+    fn meeting_home_moves_cursor_to_start() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+        app.meeting_input = "hello".to_string();
+        app.cursor_position = 3;
+        app.handle_key(key_code(KeyCode::Home));
+        assert_eq!(app.cursor_position, 0);
+    }
+
+    #[test]
+    fn meeting_end_moves_cursor_to_end() {
+        let mut app = App::new("simard-ooda.service".to_string());
+        app.active_tab = Tab::Meeting;
+        app.meeting_status = MeetingStatus::Running;
+        app.meeting_input = "hello".to_string();
+        app.cursor_position = 1;
+        app.handle_key(key_code(KeyCode::End));
+        assert_eq!(app.cursor_position, 5);
+    }
+
     // ── Tab/BackTab cycling ────────────────────────────────────────
 
     #[test]
@@ -1839,7 +1935,7 @@ mod tests {
                 "-c",
                 concat!(
                     "printf 'normal line\\n",
-                    "2024-01-01T10:00:00 INFO server started\\n",
+                    "2024-01-01T10:00:00.123Z  INFO server started\\n",
                     "another line\\n'; sleep 5"
                 ),
             ])
@@ -1888,8 +1984,10 @@ mod tests {
             "non-INFO lines should pass through"
         );
         assert!(
-            !app.meeting_output.iter().any(|l| l.contains(" INFO ")),
-            "lines containing ' INFO ' should be filtered out, got: {:?}",
+            !app.meeting_output
+                .iter()
+                .any(|l| l.contains("server started")),
+            "timestamp-prefixed INFO lines should be filtered out, got: {:?}",
             app.meeting_output
         );
     }
@@ -1936,6 +2034,130 @@ mod tests {
         assert!(
             app.meeting_output.iter().any(|l| l.contains("INFORMATION")),
             "'INFORMATION' (without space padding) should NOT be filtered"
+        );
+    }
+
+    // ── Tracing filter: false-positive avoidance ───────────────────
+
+    #[test]
+    fn is_tracing_line_rejects_user_content_with_info_word() {
+        // User typing content with log-level words must NOT be filtered
+        assert!(!is_tracing_line("we need more INFO on this"));
+        assert!(!is_tracing_line("Please provide INFO about the deploy"));
+        assert!(!is_tracing_line("The WARNING sign was clear"));
+        assert!(!is_tracing_line("ERROR in judgment is human"));
+        assert!(!is_tracing_line("There was an ERROR in the deploy"));
+    }
+
+    #[test]
+    fn is_tracing_line_accepts_timestamp_prefixed_logs() {
+        assert!(is_tracing_line(
+            "2024-06-10T15:30:00.123Z  INFO simard::main: started"
+        ));
+        assert!(is_tracing_line(
+            "2026-01-01T00:00:00.000Z  DEBUG simard::memory: lookup"
+        ));
+        assert!(is_tracing_line(
+            "2024-06-10T15:30:00.123Z  WARN simard::disk: low space"
+        ));
+    }
+
+    #[test]
+    fn is_tracing_line_accepts_bare_level_prefix() {
+        assert!(is_tracing_line("INFO simard::main: started"));
+        assert!(is_tracing_line("DEBUG some_crate::module: trace"));
+        assert!(is_tracing_line("WARN disk_health: check"));
+        // Without a colon in the rest, it's not treated as a log line
+        assert!(!is_tracing_line("INFO about the meeting"));
+    }
+
+    #[test]
+    fn is_tracing_line_accepts_simard_diagnostic_prefix() {
+        assert!(is_tracing_line("[simard] connecting to daemon"));
+        assert!(is_tracing_line("[simard] session started"));
+    }
+
+    #[test]
+    fn is_tracing_line_rejects_normal_conversation() {
+        assert!(!is_tracing_line("Hello, how are you?"));
+        assert!(!is_tracing_line("[U 15:30:00] What's the status?"));
+        assert!(!is_tracing_line("[A 15:30:05] Everything is running."));
+        assert!(!is_tracing_line(""));
+        assert!(!is_tracing_line("   "));
+    }
+
+    // ── Spinner lifetime: echo_pending logic ───────────────────────
+
+    #[test]
+    fn spinner_survives_user_echo_line() {
+        use std::process::{Command, Stdio};
+
+        let mut app = App::new("simard-ooda.service".to_string());
+
+        // Simulate: user sends input, then REPL echoes + later responds
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                concat!(
+                    "printf '[U 15:30:00] hello\\n'; ",
+                    "sleep 2; ",
+                    "printf '[A 15:30:02] reply\\n'; ",
+                    "sleep 5"
+                ),
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let stdout = child.stdout.take().unwrap();
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = stdout.as_raw_fd();
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+
+        app.meeting_stdout = Some(std::io::BufReader::new(stdout));
+        app.meeting_child = Some(child);
+        app.meeting_status = MeetingStatus::Running;
+        app.waiting_for_response = true;
+        app.echo_pending = true;
+
+        // Wait for echo line
+        for _ in 0..200 {
+            app.drain_meeting_output();
+            if !app.meeting_output.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // After echo line: waiting should still be true, echo_pending cleared
+        assert!(
+            app.waiting_for_response,
+            "spinner should survive the user echo line"
+        );
+        assert!(!app.echo_pending, "echo_pending should be cleared");
+
+        // Wait for response line
+        for _ in 0..300 {
+            app.drain_meeting_output();
+            if app.meeting_output.len() >= 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        if let Some(ref mut c) = app.meeting_child {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+
+        assert!(
+            !app.waiting_for_response,
+            "spinner should clear after assistant response"
         );
     }
 

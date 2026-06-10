@@ -172,6 +172,15 @@ pub struct MeetingHandoff {
     /// `None` for a clean close. Added in issue #1987.
     #[serde(default)]
     pub partial_reason: Option<String>,
+    /// Identified risks recorded via `/risk` or extracted from conversation.
+    /// Required by spec line 637 ("identified risks"). Added in issue #2084.
+    #[serde(default)]
+    pub risks: Vec<String>,
+    /// Disagreements or dissenting views recorded via `/disagree` or
+    /// extracted from conversation. Required by spec line 645
+    /// ("surface disagreement and uncertainty"). Added in issue #2084.
+    #[serde(default)]
+    pub disagreements: Vec<String>,
 }
 
 /// Build a stable, sortable meeting id from a started-at timestamp and a
@@ -370,6 +379,8 @@ impl MeetingHandoff {
             applied_templates: Vec::new(),
             history_truncated_count: 0,
             partial_reason: None,
+            risks: session.risks.clone(),
+            disagreements: session.disagreements.clone(),
         }
     }
 
@@ -446,6 +457,8 @@ mod tests {
             themes: vec![],
             next_owner: None,
             goal: None,
+            risks: vec![],
+            disagreements: vec![],
         }
     }
 
@@ -477,6 +490,8 @@ mod tests {
             themes: vec!["performance".to_string()],
             next_owner: Some("engineer".to_string()),
             goal: None,
+            risks: vec![],
+            disagreements: vec![],
         }
     }
 
@@ -484,9 +499,14 @@ mod tests {
 
     #[test]
     fn default_handoff_dir_returns_path() {
+        // Pin SIMARD_HANDOFF_DIR so parallel tests that unsafely set env vars
+        // don't race against the env reads inside default_handoff_dir().
+        let tmp = tempfile::tempdir().unwrap();
+        let pinned = tmp.path().join("meeting_handoffs");
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", &pinned) };
         let dir = default_handoff_dir();
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
         let dir_str = dir.to_string_lossy();
-        // May resolve via SIMARD_STATE_ROOT or SIMARD_HANDOFF_DIR env override.
         assert!(
             dir_str.contains("meeting_handoffs") || dir_str.contains("simard"),
             "default dir should be under simard state: {dir_str}"

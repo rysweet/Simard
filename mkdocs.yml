@@ -60,6 +60,7 @@ nav:
     - Prompt-driven Brain Iteration: concepts/prompt-driven-brain-iteration.md
     - Improvement context — denser execution evidence: concepts/improvement-context-execution-evidence-gap.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
+    - Pluggable Identity: concepts/pluggable-identity.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
@@ -74,6 +75,7 @@ nav:
     - Configure Adaptive Scaling: howto/configure-adaptive-scaling.md
     - Troubleshoot Goal Store: howto/troubleshoot-goal-store.md
     - Recover from Meeting Close Timeout: howto/recover-from-meeting-close-timeout.md
+    - Configure Pluggable Identity: howto/configure-pluggable-identity.md
     - Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
@@ -84,6 +86,7 @@ nav:
     - Recipe Context Var Sanitization: reference/recipe-context-var-sanitization.md
     - File-backed Goal Store: reference/file-backed-goal-store.md
     - Adaptive Scaling API: reference/adaptive-scaling-api.md
+    - Pluggable Identity API: reference/pluggable-identity-api.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
     # Hidden from nav until issue #1590 implementation lands:
     #   - reference/cognitive-memory-bridge-helpers.md

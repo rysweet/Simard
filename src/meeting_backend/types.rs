@@ -108,6 +108,15 @@ pub struct MeetingSummary {
     /// transcript completeness. Issue #1983.
     #[serde(default)]
     pub orphan_turn_count: usize,
+    /// Identified risks recorded via `/risk` or extracted from conversation.
+    /// Required by spec line 637 ("identified risks"). Added in issue #2084.
+    #[serde(default)]
+    pub risks: Vec<String>,
+    /// Disagreements or dissenting views recorded via `/disagree` or
+    /// extracted from conversation. Required by spec line 645
+    /// ("surface disagreement and uncertainty"). Added in issue #2084.
+    #[serde(default)]
+    pub disagreements: Vec<String>,
 }
 
 /// Current status of a meeting session.
@@ -194,6 +203,8 @@ mod tests {
             bundle_dir: Some("/home/user/.simard/meetings/20250101T000000Z-sprint/".to_string()),
             partial_reason: None,
             orphan_turn_count: 0,
+            risks: vec!["API stability".to_string()],
+            disagreements: vec!["Team disagrees on language choice".to_string()],
         };
         let json = serde_json::to_string(&summary).unwrap();
         let s2: MeetingSummary = serde_json::from_str(&json).unwrap();
@@ -221,6 +232,8 @@ mod tests {
         assert!(s.bundle_dir.is_none());
         assert!(s.partial_reason.is_none());
         assert_eq!(s.orphan_turn_count, 0);
+        assert!(s.risks.is_empty());
+        assert!(s.disagreements.is_empty());
     }
 
     #[test]
@@ -243,6 +256,8 @@ mod tests {
             bundle_dir: Some("/tmp/x".to_string()),
             partial_reason: Some(crate::meeting_backend::PartialReason::SummaryTimeout),
             orphan_turn_count: 0,
+            risks: vec![],
+            disagreements: vec![],
         };
         let json = serde_json::to_string(&summary).unwrap();
         assert!(

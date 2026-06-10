@@ -22,6 +22,8 @@ fn make_session(
         themes: Vec::new(),
         next_owner: None,
         goal: None,
+        risks: Vec::new(),
+        disagreements: Vec::new(),
     }
 }
 
@@ -413,6 +415,8 @@ fn round_trip_handoff_with_next_owner_and_artifacts() {
         applied_templates: Vec::new(),
         history_truncated_count: 0,
         partial_reason: None,
+        risks: vec![],
+        disagreements: vec![],
     };
 
     let json = serde_json::to_string_pretty(&handoff).expect("serialize ok");

@@ -37,8 +37,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         .highlight_style(
             Style::default()
                 .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )
+        .divider("|");
 
     f.render_widget(tabs_widget, chunks[0]);
 
@@ -53,9 +54,9 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // If an update notice is available, show it in the footer area
     let footer_text = if let Some(ref notice) = app.update_notice {
-        format!("{notice}  | Alt+1\u{2025}6: tabs | \u{2190}/\u{2192}: cycle | q: quit")
+        format!("{notice}  | Alt+1\u{2013}6: tabs | Tab/Shift+Tab: cycle | \u{2190}/\u{2192}: prev/next | q: quit")
     } else {
-        "Alt+1\u{2025}6: tabs | \u{2190}/\u{2192}: cycle | q: quit".to_string()
+        "Alt+1\u{2013}6: tabs | Tab/Shift+Tab: cycle | \u{2190}/\u{2192}: prev/next | q: quit".to_string()
     };
     let footer_style = if app.update_notice.is_some() {
         Style::default().fg(Color::Yellow)

@@ -267,6 +267,16 @@ pub enum SimardError {
         max_supported: u32,
         path: PathBuf,
     },
+    /// Failed to parse an identity.toml or watches.toml file.
+    IdentityTomlParseError {
+        path: PathBuf,
+        reason: String,
+    },
+    /// The identity directory is not under the configured prompt root.
+    IdentityPathNotUnderPromptRoot {
+        identity_path: PathBuf,
+        prompt_root: PathBuf,
+    },
 }
 
 pub type SimardResult<T> = Result<T, SimardError>;

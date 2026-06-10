@@ -199,6 +199,8 @@ mod tests {
             applied_templates: Vec::new(),
             history_truncated_count: 0,
             partial_reason: None,
+            risks: vec![],
+            disagreements: vec![],
         }
     }
 
@@ -281,6 +283,8 @@ mod tests {
             applied_templates: Vec::new(),
             history_truncated_count: 0,
             partial_reason: None,
+            risks: vec![],
+            disagreements: vec![],
         };
         let json = serde_json::to_string(&h).unwrap();
         let h2: MeetingHandoff = serde_json::from_str(&json).unwrap();

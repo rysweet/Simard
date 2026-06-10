@@ -394,6 +394,8 @@ mod tests {
             themes: Vec::new(),
             next_owner: None,
             goal: None,
+            risks: Vec::new(),
+            disagreements: Vec::new(),
         };
         crate::meeting_facilitator::save_session_wip(dir.path(), &session).expect("save WIP");
         assert!(wip_path.is_file(), "WIP file should exist before discard");

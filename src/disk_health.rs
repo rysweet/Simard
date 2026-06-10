@@ -77,8 +77,12 @@ impl DiskHealthReport {
 /// Resolve the recipe YAML path. Checks, in order:
 ///   1. `~/.simard/prompt_assets/simard/recipes/<name>` (hot-reload path)
 ///   2. `<repo_root>/prompt_assets/simard/recipes/<name>` (in-tree)
-fn resolve_recipe_path(repo_root: &Path) -> Option<PathBuf> {
-    if let Some(home) = dirs::home_dir() {
+///
+/// `home_override` allows tests to supply a fake home directory without
+/// mutating the process-wide `HOME` environment variable.
+fn resolve_recipe_path(repo_root: &Path, home_override: Option<&Path>) -> Option<PathBuf> {
+    let home = home_override.map(PathBuf::from).or_else(dirs::home_dir);
+    if let Some(home) = home {
         let hot = home
             .join(".simard")
             .join("prompt_assets/simard/recipes")
@@ -259,19 +263,24 @@ fn dir_size_bytes(path: &Path) -> u64 {
 ///
 /// `repo_root` is used to locate the recipe YAML file.
 ///
+/// `home_override` allows tests to supply a fake home directory without
+/// mutating the process-wide `HOME` environment variable.
+///
 /// Returns the parsed [`DiskHealthReport`] on success, or a
 /// [`SimardError::AdapterInvocationFailed`] on any failure.
 pub fn run_disk_health_check(
     repo_root: &Path,
     state_root: &Path,
+    home_override: Option<&Path>,
 ) -> SimardResult<DiskHealthReport> {
-    let recipe_path =
-        resolve_recipe_path(repo_root).ok_or_else(|| SimardError::AdapterInvocationFailed {
+    let recipe_path = resolve_recipe_path(repo_root, home_override).ok_or_else(|| {
+        SimardError::AdapterInvocationFailed {
             base_type: ADAPTER_TAG.to_string(),
             reason: format!(
                 "recipe file {RECIPE_FILENAME} not found in hot-reload or in-tree paths"
             ),
-        })?;
+        }
+    })?;
 
     let agent_binary = RuntimeConfig::load()?.llm_provider.agent_binary_value();
 
@@ -397,6 +406,7 @@ pub fn parse_disk_health_text(stdout: &str) -> Result<DiskHealthReport, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // ------------------------------------------------------------------
     // Text-based parser (issue #1980 — replaces JSON deserialization)
@@ -575,7 +585,8 @@ ACTION: cleaned shared-target dir
 
     #[test]
     fn resolve_recipe_path_returns_none_for_nonexistent_dir() {
-        let result = resolve_recipe_path(Path::new("/nonexistent/repo"));
+        let guard = tempfile::tempdir().unwrap();
+        let result = resolve_recipe_path(Path::new("/nonexistent/repo"), Some(guard.path()));
         assert!(result.is_none());
     }
 
@@ -586,7 +597,7 @@ ACTION: cleaned shared-target dir
         std::fs::create_dir_all(&recipe_dir).unwrap();
         std::fs::write(recipe_dir.join(RECIPE_FILENAME), "name: test").unwrap();
 
-        let result = resolve_recipe_path(tmp.path());
+        let result = resolve_recipe_path(tmp.path(), Some(tmp.path()));
         assert!(result.is_some());
         assert!(result.unwrap().ends_with(RECIPE_FILENAME));
     }
@@ -597,9 +608,11 @@ ACTION: cleaned shared-target dir
 
     #[test]
     fn run_returns_error_when_recipe_not_found() {
+        let guard = tempfile::tempdir().unwrap();
         let result = run_disk_health_check(
             Path::new("/nonexistent/repo"),
             Path::new("/nonexistent/state"),
+            Some(guard.path()),
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -616,6 +629,7 @@ ACTION: cleaned shared-target dir
     }
 
     #[test]
+    #[serial]
     fn run_returns_error_when_recipe_runner_unavailable_or_recipe_invalid() {
         // Create a syntactically-invalid recipe file. If recipe-runner-rs
         // is installed it will reject it (non-zero exit); if it's missing
@@ -626,9 +640,11 @@ ACTION: cleaned shared-target dir
         std::fs::write(recipe_dir.join(RECIPE_FILENAME), "name: test").unwrap();
 
         // Ensure RuntimeConfig::load() succeeds (CI has no config.toml).
-        // SAFETY: test-only, single-threaded access to env var.
+        // SAFETY: SIMARD_LLM_PROVIDER is not related to HOME; it controls
+        // which LLM provider the runtime selects. This is still env-var
+        // mutation but not the HOME-related UB that Finding 2 targets.
         unsafe { std::env::set_var("SIMARD_LLM_PROVIDER", "copilot") };
-        let result = run_disk_health_check(tmp.path(), tmp.path());
+        let result = run_disk_health_check(tmp.path(), tmp.path(), Some(tmp.path()));
         unsafe { std::env::remove_var("SIMARD_LLM_PROVIDER") };
         assert!(result.is_err());
         let err = result.unwrap_err();

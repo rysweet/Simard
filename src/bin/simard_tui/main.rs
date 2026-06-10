@@ -109,7 +109,11 @@ fn run(
             break;
         }
 
-        if event::poll(Duration::from_secs(2))? {
+        if event::poll(if app.waiting_for_response {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(2)
+        })? {
             if let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
             {

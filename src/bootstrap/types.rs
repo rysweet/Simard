@@ -70,6 +70,7 @@ pub struct BootstrapInputs {
     pub state_root: Option<PathBuf>,
     pub mode: Option<String>,
     pub identity: Option<String>,
+    pub identity_path: Option<PathBuf>,
     pub base_type: Option<String>,
     pub topology: Option<String>,
 }
@@ -85,6 +86,7 @@ impl Default for BootstrapInputs {
             state_root: None,
             mode: std::env::var("SIMARD_BOOTSTRAP_MODE").ok(),
             identity: None,
+            identity_path: None,
             base_type: None,
             topology: None,
         }
@@ -99,6 +101,7 @@ impl BootstrapInputs {
             state_root: std::env::var_os("SIMARD_STATE_ROOT").map(PathBuf::from),
             mode: read_optional_utf8_env("SIMARD_BOOTSTRAP_MODE")?,
             identity: read_optional_utf8_env("SIMARD_IDENTITY")?,
+            identity_path: std::env::var_os("SIMARD_IDENTITY_PATH").map(PathBuf::from),
             base_type: read_optional_utf8_env("SIMARD_BASE_TYPE")?,
             topology: read_optional_utf8_env("SIMARD_RUNTIME_TOPOLOGY")?,
         })
@@ -266,6 +269,7 @@ mod tests {
         assert!(inputs.state_root.is_none());
         assert!(inputs.mode.is_none());
         assert!(inputs.identity.is_none());
+        assert!(inputs.identity_path.is_none());
         assert!(inputs.base_type.is_none());
         assert!(inputs.topology.is_none());
     }

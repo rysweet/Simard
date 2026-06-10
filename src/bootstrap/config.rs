@@ -13,6 +13,7 @@ use super::types::BootstrapInputs;
 pub struct BootstrapConfig {
     pub mode: BootstrapMode,
     pub identity: String,
+    pub identity_path: Option<ConfigValue<PathBuf>>,
     pub prompt_root: ConfigValue<PathBuf>,
     pub objective: ConfigValue<String>,
     pub state_root: ConfigValue<PathBuf>,
@@ -119,6 +120,11 @@ impl BootstrapConfig {
             }
         };
 
+        let identity_path = inputs.identity_path.map(|path| ConfigValue {
+            value: path,
+            source: ConfigValueSource::Environment("SIMARD_IDENTITY_PATH"),
+        });
+
         Ok(Self {
             mode,
             identity: match inputs.identity {
@@ -133,6 +139,7 @@ impl BootstrapConfig {
                     });
                 }
             },
+            identity_path,
             prompt_root,
             objective,
             state_root,
@@ -194,6 +201,7 @@ mod tests {
             objective: None,
             state_root: None,
             identity: None,
+            identity_path: None,
             base_type: None,
             topology: None,
         }
@@ -220,6 +228,7 @@ mod tests {
             objective: Some("obj".to_string()),
             state_root: None,
             identity: Some("id".to_string()),
+            identity_path: None,
             base_type: Some("bt".to_string()),
             topology: Some("single-process".to_string()),
         };
@@ -235,6 +244,7 @@ mod tests {
             objective: None,
             state_root: None,
             identity: Some("id".to_string()),
+            identity_path: None,
             base_type: Some("bt".to_string()),
             topology: Some("single-process".to_string()),
         };
@@ -250,6 +260,7 @@ mod tests {
             objective: Some("obj".to_string()),
             state_root: None,
             identity: None,
+            identity_path: None,
             base_type: Some("bt".to_string()),
             topology: Some("single-process".to_string()),
         };
@@ -265,6 +276,7 @@ mod tests {
             objective: None,
             state_root: None,
             identity: None,
+            identity_path: None,
             base_type: None,
             topology: None,
         };

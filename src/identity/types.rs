@@ -1,4 +1,5 @@
 use std::fmt::{self, Display, Formatter};
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +36,22 @@ impl Display for OperatingMode {
             Self::Orchestrator => "orchestrator",
         };
         f.write_str(label)
+    }
+}
+
+impl FromStr for OperatingMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "engineer" => Ok(Self::Engineer),
+            "meeting" => Ok(Self::Meeting),
+            "curator" => Ok(Self::Curator),
+            "improvement" => Ok(Self::Improvement),
+            "gym" => Ok(Self::Gym),
+            "orchestrator" => Ok(Self::Orchestrator),
+            other => Err(format!("unknown operating mode: '{other}'")),
+        }
     }
 }
 
@@ -135,6 +152,38 @@ mod tests {
     fn operating_mode_ord_is_consistent() {
         assert!(OperatingMode::Engineer < OperatingMode::Meeting);
         assert!(OperatingMode::Gym < OperatingMode::Orchestrator);
+    }
+
+    #[test]
+    fn operating_mode_fromstr_valid() {
+        assert_eq!(
+            "engineer".parse::<OperatingMode>().unwrap(),
+            OperatingMode::Engineer
+        );
+        assert_eq!(
+            "meeting".parse::<OperatingMode>().unwrap(),
+            OperatingMode::Meeting
+        );
+        assert_eq!(
+            "curator".parse::<OperatingMode>().unwrap(),
+            OperatingMode::Curator
+        );
+        assert_eq!(
+            "improvement".parse::<OperatingMode>().unwrap(),
+            OperatingMode::Improvement
+        );
+        assert_eq!("gym".parse::<OperatingMode>().unwrap(), OperatingMode::Gym);
+        assert_eq!(
+            "orchestrator".parse::<OperatingMode>().unwrap(),
+            OperatingMode::Orchestrator
+        );
+    }
+
+    #[test]
+    fn operating_mode_fromstr_invalid() {
+        assert!("unknown".parse::<OperatingMode>().is_err());
+        assert!("Engineer".parse::<OperatingMode>().is_err());
+        assert!("".parse::<OperatingMode>().is_err());
     }
 
     // --- MemoryPolicy ---
