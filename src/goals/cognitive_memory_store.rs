@@ -27,7 +27,7 @@ use crate::metadata::{BackendDescriptor, Freshness};
 use super::{GoalRecord, GoalStatus, GoalStore};
 
 /// Concept under which goal records are filed in cognitive memory.
-const GOAL_STORE_FACT_CONCEPT: &str = "goal-store:record";
+pub(crate) const GOAL_STORE_FACT_CONCEPT: &str = "goal-store:record";
 /// Source label recorded with every fact.
 const GOAL_STORE_SOURCE: &str = "goal-store";
 /// Tag recorded with every fact.
@@ -40,7 +40,7 @@ const GOAL_PROSPECTIVE_PREFIX: &str = "goal:";
 /// `MAX_ACTIVE_GOALS = 5`; even with status churn the per-process record
 /// count stays modest, so 256 covers realistic deployments without
 /// risking truncation.
-const GOAL_STORE_LIST_LIMIT: u32 = 256;
+pub(crate) const GOAL_STORE_LIST_LIMIT: u32 = 256;
 
 /// `GoalStore` implementation backed by cognitive memory through the
 /// bridge helpers (`launch_writer_bridge` / `open_reader_bridge`).
@@ -142,6 +142,60 @@ impl CognitiveMemoryGoalStore {
 
         Ok(latest_by_slug.into_values().map(|(_, r)| r).collect())
     }
+
+    /// Reconcile drift between goal state and prospective memory entries.
+    ///
+    /// Loads all current goals via `list_via_reader()`, then for each:
+    /// - **Active** goals: ensures a prospective trigger exists; creates one
+    ///   if missing (e.g. due to a prior dual-write failure).
+    /// - **Non-Active** goals: resolves any stale prospective triggers so
+    ///   they no longer fire.
+    ///
+    /// Stops on the first error encountered. Callers should retry on
+    /// transient failures. A future improvement may collect all errors
+    /// instead of short-circuiting (see issue #2207).
+    pub fn reconcile_prospectives(&self) -> SimardResult<()> {
+        let goals = self.list_via_reader()?;
+        if goals.is_empty() {
+            return Ok(());
+        }
+
+        let writer = launch_writer_bridge(&self.state_root)?;
+
+        for goal in &goals {
+            let trigger = prospective_trigger_for(goal);
+
+            // Check whether a prospective entry already exists for this slug.
+            let existing = writer.ops().check_triggers(&trigger)?;
+            let has_goal_prospective = existing.iter().any(|p| {
+                p.description.starts_with(GOAL_PROSPECTIVE_PREFIX) && p.trigger_condition == trigger
+            });
+
+            if goal.status == GoalStatus::Active {
+                if !has_goal_prospective {
+                    // Drift: Active goal is missing its prospective trigger.
+                    let description = format!("{}{}", GOAL_PROSPECTIVE_PREFIX, goal.title);
+                    let action = format!(
+                        "Pursue goal: {} (p{}, {})",
+                        goal.title, goal.priority, goal.rationale,
+                    );
+                    writer.ops().store_prospective(
+                        &description,
+                        &trigger,
+                        &action,
+                        i64::from(goal.priority),
+                    )?;
+                }
+            } else {
+                // Non-Active goal: resolve any stale prospective entries.
+                if has_goal_prospective {
+                    resolve_goal_prospectives(&goal.slug, writer.ops())?;
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl GoalStore for CognitiveMemoryGoalStore {
@@ -163,14 +217,9 @@ impl GoalStore for CognitiveMemoryGoalStore {
         )?;
 
         // Resolve any previous prospective memory for this goal so stale
-        // entries don't accumulate. Best-effort: failures are logged, not fatal.
-        if let Err(e) = resolve_goal_prospectives(&record.slug, writer.ops()) {
-            eprintln!(
-                "[simard] CognitiveMemoryGoalStore::put: resolve_goal_prospectives \
-                 failed for slug={} ({e})",
-                record.slug,
-            );
-        }
+        // entries don't accumulate. Part of put()'s success contract (#2207):
+        // if the mirror update fails, the caller must know.
+        resolve_goal_prospectives(&record.slug, writer.ops())?;
 
         // Dual-write: store Active goals as prospective memories so they
         // surface via `check_triggers` during OODA preparation (#2207).
@@ -181,18 +230,12 @@ impl GoalStore for CognitiveMemoryGoalStore {
                 "Pursue goal: {} (p{}, {})",
                 record.title, record.priority, record.rationale,
             );
-            if let Err(e) = writer.ops().store_prospective(
+            writer.ops().store_prospective(
                 &description,
                 &trigger_condition,
                 &action_on_trigger,
                 i64::from(record.priority),
-            ) {
-                eprintln!(
-                    "[simard] CognitiveMemoryGoalStore::put: store_prospective \
-                     failed for slug={} ({e})",
-                    record.slug,
-                );
-            }
+            )?;
         }
 
         Ok(())
@@ -533,6 +576,193 @@ mod tests {
             .expect("top_goals_by_status");
         assert_eq!(proposed.len(), 2);
         assert!(proposed.iter().all(|r| r.status == GoalStatus::Proposed));
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Issue #2207 Finding 2: put() must propagate prospective-mirror errors
+    // and reconcile_prospectives() must exist to fix drift.
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// After put() of an Active goal, check_triggers must find the prospective
+    /// entry — verifying that the dual-write is part of put()'s success contract.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn put_active_goal_creates_prospective_trigger() {
+        let root = fresh_state_root("prospective-trigger");
+        let store = CognitiveMemoryGoalStore::new(root.clone()).expect("store should build");
+        store
+            .put(record("Fix authentication bug", GoalStatus::Active, 1))
+            .expect("put active goal");
+
+        // The prospective trigger condition is the slug with dashes→spaces.
+        // Open a reader bridge and check triggers with the expected phrase.
+        let reader =
+            crate::memory_ipc::open_reader_bridge(&root).expect("reader bridge should open");
+        let triggered = reader
+            .ops()
+            .check_triggers("fix authentication bug")
+            .expect("check_triggers");
+
+        assert!(
+            triggered.iter().any(|p| p.description.starts_with("goal:")),
+            "put() of an Active goal must create a goal: prospective entry; \
+             found {} triggers: {:?}",
+            triggered.len(),
+            triggered.iter().map(|p| &p.description).collect::<Vec<_>>()
+        );
+    }
+
+    /// After put() with a non-Active status, old prospective entries for that
+    /// slug must be resolved (no longer triggerable).
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn put_completed_goal_resolves_stale_prospective() {
+        let root = fresh_state_root("resolve-prospective");
+        let store = CognitiveMemoryGoalStore::new(root.clone()).expect("store should build");
+
+        // First put: Active → creates prospective.
+        store
+            .put(record("Deploy CI pipeline", GoalStatus::Active, 1))
+            .expect("put active");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        // Second put: Completed → should resolve the old prospective.
+        store
+            .put(record("Deploy CI pipeline", GoalStatus::Completed, 1))
+            .expect("put completed");
+
+        // The trigger should no longer fire for the completed goal.
+        let reader =
+            crate::memory_ipc::open_reader_bridge(&root).expect("reader bridge should open");
+        let triggered = reader
+            .ops()
+            .check_triggers("deploy ci pipeline")
+            .expect("check_triggers");
+
+        let goal_triggers: Vec<_> = triggered
+            .iter()
+            .filter(|p| p.description.starts_with("goal:"))
+            .collect();
+
+        assert!(
+            goal_triggers.is_empty(),
+            "put() of a Completed goal must resolve old prospective entries; \
+             found {} stale triggers: {:?}",
+            goal_triggers.len(),
+            goal_triggers
+                .iter()
+                .map(|p| &p.description)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// `reconcile_prospectives()` must exist as a public method on the store.
+    /// It should ensure Active goals have prospective entries and non-Active
+    /// goals don't have stale ones.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn reconcile_prospectives_fixes_drift() {
+        let root = fresh_state_root("reconcile");
+        let store = CognitiveMemoryGoalStore::new(root.clone()).expect("store should build");
+
+        // Create two goals: one Active, one Completed.
+        store
+            .put(record("Active goal", GoalStatus::Active, 1))
+            .expect("put active");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .put(record("Done goal", GoalStatus::Completed, 2))
+            .expect("put completed");
+
+        // Call reconcile — it must not error on a consistent store.
+        store
+            .reconcile_prospectives()
+            .expect("reconcile_prospectives must succeed on a consistent store");
+
+        // After reconciliation: Active goal should still have a trigger,
+        // Completed goal should not.
+        let reader =
+            crate::memory_ipc::open_reader_bridge(&root).expect("reader bridge should open");
+
+        let active_triggers = reader
+            .ops()
+            .check_triggers("active goal")
+            .expect("check_triggers for active");
+        assert!(
+            active_triggers
+                .iter()
+                .any(|p| p.description.starts_with("goal:")),
+            "reconcile must ensure Active goals have prospective entries"
+        );
+
+        let done_triggers = reader
+            .ops()
+            .check_triggers("done goal")
+            .expect("check_triggers for done");
+        let stale: Vec<_> = done_triggers
+            .iter()
+            .filter(|p| p.description.starts_with("goal:"))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "reconcile must resolve prospective entries for non-Active goals"
+        );
+    }
+
+    /// reconcile_prospectives() must re-create a missing prospective for an
+    /// Active goal (simulating drift where the dual-write was lost).
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn reconcile_prospectives_recreates_missing_active_prospective() {
+        let root = fresh_state_root("reconcile-recreate");
+        let store = CognitiveMemoryGoalStore::new(root.clone()).expect("store should build");
+
+        // Write an Active goal — this creates a prospective entry.
+        store
+            .put(record("Drifted goal", GoalStatus::Active, 1))
+            .expect("put active");
+
+        // Manually resolve the prospective to simulate drift.
+        {
+            let writer = crate::memory_ipc::launch_writer_bridge(&root).expect("writer bridge");
+            let triggered = writer
+                .ops()
+                .check_triggers("drifted goal")
+                .expect("check_triggers");
+            for p in &triggered {
+                if p.description.starts_with("goal:") {
+                    writer
+                        .ops()
+                        .resolve_prospective(&p.node_id)
+                        .expect("resolve");
+                }
+            }
+            // Confirm it's gone.
+            let after = writer
+                .ops()
+                .check_triggers("drifted goal")
+                .expect("check_triggers after resolve");
+            assert!(
+                after.iter().all(|p| !p.description.starts_with("goal:")),
+                "test setup: prospective should be resolved before reconcile"
+            );
+        }
+
+        // Reconcile should detect the missing prospective and recreate it.
+        store
+            .reconcile_prospectives()
+            .expect("reconcile_prospectives");
+
+        let reader = crate::memory_ipc::open_reader_bridge(&root).expect("reader bridge");
+        let triggered = reader
+            .ops()
+            .check_triggers("drifted goal")
+            .expect("check_triggers post-reconcile");
+        assert!(
+            triggered.iter().any(|p| p.description.starts_with("goal:")),
+            "reconcile must recreate prospective entries for Active goals \
+             that lost their trigger due to drift"
+        );
     }
 
     #[test]

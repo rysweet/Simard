@@ -169,6 +169,252 @@ fn consolidation_persistence_flushes_and_consolidates() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Issue #2207 Finding 1: preparation_memory_operations must dedup goal facts
+// by slug (latest-per-slug) so that historical revisions of a goal don't
+// crowd out current goals, and must use a limit high enough (256) that
+// status churn doesn't cause current goals to fall off the result set.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Build a bridge whose `search_facts("goal-store:record", ...)` returns
+/// multiple revisions for the same goal slug. This simulates the append-only
+/// fact store returning historical rows alongside the current version.
+fn goal_dedup_bridge() -> CognitiveMemoryBridge {
+    use crate::goals::GoalRecord;
+    let transport = InMemoryBridgeTransport::new("goal-dedup", move |method, params| {
+        match method {
+            "memory.search_facts" => {
+                // Inspect the query parameter to route goal vs objective searches.
+                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                if query == "goal-store:record" {
+                    // Two revisions of slug "alpha" (node_id n2 > n1) plus
+                    // one entry for slug "beta".
+                    let alpha_v1 = GoalRecord {
+                        slug: "alpha".to_string(),
+                        title: "Alpha v1".to_string(),
+                        rationale: "old rationale".to_string(),
+                        status: crate::goals::GoalStatus::Proposed,
+                        priority: 3,
+                        owner_identity: "test".to_string(),
+                        source_session_id: crate::session::SessionId::parse(
+                            "session-01234567-89ab-cdef-0123-456789abcdef",
+                        )
+                        .unwrap(),
+                        updated_in: crate::session::SessionPhase::Persistence,
+                    };
+                    let alpha_v2 = GoalRecord {
+                        slug: "alpha".to_string(),
+                        title: "Alpha v2".to_string(),
+                        rationale: "new rationale".to_string(),
+                        status: crate::goals::GoalStatus::Active,
+                        priority: 1,
+                        owner_identity: "test".to_string(),
+                        source_session_id: crate::session::SessionId::parse(
+                            "session-01234567-89ab-cdef-0123-456789abcdef",
+                        )
+                        .unwrap(),
+                        updated_in: crate::session::SessionPhase::Persistence,
+                    };
+                    let beta = GoalRecord {
+                        slug: "beta".to_string(),
+                        title: "Beta".to_string(),
+                        rationale: "beta rationale".to_string(),
+                        status: crate::goals::GoalStatus::Active,
+                        priority: 2,
+                        owner_identity: "test".to_string(),
+                        source_session_id: crate::session::SessionId::parse(
+                            "session-01234567-89ab-cdef-0123-456789abcdef",
+                        )
+                        .unwrap(),
+                        updated_in: crate::session::SessionPhase::Persistence,
+                    };
+                    Ok(json!({
+                        "facts": [
+                            {
+                                "node_id": "n_0001",
+                                "concept": "goal-store:record",
+                                "content": serde_json::to_string(&alpha_v1).unwrap(),
+                                "confidence": 1.0,
+                                "source_id": "goal-store",
+                                "tags": ["goal-store"]
+                            },
+                            {
+                                "node_id": "n_0002",
+                                "concept": "goal-store:record",
+                                "content": serde_json::to_string(&alpha_v2).unwrap(),
+                                "confidence": 1.0,
+                                "source_id": "goal-store",
+                                "tags": ["goal-store"]
+                            },
+                            {
+                                "node_id": "n_0003",
+                                "concept": "goal-store:record",
+                                "content": serde_json::to_string(&beta).unwrap(),
+                                "confidence": 1.0,
+                                "source_id": "goal-store",
+                                "tags": ["goal-store"]
+                            }
+                        ]
+                    }))
+                } else {
+                    // Objective search returns nothing.
+                    Ok(json!({"facts": []}))
+                }
+            }
+            "memory.check_triggers" => Ok(json!({"prospectives": []})),
+            "memory.recall_procedure" => Ok(json!({"procedures": []})),
+            "memory.push_working" => Ok(json!({"id": "wrk_1"})),
+            _ => Err(crate::bridge::BridgeErrorPayload {
+                code: -32601,
+                message: format!("unknown: {method}"),
+            }),
+        }
+    });
+    CognitiveMemoryBridge::new(Box::new(transport))
+}
+
+#[test]
+fn preparation_deduplicates_goal_facts_by_slug_keeping_latest() {
+    // The bridge returns 3 goal facts: 2 revisions of "alpha" and 1 "beta".
+    // After dedup, only the latest "alpha" (node_id n_0002) and "beta" should
+    // appear in relevant_facts.
+    let bridge = goal_dedup_bridge();
+    let ctx =
+        preparation_memory_operations("unrelated objective", &test_session_id(), &bridge).unwrap();
+
+    // Collect goal-record facts by parsing their content.
+    let goal_facts: Vec<crate::goals::GoalRecord> = ctx
+        .relevant_facts
+        .iter()
+        .filter(|f| f.concept == "goal-store:record")
+        .filter_map(|f| serde_json::from_str(&f.content).ok())
+        .collect();
+
+    // Must have exactly 2 unique slugs (alpha latest + beta).
+    assert_eq!(
+        goal_facts.len(),
+        2,
+        "expected 2 goal facts after dedup (alpha latest + beta), got {}",
+        goal_facts.len()
+    );
+
+    // The "alpha" fact must be the v2 revision (title "Alpha v2", priority 1).
+    let alpha = goal_facts.iter().find(|r| r.slug == "alpha");
+    assert!(alpha.is_some(), "alpha goal must be present after dedup");
+    assert_eq!(
+        alpha.unwrap().title,
+        "Alpha v2",
+        "dedup must keep the latest revision (highest node_id)"
+    );
+    assert_eq!(alpha.unwrap().priority, 1);
+
+    // Beta must be present unchanged.
+    assert!(
+        goal_facts.iter().any(|r| r.slug == "beta"),
+        "beta goal must be present after dedup"
+    );
+}
+
+#[test]
+fn preparation_does_not_include_unparseable_goal_facts() {
+    // A bridge that returns one valid goal fact and one with malformed JSON.
+    let transport = InMemoryBridgeTransport::new("bad-json", move |method, params| match method {
+        "memory.search_facts" => {
+            let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            if query == "goal-store:record" {
+                Ok(json!({
+                    "facts": [
+                        {
+                            "node_id": "n_good",
+                            "concept": "goal-store:record",
+                            "content": "{\"slug\":\"good\",\"title\":\"Good\",\"rationale\":\"r\",\"status\":\"active\",\"priority\":1,\"owner_identity\":\"o\",\"source_session_id\":\"session-01234567-89ab-cdef-0123-456789abcdef\",\"updated_in\":\"persistence\"}",
+                            "confidence": 1.0,
+                            "source_id": "goal-store",
+                            "tags": ["goal-store"]
+                        },
+                        {
+                            "node_id": "n_bad",
+                            "concept": "goal-store:record",
+                            "content": "NOT VALID JSON {{{",
+                            "confidence": 1.0,
+                            "source_id": "goal-store",
+                            "tags": ["goal-store"]
+                        }
+                    ]
+                }))
+            } else {
+                Ok(json!({"facts": []}))
+            }
+        }
+        "memory.check_triggers" => Ok(json!({"prospectives": []})),
+        "memory.recall_procedure" => Ok(json!({"procedures": []})),
+        "memory.push_working" => Ok(json!({"id": "wrk_1"})),
+        _ => Err(crate::bridge::BridgeErrorPayload {
+            code: -32601,
+            message: format!("unknown: {method}"),
+        }),
+    });
+    let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+    let ctx =
+        preparation_memory_operations("unrelated objective", &test_session_id(), &bridge).unwrap();
+
+    // The unparseable fact should be silently skipped (match+continue).
+    // Only the valid "good" goal fact should survive dedup.
+    let goal_facts: Vec<&crate::memory_cognitive::CognitiveFact> = ctx
+        .relevant_facts
+        .iter()
+        .filter(|f| f.concept == "goal-store:record")
+        .collect();
+
+    assert_eq!(
+        goal_facts.len(),
+        1,
+        "unparseable goal facts must be skipped; expected 1, got {}",
+        goal_facts.len()
+    );
+    assert_eq!(goal_facts[0].node_id, "n_good");
+}
+
+/// Verify that goal facts use the same limit constant as the goal store's
+/// `list_via_reader` (256), not the old hardcoded 20.
+#[test]
+fn preparation_uses_goal_store_list_limit_not_hardcoded_20() {
+    use std::sync::{Arc, Mutex};
+
+    let captured_limit = Arc::new(Mutex::new(0u32));
+    let limit_capture = captured_limit.clone();
+
+    let transport = InMemoryBridgeTransport::new("limit-check", move |method, params| {
+        match method {
+            "memory.search_facts" => {
+                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                if query == "goal-store:record" {
+                    // Capture the limit parameter.
+                    if let Some(limit) = params.get("limit").and_then(|v| v.as_u64()) {
+                        *limit_capture.lock().unwrap() = limit as u32;
+                    }
+                }
+                Ok(json!({"facts": []}))
+            }
+            "memory.check_triggers" => Ok(json!({"prospectives": []})),
+            "memory.recall_procedure" => Ok(json!({"procedures": []})),
+            "memory.push_working" => Ok(json!({"id": "wrk_1"})),
+            _ => Err(crate::bridge::BridgeErrorPayload {
+                code: -32601,
+                message: format!("unknown: {method}"),
+            }),
+        }
+    });
+    let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+    preparation_memory_operations("check limit", &test_session_id(), &bridge).unwrap();
+
+    let limit = *captured_limit.lock().unwrap();
+    assert!(
+        limit >= 256,
+        "goal fact search must use limit >= 256 (GOAL_STORE_LIST_LIMIT), got {limit}"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // G10 (issue #1604): persistence_memory_operations must propagate snapshot
 // save failures rather than silently swallowing them via `eprintln!`.
 // ───────────────────────────────────────────────────────────────────────────
