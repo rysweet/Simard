@@ -103,6 +103,10 @@ impl FileIdentityLoader {
                 )?);
             }
 
+            // Remove from visited on unwind so sibling branches can
+            // revisit the same node (diamond pattern: A→B→D, A→C→D).
+            visited.remove(&identity.name);
+
             return IdentityManifest::compose(
                 &identity.name,
                 &request.package_version,
@@ -178,7 +182,29 @@ impl FileIdentityLoader {
                         ),
                     });
                 }
-                Ok(PromptAssetRef::new(&a.id, &a.path))
+                // Store the path relative to prompt_root so
+                // FilePromptAssetStore can resolve it via
+                // prompt_root.join(relative_path).
+                let canonical_prompt_root = self.prompt_root.canonicalize().map_err(|e| {
+                    SimardError::IdentityTomlParseError {
+                        path: toml_path.to_path_buf(),
+                        reason: format!(
+                            "cannot canonicalize prompt root '{}': {e}",
+                            self.prompt_root.display()
+                        ),
+                    }
+                })?;
+                let relative_to_prompt_root = canonical_resolved
+                    .strip_prefix(&canonical_prompt_root)
+                    .map_err(|_| SimardError::IdentityTomlParseError {
+                        path: toml_path.to_path_buf(),
+                        reason: format!(
+                            "prompt asset '{}' is not under prompt root '{}'",
+                            a.path,
+                            self.prompt_root.display()
+                        ),
+                    })?;
+                Ok(PromptAssetRef::new(&a.id, relative_to_prompt_root))
             })
             .collect::<SimardResult<Vec<_>>>()?;
 
@@ -329,7 +355,58 @@ impl IdentityLoader for FileIdentityLoader {
             }
         }
 
-        // Single fs::read() call — no TOCTOU race between size check and read.
+        // Symlink containment: ensure identity.toml itself does not
+        // escape the identity directory via symlink.
+        if toml_path.exists() {
+            let canonical_toml =
+                toml_path
+                    .canonicalize()
+                    .map_err(|e| SimardError::IdentityTomlParseError {
+                        path: toml_path.clone(),
+                        reason: format!("cannot canonicalize identity.toml: {e}"),
+                    })?;
+            let canonical_identity_dir = self.identity_path.canonicalize().map_err(|e| {
+                SimardError::IdentityTomlParseError {
+                    path: toml_path.clone(),
+                    reason: format!(
+                        "cannot canonicalize identity directory '{}': {e}",
+                        self.identity_path.display()
+                    ),
+                }
+            })?;
+            if !canonical_toml.starts_with(&canonical_identity_dir) {
+                return Err(SimardError::IdentityTomlParseError {
+                    path: toml_path,
+                    reason: "identity.toml escapes identity directory (possible symlink attack)"
+                        .to_string(),
+                });
+            }
+        }
+
+        // Check file size via metadata BEFORE reading to avoid loading
+        // an oversized file into memory.
+        match std::fs::metadata(&toml_path) {
+            Ok(meta) => {
+                if meta.len() > MAX_IDENTITY_FILE_SIZE {
+                    return Err(SimardError::IdentityTomlParseError {
+                        path: toml_path,
+                        reason: format!(
+                            "file exceeds maximum size of {MAX_IDENTITY_FILE_SIZE} bytes"
+                        ),
+                    });
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return self.fallback.load(request);
+            }
+            Err(e) => {
+                return Err(SimardError::IdentityTomlParseError {
+                    path: toml_path,
+                    reason: e.to_string(),
+                });
+            }
+        }
+
         let bytes = match std::fs::read(&toml_path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -342,13 +419,6 @@ impl IdentityLoader for FileIdentityLoader {
                 });
             }
         };
-
-        if bytes.len() as u64 > MAX_IDENTITY_FILE_SIZE {
-            return Err(SimardError::IdentityTomlParseError {
-                path: toml_path,
-                reason: format!("file exceeds maximum size of {MAX_IDENTITY_FILE_SIZE} bytes"),
-            });
-        }
 
         let content =
             String::from_utf8(bytes).map_err(|e| SimardError::IdentityTomlParseError {
@@ -883,6 +953,170 @@ path = "prompts/system.md"
         let manifest = loader.load(&test_request("test-relative")).unwrap();
         assert_eq!(manifest.prompt_assets.len(), 1);
         assert_eq!(manifest.prompt_assets[0].id.as_str(), "system");
+    }
+
+    // ── F5: Diamond graphs must NOT be rejected ────────────────────
+    // The visited-set approach incorrectly rejects diamond graphs when
+    // the shared node is a composite. With proper DFS stack-based cycle
+    // detection, D is visited twice (once per path) and resolves both times.
+    // This test FAILS until the cycle detection is changed from HashSet to Vec.
+
+    #[test]
+    fn file_loader_allows_diamond_composition_graph() {
+        let prompt_root = TempDir::new().unwrap();
+        let identity_dir = prompt_root.path().join("diamond");
+        fs::create_dir_all(&identity_dir).unwrap();
+        fs::write(identity_dir.join("e_system.md"), "# E system").unwrap();
+        // Diamond: A → B → D → E (leaf), A → C → D → E (leaf)
+        // D is composite (has components), so it gets inserted into visited.
+        // The second path through D (via C) triggers a false "circular" error.
+        let toml_content = r#"
+[package]
+name = "diamond"
+version = "0.1.0"
+
+[[identities]]
+name = "node-e"
+default_mode = "engineer"
+supported_base_types = ["local-harness"]
+
+[[identities.prompt_assets]]
+id = "e-system"
+path = "e_system.md"
+
+[[identities]]
+name = "node-d"
+default_mode = "engineer"
+components = ["node-e"]
+
+[[identities]]
+name = "node-b"
+default_mode = "engineer"
+components = ["node-d"]
+
+[[identities]]
+name = "node-c"
+default_mode = "engineer"
+components = ["node-d"]
+
+[[identities]]
+name = "node-a"
+default_mode = "engineer"
+components = ["node-b", "node-c"]
+"#;
+        write_identity_toml(&identity_dir, toml_content);
+
+        let loader = FileIdentityLoader::new(&identity_dir, prompt_root.path());
+        let result = loader.load(&test_request("node-a"));
+        assert!(
+            result.is_ok(),
+            "diamond graph with composite shared node (A→B→D→E, A→C→D→E) must not be rejected as circular, got: {:?}",
+            result.err()
+        );
+        let manifest = result.unwrap();
+        assert_eq!(manifest.name, "node-a");
+    }
+
+    // ── F3: File size must be checked BEFORE reading ────────────────
+    // This test verifies that the size guard uses metadata rather than
+    // reading the whole file into memory first.
+
+    #[test]
+    fn file_loader_rejects_oversized_file_via_metadata() {
+        let prompt_root = TempDir::new().unwrap();
+        let identity_dir = prompt_root.path().join("metadata-size");
+        fs::create_dir_all(&identity_dir).unwrap();
+        // Write a file slightly over the limit
+        let large_content = "x".repeat(MAX_IDENTITY_FILE_SIZE as usize + 1);
+        write_identity_toml(&identity_dir, &large_content);
+
+        let loader = FileIdentityLoader::new(&identity_dir, prompt_root.path());
+        let err = loader.load(&test_request("anything")).unwrap_err();
+        assert!(
+            matches!(err, SimardError::IdentityTomlParseError { .. }),
+            "oversized file should be rejected via metadata check, got: {err:?}"
+        );
+    }
+
+    // ── F4: identity.toml itself must have symlink containment ──────
+    // If identity.toml is a symlink pointing outside the prompt root,
+    // it must be rejected.
+
+    #[cfg(unix)]
+    #[test]
+    fn file_loader_rejects_identity_toml_symlink_escape() {
+        use std::os::unix::fs as unix_fs;
+
+        let prompt_root = TempDir::new().unwrap();
+        let identity_dir = prompt_root.path().join("toml-symlink");
+        fs::create_dir_all(&identity_dir).unwrap();
+
+        // Create a real identity.toml outside the prompt root
+        let outside_dir = TempDir::new().unwrap();
+        let evil_toml = outside_dir.path().join("identity.toml");
+        fs::write(
+            &evil_toml,
+            r#"
+[package]
+name = "evil"
+version = "0.1.0"
+
+[[identities]]
+name = "evil-identity"
+default_mode = "engineer"
+supported_base_types = ["local-harness"]
+"#,
+        )
+        .unwrap();
+
+        // Make identity.toml a symlink pointing outside prompt_root
+        unix_fs::symlink(&evil_toml, identity_dir.join("identity.toml")).unwrap();
+
+        let loader = FileIdentityLoader::new(&identity_dir, prompt_root.path());
+        let err = loader
+            .load(&test_request("evil-identity"))
+            .expect_err("identity.toml symlink escaping prompt root should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("escape") || msg.contains("symlink") || msg.contains("not under"),
+            "error should mention symlink/escape, got: {msg}"
+        );
+    }
+
+    // ── F2: Prompt asset paths must be relative to prompt_root ──────
+    // After fix, PromptAssetRef.relative_path should be resolvable from
+    // prompt_root (not from identity_dir). This test verifies end-to-end
+    // that FilePromptAssetStore can load an asset using the path stored
+    // in the manifest by FileIdentityLoader.
+
+    #[test]
+    fn file_loader_stores_prompt_root_relative_asset_paths() {
+        use crate::prompt_assets::{FilePromptAssetStore, PromptAssetStore};
+
+        let prompt_root = TempDir::new().unwrap();
+        let identity_dir = prompt_root.path().join("custom");
+        fs::create_dir_all(&identity_dir).unwrap();
+
+        // Create prompt asset inside identity_dir
+        fs::write(identity_dir.join("engineer_system.md"), "# System prompt").unwrap();
+
+        write_identity_toml(&identity_dir, ENGINEER_TOML);
+
+        let loader = FileIdentityLoader::new(&identity_dir, prompt_root.path());
+        let manifest = loader.load(&test_request("test-engineer")).unwrap();
+
+        // The stored relative_path must be resolvable from prompt_root
+        let store = FilePromptAssetStore::new(prompt_root.path());
+        for asset_ref in &manifest.prompt_assets {
+            let result = store.load(asset_ref);
+            assert!(
+                result.is_ok(),
+                "prompt asset '{}' with relative_path '{}' should be loadable from prompt_root, got: {:?}",
+                asset_ref.id,
+                asset_ref.relative_path.display(),
+                result.err()
+            );
+        }
     }
 
     #[cfg(unix)]

@@ -18,6 +18,8 @@ pub struct BootstrapConfig {
     pub state_root: ConfigValue<PathBuf>,
     pub selected_base_type: ConfigValue<BaseTypeId>,
     pub topology: ConfigValue<RuntimeTopology>,
+    /// F1: Optional path to a custom identity directory.
+    pub identity_path: Option<ConfigValue<PathBuf>>,
 }
 
 impl BootstrapConfig {
@@ -138,6 +140,10 @@ impl BootstrapConfig {
             state_root,
             selected_base_type,
             topology,
+            identity_path: inputs.identity_path.map(|path| ConfigValue {
+                value: path,
+                source: ConfigValueSource::Environment("SIMARD_IDENTITY_PATH"),
+            }),
         })
     }
 
@@ -196,6 +202,7 @@ mod tests {
             identity: None,
             base_type: None,
             topology: None,
+            identity_path: None,
         }
     }
 
@@ -222,6 +229,7 @@ mod tests {
             identity: Some("id".to_string()),
             base_type: Some("bt".to_string()),
             topology: Some("single-process".to_string()),
+            identity_path: None,
         };
         let result = BootstrapConfig::resolve(inputs);
         assert!(result.is_err());
@@ -237,6 +245,7 @@ mod tests {
             identity: Some("id".to_string()),
             base_type: Some("bt".to_string()),
             topology: Some("single-process".to_string()),
+            identity_path: None,
         };
         let result = BootstrapConfig::resolve(inputs);
         assert!(result.is_err());
@@ -252,6 +261,7 @@ mod tests {
             identity: None,
             base_type: Some("bt".to_string()),
             topology: Some("single-process".to_string()),
+            identity_path: None,
         };
         let result = BootstrapConfig::resolve(inputs);
         assert!(result.is_err());
@@ -267,6 +277,7 @@ mod tests {
             identity: None,
             base_type: None,
             topology: None,
+            identity_path: None,
         };
         let result = BootstrapConfig::resolve(inputs);
         assert!(result.is_err());
@@ -345,5 +356,44 @@ mod tests {
         };
         let result = BootstrapConfig::resolve(inputs);
         assert!(result.is_err());
+    }
+
+    // ── F1: identity_path config field ─────────────────────────────
+    // BootstrapInputs and BootstrapConfig must support an optional
+    // identity_path field for wiring FileIdentityLoader.
+
+    #[test]
+    fn test_bootstrap_inputs_has_identity_path_field() {
+        let inputs = BootstrapInputs {
+            identity_path: None,
+            ..builtin_defaults_inputs()
+        };
+        assert!(inputs.identity_path.is_none());
+    }
+
+    #[test]
+    fn test_bootstrap_config_resolves_identity_path_from_inputs() {
+        let inputs = BootstrapInputs {
+            identity_path: Some(PathBuf::from("/custom/identity")),
+            ..builtin_defaults_inputs()
+        };
+        let config = BootstrapConfig::resolve(inputs).unwrap();
+        assert!(
+            config.identity_path.is_some(),
+            "identity_path should be resolved when provided"
+        );
+        assert_eq!(
+            config.identity_path.as_ref().unwrap().value,
+            PathBuf::from("/custom/identity")
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_config_identity_path_none_when_not_set() {
+        let config = BootstrapConfig::resolve(builtin_defaults_inputs()).unwrap();
+        assert!(
+            config.identity_path.is_none(),
+            "identity_path should be None when not set"
+        );
     }
 }

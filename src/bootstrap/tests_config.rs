@@ -137,6 +137,7 @@ fn resolve_full_explicit_config_succeeds() {
         topology: Some("single-process".to_string()),
         state_root: Some(temp_dir.path().to_path_buf()),
         identity: Some("my-identity".to_string()),
+        identity_path: None,
     };
     let config = BootstrapConfig::resolve(inputs).unwrap();
     assert_eq!(config.mode, BootstrapMode::ExplicitConfig);

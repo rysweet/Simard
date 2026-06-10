@@ -72,6 +72,8 @@ pub struct BootstrapInputs {
     pub identity: Option<String>,
     pub base_type: Option<String>,
     pub topology: Option<String>,
+    /// F1: Optional path to a custom identity directory.
+    pub identity_path: Option<PathBuf>,
 }
 
 impl Default for BootstrapInputs {
@@ -87,6 +89,7 @@ impl Default for BootstrapInputs {
             identity: None,
             base_type: None,
             topology: None,
+            identity_path: None,
         }
     }
 }
@@ -101,6 +104,7 @@ impl BootstrapInputs {
             identity: read_optional_utf8_env("SIMARD_IDENTITY")?,
             base_type: read_optional_utf8_env("SIMARD_BASE_TYPE")?,
             topology: read_optional_utf8_env("SIMARD_RUNTIME_TOPOLOGY")?,
+            identity_path: std::env::var_os("SIMARD_IDENTITY_PATH").map(PathBuf::from),
         })
     }
 }
@@ -268,6 +272,8 @@ mod tests {
         assert!(inputs.identity.is_none());
         assert!(inputs.base_type.is_none());
         assert!(inputs.topology.is_none());
+        // F1: identity_path field must exist and default to None
+        assert!(inputs.identity_path.is_none());
     }
 
     // ── decode_utf8_env_value ──

@@ -32,6 +32,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to recover a corrupted or missing goal board](./howto/recover-goal-board.md) — cognitive-memory-only recovery commands.
 - [How to troubleshoot the file-backed goal store](./howto/troubleshoot-goal-store.md) — operator playbook for goal_store.json issues.
 - [How to configure adaptive scaling](./howto/configure-adaptive-scaling.md) — enable and tune AIMD concurrency scaling.
+- [How to configure a custom identity](./howto/configure-custom-identity.md) — define identities in TOML instead of recompiling.
 
 - [How to run the OODA daemon](./howto/run-ooda-daemon.md) - Start the continuous OODA loop for autonomous goal-driven operation and act on meeting decisions.
 - [How to diagnose OODA decide/orient brain parse failures](./howto/diagnose-decide-orient-parse-failures.md) - Runbook for the silent-fallback fix (#1890): find the ERROR log, read the `parse_failure` cycle-report block, and remediate.
@@ -39,6 +40,8 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Simard CLI reference](./reference/simard-cli.md) - Look up the shipped command tree, `engineer read` audit surface, and compatibility mappings.
 - [Runtime contracts reference](./reference/runtime-contracts.md) - Look up executable contracts, state-root guarantees, and the shipped engineer audit readback semantics.
 - [Base type adapters reference](./reference/base-type-adapters.md) - Look up the pluggable agent execution substrates, their capabilities, and topology support.
+- [identity.toml reference](./reference/identity-toml.md) - File format specification for file-based identity definitions.
+- [FileIdentityLoader API reference](./reference/file-identity-loader-api.md) - Rust API for the file-based identity loader.
 - [Meeting backend API reference](./reference/meeting-backend-api.md) - Rust API for the unified MeetingBackend.
 - [Meeting close lifecycle reference](./reference/meeting-close-lifecycle.md) - Bounded close, partial-handoff envelope, atomic writes (#1908).
 - [State-root resolution reference](./reference/state-root-resolution.md) - The shared helper honoring `SIMARD_STATE_ROOT` across every Simard mode (#1906).
@@ -53,9 +56,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Concept: improvement context — denser execution evidence for the engineer loop](./concepts/improvement-context-execution-evidence-gap.md) - Captured improvement-curation context preserving the active "Capture denser execution evidence" goal and the observation that the legacy `simard_operator_probe` surface does not yet expose a terminal engineer-loop probe.
 - [Concept: automated disk health management](./concepts/automated-disk-health.md) - Design rationale for the per-cycle disk health check that prevents disk exhaustion (#2020).
 - [Concept: prompt-driven TDD discipline](./concepts/prompt-driven-tdd-discipline.md) - Why TDD commit ordering is enforced through the engineer system prompt, not CI scripts or git history parsing.
-- [Concept: pluggable identity](./concepts/pluggable-identity.md) - Design rationale for TOML-driven agent personas that let different repos define distinct identities (#2242).
-- [How to configure pluggable identities](./howto/configure-pluggable-identity.md) - Create an `identity.toml` file for custom agent personas, operating modes, and prompt assets.
-- [Pluggable identity API reference](./reference/pluggable-identity-api.md) - Rust API for `FileIdentityLoader`, TOML types, `load_watches_from_file`, and error variants.
+- [Concept: pluggable identity system](./concepts/pluggable-identity.md) - Why identities can be loaded from TOML files and the security invariants enforced.
 
 ## Canonical executable surface
 
