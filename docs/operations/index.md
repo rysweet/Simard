@@ -8,6 +8,7 @@ Simard deployment.
 | [Pre-Commit Setup](pre-commit-setup.md) | Local hooks that mirror CI |
 | [Cognitive Memory Durability](cognitive-memory-durability.md) | SIGTERM-safe shutdown + periodic backups |
 | [Meeting REPL & Handoff Ingestion](meeting-handoffs.md) | Routing operator intent into the OODA loop |
+| [Meeting Handoff Cleanup](../howto/clean-stale-meeting-handoffs.md) | Manual and automatic cleanup of accumulated handoff files |
 | [Progress-Evidence Kill Switch](progress-evidence-kill-switch.md) | `SIMARD_PROGRESS_EVIDENCE=off` and when to use it |
 
 For contributor workflow (branching, merge policy, PR evidence

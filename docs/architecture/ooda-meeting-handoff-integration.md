@@ -1,10 +1,10 @@
 ---
 title: OODA Meeting Handoff Integration & Goal Seeding
 description: Design for wiring meeting handoffs into the OODA daemon and seeding default goals — Issues #157 and #158.
-last_updated: 2026-04-03
+last_updated: 2026-06-11
 owner: simard
 doc_type: architecture-decision
-issues: ["#157", "#158"]
+issues: ["#157", "#158", "#2269"]
 ---
 
 # OODA Meeting Handoff Integration & Goal Seeding
@@ -30,41 +30,34 @@ no useful work.
 
 ## Solution
 
-### 1. `check_meeting_handoffs` — ooda_loop.rs
+### 1. `check_meeting_handoffs` — ooda_loop/curate.rs
 
-Add a function at the start of `run_ooda_cycle` that:
+A function at the start of `run_ooda_cycle` that **batch-processes up
+to 10 unprocessed handoffs per cycle** (oldest-first FIFO):
 
-1. Reads `target/meeting_handoffs/meeting_handoff.json` via
-   `meeting_facilitator::load_meeting_handoff`.
-2. Skips if no file or already `processed == true`.
-3. For each `MeetingDecision`, creates an `ActiveGoal` on the `GoalBoard`:
-   - `id`: derived from a slugified form of `decision.description` (lowercase, hyphens, truncated to 64 chars)
-   - `description`: `"[meeting] {decision.description}"`
-   - `priority`: based on position in the decisions list (earlier = higher)
-   - `status`: `GoalProgress::NotStarted`
-4. For each `ActionItem` with priority >= 2, creates a `BacklogItem`:
-   - `id`: derived from a slugified form of `action_item.description`
-   - `description`: `"[action] {action_item.description} (owner: {owner})"`
-   - `source`: `"meeting:{topic}"`
-   - `score`: mapped from action item priority (higher priority → higher score)
-5. Marks the handoff as processed via `mark_meeting_handoff_processed`.
-6. Logs the number of goals and backlog items created.
+1. Calls `find_unprocessed_handoffs(handoff_dir, 10)` to list up to 10
+   unprocessed handoff files (timestamped `handoff-*.json` and the
+   legacy `meeting_handoff.json`), sorted by filename ascending for
+   deterministic FIFO ordering. The legacy file counts toward the
+   limit.
+2. For each handoff in the returned batch:
+   a. Parses the JSON via `serde_json`. On parse failure: logs `warn!`,
+      skips to the next file without aborting the batch.
+   b. If `decisions.is_empty() && action_items.is_empty()`: marks the
+      handoff processed immediately and skips ingestion. This handles
+      legacy empty handoffs written before the write-side filter.
+   c. Otherwise: for each `MeetingDecision`, creates an `ActiveGoal`
+      on the `GoalBoard` (id from slugified description, priority from
+      position, status `NotStarted`). For each `ActionItem` with
+      priority ≥ 2, creates a `BacklogItem`.
+   d. Calls `mark_handoff_processed_in_place` to flip `processed` to
+      `true` on the specific file path.
+3. Accumulates the total `created` count across all handoffs in the
+   batch and returns it.
+4. Logs the total count and batch size.
 
-**Placement in cycle**: Before the Observe phase. Meeting handoffs are
-pre-cycle inputs, not observations. They modify the goal board directly so
-that the subsequent Observe → Orient → Decide → Act phases operate on the
-updated board.
-
-```
-run_ooda_cycle:
-    load_goal_board(memory)          // existing
-    check_meeting_handoffs(state)    // NEW — converts handoffs to goals
-    observe(state, bridges)          // existing
-    orient(observation, goals)       // existing
-    decide(priorities, config)       // existing
-    act(actions, bridges, state)     // existing
-    curate(state)                    // existing
-```
+The batch limit of 10 prevents stalling a cycle on a large historical
+backlog — the queue drains over successive cycles.
 
 **Deduplication**: Before adding a goal, check `state.active_goals.active`
 for an existing goal with the same id. Skip if already present. This prevents
@@ -72,6 +65,24 @@ re-processing if the handoff was only partially processed in a previous cycle.
 
 **Cap enforcement**: `GoalBoard` enforces `MAX_ACTIVE_GOALS = 5`. If the
 board is full, excess meeting-derived goals go to the backlog instead.
+
+### 1a. Empty handoff filtering at write time
+
+The write side (`write_handoff_with_explicit` in
+`src/meeting_backend/persist/mod.rs`) skips writing to the handoff
+directory when the meeting produced zero decisions **and** zero action
+items. This prevents empty meetings from creating handoff files that
+the OODA daemon would parse and immediately discard. The per-meeting
+archival bundle (`~/.simard/meetings/`) is still written regardless.
+
+### 1b. Handoff reaper
+
+The OODA daemon's resource cleanup phase (end of each cycle) calls
+`reap_processed_handoffs(handoff_dir, Duration::from_secs(7 * 86400))`
+to delete processed handoff files older than 7 days. The reaper
+requires both `processed == true` and `mtime > max_age` before
+deleting. The well-known `meeting_handoff.json` is excluded from
+reaping.
 
 ### 2. `seed_default_goals` — goals.rs
 
@@ -101,9 +112,13 @@ user-curated goals on restart.
 
 | File | Change |
 |------|--------|
-| `src/ooda_loop.rs` | Add `check_meeting_handoffs(&mut OodaState)` function; call it at the top of `run_ooda_cycle` |
-| `src/goals.rs` | Add `seed_default_goals(store: &dyn GoalStore, session_id, phase)` function |
-| `src/ooda_loop.rs` | Import `meeting_facilitator::{load_meeting_handoff, mark_meeting_handoff_processed, default_handoff_dir}` |
+| `src/ooda_loop/curate.rs` | Replace single-handoff ingestion with `find_unprocessed_handoffs(dir, 10)` batch loop; accumulate `created` across iterations |
+| `src/meeting_facilitator/handoff/persistence.rs` | Add `find_unprocessed_handoffs(dir, limit)` returning `Vec<PathBuf>` and `reap_processed_handoffs(dir, max_age)` |
+| `src/meeting_facilitator/handoff/mod.rs` | Re-export `find_unprocessed_handoffs` and `reap_processed_handoffs` |
+| `src/meeting_facilitator/mod.rs` | Re-export new public functions through the module facade |
+| `src/meeting_backend/persist/mod.rs` | Add early-return guard in `write_handoff_with_explicit` skipping empty handoffs |
+| `src/ooda_loop/cycle.rs` | Call `reap_processed_handoffs` in the resource cleanup block |
+| `src/goals.rs` | Add `seed_default_goals(store: &dyn GoalStore, session_id, phase)` function (unchanged) |
 | `src/goal_curation.rs` | No changes — existing `ActiveGoal`, `BacklogItem`, and board cap logic are sufficient |
 
 ## Integration Points
@@ -118,19 +133,36 @@ user-curated goals on restart.
 
 ## Degradation Behavior (Pillar 11)
 
-- If `target/meeting_handoffs/` doesn't exist or is unreadable,
+- If `~/.simard/meeting_handoffs/` doesn't exist or is unreadable,
   `check_meeting_handoffs` logs a warning and continues. The OODA cycle
   is not interrupted.
+- If an individual handoff file fails to parse within a batch, the error
+  is logged at `warn!` level and processing continues with the remaining
+  files. One bad file does not block the queue.
+- If `reap_processed_handoffs` encounters a filesystem error (e.g., mtime
+  unavailable), it logs a warning and skips the problematic file. The
+  cleanup phase always completes.
 - If `seed_default_goals` fails to write to the store, the error is logged
   but the daemon proceeds with an empty board. The next cycle will retry
   loading from cognitive memory.
 
 ## Testing
 
-- Unit test: `check_meeting_handoffs` with a temp dir containing a handoff
-  JSON, verify goals are added to the board and handoff is marked processed.
+- Unit test: `check_meeting_handoffs` with a temp dir containing multiple
+  handoff JSON files, verify batch processes all (up to 10) and goals are
+  added to the board. Verify FIFO ordering preserved within the batch.
+- Unit test: `check_meeting_handoffs` with empty handoffs (0 decisions,
+  0 action items), verify they are marked processed without ingestion.
 - Unit test: `check_meeting_handoffs` with already-processed handoff, verify
-  no-op.
+  no-op (excluded from `find_unprocessed_handoffs` results).
+- Unit test: `write_handoff_with_explicit` with 0 decisions and 0 action
+  items, verify no `handoff-*.json` created in the handoff directory.
+- Unit test: `find_unprocessed_handoffs` returns files sorted oldest-first
+  and respects the `limit` parameter.
+- Unit test: `reap_processed_handoffs` deletes only files with
+  `processed == true` AND mtime older than `max_age`.
+- Unit test: `reap_processed_handoffs` skips `meeting_handoff.json`.
+- Unit test: `reap_processed_handoffs` skips files with `processed == false`.
 - Unit test: `seed_default_goals` on empty store, verify 5 goals created.
 - Unit test: `seed_default_goals` on non-empty store, verify no-op.
 - Integration: Full OODA cycle with a handoff artifact, verify the meeting

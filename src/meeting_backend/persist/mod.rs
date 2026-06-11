@@ -288,6 +288,12 @@ pub fn write_handoff_with_explicit(
                 .collect()
         };
 
+    // #2269: Skip writing handoff when there are no decisions AND no action items.
+    if facilitator_decisions.is_empty() && facilitator_actions.is_empty() {
+        info!("Skipping empty meeting handoff (0 decisions, 0 action items)");
+        return Ok(());
+    }
+
     // Extract open questions from message content; prepend explicit ones.
     let inferred_questions = extract_open_questions(messages);
     let mut open_questions: Vec<crate::meeting_facilitator::OpenQuestion> = explicit_questions
@@ -722,7 +728,8 @@ mod tests {
     #[serial(simard_meetings_dir_env)]
     fn write_handoff_error_on_read_only_dir() {
         unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", "/proc/1/no_such_dir") };
-        let result = write_handoff("topic", "summary", &[], &[], &[]);
+        // Must include a decision so the empty-skip gate doesn't short-circuit (#2269).
+        let result = write_handoff("topic", "summary", &[], &[], &["A decision".to_string()]);
         assert!(
             result.is_err(),
             "write_handoff should surface error, not silently drop"
@@ -732,12 +739,85 @@ mod tests {
 
     #[test]
     #[serial(simard_meetings_dir_env)]
-    fn write_handoff_empty_messages() {
-        let dir = temp_meetings_dir("handoff-empty");
+    fn write_handoff_empty_skips_handoff_file() {
+        let dir = temp_meetings_dir("handoff-empty-skip");
         unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", &dir) };
 
+        // Zero decisions AND zero action items → should skip writing handoff file (#2269).
         let result = write_handoff("empty", "No messages", &[], &[], &[]);
-        assert!(result.is_ok(), "empty-message handoff should succeed");
+        assert!(
+            result.is_ok(),
+            "empty handoff should succeed (early return)"
+        );
+
+        // Verify NO handoff-*.json was created.
+        let handoff_files: Vec<_> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("handoff-"))
+            .collect();
+        assert!(
+            handoff_files.is_empty(),
+            "empty handoff (0 decisions, 0 actions) must not create a handoff file"
+        );
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_handoff_with_only_actions_still_writes() {
+        let dir = temp_meetings_dir("handoff-actions-only");
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", &dir) };
+
+        let items = vec![HandoffActionItem {
+            description: "Deploy hotfix".to_string(),
+            assignee: Some("Bob".to_string()),
+            deadline: None,
+            linked_goal: None,
+            priority: None,
+        }];
+        // Zero decisions but non-zero action items → should still write.
+        let result = write_handoff("Sprint", "Summary", &[], &items, &[]);
+        assert!(result.is_ok());
+
+        let handoff_files: Vec<_> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("handoff-"))
+            .collect();
+        assert!(
+            !handoff_files.is_empty(),
+            "handoff with action items must be written even without decisions"
+        );
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_handoff_with_only_decisions_still_writes() {
+        let dir = temp_meetings_dir("handoff-decisions-only");
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", &dir) };
+
+        // Non-zero decisions, zero action items → should still write.
+        let result = write_handoff("Sprint", "Summary", &[], &[], &["Adopt TDD".to_string()]);
+        assert!(result.is_ok());
+
+        let handoff_files: Vec<_> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("handoff-"))
+            .collect();
+        assert!(
+            !handoff_files.is_empty(),
+            "handoff with decisions must be written even without action items"
+        );
 
         unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
         let _ = std::fs::remove_dir_all(&dir);

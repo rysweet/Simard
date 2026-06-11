@@ -156,6 +156,18 @@ fn run_ooda_cycle_inner(
         if let Err(e) = handle_cleanup() {
             eprintln!("[simard] OODA cycle: resource cleanup had errors: {e}");
         }
+
+        // #2269: Reap processed handoff files older than 7 days.
+        let max_age = std::time::Duration::from_secs(7 * 24 * 3600);
+        match crate::meeting_facilitator::reap_processed_handoffs(&handoff_dir, max_age) {
+            Ok(n) if n > 0 => {
+                eprintln!("[simard] OODA cycle: reaped {n} old processed handoff file(s)");
+            }
+            Err(e) => {
+                eprintln!("[simard] OODA cycle: handoff reap failed: {e}");
+            }
+            _ => {}
+        }
     }
 
     // Snapshot active goal ids before the core OODA phases run.

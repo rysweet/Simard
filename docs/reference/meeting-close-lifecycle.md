@@ -464,7 +464,7 @@ different files:
 
 | Consumer | File | Selector | Reads |
 |---|---|---|---|
-| OODA curate | `src/ooda_loop/curate.rs` `check_meeting_handoffs` | `find_oldest_unprocessed_handoff` (FIFO) | Legacy `meeting_handoff.json` in handoff dir |
+| OODA curate | `src/ooda_loop/curate.rs` `check_meeting_handoffs` | `find_unprocessed_handoffs` (batch FIFO, up to 10/cycle) | `handoff-*.json` and legacy `meeting_handoff.json` in handoff dir |
 | `act-on-decisions` | `src/operator_cli/decisions.rs::dispatch_act_on_decisions` | `load_meeting_handoff` (newest) | Legacy `meeting_handoff.json` in handoff dir |
 | Engineer carry-over | `src/engineer_loop/meeting_decisions.rs` | `find_oldest_unprocessed_handoff` (FIFO, issue #1985) | Legacy handoff **+** per-meeting bundle (`transcript.json`, `meeting_handoff.md`) via `load_meeting_bundle` |
 

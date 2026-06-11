@@ -25,6 +25,8 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to reclaim disk space and run low-space Rust builds](./howto/reclaim-disk-space-and-run-low-space-rust-builds.md) - Reclaim stale build artifacts and run Cargo through one shared low-space target dir across worktrees.
 - [How to configure and monitor the disk health check](./howto/configure-disk-health-check.md) - Tune the per-cycle automated disk cleanup that prevents ENOSPC crashes (#2020).
 - [How to start a meeting with Simard](./howto/start-a-meeting.md) - Have a natural conversation with Simard from CLI or dashboard, with full history and memory.
+- [How to clean stale meeting handoffs](./howto/clean-stale-meeting-handoffs.md) - Manual cleanup and reaper verification for accumulated handoff files.
+- [Meeting handoff lifecycle reference](./reference/meeting-handoff-lifecycle.md) - Write gate, batch ingestion, and automatic reaper API (#2269).
 - [How to carry meeting decisions into engineer sessions](./howto/carry-meeting-decisions-into-engineer-sessions.md) - Persist meeting records under a shared state root and confirm later engineer runs carry them forward.
 - [How to inspect meeting records](./howto/inspect-meeting-records.md) - Read back the latest durable meeting record without mutating stored state.
 - [How to inspect improvement-curation state](./howto/inspect-improvement-curation-state.md) - Read back the latest approved, deferred, and promoted improvement state without mutation.

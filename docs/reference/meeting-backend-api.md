@@ -414,7 +414,7 @@ into release binaries.
 }
 ```
 
-This format is consumed by `check_meeting_handoffs()` in the OODA loop and by the `act-on-decisions` CLI command. Empty `decisions`, `action_items`, and `open_questions` vectors are valid — downstream consumers handle them without error. The `transcript` field carries the conversation summary. The `themes` field is optional (`#[serde(default)]`) and carries high-level topic tags extracted during the meeting; older handoffs without this field deserialize correctly with an empty vec.
+This format is consumed by `check_meeting_handoffs()` in the OODA loop and by the `act-on-decisions` CLI command. Empty `decisions`, `action_items`, and `open_questions` vectors are valid at the schema level — downstream consumers handle them without error. However, as of issue #2269, the write gate in `write_handoff_with_explicit` skips writing to the handoff directory when both `decisions` and `action_items` are empty, so handoff files in the directory always contain at least one decision or action item. The `transcript` field carries the conversation summary. The `themes` field is optional (`#[serde(default)]`) and carries high-level topic tags extracted during the meeting; older handoffs without this field deserialize correctly with an empty vec.
 
 ### Markdown export
 

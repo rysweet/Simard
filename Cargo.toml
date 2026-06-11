@@ -85,6 +85,7 @@ dashboard-audit = ["dep:headless_chrome", "dep:regex", "dep:url"]
 
 [dev-dependencies]
 assert_cmd = "=2.2.1"
+filetime = "=0.2.25"
 proptest = "=1.11.0"
 serial_test = "=3.4.0"
 

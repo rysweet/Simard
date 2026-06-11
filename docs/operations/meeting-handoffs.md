@@ -152,14 +152,16 @@ Schema (the `MeetingHandoff` struct in
 }
 ```
 
-### Required fields (non-empty after `/close`)
+### Empty handoff filtering
 
-`MeetingBackend` and the closing pipeline in
-`src/meeting_backend/closing.rs` will refuse to write a handoff that
-lacks at least one decision **or** at least one action item. The
-`processed` flag must be `false` for a freshly written handoff;
-ingestion flips it to `true` via
-`mark_meeting_handoff_processed`.
+When a meeting produces zero decisions **and** zero action items, the
+close pipeline skips writing to `meeting_handoffs/` entirely (issue
+#2269). The per-meeting archival bundle under `~/.simard/meetings/` is
+still written regardless. This means a `handoff-*.json` file in the
+handoff directory always contains at least one decision or action item.
+
+The `processed` flag must be `false` for a freshly written handoff;
+ingestion flips it to `true` via `mark_meeting_handoff_processed`.
 
 ### Atomic writes
 
@@ -209,6 +211,32 @@ for the full timing contract.
 
 ---
 
+## Empty Handoff Filtering (Issue #2269)
+
+The meeting close pipeline **skips** writing to the handoff directory
+when the meeting produced zero decisions **and** zero action items.
+This prevents empty or automated meetings from accumulating inert
+`handoff-{timestamp}.json` files that the OODA daemon must parse and
+discard.
+
+The filter is applied in `write_handoff_with_explicit`
+(`src/meeting_backend/persist/mod.rs`) **after** enrichment/extraction
+— the LLM has already attempted to extract structured output from the
+conversation. Only meetings that genuinely produced no actionable
+content are filtered. The per-meeting bundle in `~/.simard/meetings/`
+is still written for archival regardless.
+
+When the filter fires, the close pipeline emits:
+
+```
+INFO Skipping empty meeting handoff (0 decisions, 0 action items)
+```
+
+The REPL `/close` output is unchanged — the operator sees the bundle
+paths but no handoff-directory path for an empty meeting.
+
+---
+
 ## Ingestion by the OODA Daemon
 
 At the start of every OODA cycle, the daemon (see
@@ -220,26 +248,49 @@ At the start of every OODA cycle, the daemon (see
    `SIMARD_STATE_ROOT`, defaulting to `~/.simard/meeting_handoffs`).
    See [State-root resolution](../reference/state-root-resolution.md).
 2. Calls `check_meeting_handoffs(&mut state.active_goals,
-   &handoff_dir)`, which:
-   - Loads the handoff via `load_meeting_handoff(handoff_dir)`.
-   - Skips it if `processed == true`.
-   - Converts each `MeetingDecision` into one or more goals and each
-     `ActionItem` into a backlog item on the live `active_goals`
-     board.
-   - Calls `mark_handoff_processed_in_place(handoff_dir)` to flip
-     `processed` to `true` so the same handoff is not re-ingested.
+   &handoff_dir, &state_root)`, which now **batch-processes up to 10 unprocessed
+   handoffs per cycle** (oldest-first FIFO):
+   - Calls `find_unprocessed_handoffs(handoff_dir, 10)` to list up to
+     10 unprocessed handoff files (timestamped `handoff-*.json` and
+     the legacy `meeting_handoff.json` — both count toward the limit).
+   - For each handoff in the batch:
+     - Parses the JSON. On parse failure: logs `warn!`, skips to next.
+     - If `decisions` and `action_items` are both empty: marks
+       processed immediately, skips ingestion.
+     - Otherwise: converts each `MeetingDecision` into one or more
+       goals and each `ActionItem` into a backlog item on the live
+       `active_goals` board.
+     - Calls `mark_handoff_processed_in_place` to flip `processed` to
+       `true`.
+   - Returns the **total** count of goals/backlog items created across
+     all handoffs in the batch.
 3. Logs:
 
    ```
-   [simard] OODA start: ingested N goal/backlog item(s) from meeting handoff
+   [simard] OODA start: ingested N goal/backlog item(s) from M meeting handoff(s)
    ```
 
-   on success (logged via `eprintln!`, captured by the systemd
-   journal). On error:
+   on success. On individual handoff errors, processing continues with
+   the remaining files:
 
    ```
-   [simard] OODA start: meeting handoff check failed: <error>
+   WARN Failed to process handoff <path>: <error>; continuing with remaining handoffs
    ```
+
+   A batch that encounters errors in every file logs:
+
+   ```
+   [simard] OODA start: meeting handoff check failed for all N handoff(s)
+   ```
+
+### Batch sizing
+
+The batch limit of 10 is a compile-time constant. Under normal
+operation (meetings producing 1–3 handoffs between cycles), the daemon
+processes all pending handoffs in a single cycle. The limit prevents a
+large historical backlog (e.g., 3,000+ files from pre-filter
+accumulation) from stalling a single OODA cycle — the queue drains
+over successive cycles at 10 per iteration.
 
 ### Verifying ingestion
 
@@ -253,9 +304,58 @@ If you do not see this line within ~1 cycle of `/close`, check:
 - The daemon is running (`systemctl status simard-ooda`).
 - `SIMARD_HANDOFF_DIR` matches what `simard meeting repl` wrote (or
   both rely on the default).
-- The handoff JSON has at least one decision or action item.
+- The handoff JSON has at least one decision or action item (empty
+  meetings no longer write to the handoff directory).
 - `processed` is still `false` (a previous OODA cycle may already have
   ingested it).
+
+---
+
+## Handoff Reaper (Automatic Cleanup)
+
+The OODA daemon's resource cleanup phase (at the end of each cycle)
+now runs a **handoff reaper** that deletes processed handoff files
+older than 7 days. This prevents long-running daemons from
+accumulating thousands of stale `handoff-*.json` files.
+
+The reaper is implemented as `reap_processed_handoffs(dir, max_age)`
+in `src/meeting_facilitator/handoff/persistence.rs` and called from
+`src/ooda_loop/cycle.rs` with `Duration::from_secs(7 * 86400)`.
+
+### Double-guard before deletion
+
+A handoff file is deleted only when **both** conditions are true:
+
+1. **`processed == true`** — the file's JSON `processed` field is
+   `true`, confirming the OODA daemon or another consumer has already
+   ingested it.
+2. **mtime > 7 days** — the file's last-modified time is older than
+   the configured `max_age` (`std::fs::metadata().modified()`).
+
+Files that fail to parse, have `processed == false`, or have a recent
+mtime are left untouched. The well-known `meeting_handoff.json`
+(legacy singleton path) is **excluded** from reaping — it is used by
+multiple consumers and should not be auto-deleted.
+
+### Observability
+
+Each deletion is logged at `info!` level:
+
+```
+INFO Reaped processed handoff: handoff-20260601T120000.json (age: 8d)
+```
+
+The reaper returns the count of deleted files. The cleanup block logs:
+
+```
+[simard] resource cleanup: reaped N stale meeting handoff(s)
+```
+
+### Filesystem error handling
+
+If `metadata().modified()` fails (e.g., on a filesystem that does not
+support mtime), the reaper logs `warn!` and skips that file. It never
+panics or aborts the cleanup phase.
 
 ---
 
@@ -392,10 +492,16 @@ issue tracker by hand.
   — the WAL incident that prompted the verification proposal
 - [`docs/reference/meeting-close-lifecycle.md`](../reference/meeting-close-lifecycle.md)
   — timeout budgets, partial-handoff envelope, atomic writes
+- [`docs/reference/meeting-handoff-schema.md`](../reference/meeting-handoff-schema.md)
+  — full JSON schema and version history
+- [`docs/reference/meeting-handoff-lifecycle.md`](../reference/meeting-handoff-lifecycle.md)
+  — write gate, batch ingestion, and reaper API reference
 - [`docs/reference/state-root-resolution.md`](../reference/state-root-resolution.md)
   — the env-var ladder shared by every Simard mode
 - [`docs/howto/recover-from-meeting-close-timeout.md`](../howto/recover-from-meeting-close-timeout.md)
   — operator playbook when `handoff_partial=true` fires
+- [`docs/howto/clean-stale-meeting-handoffs.md`](../howto/clean-stale-meeting-handoffs.md)
+  — manual cleanup and reaper configuration
 - `src/meeting_facilitator/handoff/mod.rs` — `MeetingHandoff` schema
   and helpers
 - `src/ooda_loop/cycle.rs` — OODA-side ingestion

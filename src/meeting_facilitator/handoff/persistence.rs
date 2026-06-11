@@ -661,6 +661,436 @@ fn render_bundle_markdown(
     md
 }
 
+// ---------------------------------------------------------------------------
+// Batch handoff discovery and reaper (#2269)
+// ---------------------------------------------------------------------------
+
+/// Return up to `limit` unprocessed handoff file paths in FIFO order
+/// (oldest first). Scans the directory once, parsing each candidate to
+/// check its `processed` flag. Malformed files are skipped with a warning.
+pub fn find_unprocessed_handoffs(dir: &Path, limit: usize) -> SimardResult<Vec<PathBuf>> {
+    let mut result = Vec::new();
+    for path in list_handoff_files(dir) {
+        if result.len() >= limit {
+            break;
+        }
+        let raw = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skipping unreadable handoff in batch scan"
+                );
+                continue;
+            }
+        };
+        let handoff: MeetingHandoff = match serde_json::from_str(&raw) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skipping malformed handoff JSON in batch scan"
+                );
+                continue;
+            }
+        };
+        if !handoff.processed {
+            result.push(path);
+        }
+    }
+    Ok(result)
+}
+
+/// Delete processed handoff files whose mtime exceeds `max_age`.
+///
+/// Double-guard: a file is only deleted when **both** `processed == true`
+/// (from the JSON payload) **and** the filesystem mtime is older than
+/// `max_age`. The legacy `meeting_handoff.json` is never deleted.
+///
+/// Returns the number of files deleted.
+pub fn reap_processed_handoffs(dir: &Path, max_age: std::time::Duration) -> SimardResult<u32> {
+    let now = std::time::SystemTime::now();
+    let mut deleted = 0u32;
+
+    for path in list_handoff_files(dir) {
+        // Never delete the legacy fixed-name file.
+        if path
+            .file_name()
+            .map(|n| n == MEETING_HANDOFF_FILENAME)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        // Guard 1: mtime must exceed max_age.
+        let metadata = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skipping unreadable file during handoff reap"
+                );
+                continue;
+            }
+        };
+        let mtime = metadata.modified().unwrap_or(now);
+        let age = now.duration_since(mtime).unwrap_or_default();
+        if age < max_age {
+            continue;
+        }
+
+        // Guard 2: JSON must parse and have processed == true.
+        let raw = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skipping unreadable handoff during reap"
+                );
+                continue;
+            }
+        };
+        let handoff: MeetingHandoff = match serde_json::from_str(&raw) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skipping malformed handoff JSON during reap"
+                );
+                continue;
+            }
+        };
+        if !handoff.processed {
+            continue;
+        }
+
+        // Both guards passed — delete.
+        if let Err(e) = fs::remove_file(&path) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to delete processed handoff during reap"
+            );
+        } else {
+            tracing::info!(path = %path.display(), "reaped old processed handoff");
+            deleted += 1;
+        }
+    }
+
+    Ok(deleted)
+}
+
+#[cfg(test)]
+mod handoff_batch_tests {
+    use super::*;
+    use crate::meeting_facilitator::{ActionItem, MeetingDecision};
+    use tempfile::TempDir;
+
+    fn make_handoff(
+        closed_at: &str,
+        processed: bool,
+        decisions: Vec<MeetingDecision>,
+        action_items: Vec<ActionItem>,
+    ) -> MeetingHandoff {
+        MeetingHandoff {
+            schema_version: 2,
+            meeting_id: String::new(),
+            topic: "test".to_string(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            closed_at: closed_at.to_string(),
+            decisions,
+            action_items,
+            open_questions: Vec::new(),
+            processed,
+            duration_secs: None,
+            transcript: Vec::new(),
+            participants: Vec::new(),
+            themes: Vec::new(),
+            transcript_path: None,
+            next_owner: None,
+            artifacts: Vec::new(),
+            goal: None,
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
+            risks: vec![],
+            disagreements: vec![],
+        }
+    }
+
+    fn write_handoff_file(dir: &std::path::Path, name: &str, handoff: &MeetingHandoff) {
+        let path = dir.join(name);
+        let json = serde_json::to_string_pretty(handoff).unwrap();
+        std::fs::write(&path, json).unwrap();
+    }
+
+    // --- find_unprocessed_handoffs tests ---
+
+    #[test]
+    fn find_unprocessed_handoffs_returns_empty_for_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        let result = find_unprocessed_handoffs(dir.path(), 10).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn find_unprocessed_handoffs_skips_processed_files() {
+        let dir = TempDir::new().unwrap();
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-01-01T00-00-00_00-00.json",
+            &make_handoff("2026-01-01T00:00:00Z", true, vec![], vec![]),
+        );
+        let result = find_unprocessed_handoffs(dir.path(), 10).unwrap();
+        assert!(result.is_empty(), "processed handoffs should be skipped");
+    }
+
+    #[test]
+    fn find_unprocessed_handoffs_returns_unprocessed_in_fifo_order() {
+        let dir = TempDir::new().unwrap();
+        // Older file first (alphabetical = chronological for timestamps)
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-01-01T00-00-00_00-00.json",
+            &make_handoff("2026-01-01T00:00:00Z", false, vec![], vec![]),
+        );
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-01-02T00-00-00_00-00.json",
+            &make_handoff("2026-01-02T00:00:00Z", false, vec![], vec![]),
+        );
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-01-03T00-00-00_00-00.json",
+            &make_handoff("2026-01-03T00:00:00Z", false, vec![], vec![]),
+        );
+
+        let result = find_unprocessed_handoffs(dir.path(), 10).unwrap();
+        assert_eq!(result.len(), 3);
+        // FIFO: oldest first
+        assert!(
+            result[0].to_string_lossy().contains("2026-01-01"),
+            "first should be oldest"
+        );
+        assert!(
+            result[2].to_string_lossy().contains("2026-01-03"),
+            "last should be newest"
+        );
+    }
+
+    #[test]
+    fn find_unprocessed_handoffs_respects_limit() {
+        let dir = TempDir::new().unwrap();
+        for i in 0..5 {
+            write_handoff_file(
+                dir.path(),
+                &format!("handoff-2026-01-0{i}T00-00-00_00-00.json"),
+                &make_handoff(&format!("2026-01-0{i}T00:00:00Z"), false, vec![], vec![]),
+            );
+        }
+        let result = find_unprocessed_handoffs(dir.path(), 3).unwrap();
+        assert_eq!(result.len(), 3, "should return at most `limit` paths");
+        // Still FIFO: the 3 oldest
+        assert!(result[0].to_string_lossy().contains("2026-01-00"));
+        assert!(result[2].to_string_lossy().contains("2026-01-02"));
+    }
+
+    #[test]
+    fn find_unprocessed_handoffs_includes_legacy_file() {
+        let dir = TempDir::new().unwrap();
+        let legacy = make_handoff("2025-12-31T00:00:00Z", false, vec![], vec![]);
+        write_handoff_file(dir.path(), MEETING_HANDOFF_FILENAME, &legacy);
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-01-01T00-00-00_00-00.json",
+            &make_handoff("2026-01-01T00:00:00Z", false, vec![], vec![]),
+        );
+
+        let result = find_unprocessed_handoffs(dir.path(), 10).unwrap();
+        assert_eq!(result.len(), 2, "legacy file should be included");
+    }
+
+    #[test]
+    fn find_unprocessed_handoffs_skips_malformed_json() {
+        let dir = TempDir::new().unwrap();
+        // Write a malformed file
+        std::fs::write(
+            dir.path().join("handoff-2026-01-01T00-00-00_00-00.json"),
+            "not valid json {{{",
+        )
+        .unwrap();
+        // Write a valid unprocessed file
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-01-02T00-00-00_00-00.json",
+            &make_handoff("2026-01-02T00:00:00Z", false, vec![], vec![]),
+        );
+
+        let result = find_unprocessed_handoffs(dir.path(), 10).unwrap();
+        assert_eq!(result.len(), 1, "malformed file should be skipped");
+    }
+
+    #[test]
+    fn find_unprocessed_handoffs_mixed_processed_and_unprocessed() {
+        let dir = TempDir::new().unwrap();
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-01-01T00-00-00_00-00.json",
+            &make_handoff("2026-01-01T00:00:00Z", true, vec![], vec![]), // processed
+        );
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-01-02T00-00-00_00-00.json",
+            &make_handoff("2026-01-02T00:00:00Z", false, vec![], vec![]), // unprocessed
+        );
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-01-03T00-00-00_00-00.json",
+            &make_handoff("2026-01-03T00:00:00Z", true, vec![], vec![]), // processed
+        );
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-01-04T00-00-00_00-00.json",
+            &make_handoff("2026-01-04T00:00:00Z", false, vec![], vec![]), // unprocessed
+        );
+
+        let result = find_unprocessed_handoffs(dir.path(), 10).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result[0].to_string_lossy().contains("2026-01-02"));
+        assert!(result[1].to_string_lossy().contains("2026-01-04"));
+    }
+
+    // --- reap_processed_handoffs tests ---
+
+    #[test]
+    fn reap_processed_handoffs_deletes_old_processed_files() {
+        let dir = TempDir::new().unwrap();
+        // Write a processed handoff
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-01-01T00-00-00_00-00.json",
+            &make_handoff("2026-01-01T00:00:00Z", true, vec![], vec![]),
+        );
+        // Backdate the mtime so it appears older than 7 days
+        let path = dir.path().join("handoff-2026-01-01T00-00-00_00-00.json");
+        let old_time = filetime::FileTime::from_unix_time(0, 0);
+        filetime::set_file_mtime(&path, old_time).unwrap();
+
+        let max_age = std::time::Duration::from_secs(7 * 24 * 3600);
+        let count = reap_processed_handoffs(dir.path(), max_age).unwrap();
+        assert_eq!(count, 1, "should delete 1 old processed file");
+        assert!(!path.exists(), "file should be deleted");
+    }
+
+    #[test]
+    fn reap_processed_handoffs_preserves_unprocessed_files() {
+        let dir = TempDir::new().unwrap();
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-01-01T00-00-00_00-00.json",
+            &make_handoff("2026-01-01T00:00:00Z", false, vec![], vec![]),
+        );
+        // Backdate mtime
+        let path = dir.path().join("handoff-2026-01-01T00-00-00_00-00.json");
+        let old_time = filetime::FileTime::from_unix_time(0, 0);
+        filetime::set_file_mtime(&path, old_time).unwrap();
+
+        let max_age = std::time::Duration::from_secs(7 * 24 * 3600);
+        let count = reap_processed_handoffs(dir.path(), max_age).unwrap();
+        assert_eq!(count, 0, "unprocessed files must never be deleted");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn reap_processed_handoffs_preserves_recent_files() {
+        let dir = TempDir::new().unwrap();
+        // File is processed but mtime is recent (just created)
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-01-01T00-00-00_00-00.json",
+            &make_handoff("2026-01-01T00:00:00Z", true, vec![], vec![]),
+        );
+
+        let max_age = std::time::Duration::from_secs(7 * 24 * 3600);
+        let count = reap_processed_handoffs(dir.path(), max_age).unwrap();
+        assert_eq!(count, 0, "recent processed files should be preserved");
+    }
+
+    #[test]
+    fn reap_processed_handoffs_never_deletes_legacy_file() {
+        let dir = TempDir::new().unwrap();
+        write_handoff_file(
+            dir.path(),
+            MEETING_HANDOFF_FILENAME,
+            &make_handoff("2025-01-01T00:00:00Z", true, vec![], vec![]),
+        );
+        // Backdate the legacy file
+        let path = dir.path().join(MEETING_HANDOFF_FILENAME);
+        let old_time = filetime::FileTime::from_unix_time(0, 0);
+        filetime::set_file_mtime(&path, old_time).unwrap();
+
+        let max_age = std::time::Duration::from_secs(7 * 24 * 3600);
+        let count = reap_processed_handoffs(dir.path(), max_age).unwrap();
+        assert_eq!(count, 0, "legacy meeting_handoff.json must never be reaped");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn reap_processed_handoffs_empty_dir_returns_zero() {
+        let dir = TempDir::new().unwrap();
+        let max_age = std::time::Duration::from_secs(7 * 24 * 3600);
+        let count = reap_processed_handoffs(dir.path(), max_age).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn reap_processed_handoffs_skips_malformed_json() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("handoff-2026-01-01T00-00-00_00-00.json");
+        std::fs::write(&path, "{{not valid}}").unwrap();
+        let old_time = filetime::FileTime::from_unix_time(0, 0);
+        filetime::set_file_mtime(&path, old_time).unwrap();
+
+        let max_age = std::time::Duration::from_secs(7 * 24 * 3600);
+        let count = reap_processed_handoffs(dir.path(), max_age).unwrap();
+        assert_eq!(count, 0, "malformed files should be skipped, not deleted");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn reap_processed_handoffs_double_guard_both_checks_required() {
+        let dir = TempDir::new().unwrap();
+        // Case 1: processed=true but mtime recent → should NOT delete
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-06-10T00-00-00_00-00.json",
+            &make_handoff("2026-06-10T00:00:00Z", true, vec![], vec![]),
+        );
+        // Case 2: processed=false but mtime old → should NOT delete
+        let path_unproc = dir.path().join("handoff-2026-01-01T00-00-00_00-00.json");
+        write_handoff_file(
+            dir.path(),
+            "handoff-2026-01-01T00-00-00_00-00.json",
+            &make_handoff("2026-01-01T00:00:00Z", false, vec![], vec![]),
+        );
+        let old_time = filetime::FileTime::from_unix_time(0, 0);
+        filetime::set_file_mtime(&path_unproc, old_time).unwrap();
+
+        let max_age = std::time::Duration::from_secs(7 * 24 * 3600);
+        let count = reap_processed_handoffs(dir.path(), max_age).unwrap();
+        assert_eq!(
+            count, 0,
+            "both conditions (processed AND old mtime) required for deletion"
+        );
+    }
+}
+
 #[cfg(test)]
 mod bundle_tests {
     use super::*;

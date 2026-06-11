@@ -112,3 +112,20 @@ becomes desirable, but it is not required.
 - #1985 — bundle consumption (depends on v2 schema)
 - #1984 — resume support (independent)
 - #1951 — sub-issues 3, 6, 7 (coordinated via this schema bump)
+- #2269 — empty handoff filtering, batch ingestion, and reaper
+
+## Empty handoff behavior (Issue #2269)
+
+As of issue #2269, `write_handoff_with_explicit` in
+`src/meeting_backend/persist/mod.rs` **skips writing** a
+`handoff-{timestamp}.json` to the handoff directory when `decisions`
+and `action_items` are both empty. The per-meeting archival bundle
+under `~/.simard/meetings/` is still written for record-keeping. This
+means every `handoff-*.json` file in the handoff directory is
+guaranteed to have at least one decision or action item.
+
+Additionally, the OODA daemon's batch ingestion now skips empty
+handoffs (from legacy pre-filter writes) by checking
+`decisions.is_empty() && action_items.is_empty()` after parsing — such
+handoffs are marked processed without creating goals. Processed
+handoffs older than 7 days are automatically reaped.
