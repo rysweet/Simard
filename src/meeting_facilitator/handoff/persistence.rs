@@ -35,28 +35,8 @@ pub fn write_meeting_handoff(dir: &Path, handoff: &MeetingHandoff) -> SimardResu
 /// (e.g. CLI display, observe scan). The OODA dispatch queue must use
 /// [`find_oldest_unprocessed_handoff`] instead — see #1649.
 pub fn find_newest_handoff(dir: &Path) -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    // Legacy fixed filename.
-    let legacy = dir.join(MEETING_HANDOFF_FILENAME);
-    if legacy.is_file() {
-        candidates.push(legacy);
-    }
-
-    // Timestamped files written by `write_meeting_handoff`.
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with("handoff-") && name_str.ends_with(".json") {
-                candidates.push(entry.path());
-            }
-        }
-    }
-
-    // Newest by filename (timestamps sort lexicographically).
-    candidates.sort();
-    candidates.pop()
+    // Delegate to the shared directory scan to avoid duplicated logic.
+    list_handoff_files(dir).pop()
 }
 
 /// List all handoff files in a directory sorted by filename ascending
@@ -638,6 +618,15 @@ fn render_bundle_markdown(
 // Batch handoff discovery and reaper (#2269)
 // ---------------------------------------------------------------------------
 
+/// Lightweight proxy that only deserializes the `processed` flag, skipping
+/// all other fields (decisions, transcripts, etc.). Avoids the cost of a
+/// full `MeetingHandoff` parse when we only need the status bit.
+#[derive(serde::Deserialize)]
+struct HandoffStatus {
+    #[serde(default)]
+    processed: bool,
+}
+
 /// Return up to `limit` unprocessed handoff file paths in FIFO order
 /// (oldest first). Scans the directory once, parsing each candidate to
 /// check its `processed` flag. Malformed files are skipped with a warning.
@@ -658,7 +647,9 @@ pub fn find_unprocessed_handoffs(dir: &Path, limit: usize) -> SimardResult<Vec<P
                 continue;
             }
         };
-        let handoff: MeetingHandoff = match serde_json::from_str(&raw) {
+        // Use lightweight proxy — only deserializes `processed`, ignoring
+        // the rest of the struct (decisions, transcripts, etc.).
+        let status: HandoffStatus = match serde_json::from_str(&raw) {
             Ok(h) => h,
             Err(e) => {
                 tracing::warn!(
@@ -669,7 +660,7 @@ pub fn find_unprocessed_handoffs(dir: &Path, limit: usize) -> SimardResult<Vec<P
                 continue;
             }
         };
-        if !handoff.processed {
+        if !status.processed {
             result.push(path);
         }
     }
@@ -727,7 +718,7 @@ pub fn reap_processed_handoffs(dir: &Path, max_age: std::time::Duration) -> Sima
                 continue;
             }
         };
-        let handoff: MeetingHandoff = match serde_json::from_str(&raw) {
+        let status: HandoffStatus = match serde_json::from_str(&raw) {
             Ok(h) => h,
             Err(e) => {
                 tracing::warn!(
@@ -738,7 +729,7 @@ pub fn reap_processed_handoffs(dir: &Path, max_age: std::time::Duration) -> Sima
                 continue;
             }
         };
-        if !handoff.processed {
+        if !status.processed {
             continue;
         }
 

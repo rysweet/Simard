@@ -109,6 +109,20 @@ pub fn check_meeting_handoffs(
 
     let mut total_created = 0u32;
 
+    // Pre-build a HashSet of existing goal/backlog IDs for O(1) duplicate detection
+    // instead of O(n) linear scans per decision/action item.
+    let mut known_ids: HashSet<String> =
+        HashSet::with_capacity(board.active.len() + board.backlog.len() + tombstones.len());
+    for g in board.active.iter() {
+        known_ids.insert(g.id.clone());
+    }
+    for b in board.backlog.iter() {
+        known_ids.insert(b.id.clone());
+    }
+    for t in &tombstones {
+        known_ids.insert(t.clone());
+    }
+
     for path in &paths {
         let raw = match std::fs::read_to_string(path) {
             Ok(s) => s,
@@ -157,33 +171,21 @@ pub fn check_meeting_handoffs(
         let mut created = 0u32;
 
         let owner_hint = handoff.next_owner.as_deref();
-        let artifact_suffix: String = if handoff.artifacts.is_empty() {
-            String::new()
-        } else {
-            let names: Vec<String> = handoff
-                .artifacts
-                .iter()
-                .map(|a| format!("{}={}", a.kind, a.uri_or_path))
-                .collect();
-            format!(" artifacts=[{}]", names.join("; "))
-        };
 
         // Convert decisions to active goals; overflow goes to backlog.
         for (i, decision) in handoff.decisions.iter().enumerate() {
             let goal_id = crate::goals::goal_slug(&decision.description);
-            let description = format!("[meeting] {}", decision.description);
 
-            if board.active.iter().any(|g| g.id == goal_id)
-                || board.backlog.iter().any(|b| b.id == goal_id)
-                || tombstones.contains(&goal_id)
-            {
+            if known_ids.contains(&goal_id) {
                 continue;
             }
+
+            let description = format!("[meeting] {}", decision.description);
 
             if board.active.len() < crate::goal_curation::MAX_ACTIVE_GOALS {
                 let priority = (i as u32).saturating_add(1).min(5);
                 board.active.push(ActiveGoal {
-                    id: goal_id,
+                    id: goal_id.clone(),
                     description,
                     priority,
                     status: GoalProgress::NotStarted,
@@ -195,7 +197,7 @@ pub fn check_meeting_handoffs(
             } else {
                 let score = 1.0 - (i as f64 * 0.1).min(0.9);
                 board.backlog.push(BacklogItem {
-                    id: goal_id,
+                    id: goal_id.clone(),
                     description,
                     source: format!(
                         "meeting:{}{}{}",
@@ -203,11 +205,12 @@ pub fn check_meeting_handoffs(
                         owner_hint
                             .map(|o| format!(" owner={o}"))
                             .unwrap_or_default(),
-                        artifact_suffix,
+                        artifact_suffix(&handoff),
                     ),
                     score,
                 });
             }
+            known_ids.insert(goal_id);
             created += 1;
         }
 
@@ -217,15 +220,12 @@ pub fn check_meeting_handoffs(
                 continue;
             }
             let item_id = crate::goals::goal_slug(&item.description);
-            if board.backlog.iter().any(|b| b.id == item_id)
-                || board.active.iter().any(|g| g.id == item_id)
-                || tombstones.contains(&item_id)
-            {
+            if known_ids.contains(&item_id) {
                 continue;
             }
             let score = (item.priority as f64 * 0.2).min(1.0);
             board.backlog.push(BacklogItem {
-                id: item_id,
+                id: item_id.clone(),
                 description: format!("[action] {} (owner: {})", item.description, item.owner),
                 source: format!(
                     "meeting:{}{}{}",
@@ -233,10 +233,11 @@ pub fn check_meeting_handoffs(
                     owner_hint
                         .map(|o| format!(" owner={o}"))
                         .unwrap_or_default(),
-                    artifact_suffix,
+                    artifact_suffix(&handoff),
                 ),
                 score,
             });
+            known_ids.insert(item_id);
             created += 1;
         }
 
@@ -257,6 +258,20 @@ pub fn check_meeting_handoffs(
     }
 
     Ok(total_created)
+}
+
+/// Build the artifact suffix string lazily — only called when a backlog item
+/// actually needs it, avoiding allocation when all goals go to active slots.
+fn artifact_suffix(handoff: &crate::meeting_facilitator::MeetingHandoff) -> String {
+    if handoff.artifacts.is_empty() {
+        return String::new();
+    }
+    let names: Vec<String> = handoff
+        .artifacts
+        .iter()
+        .map(|a| format!("{}={}", a.kind, a.uri_or_path))
+        .collect();
+    format!(" artifacts=[{}]", names.join("; "))
 }
 
 #[cfg(test)]
