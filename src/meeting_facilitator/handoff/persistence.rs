@@ -741,7 +741,11 @@ pub fn reap_processed_handoffs(dir: &Path, max_age: std::time::Duration) -> Sima
                 "failed to delete processed handoff during reap"
             );
         } else {
-            tracing::info!(path = %path.display(), "reaped old processed handoff");
+            tracing::info!(
+                path = %path.display(),
+                age_days = age.as_secs() / 86400,
+                "reaped old processed handoff"
+            );
             deleted += 1;
         }
     }
