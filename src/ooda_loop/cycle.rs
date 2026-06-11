@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use crate::error::{SimardError, SimardResult};
-use crate::goal_curation::load_goal_board;
+use crate::goal_curation::{load_goal_board, save_goal_board_with_removals};
 use crate::gym_bridge::ScoreDimensions;
 use crate::gym_scoring::GymSuiteScore;
 use crate::memory_consolidation;
@@ -436,9 +436,33 @@ fn run_ooda_cycle_inner(
             // last-known-good state on disk is preserved.
         } else {
             // Persist the updated board to cognitive memory and disk (best-effort).
-            if let Err(e) =
+            // When goals were archived, use save_goal_board_with_removals so that
+            // the merge-on-write step cannot resurrect them from the persisted
+            // snapshot (issue #2264 — archived goals reappearing every cycle).
+            let archived_goal_ids: Vec<String> =
+                archived.iter().map(|g| g.id.clone()).collect();
+            let persist_result = if archived_goal_ids.is_empty() {
                 crate::goal_curation::persist_board(&state.active_goals, &*bridges.memory)
-            {
+            } else {
+                save_goal_board_with_removals(
+                    &state.active_goals,
+                    &archived_goal_ids,
+                    &*bridges.memory,
+                )
+                .and_then(|()| {
+                    bridges.memory.store_episode(
+                        &state.active_goals.durable_summary(),
+                        "goal-curator",
+                        Some(&serde_json::json!({
+                            "active_count": state.active_goals.active.len(),
+                            "backlog_count": state.active_goals.backlog.len(),
+                            "force_removed": archived_goal_ids.len(),
+                        })),
+                    )?;
+                    Ok(())
+                })
+            };
+            if let Err(e) = persist_result {
                 eprintln!("[simard] OODA curate: failed to persist goal board: {e}");
             }
         }
