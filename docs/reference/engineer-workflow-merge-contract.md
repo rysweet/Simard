@@ -9,12 +9,15 @@ owner: simard
 # Reference: Engineer Workflow and Merge-Ready Contract
 
 This is the normative specification for the two mandatory rules enforced
-on every Simard engineer cycle. The rules are embedded in:
+on every Simard engineer cycle. Issue #2267 introduces these rules into
+two prompt assets:
 
-- `prompt_assets/simard/engineer_system.md` — the `⛔ MANDATORY RULES`
-  section (read by every engineer session)
-- `prompt_assets/simard/goal_session_objective.md` — the PM-side gating
-  rule and evidence table (read by every goal-session cycle)
+- `prompt_assets/simard/engineer_system.md` — adds a
+  `⛔ MANDATORY RULES — Read Before Any Work` section containing both
+  rules (read by every engineer session)
+- `prompt_assets/simard/goal_session_objective.md` — adds a PM-side
+  merge-ready evidence checklist and gating rule to the priority order
+  (read by every goal-session cycle)
 
 For design rationale, see
 [Concept: mandatory workflow and merge-ready gates](../concepts/mandatory-workflow-merge-gates.md).
@@ -39,8 +42,7 @@ For a practical walkthrough, see
 ### Source
 
 `prompt_assets/simard/engineer_system.md`, section `## ⛔ MANDATORY
-RULES — Read Before Any Work`, Rule 1; and section `## Workflow Contract
-(MUST)`.
+RULES — Read Before Any Work`, Rule 1 (introduced by issue #2267).
 
 ### Entry points
 
@@ -102,11 +104,10 @@ re-dispatched as a new engineer cycle with a corrective task description.
 ### Source
 
 `prompt_assets/simard/engineer_system.md`, section `⛔ MANDATORY RULES`,
-Rule 2; section `## Merge-Ready Contract`; and section `## Definition of
-Done`.
+Rule 2 (introduced by issue #2267).
 
-`prompt_assets/simard/goal_session_objective.md`, section `# Priority
-Order`, item 1 (evidence table and gating rule).
+`prompt_assets/simard/goal_session_objective.md` — merge-ready evidence
+checklist added to the priority order by issue #2267.
 
 ### The six criteria
 
@@ -114,7 +115,7 @@ Order`, item 1 (evidence table and gating rule).
 |---|-----------|-------------------|------|
 | 1 | **QA-team** | Scenarios written, validated (`gadugi-test validate`), run (`gadugi-test run`). Output pasted or linked. | `gadugi-test` |
 | 2 | **Documentation** | User-facing docs updated for APIs, config, CLI, deployment changes. OR explicit internal-only justification. | Manual review |
-| 3 | **Quality-audit** | ≥3 SEEK→VALIDATE→FIX cycles. Final cycle clean (0 critical/high, 0 medium correctness/security). Cycle count and commit SHAs cited. | `amplihack quality-audit` |
+| 3 | **Quality-audit** | ≥3 SEEK→VALIDATE→FIX cycles. Final cycle clean (0 critical/high, 0 medium correctness/security). Cycle count and commit SHAs cited. | `amplihack recipe run smart-orchestrator -c task_description="quality-audit ..."` |
 | 4 | **CI** | All CI checks green, 0 failures. Link to green run. | `gh pr checks` |
 | 5 | **PR description** | All six headings populated with concrete evidence (not placeholders). | Manual review |
 | 6 | **Scope** | Diff contains no unrelated changes. Summary confirming focus. | `gh pr diff` |
@@ -212,8 +213,8 @@ which case applied:
 
 | Rule | Engineer prompt | PM objective | OODA brain | PostToolUse hook |
 |------|----------------|--------------|------------|-----------------|
-| Workflow (Rule 1) | `⛔ MANDATORY RULES` Rule 1 | — | `reclaim_and_redispatch` on direct edits | 3-call warning without workflow evidence |
-| Merge-ready (Rule 2) | `⛔ MANDATORY RULES` Rule 2 + `Merge-Ready Contract` + `Definition of Done` | Evidence table + `⛔ GATING RULE` | `reclaim_and_redispatch` on missing headings | — |
+| Workflow (Rule 1) | `⛔ MANDATORY RULES` Rule 1 (issue #2267) | — | `reclaim_and_redispatch` on direct edits | 3-call warning without workflow evidence |
+| Merge-ready (Rule 2) | `⛔ MANDATORY RULES` Rule 2 (issue #2267) | Merge-ready checklist + gating rule (issue #2267) | `reclaim_and_redispatch` on missing headings | — |
 
 ---
 
@@ -234,7 +235,7 @@ Prompt edits take effect on the next cycle without a rebuild — see
 
 | Date | Change | Issue/PR |
 |------|--------|----------|
-| 2026-06-11 | Initial: embedded `⛔ MANDATORY RULES` in engineer prompt, 6-row evidence table in PM objective | #2267 / PR #2266 |
+| 2026-06-11 | Initial: embedded `⛔ MANDATORY RULES` in engineer prompt, merge-ready evidence checklist in PM objective | #2267 |
 
 ---
 

@@ -88,7 +88,7 @@ through the workflow.
 
 | Surface | Mechanism |
 |---------|-----------|
-| Engineer system prompt | `⛔ MANDATORY RULES` section, Rule 1 — the LLM reads this before every action |
+| Engineer system prompt | `⛔ MANDATORY RULES` section, Rule 1 (introduced by issue #2267) — the LLM reads this before every action |
 | OODA brain lifecycle | `reclaim_and_redispatch` fires when the cycle output shows direct edits without workflow evidence |
 | PostToolUse hook | `amplihack-hooks` monitors tool calls; 3+ calls without recipe-runner evidence triggers a hard WARNING |
 | Forbidden anti-patterns | The prompt explicitly lists "bypassing the workflow" as a `reclaim_and_redispatch` trigger |
@@ -145,8 +145,8 @@ where the PM forgot to check.
 
 | Surface | Mechanism |
 |---------|-----------|
-| Engineer system prompt | `⛔ MANDATORY RULES` section, Rule 2 — engineers cannot merge without evidence |
-| Goal-session objective | 6-row evidence table + `⛔ GATING RULE` — PM cannot instruct merge without verified evidence |
+| Engineer system prompt | `⛔ MANDATORY RULES` section, Rule 2 (introduced by issue #2267) — engineers cannot merge without evidence |
+| Goal-session objective | Merge-ready evidence checklist + gating rule (introduced by issue #2267) — PM cannot instruct merge without verified evidence |
 | Merge-readiness judge | `merge_readiness_judge.md` recipe evaluates each criterion and produces a PASS/FAIL verdict |
 | Definition of Done | The DoD section requires all six headings filled before a PR is considered complete |
 | Forbidden anti-patterns | "Opening a PR without all six evidence headings" triggers `reclaim_and_redispatch` |
