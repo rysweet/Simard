@@ -349,3 +349,33 @@ fn goal_session_objective_disk_override_works() {
         "# CUSTOM GOAL OBJECTIVE\n"
     );
 }
+
+#[test]
+fn goal_session_objective_requires_merge_ready_criteria() {
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("merge-ready") || lower.contains("merge_ready"),
+        "Priority Order must require merge-ready criteria verification before merging"
+    );
+    assert!(
+        lower.contains("qa-team") || lower.contains("qa_team"),
+        "merge-ready criteria must mention qa-team scenarios"
+    );
+    assert!(
+        lower.contains("quality-audit") || lower.contains("quality_audit"),
+        "merge-ready criteria must mention quality-audit cycles"
+    );
+}
+
+#[test]
+fn goal_session_objective_mentions_self_update() {
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("self-update") || lower.contains("self_update"),
+        "goal_session_objective.md must mention self-update awareness for Simard repo merges"
+    );
+}
