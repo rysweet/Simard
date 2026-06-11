@@ -56,6 +56,9 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Concept: pluggable identity](./concepts/pluggable-identity.md) - Design rationale for TOML-driven agent personas that let different repos define distinct identities (#2242).
 - [How to configure pluggable identities](./howto/configure-pluggable-identity.md) - Create an `identity.toml` file for custom agent personas, operating modes, and prompt assets.
 - [Pluggable identity API reference](./reference/pluggable-identity-api.md) - Rust API for `FileIdentityLoader`, TOML types, `load_watches_from_file`, and error variants.
+- [Concept: mandatory workflow and merge-ready gates](./concepts/mandatory-workflow-merge-gates.md) - Why every engineer cycle must use the recipe runner and every PR merge requires 6-check evidence (#2267).
+- [How to validate merge readiness](./howto/validate-merge-readiness.md) - Step-by-step guide for the 6-check merge-ready validation before any PR merge.
+- [Engineer workflow and merge-ready contract reference](./reference/engineer-workflow-merge-contract.md) - Normative specification for the mandatory workflow rule and merge-ready gate.
 
 ## Canonical executable surface
 
