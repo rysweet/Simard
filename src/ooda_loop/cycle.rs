@@ -439,8 +439,7 @@ fn run_ooda_cycle_inner(
             // When goals were archived, use save_goal_board_with_removals so that
             // the merge-on-write step cannot resurrect them from the persisted
             // snapshot (issue #2264 — archived goals reappearing every cycle).
-            let archived_goal_ids: Vec<String> =
-                archived.iter().map(|g| g.id.clone()).collect();
+            let archived_goal_ids: Vec<String> = archived.iter().map(|g| g.id.clone()).collect();
             let persist_result = if archived_goal_ids.is_empty() {
                 crate::goal_curation::persist_board(&state.active_goals, &*bridges.memory)
             } else {
