@@ -1577,3 +1577,21 @@ fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
     }
     drop(env_guard);
 }
+
+#[test]
+fn archive_completed_also_archives_in_progress_100() {
+    let mut board = GoalBoard::new();
+    add_active_goal(&mut board, make_goal("done-goal", 1)).unwrap();
+    add_active_goal(&mut board, make_goal("wip-goal", 2)).unwrap();
+    // Set one to InProgress { percent: 100 } — should also be archived
+    update_goal_progress(
+        &mut board,
+        "done-goal",
+        GoalProgress::InProgress { percent: 100 },
+    )
+    .unwrap();
+    let archived = archive_completed(&mut board);
+    assert_eq!(archived.len(), 1, "InProgress(100) should be archived");
+    assert_eq!(archived[0].id, "done-goal");
+    assert_eq!(board.active.len(), 1, "only wip-goal should remain");
+}
