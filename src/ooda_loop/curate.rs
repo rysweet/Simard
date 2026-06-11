@@ -141,8 +141,16 @@ pub fn check_meeting_handoffs(
                 "batch: marking empty handoff processed without ingesting"
             );
             handoff.processed = true;
-            let json = serde_json::to_string_pretty(&handoff).unwrap_or_default();
-            let _ = std::fs::write(path, &json);
+            match serde_json::to_string_pretty(&handoff) {
+                Ok(json) => {
+                    if let Err(e) = std::fs::write(path, &json) {
+                        tracing::warn!(path = %path.display(), error = %e, "failed to mark empty handoff processed");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "failed to serialize empty handoff");
+                }
+            }
             continue;
         }
 

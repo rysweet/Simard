@@ -98,34 +98,7 @@ fn list_handoff_files(dir: &Path) -> Vec<PathBuf> {
 /// field; malformed JSON is skipped (an old half-written file should not
 /// block dispatch). Returns `Ok(None)` when no unprocessed handoff exists.
 pub fn find_oldest_unprocessed_handoff(dir: &Path) -> SimardResult<Option<PathBuf>> {
-    for path in list_handoff_files(dir) {
-        let raw = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "skipping unreadable handoff while scanning for oldest unprocessed"
-                );
-                continue;
-            }
-        };
-        let handoff: MeetingHandoff = match serde_json::from_str(&raw) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "skipping malformed handoff JSON while scanning for oldest unprocessed"
-                );
-                continue;
-            }
-        };
-        if !handoff.processed {
-            return Ok(Some(path));
-        }
-    }
-    Ok(None)
+    Ok(find_unprocessed_handoffs(dir, 1)?.into_iter().next())
 }
 
 /// Load a meeting handoff artifact from a directory. Returns `None` if no
