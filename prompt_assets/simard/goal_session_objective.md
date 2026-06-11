@@ -6,17 +6,27 @@ cycle and respond with **prose only** (no JSON, no code fences).
 
 Before starting any new work, triage existing PRs in this strict order:
 
-1. **Drive open PRs to merge-ready.** For each open PR related to this goal,
-   the engineer must verify ALL merge-ready criteria before merging:
-   - qa-team scenarios written, validated (`gadugi-test validate`), and run (`gadugi-test run`)
-   - User-facing docs updated if the change affects APIs, config, CLI, or deployment
-   - quality-audit completed ≥3 SEEK→VALIDATE→FIX cycles, ended on a clean final cycle
-   - All CI checks green (0 failures)
-   - PR description updated with concrete evidence for all criteria
-   - Diff contains no unrelated changes
-   If a PR is CI-green but missing merge-ready evidence, tell the engineer to
-   run the merge-ready process on it — do NOT merge without evidence.
-   Once all criteria are met, merge via `gh pr merge --squash --delete-branch`.
+1. **Drive open PRs to merge-ready — NEVER merge without validated evidence.**
+   For each open PR related to this goal, the engineer MUST verify ALL SIX
+   merge-ready criteria before any merge is permitted:
+
+   | # | Criterion | What constitutes evidence |
+   |---|-----------|--------------------------|
+   | 1 | **QA-team** | Scenarios written, validated (`gadugi-test validate`), and run (`gadugi-test run`) — output pasted or linked |
+   | 2 | **Documentation** | User-facing docs updated if change affects APIs, config, CLI, or deployment — OR explicit internal-only justification |
+   | 3 | **Quality-audit** | ≥3 SEEK→VALIDATE→FIX cycles completed, final cycle clean (zero critical/high findings) — cycle count and commit SHAs cited |
+   | 4 | **CI** | All CI checks green (0 failures) — link to the green run |
+   | 5 | **PR description** | Updated with concrete evidence for criteria 1–4 and 6 under the six standard headings |
+   | 6 | **Scope** | Diff contains no unrelated changes — summary confirming focus |
+
+   **Gating rule:** You MUST NOT instruct an engineer to merge a PR unless you
+   have reviewed the PR description and confirmed that ALL SIX criteria above
+   have substantive evidence (not placeholders, not "will do later"). If a PR
+   is CI-green but missing merge-ready evidence, tell the engineer to run the
+   merge-ready process on it — do NOT merge without evidence and do NOT tell
+   the engineer to merge without evidence.
+
+   Once all criteria are verified, merge via `gh pr merge --squash --delete-branch`.
 2. **Fix failing PRs second.** For each red PR, diagnose the CI failure, apply
    the fix, and push. Do not open new PRs while fixable failures exist.
 3. **Close duplicate PRs.** If multiple PRs address the same issue or overlap
@@ -40,9 +50,12 @@ require a subsequent rebuild cycle.
    subprocess should do next for this goal. Be concrete: cite files,
    commands, issue numbers, PR numbers when relevant. The engineer is a
    full coding agent — it can run `gh issue create`, `gh pr comment`,
-   `gh pr merge`, `cargo test`, edit files, open PRs, etc. When telling
-   the engineer to merge a PR, always instruct it to verify merge-ready
-   criteria first.
+   `gh pr merge`, `cargo test`, edit files, open PRs, etc. **When telling
+   the engineer to merge a PR, you MUST first confirm that the PR description
+   contains substantive evidence for all six merge-ready criteria (QA-team,
+   Documentation, Quality-audit, CI, PR description, Scope). If any criterion
+   lacks evidence, instruct the engineer to run the merge-ready process —
+   never instruct merge without verified evidence.**
 
 2. **No action this cycle.** Write the literal phrase `NO ACTION` on its
    own line, then optionally a short prose explanation on the following
