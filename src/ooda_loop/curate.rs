@@ -70,10 +70,19 @@ pub fn promote_from_backlog(board: &mut GoalBoard) {
     }
 }
 
+/// Maximum number of handoffs processed per OODA cycle. Prevents resource
+/// exhaustion if the handoff directory is flooded with files.
+const BATCH_HANDOFF_LIMIT: usize = 10;
+
 /// Check for unprocessed meeting handoff artifacts in `handoff_dir`, convert
 /// their decisions into active goals (or backlog items when at capacity) and
 /// action items into backlog items on the board. Marks the handoff processed.
 /// Returns the number of goals + backlog items created.
+///
+/// **Batch processing** (#2268): processes up to [`BATCH_HANDOFF_LIMIT`]
+/// unprocessed handoffs per cycle (FIFO order). Empty handoffs (0 decisions
+/// AND 0 action_items) are fast-marked as processed without incrementing
+/// the created count.
 ///
 /// **FIFO ordering** (#1649): selects the **oldest** unprocessed handoff
 /// among all candidates (lexicographic filename sort = chronological order
@@ -90,90 +99,130 @@ pub fn check_meeting_handoffs(
     use crate::meeting_facilitator::find_oldest_unprocessed_handoff;
 
     let tombstones = load_tombstones(state_root);
-
-    let path = match find_oldest_unprocessed_handoff(handoff_dir)? {
-        Some(p) => p,
-        None => return Ok(0),
-    };
-
-    // Diagnostic: surface starvation that would have occurred under the old
-    // "newest by filename" selection — log when the oldest unprocessed file
-    // is older than the newest file in the directory (meaning at least one
-    // newer file exists and is already processed, or is itself unprocessed
-    // but properly deferred).
-    if let Some(newest) = crate::meeting_facilitator::find_newest_handoff(handoff_dir)
-        && newest != path
-    {
-        tracing::info!(
-            selected = %path.display(),
-            newest = %newest.display(),
-            "OODA curate: selecting older unprocessed handoff over newer file (FIFO)"
-        );
-    }
-
-    let raw =
-        std::fs::read_to_string(&path).map_err(|e| crate::error::SimardError::ArtifactIo {
-            path: path.clone(),
-            reason: format!("reading handoff: {e}"),
-        })?;
-    let mut handoff: crate::meeting_facilitator::MeetingHandoff = serde_json::from_str(&raw)
-        .map_err(|e| crate::error::SimardError::ArtifactIo {
-            path: path.clone(),
-            reason: format!("failed to parse handoff JSON: {e}"),
-        })?;
-
     let mut created = 0u32;
 
-    // Issue #1954: surface the meeting's `next_owner` and `artifacts[]`
-    // through the curated goals/backlog so downstream consumers (engineer
-    // loop, dashboard) can see who the meeting expected to action this
-    // and which files to read. `assigned_to` carries the owner verbatim
-    // so the engineer-loop selection logic can prefer goals it owns; the
-    // backlog `source` string carries an artifact-pointer suffix.
-    let owner_hint = handoff.next_owner.as_deref();
-    let artifact_suffix: String = if handoff.artifacts.is_empty() {
-        String::new()
-    } else {
-        let names: Vec<String> = handoff
-            .artifacts
-            .iter()
-            .map(|a| format!("{}={}", a.kind, a.uri_or_path))
-            .collect();
-        format!(" artifacts=[{}]", names.join("; "))
-    };
+    for batch_idx in 0..BATCH_HANDOFF_LIMIT {
+        let path = match find_oldest_unprocessed_handoff(handoff_dir)? {
+            Some(p) => p,
+            None => break,
+        };
 
-    // Convert decisions to active goals; overflow goes to backlog.
-    for (i, decision) in handoff.decisions.iter().enumerate() {
-        let goal_id = crate::goals::goal_slug(&decision.description);
-        let description = format!("[meeting] {}", decision.description);
-
-        // Deduplicate against existing active goals, backlog, and tombstones.
-        if board.active.iter().any(|g| g.id == goal_id)
-            || board.backlog.iter().any(|b| b.id == goal_id)
-            || tombstones.contains(&goal_id)
+        // FIFO diagnostic (first iteration only to avoid log spam).
+        if batch_idx == 0
+            && let Some(newest) = crate::meeting_facilitator::find_newest_handoff(handoff_dir)
+            && newest != path
         {
+            tracing::info!(
+                selected = %path.display(),
+                newest = %newest.display(),
+                "OODA curate: selecting older unprocessed handoff over newer file (FIFO)"
+            );
+        }
+
+        let raw =
+            std::fs::read_to_string(&path).map_err(|e| crate::error::SimardError::ArtifactIo {
+                path: path.clone(),
+                reason: format!("reading handoff: {e}"),
+            })?;
+        let mut handoff: crate::meeting_facilitator::MeetingHandoff = serde_json::from_str(&raw)
+            .map_err(|e| crate::error::SimardError::ArtifactIo {
+                path: path.clone(),
+                reason: format!("failed to parse handoff JSON: {e}"),
+            })?;
+
+        // Fast-mark empty handoffs: 0 decisions AND 0 action_items means
+        // there is nothing to curate — mark processed and move to the next
+        // without incrementing `created`.
+        if handoff.decisions.is_empty() && handoff.action_items.is_empty() {
+            tracing::info!(
+                path = %path.display(),
+                "OODA curate: fast-marking empty handoff as processed"
+            );
+            handoff.processed = true;
+            let json = serde_json::to_string_pretty(&handoff).map_err(|e| {
+                crate::error::SimardError::ArtifactIo {
+                    path: path.clone(),
+                    reason: format!("serializing handoff: {e}"),
+                }
+            })?;
+            std::fs::write(&path, &json).map_err(|e| crate::error::SimardError::ArtifactIo {
+                path: path.clone(),
+                reason: format!("writing handoff: {e}"),
+            })?;
             continue;
         }
 
-        if board.active.len() < crate::goal_curation::MAX_ACTIVE_GOALS {
-            // Priority based on position: earlier decisions = higher priority.
-            let priority = (i as u32).saturating_add(1).min(5);
-            board.active.push(ActiveGoal {
-                id: goal_id,
-                description,
-                priority,
-                status: GoalProgress::NotStarted,
-                assigned_to: owner_hint.map(String::from),
-                current_activity: None,
-                wip_refs: vec![],
-                last_progress_update_at: None,
-            });
+        let owner_hint = handoff.next_owner.as_deref();
+        let artifact_suffix: String = if handoff.artifacts.is_empty() {
+            String::new()
         } else {
-            // Board full — route to backlog with score based on position.
-            let score = 1.0 - (i as f64 * 0.1).min(0.9);
+            let names: Vec<String> = handoff
+                .artifacts
+                .iter()
+                .map(|a| format!("{}={}", a.kind, a.uri_or_path))
+                .collect();
+            format!(" artifacts=[{}]", names.join("; "))
+        };
+
+        // Convert decisions to active goals; overflow goes to backlog.
+        for (i, decision) in handoff.decisions.iter().enumerate() {
+            let goal_id = crate::goals::goal_slug(&decision.description);
+            let description = format!("[meeting] {}", decision.description);
+
+            if board.active.iter().any(|g| g.id == goal_id)
+                || board.backlog.iter().any(|b| b.id == goal_id)
+                || tombstones.contains(&goal_id)
+            {
+                continue;
+            }
+
+            if board.active.len() < crate::goal_curation::MAX_ACTIVE_GOALS {
+                let priority = (i as u32).saturating_add(1).min(5);
+                board.active.push(ActiveGoal {
+                    id: goal_id,
+                    description,
+                    priority,
+                    status: GoalProgress::NotStarted,
+                    assigned_to: owner_hint.map(String::from),
+                    current_activity: None,
+                    wip_refs: vec![],
+                    last_progress_update_at: None,
+                });
+            } else {
+                let score = 1.0 - (i as f64 * 0.1).min(0.9);
+                board.backlog.push(BacklogItem {
+                    id: goal_id,
+                    description,
+                    source: format!(
+                        "meeting:{}{}{}",
+                        handoff.topic,
+                        owner_hint
+                            .map(|o| format!(" owner={o}"))
+                            .unwrap_or_default(),
+                        artifact_suffix,
+                    ),
+                    score,
+                });
+            }
+            created += 1;
+        }
+
+        // Convert action items with priority >= 2 to backlog items.
+        for item in &handoff.action_items {
+            if item.priority < 2 {
+                continue;
+            }
+            let item_id = crate::goals::goal_slug(&item.description);
+            if board.backlog.iter().any(|b| b.id == item_id)
+                || board.active.iter().any(|g| g.id == item_id)
+                || tombstones.contains(&item_id)
+            {
+                continue;
+            }
+            let score = (item.priority as f64 * 0.2).min(1.0);
             board.backlog.push(BacklogItem {
-                id: goal_id,
-                description,
+                id: item_id,
+                description: format!("[action] {} (owner: {})", item.description, item.owner),
                 source: format!(
                     "meeting:{}{}{}",
                     handoff.topic,
@@ -184,57 +233,134 @@ pub fn check_meeting_handoffs(
                 ),
                 score,
             });
+            created += 1;
         }
-        created += 1;
-    }
 
-    // Convert action items with priority >= 2 to backlog items.
-    for item in &handoff.action_items {
-        if item.priority < 2 {
-            continue;
-        }
-        let item_id = crate::goals::goal_slug(&item.description);
-        if board.backlog.iter().any(|b| b.id == item_id)
-            || board.active.iter().any(|g| g.id == item_id)
-            || tombstones.contains(&item_id)
-        {
-            continue;
-        }
-        // Higher action-item priority → higher backlog score.
-        let score = (item.priority as f64 * 0.2).min(1.0);
-        board.backlog.push(BacklogItem {
-            id: item_id,
-            description: format!("[action] {} (owner: {})", item.description, item.owner),
-            source: format!(
-                "meeting:{}{}{}",
-                handoff.topic,
-                owner_hint
-                    .map(|o| format!(" owner={o}"))
-                    .unwrap_or_default(),
-                artifact_suffix,
-            ),
-            score,
-        });
-        created += 1;
-    }
-
-    // Mark this specific file processed and write back to the same path —
-    // never let the path-lookup pick a sibling file (which is the core of
-    // the #1649 starvation: under the old in_place helper the writeback
-    // could land on the wrong file when multiple handoffs co-exist).
-    handoff.processed = true;
-    let json = serde_json::to_string_pretty(&handoff).map_err(|e| {
-        crate::error::SimardError::ArtifactIo {
+        // Mark processed and write back to the same path.
+        handoff.processed = true;
+        let json = serde_json::to_string_pretty(&handoff).map_err(|e| {
+            crate::error::SimardError::ArtifactIo {
+                path: path.clone(),
+                reason: format!("serializing handoff: {e}"),
+            }
+        })?;
+        std::fs::write(&path, &json).map_err(|e| crate::error::SimardError::ArtifactIo {
             path: path.clone(),
-            reason: format!("serializing handoff: {e}"),
-        }
-    })?;
-    std::fs::write(&path, &json).map_err(|e| crate::error::SimardError::ArtifactIo {
-        path: path.clone(),
-        reason: format!("writing handoff: {e}"),
-    })?;
+            reason: format!("writing handoff: {e}"),
+        })?;
+    }
 
     Ok(created)
+}
+
+/// Delete processed handoff JSON files older than 7 days to prevent
+/// indefinite disk accumulation. Returns the count of files deleted.
+///
+/// Uses `symlink_metadata` (not `metadata`) to prevent symlink-following
+/// attacks. Requires BOTH `processed == true` (parsed from JSON) AND
+/// file mtime > 7 days before deletion — either condition alone is
+/// insufficient. Per-file errors are logged and skipped (non-fatal).
+///
+/// Filename filter: `starts_with("handoff-") && ends_with(".json")`.
+pub fn reap_old_handoffs(handoff_dir: &std::path::Path) -> SimardResult<u32> {
+    use std::time::{Duration, SystemTime};
+
+    const REAP_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+    let entries = match std::fs::read_dir(handoff_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => {
+            return Err(crate::error::SimardError::ArtifactIo {
+                path: handoff_dir.to_path_buf(),
+                reason: format!("reading handoff dir for reap: {e}"),
+            });
+        }
+    };
+
+    let cutoff = SystemTime::now() - REAP_AGE;
+    let mut deleted = 0u32;
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("reap_old_handoffs: skipping unreadable dir entry: {e}");
+                continue;
+            }
+        };
+
+        let fname = entry.file_name();
+        let fname_str = fname.to_string_lossy();
+        if !fname_str.starts_with("handoff-") || !fname_str.ends_with(".json") {
+            continue;
+        }
+
+        let path = entry.path();
+
+        // Use symlink_metadata to prevent symlink-following attacks.
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), "reap_old_handoffs: cannot stat: {e}");
+                continue;
+            }
+        };
+
+        // Skip if not a regular file (e.g. symlink, directory).
+        if !meta.is_file() {
+            continue;
+        }
+
+        let mtime = match meta.modified() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), "reap_old_handoffs: cannot read mtime: {e}");
+                continue;
+            }
+        };
+
+        if mtime > cutoff {
+            continue; // Too recent.
+        }
+
+        // Parse JSON to verify processed == true before deleting.
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), "reap_old_handoffs: cannot read: {e}");
+                continue;
+            }
+        };
+        let handoff: crate::meeting_facilitator::MeetingHandoff = match serde_json::from_str(&raw) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), "reap_old_handoffs: cannot parse: {e}");
+                continue;
+            }
+        };
+
+        if !handoff.processed {
+            continue; // Not yet consumed — preserve.
+        }
+
+        // Both conditions met: processed AND older than 7 days — delete.
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                tracing::info!(path = %path.display(), "reap_old_handoffs: deleted old processed handoff");
+                deleted += 1;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // TOCTOU race — file vanished between stat and remove.
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), "reap_old_handoffs: failed to delete: {e}");
+            }
+        }
+    }
+
+    Ok(deleted)
 }
 
 #[cfg(test)]
@@ -533,13 +659,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // FIFO regression test for #1649 (handoff starvation).
+    // FIFO regression test for #1649 (handoff starvation), updated for
+    // #2268 batch processing.
     //
     // Scenario: a content-rich handoff A is written first, then a fresh
-    // empty handoff B is written. Under the old "newest by filename"
-    // selection, B would be processed first (and A would be permanently
-    // shadowed once B was marked processed). With FIFO-by-`created_at`
-    // ascending among `pending` handoffs, A must be processed first.
+    // empty handoff B is written. With batch processing (up to 10 per
+    // cycle) and FIFO ordering, cycle 1 processes BOTH: A first
+    // (content-rich → created=1) then B (empty → fast-marked, created=0).
+    // Cycle 2 finds nothing.
     // -----------------------------------------------------------------
     #[test]
     fn check_meeting_handoffs_picks_oldest_unprocessed_first_fifo() {
@@ -585,49 +712,265 @@ mod tests {
 
         let mut board = GoalBoard::new();
 
-        // First cycle: must process A (older, content-rich) — NOT B.
+        // Cycle 1 (batch): processes both A (1 created) and B (fast-marked, 0 created).
         let count = check_meeting_handoffs(&mut board, dir.path(), dir.path())
             .expect("check_meeting_handoffs cycle 1 should succeed");
-        assert_eq!(count, 1, "first cycle should ingest A's single decision");
+        assert_eq!(
+            count, 1,
+            "cycle 1 should ingest A's decision and fast-mark B"
+        );
         assert_eq!(board.active.len(), 1);
         assert_eq!(
             board.active[0].description, "[meeting] Older meeting decision A",
             "older handoff A must be processed first under FIFO ordering"
         );
 
-        // A's file must be marked processed; B's must remain unprocessed.
+        // Both A and B must be marked processed after the batch cycle.
         let reloaded_a: MeetingHandoff =
             serde_json::from_str(&fs::read_to_string(&path_a).unwrap()).unwrap();
         let reloaded_b: MeetingHandoff =
             serde_json::from_str(&fs::read_to_string(&path_b).unwrap()).unwrap();
         assert!(
             reloaded_a.processed,
-            "handoff A must be marked processed after first cycle"
+            "handoff A must be marked processed after batch cycle"
         );
         assert!(
-            !reloaded_b.processed,
-            "handoff B must remain unprocessed after first cycle"
+            reloaded_b.processed,
+            "handoff B must be fast-marked processed after batch cycle"
         );
 
-        // Second cycle: B is now the oldest unprocessed → gets processed
-        // (with zero items, since it's empty). Demonstrates B is no longer
-        // permanently shadowing A.
+        // Cycle 2: nothing left to process.
         let count2 = check_meeting_handoffs(&mut board, dir.path(), dir.path())
             .expect("check_meeting_handoffs cycle 2 should succeed");
         assert_eq!(
             count2, 0,
-            "second cycle ingests empty handoff B → zero items"
+            "no unprocessed handoffs remain after batch cycle"
         );
-        let reloaded_b2: MeetingHandoff =
-            serde_json::from_str(&fs::read_to_string(&path_b).unwrap()).unwrap();
-        assert!(
-            reloaded_b2.processed,
-            "handoff B must be marked processed after second cycle"
-        );
+    }
 
-        // Third cycle: nothing left to process.
-        let count3 = check_meeting_handoffs(&mut board, dir.path(), dir.path())
-            .expect("check_meeting_handoffs cycle 3 should succeed");
-        assert_eq!(count3, 0, "no unprocessed handoffs remain");
+    // -----------------------------------------------------------------
+    // Batch processing tests for #2268.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn batch_processes_multiple_handoffs() {
+        use std::fs;
+
+        let dir = TempDir::new().expect("create temp dir");
+
+        // Create 3 content-rich handoffs with ascending timestamps.
+        for i in 0..3u8 {
+            let handoff =
+                sample_handoff(vec![sample_decision(&format!("Decision from meeting {i}"))]);
+            let ts = format!("handoff-2026-05-0{}T00-00-00_00-00.json", i + 1);
+            fs::write(
+                dir.path().join(&ts),
+                serde_json::to_string_pretty(&handoff).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let mut board = GoalBoard::new();
+        let count = check_meeting_handoffs(&mut board, dir.path(), dir.path())
+            .expect("batch processing should succeed");
+
+        // All 3 handoffs should be processed in a single call.
+        assert_eq!(count, 3, "batch should process all 3 handoffs");
+        assert_eq!(board.active.len(), 3);
+
+        // Verify all files are marked processed.
+        for entry in fs::read_dir(dir.path()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy().starts_with("handoff-") {
+                let raw = fs::read_to_string(entry.path()).unwrap();
+                let h: MeetingHandoff = serde_json::from_str(&raw).unwrap();
+                assert!(h.processed, "all handoffs should be marked processed");
+            }
+        }
+    }
+
+    #[test]
+    fn batch_fast_marks_empty_handoff() {
+        use std::fs;
+
+        let dir = TempDir::new().expect("create temp dir");
+
+        // Empty handoff: 0 decisions, 0 action items.
+        let handoff = MeetingHandoff {
+            schema_version: 2,
+            topic: "Empty chat".to_string(),
+            started_at: "2026-05-01T00:00:00Z".to_string(),
+            closed_at: "2026-05-01T00:01:00Z".to_string(),
+            decisions: Vec::new(),
+            action_items: Vec::new(),
+            open_questions: Vec::new(),
+            processed: false,
+            duration_secs: None,
+            transcript: Vec::new(),
+            participants: Vec::new(),
+            themes: Vec::new(),
+            meeting_id: String::new(),
+            transcript_path: None,
+            next_owner: None,
+            artifacts: Vec::new(),
+            goal: None,
+            next_actor: None,
+            applied_templates: Vec::new(),
+            history_truncated_count: 0,
+            partial_reason: None,
+            risks: vec![],
+            disagreements: vec![],
+        };
+        let path = dir.path().join("handoff-2026-05-01T00-01-00_00-00.json");
+        fs::write(&path, serde_json::to_string_pretty(&handoff).unwrap()).unwrap();
+
+        let mut board = GoalBoard::new();
+        let count = check_meeting_handoffs(&mut board, dir.path(), dir.path())
+            .expect("fast-mark should succeed");
+
+        // Empty handoff is fast-marked → 0 items created, but file is processed.
+        assert_eq!(count, 0, "empty handoff should produce 0 created items");
+        assert!(board.active.is_empty(), "no goals should be added");
+        assert!(board.backlog.is_empty(), "no backlog items should be added");
+
+        let reloaded: MeetingHandoff =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            reloaded.processed,
+            "empty handoff must be fast-marked as processed"
+        );
+    }
+
+    #[test]
+    fn batch_cap_at_10_handoffs() {
+        use std::fs;
+
+        let dir = TempDir::new().expect("create temp dir");
+
+        // Create 12 handoffs, each with a unique decision.
+        for i in 0..12u8 {
+            let handoff = sample_handoff(vec![sample_decision(&format!("Decision {i}"))]);
+            let ts = format!("handoff-2026-06-{:02}T00-00-00_00-00.json", i + 1);
+            fs::write(
+                dir.path().join(&ts),
+                serde_json::to_string_pretty(&handoff).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let mut board = GoalBoard::new();
+        let count = check_meeting_handoffs(&mut board, dir.path(), dir.path())
+            .expect("capped batch should succeed");
+
+        // Only first 10 should be processed (batch cap).
+        assert_eq!(count, 10, "batch cap should limit to 10 handoffs per cycle");
+
+        // Exactly 10 files should be marked processed, 2 should remain.
+        let mut processed_count = 0u32;
+        let mut unprocessed_count = 0u32;
+        for entry in fs::read_dir(dir.path()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy().starts_with("handoff-") {
+                let raw = fs::read_to_string(entry.path()).unwrap();
+                let h: MeetingHandoff = serde_json::from_str(&raw).unwrap();
+                if h.processed {
+                    processed_count += 1;
+                } else {
+                    unprocessed_count += 1;
+                }
+            }
+        }
+        assert_eq!(
+            processed_count, 10,
+            "10 handoffs should be marked processed"
+        );
+        assert_eq!(unprocessed_count, 2, "2 handoffs should remain unprocessed");
+    }
+
+    // -----------------------------------------------------------------
+    // reap_old_handoffs tests for #2268.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn reap_old_handoffs_deletes_old_processed() {
+        use std::fs;
+        use std::time::{Duration, SystemTime};
+
+        let dir = TempDir::new().expect("create temp dir");
+
+        // Create a processed handoff file.
+        let mut handoff = sample_handoff(vec![sample_decision("Old processed")]);
+        handoff.processed = true;
+        let path = dir.path().join("handoff-2026-01-01T00-00-00_00-00.json");
+        fs::write(&path, serde_json::to_string_pretty(&handoff).unwrap()).unwrap();
+
+        // Set mtime to 8 days ago (> 7 day threshold).
+        let old_time = SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
+        let times = fs::FileTimes::new().set_modified(old_time);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+
+        let deleted = reap_old_handoffs(dir.path()).expect("reap should succeed");
+        assert_eq!(deleted, 1, "should delete one old processed handoff");
+        assert!(!path.exists(), "old processed file should be deleted");
+    }
+
+    #[test]
+    fn reap_old_handoffs_preserves_recent_and_unprocessed() {
+        use std::fs;
+        use std::time::{Duration, SystemTime};
+
+        let dir = TempDir::new().expect("create temp dir");
+
+        let old_time = SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
+
+        // (a) Processed + recent — should be preserved.
+        let mut ha = sample_handoff(vec![sample_decision("Recent processed")]);
+        ha.processed = true;
+        let path_a = dir.path().join("handoff-2026-06-10T00-00-00_00-00.json");
+        fs::write(&path_a, serde_json::to_string_pretty(&ha).unwrap()).unwrap();
+        // mtime is now (recent) — don't touch it.
+
+        // (b) Unprocessed + old — should be preserved (not yet consumed).
+        let hb = sample_handoff(vec![sample_decision("Old unprocessed")]);
+        let path_b = dir.path().join("handoff-2026-01-02T00-00-00_00-00.json");
+        fs::write(&path_b, serde_json::to_string_pretty(&hb).unwrap()).unwrap();
+        let times_old = fs::FileTimes::new().set_modified(old_time);
+        fs::File::options()
+            .write(true)
+            .open(&path_b)
+            .unwrap()
+            .set_times(times_old)
+            .unwrap();
+
+        // (c) Processed + old — should be deleted.
+        let mut hc = sample_handoff(vec![sample_decision("Old processed deletable")]);
+        hc.processed = true;
+        let path_c = dir.path().join("handoff-2026-01-03T00-00-00_00-00.json");
+        fs::write(&path_c, serde_json::to_string_pretty(&hc).unwrap()).unwrap();
+        let times_old2 = fs::FileTimes::new().set_modified(old_time);
+        fs::File::options()
+            .write(true)
+            .open(&path_c)
+            .unwrap()
+            .set_times(times_old2)
+            .unwrap();
+
+        let deleted = reap_old_handoffs(dir.path()).expect("reap should succeed");
+        assert_eq!(deleted, 1, "only old+processed should be deleted");
+        assert!(path_a.exists(), "recent processed should be preserved");
+        assert!(path_b.exists(), "old unprocessed should be preserved");
+        assert!(!path_c.exists(), "old processed should be deleted");
+    }
+
+    #[test]
+    fn reap_old_handoffs_empty_dir() {
+        let dir = TempDir::new().expect("create temp dir");
+        let deleted = reap_old_handoffs(dir.path()).expect("reap on empty dir should succeed");
+        assert_eq!(deleted, 0, "nothing to reap in empty dir");
     }
 }

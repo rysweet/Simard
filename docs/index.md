@@ -24,6 +24,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to configure bootstrap and inspect reflection](./howto/configure-bootstrap-and-inspect-reflection.md) - Bootstrap an explicit runtime selection and inspect the truthful runtime snapshot.
 - [How to reclaim disk space and run low-space Rust builds](./howto/reclaim-disk-space-and-run-low-space-rust-builds.md) - Reclaim stale build artifacts and run Cargo through one shared low-space target dir across worktrees.
 - [How to configure and monitor the disk health check](./howto/configure-disk-health-check.md) - Tune the per-cycle automated disk cleanup that prevents ENOSPC crashes (#2020).
+- [How to diagnose and prevent handoff accumulation](./howto/diagnose-handoff-accumulation.md) - Detect, resolve, and prevent unbounded meeting handoff file growth (#2268).
 - [How to start a meeting with Simard](./howto/start-a-meeting.md) - Have a natural conversation with Simard from CLI or dashboard, with full history and memory.
 - [How to carry meeting decisions into engineer sessions](./howto/carry-meeting-decisions-into-engineer-sessions.md) - Persist meeting records under a shared state root and confirm later engineer runs carry them forward.
 - [How to inspect meeting records](./howto/inspect-meeting-records.md) - Read back the latest durable meeting record without mutating stored state.
@@ -41,6 +42,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Base type adapters reference](./reference/base-type-adapters.md) - Look up the pluggable agent execution substrates, their capabilities, and topology support.
 - [Meeting backend API reference](./reference/meeting-backend-api.md) - Rust API for the unified MeetingBackend.
 - [Meeting close lifecycle reference](./reference/meeting-close-lifecycle.md) - Bounded close, partial-handoff envelope, atomic writes (#1908).
+- [Handoff lifecycle API reference](./reference/handoff-lifecycle-api.md) - Write guard, batch processing, and reaping for meeting handoff files (#2268).
 - [State-root resolution reference](./reference/state-root-resolution.md) - The shared helper honoring `SIMARD_STATE_ROOT` across every Simard mode (#1906).
 - [How to recover from a meeting close timeout](./howto/recover-from-meeting-close-timeout.md) - Playbook when `handoff_partial=true` fires.
 - [LightweightChatSession reference](./reference/lightweight-chat-session.md) - Direct-subprocess session used for Copilot-provider meeting turns (no PTY overhead).
