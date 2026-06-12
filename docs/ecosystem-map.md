@@ -3,7 +3,7 @@
 > A comprehensive inventory of the repositories that form the amplihack agentic
 > coding platform, their relationships, and how they fit together.
 >
-> **Last updated**: 2026-06-11 — auto-generated from GitHub API metadata and
+> **Last updated**: 2026-06-12 — auto-generated from GitHub API metadata and
 > `prompt_assets/simard/engineer_system.md`.
 
 ## Overview
@@ -13,7 +13,11 @@ agentic coding platform. At its center is **Simard** — an autonomous engineeri
 identity that orchestrates work across the ecosystem — built on top of
 **RustyClawd** (LLM SDK) and **amplihack-rs** (the core framework). Supporting
 libraries provide cognitive memory, security hardening, workflow execution,
-evaluation, knowledge grounding, testing, and remote infrastructure.
+evaluation, knowledge grounding, testing, and remote infrastructure. Two
+security-focused applications — **skwaq** (vulnerability research) and
+**Powderfinger** (cloud weakness deployment and investigation) — share the
+same Rust + RustyClawd foundation and demonstrate the ecosystem's reach
+beyond coding automation into security analysis.
 
 The ecosystem is predominantly **Rust** for performance-critical runtimes,
 **Python** for ML/evaluation tooling, and **TypeScript** for testing
@@ -36,6 +40,8 @@ infrastructure.
 | [amplihack-xpia-defender](https://github.com/rysweet/amplihack-xpia-defender) | Cross-Prompt Injection Attack detection and defense library | Rust | Security | 2026-03-10 |
 | [gadugi-agentic-test](https://github.com/rysweet/gadugi-agentic-test) | Multi-agent outside-in testing for Electron, CLI, web, and TUI apps | TypeScript | Testing | 2026-06-02 |
 | [amplihack-traits](https://github.com/rysweet/amplihack-traits) | Shared Rust traits (LLM completion, Agent, Grader) breaking circular deps | Rust | Foundational traits | 2026-04-02 |
+| [skwaq](https://github.com/rysweet/skwaq) | Self-improving multi-agent vulnerability analyzer — 18 agents, LadybugDB code property graph, taint analysis, multi-agent debate | Rust | Security research | 2026-05-06 |
+| [Powderfinger](https://github.com/rysweet/Powderfinger) | Multiagent system for dynamic killchain generation — deploys vulnerable Azure infra, investigates cloud weaknesses, shift-left scanning | Rust | Security deployment & investigation | 2026-05-12 |
 
 ### Deprecated / Archived
 
@@ -95,6 +101,11 @@ graph TD
         AZLIN["azlin<br/><i>Azure VM provisioning</i>"]
     end
 
+    subgraph "Security Applications"
+        SKWAQ["skwaq<br/><i>Multi-agent vulnerability analyzer</i>"]
+        POWDER["Powderfinger<br/><i>Cloud weakness deployment &amp; investigation</i>"]
+    end
+
     subgraph "Evaluation & Knowledge"
         EVAL["amplihack-agent-eval<br/><i>L1–L12 agent benchmarks</i>"]
         KGPACKS["agent-kgpacks<br/><i>GraphRAG knowledge packs</i>"]
@@ -120,12 +131,18 @@ graph TD
     SIMARD -.->|"validates with"| GADUGI
     AMP_RS -.->|"uses for defense"| XPIA
 
+    %% Security application dependencies
+    SKWAQ -->|"rustyclawd-core<br/>rustyclawd-tools"| RUSTY
+    POWDER -->|"rustyclawd-core<br/>rustyclawd-tools"| RUSTY
+    SKWAQ -.->|"code property graph"| MEMORY
+    POWDER -.->|"CWE knowledge graph"| KGPACKS
+
     classDef rust fill:#deb887,stroke:#8b4513,color:#000
     classDef python fill:#306998,stroke:#FFD43B,color:#fff
     classDef typescript fill:#3178c6,stroke:#fff,color:#fff
     classDef mixed fill:#9370db,stroke:#483d8b,color:#fff
 
-    class SIMARD,AMP_RS,RECIPE,XPIA,AZLIN,TRAITS rust
+    class SIMARD,AMP_RS,RECIPE,XPIA,AZLIN,TRAITS,SKWAQ,POWDER rust
     class EVAL,KGPACKS python
     class GADUGI typescript
     class RUSTY,MEMORY mixed
@@ -266,6 +283,42 @@ Knowledge packs convert documentation into local graph databases with vector
 search. Installed as agent skills, they provide domain-specific grounded context
 at query time — replacing reliance on training data for specialized topics.
 
+### skwaq ↔ RustyClawd + LadybugDB
+
+Skwaq is a self-improving multi-agent vulnerability analyzer. Its 18 specialized
+agents (taint tracker, exploit assessor, binary analyst, debate moderator, etc.)
+are powered by RustyClawd for LLM tool calling. Skwaq builds a code property
+graph in LadybugDB (the same embedded graph engine used by Simard's cognitive
+memory) and uses multi-agent debate to reason about exploitability. A built-in
+Skwaq Gym benchmarks detection accuracy against 6 industry datasets and drives a
+self-improvement loop — similar in architecture to Simard's own gym-driven
+improvement.
+
+**Integration with the ecosystem:**
+- **RustyClawd** — all 18 agents use `rustyclawd-core` + `rustyclawd-tools`
+- **LadybugDB** — shared graph engine with `amplihack-memory-lib`
+- **Self-improvement pattern** — mirrors Simard's gym → analyze failures →
+  propose improvements → overfitting review loop
+- **Simard potential** — Simard could orchestrate skwaq scans as a security
+  quality gate before PR merges
+
+### Powderfinger ↔ RustyClawd + agent-kgpacks
+
+Powderfinger is a multiagent system with three complementary aspects: red team
+(deploy intentionally vulnerable Azure infrastructure from CWE descriptions),
+blue team (investigate real tenants for cloud weaknesses), and shift-left
+(scan Terraform plans at PR time and watch deployments via webhooks). All three
+share a 959-CWE knowledge graph.
+
+**Integration with the ecosystem:**
+- **RustyClawd** — investigation agents use `rustyclawd-core` for LLM reasoning
+- **agent-kgpacks** — CWE knowledge graph is a domain-specific knowledge pack
+- **gadugi-agentic-test** — Powderfinger's deploy → investigate → score loop
+  parallels gadugi's outside-in testing methodology
+- **Simard potential** — Simard could run Powderfinger's `scan-plan` against
+  infrastructure PRs across the ecosystem, and use `deploy → investigate → score`
+  as a gym benchmark for security agent improvement
+
 ## How the Pieces Fit Together
 
 For someone new to the ecosystem, here is the mental model:
@@ -312,6 +365,17 @@ For someone new to the ecosystem, here is the mental model:
 11. **gadugi-agentic-test** validates everything end-to-end with autonomous
     AI-driven testing — the quality gate before any PR merges.
 
+12. **skwaq** is a security-focused application built on RustyClawd. It uses 18
+    specialized agents to research vulnerabilities in source code and binaries,
+    building code property graphs in LadybugDB (shared engine with
+    amplihack-memory-lib). Its self-improvement loop mirrors Simard's gym pattern.
+
+13. **Powderfinger** is the offensive/defensive security counterpart. It deploys
+    intentionally vulnerable Azure infrastructure (red), investigates real
+    tenants for weaknesses (blue), and provides shift-left scanning at PR time
+    and deploy time (green). Its CWE knowledge graph is a domain-specific
+    knowledge pack from agent-kgpacks.
+
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                        Simard                           │
@@ -328,7 +392,11 @@ For someone new to the ecosystem, here is the mental model:
 │                     │  └─ ... (26 crates)               │
 │  recipe-runner      │                                   │
 │  (workflow engine)  │  agent-kgpacks (knowledge packs)  │
-└─────────────────────┴───────────────────────────────────┘
+├─────────────────────┴───────────────────────────────────┤
+│                Security Applications                     │
+│  skwaq (vuln research)    Powderfinger (cloud security) │
+│  └─ RustyClawd + LadybugDB  └─ RustyClawd + CWE graph  │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ---
