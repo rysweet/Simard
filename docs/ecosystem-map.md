@@ -396,6 +396,220 @@ For someone new to the ecosystem, here is the mental model:
     and deploy time (green). Its CWE knowledge graph is a domain-specific
     knowledge pack from agent-kgpacks.
 
+## Application Architectures
+
+Each application is built from a mix of application-specific modules and
+shared ecosystem components. Shared components are marked with 🔗 below.
+
+### Simard — Autonomous Engineering Identity
+
+```mermaid
+graph TB
+    subgraph Interface["Human Interface"]
+        Meeting["Meeting REPL"]
+        CLI["CLI"]
+        Dashboard["Dashboard :8080"]
+    end
+
+    subgraph Daemon["OODA Daemon (systemd)"]
+        Loop["Cycle Loop<br/>observe → orient → decide → act → reflect"]
+        Brains["3 LLM Brains<br/>(orient, decide, lifecycle)"]
+        DiskGuard["Disk Guard"]
+    end
+
+    subgraph Recipes["🔗 Recipe Execution"]
+        RR["recipe-runner-rs"]
+        R1["progress-assessment"]
+        R2["merge-readiness-judge"]
+        R3["disk-health-check"]
+    end
+
+    subgraph Engineers["Engineer Dispatch"]
+        AMP["🔗 amplihack copilot<br/>(1 per active goal,<br/>isolated git worktree)"]
+    end
+
+    subgraph Memory["Cognitive Memory"]
+        LDB["🔗 LadybugDB"]
+        Cog["6-type model<br/>(sensory → working →<br/>episodic → semantic →<br/>procedural → prospective)"]
+    end
+
+    subgraph LLM["🔗 LLM Layer"]
+        RC["RustyClawd<br/>(streaming, tool calling)"]
+        KG["agent-kgpacks"]
+    end
+
+    subgraph External["External"]
+        GH["GitHub<br/>(PRs, issues, CI)"]
+        Eval["🔗 agent-eval<br/>(L1–L12 gym)"]
+    end
+
+    Interface --> Daemon
+    Loop --> Brains
+    Loop -->|invoke| RR
+    Brains --> RC
+    RR --> RC
+    Loop -->|spawn| AMP
+    AMP -->|PRs| GH
+    Loop --> Cog
+    Cog --- LDB
+    RC --> KG
+
+    classDef shared fill:#1a5276,stroke:#2980b9,color:#fff
+    classDef app fill:#1e8449,stroke:#27ae60,color:#fff
+    class RR,AMP,LDB,RC,KG,Eval shared
+    class Loop,Brains,DiskGuard,Meeting,CLI,Dashboard,Cog,R1,R2,R3 app
+```
+
+### skwaq — Multi-Agent Vulnerability Analyzer
+
+```mermaid
+graph TB
+    subgraph CLI_S["CLI (clap, 20+ commands)"]
+        Ingest["ingest binary/source"]
+        Analyze["analyze --quick"]
+        Report["report --sarif/--json"]
+        Gym_CMD["gym run / gym dashboard"]
+    end
+
+    subgraph Engine["Analysis Engine"]
+        Agents["18 Specialized Agents<br/>(taint tracker, exploit assessor,<br/>binary analyst, debate moderator, ...)"]
+        Debate["Multi-Agent Debate<br/>(exploitability reasoning)"]
+        Taint["Taint Analysis<br/>(input propagation tracing)"]
+    end
+
+    subgraph Graph["Code Property Graph"]
+        LDB_S["🔗 LadybugDB"]
+        BinParse["Binary Parser (goblin)"]
+        Decompile["Ghidra / angr<br/>(optional)"]
+    end
+
+    subgraph Improvement["Self-Improvement Loop"]
+        SG["Skwaq Gym<br/>(6 industry benchmarks)"]
+        FA["Failure Analyst Agent"]
+        OR["Overfitting Reviewer<br/>(rejects ~66% of proposals)"]
+    end
+
+    subgraph LLM_S["🔗 LLM Layer"]
+        RC_S["RustyClawd"]
+        KG_S["agent-kgpacks<br/>(vuln knowledge)"]
+    end
+
+    subgraph Recipes_S["🔗 Recipe Execution"]
+        RR_S["recipe-runner-rs"]
+    end
+
+    CLI_S --> Engine
+    Agents --> RC_S
+    Agents --> RR_S
+    Debate --> RC_S
+    Engine --> LDB_S
+    BinParse --> LDB_S
+    Decompile --> BinParse
+    RC_S --> KG_S
+    SG --> FA
+    FA --> OR
+    OR -->|accepted proposals| Agents
+
+    classDef shared fill:#1a5276,stroke:#2980b9,color:#fff
+    classDef app fill:#922b21,stroke:#c0392b,color:#fff
+    class RC_S,KG_S,LDB_S,RR_S shared
+    class Agents,Debate,Taint,SG,FA,OR,BinParse,Decompile,Ingest,Analyze,Report,Gym_CMD app
+```
+
+### Powderfinger — Cloud Weakness Deployment & Investigation
+
+```mermaid
+graph TB
+    subgraph CLI_P["CLI (22 crates)"]
+        Deploy_CMD["deploy CWE-xxx"]
+        Investigate_CMD["investigate run"]
+        ScanPlan["scan-plan (shift-left)"]
+        Gym_P["gym level / improve"]
+    end
+
+    subgraph Red["🔴 Weakness Deployment"]
+        Terrain["pf-terrain<br/>(CWE → Azure resource plan)"]
+        TFGen["pf-terraform<br/>(HCL generation)"]
+        Deployer["pf-deployer<br/>(Azure via Terraform)"]
+        Validator["pf-validator<br/>(exploit probes)"]
+    end
+
+    subgraph Blue["🔵 Weakness Investigation"]
+        Scanner["pf-investigate<br/>(static scanner, 230+ CWEs,<br/>24 Azure resource domains)"]
+        Workflow["pf-workflow<br/>(7 multiagent patterns)"]
+        InvAgents["pf-agent<br/>(agent runtime, role cards)"]
+        AWS["pf-aws (25 CWEs)"]
+        Runtime["pf-runtime<br/>(activity log threats)"]
+    end
+
+    subgraph Green["🟢 Shift-Left"]
+        Webhook["pf-shift-left<br/>(Event Grid webhook)"]
+        Defender["Microsoft Defender<br/>for Cloud"]
+    end
+
+    subgraph Knowledge["🔗 CWE Knowledge"]
+        CWE["pf-cwe<br/>(959 CWEs, MITRE hierarchy)"]
+        KG_P["agent-kgpacks"]
+    end
+
+    subgraph Gym_Loop["Self-Improvement"]
+        PFGym["pf-gym<br/>(D1–D15 detection levels)"]
+        PFEval["pf-eval<br/>(L1–L12 + OWASP Benchmark)"]
+        PFImprove["pf-improve<br/>(gym-climbing loop)"]
+    end
+
+    subgraph LLM_P["🔗 LLM Layer"]
+        RC_P["RustyClawd"]
+    end
+
+    subgraph Recipes_P["🔗 Recipe Execution"]
+        RR_P["recipe-runner-rs"]
+    end
+
+    CLI_P --> Red
+    CLI_P --> Blue
+    CLI_P --> Green
+    Terrain --> CWE
+    CWE --> KG_P
+    TFGen --> Deployer
+    Terrain --> TFGen
+    Deployer --> Validator
+    InvAgents --> RC_P
+    InvAgents --> RR_P
+    Workflow --> InvAgents
+    Scanner --> CWE
+    Webhook --> Scanner
+    Webhook --> Defender
+    Validator --> PFGym
+    Scanner --> PFGym
+    PFGym --> PFEval
+    PFEval --> PFImprove
+    PFImprove -->|improved prompts| InvAgents
+
+    classDef shared fill:#1a5276,stroke:#2980b9,color:#fff
+    classDef red fill:#922b21,stroke:#c0392b,color:#fff
+    classDef blue fill:#1a5276,stroke:#2471a3,color:#fff
+    classDef green fill:#1e8449,stroke:#27ae60,color:#fff
+    classDef app fill:#6c3483,stroke:#8e44ad,color:#fff
+    class RC_P,KG_P,RR_P shared
+    class Terrain,TFGen,Deployer,Validator red
+    class Scanner,Workflow,InvAgents,AWS,Runtime blue
+    class Webhook,Defender green
+    class CWE,PFGym,PFEval,PFImprove,Deploy_CMD,Investigate_CMD,ScanPlan,Gym_P app
+```
+
+### Shared Components Across Applications
+
+All three applications share these ecosystem building blocks:
+
+| Component | Simard | skwaq | Powderfinger | Role |
+|-----------|--------|-------|--------------|------|
+| **RustyClawd** | ✅ LLM calls for brains + engineers | ✅ 18 analysis agents | ✅ Investigation agents | LLM SDK (streaming, tool calling) |
+| **recipe-runner-rs** | ✅ OODA recipes (progress, merge, disk) | ✅ Investigation pipelines | ✅ Deploy/investigate/score workflows | Structured workflow execution |
+| **agent-kgpacks** | ✅ Domain knowledge grounding | ✅ Vulnerability knowledge | ✅ CWE knowledge graph (959 CWEs) | GraphRAG knowledge packs |
+| **LadybugDB** | ✅ Cognitive memory (6 types) | ✅ Code property graph | — | Embedded graph engine |
+| **Self-improvement gym** | ✅ L1–L12 agent-eval | ✅ 6 industry benchmarks | ✅ D1–D15 detection levels | Benchmark → analyze → improve loop |
+
 ```mermaid
 block-beta
     columns 4
