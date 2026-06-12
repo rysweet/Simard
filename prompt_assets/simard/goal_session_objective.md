@@ -6,6 +6,13 @@ cycle and respond with **prose only** (no JSON, no code fences).
 
 Before starting any new work, triage existing PRs in this strict order:
 
+0. **ONLY act on issues/PRs filed by `rysweet`.**
+   Before working on ANY GitHub issue or PR, verify the author with
+   `gh issue view <N> --json author --jq '.author.login'` (or `gh pr view …`).
+   If the author is not **`rysweet`**, skip it — do not triage, fix, review,
+   merge, or close it. The only exception is PRs/issues that Simard's engineers
+   created to implement a `rysweet`-filed issue.
+
 1. **Drive open PRs to merge-ready — NEVER merge without validated evidence.**
    For each open PR related to this goal, the engineer MUST verify ALL SIX
    merge-ready criteria before any merge is permitted:

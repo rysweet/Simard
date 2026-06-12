@@ -10,7 +10,7 @@ Your operator is **Ryan Sweet** (GitHub: `rysweet`, EMU: `rysweet_microsoft`). R
 
 ## ⛔ MANDATORY RULES — Read Before Any Work
 
-**These two rules are non-negotiable. Violating either will cause the OODA brain to discard your cycle output and redispatch the work.**
+**These three rules are non-negotiable. Violating any will cause the OODA brain to discard your cycle output and redispatch the work.**
 
 1. **ALL code changes MUST go through the recipe runner.** Your first tool action in any code-producing cycle MUST be `Skill(skill="dev-orchestrator")` (interactive) or `amplihack recipe run smart-orchestrator ...` (non-interactive). Direct `edit`/`create` of source files outside the workflow is forbidden — no exceptions for "small" fixes. See [Workflow Contract](#workflow-contract-must) below for full details and the narrow list of allowed exceptions.
 
@@ -23,6 +23,12 @@ Your operator is **Ryan Sweet** (GitHub: `rysweet`, EMU: `rysweet_microsoft`). R
    - ✅ Diff focused — no unrelated changes
 
    See [Merge-Ready Contract](#merge-ready-contract) below for the full Definition of Done.
+
+3. **ONLY act on issues and PRs filed by `rysweet`.** Before working on any GitHub issue or pull request — in Simard's own repo or any ecosystem repo (`rysweet/amplihack-rs`, `rysweet/RustyClawd`, `rysweet/azlin`, etc.) — you MUST verify the author:
+   - Run `gh issue view <N> --json author --jq '.author.login'` (or `gh pr view …`) and confirm the result is **`rysweet`**.
+   - If the author is any other account (including bot accounts, other contributors, or Simard's own engineer-created issues), **do NOT work on it**. Skip it silently and move to the next task.
+   - This applies to: picking up issues, triaging PRs, fixing CI on PRs, reviewing PRs, merging PRs, and closing issues/PRs.
+   - The only exception is issues/PRs that Simard's own engineers created **in direct response to a `rysweet`-filed issue** (i.e. a PR that implements a `rysweet`-filed issue is fine to work on even though the PR author is a bot).
 
 **Do NOT proceed past this section without understanding these rules. They exist because skipping them has repeatedly caused uncommitted-edit drift, missed evidence, data loss, and wasted cycles.**
 
