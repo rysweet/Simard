@@ -158,6 +158,26 @@ fn run_ooda_cycle_inner(
         }
     }
 
+    // --- Backup retention: prune old backups to prevent unbounded growth (#2270) ---
+    {
+        use crate::cognitive_memory::NativeCognitiveMemory;
+        use crate::state_root::simard_state_root;
+        let state_root = simard_state_root();
+        let outcome = NativeCognitiveMemory::prune_old_backups(&state_root, 20);
+        if outcome.removed > 0 {
+            eprintln!(
+                "[simard] OODA cycle: pruned {} old backup(s)",
+                outcome.removed
+            );
+        }
+        if !outcome.failed.is_empty() {
+            eprintln!(
+                "[simard] OODA cycle: {} backup prune failure(s)",
+                outcome.failed.len()
+            );
+        }
+    }
+
     // Snapshot active goal ids before the core OODA phases run.
     // Used at the end of the cycle to detect unexpected goal disappearance
     // before persisting — see corruption guard near persist_board.
@@ -214,15 +234,6 @@ fn run_ooda_cycle_inner(
         "[simard] OODA cycle: Orient complete ({} priorities)",
         priorities.len()
     );
-
-    // --- Memory consolidation: preparation (cross-session recall) ---
-    if let Err(e) = memory_consolidation::preparation_memory_operations(
-        &cycle_objective,
-        &cycle_session_id,
-        &*bridges.memory,
-    ) {
-        eprintln!("[simard] OODA consolidation: preparation failed: {e}");
-    }
 
     // --- Decide ---
     state.current_phase = OodaPhase::Decide;

@@ -273,6 +273,11 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         limit: u32,
         min_confidence: f64,
     ) -> SimardResult<Vec<CognitiveFact>> {
+        tracing::debug!(
+            query_len = query.len(),
+            is_wildcard = (query == "*"),
+            "search_facts: starting query"
+        );
         // Treat `"*"` as "match everything" — `CONTAINS '*'` would search for
         // the literal asterisk character, producing zero results when the
         // caller intended a wildcard export (e.g. `export_memory_snapshot`).
@@ -293,6 +298,7 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
                  ORDER BY f.id DESC LIMIT {limit}"
             ))?
         };
+        tracing::debug!(result_count = rows.len(), "search_facts: query complete");
         Ok(rows
             .iter()
             .map(|row| {

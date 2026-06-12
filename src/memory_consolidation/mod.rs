@@ -80,8 +80,29 @@ pub fn preparation_memory_operations(
     session_id: &SessionId,
     bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<PreparedContext> {
-    // Search for facts related to the objective.
-    let mut relevant_facts = bridge.search_facts(objective, 10, 0.0)?;
+    // Split compound objectives (joined with "; ") into individual fragments
+    // and search each separately. The old code passed the full joined string to
+    // search_facts() which uses Cypher CONTAINS — no fact matches a giant
+    // concatenated string. Issue #2270.
+    let fragments: Vec<&str> = objective
+        .split("; ")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut relevant_facts: Vec<CognitiveFact> = Vec::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for fragment in &fragments {
+        let per_fragment = bridge.search_facts(fragment, 10, 0.0)?;
+        for fact in per_fragment {
+            if seen_ids.insert(fact.node_id.clone()) {
+                relevant_facts.push(fact);
+            }
+        }
+    }
+    // Cap total results at 10 to match the original per-query limit.
+    relevant_facts.truncate(10);
 
     // Always load goal facts so goals are accessible from memory even when
     // the objective text doesn't substring-match "goal-store:record".
