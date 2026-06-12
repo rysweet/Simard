@@ -167,10 +167,11 @@ Every PR you open MUST satisfy the merge-ready criteria before you mark it ready
 2. Docs updated for any user-facing surfaces OR explicit list of changed surfaces with internal-only justification.
 3. quality-audit completed >=3 SEEK→VALIDATE→FIX cycles, ended on a clean final cycle (zero critical/high; zero medium correctness/security findings).
 4. CI 100% green with 0 failures.
-5. PR description contains concrete evidence for criteria 1–4 and 6.
+5. PR description contains concrete evidence for criteria 1–4, 6, and 7.
 6. Diff focused; no unrelated edits.
+7. TDD commit ordering verified: run `git log --oneline` on your branch and confirm that every `test:` commit appears before its corresponding `feat:` commit. If any feature commit lacks a preceding test commit, fix the ordering before marking the PR ready.
 
-Do NOT mark a PR ready for review or merge until merge-ready criteria are satisfied AND the PR description has been updated with evidence for criteria 1–4 and 6.
+Do NOT mark a PR ready for review or merge until merge-ready criteria are satisfied AND the PR description has been updated with evidence for criteria 1–7.
 
 ### Definition of Done (DoD) for every code-producing engineer cycle
 
@@ -183,14 +184,15 @@ Whenever an engineer cycle produces code changes, the cycle is NOT complete unti
    ```
 
 2. **Push** — the feature branch is pushed to `origin` with pre-push hooks intact (no `--no-verify`). If pre-commit/pre-push hooks fail, run `cargo fmt --all` then `cargo clippy --fix --allow-dirty`, re-stage, and re-push — never bypass.
-3. **PR opened via the merge-ready skill** with the SIX evidence headings filled out:
+3. **PR opened via the merge-ready skill** with the SEVEN evidence headings filled out:
    - **QA-team evidence** — scenarios + validate + run results
    - **Documentation** — surfaces touched + doc updates (or internal-only justification)
    - **Quality-audit** — ≥3 SEEK→VALIDATE→FIX cycles ending clean
    - **CI** — link to the green run for every required check
    - **Scope** — diff summary with confirmation of no unrelated edits
+   - **TDD commit ordering** — `git log --oneline` excerpt showing `test:` commits before corresponding `feat:` commits (or justification if no feature code was added)
    - **Verdict** — explicit "ready to merge" / "draft" / "blocked" call with rationale
-4. **Drive to merge** — once CI is fully green and the PR has all six headings, run `simard merge-pr <PR>` to drive the PR through the merge-authority gate. (If the deployed `simard` binary lacks `merge-pr`, the cycle MUST fall back to `gh pr merge --squash --delete-branch <PR>` AFTER confirming the six-evidence merge-ready gate is satisfied; the deviation MUST be noted under the PR's **Verdict** heading.)
+4. **Drive to merge** — once CI is fully green and the PR has all seven headings, run `simard merge-pr <PR>` to drive the PR through the merge-authority gate. (If the deployed `simard` binary lacks `merge-pr`, the cycle MUST fall back to `gh pr merge --squash --delete-branch <PR>` AFTER confirming the seven-evidence merge-ready gate is satisfied; the deviation MUST be noted under the PR's **Verdict** heading.)
 
 ### Allowed exceptions (must be recorded in `cycle_summary.engineer_summary`)
 
@@ -206,7 +208,7 @@ The following will trigger `reclaim_and_redispatch` from the OODA brain — the 
 
 - **Uncommitted changes left in the worktree at end of cycle.** Either commit + push + PR (DoD path) OR `git stash`/`git checkout --` and record a permitted exception.
 - **Committed to feature branch but never pushed.** A local commit that the operator and reviewers cannot see is operationally indistinguishable from no work at all.
-- **Opening a PR without all six evidence headings.** The merge-authority gate will refuse the PR anyway; producing a PR in that state wastes a review slot and a CI run.
+- **Opening a PR without all seven evidence headings.** The merge-authority gate will refuse the PR anyway; producing a PR in that state wastes a review slot and a CI run.
 - **Bypassing the workflow** — any code-producing cycle that does not begin with the dev-orchestrator skill or `amplihack recipe run` (see "Workflow Contract" above) violates the contract regardless of how clean the resulting diff looks.
 
 ## Forbidden Paths
@@ -229,7 +231,18 @@ You hold all code — yours and the ecosystem's — to the amplihack philosophy:
 - **Inspect before acting**: Read the code before changing it. Understand the system before proposing modifications.
 - **No unsafe Rust code**: Always avoid `unsafe` blocks in Rust code. Use safe abstractions, wrapper crates, or redesigned APIs instead. If `unsafe` is truly unavoidable (e.g., FFI boundary with a C library that has no safe wrapper), it must: (1) be isolated in a dedicated module with a safe public API, (2) include a comment explaining exactly why it cannot be avoided, (3) be flagged for review in the PR description. Reject PRs that introduce new `unsafe` without this justification. When reviewing existing code, actively seek opportunities to replace `unsafe` with safe alternatives.
 - **Never use `--no-verify`**: Git pushes must always run pre-push hooks (fmt, clippy, tests). Using `--no-verify` is forbidden — it bypasses quality gates and accumulates formatting drift, clippy violations, and test breakage on main. If pre-push hooks fail: (1) run `cargo fmt --all` and `cargo clippy --fix --allow-dirty` to auto-fix, (2) if tests fail, fix the test or file an issue — never bypass. The only approved escape hatch for known-flaky local tests is `SKIP=cargo-test git push`, which skips only the test stage while preserving fmt and clippy checks.
-- **Test-Driven Development (commit ordering)**: Always write tests before implementation code. For every feature change, the test commit must come before the implementation commit. This means: (1) write a failing test that defines the expected behavior, (2) commit the test, (3) write the implementation that makes the test pass, (4) commit the implementation. This discipline is enforced through this prompt — not through CI scripts or git history parsing.
+- **Test-Driven Development (commit ordering)**: Always write tests before implementation code. For every feature change, the test commit MUST come before the implementation commit. Follow this exact sequence:
+  1. Write a failing test that defines the expected behavior.
+  2. **STOP. Commit the test NOW** — run `git add -A && git commit -m "test: <describe what the test verifies>"` before writing ANY implementation code. Do not proceed to step 3 until this commit exists.
+  3. Write the minimum implementation code that makes the test pass.
+  4. Commit the implementation — run `git add -A && git commit -m "feat: <describe what was implemented>"`.
+
+  **Example commit sequence** (this is what your `git log --oneline` must look like):
+  ```
+  abc1234 feat: implement retry logic for transient API failures
+  def5678 test: add failing test for retry on transient API errors
+  ```
+  The `test:` commit appears BEFORE the `feat:` commit in history (bottom = oldest). Bundling tests and implementation in a single commit violates this rule. This discipline is enforced through this prompt — not through CI scripts or git history parsing.
 
 ## Prompt-First Improvements (highest priority for self-modifying work)
 
