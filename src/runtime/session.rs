@@ -12,11 +12,42 @@ use crate::session::{SessionPhase, SessionRecord};
 use super::RuntimeKernel;
 use super::types::{RuntimeState, SessionOutcome};
 
+/// Buffers memory and evidence writes for batched persistence after reflection
+/// completes (spec line 581, issue #2093). Pre-persistence phases collect
+/// records here instead of writing them to the stores immediately. All records
+/// are flushed during the Persistence phase.
+struct PendingWrites {
+    memory_records: Vec<MemoryRecord>,
+    evidence_records: Vec<EvidenceRecord>,
+}
+
+impl PendingWrites {
+    fn new() -> Self {
+        Self {
+            memory_records: Vec::new(),
+            evidence_records: Vec::new(),
+        }
+    }
+
+    fn add_memory(&mut self, record: MemoryRecord) {
+        self.memory_records.push(record);
+    }
+
+    fn add_evidence(&mut self, record: EvidenceRecord) {
+        self.evidence_records.push(record);
+    }
+}
+
 impl RuntimeKernel {
     pub(super) fn execute_session(&mut self, objective: String) -> SimardResult<SessionOutcome> {
         self.transition(RuntimeState::Active)?;
 
         let mut session = self.new_session(objective);
+
+        // Issue #2093: buffer pre-persistence writes so they are flushed
+        // atomically during the Persistence phase rather than written
+        // incrementally during Preparation/Execution.
+        let mut pending = PendingWrites::new();
 
         // --- Memory consolidation: intake at session start ---
         if let Some(bridge) = &self.cognitive_bridge {
@@ -45,13 +76,13 @@ impl RuntimeKernel {
             }
         }
 
-        self.persist_session_scratch(&mut session)?;
+        self.persist_session_scratch(&mut session, &mut pending)?;
         let outcome = self.run_selected_base_type_session(&mut session)?;
-        self.record_execution_evidence(&mut session, &outcome)?;
+        self.record_execution_evidence(&mut session, &outcome, &mut pending)?;
         // Build context once and reuse for reflection + persistence phases.
         let context = self.agent_program_context(&session);
         let reflection = self.build_reflection(&mut session, &outcome, &context)?;
-        self.persist_session_summary(&mut session, &outcome, &context)?;
+        self.persist_session_summary(&mut session, &outcome, &context, &mut pending)?;
 
         // --- Memory consolidation: persistence at session end ---
 
@@ -93,18 +124,23 @@ impl RuntimeKernel {
         session
     }
 
-    fn persist_session_scratch(&mut self, session: &mut SessionRecord) -> SimardResult<()> {
+    fn persist_session_scratch(
+        &mut self,
+        session: &mut SessionRecord,
+        pending: &mut PendingWrites,
+    ) -> SimardResult<()> {
         session.advance(SessionPhase::Preparation)?;
 
         let scratch_key = format!("{}-scratch", session.id);
-        self.ports.memory_store.put(MemoryRecord {
+        // Issue #2093: buffer the write instead of persisting immediately.
+        pending.add_memory(MemoryRecord {
             key: scratch_key.clone(),
             scope: MemoryScope::SessionScratch,
             value: objective_metadata(&session.objective),
             session_id: session.id.clone(),
             recorded_in: SessionPhase::Preparation,
             created_at: None,
-        })?;
+        });
         session.attach_memory(scratch_key);
         self.remember_session(session);
 
@@ -151,19 +187,21 @@ impl RuntimeKernel {
         &mut self,
         session: &mut SessionRecord,
         outcome: &BaseTypeOutcome,
+        pending: &mut PendingWrites,
     ) -> SimardResult<()> {
         session.advance(SessionPhase::Execution)?;
 
         let evidence_source = EvidenceSource::BaseType(self.request.selected_base_type.clone());
         for (index, detail) in outcome.evidence.iter().enumerate() {
             let evidence_id = format!("{}-evidence-{}", session.id, index + 1);
-            self.ports.evidence_store.record(EvidenceRecord {
+            // Issue #2093: buffer evidence instead of persisting immediately.
+            pending.add_evidence(EvidenceRecord {
                 id: evidence_id.clone(),
                 session_id: session.id.clone(),
                 phase: SessionPhase::Execution,
                 detail: detail.clone(),
                 source: evidence_source.clone(),
-            })?;
+            });
             session.attach_evidence(evidence_id);
         }
         self.remember_session(session);
@@ -194,9 +232,19 @@ impl RuntimeKernel {
         session: &mut SessionRecord,
         outcome: &BaseTypeOutcome,
         context: &AgentProgramContext,
+        pending: &mut PendingWrites,
     ) -> SimardResult<()> {
         self.transition(RuntimeState::Persisting)?;
         session.advance(SessionPhase::Persistence)?;
+
+        // Issue #2093: flush all buffered writes from pre-persistence phases
+        // in a single batch now that reflection has completed.
+        for record in pending.memory_records.drain(..) {
+            self.ports.memory_store.put(record)?;
+        }
+        for record in pending.evidence_records.drain(..) {
+            self.ports.evidence_store.record(record)?;
+        }
 
         let summary_key = format!("{}-summary", session.id);
         self.ports.memory_store.put(MemoryRecord {
@@ -370,5 +418,96 @@ impl RuntimeKernel {
 impl ReflectiveRuntime for RuntimeKernel {
     fn snapshot(&self) -> SimardResult<ReflectionSnapshot> {
         self.snapshot_for(self.last_session.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests_pending_writes {
+    use super::PendingWrites;
+    use crate::evidence::{EvidenceRecord, EvidenceSource};
+    use crate::memory::{MemoryRecord, MemoryScope};
+    use crate::session::SessionPhase;
+
+    fn make_memory_record(key: &str) -> MemoryRecord {
+        MemoryRecord {
+            key: key.to_string(),
+            scope: MemoryScope::SessionScratch,
+            value: "test-value".to_string(),
+            session_id: crate::session::SessionId::parse(
+                "session-00000000-0000-0000-0000-000000000001",
+            )
+            .unwrap(),
+            recorded_in: SessionPhase::Preparation,
+            created_at: None,
+        }
+    }
+
+    fn make_evidence_record(id: &str) -> EvidenceRecord {
+        EvidenceRecord {
+            id: id.to_string(),
+            session_id: crate::session::SessionId::parse(
+                "session-00000000-0000-0000-0000-000000000001",
+            )
+            .unwrap(),
+            phase: SessionPhase::Execution,
+            detail: "test-evidence".to_string(),
+            source: EvidenceSource::Runtime,
+        }
+    }
+
+    #[test]
+    fn new_pending_writes_is_empty() {
+        let pending = PendingWrites::new();
+        assert!(pending.memory_records.is_empty());
+        assert!(pending.evidence_records.is_empty());
+    }
+
+    #[test]
+    fn add_memory_accumulates_records() {
+        let mut pending = PendingWrites::new();
+        pending.add_memory(make_memory_record("key-1"));
+        pending.add_memory(make_memory_record("key-2"));
+        assert_eq!(pending.memory_records.len(), 2);
+        assert_eq!(pending.memory_records[0].key, "key-1");
+        assert_eq!(pending.memory_records[1].key, "key-2");
+    }
+
+    #[test]
+    fn add_evidence_accumulates_records() {
+        let mut pending = PendingWrites::new();
+        pending.add_evidence(make_evidence_record("ev-1"));
+        pending.add_evidence(make_evidence_record("ev-2"));
+        pending.add_evidence(make_evidence_record("ev-3"));
+        assert_eq!(pending.evidence_records.len(), 3);
+        assert_eq!(pending.evidence_records[0].id, "ev-1");
+    }
+
+    #[test]
+    fn drain_clears_pending_records() {
+        let mut pending = PendingWrites::new();
+        pending.add_memory(make_memory_record("key-1"));
+        pending.add_evidence(make_evidence_record("ev-1"));
+
+        let mem: Vec<_> = pending.memory_records.drain(..).collect();
+        let ev: Vec<_> = pending.evidence_records.drain(..).collect();
+
+        assert_eq!(mem.len(), 1);
+        assert_eq!(ev.len(), 1);
+        assert!(pending.memory_records.is_empty());
+        assert!(pending.evidence_records.is_empty());
+    }
+
+    #[test]
+    fn mixed_records_maintain_insertion_order() {
+        let mut pending = PendingWrites::new();
+        pending.add_memory(make_memory_record("mem-a"));
+        pending.add_evidence(make_evidence_record("ev-a"));
+        pending.add_memory(make_memory_record("mem-b"));
+        pending.add_evidence(make_evidence_record("ev-b"));
+
+        assert_eq!(pending.memory_records[0].key, "mem-a");
+        assert_eq!(pending.memory_records[1].key, "mem-b");
+        assert_eq!(pending.evidence_records[0].id, "ev-a");
+        assert_eq!(pending.evidence_records[1].id, "ev-b");
     }
 }

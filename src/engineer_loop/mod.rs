@@ -27,6 +27,8 @@ mod tests_types_extra;
 mod tests_types_inline;
 
 #[cfg(test)]
+mod tests_checkpoint;
+#[cfg(test)]
 mod tests_meeting_decisions;
 
 use std::fs;
@@ -47,8 +49,8 @@ use execution::{
 // Re-export all public items so `crate::engineer_loop::X` still works.
 pub use types::{
     AnalyzedAction, EngineerActionKind, EngineerLoopRun, ExecutedEngineerAction, ExecutionPlan,
-    PhaseOutcome, PhaseTrace, RepoInspection, SelectedEngineerAction, SessionErrorReflection,
-    SessionSummary, VerificationReport, analyze_objective,
+    PhaseOutcome, PhaseTrace, RepoInspection, SelectedEngineerAction, SessionCheckpoint,
+    SessionErrorReflection, SessionSummary, VerificationReport, analyze_objective,
 };
 
 // Phase-entry-point re-exports for the recipe-driven engineer loop (Phase 2 rebuild).
@@ -180,6 +182,25 @@ pub fn run_local_engineer_loop(
             },
         );
         return Err(err);
+    }
+
+    // Checkpoint after Intake (issue #2095): persist session state so a
+    // retry can skip workspace inspection if the session fails later.
+    let checkpoint = SessionCheckpoint {
+        session_id: session_id_str.clone(),
+        objective: objective.to_string(),
+        completed_phase: SessionPhase::Intake,
+        inspection: Some(inspection.clone()),
+        terminal_bridge_context: None,
+        execution_plan: None,
+        action: None,
+        verification: None,
+        session_summary: None,
+        phase_traces: phase_traces.clone(),
+        session_record: session.clone(),
+    };
+    if let Err(e) = checkpoint.save(&state_root) {
+        tracing::warn!(error = %e, "engineer loop: failed to save intake checkpoint");
     }
 
     // --- SessionPhase::Preparation ---
@@ -315,6 +336,24 @@ pub fn run_local_engineer_loop(
         }
     }
 
+    // Checkpoint after Preparation (issue #2095).
+    let checkpoint = SessionCheckpoint {
+        session_id: session_id_str.clone(),
+        objective: objective.to_string(),
+        completed_phase: SessionPhase::Preparation,
+        inspection: Some(inspection.clone()),
+        terminal_bridge_context: terminal_bridge_context.clone(),
+        execution_plan: None,
+        action: None,
+        verification: None,
+        session_summary: None,
+        phase_traces: phase_traces.clone(),
+        session_record: session.clone(),
+    };
+    if let Err(e) = checkpoint.save(&state_root) {
+        tracing::warn!(error = %e, "engineer loop: failed to save preparation checkpoint");
+    }
+
     // --- SessionPhase::Planning ---
     // Produce a bounded plan sized to the task (spec step 3).
     session.advance(SessionPhase::Planning)?;
@@ -335,6 +374,24 @@ pub fn run_local_engineer_loop(
         duration: phase_start.elapsed(),
         outcome: PhaseOutcome::Success,
     });
+
+    // Checkpoint after Planning (issue #2095).
+    let checkpoint = SessionCheckpoint {
+        session_id: session_id_str.clone(),
+        objective: objective.to_string(),
+        completed_phase: SessionPhase::Planning,
+        inspection: Some(inspection.clone()),
+        terminal_bridge_context: terminal_bridge_context.clone(),
+        execution_plan: Some(execution_plan.clone()),
+        action: None,
+        verification: None,
+        session_summary: None,
+        phase_traces: phase_traces.clone(),
+        session_record: session.clone(),
+    };
+    if let Err(e) = checkpoint.save(&state_root) {
+        tracing::warn!(error = %e, "engineer loop: failed to save planning checkpoint");
+    }
 
     // --- SessionPhase::Execution ---
     // Perform shell actions, file changes, and tool calls while recording evidence.
@@ -401,6 +458,25 @@ pub fn run_local_engineer_loop(
     };
 
     let verification = verify_agent_spawn_artifacts(&inspection, objective);
+
+    // Checkpoint after Execution (issue #2095): the most critical checkpoint
+    // since agent work is expensive and non-idempotent.
+    let checkpoint = SessionCheckpoint {
+        session_id: session_id_str.clone(),
+        objective: objective.to_string(),
+        completed_phase: SessionPhase::Execution,
+        inspection: Some(inspection.clone()),
+        terminal_bridge_context: terminal_bridge_context.clone(),
+        execution_plan: Some(execution_plan.clone()),
+        action: Some(action.clone()),
+        verification: Some(verification.clone()),
+        session_summary: None,
+        phase_traces: phase_traces.clone(),
+        session_record: session.clone(),
+    };
+    if let Err(e) = checkpoint.save(&state_root) {
+        tracing::warn!(error = %e, "engineer loop: failed to save execution checkpoint");
+    }
 
     // --- SessionPhase::Reflection ---
     // Compare results against the objective and capture what succeeded/failed.
@@ -499,6 +575,9 @@ pub fn run_local_engineer_loop(
     }
 
     // Session has been advanced to Complete by persist_artifacts_with_session.
+
+    // Clear the checkpoint on successful completion (issue #2095).
+    SessionCheckpoint::clear(&state_root);
 
     Ok(EngineerLoopRun {
         state_root,

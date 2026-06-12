@@ -292,3 +292,79 @@ pub struct SessionErrorReflection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
 }
+
+/// Checkpoint of engineer loop state at a phase boundary (issue #2095).
+///
+/// Persisted to `<state_root>/session_checkpoint.json` after each major phase
+/// so that a failed session can resume from the last successful phase rather
+/// than restarting from scratch. Per spec line 579: "Session state must survive
+/// partial failure well enough to support recovery or retry."
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SessionCheckpoint {
+    /// Session identifier for correlation.
+    pub session_id: String,
+    /// The original objective.
+    pub objective: String,
+    /// The last phase that completed successfully.
+    pub completed_phase: SessionPhase,
+    /// Workspace inspection captured during Intake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection: Option<RepoInspection>,
+    /// Terminal bridge context loaded during Preparation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_bridge_context: Option<TerminalBridgeContext>,
+    /// Execution plan formed during Planning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_plan: Option<ExecutionPlan>,
+    /// Executed action from the Execution phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<ExecutedEngineerAction>,
+    /// Verification report from post-execution checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<VerificationReport>,
+    /// Session summary from the Summarize phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_summary: Option<SessionSummary>,
+    /// Phase traces accumulated so far.
+    pub phase_traces: Vec<PhaseTrace>,
+    /// The session record tracking phase progression.
+    pub session_record: SessionRecord,
+}
+
+const CHECKPOINT_FILENAME: &str = "session_checkpoint.json";
+
+impl SessionCheckpoint {
+    /// Persist this checkpoint to `<state_root>/session_checkpoint.json`.
+    pub fn save(&self, state_root: &std::path::Path) -> crate::error::SimardResult<()> {
+        let _ = std::fs::create_dir_all(state_root);
+        let path = state_root.join(CHECKPOINT_FILENAME);
+        let json = serde_json::to_string_pretty(self).map_err(|e| {
+            crate::error::SimardError::PersistentStoreIo {
+                store: "session-checkpoint".to_string(),
+                action: "serialize".to_string(),
+                path: path.clone(),
+                reason: e.to_string(),
+            }
+        })?;
+        std::fs::write(&path, json).map_err(|e| crate::error::SimardError::PersistentStoreIo {
+            store: "session-checkpoint".to_string(),
+            action: "write".to_string(),
+            path: path.clone(),
+            reason: e.to_string(),
+        })?;
+        Ok(())
+    }
+
+    /// Load a checkpoint from `<state_root>/session_checkpoint.json`, if one exists.
+    pub fn load(state_root: &std::path::Path) -> Option<Self> {
+        let path = state_root.join(CHECKPOINT_FILENAME);
+        let content = std::fs::read_to_string(&path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    /// Remove the checkpoint file after a session completes successfully.
+    pub fn clear(state_root: &std::path::Path) {
+        let path = state_root.join(CHECKPOINT_FILENAME);
+        let _ = std::fs::remove_file(path);
+    }
+}
