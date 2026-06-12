@@ -129,13 +129,17 @@ graph TD
     SIMARD -.->|"provisions VMs via"| AZLIN
     SIMARD -.->|"benchmarks via"| EVAL
     SIMARD -.->|"validates with"| GADUGI
+    SIMARD -.->|"domain knowledge via"| KGPACKS
     AMP_RS -.->|"uses for defense"| XPIA
 
     %% Security application dependencies
     SKWAQ -->|"rustyclawd-core<br/>rustyclawd-tools"| RUSTY
     POWDER -->|"rustyclawd-core<br/>rustyclawd-tools"| RUSTY
     SKWAQ -.->|"code property graph"| MEMORY
+    SKWAQ -.->|"vuln knowledge via"| KGPACKS
+    SKWAQ -.->|"runs recipes via"| RECIPE
     POWDER -.->|"CWE knowledge graph"| KGPACKS
+    POWDER -.->|"runs recipes via"| RECIPE
 
     classDef rust fill:#deb887,stroke:#8b4513,color:#000
     classDef python fill:#306998,stroke:#FFD43B,color:#fff
@@ -235,7 +239,9 @@ The recipe runner executes multi-step YAML-defined workflows (e.g.,
 `smart-orchestrator`, `default-workflow`, `investigation-workflow`). Simard
 invokes `amplihack recipe run` to drive structured task execution. The runner
 enforces step ordering in compiled Rust code — models cannot skip or reinterpret
-steps.
+steps. Skwaq and Powderfinger also use the recipe runner for their own
+multi-step workflows (investigation pipelines, deploy-investigate-score loops),
+making it a shared execution backbone across the ecosystem.
 
 ### Simard ↔ azlin
 
@@ -256,6 +262,14 @@ Gadugi provides outside-in end-to-end testing. Simard's quality standards
 require qa-team scenarios written and validated with `gadugi-test validate` /
 `gadugi-test run` before PRs are merge-ready. The framework tests CLI, TUI,
 web, and Electron interfaces using autonomous AI agents.
+
+### Simard ↔ agent-kgpacks
+
+Simard uses agent-kgpacks for domain-specific knowledge grounding. Knowledge
+packs provide structured GraphRAG context — Simard can install packs covering
+its own codebase, the amplihack framework internals, or external domain
+knowledge to enrich its orient/decide phases with grounded facts rather than
+relying solely on LLM training data.
 
 ### amplihack-rs ↔ amplihack-xpia-defender
 
@@ -297,6 +311,10 @@ improvement.
 **Integration with the ecosystem:**
 - **RustyClawd** — all 18 agents use `rustyclawd-core` + `rustyclawd-tools`
 - **LadybugDB** — shared graph engine with `amplihack-memory-lib`
+- **agent-kgpacks** — vulnerability knowledge packs provide domain-specific
+  grounding (CWE taxonomies, exploit patterns, hardening guidance)
+- **amplihack-recipe-runner** — skwaq uses YAML recipes for structured
+  multi-step investigation workflows (ingest → analyze → debate → report)
 - **Self-improvement pattern** — mirrors Simard's gym → analyze failures →
   propose improvements → overfitting review loop
 - **Simard potential** — Simard could orchestrate skwaq scans as a security
@@ -313,6 +331,8 @@ share a 959-CWE knowledge graph.
 **Integration with the ecosystem:**
 - **RustyClawd** — investigation agents use `rustyclawd-core` for LLM reasoning
 - **agent-kgpacks** — CWE knowledge graph is a domain-specific knowledge pack
+- **amplihack-recipe-runner** — Powderfinger uses YAML recipes for structured
+  deploy → investigate → score workflows
 - **gadugi-agentic-test** — Powderfinger's deploy → investigate → score loop
   parallels gadugi's outside-in testing methodology
 - **Simard potential** — Simard could run Powderfinger's `scan-plan` against
