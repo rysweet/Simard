@@ -568,3 +568,362 @@ fn round_trip_execution_memory_recall() {
         stats.episodic_count
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #2270 Fix 1: preparation_memory_operations must split compound
+// objectives on "; " and search each fragment independently, then dedup
+// results by node_id and cap total at 10.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Build a bridge that captures search_facts query strings and returns
+/// per-fragment results with controllable node_ids for dedup testing.
+fn compound_objective_bridge(
+    captured_queries: Arc<std::sync::Mutex<Vec<String>>>,
+    facts_per_query: std::collections::HashMap<String, Vec<serde_json::Value>>,
+) -> CognitiveMemoryBridge {
+    let transport =
+        InMemoryBridgeTransport::new("compound-obj", move |method, params| match method {
+            "memory.search_facts" => {
+                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                captured_queries.lock().unwrap().push(query.to_string());
+                let facts = facts_per_query.get(query).cloned().unwrap_or_default();
+                Ok(json!({ "facts": facts }))
+            }
+            "memory.check_triggers" => Ok(json!({"prospectives": []})),
+            "memory.recall_procedure" => Ok(json!({"procedures": []})),
+            "memory.push_working" => Ok(json!({"id": "wrk_1"})),
+            _ => Err(crate::bridge::BridgeErrorPayload {
+                code: -32601,
+                message: format!("unknown: {method}"),
+            }),
+        });
+    CognitiveMemoryBridge::new(Box::new(transport))
+}
+
+#[test]
+fn preparation_splits_compound_objective_into_separate_searches() {
+    let queries = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let bridge = compound_objective_bridge(queries.clone(), std::collections::HashMap::new());
+
+    let _ctx = preparation_memory_operations(
+        "fix auth bug; deploy to staging; update docs",
+        &test_session_id(),
+        &bridge,
+    )
+    .unwrap();
+
+    let captured = queries.lock().unwrap();
+    // The objective has 3 fragments separated by "; ".
+    // After Fix 1: search_facts must be called once per fragment (3 times)
+    // PLUS once for goal-store:record = 4 total search_facts calls.
+    let objective_queries: Vec<&String> = captured
+        .iter()
+        .filter(|q| *q != "goal-store:record")
+        .collect();
+    assert_eq!(
+        objective_queries.len(),
+        3,
+        "compound objective with 3 fragments must produce 3 search_facts calls, got {}: {:?}",
+        objective_queries.len(),
+        objective_queries
+    );
+    assert!(
+        objective_queries.contains(&&"fix auth bug".to_string()),
+        "must search for first fragment"
+    );
+    assert!(
+        objective_queries.contains(&&"deploy to staging".to_string()),
+        "must search for second fragment"
+    );
+    assert!(
+        objective_queries.contains(&&"update docs".to_string()),
+        "must search for third fragment"
+    );
+}
+
+#[test]
+fn preparation_single_fragment_objective_produces_one_search() {
+    let queries = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let bridge = compound_objective_bridge(queries.clone(), std::collections::HashMap::new());
+
+    let _ctx = preparation_memory_operations("fix auth bug", &test_session_id(), &bridge).unwrap();
+
+    let captured = queries.lock().unwrap();
+    let objective_queries: Vec<&String> = captured
+        .iter()
+        .filter(|q| *q != "goal-store:record")
+        .collect();
+    // Single fragment (no "; " delimiter) → exactly 1 search_facts call.
+    assert_eq!(
+        objective_queries.len(),
+        1,
+        "single-fragment objective must produce exactly 1 search_facts call, got {}",
+        objective_queries.len()
+    );
+    assert_eq!(objective_queries[0], "fix auth bug");
+}
+
+#[test]
+fn preparation_deduplicates_split_results_by_node_id() {
+    let queries = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut facts_map = std::collections::HashMap::new();
+
+    // Fragment "goal A" returns facts n1 and n2.
+    facts_map.insert(
+        "goal A".to_string(),
+        vec![
+            json!({"node_id": "n1", "concept": "c1", "content": "fact1", "confidence": 0.9, "source_id": "src", "tags": []}),
+            json!({"node_id": "n2", "concept": "c2", "content": "fact2", "confidence": 0.8, "source_id": "src", "tags": []}),
+        ],
+    );
+    // Fragment "goal B" returns facts n2 (duplicate!) and n3.
+    facts_map.insert(
+        "goal B".to_string(),
+        vec![
+            json!({"node_id": "n2", "concept": "c2", "content": "fact2", "confidence": 0.8, "source_id": "src", "tags": []}),
+            json!({"node_id": "n3", "concept": "c3", "content": "fact3", "confidence": 0.7, "source_id": "src", "tags": []}),
+        ],
+    );
+
+    let bridge = compound_objective_bridge(queries, facts_map);
+    let ctx = preparation_memory_operations("goal A; goal B", &test_session_id(), &bridge).unwrap();
+
+    // n1, n2, n3 — n2 appears in both fragments but should only appear once.
+    let node_ids: Vec<&str> = ctx
+        .relevant_facts
+        .iter()
+        .map(|f| f.node_id.as_str())
+        .collect();
+
+    let unique: std::collections::HashSet<&str> = node_ids.iter().copied().collect();
+    assert_eq!(
+        node_ids.len(),
+        unique.len(),
+        "relevant_facts must not contain duplicate node_ids; found duplicates in {:?}",
+        node_ids
+    );
+    assert_eq!(
+        unique.len(),
+        3,
+        "expected 3 unique facts (n1, n2, n3), got {}",
+        unique.len()
+    );
+}
+
+#[test]
+fn preparation_caps_split_results_at_ten() {
+    let queries = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut facts_map = std::collections::HashMap::new();
+
+    // Fragment "goal A" returns 8 unique facts.
+    let mut goal_a_facts = Vec::new();
+    for i in 0..8 {
+        goal_a_facts.push(json!({
+            "node_id": format!("a{i}"), "concept": format!("ca{i}"),
+            "content": format!("fact a{i}"), "confidence": 0.9,
+            "source_id": "src", "tags": []
+        }));
+    }
+    facts_map.insert("goal A".to_string(), goal_a_facts);
+
+    // Fragment "goal B" returns 6 unique facts (no overlap with A).
+    let mut goal_b_facts = Vec::new();
+    for i in 0..6 {
+        goal_b_facts.push(json!({
+            "node_id": format!("b{i}"), "concept": format!("cb{i}"),
+            "content": format!("fact b{i}"), "confidence": 0.8,
+            "source_id": "src", "tags": []
+        }));
+    }
+    facts_map.insert("goal B".to_string(), goal_b_facts);
+
+    let bridge = compound_objective_bridge(queries, facts_map);
+    let ctx = preparation_memory_operations("goal A; goal B", &test_session_id(), &bridge).unwrap();
+
+    // 8 + 6 = 14 unique facts, but total must be capped at 10.
+    assert!(
+        ctx.relevant_facts.len() <= 10,
+        "relevant_facts must be capped at 10, got {}",
+        ctx.relevant_facts.len()
+    );
+}
+
+#[test]
+fn preparation_skips_empty_fragments_from_splitting() {
+    let queries = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let bridge = compound_objective_bridge(queries.clone(), std::collections::HashMap::new());
+
+    // Trailing "; " produces an empty fragment that must be skipped.
+    let _ctx =
+        preparation_memory_operations("goal A; ; goal B", &test_session_id(), &bridge).unwrap();
+
+    let captured = queries.lock().unwrap();
+    let objective_queries: Vec<&String> = captured
+        .iter()
+        .filter(|q| *q != "goal-store:record")
+        .collect();
+
+    // Only non-empty fragments should be searched.
+    for q in &objective_queries {
+        assert!(
+            !q.trim().is_empty(),
+            "must not search with empty/whitespace-only query, found: {:?}",
+            q
+        );
+    }
+    assert_eq!(
+        objective_queries.len(),
+        2,
+        "expected 2 non-empty fragments (goal A, goal B), got {}: {:?}",
+        objective_queries.len(),
+        objective_queries
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #2270 Fix 1 integration: verify with NativeCognitiveMemory that
+// compound objectives actually find facts that single-goal queries match.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn preparation_compound_objective_finds_per_goal_facts_native() {
+    use crate::cognitive_memory::NativeCognitiveMemory;
+
+    let mem = NativeCognitiveMemory::in_memory().expect("in-memory DB");
+    let sid = test_session_id();
+
+    // Store facts that match individual goal fragments but NOT the joined string.
+    mem.store_fact("auth", "JWT tokens expire after 1 hour", 0.9, &[], "src")
+        .unwrap();
+    mem.store_fact(
+        "deploy",
+        "Staging uses blue-green deploys",
+        0.85,
+        &[],
+        "src",
+    )
+    .unwrap();
+
+    // A compound objective "auth; deploy" — the joined string "auth; deploy" would
+    // NOT match via CONTAINS because no fact contains that exact substring.
+    // After Fix 1: splitting on "; " must find both facts.
+    let ctx = preparation_memory_operations("auth; deploy", &sid, &mem).unwrap();
+
+    let concepts: Vec<&str> = ctx
+        .relevant_facts
+        .iter()
+        .map(|f| f.concept.as_str())
+        .collect();
+
+    assert!(
+        concepts.contains(&"auth"),
+        "compound search must find 'auth' fact; got {:?}",
+        concepts
+    );
+    assert!(
+        concepts.contains(&"deploy"),
+        "compound search must find 'deploy' fact; got {:?}",
+        concepts
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #2270 Fix 3: prune_old_backups integration test — verify the
+// function from cognitive_memory::backup keeps the specified number and
+// deletes the rest, including paired WAL files.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn prune_old_backups_keeps_newest_and_removes_oldest() {
+    use crate::cognitive_memory::NativeCognitiveMemory;
+
+    let tmp_dir = tempfile::tempdir().expect("create tmp dir");
+    let state_root = tmp_dir.path();
+    let backup_dir = state_root.join("backups");
+    std::fs::create_dir_all(&backup_dir).expect("create backups dir");
+
+    // Create 25 fake backup files with epoch-based names.
+    for epoch in 1_000_000..1_000_025u64 {
+        let main_path = backup_dir.join(format!("cognitive_memory.ladybug.{epoch}"));
+        std::fs::write(&main_path, b"db-data").expect("write backup");
+        // Create a paired WAL file for some.
+        if epoch % 3 == 0 {
+            let wal_path = backup_dir.join(format!("cognitive_memory.ladybug.wal.{epoch}"));
+            std::fs::write(&wal_path, b"wal-data").expect("write wal");
+        }
+    }
+
+    let outcome = NativeCognitiveMemory::prune_old_backups(state_root, 20);
+
+    // 25 - 20 = 5 main backups should be removed. Some have paired WALs.
+    assert!(
+        outcome.removed > 0,
+        "prune_old_backups must remove some files when count exceeds keep"
+    );
+    assert!(
+        outcome.failed.is_empty(),
+        "expected no failures in prune, got {:?}",
+        outcome
+            .failed
+            .iter()
+            .map(|(p, e)| format!("{}: {e}", p.display()))
+            .collect::<Vec<_>>()
+    );
+
+    // Count remaining main backup files.
+    let remaining_main: Vec<_> = std::fs::read_dir(&backup_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy();
+            s.starts_with("cognitive_memory.ladybug.") && !s.contains("wal")
+        })
+        .collect();
+
+    assert_eq!(
+        remaining_main.len(),
+        20,
+        "must keep exactly 20 most recent backups, got {}",
+        remaining_main.len()
+    );
+}
+
+#[test]
+fn prune_old_backups_handles_missing_backup_dir() {
+    let tmp_dir = tempfile::tempdir().expect("create tmp dir");
+    // state_root exists but backups/ subdirectory does not.
+    let outcome =
+        crate::cognitive_memory::NativeCognitiveMemory::prune_old_backups(tmp_dir.path(), 20);
+    assert_eq!(outcome.removed, 0);
+    assert!(outcome.failed.is_empty());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #2270 Fix 4: search_facts diagnostic logging. We verify that the
+// search_facts function still returns correct results (the logging itself
+// is tracing::debug! which is a no-op without a subscriber in tests).
+// The critical contract: logging must NOT alter search behavior.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn search_facts_with_logging_returns_correct_results() {
+    use crate::cognitive_memory::NativeCognitiveMemory;
+
+    let mem = NativeCognitiveMemory::in_memory().expect("in-memory DB");
+    mem.store_fact("rust-perf", "Zero-cost abstractions", 0.95, &[], "test")
+        .unwrap();
+
+    // Normal query — must still work after logging is added.
+    let results = mem.search_facts("rust-perf", 10, 0.0).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].concept, "rust-perf");
+
+    // Wildcard query — must still work.
+    let all = mem.search_facts("*", 100, 0.0).unwrap();
+    assert_eq!(all.len(), 1);
+
+    // Empty-result query — must still work (no panic from logging empty results).
+    let empty = mem.search_facts("nonexistent-query", 10, 0.0).unwrap();
+    assert!(empty.is_empty());
+}

@@ -9,6 +9,9 @@ related:
   - ../reference/cognitive-memory-goal-store.md
   - ../architecture/cognitive-memory.md
   - ../memory.md
+  - ./preparation-compound-objective-search.md
+  - ../howto/diagnose-search-facts-issues.md
+  - ../reference/backup-pruning-api.md
 ---
 
 # Goal fact dedup in memory consolidation preparation
@@ -60,8 +63,13 @@ into `relevant_facts`.
 ### Algorithm
 
 ```
-1. Fetch objective-related facts:
-     relevant_facts = search_facts(objective, 10, 0.0)
+1. Fetch objective-related facts (with compound-objective splitting):
+     Split objective on "; " → fragments[]
+     For each fragment:
+       results += search_facts(fragment, 10, 0.0)
+     Deduplicate results by node_id (keep first seen)
+     relevant_facts = first 10 unique results
+     (See: Compound objective splitting in preparation memory operations)
 
 2. Fetch goal facts:
      goal_facts = search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)
@@ -172,6 +180,9 @@ before the `existing_ids` check, which is a simple `HashSet::contains`.
 
 ## Related reading
 
+- [Compound objective splitting](./preparation-compound-objective-search.md)
+  — how the objective search in step 1 splits multi-goal objectives
+  into per-fragment queries.
 - [Goal–prospective memory mirror](../reference/goal-prospective-memory-mirror.md)
   — the dual-write mechanism that creates goal facts and prospective
   entries.
@@ -181,3 +192,7 @@ before the `existing_ids` check, which is a simple `HashSet::contains`.
   types.
 - [Cognitive Memory Architecture](../architecture/cognitive-memory.md)
   — full schema and consolidation rules.
+- [Diagnose search_facts issues](../howto/diagnose-search-facts-issues.md)
+  — using diagnostic logging to verify preparation queries.
+- [Backup pruning API](../reference/backup-pruning-api.md) — automatic
+  retention limit for cognitive memory backups.
