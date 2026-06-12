@@ -1,22 +1,21 @@
 ---
 title: How to reconcile goal–prospective memory drift
 description: Operator guide for detecting and fixing inconsistencies between goal records in semantic memory and their prospective memory mirror entries.
-last_updated: 2026-06-10
+last_updated: 2026-06-12
 owner: simard
 doc_type: howto
 related:
   - ../reference/goal-prospective-memory-mirror.md
   - ../reference/cognitive-memory-goal-store.md
+  - ../reference/ooda-procedural-memory.md
   - ../howto/troubleshoot-goal-store.md
   - ../howto/unblock-stuck-ooda-goals.md
 ---
 
 # How to reconcile goal–prospective memory drift
 
-> **Implementation status:** This document describes the target design
-> being built in issue
-> [#2207](https://github.com/rysweet/Simard/issues/2207). It must be
-> merged alongside the implementation code — not before.
+> Shipped in issues [#2207](https://github.com/rysweet/Simard/issues/2207)
+> and [#2280](https://github.com/rysweet/Simard/issues/2280).
 
 The `CognitiveMemoryGoalStore` maintains a prospective-memory mirror for
 Active goals so they surface via `check_triggers` during OODA preparation

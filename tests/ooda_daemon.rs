@@ -49,6 +49,7 @@ fn mock_memory() -> CognitiveMemoryBridge {
             "memory.check_triggers" => Ok(json!({"prospectives": []})),
             "memory.clear_working" => Ok(json!({"count": 0})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
+            "memory.store_procedure" => Ok(json!({"id": "proc_new"})),
             _ => Err(BridgeErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),

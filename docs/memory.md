@@ -1,7 +1,7 @@
 ---
 title: Memory architecture
 description: Top-level overview of Simard's six-type cognitive memory, consolidation flow, and on-disk layout. Cross-links to the canonical architecture page.
-last_updated: 2026-04-24
+last_updated: 2026-06-12
 owner: simard
 doc_type: concept
 ---
@@ -20,8 +20,8 @@ For the full canonical specification (schema, consolidation rules, hive event bu
 | **Working** | Task-scoped (cleared at task end) | The 20-slot active task context: goal, constraints, plan steps, current execution state. |
 | **Episodic** | Persistent, autobiographical | "What happened this session" — every cycle, every action, every observation. |
 | **Semantic** | Persistent, deduplicated | Facts and learned concepts promoted from episodic memory ("the test harness uses CARGO_TARGET_DIR"). |
-| **Procedural** | Persistent, indexed by trigger | Learned how-to: action sequences that worked for a given situation. |
-| **Prospective** | Persistent, time/event-indexed | Future intentions: "when CI is green for #1209, post a follow-up comment." |
+| **Procedural** | Persistent, indexed by trigger | Learned how-to: action sequences that worked for a given situation. Written by the OODA Act phase for successful outcomes (`ooda:{kind}`). See [OODA procedural memory](reference/ooda-procedural-memory.md). |
+| **Prospective** | Persistent, time/event-indexed | Future intentions: Active goals as trigger-action pairs, meeting action items. See [Goal–prospective memory mirror](reference/goal-prospective-memory-mirror.md). |
 
 ## Consolidation flow
 
@@ -29,10 +29,11 @@ For the full canonical specification (schema, consolidation rules, hive event bu
 Sensory   ──(attention)──▶  Episodic
 Working   ──(task end)───▶  Episodic
 Episodic  ──(consolidate)─▶ Semantic
-Episodic  ──(repeated success)──▶ Procedural
+OODA Act  ──(success)────▶  Procedural    (#2280)
+Goal put  ──(Active)─────▶  Prospective   (#2207/#2280)
 ```
 
-The OODA daemon dispatches a `consolidate-memory` action whenever working-memory pressure or recent-episode density crosses a threshold. Consolidation is idempotent and runs without spawning an engineer subprocess.
+The OODA daemon dispatches a `consolidate-memory` action whenever working-memory pressure or recent-episode density crosses a threshold. Consolidation is idempotent and runs without spawning an engineer subprocess. Procedural memories are written inline during the OODA Act phase (not during consolidation) — each successful `ActionOutcome` produces an `ooda:{kind}` procedure. Prospective memories are written by `CognitiveMemoryGoalStore::put()` whenever a goal transitions to Active.
 
 ## Cross-session recall
 
@@ -66,5 +67,7 @@ For multi-host coordination see [Distributed operations](distributed-operations.
 ## Related
 
 - [Cognitive Memory Architecture](architecture/cognitive-memory.md) (canonical, full detail)
+- [OODA procedural memory](reference/ooda-procedural-memory.md) — how successful OODA outcomes become procedures
+- [Goal–prospective memory mirror](reference/goal-prospective-memory-mirror.md) — how Active goals become prospective triggers
 - [Dashboard](dashboard.md) — Memory tab
 - [Daemon mode](daemon-mode.md) — when consolidation runs

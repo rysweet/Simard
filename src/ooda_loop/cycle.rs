@@ -337,6 +337,17 @@ fn run_ooda_cycle_inner(
         }
     }
 
+    // --- Memory consolidation: procedural learning from successful actions ---
+    for outcome in &outcomes {
+        if outcome.success {
+            let proc_name = format!("ooda:{}", outcome.action.kind);
+            let steps = [outcome.action.description.clone(), outcome.detail.clone()];
+            if let Err(e) = bridges.memory.store_procedure(&proc_name, &steps, &[]) {
+                eprintln!("[simard] OODA consolidation: procedural memory failed: {e}");
+            }
+        }
+    }
+
     // --- Review: analyze outcomes and propose improvements ---
     let review_proposals = review_outcomes(&outcomes, act_elapsed);
 

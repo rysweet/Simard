@@ -1,0 +1,234 @@
+---
+title: OODA procedural memory
+description: How the OODA cycle stores successful action outcomes as procedural memories, enabling Simard to recall what worked in past cycles during future preparation phases.
+last_updated: 2026-06-12
+owner: simard
+doc_type: reference
+related:
+  - ../architecture/cognitive-memory.md
+  - ./goal-prospective-memory-mirror.md
+  - ./ooda-brain-api.md
+  - ./ooda-engineer-lifecycle-recipe.md
+  - ../memory.md
+---
+
+# OODA procedural memory
+
+Shipped in issue [#2280](https://github.com/rysweet/Simard/issues/2280).
+
+After the OODA Act phase dispatches actions and collects outcomes, each
+**successful** outcome is stored as a procedural memory. This enables
+Simard to recall effective action sequences in future OODA cycles via
+`recall_procedure` during the preparation phase.
+
+---
+
+## Overview
+
+Procedural memory is the cognitive memory type for "how-to" knowledge —
+named, reusable step sequences that encode what worked. Before issue
+#2280, procedural memories were never written by any production code
+path. The `store_procedure` API existed and was tested at the unit
+level, but no caller invoked it. This left the procedural memory table
+permanently empty.
+
+The OODA cycle's Act phase is the natural site for procedural learning:
+it dispatches actions, observes outcomes, and knows which succeeded.
+After execution, the cycle now iterates over outcomes and stores each
+successful one as a procedure.
+
+```
+Act phase
+  │
+  ├─ dispatch actions → outcomes[]
+  ├─ execution_memory_operations(outcome.detail)   ← existing
+  ├─ store_procedure(outcome) for each success      ← NEW (#2280)
+  │
+  └─ review_outcomes(outcomes)
+```
+
+---
+
+## Procedure naming convention
+
+Each procedure is named `ooda:{action_kind}`, where `action_kind` is the
+`Display` representation of the `ActionKind` enum:
+
+| ActionKind             | Procedure name              |
+|------------------------|-----------------------------|
+| `AdvanceGoal`          | `ooda:advance-goal`         |
+| `RunImprovement`       | `ooda:run-improvement`      |
+| `ConsolidateMemory`    | `ooda:consolidate-memory`   |
+| `ResearchQuery`        | `ooda:research-query`       |
+| `RunGymEval`           | `ooda:run-gym-eval`         |
+| `BuildSkill`           | `ooda:build-skill`          |
+| `LaunchSession`        | `ooda:launch-session`       |
+| `PollDeveloperActivity`| `ooda:poll-developer-activity` |
+| `ExtractIdeas`         | `ooda:extract-ideas`        |
+| `SafeUpdate`           | `ooda:safe-update`          |
+
+The `ooda:` prefix distinguishes OODA-learned procedures from any
+future manually-imported or meeting-derived procedures.
+
+**Intentional accumulation**: when the same `ActionKind` succeeds in
+multiple cycles, each `store_procedure` call creates a new
+procedure node. `recall_procedure` returns all matches ranked by
+relevance, so earlier successes remain queryable. This accumulation
+reflects the evolving understanding of what works for each action type.
+
+---
+
+## Procedure content
+
+Each stored procedure contains two steps:
+
+| Step index | Content | Source |
+|------------|---------|--------|
+| 0 | `outcome.action.description` | What was **planned** — the natural-language description from the Decide phase |
+| 1 | `outcome.detail` | What **happened** — the execution output captured during Act |
+
+Prerequisites are empty (`&[]`) because OODA actions are self-contained
+dispatches — the cycle handles sequencing and precondition checking.
+
+### Example
+
+After a successful `AdvanceGoal` action:
+
+```rust
+store_procedure(
+    "ooda:advance-goal",
+    &[
+        "Advance goal 'fix-auth-bug': spawn engineer to fix the null check in auth.rs".into(),
+        "Engineer session completed: edited auth.rs:42, all tests pass, committed abc1234".into(),
+    ],
+    &[],  // no prerequisites
+)
+```
+
+This produces a `Procedure` node:
+
+```
+Procedure {
+    name: "ooda:advance-goal",
+    steps: [
+        "Advance goal 'fix-auth-bug': spawn engineer to fix the null check in auth.rs",
+        "Engineer session completed: edited auth.rs:42, all tests pass, committed abc1234",
+    ],
+    prerequisites: [],
+    usage_count: 0,
+}
+```
+
+---
+
+## When procedures are NOT stored
+
+- **Failed outcomes** (`outcome.success == false`): failed actions
+  represent "what doesn't work" — this is negative knowledge, not
+  procedural memory. Failed outcomes are still captured in episodic
+  memory via the existing `execution_memory_operations` and
+  `reflection_memory_operations` calls.
+
+- **Bridge/memory errors**: if `store_procedure` fails, the error is
+  logged to stderr and the cycle continues. Memory failures never crash
+  the OODA loop. This matches the best-effort pattern used by every
+  other memory call in `cycle.rs`:
+
+  ```
+  [simard] OODA consolidation: procedural memory failed: <error>
+  ```
+
+---
+
+## Recall during preparation
+
+Procedural memories are available to future OODA cycles through
+`recall_procedure(query, limit)` during the preparation phase. The
+query is matched against procedure names and step content using
+keyword-based search with n-gram reranking (the same algorithm as
+`search_facts`).
+
+Typical preparation usage:
+
+```rust
+let procedures = memory.recall_procedure("advance-goal", 5)?;
+for proc in &procedures {
+    println!("Procedure: {} ({} uses)", proc.name, proc.usage_count);
+    for (i, step) in proc.steps.iter().enumerate() {
+        println!("  {}: {}", i, step);
+    }
+}
+```
+
+This enables the Orient and Decide phases to consider past successful
+approaches when selecting actions for the current cycle.
+
+---
+
+## Code location
+
+| Item | File |
+|------|------|
+| Procedural storage loop | `src/ooda_loop/cycle.rs` (after `execution_memory_operations` loop) |
+| `store_procedure` trait method | `src/cognitive_memory/mod.rs` (`CognitiveMemoryOps`) |
+| `store_procedure` implementation | `src/cognitive_memory/ops.rs` (`NativeCognitiveMemory`) |
+| `recall_procedure` implementation | `src/cognitive_memory/ops.rs` (`NativeCognitiveMemory`) |
+| `ActionOutcome` / `ActionKind` types | `src/ooda_loop/types.rs` |
+| Mock handlers | `tests/ooda.rs`, `tests/ooda_daemon.rs`, `tests/memory_consolidation_lifecycle.rs` |
+
+---
+
+## Testing
+
+### Unit test
+
+`successful_outcome_stores_procedural_memory` in the OODA test suite
+verifies that after a cycle containing a successful outcome, the mock
+transport receives a `memory.store_procedure` call (or when using
+`NativeCognitiveMemory` directly, that `get_statistics().procedural_count`
+increases).
+
+### Mock transport handler
+
+All OODA-related integration tests include a `memory.store_procedure`
+handler in their mock transport to prevent spurious `-32601 Method not
+found` errors:
+
+```rust
+"memory.store_procedure" => Ok(json!({"id": "proc_new"})),
+```
+
+This handler is present in:
+- `tests/ooda.rs`
+- `tests/ooda_daemon.rs`
+- `tests/memory_consolidation_lifecycle.rs`
+
+---
+
+## Relationship to other memory types
+
+| Memory type | What it captures from OODA | When |
+|-------------|---------------------------|------|
+| **Sensory** | Raw PTY output, objective text | Observation phase |
+| **Working** | Current goal, plan, execution state | Throughout cycle |
+| **Episodic** | Full session transcripts, action logs | Reflection phase |
+| **Semantic** | Extracted facts about codebase, patterns | Reflection phase |
+| **Procedural** | Successful action sequences | After Act phase (**#2280**) |
+| **Prospective** | Active goals as future triggers | Goal store `put()` (**#2207/#2280**) |
+
+Before issue #2280, the procedural and prospective rows were
+effectively dead — the storage APIs existed but no production code
+called them from the OODA loop. Issue #2280 closes both gaps.
+
+---
+
+## Related reading
+
+- [Cognitive Memory Architecture](../architecture/cognitive-memory.md) —
+  the six memory types and their lifecycle.
+- [Goal–prospective memory mirror](./goal-prospective-memory-mirror.md) —
+  the companion fix for prospective memory (goals as triggers).
+- [Memory architecture (operator summary)](../memory.md) — top-level
+  memory overview.
+- [OODA Brain API](./ooda-brain-api.md) — the brain that drives
+  Orient/Decide/Act.
