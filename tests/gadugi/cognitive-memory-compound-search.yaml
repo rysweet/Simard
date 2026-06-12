@@ -1,0 +1,149 @@
+name: "Cognitive Memory Compound Objective Search (#2270)"
+description: >
+  Outside-in gate for issue #2270: verifies that preparation_memory_operations
+  correctly splits compound objectives on "; ", deduplicates results by node_id,
+  caps at 10 facts, skips empty fragments, and that backup pruning retains the
+  specified number of files. Also covers the diagnostic logging addition.
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Fix 1a — compound objective splits into separate search_facts calls"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib memory_consolidation::tests::preparation_splits_compound_objective_into_separate_searches
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test memory_consolidation::tests::preparation_splits_compound_objective_into_separate_searches ... ok"
+
+  - name: "Fix 1b — single-fragment objective produces exactly one search"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib memory_consolidation::tests::preparation_single_fragment_objective_produces_one_search
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test memory_consolidation::tests::preparation_single_fragment_objective_produces_one_search ... ok"
+
+  - name: "Fix 1c — deduplicates split results by node_id"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib memory_consolidation::tests::preparation_deduplicates_split_results_by_node_id
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test memory_consolidation::tests::preparation_deduplicates_split_results_by_node_id ... ok"
+
+  - name: "Fix 1d — caps split results at ten"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib memory_consolidation::tests::preparation_caps_split_results_at_ten
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test memory_consolidation::tests::preparation_caps_split_results_at_ten ... ok"
+
+  - name: "Fix 1e — skips empty fragments from splitting"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib memory_consolidation::tests::preparation_skips_empty_fragments_from_splitting
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test memory_consolidation::tests::preparation_skips_empty_fragments_from_splitting ... ok"
+
+  - name: "Fix 1f — native integration: compound objective finds per-goal facts"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib memory_consolidation::tests::preparation_compound_objective_finds_per_goal_facts_native
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test memory_consolidation::tests::preparation_compound_objective_finds_per_goal_facts_native ... ok"
+
+  - name: "Fix 3 — backup pruning keeps newest and removes oldest"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib memory_consolidation::tests::prune_old_backups_keeps_newest_and_removes_oldest
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test memory_consolidation::tests::prune_old_backups_keeps_newest_and_removes_oldest ... ok"
+
+  - name: "Fix 3b — backup pruning paired WAL files test"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib memory_consolidation::tests::prune_old_backups_removes_paired_wal_files
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test memory_consolidation::tests::prune_old_backups_removes_paired_wal_files ... ok"
+
+  - name: "Regression gate — all memory_consolidation tests pass"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib memory_consolidation
+        -- --nocapture
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test result: ok"
