@@ -358,6 +358,18 @@ pub fn write_handoff_with_explicit(
         disagreements: enrichment.disagreements.clone(),
     };
 
+    // Guard (#2268): skip writing to the OODA handoff queue when both
+    // decisions and action_items are empty — these "empty" handoffs (from
+    // dashboard chats that close with zero substantive items) accumulate
+    // and block content-rich handoffs in the queue.
+    if handoff.decisions.is_empty() && handoff.action_items.is_empty() {
+        info!(
+            topic = topic,
+            "Skipping empty handoff write (0 decisions, 0 action items)"
+        );
+        return Ok(());
+    }
+
     let dir = default_handoff_dir();
     write_meeting_handoff(&dir, &handoff)?;
     info!("Meeting handoff artifact written");
@@ -722,7 +734,9 @@ mod tests {
     #[serial(simard_meetings_dir_env)]
     fn write_handoff_error_on_read_only_dir() {
         unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", "/proc/1/no_such_dir") };
-        let result = write_handoff("topic", "summary", &[], &[], &[]);
+        // Supply a non-empty decision so the write guard doesn't skip the write.
+        let decisions = ["a decision".to_string()];
+        let result = write_handoff("topic", "summary", &[], &[], &decisions);
         assert!(
             result.is_err(),
             "write_handoff should surface error, not silently drop"
@@ -843,5 +857,36 @@ mod tests {
     fn extract_deadline_pub_none_when_absent() {
         let result = extract_deadline_pub("no deadline here");
         assert_eq!(result, None);
+    }
+
+    // ── write guard (#2268): skip empty handoff files ───────────────
+
+    #[test]
+    #[serial(simard_meetings_dir_env)]
+    fn write_guard_skips_empty_handoff() {
+        let dir = temp_meetings_dir("guard-empty");
+        unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", &dir) };
+
+        // Call write_handoff with empty decisions and empty action_items.
+        // The guard should silently skip writing a handoff file.
+        let result = write_handoff("empty topic", "summary", &sample_messages(), &[], &[]);
+        assert!(
+            result.is_ok(),
+            "write_handoff with empty content should succeed (guard silently skips)"
+        );
+
+        // No handoff-*.json file should exist — the guard prevented the write.
+        let handoff_files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("handoff-"))
+            .collect();
+        assert!(
+            handoff_files.is_empty(),
+            "write guard should skip writing handoff file when both decisions and action_items are empty"
+        );
+
+        unsafe { std::env::remove_var("SIMARD_HANDOFF_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

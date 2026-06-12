@@ -167,6 +167,9 @@ fn write_handoff_empty_data_uses_defaults() {
         std::env::set_var("SIMARD_HANDOFF_DIR", dir.path().as_os_str());
     }
 
+    // Empty decisions + empty action_items triggers the write guard (#2268):
+    // no handoff file is written to the OODA queue because it would be
+    // content-free. The function returns Ok(()) without error.
     let result = write_handoff("Empty meeting", "No notes", &[], &[], &[]);
     assert!(result.is_ok());
 
@@ -174,14 +177,10 @@ fn write_handoff_empty_data_uses_defaults() {
         .unwrap()
         .filter_map(|e| e.ok())
         .collect();
-    let content = std::fs::read_to_string(entries[0].path()).unwrap();
-    let handoff: MeetingHandoff = serde_json::from_str(&content).unwrap();
-
-    assert!(handoff.decisions.is_empty());
-    assert!(handoff.action_items.is_empty());
-    assert!(handoff.open_questions.is_empty());
-    assert!(handoff.participants.is_empty());
-    assert!(handoff.themes.is_empty());
+    assert!(
+        entries.is_empty(),
+        "write guard should skip writing empty handoff to OODA queue"
+    );
 
     unsafe {
         std::env::remove_var("SIMARD_HANDOFF_DIR");

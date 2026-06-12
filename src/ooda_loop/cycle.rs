@@ -156,6 +156,19 @@ fn run_ooda_cycle_inner(
         if let Err(e) = handle_cleanup() {
             eprintln!("[simard] OODA cycle: resource cleanup had errors: {e}");
         }
+
+        // Reap old processed handoff files to prevent indefinite disk
+        // accumulation (issue #2268).
+        let reap_dir = crate::meeting_facilitator::default_handoff_dir();
+        match crate::ooda_loop::reap_old_handoffs(&reap_dir) {
+            Ok(n) if n > 0 => {
+                eprintln!("[simard] OODA cycle: reaped {n} old processed handoff file(s)");
+            }
+            Err(e) => {
+                eprintln!("[simard] OODA cycle: handoff reap had errors: {e}");
+            }
+            _ => {}
+        }
     }
 
     // Snapshot active goal ids before the core OODA phases run.

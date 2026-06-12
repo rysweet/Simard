@@ -10,6 +10,12 @@ Simard deployment.
 | [Meeting REPL & Handoff Ingestion](meeting-handoffs.md) | Routing operator intent into the OODA loop |
 | [Progress-Evidence Kill Switch](progress-evidence-kill-switch.md) | `SIMARD_PROGRESS_EVIDENCE=off` and when to use it |
 
+Related how-to guides:
+
+| Guide | Topic |
+|---|---|
+| [Diagnose handoff accumulation](../howto/diagnose-handoff-accumulation.md) | Detect, resolve, prevent handoff file buildup (#2268) |
+
 For contributor workflow (branching, merge policy, PR evidence
 requirements), see [`CONTRIBUTING.md`](https://github.com/rysweet/Simard/blob/main/CONTRIBUTING.md) at the
 repo root.

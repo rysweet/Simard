@@ -278,24 +278,21 @@ fn close_returns_within_budget_when_agent_blocks() {
         root.display()
     );
 
-    // The legacy OODA handoff folder is also relocated under
-    // `SIMARD_STATE_ROOT/meeting_handoffs/`. Its filename is
-    // timestamped — assert the directory contains *something* rather
-    // than fixate on the schema-version-coupled filename.
+    // The legacy OODA handoff folder under
+    // `SIMARD_STATE_ROOT/meeting_handoffs/` is only written when the
+    // meeting produced non-empty decisions or action_items (#2268 write
+    // guard). A blocking-agent partial close typically produces no
+    // substantive items, so the OODA queue file may legitimately be
+    // absent. The per-meeting bundle (checked above) is always written.
     let legacy_dir = root.join("meeting_handoffs");
-    assert!(
-        legacy_dir.exists(),
-        "legacy handoff dir {} missing (issue #1906)",
-        legacy_dir.display()
-    );
-    let entries: Vec<_> = std::fs::read_dir(&legacy_dir)
-        .map(|rd| rd.flatten().collect())
-        .unwrap_or_default();
-    assert!(
-        !entries.is_empty(),
-        "no handoff written under {} (issue #1906)",
-        legacy_dir.display()
-    );
+    if legacy_dir.exists() {
+        let entries: Vec<_> = std::fs::read_dir(&legacy_dir)
+            .map(|rd| rd.flatten().collect())
+            .unwrap_or_default();
+        // If the dir exists but is empty, that's fine — the write guard
+        // skipped it because the partial close had 0 decisions + 0 actions.
+        let _ = entries;
+    }
 
     // The detached worker thread for run_turn or close may or may
     // not have observed close_called depending on whether the
