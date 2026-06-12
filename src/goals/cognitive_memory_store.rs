@@ -765,6 +765,44 @@ mod tests {
         );
     }
 
+    /// Issue #2280 Gap 1: put(Active) must increment prospective_count in
+    /// get_statistics(). This is the quantitative assertion that complements
+    /// the qualitative `put_active_goal_creates_prospective_trigger` test.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn put_active_goal_increments_prospective_count() {
+        let root = fresh_state_root("prospective-count");
+        let store = CognitiveMemoryGoalStore::new(root.clone()).expect("store should build");
+
+        // Put a Proposed goal first to create the DB without a prospective node.
+        store
+            .put(record("Setup baseline", GoalStatus::Proposed, 2))
+            .expect("put proposed goal");
+
+        {
+            let reader = crate::memory_ipc::open_reader_bridge(&root).expect("reader bridge");
+            let before = reader.ops().get_statistics().expect("get_statistics");
+            assert_eq!(
+                before.prospective_count, 0,
+                "Proposed goal must not create a prospective node"
+            );
+        }
+
+        // Put an Active goal — this must create a prospective memory node.
+        store
+            .put(record("Implement caching layer", GoalStatus::Active, 1))
+            .expect("put active goal");
+
+        // Open a fresh reader to see the write.
+        let reader = crate::memory_ipc::open_reader_bridge(&root).expect("reader bridge");
+        let after = reader.ops().get_statistics().expect("get_statistics");
+        assert!(
+            after.prospective_count > 0,
+            "put(Active) must increment prospective_count; got {}",
+            after.prospective_count
+        );
+    }
+
     #[test]
     #[serial_test::serial(cognitive_memory)]
     fn cognitive_memory_goal_store_put_overwrites_existing_slug_with_latest_record() {

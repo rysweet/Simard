@@ -1,7 +1,7 @@
 ---
 title: Cognitive Memory Architecture
 description: How Simard uses the 6-type cognitive psychology memory model implemented natively in Rust with LadybugDB, including the hive mind for multi-agent knowledge sharing.
-last_updated: 2026-04-13
+last_updated: 2026-06-12
 owner: simard
 doc_type: concept
 ---
@@ -81,11 +81,14 @@ Reusable step-by-step action sequences.
 - **Content**: Named procedures with ordered steps and prerequisites
 - **Usage tracking**: `usage_count` increments on each recall
 - **Use**: Encode successful patterns for reuse
+- **Written by**: OODA cycle Act phase — each successful `ActionOutcome` is stored as an `ooda:{kind}` procedure (issue [#2280](https://github.com/rysweet/Simard/issues/2280))
 
 ```
-After success → store_procedure("fix-and-verify", ["read file", "edit", "cargo test", "commit"])
-Before task   → recall_procedure("how to fix a bug", limit=5)
+After success → store_procedure("ooda:advance-goal", ["planned: spawn engineer", "result: tests pass"])
+Before task   → recall_procedure("advance-goal", limit=5)
 ```
+
+See [OODA procedural memory reference](../reference/ooda-procedural-memory.md) for the full naming convention and content format.
 
 ### Prospective Memory
 
@@ -95,11 +98,15 @@ Future-oriented trigger-action pairs.
 - **Content**: Description, trigger condition, action, priority
 - **Status**: `pending` → `triggered` → `resolved`
 - **Use**: Schedule future actions based on conditions
+- **Written by**: `CognitiveMemoryGoalStore::put()` — Active goals are dual-written as prospective entries with `goal:` prefix (issues [#2207](https://github.com/rysweet/Simard/issues/2207), [#2280](https://github.com/rysweet/Simard/issues/2280)); meeting action items
 
 ```
+Goal added → store_prospective("goal:Fix auth bug", "fix auth bug", "Pursue goal: Fix auth bug (p1, CI red)", priority=1)
 Planning   → store_prospective("re-run gym after self-improve", "self_improve_complete", "run_gym_suite", priority=2)
-After work → check_triggers("self_improve_complete: score improved 3%")  # returns triggered items
+After work → check_triggers("fix auth bug: started engineer")  # returns triggered goal items
 ```
+
+See [Goal–prospective memory mirror](../reference/goal-prospective-memory-mirror.md) for the dual-write contract and reconciliation API.
 
 ## Session Lifecycle Mapping
 
@@ -124,11 +131,15 @@ flowchart LR
         S2[record_sensory<br/>pty_output]
         W4[push_working<br/>state]
     end
+    subgraph OODA-Act
+        PR1[store_procedure<br/>successful outcome]
+    end
+    subgraph Goal-Store
+        PS1[store_prospective<br/>active goal]
+    end
     subgraph Reflection
         E1[store_episode]
         F2[store_fact]
-        PR1[store_procedure]
-        PS1[store_prospective]
     end
     subgraph Persistence
         C1[consolidate_episodes]
@@ -136,16 +147,18 @@ flowchart LR
         PE[prune_expired_sensory]
     end
 
-    Intake --> Preparation --> Planning --> Execution --> Reflection --> Persistence
+    Intake --> Preparation --> Planning --> Execution --> OODA-Act --> Goal-Store --> Reflection --> Persistence
 ```
 
 | Phase | Memory Operations |
 |-------|------------------|
 | **Intake** | `record_sensory(objective)`, `push_working(goal)` |
-| **Preparation** | `search_facts(objective)`, `check_triggers(objective)`, `push_working(context)` |
+| **Preparation** | `search_facts(objective)`, `check_triggers(objective)`, `recall_procedure(task_domain)`, `push_working(context)` |
 | **Planning** | `recall_procedure(task_domain)`, `push_working(plan)` |
 | **Execution** | `record_sensory(pty_output)`, `push_working(state)` |
-| **Reflection** | `store_episode(transcript)`, `store_fact(extracted)`, `store_procedure(successful_sequence)`, `store_prospective(future_intention)` |
+| **OODA Act** | `store_procedure(successful_outcome)` — each successful `ActionOutcome` stored as `ooda:{kind}` ([#2280](https://github.com/rysweet/Simard/issues/2280)) |
+| **Goal Store** | `store_prospective(active_goal)` — Active goals dual-written as prospective triggers ([#2207](https://github.com/rysweet/Simard/issues/2207)/[#2280](https://github.com/rysweet/Simard/issues/2280)) |
+| **Reflection** | `store_episode(transcript)`, `store_fact(extracted)` |
 | **Persistence** | `consolidate_episodes(10)`, `clear_working(task_id)`, `prune_expired_sensory()` |
 
 ## Hive Mind Integration (Planned — Not Yet Implemented)
@@ -241,8 +254,8 @@ Key methods:
 | `consolidate_episodes` | Summarize old episodes |
 | `store_fact` | Store a semantic fact with confidence |
 | `search_facts` | Search by keywords with confidence filter |
-| `store_procedure` | Store a reusable action sequence |
+| `store_procedure` | Store a reusable action sequence. Called by the OODA Act phase for successful outcomes — see [OODA procedural memory](../reference/ooda-procedural-memory.md) |
 | `recall_procedure` | Recall procedures matching a query |
-| `store_prospective` | Store a future trigger-action pair |
+| `store_prospective` | Store a future trigger-action pair. Called by `CognitiveMemoryGoalStore::put()` for Active goals — see [Goal–prospective memory mirror](../reference/goal-prospective-memory-mirror.md) |
 | `check_triggers` | Check if any prospective memories match |
 | `get_statistics` | Get counts for all memory types |

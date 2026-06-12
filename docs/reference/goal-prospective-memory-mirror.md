@@ -1,12 +1,13 @@
 ---
 title: Goal–prospective memory mirror
 description: API reference for the prospective-memory mirror in CognitiveMemoryGoalStore — how put() dual-writes prospective entries for Active goals, error propagation, reconcile_prospectives(), and shared constants.
-last_updated: 2026-06-10
+last_updated: 2026-06-12
 owner: simard
 doc_type: reference
 related:
   - ./cognitive-memory-goal-store.md
   - ./goal-board-api.md
+  - ./ooda-procedural-memory.md
   - ../concepts/goal-board-persistence.md
   - ../howto/reconcile-goal-prospective-drift.md
   - ../memory.md
@@ -14,11 +15,9 @@ related:
 
 # Goal–prospective memory mirror
 
-> **Implementation status:** This document describes the target design
-> being built in issue
-> [#2207](https://github.com/rysweet/Simard/issues/2207). It must be
-> merged alongside the implementation code — not before. Until the PR
-> lands, the source code does not yet match the API described here.
+> Shipped in issue [#2207](https://github.com/rysweet/Simard/issues/2207)
+> and extended in [#2280](https://github.com/rysweet/Simard/issues/2280)
+> (test coverage for the prospective mirror).
 
 When `CognitiveMemoryGoalStore::put()` writes a goal record to semantic
 memory, it also maintains a **mirror** in prospective memory so that

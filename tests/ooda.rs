@@ -38,6 +38,7 @@ fn mock_memory_transport() -> InMemoryBridgeTransport {
         "memory.check_triggers" => Ok(json!({"prospectives": []})),
         "memory.clear_working" => Ok(json!({"count": 0})),
         "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
+        "memory.store_procedure" => Ok(json!({"id": "proc_new"})),
         _ => Err(BridgeErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
@@ -400,4 +401,90 @@ fn install_skill_refuses_overwrite() {
             .contains("already exists")
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #2280 Gap 2: Successful OODA outcomes must store procedural memories.
+/// After `run_ooda_cycle` with at least one successful outcome, the cycle
+/// should call `store_procedure` for each success. This test uses an
+/// `AtomicUsize` counter to verify the call was made.
+#[test]
+fn successful_outcome_stores_procedural_memory() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let procedure_calls = Arc::new(AtomicUsize::new(0));
+    let counter = procedure_calls.clone();
+
+    let counting_memory =
+        InMemoryBridgeTransport::new("proc-counter-mem", move |method, _params| match method {
+            "memory.store_procedure" => {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({"id": "proc_new"}))
+            }
+            "memory.search_facts" => Ok(json!({"facts": []})),
+            "memory.store_fact" => Ok(json!({"id": "sem_1"})),
+            "memory.store_episode" => Ok(json!({"id": "epi_1"})),
+            "memory.get_statistics" => Ok(json!({
+                "sensory_count": 5, "working_count": 3, "episodic_count": 12,
+                "semantic_count": 8, "procedural_count": 2, "prospective_count": 1
+            })),
+            "memory.consolidate_episodes" => Ok(json!({"id": null})),
+            "memory.recall_procedure" => Ok(json!({"procedures": []})),
+            "memory.record_sensory" => Ok(json!({"id": "sen_1"})),
+            "memory.push_working" => Ok(json!({"id": "wrk_1"})),
+            "memory.get_working" => Ok(json!({"slots": []})),
+            "memory.check_triggers" => Ok(json!({"prospectives": []})),
+            "memory.clear_working" => Ok(json!({"count": 0})),
+            "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
+            _ => Err(BridgeErrorPayload {
+                code: -32601,
+                message: format!("unknown: {method}"),
+            }),
+        });
+
+    // Custom decide brain that routes all priorities to ConsolidateMemory,
+    // which succeeds with the mock transport (no session required).
+    struct AlwaysConsolidateBrain;
+    impl simard::ooda_brain::OodaDecideBrain for AlwaysConsolidateBrain {
+        fn judge_decision(
+            &self,
+            _ctx: &simard::ooda_brain::DecideContext,
+        ) -> simard::error::SimardResult<simard::ooda_brain::DecideJudgment> {
+            Ok(simard::ooda_brain::DecideJudgment::ConsolidateMemory {
+                rationale: "test: force consolidate for success".into(),
+            })
+        }
+    }
+
+    let mut bridges = OodaBridges {
+        memory: Box::new(CognitiveMemoryBridge::new(Box::new(counting_memory))),
+        knowledge: KnowledgeBridge::new(Box::new(mock_knowledge_transport())),
+        gym: GymBridge::new(Box::new(mock_gym_transport())),
+        session: None,
+        brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
+        decide_brain: Some(std::sync::Arc::new(AlwaysConsolidateBrain)),
+        orient_brain: None,
+        repo_root: std::path::PathBuf::from("."),
+        progress_evidence: std::sync::Arc::new(
+            simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
+        ),
+    };
+
+    let mut state = OodaState::new(board_with_goals());
+    let report = run_ooda_cycle(&mut state, &mut bridges, &OodaConfig::default()).unwrap();
+
+    // The cycle must have produced at least one successful outcome.
+    let successes = report.outcomes.iter().filter(|o| o.success).count();
+    assert!(
+        successes > 0,
+        "test setup: need at least one successful outcome"
+    );
+
+    // Each successful outcome must have triggered a store_procedure call.
+    let calls = procedure_calls.load(Ordering::SeqCst);
+    assert_eq!(
+        calls, successes,
+        "store_procedure must be called once per successful outcome; \
+         expected {successes} calls, got {calls}"
+    );
 }
