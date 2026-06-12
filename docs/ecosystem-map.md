@@ -396,27 +396,59 @@ For someone new to the ecosystem, here is the mental model:
     and deploy time (green). Its CWE knowledge graph is a domain-specific
     knowledge pack from agent-kgpacks.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                        Simard                           │
-│              (orchestrator / engineer)                   │
-├──────────┬──────────┬──────────┬────────────────────────┤
-│ RustyClawd│ memory  │amplihack │  azlin    eval  gadugi │
-│  (LLM SDK)│  -lib   │   -rs    │ (infra) (bench) (test)│
-├──────────┴──────────┤  (framework)                      │
-│   amplihack-traits  │  ├─ hooks                         │
-│    (shared types)   │  ├─ multilspy                     │
-│                     │  ├─ security                      │
-│  xpia-defender      │  ├─ fleet                         │
-│  (security lib)     │  ├─ workflows                     │
-│                     │  └─ ... (26 crates)               │
-│  recipe-runner      │                                   │
-│  (workflow engine)  │  agent-kgpacks (knowledge packs)  │
-├─────────────────────┴───────────────────────────────────┤
-│                Security Applications                     │
-│  skwaq (vuln research)    Powderfinger (cloud security) │
-│  └─ RustyClawd + LadybugDB  └─ RustyClawd + CWE graph  │
-└─────────────────────────────────────────────────────────┘
+```mermaid
+block-beta
+    columns 4
+
+    block:APP:4
+        columns 4
+        Simard["🌲 Simard\n(orchestrator / engineer)"]
+        skwaq["🐦‍⬛ skwaq\n(vuln research)"]
+        Powderfinger["🎸 Powderfinger\n(cloud security)"]
+        azlin["☁️ azlin\n(VM provisioning)"]
+    end
+
+    block:SHARED:4
+        columns 4
+        RustyClawd["RustyClawd\n(LLM SDK)"]
+        recipe_runner["recipe-runner\n(workflow engine)"]
+        kgpacks["agent-kgpacks\n(knowledge packs)"]
+        gadugi["gadugi\n(agentic testing)"]
+    end
+
+    block:FRAMEWORK:4
+        columns 3
+        amp_rs["amplihack-rs (26-crate framework)\nhooks · multilspy · security · fleet · workflows"]
+        memory["amplihack-memory-lib\n(6-type cognitive memory)"]
+        eval["amplihack-agent-eval\n(L1–L12 benchmarks)"]
+    end
+
+    block:FOUNDATION:4
+        columns 3
+        traits["amplihack-traits\n(shared Rust types)"]
+        xpia["amplihack-xpia-defender\n(prompt injection defense)"]
+        ladybug["LadybugDB\n(embedded graph engine)"]
+    end
+
+    Simard --> RustyClawd
+    Simard --> recipe_runner
+    Simard --> kgpacks
+    Simard --> memory
+    skwaq --> RustyClawd
+    skwaq --> recipe_runner
+    skwaq --> kgpacks
+    skwaq --> ladybug
+    Powderfinger --> RustyClawd
+    Powderfinger --> recipe_runner
+    Powderfinger --> kgpacks
+    amp_rs --> traits
+    memory --> traits
+    amp_rs --> xpia
+
+    style APP fill:#2d5016,color:#fff
+    style SHARED fill:#1a3a5c,color:#fff
+    style FRAMEWORK fill:#5c3a1a,color:#fff
+    style FOUNDATION fill:#3a1a3a,color:#fff
 ```
 
 ---
