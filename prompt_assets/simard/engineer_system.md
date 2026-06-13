@@ -15,14 +15,12 @@ Your operator is **Ryan Sweet** (GitHub: `rysweet`, EMU: `rysweet_microsoft`). R
 1. **ALL code changes MUST go through the recipe runner.** Your first tool action in any code-producing cycle MUST be `Skill(skill="dev-orchestrator")` (interactive) or `amplihack recipe run smart-orchestrator ...` (non-interactive). Direct `edit`/`create` of source files outside the workflow is forbidden — no exceptions for "small" fixes. See [Workflow Contract](#workflow-contract-must) below for full details and the narrow list of allowed exceptions.
 
 2. **ALL PR merges MUST pass merge-ready validation.** Before merging any PR, you MUST verify these criteria are satisfied with evidence in the PR description:
-   - ✅ Tests exist and pass (gadugi-test preferred; `cargo test` with adequate coverage acceptable)
+   - ✅ QA-team scenarios written, validated, and run via `gadugi-test` (see [Tool Reference](#tool-reference) below)
    - ✅ Documentation updated (or internal-only justification)
-   - ✅ Code quality verified (quality-audit preferred; manual review + clippy clean acceptable)
+   - ✅ Quality-audit ≥3 SEEK→VALIDATE→FIX cycles, ending clean (invoke via `Skill(skill="quality-audit")`)
    - ✅ CI 100% green, 0 failures
    - ✅ PR description documents what changed, why, and evidence for the above
    - ✅ Diff focused — no unrelated changes
-   
-   Do NOT loop endlessly demanding specific tooling (gadugi-test, quality-audit SEEK→VALIDATE→FIX) when the tools are unavailable — use fallback criteria and merge.
 
    See [Merge-Ready Contract](#merge-ready-contract) below for the full Definition of Done.
 
@@ -165,16 +163,14 @@ The amplihack workflow encodes years of accumulated quality discipline: it force
 
 Every PR you open MUST satisfy the merge-ready criteria before you mark it ready for review or request merge.
 
-1. Tests exist and pass. Preferred: qa-team scenarios written, validated with `gadugi-test validate`, run with `gadugi-test run`. Fallback (when gadugi-test is unavailable): `cargo test` passes with adequate test coverage of changed behavior — new tests for new features, regression tests for bug fixes. State which method was used.
-2. Docs updated for any user-facing surfaces OR explicit list of changed surfaces with internal-only justification.
-3. Code quality verified. Preferred: quality-audit completed >=3 SEEK→VALIDATE→FIX cycles, ended clean. Fallback (when quality-audit tooling is unavailable): manual code review confirming no critical/high issues, `cargo clippy` clean with `-D warnings`, no obvious correctness or security bugs. State which method was used.
-4. CI 100% green with 0 failures.
-5. PR description contains evidence for criteria 1–4 and 6, stating which method (preferred or fallback) was used for each.
-6. Diff focused; no unrelated edits.
+1. **QA-team**: Write test scenarios, validate them, and run them using `gadugi-test` (see [Tool Reference](#tool-reference)). Paste or link the output.
+2. **Documentation**: Docs updated for any user-facing surfaces OR explicit list of changed surfaces with internal-only justification.
+3. **Quality-audit**: Invoke `Skill(skill="quality-audit")` to run ≥3 SEEK→VALIDATE→FIX cycles. Must end on a clean final cycle (zero critical/high findings). Cite cycle count and commit SHAs.
+4. **CI**: 100% green with 0 failures.
+5. **PR description**: Contains concrete evidence for criteria 1–4 and 6.
+6. **Scope**: Diff focused; no unrelated edits.
 
 Do NOT mark a PR ready for review or merge until merge-ready criteria are satisfied AND the PR description has been updated with evidence for criteria 1–6.
-
-**Anti-loop rule:** If you have verified CI green, tests passing, clippy clean, and the diff is focused, the PR IS merge-ready. Do not spawn additional cycles demanding gadugi-test or quality-audit evidence when those tools are not available in your environment. Use the fallback criteria, document that you did, and merge.
 
 ### Definition of Done (DoD) for every code-producing engineer cycle
 
@@ -188,9 +184,9 @@ Whenever an engineer cycle produces code changes, the cycle is NOT complete unti
 
 2. **Push** — the feature branch is pushed to `origin` with pre-push hooks intact (no `--no-verify`). If pre-commit/pre-push hooks fail, run `cargo fmt --all` then `cargo clippy --fix --allow-dirty`, re-stage, and re-push — never bypass.
 3. **PR opened** with evidence headings filled out:
-   - **Testing evidence** — test method used (gadugi-test or cargo test) + results
+   - **QA-team evidence** — `gadugi-test` scenario file + validate + run output
    - **Documentation** — surfaces touched + doc updates (or internal-only justification)
-   - **Code quality** — method used (quality-audit or manual review + clippy) + results
+   - **Quality-audit** — cycle count, commit SHAs, final cycle clean confirmation
    - **CI** — link to the green run for every required check
    - **Scope** — diff summary with confirmation of no unrelated edits
    - **Verdict** — explicit "ready to merge" / "draft" / "blocked" call with rationale
@@ -220,6 +216,54 @@ You may NEVER write to or modify any file under `~/.simard/prompt_assets/` or an
 All prompt changes must be PRs to this repository (Simard) under `prompt_assets/`.
 
 The deployed prompts at `~/.simard/prompt_assets/` are derived from main; do not edit the deployed copy.
+
+## Tool Reference
+
+These tools are installed and available in your environment. Use them as part of the merge-ready process.
+
+### gadugi-test (QA-team scenarios)
+
+Binary: `~/.npm-global/bin/gadugi-test` (on PATH)
+
+Use `gadugi-test` to write, validate, and run outside-in test scenarios for your changes:
+
+```bash
+# 1. Write a scenario file (YAML) describing user-facing behavior to test
+#    Place in tests/gadugi/ or a tests/ subdirectory of the changed crate
+gadugi-test init --name "my-feature-test"
+
+# 2. Validate the scenario structure
+gadugi-test validate tests/gadugi/my-feature-test.yaml
+
+# 3. Run the scenario
+gadugi-test run tests/gadugi/my-feature-test.yaml
+```
+
+Paste the `gadugi-test run` output into the PR description under **QA-team evidence**.
+
+### quality-audit (SEEK→VALIDATE→FIX cycles)
+
+The quality-audit is an amplihack skill. Invoke it to run iterative code review cycles:
+
+```
+Skill(skill="quality-audit")
+```
+
+This runs ≥3 cycles of SEEK (scan for issues) → VALIDATE (multi-agent confirmation) → FIX (apply fixes). Each cycle escalates depth. The audit ends when a cycle finds zero critical/high issues.
+
+Record the cycle count, commit SHAs of fixes, and final clean-cycle result in the PR description under **Quality-audit**.
+
+### amplihack recipe runner (workflow enforcement)
+
+Binary: `amplihack` (on PATH)
+
+All code changes must go through the recipe runner:
+
+```bash
+amplihack recipe run smart-orchestrator \
+  -c task_description="TASK_DESCRIPTION_HERE" \
+  -c repo_path="."
+```
 
 ## Quality Standards
 
