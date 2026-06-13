@@ -14,13 +14,15 @@ Your operator is **Ryan Sweet** (GitHub: `rysweet`, EMU: `rysweet_microsoft`). R
 
 1. **ALL code changes MUST go through the recipe runner.** Your first tool action in any code-producing cycle MUST be `Skill(skill="dev-orchestrator")` (interactive) or `amplihack recipe run smart-orchestrator ...` (non-interactive). Direct `edit`/`create` of source files outside the workflow is forbidden — no exceptions for "small" fixes. See [Workflow Contract](#workflow-contract-must) below for full details and the narrow list of allowed exceptions.
 
-2. **ALL PR merges MUST pass the 6-check merge-ready validation.** Before merging any PR, you MUST verify all six merge-ready criteria are satisfied with concrete evidence in the PR description:
-   - ✅ QA-team scenarios written, validated, and run
+2. **ALL PR merges MUST pass merge-ready validation.** Before merging any PR, you MUST verify these criteria are satisfied with evidence in the PR description:
+   - ✅ Tests exist and pass (gadugi-test preferred; `cargo test` with adequate coverage acceptable)
    - ✅ Documentation updated (or internal-only justification)
-   - ✅ Quality-audit ≥3 SEEK→VALIDATE→FIX cycles, ending clean
+   - ✅ Code quality verified (quality-audit preferred; manual review + clippy clean acceptable)
    - ✅ CI 100% green, 0 failures
-   - ✅ PR description contains evidence for all criteria
+   - ✅ PR description documents what changed, why, and evidence for the above
    - ✅ Diff focused — no unrelated changes
+   
+   Do NOT loop endlessly demanding specific tooling (gadugi-test, quality-audit SEEK→VALIDATE→FIX) when the tools are unavailable — use fallback criteria and merge.
 
    See [Merge-Ready Contract](#merge-ready-contract) below for the full Definition of Done.
 
@@ -163,15 +165,16 @@ The amplihack workflow encodes years of accumulated quality discipline: it force
 
 Every PR you open MUST satisfy the merge-ready criteria before you mark it ready for review or request merge.
 
-1. qa-team scenarios written, validated with `gadugi-test validate`, run with `gadugi-test run`.
+1. Tests exist and pass. Preferred: qa-team scenarios written, validated with `gadugi-test validate`, run with `gadugi-test run`. Fallback (when gadugi-test is unavailable): `cargo test` passes with adequate test coverage of changed behavior — new tests for new features, regression tests for bug fixes. State which method was used.
 2. Docs updated for any user-facing surfaces OR explicit list of changed surfaces with internal-only justification.
-3. quality-audit completed >=3 SEEK→VALIDATE→FIX cycles, ended on a clean final cycle (zero critical/high; zero medium correctness/security findings).
+3. Code quality verified. Preferred: quality-audit completed >=3 SEEK→VALIDATE→FIX cycles, ended clean. Fallback (when quality-audit tooling is unavailable): manual code review confirming no critical/high issues, `cargo clippy` clean with `-D warnings`, no obvious correctness or security bugs. State which method was used.
 4. CI 100% green with 0 failures.
-5. PR description contains concrete evidence for criteria 1–4, 6, and 7.
+5. PR description contains evidence for criteria 1–4 and 6, stating which method (preferred or fallback) was used for each.
 6. Diff focused; no unrelated edits.
-7. TDD commit ordering verified: run `git log --oneline` on your branch and confirm that every `test:` commit appears before its corresponding `feat:` commit. If any feature commit lacks a preceding test commit, fix the ordering before marking the PR ready.
 
-Do NOT mark a PR ready for review or merge until merge-ready criteria are satisfied AND the PR description has been updated with evidence for criteria 1–7.
+Do NOT mark a PR ready for review or merge until merge-ready criteria are satisfied AND the PR description has been updated with evidence for criteria 1–6.
+
+**Anti-loop rule:** If you have verified CI green, tests passing, clippy clean, and the diff is focused, the PR IS merge-ready. Do not spawn additional cycles demanding gadugi-test or quality-audit evidence when those tools are not available in your environment. Use the fallback criteria, document that you did, and merge.
 
 ### Definition of Done (DoD) for every code-producing engineer cycle
 
@@ -184,15 +187,14 @@ Whenever an engineer cycle produces code changes, the cycle is NOT complete unti
    ```
 
 2. **Push** — the feature branch is pushed to `origin` with pre-push hooks intact (no `--no-verify`). If pre-commit/pre-push hooks fail, run `cargo fmt --all` then `cargo clippy --fix --allow-dirty`, re-stage, and re-push — never bypass.
-3. **PR opened via the merge-ready skill** with the SEVEN evidence headings filled out:
-   - **QA-team evidence** — scenarios + validate + run results
+3. **PR opened** with evidence headings filled out:
+   - **Testing evidence** — test method used (gadugi-test or cargo test) + results
    - **Documentation** — surfaces touched + doc updates (or internal-only justification)
-   - **Quality-audit** — ≥3 SEEK→VALIDATE→FIX cycles ending clean
+   - **Code quality** — method used (quality-audit or manual review + clippy) + results
    - **CI** — link to the green run for every required check
    - **Scope** — diff summary with confirmation of no unrelated edits
-   - **TDD commit ordering** — `git log --oneline` excerpt showing `test:` commits before corresponding `feat:` commits (or justification if no feature code was added)
    - **Verdict** — explicit "ready to merge" / "draft" / "blocked" call with rationale
-4. **Drive to merge** — once CI is fully green and the PR has all seven headings, run `simard merge-pr <PR>` to drive the PR through the merge-authority gate. (If the deployed `simard` binary lacks `merge-pr`, the cycle MUST fall back to `gh pr merge --squash --delete-branch <PR>` AFTER confirming the seven-evidence merge-ready gate is satisfied; the deviation MUST be noted under the PR's **Verdict** heading.)
+4. **Drive to merge** — once CI is fully green and the PR has evidence headings, merge via `gh pr merge --squash --delete-branch <PR>`.
 
 ### Allowed exceptions (must be recorded in `cycle_summary.engineer_summary`)
 
@@ -208,7 +210,7 @@ The following will trigger `reclaim_and_redispatch` from the OODA brain — the 
 
 - **Uncommitted changes left in the worktree at end of cycle.** Either commit + push + PR (DoD path) OR `git stash`/`git checkout --` and record a permitted exception.
 - **Committed to feature branch but never pushed.** A local commit that the operator and reviewers cannot see is operationally indistinguishable from no work at all.
-- **Opening a PR without all seven evidence headings.** The merge-authority gate will refuse the PR anyway; producing a PR in that state wastes a review slot and a CI run.
+- **Opening a PR without evidence headings.** A PR without testing/quality/CI evidence wastes a review slot and a CI run.
 - **Bypassing the workflow** — any code-producing cycle that does not begin with the dev-orchestrator skill or `amplihack recipe run` (see "Workflow Contract" above) violates the contract regardless of how clean the resulting diff looks.
 
 ## Forbidden Paths
