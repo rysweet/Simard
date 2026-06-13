@@ -294,3 +294,217 @@ fn trend_long_history_tracks_overall_delta() {
         assert_eq!(dt.history.len(), 10);
     }
 }
+
+// ── BenchmarkRunReport intake tests ─────────────────────────────────
+
+use crate::gym::BenchmarkClass;
+use crate::gym::{
+    BenchmarkArtifactPaths, BenchmarkHandoffReport, BenchmarkRunReport, BenchmarkRuntimeReport,
+    BenchmarkScenario, BenchmarkScorecard,
+};
+use crate::runtime::RuntimeTopology;
+
+#[allow(clippy::too_many_arguments)]
+fn make_report(
+    suite: &str,
+    scenario_id: &'static str,
+    passed: bool,
+    checks_passed: usize,
+    checks_total: usize,
+    evidence: &str,
+    ts_ms: u128,
+    unnecessary: Option<u32>,
+    retries: Option<u32>,
+) -> BenchmarkRunReport {
+    BenchmarkRunReport {
+        suite_id: suite.to_string(),
+        scenario: BenchmarkScenario {
+            id: scenario_id,
+            title: "Test",
+            description: "desc",
+            class: BenchmarkClass::RepoExploration,
+            identity: "test",
+            base_type: "local-harness",
+            topology: RuntimeTopology::SingleProcess,
+            objective: "obj",
+            expected_min_runtime_evidence: 1,
+        },
+        session_id: format!("session-{ts_ms}"),
+        run_started_at_unix_ms: ts_ms,
+        passed,
+        checks: vec![],
+        scorecard: BenchmarkScorecard {
+            task_completed: passed,
+            evidence_quality: evidence.to_string(),
+            correctness_checks_passed: checks_passed,
+            correctness_checks_total: checks_total,
+            unnecessary_action_count: unnecessary,
+            retry_count: retries,
+            human_review_notes: vec![],
+            measurement_notes: vec![],
+        },
+        plan: String::new(),
+        execution_summary: String::new(),
+        reflection_summary: String::new(),
+        benchmark_memory_key: String::new(),
+        benchmark_evidence_id: String::new(),
+        runtime: BenchmarkRuntimeReport {
+            identity: String::new(),
+            selected_base_type: String::new(),
+            topology: String::new(),
+            adapter_implementation: String::new(),
+            topology_backend: String::new(),
+            transport_backend: String::new(),
+            supervisor_backend: String::new(),
+            runtime_node: String::new(),
+            mailbox_address: String::new(),
+            snapshot_state_before_stop: String::new(),
+            snapshot_state_after_stop: String::new(),
+        },
+        handoff: BenchmarkHandoffReport {
+            exported_state: String::new(),
+            exported_memory_records: 0,
+            exported_evidence_records: 0,
+            restored_runtime_state: String::new(),
+            restored_session_phase: None,
+            restored_session_objective: None,
+        },
+        artifacts: BenchmarkArtifactPaths {
+            run_dir: String::new(),
+            report_json: String::new(),
+            report_txt: String::new(),
+            review_json: String::new(),
+        },
+    }
+}
+
+#[test]
+fn suite_score_from_benchmark_report_pass_rate() {
+    let report = make_report("s1", "sc1", true, 7, 10, "sufficient", 1000, None, None);
+    let score = suite_score_from_benchmark_report(&report);
+    assert_eq!(score.suite_id, "s1");
+    assert!((score.overall - 0.7).abs() < 1e-9);
+    assert!((score.dimensions.factual_accuracy - 0.7).abs() < 1e-9);
+    assert!((score.dimensions.specificity - 1.0).abs() < 1e-9); // sufficient
+    assert_eq!(score.scenario_count, 1);
+    assert_eq!(score.scenarios_passed, 1);
+    assert_eq!(score.recorded_at_unix_ms, Some(1000));
+}
+
+#[test]
+fn suite_score_from_benchmark_report_failed() {
+    let report = make_report("s1", "sc1", false, 2, 10, "thin", 2000, None, None);
+    let score = suite_score_from_benchmark_report(&report);
+    assert!((score.overall - 0.2).abs() < 1e-9);
+    assert!((score.dimensions.specificity - 0.5).abs() < 1e-9); // thin
+    assert_eq!(score.scenarios_passed, 0);
+    assert!((score.pass_rate - 0.0).abs() < 1e-9);
+}
+
+#[test]
+fn suite_score_from_benchmark_report_zero_checks() {
+    let report = make_report("s1", "sc1", false, 0, 0, "thin", 3000, None, None);
+    let score = suite_score_from_benchmark_report(&report);
+    assert_eq!(score.overall, 0.0);
+}
+
+#[test]
+fn suite_score_from_benchmark_report_calibration_penalty() {
+    // 3 unnecessary actions → 0.3 penalty, 2 retries → 0.2 penalty → calibration = 0.5
+    let report = make_report(
+        "s1",
+        "sc1",
+        true,
+        10,
+        10,
+        "sufficient",
+        4000,
+        Some(3),
+        Some(2),
+    );
+    let score = suite_score_from_benchmark_report(&report);
+    assert!((score.dimensions.confidence_calibration - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn suite_score_from_benchmark_report_calibration_clamped() {
+    // 10 unnecessary actions → 1.0 penalty (capped at 0.5), 10 retries → 0.5 → calibration = 0.0
+    let report = make_report(
+        "s1",
+        "sc1",
+        true,
+        10,
+        10,
+        "sufficient",
+        5000,
+        Some(10),
+        Some(10),
+    );
+    let score = suite_score_from_benchmark_report(&report);
+    assert_eq!(score.dimensions.confidence_calibration, 0.0);
+}
+
+#[test]
+fn suite_score_from_benchmark_reports_empty() {
+    let score = suite_score_from_benchmark_reports("empty", &[]);
+    assert_eq!(score.scenario_count, 0);
+    assert_eq!(score.overall, 0.0);
+}
+
+#[test]
+fn suite_score_from_benchmark_reports_aggregates() {
+    let reports = vec![
+        make_report("s1", "sc1", true, 8, 10, "sufficient", 1000, None, None),
+        make_report("s1", "sc2", true, 6, 10, "thin", 2000, None, None),
+    ];
+    let score = suite_score_from_benchmark_reports("s1", &reports);
+    assert_eq!(score.scenario_count, 2);
+    assert_eq!(score.scenarios_passed, 2);
+    // overall = avg(0.8, 0.6) = 0.7
+    assert!((score.overall - 0.7).abs() < 1e-9);
+    // specificity = avg(1.0, 0.5) = 0.75
+    assert!((score.dimensions.specificity - 0.75).abs() < 1e-9);
+    assert_eq!(score.recorded_at_unix_ms, Some(2000));
+}
+
+#[test]
+fn benchmark_report_flows_to_regression_detection() {
+    let baseline = make_report("s1", "sc1", true, 9, 10, "sufficient", 1000, None, None);
+    let current = make_report("s1", "sc1", true, 5, 10, "thin", 2000, Some(3), None);
+    let baseline_score = suite_score_from_benchmark_report(&baseline);
+    let current_score = suite_score_from_benchmark_report(&current);
+    let regressions = detect_regression(&current_score, &baseline_score);
+    assert!(
+        !regressions.is_empty(),
+        "should detect regressions from degraded benchmark run"
+    );
+    assert!(
+        regressions
+            .iter()
+            .any(|r| r.dimension == "factual_accuracy"),
+        "factual_accuracy should regress (0.5 vs 0.9)"
+    );
+}
+
+#[test]
+fn benchmark_report_flows_to_improvement_tracking() {
+    let reports_over_time: Vec<GymSuiteScore> = (1..=5)
+        .map(|i| {
+            let r = make_report(
+                "s1",
+                "sc1",
+                true,
+                5 + i,
+                10,
+                "sufficient",
+                i as u128 * 1000,
+                None,
+                None,
+            );
+            suite_score_from_benchmark_report(&r)
+        })
+        .collect();
+    let trend = track_improvement(&reports_over_time);
+    assert_eq!(trend.run_count, 5);
+    assert_eq!(trend.overall_direction, TrendDirection::Improving);
+}

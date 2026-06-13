@@ -237,3 +237,141 @@ fn generate_signals_empty_suite() {
     let sigs = generate_signals(&h, "nonexistent").unwrap();
     assert!(sigs.is_empty());
 }
+
+// ── BenchmarkRunReport intake tests ─────────────────────────────────
+
+use crate::gym::{
+    BenchmarkArtifactPaths, BenchmarkClass, BenchmarkHandoffReport, BenchmarkRunReport,
+    BenchmarkRuntimeReport, BenchmarkScenario, BenchmarkScorecard,
+};
+use crate::runtime::RuntimeTopology;
+
+fn make_report(
+    suite: &str,
+    scenario_id: &'static str,
+    passed: bool,
+    checks_passed: usize,
+    checks_total: usize,
+    evidence: &str,
+    ts_ms: u128,
+) -> BenchmarkRunReport {
+    BenchmarkRunReport {
+        suite_id: suite.to_string(),
+        scenario: BenchmarkScenario {
+            id: scenario_id,
+            title: "Test",
+            description: "desc",
+            class: BenchmarkClass::RepoExploration,
+            identity: "test",
+            base_type: "local-harness",
+            topology: RuntimeTopology::SingleProcess,
+            objective: "obj",
+            expected_min_runtime_evidence: 1,
+        },
+        session_id: format!("session-{ts_ms}"),
+        run_started_at_unix_ms: ts_ms,
+        passed,
+        checks: vec![],
+        scorecard: BenchmarkScorecard {
+            task_completed: passed,
+            evidence_quality: evidence.to_string(),
+            correctness_checks_passed: checks_passed,
+            correctness_checks_total: checks_total,
+            unnecessary_action_count: None,
+            retry_count: None,
+            human_review_notes: vec![],
+            measurement_notes: vec![],
+        },
+        plan: String::new(),
+        execution_summary: String::new(),
+        reflection_summary: String::new(),
+        benchmark_memory_key: String::new(),
+        benchmark_evidence_id: String::new(),
+        runtime: BenchmarkRuntimeReport {
+            identity: String::new(),
+            selected_base_type: String::new(),
+            topology: String::new(),
+            adapter_implementation: String::new(),
+            topology_backend: String::new(),
+            transport_backend: String::new(),
+            supervisor_backend: String::new(),
+            runtime_node: String::new(),
+            mailbox_address: String::new(),
+            snapshot_state_before_stop: String::new(),
+            snapshot_state_after_stop: String::new(),
+        },
+        handoff: BenchmarkHandoffReport {
+            exported_state: String::new(),
+            exported_memory_records: 0,
+            exported_evidence_records: 0,
+            restored_runtime_state: String::new(),
+            restored_session_phase: None,
+            restored_session_objective: None,
+        },
+        artifacts: BenchmarkArtifactPaths {
+            run_dir: String::new(),
+            report_json: String::new(),
+            report_txt: String::new(),
+            review_json: String::new(),
+        },
+    }
+}
+
+#[test]
+fn score_from_benchmark_report_derives_pass_rate() {
+    let report = make_report("s1", "sc1", true, 7, 10, "sufficient", 1_700_000_000_000);
+    let record = score_from_benchmark_report(&report, Some("abc123".into()));
+    assert_eq!(record.suite_id, "s1");
+    assert_eq!(record.scenario_id, "sc1");
+    assert!((record.score - 0.7).abs() < 1e-9);
+    assert_eq!(record.timestamp, 1_700_000_000);
+    assert_eq!(record.commit_hash.as_deref(), Some("abc123"));
+}
+
+#[test]
+fn score_from_benchmark_report_zero_checks() {
+    let report = make_report("s1", "sc1", false, 0, 0, "thin", 1000);
+    let record = score_from_benchmark_report(&report, None);
+    assert_eq!(record.score, 0.0);
+}
+
+#[test]
+fn score_from_benchmark_report_perfect_score() {
+    let report = make_report("s1", "sc1", true, 8, 8, "sufficient", 2000);
+    let record = score_from_benchmark_report(&report, None);
+    assert!((record.score - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn record_benchmark_run_persists_and_returns() {
+    let h = mem_history();
+    let report = make_report("suite-a", "L1", true, 6, 8, "sufficient", 5_000_000);
+    let record = record_benchmark_run(&h, &report, None).unwrap();
+    assert!((record.score - 0.75).abs() < 1e-9);
+    let latest = h.latest("suite-a", "L1").unwrap();
+    assert!((latest.score - 0.75).abs() < 1e-9);
+}
+
+#[test]
+fn record_benchmark_run_enables_signal_generation() {
+    let h = mem_history();
+    let r1 = make_report("suite-b", "L2", true, 5, 10, "thin", 1_000_000);
+    let r2 = make_report("suite-b", "L2", true, 9, 10, "sufficient", 2_000_000);
+    record_benchmark_run(&h, &r1, None).unwrap();
+    record_benchmark_run(&h, &r2, None).unwrap();
+    let sigs = generate_signals(&h, "suite-b").unwrap();
+    assert_eq!(sigs.len(), 1);
+    assert!(matches!(sigs[0].signal, GymSignal::Improvement { .. }));
+}
+
+#[test]
+fn record_benchmark_run_detects_regression_signal() {
+    let h = mem_history();
+    let r1 = make_report("suite-c", "L3", true, 9, 10, "sufficient", 1_000_000);
+    let r2 = make_report("suite-c", "L3", false, 3, 10, "thin", 2_000_000);
+    record_benchmark_run(&h, &r1, None).unwrap();
+    record_benchmark_run(&h, &r2, None).unwrap();
+    let sigs = generate_signals(&h, "suite-c").unwrap();
+    assert_eq!(sigs.len(), 1);
+    assert!(matches!(sigs[0].signal, GymSignal::Regression { .. }));
+}

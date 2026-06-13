@@ -202,11 +202,12 @@ pub use gym::{
 pub use gym_bridge::{GymBridge, GymScenario, GymScenarioResult, GymSuiteResult, ScoreDimensions};
 pub use gym_history::{
     GymSignal, ScenarioSignal, ScoreHistory, ScoreRecord, check_promotion, generate_signals,
+    record_benchmark_run, score_from_benchmark_report,
 };
 pub use gym_scoring::{
     DimensionTrend, GymSuiteScore, ImprovementTrend, Regression, RegressionSeverity,
-    TrendDirection, aggregate_suite_scores, detect_regression, suite_score_from_result,
-    track_improvement,
+    TrendDirection, aggregate_suite_scores, detect_regression, suite_score_from_benchmark_report,
+    suite_score_from_benchmark_reports, suite_score_from_result, track_improvement,
 };
 pub use handoff::{
     CopilotSubmitAudit, FileBackedHandoffStore, InMemoryHandoffStore, RuntimeHandoffSnapshot,
