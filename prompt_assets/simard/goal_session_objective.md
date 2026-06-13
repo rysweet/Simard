@@ -18,20 +18,19 @@ Before starting any new work, triage existing PRs in this strict order:
 
    | # | Criterion | What constitutes evidence |
    |---|-----------|--------------------------|
-   | 1 | **Testing** | Tests exist and pass. Preferred: `gadugi-test validate` + `gadugi-test run`. Fallback: `cargo test` passing with adequate coverage of changed code (new tests for new behavior, regression tests for bug fixes). State which method was used. |
+   | 1 | **QA-team** | Scenarios written, validated (`gadugi-test validate`), and run (`gadugi-test run`) — output pasted or linked. The `gadugi-test` binary is at `~/.npm-global/bin/gadugi-test`. |
    | 2 | **Documentation** | User-facing docs updated if change affects APIs, config, CLI, or deployment — OR explicit internal-only justification |
-   | 3 | **Code quality** | Code reviewed for correctness. Preferred: ≥3 SEEK→VALIDATE→FIX quality-audit cycles. Fallback: manual review confirming no critical/high issues, clippy clean, no obvious bugs. State which method was used. |
+   | 3 | **Quality-audit** | ≥3 SEEK→VALIDATE→FIX cycles completed via `Skill(skill="quality-audit")`, final cycle clean (zero critical/high findings) — cycle count and commit SHAs cited |
    | 4 | **CI** | All CI checks green (0 failures) — link to the green run |
-   | 5 | **PR description** | Describes what changed and why, with evidence for criteria 1–4 and 6 |
+   | 5 | **PR description** | Updated with concrete evidence for criteria 1–4 and 6 |
    | 6 | **Scope** | Diff contains no unrelated changes — summary confirming focus |
 
-   **Gating rule:** You MUST NOT instruct an engineer to merge a PR unless CI
-   is green AND tests cover the changed behavior AND the diff is focused. If
-   a PR is CI-green with tests passing, and the PR description documents the
-   changes adequately, it is merge-ready. Do NOT loop endlessly demanding
-   specific tooling evidence (gadugi-test, quality-audit cycles) when the
-   engineer environment does not have those tools — use the fallback criteria
-   instead and merge.
+   **Gating rule:** You MUST NOT instruct an engineer to merge a PR unless you
+   have reviewed the PR description and confirmed that ALL SIX criteria above
+   have substantive evidence (not placeholders, not "will do later"). If a PR
+   is CI-green but missing merge-ready evidence, tell the engineer to run
+   `gadugi-test` and `Skill(skill="quality-audit")` on it — these tools ARE
+   available in the engineer's environment.
 
    Once all criteria are verified, merge via `gh pr merge --squash --delete-branch`.
 2. **Fix failing PRs second.** For each red PR, diagnose the CI failure, apply
