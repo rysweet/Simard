@@ -285,7 +285,15 @@ impl BaseTypeSession for PersistentAgentProxy {
     fn open(&mut self) -> SimardResult<()> {
         ensure_session_not_closed(&self.descriptor, self.is_closed, "open")?;
         ensure_session_not_already_open(&self.descriptor, self.is_open)?;
-        let (cmd, args) = resolve_agent_command()?;
+        let (cmd, mut args) = resolve_agent_command()?;
+        // Give the meeting agent read access to the Simard source tree so it
+        // can inspect code, run `simard goal`, and execute other CLI commands
+        // in the correct repository context.
+        let simard_src = std::path::Path::new("/home/azureuser/src/Simard/worktrees/main");
+        if simard_src.exists() {
+            args.push("--add-dir".to_string());
+            args.push(simard_src.to_string_lossy().into_owned());
+        }
         self.agent_cmd = cmd;
         self.agent_base_args = args;
         self.validate_agent()?;
