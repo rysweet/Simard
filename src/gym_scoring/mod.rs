@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::gym::BenchmarkRunReport;
 use crate::gym_bridge::{GymScenarioResult, GymSuiteResult, ScoreDimensions};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -211,6 +212,129 @@ fn classify_trend(delta: f64) -> TrendDirection {
         TrendDirection::Declining
     } else {
         TrendDirection::Stable
+    }
+}
+
+// ── BenchmarkRunReport intake ────────────────────────────────────────
+
+/// Build a [`GymSuiteScore`] from a single [`BenchmarkRunReport`].
+///
+/// Maps the benchmark scorecard into scoring dimensions so that
+/// [`detect_regression`] and [`track_improvement`] can consume executor output
+/// directly. The overall score is the correctness-check pass rate. Dimension
+/// values are derived from scorecard signals:
+///
+/// - `factual_accuracy`: correctness-check pass rate
+/// - `specificity`: evidence quality mapped to 0.0 / 0.5 / 1.0
+/// - `temporal_awareness`: correctness-check pass rate (benchmarks test temporal aspects)
+/// - `source_attribution`: evidence quality indicator
+/// - `confidence_calibration`: 1.0 minus penalty for unnecessary actions and retries
+pub fn suite_score_from_benchmark_report(report: &BenchmarkRunReport) -> GymSuiteScore {
+    let checks_total = report.scorecard.correctness_checks_total;
+    let checks_passed = report.scorecard.correctness_checks_passed;
+    let pass_rate = if checks_total > 0 {
+        checks_passed as f64 / checks_total as f64
+    } else {
+        0.0
+    };
+
+    let evidence_score = match report.scorecard.evidence_quality.as_str() {
+        "sufficient" => 1.0,
+        "thin" => 0.5,
+        _ => 0.0,
+    };
+
+    let action_penalty = report
+        .scorecard
+        .unnecessary_action_count
+        .map(|c| (c as f64 * 0.1).min(0.5))
+        .unwrap_or(0.0);
+    let retry_penalty = report
+        .scorecard
+        .retry_count
+        .map(|c| (c as f64 * 0.1).min(0.5))
+        .unwrap_or(0.0);
+    let calibration = (1.0 - action_penalty - retry_penalty).max(0.0);
+
+    GymSuiteScore {
+        suite_id: report.suite_id.clone(),
+        overall: pass_rate,
+        dimensions: ScoreDimensions {
+            factual_accuracy: pass_rate,
+            specificity: evidence_score,
+            temporal_awareness: pass_rate,
+            source_attribution: evidence_score,
+            confidence_calibration: calibration,
+        },
+        scenario_count: 1,
+        scenarios_passed: if report.passed { 1 } else { 0 },
+        pass_rate: if report.passed { 1.0 } else { 0.0 },
+        recorded_at_unix_ms: Some(report.run_started_at_unix_ms),
+    }
+}
+
+/// Build a [`GymSuiteScore`] by aggregating multiple [`BenchmarkRunReport`]s.
+///
+/// Each report is converted via [`suite_score_from_benchmark_report`] and
+/// the resulting dimension values are averaged across all reports. This is the
+/// primary entry point for suite-level regression detection after a full
+/// benchmark suite run.
+pub fn suite_score_from_benchmark_reports(
+    suite_id: &str,
+    reports: &[BenchmarkRunReport],
+) -> GymSuiteScore {
+    if reports.is_empty() {
+        return GymSuiteScore {
+            suite_id: suite_id.to_string(),
+            overall: 0.0,
+            dimensions: ScoreDimensions::default(),
+            scenario_count: 0,
+            scenarios_passed: 0,
+            pass_rate: 0.0,
+            recorded_at_unix_ms: None,
+        };
+    }
+
+    let scores: Vec<GymSuiteScore> = reports
+        .iter()
+        .map(suite_score_from_benchmark_report)
+        .collect();
+    let n = scores.len() as f64;
+    let overall = scores.iter().map(|s| s.overall).sum::<f64>() / n;
+    let passed = scores.iter().filter(|s| s.scenarios_passed > 0).count();
+    let dims = ScoreDimensions {
+        factual_accuracy: scores
+            .iter()
+            .map(|s| s.dimensions.factual_accuracy)
+            .sum::<f64>()
+            / n,
+        specificity: scores.iter().map(|s| s.dimensions.specificity).sum::<f64>() / n,
+        temporal_awareness: scores
+            .iter()
+            .map(|s| s.dimensions.temporal_awareness)
+            .sum::<f64>()
+            / n,
+        source_attribution: scores
+            .iter()
+            .map(|s| s.dimensions.source_attribution)
+            .sum::<f64>()
+            / n,
+        confidence_calibration: scores
+            .iter()
+            .map(|s| s.dimensions.confidence_calibration)
+            .sum::<f64>()
+            / n,
+    };
+    let latest_ts = reports.iter().map(|r| r.run_started_at_unix_ms).max();
+
+    GymSuiteScore {
+        suite_id: suite_id.to_string(),
+        overall,
+        dimensions: dims,
+        scenario_count: reports.len(),
+        scenarios_passed: passed,
+        pass_rate: passed as f64 / n,
+        recorded_at_unix_ms: latest_ts,
     }
 }
 

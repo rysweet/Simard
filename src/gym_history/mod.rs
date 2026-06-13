@@ -4,6 +4,7 @@
 //! regressions and promotions across runs without in-memory state.
 
 use crate::error::{SimardError, SimardResult};
+use crate::gym::BenchmarkRunReport;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -207,6 +208,45 @@ impl ScoreHistory {
             .collect();
         Ok(rows)
     }
+}
+
+// ── BenchmarkRunReport intake ────────────────────────────────────────
+
+/// Derive a [`ScoreRecord`] from a [`BenchmarkRunReport`].
+///
+/// The score is the ratio of passed correctness checks to total checks (0.0–1.0).
+/// The timestamp converts `run_started_at_unix_ms` to epoch seconds.
+pub fn score_from_benchmark_report(
+    report: &BenchmarkRunReport,
+    commit_hash: Option<String>,
+) -> ScoreRecord {
+    let score = if report.scorecard.correctness_checks_total > 0 {
+        report.scorecard.correctness_checks_passed as f64
+            / report.scorecard.correctness_checks_total as f64
+    } else {
+        0.0
+    };
+    ScoreRecord {
+        suite_id: report.suite_id.clone(),
+        scenario_id: report.scenario.id.to_string(),
+        score,
+        timestamp: (report.run_started_at_unix_ms / 1000) as i64,
+        commit_hash,
+    }
+}
+
+/// Record a [`BenchmarkRunReport`] into the score history database.
+///
+/// Converts the report to a [`ScoreRecord`] via [`score_from_benchmark_report`],
+/// persists it, and returns the record for downstream use (e.g. signal generation).
+pub fn record_benchmark_run(
+    history: &ScoreHistory,
+    report: &BenchmarkRunReport,
+    commit_hash: Option<String>,
+) -> Result<ScoreRecord, rusqlite::Error> {
+    let record = score_from_benchmark_report(report, commit_hash);
+    history.record(&record)?;
+    Ok(record)
 }
 
 // ── Signal generation ────────────────────────────────────────────────
