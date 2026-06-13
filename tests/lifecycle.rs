@@ -529,7 +529,10 @@ fn failed_runs_preserve_failed_session_metadata_until_shutdown() {
     let failed_snapshot = runtime.snapshot().expect("snapshot should still work");
     assert_eq!(failed_snapshot.runtime_state, RuntimeState::Failed);
     assert_eq!(failed_snapshot.session_phase, Some(SessionPhase::Failed));
-    assert_eq!(failed_snapshot.memory_records, 1);
+    // Issue #2093: with batched persistence, memory writes are deferred until
+    // the Persistence phase. A session that fails before reaching Persistence
+    // correctly has 0 memory records — no orphaned writes.
+    assert_eq!(failed_snapshot.memory_records, 0);
     assert_eq!(failed_snapshot.evidence_records, 0);
     assert_eq!(
         failed_snapshot.agent_program_backend.identity,
