@@ -172,6 +172,7 @@ fn goal_curator_plan_turn_with_active_goals_in_context() {
         owner_identity: "test".to_string(),
         source_session_id: context.session_id.clone(),
         updated_in: crate::session::SessionPhase::Persistence,
+        evidence: Vec::new(),
     }];
     let input = program
         .plan_turn(&context)
@@ -257,6 +258,7 @@ fn goal_plan_turn_objective_with_active_goals() {
         source_session_id: SessionId::parse("session-00000000-0000-0000-0000-000000000001")
             .expect("test operation should succeed"),
         updated_in: crate::session::SessionPhase::Persistence,
+        evidence: Vec::new(),
     }];
     let obj = plan.turn_objective(&goals);
     assert!(obj.contains("Existing"));

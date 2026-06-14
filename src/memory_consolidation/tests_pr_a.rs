@@ -131,6 +131,7 @@ fn mixed_goal_store_bridge() -> CognitiveMemoryBridge {
         source_session_id: SessionId::parse("session-01234567-89ab-cdef-0123-456789abcdef")
             .unwrap(),
         updated_in: SessionPhase::Persistence,
+        evidence: Vec::new(),
     };
 
     let alpha = make_record("alpha", "Alpha");

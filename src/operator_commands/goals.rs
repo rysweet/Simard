@@ -103,6 +103,7 @@ mod tests {
             owner_identity: s("test-identity"),
             source_session_id: SessionId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
             updated_in: SessionPhase::Execution,
+            evidence: Vec::new(),
         }
     }
 

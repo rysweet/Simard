@@ -205,6 +205,7 @@ fn goal_dedup_bridge() -> CognitiveMemoryBridge {
                         )
                         .unwrap(),
                         updated_in: crate::session::SessionPhase::Persistence,
+                        evidence: Vec::new(),
                     };
                     let alpha_v2 = GoalRecord {
                         slug: "alpha".to_string(),
@@ -218,6 +219,7 @@ fn goal_dedup_bridge() -> CognitiveMemoryBridge {
                         )
                         .unwrap(),
                         updated_in: crate::session::SessionPhase::Persistence,
+                        evidence: Vec::new(),
                     };
                     let beta = GoalRecord {
                         slug: "beta".to_string(),
@@ -231,6 +233,7 @@ fn goal_dedup_bridge() -> CognitiveMemoryBridge {
                         )
                         .unwrap(),
                         updated_in: crate::session::SessionPhase::Persistence,
+                        evidence: Vec::new(),
                     };
                     Ok(json!({
                         "facts": [

@@ -1180,6 +1180,7 @@ pub fn active_goals_as_records(board: &GoalBoard) -> Vec<crate::goals::GoalRecor
                 owner_identity,
                 source_session_id: SENTINEL_SESSION_ID.clone(),
                 updated_in: crate::session::SessionPhase::Persistence,
+                evidence: Vec::new(),
             }
         })
         .collect()
