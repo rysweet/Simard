@@ -7,7 +7,7 @@ use crate::goal_curation::{load_goal_board, save_goal_board_with_removals};
 use crate::gym_bridge::ScoreDimensions;
 use crate::gym_scoring::GymSuiteScore;
 use crate::memory_consolidation;
-use crate::memory_consolidation::preparation_memory_operations;
+use crate::memory_consolidation::preparation_memory_operations_with_active_slugs;
 use crate::self_improve::{ImprovementCycle, ImprovementPhase};
 
 use super::types::*;
@@ -216,9 +216,25 @@ fn run_ooda_cycle_inner(
         .map(|g| g.description.as_str())
         .collect::<Vec<_>>()
         .join("; ");
+    // PR-A (issue #2281): build the live `active_slugs` set from
+    // `active` + `backlog` so `preparation_memory_operations_with_active_slugs`
+    // can drop stale `goal-store:record` facts whose slug is no longer
+    // on the board. Using the live board (not snapshot facts) prevents
+    // a stale snapshot from resurrecting a deleted slug into recall.
+    let active_slugs: std::collections::HashSet<&str> = state
+        .active_goals
+        .active
+        .iter()
+        .map(|g| g.id.as_str())
+        .chain(state.active_goals.backlog.iter().map(|b| b.id.as_str()))
+        .collect();
     // Reuse cycle_session_id established above — the entire cycle is one logical session.
-    let ctx =
-        preparation_memory_operations(&objective_summary, &cycle_session_id, &*bridges.memory)?;
+    let ctx = preparation_memory_operations_with_active_slugs(
+        &objective_summary,
+        &cycle_session_id,
+        &*bridges.memory,
+        Some(&active_slugs),
+    )?;
     eprintln!(
         "[simard] OODA cycle: prepared context ({} facts, {} triggers, {} procedures)",
         ctx.relevant_facts.len(),

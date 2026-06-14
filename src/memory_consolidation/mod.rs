@@ -74,11 +74,51 @@ pub fn intake_memory_operations(
 /// procedures. Also explicitly loads active goal records from semantic
 /// memory so goals are always available in the prepared context regardless
 /// of whether the objective text happens to match (issue #2207).
+///
+/// This is the legacy 3-argument entry point retained for backward
+/// compatibility. It applies the goal-board:snapshot filter (PR-A
+/// filter 1, issue #2281) but does **not** apply the stale-slug
+/// filter (PR-A filter 2) because that filter requires the live
+/// goal-board state to know which slugs are active. New callers
+/// should use [`preparation_memory_operations_with_active_slugs`]
+/// instead so stale `goal-store:record` facts are dropped.
 #[tracing::instrument(skip_all)]
 pub fn preparation_memory_operations(
     objective: &str,
     session_id: &SessionId,
     bridge: &dyn CognitiveMemoryOps,
+) -> SimardResult<PreparedContext> {
+    preparation_memory_operations_with_active_slugs(
+        objective, session_id, bridge,
+        // `None` opts out of the stale-slug filter so existing test
+        // fixtures (`tests.rs`) that exercise the goal-fact dedup
+        // path keep passing unchanged.
+        None,
+    )
+}
+
+/// Preparation phase, taking the live active+backlog slugs so stale
+/// `goal-store:record` facts can be filtered out.
+///
+/// `active_slugs` should be the union of `state.active_goals.active`
+/// and `state.active_goals.backlog` ids built immediately before this
+/// call from the **live** goal-board (not from snapshot facts). Pass
+/// `Some(&empty)` to drop all `goal-store:record` facts (correct when
+/// there are no live goals); pass `None` to skip the stale filter
+/// entirely (backwards-compat path used by `preparation_memory_operations`).
+///
+/// Always applies the `goal-board:snapshot` filter (PR-A filter 1)
+/// regardless of `active_slugs`: snapshot revisions are pure
+/// redundancy because `advance.rs` already injects the live goal
+/// board into the prompt.
+///
+/// Issue [#2281](https://github.com/rysweet/Simard/issues/2281), PR-A.
+#[tracing::instrument(skip_all)]
+pub fn preparation_memory_operations_with_active_slugs(
+    objective: &str,
+    session_id: &SessionId,
+    bridge: &dyn CognitiveMemoryOps,
+    active_slugs: Option<&std::collections::HashSet<&str>>,
 ) -> SimardResult<PreparedContext> {
     // Split compound objectives (joined with "; ") into individual fragments
     // and search each separately. The old code passed the full joined string to
@@ -96,6 +136,12 @@ pub fn preparation_memory_operations(
     for fragment in &fragments {
         let per_fragment = bridge.search_facts(fragment, 10, 0.0)?;
         for fact in per_fragment {
+            // PR-A filter 1: drop goal-board:snapshot revisions even
+            // when they surface from a per-fragment match. The live
+            // board is already injected by `advance.rs`.
+            if fact.concept == GOAL_BOARD_SNAPSHOT_CONCEPT {
+                continue;
+            }
             if seen_ids.insert(fact.node_id.clone()) {
                 relevant_facts.push(fact);
             }
@@ -114,7 +160,7 @@ pub fn preparation_memory_operations(
     // (highest node_id, which is UUID-v7 time-ordered). This mirrors the
     // dedup logic in CognitiveMemoryGoalStore::list_via_reader() and
     // prevents historical revisions from crowding out current goals (#2207).
-    let mut latest_by_slug: std::collections::HashMap<String, CognitiveFact> =
+    let mut latest_by_slug: std::collections::HashMap<String, (String, CognitiveFact)> =
         std::collections::HashMap::new();
     for fact in goal_facts {
         if fact.concept != GOAL_STORE_FACT_CONCEPT {
@@ -133,19 +179,36 @@ pub fn preparation_memory_operations(
         };
         let slug = record.slug;
         match latest_by_slug.get(&slug) {
-            Some(existing) if existing.node_id >= fact.node_id => {}
+            Some((_, existing)) if existing.node_id >= fact.node_id => {}
             _ => {
-                latest_by_slug.insert(slug, fact);
+                latest_by_slug.insert(slug.clone(), (slug, fact));
             }
         }
     }
 
     let existing_ids: std::collections::HashSet<String> =
         relevant_facts.iter().map(|f| f.node_id.clone()).collect();
-    for fact in latest_by_slug.into_values() {
+    let mut dropped_stale: usize = 0;
+    for (slug, fact) in latest_by_slug.into_values() {
+        // PR-A filter 2 (issue #2281): drop goal-store:record facts
+        // whose slug is not in the live active+backlog goal-board.
+        // Skipped when `active_slugs.is_none()` — backward-compat for
+        // the 3-arg `preparation_memory_operations` entry point.
+        if let Some(slugs) = active_slugs
+            && !slugs.contains(slug.as_str())
+        {
+            dropped_stale += 1;
+            continue;
+        }
         if !existing_ids.contains(&fact.node_id) {
             relevant_facts.push(fact);
         }
+    }
+    if dropped_stale > 0 {
+        tracing::debug!(
+            dropped = dropped_stale,
+            "preparation: dropped stale goal-store:record facts (slug not in active goal-board)"
+        );
     }
 
     // Check if any prospective memories are triggered by the objective.
@@ -174,6 +237,11 @@ pub fn preparation_memory_operations(
         recalled_procedures,
     })
 }
+
+/// Concept label for goal-board snapshot facts, filtered by PR-A
+/// (issue #2281). Snapshot revisions duplicate the live board that
+/// `advance.rs` already injects into the prompt.
+pub(crate) const GOAL_BOARD_SNAPSHOT_CONCEPT: &str = "goal-board:snapshot";
 
 /// Execution phase: record PTY output as sensory observations.
 ///
@@ -437,3 +505,11 @@ pub fn consolidation_persistence(
 
 #[cfg(test)]
 mod tests;
+
+// PR-A (issue #2281): preparation-phase memory filters. Tests assert
+// that `goal-board:snapshot` revisions are dropped from the prepared
+// context and that stale `goal-store:record` facts (slugs not in the
+// live goal-board) are filtered out when the caller supplies the
+// active+backlog slug set.
+#[cfg(test)]
+mod tests_pr_a;
