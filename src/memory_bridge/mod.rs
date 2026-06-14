@@ -13,7 +13,7 @@ use crate::bridge::{BridgeRequest, BridgeTransport, new_request_id, unpack_bridg
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardResult;
 use crate::memory_cognitive::{
-    CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
+    CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
     CognitiveWorkingSlot,
 };
 
@@ -243,6 +243,24 @@ impl CognitiveMemoryBridge {
     pub fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
         self.call("memory.get_statistics", json!({}))
     }
+
+    /// PR-C (issue #2281, problem 4): forward episodic-recall keyword
+    /// search to the bridge server. The server-side handler routes to
+    /// the trait method on the underlying memory backend.
+    pub fn search_episodes_by_keywords(
+        &self,
+        keywords: &[String],
+        limit: u32,
+    ) -> SimardResult<Vec<CognitiveEpisode>> {
+        let result: EpisodesResponse = self.call(
+            "memory.search_episodes_by_keywords",
+            json!({
+                "keywords": keywords,
+                "limit": limit,
+            }),
+        )?;
+        Ok(result.episodes)
+    }
 }
 
 impl CognitiveMemoryOps for CognitiveMemoryBridge {
@@ -346,6 +364,14 @@ impl CognitiveMemoryOps for CognitiveMemoryBridge {
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
         CognitiveMemoryBridge::get_statistics(self)
     }
+
+    fn search_episodes_by_keywords(
+        &self,
+        keywords: &[String],
+        limit: u32,
+    ) -> SimardResult<Vec<CognitiveEpisode>> {
+        CognitiveMemoryBridge::search_episodes_by_keywords(self, keywords, limit)
+    }
 }
 
 // Wire-format response wrappers
@@ -382,6 +408,13 @@ struct ProceduresResponse {
 #[derive(serde::Deserialize)]
 struct ProspectivesResponse {
     prospectives: Vec<CognitiveProspective>,
+}
+
+/// PR-C (issue #2281, problem 4): wire-format wrapper for the
+/// `memory.search_episodes_by_keywords` response.
+#[derive(serde::Deserialize)]
+struct EpisodesResponse {
+    episodes: Vec<CognitiveEpisode>,
 }
 
 #[cfg(test)]

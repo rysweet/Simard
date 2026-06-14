@@ -219,6 +219,7 @@ fn stateful_bridge() -> CognitiveMemoryBridge {
                 "procedural_count": p.lock().unwrap().len() as u64,
                 "prospective_count": pr.lock().unwrap().len() as u64,
             })),
+            "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             _ => Err(BridgeErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),

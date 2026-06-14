@@ -119,6 +119,25 @@ pub trait CognitiveMemoryOps: Send + Sync {
         Ok(vec![])
     }
 
+    /// Return up to `limit` recent episodes whose `content` contains
+    /// at least one of the supplied keywords (case-insensitive
+    /// substring). Newest first.
+    ///
+    /// Default impl returns empty so legacy backends keep compiling.
+    /// `NativeCognitiveMemory` overrides this with a Cypher query
+    /// that ORs one `e.content CONTAINS '<escaped>'` clause per
+    /// keyword, ordered by `e.id DESC` (UUID-v7 ids are time-prefixed
+    /// so descending lex-sort == newest-by-creation).
+    ///
+    /// Issue #2281, PR-C, problem 4.
+    fn search_episodes_by_keywords(
+        &self,
+        _keywords: &[String],
+        _limit: u32,
+    ) -> SimardResult<Vec<CognitiveEpisode>> {
+        Ok(vec![])
+    }
+
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics>;
 
     /// Search recent episodes by content prefix.
@@ -642,6 +661,13 @@ pub(crate) fn as_f64(val: &lbug::Value) -> Option<f64> {
 #[allow(unused_imports)]
 pub(crate) use ops::escape_cypher;
 
+// PR-C (issue #2281): bootstrap procedural-memory seeding. Three
+// baseline procedures (`pr-merge:bootstrap`, `ci-fix:bootstrap`,
+// `run-tests:bootstrap`) are seeded into procedural memory on
+// daemon boot so `recall_procedure` returns ≥1 hit for common
+// engineer-loop objectives from the very first cycle.
+pub mod bootstrap_procedures;
+
 #[cfg(test)]
 mod tests_mod;
 
@@ -650,6 +676,12 @@ mod tests_lock_vs_corruption_1967;
 
 #[cfg(test)]
 mod tests_hermetic_parity;
+
+// PR-C (issue #2281): tests for `bootstrap_procedures::seed_bootstrap_procedures`
+// — idempotency, error propagation, and the three required procedure
+// names with their `| triggers:` suffixes.
+#[cfg(test)]
+mod bootstrap_procedures_tests;
 
 // ============================================================================
 // Inline unit tests for mod.rs (issue #2036)

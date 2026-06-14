@@ -47,10 +47,37 @@ pub fn connect_memory(state_root: &Path) -> SimardResult<Box<dyn CognitiveMemory
         // Wrap in SharedMemory so the trait-object type matches the
         // `Box<dyn CognitiveMemoryOps>` shape expected by OodaBridges.
         let arc: Arc<dyn CognitiveMemoryOps> = Arc::new(remote);
-        return Ok(Box::new(SharedMemory(arc)));
+        let boxed: Box<dyn CognitiveMemoryOps> = Box::new(SharedMemory(arc));
+        // PR-C (issue #2281, problem 3): seed bootstrap procedures
+        // exactly once, post-`open`, pre-loop. Best-effort: failures
+        // log and continue — daemon boot is not blocked on seeding.
+        seed_bootstrap_or_log(&*boxed);
+        return Ok(boxed);
     }
     let native = NativeCognitiveMemory::open(state_root)?;
-    Ok(Box::new(native))
+    let boxed: Box<dyn CognitiveMemoryOps> = Box::new(native);
+    seed_bootstrap_or_log(&*boxed);
+    Ok(boxed)
+}
+
+/// PR-C (issue #2281, problem 3): idempotent bootstrap seed wrapper
+/// with logging. Calls
+/// [`crate::cognitive_memory::bootstrap_procedures::seed_bootstrap_procedures`]
+/// and emits one of two log lines depending on the outcome:
+///
+/// * `[simard] cognitive memory: N bootstrap procedures seeded`   (N > 0)
+/// * `[simard] cognitive memory: 0 bootstrap procedures seeded (all present)`
+/// * `[simard] cognitive memory: bootstrap seeding failed: <err>` (on error)
+///
+/// Seeding errors are never fatal; the daemon continues to boot.
+fn seed_bootstrap_or_log(memory: &dyn CognitiveMemoryOps) {
+    match crate::cognitive_memory::bootstrap_procedures::seed_bootstrap_procedures(memory) {
+        Ok(0) => {
+            eprintln!("[simard] cognitive memory: 0 bootstrap procedures seeded (all present)")
+        }
+        Ok(n) => eprintln!("[simard] cognitive memory: {n} bootstrap procedures seeded"),
+        Err(e) => eprintln!("[simard] cognitive memory: bootstrap seeding failed: {e}"),
+    }
 }
 
 /// Build an [`OodaBridges`] suitable for stateless helper-bin invocations.

@@ -43,6 +43,7 @@ fn mock_memory_bridge() -> CognitiveMemoryBridge {
         "memory.recall_procedure" => Ok(json!({"procedures": [{"node_id": "proc_001",
             "name": "build-and-test", "steps": ["cargo build", "cargo test"],
             "prerequisites": ["rust toolchain"], "usage_count": 5}]})),
+        "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
         _ => Err(BridgeErrorPayload {
             code: -32601,
             message: format!("unknown method: {method}"),

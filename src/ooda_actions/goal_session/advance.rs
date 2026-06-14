@@ -199,6 +199,27 @@ pub(crate) fn advance_goal_with_session(
                 let _ = write!(objective, "\n- {}: {}", proc.name, proc.steps.join(" → "));
             }
         }
+        // PR-C (issue #2281, problem 4): inject Prior episodes
+        // section. Omitted entirely when empty to avoid empty-section
+        // noise. Each line includes the source label, the
+        // monotonically-increasing temporal index, and content
+        // truncated to 200 characters with an ellipsis.
+        if !ctx.episodic_recall.is_empty() {
+            objective.push_str("\n\n## Prior episodes (most-recent first)");
+            for ep in &ctx.episodic_recall {
+                let content = if ep.content.chars().count() > 200 {
+                    let truncated: String = ep.content.chars().take(200).collect();
+                    format!("{truncated}…")
+                } else {
+                    ep.content.clone()
+                };
+                let _ = write!(
+                    objective,
+                    "\n- [{}] [t={}] {}",
+                    ep.source_label, ep.temporal_index, content
+                );
+            }
+        }
     }
 
     const GOAL_SESSION_IDENTITY: &str =

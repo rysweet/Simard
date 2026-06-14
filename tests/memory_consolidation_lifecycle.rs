@@ -31,6 +31,7 @@ fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
             "memory.store_episode" => Ok(json!({"id": "epi_1"})),
             "memory.search_facts" => Ok(json!({"facts": []})),
             "memory.check_triggers" => Ok(json!({"prospectives": []})),
+            "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
             "memory.store_fact" => Ok(json!({"id": "sem_1"})),
             "memory.clear_working" => Ok(json!({"count": 2})),
@@ -131,6 +132,7 @@ fn full_mock_memory_transport() -> InMemoryBridgeTransport {
         "memory.push_working" => Ok(json!({"id": "wrk_1"})),
         "memory.get_working" => Ok(json!({"slots": []})),
         "memory.check_triggers" => Ok(json!({"prospectives": []})),
+        "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
         "memory.clear_working" => Ok(json!({"count": 0})),
         "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
         "memory.store_procedure" => Ok(json!({"id": "proc_new"})),
@@ -286,6 +288,7 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
             "memory.get_working" => Ok(json!({"slots": []})),
             "memory.check_triggers" => Ok(json!({"prospectives": []})),
+            "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             "memory.clear_working" => Ok(json!({"count": 0})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
             _ => Err(BridgeErrorPayload {

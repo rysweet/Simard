@@ -36,6 +36,7 @@ fn mock_memory_transport() -> InMemoryBridgeTransport {
         "memory.record_sensory" => Ok(json!({"id": "sen_1"})),
         "memory.push_working" => Ok(json!({"id": "wrk_1"})),
         "memory.check_triggers" => Ok(json!({"prospectives": []})),
+        "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
         "memory.clear_working" => Ok(json!({"count": 0})),
         "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
         "memory.store_procedure" => Ok(json!({"id": "proc_new"})),
@@ -434,6 +435,7 @@ fn successful_outcome_stores_procedural_memory() {
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
             "memory.get_working" => Ok(json!({"slots": []})),
             "memory.check_triggers" => Ok(json!({"prospectives": []})),
+            "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             "memory.clear_working" => Ok(json!({"count": 0})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
             _ => Err(BridgeErrorPayload {

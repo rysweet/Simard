@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::{
-    CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
+    CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
     CognitiveWorkingSlot,
 };
 
@@ -188,6 +188,12 @@ pub enum MemoryRequest {
     ResolveProspective {
         node_id: String,
     },
+    /// PR-C (issue #2281, problem 4): keyword-overlap episodic search
+    /// for `preparation_memory_operations`.
+    SearchEpisodesByKeywords {
+        keywords: Vec<String>,
+        limit: u32,
+    },
     GetStatistics,
 }
 
@@ -203,6 +209,9 @@ pub enum MemoryResponse {
     Facts(Vec<CognitiveFact>),
     Procedures(Vec<CognitiveProcedure>),
     Prospectives(Vec<CognitiveProspective>),
+    /// PR-C (issue #2281, problem 4): response variant for
+    /// [`MemoryRequest::SearchEpisodesByKeywords`].
+    Episodes(Vec<CognitiveEpisode>),
     Statistics(CognitiveStatistics),
     Ack,
     Error(String),

@@ -577,6 +577,53 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             .collect())
     }
 
+    /// Native impl of `search_episodes_by_keywords` for
+    /// [`NativeCognitiveMemory`]. Builds one Cypher
+    /// `e.content CONTAINS '<escaped>'` clause per keyword and
+    /// OR-joins them. Orders by `e.id DESC` to surface newest
+    /// matches first — `id` is a UUID-v7 so descending lex-sort
+    /// is equivalent to descending creation order without needing
+    /// the `temporal_index` column.
+    ///
+    /// Empty `keywords` slice short-circuits to `Ok(vec![])` so
+    /// callers never need to special-case it.
+    ///
+    /// Issue #2281, PR-C, problem 4.
+    fn search_episodes_by_keywords(
+        &self,
+        keywords: &[String],
+        limit: u32,
+    ) -> SimardResult<Vec<CognitiveEpisode>> {
+        if keywords.is_empty() {
+            return Ok(vec![]);
+        }
+        let where_clause = keywords
+            .iter()
+            .map(|kw| format!("e.content CONTAINS '{}'", escape_cypher(kw)))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let rows = self.query(&format!(
+            "MATCH (e:Episode) WHERE {where_clause} \
+             RETURN e.id, e.content, e.source_label, e.temporal_index, e.compressed \
+             ORDER BY e.id DESC LIMIT {limit}"
+        ))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                if row.len() < 5 {
+                    return None;
+                }
+                Some(CognitiveEpisode {
+                    node_id: as_str(&row[0])?.to_string(),
+                    content: as_str(&row[1])?.to_string(),
+                    source_label: as_str(&row[2]).unwrap_or("").to_string(),
+                    temporal_index: as_i64(&row[3]).unwrap_or(0),
+                    compressed: as_i64(&row[4]).map(|n| n != 0).unwrap_or(false),
+                })
+            })
+            .collect())
+    }
+
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
         let count_query = |table: &str| -> SimardResult<u64> {
             let rows = self.query(&format!("MATCH (n:{table}) RETURN count(n)"))?;

@@ -138,6 +138,7 @@ fn mock_bridge() -> CognitiveMemoryBridge {
                 });
                 Ok(json!({"id": id}))
             }
+            "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             _ => Err(BridgeErrorPayload {
                 code: -32601,
                 message: format!("method not found: {method}"),

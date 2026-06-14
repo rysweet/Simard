@@ -94,6 +94,7 @@ pub(crate) fn mock_memory() -> Box<dyn CognitiveMemoryOps> {
                     "steps": ["compile", "test"], "prerequisites": ["rust"],
                     "usage_count": 5}]
             })),
+            "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             _ => Err(BridgeErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),

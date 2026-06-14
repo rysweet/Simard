@@ -22,6 +22,11 @@ fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
             "memory.clear_working" => Ok(json!({"count": 2})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
             "memory.consolidate_episodes" => Ok(json!({"id": null})),
+            // PR-C (issue #2281, problem 4): preparation now calls
+            // `memory.search_episodes_by_keywords`. Default to empty
+            // so legacy fixtures keep working without any test-side
+            // changes.
+            "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             _ => Err(crate::bridge::BridgeErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
@@ -263,6 +268,7 @@ fn goal_dedup_bridge() -> CognitiveMemoryBridge {
             "memory.check_triggers" => Ok(json!({"prospectives": []})),
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
+            "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             _ => Err(crate::bridge::BridgeErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
@@ -348,6 +354,7 @@ fn preparation_does_not_include_unparseable_goal_facts() {
         "memory.check_triggers" => Ok(json!({"prospectives": []})),
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
         "memory.push_working" => Ok(json!({"id": "wrk_1"})),
+        "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
         _ => Err(crate::bridge::BridgeErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
@@ -398,6 +405,7 @@ fn preparation_uses_goal_store_list_limit_not_hardcoded_20() {
             "memory.check_triggers" => Ok(json!({"prospectives": []})),
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
+            "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             _ => Err(crate::bridge::BridgeErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
@@ -592,6 +600,7 @@ fn compound_objective_bridge(
             "memory.check_triggers" => Ok(json!({"prospectives": []})),
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
+            "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             _ => Err(crate::bridge::BridgeErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
