@@ -513,3 +513,11 @@ mod tests;
 // active+backlog slug set.
 #[cfg(test)]
 mod tests_pr_a;
+
+// PR-B (issue #2281): episode distillation — periodic many-to-few
+// extraction of semantic facts from recent episodes via an LLM
+// recipe. See `docs/architecture/episode-distillation.md`.
+pub mod distillation;
+
+#[cfg(test)]
+mod distillation_tests;
