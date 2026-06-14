@@ -216,6 +216,7 @@ mod tests {
                 "memory.recall_procedure" => Ok(json!({"procedures": []})),
                 "memory.store_fact" => Ok(json!({"id": "imported-1"})),
                 "memory.store_procedure" => Ok(json!({"id": "imported-p1"})),
+                "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
                 _ => Err(crate::bridge::BridgeErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),

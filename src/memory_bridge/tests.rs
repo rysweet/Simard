@@ -49,6 +49,7 @@ fn mock_bridge() -> CognitiveMemoryBridge {
         })),
         "memory.store_prospective" => Ok(json!({"id": "pro_test"})),
         "memory.check_triggers" => Ok(json!({"prospectives": []})),
+        "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
         _ => Err(crate::bridge::BridgeErrorPayload {
             code: -32601,
             message: format!("unknown method: {method}"),
