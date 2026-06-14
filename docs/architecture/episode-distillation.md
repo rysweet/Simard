@@ -152,9 +152,11 @@ recipe with a single LLM agent. It follows the same shape as
 
 The Rust-side invocation reuses the existing
 `Command::new("recipe-runner-rs")` shape demonstrated by
-[`stewardship::recipe_merge_judge::RecipeMergeJudge`](../../src/stewardship/recipe_merge_judge.rs)
+`stewardship::recipe_merge_judge::RecipeMergeJudge`
+(`src/stewardship/recipe_merge_judge.rs`)
 and
-[`goal_curation::recipe_progress_checker::RecipeProgressChecker`](../../src/goal_curation/recipe_progress_checker.rs):
+`goal_curation::recipe_progress_checker::RecipeProgressChecker`
+(`src/goal_curation/recipe_progress_checker.rs`):
 the binary takes the recipe path as a positional arg followed by
 zero or more `-c key=value` pairs and `AMPLIHACK_AGENT_BINARY` in
 the environment. The episodes payload is passed as a single context
