@@ -104,6 +104,7 @@ fn snapshot_revisions_bridge() -> CognitiveMemoryBridge {
         }
         "memory.check_triggers" => Ok(json!({"prospectives": []})),
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
+        "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
         "memory.push_working" => Ok(json!({"id": "wrk_1"})),
         _ => Err(crate::bridge::BridgeErrorPayload {
             code: -32601,
@@ -175,6 +176,7 @@ fn mixed_goal_store_bridge() -> CognitiveMemoryBridge {
             }
             "memory.check_triggers" => Ok(json!({"prospectives": []})),
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
+            "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
             _ => Err(crate::bridge::BridgeErrorPayload {
                 code: -32601,
@@ -211,6 +213,7 @@ fn diverse_concepts_bridge() -> CognitiveMemoryBridge {
         })),
         "memory.check_triggers" => Ok(json!({"prospectives": []})),
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
+        "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
         "memory.push_working" => Ok(json!({"id": "wrk_1"})),
         _ => Err(crate::bridge::BridgeErrorPayload {
             code: -32601,
