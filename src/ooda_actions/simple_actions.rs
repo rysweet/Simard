@@ -6,15 +6,54 @@ use crate::skill_builder::extract_skill_candidates;
 
 use super::{SKILL_MIN_USAGE, make_outcome};
 
-/// ConsolidateMemory: batch-consolidate episodic memory entries.
+/// ConsolidateMemory: batch-consolidate episodic memory entries and
+/// distill recent episodes into semantic facts.
+///
+/// Runs TWO independent passes:
+///
+/// 1. **Textual dedup** via `consolidate_episodes(20)` — collapses
+///    identical episodes into a single summary; sets `compressed = 1`.
+/// 2. **Semantic distillation** via
+///    `memory_consolidation::distillation::distill_recent_episodes` —
+///    pulls up to 50 undistilled episodes and extracts semantic facts
+///    via an LLM recipe; sets `distilled = 1`. Issue #2281, PR-B.
+///
+/// The two passes are independent: a failure of one does not abort
+/// the other. The outcome message reports both so the operator can
+/// attribute work to the correct pass.
 pub(super) fn dispatch_consolidate_memory(
     action: &PlannedAction,
     bridges: &OodaBridges,
 ) -> ActionOutcome {
-    match bridges.memory.consolidate_episodes(20) {
-        Ok(_) => make_outcome(action, true, "consolidated up to 20 episodes".to_string()),
-        Err(e) => make_outcome(action, false, format!("consolidation failed: {e}")),
-    }
+    // Pass 1: textual dedup. Errors here are fatal for the outcome
+    // because they signal a backend problem that would also affect
+    // pass 2.
+    let consolidate_msg = match bridges.memory.consolidate_episodes(20) {
+        Ok(_) => "consolidated up to 20 episodes".to_string(),
+        Err(e) => {
+            return make_outcome(action, false, format!("consolidation failed: {e}"));
+        }
+    };
+
+    // Pass 2: semantic distillation. Errors here are logged but do
+    // not fail the outcome — distillation depends on external LLM
+    // infrastructure (recipe-runner-rs + agent binary) that may be
+    // intentionally unavailable in some deployments. The
+    // `Ok(skipped)` shape is the graceful no-op path.
+    let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let distill_msg = match crate::memory_consolidation::distillation::distill_recent_episodes(
+        &*bridges.memory,
+        &repo_root,
+    ) {
+        Ok(report) if report.was_skipped() => "distill skipped (below min threshold)".to_string(),
+        Ok(report) => format!(
+            "distill: {} episodes → {} facts, {} marked",
+            report.input_count, report.fact_count, report.marked_count
+        ),
+        Err(e) => format!("distill failed (non-fatal): {e}"),
+    };
+
+    make_outcome(action, true, format!("{consolidate_msg}; {distill_msg}"))
 }
 
 /// ResearchQuery: list available knowledge packs.

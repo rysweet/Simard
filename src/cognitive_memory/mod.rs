@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::{
-    CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
+    CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
     CognitiveWorkingSlot,
 };
 
@@ -97,6 +97,26 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// status transitions (legacy Python bridge, test stubs).
     fn resolve_prospective(&self, _node_id: &str) -> SimardResult<()> {
         Ok(())
+    }
+
+    /// Mark an episode as distilled so subsequent distillation passes
+    /// skip it. Default impl is a no-op for backends that do not
+    /// support metadata mutation (legacy Python bridge, test stubs).
+    /// Issue #2281, PR-B.
+    fn mark_episode_distilled(&self, _node_id: &str) -> SimardResult<()> {
+        Ok(())
+    }
+
+    /// Return up to `limit` undistilled episodes, newest first.
+    ///
+    /// Default impl returns empty, which makes the distillation pass a
+    /// no-op for backends that do not track the `distilled` flag.
+    /// `NativeCognitiveMemory` overrides this to query the
+    /// `Episode.distilled = 0` set ordered by `id DESC` (which is
+    /// chronological because UUID-v7 ids are time-prefixed).
+    /// Issue #2281, PR-B.
+    fn list_undistilled_episodes(&self, _limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+        Ok(vec![])
     }
 
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics>;
@@ -419,6 +439,26 @@ impl NativeCognitiveMemory {
             if let Err(e) = self.execute(ddl) {
                 let msg = format!("{e}");
                 if !msg.contains("already exists") {
+                    return Err(e);
+                }
+            }
+        }
+        // Lazy schema migrations: each ALTER is idempotent and is run
+        // unconditionally; errors signalling "the column is already
+        // there" are swallowed because the CREATE statement above may
+        // have already provided the column on fresh DBs. lbug's
+        // wording for this case is `"already has property <name>"`
+        // (Kuzu-derived) — accept that and the more standard SQL
+        // wordings so the migration is portable to future backends.
+        for migration in schema::SCHEMA_MIGRATIONS {
+            if let Err(e) = self.execute(migration) {
+                let msg = format!("{e}").to_lowercase();
+                let benign = msg.contains("already exists")
+                    || msg.contains("already has")
+                    || msg.contains("duplicate column")
+                    || msg.contains("column already")
+                    || msg.contains("property already");
+                if !benign {
                     return Err(e);
                 }
             }
@@ -867,3 +907,11 @@ mod tests_inline {
         CognitiveMemoryOps::checkpoint(&mem).expect("trait checkpoint should succeed");
     }
 }
+
+// PR-B (issue #2281): episode-distillation trait-method tests against
+// the `NativeCognitiveMemory` backend. Verifies that
+// `mark_episode_distilled` and `list_undistilled_episodes` round-trip
+// against the lbug-backed Episode table with the lazy `distilled`
+// column migration applied.
+#[cfg(test)]
+mod tests_pr_b_distill;

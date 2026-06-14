@@ -2,7 +2,7 @@
 
 use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::{
-    CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
+    CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
     CognitiveWorkingSlot,
 };
 
@@ -533,6 +533,48 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         ))?;
         self.post_write_barrier("resolve_prospective")?;
         Ok(())
+    }
+
+    /// PR-B (issue #2281): mark an episode as distilled so subsequent
+    /// distillation passes skip it. Idempotent — re-marking a row
+    /// already at `distilled = 1` is a no-op.
+    fn mark_episode_distilled(&self, node_id: &str) -> SimardResult<()> {
+        #[cfg(test)]
+        self.assert_hermetic_for("NativeCognitiveMemory::mark_episode_distilled");
+
+        let id = escape_cypher(node_id);
+        self.execute(&format!(
+            "MATCH (e:Episode) WHERE e.id = '{id}' SET e.distilled = 1"
+        ))?;
+        self.post_write_barrier("mark_episode_distilled")?;
+        Ok(())
+    }
+
+    /// PR-B (issue #2281): return up to `limit` undistilled episodes,
+    /// newest first.
+    ///
+    /// Ordering is `e.id DESC` because Episode ids are UUID-v7
+    /// (time-prefixed) and so lex-descending equals
+    /// chronologically-newest-first without consulting
+    /// `temporal_index`. The `WHERE e.distilled = 0` clause is the
+    /// undistilled gate; legacy rows whose column defaults to `0`
+    /// from the lazy schema migration are included automatically.
+    fn list_undistilled_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+        let rows = self.query(&format!(
+            "MATCH (e:Episode) WHERE e.distilled = 0 \
+             RETURN e.id, e.content, e.source_label, e.temporal_index, e.compressed \
+             ORDER BY e.id DESC LIMIT {limit}"
+        ))?;
+        Ok(rows
+            .into_iter()
+            .map(|row| CognitiveEpisode {
+                node_id: as_str(&row[0]).unwrap_or("").to_string(),
+                content: as_str(&row[1]).unwrap_or("").to_string(),
+                source_label: as_str(&row[2]).unwrap_or("").to_string(),
+                temporal_index: as_i64(&row[3]).unwrap_or(0),
+                compressed: as_i64(&row[4]).unwrap_or(0) != 0,
+            })
+            .collect())
     }
 
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {

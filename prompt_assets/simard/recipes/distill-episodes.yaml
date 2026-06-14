@@ -1,0 +1,103 @@
+# distill-episodes.yaml — Recipe for PR-B episode distillation (issue #2281).
+#
+# Periodic many-to-few extraction: given a batch of up to 50 recent
+# episodes, classify each into one of three concept labels (or `skip`)
+# and emit a single JSON envelope of derived facts.
+#
+# Context vars (passed via -c):
+#   episodes — JSON array of objects with
+#     { id, source_label, temporal_index, content }
+#
+# Output: agent stdout containing a single JSON object of the form:
+#   {
+#     "facts": [
+#       { "concept": "pr-pattern" | "bug-pattern" | "lesson-learned",
+#         "content": "<short, declarative summary>",
+#         "source_episode_id": "<id of the episode this fact derives from>" }
+#     ]
+#   }
+#
+# See docs/architecture/episode-distillation.md for the full contract,
+# concept-label semantics, and retry-safety invariants.
+
+name: "distill-episodes"
+description: "Distill a batch of recent episodes into semantic facts"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "memory", "distillation"]
+
+context: {}
+
+steps:
+  - id: "distill"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are the **semantic distiller** for Simard's cognitive memory.
+      You are given a batch of recent **episodes** (events that happened
+      during prior OODA cycles) and you produce a small number of
+      durable **semantic facts** that will be stored alongside the
+      episodes for future retrieval.
+
+      ## Input
+
+      The batch of episodes is a JSON array. Each entry has:
+
+      - `id` — opaque episode identifier you must echo back as
+        `source_episode_id` when you derive a fact from it.
+      - `source_label` — short tag describing where the episode came
+        from (e.g. `goal-curator`, `consolidation-persistence`).
+      - `temporal_index` — monotonic ordering key (NOT a wall-clock
+        timestamp; you only need it for ordering, if at all).
+      - `content` — the free-text payload of the episode.
+
+      ```json
+      {{episodes}}
+      ```
+
+      ## Your job
+
+      Walk the episodes and decide which are worth distilling. For each
+      episode you keep, emit **exactly one** fact with:
+
+      - `concept` — one of:
+        - `pr-pattern` — pull-request shaped events: merge sequences,
+          CI patterns, review patterns, scope-creep observations.
+        - `bug-pattern` — bug reproductions, root causes, recurring
+          failure modes, environmental fragility.
+        - `lesson-learned` — decisions made, tradeoffs encountered,
+          things that surprised the engineer, retrospective insights.
+      - `content` — a **short, declarative** sentence capturing the
+        durable lesson (≤ 200 chars is ideal). NOT a transcript; NOT a
+        timestamp; just the takeaway.
+      - `source_episode_id` — the `id` from the source episode,
+        verbatim.
+
+      Episodes that are pure noise (startup logs, simple retries,
+      progress chatter, exact duplicates of earlier episodes) should be
+      **skipped** — do NOT emit a fact for them. The system records
+      that you saw them via a separate mechanism, so dropping low-value
+      episodes is the correct call.
+
+      ## Output
+
+      Return **only** the following JSON object — no surrounding prose,
+      no markdown fence, no commentary:
+
+      ```json
+      {
+        "facts": [
+          {
+            "concept": "pr-pattern" | "bug-pattern" | "lesson-learned",
+            "content": "<short declarative sentence>",
+            "source_episode_id": "<id from input>"
+          }
+        ]
+      }
+      ```
+
+      If nothing in the batch is worth keeping, emit `{"facts": []}`.
+
+      Do not invent new concept labels. Do not invent episode ids. Do
+      not include the literal string `skip` in the `concept` field —
+      skipped episodes simply contribute no entry to the `facts` array.
