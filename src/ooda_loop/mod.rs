@@ -8,6 +8,7 @@
 pub mod adaptive_scaling;
 mod bridge_factory;
 mod curate;
+pub mod cycle;
 mod decide;
 mod observe;
 mod orient;
@@ -26,6 +27,12 @@ mod tests_orient_extra;
 mod tests_parse_failure_1890;
 #[cfg(test)]
 mod tests_types;
+
+// PR-C (issue #2281, problem 3): tests for the new `cycle.rs`
+// helpers (`pattern_for`, `compose_procedure_name`,
+// `derive_triggers_from_objective`).
+#[cfg(test)]
+mod tests_pr_c_procedures;
 
 // Re-export all public items so `crate::ooda_loop::X` still works.
 pub use bridge_factory::{bridges_from_state_root, connect_memory};
@@ -59,5 +66,4 @@ pub fn act(
     crate::ooda_actions::dispatch_actions(actions, bridges, state)
 }
 
-mod cycle;
 pub use cycle::run_ooda_cycle;

@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::{
-    CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
+    CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
     CognitiveWorkingSlot,
 };
 
@@ -269,6 +269,20 @@ impl CognitiveMemoryOps for RemoteCognitiveMemory {
         })? {
             MemoryResponse::Ack => Ok(()),
             other => Err(Self::unexpected("resolve_prospective", other)),
+        }
+    }
+
+    fn search_episodes_by_keywords(
+        &self,
+        keywords: &[String],
+        limit: u32,
+    ) -> SimardResult<Vec<CognitiveEpisode>> {
+        match self.call(MemoryRequest::SearchEpisodesByKeywords {
+            keywords: keywords.to_vec(),
+            limit,
+        })? {
+            MemoryResponse::Episodes(v) => Ok(v),
+            other => Err(Self::unexpected("search_episodes_by_keywords", other)),
         }
     }
 

@@ -9,19 +9,27 @@ use serde::{Deserialize, Serialize};
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardResult;
 use crate::goals::{GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, GoalRecord};
-use crate::memory_cognitive::{CognitiveFact, CognitiveProcedure, CognitiveProspective};
+use crate::memory_cognitive::{
+    CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective,
+};
 use crate::session::SessionId;
 
 /// Context assembled during the preparation phase for use during execution.
 ///
-/// Contains the relevant facts, triggered prospective memories, and recalled
-/// procedures that the agent should consider when executing the session
-/// objective.
+/// Contains the relevant facts, triggered prospective memories, recalled
+/// procedures, and recent similar episodes that the agent should consider
+/// when executing the session objective.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreparedContext {
     pub relevant_facts: Vec<CognitiveFact>,
     pub triggered_prospectives: Vec<CognitiveProspective>,
     pub recalled_procedures: Vec<CognitiveProcedure>,
+    /// PR-C (issue #2281, problem 4): episodes with at least one
+    /// keyword overlap with the objective, filtered to drop
+    /// self-session noise. Defaults to empty (no recall) when the
+    /// objective has no usable tokens or the bridge returns nothing.
+    #[serde(default)]
+    pub episodic_recall: Vec<CognitiveEpisode>,
 }
 
 /// A fact extracted during the reflection phase.
@@ -214,15 +222,72 @@ pub fn preparation_memory_operations_with_active_slugs(
     // Check if any prospective memories are triggered by the objective.
     let triggered_prospectives = bridge.check_triggers(objective)?;
 
-    // Recall procedures that might be relevant.
-    let recalled_procedures = bridge.recall_procedure(objective, 5)?;
+    // PR-C (issue #2281, problem 3 + 4): both procedural and episodic
+    // recall benefit from breaking the objective into trigger
+    // keywords first. `recall_procedure` is a single-CONTAINS query
+    // on Procedure.name, so a multi-token objective like
+    // `"merge PR #2281"` never matches `pr-merge:bootstrap | triggers: …`
+    // unless we issue one query per token. The bootstrap procedures
+    // (problem 3) are useless without this fan-out.
+    let tokens = tokenize_objective(objective);
+
+    // Recall procedures that might be relevant. When the objective
+    // produces no usable tokens we still fall back to the original
+    // single-string call so callers that pass a structured query
+    // (e.g. exact procedure name) keep working.
+    let recalled_procedures = if tokens.is_empty() {
+        bridge.recall_procedure(objective, 5)?
+    } else {
+        let mut by_id: std::collections::HashMap<String, CognitiveProcedure> =
+            std::collections::HashMap::new();
+        for tok in &tokens {
+            let hits = bridge.recall_procedure(tok, 5)?;
+            for p in hits {
+                by_id.entry(p.node_id.clone()).or_insert(p);
+            }
+        }
+        let mut out: Vec<CognitiveProcedure> = by_id.into_values().collect();
+        // Highest usage_count first, then name for determinism.
+        out.sort_by(|a, b| {
+            b.usage_count
+                .cmp(&a.usage_count)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        out.truncate(5);
+        out
+    };
+
+    // PR-C (issue #2281, problem 4): episodic recall.
+    //
+    // Tokenize the objective into trigger keywords, ask the bridge for
+    // up to 5 recent matching episodes, then filter out self-session
+    // noise (`source_label.starts_with("session-")`) which is just the
+    // current session loop's own breath echoing back into the prompt.
+    //
+    // When the tokenizer produces no usable keywords we skip the
+    // bridge call entirely — there is no cheap "match anything"
+    // fallback and a no-token query would surface arbitrary recent
+    // episodes that bear no relation to the objective.
+    let (raw_recall_count, session_filtered_count, episodic_recall) = if tokens.is_empty() {
+        (0usize, 0usize, Vec::<CognitiveEpisode>::new())
+    } else {
+        let raw = bridge.search_episodes_by_keywords(&tokens, 5)?;
+        let raw_len = raw.len();
+        let kept: Vec<CognitiveEpisode> = raw
+            .into_iter()
+            .filter(|e| !e.source_label.starts_with("session-"))
+            .collect();
+        let filtered = raw_len - kept.len();
+        (raw_len, filtered, kept)
+    };
 
     // Push a summary of what we found into working memory.
     let context_summary = format!(
-        "Prepared context: {} facts, {} triggers, {} procedures",
+        "Prepared context: {} facts, {} triggers, {} procedures, {} episodes",
         relevant_facts.len(),
         triggered_prospectives.len(),
         recalled_procedures.len(),
+        episodic_recall.len(),
     );
     bridge.push_working(
         "context-summary",
@@ -231,10 +296,19 @@ pub fn preparation_memory_operations_with_active_slugs(
         0.8,
     )?;
 
+    eprintln!(
+        "[simard] preparation: {} procedures, {} episodes recalled ({} raw, {} session-filtered)",
+        recalled_procedures.len(),
+        episodic_recall.len(),
+        raw_recall_count,
+        session_filtered_count,
+    );
+
     Ok(PreparedContext {
         relevant_facts,
         triggered_prospectives,
         recalled_procedures,
+        episodic_recall,
     })
 }
 
@@ -242,6 +316,47 @@ pub fn preparation_memory_operations_with_active_slugs(
 /// (issue #2281). Snapshot revisions duplicate the live board that
 /// `advance.rs` already injects into the prompt.
 pub(crate) const GOAL_BOARD_SNAPSHOT_CONCEPT: &str = "goal-board:snapshot";
+
+/// Common English stopwords dropped during objective tokenization
+/// for episodic recall (PR-C, issue #2281, problem 4). These tokens
+/// add zero signal to a `CONTAINS` search and would only inflate
+/// the OR-clause without changing the recall set.
+const TOKEN_STOPWORDS: &[&str] = &[
+    "the", "and", "for", "with", "this", "that", "from", "has", "was", "were", "will", "into",
+    "when", "where", "what", "why", "how",
+];
+
+/// Tokenize the objective text into keywords for
+/// [`CognitiveMemoryOps::search_episodes_by_keywords`].
+///
+/// Steps (in order):
+/// 1. Split on non-alphanumeric runs (so `#2281` becomes `2281`,
+///    `src/foo.rs` becomes `src foo rs`, etc.).
+/// 2. Lowercase each token.
+/// 3. Drop tokens shorter than 3 characters.
+/// 4. Drop common English stopwords (`the, and, for, …`).
+/// 5. Deduplicate while preserving first-seen order.
+///
+/// Returns an empty vec when the objective produces no usable
+/// tokens; callers should skip the bridge call in that case
+/// (per the episodic-recall spec — no "match anything" fallback).
+fn tokenize_objective(objective: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let lowered = objective.to_ascii_lowercase();
+    for raw in lowered.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if raw.len() < 3 {
+            continue;
+        }
+        if TOKEN_STOPWORDS.contains(&raw) {
+            continue;
+        }
+        if seen.insert(raw.to_string()) {
+            out.push(raw.to_string());
+        }
+    }
+    out
+}
 
 /// Execution phase: record PTY output as sensory observations.
 ///
@@ -521,3 +636,10 @@ pub mod distillation;
 
 #[cfg(test)]
 mod distillation_tests;
+
+// PR-C (issue #2281, problem 4): episodic recall tests for
+// `preparation_memory_operations`. Pins the tokenizer rules,
+// self-session noise filter, and no-tokens short-circuit
+// behaviour.
+#[cfg(test)]
+mod tests_pr_c;

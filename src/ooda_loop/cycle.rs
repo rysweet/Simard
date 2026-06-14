@@ -236,10 +236,11 @@ fn run_ooda_cycle_inner(
         Some(&active_slugs),
     )?;
     eprintln!(
-        "[simard] OODA cycle: prepared context ({} facts, {} triggers, {} procedures)",
+        "[simard] OODA cycle: prepared context ({} facts, {} triggers, {} procedures, {} episodes)",
         ctx.relevant_facts.len(),
         ctx.triggered_prospectives.len(),
         ctx.recalled_procedures.len(),
+        ctx.episodic_recall.len(),
     );
     state.prepared_context = Some(ctx);
 
@@ -356,10 +357,23 @@ fn run_ooda_cycle_inner(
     // --- Memory consolidation: procedural learning from successful actions ---
     for outcome in &outcomes {
         if outcome.success {
-            let proc_name = format!("ooda:{}", outcome.action.kind);
+            // PR-C (issue #2281, problem 3): store procedures under a
+            // goal-scoped, trigger-bearing name so `recall_procedure`'s
+            // `CONTAINS` matcher can hit them when a future objective
+            // mentions the same triggers, PR number, or file extension.
+            // Pre-PR-C this was `format!("ooda:{}", outcome.action.kind)`
+            // which never matched any natural-language objective.
+            let proc_name = compose_procedure_name(
+                outcome.action.kind.clone(),
+                outcome.action.goal_id.as_deref(),
+                &objective_summary,
+                &outcome.action.description,
+            );
             let steps = [outcome.action.description.clone(), outcome.detail.clone()];
             if let Err(e) = bridges.memory.store_procedure(&proc_name, &steps, &[]) {
                 eprintln!("[simard] OODA consolidation: procedural memory failed: {e}");
+            } else {
+                eprintln!("[simard] OODA consolidation: stored procedure '{proc_name}'");
             }
         }
     }
@@ -662,6 +676,159 @@ pub(crate) fn sweep_stale_assignments_with_sessions(
             goal.status = crate::goal_curation::GoalProgress::NotStarted;
         }
     }
+}
+
+// ============================================================================
+// PR-C (issue #2281, problem 3): procedure-naming helpers
+// ============================================================================
+//
+// The OODA cycle's `store_procedure` call at the top of this file now
+// constructs goal-scoped, trigger-bearing names via these helpers so
+// that `recall_procedure`'s `CONTAINS` matcher actually hits when the
+// next objective mentions any of the embedded trigger keywords.
+//
+// Pre-PR-C the writer used `format!("ooda:{}", outcome.action.kind)`
+// which produced names like `ooda:advance-goal` that no
+// natural-language objective ever contains. See
+// `docs/reference/cognitive-memory-bootstrap-procedures.md`.
+
+/// Map an [`ActionKind`] to the short verb-phrase tag used as the
+/// `pattern` segment of a procedure name (e.g. `pr-merge`, `ci-fix`,
+/// `run-tests`). Centralised so the mapping table in the docs has a
+/// single source of truth.
+pub fn pattern_for(kind: ActionKind) -> &'static str {
+    match kind {
+        ActionKind::AdvanceGoal => "pr-merge",
+        ActionKind::RunImprovement => "ci-fix",
+        ActionKind::ConsolidateMemory => "consolidate",
+        ActionKind::RunGymEval => "run-tests",
+        ActionKind::BuildSkill => "build-skill",
+        ActionKind::LaunchSession => "engineer-loop",
+        ActionKind::ResearchQuery => "research",
+        ActionKind::PollDeveloperActivity => "poll-activity",
+        ActionKind::ExtractIdeas => "extract-ideas",
+        ActionKind::SafeUpdate => "safe-update",
+    }
+}
+
+/// Always-merged base triggers for each [`ActionKind`]. These guarantee
+/// that the most common engineer-loop keywords ("merge", "ci", "test",
+/// …) appear in the procedure name even when the objective text adds
+/// nothing useful via [`derive_triggers_from_objective`].
+pub fn base_triggers_for(kind: ActionKind) -> &'static [&'static str] {
+    match kind {
+        ActionKind::AdvanceGoal => &["merge", "pr", "review", "ci"],
+        ActionKind::RunImprovement => &["ci", "green", "failing", "fix-ci", "improve"],
+        ActionKind::ConsolidateMemory => &["consolidate", "memory", "distill"],
+        ActionKind::RunGymEval => &["test", "gym", "eval", "benchmark"],
+        ActionKind::BuildSkill => &["skill", "build", "scaffold"],
+        ActionKind::LaunchSession => &["engineer", "session", "spawn"],
+        ActionKind::ResearchQuery => &["research", "investigate", "explore"],
+        ActionKind::PollDeveloperActivity => &["poll", "activity", "status"],
+        ActionKind::ExtractIdeas => &["idea", "extract", "brainstorm"],
+        ActionKind::SafeUpdate => &["update", "upgrade", "version"],
+    }
+}
+
+/// Scan the objective + action description for the two narrow
+/// identifier shapes that empirically improve `recall_procedure`
+/// hit rate the most: PR numbers (`#NNNN`) and file extensions
+/// (`.<ext>`). Captures are lowercased and deduped against the base
+/// trigger list at composition time.
+///
+/// This is **not** a general tokenizer — `tokenize_objective` in
+/// `memory_consolidation` already exists for episodic-recall keyword
+/// extraction. The two paths intentionally use different rules.
+pub fn derive_triggers_from_objective(objective: &str, action_desc: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let combined = format!("{objective} {action_desc}");
+
+    // Pass 1: PR numbers — `#NNNN` (any positive number of digits).
+    {
+        let bytes = combined.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'#' {
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > i + 1 {
+                    let digits = &combined[i + 1..j];
+                    let key = digits.to_ascii_lowercase();
+                    if seen.insert(key.clone()) {
+                        out.push(key);
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // Pass 2: file extensions — `.<ext>` where `<ext>` is 1..=5 alphanumeric
+    // characters starting with a letter, terminated by a non-alphanumeric
+    // boundary or end-of-string.
+    {
+        let bytes = combined.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_alphabetic() {
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j].is_ascii_alphanumeric() && j - i <= 5 {
+                    j += 1;
+                }
+                let ext_len = j - i - 1;
+                let at_word_boundary = j == bytes.len() || !bytes[j].is_ascii_alphanumeric();
+                if (1..=5).contains(&ext_len) && at_word_boundary {
+                    let ext = &combined[i + 1..j];
+                    let key = ext.to_ascii_lowercase();
+                    if seen.insert(key.clone()) {
+                        out.push(key);
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Compose the full procedure name a successful OODA outcome should
+/// be stored under:
+///
+/// ```text
+/// {pattern}:{scope} | triggers: {base,...,derived,...}
+/// ```
+///
+/// `scope` is the action's `goal_id` when present, else `ad-hoc`.
+/// `base` triggers always precede `derived` triggers; the merge
+/// dedup drops later duplicates so a derived keyword shadowed by a
+/// base keyword only appears once.
+pub fn compose_procedure_name(
+    kind: ActionKind,
+    goal_id: Option<&str>,
+    objective: &str,
+    action_desc: &str,
+) -> String {
+    let pattern = pattern_for(kind.clone());
+    let scope = goal_id.unwrap_or("ad-hoc");
+    let base = base_triggers_for(kind.clone());
+    let derived = derive_triggers_from_objective(objective, action_desc);
+
+    // base first, derived appended only if not already in base
+    let mut triggers: Vec<String> = base.iter().map(|s| (*s).to_string()).collect();
+    let base_set: std::collections::HashSet<&str> = base.iter().copied().collect();
+    for d in derived {
+        if !base_set.contains(d.as_str()) {
+            triggers.push(d);
+        }
+    }
+    format!("{pattern}:{scope} | triggers: {}", triggers.join(","))
 }
 
 #[cfg(test)]
