@@ -231,31 +231,14 @@ pub fn preparation_memory_operations_with_active_slugs(
     // (problem 3) are useless without this fan-out.
     let tokens = tokenize_objective(objective);
 
-    // Recall procedures that might be relevant. When the objective
-    // produces no usable tokens we still fall back to the original
-    // single-string call so callers that pass a structured query
-    // (e.g. exact procedure name) keep working.
-    let recalled_procedures = if tokens.is_empty() {
-        bridge.recall_procedure(objective, 5)?
-    } else {
-        let mut by_id: std::collections::HashMap<String, CognitiveProcedure> =
-            std::collections::HashMap::new();
-        for tok in &tokens {
-            let hits = bridge.recall_procedure(tok, 5)?;
-            for p in hits {
-                by_id.entry(p.node_id.clone()).or_insert(p);
-            }
-        }
-        let mut out: Vec<CognitiveProcedure> = by_id.into_values().collect();
-        // Highest usage_count first, then name for determinism.
-        out.sort_by(|a, b| {
-            b.usage_count
-                .cmp(&a.usage_count)
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        out.truncate(5);
-        out
-    };
+    // Recall procedures via the unified tokenized helper (ws2 #2295).
+    // Both bootstrap procedures (`*-bootstrap`) seeded by
+    // `seed_bootstrap_procedures` and distilled procedures emitted each
+    // cycle by `ooda_loop::cycle::compose_procedure_name` go through the
+    // exact same `bridge.recall_procedure(token, …)` Cypher CONTAINS path
+    // so neither class can win or lose recall relative to the other.
+    let recalled_procedures =
+        recall_procedures_for_objective_with_tokens(bridge, objective, &tokens, 5)?;
 
     // PR-C (issue #2281, problem 4): episodic recall.
     //
@@ -327,7 +310,8 @@ const TOKEN_STOPWORDS: &[&str] = &[
 ];
 
 /// Tokenize the objective text into keywords for
-/// [`CognitiveMemoryOps::search_episodes_by_keywords`].
+/// [`CognitiveMemoryOps::search_episodes_by_keywords`] **and** for
+/// procedural recall via [`recall_procedures_for_objective`].
 ///
 /// Steps (in order):
 /// 1. Split on non-alphanumeric runs (so `#2281` becomes `2281`,
@@ -340,7 +324,14 @@ const TOKEN_STOPWORDS: &[&str] = &[
 /// Returns an empty vec when the objective produces no usable
 /// tokens; callers should skip the bridge call in that case
 /// (per the episodic-recall spec — no "match anything" fallback).
-fn tokenize_objective(objective: &str) -> Vec<String> {
+///
+/// Pub-crate so [`crate::base_type_turn`] can share the same tokenizer
+/// and procedural recall as the OODA cycle preparation phase. The
+/// 3-character minimum is the **read-side floor** that the write-side
+/// `derive_triggers_from_objective` aligns against — see
+/// `docs/reference/cognitive-memory-bootstrap-procedures.md` for the
+/// full contract.
+pub(crate) fn tokenize_objective(objective: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let lowered = objective.to_ascii_lowercase();
@@ -356,6 +347,114 @@ fn tokenize_objective(objective: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Unified procedural-recall helper used by both the OODA cycle's
+/// preparation phase ([`preparation_memory_operations_with_active_slugs`])
+/// and the base-type-adapter turn preparation
+/// ([`crate::base_type_turn::prepare_turn_context`]).
+///
+/// **Why a shared helper.** Before ws2 #2295, the two call sites used
+/// different recall strategies:
+///
+/// * Preparation phase tokenized the objective and fanned out one
+///   `recall_procedure` call per token (PR-C, #2281), which surfaces
+///   both bootstrap procedures (`pr-merge:bootstrap`, …) and distilled
+///   procedures written by the OODA cycle's
+///   [`crate::ooda_loop::cycle::compose_procedure_name`].
+/// * Base-type adapters passed the **entire raw objective** to a single
+///   `bridge.recall_procedure(objective, 5)` call. The Cypher
+///   `name CONTAINS '<full objective>'` clause never matched any
+///   stored procedure because no procedure name embeds a natural
+///   sentence. Effect: zero distilled procedures ever reached the
+///   prompt unless the operator's prompt happened to literally
+///   contain a procedure name.
+///
+/// Unifying both sites here means the same set of procedures surfaces
+/// regardless of which adapter is driving the turn, and prevents a
+/// future divergence by giving callers one obvious entry point.
+///
+/// **Case-folding contract.** [`tokenize_objective`] lowercases every
+/// token; both [`crate::cognitive_memory::bootstrap_procedures::BOOTSTRAP_PROCEDURES`]
+/// and [`crate::ooda_loop::cycle::compose_procedure_name`] emit names
+/// whose trigger portion is already lowercase. The Cypher `CONTAINS`
+/// operator is case-sensitive, so the all-lowercase invariant on both
+/// sides is what makes recall actually fire.
+///
+/// **Empty-token fallback.** When the objective produces no tokens
+/// of three or more chars (very short or punctuation-only input), we
+/// issue a single `recall_procedure(objective, max)` call so callers
+/// that pass a pre-tokenized or exact-name query keep working.
+pub fn recall_procedures_for_objective(
+    bridge: &dyn CognitiveMemoryOps,
+    objective: &str,
+    max: u32,
+) -> SimardResult<Vec<CognitiveProcedure>> {
+    let tokens = tokenize_objective(objective);
+    recall_procedures_for_objective_with_tokens(bridge, objective, &tokens, max)
+}
+
+/// Token-aware inner form of [`recall_procedures_for_objective`].
+///
+/// Lets the OODA preparation phase reuse the same tokenization it
+/// already computed for episodic recall instead of paying for a second
+/// pass over the objective string.
+pub(crate) fn recall_procedures_for_objective_with_tokens(
+    bridge: &dyn CognitiveMemoryOps,
+    objective: &str,
+    tokens: &[String],
+    max: u32,
+) -> SimardResult<Vec<CognitiveProcedure>> {
+    if tokens.is_empty() {
+        // Empty-token fallback (see doc on
+        // `recall_procedures_for_objective`).
+        let mut hits = bridge.recall_procedure(objective, max)?;
+        hits.truncate(max as usize);
+        return Ok(hits);
+    }
+
+    let per_token_cap = max;
+    let mut by_id: std::collections::HashMap<String, CognitiveProcedure> =
+        std::collections::HashMap::new();
+    for tok in tokens {
+        let hits = bridge.recall_procedure(tok, per_token_cap)?;
+        for p in hits {
+            by_id.entry(p.node_id.clone()).or_insert(p);
+        }
+    }
+    let mut out: Vec<CognitiveProcedure> = by_id.into_values().collect();
+    // Highest usage_count first, then name for determinism.
+    out.sort_by(|a, b| {
+        b.usage_count
+            .cmp(&a.usage_count)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    out.truncate(max as usize);
+
+    // Structured tracing event so the journal records exactly which
+    // procedure names surfaced. The previous summary-count-only log
+    // line ("prepared context (… N procedures …)") hid which
+    // procedures actually fired, which made it impossible for
+    // operators to tell whether distilled procedures were being
+    // recalled or only the bootstrap set. Names are emitted as a
+    // single comma-separated structured field so a downstream JSON
+    // log layer captures each name in full (no per-field truncation).
+    if !out.is_empty() {
+        let names: Vec<&str> = out.iter().map(|p| p.name.as_str()).collect();
+        tracing::info!(
+            procedure_count = out.len(),
+            tokens = ?tokens,
+            procedure_names = %names.join(" | "),
+            "recalled procedures for objective",
+        );
+    } else {
+        tracing::debug!(
+            tokens = ?tokens,
+            "no procedures recalled for objective",
+        );
+    }
+
+    Ok(out)
 }
 
 /// Execution phase: record PTY output as sensory observations.

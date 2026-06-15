@@ -371,8 +371,24 @@ fn run_ooda_cycle_inner(
             );
             let steps = [outcome.action.description.clone(), outcome.detail.clone()];
             if let Err(e) = bridges.memory.store_procedure(&proc_name, &steps, &[]) {
+                tracing::warn!(
+                    procedure_name = %proc_name,
+                    error = %e,
+                    "OODA consolidation: procedural memory store failed",
+                );
                 eprintln!("[simard] OODA consolidation: procedural memory failed: {e}");
             } else {
+                // ws2 #2295: structured tracing event in addition to the
+                // eprintln! line. The structured `procedure_name` field is
+                // written verbatim by every fmt layer (JSON and the
+                // default human formatter) and bypasses any line-length
+                // truncation a downstream log shipper might apply to the
+                // free-form message — making "is my trigger list
+                // truncated?" an answerable question from the journal.
+                tracing::info!(
+                    procedure_name = %proc_name,
+                    "OODA consolidation: stored procedure",
+                );
                 eprintln!("[simard] OODA consolidation: stored procedure '{proc_name}'");
             }
         }
@@ -768,9 +784,20 @@ pub fn derive_triggers_from_objective(objective: &str, action_desc: &str) -> Vec
         }
     }
 
-    // Pass 2: file extensions — `.<ext>` where `<ext>` is 1..=5 alphanumeric
+    // Pass 2: file extensions — `.<ext>` where `<ext>` is 3..=5 alphanumeric
     // characters starting with a letter, terminated by a non-alphanumeric
     // boundary or end-of-string.
+    //
+    // The 3-character lower bound aligns with the **read-side** floor
+    // enforced by `memory_consolidation::tokenize_objective`, which
+    // drops every objective-derived token shorter than 3 chars. A
+    // 1- or 2-char derived trigger (`g`, `rs`, …) can therefore never
+    // be matched by a future tokenized recall query — it would only
+    // sit in the procedure name as visible-but-dead weight and, when
+    // it appears as the trailing trigger, look exactly like the
+    // mid-word truncation symptom reported in ws2 #2295. Aligning the
+    // floors removes that confusion without losing any real recall
+    // power.
     {
         let bytes = combined.as_bytes();
         let mut i = 0;
@@ -782,7 +809,7 @@ pub fn derive_triggers_from_objective(objective: &str, action_desc: &str) -> Vec
                 }
                 let ext_len = j - i - 1;
                 let at_word_boundary = j == bytes.len() || !bytes[j].is_ascii_alphanumeric();
-                if (1..=5).contains(&ext_len) && at_word_boundary {
+                if (3..=5).contains(&ext_len) && at_word_boundary {
                     let ext = &combined[i + 1..j];
                     let key = ext.to_ascii_lowercase();
                     if seen.insert(key.clone()) {
