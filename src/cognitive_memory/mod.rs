@@ -947,3 +947,9 @@ mod tests_inline {
 // column migration applied.
 #[cfg(test)]
 mod tests_pr_b_distill;
+
+// Issue #2298: procedural-memory non-idempotency regression. `store_procedure`
+// must be an idempotent upsert keyed on exact `name` so repeated OODA
+// consolidation cycles stop re-storing identical procedures.
+#[cfg(test)]
+mod tests_pr_2298_idempotency;
