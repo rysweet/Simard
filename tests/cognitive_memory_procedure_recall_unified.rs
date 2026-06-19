@@ -46,7 +46,7 @@ use simard::cognitive_memory::bootstrap_procedures::{
 };
 use simard::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use simard::ooda_loop::{ActionKind, compose_procedure_name, derive_triggers_from_objective};
-use simard::recall_procedures_for_objective;
+use simard::{prepare_turn_context, recall_procedures_for_objective};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -258,4 +258,53 @@ fn derived_triggers_no_longer_emit_sub_three_char_extensions() {
              got: {kept:?}"
         );
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Gate 5: end-to-end through the base-type adapter call site
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Gates 1–3 exercise the unified helper directly. This gate drives the
+/// **actual fixed call site** —
+/// [`simard::prepare_turn_context`] (the base-type adapter turn
+/// preparation that exhibited the cycle-238 symptom) — end to end, so a
+/// future revert of that specific call site back to a raw
+/// `recall_procedure(objective, …)` call is caught here even though the
+/// shared helper itself would still be correct.
+///
+/// Before ws2 #2295, `prepare_turn_context` passed the entire raw
+/// objective sentence to `recall_procedure`, so a distilled procedure
+/// was invisible to the prompt regardless of trigger match. This gate
+/// stores a distilled procedure and asserts it surfaces in the resulting
+/// [`simard::TurnContext::procedures`] list under a matching objective.
+#[test]
+#[serial(cognitive_memory)]
+fn distilled_procedure_surfaces_through_prepare_turn_context() {
+    let mem = NativeCognitiveMemory::in_memory()
+        .expect("construct in-memory NativeCognitiveMemory with real SCHEMA_DDL");
+
+    // Store a distilled-shape procedure whose trigger matches a token in
+    // the objective below ("payload").
+    let stored_name = make_name("payload-recall", "g7", "payload,inspect");
+    mem.store_procedure(&stored_name, &["inspect the payload".to_string()], &[])
+        .expect("store distilled procedure");
+
+    // Drive the real base-type adapter preparation path. Knowledge bridge
+    // is None (not configured) — exactly the engineer/base-type turn shape.
+    let context = prepare_turn_context("inspect the payload before shipping", Some(&mem), None)
+        .expect("prepare_turn_context must not error with a live memory bridge");
+
+    let names: Vec<&str> = context.procedures.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        names.contains(&stored_name.as_str()),
+        "distilled procedure '{stored_name}' must surface in prepare_turn_context \
+         output (the cycle-238 fix); got: {names:?}",
+    );
+
+    // The full-sentence-CONTAINS regression would return zero procedures
+    // here; assert the prompt context is non-empty as a second guard.
+    assert!(
+        !context.procedures.is_empty(),
+        "base-type adapter turn must recall at least the matching distilled procedure",
+    );
 }

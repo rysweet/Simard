@@ -423,11 +423,18 @@ pub(crate) fn recall_procedures_for_objective_with_tokens(
         }
     }
     let mut out: Vec<CognitiveProcedure> = by_id.into_values().collect();
-    // Highest usage_count first, then name for determinism.
+    // Highest usage_count first, then name, then node_id for a fully
+    // deterministic order. Procedure names are NOT unique (only the
+    // graph `id` is) — repeated OODA cycles can store the same composed
+    // name under different `node_id`s. Without the `node_id` tiebreaker a
+    // `usage_count`+`name` tie would fall through to unordered
+    // `HashMap::into_values()` iteration, so `truncate` could keep a
+    // different procedure across runs and silently vary prompt contents.
     out.sort_by(|a, b| {
         b.usage_count
             .cmp(&a.usage_count)
             .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.node_id.cmp(&b.node_id))
     });
     out.truncate(max as usize);
 
