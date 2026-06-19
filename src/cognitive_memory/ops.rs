@@ -399,6 +399,22 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         Ok(id)
     }
 
+    /// Issue #2298: exact-name existence probe used by the bootstrap seeder and
+    /// the OODA consolidation log. Overrides the trait default — which fans out
+    /// a `CONTAINS` recall and JSON-decodes every hit's `steps`/`prerequisites`
+    /// only to compare names — with a direct exact-equality lookup that returns
+    /// no payload and stops at the first match (`LIMIT 1`). This is the same
+    /// authoritative check `store_procedure` performs before deciding whether to
+    /// reinforce or create, and unlike the recall fan-out it cannot be starved
+    /// by trigger-token collisions exceeding the recall limit.
+    fn procedure_exists(&self, name: &str) -> SimardResult<bool> {
+        let escaped_name = escape_cypher(name);
+        let rows = self.query(&format!(
+            "MATCH (p:Procedure) WHERE p.name = '{escaped_name}' RETURN p.id LIMIT 1"
+        ))?;
+        Ok(!rows.is_empty())
+    }
+
     fn recall_procedure(&self, query: &str, limit: u32) -> SimardResult<Vec<CognitiveProcedure>> {
         // Same wildcard treatment as `search_facts` — `"*"` means "return all"
         // so `export_memory_snapshot` actually captures every procedure.
@@ -991,6 +1007,48 @@ mod tests {
         let mem = test_mem();
         let procs = mem.recall_procedure("nonexistent", 10).unwrap();
         assert!(procs.is_empty());
+    }
+
+    // ── procedure_exists (native exact-name probe, issue #2298) ─────────
+
+    #[test]
+    fn procedure_exists_true_for_exact_name() {
+        let mem = test_mem();
+        mem.store_procedure("deploy-prod", &["build".into()], &[])
+            .unwrap();
+        assert!(
+            mem.procedure_exists("deploy-prod").unwrap(),
+            "exact name must report present"
+        );
+    }
+
+    #[test]
+    fn procedure_exists_false_when_absent() {
+        let mem = test_mem();
+        assert!(
+            !mem.procedure_exists("never-stored").unwrap(),
+            "absent name must report missing"
+        );
+    }
+
+    #[test]
+    fn procedure_exists_is_exact_not_contains() {
+        // The native override must match on exact equality, not the
+        // `CONTAINS` semantics of `recall_procedure`. A substring or
+        // superstring of an existing name must NOT count as present —
+        // otherwise the idempotency probe would conflate distinct
+        // trigger-sharing procedures (issue #2298).
+        let mem = test_mem();
+        mem.store_procedure("deploy-prod", &["build".into()], &[])
+            .unwrap();
+        assert!(
+            !mem.procedure_exists("deploy").unwrap(),
+            "substring of an existing name must not report present"
+        );
+        assert!(
+            !mem.procedure_exists("deploy-prod-eu").unwrap(),
+            "superstring of an existing name must not report present"
+        );
     }
 
     // ── store_prospective / check_triggers ─────────────────────────────

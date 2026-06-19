@@ -375,12 +375,13 @@ fn run_ooda_cycle_inner(
             // never re-created. Probe first so the log distinguishes the two —
             // otherwise frozen procedural memory reads as fresh learning. A
             // recall failure is non-fatal and defaults to the "stored" wording.
-            let already_present =
-                crate::cognitive_memory::procedure_exists(&*bridges.memory, &proc_name)
-                    .unwrap_or_else(|e| {
-                        eprintln!("[simard] OODA consolidation: procedural recall failed: {e}");
-                        false
-                    });
+            let already_present = bridges
+                .memory
+                .procedure_exists(&proc_name)
+                .unwrap_or_else(|e| {
+                    eprintln!("[simard] OODA consolidation: procedural recall failed: {e}");
+                    false
+                });
             if let Err(e) = bridges.memory.store_procedure(&proc_name, &steps, &[]) {
                 eprintln!("[simard] OODA consolidation: procedural memory failed: {e}");
             } else if already_present {

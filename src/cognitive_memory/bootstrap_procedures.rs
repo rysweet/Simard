@@ -25,7 +25,7 @@
 //! that exceeds PR-C's scope; the in-name encoding is a deliberate
 //! single-PR shortcut.
 
-use crate::cognitive_memory::{CognitiveMemoryOps, procedure_exists};
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardResult;
 
 /// A single bootstrap procedure: fully-rendered name (including
@@ -116,14 +116,16 @@ pub const BOOTSTRAP_PROCEDURES: &[BootstrapProcedure] = &[
 
 /// Seed [`BOOTSTRAP_PROCEDURES`] into cognitive memory if missing.
 ///
-/// For each procedure we ask [`procedure_exists`] — an exact-name probe over
-/// `recall_procedure` — whether it is already present, and
+/// For each procedure we ask [`CognitiveMemoryOps::procedure_exists`] — an
+/// exact-name probe — whether it is already present, and
 /// `store_procedure(name, steps, prerequisites)` it only if not. Returns the
 /// count of procedures newly stored (`0` if all were already present).
 ///
-/// The exact-name filter matters: `recall_procedure` matches on Cypher
+/// The exact-name semantics matter: `recall_procedure` matches on Cypher
 /// `CONTAINS`, so bootstrap procedures that share trigger tokens would
-/// otherwise over-report presence and starve later seeds.
+/// otherwise over-report presence and starve later seeds. `procedure_exists`
+/// encapsulates that exact-name filter (and lets the native backend answer it
+/// with a direct `LIMIT 1` lookup instead of a recall fan-out).
 ///
 /// **Idempotent**: safe to call on every daemon start; subsequent
 /// calls after the first all return `Ok(0)`.
@@ -138,7 +140,7 @@ pub const BOOTSTRAP_PROCEDURES: &[BootstrapProcedure] = &[
 pub fn seed_bootstrap_procedures(bridge: &dyn CognitiveMemoryOps) -> SimardResult<usize> {
     let mut seeded = 0usize;
     for proc in BOOTSTRAP_PROCEDURES {
-        if !procedure_exists(bridge, proc.name())? {
+        if !bridge.procedure_exists(proc.name())? {
             bridge.store_procedure(proc.name(), &proc.steps(), &proc.prerequisites())?;
             seeded += 1;
         }
