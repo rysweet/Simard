@@ -14,6 +14,16 @@ related:
 
 # Prospective-trigger firing
 
+> **De-fork Phase 2b.** The OODA-side objective probe (`ooda_loop/cycle.rs`) is
+> unchanged. The *match* itself now runs inside the `amplihack-memory-lib`
+> backend's `check_triggers` (reached through the `CognitiveMemoryOps` trait), not
+> the deleted native `src/cognitive_memory/ops.rs` Cypher. The library's matching
+> is tokenized/lowercased keyword-overlap and marks a matched trigger
+> `"triggered"` (fires once), which differs from the old native case-insensitive
+> whole-substring re-firing match — see the divergence note in
+> [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md#documented-behavioral-divergences).
+> Treat the `ops.rs` / `escape_cypher` citations below as historical.
+
 > Shipped in issue [#2300](https://github.com/rysweet/Simard/issues/2300)
 > (fix the "prospective triggers never fire" defect). Companion to the
 > write side documented in

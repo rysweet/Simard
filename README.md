@@ -57,7 +57,7 @@ Full reference: [docs/daemon-mode.md](docs/daemon-mode.md) · How-to: [docs/howt
 
 ## Memory architecture
 
-Simard's memory is not a flat key-value store. She uses **six distinct memory types** modeled after cognitive psychology, implemented natively in Rust via `NativeCognitiveMemory` backed by LadybugDB (the `lbug` crate). There is no Python bridge — memory operations are direct LadybugDB calls.
+Simard's memory is not a flat key-value store. She uses **six distinct memory types** modeled after cognitive psychology, provided by the `amplihack-memory-lib` library (persistent, LadybugDB/`lbug`-backed) and reached through the `LibraryCognitiveMemory` adapter on the `CognitiveMemoryOps` trait. This library backend is the sole on-disk cognitive-memory backend — there is no Python bridge and no native fork.
 
 | Type | Lifetime | What it holds |
 |------|----------|---------------|
@@ -70,7 +70,7 @@ Simard's memory is not a flat key-value store. She uses **six distinct memory ty
 
 Consolidation is automatic: working → episodic at task end; episodic → semantic / procedural when the OODA daemon dispatches a `consolidate-memory` action. Cross-session recall is automatic — when the daemon spawns a new engineer for a goal it seeds the engineer's working memory with the most relevant prior episodes for that goal-id.
 
-On-disk layout: `~/.simard/memory/lbug/` (LadybugDB persistent store), `~/.simard/memory/working/`, `~/.simard/memory/sensory/`.
+On-disk layout: `~/.simard/cognitive/` (the library's LadybugDB store).
 
 Multi-agent knowledge sharing inside a single Simard process is handled by the **hive event bus** (`src/hive_event_bus.rs`) — a `tokio::sync::broadcast` channel that every subsystem (memory consolidation, meeting facilitator, gym runner, engineer dispatcher) can publish to and subscribe from.
 

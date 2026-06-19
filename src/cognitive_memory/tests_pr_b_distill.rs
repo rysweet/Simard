@@ -7,11 +7,11 @@
 //! * `list_undistilled_episodes(limit) -> SimardResult<Vec<CognitiveEpisode>>`
 //!
 //! Both methods MUST land with a default no-op impl so legacy bridges
-//! keep compiling. `NativeCognitiveMemory` MUST override them against
+//! keep compiling. `LibraryCognitiveMemory` MUST override them against
 //! the lbug-backed `Episode` schema, which gains a lazy `distilled
 //! INT64 DEFAULT 0` column.
 //!
-//! These tests target `NativeCognitiveMemory::in_memory()` directly so
+//! These tests target `LibraryCognitiveMemory::in_memory()` directly so
 //! the override behaviour is exercised without going through the
 //! bridge layer.
 //!
@@ -22,10 +22,10 @@
 //! results or post-mark filtering will fail. The lazy schema migration
 //! is also untested today — this file is the contract.
 
-use super::{CognitiveMemoryOps, NativeCognitiveMemory};
+use super::{CognitiveMemoryOps, LibraryCognitiveMemory};
 
-fn test_mem() -> NativeCognitiveMemory {
-    NativeCognitiveMemory::in_memory().expect("in-memory DB should create")
+fn test_mem() -> LibraryCognitiveMemory {
+    LibraryCognitiveMemory::in_memory().expect("in-memory DB should create")
 }
 
 /// `list_undistilled_episodes` MUST return episodes newest-first by

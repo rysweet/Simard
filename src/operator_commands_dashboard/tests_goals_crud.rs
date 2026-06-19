@@ -8,7 +8,7 @@ use axum::Json;
 use axum::extract::Path;
 use serde_json::json;
 
-use crate::cognitive_memory::NativeCognitiveMemory;
+use crate::cognitive_memory::LibraryCognitiveMemory;
 use crate::goal_curation::{GoalBoard, GoalProgress, save_goal_board};
 use crate::operator_commands_dashboard::goals::*;
 use crate::operator_commands_dashboard::{
@@ -19,7 +19,7 @@ use crate::test_support::HermeticState;
 /// Seed an empty goal board into the hermetic cognitive memory so handlers
 /// that read from it don't fail on a missing snapshot.
 fn init_empty_board(state: &HermeticState) {
-    let mem = NativeCognitiveMemory::open(state.state_root()).expect("open native memory");
+    let mem = LibraryCognitiveMemory::open(state.state_root()).expect("open native memory");
     save_goal_board(&GoalBoard::new(), &mem).expect("seed empty board");
 }
 
@@ -28,7 +28,7 @@ fn init_empty_board(state: &HermeticState) {
 fn init_board_with_goals(state: &HermeticState) {
     // Step 1: initialize cognitive memory DB
     {
-        let mem = NativeCognitiveMemory::open(state.state_root()).expect("open native memory");
+        let mem = LibraryCognitiveMemory::open(state.state_root()).expect("open native memory");
         save_goal_board(&GoalBoard::new(), &mem).expect("init empty board");
     }
 
@@ -197,7 +197,7 @@ async fn add_goal_backlog_defaults_score_to_half() {
 async fn add_goal_rejects_when_at_max_active() {
     let state = HermeticState::new();
     {
-        let mem = NativeCognitiveMemory::open(state.state_root()).expect("open");
+        let mem = LibraryCognitiveMemory::open(state.state_root()).expect("open");
         save_goal_board(&GoalBoard::new(), &mem).expect("init");
     }
     let mut board = GoalBoard::new();
@@ -410,7 +410,7 @@ async fn promote_backlog_item_returns_error_when_not_found() {
 async fn promote_backlog_item_rejects_when_at_max_active() {
     let state = HermeticState::new();
     {
-        let mem = NativeCognitiveMemory::open(state.state_root()).expect("open");
+        let mem = LibraryCognitiveMemory::open(state.state_root()).expect("open");
         save_goal_board(&GoalBoard::new(), &mem).expect("init");
     }
     let mut board = GoalBoard::new();
@@ -510,7 +510,7 @@ async fn goals_returns_active_and_backlog_lists() {
 async fn goals_returns_empty_when_no_board() {
     let state = HermeticState::new();
     {
-        let _mem = NativeCognitiveMemory::open(state.state_root()).expect("open");
+        let _mem = LibraryCognitiveMemory::open(state.state_root()).expect("open");
     }
 
     let result = goals().await;
@@ -523,7 +523,7 @@ async fn goals_returns_empty_when_no_board() {
 async fn goals_includes_status_chip_for_active_goals() {
     let state = HermeticState::new();
     {
-        let mem = NativeCognitiveMemory::open(state.state_root()).expect("open");
+        let mem = LibraryCognitiveMemory::open(state.state_root()).expect("open");
         save_goal_board(&GoalBoard::new(), &mem).expect("init");
     }
     let mut board = GoalBoard::new();

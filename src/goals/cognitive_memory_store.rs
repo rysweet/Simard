@@ -162,36 +162,34 @@ impl CognitiveMemoryGoalStore {
 
         let writer = launch_writer_bridge(&self.state_root)?;
 
+        // De-fork Phase 2b (issue #2307): the library backend's `check_triggers`
+        // is a FIRE-ONCE mutator (marks matches `"triggered"`) that matches on
+        // ANY shared whole word — including the ubiquitous token `goal` — rather
+        // than the deleted native backend's read-only whole-substring match. A
+        // single mixed loop that probed/resolved one goal would therefore consume
+        // another goal's freshly-stored prospective (they share `goal`). Split
+        // the work into two phases so stored prospectives are never re-probed:
+        //   1. Resolve every goal-prospective (clears stale + drift entries).
+        //   2. Store exactly one fresh PENDING prospective per Active goal.
         for goal in &goals {
-            let trigger = prospective_trigger_for(goal);
-
-            // Check whether a prospective entry already exists for this slug.
-            let existing = writer.ops().check_triggers(&trigger)?;
-            let has_goal_prospective = existing.iter().any(|p| {
-                p.description.starts_with(GOAL_PROSPECTIVE_PREFIX) && p.trigger_condition == trigger
-            });
-
-            if goal.status == GoalStatus::Active {
-                if !has_goal_prospective {
-                    // Drift: Active goal is missing its prospective trigger.
-                    let description = format!("{}{}", GOAL_PROSPECTIVE_PREFIX, goal.title);
-                    let action = format!(
-                        "Pursue goal: {} (p{}, {})",
-                        goal.title, goal.priority, goal.rationale,
-                    );
-                    writer.ops().store_prospective(
-                        &description,
-                        &trigger,
-                        &action,
-                        i64::from(goal.priority),
-                    )?;
-                }
-            } else {
-                // Non-Active goal: resolve any stale prospective entries.
-                if has_goal_prospective {
-                    resolve_goal_prospectives(&goal.slug, writer.ops())?;
-                }
+            resolve_goal_prospectives(&goal.slug, writer.ops())?;
+        }
+        for goal in &goals {
+            if goal.status != GoalStatus::Active {
+                continue;
             }
+            let trigger = prospective_trigger_for(goal);
+            let description = format!("{}{}", GOAL_PROSPECTIVE_PREFIX, goal.title);
+            let action = format!(
+                "Pursue goal: {} (p{}, {})",
+                goal.title, goal.priority, goal.rationale,
+            );
+            writer.ops().store_prospective(
+                &description,
+                &trigger,
+                &action,
+                i64::from(goal.priority),
+            )?;
         }
 
         Ok(())
@@ -373,10 +371,11 @@ pub fn migrate_file_backed_goal_store_if_present(state_root: &std::path::Path) {
     };
 
     // Read existing slugs from cognitive memory to skip duplicates.
-    // If the DB file exists but we cannot read it, abort the migration
+    // If the store exists but we cannot read it, abort the migration
     // to avoid overwriting newer cognitive-memory records with stale
-    // legacy data.
-    let db_file = state_root.join("cognitive_memory.ladybug");
+    // legacy data. De-fork Phase 2b (#2307): the library backend persists
+    // at `<state_root>/cognitive`, not the native `cognitive_memory.ladybug`.
+    let db_file = state_root.join("cognitive");
     let existing_slugs: std::collections::HashSet<String> = if db_file.exists() {
         match writer
             .ops()

@@ -208,8 +208,8 @@ daemon IPC socket nor the local writer lock could be obtained. Either:
 - The daemon's IPC socket exists but the daemon is not responding —
   restart the daemon.
 - A stale writer lock could not be reaped — stop everything that might be
-  writing, remove the LadybugDB lock file
-  (`$STATE_ROOT/cognitive_memory.ladybug.open.lock`), and try again.
+  writing, remove the LadybugDB lock file under the cognitive-memory store
+  directory (`$STATE_ROOT/cognitive/`), and try again.
 
 See [Cognitive memory bridge helpers](../reference/cognitive-memory-bridge-helpers.md)
 for the full ladder.

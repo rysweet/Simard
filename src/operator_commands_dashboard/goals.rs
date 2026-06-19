@@ -5,9 +5,9 @@ use serde_json::{Value, json};
 use super::goals_status::render_status_and_detail;
 use super::routes::resolve_state_root;
 use super::{dashboard_goal_board_snapshot, dashboard_save_goal_board};
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 use crate::goal_curation::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
 use crate::goals::goal_slug;
+use crate::memory_ipc::open_reader_bridge;
 
 /// Load the dashboard's view of the goal board from cognitive memory.
 /// Returns an empty `GoalBoard` when the snapshot is missing or the bridge
@@ -112,7 +112,8 @@ pub(crate) async fn goals() -> Json<Value> {
 
     // Pull meeting-captured actions and decisions from cognitive memory (#415)
     // (#1686: filter out raw memory IDs and debug strings, provide clean labels)
-    if let Ok(mem) = NativeCognitiveMemory::open_read_only(&state_root) {
+    if let Ok(reader) = open_reader_bridge(&state_root) {
+        let mem = reader.ops();
         for tag in &["goal", "action", "decision"] {
             if let Ok(facts) = mem.search_facts(tag, 20, 0.0) {
                 for fact in facts {

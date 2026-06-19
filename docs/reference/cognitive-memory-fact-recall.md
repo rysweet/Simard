@@ -15,6 +15,15 @@ doc_type: reference
 
 # Tokenized fact recall in preparation
 
+> **De-fork Phase 2b.** The *behavior* described here (tokenized, multi-keyword
+> fact recall) is preserved: it is reached through the `CognitiveMemoryOps` trait,
+> now backed solely by `LibraryCognitiveMemory` over `amplihack-memory-lib`. The
+> native implementation details this page cites — the raw Cypher in
+> `src/cognitive_memory/ops.rs`, the `escape_cypher` helper, and
+> `NativeCognitiveMemory` — were **deleted** with the fork; treat those code
+> citations as historical. The library performs the equivalent tokenized search
+> internally (see [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md)).
+
 > Shipped in issue [#2302](https://github.com/rysweet/Simard/issues/2302)
 > (the "facts always zero" defect). Companion to the issue #2281
 > retrieval work — see
@@ -406,7 +415,7 @@ count.
 ### Store
 
 ```rust
-let mem = NativeCognitiveMemory::in_memory()?;
+let mem = LibraryCognitiveMemory::in_memory()?;
 
 // A learned fact whose CONTENT shares a keyword with the objective,
 // but whose content does NOT contain the whole objective verbatim.

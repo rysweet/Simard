@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use simard::cognitive_memory::NativeCognitiveMemory;
+use simard::cognitive_memory::LibraryCognitiveMemory;
 use simard::memory::{MemoryRecord, MemoryScope, MemoryStore};
 use simard::memory_bridge_adapter::CognitiveBridgeMemoryStore;
 use simard::session::SessionPhase;
@@ -23,7 +23,7 @@ impl TestFixture {
         let state_root =
             std::env::temp_dir().join(format!("adapter-live-{}", uuid::Uuid::now_v7()));
         let native_mem =
-            NativeCognitiveMemory::open(&state_root).expect("native memory should open");
+            LibraryCognitiveMemory::open(&state_root).expect("native memory should open");
         let local_store =
             std::env::temp_dir().join(format!("adapter-ls-{}.json", uuid::Uuid::now_v7()));
         let store = CognitiveBridgeMemoryStore::new(native_mem, &local_store).expect("adapter");

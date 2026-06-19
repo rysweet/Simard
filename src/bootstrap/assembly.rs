@@ -10,7 +10,7 @@ use crate::base_type_claude_agent_sdk::claude_agent_sdk_adapter;
 use crate::base_type_ms_agent::ms_agent_framework_adapter;
 use crate::base_type_rustyclawd::RustyClawdAdapter;
 use crate::base_types::BaseTypeId;
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceStore, FileBackedEvidenceStore};
 use crate::goals::{CognitiveMemoryGoalStore, GoalStore};
@@ -44,37 +44,40 @@ pub struct LocalSessionExecution {
     pub stopped_snapshot: ReflectionSnapshot,
 }
 
-/// Build the memory store and an optional native cognitive memory backend
+/// Build the memory store and an optional cognitive memory backend
 /// for session lifecycle consolidation hooks.
 ///
 /// In `BuiltinDefaults` mode (tests/dev), falls back to file-backed store
-/// when LadybugDB is unavailable. In `ExplicitConfig` mode (production),
-/// the cognitive memory MUST succeed or startup fails.
+/// when the library backend is unavailable. In `ExplicitConfig` mode
+/// (production), the cognitive memory MUST succeed or startup fails.
 fn build_memory_store(
     config: &BootstrapConfig,
 ) -> SimardResult<(Arc<dyn MemoryStore>, Option<Box<dyn CognitiveMemoryOps>>)> {
     #![allow(clippy::type_complexity)]
-    match NativeCognitiveMemory::open(&config.state_root.value) {
-        Ok(native) => {
-            // Share ONE backend Arc across:
-            //   1. the in-process writer registration (so the goal store
-            //      and any other in-process bridge consumer hits the same
-            //      lbug::Database — a fresh `NativeCognitiveMemory::open`
-            //      per call would create disjoint Database instances and
-            //      writes wouldn't be visible across them);
-            //   2. the consolidation bridge handed to the runtime
-            //      (wrapped via `SharedMemory` for `Box<dyn ...>` shape);
+    match LibraryCognitiveMemory::open(&config.state_root.value) {
+        Ok(library) => {
+            // De-fork Phase 2b (issue #2307): open the library-backed store
+            // ONCE and share the single Arc across:
+            //   1. the in-process writer registration (so the goal store and
+            //      any other in-process bridge consumer hits the same handle);
+            //   2. the consolidation bridge handed to the runtime (wrapped via
+            //      `SharedMemory` for `Box<dyn ...>` shape);
             //   3. the cognitive memory store overlay used for legacy
             //      memory-record persistence.
-            let shared: Arc<dyn CognitiveMemoryOps> = Arc::new(native);
+            // A second `open` on the same path within this process would fail —
+            // the library's lbug store holds an exclusive lock for the lifetime
+            // of the handle — so `SharedMemory` is what lets these consumers
+            // reuse the one open handle.
+            let shared: Arc<dyn CognitiveMemoryOps> = Arc::new(library);
             crate::memory_ipc::register_in_process_writer(
                 config.state_root.value.clone(),
                 Arc::clone(&shared),
             );
 
-            let native_for_store = NativeCognitiveMemory::open(&config.state_root.value)?;
-            let store =
-                CognitiveBridgeMemoryStore::new(native_for_store, config.memory_store_path())?;
+            let store = CognitiveBridgeMemoryStore::new(
+                crate::memory_ipc::SharedMemory(Arc::clone(&shared)),
+                config.memory_store_path(),
+            )?;
             store.hydrate_from_bridge()?;
 
             eprintln!("[simard] consolidation hooks active — session lifecycle hooks enabled");
@@ -86,7 +89,7 @@ fn build_memory_store(
         }
         Err(e) if config.mode == crate::bootstrap::BootstrapMode::BuiltinDefaults => {
             eprintln!(
-                "[simard] native cognitive memory unavailable ({e}) — using file backend for testing"
+                "[simard] cognitive memory unavailable ({e}) — using file backend for testing"
             );
             Ok((
                 Arc::new(FileBackedMemoryStore::try_new(config.memory_store_path())?),
@@ -95,7 +98,7 @@ fn build_memory_store(
         }
         Err(e) => Err(SimardError::RuntimeInitFailed {
             component: "cognitive-memory".into(),
-            reason: format!("native cognitive memory is required in production mode: {e}"),
+            reason: format!("cognitive memory is required in production mode: {e}"),
         }),
     }
 }

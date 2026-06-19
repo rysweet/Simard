@@ -25,15 +25,15 @@
 //! `--nocapture` surfaces the real `[simard] preparation: …` stderr line so the
 //! fix is visible, not just asserted.
 
-use simard::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use simard::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use simard::memory_consolidation::preparation_memory_operations;
 use simard::session::SessionId;
 
 /// Hermetic in-memory cognitive store. No disk, no env, no `$HOME` leakage —
 /// the same backend the `ops.rs` unit tests use, so the Cypher recall path is
 /// exercised for real.
-fn mem() -> NativeCognitiveMemory {
-    NativeCognitiveMemory::in_memory().expect("in-memory cognitive store should open")
+fn mem() -> LibraryCognitiveMemory {
+    LibraryCognitiveMemory::in_memory().expect("in-memory cognitive store should open")
 }
 
 /// Deterministic session id (literal UUID, no clock/PID derivation) so the

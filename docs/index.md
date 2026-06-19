@@ -134,6 +134,7 @@ If you are changing architecture, start with the [architecture overview](./archi
 
 - [Agent composition](./architecture/agent-composition.md) - How Simard composes subordinate agents with goal assignment, supervision, and crash recovery.
 - [Cognitive memory](./architecture/cognitive-memory.md) - Six-type memory model, session lifecycle mapping, and hive mind integration.
+- [Library-backed cognitive memory](./architecture/cognitive-memory-library-adapter.md) - The `amplihack-memory-lib` backend (`LibraryCognitiveMemory`), the sole on-disk cognitive-memory store after the de-fork (Phase 2b).
 - [Implementation plan](./architecture/implementation-plan.md) - Phased roadmap with current status and quality gates.
 - [OODA meeting handoff integration](./architecture/ooda-meeting-handoff-integration.md) - Wire meeting handoffs into the OODA daemon and seed default goals (Issues #157, #158).
 - [Unified meeting backend](./architecture/unified-meeting-backend.md) - One conversational engine behind CLI REPL and dashboard WebSocket chat (Issue #462).
