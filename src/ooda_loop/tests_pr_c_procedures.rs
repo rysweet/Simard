@@ -110,23 +110,26 @@ fn compose_name_for_run_improvement_uses_ci_fix_pattern() {
 }
 
 /// `derive_triggers_from_objective` extracts `#NNNN` PR numbers
-/// and file extensions like `.rs`. Both must end up in the returned
+/// and file extensions like `.toml`. Both must end up in the returned
 /// list (lowercased, deduplicated), and `compose_procedure_name`
 /// folds them into the rendered name.
+///
+/// File extensions must be at least 3 characters (aligned with the
+/// read-side `tokenize_objective` floor in `memory_consolidation` —
+/// shorter tokens can never be matched by tokenized recall and only
+/// add visual noise that resembles trailing-token truncation).
 #[test]
 fn procedure_name_contains_objective_derived_triggers() {
-    let derived = derive_triggers_from_objective(
-        "merge PR #2281 fixing src/ooda_loop/cycle.rs",
-        "engineer review",
-    );
+    let derived =
+        derive_triggers_from_objective("merge PR #2281 fixing config.toml", "engineer review");
     let derived_set: std::collections::HashSet<&str> = derived.iter().map(|s| s.as_str()).collect();
     assert!(
         derived_set.contains("2281"),
         "derived triggers must include the PR number '2281'; got: {derived_set:?}"
     );
     assert!(
-        derived_set.contains("rs"),
-        "derived triggers must include the file extension 'rs'; got: {derived_set:?}"
+        derived_set.contains("toml"),
+        "derived triggers must include the file extension 'toml'; got: {derived_set:?}"
     );
 
     // End-to-end: compose_procedure_name must surface those captures
@@ -134,7 +137,7 @@ fn procedure_name_contains_objective_derived_triggers() {
     let name = compose_procedure_name(
         ActionKind::AdvanceGoal,
         Some("fix-cog-mem"),
-        "merge PR #2281 fixing src/ooda_loop/cycle.rs",
+        "merge PR #2281 fixing config.toml",
         "engineer review",
     );
     assert!(
@@ -142,8 +145,8 @@ fn procedure_name_contains_objective_derived_triggers() {
         "rendered name must contain '2281' from objective; got: {name}"
     );
     assert!(
-        name.contains("rs"),
-        "rendered name must contain 'rs' file-extension capture; got: {name}"
+        name.contains("toml"),
+        "rendered name must contain 'toml' file-extension capture; got: {name}"
     );
 
     // Base triggers must still appear FIRST in the trigger list per
@@ -189,12 +192,12 @@ fn derive_triggers_handles_no_pr_or_ext_match() {
 }
 
 /// Derived triggers must dedupe against base triggers and against
-/// each other. An objective like "merge PR #2281 #2281 .rs .rs" must
+/// each other. An objective like "merge PR #2281 #2281 .toml .toml" must
 /// not produce duplicate keywords in the rendered name.
 #[test]
 fn derived_triggers_dedupe_against_base_and_self() {
     let derived = derive_triggers_from_objective(
-        "merge merge PR #2281 #2281 file.rs cycle.rs",
+        "merge merge PR #2281 #2281 config.toml manifest.toml",
         "duplicate test",
     );
 
@@ -204,10 +207,10 @@ fn derived_triggers_dedupe_against_base_and_self() {
         count_2281, 1,
         "derived triggers must self-dedupe; '2281' appeared {count_2281} times"
     );
-    let count_rs = derived.iter().filter(|s| *s == "rs").count();
+    let count_toml = derived.iter().filter(|s| *s == "toml").count();
     assert_eq!(
-        count_rs, 1,
-        "derived triggers must self-dedupe; 'rs' appeared {count_rs} times"
+        count_toml, 1,
+        "derived triggers must self-dedupe; 'toml' appeared {count_toml} times"
     );
 
     // "merge" is a base trigger; it must NOT appear in derived (which
@@ -215,5 +218,37 @@ fn derived_triggers_dedupe_against_base_and_self() {
     assert!(
         !derived.iter().any(|s| s == "merge"),
         "derived triggers must not duplicate base triggers; got: {derived:?}"
+    );
+}
+
+/// ws2 #2295: short file-extension matches (1- or 2-char) must NOT
+/// produce derived triggers. The read-side `tokenize_objective` floors
+/// at 3 chars, so any sub-3-char trigger in a procedure name is dead
+/// weight that can never be matched — and when it lands as the
+/// trailing trigger it looks like the mid-word truncation symptom
+/// users have flagged (a name ending in `…,distill,g`).
+#[test]
+fn derive_triggers_rejects_short_file_extensions() {
+    // `.g` (1 char), `.rs` (2 chars), `.go` (2 chars), `.py` (2 chars)
+    // are all valid file-extension shapes that the read-side
+    // tokenizer cannot match. They must be dropped.
+    let derived = derive_triggers_from_objective(
+        "touch .g read cycle.rs build main.go ship script.py",
+        "short-ext probe",
+    );
+    for shorty in ["g", "rs", "go", "py"] {
+        assert!(
+            !derived.iter().any(|t| t == shorty),
+            "1- and 2-char file extensions must not be emitted as derived triggers; \
+             got '{shorty}' in {derived:?}"
+        );
+    }
+
+    // 3-char extensions are still accepted — they ARE matchable by
+    // tokenize_objective.
+    let kept = derive_triggers_from_objective("update vars.tfvars and config.toml", "");
+    assert!(
+        kept.iter().any(|t| t == "toml"),
+        "3+ char extensions must still be extracted; got: {kept:?}"
     );
 }

@@ -69,7 +69,7 @@ Where:
 
 | Source                                        | Name                                                       |
 |-----------------------------------------------|------------------------------------------------------------|
-| OODA cycle: successful `AdvanceGoal` for `fix-auth-bug`, objective mentions `#2281` and `auth.rs` | `pr-merge:fix-auth-bug \| triggers: merge,pr,review,ci,2281,rs` |
+| OODA cycle: successful `AdvanceGoal` for `fix-auth-bug`, objective mentions `#2281` and `Cargo.toml` | `pr-merge:fix-auth-bug \| triggers: merge,pr,review,ci,2281,toml` |
 | OODA cycle: successful `RunImprovement` with no PR number, no file extension in objective       | `ci-fix:improve-coverage \| triggers: ci,green,failing,fix-ci,improve` |
 | Bootstrap seed                                | `pr-merge:bootstrap \| triggers: merge,pr,merge-pr,landing,ready-to-merge` |
 | Bootstrap seed                                | `ci-fix:bootstrap \| triggers: ci,green,failing,fix-ci,red` |
@@ -261,21 +261,36 @@ identifier shapes that empirically improve recall hit rate the most:
 | Pattern    | Regex                  | Capture used as trigger  |
 |------------|------------------------|--------------------------|
 | PR number  | `#(\d+)`               | The digits, e.g. `2281`  |
-| File ext   | `\.([A-Za-z][A-Za-z0-9]{0,4})\b` | The extension, e.g. `rs`, `md`, `yaml` |
+| File ext   | `\.([A-Za-z][A-Za-z0-9]{2,4})\b` | The extension, e.g. `toml`, `json`, `yaml` |
 
 Captures are lowercased and deduplicated against the base trigger
 list. The merge order is `base ++ derived`, with later duplicates
 dropped, so base triggers always appear first in the rendered name.
 
+> **Read/write floor alignment (ws2 #2295).** The file-extension
+> capture floors at **3 characters** (`{2,4}` ⇒ 3–5 chars total). This
+> deliberately matches the **read-side** floor in
+> `memory_consolidation::tokenize_objective`, which drops every
+> objective token shorter than 3 chars before issuing a recall query. A
+> 1- or 2-char derived trigger (`g`, `rs`, `md`, …) could therefore
+> never be matched by a tokenized recall — it would only sit in the
+> procedure name as visible-but-dead weight and, when it landed as the
+> trailing trigger, look exactly like the mid-word truncation symptom
+> reported in ws2 #2295. Aligning both floors removes that confusion
+> without losing any recall power.
+
 Example:
 
 ```
 ActionKind::AdvanceGoal
-objective = "merge PR #2281 fixing src/ooda_loop/cycle.rs"
+objective = "merge PR #2281 updating Cargo.toml"
 base      = ["merge", "pr", "review", "ci"]
-derived   = ["2281", "rs"]
-name      = "pr-merge:fix-cog-mem | triggers: merge,pr,review,ci,2281,rs"
+derived   = ["2281", "toml"]
+name      = "pr-merge:fix-cog-mem | triggers: merge,pr,review,ci,2281,toml"
 ```
+
+(Touching a 1–2 char extension such as `cycle.rs` adds no `rs` trigger
+under the 3-char floor; only the `#2281` PR-number capture survives.)
 
 Cost is one regex scan per stored procedure (already on a code path
 that only fires on successful outcomes — i.e. infrequently), and
@@ -310,6 +325,51 @@ query; `usage_count` is recorded for future ranking). See
 PR-C only changes what procedures *exist* and what their *names* look
 like. The query semantics remain `CONTAINS` over name and steps.
 
+### Unified tokenized recall path (ws2 #2295)
+
+Before ws2 #2295 two recall paths coexisted and disagreed:
+
+- The OODA **preparation phase**
+  (`memory_consolidation::preparation_memory_operations_with_active_slugs`)
+  tokenized the objective and issued one `recall_procedure(token, …)`
+  call per token, deduped by `node_id` — so both bootstrap *and*
+  distilled procedures surfaced.
+- The **base-type adapter** turn preparation
+  (`base_type_turn::prepare_turn_context`, used by the engineer loop)
+  passed the **entire raw objective sentence** to a single
+  `recall_procedure(objective, 5)` call. The Cypher
+  `name CONTAINS '<full sentence>'` predicate never matched any stored
+  procedure (no procedure name embeds a natural sentence), so only the
+  bootstrap procedures — injected by other means — ever appeared in
+  `prepared context (… procedures …)`, regardless of how many cycles
+  had run. This was the cycle-238 symptom.
+
+Both call sites now share one entry point,
+`memory_consolidation::recall_procedures_for_objective(bridge,
+objective, max)` (re-exported as `simard::recall_procedures_for_objective`):
+
+1. Tokenize the objective with the shared `tokenize_objective`
+   (lowercased, 3-char floor, stopwords removed).
+2. Issue one `recall_procedure(token, max)` per token, dedup by
+   `node_id`.
+3. Sort by `usage_count` desc, then `name` asc, then `node_id` asc for
+   a fully deterministic order (names are **not** unique — repeated
+   cycles store the same composed name under different `node_id`s — so
+   `node_id` is the final tiebreaker that keeps `truncate` stable across
+   runs).
+4. Truncate to `max`.
+
+**Empty-token fallback.** When the objective produces no 3+ char tokens
+(very short or punctuation-only input), the helper issues a single
+`recall_procedure(objective, max)` call so callers that pass a
+pre-tokenized or exact-name query (e.g. the bootstrap idempotency
+check) keep working.
+
+**Case-folding contract.** `tokenize_objective` lowercases every token;
+both `BOOTSTRAP_PROCEDURES` and `compose_procedure_name` emit lowercase
+trigger text. Cypher `CONTAINS` is case-sensitive, so the all-lowercase
+invariant on both sides is what makes recall actually fire.
+
 The new naming convention means:
 
 | Objective text                       | Procedures recalled (at minimum)                |
@@ -331,8 +391,24 @@ Two log lines surface PR-C's procedural changes:
 
 ```
 [simard] cognitive memory: 3 bootstrap procedures seeded
-[simard] OODA consolidation: stored procedure 'pr-merge:fix-auth-bug | triggers: merge,pr,review,ci,2281,rs'
+[simard] OODA consolidation: stored procedure 'pr-merge:fix-auth-bug | triggers: merge,pr,review,ci,2281,toml'
 ```
+
+ws2 #2295 adds **structured `tracing` events** alongside the free-form
+`eprintln!` lines so operators can answer "which procedures fired this
+cycle?" and "is my trigger list truncated?" directly from the JSON
+journal, without tail-following or risk of shipper line-length
+truncation:
+
+```
+INFO recalled procedures for objective   procedure_count=2 tokens=[…] procedure_names="pr-merge:bootstrap … | pr-merge:g1 …"
+INFO OODA consolidation: stored procedure   procedure_name="pr-merge:fix-auth-bug | triggers: merge,pr,review,ci,2281,toml"
+```
+
+The structured `procedure_name` / `procedure_names` fields are written
+verbatim by every `fmt` layer (JSON and the default human formatter),
+so the full name is captured even if a downstream log shipper truncates
+the free-form message string.
 
 The preparation-phase line (shared with episodic recall) also reports
 procedure count:
@@ -389,8 +465,12 @@ procedure count:
 | OODA cycle procedure storage                  | `src/ooda_loop/cycle.rs` (currently at `cycle.rs:343`, the `format!("ooda:{}", outcome.action.kind)` site) |
 | Runtime pattern + trigger mapping             | `src/ooda_loop/cycle.rs` (next to the storage site)   |
 | `derive_triggers_from_objective` helper       | `src/ooda_loop/cycle.rs`                              |
+| `recall_procedures_for_objective` unified helper | `src/memory_consolidation/mod.rs` (re-exported as `simard::recall_procedures_for_objective`) |
+| `tokenize_objective` (shared read-side tokenizer / 3-char floor) | `src/memory_consolidation/mod.rs` |
+| Base-type adapter call site (now routed through the helper) | `src/base_type_turn.rs` (`prepare_turn_context`) |
 | Tests                                         | `src/cognitive_memory/bootstrap_procedures_tests.rs`, |
-|                                               | `src/ooda_loop/cycle.rs`                              |
+|                                               | `src/ooda_loop/cycle.rs`,                             |
+|                                               | `tests/cognitive_memory_procedure_recall_unified.rs` |
 
 ---
 
@@ -418,6 +498,24 @@ In `src/ooda_loop/cycle.rs` tests module:
 | `procedure_name_contains_objective_derived_triggers`          | `derive_triggers_from_objective` populates `#NNNN` PR numbers and `.ext` file extensions into the name, deduplicated against base triggers, base-first order preserved |
 | `derive_triggers_handles_no_pr_or_ext_match`                  | Objective without `#N` and without `.ext` → derived list empty, name omits extras, no panic |
 | `failed_outcomes_do_not_store_procedures`                     | Regression guard for the existing "successes only" rule |
+
+### Unified recall regression gates (ws2 #2295)
+
+In `tests/cognitive_memory_procedure_recall_unified.rs` — run against
+the live `cognitive_memory.ladybug` schema via
+`NativeCognitiveMemory::in_memory` (real `lbug::Database` + real
+`SCHEMA_DDL`, no storage-layer mocks):
+
+| Test                                                          | Coverage                                          |
+|---------------------------------------------------------------|---------------------------------------------------|
+| `distilled_procedure_with_foo_bar_trigger_surfaces_for_foo_objective` | A `foo,bar`-triggered procedure surfaces under objective `"fix the foo issue"`; recalled name is byte-for-byte intact (no mid-word truncation) |
+| `bootstrap_and_distilled_pr_merge_procedures_both_surface`    | Bootstrap **and** distilled `pr-merge` procedures both surface through the unified path |
+| `recall_is_case_insensitive_via_consistent_lowercase_folding` | Lowercase-stored procedure is hit by a SHOUTED uppercase objective (write/read case-folding invariant) |
+| `derived_triggers_no_longer_emit_sub_three_char_extensions`  | 1/2-char file extensions dropped; 3+ char extensions kept (read/write floor alignment) |
+| `distilled_procedure_surfaces_through_prepare_turn_context`  | End-to-end through the **fixed call site** `base_type_turn::prepare_turn_context` — catches a future revert even if the shared helper stays correct |
+
+Outside-in CLI gate: `tests/gadugi/procedure-recall-unified.yaml`
+drives each gate via `gadugi-test run`.
 
 ---
 

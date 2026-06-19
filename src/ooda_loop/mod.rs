@@ -67,3 +67,4 @@ pub fn act(
 }
 
 pub use cycle::run_ooda_cycle;
+pub use cycle::{compose_procedure_name, derive_triggers_from_objective};
