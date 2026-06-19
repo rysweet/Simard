@@ -1228,6 +1228,42 @@ mod tests {
         );
     }
 
+    /// Multi-keyword recall locks the optimized OR-join path. The perf
+    /// change projects `toLower(e.content)` once via `WITH e, … AS lc` and
+    /// OR-joins one `lc CONTAINS '<kw>'` predicate per keyword, so the
+    /// multi-keyword query is the case the optimization actually
+    /// restructured — yet every other test exercises only a single
+    /// keyword. This stores three mixed-case episodes and searches two
+    /// lowercased keywords that each match a different episode: the union
+    /// of matches must be returned (case-insensitively via the projected
+    /// `lc`), the non-matching episode excluded, and results ordered
+    /// newest-first by `id DESC`.
+    #[test]
+    fn search_episodes_by_keywords_unions_multiple_keywords() {
+        let mem = test_mem();
+        mem.store_episode("Deploy the Authentication Service", "ooda-objective", None)
+            .unwrap();
+        mem.store_episode("Configure the Payment Gateway", "ooda-objective", None)
+            .unwrap();
+        mem.store_episode("Restart the Logging Daemon", "ooda-objective", None)
+            .unwrap();
+
+        let hits = mem
+            .search_episodes_by_keywords(&["authentication".to_string(), "payment".to_string()], 10)
+            .unwrap();
+
+        let contents: Vec<&str> = hits.iter().map(|e| e.content.as_str()).collect();
+        assert_eq!(
+            contents,
+            vec![
+                "Configure the Payment Gateway",
+                "Deploy the Authentication Service",
+            ],
+            "OR-joined keywords must return both matches case-insensitively, \
+             newest-first by id DESC, excluding the non-matching episode"
+        );
+    }
+
     // ── is_read_only ───────────────────────────────────────────────────
 
     #[test]
