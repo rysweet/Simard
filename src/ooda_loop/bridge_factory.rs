@@ -40,6 +40,26 @@ use super::OodaBridges;
 /// Returned as `Box<dyn CognitiveMemoryOps>` so callers don't need to know
 /// which path was taken.
 pub fn connect_memory(state_root: &Path) -> SimardResult<Box<dyn CognitiveMemoryOps>> {
+    // De-fork Phase 2a (issue #86): with `--features library-memory` built AND
+    // `SIMARD_COGMEM_BACKEND=library` set, select the upstream library-backed
+    // adapter at the FRONT of the precedence order, bypassing the IPC socket
+    // (there is no library IPC server). This is for parity validation / review
+    // only — it opens a SEPARATE store at `state_root/cognitive` and never
+    // touches the native live data at `state_root/cognitive_memory.ladybug`. The
+    // branch is compiled out of default builds and is a no-op when the env var
+    // is unset, so existing behavior is byte-for-byte unchanged.
+    #[cfg(feature = "library-memory")]
+    if std::env::var("SIMARD_COGMEM_BACKEND").as_deref() == Ok("library") {
+        let library = crate::cognitive_memory::LibraryCognitiveMemory::open(state_root)?;
+        let boxed: Box<dyn CognitiveMemoryOps> = Box::new(library);
+        eprintln!(
+            "[simard] cognitive memory: using library backend \
+             (SIMARD_COGMEM_BACKEND=library; de-fork Phase 2a, issue #86)"
+        );
+        seed_bootstrap_or_log(&*boxed);
+        return Ok(boxed);
+    }
+
     let socket_path = memory_ipc::socket_path_for(state_root);
     if socket_path.exists()
         && let Ok(remote) = RemoteCognitiveMemory::connect(&socket_path)

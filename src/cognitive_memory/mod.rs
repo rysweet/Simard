@@ -420,6 +420,15 @@ mod fsync;
 pub mod metrics;
 mod ops;
 
+// De-fork phase 2a (issue #86): the library-backed `CognitiveMemoryOps`
+// adapter. Compiled only behind the `library-memory` cargo feature so the
+// default build is the native path alone. Re-exported at the module root so
+// callers (and the parity test) reference `cognitive_memory::LibraryCognitiveMemory`.
+#[cfg(feature = "library-memory")]
+mod library_adapter;
+#[cfg(feature = "library-memory")]
+pub use library_adapter::LibraryCognitiveMemory;
+
 impl NativeCognitiveMemory {
     fn conn(&self) -> SimardResult<lbug::Connection<'_>> {
         lbug::Connection::new(&self.db).map_err(|e| SimardError::RuntimeInitFailed {
@@ -711,6 +720,12 @@ mod tests_lock_vs_corruption_1967;
 
 #[cfg(test)]
 mod tests_hermetic_parity;
+
+// De-fork phase 2a (issue #86): parity / conformance tests that drive the
+// same scenarios against the native backend (always) and the library-backed
+// `LibraryCognitiveMemory` adapter (only under `--features library-memory`).
+#[cfg(test)]
+mod tests_library_parity;
 
 // PR-C (issue #2281): tests for `bootstrap_procedures::seed_bootstrap_procedures`
 // — idempotency, error propagation, and the three required procedure

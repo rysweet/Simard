@@ -1,6 +1,6 @@
 [package]
 name = "simard"
-version = "0.19.1"
+version = "0.20.0"
 edition = "2024"
 default-run = "simard"
 
@@ -43,9 +43,16 @@ name = "simard-tui"
 path = "src/bin/simard_tui/main.rs"
 
 [dependencies]
-# TODO: enable `ladybug` feature once amplihack-memory-lib publishes ladybug-graph-rs to crates.io
-# amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", features = ["ladybug"] }
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "4ab3def6d402513e3f8e923464b71f4e59202319" }
+# De-fork phase 2a (issue #86): repointed at the library commit that ships the
+# persistent lbug-backed GraphStore + pluggable `CognitiveMemory`. The
+# `persistent` feature builds LadybugDB through the published `lbug = "=0.15.3"`
+# crate — the SAME pin Simard's native backend already compiles, so cargo
+# unifies the two and no *additional* C++ engine is built. The library-backed
+# adapter (`cognitive_memory::library_adapter::LibraryCognitiveMemory`) and its
+# parity tests are gated behind the `library-memory` feature below; this
+# dependency just makes the library's `CognitiveMemory::open_persistent`
+# constructor available to that gated module.
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "291eb14", features = ["persistent"] }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "43ebaa1c1b18a5630c53f0519989a2bacd42ef62" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "43ebaa1c1b18a5630c53f0519989a2bacd42ef62" }
 lbug = "=0.15.3"
@@ -82,6 +89,15 @@ libc = "=0.2.185"
 [features]
 slow-tests = []
 dashboard-audit = ["dep:headless_chrome", "dep:regex", "dep:url"]
+# De-fork phase 2a (issue #86): gates the amplihack-memory-lib-backed
+# cognitive-memory adapter (`LibraryCognitiveMemory`) and its parity tests
+# alongside the native LadybugDB backend. OFF by default so the standard build
+# compiles and runs ONLY the native path. The `amplihack-memory` dependency is
+# always built with its `persistent` feature (reusing Simard's existing
+# `lbug = "=0.15.3"` build), but the gated `library_adapter` module + its
+# `pub use` re-export and the parity test (`cognitive_memory::
+# tests_library_parity::library`) only compile when this feature is enabled.
+library-memory = []
 
 [dev-dependencies]
 assert_cmd = "=2.2.1"

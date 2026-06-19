@@ -67,6 +67,7 @@ For multi-host coordination see [Distributed operations](distributed-operations.
 ## Related
 
 - [Cognitive Memory Architecture](architecture/cognitive-memory.md) (canonical, full detail)
+- [Library-backed Cognitive Memory (de-fork Phase 2a)](architecture/cognitive-memory-library-adapter.md) — opt-in `amplihack-memory-lib` backend behind the `library-memory` feature
 - [OODA procedural memory](reference/ooda-procedural-memory.md) — how successful OODA outcomes become procedures
 - [Procedural-memory store idempotency](reference/cognitive-memory-procedural-idempotency.md) — exact-name dedup that stops repeated cycles re-storing identical procedures (#2298)
 - [Goal–prospective memory mirror](reference/goal-prospective-memory-mirror.md) — how Active goals become prospective triggers
