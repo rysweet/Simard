@@ -41,7 +41,7 @@
 //! store at `~/.simard/cognitive_memory.ladybug`.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use amplihack_memory::{
@@ -74,13 +74,6 @@ pub struct LibraryCognitiveMemory {
     /// The library memory, behind a `Mutex` for `&self` -> `&mut` interior
     /// mutability (see module docs, A2).
     inner: Mutex<CognitiveMemory>,
-    /// The on-disk store path (`state_root/cognitive`). Retained for diagnostics
-    /// and to make the store location explicit; never points at `~/.simard`.
-    #[allow(dead_code)]
-    db_path: PathBuf,
-    /// Whether this handle is read-only. Always `false` today (the library
-    /// backend is a writer); surfaced through [`CognitiveMemoryOps::is_read_only`].
-    read_only: bool,
 }
 
 impl LibraryCognitiveMemory {
@@ -102,14 +95,12 @@ impl LibraryCognitiveMemory {
                 SimardError::PersistentStoreIo {
                     store: STORE_NAME.to_string(),
                     action: "open_persistent".to_string(),
-                    path: db_path.clone(),
+                    path: db_path,
                     reason: e.to_string(),
                 }
             })?;
         Ok(Self {
             inner: Mutex::new(inner),
-            db_path,
-            read_only: false,
         })
     }
 
@@ -438,7 +429,10 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
     }
 
     fn is_read_only(&self) -> bool {
-        self.read_only
+        // The library backend is always a writer (no read-only constructor at
+        // the pinned commit), so this is a fixed `false` rather than a stored
+        // flag — matching the trait's documented default.
+        false
     }
 
     fn checkpoint(&self) -> SimardResult<()> {

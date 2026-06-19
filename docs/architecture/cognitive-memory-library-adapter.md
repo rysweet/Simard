@@ -79,7 +79,6 @@ the library backend slots into that precedence.)
 // src/cognitive_memory/library_adapter.rs  (compiled only with `library-memory`)
 pub struct LibraryCognitiveMemory {
     inner: std::sync::Mutex<amplihack_memory::CognitiveMemory</* persistent store */>>,
-    read_only: bool,
 }
 
 impl CognitiveMemoryOps for LibraryCognitiveMemory {
@@ -239,7 +238,7 @@ A new variant must keep the enum's `#[derive(Clone, Debug, Eq, PartialEq)]`
 | `list_undistilled_episodes` | — none — | **Gap.** Inherits the trait's safe no-op default (returns empty). |
 | `search_episodes_by_keywords` | `get_episodes(.., include_compressed = true)` + filter | Adapter recalls **all** episodes (compressed included, so consolidation sources stay recallable — matching native, whose query has no compressed filter), then filters on case-insensitive `content.contains` and caps at `limit`. |
 | `search_episodes_starting_with` | `get_episodes(.., include_compressed = true)` + filter | Adapter recalls all episodes, filters on `content.starts_with`, and pairs each match with the library record's `created_at` to build the `(content, recorded_at)` return. |
-| `is_read_only()` | n/a | Returns the adapter's stored `read_only` flag. |
+| `is_read_only()` | n/a | Always `false` — the library backend is a writer (no read-only constructor). |
 | `checkpoint()` | library flush (if present) | No-op when the library exposes no checkpoint. |
 
 ### Type conversion
