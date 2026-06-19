@@ -506,9 +506,15 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
     }
 
     fn check_triggers(&self, content: &str) -> SimardResult<Vec<CognitiveProspective>> {
+        // Escape first, then interpolate, then case-fold both sides. Folding
+        // makes matching case-insensitive (#2300) so a goal's lowercase
+        // slug-phrase `trigger_condition` fires even when the OODA objective
+        // probe mentions the phrase in its original (mixed) case. The single
+        // escape chokepoint is preserved: `toLower` wraps the already-escaped
+        // literal, and `p.trigger_condition` is a schema-controlled column.
         let c = escape_cypher(content);
         let rows = self.query(&format!(
-            "MATCH (p:Prospective) WHERE p.status = 'pending' AND '{c}' CONTAINS p.trigger_condition RETURN p.id, p.description, p.trigger_condition, p.action_on_trigger, p.status, p.priority"
+            "MATCH (p:Prospective) WHERE p.status = 'pending' AND toLower('{c}') CONTAINS toLower(p.trigger_condition) RETURN p.id, p.description, p.trigger_condition, p.action_on_trigger, p.status, p.priority"
         ))?;
         Ok(rows
             .iter()
@@ -1001,6 +1007,84 @@ mod tests {
         assert!(
             triggered.is_empty(),
             "non-pending prospectives must not trigger"
+        );
+    }
+
+    // ── #2300 regression: prospective-triggers-never-fire ───────────────
+    //
+    // Root cause (b): the read/match path never fires a stored trigger when
+    // the OODA objective probe mentions the goal phrase in its original
+    // (mixed) case. An Active goal writes a prospective whose
+    // `trigger_condition` is the lowercase slug-phrase
+    // (`prospective_trigger_for` = `goal_slug(id).replace('-', " ")`), but a
+    // realistic objective probe carries the goal's phrase in mixed case.
+    // Under a case-SENSITIVE `CONTAINS`, the trigger never fires.
+
+    /// RED for #2300: storing an Active-goal-style prospective and probing
+    /// `check_triggers` with a realistic, mixed-case objective that contains
+    /// the goal phrase MUST fire the trigger. Fails on `main` (case-sensitive
+    /// CONTAINS); passes once matching is case-folded.
+    #[test]
+    fn check_triggers_fires_for_active_goal_objective() {
+        let mem = test_mem();
+        // Mirrors the live write path: description prefixed with `goal:`,
+        // trigger_condition is the lowercase slug-phrase.
+        mem.store_prospective(
+            "goal:Fix Authentication Bug",
+            "fix authentication bug",
+            "Pursue goal: Fix Authentication Bug",
+            1,
+        )
+        .unwrap();
+
+        // Realistic OODA objective text — same words, original (mixed) case.
+        let triggered = mem
+            .check_triggers("Investigate and Fix Authentication Bug in the login flow")
+            .unwrap();
+
+        assert!(
+            !triggered.is_empty(),
+            "an Active-goal prospective must fire when the objective probe \
+             mentions the goal phrase (case-insensitively); got {} triggers",
+            triggered.len()
+        );
+        assert!(
+            triggered.iter().any(|p| p.description.starts_with("goal:")),
+            "the fired trigger must be the goal: prospective"
+        );
+    }
+
+    /// RED for #2300: `check_triggers` matching MUST be case-insensitive.
+    /// A lowercase `trigger_condition` must fire against an UPPERCASE probe.
+    #[test]
+    fn check_triggers_is_case_insensitive() {
+        let mem = test_mem();
+        mem.store_prospective("watch", "deploy ci pipeline", "act", 2)
+            .unwrap();
+        let triggered = mem.check_triggers("DEPLOY CI PIPELINE now").unwrap();
+        assert_eq!(
+            triggered.len(),
+            1,
+            "trigger matching must be case-insensitive"
+        );
+        assert_eq!(triggered[0].trigger_condition, "deploy ci pipeline");
+    }
+
+    /// Security regression for #2300: a probe laden with Cypher-significant
+    /// characters (quote, backslash, newline, statement terminators) must not
+    /// break the generated query nor spuriously match. The single escape
+    /// chokepoint (`escape_cypher`) must remain intact under case-folding.
+    #[test]
+    fn check_triggers_handles_injection_chars_safely() {
+        let mem = test_mem();
+        mem.store_prospective("watch", "needle", "act", 1).unwrap();
+        let probe = "trouble '; MATCH (n) DETACH DELETE n; -- \\ \n \" end";
+        let triggered = mem
+            .check_triggers(probe)
+            .expect("injection-laden probe must not break the query");
+        assert!(
+            triggered.is_empty(),
+            "no trigger should match the injection probe"
         );
     }
 

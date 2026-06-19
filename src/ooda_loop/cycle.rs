@@ -38,6 +38,39 @@ pub fn run_ooda_cycle(
     crate::ooda_brain::with_brain_judgment_scope(|| run_ooda_cycle_inner(state, bridges, config))
 }
 
+/// Build the OODA objective probe from the active goals.
+///
+/// The probe is fed to `check_triggers` (and fact/episode recall) during the
+/// Prepare phase. It concatenates, per active goal:
+///
+///   1. the free-text `description` — drives targeted fact/episode recall, and
+///   2. the goal's **slug-phrase** — `goal_slug(id)` with dashes→spaces.
+///
+/// The slug-phrase is exactly what `prospective_trigger_for`
+/// (`src/goals/cognitive_memory_store.rs`) writes as a goal's
+/// `trigger_condition`. Including it here is what lets `check_triggers` fire a
+/// goal's prospective memory (#2300, root cause (b)). Before this, the probe
+/// carried only free-text descriptions, which never contain the slug-derived
+/// trigger substring — so `check_triggers` matched nothing and the
+/// prospective subsystem was dead ("0 triggers" every OODA cycle).
+fn build_objective_probe(active: &[crate::goal_curation::ActiveGoal]) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(active.len() * 2);
+    for g in active {
+        let description = g.description.trim();
+        if !description.is_empty() {
+            parts.push(description.to_string());
+        }
+        // Byte-identical to the written `trigger_condition`: the store path
+        // uses `goal_slug(&active.id).replace('-', " ")` via
+        // `active_goals_as_records` + `prospective_trigger_for`.
+        let trigger_phrase = crate::goals::goal_slug(&g.id).replace('-', " ");
+        if !trigger_phrase.is_empty() {
+            parts.push(trigger_phrase);
+        }
+    }
+    parts.join("; ")
+}
+
 fn run_ooda_cycle_inner(
     state: &mut OodaState,
     bridges: &mut OodaBridges,
@@ -208,14 +241,10 @@ fn run_ooda_cycle_inner(
     eprintln!("[simard] OODA cycle: Observe complete");
 
     // --- Prepare: gather relevant context from cognitive memory ---
-    // Build an objective summary from active goals so memory retrieval is targeted.
-    let objective_summary: String = state
-        .active_goals
-        .active
-        .iter()
-        .map(|g| g.description.as_str())
-        .collect::<Vec<_>>()
-        .join("; ");
+    // Build an objective summary from active goals so memory retrieval is
+    // targeted. Includes each goal's slug-phrase so prospective `check_triggers`
+    // can fire the goal's trigger (#2300) — see `build_objective_probe`.
+    let objective_summary: String = build_objective_probe(&state.active_goals.active);
     // PR-A (issue #2281): build the live `active_slugs` set from
     // `active` + `backlog` so `preparation_memory_operations_with_active_slugs`
     // can drop stale `goal-store:record` facts whose slug is no longer
@@ -1245,5 +1274,96 @@ mod tests_board_integrity {
             .filter(|id| !post_active.contains(*id) && !archived.contains(*id))
             .collect();
         assert!(vanished.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests_objective_probe {
+    use super::build_objective_probe;
+    use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+    use crate::goal_curation::{ActiveGoal, GoalProgress};
+
+    fn active_goal(id: &str, description: &str) -> ActiveGoal {
+        ActiveGoal {
+            id: id.to_string(),
+            description: description.to_string(),
+            priority: 1,
+            status: GoalProgress::InProgress { percent: 0 },
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![],
+            last_progress_update_at: None,
+        }
+    }
+
+    /// The probe MUST contain each active goal's slug-phrase — the exact
+    /// substring `prospective_trigger_for` writes as the goal's
+    /// `trigger_condition`. Without it `check_triggers` can never fire a
+    /// goal's prospective memory during OODA preparation (#2300, cause (b)).
+    #[test]
+    fn probe_contains_goal_slug_phrase() {
+        let active = vec![active_goal(
+            "fix-authentication-bug",
+            "Investigate and repair the broken login path",
+        )];
+        let probe = build_objective_probe(&active);
+        let slug_phrase = crate::goals::goal_slug("fix-authentication-bug").replace('-', " ");
+        assert!(
+            probe.contains(&slug_phrase),
+            "probe must contain slug-phrase {slug_phrase:?}; got {probe:?}"
+        );
+    }
+
+    /// The probe must still carry the free-text description so targeted
+    /// fact/episode recall keeps working.
+    #[test]
+    fn probe_retains_goal_description() {
+        let active = vec![active_goal(
+            "deploy-ci-pipeline",
+            "Stand up the CI pipeline",
+        )];
+        let probe = build_objective_probe(&active);
+        assert!(
+            probe.contains("Stand up the CI pipeline"),
+            "probe must retain the goal description; got {probe:?}"
+        );
+    }
+
+    /// End-to-end (#2300): an Active goal's prospective — stored with the
+    /// slug-derived `trigger_condition` exactly as the live write path does —
+    /// MUST fire when `check_triggers` is probed with the objective summary
+    /// built by `build_objective_probe`. The goal's free-text description is
+    /// deliberately unrelated to the slug to prove the slug-phrase enrichment
+    /// (not the description) is what makes the trigger fire.
+    #[test]
+    fn objective_probe_fires_stored_goal_trigger() {
+        let mem = NativeCognitiveMemory::in_memory().expect("in-memory DB");
+
+        let goal_id = "improve-retrieval-latency";
+        // Mirror the live write path's trigger_condition derivation
+        // (active_goals_as_records + prospective_trigger_for).
+        let trigger_condition = crate::goals::goal_slug(goal_id).replace('-', " ");
+        mem.store_prospective(
+            "goal:Improve retrieval latency",
+            &trigger_condition,
+            "Pursue goal: Improve retrieval latency",
+            1,
+        )
+        .unwrap();
+
+        // Description shares no words with the slug, so only the appended
+        // slug-phrase can satisfy CONTAINS.
+        let active = vec![active_goal(goal_id, "Make the system snappier for users")];
+        let probe = build_objective_probe(&active);
+
+        let triggered = mem.check_triggers(&probe).unwrap();
+        assert!(
+            triggered
+                .iter()
+                .any(|p| p.trigger_condition == trigger_condition),
+            "objective probe must fire the stored goal trigger; probe={probe:?}, \
+             got {} triggers",
+            triggered.len()
+        );
     }
 }

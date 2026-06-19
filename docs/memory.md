@@ -69,5 +69,6 @@ For multi-host coordination see [Distributed operations](distributed-operations.
 - [Cognitive Memory Architecture](architecture/cognitive-memory.md) (canonical, full detail)
 - [OODA procedural memory](reference/ooda-procedural-memory.md) — how successful OODA outcomes become procedures
 - [Goal–prospective memory mirror](reference/goal-prospective-memory-mirror.md) — how Active goals become prospective triggers
+- [Prospective-trigger firing](reference/prospective-trigger-firing.md) — how the OODA objective probe and case-insensitive match make stored triggers fire
 - [Dashboard](dashboard.md) — Memory tab
 - [Daemon mode](daemon-mode.md) — when consolidation runs
