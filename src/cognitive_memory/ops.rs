@@ -578,18 +578,23 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
     }
 
     /// Native impl of `search_episodes_by_keywords` for
-    /// [`NativeCognitiveMemory`]. Builds one Cypher
-    /// `toLower(e.content) CONTAINS '<lowercased+escaped>'` clause per
-    /// keyword and OR-joins them. Matching is **case-insensitive**:
-    /// keywords come from `tokenize_objective` already lowercased, but
-    /// `store_episode` persists `content` verbatim, so both sides are
-    /// lowered at query time (`toLower` on the column, `to_lowercase()`
-    /// on the keyword). This fixes the episodic-recall-returns-zero
-    /// defect (issue #2299) without re-migrating already-stored
-    /// verbatim episodes. Orders by `e.id DESC` to surface newest
-    /// matches first — `id` is a UUID-v7 so descending lex-sort is
-    /// equivalent to descending creation order without needing the
-    /// `temporal_index` column.
+    /// [`NativeCognitiveMemory`]. Lowercases each keyword and OR-joins one
+    /// `lc CONTAINS '<lowercased+escaped>'` clause per keyword, where `lc`
+    /// is `toLower(e.content)` projected **once per row** via a `WITH`
+    /// stage. Matching is **case-insensitive**: keywords come from
+    /// `tokenize_objective` already lowercased, but `store_episode`
+    /// persists `content` verbatim, so both sides are lowered at query
+    /// time (`toLower` on the column once per row via `WITH`,
+    /// `to_lowercase()` on the keyword). Projecting the lowered content a
+    /// single time — rather than recomputing `toLower(e.content)` inside
+    /// every predicate — avoids N redundant per-row lowercasings when N
+    /// keywords are searched, which matters on the 20k+ episode corpus
+    /// this scans. This fixes the episodic-recall-returns-zero defect
+    /// (issue #2299) without re-migrating already-stored verbatim
+    /// episodes. Orders by `e.id DESC` to surface newest matches first —
+    /// `id` is a UUID-v7 so descending lex-sort is equivalent to
+    /// descending creation order without needing the `temporal_index`
+    /// column.
     ///
     /// Keywords are trimmed, lowercased, and blank / whitespace-only
     /// entries dropped before predicates are built. If nothing remains —
@@ -610,14 +615,16 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             .iter()
             .map(|kw| kw.trim().to_lowercase())
             .filter(|kw| !kw.is_empty())
-            .map(|kw| format!("toLower(e.content) CONTAINS '{}'", escape_cypher(&kw)))
+            .map(|kw| format!("lc CONTAINS '{}'", escape_cypher(&kw)))
             .collect();
         if predicates.is_empty() {
             return Ok(vec![]);
         }
         let where_clause = predicates.join(" OR ");
         let rows = self.query(&format!(
-            "MATCH (e:Episode) WHERE {where_clause} \
+            "MATCH (e:Episode) \
+             WITH e, toLower(e.content) AS lc \
+             WHERE {where_clause} \
              RETURN e.id, e.content, e.source_label, e.temporal_index, e.compressed \
              ORDER BY e.id DESC LIMIT {limit}"
         ))?;
