@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-86-de-fork-phase-2a-safe-integration-step-for-simard
+## Project: main
 
 ## Overview
 
