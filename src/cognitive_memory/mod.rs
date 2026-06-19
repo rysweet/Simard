@@ -189,6 +189,29 @@ pub trait CognitiveMemoryOps: Send + Sync {
     }
 }
 
+/// Recall fan-out used by [`procedure_exists`]. [`CognitiveMemoryOps::recall_procedure`]
+/// ranks by a `CONTAINS` match on the procedure name, so an exact-name lookup
+/// may have to look past several superstring / trigger-sharing hits before it
+/// finds (or rules out) the exact one. 16 clears the bootstrap set plus a
+/// realistic cycle's worth of trigger-token collisions.
+const EXACT_NAME_RECALL_LIMIT: u32 = 16;
+
+/// Returns `true` if a procedure with this **exact** `name` already exists.
+///
+/// [`CognitiveMemoryOps::recall_procedure`] matches names with Cypher
+/// `CONTAINS`, so a name-shaped query can surface *other* procedures that merely
+/// share trigger tokens (`merge`, `bootstrap`, …) or are superstrings. Callers
+/// that need an identity check — "does *this* procedure already exist?" — must
+/// filter the recall hits down to exact-name equality; a bare `is_empty()` on
+/// the raw recall would over-report presence. Centralizing the filter here keeps
+/// the bootstrap seeder and the OODA consolidation log in lockstep (issue #2298).
+pub fn procedure_exists(memory: &dyn CognitiveMemoryOps, name: &str) -> SimardResult<bool> {
+    Ok(memory
+        .recall_procedure(name, EXACT_NAME_RECALL_LIMIT)?
+        .iter()
+        .any(|hit| hit.name == name))
+}
+
 // ============================================================================
 // NativeCognitiveMemory — LadybugDB backend
 // ============================================================================
