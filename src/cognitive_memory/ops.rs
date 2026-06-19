@@ -45,8 +45,9 @@ const MAX_FACT_QUERY_TOKENS: usize = 6;
 /// `TOKEN_STOPWORDS` constant used by the episodic/procedural
 /// `tokenize_objective` helper, so this fix stays confined to fact
 /// search and cannot alter episodic or procedural recall (issue #2302
-/// scope). All entries are lowercase; the membership test compares a
-/// lowercased copy of each token.
+/// scope). All entries are lowercase; tokens are matched against them
+/// case-insensitively via `eq_ignore_ascii_case` (no lowercased copy is
+/// allocated).
 const FACT_QUERY_STOPWORDS: &[&str] = &[
     "the", "and", "for", "with", "this", "that", "from", "has", "was", "were", "will", "into",
     "when", "where", "what", "why", "how", "on", "of", "to", "in", "a", "an", "at", "is", "are",
@@ -71,22 +72,28 @@ const FACT_QUERY_STOPWORDS: &[&str] = &[
 ///    matches the prior whole-string query.
 /// 4. Cap at the first [`MAX_FACT_QUERY_TOKENS`] surviving tokens.
 fn tokenize_fact_query(query: &str) -> Vec<String> {
-    let mut tokens: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Bounded at MAX_FACT_QUERY_TOKENS surviving tokens, so a pre-sized Vec
+    // with a case-insensitive linear dedup is cheaper than a HashSet: it
+    // avoids a per-token `to_ascii_lowercase` allocation, the set allocation,
+    // and all hashing on the OODA-prep recall path.
+    let mut tokens: Vec<String> = Vec::with_capacity(MAX_FACT_QUERY_TOKENS);
     for raw in query.split_ascii_whitespace() {
         let trimmed = raw.trim_matches(|c: char| !c.is_alphanumeric());
         if trimmed.is_empty() {
             continue;
         }
-        let lowered = trimmed.to_ascii_lowercase();
-        if FACT_QUERY_STOPWORDS.contains(&lowered.as_str()) {
+        if FACT_QUERY_STOPWORDS
+            .iter()
+            .any(|s| trimmed.eq_ignore_ascii_case(s))
+        {
             continue;
         }
-        if seen.insert(lowered) {
-            tokens.push(trimmed.to_string());
-            if tokens.len() == MAX_FACT_QUERY_TOKENS {
-                break;
-            }
+        if tokens.iter().any(|t| t.eq_ignore_ascii_case(trimmed)) {
+            continue;
+        }
+        tokens.push(trimmed.to_string());
+        if tokens.len() == MAX_FACT_QUERY_TOKENS {
+            break;
         }
     }
     tokens
