@@ -53,6 +53,45 @@ const FACT_QUERY_STOPWORDS: &[&str] = &[
     "by", "or", "as", "it",
 ];
 
+/// Tokenize a [`CognitiveMemoryOps::search_facts`] query into the keywords
+/// that get OR-joined into `CONTAINS` clauses (issue #2302). Kept separate
+/// from `tokenize_objective` (used by episodic/procedural recall) so the
+/// fact-search fix cannot alter those paths; see
+/// `docs/reference/cognitive-memory-fact-recall.md`.
+///
+/// Rules (in order):
+/// 1. Split on ASCII whitespace ONLY — never on `-`/`:`/`/`, so a
+///    single-token concept literal like `goal-store:record` stays intact
+///    and the goal-fact load path in `memory_consolidation` is unchanged.
+/// 2. Trim leading/trailing non-alphanumerics per token, preserving
+///    interior punctuation; drop tokens that become empty.
+/// 3. Drop stopwords (compared case-insensitively against
+///    [`FACT_QUERY_STOPWORDS`]) and deduplicate (also case-insensitively).
+///    Emitted tokens keep their original case so `CONTAINS` case-behaviour
+///    matches the prior whole-string query.
+/// 4. Cap at the first [`MAX_FACT_QUERY_TOKENS`] surviving tokens.
+fn tokenize_fact_query(query: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for raw in query.split_ascii_whitespace() {
+        let trimmed = raw.trim_matches(|c: char| !c.is_alphanumeric());
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lowered = trimmed.to_ascii_lowercase();
+        if FACT_QUERY_STOPWORDS.contains(&lowered.as_str()) {
+            continue;
+        }
+        if seen.insert(lowered) {
+            tokens.push(trimmed.to_string());
+            if tokens.len() == MAX_FACT_QUERY_TOKENS {
+                break;
+            }
+        }
+    }
+    tokens
+}
+
 /// null bytes — the full set of characters that can break or inject into
 /// Cypher string literals.
 pub(crate) fn escape_cypher(s: &str) -> String {
@@ -326,37 +365,8 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             // string is almost never a verbatim substring of any stored
             // fact's concept/content, so the previous single whole-string
             // CONTAINS matched 0 rows — the "facts always zero" defect.
-            //
-            // Rules (kept deliberately minimal — see
-            // docs/reference/cognitive-memory-fact-recall.md):
-            //   1. Split on ASCII whitespace ONLY (never on `-`/`:`/`/`), so
-            //      single-token concept literals like `goal-store:record`
-            //      stay intact and the goal-fact load path below is
-            //      byte-for-byte unchanged.
-            //   2. Trim leading/trailing punctuation per token, preserving
-            //      interior punctuation; drop empties.
-            //   3. Drop stopwords (case-insensitively) and deduplicate. The
-            //      emitted token keeps its original case so `CONTAINS`
-            //      case-behaviour matches the prior whole-string query.
-            //   4. Cap at the first MAX_FACT_QUERY_TOKENS surviving tokens.
-            let mut tokens: Vec<String> = Vec::new();
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for raw in query.split_ascii_whitespace() {
-                let trimmed = raw.trim_matches(|c: char| !c.is_alphanumeric());
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let lowered = trimmed.to_ascii_lowercase();
-                if FACT_QUERY_STOPWORDS.contains(&lowered.as_str()) {
-                    continue;
-                }
-                if seen.insert(lowered) {
-                    tokens.push(trimmed.to_string());
-                    if tokens.len() == MAX_FACT_QUERY_TOKENS {
-                        break;
-                    }
-                }
-            }
+            // See `tokenize_fact_query` for the tokenization rules.
+            let tokens = tokenize_fact_query(query);
             let where_clause = if tokens.len() < 2 {
                 // 0 or 1 keyword: preserve the original whole-string
                 // exact-match behavior. Empty/whitespace/all-stopword
@@ -1083,6 +1093,67 @@ mod tests {
                 .map(|f| f.concept.clone())
                 .collect::<Vec<_>>()
         );
+    }
+
+    // ── tokenize_fact_query unit contract (issue #2302) ────────────────
+
+    #[test]
+    fn tokenize_fact_query_splits_on_whitespace_only() {
+        // Internal `-`/`:`/`/` must be preserved; only whitespace splits.
+        assert_eq!(
+            tokenize_fact_query("goal-store:record src/foo.rs"),
+            vec!["goal-store:record".to_string(), "src/foo.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_trims_edge_punctuation_keeps_interior() {
+        assert_eq!(
+            tokenize_fact_query("(auth) module, ci."),
+            vec!["auth".to_string(), "module".to_string(), "ci".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_drops_stopwords_case_insensitively() {
+        // "The"/"the" and "CI" — function words go, keyword stays, and the
+        // surviving token keeps its original case.
+        assert_eq!(
+            tokenize_fact_query("The auth THE module"),
+            vec!["auth".to_string(), "module".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_dedups_case_insensitively_first_case_wins() {
+        assert_eq!(
+            tokenize_fact_query("Auth auth AUTH module"),
+            vec!["Auth".to_string(), "module".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_caps_at_max_tokens() {
+        let tokens = tokenize_fact_query("k1 k2 k3 k4 k5 k6 k7 k8");
+        assert_eq!(tokens.len(), MAX_FACT_QUERY_TOKENS);
+        assert_eq!(tokens.first().map(String::as_str), Some("k1"));
+        assert_eq!(tokens.last().map(String::as_str), Some("k6"));
+    }
+
+    #[test]
+    fn tokenize_fact_query_keeps_short_non_stopwords() {
+        // `CI`, `PR`, `#2302` are short but discriminating — never dropped.
+        assert_eq!(
+            tokenize_fact_query("CI PR #2302"),
+            vec!["CI".to_string(), "PR".to_string(), "2302".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_empty_for_whitespace_or_all_stopwords() {
+        assert!(tokenize_fact_query("   ").is_empty());
+        assert!(tokenize_fact_query("the and of to").is_empty());
+        assert!(tokenize_fact_query("").is_empty());
     }
 
     #[test]
