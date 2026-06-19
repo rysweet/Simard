@@ -116,16 +116,16 @@ pub const BOOTSTRAP_PROCEDURES: &[BootstrapProcedure] = &[
 
 /// Seed [`BOOTSTRAP_PROCEDURES`] into cognitive memory if missing.
 ///
-/// For each procedure, we first call
-/// `recall_procedure(name, 1)` — but because `recall_procedure`
-/// is allowed to return tokenized partial matches (PR-C makes the
-/// call site tokenize objectives so a query like `"merge PR #2281"`
-/// hits `pr-merge:bootstrap | triggers: …`), we filter the recall
-/// hits to **exact name matches** before deciding whether to skip.
-/// If any hit has `p.name == procedure.name()` the procedure is
-/// considered present and skipped. Otherwise we
-/// `store_procedure(name, steps, prerequisites)`. Returns the count
-/// of procedures newly stored (`0` if all were already present).
+/// For each procedure we ask [`CognitiveMemoryOps::procedure_exists`] — an
+/// exact-name probe — whether it is already present, and
+/// `store_procedure(name, steps, prerequisites)` it only if not. Returns the
+/// count of procedures newly stored (`0` if all were already present).
+///
+/// The exact-name semantics matter: `recall_procedure` matches on Cypher
+/// `CONTAINS`, so bootstrap procedures that share trigger tokens would
+/// otherwise over-report presence and starve later seeds. `procedure_exists`
+/// encapsulates that exact-name filter (and lets the native backend answer it
+/// with a direct `LIMIT 1` lookup instead of a recall fan-out).
 ///
 /// **Idempotent**: safe to call on every daemon start; subsequent
 /// calls after the first all return `Ok(0)`.
@@ -140,15 +140,7 @@ pub const BOOTSTRAP_PROCEDURES: &[BootstrapProcedure] = &[
 pub fn seed_bootstrap_procedures(bridge: &dyn CognitiveMemoryOps) -> SimardResult<usize> {
     let mut seeded = 0usize;
     for proc in BOOTSTRAP_PROCEDURES {
-        // Pull a generous candidate set then filter to exact-name
-        // matches — tokenized recall semantics mean a name-shaped
-        // query may surface OTHER procedures that share trigger
-        // tokens (`bootstrap`, `merge`, …). A simple `is_empty()`
-        // check on the raw recall would over-report presence and
-        // never seed the second and third bootstrap procedures.
-        let hits = bridge.recall_procedure(proc.name(), 16)?;
-        let already_present = hits.iter().any(|h| h.name == proc.name());
-        if !already_present {
+        if !bridge.procedure_exists(proc.name())? {
             bridge.store_procedure(proc.name(), &proc.steps(), &proc.prerequisites())?;
             seeded += 1;
         }
