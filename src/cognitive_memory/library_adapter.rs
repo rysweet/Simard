@@ -291,12 +291,16 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         let guard = self.lock()?;
         // Wildcard / empty query (A4): map to the library's "return all" path
         // rather than tokenizing a literal `*`. Apply `min_confidence` and the
-        // limit after, matching the native wildcard semantics (filter then cap).
+        // limit, matching the native wildcard semantics (filter then cap).
+        // `get_all_facts` returns facts sorted by confidence descending, so the
+        // facts passing `min_confidence` are always a prefix; requesting only
+        // `limit` rows up front yields the same top-`limit` qualifying facts as
+        // fetching everything and truncating, while materializing far fewer rows
+        // when the store is large.
         let facts: Vec<SemanticFact> = if query == "*" || query.trim().is_empty() {
-            let mut all = guard.get_all_facts(usize::MAX);
-            all.retain(|f| f.confidence >= min_confidence);
-            all.truncate(limit as usize);
-            all
+            let mut top = guard.get_all_facts(limit as usize);
+            top.retain(|f| f.confidence >= min_confidence);
+            top
         } else {
             guard.search_facts(query, limit as usize, min_confidence)
         };
@@ -382,7 +386,10 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // Include compressed episodes so consolidation sources remain recallable
         // by keyword (matching native, whose query has no compressed filter).
         // `get_episodes` already returns newest-first by `temporal_index`.
-        let mut episodes: Vec<CognitiveEpisode> = self
+        // `take(limit)` short-circuits the per-episode lowercase/contains scan
+        // (and the DTO conversion) once `limit` matches are found, instead of
+        // converting every match and truncating afterwards.
+        let episodes: Vec<CognitiveEpisode> = self
             .lock()?
             .get_episodes(usize::MAX, true)
             .into_iter()
@@ -390,9 +397,9 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
                 let content = e.content.to_lowercase();
                 needles.iter().any(|kw| content.contains(kw))
             })
+            .take(limit as usize)
             .map(to_episode)
             .collect();
-        episodes.truncate(limit as usize);
         Ok(episodes)
     }
 
@@ -401,14 +408,17 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         prefix: &str,
         limit: u32,
     ) -> SimardResult<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
-        let mut out: Vec<(String, chrono::DateTime<chrono::Utc>)> = self
+        // `get_episodes` returns newest-first; `take(limit)` stops once `limit`
+        // matches are collected instead of materializing every match and then
+        // truncating.
+        let out: Vec<(String, chrono::DateTime<chrono::Utc>)> = self
             .lock()?
             .get_episodes(usize::MAX, true)
             .into_iter()
             .filter(|e| e.content.starts_with(prefix))
+            .take(limit as usize)
             .map(|e| (e.content, e.created_at))
             .collect();
-        out.truncate(limit as usize);
         Ok(out)
     }
 
