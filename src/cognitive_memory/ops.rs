@@ -591,13 +591,14 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
     /// equivalent to descending creation order without needing the
     /// `temporal_index` column.
     ///
-    /// Empty `keywords` slice short-circuits to `Ok(vec![])` so callers
-    /// never need to special-case it. Blank / whitespace-only keywords
-    /// are dropped *after* normalization so a single empty keyword can
-    /// never degrade into a `CONTAINS ''` match-all (over-disclosure +
-    /// full-corpus scan). `escape_cypher` is applied last, after
-    /// lowercasing, so the case-insensitive path keeps the same
-    /// Cypher-injection protection as the original.
+    /// Keywords are trimmed, lowercased, and blank / whitespace-only
+    /// entries dropped before predicates are built. If nothing remains —
+    /// an empty slice or all-blank keywords — the query short-circuits to
+    /// `Ok(vec![])`, so callers never need to special-case it and a lone
+    /// blank keyword can never degrade into a `CONTAINS ''` match-all
+    /// (over-disclosure + full-corpus scan). `escape_cypher` is applied
+    /// last, after lowercasing, so the case-insensitive path keeps the
+    /// same Cypher-injection protection as the original.
     ///
     /// Issue #2281, PR-C, problem 4. Issue #2299 (case-insensitive fix).
     fn search_episodes_by_keywords(
@@ -605,9 +606,6 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         keywords: &[String],
         limit: u32,
     ) -> SimardResult<Vec<CognitiveEpisode>> {
-        if keywords.is_empty() {
-            return Ok(vec![]);
-        }
         let predicates: Vec<String> = keywords
             .iter()
             .map(|kw| kw.trim().to_lowercase())
