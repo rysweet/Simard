@@ -8,6 +8,7 @@ related:
   - ./cognitive-memory-goal-store.md
   - ./goal-board-api.md
   - ./ooda-procedural-memory.md
+  - ./prospective-trigger-firing.md
   - ../concepts/goal-board-persistence.md
   - ../howto/reconcile-goal-prospective-drift.md
   - ../memory.md
@@ -195,6 +196,9 @@ Called by `put()` before every mirror write, and by
 
 ## Related reading
 
+- [Prospective-trigger firing](./prospective-trigger-firing.md) — the
+  read side: how the OODA objective probe is shaped and matched so the
+  prospective triggers written here actually fire (issue #2300).
 - [Goal fact dedup in preparation](../concepts/goal-fact-dedup-in-preparation.md)
   — how `preparation_memory_operations` loads and deduplicates goal
   facts using the shared constants.

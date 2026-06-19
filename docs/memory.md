@@ -70,5 +70,6 @@ For multi-host coordination see [Distributed operations](distributed-operations.
 - [OODA procedural memory](reference/ooda-procedural-memory.md) — how successful OODA outcomes become procedures
 - [Procedural-memory store idempotency](reference/cognitive-memory-procedural-idempotency.md) — exact-name dedup that stops repeated cycles re-storing identical procedures (#2298)
 - [Goal–prospective memory mirror](reference/goal-prospective-memory-mirror.md) — how Active goals become prospective triggers
+- [Prospective-trigger firing](reference/prospective-trigger-firing.md) — how the OODA objective probe and case-insensitive match make stored triggers fire
 - [Dashboard](dashboard.md) — Memory tab
 - [Daemon mode](daemon-mode.md) — when consolidation runs
