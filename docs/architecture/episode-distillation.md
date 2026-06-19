@@ -9,6 +9,7 @@ related:
   - ../reference/cognitive-memory-preparation-filters.md
   - ../reference/cognitive-memory-episodic-recall.md
   - ../reference/ooda-procedural-memory.md
+  - ../reference/cognitive-memory-procedural-idempotency.md
   - ../memory.md
 ---
 

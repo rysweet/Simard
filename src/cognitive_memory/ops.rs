@@ -328,6 +328,42 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         #[cfg(test)]
         self.assert_hermetic_for("NativeCognitiveMemory::store_procedure");
 
+        // Issue #2298: procedural memory was "frozen" — every OODA
+        // consolidation cycle re-stored the identical procedures
+        // (`consolidate:ad-hoc`, `pr-merge:adopt-tdd`, …) because this
+        // method ran an unconditional `CREATE` with a fresh `new_id`, and
+        // the `Procedure` table keys on `id` (not `name`), so the DB never
+        // deduped. Duplicate-named nodes piled up, compression stayed at
+        // 0%, and recall only ever surfaced the bootstrap set.
+        //
+        // Make the store an idempotent upsert keyed on the exact `name`:
+        // if a procedure with this exact name already exists, bump its
+        // `usage_count` (preserving the reinforcement signal) and return
+        // the existing id instead of minting a new node.
+        let escaped_name = escape_cypher(name);
+        let existing = self.query(&format!(
+            "MATCH (p:Procedure) WHERE p.name = '{escaped_name}' \
+             RETURN p.id ORDER BY p.id LIMIT 1"
+        ))?;
+        if let Some(row) = existing.first() {
+            let existing_id = as_str(&row[0])
+                .ok_or_else(|| SimardError::BridgeCallFailed {
+                    bridge: "cognitive-memory-native".into(),
+                    method: "store_procedure".into(),
+                    reason: format!(
+                        "existing procedure '{name}' column 0 (id) was not a string: {:?}",
+                        row[0]
+                    ),
+                })?
+                .to_string();
+            self.execute(&format!(
+                "MATCH (p:Procedure {{id: '{}'}}) SET p.usage_count = p.usage_count + 1",
+                escape_cypher(&existing_id),
+            ))?;
+            self.post_write_barrier("store_procedure")?;
+            return Ok(existing_id);
+        }
+
         let id = Self::new_id("proc");
         // Errors propagated (no silent `unwrap_or_default()`) so a
         // serialize failure cannot land a row whose `steps` column is the

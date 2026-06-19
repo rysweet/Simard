@@ -48,6 +48,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [LightweightChatSession reference](./reference/lightweight-chat-session.md) - Direct-subprocess session used for Copilot-provider meeting turns (no PTY overhead).
 - [Terminal session idle detection](./reference/terminal-session-idle-detection.md) - How Simard determines when a PTY session is genuinely idle vs. silently computing.
 - [Cognitive memory bridge helpers](./reference/cognitive-memory-bridge-helpers.md) - `launch_writer_bridge` / `open_reader_bridge` resolution ladder; design notes for the planned in-process Arc shortcut and strict no-silent-degradation contract (issue #1590 follow-up).
+- [Procedural-memory store idempotency](./reference/cognitive-memory-procedural-idempotency.md) - `store_procedure` deduplicates on exact name so repeated OODA consolidation cycles stop re-storing identical procedures, ending the 0% compression / frozen procedural-store defect (issue #2298).
 - [Cognitive-memory goal store adapter](./reference/cognitive-memory-goal-store.md) - Superseded design for the planned `GoalStore` implementation that was replaced by the file-backed store (issue #2182).
 - [File-backed goal store reference](./reference/file-backed-goal-store.md) - Production GoalStore with flock locking at goal_store.json (issue #2182).
 - [String truncation helpers](./reference/string-truncation-helpers.md) - Design for the planned `truncate_to_char_boundary` UTF-8-safe byte-budget helper (issue #1590 follow-up).

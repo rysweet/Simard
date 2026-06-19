@@ -370,8 +370,26 @@ fn run_ooda_cycle_inner(
                 &outcome.action.description,
             );
             let steps = [outcome.action.description.clone(), outcome.detail.clone()];
+            // Issue #2298: `store_procedure` is now an idempotent upsert, so
+            // re-storing an existing procedure creates no new node (it only
+            // bumps `usage_count`). The old log unconditionally claimed
+            // "stored procedure" every cycle, which made frozen procedural
+            // memory look like fresh learning. Pre-check for an existing
+            // exact-name procedure — mirroring the bootstrap seeder, since
+            // `recall_procedure` uses `CONTAINS` and can surface superstring
+            // names — and log "reinforced" rather than "stored" when the
+            // procedure already existed.
+            let already_present = match bridges.memory.recall_procedure(&proc_name, 16) {
+                Ok(hits) => hits.iter().any(|h| h.name == proc_name),
+                Err(e) => {
+                    eprintln!("[simard] OODA consolidation: procedural recall failed: {e}");
+                    false
+                }
+            };
             if let Err(e) = bridges.memory.store_procedure(&proc_name, &steps, &[]) {
                 eprintln!("[simard] OODA consolidation: procedural memory failed: {e}");
+            } else if already_present {
+                eprintln!("[simard] OODA consolidation: reinforced procedure '{proc_name}'");
             } else {
                 eprintln!("[simard] OODA consolidation: stored procedure '{proc_name}'");
             }

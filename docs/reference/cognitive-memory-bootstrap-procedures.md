@@ -6,6 +6,7 @@ owner: simard
 doc_type: reference
 related:
   - ./ooda-procedural-memory.md
+  - ./cognitive-memory-procedural-idempotency.md
   - ./cognitive-memory-preparation-filters.md
   - ./cognitive-memory-episodic-recall.md
   - ../architecture/cognitive-memory.md
@@ -286,14 +287,20 @@ If either pattern fails to match (no `#N`, no `.ext`), the derived
 list is simply empty and the rendered name omits the extras — there
 is no fallback or wildcard.
 
-### Intentional accumulation (still applies)
+### Intentional accumulation (revised by #2298)
 
-The "one procedure node per successful cycle" semantics from
-[OODA procedural memory](./ooda-procedural-memory.md) still hold.
-Multiple successful `AdvanceGoal` runs against the same goal produce
-multiple `pr-merge:{goal_id} | triggers: …` rows with identical
-names. `recall_procedure` returns all of them ranked by relevance and
-usage count.
+The "one procedure node per successful cycle" semantics described here
+were **superseded by issue
+[#2298](https://github.com/rysweet/Simard/issues/2298)**. `store_procedure`
+is now idempotent on exact name: multiple successful `AdvanceGoal` runs
+against the same goal that derive the **same** `pr-merge:{goal_id} |
+triggers: …` name collapse to a single node (with `usage_count`
+incremented), rather than creating duplicate rows. Runs that derive
+**distinct** names still accumulate distinct nodes. `recall_procedure`
+returns the de-duplicated set (recall does not currently rank by
+`usage_count` — rows return in store order under its `CONTAINS`/`LIMIT`
+query; `usage_count` is recorded for future ranking). See
+[Procedural-memory store idempotency](./cognitive-memory-procedural-idempotency.md).
 
 ---
 
