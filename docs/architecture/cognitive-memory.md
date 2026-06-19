@@ -259,3 +259,15 @@ Key methods:
 | `store_prospective` | Store a future trigger-action pair. Called by `CognitiveMemoryGoalStore::put()` for Active goals — see [Goal–prospective memory mirror](../reference/goal-prospective-memory-mirror.md) |
 | `check_triggers` | Check if any prospective memories match |
 | `get_statistics` | Get counts for all memory types |
+
+## Alternate backend: the upstream library adapter
+
+`NativeCognitiveMemory` is the default and only backend in a standard build. A
+second `CognitiveMemoryOps` implementor — `LibraryCognitiveMemory` — can back
+the same trait with the upstream `amplihack-memory-lib` `CognitiveMemory`. It is
+**additive and opt-in**, compiled only behind the `library-memory` cargo
+feature, and exists to de-risk reconciling Simard's fork onto the library.
+
+See [Library-backed Cognitive Memory (de-fork Phase 2a)](cognitive-memory-library-adapter.md)
+for the adapter API, configuration, parity testing, documented behavioral
+divergences, and the known API gaps.
