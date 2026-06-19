@@ -23,6 +23,82 @@ impl NativeCognitiveMemory {
     }
 }
 
+/// Maximum number of keyword tokens OR-joined into a single
+/// [`CognitiveMemoryOps::search_facts`] Cypher query (issue #2302).
+/// Caps the WHERE clause so a pathologically long objective cannot
+/// explode into hundreds of `CONTAINS` clauses; the first few keywords
+/// of an objective carry the recall signal. The cap is applied *after*
+/// stopword removal so the budget is spent on discriminating keywords
+/// rather than on function words like `the`/`on`.
+const MAX_FACT_QUERY_TOKENS: usize = 6;
+
+/// Stopwords dropped during [`CognitiveMemoryOps::search_facts`] query
+/// tokenization (issue #2302). A function word such as `the` appears in
+/// almost every stored fact's `content`, so a `CONTAINS 'the'` clause
+/// would collapse the query into "the newest `LIMIT` facts" and — worse,
+/// combined with [`MAX_FACT_QUERY_TOKENS`] — crowd the discriminating
+/// keywords out of the token budget. Short non-stopword tokens (`CI`,
+/// `PR`, `#2302`) are deliberately kept: the distinction that gates a
+/// token is keyword-vs-function-word, not length.
+///
+/// This list is intentionally **fact-recall-local** rather than the
+/// `TOKEN_STOPWORDS` constant used by the episodic/procedural
+/// `tokenize_objective` helper, so this fix stays confined to fact
+/// search and cannot alter episodic or procedural recall (issue #2302
+/// scope). All entries are lowercase; tokens are matched against them
+/// case-insensitively via `eq_ignore_ascii_case` (no lowercased copy is
+/// allocated).
+const FACT_QUERY_STOPWORDS: &[&str] = &[
+    "the", "and", "for", "with", "this", "that", "from", "has", "was", "were", "will", "into",
+    "when", "where", "what", "why", "how", "on", "of", "to", "in", "a", "an", "at", "is", "are",
+    "by", "or", "as", "it",
+];
+
+/// Tokenize a [`CognitiveMemoryOps::search_facts`] query into the keywords
+/// that get OR-joined into `CONTAINS` clauses (issue #2302). Kept separate
+/// from `tokenize_objective` (used by episodic/procedural recall) so the
+/// fact-search fix cannot alter those paths; see
+/// `docs/reference/cognitive-memory-fact-recall.md`.
+///
+/// Rules (in order):
+/// 1. Split on ASCII whitespace ONLY — never on `-`/`:`/`/`, so a
+///    single-token concept literal like `goal-store:record` stays intact
+///    and the goal-fact load path in `memory_consolidation` is unchanged.
+/// 2. Trim leading/trailing non-alphanumerics per token, preserving
+///    interior punctuation; drop tokens that become empty.
+/// 3. Drop stopwords (compared case-insensitively against
+///    [`FACT_QUERY_STOPWORDS`]) and deduplicate (also case-insensitively).
+///    Emitted tokens keep their original case so `CONTAINS` case-behaviour
+///    matches the prior whole-string query.
+/// 4. Cap at the first [`MAX_FACT_QUERY_TOKENS`] surviving tokens.
+fn tokenize_fact_query(query: &str) -> Vec<String> {
+    // Bounded at MAX_FACT_QUERY_TOKENS surviving tokens, so a pre-sized Vec
+    // with a case-insensitive linear dedup is cheaper than a HashSet: it
+    // avoids a per-token `to_ascii_lowercase` allocation, the set allocation,
+    // and all hashing on the OODA-prep recall path.
+    let mut tokens: Vec<String> = Vec::with_capacity(MAX_FACT_QUERY_TOKENS);
+    for raw in query.split_ascii_whitespace() {
+        let trimmed = raw.trim_matches(|c: char| !c.is_alphanumeric());
+        if trimmed.is_empty() {
+            continue;
+        }
+        if FACT_QUERY_STOPWORDS
+            .iter()
+            .any(|s| trimmed.eq_ignore_ascii_case(s))
+        {
+            continue;
+        }
+        if tokens.iter().any(|t| t.eq_ignore_ascii_case(trimmed)) {
+            continue;
+        }
+        tokens.push(trimmed.to_string());
+        if tokens.len() == MAX_FACT_QUERY_TOKENS {
+            break;
+        }
+    }
+    tokens
+}
+
 /// null bytes — the full set of characters that can break or inject into
 /// Cypher string literals.
 pub(crate) fn escape_cypher(s: &str) -> String {
@@ -290,9 +366,49 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
                  ORDER BY f.id DESC LIMIT {limit}"
             ))?
         } else {
-            let q = escape_cypher(query);
+            // Tokenize the query into keywords and OR one CONTAINS clause
+            // per keyword (issue #2302). The OODA preparation phase passes
+            // an entire multi-word objective fragment as `query`; that whole
+            // string is almost never a verbatim substring of any stored
+            // fact's concept/content, so the previous single whole-string
+            // CONTAINS matched 0 rows — the "facts always zero" defect.
+            // See `tokenize_fact_query` for the tokenization rules.
+            let tokens = tokenize_fact_query(query);
+            let where_clause = if tokens.len() >= 2 {
+                // Multi-keyword objective fragment: OR one CONTAINS clause
+                // per keyword, each escaped individually.
+                tokens
+                    .iter()
+                    .map(|t| {
+                        let esc = escape_cypher(t);
+                        format!("(f.concept CONTAINS '{esc}' OR f.content CONTAINS '{esc}')")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" OR ")
+            } else if tokens.len() == 1 && query.split_ascii_whitespace().nth(1).is_some() {
+                // A multi-word fragment that collapsed to a single keyword
+                // after stopword removal (e.g. "the auth" -> ["auth"]).
+                // Searching the whole original string would re-introduce the
+                // #2302 zero-recall symptom — no stored fact contains
+                // "the auth" verbatim — so search the surviving keyword.
+                // Gated on the query being multi-word so single-token
+                // exact-concept lookups keep their whole-string semantics in
+                // the branch below.
+                let esc = escape_cypher(&tokens[0]);
+                format!("f.concept CONTAINS '{esc}' OR f.content CONTAINS '{esc}'")
+            } else {
+                // Single-token exact-concept lookup (`research:`,
+                // `goal-store:record`, `goal-board:snapshot`, a one-word
+                // tag) or an empty/all-stopword query: preserve the original
+                // whole-string match byte-for-byte. Namespace-prefix callers
+                // post-filter on the trailing colon, so broadening the
+                // CONTAINS needle here could evict genuine matches under the
+                // `ORDER BY id DESC LIMIT` window.
+                let q = escape_cypher(query);
+                format!("f.concept CONTAINS '{q}' OR f.content CONTAINS '{q}'")
+            };
             self.query(&format!(
-                "MATCH (f:Fact) WHERE (f.concept CONTAINS '{q}' OR f.content CONTAINS '{q}') \
+                "MATCH (f:Fact) WHERE ({where_clause}) \
                  AND f.confidence >= {min_confidence} \
                  RETURN f.id, f.concept, f.content, f.confidence, f.source_id, f.tags \
                  ORDER BY f.id DESC LIMIT {limit}"
@@ -989,6 +1105,251 @@ mod tests {
         );
     }
 
+    // ── tokenized fact recall (issue #2302) ────────────────────────────
+
+    /// **TDD red → green (issue #2302).** A realistic multi-word objective
+    /// whose full text is NOT a verbatim substring of any stored fact must
+    /// still recall a fact that shares a single keyword.
+    ///
+    /// Before the fix `search_facts` built one whole-string `CONTAINS`
+    /// clause from the entire query, so the 38-char objective matched no
+    /// fact substring and returned zero rows — the "facts always zero"
+    /// defect. After tokenization the shared `auth`/`module` keywords
+    /// match. This test FAILS against the pre-fix body and PASSES after.
+    #[test]
+    fn search_facts_recalls_on_shared_keyword() {
+        let mem = test_mem();
+        // The CONTENT shares the keywords "auth" and "module" with the
+        // objective, but does NOT contain the full objective verbatim.
+        mem.store_fact(
+            "ci-pattern",
+            "the auth module integration tests are flaky under heavy load",
+            0.8,
+            &[],
+            "episode-1",
+        )
+        .unwrap();
+
+        let query = "investigate the failing auth module CI";
+        let results = mem.search_facts(query, 10, 0.0).unwrap();
+
+        assert!(
+            results.iter().any(|f| f.concept == "ci-pattern"),
+            "a multi-word objective must recall a fact sharing a keyword \
+             via tokenized CONTAINS; got {} row(s): {:?}",
+            results.len(),
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Regression guard for the tokenization contract (issue #2302).
+    ///
+    /// A single-token query that contains internal punctuation — most
+    /// importantly the `goal-store:record` concept literal that the
+    /// preparation phase loads goal facts with — must stay on the
+    /// preserved whole-string exact-match path. The tokenizer splits on
+    /// **whitespace only**, so `goal-store:record` is one token and never
+    /// explodes into `goal` / `store` / `record`. If it did, the query
+    /// would also pull in the unrelated `audit-log` decoy below (whose
+    /// content contains the word "record"), breaking the goal-store load.
+    ///
+    /// Passes on both the pre-fix body and a correct post-fix body; FAILS
+    /// only if tokenization wrongly splits on `:`/`-`.
+    #[test]
+    fn search_facts_single_token_with_punctuation_is_exact() {
+        let mem = test_mem();
+        mem.store_fact(
+            "goal-store:record",
+            "{\"slug\":\"fix-auth\",\"title\":\"Stabilize auth tests\"}",
+            1.0,
+            &[],
+            "goal-store",
+        )
+        .unwrap();
+        // Decoy: shares the sub-word "record" but is NOT a goal-store fact.
+        mem.store_fact(
+            "audit-log",
+            "a record of every config change applied this week",
+            0.9,
+            &[],
+            "src",
+        )
+        .unwrap();
+
+        let results = mem.search_facts("goal-store:record", 256, 0.0).unwrap();
+
+        assert!(
+            results.iter().any(|f| f.concept == "goal-store:record"),
+            "exact goal-store:record concept must be recalled"
+        );
+        assert!(
+            !results.iter().any(|f| f.concept == "audit-log"),
+            "single-token punctuation query must NOT split into sub-words \
+             and match the unrelated 'record' decoy; got: {:?}",
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// **Single-keyword recall for multi-word fragments (issue #2302).**
+    ///
+    /// A multi-word objective fragment that collapses to exactly one
+    /// keyword after stopword removal (here `"the auth"` -> `["auth"]`)
+    /// must search that surviving keyword, not the whole `"the auth"`
+    /// literal. No stored fact contains the verbatim phrase `"the auth"`,
+    /// so the pre-fix whole-string clause returned zero rows — the same
+    /// "facts always zero" symptom #2302 fixes for the >=2-keyword path.
+    ///
+    /// FAILS against a body that searches the whole query for the
+    /// single-survivor case; PASSES once the surviving keyword is used.
+    #[test]
+    fn search_facts_multiword_collapsing_to_one_keyword_recalls() {
+        let mem = test_mem();
+        // Content contains "auth" but never the verbatim phrase "the auth".
+        mem.store_fact(
+            "auth-pattern",
+            "module auth flow is covered by integration tests",
+            0.8,
+            &[],
+            "episode-1",
+        )
+        .unwrap();
+
+        // "the" is a stopword, so only "auth" survives tokenization.
+        let results = mem.search_facts("the auth", 10, 0.0).unwrap();
+
+        assert!(
+            results.iter().any(|f| f.concept == "auth-pattern"),
+            "a multi-word fragment collapsing to one keyword must recall on \
+             that keyword, not the whole 'the auth' literal; got {} row(s): \
+             {:?}",
+            results.len(),
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// **Namespace-lookup non-broadening guard (issue #2302).**
+    ///
+    /// A single whitespace-token query that carries a trailing-colon
+    /// namespace prefix (`"research:"`, as passed by
+    /// `research_tracker::load_research_topics`) must keep its exact
+    /// whole-string `CONTAINS 'research:'` needle. The colon is what
+    /// distinguishes a `research:<id>` topic fact from arbitrary prose
+    /// that merely mentions the word "research"; broadening the needle to
+    /// `CONTAINS 'research'` would let unrelated facts crowd the
+    /// `ORDER BY id DESC LIMIT` window and evict genuine topics.
+    ///
+    /// FAILS if the single-survivor keyword path is applied to a
+    /// single-token query (which would strip the colon and surface the
+    /// prose decoy); PASSES on the whole-string namespace path.
+    #[test]
+    fn search_facts_single_token_namespace_not_broadened() {
+        let mem = test_mem();
+        // A genuine namespaced topic fact.
+        mem.store_fact(
+            "research:topic-1",
+            "title=Vector clocks source=paper priority=1 status=proposed",
+            0.9,
+            &[],
+            "research-tracker",
+        )
+        .unwrap();
+        // Decoy: prose mentioning "research" but NOT under the namespace.
+        mem.store_fact(
+            "weekly-note",
+            "spent the afternoon on research and prototyping",
+            0.9,
+            &[],
+            "src",
+        )
+        .unwrap();
+
+        let results = mem.search_facts("research:", 50, 0.0).unwrap();
+
+        assert!(
+            results.iter().any(|f| f.concept == "research:topic-1"),
+            "the namespaced topic fact must be recalled"
+        );
+        assert!(
+            !results.iter().any(|f| f.concept == "weekly-note"),
+            "a single-token namespace query must NOT be broadened by \
+             dropping the trailing colon and match the prose decoy; got: {:?}",
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ── tokenize_fact_query unit contract (issue #2302) ────────────────
+
+    #[test]
+    fn tokenize_fact_query_splits_on_whitespace_only() {
+        // Internal `-`/`:`/`/` must be preserved; only whitespace splits.
+        assert_eq!(
+            tokenize_fact_query("goal-store:record src/foo.rs"),
+            vec!["goal-store:record".to_string(), "src/foo.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_trims_edge_punctuation_keeps_interior() {
+        assert_eq!(
+            tokenize_fact_query("(auth) module, ci."),
+            vec!["auth".to_string(), "module".to_string(), "ci".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_drops_stopwords_case_insensitively() {
+        // "The"/"the" and "CI" — function words go, keyword stays, and the
+        // surviving token keeps its original case.
+        assert_eq!(
+            tokenize_fact_query("The auth THE module"),
+            vec!["auth".to_string(), "module".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_dedups_case_insensitively_first_case_wins() {
+        assert_eq!(
+            tokenize_fact_query("Auth auth AUTH module"),
+            vec!["Auth".to_string(), "module".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_caps_at_max_tokens() {
+        let tokens = tokenize_fact_query("k1 k2 k3 k4 k5 k6 k7 k8");
+        assert_eq!(tokens.len(), MAX_FACT_QUERY_TOKENS);
+        assert_eq!(tokens.first().map(String::as_str), Some("k1"));
+        assert_eq!(tokens.last().map(String::as_str), Some("k6"));
+    }
+
+    #[test]
+    fn tokenize_fact_query_keeps_short_non_stopwords() {
+        // `CI`, `PR`, `#2302` are short but discriminating — never dropped.
+        assert_eq!(
+            tokenize_fact_query("CI PR #2302"),
+            vec!["CI".to_string(), "PR".to_string(), "2302".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_empty_for_whitespace_or_all_stopwords() {
+        assert!(tokenize_fact_query("   ").is_empty());
+        assert!(tokenize_fact_query("the and of to").is_empty());
+        assert!(tokenize_fact_query("").is_empty());
+    }
+
     #[test]
     fn recall_procedure_wildcard_returns_all() {
         let mem = test_mem();
@@ -1280,6 +1641,56 @@ mod tests {
         assert!(id.starts_with("sem_"));
         let facts = mem.search_facts("con", 10, 0.0).unwrap();
         assert_eq!(facts.len(), 1);
+    }
+
+    /// Injection regression guard for the **multi-token** query path
+    /// (issue #2302, security requirement SR-1).
+    ///
+    /// The single-token path escapes the whole query string; the new
+    /// multi-token path escapes each token individually before
+    /// interpolating it into its own `CONTAINS` clause (see
+    /// `search_facts`). This test forces the multi-token branch (>= 2
+    /// surviving keywords) with a keyword that carries an *interior*
+    /// single quote — which survives the tokenizer's edge-punctuation
+    /// trim — so the per-token `escape_cypher` call is actually
+    /// exercised. Left unescaped, that token would break out of its
+    /// string literal as the Cypher fragment `'x' OR '1'`; the escape
+    /// keeps it a harmless literal. If the per-token escape were ever
+    /// dropped, the query would either raise a Cypher syntax error (the
+    /// `unwrap` below panics) or widen the match to the `secret` decoy
+    /// (the negative assertion fails).
+    #[test]
+    fn search_facts_multi_token_escapes_injection() {
+        let mem = test_mem();
+        mem.store_fact("alpha-fact", "benign keyword content", 0.9, &[], "src")
+            .unwrap();
+        // Decoy that must never surface via an injected `OR`-style payload.
+        mem.store_fact("secret", "classified value", 0.9, &[], "src")
+            .unwrap();
+
+        // Two surviving tokens -> multi-token path. The second token keeps an
+        // interior single quote, so `escape_cypher` must neutralize it; left
+        // raw it would inject the Cypher fragment `'x' OR '1'`.
+        let results = mem.search_facts("alpha x'OR'1", 256, 0.0).unwrap();
+
+        assert!(
+            results.iter().any(|f| f.concept == "alpha-fact"),
+            "the escaped multi-token query must still recall the benign fact \
+             via its real keyword; got: {:?}",
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !results.iter().any(|f| f.concept == "secret"),
+            "an interior-quote token must be escaped to a literal, never \
+             interpreted as a Cypher OR that leaks the decoy; got: {:?}",
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
