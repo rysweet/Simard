@@ -80,6 +80,30 @@ pub trait CognitiveMemoryOps: Send + Sync {
 
     fn recall_procedure(&self, query: &str, limit: u32) -> SimardResult<Vec<CognitiveProcedure>>;
 
+    /// Returns `true` if a procedure with this **exact** `name` already exists.
+    ///
+    /// [`recall_procedure`](Self::recall_procedure) matches names with Cypher
+    /// `CONTAINS`, so a name-shaped query can surface *other* procedures that
+    /// merely share trigger tokens (`merge`, `bootstrap`, …) or are
+    /// superstrings. An identity check — "does *this* procedure already
+    /// exist?" — must therefore filter recall hits down to exact-name
+    /// equality; a bare `is_empty()` would over-report presence. Centralizing
+    /// the contract here keeps the bootstrap seeder and the OODA consolidation
+    /// log in lockstep (issue #2298).
+    ///
+    /// The default implementation pays for that filter with an
+    /// [`EXACT_NAME_RECALL_LIMIT`]-wide recall plus a linear exact-name scan,
+    /// and decodes each hit's `steps`/`prerequisites` JSON only to discard it.
+    /// Backends that can answer existence directly (e.g.
+    /// [`NativeCognitiveMemory`]) should override this with an exact-name probe
+    /// that returns no payload and stops at the first match.
+    fn procedure_exists(&self, name: &str) -> SimardResult<bool> {
+        Ok(self
+            .recall_procedure(name, EXACT_NAME_RECALL_LIMIT)?
+            .iter()
+            .any(|hit| hit.name == name))
+    }
+
     fn store_prospective(
         &self,
         description: &str,
@@ -124,10 +148,12 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// substring). Newest first.
     ///
     /// Default impl returns empty so legacy backends keep compiling.
-    /// `NativeCognitiveMemory` overrides this with a Cypher query
-    /// that ORs one `e.content CONTAINS '<escaped>'` clause per
-    /// keyword, ordered by `e.id DESC` (UUID-v7 ids are time-prefixed
-    /// so descending lex-sort == newest-by-creation).
+    /// `NativeCognitiveMemory` overrides this with a Cypher query that
+    /// ORs one `toLower(e.content) CONTAINS '<lowercased+escaped>'`
+    /// clause per keyword, ordered by `e.id DESC` (UUID-v7 ids are
+    /// time-prefixed so descending lex-sort == newest-by-creation).
+    /// Both sides are lowered at query time so the contract holds
+    /// against episodes already persisted verbatim (issue #2299).
     ///
     /// Issue #2281, PR-C, problem 4.
     fn search_episodes_by_keywords(
@@ -188,6 +214,15 @@ pub trait CognitiveMemoryOps: Send + Sync {
         Ok(())
     }
 }
+
+/// Recall fan-out for the default [`CognitiveMemoryOps::procedure_exists`].
+/// [`CognitiveMemoryOps::recall_procedure`] ranks by a `CONTAINS` match on the
+/// procedure name, so an exact-name lookup may have to look past several
+/// superstring / trigger-sharing hits before it finds (or rules out) the exact
+/// one. 16 clears the bootstrap set plus a realistic cycle's worth of
+/// trigger-token collisions. Backends that override `procedure_exists` with a
+/// direct exact-name probe do not pay this fan-out.
+const EXACT_NAME_RECALL_LIMIT: u32 = 16;
 
 // ============================================================================
 // NativeCognitiveMemory — LadybugDB backend
@@ -962,3 +997,9 @@ mod tests_inline {
 // column migration applied.
 #[cfg(test)]
 mod tests_pr_b_distill;
+
+// Issue #2298: procedural-memory non-idempotency regression. `store_procedure`
+// must be an idempotent upsert keyed on exact `name` so repeated OODA
+// consolidation cycles stop re-storing identical procedures.
+#[cfg(test)]
+mod tests_pr_2298_idempotency;

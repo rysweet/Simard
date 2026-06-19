@@ -1,7 +1,7 @@
 ---
 title: Episodic recall in preparation
 description: How preparation_memory_operations surfaces similar past episodes via keyword-overlap search, how the results are injected into the prompt, and how self-session noise is filtered.
-last_updated: 2026-06-14
+last_updated: 2026-06-19
 owner: simard
 doc_type: reference
 related:
@@ -19,6 +19,14 @@ related:
 > as PR-C (procedural seeding + episodic recall). PR-C also reshapes
 > procedural memory storage — see
 > [Bootstrap procedures](./cognitive-memory-bootstrap-procedures.md).
+>
+> **Case-insensitivity fix:** issue
+> [#2299](https://github.com/rysweet/Simard/issues/2299) repaired the
+> recall path so that lowercased objective keywords match mixed-case
+> stored episode content. Before the fix, recall returned **zero**
+> episodes every cycle despite 20k+ stored episodes — the "0 episodes
+> recalled (0 raw, 0 session-filtered)" symptom. See
+> [Case-insensitive matching](#case-insensitive-matching-issue-2299).
 
 `preparation_memory_operations` now retrieves up to **5** recent
 episodes whose content overlaps with the current objective and
@@ -48,6 +56,9 @@ pub trait CognitiveMemoryOps {
     /// at least one of the supplied keywords (case-insensitive
     /// substring). Newest first.
     ///
+    /// Blank / whitespace-only keywords are skipped, and an empty (or
+    /// all-blank) keyword list returns empty without executing a query.
+    ///
     /// Default impl returns empty so legacy backends keep compiling.
     fn search_episodes_by_keywords(
         &self,
@@ -60,11 +71,15 @@ pub trait CognitiveMemoryOps {
 ```
 
 `NativeCognitiveMemory` overrides with a Cypher query that ORs one
-`e.content CONTAINS '<escaped>'` clause per keyword, orders by
-descending `e.id` (newest first — UUID-v7 ids are time-prefixed, so
-descending lex-sort is the same as newest-by-creation), and caps the
-result at `limit`. No reliance on `temporal_index` is required for
-the ordering.
+**case-insensitive** `toLower(e.content) CONTAINS '<lowercased+escaped>'`
+clause per keyword, orders by descending `e.id` (newest first — UUID-v7
+ids are time-prefixed, so descending lex-sort is the same as
+newest-by-creation), and caps the result at `limit`. No reliance on
+`temporal_index` is required for the ordering. Matching is case-insensitive
+on **both** sides: the keyword is lowercased before being escaped, and
+`toLower(e.content)` lowercases the stored content at query time so that
+existing verbatim (mixed-case) episodes match without any write-path change
+or data migration — see [Case-insensitive matching](#case-insensitive-matching-issue-2299).
 
 ### Why keyword overlap, not embeddings
 
@@ -85,6 +100,121 @@ overlap proves insufficient in practice. The trait method shape
 implementation swap in semantic ranking without forcing every caller
 to be embedding-aware. Callers that want semantic ranking would call
 a different method; the existing one will remain.
+
+---
+
+## Case-insensitive matching (issue #2299)
+
+Episodic recall is **case-insensitive**: a lowercased objective keyword
+matches stored episode content regardless of the content's original case.
+This section documents the defect that made recall return zero episodes and
+the query-side fix that restores it.
+
+### Symptom
+
+Every OODA preparation pass logged:
+
+```
+[simard] preparation: 5 procedures, 0 episodes recalled (0 raw, 0 session-filtered)
+[simard] prepared context (... 0 episodes)
+```
+
+`raw = 0` on every cycle, despite 20k+ episodes persisted in the store.
+Keyword search never matched anything, so the brain re-derived context from
+scratch each cycle instead of recalling "did I see something like this
+before?".
+
+### Root cause
+
+A case-sensitivity contract violation between the write path and the search
+path:
+
+| Stage                     | Behaviour                                               |
+|---------------------------|---------------------------------------------------------|
+| `store_episode`           | Persists `content` **verbatim**, preserving original case (e.g. `"Merged PR #2278"`). |
+| `tokenize_objective`      | **Lowercases** every keyword (step 2 of tokenization).  |
+| `search_episodes_by_keywords` (before fix) | Emitted `e.content CONTAINS '<lowercased_kw>'`. |
+
+The Ladybug (`lbug`) Cypher `CONTAINS` operator is **case-sensitive**. A
+lowercased keyword such as `merged` is not a substring of the verbatim
+stored content `Merged PR #2278` (capital `M`), so the predicate matched
+nothing. Because the tokenizer always lowercases and the store always keeps
+verbatim case, the two sides could only ever agree by accident (content that
+happened to be all-lowercase). Result: `raw = 0` on essentially every cycle.
+
+This was **not** caused by distillation draining episodes, nor by a
+field-name mismatch — episodes were present and stored under `e.content`.
+The single fault was case sensitivity in the comparison.
+
+### Fix (query-side, no migration)
+
+The fix is applied entirely on the **read/query side**, so it works against
+the 20k+ episodes already persisted verbatim — no write-path change and no
+data migration:
+
+```cypher
+MATCH (e:Episode)
+WHERE toLower(e.content) CONTAINS '<lowercased+escaped keyword>'
+   OR toLower(e.content) CONTAINS '<lowercased+escaped keyword>'
+RETURN e.id, e.content, e.source_label, e.temporal_index, e.compressed
+ORDER BY e.id DESC
+LIMIT <limit>
+```
+
+Both sides are normalised to lower case:
+
+1. The keyword is lowercased in Rust (`kw.to_lowercase()`), **then** passed
+   through `escape_cypher` — escaping is always the last transform so the
+   Cypher-injection guarantees are preserved (see [Security](#security)).
+2. `toLower(e.content)` lowercases the stored content at query time.
+
+If the embedded `lbug` engine does not support `toLower()` in a `CONTAINS`
+predicate, the implementation falls back to fetching a bounded, newest-first
+candidate window and filtering case-insensitively in Rust with
+`content.to_lowercase().contains(&kw.to_lowercase())`. Both strategies are
+query-time only and therefore both fix existing stored data identically; the
+observable contract (below) is the same regardless of which is used.
+
+> **Implementation note:** the in-code doc comments on the trait method
+> (`src/cognitive_memory/mod.rs`) and the native implementation
+> (`src/cognitive_memory/ops.rs`) are updated in the same change to describe
+> the case-insensitive `toLower(...) CONTAINS` comparison, replacing the
+> previous case-sensitive `e.content CONTAINS` wording so the code and this
+> reference agree.
+
+### Contract
+
+- **Case-insensitive substring**: for keyword `k` and episode content `c`,
+  the episode matches iff `c.to_lowercase()` contains `k.to_lowercase()`.
+- **Works on existing data**: matching applies to episodes stored verbatim
+  before the fix; no re-write or migration is required.
+- **Stored content is unchanged**: returned `CognitiveEpisode.content`
+  preserves the original case — only the *comparison* is case-folded.
+- **`raw` counts matches before the session filter**: a successful keyword
+  match increments the `raw` count even if the episode is later dropped by
+  the `session-` filter (see [Self-session noise filter](#self-session-noise-filter)).
+- **Empty / whitespace-only keywords are dropped inside
+  `search_episodes_by_keywords` itself** — defense-in-depth, not a reliance on
+  the caller's tokenizer. The current code only guards the *empty slice*
+  (`keywords.is_empty()`); the fix additionally trims each keyword after
+  lowercasing and skips any that are blank before building a `CONTAINS` clause.
+  If no keywords survive, the method returns empty without executing Cypher.
+  A blank keyword can therefore never produce a match-all `CONTAINS ''` clause,
+  even if a future caller bypasses `tokenize_objective`.
+
+### Security
+
+The injection-safety contract from PR-C is preserved unchanged. Escaping is
+applied **after** lowercasing (`escape_cypher(&kw.to_lowercase())`), never
+before and never omitted, so a keyword such as `' OR 1=1 //` is treated as a
+literal substring and matches nothing rather than altering the query.
+`limit` remains a typed integer interpolation. The query string, raw
+keywords, and raw content are never logged — only counts and ids.
+
+The blank-keyword guard (above) lives inside `search_episodes_by_keywords`,
+not in `tokenize_objective`, so the public trait method is self-defending: a
+caller passing `[""]` or `["   "]` can never produce a match-all
+`CONTAINS ''` predicate regardless of how the keyword list was built.
 
 ---
 
@@ -126,7 +256,7 @@ Example:
 
 ```
 objective = "merge PR #2281 and fix the CI"
-tokens    = ["merge", "pr", "fix"]    // "and", "the" dropped; "ci" too short; "2281" survives
+tokens    = ["merge", "2281", "fix"]    // "and", "the" dropped (stopwords); "pr", "ci" dropped (len < 3); "2281" survives
 ```
 
 (The "#" prefix is stripped during tokenization, so `#2281` becomes
@@ -222,7 +352,7 @@ is made.
 
 ```
 objective = "merge PR #2281 for cog-mem fix"
-tokens    = ["merge", "pr", "2281", "cog", "mem", "fix"]
+tokens    = ["merge", "2281", "cog", "mem", "fix"]   // "for" dropped (stopword); "pr" dropped (len < 3)
 ```
 
 Episode store contains:
@@ -232,7 +362,7 @@ Episode store contains:
 | epi_a            | goal-curator  | "merged PR #2278 with squashed CI fix"                     |
 | epi_b            | distill:epi_b | "pr-merge pattern: enable auto-merge before review"        |
 | epi_c            | session-12345 | "merge PR #2281 starting now"                              |
-| epi_d            | meeting-probe | "decision: prefer PR review squash over rebase"            |
+| epi_d            | meeting-probe | "decision: prefer merge-squash over PR rebase review"      |
 | epi_e            | goal-curator  | "ran cargo bench unrelated"                                |
 
 Raw search returns 4 hits (a, b, c, d match a keyword). After
@@ -276,6 +406,37 @@ Log:
 [simard] preparation: 0 procedures, 0 episodes recalled (0 raw, 0 session-filtered)
 ```
 
+### Example 4 — case-insensitive match (issue #2299 regression)
+
+This is the scenario that returned **zero** episodes before the fix.
+
+```
+objective = "merge the rollback PR"
+tokens    = ["merge", "rollback"]   // lowercased by the tokenizer; "the" is a stopword, "pr" is len < 3
+```
+
+Episode store contains a single verbatim, mixed-case episode:
+
+| Episode | source_label | content                                  |
+|---------|--------------|------------------------------------------|
+| epi_x   | goal-curator | `"Merged the Rollback PR after CI green"` |
+
+- **Before #2299:** `e.content CONTAINS 'merge'` is case-sensitive; the
+  stored content has capital `M`/`R`, so nothing matches → `raw = 0`.
+- **After #2299:** `toLower(e.content) CONTAINS 'merge'` matches
+  `"merged the rollback pr after ci green"` → `raw = 1`. Because the label
+  is `goal-curator` (not `session-`), it survives the filter.
+
+Log:
+
+```
+[simard] preparation: 2 procedures, 1 episodes recalled (1 raw, 0 session-filtered)
+```
+
+The returned `CognitiveEpisode.content` is still the original
+`"Merged the Rollback PR after CI green"` — only the comparison was
+case-folded.
+
 ---
 
 ## Code location
@@ -288,7 +449,7 @@ Log:
 | Tokenizer + filter + caller           | `src/memory_consolidation/mod.rs`                     |
 | Prompt injection                      | `src/ooda_actions/goal_session/advance.rs`            |
 | Tests                                 | `src/cognitive_memory/ops.rs`,                         |
-|                                       | `src/memory_consolidation/tests.rs`                    |
+|                                       | `src/memory_consolidation/tests_pr_c.rs`              |
 
 ---
 
@@ -296,14 +457,22 @@ Log:
 
 ### Trait-level tests in `src/cognitive_memory/ops.rs`
 
-| Test                                                | Coverage                                              |
-|-----------------------------------------------------|-------------------------------------------------------|
-| `search_episodes_by_keywords_returns_substring_matches` | OR semantics across multiple keywords             |
-| `search_episodes_by_keywords_orders_newest_first`   | Ordering by `e.id DESC`; UUID-v7 time-prefix makes this monotonically newest-first |
-| `search_episodes_by_keywords_empty_keywords_returns_empty` | Empty input → empty output, no Cypher executed |
-| `search_episodes_by_keywords_respects_limit`        | `limit=N` returns at most N rows                       |
+`search_episodes_by_keywords` has **no** direct trait-level coverage on the
+base branch. This fix adds the three #2299 regression tests and backfills the
+four substrate tests to lock down the method it modifies. The table below is a
+deliverable spec, not a description of pre-existing tests.
 
-### Preparation-level tests in `src/memory_consolidation/tests.rs`
+| Test                                                | Coverage                                              | Status |
+|-----------------------------------------------------|-------------------------------------------------------|--------|
+| `search_episodes_by_keywords_matches_case_insensitively` | **Issue #2299 regression:** store mixed-case content with a non-`session-` label, search a lowercased keyword, assert result count > 0 (`raw > 0`). Fails on base (case-sensitive `CONTAINS`), passes after the fix. | Added by #2299 |
+| `search_episodes_by_keywords_lowercase_keyword_is_injection_safe` | Lowercase path still escapes; a keyword like `' OR 1=1 //` is treated as a literal substring and matches nothing | Added by #2299 |
+| `search_episodes_by_keywords_blank_keyword_emits_no_match_all` | A blank / whitespace-only keyword (e.g. `[""]`, `["   "]`) is dropped inside the method; no `CONTAINS ''` clause is built and no match-all occurs. Exercises the defense-in-depth guard. | Added by #2299 |
+| `search_episodes_by_keywords_returns_substring_matches` | OR semantics across multiple keywords             | Backfilled |
+| `search_episodes_by_keywords_orders_newest_first`   | Ordering by `e.id DESC`; UUID-v7 time-prefix makes this monotonically newest-first | Backfilled |
+| `search_episodes_by_keywords_empty_keywords_returns_empty` | Empty slice input → empty output, no Cypher executed | Backfilled |
+| `search_episodes_by_keywords_respects_limit`        | `limit=N` returns at most N rows                       | Backfilled |
+
+### Preparation-level tests in `src/memory_consolidation/tests_pr_c.rs`
 
 | Test                                                | Coverage                                              |
 |-----------------------------------------------------|-------------------------------------------------------|
@@ -327,3 +496,23 @@ Log:
 - **Cross-repo recall** — recall is scoped to the local cognitive
   memory file; multi-agent hive-mind sharing is a separate concern
   (see `docs/architecture/cognitive-memory.md` on hive mind).
+
+### Ruled out as the #2299 root cause
+
+These candidates were investigated and confirmed **not** the cause; the
+single fault was case sensitivity (above). They remain out of scope:
+
+- **Write-path-only normalisation** (`store_episode` lowercasing content or
+  writing a shadow `content_lc` field) — rejected. 20k+ episodes are already
+  persisted verbatim; a write-only fix would leave all existing data
+  unmatched, and re-migration is out of scope. The fix is query-side so it
+  works against existing data.
+- **Field-name mismatch between write and search** — ruled out. Episodes are
+  written to and read from `e.content`; the field names already agree.
+- **Distillation / `list_undistilled_episodes` draining or relabelling
+  episodes before recall** — ruled out as the cause and explicitly untouched.
+  Distillation idempotency and trigger code are owned by separate
+  workstreams; this fix does not modify them.
+- **20k-row data migration** — not performed; the query-side fix makes it
+  unnecessary.
+

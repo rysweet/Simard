@@ -23,6 +23,82 @@ impl NativeCognitiveMemory {
     }
 }
 
+/// Maximum number of keyword tokens OR-joined into a single
+/// [`CognitiveMemoryOps::search_facts`] Cypher query (issue #2302).
+/// Caps the WHERE clause so a pathologically long objective cannot
+/// explode into hundreds of `CONTAINS` clauses; the first few keywords
+/// of an objective carry the recall signal. The cap is applied *after*
+/// stopword removal so the budget is spent on discriminating keywords
+/// rather than on function words like `the`/`on`.
+const MAX_FACT_QUERY_TOKENS: usize = 6;
+
+/// Stopwords dropped during [`CognitiveMemoryOps::search_facts`] query
+/// tokenization (issue #2302). A function word such as `the` appears in
+/// almost every stored fact's `content`, so a `CONTAINS 'the'` clause
+/// would collapse the query into "the newest `LIMIT` facts" and — worse,
+/// combined with [`MAX_FACT_QUERY_TOKENS`] — crowd the discriminating
+/// keywords out of the token budget. Short non-stopword tokens (`CI`,
+/// `PR`, `#2302`) are deliberately kept: the distinction that gates a
+/// token is keyword-vs-function-word, not length.
+///
+/// This list is intentionally **fact-recall-local** rather than the
+/// `TOKEN_STOPWORDS` constant used by the episodic/procedural
+/// `tokenize_objective` helper, so this fix stays confined to fact
+/// search and cannot alter episodic or procedural recall (issue #2302
+/// scope). All entries are lowercase; tokens are matched against them
+/// case-insensitively via `eq_ignore_ascii_case` (no lowercased copy is
+/// allocated).
+const FACT_QUERY_STOPWORDS: &[&str] = &[
+    "the", "and", "for", "with", "this", "that", "from", "has", "was", "were", "will", "into",
+    "when", "where", "what", "why", "how", "on", "of", "to", "in", "a", "an", "at", "is", "are",
+    "by", "or", "as", "it",
+];
+
+/// Tokenize a [`CognitiveMemoryOps::search_facts`] query into the keywords
+/// that get OR-joined into `CONTAINS` clauses (issue #2302). Kept separate
+/// from `tokenize_objective` (used by episodic/procedural recall) so the
+/// fact-search fix cannot alter those paths; see
+/// `docs/reference/cognitive-memory-fact-recall.md`.
+///
+/// Rules (in order):
+/// 1. Split on ASCII whitespace ONLY — never on `-`/`:`/`/`, so a
+///    single-token concept literal like `goal-store:record` stays intact
+///    and the goal-fact load path in `memory_consolidation` is unchanged.
+/// 2. Trim leading/trailing non-alphanumerics per token, preserving
+///    interior punctuation; drop tokens that become empty.
+/// 3. Drop stopwords (compared case-insensitively against
+///    [`FACT_QUERY_STOPWORDS`]) and deduplicate (also case-insensitively).
+///    Emitted tokens keep their original case so `CONTAINS` case-behaviour
+///    matches the prior whole-string query.
+/// 4. Cap at the first [`MAX_FACT_QUERY_TOKENS`] surviving tokens.
+fn tokenize_fact_query(query: &str) -> Vec<String> {
+    // Bounded at MAX_FACT_QUERY_TOKENS surviving tokens, so a pre-sized Vec
+    // with a case-insensitive linear dedup is cheaper than a HashSet: it
+    // avoids a per-token `to_ascii_lowercase` allocation, the set allocation,
+    // and all hashing on the OODA-prep recall path.
+    let mut tokens: Vec<String> = Vec::with_capacity(MAX_FACT_QUERY_TOKENS);
+    for raw in query.split_ascii_whitespace() {
+        let trimmed = raw.trim_matches(|c: char| !c.is_alphanumeric());
+        if trimmed.is_empty() {
+            continue;
+        }
+        if FACT_QUERY_STOPWORDS
+            .iter()
+            .any(|s| trimmed.eq_ignore_ascii_case(s))
+        {
+            continue;
+        }
+        if tokens.iter().any(|t| t.eq_ignore_ascii_case(trimmed)) {
+            continue;
+        }
+        tokens.push(trimmed.to_string());
+        if tokens.len() == MAX_FACT_QUERY_TOKENS {
+            break;
+        }
+    }
+    tokens
+}
+
 /// null bytes — the full set of characters that can break or inject into
 /// Cypher string literals.
 pub(crate) fn escape_cypher(s: &str) -> String {
@@ -290,9 +366,49 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
                  ORDER BY f.id DESC LIMIT {limit}"
             ))?
         } else {
-            let q = escape_cypher(query);
+            // Tokenize the query into keywords and OR one CONTAINS clause
+            // per keyword (issue #2302). The OODA preparation phase passes
+            // an entire multi-word objective fragment as `query`; that whole
+            // string is almost never a verbatim substring of any stored
+            // fact's concept/content, so the previous single whole-string
+            // CONTAINS matched 0 rows — the "facts always zero" defect.
+            // See `tokenize_fact_query` for the tokenization rules.
+            let tokens = tokenize_fact_query(query);
+            let where_clause = if tokens.len() >= 2 {
+                // Multi-keyword objective fragment: OR one CONTAINS clause
+                // per keyword, each escaped individually.
+                tokens
+                    .iter()
+                    .map(|t| {
+                        let esc = escape_cypher(t);
+                        format!("(f.concept CONTAINS '{esc}' OR f.content CONTAINS '{esc}')")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" OR ")
+            } else if tokens.len() == 1 && query.split_ascii_whitespace().nth(1).is_some() {
+                // A multi-word fragment that collapsed to a single keyword
+                // after stopword removal (e.g. "the auth" -> ["auth"]).
+                // Searching the whole original string would re-introduce the
+                // #2302 zero-recall symptom — no stored fact contains
+                // "the auth" verbatim — so search the surviving keyword.
+                // Gated on the query being multi-word so single-token
+                // exact-concept lookups keep their whole-string semantics in
+                // the branch below.
+                let esc = escape_cypher(&tokens[0]);
+                format!("f.concept CONTAINS '{esc}' OR f.content CONTAINS '{esc}'")
+            } else {
+                // Single-token exact-concept lookup (`research:`,
+                // `goal-store:record`, `goal-board:snapshot`, a one-word
+                // tag) or an empty/all-stopword query: preserve the original
+                // whole-string match byte-for-byte. Namespace-prefix callers
+                // post-filter on the trailing colon, so broadening the
+                // CONTAINS needle here could evict genuine matches under the
+                // `ORDER BY id DESC LIMIT` window.
+                let q = escape_cypher(query);
+                format!("f.concept CONTAINS '{q}' OR f.content CONTAINS '{q}'")
+            };
             self.query(&format!(
-                "MATCH (f:Fact) WHERE (f.concept CONTAINS '{q}' OR f.content CONTAINS '{q}') \
+                "MATCH (f:Fact) WHERE ({where_clause}) \
                  AND f.confidence >= {min_confidence} \
                  RETURN f.id, f.concept, f.content, f.confidence, f.source_id, f.tags \
                  ORDER BY f.id DESC LIMIT {limit}"
@@ -328,6 +444,42 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         #[cfg(test)]
         self.assert_hermetic_for("NativeCognitiveMemory::store_procedure");
 
+        // Issue #2298: procedural memory was "frozen" — every OODA
+        // consolidation cycle re-stored the identical procedures
+        // (`consolidate:ad-hoc`, `pr-merge:adopt-tdd`, …) because this
+        // method ran an unconditional `CREATE` with a fresh `new_id`, and
+        // the `Procedure` table keys on `id` (not `name`), so the DB never
+        // deduped. Duplicate-named nodes piled up, compression stayed at
+        // 0%, and recall only ever surfaced the bootstrap set.
+        //
+        // Make the store an idempotent upsert keyed on the exact `name`:
+        // if a procedure with this exact name already exists, bump its
+        // `usage_count` (preserving the reinforcement signal) and return
+        // the existing id instead of minting a new node.
+        let escaped_name = escape_cypher(name);
+        let existing = self.query(&format!(
+            "MATCH (p:Procedure) WHERE p.name = '{escaped_name}' \
+             RETURN p.id ORDER BY p.id LIMIT 1"
+        ))?;
+        if let Some(row) = existing.first() {
+            let existing_id = as_str(&row[0])
+                .ok_or_else(|| SimardError::BridgeCallFailed {
+                    bridge: "cognitive-memory-native".into(),
+                    method: "store_procedure".into(),
+                    reason: format!(
+                        "existing procedure '{name}' column 0 (id) was not a string: {:?}",
+                        row[0]
+                    ),
+                })?
+                .to_string();
+            self.execute(&format!(
+                "MATCH (p:Procedure {{id: '{}'}}) SET p.usage_count = p.usage_count + 1",
+                escape_cypher(&existing_id),
+            ))?;
+            self.post_write_barrier("store_procedure")?;
+            return Ok(existing_id);
+        }
+
         let id = Self::new_id("proc");
         // Errors propagated (no silent `unwrap_or_default()`) so a
         // serialize failure cannot land a row whose `steps` column is the
@@ -361,6 +513,22 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         ))?;
         self.post_write_barrier("store_procedure")?;
         Ok(id)
+    }
+
+    /// Issue #2298: exact-name existence probe used by the bootstrap seeder and
+    /// the OODA consolidation log. Overrides the trait default — which fans out
+    /// a `CONTAINS` recall and JSON-decodes every hit's `steps`/`prerequisites`
+    /// only to compare names — with a direct exact-equality lookup that returns
+    /// no payload and stops at the first match (`LIMIT 1`). This is the same
+    /// authoritative check `store_procedure` performs before deciding whether to
+    /// reinforce or create, and unlike the recall fan-out it cannot be starved
+    /// by trigger-token collisions exceeding the recall limit.
+    fn procedure_exists(&self, name: &str) -> SimardResult<bool> {
+        let escaped_name = escape_cypher(name);
+        let rows = self.query(&format!(
+            "MATCH (p:Procedure) WHERE p.name = '{escaped_name}' RETURN p.id LIMIT 1"
+        ))?;
+        Ok(!rows.is_empty())
     }
 
     fn recall_procedure(&self, query: &str, limit: u32) -> SimardResult<Vec<CognitiveProcedure>> {
@@ -506,9 +674,15 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
     }
 
     fn check_triggers(&self, content: &str) -> SimardResult<Vec<CognitiveProspective>> {
+        // Escape first, then interpolate, then case-fold both sides. Folding
+        // makes matching case-insensitive (#2300) so a goal's lowercase
+        // slug-phrase `trigger_condition` fires even when the OODA objective
+        // probe mentions the phrase in its original (mixed) case. The single
+        // escape chokepoint is preserved: `toLower` wraps the already-escaped
+        // literal, and `p.trigger_condition` is a schema-controlled column.
         let c = escape_cypher(content);
         let rows = self.query(&format!(
-            "MATCH (p:Prospective) WHERE p.status = 'pending' AND '{c}' CONTAINS p.trigger_condition RETURN p.id, p.description, p.trigger_condition, p.action_on_trigger, p.status, p.priority"
+            "MATCH (p:Prospective) WHERE p.status = 'pending' AND toLower('{c}') CONTAINS toLower(p.trigger_condition) RETURN p.id, p.description, p.trigger_condition, p.action_on_trigger, p.status, p.priority"
         ))?;
         Ok(rows
             .iter()
@@ -578,32 +752,53 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
     }
 
     /// Native impl of `search_episodes_by_keywords` for
-    /// [`NativeCognitiveMemory`]. Builds one Cypher
-    /// `e.content CONTAINS '<escaped>'` clause per keyword and
-    /// OR-joins them. Orders by `e.id DESC` to surface newest
-    /// matches first — `id` is a UUID-v7 so descending lex-sort
-    /// is equivalent to descending creation order without needing
-    /// the `temporal_index` column.
+    /// [`NativeCognitiveMemory`]. Lowercases each keyword and OR-joins one
+    /// `lc CONTAINS '<lowercased+escaped>'` clause per keyword, where `lc`
+    /// is `toLower(e.content)` projected **once per row** via a `WITH`
+    /// stage. Matching is **case-insensitive**: keywords come from
+    /// `tokenize_objective` already lowercased, but `store_episode`
+    /// persists `content` verbatim, so both sides are lowered at query
+    /// time (`toLower` on the column once per row via `WITH`,
+    /// `to_lowercase()` on the keyword). Projecting the lowered content a
+    /// single time — rather than recomputing `toLower(e.content)` inside
+    /// every predicate — avoids N redundant per-row lowercasings when N
+    /// keywords are searched, which matters on the 20k+ episode corpus
+    /// this scans. This fixes the episodic-recall-returns-zero defect
+    /// (issue #2299) without re-migrating already-stored verbatim
+    /// episodes. Orders by `e.id DESC` to surface newest matches first —
+    /// `id` is a UUID-v7 so descending lex-sort is equivalent to
+    /// descending creation order without needing the `temporal_index`
+    /// column.
     ///
-    /// Empty `keywords` slice short-circuits to `Ok(vec![])` so
-    /// callers never need to special-case it.
+    /// Keywords are trimmed, lowercased, and blank / whitespace-only
+    /// entries dropped before predicates are built. If nothing remains —
+    /// an empty slice or all-blank keywords — the query short-circuits to
+    /// `Ok(vec![])`, so callers never need to special-case it and a lone
+    /// blank keyword can never degrade into a `CONTAINS ''` match-all
+    /// (over-disclosure + full-corpus scan). `escape_cypher` is applied
+    /// last, after lowercasing, so the case-insensitive path keeps the
+    /// same Cypher-injection protection as the original.
     ///
-    /// Issue #2281, PR-C, problem 4.
+    /// Issue #2281, PR-C, problem 4. Issue #2299 (case-insensitive fix).
     fn search_episodes_by_keywords(
         &self,
         keywords: &[String],
         limit: u32,
     ) -> SimardResult<Vec<CognitiveEpisode>> {
-        if keywords.is_empty() {
+        let predicates: Vec<String> = keywords
+            .iter()
+            .map(|kw| kw.trim().to_lowercase())
+            .filter(|kw| !kw.is_empty())
+            .map(|kw| format!("lc CONTAINS '{}'", escape_cypher(&kw)))
+            .collect();
+        if predicates.is_empty() {
             return Ok(vec![]);
         }
-        let where_clause = keywords
-            .iter()
-            .map(|kw| format!("e.content CONTAINS '{}'", escape_cypher(kw)))
-            .collect::<Vec<_>>()
-            .join(" OR ");
+        let where_clause = predicates.join(" OR ");
         let rows = self.query(&format!(
-            "MATCH (e:Episode) WHERE {where_clause} \
+            "MATCH (e:Episode) \
+             WITH e, toLower(e.content) AS lc \
+             WHERE {where_clause} \
              RETURN e.id, e.content, e.source_label, e.temporal_index, e.compressed \
              ORDER BY e.id DESC LIMIT {limit}"
         ))?;
@@ -910,6 +1105,251 @@ mod tests {
         );
     }
 
+    // ── tokenized fact recall (issue #2302) ────────────────────────────
+
+    /// **TDD red → green (issue #2302).** A realistic multi-word objective
+    /// whose full text is NOT a verbatim substring of any stored fact must
+    /// still recall a fact that shares a single keyword.
+    ///
+    /// Before the fix `search_facts` built one whole-string `CONTAINS`
+    /// clause from the entire query, so the 38-char objective matched no
+    /// fact substring and returned zero rows — the "facts always zero"
+    /// defect. After tokenization the shared `auth`/`module` keywords
+    /// match. This test FAILS against the pre-fix body and PASSES after.
+    #[test]
+    fn search_facts_recalls_on_shared_keyword() {
+        let mem = test_mem();
+        // The CONTENT shares the keywords "auth" and "module" with the
+        // objective, but does NOT contain the full objective verbatim.
+        mem.store_fact(
+            "ci-pattern",
+            "the auth module integration tests are flaky under heavy load",
+            0.8,
+            &[],
+            "episode-1",
+        )
+        .unwrap();
+
+        let query = "investigate the failing auth module CI";
+        let results = mem.search_facts(query, 10, 0.0).unwrap();
+
+        assert!(
+            results.iter().any(|f| f.concept == "ci-pattern"),
+            "a multi-word objective must recall a fact sharing a keyword \
+             via tokenized CONTAINS; got {} row(s): {:?}",
+            results.len(),
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Regression guard for the tokenization contract (issue #2302).
+    ///
+    /// A single-token query that contains internal punctuation — most
+    /// importantly the `goal-store:record` concept literal that the
+    /// preparation phase loads goal facts with — must stay on the
+    /// preserved whole-string exact-match path. The tokenizer splits on
+    /// **whitespace only**, so `goal-store:record` is one token and never
+    /// explodes into `goal` / `store` / `record`. If it did, the query
+    /// would also pull in the unrelated `audit-log` decoy below (whose
+    /// content contains the word "record"), breaking the goal-store load.
+    ///
+    /// Passes on both the pre-fix body and a correct post-fix body; FAILS
+    /// only if tokenization wrongly splits on `:`/`-`.
+    #[test]
+    fn search_facts_single_token_with_punctuation_is_exact() {
+        let mem = test_mem();
+        mem.store_fact(
+            "goal-store:record",
+            "{\"slug\":\"fix-auth\",\"title\":\"Stabilize auth tests\"}",
+            1.0,
+            &[],
+            "goal-store",
+        )
+        .unwrap();
+        // Decoy: shares the sub-word "record" but is NOT a goal-store fact.
+        mem.store_fact(
+            "audit-log",
+            "a record of every config change applied this week",
+            0.9,
+            &[],
+            "src",
+        )
+        .unwrap();
+
+        let results = mem.search_facts("goal-store:record", 256, 0.0).unwrap();
+
+        assert!(
+            results.iter().any(|f| f.concept == "goal-store:record"),
+            "exact goal-store:record concept must be recalled"
+        );
+        assert!(
+            !results.iter().any(|f| f.concept == "audit-log"),
+            "single-token punctuation query must NOT split into sub-words \
+             and match the unrelated 'record' decoy; got: {:?}",
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// **Single-keyword recall for multi-word fragments (issue #2302).**
+    ///
+    /// A multi-word objective fragment that collapses to exactly one
+    /// keyword after stopword removal (here `"the auth"` -> `["auth"]`)
+    /// must search that surviving keyword, not the whole `"the auth"`
+    /// literal. No stored fact contains the verbatim phrase `"the auth"`,
+    /// so the pre-fix whole-string clause returned zero rows — the same
+    /// "facts always zero" symptom #2302 fixes for the >=2-keyword path.
+    ///
+    /// FAILS against a body that searches the whole query for the
+    /// single-survivor case; PASSES once the surviving keyword is used.
+    #[test]
+    fn search_facts_multiword_collapsing_to_one_keyword_recalls() {
+        let mem = test_mem();
+        // Content contains "auth" but never the verbatim phrase "the auth".
+        mem.store_fact(
+            "auth-pattern",
+            "module auth flow is covered by integration tests",
+            0.8,
+            &[],
+            "episode-1",
+        )
+        .unwrap();
+
+        // "the" is a stopword, so only "auth" survives tokenization.
+        let results = mem.search_facts("the auth", 10, 0.0).unwrap();
+
+        assert!(
+            results.iter().any(|f| f.concept == "auth-pattern"),
+            "a multi-word fragment collapsing to one keyword must recall on \
+             that keyword, not the whole 'the auth' literal; got {} row(s): \
+             {:?}",
+            results.len(),
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// **Namespace-lookup non-broadening guard (issue #2302).**
+    ///
+    /// A single whitespace-token query that carries a trailing-colon
+    /// namespace prefix (`"research:"`, as passed by
+    /// `research_tracker::load_research_topics`) must keep its exact
+    /// whole-string `CONTAINS 'research:'` needle. The colon is what
+    /// distinguishes a `research:<id>` topic fact from arbitrary prose
+    /// that merely mentions the word "research"; broadening the needle to
+    /// `CONTAINS 'research'` would let unrelated facts crowd the
+    /// `ORDER BY id DESC LIMIT` window and evict genuine topics.
+    ///
+    /// FAILS if the single-survivor keyword path is applied to a
+    /// single-token query (which would strip the colon and surface the
+    /// prose decoy); PASSES on the whole-string namespace path.
+    #[test]
+    fn search_facts_single_token_namespace_not_broadened() {
+        let mem = test_mem();
+        // A genuine namespaced topic fact.
+        mem.store_fact(
+            "research:topic-1",
+            "title=Vector clocks source=paper priority=1 status=proposed",
+            0.9,
+            &[],
+            "research-tracker",
+        )
+        .unwrap();
+        // Decoy: prose mentioning "research" but NOT under the namespace.
+        mem.store_fact(
+            "weekly-note",
+            "spent the afternoon on research and prototyping",
+            0.9,
+            &[],
+            "src",
+        )
+        .unwrap();
+
+        let results = mem.search_facts("research:", 50, 0.0).unwrap();
+
+        assert!(
+            results.iter().any(|f| f.concept == "research:topic-1"),
+            "the namespaced topic fact must be recalled"
+        );
+        assert!(
+            !results.iter().any(|f| f.concept == "weekly-note"),
+            "a single-token namespace query must NOT be broadened by \
+             dropping the trailing colon and match the prose decoy; got: {:?}",
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ── tokenize_fact_query unit contract (issue #2302) ────────────────
+
+    #[test]
+    fn tokenize_fact_query_splits_on_whitespace_only() {
+        // Internal `-`/`:`/`/` must be preserved; only whitespace splits.
+        assert_eq!(
+            tokenize_fact_query("goal-store:record src/foo.rs"),
+            vec!["goal-store:record".to_string(), "src/foo.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_trims_edge_punctuation_keeps_interior() {
+        assert_eq!(
+            tokenize_fact_query("(auth) module, ci."),
+            vec!["auth".to_string(), "module".to_string(), "ci".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_drops_stopwords_case_insensitively() {
+        // "The"/"the" and "CI" — function words go, keyword stays, and the
+        // surviving token keeps its original case.
+        assert_eq!(
+            tokenize_fact_query("The auth THE module"),
+            vec!["auth".to_string(), "module".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_dedups_case_insensitively_first_case_wins() {
+        assert_eq!(
+            tokenize_fact_query("Auth auth AUTH module"),
+            vec!["Auth".to_string(), "module".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_caps_at_max_tokens() {
+        let tokens = tokenize_fact_query("k1 k2 k3 k4 k5 k6 k7 k8");
+        assert_eq!(tokens.len(), MAX_FACT_QUERY_TOKENS);
+        assert_eq!(tokens.first().map(String::as_str), Some("k1"));
+        assert_eq!(tokens.last().map(String::as_str), Some("k6"));
+    }
+
+    #[test]
+    fn tokenize_fact_query_keeps_short_non_stopwords() {
+        // `CI`, `PR`, `#2302` are short but discriminating — never dropped.
+        assert_eq!(
+            tokenize_fact_query("CI PR #2302"),
+            vec!["CI".to_string(), "PR".to_string(), "2302".to_string()]
+        );
+    }
+
+    #[test]
+    fn tokenize_fact_query_empty_for_whitespace_or_all_stopwords() {
+        assert!(tokenize_fact_query("   ").is_empty());
+        assert!(tokenize_fact_query("the and of to").is_empty());
+        assert!(tokenize_fact_query("").is_empty());
+    }
+
     #[test]
     fn recall_procedure_wildcard_returns_all() {
         let mem = test_mem();
@@ -957,6 +1397,48 @@ mod tests {
         assert!(procs.is_empty());
     }
 
+    // ── procedure_exists (native exact-name probe, issue #2298) ─────────
+
+    #[test]
+    fn procedure_exists_true_for_exact_name() {
+        let mem = test_mem();
+        mem.store_procedure("deploy-prod", &["build".into()], &[])
+            .unwrap();
+        assert!(
+            mem.procedure_exists("deploy-prod").unwrap(),
+            "exact name must report present"
+        );
+    }
+
+    #[test]
+    fn procedure_exists_false_when_absent() {
+        let mem = test_mem();
+        assert!(
+            !mem.procedure_exists("never-stored").unwrap(),
+            "absent name must report missing"
+        );
+    }
+
+    #[test]
+    fn procedure_exists_is_exact_not_contains() {
+        // The native override must match on exact equality, not the
+        // `CONTAINS` semantics of `recall_procedure`. A substring or
+        // superstring of an existing name must NOT count as present —
+        // otherwise the idempotency probe would conflate distinct
+        // trigger-sharing procedures (issue #2298).
+        let mem = test_mem();
+        mem.store_procedure("deploy-prod", &["build".into()], &[])
+            .unwrap();
+        assert!(
+            !mem.procedure_exists("deploy").unwrap(),
+            "substring of an existing name must not report present"
+        );
+        assert!(
+            !mem.procedure_exists("deploy-prod-eu").unwrap(),
+            "superstring of an existing name must not report present"
+        );
+    }
+
     // ── store_prospective / check_triggers ─────────────────────────────
 
     #[test]
@@ -1001,6 +1483,84 @@ mod tests {
         assert!(
             triggered.is_empty(),
             "non-pending prospectives must not trigger"
+        );
+    }
+
+    // ── #2300 regression: prospective-triggers-never-fire ───────────────
+    //
+    // Root cause (b): the read/match path never fires a stored trigger when
+    // the OODA objective probe mentions the goal phrase in its original
+    // (mixed) case. An Active goal writes a prospective whose
+    // `trigger_condition` is the lowercase slug-phrase
+    // (`prospective_trigger_for` = `goal_slug(id).replace('-', " ")`), but a
+    // realistic objective probe carries the goal's phrase in mixed case.
+    // Under a case-SENSITIVE `CONTAINS`, the trigger never fires.
+
+    /// RED for #2300: storing an Active-goal-style prospective and probing
+    /// `check_triggers` with a realistic, mixed-case objective that contains
+    /// the goal phrase MUST fire the trigger. Fails on `main` (case-sensitive
+    /// CONTAINS); passes once matching is case-folded.
+    #[test]
+    fn check_triggers_fires_for_active_goal_objective() {
+        let mem = test_mem();
+        // Mirrors the live write path: description prefixed with `goal:`,
+        // trigger_condition is the lowercase slug-phrase.
+        mem.store_prospective(
+            "goal:Fix Authentication Bug",
+            "fix authentication bug",
+            "Pursue goal: Fix Authentication Bug",
+            1,
+        )
+        .unwrap();
+
+        // Realistic OODA objective text — same words, original (mixed) case.
+        let triggered = mem
+            .check_triggers("Investigate and Fix Authentication Bug in the login flow")
+            .unwrap();
+
+        assert!(
+            !triggered.is_empty(),
+            "an Active-goal prospective must fire when the objective probe \
+             mentions the goal phrase (case-insensitively); got {} triggers",
+            triggered.len()
+        );
+        assert!(
+            triggered.iter().any(|p| p.description.starts_with("goal:")),
+            "the fired trigger must be the goal: prospective"
+        );
+    }
+
+    /// RED for #2300: `check_triggers` matching MUST be case-insensitive.
+    /// A lowercase `trigger_condition` must fire against an UPPERCASE probe.
+    #[test]
+    fn check_triggers_is_case_insensitive() {
+        let mem = test_mem();
+        mem.store_prospective("watch", "deploy ci pipeline", "act", 2)
+            .unwrap();
+        let triggered = mem.check_triggers("DEPLOY CI PIPELINE now").unwrap();
+        assert_eq!(
+            triggered.len(),
+            1,
+            "trigger matching must be case-insensitive"
+        );
+        assert_eq!(triggered[0].trigger_condition, "deploy ci pipeline");
+    }
+
+    /// Security regression for #2300: a probe laden with Cypher-significant
+    /// characters (quote, backslash, newline, statement terminators) must not
+    /// break the generated query nor spuriously match. The single escape
+    /// chokepoint (`escape_cypher`) must remain intact under case-folding.
+    #[test]
+    fn check_triggers_handles_injection_chars_safely() {
+        let mem = test_mem();
+        mem.store_prospective("watch", "needle", "act", 1).unwrap();
+        let probe = "trouble '; MATCH (n) DETACH DELETE n; -- \\ \n \" end";
+        let triggered = mem
+            .check_triggers(probe)
+            .expect("injection-laden probe must not break the query");
+        assert!(
+            triggered.is_empty(),
+            "no trigger should match the injection probe"
         );
     }
 
@@ -1083,6 +1643,56 @@ mod tests {
         assert_eq!(facts.len(), 1);
     }
 
+    /// Injection regression guard for the **multi-token** query path
+    /// (issue #2302, security requirement SR-1).
+    ///
+    /// The single-token path escapes the whole query string; the new
+    /// multi-token path escapes each token individually before
+    /// interpolating it into its own `CONTAINS` clause (see
+    /// `search_facts`). This test forces the multi-token branch (>= 2
+    /// surviving keywords) with a keyword that carries an *interior*
+    /// single quote — which survives the tokenizer's edge-punctuation
+    /// trim — so the per-token `escape_cypher` call is actually
+    /// exercised. Left unescaped, that token would break out of its
+    /// string literal as the Cypher fragment `'x' OR '1'`; the escape
+    /// keeps it a harmless literal. If the per-token escape were ever
+    /// dropped, the query would either raise a Cypher syntax error (the
+    /// `unwrap` below panics) or widen the match to the `secret` decoy
+    /// (the negative assertion fails).
+    #[test]
+    fn search_facts_multi_token_escapes_injection() {
+        let mem = test_mem();
+        mem.store_fact("alpha-fact", "benign keyword content", 0.9, &[], "src")
+            .unwrap();
+        // Decoy that must never surface via an injected `OR`-style payload.
+        mem.store_fact("secret", "classified value", 0.9, &[], "src")
+            .unwrap();
+
+        // Two surviving tokens -> multi-token path. The second token keeps an
+        // interior single quote, so `escape_cypher` must neutralize it; left
+        // raw it would inject the Cypher fragment `'x' OR '1'`.
+        let results = mem.search_facts("alpha x'OR'1", 256, 0.0).unwrap();
+
+        assert!(
+            results.iter().any(|f| f.concept == "alpha-fact"),
+            "the escaped multi-token query must still recall the benign fact \
+             via its real keyword; got: {:?}",
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !results.iter().any(|f| f.concept == "secret"),
+            "an interior-quote token must be escaped to a literal, never \
+             interpreted as a Cypher OR that leaks the decoy; got: {:?}",
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn store_episode_with_newlines() {
         let mem = test_mem();
@@ -1090,6 +1700,157 @@ mod tests {
         mem.store_episode(content, "src", None).unwrap();
         let stats = mem.get_statistics().unwrap();
         assert_eq!(stats.episodic_count, 1);
+    }
+
+    // ── search_episodes_by_keywords (issue #2299) ──────────────────────
+
+    /// RED test for issue #2299: "episodic recall returns zero".
+    ///
+    /// `tokenize_objective` lowercases every keyword it extracts from the
+    /// OODA objective, but `store_episode` persists `content` verbatim and
+    /// the Cypher `CONTAINS` clause is case-sensitive. A lowercased keyword
+    /// therefore never matches mixed-case stored content, so recall logs
+    /// "0 raw" every cycle despite tens of thousands of stored episodes.
+    ///
+    /// The trait contract (`mod.rs`) explicitly promises *case-insensitive*
+    /// substring matching, so the case-sensitive implementation is a
+    /// contract violation. This test stores mixed-case content under a
+    /// NON-`session-` label (so the raw count is not confounded by the
+    /// downstream session filter) and searches the lowercased keyword. It
+    /// must return at least one episode (raw count > 0).
+    ///
+    /// Fails on base; passes once `search_episodes_by_keywords` matches
+    /// case-insensitively.
+    #[test]
+    fn search_episodes_by_keywords_matches_case_insensitively() {
+        let mem = test_mem();
+        mem.store_episode("Deploy the Authentication Service", "ooda-objective", None)
+            .unwrap();
+
+        let hits = mem
+            .search_episodes_by_keywords(&["authentication".to_string()], 10)
+            .unwrap();
+
+        assert!(
+            !hits.is_empty(),
+            "lowercased keyword must match mixed-case stored content (raw count > 0)"
+        );
+        assert_eq!(hits[0].content, "Deploy the Authentication Service");
+    }
+
+    /// Matching is symmetric: an upper-cased keyword must also find
+    /// lower-cased stored content. Locks the contract in both directions
+    /// so a one-sided `toLower` on only the content (or only the keyword)
+    /// cannot silently pass.
+    #[test]
+    fn search_episodes_by_keywords_is_case_insensitive_both_directions() {
+        let mem = test_mem();
+        mem.store_episode("deploy the payment gateway", "ooda-objective", None)
+            .unwrap();
+
+        let hits = mem
+            .search_episodes_by_keywords(&["PAYMENT".to_string()], 10)
+            .unwrap();
+
+        assert_eq!(
+            hits.len(),
+            1,
+            "upper-cased keyword must match lower-cased stored content"
+        );
+    }
+
+    /// An empty keyword slice short-circuits to an empty result so callers
+    /// never need to special-case it (regression lock for the existing
+    /// fast path).
+    #[test]
+    fn search_episodes_by_keywords_empty_slice_returns_empty() {
+        let mem = test_mem();
+        mem.store_episode("anything at all", "ooda-objective", None)
+            .unwrap();
+        let hits = mem.search_episodes_by_keywords(&[], 10).unwrap();
+        assert!(
+            hits.is_empty(),
+            "empty keyword slice must return no episodes"
+        );
+    }
+
+    /// A blank / whitespace-only keyword must NOT degrade into a
+    /// `CONTAINS ''` match-all (over-disclosure + full-corpus scan). The
+    /// guard lives inside `search_episodes_by_keywords` itself, so a single
+    /// blank keyword returns nothing rather than every episode.
+    ///
+    /// Fails on base, where `CONTAINS ''` matches every stored episode.
+    #[test]
+    fn search_episodes_by_keywords_blank_keyword_emits_no_match_all() {
+        let mem = test_mem();
+        mem.store_episode("Some Episode Content", "ooda-objective", None)
+            .unwrap();
+
+        for blank in ["", "   ", "\t"] {
+            let hits = mem
+                .search_episodes_by_keywords(&[blank.to_string()], 10)
+                .unwrap();
+            assert!(
+                hits.is_empty(),
+                "blank keyword {blank:?} must not match every episode"
+            );
+        }
+    }
+
+    /// A Cypher-injection attempt is treated as a literal substring on the
+    /// case-insensitive path: it matches nothing and raises no error. Locks
+    /// in that `escape_cypher` is still applied (after lowercasing) so the
+    /// fix does not open an injection hole.
+    #[test]
+    fn search_episodes_by_keywords_treats_injection_as_literal() {
+        let mem = test_mem();
+        mem.store_episode("Benign Episode", "ooda-objective", None)
+            .unwrap();
+
+        let hits = mem
+            .search_episodes_by_keywords(&["' OR 1=1 //".to_string()], 10)
+            .unwrap();
+
+        assert!(
+            hits.is_empty(),
+            "injection payload must be a literal substring, matching nothing"
+        );
+    }
+
+    /// Multi-keyword recall locks the optimized OR-join path. The perf
+    /// change projects `toLower(e.content)` once via `WITH e, … AS lc` and
+    /// OR-joins one `lc CONTAINS '<kw>'` predicate per keyword, so the
+    /// multi-keyword query is the case the optimization actually
+    /// restructured — yet every other test exercises only a single
+    /// keyword. This stores three mixed-case episodes and searches two
+    /// lowercased keywords that each match a different episode: the union
+    /// of matches must be returned (case-insensitively via the projected
+    /// `lc`), the non-matching episode excluded, and results ordered
+    /// newest-first by `id DESC`.
+    #[test]
+    fn search_episodes_by_keywords_unions_multiple_keywords() {
+        let mem = test_mem();
+        mem.store_episode("Deploy the Authentication Service", "ooda-objective", None)
+            .unwrap();
+        mem.store_episode("Configure the Payment Gateway", "ooda-objective", None)
+            .unwrap();
+        mem.store_episode("Restart the Logging Daemon", "ooda-objective", None)
+            .unwrap();
+
+        let hits = mem
+            .search_episodes_by_keywords(&["authentication".to_string(), "payment".to_string()], 10)
+            .unwrap();
+
+        let contents: Vec<&str> = hits.iter().map(|e| e.content.as_str()).collect();
+        assert_eq!(
+            contents,
+            vec![
+                "Configure the Payment Gateway",
+                "Deploy the Authentication Service",
+            ],
+            "OR-joined keywords must return both matches case-insensitively, \
+             newest-first by id DESC, excluding the non-matching episode"
+        );
     }
 
     // ── is_read_only ───────────────────────────────────────────────────

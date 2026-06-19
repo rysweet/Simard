@@ -7,6 +7,7 @@ doc_type: reference
 related:
   - ../architecture/cognitive-memory.md
   - ./goal-prospective-memory-mirror.md
+  - ./prospective-trigger-firing.md
   - ./ooda-procedural-memory.md
   - ./cognitive-memory-episodic-recall.md
   - ../memory.md

@@ -20,7 +20,7 @@ For the full canonical specification (schema, consolidation rules, hive event bu
 | **Working** | Task-scoped (cleared at task end) | The 20-slot active task context: goal, constraints, plan steps, current execution state. |
 | **Episodic** | Persistent, autobiographical | "What happened this session" — every cycle, every action, every observation. |
 | **Semantic** | Persistent, deduplicated | Facts and learned concepts promoted from episodic memory ("the test harness uses CARGO_TARGET_DIR"). |
-| **Procedural** | Persistent, indexed by trigger | Learned how-to: action sequences that worked for a given situation. Written by the OODA Act phase for successful outcomes (`ooda:{kind}`). See [OODA procedural memory](reference/ooda-procedural-memory.md). |
+| **Procedural** | Persistent, indexed by trigger, deduplicated by name | Learned how-to: action sequences that worked for a given situation. Written by the OODA Act phase for successful outcomes. Storing an identically-named procedure is idempotent (#2298). See [OODA procedural memory](reference/ooda-procedural-memory.md) and [Procedural-memory store idempotency](reference/cognitive-memory-procedural-idempotency.md). |
 | **Prospective** | Persistent, time/event-indexed | Future intentions: Active goals as trigger-action pairs, meeting action items. See [Goal–prospective memory mirror](reference/goal-prospective-memory-mirror.md). |
 
 ## Consolidation flow
@@ -69,6 +69,8 @@ For multi-host coordination see [Distributed operations](distributed-operations.
 - [Cognitive Memory Architecture](architecture/cognitive-memory.md) (canonical, full detail)
 - [Library-backed Cognitive Memory (de-fork Phase 2a)](architecture/cognitive-memory-library-adapter.md) — opt-in `amplihack-memory-lib` backend behind the `library-memory` feature
 - [OODA procedural memory](reference/ooda-procedural-memory.md) — how successful OODA outcomes become procedures
+- [Procedural-memory store idempotency](reference/cognitive-memory-procedural-idempotency.md) — exact-name dedup that stops repeated cycles re-storing identical procedures (#2298)
 - [Goal–prospective memory mirror](reference/goal-prospective-memory-mirror.md) — how Active goals become prospective triggers
+- [Prospective-trigger firing](reference/prospective-trigger-firing.md) — how the OODA objective probe and case-insensitive match make stored triggers fire
 - [Dashboard](dashboard.md) — Memory tab
 - [Daemon mode](daemon-mode.md) — when consolidation runs

@@ -106,7 +106,7 @@ Planning   → store_prospective("re-run gym after self-improve", "self_improve_
 After work → check_triggers("fix auth bug: started engineer")  # returns triggered goal items
 ```
 
-See [Goal–prospective memory mirror](../reference/goal-prospective-memory-mirror.md) for the dual-write contract and reconciliation API.
+See [Goal–prospective memory mirror](../reference/goal-prospective-memory-mirror.md) for the dual-write contract and reconciliation API, and [Prospective-trigger firing](../reference/prospective-trigger-firing.md) for how stored triggers are matched against the OODA objective probe (issue #2300).
 
 ## Session Lifecycle Mapping
 
