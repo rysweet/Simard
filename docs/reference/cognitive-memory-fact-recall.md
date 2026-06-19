@@ -234,7 +234,17 @@ tokens = (n/a)                    // wildcard branch, see below
 
 ```
 query  = "auth"
-tokens = ["auth"]                 // single keyword — whole-string path preserved
+tokens = ["auth"]                 // single token — whole-string path preserved
+```
+
+```
+query  = "research:"
+tokens = ["research"]             // single token — whole-string 'research:' preserved (colon NOT dropped)
+```
+
+```
+query  = "the auth"
+tokens = ["auth"]                 // multi-word, 1 survivor — searches keyword "auth"
 ```
 
 ```
@@ -251,7 +261,8 @@ tokens = []                       // whitespace only — whole-string path prese
 
 ## Query construction
 
-`search_facts` chooses one of three shapes based on the token count.
+`search_facts` chooses one of four shapes based on the query and its
+token count.
 
 ### 1. Wildcard (`query == "*"`)
 
@@ -266,13 +277,24 @@ RETURN f.id, f.concept, f.content, f.confidence, f.source_id, f.tags
 ORDER BY f.id DESC LIMIT {limit}
 ```
 
-### 2. Zero or one token
+### 2. Single-token or empty query (whole-string)
 
-When tokenization yields 0 or 1 tokens, the **original single
+When the query is a **single whitespace-delimited token** (or is
+empty / all stopwords, so 0 tokens survive), the **original single
 whole-string clause is preserved** via `escape_cypher(query)`. This
-keeps three cases bit-for-bit identical to the previous behaviour:
-empty/whitespace queries, single-keyword queries, and the
-`goal-store:record` exact-concept load.
+keeps exact-concept and namespace lookups bit-for-bit identical to the
+previous behaviour: empty/whitespace queries, a one-word keyword, the
+`goal-store:record` exact-concept load, and trailing-colon namespace
+prefixes such as `research:` and `dev-activity:`.
+
+Preserving the whole string matters for the namespace callers
+(`research_tracker::load_research_topics`,
+`research_tracker::idea_extraction::extract_ideas`): they pass a literal
+prefix like `"research:"` and post-filter results with
+`concept.starts_with("research:")`. Dropping the trailing colon to
+search the bare keyword `research` would widen the `CONTAINS` needle to
+arbitrary prose mentioning "research", letting unrelated facts crowd the
+`ORDER BY f.id DESC LIMIT {limit}` window and evict genuine topic facts.
 
 ```rust
 let esc = escape_cypher(query);
@@ -283,7 +305,28 @@ RETURN f.id, f.concept, f.content, f.confidence, f.source_id, f.tags
 ORDER BY f.id DESC LIMIT {limit}
 ```
 
-### 3. Two or more tokens
+### 3. Multi-word fragment collapsing to one keyword
+
+When the query is **multi-word** (contains whitespace) but only a single
+keyword survives stopword removal — e.g. `"the auth"` -> `["auth"]` —
+the surviving keyword is searched, **not** the whole `"the auth"`
+literal. No stored fact contains the verbatim phrase `"the auth"`, so
+the whole-string clause would return zero rows: the same "facts always
+zero" symptom #2302 fixes for the multi-keyword path. This branch is
+gated on the query being multi-word so the single-token namespace
+lookups in case 2 are untouched.
+
+```rust
+// for query "the auth" -> tokens ["auth"]
+let esc = escape_cypher("auth");
+MATCH (f:Fact)
+WHERE (f.concept CONTAINS '{esc}' OR f.content CONTAINS '{esc}')
+  AND f.confidence >= {min_confidence}
+RETURN f.id, f.concept, f.content, f.confidence, f.source_id, f.tags
+ORDER BY f.id DESC LIMIT {limit}
+```
+
+### 4. Two or more tokens
 
 The fix path. One `(concept CONTAINS … OR content CONTAINS …)` group
 per token, OR-joined, each token escaped with the **same**

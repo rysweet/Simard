@@ -374,15 +374,9 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             // CONTAINS matched 0 rows — the "facts always zero" defect.
             // See `tokenize_fact_query` for the tokenization rules.
             let tokens = tokenize_fact_query(query);
-            let where_clause = if tokens.len() < 2 {
-                // 0 or 1 keyword: preserve the original whole-string
-                // exact-match behavior. Empty/whitespace/all-stopword
-                // queries, single keywords, and the `goal-store:record`
-                // concept literal all stay byte-for-byte identical to the
-                // pre-fix query.
-                let q = escape_cypher(query);
-                format!("f.concept CONTAINS '{q}' OR f.content CONTAINS '{q}'")
-            } else {
+            let where_clause = if tokens.len() >= 2 {
+                // Multi-keyword objective fragment: OR one CONTAINS clause
+                // per keyword, each escaped individually.
                 tokens
                     .iter()
                     .map(|t| {
@@ -391,6 +385,27 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
                     })
                     .collect::<Vec<_>>()
                     .join(" OR ")
+            } else if tokens.len() == 1 && query.split_ascii_whitespace().nth(1).is_some() {
+                // A multi-word fragment that collapsed to a single keyword
+                // after stopword removal (e.g. "the auth" -> ["auth"]).
+                // Searching the whole original string would re-introduce the
+                // #2302 zero-recall symptom — no stored fact contains
+                // "the auth" verbatim — so search the surviving keyword.
+                // Gated on the query being multi-word so single-token
+                // exact-concept lookups keep their whole-string semantics in
+                // the branch below.
+                let esc = escape_cypher(&tokens[0]);
+                format!("f.concept CONTAINS '{esc}' OR f.content CONTAINS '{esc}'")
+            } else {
+                // Single-token exact-concept lookup (`research:`,
+                // `goal-store:record`, `goal-board:snapshot`, a one-word
+                // tag) or an empty/all-stopword query: preserve the original
+                // whole-string match byte-for-byte. Namespace-prefix callers
+                // post-filter on the trailing colon, so broadening the
+                // CONTAINS needle here could evict genuine matches under the
+                // `ORDER BY id DESC LIMIT` window.
+                let q = escape_cypher(query);
+                format!("f.concept CONTAINS '{q}' OR f.content CONTAINS '{q}'")
             };
             self.query(&format!(
                 "MATCH (f:Fact) WHERE ({where_clause}) \
@@ -1095,6 +1110,99 @@ mod tests {
             !results.iter().any(|f| f.concept == "audit-log"),
             "single-token punctuation query must NOT split into sub-words \
              and match the unrelated 'record' decoy; got: {:?}",
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// **Single-keyword recall for multi-word fragments (issue #2302).**
+    ///
+    /// A multi-word objective fragment that collapses to exactly one
+    /// keyword after stopword removal (here `"the auth"` -> `["auth"]`)
+    /// must search that surviving keyword, not the whole `"the auth"`
+    /// literal. No stored fact contains the verbatim phrase `"the auth"`,
+    /// so the pre-fix whole-string clause returned zero rows — the same
+    /// "facts always zero" symptom #2302 fixes for the >=2-keyword path.
+    ///
+    /// FAILS against a body that searches the whole query for the
+    /// single-survivor case; PASSES once the surviving keyword is used.
+    #[test]
+    fn search_facts_multiword_collapsing_to_one_keyword_recalls() {
+        let mem = test_mem();
+        // Content contains "auth" but never the verbatim phrase "the auth".
+        mem.store_fact(
+            "auth-pattern",
+            "module auth flow is covered by integration tests",
+            0.8,
+            &[],
+            "episode-1",
+        )
+        .unwrap();
+
+        // "the" is a stopword, so only "auth" survives tokenization.
+        let results = mem.search_facts("the auth", 10, 0.0).unwrap();
+
+        assert!(
+            results.iter().any(|f| f.concept == "auth-pattern"),
+            "a multi-word fragment collapsing to one keyword must recall on \
+             that keyword, not the whole 'the auth' literal; got {} row(s): \
+             {:?}",
+            results.len(),
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// **Namespace-lookup non-broadening guard (issue #2302).**
+    ///
+    /// A single whitespace-token query that carries a trailing-colon
+    /// namespace prefix (`"research:"`, as passed by
+    /// `research_tracker::load_research_topics`) must keep its exact
+    /// whole-string `CONTAINS 'research:'` needle. The colon is what
+    /// distinguishes a `research:<id>` topic fact from arbitrary prose
+    /// that merely mentions the word "research"; broadening the needle to
+    /// `CONTAINS 'research'` would let unrelated facts crowd the
+    /// `ORDER BY id DESC LIMIT` window and evict genuine topics.
+    ///
+    /// FAILS if the single-survivor keyword path is applied to a
+    /// single-token query (which would strip the colon and surface the
+    /// prose decoy); PASSES on the whole-string namespace path.
+    #[test]
+    fn search_facts_single_token_namespace_not_broadened() {
+        let mem = test_mem();
+        // A genuine namespaced topic fact.
+        mem.store_fact(
+            "research:topic-1",
+            "title=Vector clocks source=paper priority=1 status=proposed",
+            0.9,
+            &[],
+            "research-tracker",
+        )
+        .unwrap();
+        // Decoy: prose mentioning "research" but NOT under the namespace.
+        mem.store_fact(
+            "weekly-note",
+            "spent the afternoon on research and prototyping",
+            0.9,
+            &[],
+            "src",
+        )
+        .unwrap();
+
+        let results = mem.search_facts("research:", 50, 0.0).unwrap();
+
+        assert!(
+            results.iter().any(|f| f.concept == "research:topic-1"),
+            "the namespaced topic fact must be recalled"
+        );
+        assert!(
+            !results.iter().any(|f| f.concept == "weekly-note"),
+            "a single-token namespace query must NOT be broadened by \
+             dropping the trailing colon and match the prose decoy; got: {:?}",
             results
                 .iter()
                 .map(|f| f.concept.clone())
