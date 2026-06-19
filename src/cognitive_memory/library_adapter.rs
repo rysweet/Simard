@@ -30,11 +30,14 @@
 //!   and in `docs/architecture/cognitive-memory-library-adapter.md`, and feed
 //!   amplihack-memory-lib#85.
 //! * **API gaps (A5).** `mark_episode_distilled` and `list_undistilled_episodes`
-//!   have no library equivalent at the pinned commit. The adapter deliberately
-//!   does **not** override them: it inherits the trait's contractually-safe
-//!   no-op default (rather than `unimplemented!`-panicking), because these run on
-//!   the OODA distillation hot path where a panic would be strictly worse than a
-//!   documented no-op. Tracked upstream as amplihack-memory-lib#85.
+//!   have no library equivalent at the pinned commit, so episode distillation
+//!   cannot run against this backend. A panic on the OODA distillation hot path
+//!   would be strictly worse than degrading, so the adapter degrades to a no-op
+//!   — but *loudly*: `list_undistilled_episodes` is overridden to emit a
+//!   one-time warning (so a disabled backend is distinguishable from a merely
+//!   quiet one) before returning empty, while `mark_episode_distilled` inherits
+//!   the trait's no-op default (it is only reached after a non-empty undistilled
+//!   list, which never occurs here). Tracked upstream as amplihack-memory-lib#85.
 //!
 //! All persistence is rooted at a caller-supplied `state_root` (a `TempDir` in
 //! tests). The adapter never opens, reads, writes, or migrates the live daemon
@@ -42,7 +45,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, Once};
 
 use amplihack_memory::{
     CognitiveMemory, EpisodicMemory, MemoryError, ProceduralMemory, ProspectiveMemory,
@@ -74,6 +77,11 @@ pub struct LibraryCognitiveMemory {
     /// The library memory, behind a `Mutex` for `&self` -> `&mut` interior
     /// mutability (see module docs, A2).
     inner: Mutex<CognitiveMemory>,
+    /// Fires the "distillation disabled" warning at most once per instance
+    /// (A5). The library has no distilled-flag API at the pinned commit, so
+    /// distillation degrades to a no-op; this makes that degradation loud once
+    /// instead of invisible on the OODA hot path. See `list_undistilled_episodes`.
+    distillation_warning: Once,
 }
 
 impl LibraryCognitiveMemory {
@@ -101,6 +109,7 @@ impl LibraryCognitiveMemory {
             })?;
         Ok(Self {
             inner: Mutex::new(inner),
+            distillation_warning: Once::new(),
         })
     }
 
@@ -368,11 +377,30 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         Ok(())
     }
 
-    // `mark_episode_distilled` and `list_undistilled_episodes` are intentionally
-    // NOT overridden (A5): the library has no distilled-flag API at the pinned
-    // commit, so the adapter inherits the trait's contractually-safe no-op
-    // default (no error, empty list) instead of panicking. Tracked upstream as
-    // amplihack-memory-lib#85.
+    // `mark_episode_distilled` is intentionally NOT overridden (A5): the library
+    // has no distilled-flag API at the pinned commit, and it is only reached
+    // after `list_undistilled_episodes` yields episodes — which never happens
+    // here — so the adapter inherits the trait's contractually-safe no-op
+    // default instead of panicking. Tracked upstream as amplihack-memory-lib#85.
+
+    fn list_undistilled_episodes(&self, _limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+        // A5 gap: the library has no distilled-flag API at the pinned commit, so
+        // episode distillation cannot run against this backend. The trait's
+        // no-op default returns empty — but on the OODA distillation hot path
+        // that is indistinguishable from "no episodes to distill", silently
+        // disabling the feature. Surface the degradation LOUDLY exactly once per
+        // instance so an operator can tell a disabled backend from a quiet one,
+        // then return empty so the pass cleanly (and non-fatally) skips. Tracked
+        // upstream as amplihack-memory-lib#85.
+        self.distillation_warning.call_once(|| {
+            eprintln!(
+                "[simard] cognitive memory: library backend cannot track the \
+                 distilled flag — episode distillation is DISABLED (no-op) for \
+                 this backend (de-fork Phase 2a, issue #86; amplihack-memory-lib#85)"
+            );
+        });
+        Ok(vec![])
+    }
 
     fn search_episodes_by_keywords(
         &self,

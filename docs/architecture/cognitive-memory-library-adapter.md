@@ -235,7 +235,7 @@ A new variant must keep the enum's `#[derive(Clone, Debug, Eq, PartialEq)]`
 | `store_prospective / check_triggers / resolve_prospective` | `store_prospective` / `check_triggers` / `resolve_prospective` | `priority` i64↔i32 cast. Trigger semantics differ (below). |
 | `get_statistics()` | `get_statistics() -> HashMap<String, usize>` | Folded into the typed `CognitiveStatistics` DTO. |
 | `mark_episode_distilled` | — none — | **Gap.** Inherits the trait's safe no-op default; distillation degrades to a no-op under the library backend. |
-| `list_undistilled_episodes` | — none — | **Gap.** Inherits the trait's safe no-op default (returns empty). |
+| `list_undistilled_episodes` | — none — | **Gap.** Overridden to degrade *loudly*: emits a one-time warning (so a disabled backend is distinguishable from a quiet one), then returns empty. |
 | `search_episodes_by_keywords` | `get_episodes(.., include_compressed = true)` + filter | Adapter recalls **all** episodes (compressed included, so consolidation sources stay recallable — matching native, whose query has no compressed filter), then filters on case-insensitive `content.contains` and caps at `limit`. |
 | `search_episodes_starting_with` | `get_episodes(.., include_compressed = true)` + filter | Adapter recalls all episodes, filters on `content.starts_with`, and pairs each match with the library record's `created_at` to build the `(content, recorded_at)` return. |
 | `is_read_only()` | n/a | Always `false` — the library backend is a writer (no read-only constructor). |
@@ -316,7 +316,7 @@ backends that lack the feature) and with the approved Phase 2a design:
 | Method | Why it matters | Adapter behavior in Phase 2a |
 |---|---|---|
 | `mark_episode_distilled` | OODA distillation flag (issue #2281, PR-B) | inherit the trait no-op default; distillation degrades to a no-op under the library backend |
-| `list_undistilled_episodes` | distillation pass input | inherit the trait no-op default (returns empty) |
+| `list_undistilled_episodes` | distillation pass input | override to degrade *loudly*: emit a one-time warning, then return empty so the pass skips |
 | `search_episodes_by_keywords` | keyword episode recall (#2281, PR-C) | implement in-adapter: recall **all** episodes via `get_episodes(.., include_compressed = true)`, then filter on case-insensitive `content.contains` (compressed sources stay recallable, matching native) |
 | `search_episodes_starting_with` | progress-evidence `since` timestamp gate | implement in-adapter: recall all episodes via `get_episodes(.., include_compressed = true)`, then filter on `content.starts_with`, pairing each with the library record's `created_at` |
 
@@ -328,7 +328,9 @@ run through the same `connect_memory()` seam. Panicking there would break the
 `SIMARD_COGMEM_BACKEND=library` is set on a live run. The trait already defines a
 no-op as the *contractually safe* degradation (not a hollow success), and the
 native backend keeps its real implementations untouched. This is still zero-BS:
-the distillation gap is **documented and tracked upstream**
+`list_undistilled_episodes` additionally emits a **one-time runtime warning** when
+the gap is hit, so the degradation is loud rather than invisible on the OODA hot
+path, and the distillation gap is **documented and tracked upstream**
 ([amplihack-memory-lib#85](https://github.com/rysweet/amplihack-memory-lib/issues/85)),
 not silently hidden. Adding a `distilled` mutation/filter API upstream — and
 promoting the in-adapter keyword/prefix filters into the library — is Phase 2b

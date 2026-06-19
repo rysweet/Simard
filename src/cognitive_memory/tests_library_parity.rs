@@ -47,10 +47,12 @@
 //!   not assert `sensory_count` / `working_count`.
 //! * **Distillation gap (A5):** `mark_episode_distilled` /
 //!   `list_undistilled_episodes` have no library equivalent at the pinned
-//!   commit. The adapter inherits the trait's *contractually safe no-op default*
-//!   (it does **not** panic). `native_distillation_tracks_distilled_flag`
-//!   documents the real native behavior; `distillation_gap_degrades_to_noop`
-//!   (library-only) pins the no-op degradation. Keyword/prefix episode recall
+//!   commit. `mark_episode_distilled` inherits the trait's *contractually safe
+//!   no-op default*; `list_undistilled_episodes` is overridden to degrade
+//!   *loudly* — it emits a one-time warning, then returns empty (it does **not**
+//!   panic). `native_distillation_tracks_distilled_flag` documents the real
+//!   native behavior; `distillation_gap_degrades_to_noop` (library-only) pins
+//!   the empty/no-error degradation. Keyword/prefix episode recall
 //!   (`search_episodes_by_keywords` / `search_episodes_starting_with`) is
 //!   implemented in-adapter via recent-recall + filter, so it *is* exercised
 //!   cross-backend.
@@ -234,9 +236,11 @@ where
             &[],
         )
         .expect("store_procedure before reopen");
-        // Best-effort flush before drop (native checkpoints the WAL; the
-        // library no-ops unless it exposes a checkpoint).
-        let _ = mem.checkpoint();
+        // Flush before drop so the reopen below observes the writes. Both
+        // backends now implement `checkpoint` meaningfully (native issues a WAL
+        // CHECKPOINT; the library flushes via `close`), so a failure here is a
+        // real durability bug — assert it rather than discarding it.
+        mem.checkpoint().expect("checkpoint before reopen");
     } // drop closes the store
 
     let mem = reopen();
@@ -415,10 +419,11 @@ mod library {
     }
 
     /// A5 gap: the library has no distilled mutation/filter API at the pinned
-    /// commit, so the adapter inherits the trait's contractually-safe no-op
-    /// default. This pins the degradation: `mark_episode_distilled` must not
-    /// error and `list_undistilled_episodes` returns empty — **not** a panic.
-    /// Tracked upstream as amplihack-memory-lib#85.
+    /// commit. `mark_episode_distilled` inherits the trait's no-op default;
+    /// `list_undistilled_episodes` is overridden to degrade *loudly* (one-time
+    /// warning) but still returns empty. This pins the degradation:
+    /// `mark_episode_distilled` must not error and `list_undistilled_episodes`
+    /// returns empty — **not** a panic. Tracked upstream as amplihack-memory-lib#85.
     #[test]
     fn distillation_gap_degrades_to_noop() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -435,7 +440,7 @@ mod library {
             .expect("list_undistilled_episodes no-op must not error or panic");
         assert!(
             undistilled.is_empty(),
-            "library backend inherits the trait no-op default (empty); documented for #85"
+            "library backend degrades distillation to empty (loud-once); documented for #85"
         );
     }
 
