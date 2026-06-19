@@ -1336,6 +1336,56 @@ mod tests {
         assert_eq!(facts.len(), 1);
     }
 
+    /// Injection regression guard for the **multi-token** query path
+    /// (issue #2302, security requirement SR-1).
+    ///
+    /// The single-token path escapes the whole query string; the new
+    /// multi-token path escapes each token individually before
+    /// interpolating it into its own `CONTAINS` clause (see
+    /// `search_facts`). This test forces the multi-token branch (>= 2
+    /// surviving keywords) with a keyword that carries an *interior*
+    /// single quote — which survives the tokenizer's edge-punctuation
+    /// trim — so the per-token `escape_cypher` call is actually
+    /// exercised. Left unescaped, that token would break out of its
+    /// string literal as the Cypher fragment `'x' OR '1'`; the escape
+    /// keeps it a harmless literal. If the per-token escape were ever
+    /// dropped, the query would either raise a Cypher syntax error (the
+    /// `unwrap` below panics) or widen the match to the `secret` decoy
+    /// (the negative assertion fails).
+    #[test]
+    fn search_facts_multi_token_escapes_injection() {
+        let mem = test_mem();
+        mem.store_fact("alpha-fact", "benign keyword content", 0.9, &[], "src")
+            .unwrap();
+        // Decoy that must never surface via an injected `OR`-style payload.
+        mem.store_fact("secret", "classified value", 0.9, &[], "src")
+            .unwrap();
+
+        // Two surviving tokens -> multi-token path. The second token keeps an
+        // interior single quote, so `escape_cypher` must neutralize it; left
+        // raw it would inject the Cypher fragment `'x' OR '1'`.
+        let results = mem.search_facts("alpha x'OR'1", 256, 0.0).unwrap();
+
+        assert!(
+            results.iter().any(|f| f.concept == "alpha-fact"),
+            "the escaped multi-token query must still recall the benign fact \
+             via its real keyword; got: {:?}",
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !results.iter().any(|f| f.concept == "secret"),
+            "an interior-quote token must be escaped to a literal, never \
+             interpreted as a Cypher OR that leaks the decoy; got: {:?}",
+            results
+                .iter()
+                .map(|f| f.concept.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn store_episode_with_newlines() {
         let mem = test_mem();
