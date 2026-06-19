@@ -124,10 +124,12 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// substring). Newest first.
     ///
     /// Default impl returns empty so legacy backends keep compiling.
-    /// `NativeCognitiveMemory` overrides this with a Cypher query
-    /// that ORs one `e.content CONTAINS '<escaped>'` clause per
-    /// keyword, ordered by `e.id DESC` (UUID-v7 ids are time-prefixed
-    /// so descending lex-sort == newest-by-creation).
+    /// `NativeCognitiveMemory` overrides this with a Cypher query that
+    /// ORs one `toLower(e.content) CONTAINS '<lowercased+escaped>'`
+    /// clause per keyword, ordered by `e.id DESC` (UUID-v7 ids are
+    /// time-prefixed so descending lex-sort == newest-by-creation).
+    /// Both sides are lowered at query time so the contract holds
+    /// against episodes already persisted verbatim (issue #2299).
     ///
     /// Issue #2281, PR-C, problem 4.
     fn search_episodes_by_keywords(

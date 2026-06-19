@@ -579,16 +579,27 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
 
     /// Native impl of `search_episodes_by_keywords` for
     /// [`NativeCognitiveMemory`]. Builds one Cypher
-    /// `e.content CONTAINS '<escaped>'` clause per keyword and
-    /// OR-joins them. Orders by `e.id DESC` to surface newest
-    /// matches first — `id` is a UUID-v7 so descending lex-sort
-    /// is equivalent to descending creation order without needing
-    /// the `temporal_index` column.
+    /// `toLower(e.content) CONTAINS '<lowercased+escaped>'` clause per
+    /// keyword and OR-joins them. Matching is **case-insensitive**:
+    /// keywords come from `tokenize_objective` already lowercased, but
+    /// `store_episode` persists `content` verbatim, so both sides are
+    /// lowered at query time (`toLower` on the column, `to_lowercase()`
+    /// on the keyword). This fixes the episodic-recall-returns-zero
+    /// defect (issue #2299) without re-migrating already-stored
+    /// verbatim episodes. Orders by `e.id DESC` to surface newest
+    /// matches first — `id` is a UUID-v7 so descending lex-sort is
+    /// equivalent to descending creation order without needing the
+    /// `temporal_index` column.
     ///
-    /// Empty `keywords` slice short-circuits to `Ok(vec![])` so
-    /// callers never need to special-case it.
+    /// Empty `keywords` slice short-circuits to `Ok(vec![])` so callers
+    /// never need to special-case it. Blank / whitespace-only keywords
+    /// are dropped *after* normalization so a single empty keyword can
+    /// never degrade into a `CONTAINS ''` match-all (over-disclosure +
+    /// full-corpus scan). `escape_cypher` is applied last, after
+    /// lowercasing, so the case-insensitive path keeps the same
+    /// Cypher-injection protection as the original.
     ///
-    /// Issue #2281, PR-C, problem 4.
+    /// Issue #2281, PR-C, problem 4. Issue #2299 (case-insensitive fix).
     fn search_episodes_by_keywords(
         &self,
         keywords: &[String],
@@ -597,11 +608,16 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
         if keywords.is_empty() {
             return Ok(vec![]);
         }
-        let where_clause = keywords
+        let predicates: Vec<String> = keywords
             .iter()
-            .map(|kw| format!("e.content CONTAINS '{}'", escape_cypher(kw)))
-            .collect::<Vec<_>>()
-            .join(" OR ");
+            .map(|kw| kw.trim().to_lowercase())
+            .filter(|kw| !kw.is_empty())
+            .map(|kw| format!("toLower(e.content) CONTAINS '{}'", escape_cypher(&kw)))
+            .collect();
+        if predicates.is_empty() {
+            return Ok(vec![]);
+        }
+        let where_clause = predicates.join(" OR ");
         let rows = self.query(&format!(
             "MATCH (e:Episode) WHERE {where_clause} \
              RETURN e.id, e.content, e.source_label, e.temporal_index, e.compressed \
@@ -1090,6 +1106,121 @@ mod tests {
         mem.store_episode(content, "src", None).unwrap();
         let stats = mem.get_statistics().unwrap();
         assert_eq!(stats.episodic_count, 1);
+    }
+
+    // ── search_episodes_by_keywords (issue #2299) ──────────────────────
+
+    /// RED test for issue #2299: "episodic recall returns zero".
+    ///
+    /// `tokenize_objective` lowercases every keyword it extracts from the
+    /// OODA objective, but `store_episode` persists `content` verbatim and
+    /// the Cypher `CONTAINS` clause is case-sensitive. A lowercased keyword
+    /// therefore never matches mixed-case stored content, so recall logs
+    /// "0 raw" every cycle despite tens of thousands of stored episodes.
+    ///
+    /// The trait contract (`mod.rs`) explicitly promises *case-insensitive*
+    /// substring matching, so the case-sensitive implementation is a
+    /// contract violation. This test stores mixed-case content under a
+    /// NON-`session-` label (so the raw count is not confounded by the
+    /// downstream session filter) and searches the lowercased keyword. It
+    /// must return at least one episode (raw count > 0).
+    ///
+    /// Fails on base; passes once `search_episodes_by_keywords` matches
+    /// case-insensitively.
+    #[test]
+    fn search_episodes_by_keywords_matches_case_insensitively() {
+        let mem = test_mem();
+        mem.store_episode("Deploy the Authentication Service", "ooda-objective", None)
+            .unwrap();
+
+        let hits = mem
+            .search_episodes_by_keywords(&["authentication".to_string()], 10)
+            .unwrap();
+
+        assert!(
+            !hits.is_empty(),
+            "lowercased keyword must match mixed-case stored content (raw count > 0)"
+        );
+        assert_eq!(hits[0].content, "Deploy the Authentication Service");
+    }
+
+    /// Matching is symmetric: an upper-cased keyword must also find
+    /// lower-cased stored content. Locks the contract in both directions
+    /// so a one-sided `toLower` on only the content (or only the keyword)
+    /// cannot silently pass.
+    #[test]
+    fn search_episodes_by_keywords_is_case_insensitive_both_directions() {
+        let mem = test_mem();
+        mem.store_episode("deploy the payment gateway", "ooda-objective", None)
+            .unwrap();
+
+        let hits = mem
+            .search_episodes_by_keywords(&["PAYMENT".to_string()], 10)
+            .unwrap();
+
+        assert_eq!(
+            hits.len(),
+            1,
+            "upper-cased keyword must match lower-cased stored content"
+        );
+    }
+
+    /// An empty keyword slice short-circuits to an empty result so callers
+    /// never need to special-case it (regression lock for the existing
+    /// fast path).
+    #[test]
+    fn search_episodes_by_keywords_empty_slice_returns_empty() {
+        let mem = test_mem();
+        mem.store_episode("anything at all", "ooda-objective", None)
+            .unwrap();
+        let hits = mem.search_episodes_by_keywords(&[], 10).unwrap();
+        assert!(
+            hits.is_empty(),
+            "empty keyword slice must return no episodes"
+        );
+    }
+
+    /// A blank / whitespace-only keyword must NOT degrade into a
+    /// `CONTAINS ''` match-all (over-disclosure + full-corpus scan). The
+    /// guard lives inside `search_episodes_by_keywords` itself, so a single
+    /// blank keyword returns nothing rather than every episode.
+    ///
+    /// Fails on base, where `CONTAINS ''` matches every stored episode.
+    #[test]
+    fn search_episodes_by_keywords_blank_keyword_emits_no_match_all() {
+        let mem = test_mem();
+        mem.store_episode("Some Episode Content", "ooda-objective", None)
+            .unwrap();
+
+        for blank in ["", "   ", "\t"] {
+            let hits = mem
+                .search_episodes_by_keywords(&[blank.to_string()], 10)
+                .unwrap();
+            assert!(
+                hits.is_empty(),
+                "blank keyword {blank:?} must not match every episode"
+            );
+        }
+    }
+
+    /// A Cypher-injection attempt is treated as a literal substring on the
+    /// case-insensitive path: it matches nothing and raises no error. Locks
+    /// in that `escape_cypher` is still applied (after lowercasing) so the
+    /// fix does not open an injection hole.
+    #[test]
+    fn search_episodes_by_keywords_treats_injection_as_literal() {
+        let mem = test_mem();
+        mem.store_episode("Benign Episode", "ooda-objective", None)
+            .unwrap();
+
+        let hits = mem
+            .search_episodes_by_keywords(&["' OR 1=1 //".to_string()], 10)
+            .unwrap();
+
+        assert!(
+            hits.is_empty(),
+            "injection payload must be a literal substring, matching nothing"
+        );
     }
 
     // ── is_read_only ───────────────────────────────────────────────────
