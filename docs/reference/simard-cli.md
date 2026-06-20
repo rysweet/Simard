@@ -64,6 +64,9 @@ simard
 |  |- list
 |  |- unblock <goal-id>
 |  `- unblock-all
+|- memory
+|  |- stats [state-root] [--json]
+|  `- dump [state-root] [--type=TYPE] [--limit=N] [--json]
 |- act-on-decisions
 |- spawn <agent-name> <goal> <worktree-path>
 |- handover [--canary-dir=PATH]
@@ -202,6 +205,62 @@ The `--placeholders` flag is required so that future cleanup criteria
 can be added as additional flags without changing the default behaviour.
 Invoking `simard goal cleanup` with no criteria flag is an error
 (exit code 2, usage message on stderr).
+
+## Memory subcommands
+
+The `simard memory` subcommand tree is the operator surface for
+**inspecting** the six-type cognitive-memory store on the
+[`amplihack-memory-lib`](../architecture/cognitive-memory-library-adapter.md)
+backend. Both subcommands are **read-only** and **safe to run while the
+OODA daemon holds the store** — they route through the daemon's memory
+socket when it is up and fall back to a direct on-disk open when it is
+down. The state root resolves via `$SIMARD_STATE_ROOT` then `$HOME/.simard`,
+matching the daemon, so a bare invocation always targets the live store.
+
+See the full reference — output schema, type→field mapping, sampling
+caveats, and the stored-vs-recalled episode distinction — in
+[Memory introspection CLI](./simard-memory-cli.md).
+
+### `simard memory stats [state-root] [--json]`
+
+Print per-type counts (`sensory`, `working`, `episodic` (episodes),
+`semantic` (facts), `procedural` (procedures), `prospective` (triggers))
+plus a `total`, and a few sample rows per populated type. Counts come from
+a single authoritative `get_statistics()` call, so all six types are
+always reported.
+
+```text
+$ simard memory stats
+cognitive memory @ /home/azureuser/.simard/cognitive  (via daemon socket)
+
+  TYPE          COUNT
+  sensory           4
+  working           7
+  episodic         18
+  semantic          5     (facts)
+  procedural        5     (procedures)
+  prospective       5     (triggers)
+  ---------------------
+  total            44
+```
+
+`--json` emits a stable object keyed by the raw field stems
+(`sensory`/`working`/`episodic`/`semantic`/`procedural`/`prospective`) plus
+`total`. A successful read of an empty store prints all-zeros and exits
+zero; only an unparseable invocation or a bridge-open failure exits
+non-zero.
+
+### `simard memory dump [state-root] [--type=TYPE] [--limit=N] [--json]`
+
+Like `stats`, plus a larger set of sample rows per type for eyeballing
+content. `--type` restricts to one of `facts`, `episodes`, `procedures`,
+`working`, `sensory`; `--limit` caps rows per type (default `10`).
+`triggers` (prospective) is **count-only** — the store has no read-only
+prospective enumerator, so `dump` never row-samples triggers (see
+[Memory introspection CLI](./simard-memory-cli.md)). When a sampler is
+unavailable over the daemon socket (e.g. the library's `get_episodes`),
+`dump` prints the count with `(samples unavailable over IPC)` and
+continues — run with the daemon stopped for full rows.
 
 ## Self-management commands
 

@@ -303,6 +303,68 @@ fn resolve_goal_prospectives(
     Ok(())
 }
 
+/// Mirror a live [`GoalBoard`](crate::goal_curation::GoalBoard)'s active goals
+/// into prospective memory so they fire as triggers during OODA preparation
+/// (issue #2308 follow-up).
+///
+/// The daemon persists its goals through the `GoalBoard` snapshot path, not
+/// through [`CognitiveMemoryGoalStore::put`] — so the only live prospective
+/// writer never ran and `check_triggers` had nothing to match ("0 triggers"
+/// every cycle). This board-sourced reconcile closes that gap without
+/// migrating the daemon's goal persistence: it runs every cycle, before
+/// preparation, and ensures exactly one `pending` prospective per active goal.
+///
+/// Operates on the caller's existing memory handle (the daemon's own writer)
+/// rather than opening a fresh bridge, so it never contends for the store lock.
+///
+/// Implemented as a two-phase pass for the same reason
+/// [`CognitiveMemoryGoalStore::reconcile_prospectives`] is: the library's
+/// `check_triggers` is a fire-once mutator that matches on any shared whole
+/// word, so resolving one goal's prospect mid-loop could consume another's
+/// freshly-stored one. Phase 1 resolves every goal-prospective for the active
+/// slugs; phase 2 stores one fresh `pending` prospective per Active goal.
+pub fn reconcile_board_prospectives(
+    board: &crate::goal_curation::GoalBoard,
+    ops: &dyn crate::cognitive_memory::CognitiveMemoryOps,
+) -> SimardResult<()> {
+    // Project the live board's active goals to records (slug = goal_slug(id),
+    // status mapped). This is the same projection the snapshot→record path
+    // uses, so the slug-phrase trigger is byte-identical with the read-side
+    // `build_objective_probe`.
+    let records = crate::goal_curation::active_goals_as_records(board);
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    // Phase 1: resolve every existing goal-prospective for these slugs first.
+    // The library's `check_triggers` is a fire-once mutator that matches on any
+    // shared whole word, so resolving one goal's prospect mid-loop could
+    // consume another's freshly-stored one — splitting the work guarantees a
+    // stored prospect is never re-probed (mirrors `reconcile_prospectives`).
+    for record in &records {
+        resolve_goal_prospectives(&record.slug, ops)?;
+    }
+
+    // Phase 2: store exactly one fresh PENDING prospective per Active goal so
+    // `check_triggers` fires it during the same cycle's preparation pass.
+    // Non-Active goals (paused/completed/proposed) were resolved in phase 1 and
+    // are intentionally not re-created.
+    for record in &records {
+        if record.status != GoalStatus::Active {
+            continue;
+        }
+        let trigger = prospective_trigger_for(record);
+        let description = format!("{}{}", GOAL_PROSPECTIVE_PREFIX, record.title);
+        let action = format!(
+            "Pursue goal: {} (p{}, {})",
+            record.title, record.priority, record.rationale,
+        );
+        ops.store_prospective(&description, &trigger, &action, i64::from(record.priority))?;
+    }
+
+    Ok(())
+}
+
 /// One-time migration: if a legacy `state/goal_store.json` exists on disk
 /// (from the `FileBackedGoalStore` era), read its records, write them into
 /// cognitive memory, and rename the file to `state/goal_store.json.migrated`.
@@ -827,5 +889,115 @@ mod tests {
         );
         assert_eq!(same_goal[0].status, GoalStatus::Active);
         assert_eq!(same_goal[0].priority, 1);
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Issue #2308 follow-up: board-sourced prospective reconcile.
+    //
+    // The daemon persists goals through the GoalBoard snapshot path, not
+    // through CognitiveMemoryGoalStore::put — so no prospects were ever
+    // written and OODA preparation reported "0 triggers" every cycle even
+    // with active goals. `reconcile_board_prospectives` mirrors the live
+    // board into prospective memory so check_triggers fires during prep.
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// TDD red: seed one Active goal on a `GoalBoard`, reconcile it into
+    /// prospective memory, then run the real preparation recall path against
+    /// the daemon-shaped objective probe. A trigger MUST fire.
+    #[test]
+    fn board_reconcile_fires_trigger_for_active_goal_in_preparation() {
+        use crate::cognitive_memory::LibraryCognitiveMemory;
+        use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mem = LibraryCognitiveMemory::open(tmp.path()).expect("open library store");
+
+        let mut board = GoalBoard::new();
+        board.active.push(ActiveGoal {
+            id: "fix-episode-recall".to_string(),
+            description: "Fix episode recall during OODA preparation".to_string(),
+            priority: 1,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: Vec::new(),
+            last_progress_update_at: None,
+        });
+
+        // Mirror the active board into prospective memory.
+        reconcile_board_prospectives(&board, &mem).expect("reconcile");
+
+        // Build the objective probe exactly as `build_objective_probe` does in
+        // the daemon: free-text description + the slug-phrase trigger.
+        let goal = &board.active[0];
+        let probe = format!(
+            "{}; {}",
+            goal.description.trim(),
+            crate::goals::goal_slug(&goal.id).replace('-', " "),
+        );
+
+        let session = SessionId::parse("session-018f1f7e-4c5d-7b2a-8f10-b5c0d4f7b123")
+            .expect("valid session id");
+        let ctx =
+            crate::memory_consolidation::preparation_memory_operations(&probe, &session, &mem)
+                .expect("preparation");
+
+        assert!(
+            !ctx.triggered_prospectives.is_empty(),
+            "an active board goal must fire a prospective trigger during preparation; \
+             reconcile wrote no matching prospective"
+        );
+        assert!(
+            ctx.triggered_prospectives
+                .iter()
+                .any(|p| p.description.starts_with("goal:")),
+            "the fired trigger must be the goal-prefixed prospective; got: {:?}",
+            ctx.triggered_prospectives
+                .iter()
+                .map(|p| &p.description)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The reconcile is idempotent: running it twice for the same single
+    /// active goal must leave exactly one `pending` prospective (the fresh
+    /// one), not accumulate duplicates within a cycle.
+    #[test]
+    fn board_reconcile_is_idempotent_for_a_stable_active_goal() {
+        use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+        use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mem = LibraryCognitiveMemory::open(tmp.path()).expect("open library store");
+
+        let mut board = GoalBoard::new();
+        board.active.push(ActiveGoal {
+            id: "ship-introspection-cli".to_string(),
+            description: "Ship the memory introspection CLI".to_string(),
+            priority: 2,
+            status: GoalProgress::InProgress { percent: 40 },
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: Vec::new(),
+            last_progress_update_at: None,
+        });
+
+        reconcile_board_prospectives(&board, &mem).expect("first reconcile");
+        reconcile_board_prospectives(&board, &mem).expect("second reconcile");
+
+        // After two reconciles the probe must still surface exactly one
+        // pending goal prospective (the latest fresh one), not two.
+        let probe = crate::goals::goal_slug(&board.active[0].id).replace('-', " ");
+        let pending = mem.check_triggers(&probe).expect("check_triggers");
+        let goal_pending: Vec<_> = pending
+            .iter()
+            .filter(|p| p.description.starts_with("goal:"))
+            .collect();
+        assert_eq!(
+            goal_pending.len(),
+            1,
+            "idempotent reconcile must leave exactly one pending goal prospective; got {}",
+            goal_pending.len()
+        );
     }
 }

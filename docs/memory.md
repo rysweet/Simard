@@ -33,7 +33,39 @@ OODA Act  ──(success)────▶  Procedural    (#2280)
 Goal put  ──(Active)─────▶  Prospective   (#2207/#2280)
 ```
 
-The OODA daemon dispatches a `consolidate-memory` action whenever working-memory pressure or recent-episode density crosses a threshold. Consolidation is idempotent and runs without spawning an engineer subprocess. Procedural memories are written inline during the OODA Act phase (not during consolidation) — each successful `ActionOutcome` produces an `ooda:{kind}` procedure. Prospective memories are written by `CognitiveMemoryGoalStore::put()` whenever a goal transitions to Active.
+The OODA daemon dispatches a `consolidate-memory` action whenever working-memory pressure or recent-episode density crosses a threshold. Consolidation is idempotent and runs without spawning an engineer subprocess. Procedural memories are written inline during the OODA Act phase (not during consolidation) — each successful `ActionOutcome` produces an `ooda:{kind}` procedure. Prospective memories are written each cycle by a **board-sourced reconcile**: before every preparation pass the daemon mirrors each Active goal in the live `GoalBoard` into a prospective trigger via `store_prospective`, so `check_triggers` has something to match. See [Goal–prospective memory mirror](reference/goal-prospective-memory-mirror.md) for the original `CognitiveMemoryGoalStore` mirror and [Goal-board prospective reconcile](reference/goal-board-prospective-reconcile.md) for the per-cycle board-sourced step that the live daemon actually runs.
+
+## Inspecting memory from the CLI
+
+Use `simard memory stats` to see per-type counts for the live store, and
+`simard memory dump` for sample rows. Both are read-only and safe to run
+while the daemon holds the store — they read through the daemon's memory
+socket when it is up and fall back to a direct on-disk open when it is
+down.
+
+```text
+$ simard memory stats
+cognitive memory @ /home/azureuser/.simard/cognitive  (via daemon socket)
+
+  TYPE          COUNT
+  sensory           4
+  working           7
+  episodic         18
+  semantic          5     (facts)
+  procedural        5     (procedures)
+  prospective       5     (triggers)
+  ---------------------
+  total            44
+```
+
+The `episodic` count here is the number of episodes **stored**; it is
+distinct from the `… episodes` figure in the per-cycle OODA log, which
+counts episodes **recalled for the current objective** (keyword-relevant,
+self-session noise filtered). A populated store can legitimately recall
+`0` episodes for an unrelated objective. See
+[Memory introspection CLI](reference/simard-memory-cli.md) for the full
+contract, including the type→field mapping and the stored-vs-recalled
+distinction.
 
 ## Cross-session recall
 
@@ -52,7 +84,11 @@ The library backend persists at `state_root/cognitive` (a LadybugDB `GraphStore`
 
 The library owns its own durability (WAL + CHECKPOINT). The old native store at `~/.simard/cognitive_memory.ladybug` is abandoned by Phase 2b — it is never read or migrated, and the memory store rebuilds from scratch in `cognitive/`.
 
-Inspect with the dashboard's **Memory** tab ([Dashboard](dashboard.md)) — the graph view supports per-type filters and full-text search across the persistent layers.
+Inspect with `simard memory stats` / `simard memory dump` (see
+[Memory introspection CLI](reference/simard-memory-cli.md)), or with the
+dashboard's **Memory** tab ([Dashboard](dashboard.md)) — the graph view
+supports per-type filters and full-text search across the persistent
+layers.
 
 ![Memory tab](assets/dashboard-memory.png)
 
@@ -72,9 +108,12 @@ For multi-host coordination see [Distributed operations](distributed-operations.
 
 - [Cognitive Memory Architecture](architecture/cognitive-memory.md) (canonical, full detail)
 - [Library-backed Cognitive Memory](architecture/cognitive-memory-library-adapter.md) — the `amplihack-memory-lib` backend, now the sole on-disk store (de-fork Phase 2b)
+- [Memory introspection CLI](reference/simard-memory-cli.md) — `simard memory stats` / `simard memory dump` for read-only, lock-safe per-type counts and sample rows
 - [OODA procedural memory](reference/ooda-procedural-memory.md) — how successful OODA outcomes become procedures
 - [Procedural-memory store idempotency](reference/cognitive-memory-procedural-idempotency.md) — exact-name dedup that stops repeated cycles re-storing identical procedures (#2298)
 - [Goal–prospective memory mirror](reference/goal-prospective-memory-mirror.md) — how Active goals become prospective triggers
+- [Goal-board prospective reconcile](reference/goal-board-prospective-reconcile.md) — the per-cycle board-sourced mirror the live daemon runs so triggers actually populate (#2308)
 - [Prospective-trigger firing](reference/prospective-trigger-firing.md) — how the OODA objective probe and case-insensitive match make stored triggers fire
+- [Episodic keyword recall](reference/cognitive-memory-episodic-recall.md) — how stored episodes surface for a matching objective
 - [Dashboard](dashboard.md) — Memory tab
 - [Daemon mode](daemon-mode.md) — when consolidation runs

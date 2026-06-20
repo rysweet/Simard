@@ -6,6 +6,7 @@ mod engineer;
 mod goal;
 mod gym;
 mod meeting;
+mod memory;
 mod merge;
 mod ooda;
 mod review;
@@ -97,6 +98,11 @@ Product modes:
   gym run-suite <suite-id>
   ooda run [--cycles=N] [--no-auto-reload] [state-root]
   dashboard serve [--port=8080]
+  memory stats [state-root] [--json]
+                         — read-only per-type cognitive-memory counts +
+                           sample rows (safe while the daemon holds the store)
+  memory dump [state-root] [--type=TYPE] [--limit=N] [--json]
+                         — counts plus a larger set of sample rows per type
   spawn <agent-name> <goal> <worktree-path> [--depth=N]
   merge-pr <pr-number>   — squash-merge PR in rysweet/Simard if it is merge-ready
   worktree-gc [--apply] [--idle-days=N] [--root=PATH ...] [--parent-repo=PATH]
@@ -218,6 +224,7 @@ where
         "gym" => gym::dispatch_gym_command(args),
         "ooda" => ooda::dispatch_ooda_command(args),
         "dashboard" => dashboard::dispatch_dashboard_command(args),
+        "memory" => memory::dispatch_memory_command(args),
         "spawn" => dispatch_spawn_command(args),
         "merge-pr" => merge::dispatch_merge_pr_command(args),
         "worktree-gc" => worktree_gc::dispatch_worktree_gc_command(args),
@@ -308,7 +315,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|spawn|merge-pr|worktree-gc|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap> ..."
+    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|memory|spawn|merge-pr|worktree-gc|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {

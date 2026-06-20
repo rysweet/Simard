@@ -241,6 +241,19 @@ fn run_ooda_cycle_inner(
         .map(|g| g.id.as_str())
         .chain(state.active_goals.backlog.iter().map(|b| b.id.as_str()))
         .collect();
+    // Issue #2308 follow-up: mirror the live board's active goals into
+    // prospective memory BEFORE preparation so `check_triggers` can fire them
+    // this cycle. The daemon persists goals via the GoalBoard snapshot path,
+    // not `CognitiveMemoryGoalStore::put`, so without this reconcile no
+    // prospects exist and preparation reports "0 triggers" forever. The
+    // reconcile is idempotent and fire-once-safe (it re-establishes a pending
+    // prospect for every still-active goal each cycle). Failures are logged but
+    // non-fatal — a reconcile hiccup must not abort the cycle.
+    if let Err(e) =
+        crate::goals::reconcile_board_prospectives(&state.active_goals, &*bridges.memory)
+    {
+        eprintln!("[simard] OODA cycle: board-sourced prospective reconcile failed: {e}");
+    }
     // Reuse cycle_session_id established above — the entire cycle is one logical session.
     let ctx = preparation_memory_operations_with_active_slugs(
         &objective_summary,
