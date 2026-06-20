@@ -159,7 +159,7 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
         const d=await apiFetch('/api/memory');
         let overviewHtml=`
           <div class="stat"><span class="label">Total Facts</span><span class="value">${d.total_facts}</span></div>
-          <div class="stat"><span class="label">Last Memory Compaction</span><span class="value">${d.last_consolidation?timeAgo(d.last_consolidation)+' ('+formatTime(d.last_consolidation)+')':'Never'}</span></div>
+          <div class="stat"><span class="label">Last Memory Compaction</span><span class="value">${d.last_consolidation?timeAgo(d.last_consolidation)+' ('+formatTime(d.last_consolidation)+')':'Not tracked yet'}</span></div>
           <div class="stat"><span class="label">State Root</span><span class="value" style="font-size:.8rem;word-break:break-all">${esc(d.state_root)}</span></div>`;
         if(d.native_memory){
           const nm=d.native_memory;
@@ -174,19 +174,45 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
           <div class="stat"><span class="label"><strong>Total Native</strong></span><span class="value"><strong>${nm.total}</strong></span></div>`;
         }
         document.getElementById('mem-overview').innerHTML=overviewHtml;
-        const files=[
-          {key:'memory_records',label:'Memory Records'},
-          {key:'evidence_records',label:'Evidence Records'},
-          {key:'goal_records',label:'Goal Records (agent memory)'},
-          {key:'handoff',label:'Latest Handoff'}];
-        document.getElementById('mem-files').innerHTML=files.map(f=>{
+        // Memory Files panel (#1681). The Memory Store above is the live
+        // source of truth; the JSON snapshot files below are legacy and were
+        // superseded by it. Rendering empty "0 records / 0 B" tiles next to a
+        // populated store told the operator memory was empty when it was not,
+        // so legacy file tiles now render only when a file actually has
+        // content. The goals snapshot is sourced from cognitive memory (not a
+        // file) and is always shown with a link back to the Goals tab.
+        const goals=d.goal_records||{};
+        let filesHtml=`<div class="mem-file">
+            <h3>Goals (snapshot) ${goals.count!==undefined?'<span class="badge">'+goals.count+'</span>':''}</h3>
+            <p style="margin:.25rem 0 0;font-size:.8rem;color:#8b949e">A point-in-time count of active and backlog goals. Open the <a href="javascript:void(0)" onclick="document.querySelector('.tab[data-tab=goals]').click();return false" style="color:var(--accent)">Goals tab</a> for the full board.</p>
+          </div>`;
+        const legacy=[
+          {key:'memory_records',label:'Memory records'},
+          {key:'evidence_records',label:'Evidence records'},
+          {key:'handoff',label:'Latest handoff'}];
+        // A legacy file is worth showing only when it has bytes on disk AND,
+        // for the JSON record files that report a count, at least one record —
+        // so an empty "[]" snapshot never resurfaces the "0 records" misread.
+        const legacyWithData=legacy.filter(f=>{
           const info=d[f.key]||{};
-          const modStr=info.modified?timeAgo(info.modified):(info.source?esc(info.source):'N/A');
-          const sizeBadge=(info.size_bytes!==undefined)?'<span class="badge">'+fmtB(info.size_bytes||0)+'</span>':'';
-          return`<div class="mem-file">
-            <h3>${f.label} ${info.count!==undefined?'<span class="badge">'+info.count+' records</span>':''} ${sizeBadge}</h3>
-            <div class="stat"><span class="label">${info.source?'Source':'Modified'}</span><span class="value">${modStr}</span></div>
-          </div>`;}).join('');
+          if((info.size_bytes||0)<=0) return false;
+          if(info.count!==undefined && info.count<=0) return false;
+          return true;
+        });
+        if(legacyWithData.length){
+          const cards=legacyWithData.map(f=>{
+            const info=d[f.key]||{};
+            const modStr=info.modified?timeAgo(info.modified):'N/A';
+            const countBadge=info.count!==undefined?'<span class="badge">'+info.count+' records</span>':'';
+            return`<div class="mem-file">
+              <h3>${esc(f.label)} ${countBadge} <span class="badge">${fmtB(info.size_bytes||0)}</span></h3>
+              <div class="stat"><span class="label">Modified</span><span class="value">${modStr}</span></div>
+            </div>`;}).join('');
+          filesHtml+=`<details style="margin-top:.5rem"><summary style="cursor:pointer;color:#8b949e;font-size:.85rem;user-select:none">Legacy snapshots (superseded by the Memory Store)</summary><div style="margin-top:.5rem">${cards}</div></details>`;
+        }else{
+          filesHtml+=`<p style="margin:.5rem 0 0;font-size:.8rem;color:#8b949e">No legacy snapshot files with content — memory now lives in the Memory Store above.</p>`;
+        }
+        document.getElementById('mem-files').innerHTML=filesHtml;
       }catch(e){document.getElementById('mem-overview').innerHTML='<span class="err">Failed to load memory data — check state root path</span>';}
     }
 

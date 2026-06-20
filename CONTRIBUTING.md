@@ -213,35 +213,48 @@ Before requesting merge:
 
 ## Cognitive Memory Durability (Per-Write Barrier + SIGTERM + Periodic Backups)
 
-Simard's cognitive memory is backed by [`lbug`](https://docs.rs/lbug)
-(`0.15.x`, see [`Cargo.toml`](Cargo.toml) for the active minor). The
-on-disk path is `~/.simard/cognitive_memory.ladybug` (a single file as
-of issue #1973). A legacy KuzuDB **directory** at this path from
-prototype builds is renamed aside to
-`cognitive_memory.ladybug.kuzu-backup` on first open and a fresh empty
-lbug file is created in its place — the legacy data is preserved but
-**not** automatically imported (the formats are incompatible). lbug
-only flushes its WAL inside `Database::drop`, which does **not** run
-automatically on signal-induced process exit, and even acknowledged
-in-process writes are not on stable storage until the writer
-`fsync(2)`s the data file.
+As of the de-fork (issue #2307, Phase 2b), Simard's cognitive memory is
+provided by the `amplihack-memory-lib` library backend
+(`LibraryCognitiveMemory`), which **owns its own durability**. The library
+persists to `~/.simard/cognitive/` (`state_root/cognitive`, a LadybugDB
+`GraphStore` directory using `lbug = "=0.15.3"`). The old native single-file
+store at `~/.simard/cognitive_memory.ladybug` is **abandoned** — never opened,
+read, or migrated. LadybugDB journals writes through its WAL and collapses the
+WAL into the store on CHECKPOINT (and inside `Database::drop`). Because
+`SIGTERM` does not invoke `Drop`, the daemon's shutdown handler explicitly
+checkpoints before exit.
 
-Three layers together provide durability:
+Durability today rests on three things:
 
-1. **Per-write fsync barrier** (issue #1973) — every mutating op on
-   `NativeCognitiveMemory` is followed by `fsync(data file) →
-   fsync(parent dir)` before returning to the caller. Survives
-   `SIGKILL`, OOM, and power loss for any write whose mutating call
-   returned `Ok(())`. lbug's internal WAL is co-resident in the data
-   file; a single `fsync(2)` on the data file captures both committed
-   pages and uncheckpointed WAL frames, which lbug replays on reopen.
-2. **Graceful shutdown handler** — drains the WAL on
-   `SIGTERM`/`SIGINT`/`SIGHUP` so `systemctl restart` is lossless
-   even for in-flight writes.
-3. **Periodic verified backups** — secondary recovery point used
-   only if the main data file becomes unreadable.
+1. **Library WAL + CHECKPOINT** — writes are journaled by LadybugDB; the
+   `CognitiveMemoryOps::checkpoint` trait method (delegating to
+   `LibraryCognitiveMemory::checkpoint` → the library's `close()`) collapses
+   the WAL into the store.
+2. **SIGTERM-safe shutdown handler** (issue #1631) — graceful signals
+   (`SIGTERM`/`SIGINT`/`SIGHUP`) run the shutdown sequence, which checkpoints
+   the store before the process exits, so `systemctl restart` is lossless.
+3. **File-level snapshot backups** — the trait-based `memory_backup/` module
+   takes periodic file snapshots through `CognitiveMemoryOps`, providing a
+   bounded-RPO secondary recovery point.
+
+> **Removed in Phase 2b.** The native fork's per-write `fsync` barrier
+> (issue #1973) and its lbug-WAL "verified backup" loop
+> (`NativeCognitiveMemory::create_verified_backup` / `prune_old_backups`,
+> issue #1631) were **deleted** with `NativeCognitiveMemory`. The library
+> backend supersedes them: durability is the library's responsibility, and
+> snapshot backups come from `memory_backup/`. The subsections below that
+> describe the native per-write barrier, the native verified-backup loop, the
+> native on-disk layout, and the native restore procedure are **historical** —
+> they document machinery that no longer exists — and are retained only for
+> archival context. For the current model see
+> [`docs/operations/cognitive-memory-durability.md`](docs/operations/cognitive-memory-durability.md).
 
 ### Per-Write fsync Barrier (issue #1973)
+
+> **Historical (removed in Phase 2b).** The per-write `fsync` barrier below was
+> a property of the deleted `NativeCognitiveMemory`. The library backend relies
+> on LadybugDB's WAL + CHECKPOINT for durability, so there is no Simard-side
+> per-write barrier any more. This subsection is retained for archival context.
 
 Implemented as a private `NativeCognitiveMemory::post_write_barrier(
 op: &'static str)` and called by every mutating method in
@@ -303,14 +316,13 @@ following steps **in order**:
 
 1. **Persist the goal board** via `persist_board(&state.active_goals,
    &*bridges.memory)`. The write goes through the live cognitive-memory
-   writer; the per-write barrier (#1973) makes it durable before the
-   call returns.
+   writer; LadybugDB journals it to the WAL, and the pre-exit checkpoint
+   (step 2) collapses it into the store before the process exits.
 2. **Pre-exit checkpoint** via `shared_mem.checkpoint()`
    (`CognitiveMemoryOps::checkpoint`, which delegates to
-   `NativeCognitiveMemory::checkpoint`). Collapses any WAL residue
-   into the main DB file (the per-write barrier already checkpointed
-   each individual write, but this catches anything written through
-   a path that bypasses `CognitiveMemoryOps`).
+   `LibraryCognitiveMemory::checkpoint` → the library's `close()`). Collapses
+   any WAL residue into the store so a graceful restart observes every
+   committed write.
 3. **Close the LLM session** if one is bound (`bridges.session.close()`).
 4. **Clear the in-process writer** via
    `memory_ipc::clear_in_process_writer()`. This drops the global
@@ -327,6 +339,14 @@ the correct stance for a process that is already dying. When
 assertions can fire.
 
 ### Periodic Backup Loop
+
+> **Historical (removed in Phase 2b).** The native `create_verified_backup` /
+> `prune_old_backups` loop described below was **deleted** with
+> `NativeCognitiveMemory`. In Phase 2b the library owns durability and the
+> trait-based `memory_backup/` module provides file-level snapshots instead.
+> This subsection (and the **File and Directory Layout**, **Restoring from
+> Backup**, and **Local Data Retention Disclosure** subsections that follow) is
+> retained for archival context only.
 
 At the start of every OODA cycle the daemon checks whether
 `SIMARD_DB_BACKUP_INTERVAL_SECS` (default `300`) has elapsed since the

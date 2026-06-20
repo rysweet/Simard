@@ -1,16 +1,16 @@
 ---
 title: Cognitive Memory Architecture
-description: How Simard uses the 6-type cognitive psychology memory model implemented natively in Rust with LadybugDB, including the hive mind for multi-agent knowledge sharing.
-last_updated: 2026-06-12
+description: How Simard uses the 6-type cognitive psychology memory model, implemented by the amplihack-memory-lib library (persistent, LadybugDB-backed) and reached through the LibraryCognitiveMemory adapter, including the hive mind for multi-agent knowledge sharing.
+last_updated: 2026-06-19
 owner: simard
 doc_type: concept
 ---
 
 # Cognitive Memory Architecture
 
-Simard's memory is not a flat key-value store. It uses six distinct memory types modeled after cognitive psychology, implemented natively in Rust via `NativeCognitiveMemory` backed by LadybugDB (the `lbug` crate).
+Simard's memory is not a flat key-value store. It uses six distinct memory types modeled after cognitive psychology. They are provided by the upstream [`amplihack-memory-lib`](https://github.com/rysweet/amplihack-memory-lib) crate's persistent `CognitiveMemory` (backed by LadybugDB / the `lbug` crate) and reached through a single Simard adapter, `LibraryCognitiveMemory`, which implements the `CognitiveMemoryOps` trait. This library backend is the **sole** on-disk cognitive-memory backend.
 
-> **History**: Prior to issue #512, memory operations were proxied through a Python subprocess bridge to `amplihack-memory-lib`. The native Rust implementation replaces that bridge, eliminating the Python dependency for memory and providing direct LadybugDB access.
+> **History**: Prior to issue #512, memory operations were proxied through a Python subprocess bridge to `amplihack-memory-lib`. A native Rust fork (`NativeCognitiveMemory`, written directly over LadybugDB) then replaced that bridge. The de-fork (issue #2307) retired the fork: Phase 2a added the library backend as an opt-in adapter, and **Phase 2b deleted `NativeCognitiveMemory` entirely**, making the library the default and only backend. The old native store at `~/.simard/cognitive_memory.ladybug` is abandoned (not migrated); memory rebuilds in the library store at `state_root/cognitive` and goals re-derive from issues. See [Library-backed Cognitive Memory](cognitive-memory-library-adapter.md).
 
 ## The Six Memory Types
 
@@ -106,7 +106,7 @@ Planning   → store_prospective("re-run gym after self-improve", "self_improve_
 After work → check_triggers("fix auth bug: started engineer")  # returns triggered goal items
 ```
 
-See [Goal–prospective memory mirror](../reference/goal-prospective-memory-mirror.md) for the dual-write contract and reconciliation API.
+See [Goal–prospective memory mirror](../reference/goal-prospective-memory-mirror.md) for the dual-write contract and reconciliation API, and [Prospective-trigger firing](../reference/prospective-trigger-firing.md) for how stored triggers are matched against the OODA objective probe (issue #2300).
 
 ## Session Lifecycle Mapping
 
@@ -163,7 +163,7 @@ flowchart LR
 
 ## Hive Mind Integration (Planned — Not Yet Implemented)
 
-> **Status**: The hive mind is a planned feature. The current `NativeCognitiveMemory` implementation is single-agent with no cross-agent knowledge sharing. The architecture below describes the intended design.
+> **Status**: The hive mind is a planned feature. The current library backend is single-agent with no cross-agent knowledge sharing. The architecture below describes the intended design.
 
 When multiple Simard processes run concurrently (parent + subordinates), they will share knowledge through the hive mind:
 
@@ -211,7 +211,7 @@ This creates a natural recency bias without deleting old knowledge. A fact with 
 
 ## LadybugDB Graph Schema
 
-The Rust `NativeCognitiveMemory` struct manages eight node tables in LadybugDB (see `src/cognitive_memory/schema.rs`):
+The library's persistent `CognitiveMemory` manages the node tables in LadybugDB. Simard models them as the flat `Cognitive*` DTOs in `src/memory_cognitive.rs`; the library owns the on-disk schema.
 
 ### Node Tables
 
@@ -239,7 +239,7 @@ The following relationship types are part of the intended design but are **not y
 
 ## API Reference
 
-`NativeCognitiveMemory` implements the `CognitiveMemoryOps` trait. All operations are direct Cypher queries against LadybugDB — no bridge, no wire protocol, no Python subprocess.
+`LibraryCognitiveMemory` implements the `CognitiveMemoryOps` trait by delegating to the library's persistent `CognitiveMemory` and converting result types. Every memory call site depends only on the trait object, never on the concrete backend.
 
 Key methods:
 
@@ -258,4 +258,19 @@ Key methods:
 | `recall_procedure` | Recall procedures matching a query |
 | `store_prospective` | Store a future trigger-action pair. Called by `CognitiveMemoryGoalStore::put()` for Active goals — see [Goal–prospective memory mirror](../reference/goal-prospective-memory-mirror.md) |
 | `check_triggers` | Check if any prospective memories match |
+| `mark_episode_distilled` | Flag an episode as distilled so distillation passes skip it — delegates to the library (see [Episode distillation](episode-distillation.md)) |
+| `list_undistilled_episodes` | Return undistilled episodes newest-first — delegates to the library |
 | `get_statistics` | Get counts for all memory types |
+| `checkpoint` | CHECKPOINT the store (collapse the WAL into the main file) |
+
+## The backend: the upstream library adapter
+
+`LibraryCognitiveMemory` is the **only** on-disk backend. It backs the
+`CognitiveMemoryOps` trait with the upstream `amplihack-memory-lib`
+`CognitiveMemory` and persists at `state_root/cognitive`. The daemon's IPC client
+`RemoteCognitiveMemory` remains the preferred path when a live daemon socket
+exists, so non-daemon processes do not contend for the single-writer store.
+
+See [Library-backed Cognitive Memory](cognitive-memory-library-adapter.md)
+for the adapter API, configuration, conformance testing, documented behavioral
+divergences, and the re-enabled distillation path.

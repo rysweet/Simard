@@ -4,7 +4,8 @@
 //! knowledge and gym bridges using [`NativeBridgeTransport`] for in-process
 //! Rust execution.
 //!
-//! Cognitive memory is handled natively by [`NativeCognitiveMemory`](crate::cognitive_memory::NativeCognitiveMemory).
+//! Cognitive memory is handled by the library-backed
+//! [`LibraryCognitiveMemory`](crate::cognitive_memory::LibraryCognitiveMemory).
 
 use std::path::PathBuf;
 use std::time::Duration;

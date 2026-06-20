@@ -99,8 +99,8 @@ re-deriving it from a fresh `grep`:
   that holds the cycle entry point (`cycle.rs` / `mod.rs`).
 - `knowledge-recall-repo-cognitive-memory-store` — recalls the storage
   backend used by the cognitive memory subsystem (`ladybug`) and the
-  on-disk filename of the primary persistent store under
-  `~/.simard/` (`cognitive_memory.ladybug`).
+  on-disk location of the primary persistent store under
+  `~/.simard/` (the LadybugDB store at `~/.simard/cognitive/`).
 - `knowledge-recall-repo-engineer-worktree-pattern` — recalls how the
   OODA daemon spawns engineer subagents into isolated worktrees: the
   `~/.simard/engineer-worktrees/` directory and the

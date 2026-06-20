@@ -29,7 +29,7 @@ The dashboard is a single-page app with the following tabs:
 | **Traces** | Live-tailed engineer subprocess traces and OODA cycle traces (xterm.js terminal). |
 | **Logs** | Aggregated daemon and engineer logs. |
 | **Processes** | Live process tree under the daemon — engineer subprocesses, LLM sessions, and their resource usage. |
-| **Memory** | Cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters; full-text memory search; memory overview and per-type file listings. See [Memory architecture](memory.md). |
+| **Memory** | Cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters; full-text memory search; a **Memory Overview** with the live **Memory Store** counts; and a **Memory Files** panel showing the goals snapshot plus any non-empty legacy snapshot files. See [Memory architecture](memory.md). |
 | **Costs** | Per-provider, per-model token spend across the active session. |
 | **Chat** | Direct chat with Simard. |
 | **Workboard** | Shared scratch canvas. (Renamed from "Whiteboard" — see [Tab identity contract](#tab-identity-contract).) |
@@ -49,6 +49,30 @@ Goals — active priorities and backlog:
 Memory — six cognitive memory types with filters and search:
 
 ![Memory tab](assets/dashboard-memory.png)
+
+### Memory tab: live store vs. legacy snapshots
+
+The **Memory Overview** card is the source of truth. Its **Memory Store**
+section reports the live cognitive-memory counts straight from the native
+graph store: recent observations, what Simard is currently thinking about,
+events remembered, facts learned, known procedures, and planned actions.
+
+The **Memory Files** panel sits beside it and is intentionally minimal:
+
+- **Goals (snapshot)** — a point-in-time count of active and backlog goals,
+  sourced from cognitive memory (not a disk file). It links to the **Goals**
+  tab for the full board.
+- **Legacy snapshots** — a single collapsed disclosure ("Legacy snapshots
+  (superseded by the Memory Store)") that lists the retired JSON snapshot
+  files (`memory_records.json`, `evidence_records.json`, `latest_handoff.json`)
+  **only when a file actually has content**. When none of them qualify, the
+  panel shows a one-line note instead.
+
+This matters because those JSON files were superseded by the native Memory
+Store. Rendering them as permanent "0 records / 0 B" tiles next to a store
+holding thousands of facts told operators that memory was empty when it was
+rich. The panel now hides empty legacy tiles so the displayed numbers always
+match Simard's actual remembered state.
 
 ## Read-only
 

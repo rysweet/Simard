@@ -18,7 +18,7 @@
 //!      matches — used by separate-process clients (meeting REPL, engineer
 //!      subprocesses).
 //!   2. Reap any stale open-lock left by a crashed prior process and
-//!      [`NativeCognitiveMemory::open`] the DB directly.
+//!      [`LibraryCognitiveMemory::open`] the store directly.
 //!
 //! There is **no** silent read-only fallback. If the launcher cannot
 //! produce a writer that can actually write, it returns `Err`. The
@@ -27,13 +27,13 @@
 //! persisted change. See issue #1590 follow-up.
 //!
 //! Reader semantics: prefer the in-process Arc, then the daemon socket,
-//! then [`NativeCognitiveMemory::open_read_only`] (which fails when the
-//! underlying DB has never been opened).
+//! then a direct [`LibraryCognitiveMemory::open`] (which creates the store
+//! if the underlying DB has never been opened).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, Weak};
 
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use crate::error::{SimardError, SimardResult};
 
 use super::{RemoteCognitiveMemory, SharedMemory, reap_stale_open_lock, socket_path_for};
@@ -86,9 +86,8 @@ impl WriterBridge {
     }
 }
 
-/// Reader bridge to cognitive memory. Read-only by construction (either the
-/// daemon's IPC client, which serializes through the daemon, or
-/// [`NativeCognitiveMemory::open_read_only`]).
+/// Reader bridge to cognitive memory. Either the daemon's IPC client (which
+/// serializes through the daemon) or a direct [`LibraryCognitiveMemory::open`].
 pub struct ReaderBridge {
     inner: Box<dyn CognitiveMemoryOps>,
 }
@@ -201,7 +200,7 @@ fn lookup_in_process_writer(state_root: &Path) -> Option<Arc<dyn CognitiveMemory
 ///      socket at `~/.simard/state/memory.sock` (closes
 ///      [#1923](https://github.com/rysweet/Simard/issues/1923) /
 ///      [#1925](https://github.com/rysweet/Simard/issues/1925)).
-///   2. Reap any stale lock and `NativeCognitiveMemory::open` directly.
+///   2. Reap any stale lock and `LibraryCognitiveMemory::open` directly.
 ///
 /// **No read-only fallback.** A writer bridge that cannot write is a
 /// silent-degradation hazard (the dashboard hollow-success bug from
@@ -251,7 +250,7 @@ pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
     }
 
     let mem =
-        NativeCognitiveMemory::open(state_root).map_err(|e| SimardError::RuntimeInitFailed {
+        LibraryCognitiveMemory::open(state_root).map_err(|e| SimardError::RuntimeInitFailed {
             component: "memory-ipc-launcher".into(),
             reason: format!(
                 "cognitive memory writer unavailable at {} — IPC and direct open both failed: \
@@ -268,8 +267,8 @@ pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
 /// Resolution ladder:
 ///   0. In-process Arc shortcut.
 ///   1. Try `RemoteCognitiveMemory::connect(socket_path_for(state_root))`.
-///   2. Otherwise `NativeCognitiveMemory::open_read_only` — fails when
-///      the DB has never been opened.
+///   2. Otherwise a direct [`LibraryCognitiveMemory::open`] — creates the
+///      store if the DB has never been opened.
 pub fn open_reader_bridge(state_root: &Path) -> SimardResult<ReaderBridge> {
     // (0) Same-process daemon writer: serves reads too.
     if let Some(arc) = lookup_in_process_writer(state_root) {
@@ -293,15 +292,19 @@ pub fn open_reader_bridge(state_root: &Path) -> SimardResult<ReaderBridge> {
             Err(e) => {
                 eprintln!(
                     "[simard] open_reader_bridge: socket {} present but connect failed ({e}); \
-                     falling back to direct open_read_only",
+                     falling back to direct open",
                     sock.display()
                 );
             }
         }
     }
 
-    // (2) Direct read-only open of the on-disk DB.
-    let mem = NativeCognitiveMemory::open_read_only(state_root)?;
+    // (2) De-fork Phase 2b (issue #2307): direct open of the library-backed
+    // store. The library has no read-only constructor, so this is a writer
+    // handle used for reads — acceptable because tiers 0/1 already cover the
+    // case where the daemon holds the store, and only one direct opener exists
+    // per process otherwise.
+    let mem = LibraryCognitiveMemory::open(state_root)?;
     Ok(ReaderBridge {
         inner: Box::new(mem),
     })

@@ -18,7 +18,7 @@ Simard uses a **bridge abstraction** — typed `BridgeTransport` implementations
 | **SubprocessBridgeTransport** | Testing infrastructure | Spawns a Python subprocess; used only in integration tests |
 | **InMemoryBridgeTransport** | Unit testing | In-memory mock; no I/O |
 
-> **History**: Prior to #2181, knowledge and gym bridges used Python subprocess transports with a native Rust fallback. The native Rust transports are now the only production path. Memory was already migrated to native `NativeCognitiveMemory` (see [Cognitive Memory Architecture](cognitive-memory.md)).
+> **History**: Prior to #2181, knowledge and gym bridges used Python subprocess transports with a native Rust fallback. The native Rust transports are now the only production path. Cognitive memory is provided by the library-backed `LibraryCognitiveMemory` (over `amplihack-memory-lib`) as the sole on-disk backend after the de-fork (Phase 2b) — see [Cognitive Memory Architecture](cognitive-memory.md) and [Library-backed Cognitive Memory](cognitive-memory-library-adapter.md).
 
 ## Wire Protocol
 

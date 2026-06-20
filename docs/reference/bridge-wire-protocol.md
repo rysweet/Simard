@@ -56,7 +56,7 @@ All Simard bridges communicate via newline-delimited JSON on stdin (requests) an
 
 ## Memory Bridge Methods (Legacy — Removed)
 
-> **These methods are no longer available via the bridge.** Memory operations are now handled natively in Rust by `NativeCognitiveMemory`, which talks directly to LadybugDB. See [Cognitive Memory Architecture](../architecture/cognitive-memory.md) for the current API. The method signatures below are preserved for historical reference only.
+> **These methods are no longer available via the bridge.** Memory operations are now handled in Rust by the library-backed `LibraryCognitiveMemory` (over `amplihack-memory-lib`), which persists to LadybugDB. See [Cognitive Memory Architecture](../architecture/cognitive-memory.md) and [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md) for the current API. The method signatures below are preserved for historical reference only.
 
 ### `memory.record_sensory`
 

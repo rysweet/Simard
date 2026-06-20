@@ -1,0 +1,116 @@
+name: "Cognitive Memory — Episodic Recall & Prospective Triggers"
+description: >
+  Outside-in gate re-validating the episodic-recall (#2299) and
+  prospective-trigger (#2300) defects against the library cognitive-memory
+  backend, the sole backend after de-fork Phase 2b (#2308). The original native
+  `src/cognitive_memory/ops.rs` fixes (PRs #2301, #2303) were deleted by the
+  de-fork; these steps drive the user-observable OODA preparation phase
+  (`preparation_memory_operations`) — the same path that emits
+  `prepared context (… triggers …)` and
+  `preparation: … episodes recalled (R raw, …)` — and assert recall and triggers
+  are non-zero on the library backend. Steps drive the live regression gates in
+  `tests/episodic_recall_outside_in.rs` (#2299) and
+  `tests/prospective_triggers_outside_in.rs` (#2300).
+version: "1.0.0"
+
+config:
+  timeout: 180000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 180000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "#2299 — preparation recalls a mixed-case episode case-insensitively (raw > 0)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test episodic_recall_outside_in
+        preparation_recalls_episode_case_insensitively
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test preparation_recalls_episode_case_insensitively ... ok"
+
+  - name: "#2299 — keyword union, session-noise filtering, and no match-all"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test episodic_recall_outside_in
+        preparation_unions_keywords_filters_session_noise_and_excludes_nonmatches
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test preparation_unions_keywords_filters_session_noise_and_excludes_nonmatches ... ok"
+
+  - name: "#2300 — preparation fires a goal prospective for a realistic objective"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test prospective_triggers_outside_in
+        preparation_fires_goal_prospective_for_realistic_objective
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test preparation_fires_goal_prospective_for_realistic_objective ... ok"
+
+  - name: "#2300 — trigger fires on keyword overlap and not on an unrelated objective"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test prospective_triggers_outside_in
+        preparation_fires_on_keyword_overlap_and_not_on_unrelated_objective
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test preparation_fires_on_keyword_overlap_and_not_on_unrelated_objective ... ok"
+
+assertions: []
+
+cleanup:
+  - name: "Test agent cleanup"
+    agent: "test-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "cognitive-memory"
+    - "episodic-recall"
+    - "prospective-triggers"
+    - "ooda"
+    - "regression"
+    - "issue-2299"
+    - "issue-2300"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

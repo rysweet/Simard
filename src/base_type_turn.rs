@@ -67,7 +67,20 @@ pub fn prepare_turn_context(
     };
 
     let procedures = match memory_bridge {
-        Some(bridge) => bridge.recall_procedure(objective, MAX_PROCEDURES)?,
+        // ws2 #2295: route base-type adapter recall through the same
+        // tokenized helper the OODA preparation phase uses. The
+        // previous direct `recall_procedure(objective, MAX_PROCEDURES)`
+        // call passed the entire natural-language objective to a
+        // single Cypher CONTAINS, which never matched any stored
+        // procedure name and starved the prompt of distilled
+        // procedures regardless of how many cycles had run. See
+        // `crate::memory_consolidation::recall_procedures_for_objective`
+        // for the unification contract and case-folding invariant.
+        Some(bridge) => crate::memory_consolidation::recall_procedures_for_objective(
+            bridge,
+            objective,
+            MAX_PROCEDURES,
+        )?,
         None => Vec::new(),
     };
 

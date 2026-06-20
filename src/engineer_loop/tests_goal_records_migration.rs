@@ -17,7 +17,7 @@
 
 use std::path::PathBuf;
 
-use crate::cognitive_memory::NativeCognitiveMemory;
+use crate::cognitive_memory::LibraryCognitiveMemory;
 use crate::goal_curation::{
     ActiveGoal, GoalBoard, GoalProgress, active_goals_as_records, load_goal_board, save_goal_board,
 };
@@ -36,7 +36,7 @@ fn fresh_state_root(tag: &str) -> PathBuf {
 }
 
 fn seed_active_only(state_root: &std::path::Path, n: usize) -> GoalBoard {
-    let mem = NativeCognitiveMemory::open(state_root).expect("open native memory");
+    let mem = LibraryCognitiveMemory::open(state_root).expect("open native memory");
     let mut board = GoalBoard::new();
     for i in 0..n {
         board.active.push(ActiveGoal {
@@ -64,7 +64,7 @@ fn top_5_active_records_come_from_cognitive_memory_in_seeded_order() {
     let seeded = seed_active_only(&root, 7);
     assert_eq!(seeded.active.len(), 7);
 
-    let mem = NativeCognitiveMemory::open(&root).expect("reopen native memory");
+    let mem = LibraryCognitiveMemory::open(&root).expect("reopen native memory");
     let loaded = load_goal_board(&mem).expect("load_goal_board");
     let top: Vec<_> = active_goals_as_records(&loaded)
         .into_iter()
@@ -94,10 +94,10 @@ fn engineer_pipeline_returns_empty_top_5_when_no_snapshot() {
     // by returning an empty Vec when the legacy file is absent).
     let root = fresh_state_root("empty-top5");
     {
-        let _mem = NativeCognitiveMemory::open(&root).expect("open native memory");
+        let _mem = LibraryCognitiveMemory::open(&root).expect("open native memory");
     }
 
-    let mem = NativeCognitiveMemory::open(&root).expect("reopen native memory");
+    let mem = LibraryCognitiveMemory::open(&root).expect("reopen native memory");
     let loaded = load_goal_board(&mem).expect("load_goal_board");
     let top: Vec<_> = active_goals_as_records(&loaded)
         .into_iter()
@@ -117,7 +117,7 @@ fn engineer_pipeline_caps_at_five_even_when_more_goals_exist() {
     let root = fresh_state_root("cap-at-5");
     seed_active_only(&root, 5);
 
-    let mem = NativeCognitiveMemory::open(&root).expect("reopen native memory");
+    let mem = LibraryCognitiveMemory::open(&root).expect("reopen native memory");
     let loaded = load_goal_board(&mem).expect("load_goal_board");
     let top: Vec<_> = active_goals_as_records(&loaded)
         .into_iter()

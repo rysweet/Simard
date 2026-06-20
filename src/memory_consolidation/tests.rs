@@ -548,14 +548,14 @@ fn prune_snapshots_does_not_panic_when_dir_missing() {
 
 /// Round-trip verification: intake → execution → persistence → recall.
 ///
-/// Uses `NativeCognitiveMemory` (in-memory LadybugDB) so that stored
+/// Uses `LibraryCognitiveMemory` (in-memory LadybugDB) so that stored
 /// data is actually queryable, unlike the counting bridge which only
 /// counts calls.
 #[test]
 fn round_trip_execution_memory_recall() {
-    use crate::cognitive_memory::NativeCognitiveMemory;
+    use crate::cognitive_memory::LibraryCognitiveMemory;
 
-    let mem = NativeCognitiveMemory::in_memory().expect("in-memory DB");
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory DB");
     let sid = test_session_id();
 
     // 1. Intake — records objective as sensory + working + episode.
@@ -793,15 +793,15 @@ fn preparation_skips_empty_fragments_from_splitting() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Issue #2270 Fix 1 integration: verify with NativeCognitiveMemory that
+// Issue #2270 Fix 1 integration: verify with LibraryCognitiveMemory that
 // compound objectives actually find facts that single-goal queries match.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn preparation_compound_objective_finds_per_goal_facts_native() {
-    use crate::cognitive_memory::NativeCognitiveMemory;
+    use crate::cognitive_memory::LibraryCognitiveMemory;
 
-    let mem = NativeCognitiveMemory::in_memory().expect("in-memory DB");
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory DB");
     let sid = test_session_id();
 
     // Store facts that match individual goal fragments but NOT the joined string.
@@ -840,78 +840,6 @@ fn preparation_compound_objective_finds_per_goal_facts_native() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Issue #2270 Fix 3: prune_old_backups integration test — verify the
-// function from cognitive_memory::backup keeps the specified number and
-// deletes the rest, including paired WAL files.
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn prune_old_backups_keeps_newest_and_removes_oldest() {
-    use crate::cognitive_memory::NativeCognitiveMemory;
-
-    let tmp_dir = tempfile::tempdir().expect("create tmp dir");
-    let state_root = tmp_dir.path();
-    let backup_dir = state_root.join("backups");
-    std::fs::create_dir_all(&backup_dir).expect("create backups dir");
-
-    // Create 25 fake backup files with epoch-based names.
-    for epoch in 1_000_000..1_000_025u64 {
-        let main_path = backup_dir.join(format!("cognitive_memory.ladybug.{epoch}"));
-        std::fs::write(&main_path, b"db-data").expect("write backup");
-        // Create a paired WAL file for some.
-        if epoch % 3 == 0 {
-            let wal_path = backup_dir.join(format!("cognitive_memory.ladybug.wal.{epoch}"));
-            std::fs::write(&wal_path, b"wal-data").expect("write wal");
-        }
-    }
-
-    let outcome = NativeCognitiveMemory::prune_old_backups(state_root, 20);
-
-    // 25 - 20 = 5 main backups should be removed. Some have paired WALs.
-    assert!(
-        outcome.removed > 0,
-        "prune_old_backups must remove some files when count exceeds keep"
-    );
-    assert!(
-        outcome.failed.is_empty(),
-        "expected no failures in prune, got {:?}",
-        outcome
-            .failed
-            .iter()
-            .map(|(p, e)| format!("{}: {e}", p.display()))
-            .collect::<Vec<_>>()
-    );
-
-    // Count remaining main backup files.
-    let remaining_main: Vec<_> = std::fs::read_dir(&backup_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name();
-            let s = name.to_string_lossy();
-            s.starts_with("cognitive_memory.ladybug.") && !s.contains("wal")
-        })
-        .collect();
-
-    assert_eq!(
-        remaining_main.len(),
-        20,
-        "must keep exactly 20 most recent backups, got {}",
-        remaining_main.len()
-    );
-}
-
-#[test]
-fn prune_old_backups_handles_missing_backup_dir() {
-    let tmp_dir = tempfile::tempdir().expect("create tmp dir");
-    // state_root exists but backups/ subdirectory does not.
-    let outcome =
-        crate::cognitive_memory::NativeCognitiveMemory::prune_old_backups(tmp_dir.path(), 20);
-    assert_eq!(outcome.removed, 0);
-    assert!(outcome.failed.is_empty());
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // Issue #2270 Fix 4: search_facts diagnostic logging. We verify that the
 // search_facts function still returns correct results (the logging itself
 // is tracing::debug! which is a no-op without a subscriber in tests).
@@ -920,9 +848,9 @@ fn prune_old_backups_handles_missing_backup_dir() {
 
 #[test]
 fn search_facts_with_logging_returns_correct_results() {
-    use crate::cognitive_memory::NativeCognitiveMemory;
+    use crate::cognitive_memory::LibraryCognitiveMemory;
 
-    let mem = NativeCognitiveMemory::in_memory().expect("in-memory DB");
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory DB");
     mem.store_fact("rust-perf", "Zero-cost abstractions", 0.95, &[], "test")
         .unwrap();
 

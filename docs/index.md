@@ -47,7 +47,9 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to recover from a meeting close timeout](./howto/recover-from-meeting-close-timeout.md) - Playbook when `handoff_partial=true` fires.
 - [LightweightChatSession reference](./reference/lightweight-chat-session.md) - Direct-subprocess session used for Copilot-provider meeting turns (no PTY overhead).
 - [Terminal session idle detection](./reference/terminal-session-idle-detection.md) - How Simard determines when a PTY session is genuinely idle vs. silently computing.
+- [Tokenized fact recall in preparation](./reference/cognitive-memory-fact-recall.md) - How `search_facts` tokenizes a multi-word objective into keywords and ORs one `CONTAINS` per token so semantic facts (and `goal-store:record` goal facts) actually surface into the OODA prepared context — fixes the "facts always zero" defect (issue #2302).
 - [Cognitive memory bridge helpers](./reference/cognitive-memory-bridge-helpers.md) - `launch_writer_bridge` / `open_reader_bridge` resolution ladder; design notes for the planned in-process Arc shortcut and strict no-silent-degradation contract (issue #1590 follow-up).
+- [Procedural-memory store idempotency](./reference/cognitive-memory-procedural-idempotency.md) - `store_procedure` deduplicates on exact name so repeated OODA consolidation cycles stop re-storing identical procedures, ending the 0% compression / frozen procedural-store defect (issue #2298).
 - [Cognitive-memory goal store adapter](./reference/cognitive-memory-goal-store.md) - Superseded design for the planned `GoalStore` implementation that was replaced by the file-backed store (issue #2182).
 - [File-backed goal store reference](./reference/file-backed-goal-store.md) - Production GoalStore with flock locking at goal_store.json (issue #2182).
 - [String truncation helpers](./reference/string-truncation-helpers.md) - Design for the planned `truncate_to_char_boundary` UTF-8-safe byte-budget helper (issue #1590 follow-up).
@@ -132,6 +134,7 @@ If you are changing architecture, start with the [architecture overview](./archi
 
 - [Agent composition](./architecture/agent-composition.md) - How Simard composes subordinate agents with goal assignment, supervision, and crash recovery.
 - [Cognitive memory](./architecture/cognitive-memory.md) - Six-type memory model, session lifecycle mapping, and hive mind integration.
+- [Library-backed cognitive memory](./architecture/cognitive-memory-library-adapter.md) - The `amplihack-memory-lib` backend (`LibraryCognitiveMemory`), the sole on-disk cognitive-memory store after the de-fork (Phase 2b).
 - [Implementation plan](./architecture/implementation-plan.md) - Phased roadmap with current status and quality gates.
 - [OODA meeting handoff integration](./architecture/ooda-meeting-handoff-integration.md) - Wire meeting handoffs into the OODA daemon and seed default goals (Issues #157, #158).
 - [Unified meeting backend](./architecture/unified-meeting-backend.md) - One conversational engine behind CLI REPL and dashboard WebSocket chat (Issue #462).

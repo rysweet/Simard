@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::bridge_launcher::{launch_gym_bridge_native, launch_knowledge_bridge_native};
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use crate::goal_curation::{load_goal_board, persist_board};
 use crate::identity::OperatingMode;
 use crate::memory_ipc;
@@ -76,7 +76,7 @@ pub fn run_ooda_daemon(
     }
 
     let shared_mem: Arc<dyn CognitiveMemoryOps> =
-        Arc::new(NativeCognitiveMemory::open(&state_root)?);
+        Arc::new(LibraryCognitiveMemory::open(&state_root)?);
 
     // Register the live writer for in-process callers (dashboard, OODA
     // loop, reflection, etc.) so they bypass IPC and disk re-open and
@@ -347,29 +347,11 @@ pub fn run_ooda_daemon(
         daemon_log(&state_root, "[simard] OODA daemon: auto-reload enabled");
     }
 
-    // --- periodic DB backup state -----------------------------------------
-    // Defaults: 5-minute interval and 24-backup retention give 2 hours of
-    // history, which has been sufficient to recover from every observed
-    // WAL-corruption incident. Override with the env vars below.
-    let db_backup_interval_secs: u64 = std::env::var("SIMARD_DB_BACKUP_INTERVAL_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(300);
-    let db_backup_keep: usize = std::env::var("SIMARD_DB_BACKUP_KEEP")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(24);
-    let mut last_db_backup = Instant::now()
-        .checked_sub(Duration::from_secs(db_backup_interval_secs))
-        .unwrap_or_else(Instant::now);
-    let backup_consecutive_failures = AtomicU32::new(0);
-    let checkpoint_consecutive_failures = AtomicU32::new(0);
-    daemon_log(
-        &state_root,
-        &format!(
-            "[simard] OODA daemon: DB backup interval = {db_backup_interval_secs}s, keep = {db_backup_keep}"
-        ),
-    );
+    // De-fork Phase 2b (issue #2307): the native lbug-WAL file-copy backup
+    // (`create_verified_backup` / `prune_old_backups`) has been removed. The
+    // library backend owns its own durability (WAL flush on `checkpoint` /
+    // drop). File-level snapshot backups remain available via the trait-based
+    // `memory_backup` module.
 
     // --- periodic disk health check state ---------------------------------
     let disk_health_interval_secs: u64 = std::env::var("SIMARD_DISK_HEALTH_INTERVAL_SECS")
@@ -439,84 +421,6 @@ pub fn run_ooda_daemon(
             break;
         }
 
-        // --- periodic DB backup (at START of cycle) ------------------------
-        if last_db_backup.elapsed() >= Duration::from_secs(db_backup_interval_secs) {
-            // Checkpoint first so committed-but-WAL-resident writes are
-            // captured by the file copy. Failures here increment the
-            // pre_backup_checkpoint_failed counter (issue #1975 G3) and
-            // are tracked alongside backup_consecutive_failures so the
-            // daemon refuses to declare success after N consecutive
-            // checkpoint failures.
-            if let Err(e) = shared_mem.checkpoint() {
-                crate::cognitive_memory::metrics::increment(
-                    "pre_backup_checkpoint_failed",
-                    "daemon:periodic_backup",
-                );
-                let n = checkpoint_consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
-                daemon_log(
-                    &state_root,
-                    &format!("[simard] DB backup: pre-copy checkpoint failed (#{n}): {e}"),
-                );
-            } else {
-                checkpoint_consecutive_failures.store(0, Ordering::SeqCst);
-            }
-            match NativeCognitiveMemory::create_verified_backup(&state_root) {
-                Ok(backup_path) => {
-                    let ckpt_fails = checkpoint_consecutive_failures.load(Ordering::SeqCst);
-                    if ckpt_fails >= 3 {
-                        // G3: refuse to declare healthy backup when the
-                        // checkpoint that should have flushed WAL writes
-                        // has failed repeatedly — the backup may be stale.
-                        daemon_log(
-                            &state_root,
-                            &format!(
-                                "[simard] WARN: DB backup created at {} but \
-                                 pre-backup checkpoint has failed {ckpt_fails} \
-                                 consecutive times — backup may contain stale data",
-                                backup_path.display()
-                            ),
-                        );
-                    } else {
-                        daemon_log(
-                            &state_root,
-                            &format!("[simard] DB backup created: {}", backup_path.display()),
-                        );
-                    }
-                    let prune_outcome =
-                        NativeCognitiveMemory::prune_old_backups(&state_root, db_backup_keep);
-                    if !prune_outcome.failed.is_empty() {
-                        daemon_log(
-                            &state_root,
-                            &format!(
-                                "[simard] WARN: prune_old_backups: {} removed, {} failed",
-                                prune_outcome.removed,
-                                prune_outcome.failed.len()
-                            ),
-                        );
-                    }
-                    backup_consecutive_failures.store(0, Ordering::SeqCst);
-                }
-                Err(e) => {
-                    let n = backup_consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
-                    if n >= 3 {
-                        daemon_log(
-                            &state_root,
-                            &format!(
-                                "[simard] ERROR: DB backup failed {n} consecutive times \
-                                 — last error at {}: {e}",
-                                state_root.join("backups").display()
-                            ),
-                        );
-                    } else {
-                        daemon_log(
-                            &state_root,
-                            &format!("[simard] WARN: DB backup failed (#{n}): {e}"),
-                        );
-                    }
-                }
-            }
-            last_db_backup = Instant::now();
-        }
         // ── Disk health check (before spawning engineers) ────────────────
         if last_disk_health.elapsed() >= Duration::from_secs(disk_health_interval_secs) {
             // Tier 1: deterministic emergency cleanup (no LLM, no recipe)
@@ -789,7 +693,7 @@ fn shutdown_daemon(
     // 4. Clear in-process writer registration so the Weak ref drops.
     memory_ipc::clear_in_process_writer();
 
-    // 5. Bridges (and the daemon-owned strong Arc to NativeCognitiveMemory)
+    // 5. Bridges (and the daemon-owned strong Arc to LibraryCognitiveMemory)
     //    drop on function return — the inherent Database::drop runs
     //    force_checkpoint_on_close as a backstop.
     daemon_log(

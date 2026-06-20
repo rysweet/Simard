@@ -14,6 +14,15 @@ related:
 
 # Compound objective splitting in preparation memory operations
 
+> **De-fork Phase 2b.** The split-search *behavior* described here lives in
+> `preparation_memory_operations()` (`src/memory_consolidation/mod.rs`), which is
+> unchanged and remains backend-agnostic via the `CognitiveMemoryOps` trait. The
+> `search_facts()` implementation and its diagnostic logging that this page
+> anchors to `src/cognitive_memory/ops.rs` moved into the `amplihack-memory-lib`
+> backend (`LibraryCognitiveMemory`) when the native fork was deleted; treat the
+> `ops.rs` citations below as historical. See
+> [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md).
+
 `preparation_memory_operations()` in `src/memory_consolidation/mod.rs`
 assembles a `PreparedContext` for each engineer session. A key step is
 querying cognitive memory for facts relevant to the session's objective.

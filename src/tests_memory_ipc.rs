@@ -48,13 +48,13 @@ fn reap_stale_lock_removes_file_with_dead_pid() {
 
 #[test]
 fn server_client_roundtrip_with_in_memory_backend() {
-    use crate::cognitive_memory::NativeCognitiveMemory;
+    use crate::cognitive_memory::LibraryCognitiveMemory;
 
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("memory.sock");
 
     let mem: Arc<dyn CognitiveMemoryOps> =
-        Arc::new(NativeCognitiveMemory::in_memory().expect("in-memory db"));
+        Arc::new(LibraryCognitiveMemory::in_memory().expect("in-memory db"));
     let _handle = spawn_server(sock.clone(), mem).expect("spawn server");
 
     // Give server a moment to start accepting.

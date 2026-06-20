@@ -111,12 +111,19 @@ intentionally verbose because a tripped guard always indicates the test
 needs a code change — there is no scenario in which retrying or
 ignoring it is correct.
 
-The guard runs via a `cfg(test)`-only helper
+> **De-fork Phase 2b.** The per-method `NativeCognitiveMemory::assert_hermetic_for`
+> guard described below was deleted with the native fork (the `ops.rs` it lived in
+> no longer exists). The library backend (`LibraryCognitiveMemory`) has no
+> per-op hermetic guard: production callers pass a correct `state_root`, tests
+> always pass a `TempDir`, and the remaining enforcement points (the bridge
+> launcher guard and the non-cognitive-memory sites listed below) still apply.
+> The risk the per-op guard mitigated — the native backend writing to the live
+> home store — no longer exists on the library path. The table below is archival.
+
+The guard ran via a `cfg(test)`-only helper
 `NativeCognitiveMemory::assert_hermetic_for(site)` at the top of every
-mutating `CognitiveMemoryOps` method. Any new mutating method **must**
-call `self.assert_hermetic_for("NativeCognitiveMemory::<method>")` as
-its acceptance criteria. The nine guarded cognitive-memory entry points
-are:
+mutating `CognitiveMemoryOps` method on the native backend. The nine
+guarded cognitive-memory entry points were:
 
 | # | Method                | Guard site string |
 |---|----------------------|-------------------|
