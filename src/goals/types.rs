@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{SimardError, SimardResult};
+use crate::improvements::EvidenceRef;
 use crate::session::{SessionId, SessionPhase};
 
 /// Lifecycle status of a goal in the goal curation system.
@@ -54,13 +55,22 @@ impl Display for GoalStatus {
 }
 
 /// A proposed change to a goal (parsed from agent output).
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GoalUpdate {
     pub slug: String,
     pub title: String,
     pub rationale: String,
     pub status: GoalStatus,
     pub priority: u8,
+    /// Typed references to evidence justifying this update.
+    ///
+    /// Empty for legacy goal updates; populated by improvement promotion
+    /// flows so the spec's evidence-traceability requirement
+    /// (`Specs/ProductArchitecture.md` lines 684, 696) is enforceable
+    /// downstream. Serialised with `#[serde(default)]` so previously
+    /// persisted records without this field still deserialise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<EvidenceRef>,
 }
 
 impl GoalUpdate {
@@ -80,12 +90,20 @@ impl GoalUpdate {
             rationale,
             status,
             priority,
+            evidence: Vec::new(),
         })
+    }
+
+    /// Builder-style helper that attaches evidence to an existing
+    /// [`GoalUpdate`]. Returns `self` so it composes with [`GoalUpdate::new`].
+    pub fn with_evidence(mut self, evidence: Vec<EvidenceRef>) -> Self {
+        self.evidence = evidence;
+        self
     }
 }
 
 /// Persisted goal with ownership and provenance metadata.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GoalRecord {
     pub slug: String,
     pub title: String,
@@ -95,6 +113,12 @@ pub struct GoalRecord {
     pub owner_identity: String,
     pub source_session_id: SessionId,
     pub updated_in: SessionPhase,
+    /// Typed evidence references carried over from the originating
+    /// [`GoalUpdate`]. Empty for legacy/seed records. Serialised with
+    /// `#[serde(default)]` for backward compatibility with goal-store
+    /// snapshots written before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<EvidenceRef>,
 }
 
 impl GoalRecord {
@@ -114,6 +138,7 @@ impl GoalRecord {
             owner_identity,
             source_session_id,
             updated_in,
+            evidence: update.evidence,
         })
     }
 

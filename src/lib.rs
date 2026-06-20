@@ -226,8 +226,8 @@ pub use identity_composition::{
 };
 pub use identity_precedence::{ConflictEntry, ConflictLog, PrecedenceResolver, ResolvedIdentity};
 pub use improvements::{
-    ImprovementPromotionPlan, PersistedImprovementApproval, PersistedImprovementRecord,
-    render_review_context_directives,
+    EvidenceRef, ImprovementPromotionPlan, PersistedImprovementApproval,
+    PersistedImprovementRecord, render_review_context_directives,
 };
 pub use knowledge_bridge::{
     KnowledgeBridge, KnowledgePackInfo, KnowledgeQueryResult, KnowledgeSource,
@@ -326,8 +326,11 @@ pub use runtime_reflection::{
     LocalReflector, ResourceSnapshot, RuntimeReflection, RuntimeSnapshot, snapshot,
 };
 pub use self_improve::{
-    ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,
-    apply_improvements, run_improvement_cycle, summarize_cycle,
+    ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementHypothesis,
+    ImprovementPhase, ProposedChange, aggregate_hypotheses, apply_improvements,
+    form_hypotheses_from_benchmark_reports, form_hypotheses_from_review,
+    form_hypotheses_from_session_failures, form_hypotheses_from_signals,
+    form_hypotheses_from_weak_dimensions, run_improvement_cycle, summarize_cycle,
 };
 pub use self_improve_executor::{
     ApplyResult, ApprovalPolicy, ImprovementPatch, apply_and_review, generate_patch,
