@@ -1,0 +1,54 @@
+name: "Meeting-close issue stubs (#2309)"
+description: "Outside-in verification that closing a meeting emits ready-to-file GitHub issue stubs (issues/NN-*.md) into the per-meeting bundle directory, with a no-op for empty handoffs, sanitized traversal-proof filenames, idempotent regeneration, and a linked '## Issue stubs' markdown section."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Meeting-close emits issue stubs"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/meeting-issue-stubs.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "meeting"
+    - "handoff"
+    - "issue-stubs"
+    - "outside-in"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
+  issue: "2309"

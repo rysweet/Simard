@@ -78,11 +78,13 @@ sub_live=$(jq -r '.live | length' <<<"$sub")
 check_eq "#1678 engineers: Workboard == Terminal live sessions" "$wb_eng" "$sub_live"
 
 # ---- #1679: working-memory count matches the Memory tab ------------------
-wb_wm=$(jq -r '.working_memory | length' <<<"$wb")
+# Slot-level enumeration is not exposed by the de-forked memory library, so the
+# Workboard now drives its slot badge from the same `working_count` statistic
+# the Memory tab reads. The cross-panel invariant is that both report the same
+# working-memory count.
 wb_wc=$(jq -r '.cognitive_statistics.working_count // 0' <<<"$wb")
 mem_wc=$(jq -r '.native_memory.working // 0' <<<"$mem")
-check_eq "#1679 working memory: list length == Workboard working_count" "$wb_wm" "$wb_wc"
-check_eq "#1679 working memory: Workboard working_count == Memory tab"   "$wb_wc" "$mem_wc"
+check_eq "#1679 working memory: Workboard working_count == Memory tab" "$wb_wc" "$mem_wc"
 
 if [ "$fail" -ne 0 ]; then
   echo "RESULT: dashboard self-consistency FAILED"

@@ -296,3 +296,89 @@ fn preparation_emits_no_recall_when_objective_yields_no_tokens() {
         recall.len()
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Issue #2308 follow-up: end-to-end episode store + recall on the *library*
+// backend (the sole backend), not a mock bridge. Confirms that an episode
+// whose content shares a keyword with the objective is actually persisted and
+// recalled through the real preparation path, and that it is counted by
+// `get_statistics().episodic_count` (the number `simard memory stats` reports).
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Store one episode that shares the keyword "authentication" with the
+/// objective, run the real preparation recall path against
+/// `LibraryCognitiveMemory`, and assert it is recalled AND counted.
+#[test]
+fn library_episode_sharing_objective_keyword_is_recalled_and_counted_e2e() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mem = LibraryCognitiveMemory::open(tmp.path()).expect("open library store");
+
+    // source_label must NOT start with "session-" or preparation filters it as
+    // self-session noise.
+    mem.store_episode(
+        "Resolved the authentication timeout in the login service",
+        "engineer-cycle",
+        None,
+    )
+    .expect("store_episode");
+
+    let objective = "investigate authentication regressions";
+    let (ctx, recall) =
+        prep_returning_recall(objective, &test_session_id(), &mem).expect("preparation");
+
+    assert!(
+        !recall.is_empty(),
+        "an episode sharing keyword 'authentication' with the objective must be \
+         recalled end-to-end on the library backend; episodic_recall was empty"
+    );
+    assert!(
+        ctx.episodic_recall
+            .iter()
+            .any(|e| e.content.to_lowercase().contains("authentication")),
+        "recalled episode content must contain the shared keyword"
+    );
+
+    let stats = mem.get_statistics().expect("get_statistics");
+    assert!(
+        stats.episodic_count > 0,
+        "the stored episode must be counted by get_statistics (this is what \
+         `simard memory stats` reports); episodic_count = {}",
+        stats.episodic_count
+    );
+}
+
+/// A populated episode store can still recall nothing for an *unrelated*
+/// objective — documenting that the live "0 episodes recalled" line is a
+/// relevance outcome, not a storage failure. `episodic_count` stays > 0.
+#[test]
+fn library_unrelated_objective_recalls_zero_but_count_stays_positive_e2e() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mem = LibraryCognitiveMemory::open(tmp.path()).expect("open library store");
+
+    mem.store_episode(
+        "Provisioned the staging kubernetes cluster",
+        "engineer-cycle",
+        None,
+    )
+    .expect("store_episode");
+
+    let objective = "refactor authentication tokens";
+    let (_ctx, recall) =
+        prep_returning_recall(objective, &test_session_id(), &mem).expect("preparation");
+
+    assert!(
+        recall.is_empty(),
+        "no stored episode shares a keyword with this objective, so recall is empty"
+    );
+
+    let stats = mem.get_statistics().expect("get_statistics");
+    assert!(
+        stats.episodic_count > 0,
+        "stored episode count must remain > 0 even when nothing is recalled; got {}",
+        stats.episodic_count
+    );
+}

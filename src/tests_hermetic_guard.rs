@@ -8,7 +8,7 @@
 //! The guard runs at three independent enforcement sites:
 //!   1. `goals::persistence::save_goal_board` (and
 //!      `save_goal_board_with_removals`)
-//!   2. `cognitive_memory::native::NativeCognitiveMemory::store_fact`
+//!   2. `cognitive_memory::LibraryCognitiveMemory::store_fact`
 //!      (and its `store_episode` / `store_procedure` siblings)
 //!   3. `memory_ipc::launcher::launch_writer_bridge`
 //!
@@ -51,7 +51,7 @@ use std::path::PathBuf;
 use serial_test::serial;
 use tempfile::TempDir;
 
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use crate::goal_curation::{
     ActiveGoal, GoalBoard, GoalProgress, add_active_goal, save_goal_board,
     save_goal_board_with_removals,
@@ -174,7 +174,7 @@ fn save_goal_board_against_home_simard_state_root_trips_guard() {
         // (see the dedicated test below) — to isolate the save site we
         // bypass the launcher's guard via the test-only constructor.
         let mem =
-            NativeCognitiveMemory::open(&state_root).expect("open DB at fake home state root");
+            LibraryCognitiveMemory::open(&state_root).expect("open DB at fake home state root");
         let bridge = crate::memory_ipc::WriterBridge::from_ops_for_test(Box::new(mem));
         let _ = save_goal_board(&board, bridge.ops());
     }));
@@ -197,7 +197,7 @@ fn store_fact_against_home_simard_state_root_trips_guard() {
     let _allow = EnvGuard::unset(TEST_ALLOW_LIVE_STATE_ENV);
 
     let panicked = catch_unwind(AssertUnwindSafe(|| {
-        let mem = NativeCognitiveMemory::open(&state_root).expect("open DB");
+        let mem = LibraryCognitiveMemory::open(&state_root).expect("open DB");
         let _ = mem.store_fact(
             "tdd-guard:store-fact",
             "should be guard-rejected",

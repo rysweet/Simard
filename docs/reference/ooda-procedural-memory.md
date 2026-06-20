@@ -14,6 +14,15 @@ related:
 
 # OODA procedural memory
 
+> **De-fork Phase 2b.** The store/recall *behavior* described here is
+> preserved: `store_procedure` and `recall_procedure` are reached through the
+> `CognitiveMemoryOps` trait, now backed solely by `LibraryCognitiveMemory`
+> over `amplihack-memory-lib`. The implementation citations on this page —
+> `src/cognitive_memory/ops.rs` (`NativeCognitiveMemory`) and tests that
+> exercise `NativeCognitiveMemory` directly — were **deleted** with the fork;
+> treat those code citations as historical. See
+> [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md).
+
 Shipped in issue [#2280](https://github.com/rysweet/Simard/issues/2280).
 
 After the OODA Act phase dispatches actions and collects outcomes, each
@@ -51,8 +60,18 @@ Act phase
 
 ## Procedure naming convention
 
-Each procedure is named `ooda:{action_kind}`, where `action_kind` is the
-`Display` representation of the `ActionKind` enum:
+> **Superseded since #2281.** The live OODA write path now derives procedure
+> names via `compose_procedure_name` (goal-scoped, trigger-bearing — e.g.
+> `pr-merge:{goal_id} | triggers: merge,pr,review`), **not** the
+> `ooda:{action_kind}` form shown below. That full name string is also the
+> dedup key for #2298 idempotency. See
+> [Bootstrap procedures and trigger naming](./cognitive-memory-bootstrap-procedures.md)
+> and
+> [Procedural-memory store idempotency](./cognitive-memory-procedural-idempotency.md).
+> The original #2280 scheme below is retained for historical context.
+
+Each procedure was originally named `ooda:{action_kind}` (the #2280 scheme),
+where `action_kind` is the `Display` representation of the `ActionKind` enum:
 
 | ActionKind             | Procedure name              |
 |------------------------|-----------------------------|
@@ -70,11 +89,18 @@ Each procedure is named `ooda:{action_kind}`, where `action_kind` is the
 The `ooda:` prefix distinguishes OODA-learned procedures from any
 future manually-imported or meeting-derived procedures.
 
-**Intentional accumulation**: when the same `ActionKind` succeeds in
-multiple cycles, each `store_procedure` call creates a new
-procedure node. `recall_procedure` returns all matches ranked by
-relevance, so earlier successes remain queryable. This accumulation
-reflects the evolving understanding of what works for each action type.
+**Accumulation semantics (updated by #2298)**: when the same
+`ActionKind` succeeds in multiple cycles and produces the **same
+procedure name**, `store_procedure` is now idempotent on exact name —
+no duplicate node is created (it bumps `usage_count` instead). When a
+success produces a **distinct** name, a new procedure node is created
+and accumulates. `recall_procedure` returns the de-duplicated set (it
+does not currently rank by `usage_count` — rows come back in store
+order under its `CONTAINS`/`LIMIT` query), so distinct learned
+procedures remain queryable. See
+[Procedural-memory store idempotency](./cognitive-memory-procedural-idempotency.md).
+Prior to #2298 every store created a new node even for identical names,
+which froze the procedural store at 0% compression.
 
 ---
 

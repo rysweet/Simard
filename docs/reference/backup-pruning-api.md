@@ -1,7 +1,7 @@
 ---
 title: Backup pruning API
-description: Reference for NativeCognitiveMemory::prune_old_backups() — automatic retention-limited cleanup of cognitive memory backup files and paired WAL files.
-last_updated: 2026-06-12
+description: Reference for retention-limited cleanup of cognitive memory backup files. The native epoch-based pruner was removed in de-fork Phase 2b; the surviving pruner is the date-based memory_backup/ module.
+last_updated: 2026-06-19
 owner: simard
 doc_type: reference
 related:
@@ -13,16 +13,24 @@ related:
 
 # Backup pruning API
 
-**Module:** `src/cognitive_memory/backup.rs`
+> **De-fork Phase 2b.** The epoch-based pruner documented here lived in the
+> native `src/cognitive_memory/backup.rs` module, which was **deleted** along
+> with `NativeCognitiveMemory`. The library backend owns its own durability and
+> emits no `cognitive_memory.ladybug.<epoch>` files, so there is nothing for this
+> pruner to clean. The **surviving** backup pruner is the date-based
+> `prune_old_backups()` in `src/memory_backup/mod.rs` (using `BackupConfig`),
+> which operates through the `CognitiveMemoryOps` trait on file-level snapshots.
+> The remainder of this page is archival: it documents the removed native API.
 
-The `NativeCognitiveMemory::prune_old_backups()` method enforces a
+**Module (removed in Phase 2b):** `src/cognitive_memory/backup.rs`
+
+The `NativeCognitiveMemory::prune_old_backups()` method enforced a
 retention limit on cognitive memory backup files, preventing unbounded
 disk growth in the `backups/` subdirectory of the state root.
 
-> **Note:** A separate `prune_old_backups()` function exists in
-> `src/memory_backup/mod.rs` (date-based, using `BackupConfig`). This
-> document covers the epoch-based implementation in
-> `cognitive_memory/backup.rs` which handles `.ladybug` database files.
+> **Surviving implementation:** the date-based `prune_old_backups()` in
+> `src/memory_backup/mod.rs` (using `BackupConfig`) remains the cognitive-memory
+> backup pruner after Phase 2b.
 
 ---
 

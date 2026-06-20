@@ -1,10 +1,10 @@
 //! IPC bridge between clients (meeting, engineer, etc.) and the
 //! OODA daemon's cognitive memory.
 //!
-//! The daemon holds an exclusive lock on `cognitive_memory.ladybug`. To let
+//! The daemon holds an exclusive lock on the cognitive-memory store. To let
 //! other processes read/write memory while the daemon is running, the daemon
 //! publishes a Unix-domain socket at `{socket_dir}/memory.sock` and dispatches
-//! [`MemoryRequest`] messages to its in-process [`NativeCognitiveMemory`].
+//! [`MemoryRequest`] messages to its in-process [`LibraryCognitiveMemory`](crate::cognitive_memory::LibraryCognitiveMemory).
 //!
 //! Clients use [`RemoteCognitiveMemory`] which implements
 //! [`CognitiveMemoryOps`] by sending framed JSON messages to the socket.
@@ -97,8 +97,8 @@ pub const MEMORY_SOCKET_ENV: &str = "SIMARD_MEMORY_SOCKET";
 
 /// Environment variable that opts a test out of the hermetic-state-root
 /// guard. Read by the cfg(test)-only assertion sites
-/// (`save_goal_board` / `save_goal_board_with_removals`,
-/// `NativeCognitiveMemory::store_fact`, `launch_writer_bridge`). The
+/// (`save_goal_board` / `save_goal_board_with_removals`, the cognitive-memory
+/// writer, `launch_writer_bridge`). The
 /// only legitimate consumer is the npm install-real / install-fake
 /// harness; new uses require code-review acknowledgement.
 pub const TEST_ALLOW_LIVE_STATE_ENV: &str = "SIMARD_TEST_ALLOW_LIVE_STATE";
@@ -363,12 +363,10 @@ impl CognitiveMemoryOps for SharedMemory {
 
 /// Remove `cognitive_memory.open.lock` if no running process holds it.
 ///
-/// The lock file is created by [`NativeCognitiveMemory::open`] and normally
-/// released automatically when the owning process exits. In rare cases
-/// (e.g. SIGKILL, OOM) the file can linger with no owner — which has been
-/// observed to confuse LadybugDB's own locking. This function writes the
-/// current pid into the file on successful open; on startup, if the recorded
-/// pid isn't alive, the file is removed.
+/// This lock file is a legacy artifact of the deleted native backend's
+/// open path. The library backend manages its own locking, so on current
+/// installs this file generally does not exist and the function is a no-op;
+/// it is retained to clean up stale locks left by pre-de-fork daemons.
 pub fn reap_stale_open_lock(state_root: &Path) -> SimardResult<bool> {
     let lock_path = state_root.join("cognitive_memory.ladybug.open.lock");
     if !lock_path.exists() {

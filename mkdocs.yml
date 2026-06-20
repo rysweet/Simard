@@ -53,6 +53,7 @@ nav:
     - Overview: architecture/overview.md
     - Bridge Pattern: architecture/bridge-pattern.md
     - Cognitive Memory: architecture/cognitive-memory.md
+    - Cognitive Memory — Library Adapter: architecture/cognitive-memory-library-adapter.md
     - Agent Composition: architecture/agent-composition.md
     - Implementation Plan: architecture/implementation-plan.md
   - Concepts:
@@ -79,6 +80,8 @@ nav:
     - Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
+    - Memory introspection CLI: reference/simard-memory-cli.md
+    - Goal-board prospective reconcile: reference/goal-board-prospective-reconcile.md
     - Runtime Contracts: reference/runtime-contracts.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Bridge Wire Protocol: reference/bridge-wire-protocol.md

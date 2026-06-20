@@ -9,6 +9,7 @@ related:
   - ../reference/cognitive-memory-preparation-filters.md
   - ../reference/cognitive-memory-episodic-recall.md
   - ../reference/ooda-procedural-memory.md
+  - ../reference/cognitive-memory-procedural-idempotency.md
   - ../memory.md
 ---
 
@@ -197,9 +198,10 @@ clear retrieval pattern motivates them.
 
 ## Trait surface
 
-PR-B adds two methods to `CognitiveMemoryOps`
+The pass uses two `CognitiveMemoryOps` methods
 (`src/cognitive_memory/mod.rs`), both with default no-op
-implementations so legacy bridges keep compiling:
+implementations so any backend that lacks a distilled-flag API keeps
+compiling:
 
 ```rust
 pub trait CognitiveMemoryOps {
@@ -220,20 +222,44 @@ pub trait CognitiveMemoryOps {
 }
 ```
 
-`NativeCognitiveMemory` overrides both with real implementations
-against the lbug-backed `Episode` schema.
+`LibraryCognitiveMemory` (the sole backend) **overrides both** by
+delegating to the `amplihack-memory-lib` `CognitiveMemory`, which
+exposes `mark_episode_distilled(node_id) -> bool` and
+`list_undistilled_episodes(limit) -> Vec<EpisodicMemory>` directly:
+
+```rust
+fn mark_episode_distilled(&self, node_id: &str) -> SimardResult<()> {
+    self.lock()?.mark_episode_distilled(node_id); // bool ignored (id-missing latch)
+    Ok(())
+}
+
+fn list_undistilled_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+    Ok(self.lock()?
+        .list_undistilled_episodes(limit as usize)
+        .into_iter()
+        .map(to_episode)
+        .collect())
+}
+```
+
+> **De-fork note (Phase 2b).** The native fork once owned these
+> implementations against an lbug-backed `Episode` schema. With the fork
+> deleted, the `distilled` flag and its persistence live in the library;
+> the Simard adapter simply forwards to it. (During Phase 2a the library
+> backend had no distilled-flag API and degraded these to a loud no-op —
+> that gap is closed.)
 
 ### Schema
 
-The `Episode` node gains one column:
+The library's `Episode` node carries a `distilled` flag:
 
-| Column      | Type   | Default | Meaning                                                |
-|-------------|--------|---------|--------------------------------------------------------|
-| `distilled` | `i64`  | `0`     | `1` once an episode has been processed by distillation |
+| Column      | Meaning                                                |
+|-------------|--------------------------------------------------------|
+| `distilled` | set once an episode has been processed by distillation |
 
-The migration is **lazy**: legacy rows with no `distilled` column read
-as `0` (undistilled), so the first post-upgrade pass naturally
-processes everything. No offline migration step is required.
+The library owns the column and its migration. Legacy/un-flagged rows
+read as undistilled, so the first post-upgrade pass naturally processes
+everything; no offline migration step is required.
 
 ### `compressed` vs `distilled` are independent
 
@@ -427,10 +453,10 @@ config-file or env-var override in a future PR.
 | Recipe                              | `prompt_assets/simard/recipes/distill-episodes.yaml`   |
 | Dispatcher hook                     | `src/ooda_actions/simple_actions.rs` (`dispatch_consolidate_memory`) |
 | Trait methods                       | `src/cognitive_memory/mod.rs`                          |
-| `NativeCognitiveMemory` impls       | `src/cognitive_memory/ops.rs`                          |
-| Episode schema                      | `src/cognitive_memory/schema.rs`                       |
+| Adapter impls (delegation)          | `src/cognitive_memory/library_adapter.rs`              |
+| Episode schema + `distilled` flag   | `amplihack-memory-lib` (`CognitiveMemory`)             |
 | Tests                               | `src/memory_consolidation/distillation_tests.rs`,      |
-|                                     | `src/cognitive_memory/ops.rs` (round-trip tests)       |
+|                                     | `src/cognitive_memory/tests_library_parity.rs` (round-trip) |
 
 ---
 
@@ -438,11 +464,11 @@ config-file or env-var override in a future PR.
 
 ### Trait round-trip tests
 
-In `src/cognitive_memory/ops.rs`:
+In `src/cognitive_memory/tests_library_parity.rs` (against the library backend):
 
 | Test                                              | Coverage                                                    |
 |---------------------------------------------------|-------------------------------------------------------------|
-| `list_undistilled_episodes_returns_newest_first`  | Ordering: newest by `node_id` descending. Because episode node ids are UUID-v7 (time-prefixed), `ORDER BY e.id DESC` is monotonically newest-first without consulting `temporal_index`. |
+| `list_undistilled_episodes_returns_newest_first`  | Ordering: newest first. Episode ids are time-prefixed, so the library returns newest-first without consulting `temporal_index`. |
 | `mark_episode_distilled_round_trips`              | `mark` then `list` excludes the marked row                  |
 | `list_undistilled_respects_limit`                 | `limit` parameter honoured                                  |
 

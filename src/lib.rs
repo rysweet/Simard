@@ -168,7 +168,7 @@ pub use bridge::{
 pub use bridge_circuit::{CircuitBreakerConfig, CircuitBreakerTransport, CircuitState};
 pub use bridge_subprocess::{InMemoryBridgeTransport, SubprocessBridgeTransport};
 pub use build_lock::{BuildLock, BuildLockGuard};
-pub use cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+pub use cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 pub use cost_tracking::{
     CostEntry, CostSummary, daily_summary, estimate_tokens, record_cost, weekly_summary,
 };
@@ -263,7 +263,7 @@ pub use memory_consolidation::{
     FactExtraction, PreparedContext, consolidation_intake, consolidation_persistence,
     execution_memory_operations, intake_memory_operations, persistence_memory_operations,
     preparation_memory_operations, preparation_memory_operations_with_active_slugs,
-    reflection_memory_operations,
+    recall_procedures_for_objective, reflection_memory_operations,
 };
 pub use ooda_actions::dispatch_actions;
 pub use ooda_loop::{

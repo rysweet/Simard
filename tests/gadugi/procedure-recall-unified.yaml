@@ -1,0 +1,128 @@
+name: "Cognitive Memory — Unified Procedure Recall"
+description: >
+  Outside-in gate for ws2 #2295 (PR #2297): verifies that distilled
+  procedures emitted each OODA cycle surface in the prepared prompt
+  context through the SAME unified, tokenized recall path used by the
+  bootstrap procedures. Prior to the fix, base-type adapter turns passed
+  the entire raw objective sentence to a single Cypher `name CONTAINS
+  '<full sentence>'` query that never matched any stored procedure, so
+  only bootstrap procedures ever appeared in
+  `prepared context (… procedures …)`. These steps drive the new
+  live-schema regression gates in
+  `tests/cognitive_memory_procedure_recall_unified.rs`, which exercise
+  the real `cognitive_memory.ladybug` schema (no storage-layer mocks).
+version: "1.0.0"
+
+config:
+  timeout: 180000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 180000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Distilled procedure with a matching trigger surfaces for a matching objective"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cognitive_memory_procedure_recall_unified
+        distilled_procedure_with_foo_bar_trigger_surfaces_for_foo_objective
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test distilled_procedure_with_foo_bar_trigger_surfaces_for_foo_objective ... ok"
+
+  - name: "Bootstrap AND distilled procedures both surface under one objective"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cognitive_memory_procedure_recall_unified
+        bootstrap_and_distilled_pr_merge_procedures_both_surface
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test bootstrap_and_distilled_pr_merge_procedures_both_surface ... ok"
+
+  - name: "Recall is case-insensitive via consistent lowercase folding"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cognitive_memory_procedure_recall_unified
+        recall_is_case_insensitive_via_consistent_lowercase_folding
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test recall_is_case_insensitive_via_consistent_lowercase_folding ... ok"
+
+  - name: "Derived triggers no longer emit sub-three-char file extensions"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cognitive_memory_procedure_recall_unified
+        derived_triggers_no_longer_emit_sub_three_char_extensions
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test derived_triggers_no_longer_emit_sub_three_char_extensions ... ok"
+
+  - name: "Distilled procedure surfaces end-to-end through the base-type adapter call site"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cognitive_memory_procedure_recall_unified
+        distilled_procedure_surfaces_through_prepare_turn_context
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test distilled_procedure_surfaces_through_prepare_turn_context ... ok"
+
+assertions: []
+
+cleanup:
+  - name: "Test agent cleanup"
+    agent: "test-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "cognitive-memory"
+    - "procedural-recall"
+    - "ooda"
+    - "regression"
+    - "ws2-2295"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

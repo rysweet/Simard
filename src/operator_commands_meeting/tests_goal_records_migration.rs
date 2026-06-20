@@ -10,7 +10,7 @@
 //! `crate::goal_curation::active_goals_as_records` and
 //! `crate::memory_ipc::launch_writer_bridge`.
 
-use crate::cognitive_memory::NativeCognitiveMemory;
+use crate::cognitive_memory::LibraryCognitiveMemory;
 use crate::goal_curation::{
     ActiveGoal, GoalBoard, GoalProgress, active_goals_as_records, load_goal_board, save_goal_board,
 };
@@ -20,7 +20,7 @@ use crate::test_support::HermeticState;
 use super::run_goal_curation_read_probe;
 
 fn seed_active_only(state_root: &std::path::Path, n: usize) -> GoalBoard {
-    let mem = NativeCognitiveMemory::open(state_root).expect("open native memory");
+    let mem = LibraryCognitiveMemory::open(state_root).expect("open native memory");
     let mut board = GoalBoard::new();
     for i in 0..n {
         board.active.push(ActiveGoal {
@@ -69,7 +69,7 @@ fn meeting_goal_curation_read_probe_succeeds_with_empty_cognitive_memory() {
     let state = HermeticState::new();
     let root = state.state_root().to_path_buf();
     {
-        let mem = NativeCognitiveMemory::open(&root).expect("open native memory");
+        let mem = LibraryCognitiveMemory::open(&root).expect("open native memory");
         save_goal_board(&GoalBoard::new(), &mem).expect("save empty board");
     }
     assert!(!root.join("goal_records.json").exists());
@@ -94,7 +94,7 @@ fn active_goals_as_records_round_trips_through_cognitive_memory() {
     let root = state.state_root().to_path_buf();
     let seeded = seed_active_only(&root, 4);
 
-    let mem = NativeCognitiveMemory::open(&root).expect("reopen native memory");
+    let mem = LibraryCognitiveMemory::open(&root).expect("reopen native memory");
     let loaded = load_goal_board(&mem).expect("load_goal_board");
     let records = active_goals_as_records(&loaded);
 

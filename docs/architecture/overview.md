@@ -131,7 +131,7 @@ Simard uses a bridge abstraction (`BridgeTransport` trait) for knowledge and gym
 ```
 Simard (Rust) ──native──→ NativeKnowledge (rusqlite, pack manifests)
               ──native──→ NativeGym (built-in scenario definitions)
-              ──native──→ NativeCognitiveMemory (LadybugDB)
+              ──native──→ LibraryCognitiveMemory (amplihack-memory-lib → LadybugDB)
 ```
 
 Each bridge has:

@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::routes::resolve_state_root;
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory, as_f64, as_i64, as_str};
 use crate::memory_cognitive::CognitiveStatistics;
+use crate::memory_ipc::open_reader_bridge;
 
 // ---------------------------------------------------------------------------
 // Memory history — per-cycle snapshots with deltas and growth rates (#2136)
@@ -178,9 +178,10 @@ pub(crate) async fn memory_history() -> Json<Value> {
     let state_root = resolve_state_root();
     let history_path = state_root.join("memory_history.json");
 
-    // Get current stats
+    // Get current stats via the library backend, routed through
+    // `open_reader_bridge` so the daemon's IPC writer serves embedded reads.
     let stats_result =
-        NativeCognitiveMemory::open_read_only(&state_root).and_then(|mem| mem.get_statistics());
+        open_reader_bridge(&state_root).and_then(|reader| reader.ops().get_statistics());
 
     let stats = match stats_result {
         Ok(s) => s,
@@ -225,243 +226,24 @@ pub(crate) async fn memory_history() -> Json<Value> {
 // Recent memories — plain-English view for #1997
 // ---------------------------------------------------------------------------
 
-/// Extract an approximate Unix timestamp (seconds) from a UUIDv7 simple-hex
-/// string embedded in a LadybugDB node id like `epi_<uuid_hex>`.
-fn timestamp_from_v7_id(id: &str) -> Option<f64> {
-    let hex = id.split('_').nth(1)?;
-    if hex.len() < 12 {
-        return None;
-    }
-    // UUIDv7 encodes the Unix-epoch millisecond timestamp in the first 48
-    // bits (12 hex characters).
-    let millis = u64::from_str_radix(&hex[..12], 16).ok()?;
-    Some(millis as f64 / 1000.0)
-}
-
-/// Plain-English label for an internal node type.
-fn human_category(node_type: &str) -> &'static str {
-    match node_type {
-        "WorkingMemory" => "Current task context",
-        "SemanticFact" => "Learned fact",
-        "EpisodicMemory" => "Past event",
-        "ProceduralMemory" => "How-to knowledge",
-        "ProspectiveMemory" => "Planned reminder",
-        "SensoryBuffer" => "Recent observation",
-        _ => "Memory",
-    }
-}
-
-/// `GET /api/memory/recent` — returns recent memories sorted by time,
-/// with plain-English summaries and a count of items from the last hour.
+/// `GET /api/memory/recent` — recent-memory listing.
+///
+/// De-fork Phase 2b (issue #2307): this panel previously enumerated every
+/// node type with raw Cypher against the deleted native LadybugDB schema. The
+/// library backend exposes no equivalent "list all nodes by type" API through
+/// `CognitiveMemoryOps`, so the per-item listing is reported as unavailable
+/// rather than reading the abandoned native store. Aggregate counts remain
+/// available via `GET /api/memory/history`.
 pub(crate) async fn memory_recent() -> Json<Value> {
-    let state_root = resolve_state_root();
-    let mem = match NativeCognitiveMemory::open_read_only(&state_root) {
-        Ok(m) => m,
-        Err(e) => {
-            return Json(json!({
-                "items": [],
-                "total": 0,
-                "last_hour_count": 0,
-                "error": format!("Cannot open memory store: {e}"),
-            }));
-        }
-    };
-
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
-    let one_hour_ago = now_secs - 3600.0;
-
-    let query_rows =
-        |cypher: &str| -> Vec<Vec<lbug::Value>> { mem.query(cypher).unwrap_or_default() };
-
-    #[derive(Debug)]
-    struct RecentItem {
-        id: String,
-        node_type: &'static str,
-        summary: String,
-        detail: String,
-        ts: f64,
-    }
-
-    let mut items: Vec<RecentItem> = Vec::new();
-
-    // Working memory
-    for row in query_rows("MATCH (w:WorkingMemory) RETURN w.id, w.content, w.slot_type LIMIT 50") {
-        if let Some(id) = row.first().and_then(as_str) {
-            let content = row.get(1).and_then(as_str).unwrap_or("");
-            let summary = first_sentence(content);
-            items.push(RecentItem {
-                ts: timestamp_from_v7_id(id).unwrap_or(0.0),
-                id: id.to_string(),
-                node_type: "WorkingMemory",
-                summary,
-                detail: content.to_string(),
-            });
-        }
-    }
-
-    // Semantic facts
-    for row in query_rows("MATCH (f:Fact) RETURN f.id, f.concept, f.content, f.confidence LIMIT 50")
-    {
-        if let Some(id) = row.first().and_then(as_str) {
-            let concept = row.get(1).and_then(as_str).unwrap_or("");
-            let content = row.get(2).and_then(as_str).unwrap_or("");
-            let summary = if concept.is_empty() {
-                first_sentence(content)
-            } else {
-                concept.to_string()
-            };
-            items.push(RecentItem {
-                ts: timestamp_from_v7_id(id).unwrap_or(0.0),
-                id: id.to_string(),
-                node_type: "SemanticFact",
-                summary,
-                detail: content.to_string(),
-            });
-        }
-    }
-
-    // Episodes
-    for row in query_rows("MATCH (e:Episode) RETURN e.id, e.content, e.source_label LIMIT 50") {
-        if let Some(id) = row.first().and_then(as_str) {
-            let content = row.get(1).and_then(as_str).unwrap_or("");
-            let summary = first_sentence(content);
-            items.push(RecentItem {
-                ts: timestamp_from_v7_id(id).unwrap_or(0.0),
-                id: id.to_string(),
-                node_type: "EpisodicMemory",
-                summary,
-                detail: content.to_string(),
-            });
-        }
-    }
-
-    // Procedures
-    for row in query_rows("MATCH (p:Procedure) RETURN p.id, p.name, p.steps LIMIT 50") {
-        if let Some(id) = row.first().and_then(as_str) {
-            let name = row.get(1).and_then(as_str).unwrap_or("");
-            let summary = if name.is_empty() {
-                "(unnamed procedure)".to_string()
-            } else {
-                name.to_string()
-            };
-            items.push(RecentItem {
-                ts: timestamp_from_v7_id(id).unwrap_or(0.0),
-                id: id.to_string(),
-                node_type: "ProceduralMemory",
-                summary,
-                detail: row.get(2).and_then(as_str).unwrap_or("").to_string(),
-            });
-        }
-    }
-
-    // Prospective memory
-    for row in
-        query_rows("MATCH (p:Prospective) RETURN p.id, p.description, p.trigger_condition LIMIT 50")
-    {
-        if let Some(id) = row.first().and_then(as_str) {
-            let desc = row.get(1).and_then(as_str).unwrap_or("");
-            let summary = first_sentence(desc);
-            items.push(RecentItem {
-                ts: timestamp_from_v7_id(id).unwrap_or(0.0),
-                id: id.to_string(),
-                node_type: "ProspectiveMemory",
-                summary,
-                detail: desc.to_string(),
-            });
-        }
-    }
-
-    // Sensory
-    for row in query_rows("MATCH (s:Sensory) RETURN s.id, s.modality, s.raw_data LIMIT 50") {
-        if let Some(id) = row.first().and_then(as_str) {
-            let modality = row.get(1).and_then(as_str).unwrap_or("");
-            let raw = row.get(2).and_then(as_str).unwrap_or("");
-            let summary = if raw.is_empty() {
-                format!("({modality} observation)")
-            } else {
-                first_sentence(raw)
-            };
-            items.push(RecentItem {
-                ts: timestamp_from_v7_id(id).unwrap_or(0.0),
-                id: id.to_string(),
-                node_type: "SensoryBuffer",
-                summary,
-                detail: raw.to_string(),
-            });
-        }
-    }
-
-    // Sort newest first
-    items.sort_by(|a, b| b.ts.partial_cmp(&a.ts).unwrap_or(std::cmp::Ordering::Equal));
-
-    let total = items.len();
-    let last_hour_count = items.iter().filter(|i| i.ts >= one_hour_ago).count();
-
-    let json_items: Vec<Value> = items
-        .iter()
-        .take(100)
-        .map(|item| {
-            let ts_str = if item.ts > 0.0 {
-                chrono::DateTime::from_timestamp(item.ts as i64, 0)
-                    .map(|dt| dt.to_rfc3339())
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            json!({
-                "id": item.id,
-                "category": human_category(item.node_type),
-                "summary": item.summary,
-                "detail": item.detail,
-                "timestamp": ts_str,
-                "epoch_secs": item.ts,
-            })
-        })
-        .collect();
-
     Json(json!({
-        "items": json_items,
-        "total": total,
-        "last_hour_count": last_hour_count,
+        "items": [],
+        "total": 0,
+        "last_hour_count": 0,
+        "available": false,
+        "note": "Per-item recent-memory listing is unavailable on the library \
+                 backend (de-fork Phase 2b, #2307). See /api/memory/history for counts.",
         "server_time": chrono::Utc::now().to_rfc3339(),
     }))
-}
-
-/// Extract the first sentence (or first ~120 chars) as a summary.
-fn first_sentence(text: &str) -> String {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return "(empty)".to_string();
-    }
-    // If it starts with '[' it might be a consolidation tag — skip it
-    let cleaned = if trimmed.starts_with('[') {
-        trimmed
-            .find(']')
-            .map(|i| &trimmed[i + 1..])
-            .unwrap_or(trimmed)
-            .trim()
-    } else {
-        trimmed
-    };
-    if cleaned.is_empty() {
-        return trimmed.chars().take(120).collect();
-    }
-    // Find first sentence boundary
-    for (i, c) in cleaned.char_indices() {
-        if i > 10 && (c == '.' || c == '!' || c == '?') {
-            let sentence: String = cleaned[..=i].to_string();
-            if sentence.len() <= 200 {
-                return sentence;
-            }
-        }
-        if i >= 120 {
-            return format!("{}…", &cleaned[..i]);
-        }
-    }
-    cleaned.to_string()
 }
 
 pub(crate) async fn memory_search(Json(body): Json<Value>) -> Json<Value> {
@@ -566,177 +348,24 @@ pub(crate) async fn memory_search(Json(body): Json<Value>) -> Json<Value> {
     }))
 }
 
+/// `GET /api/memory/graph` — memory graph visualization.
+///
+/// De-fork Phase 2b (issue #2307): the node/edge graph was built from raw
+/// Cypher against the deleted native schema. Aggregate statistics are still
+/// available through the trait (routed via `open_reader_bridge`), so those are
+/// surfaced; the per-node graph is reported as unavailable rather than reading
+/// the abandoned native store.
 pub(crate) async fn memory_graph() -> Json<Value> {
     let state_root = resolve_state_root();
-    let mem = match NativeCognitiveMemory::open_read_only(&state_root) {
-        Ok(m) => m,
-        Err(e) => {
-            return Json(json!({
-                "nodes": [],
-                "edges": [],
-                "stats": {},
-                "error": format!("Cannot open cognitive memory: {e}"),
-            }));
-        }
-    };
-
-    let stats = mem.get_statistics().unwrap_or_default();
-    let mut nodes: Vec<Value> = Vec::new();
-    let mut edges: Vec<Value> = Vec::new();
-
-    let query_rows =
-        |cypher: &str| -> Vec<Vec<lbug::Value>> { mem.query(cypher).unwrap_or_default() };
-
-    for row in query_rows(
-        "MATCH (w:WorkingMemory) RETURN w.id, w.slot_type, w.content, w.task_id, w.relevance LIMIT 100",
-    ) {
-        if let Some(id) = row.first().and_then(as_str) {
-            let content = row.get(2).and_then(as_str).unwrap_or("");
-            let label = if content.len() > 60 {
-                format!("{}…", &content[..60])
-            } else {
-                content.to_string()
-            };
-            nodes.push(json!({
-                "id": id, "type": "WorkingMemory", "label": label,
-                "content": content,
-                "task_id": row.get(3).and_then(as_str).unwrap_or(""),
-                "relevance": row.get(4).and_then(as_f64).unwrap_or(0.0),
-            }));
-        }
-    }
-
-    for row in query_rows(
-        "MATCH (f:Fact) RETURN f.id, f.concept, f.content, f.confidence, f.source_id, f.tags LIMIT 100",
-    ) {
-        if let Some(id) = row.first().and_then(as_str) {
-            let concept = row.get(1).and_then(as_str).unwrap_or("");
-            let content = row.get(2).and_then(as_str).unwrap_or("");
-            let label = if concept.is_empty() {
-                if content.len() > 60 {
-                    format!("{}…", &content[..60])
-                } else {
-                    content.to_string()
-                }
-            } else {
-                concept.to_string()
-            };
-            nodes.push(json!({
-                "id": id, "type": "SemanticFact", "label": label,
-                "content": content, "confidence": row.get(3).and_then(as_f64).unwrap_or(0.0),
-                "source_id": row.get(4).and_then(as_str).unwrap_or(""),
-            }));
-        }
-    }
-
-    for row in query_rows(
-        "MATCH (e:Episode) RETURN e.id, e.content, e.source_label, e.temporal_index LIMIT 100",
-    ) {
-        if let Some(id) = row.first().and_then(as_str) {
-            let content = row.get(1).and_then(as_str).unwrap_or("");
-            let label = if content.len() > 60 {
-                format!("{}…", &content[..60])
-            } else {
-                content.to_string()
-            };
-            nodes.push(json!({
-                "id": id, "type": "EpisodicMemory", "label": label,
-                "content": content,
-                "temporal_index": row.get(3).and_then(as_i64).unwrap_or(0),
-            }));
-        }
-    }
-
-    for row in query_rows(
-        "MATCH (p:Procedure) RETURN p.id, p.name, p.steps, p.prerequisites, p.usage_count LIMIT 100",
-    ) {
-        if let Some(id) = row.first().and_then(as_str) {
-            nodes.push(json!({
-                "id": id, "type": "ProceduralMemory",
-                "label": row.get(1).and_then(as_str).unwrap_or(""),
-                "content": row.get(2).and_then(as_str).unwrap_or(""),
-                "usage_count": row.get(4).and_then(as_i64).unwrap_or(0),
-            }));
-        }
-    }
-
-    for row in query_rows(
-        "MATCH (p:Prospective) RETURN p.id, p.description, p.trigger_condition, p.action_on_trigger, p.status, p.priority LIMIT 100",
-    ) {
-        if let Some(id) = row.first().and_then(as_str) {
-            nodes.push(json!({
-                "id": id, "type": "ProspectiveMemory",
-                "label": row.get(1).and_then(as_str).unwrap_or(""),
-                "content": row.get(2).and_then(as_str).unwrap_or(""),
-                "status": row.get(4).and_then(as_str).unwrap_or("pending"),
-            }));
-        }
-    }
-
-    for row in query_rows("MATCH (s:Sensory) RETURN s.id, s.modality, s.raw_data LIMIT 100") {
-        if let Some(id) = row.first().and_then(as_str) {
-            let modality = row.get(1).and_then(as_str).unwrap_or("");
-            let raw = row.get(2).and_then(as_str).unwrap_or("");
-            let label = if raw.len() > 40 {
-                format!("[{modality}] {}…", &raw[..40])
-            } else {
-                format!("[{modality}] {raw}")
-            };
-            nodes.push(json!({
-                "id": id, "type": "SensoryBuffer", "label": label,
-                "content": raw, "modality": modality,
-            }));
-        }
-    }
-
-    // Infer edges: link WorkingMemory to nodes sharing the same task_id via source_id
-    let working_nodes: Vec<(String, String)> = nodes
-        .iter()
-        .filter(|n| n["type"] == "WorkingMemory")
-        .filter_map(|n| {
-            let id = n["id"].as_str()?.to_string();
-            let tid = n["task_id"].as_str()?.to_string();
-            if tid.is_empty() {
-                None
-            } else {
-                Some((id, tid))
-            }
-        })
-        .collect();
-    for wn in &working_nodes {
-        for other in &nodes {
-            if other["type"] == "WorkingMemory" {
-                continue;
-            }
-            if let Some(oid) = other["id"].as_str()
-                && let Some(src) = other["source_id"].as_str()
-                && !src.is_empty()
-                && src == wn.1
-            {
-                edges.push(json!({"source": wn.0, "target": oid, "type": "REFERENCES"}));
-            }
-        }
-    }
-
-    // Link episodes with sequential temporal indices
-    let mut episode_ids: Vec<(String, i64)> = nodes
-        .iter()
-        .filter(|n| n["type"] == "EpisodicMemory")
-        .filter_map(|n| {
-            Some((
-                n["id"].as_str()?.to_string(),
-                n["temporal_index"].as_i64().unwrap_or(0),
-            ))
-        })
-        .collect();
-    episode_ids.sort_by_key(|e| e.1);
-    for pair in episode_ids.windows(2) {
-        edges.push(json!({"source": pair[0].0, "target": pair[1].0, "type": "FOLLOWS"}));
-    }
-
+    let stats = open_reader_bridge(&state_root)
+        .and_then(|reader| reader.ops().get_statistics())
+        .unwrap_or_default();
     Json(json!({
-        "nodes": nodes,
-        "edges": edges,
+        "nodes": [],
+        "edges": [],
+        "available": false,
+        "note": "Memory graph visualization is unavailable on the library \
+                 backend (de-fork Phase 2b, #2307); aggregate stats are shown.",
         "stats": {
             "working": stats.working_count,
             "semantic": stats.semantic_count,

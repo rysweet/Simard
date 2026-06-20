@@ -6,7 +6,7 @@ use super::current_work::read_recent_cycle_reports;
 use super::cycle_source;
 use super::dashboard_goal_board_snapshot;
 use super::routes::resolve_state_root;
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use crate::memory_ipc::open_reader_bridge;
 
 // ---------------------------------------------------------------------------
 // Workboard API — aggregated view of Simard's current mental state
@@ -274,7 +274,8 @@ pub(crate) async fn workboard() -> Json<Value> {
     let mut working_memory: Vec<Value> = Vec::new();
     let mut cognitive_stats: Option<Value> = None;
 
-    if let Ok(mem) = NativeCognitiveMemory::open_read_only(&state_root) {
+    if let Ok(reader) = open_reader_bridge(&state_root) {
+        let mem = reader.ops();
         // Cognitive statistics
         if let Ok(stats) = mem.get_statistics() {
             facts_count = stats.semantic_count;
@@ -289,44 +290,29 @@ pub(crate) async fn workboard() -> Json<Value> {
             }));
         }
 
-        // Working memory slots. Read *all* active slots from the same store
-        // the Memory tab counts (`working_count`) so the panel's slot count
-        // agrees with it instead of showing 0 (#1679). Slots are keyed by the
-        // task/session id that wrote them, which need not match a currently
-        // active goal; the per-goal lookup used previously therefore missed
-        // every populated slot. Map the slot's task id back to a goal
-        // description when one is active for a human-readable label (#1683).
-        let goal_desc: std::collections::HashMap<String, String> = goal_board
-            .as_ref()
-            .map(|board| {
-                board
-                    .active
-                    .iter()
-                    .map(|g| (g.id.clone(), g.description.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if let Ok(slots) = mem.get_all_working() {
-            for slot in slots {
-                let type_label = human_slot_type(&slot.slot_type);
-                let goal_label = goal_desc
-                    .get(&slot.task_id)
-                    .cloned()
-                    .unwrap_or_else(|| slot.task_id.clone());
-                let relevance_label = if slot.relevance >= 0.8 {
-                    "High"
-                } else if slot.relevance >= 0.5 {
-                    "Medium"
-                } else {
-                    "Low"
-                };
-                working_memory.push(json!({
-                    "type_label": type_label,
-                    "content": slot.content,
-                    "goal": goal_label,
-                    "relevance_label": relevance_label,
-                    "relevance": slot.relevance,
-                }));
+        // Working memory slots for each active goal (#1683: human-readable labels)
+        if let Some(board) = &goal_board {
+            for goal in &board.active {
+                if let Ok(slots) = mem.get_working(&goal.id) {
+                    for slot in slots {
+                        let type_label = human_slot_type(&slot.slot_type);
+                        let goal_label = &goal.description;
+                        let relevance_label = if slot.relevance >= 0.8 {
+                            "High"
+                        } else if slot.relevance >= 0.5 {
+                            "Medium"
+                        } else {
+                            "Low"
+                        };
+                        working_memory.push(json!({
+                            "type_label": type_label,
+                            "content": slot.content,
+                            "goal": goal_label,
+                            "relevance_label": relevance_label,
+                            "relevance": slot.relevance,
+                        }));
+                    }
+                }
             }
         }
 

@@ -5,7 +5,6 @@
 //! and reset without touching global state outside their scope.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -37,16 +36,4 @@ pub fn cognitive_memory_silent_drop_count(kind: &str, site: &str) -> u64 {
 pub fn scoped_reset() {
     let mut map = counters().lock().expect("metrics lock poisoned");
     map.clear();
-}
-
-// ============================================================================
-// PruneOutcome — structured result from prune_old_backups
-// ============================================================================
-
-/// Outcome of [`NativeCognitiveMemory::prune_old_backups`]: the caller sees
-/// both how many files were successfully removed and which (if any) failed.
-#[derive(Debug)]
-pub struct PruneOutcome {
-    pub removed: usize,
-    pub failed: Vec<(PathBuf, std::io::Error)>,
 }

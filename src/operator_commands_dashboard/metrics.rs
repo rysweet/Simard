@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use super::dashboard_goal_board_snapshot;
 use super::routes::resolve_state_root;
 use super::subagent::{count_json_records, file_metrics};
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use crate::memory_ipc::open_reader_bridge;
 
 // ---------------------------------------------------------------------------
 // Memory metrics panel
@@ -33,11 +33,12 @@ pub(crate) async fn memory_metrics() -> Json<Value> {
         .map(|b| (b.active.len() + b.backlog.len()) as u64)
         .unwrap_or(0);
 
-    // Query NativeCognitiveMemory (LadybugDB) for live statistics (#419).
-    // Capture the error so the dashboard can show *why* data is missing
-    // instead of silently returning zeros.
+    // Query the library-backed cognitive memory for live statistics (#419),
+    // routed through `open_reader_bridge` so the daemon's IPC writer serves the
+    // read when running embedded. Capture the error so the dashboard can show
+    // *why* data is missing instead of silently returning zeros.
     let native_result =
-        NativeCognitiveMemory::open_read_only(&state_root).and_then(|mem| mem.get_statistics());
+        open_reader_bridge(&state_root).and_then(|reader| reader.ops().get_statistics());
     let native_error = native_result.as_ref().err().map(|e| e.to_string());
     let native_stats = native_result.ok();
 
@@ -57,7 +58,9 @@ pub(crate) async fn memory_metrics() -> Json<Value> {
         .map(|s| s.total())
         .unwrap_or(fact_count + evidence_count + goal_count);
 
-    let db_path = state_root.join("cognitive_memory.ladybug");
+    // De-fork Phase 2b (#2307): the library backend persists at
+    // `<state_root>/cognitive`, replacing the native `cognitive_memory.ladybug`.
+    let db_path = state_root.join("cognitive");
 
     Json(json!({
         "state_root": state_root.to_string_lossy(),

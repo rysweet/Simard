@@ -376,3 +376,91 @@ fn preparation_does_not_filter_other_concepts() {
         "pr-pattern fact must pass through filters; concepts: {concepts:?}"
     );
 }
+
+/// **TDD red → green (issue #2302): the "facts always zero" defect.**
+///
+/// End-to-end through the real `LibraryCognitiveMemory` (not a mock
+/// bridge) so the actual `search_facts` body is exercised. Stores a
+/// keyword-bearing learned fact and a valid `goal-store:record` fact,
+/// then prepares with a realistic multi-word objective and the live
+/// active slug set. Both facts must surface in `PreparedContext`.
+///
+/// **Discriminating assertion:** the `ci-pattern` keyword fact. Before
+/// the fix the per-fragment recall passes the whole 38-char objective to
+/// `search_facts` as one `CONTAINS` needle, so no fact substring matches
+/// and `ci-pattern` never lands in `relevant_facts` — the prepared
+/// context shows zero learned facts on every cycle. After tokenization
+/// the shared `auth`/`module` keywords recall it.
+///
+/// (`relevant_facts.len() > 0` and the `goal-store:record` assertion
+/// pass even pre-fix because the goal-fact load uses the exact-concept
+/// path, so they are not the red signal — they guard that the goal-load
+/// path keeps working alongside the new keyword recall.)
+#[test]
+fn preparation_recalls_keyword_and_goal_facts() {
+    use crate::goals::{GoalRecord, GoalStatus};
+    use crate::session::SessionPhase;
+
+    let mem = crate::cognitive_memory::LibraryCognitiveMemory::in_memory().unwrap();
+
+    // A learned fact whose CONTENT shares the keywords "auth"/"module"
+    // with the objective but does NOT contain the full objective verbatim.
+    mem.store_fact(
+        "ci-pattern",
+        "the auth module integration tests are flaky under heavy load",
+        0.8,
+        &[],
+        "episode-1",
+    )
+    .unwrap();
+
+    // A goal record filed under the goal-store:record concept. Its slug
+    // is in the live active set, so the stale-slug filter keeps it.
+    let goal = GoalRecord {
+        slug: "fix-auth".to_string(),
+        title: "Stabilize auth module tests".to_string(),
+        rationale: "flaky CI blocks merges".to_string(),
+        status: GoalStatus::Active,
+        priority: 1,
+        owner_identity: "simard".to_string(),
+        source_session_id: test_session_id(),
+        updated_in: SessionPhase::Reflection,
+    };
+    mem.store_fact(
+        crate::goals::GOAL_STORE_FACT_CONCEPT,
+        &serde_json::to_string(&goal).unwrap(),
+        1.0,
+        &[],
+        "goal-store",
+    )
+    .unwrap();
+
+    let objective = "investigate the failing auth module CI";
+    let active: HashSet<&str> = ["fix-auth"].into_iter().collect();
+
+    let ctx = prep_with_active_slugs(objective, &test_session_id(), &mem, &active).unwrap();
+
+    let concepts: Vec<String> = ctx
+        .relevant_facts
+        .iter()
+        .map(|f| f.concept.clone())
+        .collect();
+
+    assert!(
+        !ctx.relevant_facts.is_empty(),
+        "prepared context must contain facts (the 'facts always zero' \
+         defect); concepts: {concepts:?}"
+    );
+    assert!(
+        ctx.relevant_facts.iter().any(|f| f.concept == "ci-pattern"),
+        "keyword-bearing fact must surface via tokenized per-fragment \
+         recall (was always missing pre-#2302); concepts: {concepts:?}"
+    );
+    assert!(
+        ctx.relevant_facts
+            .iter()
+            .any(|f| f.concept == crate::goals::GOAL_STORE_FACT_CONCEPT),
+        "active goal-store:record fact must surface alongside the keyword \
+         fact; concepts: {concepts:?}"
+    );
+}

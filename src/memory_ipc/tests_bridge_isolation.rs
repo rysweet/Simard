@@ -106,20 +106,23 @@ fn launch_writer_bridge_with_tempdir_state_root_does_not_touch_home_simard() {
         )
         .expect("store_fact must succeed through the hermetic writer");
 
-    // Property 1: the TempDir's DB file or its WAL exists after the
-    // write — proves the writer landed inside the TempDir.
+    // Property 1: the TempDir's library store artifact exists after the
+    // write — proves the writer landed inside the TempDir. De-fork Phase 2b
+    // (#2307): the library backend persists at `<state_root>/cognitive`
+    // (plus any `cognitive*` WAL/sidecar files), replacing the native
+    // `cognitive_memory.ladybug`.
     let tempdir_db_artifact_present = std::fs::read_dir(root)
         .expect("state root readable")
         .filter_map(|e| e.ok())
         .any(|e| {
             let n = e.file_name();
             let s = n.to_string_lossy();
-            s.starts_with("cognitive_memory.ladybug")
+            s.starts_with("cognitive")
         });
     assert!(
         tempdir_db_artifact_present,
         "after a writer bridge round-trip against state_root={}, at \
-         least one cognitive_memory.ladybug* file must exist there. \
+         least one `cognitive*` library-store artifact must exist there. \
          If none exists, the writer routed to a different DB — the \
          #1923/#1925 leak.",
         root.display(),

@@ -89,8 +89,9 @@ def main() -> int:
         cycle = (wb.get("cycle") or {}).get("number")
         engineers = len(wb.get("spawned_engineers") or [])
         live_sessions = len(sub.get("live") or [])
-        wm = len(wb.get("working_memory") or [])
         working_count = (wb.get("cognitive_statistics") or {}).get("working_count")
+        mem = ctx.request.get(f"{args.url}/api/memory").json()
+        memory_working = (mem.get("native_memory") or {}).get("working")
         action_cycles = [a.get("cycle", 0) for a in (wb.get("recent_actions") or [])]
         max_action_cycle = max(action_cycles, default=0)
 
@@ -101,11 +102,11 @@ def main() -> int:
             "recent_actions_max_cycle": max_action_cycle,
             "active_engineers": engineers,
             "terminal_live_sessions": live_sessions,
-            "working_memory_slots": wm,
-            "working_count_stat": working_count,
+            "workboard_working_count": working_count,
+            "memory_tab_working_count": memory_working,
             "cycle_consistent": cycle is not None and cycle >= max_action_cycle,
             "engineers_consistent": engineers == live_sessions,
-            "working_memory_consistent": wm == working_count,
+            "working_memory_consistent": working_count == memory_working,
         }
         (OUT_DIR / f"{args.label}-summary.txt").write_text(
             json.dumps(summary, indent=2) + "\n", encoding="utf-8"
