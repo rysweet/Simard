@@ -114,13 +114,19 @@ fn dims_value(dims: &ScoreDimensions) -> Value {
     serde_json::to_value(dims).unwrap_or_else(|_| json!({}))
 }
 
+/// Wire JSON for the all-zero dimensions object used by the degraded
+/// (`fail_*`) and synthetic (`skip_*`) results.
+fn zero_dims() -> Value {
+    dims_value(&ScoreDimensions::default())
+}
+
 /// Wire JSON for a failing scenario result (structured — never an RPC error).
 fn fail_scenario(scenario_id: &str, message: &str) -> Value {
     json!({
         "scenario_id": scenario_id,
         "success": false,
         "score": 0.0,
-        "dimensions": dims_value(&ScoreDimensions::default()),
+        "dimensions": zero_dims(),
         "question_count": 0,
         "questions_answered": 0,
         "error_message": message,
@@ -134,12 +140,45 @@ fn fail_suite(suite_id: &str, message: &str) -> Value {
         "suite_id": suite_id,
         "success": false,
         "overall_score": 0.0,
-        "dimensions": dims_value(&ScoreDimensions::default()),
+        "dimensions": zero_dims(),
         "scenario_results": [],
         "scenarios_passed": 0,
         "scenarios_total": 0,
         "error_message": message,
         "degraded_sources": [],
+    })
+}
+
+/// Wire JSON for the `SIMARD_SKIP_GYM=1` synthetic scenario result: a
+/// zero-score success that bypasses the engine and records the skip in
+/// `degraded_sources`.
+fn skip_scenario(scenario_id: &str) -> Value {
+    json!({
+        "scenario_id": scenario_id,
+        "success": true,
+        "score": 0.0,
+        "dimensions": zero_dims(),
+        "question_count": 0,
+        "questions_answered": 0,
+        "error_message": null,
+        "degraded_sources": [SKIP_GYM_SOURCE],
+    })
+}
+
+/// Wire JSON for the `SIMARD_SKIP_GYM=1` synthetic suite result: a
+/// zero-scenario success that bypasses the engine and records the skip in
+/// `degraded_sources`.
+fn skip_suite(suite_id: &str) -> Value {
+    json!({
+        "suite_id": suite_id,
+        "success": true,
+        "overall_score": 0.0,
+        "dimensions": zero_dims(),
+        "scenario_results": [],
+        "scenarios_passed": 0,
+        "scenarios_total": 0,
+        "error_message": null,
+        "degraded_sources": [SKIP_GYM_SOURCE],
     })
 }
 
@@ -206,16 +245,7 @@ pub fn register_gym_handlers(transport: &mut NativeBridgeTransport) {
 
             // SIMARD_SKIP_GYM bypasses the engine entirely for any id.
             if skip_gym() {
-                return Ok(json!({
-                    "scenario_id": scenario_id,
-                    "success": true,
-                    "score": 0.0,
-                    "dimensions": dims_value(&ScoreDimensions::default()),
-                    "question_count": 0,
-                    "questions_answered": 0,
-                    "error_message": null,
-                    "degraded_sources": [SKIP_GYM_SOURCE],
-                }));
+                return Ok(skip_scenario(scenario_id));
             }
 
             if !id_is_safe(scenario_id) {
@@ -242,17 +272,7 @@ pub fn register_gym_handlers(transport: &mut NativeBridgeTransport) {
                 .unwrap_or("progressive");
 
             if skip_gym() {
-                return Ok(json!({
-                    "suite_id": suite_id,
-                    "success": true,
-                    "overall_score": 0.0,
-                    "dimensions": dims_value(&ScoreDimensions::default()),
-                    "scenario_results": [],
-                    "scenarios_passed": 0,
-                    "scenarios_total": 0,
-                    "error_message": null,
-                    "degraded_sources": [SKIP_GYM_SOURCE],
-                }));
+                return Ok(skip_suite(suite_id));
             }
 
             // The library's run_suite joins suite_id onto output_dir with no
