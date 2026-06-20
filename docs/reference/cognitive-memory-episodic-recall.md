@@ -453,18 +453,33 @@ case-folded.
 | Item                                  | File                                                  |
 |---------------------------------------|-------------------------------------------------------|
 | `search_episodes_by_keywords` trait   | `src/cognitive_memory/mod.rs`                         |
-| `NativeCognitiveMemory` implementation| `src/cognitive_memory/ops.rs`                         |
+| `LibraryCognitiveMemory` implementation| `src/cognitive_memory/library_adapter.rs`            |
 | `PreparedContext.episodic_recall`     | `src/memory_consolidation/mod.rs`                     |
 | Tokenizer + filter + caller           | `src/memory_consolidation/mod.rs`                     |
 | Prompt injection                      | `src/ooda_actions/goal_session/advance.rs`            |
-| Tests                                 | `src/cognitive_memory/ops.rs`,                         |
+| Tests (live, library backend)         | `src/cognitive_memory/tests_pr_2299_2300_recall_triggers.rs`, |
 |                                       | `src/memory_consolidation/tests_pr_c.rs`              |
 
 ---
 
 ## Testing
 
-### Trait-level tests in `src/cognitive_memory/ops.rs`
+### Re-validation on the library backend (de-fork Phase 2b, #2308)
+
+The native `ops.rs` and its #2299 trait-level tests were **deleted** by the
+de-fork (#2308). The fix now lives query-side in
+[`LibraryCognitiveMemory::search_episodes_by_keywords`](../architecture/cognitive-memory-library-adapter.md),
+which lowercases both the stored episode `content` and every keyword before a
+Rust-side substring match — so existing verbatim-stored episodes match
+case-insensitively without a write-path migration. The live regression guards
+are in `src/cognitive_memory/tests_pr_2299_2300_recall_triggers.rs`:
+
+| Test (library backend, `LibraryCognitiveMemory::in_memory()`) | Coverage |
+|---------------------------------------------------------------|----------|
+| `episodic_recall_returns_nonzero_raw_for_objective_keyword`   | **Issue #2299:** store mixed-case content under a non-`session-` label, tokenize a realistic objective via `tokenize_objective`, call `search_episodes_by_keywords`, assert `raw > 0`. |
+| `episodic_recall_is_case_insensitive_on_library_backend`      | Minimal case-sensitivity reproduction: ALL-CAPS content recalled by a lowercased keyword returns exactly one hit. |
+
+### Historical trait-level tests in `src/cognitive_memory/ops.rs`
 
 `search_episodes_by_keywords` has **no** direct trait-level coverage on the
 base branch. This fix adds the three #2299 regression tests and backfills the

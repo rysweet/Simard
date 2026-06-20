@@ -249,3 +249,10 @@ mod tests_pr_b_distill;
 // consolidation cycles stop re-storing identical procedures.
 #[cfg(test)]
 mod tests_pr_2298_idempotency;
+
+// Issues #2299 / #2300: re-validate episodic recall (`search_episodes_by_keywords`)
+// and prospective triggers (`check_triggers`) against the library backend after
+// the de-fork (#2308) deleted the native fork where the original fixes lived.
+// Guards "0 raw episodes" (#2299) and "0 triggers" (#2300) regressions.
+#[cfg(test)]
+mod tests_pr_2299_2300_recall_triggers;

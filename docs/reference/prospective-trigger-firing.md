@@ -1,6 +1,6 @@
 ---
 title: Prospective-trigger firing
-description: How OODA preparation makes prospective-memory triggers actually fire — the slug-phrase-enriched objective probe built in ooda_loop/cycle.rs and the case-insensitive substring match in cognitive_memory/ops.rs (issue #2300).
+description: How OODA preparation makes prospective-memory triggers actually fire — the slug-phrase-enriched objective probe built in ooda_loop/cycle.rs and the case-insensitive keyword-overlap match in cognitive_memory/library_adapter.rs (amplihack-memory-lib) (issue #2300; re-validated on the library backend after de-fork #2308).
 last_updated: 2026-06-19
 owner: simard
 doc_type: reference
@@ -314,11 +314,11 @@ assert!(triggered.is_empty());           // correct: needle absent
 
 | Item                                | File                                          |
 |-------------------------------------|-----------------------------------------------|
-| `check_triggers` (match query)      | `src/cognitive_memory/ops.rs`                 |
+| `check_triggers` (match query)      | `src/cognitive_memory/library_adapter.rs` (delegates to `amplihack-memory-lib`) |
 | `build_objective_probe`             | `src/ooda_loop/cycle.rs`                       |
 | Probe call site (prepare phase)     | `src/ooda_loop/cycle.rs`                       |
 | `prospective_trigger_for` (write)   | `src/goals/cognitive_memory_store.rs`         |
-| `store_prospective` (write)         | `src/cognitive_memory/ops.rs`                  |
+| `store_prospective` (write)         | `src/cognitive_memory/library_adapter.rs` (delegates to `amplihack-memory-lib`) |
 | Live consumer (`check_triggers(objective)`) | `src/memory_consolidation/mod.rs`     |
 
 > The live consumer in `src/memory_consolidation/mod.rs` is **not
@@ -330,6 +330,22 @@ assert!(triggered.is_empty());           // correct: needle absent
 ---
 
 ## Testing
+
+### Re-validation on the library backend (de-fork Phase 2b, #2308)
+
+The native `ops.rs` `check_triggers` Cypher and its #2300 tests were **deleted**
+by the de-fork (#2308). Matching now runs in `amplihack-memory-lib` via
+[`LibraryCognitiveMemory::check_triggers`](../architecture/cognitive-memory-library-adapter.md#documented-behavioral-divergences),
+which lowercases and tokenizes both sides and fires each matching prospective
+once (a `"triggered"` mutator). The live regression guards are in
+`src/cognitive_memory/tests_pr_2299_2300_recall_triggers.rs`:
+
+| Test (library backend, `LibraryCognitiveMemory::in_memory()`) | Coverage |
+|---------------------------------------------------------------|----------|
+| `prospective_trigger_fires_for_realistic_objective`           | **Issue #2300:** store a slug-derived (`dashes→spaces`) `goal:` prospective, probe `check_triggers` with a realistic mixed-case OODA objective, assert a `goal:` trigger fires. |
+| `prospective_trigger_fires_on_keyword_overlap_without_contiguous_phrase` | Fires on tokenized keyword overlap even when the slug phrase is not a contiguous substring — proving the library's overlap semantics, not whole-phrase `CONTAINS`. |
+
+### Historical tests (native backend, removed by #2308)
 
 | Test                                                  | File | Coverage |
 |-------------------------------------------------------|------|----------|
