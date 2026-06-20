@@ -10,6 +10,7 @@ mod coverage_tests;
 // Re-export all public items so `crate::goals::X` still works.
 pub use cognitive_memory_store::CognitiveMemoryGoalStore;
 pub use cognitive_memory_store::migrate_file_backed_goal_store_if_present;
+pub use cognitive_memory_store::reconcile_board_prospectives;
 pub(crate) use cognitive_memory_store::{GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT};
 pub use seed::seed_default_goals;
 pub use store::{FileBackedGoalStore, GoalStore, InMemoryGoalStore};
