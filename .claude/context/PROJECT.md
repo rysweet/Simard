@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-2325-wire-simards-cognitive-memory-writes-to-record-pro
+## Project: issue-2299-fix-the-episodic-recall-returns-zero-defect-in-sim
 
 ## Overview
 
