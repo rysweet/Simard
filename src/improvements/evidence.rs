@@ -93,14 +93,20 @@ impl EvidenceRef {
     /// pipelines):
     ///
     /// - `review:<review-id>` or `review-id=<review-id>` / `review-id:<id>`
+    ///   (with optional `@target=<label>` suffix)
     /// - `benchmark:<suite>/<scenario>` or
-    ///   `benchmark-scenario:<suite>/<scenario>`
+    ///   `benchmark-scenario:<suite>/<scenario>` (with optional
+    ///   `@session=<session-id>` suffix)
+    /// - `benchmark-run:<suite>/<scenario>@session=<session-id>@ms=<u64>`
     /// - `score:<suite>/<scenario>@<timestamp_unix_s>`
     /// - `weak-dimension:<name>@<deficit-as-f64>`
     /// - `check-failure:<suite>/<scenario>/<check_id>:<detail>`
     /// - `session-failure:<session_id>/<signal_id>` (with optional `:<detail>`)
     ///
-    /// Anything else is preserved as [`EvidenceRef::Raw`].
+    /// These shapes are the exact inverse of [`Self::to_persisted_string`], so
+    /// every structured variant survives a `to_persisted_string` →
+    /// `parse_str` round trip. Anything else is preserved as
+    /// [`EvidenceRef::Raw`].
     pub fn parse_str(raw: &str) -> Self {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -115,24 +121,74 @@ impl EvidenceRef {
         {
             let rest = rest.trim();
             if !rest.is_empty() {
-                return Self::Review {
-                    review_id: rest.to_string(),
-                    target_label: None,
+                let (review_id, target_label) = match rest.split_once("@target=") {
+                    Some((id, label)) => {
+                        let label = label.trim();
+                        (
+                            id.trim(),
+                            if label.is_empty() {
+                                None
+                            } else {
+                                Some(label.to_string())
+                            },
+                        )
+                    }
+                    None => (rest, None),
+                };
+                if !review_id.is_empty() {
+                    return Self::Review {
+                        review_id: review_id.to_string(),
+                        target_label,
+                    };
+                }
+            }
+        }
+
+        if let Some(rest) = strip_prefix_ci(trimmed, "benchmark-run:") {
+            let rest = rest.trim();
+            if let Some((id_part, meta)) = rest.split_once("@session=")
+                && let Some((suite, scenario)) = id_part.split_once('/')
+                && let Some((session, ms_part)) = meta.split_once("@ms=")
+                && let Ok(ms) = ms_part.trim().parse::<u64>()
+                && !suite.trim().is_empty()
+                && !scenario.trim().is_empty()
+                && !session.trim().is_empty()
+            {
+                return Self::BenchmarkRunReport {
+                    suite_id: suite.trim().to_string(),
+                    scenario_id: scenario.trim().to_string(),
+                    session_id: session.trim().to_string(),
+                    run_started_at_unix_ms: ms,
                 };
             }
         }
 
         if let Some(rest) = strip_prefix_ci(trimmed, "benchmark-scenario:")
             .or_else(|| strip_prefix_ci(trimmed, "benchmark:"))
-            && let Some((suite, scenario)) = rest.trim().split_once('/')
+            && let Some((suite, scenario_and_meta)) = rest.trim().split_once('/')
             && !suite.trim().is_empty()
-            && !scenario.trim().is_empty()
         {
-            return Self::BenchmarkScenario {
-                suite_id: suite.trim().to_string(),
-                scenario_id: scenario.trim().to_string(),
-                session_id: None,
+            let (scenario, session_id) = match scenario_and_meta.split_once("@session=") {
+                Some((scenario, sid)) => {
+                    let sid = sid.trim();
+                    (
+                        scenario,
+                        if sid.is_empty() {
+                            None
+                        } else {
+                            Some(sid.to_string())
+                        },
+                    )
+                }
+                None => (scenario_and_meta, None),
             };
+            if !scenario.trim().is_empty() {
+                return Self::BenchmarkScenario {
+                    suite_id: suite.trim().to_string(),
+                    scenario_id: scenario.trim().to_string(),
+                    session_id,
+                };
+            }
         }
 
         if let Some(rest) = strip_prefix_ci(trimmed, "score:")
@@ -272,12 +328,13 @@ impl EvidenceRef {
 }
 
 fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-    if value.len() < prefix.len() {
-        return None;
-    }
-    let (head, tail) = value.split_at(prefix.len());
+    // `str::get(..n)` returns `None` both when `n` is past the end and when it
+    // lands inside a multibyte UTF-8 character, so it is panic-safe at a byte
+    // boundary that splits a char (e.g. an em-dash or emoji in agent-authored
+    // evidence). `str::split_at` would panic in that case.
+    let head = value.get(..prefix.len())?;
     if head.eq_ignore_ascii_case(prefix) {
-        Some(tail)
+        Some(&value[prefix.len()..])
     } else {
         None
     }
@@ -418,10 +475,25 @@ mod tests {
                 review_id: "rev-7".into(),
                 target_label: None,
             },
+            EvidenceRef::Review {
+                review_id: "rev-8".into(),
+                target_label: Some("operator-review".into()),
+            },
             EvidenceRef::BenchmarkScenario {
                 suite_id: "gym".into(),
                 scenario_id: "echo".into(),
                 session_id: None,
+            },
+            EvidenceRef::BenchmarkScenario {
+                suite_id: "gym".into(),
+                scenario_id: "echo".into(),
+                session_id: Some("sess-1".into()),
+            },
+            EvidenceRef::BenchmarkRunReport {
+                suite_id: "gym".into(),
+                scenario_id: "echo".into(),
+                session_id: "sess-1".into(),
+                run_started_at_unix_ms: 1_700_000_000_000,
             },
             EvidenceRef::ScoreRecord {
                 suite_id: "gym".into(),
@@ -448,6 +520,26 @@ mod tests {
             let s = ev.to_persisted_string();
             let parsed = EvidenceRef::parse_str(&s);
             assert_eq!(parsed, ev, "round trip failed for {s}");
+        }
+    }
+
+    #[test]
+    fn parse_str_does_not_panic_on_multibyte_boundary() {
+        // An em-dash / emoji / accented char whose bytes straddle one of the
+        // probed prefix lengths (e.g. `review:` = 7 bytes) must not panic —
+        // `parse_str` is called directly on agent/operator-authored evidence
+        // strings, which routinely contain such characters.
+        for input in [
+            "score—X",
+            "emoji 😀 token here",
+            "reviewéx",
+            "review:rev—1",
+            "benchmark😀",
+        ] {
+            let ev = EvidenceRef::parse_str(input);
+            // Whatever it parses to, it must preserve the input as data and
+            // never panic.
+            let _ = ev;
         }
     }
 

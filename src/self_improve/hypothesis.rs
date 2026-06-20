@@ -279,7 +279,7 @@ fn hypothesis_from_regression(
     scenario_id: &str,
     delta: f64,
 ) -> ImprovementHypothesis {
-    let abs_delta_pct = (delta.abs() * 100.0).round() / 100.0;
+    let abs_delta_rounded = (delta.abs() * 100.0).round() / 100.0;
     ImprovementHypothesis {
         id: format!("regression::{suite_id}::{scenario_id}"),
         title: format!(
@@ -288,9 +288,9 @@ fn hypothesis_from_regression(
         ),
         category: "benchmark-regression".to_string(),
         rationale: format!(
-            "Scenario '{}/{}' regressed by {abs_delta_pct} versus the previous recorded score. \
-             Per spec line 684, the loop must only promote measurable improvements — a regression \
-             needs a hypothesis to drive the next cycle.",
+            "Scenario '{}/{}' regressed by Δ {abs_delta_rounded} versus the previous recorded \
+             score. Per spec line 684, the loop must only promote measurable improvements — a \
+             regression needs a hypothesis to drive the next cycle.",
             suite_id, scenario_id,
         ),
         suggested_change: format!(
