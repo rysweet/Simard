@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod common;
+
 const CLEARED_GIT_ENV_VARS: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -59,66 +61,74 @@ fn rendered_output(output: &Output) -> String {
     format!("{stdout}{stderr}")
 }
 
-/// Returns true when the rendered output indicates the test cannot run
-/// because the CI environment lacks an LLM provider (no ANTHROPIC_API_KEY,
-/// no gh auth for Copilot SDK, or the `amplihack RustyClawd` subprocess
-/// cannot complete in CI). Tests that drive the full engineer loop
-/// require a real LLM session and must skip in that case.
-fn skip_if_no_llm_provider(rendered: &str) -> bool {
-    if rendered.contains("No API key found")
-        || rendered.contains("LLM-based review is unavailable")
-        || rendered.contains("LLM session but open() failed")
-        || rendered.contains("base type 'review-pipeline-rustyclawd' failed")
-        || rendered.contains("missing required configuration 'SIMARD_LLM_PROVIDER'")
-        // After the engineer-loop subprocess pivot (issue #1648), the loop
-        // shells out to `amplihack RustyClawd --auto`. CI cannot complete
-        // a real RustyClawd run (no auth, no network for the LLM provider).
-        || rendered.contains("amplihack RustyClawd")
-        || rendered.contains("RustyClawd exited with status")
-        || rendered.contains("failed to spawn `amplihack")
-        || rendered.contains("agent session failed")
-    {
-        eprintln!("SKIP: no LLM provider available (CI environment)");
-        return true;
-    }
-    false
-}
-
+// The LLM-provider detection + fail-explicit guard now live in the shared
+// `tests/common/mod.rs` module so the three engineer-loop integration crates
+// no longer carry divergent copies (issue #2047). Unit tests for those helpers
+// live here so they run once rather than once per including crate.
 #[cfg(test)]
-mod skip_helper_tests {
-    use super::skip_if_no_llm_provider;
+mod llm_provider_guard_tests {
+    use crate::common::{llm_provider_unavailable, require_llm_provider};
 
     #[test]
-    fn recognizes_missing_simard_llm_provider_config() {
+    fn detects_missing_simard_llm_provider_config() {
         // After kill-tier1-fallbacks (src/error/display.rs:9), RuntimeConfig::load()
         // surfaces this exact error when SIMARD_LLM_PROVIDER is unset and no config
-        // file exists. Tests that drive the engineer loop must skip in that case.
+        // file exists. Tests that drive the engineer loop must not pass by skipping.
         let rendered = "thread 'main' panicked: missing required configuration 'SIMARD_LLM_PROVIDER': \
              set the SIMARD_LLM_PROVIDER env var or add it to ~/.simard/config.toml";
         assert!(
-            skip_if_no_llm_provider(rendered),
-            "skip_if_no_llm_provider must recognize the new SIMARD_LLM_PROVIDER missing-config error"
+            llm_provider_unavailable(rendered),
+            "must recognize the SIMARD_LLM_PROVIDER missing-config error"
         );
     }
 
     #[test]
-    fn recognizes_legacy_no_api_key() {
-        let rendered = "Error: No API key found in environment";
-        assert!(skip_if_no_llm_provider(rendered));
+    fn detects_legacy_no_api_key() {
+        assert!(llm_provider_unavailable(
+            "Error: No API key found in environment"
+        ));
     }
 
     #[test]
-    fn recognizes_legacy_llm_session_open_failed() {
-        let rendered = "attempted to open LLM session but open() failed: connection refused";
-        assert!(skip_if_no_llm_provider(rendered));
+    fn detects_legacy_llm_session_open_failed() {
+        assert!(llm_provider_unavailable(
+            "attempted to open LLM session but open() failed: connection refused"
+        ));
     }
 
     #[test]
-    fn does_not_skip_on_unrelated_output() {
-        let rendered = "engineer loop completed: 1 cycle, 0 errors";
+    fn detects_amplihack_subprocess_failure() {
+        assert!(llm_provider_unavailable(
+            "engineer loop failed: failed to spawn `amplihack RustyClawd --auto`"
+        ));
+    }
+
+    #[test]
+    fn does_not_flag_unrelated_output() {
         assert!(
-            !skip_if_no_llm_provider(rendered),
-            "skip helper must not false-positive on benign output"
+            !llm_provider_unavailable("engineer loop completed: 1 cycle, 0 errors"),
+            "must not false-positive on benign output"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a real LLM provider")]
+    fn require_llm_provider_panics_when_unavailable() {
+        // Force-running an ignored LLM test without a provider must fail loudly
+        // (issue #2047), never silently pass by skipping.
+        require_llm_provider(
+            "example_test",
+            "Error: missing required configuration 'SIMARD_LLM_PROVIDER'",
+        );
+    }
+
+    #[test]
+    fn require_llm_provider_is_noop_when_available() {
+        // When the provider is available the guard returns without panicking,
+        // letting the real assertions run.
+        require_llm_provider(
+            "example_test",
+            "Probe mode: engineer-loop-run\noutcome=Success",
         );
     }
 }
@@ -223,6 +233,7 @@ fn engineer_loop_probe_rejects_non_repo_workspaces_with_explicit_not_a_repo_sign
 }
 
 #[test]
+#[ignore = "requires a real LLM provider/session; reported as `ignored` by default rather than passing by skipping (issue #2047)"]
 fn engineer_loop_probe_reports_repo_state_runs_verified_action_and_persists_truthful_artifacts() {
     let expected_dirty = worktree_dirty(&repo_root());
     let isolated_state = TempDirGuard::new("simard-engineer-loop-isolated-state");
@@ -233,9 +244,10 @@ fn engineer_loop_probe_reports_repo_state_runs_verified_action_and_persists_trut
     );
     let rendered = rendered_output(&output);
 
-    if skip_if_no_llm_provider(&rendered) {
-        return;
-    }
+    common::require_llm_provider(
+        "engineer_loop_probe_reports_repo_state_runs_verified_action_and_persists_truthful_artifacts",
+        &rendered,
+    );
     assert!(
         output.status.success(),
         "repo-grounded engineer loop should succeed once implemented:\n{rendered}"
@@ -423,6 +435,7 @@ fn engineer_loop_timeout_kills_hung_child_and_returns_command_timeout() {
 }
 
 #[test]
+#[ignore = "requires a real LLM provider/session; reported as `ignored` by default rather than passing by skipping (issue #2047)"]
 fn engineer_loop_run_includes_non_zero_elapsed_duration() {
     let isolated_state = TempDirGuard::new("simard-engineer-loop-elapsed-state");
     let output = run_engineer_loop_probe_with_state_root(
@@ -432,9 +445,10 @@ fn engineer_loop_run_includes_non_zero_elapsed_duration() {
     );
     let rendered = rendered_output(&output);
 
-    if skip_if_no_llm_provider(&rendered) {
-        return;
-    }
+    common::require_llm_provider(
+        "engineer_loop_run_includes_non_zero_elapsed_duration",
+        &rendered,
+    );
     assert!(
         output.status.success(),
         "engineer loop should succeed:\n{rendered}"
@@ -509,9 +523,10 @@ fn engineer_loop_meeting_handoff_load_failure_surfaces_in_stderr() {
         .expect("engineer-loop probe should launch");
 
     let rendered = rendered_output(&output);
-    if skip_if_no_llm_provider(&rendered) {
-        return;
-    }
+    common::require_llm_provider(
+        "engineer_loop_meeting_handoff_load_failure_surfaces_in_stderr",
+        &rendered,
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
 
