@@ -78,12 +78,22 @@ pub fn write_issue_stubs(
     handoff: &MeetingHandoff,
 ) -> SimardResult<Vec<PathBuf>> {
     let stubs = plan_issue_stubs(handoff);
-    // No-op for empty handoffs — mirrors the empty-handoff write guard (#2268).
+    let issues_dir = bundle_dir.join(ISSUES_SUBDIR);
+
+    // No decisions and no action items. Do not *create* an `issues/` directory
+    // for a fresh empty handoff (no-op, mirrors the empty-handoff write guard
+    // #2268), but still clear any stale stubs left by a prior non-empty close
+    // of the *same* meeting — the bundle dir is keyed by `meeting_id` and is
+    // never wiped, so without this a re-close to empty would leave orphaned
+    // `*.md` stubs the regenerated markdown no longer references.
     if stubs.is_empty() {
+        clear_stale_stubs(&issues_dir);
+        // Drop the now-empty directory if we emptied it (succeeds only when it
+        // is empty; a pre-existing dir with non-stub contents is left intact).
+        let _ = fs::remove_dir(&issues_dir);
         return Ok(Vec::new());
     }
 
-    let issues_dir = bundle_dir.join(ISSUES_SUBDIR);
     fs::create_dir_all(&issues_dir).map_err(|e| SimardError::ArtifactIo {
         path: issues_dir.clone(),
         reason: format!("creating issues dir: {e}"),
@@ -91,14 +101,7 @@ pub fn write_issue_stubs(
 
     // Idempotent regeneration: clear stale `*.md` stubs before writing the
     // fresh set so a regeneration with fewer items leaves nothing behind.
-    if let Ok(entries) = fs::read_dir(&issues_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                let _ = fs::remove_file(&path);
-            }
-        }
-    }
+    clear_stale_stubs(&issues_dir);
 
     let mut written = Vec::with_capacity(stubs.len());
     for stub in &stubs {
@@ -123,6 +126,21 @@ pub fn write_issue_stubs(
     }
 
     Ok(written)
+}
+
+/// Remove every `*.md` file directly inside `issues_dir`. Best-effort: a
+/// missing directory or an individual unlink failure is ignored. Only direct
+/// children are touched (`read_dir` does not recurse) and `remove_file` unlinks
+/// a symlink rather than following it, so this cannot delete outside the dir.
+fn clear_stale_stubs(issues_dir: &Path) {
+    if let Ok(entries) = fs::read_dir(issues_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
 }
 
 /// Build a filesystem-safe slug containing only `[a-z0-9-]`.
@@ -567,6 +585,62 @@ mod tests {
             .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
             .count();
         assert_eq!(md_count, 1);
+
+        std::fs::remove_dir_all(&bundle).ok();
+    }
+
+    #[test]
+    fn regeneration_to_empty_clears_all_stubs() {
+        // Re-closing the *same* meeting (same bundle dir) after every decision
+        // and action item was removed must not leave orphaned stubs behind —
+        // the bundle dir is keyed by meeting_id and is never wiped. (#2309)
+        let bundle = temp_bundle("stubs-to-empty");
+        let mut handoff = base_handoff();
+        handoff.decisions = vec![decision("D1", "r1")];
+        handoff.action_items = vec![action("A1", "bob")];
+
+        let first = write_issue_stubs(&bundle, &handoff).expect("write 1");
+        assert_eq!(first.len(), 2);
+        let issues_dir = bundle.join(ISSUES_SUBDIR);
+        assert!(issues_dir.is_dir());
+
+        // Now the handoff has nothing — the prior stubs must be cleared and the
+        // emptied issues/ dir removed (no orphaned *.md, no stray directory).
+        handoff.decisions = vec![];
+        handoff.action_items = vec![];
+        let second = write_issue_stubs(&bundle, &handoff).expect("write 2");
+        assert!(second.is_empty());
+        assert!(
+            !issues_dir.exists(),
+            "issues/ dir must be gone after an empty re-close"
+        );
+
+        std::fs::remove_dir_all(&bundle).ok();
+    }
+
+    #[test]
+    fn empty_reclose_preserves_non_stub_files() {
+        // Clearing on an empty re-close must only touch `*.md` stubs; any other
+        // file an operator dropped in issues/ is preserved (and the dir stays).
+        let bundle = temp_bundle("stubs-empty-keep");
+        let mut handoff = base_handoff();
+        handoff.action_items = vec![action("A1", "bob")];
+        write_issue_stubs(&bundle, &handoff).expect("write 1");
+
+        let issues_dir = bundle.join(ISSUES_SUBDIR);
+        let keep = issues_dir.join("notes.txt");
+        std::fs::write(&keep, "operator notes").unwrap();
+
+        handoff.action_items = vec![];
+        let second = write_issue_stubs(&bundle, &handoff).expect("write 2");
+        assert!(second.is_empty());
+        assert!(keep.is_file(), "non-stub file must be preserved");
+        let md_count = std::fs::read_dir(&issues_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
+            .count();
+        assert_eq!(md_count, 0, "all *.md stubs cleared");
 
         std::fs::remove_dir_all(&bundle).ok();
     }
