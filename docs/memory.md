@@ -1,14 +1,14 @@
 ---
 title: Memory architecture
 description: Top-level overview of Simard's six-type cognitive memory, consolidation flow, and on-disk layout. Cross-links to the canonical architecture page.
-last_updated: 2026-06-12
+last_updated: 2026-06-19
 owner: simard
 doc_type: concept
 ---
 
 # Memory architecture
 
-Simard's memory is not a flat key-value store. She uses **six distinct memory types** modeled after cognitive psychology, implemented natively in Rust via `NativeCognitiveMemory` backed by LadybugDB (the `lbug` crate). There is no Python bridge — memory operations are direct LadybugDB calls.
+Simard's memory is not a flat key-value store. She uses **six distinct memory types** modeled after cognitive psychology. They are provided by the upstream [`amplihack-memory-lib`](https://github.com/rysweet/amplihack-memory-lib) crate (persistent, LadybugDB/`lbug`-backed) and reached through the `LibraryCognitiveMemory` adapter, which implements the `CognitiveMemoryOps` trait. This library backend is the sole on-disk cognitive-memory backend — there is no Python bridge and no native fork.
 
 For the full canonical specification (schema, consolidation rules, hive event bus contract) see [Cognitive Memory Architecture](architecture/cognitive-memory.md). This page is the operator-level summary.
 
@@ -41,12 +41,16 @@ Semantic, procedural, and prospective memory survive process restarts and are qu
 
 ## On-disk layout
 
+The library backend persists at `state_root/cognitive` (a LadybugDB `GraphStore`). In production `state_root` is `~/.simard`:
+
 ```
-~/.simard/memory/
-  ├── lbug/                  # LadybugDB persistent store (semantic, procedural, prospective, episodic)
-  ├── working/               # Per-task working-memory snapshots
-  └── sensory/               # Short-lived sensory ring buffer
+~/.simard/
+  └── cognitive/             # library CognitiveMemory store (LadybugDB):
+                             #   sensory, working, episodic, semantic,
+                             #   procedural, prospective
 ```
+
+The library owns its own durability (WAL + CHECKPOINT). The old native store at `~/.simard/cognitive_memory.ladybug` is abandoned by Phase 2b — it is never read or migrated, and the memory store rebuilds from scratch in `cognitive/`.
 
 Inspect with the dashboard's **Memory** tab ([Dashboard](dashboard.md)) — the graph view supports per-type filters and full-text search across the persistent layers.
 
@@ -60,14 +64,14 @@ For multi-host coordination see [Distributed operations](distributed-operations.
 
 ## Code entry points
 
-- `src/cognitive_memory/mod.rs` — `NativeCognitiveMemory` runtime
-- `src/cognitive_memory/schema.rs` — LadybugDB schema
+- `src/cognitive_memory/mod.rs` — `CognitiveMemoryOps` trait + DTOs
+- `src/cognitive_memory/library_adapter.rs` — `LibraryCognitiveMemory` (the sole backend)
 - `src/hive_event_bus.rs` — multi-agent event bus
 
 ## Related
 
 - [Cognitive Memory Architecture](architecture/cognitive-memory.md) (canonical, full detail)
-- [Library-backed Cognitive Memory (de-fork Phase 2a)](architecture/cognitive-memory-library-adapter.md) — opt-in `amplihack-memory-lib` backend behind the `library-memory` feature
+- [Library-backed Cognitive Memory](architecture/cognitive-memory-library-adapter.md) — the `amplihack-memory-lib` backend, now the sole on-disk store (de-fork Phase 2b)
 - [OODA procedural memory](reference/ooda-procedural-memory.md) — how successful OODA outcomes become procedures
 - [Procedural-memory store idempotency](reference/cognitive-memory-procedural-idempotency.md) — exact-name dedup that stops repeated cycles re-storing identical procedures (#2298)
 - [Goal–prospective memory mirror](reference/goal-prospective-memory-mirror.md) — how Active goals become prospective triggers

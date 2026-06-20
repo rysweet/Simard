@@ -16,17 +16,16 @@
 //!
 //! Behavioural ladder for the writer (matches `launch_real_meeting_bridge`):
 //!   1. Connect to the daemon's UDS at `default_socket_path()` if present.
-//!   2. Otherwise reap any stale open-lock and `NativeCognitiveMemory::open`.
-//!   3. Last-resort: `open_read_only` (typed as a writer here is a recoverable
-//!      degradation — write attempts will surface errors at call time).
+//!   2. Otherwise reap any stale open-lock and `LibraryCognitiveMemory::open`.
 //!
-//! Reader semantics: prefer the daemon socket; otherwise `open_read_only`
-//! (which requires the underlying DB file to already exist).
+//! Reader semantics (de-fork Phase 2b): prefer the daemon socket; otherwise a
+//! direct `LibraryCognitiveMemory::open` (the library has no read-only mode, so
+//! the reader creates the store if it does not yet exist).
 
 use super::{
     clear_in_process_writer, launch_writer_bridge, open_reader_bridge, register_in_process_writer,
 };
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use crate::goal_curation::{GoalBoard, load_goal_board, save_goal_board};
 use std::sync::Arc;
 
@@ -46,7 +45,7 @@ fn fresh_state_root(tag: &str) -> std::path::PathBuf {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn launch_writer_bridge_succeeds_on_fresh_state_root_without_daemon() {
-    // No daemon socket → must fall through to NativeCognitiveMemory::open.
+    // No daemon socket → must fall through to LibraryCognitiveMemory::open.
     let root = fresh_state_root("writer-fresh");
     let writer = launch_writer_bridge(&root)
         .expect("launch_writer_bridge must succeed without a daemon when state root is writable");
@@ -87,15 +86,21 @@ fn writer_bridge_supports_store_fact_round_trip() {
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn open_reader_bridge_requires_existing_db() {
-    // No DB has ever been opened → open_read_only would fail. The reader
-    // helper is allowed to surface that as `Err`, but it must NOT panic
-    // and must NOT silently succeed against a DB that was never created.
+fn open_reader_bridge_creates_empty_store_when_missing() {
+    // De-fork Phase 2b (issue #2307): the library backend has no read-only
+    // constructor, so the reader's tier-2 direct open CREATES the store when it
+    // does not yet exist (rather than the native `open_read_only`, which failed
+    // on a missing DB). The contract is now: `open_reader_bridge` succeeds and
+    // returns an empty, queryable store.
     let root = fresh_state_root("reader-missing");
-    let result = open_reader_bridge(&root);
-    assert!(
-        result.is_err(),
-        "open_reader_bridge against a never-initialised state root must return Err"
+    let reader = open_reader_bridge(&root).expect("open_reader_bridge must create an empty store");
+    let stats = reader
+        .ops()
+        .get_statistics()
+        .expect("get_statistics on a freshly created store must succeed");
+    assert_eq!(
+        stats.semantic_count, 0,
+        "a freshly created store must hold no facts"
     );
 }
 
@@ -196,20 +201,18 @@ fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
 // ---------------------------------------------------------------------------
 // Issue #1590 follow-up — TDD tests for the dashboard hollow-success bug.
 //
-// The dashboard runs in the same process as the OODA daemon. When it calls
-// `launch_writer_bridge`, the launcher today walks tiers 1 → 2 → 3:
+// The dashboard runs in the same process as the OODA daemon. Historically the
+// launcher walked tiers 1 → 2 → 3 and the (now-removed) tier 3 was the bug:
 //
 //   1. IPC to ~/.simard/memory.sock — fails when the daemon's own writer
 //      thread is already serving the request from the same process and
 //      the connection self-deadlocks (or when state_root_matches_daemon
 //      returns false for non-canonicalised paths).
-//   2. NativeCognitiveMemory::open — fails because the daemon owns the
-//      writer flock.
-//   3. open_read_only — succeeds, returns a read-only handle wrapped as
-//      a `WriterBridge`. Subsequent writes silently no-op at the IPC
-//      transport (or surface BridgeTransportError that the dashboard
-//      handler converts into Json({"error": …}) but only after the
-//      Ok(()) path has been threaded through `dashboard_save_goal_board`).
+//   2. LibraryCognitiveMemory::open — fails because the daemon owns the
+//      writer lock.
+//   3. (removed) open_read_only — used to succeed, returning a read-only
+//      handle wrapped as a `WriterBridge`. Subsequent writes silently no-op
+//      at the IPC transport. This silent-degradation tier was deleted.
 //
 // The fix:
 //   - Tier 0: in-process Arc shortcut, registered by the daemon at
@@ -221,7 +224,7 @@ fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn register_in_process_writer_returns_registered_arc_via_launch_writer_bridge() {
-    // Use an in-memory NativeCognitiveMemory so we don't depend on disk
+    // Use an in-memory LibraryCognitiveMemory so we don't depend on disk
     // state. The state_root passed to launch_writer_bridge must match
     // the registered state_root for the shortcut to fire (path-aware
     // registration so unrelated tests with different state_roots are
@@ -229,8 +232,8 @@ fn register_in_process_writer_returns_registered_arc_via_launch_writer_bridge() 
     clear_in_process_writer();
 
     let inner: Arc<dyn CognitiveMemoryOps> = Arc::new(
-        NativeCognitiveMemory::in_memory()
-            .expect("in-memory NativeCognitiveMemory must construct for tests"),
+        LibraryCognitiveMemory::in_memory()
+            .expect("in-memory LibraryCognitiveMemory must construct for tests"),
     );
 
     let root = fresh_state_root("in-process-writer-shortcut");
@@ -268,9 +271,9 @@ fn register_in_process_writer_returns_registered_arc_via_launch_writer_bridge() 
         facts.len()
     );
 
-    // The registered shortcut must also avoid creating a DB file on disk
+    // The registered shortcut must also avoid creating a DB on disk
     // at the (irrelevant) state_root passed to launch_writer_bridge.
-    let db_path = root.join("cognitive_memory.ladybug");
+    let db_path = root.join("cognitive");
     assert!(
         !db_path.exists(),
         "tier-0 shortcut must NOT create an on-disk DB at {}",
@@ -283,53 +286,12 @@ fn register_in_process_writer_returns_registered_arc_via_launch_writer_bridge() 
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn writer_bridge_construction_panics_when_inner_is_read_only() {
-    // Defensive invariant: WriterBridge must refuse to wrap a read-only
-    // handle. We construct a NativeCognitiveMemory via open() to create
-    // the DB, drop it, then re-open read-only and assert that the
-    // launcher (or whatever path constructs a WriterBridge from the
-    // read-only handle) panics with a clear message.
-    use crate::memory_ipc::WriterBridge;
-
-    let root = fresh_state_root("writer-bridge-readonly-guard");
-    {
-        let _writer = launch_writer_bridge(&root).expect("seed the DB");
-    }
-    let ro = NativeCognitiveMemory::open_read_only(&root).expect("open read-only");
-    assert!(
-        ro.is_read_only(),
-        "open_read_only must report is_read_only() == true"
-    );
-
-    // Construct a WriterBridge directly from the read-only handle. The
-    // assertion in WriterBridge's constructor must fire — a writer
-    // bridge wrapping a read-only handle is exactly the silent-
-    // degradation hazard the fix eliminates.
-    //
-    // `NativeCognitiveMemory` is not `RefUnwindSafe` (its inner
-    // `lbug::Database` wraps an `UnsafeCell`), so wrap the call in
-    // `AssertUnwindSafe` — we are the sole owner of `ro` here, and the
-    // panic we want to assert against happens before any state can be
-    // observed.
-    let ro_box: Box<dyn CognitiveMemoryOps> = Box::new(ro);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        WriterBridge::from_ops_for_test(ro_box)
-    }));
-    assert!(
-        result.is_err(),
-        "WriterBridge construction must panic when wrapping a read-only handle"
-    );
-}
-
-#[test]
-#[serial_test::serial(cognitive_memory)]
 fn launch_writer_bridge_returns_err_when_state_root_is_unwritable_file() {
     // Force tiers 1 and 2 to fail by passing a path that is a regular
-    // file rather than a directory. Today the launcher falls through
-    // to tier 3 (open_read_only) which itself fails because the file
-    // is not a LadybugDB — the user-visible result is `Err`. After the
-    // fix tier 3 is removed entirely; the failure surfaces from tier 2
-    // with a clearer message but still as `Err`.
+    // file rather than a directory. The launcher's tier 2
+    // (LibraryCognitiveMemory::open) fails because the path is not a
+    // usable directory — the user-visible result is `Err`. There is no
+    // read-only fallback tier; the failure surfaces from tier 2.
     //
     // Either way, the contract this test pins is: the launcher must
     // never silently return a `WriterBridge` whose underlying handle
@@ -343,27 +305,5 @@ fn launch_writer_bridge_returns_err_when_state_root_is_unwritable_file() {
         result.is_err(),
         "launch_writer_bridge must return Err for an unusable state_root, \
          got Ok writer (regression: silent read-only fallback or hollow success)"
-    );
-}
-
-#[test]
-#[serial_test::serial(cognitive_memory)]
-fn native_cognitive_memory_open_read_only_reports_is_read_only_true() {
-    // Trait-default contract: writers report false, the read-only
-    // opener reports true. Pin both so any future regression that
-    // forgets to override `is_read_only` for a read-only backend is
-    // caught immediately.
-    let root = fresh_state_root("is-read-only-trait");
-    {
-        let writer = launch_writer_bridge(&root).expect("seed DB");
-        assert!(
-            !writer.ops().is_read_only(),
-            "writer bridge must report is_read_only() == false"
-        );
-    }
-    let ro = NativeCognitiveMemory::open_read_only(&root).expect("open read-only");
-    assert!(
-        ro.is_read_only(),
-        "NativeCognitiveMemory::open_read_only must report is_read_only() == true"
     );
 }

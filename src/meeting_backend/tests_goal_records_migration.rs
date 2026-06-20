@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::cognitive_memory::NativeCognitiveMemory;
+use crate::cognitive_memory::LibraryCognitiveMemory;
 use crate::goals::{
     CognitiveMemoryGoalStore, GoalRecord, GoalStatus, GoalStore, GoalUpdate,
     migrate_file_backed_goal_store_if_present,
@@ -80,12 +80,12 @@ fn migration_skips_slugs_already_in_cognitive_memory() {
     let root = state.state_root().to_path_buf();
 
     // Register an in-process writer so that put(), migration, and list()
-    // share a single NativeCognitiveMemory handle.  Without this, each
+    // share a single LibraryCognitiveMemory handle.  Without this, each
     // launch_writer_bridge / open_reader_bridge opens a separate DB
     // instance, and LadybugDB's WAL may not be visible across sequential
     // open/close cycles under CI (coverage instrumentation, GitHub Actions
     // runners).
-    let mem = Arc::new(NativeCognitiveMemory::open(&root).expect("open cognitive memory"));
+    let mem = Arc::new(LibraryCognitiveMemory::open(&root).expect("open cognitive memory"));
     register_in_process_writer(root.clone(), mem.clone());
 
     // Pre-populate cognitive memory with one record
@@ -189,9 +189,9 @@ fn write_goals_from_decisions_does_not_produce_legacy_file() {
     let root = state.state_root().to_path_buf();
 
     // Register an in-process writer so put() and list() share a single
-    // NativeCognitiveMemory handle — avoids WAL visibility issues across
+    // LibraryCognitiveMemory handle — avoids WAL visibility issues across
     // sequential DB open/close cycles under CI.
-    let mem = Arc::new(NativeCognitiveMemory::open(&root).expect("open cognitive memory"));
+    let mem = Arc::new(LibraryCognitiveMemory::open(&root).expect("open cognitive memory"));
     register_in_process_writer(root.clone(), mem.clone());
 
     // Write a goal directly through CognitiveMemoryGoalStore (matching

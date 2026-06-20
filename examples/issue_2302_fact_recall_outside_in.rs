@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 
-use simard::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use simard::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use simard::goals::{GoalRecord, GoalStatus};
 use simard::preparation_memory_operations_with_active_slugs;
 use simard::session::{SessionId, SessionPhase};
@@ -30,7 +30,7 @@ fn session_id() -> SessionId {
 /// keyword. Pre-fix this returned 0 rows (the whole-string CONTAINS).
 fn scenario_1_keyword_recall() -> bool {
     println!("── Scenario 1: keyword fact recall via multi-word objective ──");
-    let mem = NativeCognitiveMemory::in_memory().expect("in-memory store");
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory store");
 
     // Content shares "auth"/"module" with the objective but never the
     // full objective string verbatim.
@@ -77,7 +77,7 @@ fn scenario_1_keyword_recall() -> bool {
 /// keyword fact and the goal fact.
 fn scenario_2_preparation_path() -> bool {
     println!("── Scenario 2: full OODA preparation path (compound objective) ──");
-    let mem = NativeCognitiveMemory::in_memory().expect("in-memory store");
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory store");
 
     mem.store_fact(
         "ci-pattern",

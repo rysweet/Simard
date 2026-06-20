@@ -11,7 +11,7 @@
 //!
 //! ## Confirmed root cause
 //!
-//! [`NativeCognitiveMemory::store_procedure`](super::ops) issues an
+//! [`LibraryCognitiveMemory::store_procedure`](super::ops) issues an
 //! unconditional `CREATE (p:Procedure { id: <fresh new_id> … })` with no
 //! dedup on `name`, and the `Procedure` table keys on `id` (not `name`),
 //! so the DB does not dedup either. Calling it twice with the same
@@ -40,15 +40,15 @@
 //! existing id. All tests below pass; genuinely new names still create
 //! new nodes (`store_procedure_preserves_distinct_named_procedures`).
 //!
-//! These tests target `NativeCognitiveMemory::in_memory()` directly so
+//! These tests target `LibraryCognitiveMemory::in_memory()` directly so
 //! the native override — where the bug lives — is exercised without the
 //! bridge/IPC/mock layers (whose stub `store_procedure` impls would hide
 //! the defect).
 
-use super::{CognitiveMemoryOps, NativeCognitiveMemory};
+use super::{CognitiveMemoryOps, LibraryCognitiveMemory};
 
-fn test_mem() -> NativeCognitiveMemory {
-    NativeCognitiveMemory::in_memory().expect("in-memory DB should create")
+fn test_mem() -> LibraryCognitiveMemory {
+    LibraryCognitiveMemory::in_memory().expect("in-memory DB should create")
 }
 
 /// Count the procedures whose `name` is *exactly* `name`.
@@ -57,7 +57,7 @@ fn test_mem() -> NativeCognitiveMemory {
 /// with a generous limit and then filters in Rust to exact equality. We
 /// deliberately avoid `recall_procedure(name, …)` because its `CONTAINS`
 /// matcher would also surface superstring names and mask duplicates.
-fn count_exact(mem: &NativeCognitiveMemory, name: &str) -> usize {
+fn count_exact(mem: &LibraryCognitiveMemory, name: &str) -> usize {
     mem.recall_procedure("*", 10_000)
         .expect("recall_procedure(\"*\") must succeed")
         .into_iter()
@@ -227,7 +227,7 @@ fn consolidation_cycle_is_idempotent_and_keeps_episodes_distilled() {
 
     // One consolidation cycle: learn the procedure, then mark every
     // episode in the window as distilled. Runs identically each cycle.
-    let run_cycle = |mem: &NativeCognitiveMemory| {
+    let run_cycle = |mem: &LibraryCognitiveMemory| {
         mem.store_procedure(proc_name, &proc_steps, &[])
             .expect("procedural learning store");
         for id in &episode_ids {

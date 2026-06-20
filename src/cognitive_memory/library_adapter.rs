@@ -1,14 +1,12 @@
-//! Library-backed cognitive memory adapter — de-fork Phase 2a (issue #86).
+//! Library-backed cognitive memory adapter — de-fork Phase 2b (issue #2307).
 //!
-//! [`LibraryCognitiveMemory`] implements Simard's existing
+//! [`LibraryCognitiveMemory`] implements Simard's
 //! [`CognitiveMemoryOps`](super::CognitiveMemoryOps) trait by delegating to the
 //! upstream `amplihack-memory-lib` [`CognitiveMemory`], opened with
-//! `open_persistent` (the library's lbug-backed durable `GraphStore`). It is the
-//! "SAFE INTEGRATION" seam: it proves Simard can drive the library behind its own
-//! abstraction WITHOUT deleting [`NativeCognitiveMemory`](super::NativeCognitiveMemory)
-//! and WITHOUT migrating live daemon data. The native backend remains the
-//! default; this adapter is only compiled behind the `library-memory` cargo
-//! feature.
+//! `open_persistent` (the library's lbug-backed durable `GraphStore`). As of
+//! Phase 2b it is the **sole** cognitive-memory backend: Simard's native
+//! LadybugDB fork has been deleted and every code path that opened a backend
+//! directly now opens this adapter.
 //!
 //! # Design decisions
 //!
@@ -19,33 +17,27 @@
 //!   [`SimardError::StoragePoisoned`].
 //! * **Error mapping.** `open` failures map to
 //!   [`SimardError::PersistentStoreIo`]; per-operation failures map to
-//!   [`SimardError::BridgeCallFailed`] with `bridge = "cognitive-memory-library"`
-//!   (mirroring how the native backend tags `cognitive-memory-native`),
+//!   [`SimardError::BridgeCallFailed`] with `bridge = "cognitive-memory-library"`,
 //!   preserving the upstream `MemoryError` message. No new `SimardError` variant
 //!   is introduced — this keeps the change additive.
 //! * **Documented divergences (A3/A6/A7).** `check_triggers`,
 //!   `consolidate_episodes`, and `get_statistics` legitimately differ from the
-//!   native semantics. The adapter maps onto the library's high-level behavior
-//!   rather than forcing native semantics; the divergences are documented here
-//!   and in `docs/architecture/cognitive-memory-library-adapter.md`, and feed
-//!   amplihack-memory-lib#85.
-//! * **API gaps (A5).** `mark_episode_distilled` and `list_undistilled_episodes`
-//!   have no library equivalent at the pinned commit, so episode distillation
-//!   cannot run against this backend. A panic on the OODA distillation hot path
-//!   would be strictly worse than degrading, so the adapter degrades to a no-op
-//!   — but *loudly*: `list_undistilled_episodes` is overridden to emit a
-//!   one-time warning (so a disabled backend is distinguishable from a merely
-//!   quiet one) before returning empty, while `mark_episode_distilled` inherits
-//!   the trait's no-op default (it is only reached after a non-empty undistilled
-//!   list, which never occurs here). Tracked upstream as amplihack-memory-lib#85.
+//!   former native semantics. The adapter maps onto the library's high-level
+//!   behavior; the divergences are documented here and in
+//!   `docs/architecture/cognitive-memory-library-adapter.md`.
+//! * **Episode distillation (A5).** The library exposes a persistent
+//!   distilled-flag API (`mark_episode_distilled` / `list_undistilled_episodes`),
+//!   so episode distillation runs natively against this backend — see those
+//!   methods below. (Earlier phases degraded distillation to a no-op because the
+//!   pinned library commit lacked the flag; that gap is closed.)
 //!
 //! All persistence is rooted at a caller-supplied `state_root` (a `TempDir` in
-//! tests). The adapter never opens, reads, writes, or migrates the live daemon
-//! store at `~/.simard/cognitive_memory.ladybug`.
+//! tests). The adapter opens its store at `state_root/cognitive`.
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, Once};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use amplihack_memory::{
     CognitiveMemory, EpisodicMemory, MemoryError, ProceduralMemory, ProspectiveMemory,
@@ -65,23 +57,52 @@ use crate::memory_cognitive::{
 const LIBRARY_AGENT_NAME: &str = "simard";
 
 /// Identifier used in mapped [`SimardError`]s so failures are attributable to
-/// the library backend (vs. the native `cognitive-memory-native`).
+/// the library backend.
 const STORE_NAME: &str = "cognitive-memory-library";
+
+/// Metadata key the adapter stamps on every fact with a per-store, process-wide
+/// monotonic sequence number.
+///
+/// **Why.** Several Simard call sites (the goal-board snapshot in
+/// `goal_curation::operations`, `goals::CognitiveMemoryGoalStore`, and
+/// `memory_consolidation`) select "the most recent fact for concept X" by taking
+/// the lexicographically-largest `node_id`. That works only when fact ids are
+/// time-ordered. The deleted native backend used UUID-v7 ids (time-prefixed);
+/// the library uses **random UUID-v4** ids and only second-granularity
+/// `created_at`, so neither the id nor the timestamp reliably orders two facts
+/// written within the same second. The adapter therefore stamps a monotonic
+/// sequence into fact metadata at store time and folds it into the **front** of
+/// the `node_id` it surfaces (`to_fact`), restoring the "max node_id == newest"
+/// invariant those consumers depend on — without changing the `search_facts`
+/// result ordering (which stays confidence-ranked for general recall).
+const FACT_SEQ_META_KEY: &str = "_simard_seq";
+
+/// Zero-padding width for the sequence prefix so lexical comparison of the
+/// composite `node_id` matches numeric sequence order. 20 digits covers the full
+/// `u64` range.
+const FACT_SEQ_WIDTH: usize = 20;
 
 /// Cognitive memory backed by the upstream `amplihack-memory-lib`
 /// [`CognitiveMemory`] (persistent, lbug-backed).
 ///
-/// Implements [`CognitiveMemoryOps`] so callers are backend-agnostic. Only
-/// available with `--features library-memory`.
+/// Implements [`CognitiveMemoryOps`] so callers are backend-agnostic. This is
+/// the only cognitive-memory backend in Simard as of de-fork Phase 2b.
 pub struct LibraryCognitiveMemory {
     /// The library memory, behind a `Mutex` for `&self` -> `&mut` interior
     /// mutability (see module docs, A2).
     inner: Mutex<CognitiveMemory>,
-    /// Fires the "distillation disabled" warning at most once per instance
-    /// (A5). The library has no distilled-flag API at the pinned commit, so
-    /// distillation degrades to a no-op; this makes that degradation loud once
-    /// instead of invisible on the OODA hot path. See `list_undistilled_episodes`.
-    distillation_warning: Once,
+    /// Process-wide monotonic fact sequence (see [`FACT_SEQ_META_KEY`]). Seeded
+    /// on open from the maximum sequence already persisted so it keeps advancing
+    /// across reopens.
+    fact_seq: AtomicU64,
+    /// The `state_root` this handle was opened against (`None` for the
+    /// in-memory test constructor). Used **only** by the `cfg(test)`
+    /// hermetic-state-root guard in [`Self::lock_write`], which preserves the
+    /// safety property the deleted native backend enforced in every mutating
+    /// op: cargo-test must never write into the operator's live cognitive
+    /// memory under `$HOME/.simard` (issues #1923 / #1925).
+    #[cfg_attr(not(test), allow(dead_code))]
+    state_root: Option<std::path::PathBuf>,
 }
 
 impl LibraryCognitiveMemory {
@@ -90,7 +111,7 @@ impl LibraryCognitiveMemory {
     ///
     /// The store lives at a dedicated sub-path (`state_root/cognitive`) so it is
     /// isolated from anything else under `state_root`. In tests `state_root` is a
-    /// `TempDir`; the adapter never touches the live daemon store.
+    /// `TempDir`.
     ///
     /// # Errors
     ///
@@ -107,9 +128,41 @@ impl LibraryCognitiveMemory {
                     reason: e.to_string(),
                 }
             })?;
+        let fact_seq = AtomicU64::new(recover_fact_seq(&inner));
         Ok(Self {
             inner: Mutex::new(inner),
-            distillation_warning: Once::new(),
+            fact_seq,
+            state_root: Some(state_root.to_path_buf()),
+        })
+    }
+
+    /// Create a non-persistent, in-memory library-backed cognitive memory for
+    /// tests.
+    ///
+    /// Backed by the library's `InMemoryGraphStore`; nothing is written to disk
+    /// and nothing survives the process. This is the replacement for the deleted
+    /// native in-memory test constructor — the full
+    /// [`CognitiveMemoryOps`] surface (including episode distillation) behaves
+    /// identically to the persistent backend, only durability differs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimardError::PersistentStoreIo`] if the in-memory store cannot
+    /// be constructed (only possible on an invalid agent name, which is a fixed
+    /// non-empty constant here).
+    pub fn in_memory() -> SimardResult<Self> {
+        let inner = CognitiveMemory::new(LIBRARY_AGENT_NAME).map_err(|e| {
+            SimardError::PersistentStoreIo {
+                store: STORE_NAME.to_string(),
+                action: "new_in_memory".to_string(),
+                path: std::path::PathBuf::from("<in-memory>"),
+                reason: e.to_string(),
+            }
+        })?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+            fact_seq: AtomicU64::new(0),
+            state_root: None,
         })
     }
 
@@ -119,6 +172,22 @@ impl LibraryCognitiveMemory {
         self.inner.lock().map_err(|_| SimardError::StoragePoisoned {
             store: STORE_NAME.to_string(),
         })
+    }
+
+    /// Lock for a **mutating** op, first running the `cfg(test)`-only
+    /// hermetic-state-root guard so a cargo-test write can never land in the
+    /// operator's live `$HOME/.simard` store. This is the adapter's
+    /// reimplementation of the per-write guard the deleted native backend ran;
+    /// it keeps the documented multi-site contract intact (`launch_writer_bridge`
+    /// remains the other site). No-op for the in-memory constructor (no
+    /// `state_root`) and compiled out of release builds. See
+    /// `docs/testing/hermetic-tests.md`.
+    fn lock_write(&self, _site: &'static str) -> SimardResult<MutexGuard<'_, CognitiveMemory>> {
+        #[cfg(test)]
+        if let Some(root) = &self.state_root {
+            crate::test_support::hermetic_guard::assert_state_root_isolated(root, _site);
+        }
+        self.lock()
     }
 }
 
@@ -137,14 +206,43 @@ fn map_op_err(method: &str, err: MemoryError) -> SimardError {
 // ---------------------------------------------------------------------------
 
 fn to_fact(f: SemanticFact) -> CognitiveFact {
+    // Fold the per-store monotonic sequence (see `FACT_SEQ_META_KEY`) into the
+    // FRONT of the exposed `node_id` so the "max node_id == most recent fact"
+    // selection used by the goal-board snapshot / goal store / consolidation
+    // call sites is correct on the library backend (whose raw ids are random
+    // UUID-v4). Facts written before this stamping existed (or by other tooling)
+    // have no sequence and sort oldest via a zero prefix. The original library id
+    // is preserved as the suffix so the value stays unique and traceable.
+    let seq = seq_from_metadata(&f.metadata).unwrap_or(0);
+    let node_id = format!("{seq:0width$}_{}", f.node_id, width = FACT_SEQ_WIDTH);
     CognitiveFact {
-        node_id: f.node_id,
+        node_id,
         concept: f.concept,
         content: f.content,
         confidence: f.confidence,
         source_id: f.source_id,
         tags: f.tags,
     }
+}
+
+/// Extract the adapter's monotonic fact sequence from a library fact's metadata,
+/// tolerating either a JSON number or a stringified number.
+fn seq_from_metadata(metadata: &HashMap<String, serde_json::Value>) -> Option<u64> {
+    let v = metadata.get(FACT_SEQ_META_KEY)?;
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+/// Seed the monotonic fact sequence on open from the maximum sequence already
+/// persisted, so it keeps advancing across reopens. Returns the next value to
+/// hand out (max existing + 1, or 0 for an empty / fresh store).
+fn recover_fact_seq(inner: &CognitiveMemory) -> u64 {
+    inner
+        .get_all_facts(usize::MAX)
+        .iter()
+        .filter_map(|f| seq_from_metadata(&f.metadata))
+        .max()
+        .map_or(0, |m| m.saturating_add(1))
 }
 
 fn to_procedure(p: ProceduralMemory) -> CognitiveProcedure {
@@ -196,13 +294,15 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         ttl_seconds: u64,
     ) -> SimardResult<String> {
         let ttl = i64::try_from(ttl_seconds).unwrap_or(i64::MAX);
-        self.lock()?
+        self.lock_write("record_sensory")?
             .store_sensory(modality, raw_data, ttl)
             .map_err(|e| map_op_err("record_sensory", e))
     }
 
     fn prune_expired_sensory(&self) -> SimardResult<usize> {
-        Ok(self.lock()?.prune_expired_sensory())
+        Ok(self
+            .lock_write("prune_expired_sensory")?
+            .prune_expired_sensory())
     }
 
     fn push_working(
@@ -212,7 +312,7 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         task_id: &str,
         relevance: f64,
     ) -> SimardResult<String> {
-        self.lock()?
+        self.lock_write("push_working")?
             .store_working(slot_type, content, task_id, relevance)
             .map_err(|e| map_op_err("push_working", e))
     }
@@ -227,7 +327,7 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
     }
 
     fn clear_working(&self, task_id: &str) -> SimardResult<usize> {
-        Ok(self.lock()?.clear_working(task_id))
+        Ok(self.lock_write("clear_working")?.clear_working(task_id))
     }
 
     fn store_episode(
@@ -246,7 +346,7 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
                     .collect()
             })
         });
-        self.lock()?
+        self.lock_write("store_episode")?
             .store_episode(content, source_label, None, meta_map.as_ref())
             .map_err(|e| map_op_err("store_episode", e))
     }
@@ -260,7 +360,7 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // OBSERVABLE behavior ("consolidate if there are >= 2 un-compressed
         // episodes, up to batch_size"), clamp the effective batch to the number
         // of available un-compressed episodes and require >= 2.
-        let mut guard = self.lock()?;
+        let mut guard = self.lock_write("consolidate_episodes")?;
         let available = guard.get_episodes(usize::MAX, false).len();
         let effective = (batch_size as usize).min(available);
         if effective < 2 {
@@ -286,8 +386,23 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         tags: &[String],
         source_id: &str,
     ) -> SimardResult<String> {
-        self.lock()?
-            .store_fact(concept, content, confidence, source_id, Some(tags), None)
+        // Stamp a process-wide monotonic sequence into metadata so `to_fact` can
+        // expose a time-ordered `node_id` (see `FACT_SEQ_META_KEY`). The fetch is
+        // done while holding the write lock so the sequence order matches the
+        // store order.
+        let mut guard = self.lock_write("store_fact")?;
+        let seq = self.fact_seq.fetch_add(1, Ordering::Relaxed);
+        let mut metadata: HashMap<String, serde_json::Value> = HashMap::with_capacity(1);
+        metadata.insert(FACT_SEQ_META_KEY.to_string(), serde_json::Value::from(seq));
+        guard
+            .store_fact(
+                concept,
+                content,
+                confidence,
+                source_id,
+                Some(tags),
+                Some(&metadata),
+            )
             .map_err(|e| map_op_err("store_fact", e))
     }
 
@@ -322,9 +437,28 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         steps: &[String],
         prerequisites: &[String],
     ) -> SimardResult<String> {
-        self.lock()?
+        let mut guard = self.lock_write("store_procedure")?;
+        // Simard's contract (docs/reference/cognitive-memory-procedural-idempotency.md)
+        // treats a duplicate store as an idempotent *upsert that reinforces*: the
+        // node count stays at one, but `usage_count` is bumped to record the
+        // recurrence that `recall_procedure` ranks on. The library's
+        // `store_procedure` dedups on exact name but does NOT bump usage_count on
+        // update (it reinforces only on a mutating recall), so detect the
+        // duplicate here and reinforce after the store. Existence is checked by
+        // exact name to avoid the keyword matcher's superstring hits.
+        let existed = guard
+            .search_procedures(name, usize::MAX)
+            .iter()
+            .any(|p| p.name == name);
+        let id = guard
             .store_procedure(name, steps, Some(prerequisites))
-            .map_err(|e| map_op_err("store_procedure", e))
+            .map_err(|e| map_op_err("store_procedure", e))?;
+        if existed {
+            // `recall_procedure` (mutating) increments the matched procedure's
+            // persisted `usage_count` by one — the reinforcement signal.
+            let _ = guard.recall_procedure(name, usize::MAX);
+        }
+        Ok(id)
     }
 
     fn recall_procedure(&self, query: &str, limit: u32) -> SimardResult<Vec<CognitiveProcedure>> {
@@ -347,7 +481,7 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         priority: i64,
     ) -> SimardResult<String> {
         let priority_i32 = priority.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-        self.lock()?
+        self.lock_write("store_prospective")?
             .store_prospective(
                 description,
                 trigger_condition,
@@ -365,7 +499,7 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // read-only, and re-fires on every call. Both agree on FIRST-fire for a
         // matching trigger, which is what callers rely on. Documented for #85.
         Ok(self
-            .lock()?
+            .lock_write("check_triggers")?
             .check_triggers(content)
             .into_iter()
             .map(to_prospective)
@@ -373,33 +507,34 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
     }
 
     fn resolve_prospective(&self, node_id: &str) -> SimardResult<()> {
-        self.lock()?.resolve_prospective(node_id);
+        self.lock_write("resolve_prospective")?
+            .resolve_prospective(node_id);
         Ok(())
     }
 
-    // `mark_episode_distilled` is intentionally NOT overridden (A5): the library
-    // has no distilled-flag API at the pinned commit, and it is only reached
-    // after `list_undistilled_episodes` yields episodes — which never happens
-    // here — so the adapter inherits the trait's contractually-safe no-op
-    // default instead of panicking. Tracked upstream as amplihack-memory-lib#85.
+    fn mark_episode_distilled(&self, node_id: &str) -> SimardResult<()> {
+        // De-fork Phase 2b (issue #2307): the library now exposes a persistent,
+        // one-way distilled latch. Delegate to it. The library returns `false`
+        // when the id is unknown or owned by a different agent; that is not an
+        // error for this caller (the native backend likewise no-op'd a
+        // non-matching id), so we map any outcome to `Ok(())`.
+        self.lock_write("mark_episode_distilled")?
+            .mark_episode_distilled(node_id);
+        Ok(())
+    }
 
-    fn list_undistilled_episodes(&self, _limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
-        // A5 gap: the library has no distilled-flag API at the pinned commit, so
-        // episode distillation cannot run against this backend. The trait's
-        // no-op default returns empty — but on the OODA distillation hot path
-        // that is indistinguishable from "no episodes to distill", silently
-        // disabling the feature. Surface the degradation LOUDLY exactly once per
-        // instance so an operator can tell a disabled backend from a quiet one,
-        // then return empty so the pass cleanly (and non-fatally) skips. Tracked
-        // upstream as amplihack-memory-lib#85.
-        self.distillation_warning.call_once(|| {
-            eprintln!(
-                "[simard] cognitive memory: library backend cannot track the \
-                 distilled flag — episode distillation is DISABLED (no-op) for \
-                 this backend (de-fork Phase 2a, issue #86; amplihack-memory-lib#85)"
-            );
-        });
-        Ok(vec![])
+    fn list_undistilled_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+        // De-fork Phase 2b (issue #2307): episode distillation now runs against
+        // this backend. The library returns this agent's not-yet-distilled
+        // episodes, newest-first, capped at `limit` — the same contract the
+        // deleted native backend implemented with `WHERE e.distilled = 0
+        // ORDER BY e.id DESC`.
+        Ok(self
+            .lock()?
+            .list_undistilled_episodes(limit as usize)
+            .into_iter()
+            .map(to_episode)
+            .collect())
     }
 
     fn search_episodes_by_keywords(

@@ -15,6 +15,15 @@ related:
 
 # Bootstrap procedures and trigger naming
 
+> **De-fork Phase 2b.** The bootstrap-seeding and trigger-naming *behavior*
+> described here is preserved: writes and recalls go through the
+> `CognitiveMemoryOps` trait, now backed solely by `LibraryCognitiveMemory`
+> over `amplihack-memory-lib`. The daemon-boot wiring that this page anchors to
+> `NativeCognitiveMemory::open` is now `LibraryCognitiveMemory::open`, and the
+> `NativeCognitiveMemory::in_memory` test helper is replaced by the library
+> in-memory store; treat those native code citations as historical. See
+> [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md).
+
 > Shipped in issue [#2281](https://github.com/rysweet/Simard/issues/2281)
 > as PR-C (procedural seeding + episodic recall). PR-C also adds
 > episodic recall — see

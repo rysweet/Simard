@@ -14,6 +14,16 @@ related:
 
 # Procedural-memory store idempotency
 
+> **De-fork Phase 2b.** The idempotent-upsert *behavior* described here is
+> preserved: it is reached through the `CognitiveMemoryOps` trait, now backed
+> solely by `LibraryCognitiveMemory` over `amplihack-memory-lib`. The native
+> implementation details this page cites — `store_procedure` /
+> `mark_episode_distilled` / `list_undistilled_episodes` in
+> `src/cognitive_memory/ops.rs` and the `NativeCognitiveMemory::in_memory()`
+> test helper — were **deleted** with the fork; treat those code citations as
+> historical. The library performs the equivalent name-keyed upsert internally
+> (see [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md)).
+
 > Shipped in issue [#2298](https://github.com/rysweet/Simard/issues/2298).
 > Supersedes the "one procedure node per successful cycle / intentional
 > accumulation" behaviour described in

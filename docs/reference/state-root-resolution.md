@@ -101,9 +101,10 @@ locking protocol and wiring.
 
 Cognitive-memory backups under `<root>/backups/` are **not** in scope
 for this migration — they continue to resolve through the existing
-`NativeCognitiveMemory` paths and are tracked for state-root unification
-in a follow-up issue. Setting `SIMARD_STATE_ROOT` today does **not**
-relocate the backup tree.
+cognitive-memory backup paths (the trait-based `memory_backup/` snapshots
+that replaced the native verified-backup loop in Phase 2b) and are tracked
+for state-root unification in a follow-up issue. Setting `SIMARD_STATE_ROOT`
+today does **not** relocate the backup tree.
 
 ---
 

@@ -6,7 +6,7 @@ use super::current_work::read_recent_cycle_reports;
 use super::dashboard_goal_board_snapshot;
 use super::routes::resolve_state_root;
 use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
-use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use crate::memory_ipc::open_reader_bridge;
 
 // ---------------------------------------------------------------------------
 // Workboard API — aggregated view of Simard's current mental state
@@ -250,7 +250,8 @@ pub(crate) async fn workboard() -> Json<Value> {
     let mut working_memory: Vec<Value> = Vec::new();
     let mut cognitive_stats: Option<Value> = None;
 
-    if let Ok(mem) = NativeCognitiveMemory::open_read_only(&state_root) {
+    if let Ok(reader) = open_reader_bridge(&state_root) {
+        let mem = reader.ops();
         // Cognitive statistics
         if let Ok(stats) = mem.get_statistics() {
             facts_count = stats.semantic_count;

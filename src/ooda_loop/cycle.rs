@@ -204,25 +204,9 @@ fn run_ooda_cycle_inner(
         }
     }
 
-    // --- Backup retention: prune old backups to prevent unbounded growth (#2270) ---
-    {
-        use crate::cognitive_memory::NativeCognitiveMemory;
-        use crate::state_root::simard_state_root;
-        let state_root = simard_state_root();
-        let outcome = NativeCognitiveMemory::prune_old_backups(&state_root, 20);
-        if outcome.removed > 0 {
-            eprintln!(
-                "[simard] OODA cycle: pruned {} old backup(s)",
-                outcome.removed
-            );
-        }
-        if !outcome.failed.is_empty() {
-            eprintln!(
-                "[simard] OODA cycle: {} backup prune failure(s)",
-                outcome.failed.len()
-            );
-        }
-    }
+    // De-fork Phase 2b (issue #2307): native lbug-WAL backup pruning has been
+    // removed — the library backend owns its own durability and there is no
+    // native `backups/` directory to prune.
 
     // Snapshot active goal ids before the core OODA phases run.
     // Used at the end of the cycle to detect unexpected goal disappearance
@@ -1321,7 +1305,7 @@ mod tests_board_integrity {
 #[cfg(test)]
 mod tests_objective_probe {
     use super::build_objective_probe;
-    use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
     use crate::goal_curation::{ActiveGoal, GoalProgress};
 
     fn active_goal(id: &str, description: &str) -> ActiveGoal {
@@ -1378,7 +1362,7 @@ mod tests_objective_probe {
     /// (not the description) is what makes the trigger fire.
     #[test]
     fn objective_probe_fires_stored_goal_trigger() {
-        let mem = NativeCognitiveMemory::in_memory().expect("in-memory DB");
+        let mem = LibraryCognitiveMemory::in_memory().expect("in-memory DB");
 
         let goal_id = "improve-retrieval-latency";
         // Mirror the live write path's trigger_condition derivation

@@ -1,15 +1,33 @@
 # Cognitive Memory Durability
 
-This page documents the three layers that together guarantee Simard's
-cognitive memory survives graceful restarts, forced restarts, and
-mid-write process death of the OODA daemon:
+As of the de-fork (issue #2307, Phase 2b), Simard's cognitive memory is
+provided by the `amplihack-memory-lib` library backend
+(`LibraryCognitiveMemory`), which **owns its own durability**. The library
+writes through LadybugDB's write-ahead log (WAL), and a CHECKPOINT collapses the
+WAL into the main store. The OODA daemon's shutdown handler issues that
+CHECKPOINT before exit, so a graceful restart observes every committed write.
 
-1. **Per-write fsync barrier** (issue #1973) — every mutating op is
-   flushed to stable storage *before* it is observed as committed.
+Durability today rests on three things:
+
+1. **Library WAL + CHECKPOINT** — writes are journaled by LadybugDB; the
+   `CognitiveMemoryOps::checkpoint` trait method (delegating to
+   `LibraryCognitiveMemory::checkpoint` → the library's `close()`) collapses the
+   WAL into the store.
 2. **SIGTERM-safe shutdown handler** (issue #1631) — graceful signals
-   still drain the WAL.
-3. **Periodic verified backups** (issue #1631) — bounded RPO under
-   SIGKILL/OOM/power-loss.
+   (`SIGTERM`/`SIGINT`/`SIGHUP`) run the shutdown sequence, which checkpoints the
+   store before the process exits.
+3. **File-level snapshot backups** — the trait-based `memory_backup/` module
+   takes periodic file snapshots through `CognitiveMemoryOps`, providing a
+   bounded-RPO secondary recovery point.
+
+> **Removed in Phase 2b.** The native fork's per-write `fsync` barrier
+> (issue #1973) and its lbug-WAL "verified backup" loop
+> (`create_verified_backup` / `prune_old_backups`, issue #1631) were deleted with
+> `NativeCognitiveMemory`. The library backend supersedes them: durability is the
+> library's responsibility, and snapshot backups come from `memory_backup/`. The
+> sections below that describe the native per-write barrier and the native
+> verified-backup loop are **historical** — they document machinery that no
+> longer exists — and are retained only for archival context.
 
 > Quick reference for contributors: see the
 > [Cognitive Memory Durability section in CONTRIBUTING.md](https://github.com/rysweet/Simard/blob/main/CONTRIBUTING.md#cognitive-memory-durability-per-write-barrier--sigterm--periodic-backups).
@@ -18,19 +36,17 @@ mid-write process death of the OODA daemon:
 
 ## Background
 
-Simard's cognitive memory is stored at `~/.simard/cognitive_memory.ladybug`
-using lbug `0.15.x`. As of issue #1973, this path is a **single file**.
-Earlier prototype builds used a KuzuDB directory at the same path; on
-first open with a legacy directory present, `NativeCognitiveMemory::open`
-**renames the directory aside** to `cognitive_memory.ladybug.kuzu-backup`
-and creates a fresh, empty lbug file. The legacy directory is preserved
-on disk for manual inspection but its contents are **not** automatically
-migrated into the new file format (the data models are incompatible). lbug
-only flushes its WAL inside `Database::drop`. Process termination via
-`SIGTERM` (the default signal `systemctl restart` sends) does not invoke
-`Drop`, and even an in-process write that has returned `Ok(())` to the
-caller is not necessarily on stable storage until the next checkpoint
-plus `fsync(2)` have completed.
+Simard's cognitive memory is stored by the library backend at
+`state_root/cognitive` (in production, `~/.simard/cognitive`) — a LadybugDB
+`GraphStore` directory using `lbug = "=0.15.3"`. The old native single-file
+store at `~/.simard/cognitive_memory.ladybug` is **abandoned** by Phase 2b: it is
+never opened, read, or migrated, and memory rebuilds from scratch in the new
+`cognitive/` store.
+
+LadybugDB flushes its WAL on CHECKPOINT and inside `Database::drop`. Process
+termination via `SIGTERM` (the default signal `systemctl restart` sends) does not
+invoke `Drop`, so the shutdown handler explicitly checkpoints the library store
+before exit (see [Shutdown Sequence](#shutdown-sequence-sigterm-sigint-sighup)).
 
 Two incidents motivated the current design:
 
@@ -71,34 +87,32 @@ recovery point for catastrophic corruption.
 |  | backup tick         |  |   default interval = 300s
 |  +---------------------+  |
 |                           |
-|  +---------------------+  |   #1973: every mutating op calls
-|  | post_write_barrier  |  |     fsync(data file) →
-|  | (per-write fsync)   |  |     fsync(parent dir) before return
+|  +---------------------+  |   shutdown: CognitiveMemoryOps::checkpoint
+|  | checkpoint on exit  |  |     → LibraryCognitiveMemory::checkpoint
+|  | (library CHECKPOINT)|  |     → library close() (collapse WAL)
 |  +---------------------+  |
 +---------------------------+
             |
             v
 +---------------------------+
 | ~/.simard/                |
-|   cognitive_memory.ladybug              (lbug DB file as of #1973;
-|                                          a legacy KuzuDB directory
-|                                          at this path is renamed to
-|                                          cognitive_memory.ladybug.kuzu-backup
-|                                          and a fresh empty DB is opened)
-|   cognitive_memory.ladybug.wal          (WAL sibling, may exist)
-|   cognitive_memory.wal                  (alt WAL name, may exist)
-|   cognitive_memory.ladybug.kuzu-backup  (legacy KuzuDB dir, if migrated;
-|                                          contents NOT auto-imported)
-|   backups/                |
-|     cognitive_memory.ladybug.<ts>          (paired snapshot)
-|     cognitive_memory.ladybug.wal.<ts>      (paired WAL backup)
-|     cognitive_memory.wal.<ts>              (paired alt WAL backup)
+|   cognitive/              (library GraphStore — LadybugDB; the WAL is
+|                            managed internally by the library)
+|   backups/                (file-level snapshots from memory_backup/)
 +---------------------------+
 ```
+
+> The boxes for the native `post_write_barrier` and the native verified-backup
+> tick that previously appeared here were removed with the fork (Phase 2b).
 
 ---
 
 ## Per-Write fsync Barrier (issue #1973)
+
+> **Historical (removed in Phase 2b).** The per-write `fsync` barrier was a
+> property of the deleted native backend. The library backend manages its own
+> WAL durability, so there is no Simard-side per-write barrier any more. This
+> section is retained for archival context only.
 
 Every mutating operation on `NativeCognitiveMemory` is followed by a
 **per-write fsync barrier** before control returns to the caller. The
@@ -298,8 +312,13 @@ This defends against:
 
 ### In-Memory Backend
 
-`NativeCognitiveMemory::in_memory()` constructs a store with
-`durable_writes = false`. The first line of `post_write_barrier` is:
+> **Phase 2b.** Tests use `LibraryCognitiveMemory::in_memory()`, which builds the
+> library's `CognitiveMemory::new("simard")` (no on-disk LadybugDB directory).
+> The native `in_memory()` and its `durable_writes`/`post_write_barrier` opt-out
+> described below were deleted with the fork; the text is archival.
+
+`NativeCognitiveMemory::in_memory()` constructed a store with
+`durable_writes = false`. The first line of `post_write_barrier` was:
 
 ```rust
 if !self.durable_writes { return Ok(()); }
@@ -361,10 +380,10 @@ flag, breaks out of the loop, and invokes `shutdown_daemon(...)` (in
 | Step | Operation | Failure mode (`signal_driven=true`) |
 |---|---|---|
 | 1 | `persist_board(&state.active_goals, &*bridges.memory)` — writes the active-goal board through the live cognitive-memory writer so it is captured by the next checkpoint. | Logged via `daemon_log`, next step still runs. |
-| 2 | `shared_mem.checkpoint()` — collapses the WAL into the main DB file through the `CognitiveMemoryOps::checkpoint` trait method (delegates to `NativeCognitiveMemory::checkpoint`). | Logged, next step still runs. |
+| 2 | `shared_mem.checkpoint()` — collapses the WAL into the main store through the `CognitiveMemoryOps::checkpoint` trait method (delegates to `LibraryCognitiveMemory::checkpoint`, which calls the library's `close()`). | Logged, next step still runs. |
 | 3 | `bridges.session.close()` — closes the LLM session if bound. | Logged, next step still runs. |
 | 4 | `memory_ipc::clear_in_process_writer()` — drops the global `Weak`/`Arc` registration so the daemon-owned writer Arc becomes the sole strong reference. | Cannot fail. |
-| 5 | (implicit) Bridges + the daemon's strong `Arc<NativeCognitiveMemory>` drop on function return. `Database::drop` runs `force_checkpoint_on_close` as a defense-in-depth backstop. | Inside `Drop` — failures are logged by lbug. |
+| 5 | (implicit) Bridges + the daemon's strong `Arc<dyn CognitiveMemoryOps>` (a `LibraryCognitiveMemory`) drop on function return. The library closes its store on drop as a defense-in-depth backstop. | Inside `Drop` — failures are logged. |
 
 The single function `shutdown_daemon` is shared by both the
 signal-driven shutdown path and the normal-exit path. When called from
@@ -398,6 +417,14 @@ issue #1973:
 ---
 
 ## Periodic Backup Loop
+
+> **Historical (removed in Phase 2b).** The native daemon backup loop called the
+> fork's lbug-WAL statics `NativeCognitiveMemory::create_verified_backup` /
+> `prune_old_backups`, which were deleted with the fork. In Phase 2b the daemon no
+> longer runs this lbug-WAL backup; file-level snapshot backups are provided by
+> the trait-based `memory_backup/` module (which operates through
+> `CognitiveMemoryOps`, not raw `lbug`). The description below documents the
+> removed native loop for archival context.
 
 Backups are not driven by their own task. At the **start of every OODA
 cycle**, the daemon compares `Instant::elapsed()` since the last backup
@@ -554,26 +581,27 @@ declaring it a success, so corrupt backups should be extremely rare.
 ### `CognitiveMemoryOps::checkpoint`
 
 ```rust
-// src/cognitive_memory/ops.rs
+// src/cognitive_memory/mod.rs
 pub trait CognitiveMemoryOps {
-    /// Force a WAL checkpoint, collapsing the WAL into the main DB
-    /// directory. Default impl delegates to
-    /// [`NativeCognitiveMemory::checkpoint`] (issue #1631).
+    /// Force a WAL checkpoint, collapsing the WAL into the main store.
+    /// Implemented by [`LibraryCognitiveMemory::checkpoint`], which calls
+    /// the library's `close()`.
     fn checkpoint(&self) -> SimardResult<()> { /* ... */ }
 }
 ```
 
-### `NativeCognitiveMemory::checkpoint`
+### `LibraryCognitiveMemory::checkpoint`
 
 ```rust
-// src/cognitive_memory/mod.rs
-impl NativeCognitiveMemory {
-    /// Force a WAL checkpoint, collapsing the WAL into the main DB.
+// src/cognitive_memory/library_adapter.rs
+impl CognitiveMemoryOps for LibraryCognitiveMemory {
+    /// Force a CHECKPOINT, collapsing the WAL into the main store so a
+    /// subsequent reopen of the same path observes all committed writes.
     ///
-    /// Idempotent and safe under concurrent reads. The periodic backup
-    /// loop logs failures at warn level and continues; the shutdown
-    /// path also logs and continues under `signal_driven=true`.
-    pub fn checkpoint(&self) -> SimardResult<()>;
+    /// Delegates to the library's `close()` (which issues a LadybugDB
+    /// CHECKPOINT while keeping the store usable). The shutdown path logs
+    /// and continues under `signal_driven=true`.
+    fn checkpoint(&self) -> SimardResult<()> { self.lock()?.close(); Ok(()) }
 }
 ```
 
@@ -613,6 +641,9 @@ shutdown-flag observation path (`signal_driven=true`, errors are
 logged and the next step still runs).
 
 ### Private: `NativeCognitiveMemory::post_write_barrier` (issue #1973)
+
+> **Historical (removed in Phase 2b).** Deleted with the native fork; the library
+> backend manages WAL durability internally. Archival reference only.
 
 ```rust
 // src/cognitive_memory/mod.rs

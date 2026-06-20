@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use simard::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use simard::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 
 fn test_state_root() -> PathBuf {
     std::env::temp_dir().join(format!("simard-live-test-{}", uuid::Uuid::now_v7()))
@@ -14,7 +14,7 @@ fn test_state_root() -> PathBuf {
 #[ignore] // Requires LadybugDB — run with: cargo test -- --ignored
 fn live_memory_bridge_stores_and_retrieves_fact() {
     let state_root = test_state_root();
-    let bridge = NativeCognitiveMemory::open(&state_root).expect("native memory should open");
+    let bridge = LibraryCognitiveMemory::open(&state_root).expect("native memory should open");
 
     // Store a fact
     let fact_id = bridge
@@ -53,7 +53,7 @@ fn live_memory_bridge_stores_and_retrieves_fact() {
 #[ignore] // Requires LadybugDB — run with: cargo test -- --ignored
 fn live_memory_bridge_working_memory_lifecycle() {
     let state_root = test_state_root();
-    let bridge = NativeCognitiveMemory::open(&state_root).expect("native memory should open");
+    let bridge = LibraryCognitiveMemory::open(&state_root).expect("native memory should open");
 
     // Push a working memory slot
     let slot_id = bridge
@@ -84,7 +84,7 @@ fn live_memory_bridge_working_memory_lifecycle() {
 #[ignore] // Requires LadybugDB — run with: cargo test -- --ignored
 fn live_memory_bridge_episode_and_consolidation() {
     let state_root = test_state_root();
-    let bridge = NativeCognitiveMemory::open(&state_root).expect("native memory should open");
+    let bridge = LibraryCognitiveMemory::open(&state_root).expect("native memory should open");
 
     // Store several episodes
     for i in 0..3 {
@@ -114,7 +114,7 @@ fn live_memory_bridge_episode_and_consolidation() {
 #[ignore] // Requires LadybugDB — run with: cargo test -- --ignored
 fn live_memory_bridge_procedure_store_and_recall() {
     let state_root = test_state_root();
-    let bridge = NativeCognitiveMemory::open(&state_root).expect("native memory should open");
+    let bridge = LibraryCognitiveMemory::open(&state_root).expect("native memory should open");
 
     bridge
         .store_procedure(

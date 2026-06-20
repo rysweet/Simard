@@ -1,6 +1,6 @@
 ---
 title: How to clean a fixture leak from the live goal board
-description: Runbook for removing synthetic test-fixture goals that leaked into ~/.simard/cognitive_memory.ladybug, and restoring lost production goals.
+description: Runbook for removing synthetic test-fixture goals that leaked into the cognitive-memory store (`~/.simard/cognitive/`), and restoring lost production goals.
 last_updated: 2026-05-19
 review_schedule: as-needed
 owner: simard

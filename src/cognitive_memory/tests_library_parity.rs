@@ -1,23 +1,12 @@
-//! Parity / conformance tests: `NativeCognitiveMemory` vs `LibraryCognitiveMemory`.
+//! Conformance tests for [`LibraryCognitiveMemory`](super::LibraryCognitiveMemory),
+//! the sole cognitive-memory backend (de-fork Phase 2b, issue #2307).
 //!
-//! De-fork Phase 2a (SAFE INTEGRATION), issue #86. Written **test-first**: the
-//! native branch is the executable specification for the
-//! [`CognitiveMemoryOps`](super::CognitiveMemoryOps) contract and runs on every
-//! build. The library branch drives the **same** backend-agnostic scenarios
-//! through a `Box<dyn CognitiveMemoryOps>` so the assertions are identical, and
-//! is compiled only behind the opt-in `library-memory` cargo feature.
-//!
-//! ## TDD state
-//!
-//! Until the implementation step lands
-//! `src/cognitive_memory/library_adapter.rs` (the `LibraryCognitiveMemory`
-//! adapter), its `#[cfg(feature = "library-memory")] pub use` re-export in
-//! `mod.rs`, and repoints the `amplihack-memory` dependency at the persistent
-//! commit, the library branch is **RED** — `cargo test --features
-//! library-memory` will not compile because `super::LibraryCognitiveMemory`
-//! does not yet exist. The **default** build/test
-//! (`cargo build` / `cargo test`, no feature) stays green: the gated module is
-//! excluded and only the native scenarios compile and run.
+//! The backend-agnostic `scenario_*` helpers below encode the
+//! [`CognitiveMemoryOps`](super::CognitiveMemoryOps) contract; the `library`
+//! module drives every one of them through a `Box<dyn CognitiveMemoryOps>`
+//! backed by the library adapter. Originally written test-first against the
+//! now-deleted native backend (Phase 2a, #86); the native runner has been
+//! removed along with the fork.
 //!
 //! ## What is asserted (and what is not)
 //!
@@ -45,22 +34,23 @@
 //!   scenario asserts only the four fields **both** backends populate
 //!   (`semantic`, `procedural`, `prospective`, `episodic`) and deliberately does
 //!   not assert `sensory_count` / `working_count`.
-//! * **Distillation gap (A5):** `mark_episode_distilled` /
-//!   `list_undistilled_episodes` have no library equivalent at the pinned
-//!   commit. `mark_episode_distilled` inherits the trait's *contractually safe
-//!   no-op default*; `list_undistilled_episodes` is overridden to degrade
-//!   *loudly* — it emits a one-time warning, then returns empty (it does **not**
-//!   panic). `native_distillation_tracks_distilled_flag` documents the real
-//!   native behavior; `distillation_gap_degrades_to_noop` (library-only) pins
-//!   the empty/no-error degradation. Keyword/prefix episode recall
-//!   (`search_episodes_by_keywords` / `search_episodes_starting_with`) is
+//! * **Distillation (A5 — re-enabled in de-fork Phase 2b, issue #2307):** the
+//!   library now exposes `mark_episode_distilled` / `list_undistilled_episodes`
+//!   with a persistent `distilled` flag, so the adapter DELEGATES to them
+//!   instead of degrading to a no-op. `distillation_round_trip`,
+//!   `list_undistilled_newest_first_and_respects_limit`, and
+//!   `distillation_persists_across_reopen` (library-only) pin the re-enabled
+//!   behavior: freshly stored episodes are undistilled, marking excludes an
+//!   episode from the undistilled set, the listing is newest-first and honours
+//!   `limit`, and the flag survives checkpoint + reopen. Keyword/prefix episode
+//!   recall (`search_episodes_by_keywords` / `search_episodes_starting_with`) is
 //!   implemented in-adapter via recent-recall + filter, so it *is* exercised
 //!   cross-backend.
 //!
 //! All filesystem use goes through `TempDir`; these tests never read, write, or
-//! migrate the live daemon store at `~/.simard/cognitive_memory.ladybug`.
+//! migrate the live daemon store at `~/.simard/cognitive`.
 
-use super::{CognitiveMemoryOps, NativeCognitiveMemory};
+use super::CognitiveMemoryOps;
 
 // ============================================================================
 // Backend-agnostic conformance scenarios
@@ -215,8 +205,8 @@ fn scenario_statistics(mem: &dyn CognitiveMemoryOps) {
 }
 
 /// Write through `create()`, drop, reopen through `reopen()`, and assert the
-/// data round-trips. Used by both backends with their respective on-disk
-/// constructors (`NativeCognitiveMemory::open` / `LibraryCognitiveMemory::open`).
+/// data round-trips. Used with the library backend's on-disk constructor
+/// (`LibraryCognitiveMemory::open`).
 fn assert_persistence_round_trip<C, R>(create: C, reopen: R)
 where
     C: FnOnce() -> Box<dyn CognitiveMemoryOps>,
@@ -268,98 +258,12 @@ where
 }
 
 // ============================================================================
-// Native backend — always compiled; the executable specification.
-// ============================================================================
-
-fn native_mem() -> NativeCognitiveMemory {
-    NativeCognitiveMemory::in_memory().expect("native in-memory DB should create")
-}
-
-#[test]
-fn native_store_and_search_fact() {
-    scenario_store_and_search_fact(&native_mem());
-}
-
-#[test]
-fn native_search_facts_min_confidence() {
-    scenario_search_facts_min_confidence(&native_mem());
-}
-
-#[test]
-fn native_store_and_recall_procedure() {
-    scenario_store_and_recall_procedure(&native_mem());
-}
-
-#[test]
-fn native_store_and_recall_episode() {
-    scenario_store_and_recall_episode(&native_mem());
-}
-
-#[test]
-fn native_trigger_first_fire() {
-    scenario_trigger_first_fire(&native_mem());
-}
-
-#[test]
-fn native_episode_consolidation() {
-    scenario_episode_consolidation(&native_mem());
-}
-
-#[test]
-fn native_statistics() {
-    scenario_statistics(&native_mem());
-}
-
-/// Native distillation works (the real implementation the library backend
-/// degrades away from). Documents the A5 gap by exercising the native side.
-#[test]
-fn native_distillation_tracks_distilled_flag() {
-    let mem = native_mem();
-    let id = mem
-        .store_episode("distill me", "test", None)
-        .expect("store_episode");
-
-    let before = mem
-        .list_undistilled_episodes(10)
-        .expect("list_undistilled_episodes");
-    assert!(
-        before.iter().any(|e| e.node_id == id),
-        "a freshly stored episode must start undistilled"
-    );
-
-    mem.mark_episode_distilled(&id)
-        .expect("mark_episode_distilled");
-
-    let after = mem
-        .list_undistilled_episodes(10)
-        .expect("list_undistilled_episodes after mark");
-    assert!(
-        after.iter().all(|e| e.node_id != id),
-        "a distilled episode must drop out of the undistilled set"
-    );
-}
-
-#[test]
-#[serial_test::serial(cognitive_memory)]
-fn native_persistence_across_reopen() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let path = tmp.path().to_path_buf();
-    assert_persistence_round_trip(
-        || Box::new(NativeCognitiveMemory::open(&path).unwrap()) as Box<dyn CognitiveMemoryOps>,
-        || Box::new(NativeCognitiveMemory::open(&path).unwrap()) as Box<dyn CognitiveMemoryOps>,
-    );
-}
-
-// ============================================================================
-// Library backend — gated behind `library-memory`.
+// Conformance tests — library backend (the sole backend, de-fork Phase 2b).
 //
-// RED until the implementation step adds `LibraryCognitiveMemory` (and its
-// `#[cfg(feature = "library-memory")] pub use` re-export) and repoints the
-// `amplihack-memory` dependency. Drives the identical scenarios so the contract
-// is proven equivalent (or its divergences explicitly documented).
+// Drives the backend-agnostic scenarios above through `LibraryCognitiveMemory`,
+// the only `CognitiveMemoryOps` implementation after the native fork's deletion.
 // ============================================================================
 
-#[cfg(feature = "library-memory")]
 mod library {
     use super::{
         assert_persistence_round_trip, scenario_episode_consolidation,
@@ -418,29 +322,118 @@ mod library {
         scenario_statistics(&library_mem(&tmp));
     }
 
-    /// A5 gap: the library has no distilled mutation/filter API at the pinned
-    /// commit. `mark_episode_distilled` inherits the trait's no-op default;
-    /// `list_undistilled_episodes` is overridden to degrade *loudly* (one-time
-    /// warning) but still returns empty. This pins the degradation:
-    /// `mark_episode_distilled` must not error and `list_undistilled_episodes`
-    /// returns empty — **not** a panic. Tracked upstream as amplihack-memory-lib#85.
+    /// De-fork Phase 2b (issue #2307): the library now tracks the `distilled`
+    /// flag, so the adapter delegates instead of degrading. A freshly stored
+    /// episode starts undistilled; marking it excludes it from the undistilled
+    /// set while leaving its siblings.
     #[test]
-    fn distillation_gap_degrades_to_noop() {
+    fn distillation_round_trip() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let mem = library_mem(&tmp);
-        let id = mem
-            .store_episode("distill me", "test", None)
-            .expect("store_episode");
 
-        mem.mark_episode_distilled(&id)
-            .expect("mark_episode_distilled no-op must not error or panic");
+        let id_a = mem
+            .store_episode("alpha", "test", None)
+            .expect("store alpha");
+        let id_b = mem.store_episode("beta", "test", None).expect("store beta");
+        let id_c = mem
+            .store_episode("gamma", "test", None)
+            .expect("store gamma");
 
-        let undistilled = mem
+        let before: std::collections::HashSet<String> = mem
             .list_undistilled_episodes(10)
-            .expect("list_undistilled_episodes no-op must not error or panic");
+            .expect("list undistilled")
+            .into_iter()
+            .map(|e| e.node_id)
+            .collect();
+        assert!(before.contains(&id_a), "alpha must start undistilled");
+        assert!(before.contains(&id_b), "beta must start undistilled");
+        assert!(before.contains(&id_c), "gamma must start undistilled");
+
+        mem.mark_episode_distilled(&id_b)
+            .expect("mark beta distilled");
+
+        let after: std::collections::HashSet<String> = mem
+            .list_undistilled_episodes(10)
+            .expect("list undistilled after mark")
+            .into_iter()
+            .map(|e| e.node_id)
+            .collect();
+        assert!(after.contains(&id_a), "alpha must remain undistilled");
         assert!(
-            undistilled.is_empty(),
-            "library backend degrades distillation to empty (loud-once); documented for #85"
+            !after.contains(&id_b),
+            "beta must be excluded after mark_episode_distilled"
+        );
+        assert!(after.contains(&id_c), "gamma must remain undistilled");
+    }
+
+    /// `list_undistilled_episodes` returns newest-first (temporal index
+    /// descending) and honours `limit`.
+    #[test]
+    fn list_undistilled_newest_first_and_respects_limit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mem = library_mem(&tmp);
+
+        mem.store_episode("first", "test", None)
+            .expect("store first");
+        mem.store_episode("second", "test", None)
+            .expect("store second");
+        mem.store_episode("third", "test", None)
+            .expect("store third");
+
+        let all = mem.list_undistilled_episodes(10).expect("list undistilled");
+        let contents: Vec<&str> = all.iter().map(|e| e.content.as_str()).collect();
+        assert_eq!(
+            contents,
+            vec!["third", "second", "first"],
+            "undistilled episodes must be newest-first by temporal index"
+        );
+
+        let limited = mem
+            .list_undistilled_episodes(2)
+            .expect("list undistilled limited");
+        assert_eq!(limited.len(), 2, "limit=2 must cap the result at 2 rows");
+        assert_eq!(
+            limited[0].content, "third",
+            "the newest episode must come first even when the list is limited"
+        );
+    }
+
+    /// The `distilled` flag is durable: it survives `checkpoint` + reopen of the
+    /// persistent library store.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn distillation_persists_across_reopen() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+
+        let distilled_id = {
+            let mem = LibraryCognitiveMemory::open(&root).expect("open library store");
+            mem.store_episode("keep me", "test", None)
+                .expect("store keep");
+            let distill = mem
+                .store_episode("distill me", "test", None)
+                .expect("store distill");
+            mem.mark_episode_distilled(&distill)
+                .expect("mark distilled");
+            mem.checkpoint().expect("checkpoint before reopen");
+            distill
+        }; // drop closes the store
+
+        let mem = LibraryCognitiveMemory::open(&root).expect("reopen library store");
+        let undistilled: Vec<String> = mem
+            .list_undistilled_episodes(10)
+            .expect("list undistilled after reopen")
+            .into_iter()
+            .map(|e| e.node_id)
+            .collect();
+        assert!(
+            !undistilled.contains(&distilled_id),
+            "the distilled flag must persist across reopen (distilled episode stays excluded)"
+        );
+        assert_eq!(
+            undistilled.len(),
+            1,
+            "exactly the one still-undistilled episode must remain after reopen"
         );
     }
 

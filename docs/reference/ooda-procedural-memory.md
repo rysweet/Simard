@@ -14,6 +14,15 @@ related:
 
 # OODA procedural memory
 
+> **De-fork Phase 2b.** The store/recall *behavior* described here is
+> preserved: `store_procedure` and `recall_procedure` are reached through the
+> `CognitiveMemoryOps` trait, now backed solely by `LibraryCognitiveMemory`
+> over `amplihack-memory-lib`. The implementation citations on this page —
+> `src/cognitive_memory/ops.rs` (`NativeCognitiveMemory`) and tests that
+> exercise `NativeCognitiveMemory` directly — were **deleted** with the fork;
+> treat those code citations as historical. See
+> [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md).
+
 Shipped in issue [#2280](https://github.com/rysweet/Simard/issues/2280).
 
 After the OODA Act phase dispatches actions and collects outcomes, each

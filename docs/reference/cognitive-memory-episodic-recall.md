@@ -15,6 +15,15 @@ related:
 
 # Episodic recall in preparation
 
+> **De-fork Phase 2b.** The *behavior* described here (keyword-overlap episodic
+> recall via `search_episodes_by_keywords`) is preserved through the
+> `CognitiveMemoryOps` trait, now backed solely by `LibraryCognitiveMemory`. The
+> adapter implements this by recalling episodes from the library and filtering on
+> case-insensitive `content.contains` (see
+> [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md)).
+> The native `NativeCognitiveMemory` Cypher implementation and `src/cognitive_memory/ops.rs`
+> citations on this page were **deleted** with the fork; treat them as historical.
+
 > Shipped in issue [#2281](https://github.com/rysweet/Simard/issues/2281)
 > as PR-C (procedural seeding + episodic recall). PR-C also reshapes
 > procedural memory storage — see

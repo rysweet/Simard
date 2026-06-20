@@ -379,7 +379,7 @@ fn preparation_does_not_filter_other_concepts() {
 
 /// **TDD red → green (issue #2302): the "facts always zero" defect.**
 ///
-/// End-to-end through the real `NativeCognitiveMemory` (not a mock
+/// End-to-end through the real `LibraryCognitiveMemory` (not a mock
 /// bridge) so the actual `search_facts` body is exercised. Stores a
 /// keyword-bearing learned fact and a valid `goal-store:record` fact,
 /// then prepares with a realistic multi-word objective and the live
@@ -401,7 +401,7 @@ fn preparation_recalls_keyword_and_goal_facts() {
     use crate::goals::{GoalRecord, GoalStatus};
     use crate::session::SessionPhase;
 
-    let mem = crate::cognitive_memory::NativeCognitiveMemory::in_memory().unwrap();
+    let mem = crate::cognitive_memory::LibraryCognitiveMemory::in_memory().unwrap();
 
     // A learned fact whose CONTENT shares the keywords "auth"/"module"
     // with the objective but does NOT contain the full objective verbatim.

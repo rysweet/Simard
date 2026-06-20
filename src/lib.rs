@@ -168,7 +168,7 @@ pub use bridge::{
 pub use bridge_circuit::{CircuitBreakerConfig, CircuitBreakerTransport, CircuitState};
 pub use bridge_subprocess::{InMemoryBridgeTransport, SubprocessBridgeTransport};
 pub use build_lock::{BuildLock, BuildLockGuard};
-pub use cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+pub use cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 pub use cost_tracking::{
     CostEntry, CostSummary, daily_summary, estimate_tokens, record_cost, weekly_summary,
 };

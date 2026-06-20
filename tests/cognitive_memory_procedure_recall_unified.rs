@@ -27,7 +27,7 @@
 //! both adapters now share. This gate locks the contract: every required
 //! invariant fails the build if it regresses.
 //!
-//! **Live schema.** The test runs against [`NativeCognitiveMemory::in_memory`]
+//! **Live schema.** The test runs against [`LibraryCognitiveMemory::in_memory`]
 //! which constructs a real `lbug::Database` and executes the real
 //! `SCHEMA_DDL` for the `cognitive_memory.ladybug` schema. There is no
 //! storage-layer mock anywhere in the call path: every Cypher statement
@@ -44,7 +44,7 @@ use serial_test::serial;
 use simard::cognitive_memory::bootstrap_procedures::{
     BOOTSTRAP_PROCEDURES, seed_bootstrap_procedures,
 };
-use simard::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
+use simard::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use simard::ooda_loop::{ActionKind, compose_procedure_name, derive_triggers_from_objective};
 use simard::{prepare_turn_context, recall_procedures_for_objective};
 
@@ -73,12 +73,12 @@ fn make_name(pattern: &str, scope: &str, triggers: &str) -> String {
 ///    identical to what was stored, no mid-word truncation.
 ///
 /// Uses the live `cognitive_memory.ladybug` schema via
-/// `NativeCognitiveMemory::in_memory`.
+/// `LibraryCognitiveMemory::in_memory`.
 #[test]
 #[serial(cognitive_memory)]
 fn distilled_procedure_with_foo_bar_trigger_surfaces_for_foo_objective() {
-    let mem = NativeCognitiveMemory::in_memory()
-        .expect("construct in-memory NativeCognitiveMemory with real SCHEMA_DDL");
+    let mem = LibraryCognitiveMemory::in_memory()
+        .expect("construct in-memory LibraryCognitiveMemory with real SCHEMA_DDL");
 
     // 1. Store a distilled-shape procedure with the user-spec trigger.
     let stored_name = make_name("foo-recall", "ad-hoc", "foo,bar");
@@ -141,8 +141,8 @@ fn distilled_procedure_with_foo_bar_trigger_surfaces_for_foo_objective() {
 #[test]
 #[serial(cognitive_memory)]
 fn bootstrap_and_distilled_pr_merge_procedures_both_surface() {
-    let mem = NativeCognitiveMemory::in_memory()
-        .expect("construct in-memory NativeCognitiveMemory with real SCHEMA_DDL");
+    let mem = LibraryCognitiveMemory::in_memory()
+        .expect("construct in-memory LibraryCognitiveMemory with real SCHEMA_DDL");
 
     // Seed the canonical bootstrap set.
     let seeded = seed_bootstrap_procedures(&mem).expect("seed bootstrap procedures");
@@ -198,8 +198,8 @@ fn bootstrap_and_distilled_pr_merge_procedures_both_surface() {
 #[test]
 #[serial(cognitive_memory)]
 fn recall_is_case_insensitive_via_consistent_lowercase_folding() {
-    let mem = NativeCognitiveMemory::in_memory()
-        .expect("construct in-memory NativeCognitiveMemory with real SCHEMA_DDL");
+    let mem = LibraryCognitiveMemory::in_memory()
+        .expect("construct in-memory LibraryCognitiveMemory with real SCHEMA_DDL");
 
     // Stored name uses lowercase, which is the production invariant.
     let stored_name = make_name("foo-recall", "ad-hoc", "foo,bar");
@@ -280,8 +280,8 @@ fn derived_triggers_no_longer_emit_sub_three_char_extensions() {
 #[test]
 #[serial(cognitive_memory)]
 fn distilled_procedure_surfaces_through_prepare_turn_context() {
-    let mem = NativeCognitiveMemory::in_memory()
-        .expect("construct in-memory NativeCognitiveMemory with real SCHEMA_DDL");
+    let mem = LibraryCognitiveMemory::in_memory()
+        .expect("construct in-memory LibraryCognitiveMemory with real SCHEMA_DDL");
 
     // Store a distilled-shape procedure whose trigger matches a token in
     // the objective below ("payload").

@@ -19,7 +19,7 @@
 //! Tests below reference both helpers — they will not compile until the
 //! migration adds them, which is the intended TDD red state.
 
-use crate::cognitive_memory::NativeCognitiveMemory;
+use crate::cognitive_memory::LibraryCognitiveMemory;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, load_goal_board, save_goal_board};
 use crate::test_support::HermeticState;
 
@@ -49,7 +49,7 @@ fn reader_returns_snapshot_from_cognitive_memory_without_legacy_file() {
     let root = state.state_root().to_path_buf();
     let board = seeded_board();
     {
-        let mem = NativeCognitiveMemory::open(&root).expect("open native memory");
+        let mem = LibraryCognitiveMemory::open(&root).expect("open native memory");
         save_goal_board(&board, &mem).expect("seed snapshot");
     }
     assert!(
@@ -87,7 +87,7 @@ fn writer_persists_through_cognitive_memory_without_legacy_file() {
     let state = HermeticState::new();
     let root = state.state_root().to_path_buf();
     {
-        let mem = NativeCognitiveMemory::open(&root).expect("open native memory");
+        let mem = LibraryCognitiveMemory::open(&root).expect("open native memory");
         save_goal_board(&GoalBoard::new(), &mem).expect("seed empty board");
     }
 
@@ -105,7 +105,7 @@ fn writer_persists_through_cognitive_memory_without_legacy_file() {
 
     dashboard_save_goal_board(&root, &board).expect("dashboard writer must succeed");
 
-    let mem = NativeCognitiveMemory::open(&root).expect("reopen native memory");
+    let mem = LibraryCognitiveMemory::open(&root).expect("reopen native memory");
     let loaded = load_goal_board(&mem).expect("load_goal_board after dashboard write");
     assert!(
         loaded
@@ -133,7 +133,7 @@ fn reader_returns_empty_board_when_snapshot_missing() {
     let state = HermeticState::new();
     let root = state.state_root().to_path_buf();
     {
-        let _mem = NativeCognitiveMemory::open(&root).expect("open native memory");
+        let _mem = LibraryCognitiveMemory::open(&root).expect("open native memory");
     }
 
     let loaded = dashboard_goal_board_snapshot(&root)
@@ -154,7 +154,7 @@ fn writer_round_trip_via_dashboard_helpers() {
     let state = HermeticState::new();
     let root = state.state_root().to_path_buf();
     {
-        let mem = NativeCognitiveMemory::open(&root).expect("open native memory");
+        let mem = LibraryCognitiveMemory::open(&root).expect("open native memory");
         save_goal_board(&GoalBoard::new(), &mem).expect("init empty board");
     }
 

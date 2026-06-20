@@ -33,7 +33,7 @@ consumer should use to obtain a typed cognitive-memory bridge:
 | `open_reader_bridge` | `SimardResult<ReaderBridge>` | Read-only consumers — dashboard read handlers (`workboard`, `current_work`, `metrics`, GET goals), engineer-loop top-5 read, inspection tools |
 
 These helpers encapsulate the **daemon-or-direct fallback ladder** so that
-callers never instantiate `NativeCognitiveMemory` or `RemoteCognitiveMemory`
+callers never instantiate `LibraryCognitiveMemory` or `RemoteCognitiveMemory`
 directly.
 
 ---
@@ -92,11 +92,13 @@ read-only fallback:
 | Tier | Source | Condition |
 |------|--------|-----------|
 | 1 | `RemoteCognitiveMemory::connect(socket_path_for(state_root))` | A running OODA daemon's IPC socket exists at `<state_root>/memory.sock` (or `$SIMARD_MEMORY_SOCKET` if set) |
-| 2 | `NativeCognitiveMemory::open(state_root)` | No daemon socket; this process can take the writer lock directly (after `reap_stale_open_lock`) |
-| 3 (read-only fallback) | `NativeCognitiveMemory::open_read_only(state_root)` | Both writer attempts failed; the helper currently returns the read-only handle wrapped as a `WriterBridge` |
+| 2 | `LibraryCognitiveMemory::open(state_root)` | No daemon socket; this process can take the writer lock directly (after `reap_stale_open_lock`) |
+| 3 (fallback) | `LibraryCognitiveMemory::open(state_root)` | Both writer attempts failed; the library has no read-only constructor at the pinned commit, so the fallback re-opens the writer handle |
 
-Tier 3 is the **silent-degradation hazard** that issue #1590's follow-up
-work targets — see "Planned changes" below.
+Tier 3 is the **degradation point** that issue #1590's follow-up
+work targets — see "Planned changes" below. (Phase 2b note: before the de-fork,
+tier 2 used `NativeCognitiveMemory::open` and tier 3 used the native
+`open_read_only`; both now resolve to `LibraryCognitiveMemory::open`.)
 
 ### Planned: tier 0 in-process `Arc` shortcut
 
@@ -171,7 +173,8 @@ pub trait CognitiveMemoryOps: Send + Sync + 'static {
 }
 ```
 
-`NativeCognitiveMemory::open_read_only` overrides this to return `true`.
+The library backend (`LibraryCognitiveMemory`) leaves the default `false` — it
+has no read-only constructor at the pinned commit, so it is always a writer.
 The IPC client (`RemoteCognitiveMemory`) and the daemon's in-process Arc
 both leave the default `false` because the daemon is the writer.
 
@@ -219,7 +222,7 @@ order:
 | Tier | Source | Condition |
 |------|--------|-----------|
 | 1 | `RemoteCognitiveMemory::connect(socket_path_for(state_root))` | A running daemon's IPC socket exists at `<state_root>/memory.sock` (or `$SIMARD_MEMORY_SOCKET` if set) |
-| 2 | `NativeCognitiveMemory::open_read_only(state_root)` | No daemon; the read-only opener never contends with the writer lock |
+| 2 | `LibraryCognitiveMemory::open(state_root)` | No daemon; the library backend opens the store directly (preferring IPC when the daemon holds the writer to avoid lock contention) |
 
 Read-only callers should always prefer this helper over
 `launch_writer_bridge` because:

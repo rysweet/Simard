@@ -1,19 +1,14 @@
-//! Native cognitive memory backed by LadybugDB.
+//! Cognitive memory: the [`CognitiveMemoryOps`] trait and its sole backend.
 //!
-//! Replaces the Python bridge (`simard_memory_server.py`) with a direct Rust
-//! implementation. The [`CognitiveMemoryOps`] trait defines the API shared by
-//! both the native backend ([`NativeCognitiveMemory`]) and the legacy bridge
-//! client ([`CognitiveMemoryBridge`](crate::memory_bridge::CognitiveMemoryBridge)).
-//!
-//! The flock-based multi-writer serialization is copied from the skwaq
-//! reference implementation in `ladybug_db.rs`.
+//! De-fork Phase 2b (issue #2307): Simard's native LadybugDB fork has been
+//! deleted. The [`CognitiveMemoryOps`] trait defines the backend-agnostic API;
+//! the only implementation is [`LibraryCognitiveMemory`], which delegates to the
+//! upstream `amplihack-memory-lib` `CognitiveMemory` (persistent, lbug-backed).
+//! The legacy bridge client
+//! ([`CognitiveMemoryBridge`](crate::memory_bridge::CognitiveMemoryBridge)) and
+//! the IPC client also implement the trait so callers stay backend-agnostic.
 
-pub(crate) mod schema;
-
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-use crate::error::{SimardError, SimardResult};
+use crate::error::SimardResult;
 use crate::memory_cognitive::{
     CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
     CognitiveWorkingSlot,
@@ -21,7 +16,7 @@ use crate::memory_cognitive::{
 
 /// Trait abstracting cognitive memory operations.
 ///
-/// Both [`NativeCognitiveMemory`] (LadybugDB) and
+/// Both [`LibraryCognitiveMemory`] (amplihack-memory-lib, lbug-backed) and
 /// [`CognitiveMemoryBridge`](crate::memory_bridge::CognitiveMemoryBridge)
 /// (Python subprocess) implement this trait so callers are backend-agnostic.
 pub trait CognitiveMemoryOps: Send + Sync {
@@ -94,9 +89,8 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// The default implementation pays for that filter with an
     /// [`EXACT_NAME_RECALL_LIMIT`]-wide recall plus a linear exact-name scan,
     /// and decodes each hit's `steps`/`prerequisites` JSON only to discard it.
-    /// Backends that can answer existence directly (e.g.
-    /// [`NativeCognitiveMemory`]) should override this with an exact-name probe
-    /// that returns no payload and stops at the first match.
+    /// Backends that can answer existence directly should override this with an
+    /// exact-name probe that returns no payload and stops at the first match.
     fn procedure_exists(&self, name: &str) -> SimardResult<bool> {
         Ok(self
             .recall_procedure(name, EXACT_NAME_RECALL_LIMIT)?
@@ -135,10 +129,9 @@ pub trait CognitiveMemoryOps: Send + Sync {
     ///
     /// Default impl returns empty, which makes the distillation pass a
     /// no-op for backends that do not track the `distilled` flag.
-    /// `NativeCognitiveMemory` overrides this to query the
-    /// `Episode.distilled = 0` set ordered by `id DESC` (which is
-    /// chronological because UUID-v7 ids are time-prefixed).
-    /// Issue #2281, PR-B.
+    /// [`LibraryCognitiveMemory`] overrides this to return the agent's
+    /// not-yet-distilled episodes (newest-first), which is what the OODA
+    /// distillation pass consumes. Issue #2281, PR-B; #2307.
     fn list_undistilled_episodes(&self, _limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
         Ok(vec![])
     }
@@ -148,14 +141,9 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// substring). Newest first.
     ///
     /// Default impl returns empty so legacy backends keep compiling.
-    /// `NativeCognitiveMemory` overrides this with a Cypher query that
-    /// ORs one `toLower(e.content) CONTAINS '<lowercased+escaped>'`
-    /// clause per keyword, ordered by `e.id DESC` (UUID-v7 ids are
-    /// time-prefixed so descending lex-sort == newest-by-creation).
-    /// Both sides are lowered at query time so the contract holds
-    /// against episodes already persisted verbatim (issue #2299).
-    ///
-    /// Issue #2281, PR-C, problem 4.
+    /// [`LibraryCognitiveMemory`] overrides this with a case-insensitive
+    /// keyword-overlap scan ordered newest-first. Issue #2281, PR-C, problem 4;
+    /// #2299.
     fn search_episodes_by_keywords(
         &self,
         _keywords: &[String],
@@ -191,8 +179,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     ///
     /// Defaulted to `false` because the overwhelming majority of
     /// implementations are writers (the IPC client, the daemon's
-    /// in-process Arc, the live `NativeCognitiveMemory::open`).
-    /// `NativeCognitiveMemory::open_read_only` overrides this to `true`.
+    /// in-process Arc, the live [`LibraryCognitiveMemory`]).
     ///
     /// `WriterBridge` constructors assert that this is `false` so a
     /// read-only handle cannot be silently wrapped as a writer — the
@@ -205,8 +192,8 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// Force a WAL checkpoint, collapsing the WAL into the main DB file.
     ///
     /// Defaults to a no-op for backends where this is not meaningful
-    /// (IPC client, bridge clients). Overridden by [`NativeCognitiveMemory`]
-    /// to issue a `CHECKPOINT;` Cypher statement.
+    /// (IPC client, bridge clients). Overridden by [`LibraryCognitiveMemory`]
+    /// to flush the library's lbug-backed store via `close`.
     ///
     /// Call this **before** taking a backup or shutting down the host
     /// process so committed-but-WAL-resident writes are captured (issue #1631).
@@ -223,487 +210,13 @@ pub trait CognitiveMemoryOps: Send + Sync {
 /// trigger-token collisions. Backends that override `procedure_exists` with a
 /// direct exact-name probe do not pay this fan-out.
 const EXACT_NAME_RECALL_LIMIT: u32 = 16;
-
-// ============================================================================
-// NativeCognitiveMemory — LadybugDB backend
-// ============================================================================
-
-/// Native cognitive memory backed by an embedded LadybugDB graph database.
-///
-/// Uses flock serialization for safe multi-writer access (same pattern as
-/// the skwaq `LadybugGraphDb`). All errors propagate via [`SimardResult`].
-pub struct NativeCognitiveMemory {
-    db: Arc<lbug::Database>,
-    #[allow(dead_code)]
-    path: PathBuf,
-    #[allow(dead_code)]
-    _temp_dir: Option<Arc<tempfile::TempDir>>,
-    /// Whether this handle was created via [`Self::open_read_only`].
-    /// Surfaced through [`CognitiveMemoryOps::is_read_only`] so the
-    /// `WriterBridge` defensive guard refuses to wrap a read-only
-    /// handle (issue #1590 follow-up — closes the dashboard hollow-
-    /// success failure mode).
-    read_only: bool,
-    /// Whether mutating ops must call [`Self::post_write_barrier`] after
-    /// every successful Cypher write. `true` for [`Self::open`] (on-disk
-    /// writer), `false` for [`Self::in_memory`] (no on-disk file to fsync)
-    /// and for [`Self::open_read_only`] (writes aren't possible).
-    ///
-    /// Per-write fsync barrier: issue #1973, goals G1 + G2 of epic
-    /// #1972 (improve-cognitive-memory-persistence). Without the barrier,
-    /// SIGKILL between two writes loses acknowledged data because lbug
-    /// only flushes its WAL on `Database::drop`.
-    durable_writes: bool,
-}
-
-// SAFETY: lbug::Database is thread-safe by design (internal locking).
-unsafe impl Send for NativeCognitiveMemory {}
-unsafe impl Sync for NativeCognitiveMemory {}
-
-impl NativeCognitiveMemory {
-    /// Open or create a LadybugDB cognitive memory database under `state_root`.
-    ///
-    /// The database directory is `<state_root>/cognitive_memory.ladybug`.
-    /// Uses flock to serialize `Database::new()` across processes.
-    #[cfg(unix)]
-    pub fn open(state_root: &Path) -> SimardResult<Self> {
-        std::fs::create_dir_all(state_root).map_err(|e| SimardError::PersistentStoreIo {
-            store: "cognitive-memory".into(),
-            action: "create_dir".into(),
-            path: state_root.to_path_buf(),
-            reason: e.to_string(),
-        })?;
-        let db_path = state_root.join("cognitive_memory.ladybug");
-
-        // Migrate from old KuzuDB directory layout to native LadybugDB file.
-        // The Python bridge stored KuzuDB data as a directory; lbug expects a file.
-        if db_path.is_dir() {
-            let backup = state_root.join("cognitive_memory.ladybug.kuzu-backup");
-            eprintln!(
-                "[simard] migrating old KuzuDB directory → {}",
-                backup.display()
-            );
-            std::fs::rename(&db_path, &backup).map_err(|e| SimardError::PersistentStoreIo {
-                store: "cognitive-memory".into(),
-                action: "migrate-kuzu-backup".into(),
-                path: db_path.clone(),
-                reason: e.to_string(),
-            })?;
-        }
-
-        let db = Self::open_db_with_recovery(&db_path)?;
-        let mem = Self {
-            db: Arc::new(db),
-            path: db_path,
-            _temp_dir: None,
-            read_only: false,
-            durable_writes: true,
-        };
-        mem.ensure_schema()?;
-        eprintln!(
-            "[simard] native cognitive memory active — LadybugDB at {}",
-            state_root.display()
-        );
-        Ok(mem)
-    }
-
-    /// Create an in-memory LadybugDB for tests (no flock needed).
-    pub fn in_memory() -> SimardResult<Self> {
-        let tmp = tempfile::tempdir().map_err(|e| SimardError::RuntimeInitFailed {
-            component: "cognitive-memory".into(),
-            reason: format!("Failed to create temp dir: {e}"),
-        })?;
-        let db_path = tmp.path().join("cognitive_memory_test");
-        let db = lbug::Database::new(
-            &db_path,
-            lbug::SystemConfig::default()
-                .buffer_pool_size(64 * 1024 * 1024)
-                .max_db_size(1 << 28)
-                .max_num_threads(1),
-        )
-        .map_err(|e| SimardError::RuntimeInitFailed {
-            component: "cognitive-memory".into(),
-            reason: format!("Failed to create in-memory LadybugDB: {e}"),
-        })?;
-        let mem = Self {
-            db: Arc::new(db),
-            path: db_path,
-            _temp_dir: Some(Arc::new(tmp)),
-            read_only: false,
-            // In-memory handles back a temp file whose lifetime is tied to
-            // the process — there is no recovery scenario where fsyncing it
-            // would help, and unit tests rely on the latency profile of an
-            // un-fsynced backend. Issue #1973 opt-out.
-            durable_writes: false,
-        };
-        mem.ensure_schema()?;
-        Ok(mem)
-    }
-
-    /// Open LadybugDB in **read-only** mode for concurrent access.
-    ///
-    /// Multiple processes can open the same DB read-only simultaneously
-    /// (no exclusive flock needed). Uses `SystemConfig::read_only(true)`
-    /// following the skwaq `LadybugGraphDb::open_read_only` pattern.
-    /// Write operations will fail — use `open()` for the primary writer.
-    #[cfg(unix)]
-    pub fn open_read_only(state_root: &Path) -> SimardResult<Self> {
-        let db_path = state_root.join("cognitive_memory.ladybug");
-        if !db_path.exists() {
-            return Err(SimardError::RuntimeInitFailed {
-                component: "cognitive-memory".into(),
-                reason: format!(
-                    "Cannot open LadybugDB read-only: {} does not exist",
-                    db_path.display()
-                ),
-            });
-        }
-        let config = lbug::SystemConfig::default().read_only(true);
-        let db = Self::with_open_lock(&db_path, || {
-            lbug::Database::new(&db_path, config).map_err(|e| SimardError::RuntimeInitFailed {
-                component: "cognitive-memory".into(),
-                reason: format!(
-                    "Failed to open LadybugDB read-only at {}: {e}",
-                    db_path.display()
-                ),
-            })
-        })?;
-        let mem = Self {
-            db: Arc::new(db),
-            path: db_path,
-            _temp_dir: None,
-            read_only: true,
-            // Read-only handles cannot mutate, so the barrier is a no-op
-            // and we save the cost of even checking the flag inside hot
-            // read paths that happen to call into shared code.
-            durable_writes: false,
-        };
-        eprintln!(
-            "[simard] cognitive memory opened read-only — LadybugDB at {}",
-            state_root.display()
-        );
-        Ok(mem)
-    }
-    // Backup/recovery helpers — see backup.rs.
-
-    /// Open or create a cognitive memory database and then automatically
-    /// restore the latest snapshot from `<state_root>/snapshots/` if one
-    /// exists (issue #1919).
-    ///
-    /// This is the recommended entry point for session startup: it
-    /// combines [`Self::open`] with the snapshot recovery ladder so
-    /// cross-session recall is the default, not an opt-in dance.
-    ///
-    /// If no snapshot directory or snapshot file exists, this behaves
-    /// identically to [`Self::open`].
-    #[cfg(unix)]
-    pub fn open_with_recovery(state_root: &Path) -> SimardResult<Self> {
-        let mem = Self::open(state_root)?;
-
-        let snapshot_dir = state_root.join("snapshots");
-        if snapshot_dir.is_dir()
-            && let Some(snapshot) = crate::memory_snapshot::load_latest_snapshot(&snapshot_dir)
-        {
-            let count = crate::memory_snapshot::restore_snapshot(&mem, &snapshot)?;
-            eprintln!(
-                "[simard] recovery: restored {count} items from latest snapshot in {}",
-                snapshot_dir.display()
-            );
-        }
-
-        Ok(mem)
-    }
-}
-
-mod backup;
-mod fsync;
 pub mod metrics;
-mod ops;
 
-// De-fork phase 2a (issue #86): the library-backed `CognitiveMemoryOps`
-// adapter. Compiled only behind the `library-memory` cargo feature so the
-// default build is the native path alone. Re-exported at the module root so
-// callers (and the parity test) reference `cognitive_memory::LibraryCognitiveMemory`.
-#[cfg(feature = "library-memory")]
+// De-fork Phase 2b (issue #2307): the library-backed `CognitiveMemoryOps`
+// adapter is now the sole cognitive-memory backend. Re-exported at the
+// module root so callers reference `cognitive_memory::LibraryCognitiveMemory`.
 mod library_adapter;
-#[cfg(feature = "library-memory")]
 pub use library_adapter::LibraryCognitiveMemory;
-
-impl NativeCognitiveMemory {
-    fn conn(&self) -> SimardResult<lbug::Connection<'_>> {
-        lbug::Connection::new(&self.db).map_err(|e| SimardError::RuntimeInitFailed {
-            component: "cognitive-memory".into(),
-            reason: format!("Failed to create LadybugDB connection: {e}"),
-        })
-    }
-
-    pub(crate) fn query(&self, cypher: &str) -> SimardResult<Vec<Vec<lbug::Value>>> {
-        let conn = self.conn()?;
-        let result = conn
-            .query(cypher)
-            .map_err(|e| SimardError::BridgeCallFailed {
-                bridge: "cognitive-memory-native".into(),
-                method: "query".into(),
-                reason: format!("{e}\nCypher: {cypher}"),
-            })?;
-        Ok(result.collect())
-    }
-
-    fn execute(&self, cypher: &str) -> SimardResult<()> {
-        self.conn()?
-            .query(cypher)
-            .map_err(|e| SimardError::BridgeCallFailed {
-                bridge: "cognitive-memory-native".into(),
-                method: "execute".into(),
-                reason: format!("{e}\nCypher: {cypher}"),
-            })?;
-        Ok(())
-    }
-
-    /// Execute multiple Cypher statements atomically within a single
-    /// `BEGIN TRANSACTION` / `COMMIT` block on one connection.
-    ///
-    /// If any statement fails, `ROLLBACK` is issued so no partial state
-    /// is visible to subsequent reads. This is the crash-atomicity
-    /// primitive used by `consolidate_episodes` (issue #2044, goal G4).
-    fn execute_in_transaction(&self, statements: &[String]) -> SimardResult<()> {
-        let conn = self.conn()?;
-        conn.query("BEGIN TRANSACTION")
-            .map_err(|e| SimardError::BridgeCallFailed {
-                bridge: "cognitive-memory-native".into(),
-                method: "execute_in_transaction".into(),
-                reason: format!("BEGIN TRANSACTION failed: {e}"),
-            })?;
-        for stmt in statements {
-            if let Err(e) = conn.query(stmt) {
-                // Best-effort rollback — if this also fails, the
-                // original error is more informative.
-                let _ = conn.query("ROLLBACK");
-                return Err(SimardError::BridgeCallFailed {
-                    bridge: "cognitive-memory-native".into(),
-                    method: "execute_in_transaction".into(),
-                    reason: format!("{e}\nCypher: {stmt}"),
-                });
-            }
-        }
-        conn.query("COMMIT").map_err(|e| {
-            let _ = conn.query("ROLLBACK");
-            SimardError::BridgeCallFailed {
-                bridge: "cognitive-memory-native".into(),
-                method: "execute_in_transaction".into(),
-                reason: format!("COMMIT failed: {e}"),
-            }
-        })?;
-        Ok(())
-    }
-
-    fn ensure_schema(&self) -> SimardResult<()> {
-        for ddl in schema::SCHEMA_DDL {
-            if let Err(e) = self.execute(ddl) {
-                let msg = format!("{e}");
-                if !msg.contains("already exists") {
-                    return Err(e);
-                }
-            }
-        }
-        // Lazy schema migrations: each ALTER is idempotent and is run
-        // unconditionally; errors signalling "the column is already
-        // there" are swallowed because the CREATE statement above may
-        // have already provided the column on fresh DBs. lbug's
-        // wording for this case is `"already has property <name>"`
-        // (Kuzu-derived) — accept that and the more standard SQL
-        // wordings so the migration is portable to future backends.
-        for migration in schema::SCHEMA_MIGRATIONS {
-            if let Err(e) = self.execute(migration) {
-                let msg = format!("{e}").to_lowercase();
-                let benign = msg.contains("already exists")
-                    || msg.contains("already has")
-                    || msg.contains("duplicate column")
-                    || msg.contains("column already")
-                    || msg.contains("property already");
-                if !benign {
-                    return Err(e);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn new_id(prefix: &str) -> String {
-        format!("{prefix}_{}", uuid::Uuid::now_v7().simple())
-    }
-
-    fn now_secs() -> SimardResult<f64> {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .map_err(|_| SimardError::ClockBeforeUnixEpoch {
-                reason: "system clock before Unix epoch".into(),
-            })
-    }
-
-    /// Force a WAL checkpoint, collapsing the WAL into the main DB file.
-    ///
-    /// Call this **before** copying the DB file (e.g. for a snapshot or
-    /// backup) so committed-but-WAL-resident writes are captured. Also
-    /// useful in shutdown paths where the host process is about to exit
-    /// without a clean `Database::drop` (issue #1631).
-    ///
-    /// Idempotent and safe to call concurrently with reads. Issues a
-    /// `CHECKPOINT;` Cypher statement over a fresh connection. Read-only
-    /// handles are a no-op (returns `Ok(())`).
-    pub fn checkpoint(&self) -> SimardResult<()> {
-        if self.read_only {
-            return Ok(());
-        }
-        // CHECKPOINT is the lbug/Kuzu Cypher statement that flushes the WAL.
-        // Some lbug versions may parse it as `CALL CHECKPOINT()`; try both
-        // before propagating an error so the caller doesn't have to know.
-        let conn = self.conn()?;
-        match conn.query("CHECKPOINT;") {
-            Ok(_) => Ok(()),
-            Err(first_err) => match conn.query("CALL CHECKPOINT();") {
-                Ok(_) => Ok(()),
-                Err(_) => Err(SimardError::BridgeCallFailed {
-                    bridge: "cognitive-memory-native".into(),
-                    method: "checkpoint".into(),
-                    reason: format!("CHECKPOINT not accepted by lbug: {first_err}"),
-                }),
-            },
-        }
-    }
-
-    /// Per-write fsync barrier (issue #1973, goals G1 + G2 of epic #1972).
-    ///
-    /// Runs after every successful Cypher mutation on an on-disk
-    /// `NativeCognitiveMemory` so that, by the time the calling `Ok(())`
-    /// returns to the caller, the written bytes are on stable storage
-    /// and the directory entry for the data file is durable.
-    ///
-    /// Pipeline (Unix; the only platform supported for on-disk writers):
-    /// 1. `sync_all()` the data file so kernel page cache is flushed.
-    ///    lbug's internal WAL is co-resident in this same file, so a
-    ///    single fsync of the file durably captures both committed pages
-    ///    and any uncheckpointed WAL frames. Reopen replays the WAL.
-    /// 2. `sync_all()` the parent directory so the dirent itself is
-    ///    durable on ext4/xfs/btrfs/apfs after any preceding rename.
-    ///
-    /// **No CHECKPOINT here.** lbug's `CHECKPOINT;` Cypher statement,
-    /// when invoked between writes inside a multi-statement op
-    /// (notably `consolidate_episodes`), has been observed to corrupt
-    /// subsequent reads of `e.content` on previously-written `Episode`
-    /// rows in the same connection — raw page bytes are returned
-    /// instead of the stored string literal. The crash-recovery
-    /// integration tests in `tests/cognitive_memory_crash_durability.rs`
-    /// and `tests/daemon_sigterm_durability.rs` empirically confirm
-    /// that the fsync pair above (without CHECKPOINT) preserves every
-    /// acknowledged write across `SIGKILL`/restart cycles.
-    ///
-    /// CHECKPOINT is still invoked at backup time
-    /// (see `NativeCognitiveMemory::backup`), which is the only context
-    /// where the WAL must be folded into the data file before the file
-    /// is copied.
-    ///
-    /// No-op when `durable_writes` is `false` (in-memory backend used by
-    /// the unit-test suite; read-only handles).
-    ///
-    /// Errors map to existing typed variants — no new error variants
-    /// were introduced for this feature:
-    /// - data-file fsync failure → `SimardError::PersistentStoreIo` with
-    ///   `action = "fsync-data-file"`.
-    /// - parent-dir fsync failure → `SimardError::PersistentStoreIo` with
-    ///   `action = "fsync-parent-dir"`.
-    ///
-    /// The `op` argument is a static string identifying the calling
-    /// mutating op (e.g. `"store_fact"`) and is woven into error
-    /// `reason` strings so a fsync failure can be attributed in logs.
-    pub(crate) fn post_write_barrier(&self, op: &'static str) -> SimardResult<()> {
-        if !self.durable_writes {
-            return Ok(());
-        }
-
-        // Per-write barrier — no CHECKPOINT (see method doc). Just
-        // fsync the data file + parent directory via the shared
-        // `fsync::open_and_fsync` helper, which preserves the
-        // site-distinct action labels operator logs grep on.
-        //
-        // `op` is forwarded as `Some(&str)` rather than a pre-formatted
-        // `format!("op={op}")` string so the success path — taken on
-        // every successful write — does **zero string allocation**.
-        // The "op=…" prefix is composed inside `fsync::io_err` only
-        // when an IO syscall actually fails.
-        let op_ctx = Some(op);
-
-        // Step 1: fsync the data file. lbug owns the exclusive writer
-        // fd; the helper opens a separate read-only fd just long
-        // enough to issue sync_all(2). The data file is co-resident
-        // with lbug's WAL, so a single sync_all() captures both
-        // committed pages and any uncheckpointed WAL frames.
-        //
-        // Guard: if the data file does not exist on disk yet (lbug may
-        // operate entirely from the WAL before the first CHECKPOINT),
-        // skip the fsync — there is nothing to sync. The write already
-        // succeeded in lbug's internal state and the WAL is
-        // authoritative for crash recovery on next open.
-        //
-        // Even with the `exists()` check there is a small TOCTOU window
-        // where lbug's background page management can rename/recreate
-        // the data file between the check and the `open()` call. Treat
-        // NotFound from open as equivalent to "file doesn't exist yet"
-        // rather than a hard error.
-        if self.path.exists()
-            && let Err(e) = fsync::open_and_fsync(
-                &self.path,
-                "fsync-data-file-open",
-                "fsync-data-file",
-                op_ctx,
-            )
-            && !fsync::is_not_found(&e)
-        {
-            return Err(e);
-        }
-
-        // Step 2: fsync the parent directory so the dirent for
-        // `self.path` is itself crash-durable on filesystems that
-        // journal metadata separately (notably ext4).
-        let parent = self
-            .path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| std::path::Path::new("."));
-        if parent.exists() {
-            fsync::open_and_fsync(parent, "fsync-parent-dir-open", "fsync-parent-dir", op_ctx)?;
-        }
-
-        Ok(())
-    }
-}
-
-pub(crate) fn as_str(val: &lbug::Value) -> Option<&str> {
-    match val {
-        lbug::Value::String(s) => Some(s.as_str()),
-        _ => None,
-    }
-}
-
-pub(crate) fn as_i64(val: &lbug::Value) -> Option<i64> {
-    match val {
-        lbug::Value::Int64(n) => Some(*n),
-        _ => None,
-    }
-}
-
-pub(crate) fn as_f64(val: &lbug::Value) -> Option<f64> {
-    match val {
-        lbug::Value::Double(d) => Some(*d),
-        lbug::Value::Int64(n) => Some(*n as f64),
-        _ => None,
-    }
-}
-
-// re-exported for cfg(test) consumers in cognitive_memory/tests_mod.rs (false-positive of clippy unused_imports on lib pass — see #1405)
-#[allow(unused_imports)]
-pub(crate) use ops::escape_cypher;
 
 // PR-C (issue #2281): bootstrap procedural-memory seeding. Three
 // baseline procedures (`pr-merge:bootstrap`, `ci-fix:bootstrap`,
@@ -712,18 +225,9 @@ pub(crate) use ops::escape_cypher;
 // engineer-loop objectives from the very first cycle.
 pub mod bootstrap_procedures;
 
-#[cfg(test)]
-mod tests_mod;
-
-#[cfg(test)]
-mod tests_lock_vs_corruption_1967;
-
-#[cfg(test)]
-mod tests_hermetic_parity;
-
-// De-fork phase 2a (issue #86): parity / conformance tests that drive the
-// same scenarios against the native backend (always) and the library-backed
-// `LibraryCognitiveMemory` adapter (only under `--features library-memory`).
+// De-fork Phase 2b (issue #2307): conformance tests that drive the
+// cognitive-memory scenarios against the library-backed
+// `LibraryCognitiveMemory` adapter (the sole backend).
 #[cfg(test)]
 mod tests_library_parity;
 
@@ -733,268 +237,10 @@ mod tests_library_parity;
 #[cfg(test)]
 mod bootstrap_procedures_tests;
 
-// ============================================================================
-// Inline unit tests for mod.rs (issue #2036)
-// ============================================================================
-
-#[cfg(test)]
-mod tests_inline {
-    use super::*;
-
-    // ── NativeCognitiveMemory construction ──────────────────────────────
-
-    #[test]
-    fn in_memory_creates_successfully() {
-        let mem = NativeCognitiveMemory::in_memory().expect("in_memory should succeed");
-        assert!(!mem.read_only, "in_memory handle must not be read-only");
-        assert!(!mem.durable_writes, "in_memory must skip fsync barrier");
-    }
-
-    #[test]
-    fn in_memory_schema_is_applied() {
-        let mem = NativeCognitiveMemory::in_memory().unwrap();
-        // Schema DDL creates 8 node tables; a simple count query on each
-        // should succeed (returning 0) rather than erroring with
-        // "table does not exist".
-        for table in [
-            "Fact",
-            "Decision",
-            "Goal",
-            "Episode",
-            "Sensory",
-            "WorkingMemory",
-            "Procedure",
-            "Prospective",
-        ] {
-            let rows = mem
-                .query(&format!("MATCH (n:{table}) RETURN count(n)"))
-                .unwrap_or_else(|e| panic!("count query on {table} failed: {e}"));
-            assert_eq!(rows.len(), 1, "{table} count query should return one row");
-        }
-    }
-
-    #[test]
-    #[serial_test::serial(cognitive_memory)]
-    fn open_creates_db_directory_and_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state_root = tmp.path().to_path_buf();
-        let _mem = NativeCognitiveMemory::open(&state_root).unwrap();
-        assert!(
-            state_root.join("cognitive_memory.ladybug").exists(),
-            "DB file must be created under state_root"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(cognitive_memory)]
-    fn open_sets_durable_writes_true() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mem = NativeCognitiveMemory::open(tmp.path()).unwrap();
-        assert!(
-            mem.durable_writes,
-            "on-disk writer must enable durable_writes"
-        );
-        assert!(!mem.read_only, "writer handle must not be read-only");
-    }
-
-    #[test]
-    #[serial_test::serial(cognitive_memory)]
-    fn open_migrates_kuzu_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state_root = tmp.path().to_path_buf();
-        let db_as_dir = state_root.join("cognitive_memory.ladybug");
-        std::fs::create_dir_all(&db_as_dir).unwrap();
-        std::fs::write(db_as_dir.join("dummy"), b"kuzu data").unwrap();
-
-        let _mem = NativeCognitiveMemory::open(&state_root).unwrap();
-
-        assert!(
-            !db_as_dir.is_dir() || db_as_dir.is_file(),
-            "old KuzuDB dir should be migrated away"
-        );
-        assert!(
-            state_root
-                .join("cognitive_memory.ladybug.kuzu-backup")
-                .exists(),
-            "backup of KuzuDB dir should exist"
-        );
-    }
-
-    // ── conn / query / execute helpers ──────────────────────────────────
-
-    #[test]
-    fn conn_creates_valid_connection() {
-        let mem = NativeCognitiveMemory::in_memory().unwrap();
-        let _conn = mem.conn().expect("conn() must return Ok");
-    }
-
-    #[test]
-    fn query_returns_rows() {
-        let mem = NativeCognitiveMemory::in_memory().unwrap();
-        let rows = mem.query("RETURN 42").unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(as_i64(&rows[0][0]), Some(42));
-    }
-
-    #[test]
-    fn execute_runs_ddl_without_error() {
-        let mem = NativeCognitiveMemory::in_memory().unwrap();
-        // Schema already created; re-executing DDL with IF NOT EXISTS is idempotent.
-        mem.execute(
-            "CREATE NODE TABLE IF NOT EXISTS TestInline(id STRING PRIMARY KEY, val STRING)",
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn execute_errors_on_invalid_cypher() {
-        let mem = NativeCognitiveMemory::in_memory().unwrap();
-        let err = mem.execute("THIS IS NOT VALID CYPHER !!!");
-        assert!(err.is_err(), "invalid Cypher must return Err");
-    }
-
-    // ── new_id ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn new_id_includes_prefix() {
-        let id = NativeCognitiveMemory::new_id("test");
-        assert!(id.starts_with("test_"), "id should start with prefix_");
-        assert!(id.len() > 5, "id should include uuid suffix");
-    }
-
-    #[test]
-    fn new_id_is_unique() {
-        let ids: Vec<String> = (0..100)
-            .map(|_| NativeCognitiveMemory::new_id("u"))
-            .collect();
-        let unique: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
-        assert_eq!(unique.len(), 100, "100 ids must all be unique");
-    }
-
-    // ── now_secs ───────────────────────────────────────────────────────
-
-    #[test]
-    fn now_secs_returns_plausible_epoch() {
-        let ts = NativeCognitiveMemory::now_secs().unwrap();
-        // After 2024-01-01 and before 2100-01-01
-        assert!(ts > 1_704_067_200.0, "timestamp too old: {ts}");
-        assert!(ts < 4_102_444_800.0, "timestamp too far future: {ts}");
-    }
-
-    // ── checkpoint ─────────────────────────────────────────────────────
-
-    #[test]
-    fn checkpoint_succeeds_on_in_memory() {
-        let mem = NativeCognitiveMemory::in_memory().unwrap();
-        // In-memory is not read_only, so checkpoint actually attempts
-        // the CHECKPOINT statement. It should succeed.
-        mem.checkpoint().expect("checkpoint should succeed");
-    }
-
-    #[test]
-    fn checkpoint_noop_on_read_only_in_memory() {
-        // Construct a mock read-only by flipping the flag on in_memory.
-        // This tests the early return branch.
-        let mut mem = NativeCognitiveMemory::in_memory().unwrap();
-        mem.read_only = true;
-        mem.checkpoint()
-            .expect("checkpoint on read-only must be Ok(())");
-    }
-
-    // ── post_write_barrier ─────────────────────────────────────────────
-
-    #[test]
-    fn post_write_barrier_noop_when_durable_writes_false() {
-        let mem = NativeCognitiveMemory::in_memory().unwrap();
-        assert!(!mem.durable_writes);
-        mem.post_write_barrier("test_op")
-            .expect("barrier must be no-op for in-memory");
-    }
-
-    #[test]
-    #[serial_test::serial(cognitive_memory)]
-    fn post_write_barrier_succeeds_for_on_disk_writer() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mem = NativeCognitiveMemory::open(tmp.path()).unwrap();
-        assert!(mem.durable_writes);
-        mem.post_write_barrier("test_op")
-            .expect("barrier must succeed on healthy on-disk file");
-    }
-
-    // ── Value conversion helpers ───────────────────────────────────────
-
-    #[test]
-    fn as_str_extracts_string() {
-        let val = lbug::Value::String("hello".to_string());
-        assert_eq!(as_str(&val), Some("hello"));
-    }
-
-    #[test]
-    fn as_str_returns_none_for_non_string() {
-        let val = lbug::Value::Int64(42);
-        assert_eq!(as_str(&val), None);
-    }
-
-    #[test]
-    fn as_i64_extracts_int() {
-        let val = lbug::Value::Int64(99);
-        assert_eq!(as_i64(&val), Some(99));
-    }
-
-    #[test]
-    fn as_i64_returns_none_for_string() {
-        let val = lbug::Value::String("not a number".to_string());
-        assert_eq!(as_i64(&val), None);
-    }
-
-    #[test]
-    fn as_f64_extracts_double() {
-        let val = lbug::Value::Double(42.5);
-        assert_eq!(as_f64(&val), Some(42.5));
-    }
-
-    #[test]
-    fn as_f64_coerces_int64_to_f64() {
-        let val = lbug::Value::Int64(7);
-        assert_eq!(as_f64(&val), Some(7.0));
-    }
-
-    #[test]
-    fn as_f64_returns_none_for_string() {
-        let val = lbug::Value::String("nope".to_string());
-        assert_eq!(as_f64(&val), None);
-    }
-
-    // ── CognitiveMemoryOps trait defaults ──────────────────────────────
-
-    #[test]
-    fn search_episodes_starting_with_default_returns_empty() {
-        let mem = NativeCognitiveMemory::in_memory().unwrap();
-        let result = mem.search_episodes_starting_with("any", 10).unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn is_read_only_returns_false_for_writer() {
-        let mem = NativeCognitiveMemory::in_memory().unwrap();
-        assert!(
-            !CognitiveMemoryOps::is_read_only(&mem),
-            "writer handle reports read_only=false"
-        );
-    }
-
-    #[test]
-    fn trait_checkpoint_delegates_to_inherent() {
-        let mem = NativeCognitiveMemory::in_memory().unwrap();
-        CognitiveMemoryOps::checkpoint(&mem).expect("trait checkpoint should succeed");
-    }
-}
-
-// PR-B (issue #2281): episode-distillation trait-method tests against
-// the `NativeCognitiveMemory` backend. Verifies that
+// PR-B (issue #2281) + de-fork Phase 2b (#2307): episode-distillation
+// trait-method tests against the library backend. Verify that
 // `mark_episode_distilled` and `list_undistilled_episodes` round-trip
-// against the lbug-backed Episode table with the lazy `distilled`
-// column migration applied.
+// through `LibraryCognitiveMemory`.
 #[cfg(test)]
 mod tests_pr_b_distill;
 
