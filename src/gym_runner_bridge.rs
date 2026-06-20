@@ -110,8 +110,14 @@ pub(crate) fn suite_success(scenarios_passed: usize, scenarios_total: usize) -> 
 }
 
 /// Serialize a [`ScoreDimensions`] into its wire JSON object (all five keys).
+///
+/// `ScoreDimensions` is five already-sanitised, finite `f64` fields, so this
+/// serialization cannot fail. An `Err` here would mean a broken invariant — not
+/// a degraded result — so we surface it loudly via `expect` rather than emit a
+/// misleading empty `{}` (Pillar 11: honest degradation, no silent zeros).
 fn dims_value(dims: &ScoreDimensions) -> Value {
-    serde_json::to_value(dims).unwrap_or_else(|_| json!({}))
+    serde_json::to_value(dims)
+        .expect("ScoreDimensions (five finite f64 fields) is always JSON-serializable")
 }
 
 /// Wire JSON for the all-zero dimensions object used by the degraded
@@ -224,7 +230,12 @@ pub fn register_gym_handlers(transport: &mut NativeBridgeTransport) {
         "gym.list_scenarios",
         Arc::new(|_params: &Value| -> Result<Value, BridgeErrorPayload> {
             let runner = GymRunner::new(gym_config());
-            Ok(serde_json::to_value(runner.list_scenarios()).unwrap_or_else(|_| json!([])))
+            // `GymScenario` carries only String/usize fields, so this
+            // serialization cannot fail. An `Err` would be a broken invariant —
+            // not a degraded result — so surface it loudly rather than emit a
+            // misleading empty `[]` (Pillar 11: honest degradation).
+            Ok(serde_json::to_value(runner.list_scenarios())
+                .expect("Vec<GymScenario> (String/usize fields only) is always JSON-serializable"))
         }),
     );
 
