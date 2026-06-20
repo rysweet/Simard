@@ -621,7 +621,15 @@ fn render_bundle_markdown(
         );
         let _ = writeln!(md);
         for stub in stubs {
-            let link_text = stub.title.replace('[', "(").replace(']', ")");
+            // Escape markdown link-text metacharacters so an arbitrary
+            // decision/action title can never break the link. Backslash is
+            // escaped first so the brackets we add below aren't double-escaped
+            // and a trailing `\` in the title can't escape the closing `]`.
+            let link_text = stub
+                .title
+                .replace('\\', r"\\")
+                .replace('[', r"\[")
+                .replace(']', r"\]");
             let _ = writeln!(md, "- [{}]({}/{})", link_text, ISSUES_SUBDIR, stub.filename);
         }
         let _ = writeln!(md);
@@ -955,5 +963,30 @@ mod bundle_tests {
             std::env::remove_var("SIMARD_MEETINGS_ROOT");
         }
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn issue_stub_markdown_links_escape_brackets_and_backslash() {
+        // A decision/action title containing `[`, `]`, or a trailing `\` must
+        // not break the generated `## Issue stubs` relative link (#2309).
+        let mut handoff = sample_handoff();
+        handoff.decisions = vec![];
+        handoff.action_items = vec![ActionItem {
+            description: r"Fix [weird] path C:\".to_string(),
+            owner: "x".to_string(),
+            priority: 1,
+            due_description: None,
+            linked_issue: None,
+        }];
+
+        let stubs = crate::meeting_facilitator::plan_issue_stubs(&handoff);
+        let md = render_bundle_markdown(&handoff, &[], &stubs);
+
+        // Link target is intact and well-formed.
+        assert!(md.contains("](issues/01-"), "md: {md}");
+        // Brackets are escaped, not left raw to truncate the link text.
+        assert!(md.contains(r"\[weird\]"), "md: {md}");
+        // The trailing backslash is escaped so it cannot escape the `]`.
+        assert!(md.contains(r"C:\\]("), "md: {md}");
     }
 }
