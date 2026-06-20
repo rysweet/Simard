@@ -189,6 +189,39 @@ impl LibraryCognitiveMemory {
         }
         self.lock()
     }
+
+    /// Store a procedure under Simard's idempotent *upsert-that-reinforces*
+    /// contract (`docs/reference/cognitive-memory-procedural-idempotency.md`,
+    /// #2298) and return its id.
+    ///
+    /// The library upserts by exact name — re-storing the same name keeps a
+    /// single canonical node — but does NOT bump `usage_count` on update (it
+    /// reinforces only on a mutating recall). So detect the duplicate by exact
+    /// name (avoiding the keyword matcher's superstring hits) and reinforce
+    /// after the store. `store` performs the actual library write — plain or
+    /// provenance-recording — so [`store_procedure`](CognitiveMemoryOps::store_procedure)
+    /// and
+    /// [`store_procedure_with_provenance`](CognitiveMemoryOps::store_procedure_with_provenance)
+    /// share this subtle contract instead of duplicating it.
+    fn store_procedure_reinforcing(
+        &self,
+        site: &'static str,
+        name: &str,
+        store: impl FnOnce(&mut CognitiveMemory) -> Result<String, MemoryError>,
+    ) -> SimardResult<String> {
+        let mut guard = self.lock_write(site)?;
+        let existed = guard
+            .search_procedures(name, usize::MAX)
+            .iter()
+            .any(|p| p.name == name);
+        let id = store(&mut guard).map_err(|e| map_op_err(site, e))?;
+        if existed {
+            // `recall_procedure` (mutating) increments the matched procedure's
+            // persisted `usage_count` by one — the reinforcement signal.
+            let _ = guard.recall_procedure(name, usize::MAX);
+        }
+        Ok(id)
+    }
 }
 
 /// Map an upstream [`MemoryError`] from a delegated call onto a Simard error,
@@ -504,28 +537,9 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         steps: &[String],
         prerequisites: &[String],
     ) -> SimardResult<String> {
-        let mut guard = self.lock_write("store_procedure")?;
-        // Simard's contract (docs/reference/cognitive-memory-procedural-idempotency.md)
-        // treats a duplicate store as an idempotent *upsert that reinforces*: the
-        // node count stays at one, but `usage_count` is bumped to record the
-        // recurrence that `recall_procedure` ranks on. The library's
-        // `store_procedure` dedups on exact name but does NOT bump usage_count on
-        // update (it reinforces only on a mutating recall), so detect the
-        // duplicate here and reinforce after the store. Existence is checked by
-        // exact name to avoid the keyword matcher's superstring hits.
-        let existed = guard
-            .search_procedures(name, usize::MAX)
-            .iter()
-            .any(|p| p.name == name);
-        let id = guard
-            .store_procedure(name, steps, Some(prerequisites))
-            .map_err(|e| map_op_err("store_procedure", e))?;
-        if existed {
-            // `recall_procedure` (mutating) increments the matched procedure's
-            // persisted `usage_count` by one — the reinforcement signal.
-            let _ = guard.recall_procedure(name, usize::MAX);
-        }
-        Ok(id)
+        self.store_procedure_reinforcing("store_procedure", name, |m| {
+            m.store_procedure(name, steps, Some(prerequisites))
+        })
     }
 
     fn store_procedure_with_provenance(
@@ -535,24 +549,14 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         prerequisites: &[String],
         source_episode_ids: &[String],
     ) -> SimardResult<String> {
-        // Same idempotent upsert-that-reinforces contract as `store_procedure`
-        // (#2298) — the library's `store_procedure_with_provenance` upserts by
-        // name but does NOT bump usage_count on update, so detect the duplicate
-        // and reinforce after the store — plus the `PROCEDURE_DERIVES_FROM`
-        // edges to `source_episode_ids` (#2325), which the library attaches to
-        // the single canonical node (re-storing the same name does not fork it).
-        let mut guard = self.lock_write("store_procedure_with_provenance")?;
-        let existed = guard
-            .search_procedures(name, usize::MAX)
-            .iter()
-            .any(|p| p.name == name);
-        let id = guard
-            .store_procedure_with_provenance(name, steps, Some(prerequisites), source_episode_ids)
-            .map_err(|e| map_op_err("store_procedure_with_provenance", e))?;
-        if existed {
-            let _ = guard.recall_procedure(name, usize::MAX);
-        }
-        Ok(id)
+        // Identical idempotent upsert-that-reinforces contract as
+        // `store_procedure` (#2298, enforced by `store_procedure_reinforcing`),
+        // plus `PROCEDURE_DERIVES_FROM` edges to `source_episode_ids` (#2325) —
+        // which the library attaches to the single canonical node, so
+        // re-storing the same name does not fork it.
+        self.store_procedure_reinforcing("store_procedure_with_provenance", name, |m| {
+            m.store_procedure_with_provenance(name, steps, Some(prerequisites), source_episode_ids)
+        })
     }
 
     fn recall_procedure(&self, query: &str, limit: u32) -> SimardResult<Vec<CognitiveProcedure>> {
