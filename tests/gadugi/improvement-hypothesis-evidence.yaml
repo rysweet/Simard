@@ -46,6 +46,7 @@ steps:
       exitCode: 0
       outputContains:
         - "test result: ok"
+        - "round_trip_survives_reserved_delimiters_in_every_field"
 
   - name: "ImprovementHypothesis formers — benchmark, signal, weak-dim, review, session (#2099)"
     agent: "test-agent"
@@ -59,6 +60,7 @@ steps:
       exitCode: 0
       outputContains:
         - "test result: ok"
+        - "benchmark_report_with_failed_scenarios_produces_hypotheses_with_evidence"
 
   - name: "Promotion plan — evidence round-trip through GoalUpdate / GoalRecord (#2091)"
     agent: "test-agent"
@@ -72,3 +74,4 @@ steps:
       exitCode: 0
       outputContains:
         - "test result: ok"
+        - "approved_goal_updates_preserve_proposal_evidence"

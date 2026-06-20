@@ -313,3 +313,125 @@ fn hypothesis_into_proposed_change_carries_evidence_in_expected_impact() {
             .contains("benchmark:suite-a/scenario-1")
     );
 }
+
+fn review_with_title(title: &str) -> ReviewArtifact {
+    ReviewArtifact {
+        review_id: "rev-x".to_string(),
+        reviewed_at_unix_ms: 0,
+        target_kind: ReviewTargetKind::Session,
+        target_label: "t".to_string(),
+        identity_name: "id".to_string(),
+        session_id: "sess".to_string(),
+        selected_base_type: "bt".to_string(),
+        topology: "single-process".to_string(),
+        objective_metadata: "meta".to_string(),
+        execution_summary: "exec".to_string(),
+        reflection_summary: "refl".to_string(),
+        summary: "sum".to_string(),
+        measurement_notes: vec![],
+        evidence_summary: ReviewEvidenceSummary {
+            memory_records: 0,
+            evidence_records: 0,
+            decision_records: 0,
+            benchmark_records: 0,
+            exported_state: "stopped".to_string(),
+            session_phase: None,
+            failed_signals: vec![],
+        },
+        proposals: vec![ImprovementProposal {
+            category: "c".to_string(),
+            title: title.to_string(),
+            rationale: "r".to_string(),
+            suggested_change: "s".to_string(),
+            evidence: vec![],
+        }],
+    }
+}
+
+#[test]
+fn review_hypothesis_ids_disambiguate_titles_that_only_differ_in_punctuation() {
+    let a = form_hypotheses_from_review(&review_with_title("Fix the bug!"));
+    let b = form_hypotheses_from_review(&review_with_title("Fix the bug?"));
+    assert_ne!(
+        a[0].id, b[0].id,
+        "titles differing only by punctuation must yield distinct hypothesis ids"
+    );
+
+    // Deterministic: the same title always yields the same id.
+    let a2 = form_hypotheses_from_review(&review_with_title("Fix the bug!"));
+    assert_eq!(a[0].id, a2[0].id);
+
+    // Non-ASCII and punctuation-only titles must still produce a non-empty id
+    // fragment (no trailing "::") and stay distinct from one another.
+    let non_ascii = form_hypotheses_from_review(&review_with_title("日本語タイトル"));
+    assert!(
+        !non_ascii[0].id.ends_with("::"),
+        "non-ASCII title must not produce an empty id fragment: {}",
+        non_ascii[0].id
+    );
+    let punct_a = form_hypotheses_from_review(&review_with_title("!!!"));
+    let punct_b = form_hypotheses_from_review(&review_with_title("???"));
+    assert_ne!(punct_a[0].id, punct_b[0].id);
+}
+
+#[test]
+fn session_failure_hypothesis_ids_disambiguate_punctuation() {
+    let a = form_hypotheses_from_session_failures("sess", &["retry storm".to_string()]);
+    let b = form_hypotheses_from_session_failures("sess", &["retry-storm".to_string()]);
+    assert_ne!(a[0].id, b[0].id);
+}
+
+#[test]
+fn weak_dimension_non_finite_deficit_is_sanitised() {
+    let weak = vec![
+        WeakDimension {
+            name: "specificity".to_string(),
+            deficit: f64::NAN,
+        },
+        WeakDimension {
+            name: "depth".to_string(),
+            deficit: f64::INFINITY,
+        },
+    ];
+    let hypotheses = form_hypotheses_from_weak_dimensions(&weak);
+    for h in &hypotheses {
+        match &h.source_evidence[0] {
+            EvidenceRef::WeakDimension { deficit, .. } => {
+                assert!(
+                    deficit.is_finite(),
+                    "non-finite deficit must be sanitised to a finite value"
+                );
+            }
+            other => panic!("expected WeakDimension evidence, got {other:?}"),
+        }
+        // The persisted form of a sanitised deficit must round-trip cleanly.
+        let s = h.source_evidence[0].to_persisted_string();
+        assert!(matches!(
+            EvidenceRef::parse_str(&s),
+            EvidenceRef::WeakDimension { .. }
+        ));
+    }
+}
+
+#[test]
+fn benchmark_run_evidence_saturates_out_of_range_timestamp() {
+    let mut report = synthetic_report("suite-a", "scenario-1", false, &["chk-1"]);
+    report.run_started_at_unix_ms = u128::MAX;
+    let hypotheses = form_hypotheses_from_benchmark_reports(&[report]);
+    let run_ms = hypotheses[0]
+        .source_evidence
+        .iter()
+        .find_map(|ev| match ev {
+            EvidenceRef::BenchmarkRunReport {
+                run_started_at_unix_ms,
+                ..
+            } => Some(*run_started_at_unix_ms),
+            _ => None,
+        })
+        .expect("benchmark run evidence present");
+    assert_eq!(
+        run_ms,
+        u64::MAX,
+        "an out-of-range u128 timestamp must saturate to u64::MAX, not wrap"
+    );
+}

@@ -13,6 +13,7 @@
 //! hypothesis is later promoted into a durable [`crate::goals::GoalUpdate`].
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::gym::{BenchmarkCheckResult, BenchmarkRunReport};
 use crate::gym_history::{GymSignal, ScenarioSignal};
@@ -140,7 +141,11 @@ pub fn form_hypotheses_from_review(review: &ReviewArtifact) -> Vec<ImprovementHy
                 },
             });
             ImprovementHypothesis {
-                id: format!("review-{}::{}", review.review_id, slugify(&proposal.title)),
+                id: format!(
+                    "review-{}::{}",
+                    review.review_id,
+                    stable_id_fragment(&proposal.title)
+                ),
                 title: proposal.title.clone(),
                 category: format!("review-{}", proposal.category),
                 rationale: proposal.rationale.clone(),
@@ -163,7 +168,7 @@ pub fn form_hypotheses_from_session_failures(
     failed_signals
         .iter()
         .map(|signal_id| ImprovementHypothesis {
-            id: format!("session-{session_id}::{}", slugify(signal_id)),
+            id: format!("session-{session_id}::{}", stable_id_fragment(signal_id)),
             title: format!("Investigate failed signal '{signal_id}'"),
             category: "session-failure".to_string(),
             rationale: format!(
@@ -232,7 +237,7 @@ fn hypothesis_from_benchmark_report(report: &BenchmarkRunReport) -> ImprovementH
         suite_id: suite_id.clone(),
         scenario_id: scenario_id.clone(),
         session_id: report.session_id.clone(),
-        run_started_at_unix_ms: u64::try_from(report.run_started_at_unix_ms).unwrap_or(u64::MAX),
+        run_started_at_unix_ms: epoch_ms_to_u64(report.run_started_at_unix_ms),
     });
     for check in &failed_checks {
         source_evidence.push(EvidenceRef::BenchmarkCheckFailure {
@@ -307,17 +312,21 @@ fn hypothesis_from_regression(
 }
 
 fn hypothesis_from_weak_dimension(weak: &WeakDimension) -> ImprovementHypothesis {
+    // A non-finite deficit (NaN/±inf) would make the resulting
+    // `EvidenceRef::WeakDimension` non-reflexive under `PartialEq` and render
+    // as "NaN" in the title, so sanitize it at the construction boundary.
+    let deficit = finite_or_zero(weak.deficit);
     ImprovementHypothesis {
         id: format!("weak-dimension::{}", weak.name),
         title: format!(
             "Strengthen weak dimension '{}' (deficit {:.2})",
-            weak.name, weak.deficit
+            weak.name, deficit
         ),
         category: "weak-dimension".to_string(),
         rationale: format!(
             "Dimension '{}' scored {:.2} below the configured weak threshold. Per spec line 681 \
              this is a captured failure signal that should drive an improvement hypothesis.",
-            weak.name, weak.deficit
+            weak.name, deficit
         ),
         suggested_change: format!(
             "Target the '{}' dimension with a focused improvement cycle (prompt update, policy \
@@ -326,7 +335,7 @@ fn hypothesis_from_weak_dimension(weak: &WeakDimension) -> ImprovementHypothesis
         ),
         source_evidence: vec![EvidenceRef::WeakDimension {
             dimension: weak.name.clone(),
-            deficit: weak.deficit,
+            deficit,
         }],
     }
 }
@@ -344,4 +353,47 @@ fn slugify(value: &str) -> String {
         }
     }
     out.trim_matches('-').to_string()
+}
+
+/// Build a collision-resistant, deterministic id fragment from free-form text.
+///
+/// [`slugify`] alone collapses case, punctuation, and Unicode distinctions to
+/// the same slug (and yields an empty string for punctuation-only or non-ASCII
+/// input), so two genuinely different titles/signals could otherwise share a
+/// "stable" hypothesis id and be silently merged by any id-keyed consumer.
+/// Appending a short hash of the *original* text restores uniqueness while
+/// staying deterministic: identical input always yields the same fragment, and
+/// the slug is still present for human readability when it is non-empty.
+fn stable_id_fragment(raw: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(raw.as_bytes());
+    let digest = hasher.finalize();
+    let mut hash_hex = String::with_capacity(8);
+    for byte in digest.iter().take(4) {
+        hash_hex.push_str(&format!("{byte:02x}"));
+    }
+    let slug = slugify(raw);
+    if slug.is_empty() {
+        hash_hex
+    } else {
+        format!("{slug}-{hash_hex}")
+    }
+}
+
+/// Convert a `u128` epoch-millisecond timestamp to the `u64` carried by
+/// [`EvidenceRef::BenchmarkRunReport`]. Real epoch-ms values (~1.7e12) sit far
+/// below `u64::MAX` (~5.8e8 years), so the saturating branch is unreachable in
+/// practice; it exists only so a corrupt upstream sentinel cannot panic the
+/// infallible hypothesis former. Saturation is explicit and tested rather than
+/// hidden behind a bare `unwrap_or`.
+fn epoch_ms_to_u64(ms: u128) -> u64 {
+    u64::try_from(ms).unwrap_or(u64::MAX)
+}
+
+/// Replace a non-finite (`NaN`/`±inf`) value with `0.0`. A non-finite deficit
+/// would make any `EvidenceRef::WeakDimension` it reaches non-reflexive under
+/// `PartialEq` (`NaN != NaN`), silently breaking equality/dedup on goals that
+/// carry the evidence.
+fn finite_or_zero(value: f64) -> f64 {
+    if value.is_finite() { value } else { 0.0 }
 }

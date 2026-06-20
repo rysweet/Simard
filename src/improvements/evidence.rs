@@ -103,9 +103,17 @@ impl EvidenceRef {
     /// - `check-failure:<suite>/<scenario>/<check_id>:<detail>`
     /// - `session-failure:<session_id>/<signal_id>` (with optional `:<detail>`)
     ///
-    /// These shapes are the exact inverse of [`Self::to_persisted_string`], so
-    /// every structured variant survives a `to_persisted_string` →
-    /// `parse_str` round trip. Anything else is preserved as
+    /// [`Self::to_persisted_string`] percent-escapes the structural delimiters
+    /// (`%`, `/`, `:`, `@`) inside every field, and `parse_str` reverses that
+    /// escaping, so a *structured* [`EvidenceRef`] survives a
+    /// `to_persisted_string` → `parse_str` round trip exactly — even when a
+    /// field value itself contains a delimiter or one of the literal markers.
+    /// Two documented normalisations apply: an optional field that is
+    /// `Some("")` round-trips to `None` (an empty suffix carries no
+    /// information), and surrounding whitespace in a field is trimmed. Legacy,
+    /// unescaped evidence strings (as produced by today's reviewer / proposal
+    /// pipelines) are still accepted on a best-effort basis; anything that
+    /// matches no structured shape is preserved verbatim as
     /// [`EvidenceRef::Raw`].
     pub fn parse_str(raw: &str) -> Self {
         let trimmed = raw.trim();
@@ -129,7 +137,7 @@ impl EvidenceRef {
                             if label.is_empty() {
                                 None
                             } else {
-                                Some(label.to_string())
+                                Some(unescape_segment(label))
                             },
                         )
                     }
@@ -137,7 +145,7 @@ impl EvidenceRef {
                 };
                 if !review_id.is_empty() {
                     return Self::Review {
-                        review_id: review_id.to_string(),
+                        review_id: unescape_segment(review_id),
                         target_label,
                     };
                 }
@@ -155,9 +163,9 @@ impl EvidenceRef {
                 && !session.trim().is_empty()
             {
                 return Self::BenchmarkRunReport {
-                    suite_id: suite.trim().to_string(),
-                    scenario_id: scenario.trim().to_string(),
-                    session_id: session.trim().to_string(),
+                    suite_id: unescape_segment(suite.trim()),
+                    scenario_id: unescape_segment(scenario.trim()),
+                    session_id: unescape_segment(session.trim()),
                     run_started_at_unix_ms: ms,
                 };
             }
@@ -176,7 +184,7 @@ impl EvidenceRef {
                         if sid.is_empty() {
                             None
                         } else {
-                            Some(sid.to_string())
+                            Some(unescape_segment(sid))
                         },
                     )
                 }
@@ -184,8 +192,8 @@ impl EvidenceRef {
             };
             if !scenario.trim().is_empty() {
                 return Self::BenchmarkScenario {
-                    suite_id: suite.trim().to_string(),
-                    scenario_id: scenario.trim().to_string(),
+                    suite_id: unescape_segment(suite.trim()),
+                    scenario_id: unescape_segment(scenario.trim()),
                     session_id,
                 };
             }
@@ -199,8 +207,8 @@ impl EvidenceRef {
             && !scenario.trim().is_empty()
         {
             return Self::ScoreRecord {
-                suite_id: suite.trim().to_string(),
-                scenario_id: scenario.trim().to_string(),
+                suite_id: unescape_segment(suite.trim()),
+                scenario_id: unescape_segment(scenario.trim()),
                 timestamp_unix_s: ts,
             };
         }
@@ -208,10 +216,11 @@ impl EvidenceRef {
         if let Some(rest) = strip_prefix_ci(trimmed, "weak-dimension:")
             && let Some((name, deficit_part)) = rest.trim().split_once('@')
             && let Ok(deficit) = deficit_part.trim().parse::<f64>()
+            && deficit.is_finite()
             && !name.trim().is_empty()
         {
             return Self::WeakDimension {
-                dimension: name.trim().to_string(),
+                dimension: unescape_segment(name.trim()),
                 deficit,
             };
         }
@@ -226,10 +235,10 @@ impl EvidenceRef {
                 && !parts[2].trim().is_empty()
             {
                 return Self::BenchmarkCheckFailure {
-                    suite_id: parts[0].trim().to_string(),
-                    scenario_id: parts[1].trim().to_string(),
-                    check_id: parts[2].trim().to_string(),
-                    detail: detail.trim().to_string(),
+                    suite_id: unescape_segment(parts[0].trim()),
+                    scenario_id: unescape_segment(parts[1].trim()),
+                    check_id: unescape_segment(parts[2].trim()),
+                    detail: unescape_segment(detail.trim()),
                 };
             }
         }
@@ -243,12 +252,12 @@ impl EvidenceRef {
             {
                 let detail = detail_part.trim();
                 return Self::SessionFailure {
-                    session_id: session.trim().to_string(),
-                    signal_id: signal.trim().to_string(),
+                    session_id: unescape_segment(session.trim()),
+                    signal_id: unescape_segment(signal.trim()),
                     detail: if detail.is_empty() {
                         None
                     } else {
-                        Some(detail.to_string())
+                        Some(unescape_segment(detail))
                     },
                 };
             }
@@ -270,8 +279,17 @@ impl EvidenceRef {
                 scenario_id,
                 session_id,
             } => match session_id {
-                Some(sid) => format!("benchmark:{suite_id}/{scenario_id}@session={sid}"),
-                None => format!("benchmark:{suite_id}/{scenario_id}"),
+                Some(sid) if !sid.is_empty() => format!(
+                    "benchmark:{}/{}@session={}",
+                    escape_segment(suite_id),
+                    escape_segment(scenario_id),
+                    escape_segment(sid)
+                ),
+                _ => format!(
+                    "benchmark:{}/{}",
+                    escape_segment(suite_id),
+                    escape_segment(scenario_id)
+                ),
             },
             Self::BenchmarkRunReport {
                 suite_id,
@@ -279,36 +297,62 @@ impl EvidenceRef {
                 session_id,
                 run_started_at_unix_ms,
             } => format!(
-                "benchmark-run:{suite_id}/{scenario_id}@session={session_id}@ms={run_started_at_unix_ms}"
+                "benchmark-run:{}/{}@session={}@ms={run_started_at_unix_ms}",
+                escape_segment(suite_id),
+                escape_segment(scenario_id),
+                escape_segment(session_id)
             ),
             Self::BenchmarkCheckFailure {
                 suite_id,
                 scenario_id,
                 check_id,
                 detail,
-            } => format!("check-failure:{suite_id}/{scenario_id}/{check_id}:{detail}"),
+            } => format!(
+                "check-failure:{}/{}/{}:{}",
+                escape_segment(suite_id),
+                escape_segment(scenario_id),
+                escape_segment(check_id),
+                escape_segment(detail)
+            ),
             Self::ScoreRecord {
                 suite_id,
                 scenario_id,
                 timestamp_unix_s,
-            } => format!("score:{suite_id}/{scenario_id}@{timestamp_unix_s}"),
+            } => format!(
+                "score:{}/{}@{timestamp_unix_s}",
+                escape_segment(suite_id),
+                escape_segment(scenario_id)
+            ),
             Self::WeakDimension { dimension, deficit } => {
-                format!("weak-dimension:{dimension}@{deficit}")
+                format!("weak-dimension:{}@{deficit}", escape_segment(dimension))
             }
             Self::Review {
                 review_id,
                 target_label,
             } => match target_label {
-                Some(label) => format!("review:{review_id}@target={label}"),
-                None => format!("review:{review_id}"),
+                Some(label) if !label.is_empty() => format!(
+                    "review:{}@target={}",
+                    escape_segment(review_id),
+                    escape_segment(label)
+                ),
+                _ => format!("review:{}", escape_segment(review_id)),
             },
             Self::SessionFailure {
                 session_id,
                 signal_id,
                 detail,
             } => match detail {
-                Some(d) => format!("session-failure:{session_id}/{signal_id}:{d}"),
-                None => format!("session-failure:{session_id}/{signal_id}"),
+                Some(d) if !d.is_empty() => format!(
+                    "session-failure:{}/{}:{}",
+                    escape_segment(session_id),
+                    escape_segment(signal_id),
+                    escape_segment(d)
+                ),
+                _ => format!(
+                    "session-failure:{}/{}",
+                    escape_segment(session_id),
+                    escape_segment(signal_id)
+                ),
             },
             Self::Raw { label } => label.clone(),
         }
@@ -338,6 +382,55 @@ fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
     } else {
         None
     }
+}
+
+/// Percent-escape the four structural delimiters used by
+/// [`EvidenceRef::to_persisted_string`] (`%`, `/`, `:`, `@`) inside a field so
+/// the value can contain any of them without colliding with the format
+/// separators. The escape character `%` is encoded first so the transform is
+/// unambiguous and exactly reversible by [`unescape_segment`].
+fn escape_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '%' => out.push_str("%25"),
+            '/' => out.push_str("%2F"),
+            ':' => out.push_str("%3A"),
+            '@' => out.push_str("%40"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Reverse [`escape_segment`]. Only the exact uppercase tokens this module
+/// emits are decoded; any other `%` sequence (e.g. a literal "50%" in a legacy,
+/// unescaped agent-authored evidence string) is preserved verbatim so legacy
+/// input is never corrupted.
+fn unescape_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while !rest.is_empty() {
+        if let Some(stripped) = rest.strip_prefix("%25") {
+            out.push('%');
+            rest = stripped;
+        } else if let Some(stripped) = rest.strip_prefix("%2F") {
+            out.push('/');
+            rest = stripped;
+        } else if let Some(stripped) = rest.strip_prefix("%3A") {
+            out.push(':');
+            rest = stripped;
+        } else if let Some(stripped) = rest.strip_prefix("%40") {
+            out.push('@');
+            rest = stripped;
+        } else {
+            let mut chars = rest.chars();
+            let ch = chars.next().expect("rest is non-empty");
+            out.push(ch);
+            rest = chars.as_str();
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -593,5 +686,143 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert!(json.contains("\"kind\":\"weak-dimension\""), "json={json}");
+    }
+
+    #[test]
+    fn round_trip_survives_reserved_delimiters_in_every_field() {
+        // Each field embeds the structural delimiters (`/ : @`), the escape
+        // char (`%`), and the literal markers (`@session= @ms= @target=`); a
+        // regression in escaping would silently corrupt or downgrade-to-Raw.
+        let nasty = "a/b:c@d%e@session=x@ms=9@target=z";
+        let cases = vec![
+            EvidenceRef::Review {
+                review_id: nasty.to_string(),
+                target_label: Some(nasty.to_string()),
+            },
+            EvidenceRef::BenchmarkScenario {
+                suite_id: nasty.to_string(),
+                scenario_id: nasty.to_string(),
+                session_id: Some(nasty.to_string()),
+            },
+            EvidenceRef::BenchmarkRunReport {
+                suite_id: nasty.to_string(),
+                scenario_id: nasty.to_string(),
+                session_id: nasty.to_string(),
+                run_started_at_unix_ms: 1,
+            },
+            EvidenceRef::ScoreRecord {
+                suite_id: nasty.to_string(),
+                scenario_id: nasty.to_string(),
+                timestamp_unix_s: -5,
+            },
+            EvidenceRef::WeakDimension {
+                dimension: nasty.to_string(),
+                deficit: 0.25,
+            },
+            EvidenceRef::BenchmarkCheckFailure {
+                suite_id: nasty.to_string(),
+                scenario_id: nasty.to_string(),
+                check_id: nasty.to_string(),
+                detail: nasty.to_string(),
+            },
+            EvidenceRef::SessionFailure {
+                session_id: nasty.to_string(),
+                signal_id: nasty.to_string(),
+                detail: Some(nasty.to_string()),
+            },
+        ];
+        for ev in cases {
+            let s = ev.to_persisted_string();
+            let parsed = EvidenceRef::parse_str(&s);
+            assert_eq!(parsed, ev, "round trip failed for persisted form {s}");
+        }
+    }
+
+    #[test]
+    fn empty_optional_fields_normalise_to_none_on_round_trip() {
+        // `Some("")` carries no information; the persisted form omits the
+        // suffix and re-parses as `None`. Documented normalisation, not loss.
+        let review = EvidenceRef::parse_str(
+            &EvidenceRef::Review {
+                review_id: "rev-1".into(),
+                target_label: Some(String::new()),
+            }
+            .to_persisted_string(),
+        );
+        assert_eq!(
+            review,
+            EvidenceRef::Review {
+                review_id: "rev-1".into(),
+                target_label: None,
+            }
+        );
+
+        let scenario = EvidenceRef::parse_str(
+            &EvidenceRef::BenchmarkScenario {
+                suite_id: "gym".into(),
+                scenario_id: "echo".into(),
+                session_id: Some(String::new()),
+            }
+            .to_persisted_string(),
+        );
+        assert_eq!(
+            scenario,
+            EvidenceRef::BenchmarkScenario {
+                suite_id: "gym".into(),
+                scenario_id: "echo".into(),
+                session_id: None,
+            }
+        );
+
+        let session = EvidenceRef::parse_str(
+            &EvidenceRef::SessionFailure {
+                session_id: "s".into(),
+                signal_id: "sig".into(),
+                detail: Some(String::new()),
+            }
+            .to_persisted_string(),
+        );
+        assert_eq!(
+            session,
+            EvidenceRef::SessionFailure {
+                session_id: "s".into(),
+                signal_id: "sig".into(),
+                detail: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_rejects_non_finite_weak_dimension_deficit() {
+        // A NaN/inf deficit would make `EvidenceRef` (and any GoalRecord that
+        // carries it) non-reflexive under `PartialEq`, so a non-finite deficit
+        // must never enter the evidence graph via the string path.
+        for input in [
+            "weak-dimension:specificity@NaN",
+            "weak-dimension:specificity@inf",
+            "weak-dimension:specificity@-inf",
+        ] {
+            assert!(
+                matches!(EvidenceRef::parse_str(input), EvidenceRef::Raw { .. }),
+                "non-finite deficit must not parse to WeakDimension: {input}"
+            );
+        }
+        assert!(matches!(
+            EvidenceRef::parse_str("weak-dimension:specificity@0.5"),
+            EvidenceRef::WeakDimension { .. }
+        ));
+    }
+
+    #[test]
+    fn legacy_unescaped_percent_text_is_preserved_in_raw() {
+        // Legacy free-form evidence containing a bare `%` (not one of our
+        // tokens) must survive untouched through Raw.
+        let ev = EvidenceRef::parse_str("CPU spiked to 50% during run");
+        assert_eq!(
+            ev,
+            EvidenceRef::Raw {
+                label: "CPU spiked to 50% during run".to_string(),
+            }
+        );
     }
 }

@@ -327,23 +327,32 @@ mod evidence_round_trip {
 
     #[test]
     fn promotion_appends_review_evidence_even_when_proposal_has_none() {
+        // The proposal carries NO `evidence=` segment, so the only evidence on
+        // the promoted GoalUpdate must be the review-level ref the plan appends.
         let raw = [
             "review-id: rev-no-evidence",
             "review-target: suite-b:scenario-y",
-            "proposal: Title only | category=c | rationale=r | suggested_change=s | evidence=irrelevant",
+            "proposal: Title only | category=c | rationale=r | suggested_change=s",
             "approve: Title only | priority=1 | status=active | rationale=push it",
         ]
         .join("\n");
         let plan = ImprovementPromotionPlan::parse(&raw).unwrap();
         let updates = plan.approved_goal_updates().unwrap();
-        let review_evidence_count = updates[0]
-            .evidence
-            .iter()
-            .filter(|ev| matches!(ev, EvidenceRef::Review { .. }))
-            .count();
         assert_eq!(
-            review_evidence_count, 1,
-            "promotion must always append exactly one review-level evidence ref"
+            updates[0].evidence.len(),
+            1,
+            "an evidence-free proposal must yield exactly the appended review ref: {:?}",
+            updates[0].evidence
+        );
+        assert!(
+            matches!(
+                &updates[0].evidence[0],
+                EvidenceRef::Review { review_id, target_label }
+                    if review_id == "rev-no-evidence"
+                        && target_label.as_deref() == Some("suite-b:scenario-y")
+            ),
+            "appended evidence must be the review-level ref: {:?}",
+            updates[0].evidence
         );
     }
 
@@ -390,5 +399,39 @@ mod evidence_round_trip {
         let update: GoalUpdate = serde_json::from_str(legacy).unwrap();
         assert_eq!(update.title, "old title");
         assert!(update.evidence.is_empty());
+    }
+
+    #[test]
+    fn empty_evidence_is_omitted_from_serialised_output() {
+        // The PR claims byte-identical on-the-wire output until evidence is
+        // populated. `skip_serializing_if = "Vec::is_empty"` must actually omit
+        // the `evidence` key for an empty vector on both GoalUpdate and the
+        // persisted GoalRecord, so legacy readers see no new field.
+        let update = GoalUpdate::new(
+            "title".to_string(),
+            "rationale".to_string(),
+            crate::goals::GoalStatus::Active,
+            1,
+        )
+        .unwrap();
+        let update_json = serde_json::to_string(&update).unwrap();
+        assert!(
+            !update_json.contains("evidence"),
+            "empty evidence must be omitted from GoalUpdate JSON: {update_json}"
+        );
+
+        let session = SessionId::parse("session-01234567-89ab-cdef-0123-456789abcdef").unwrap();
+        let record = GoalRecord::from_update(
+            update,
+            "operator".to_string(),
+            session,
+            SessionPhase::Persistence,
+        )
+        .unwrap();
+        let record_json = serde_json::to_string(&record).unwrap();
+        assert!(
+            !record_json.contains("evidence"),
+            "empty evidence must be omitted from GoalRecord JSON: {record_json}"
+        );
     }
 }
