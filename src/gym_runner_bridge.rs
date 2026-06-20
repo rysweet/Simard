@@ -206,9 +206,10 @@ fn compact_id_map(runner: &GymRunner) -> HashMap<String, String> {
         .list_scenarios()
         .into_iter()
         .filter_map(|s| {
-            s.id.split('-')
-                .next()
-                .map(|compact| (compact.to_string(), s.id.clone()))
+            // `s` is owned, so move `s.id` into the value instead of cloning;
+            // only the small compact prefix needs a fresh allocation.
+            let compact = s.id.split('-').next()?.to_string();
+            Some((compact, s.id))
         })
         .collect()
 }
@@ -292,11 +293,14 @@ pub fn register_gym_handlers(transport: &mut NativeBridgeTransport) {
                         .scenario_results
                         .iter()
                         .map(|sr| {
+                            // Borrow the wire id straight from the map (or fall
+                            // back to the engine's own id) — no per-scenario
+                            // String allocation; `scenario_value` takes `&str`.
                             let wire_id = id_map
                                 .get(&sr.scenario_id)
-                                .cloned()
-                                .unwrap_or_else(|| sr.scenario_id.clone());
-                            scenario_value(&wire_id, sr)
+                                .map(String::as_str)
+                                .unwrap_or(sr.scenario_id.as_str());
+                            scenario_value(wire_id, sr)
                         })
                         .collect();
                     Ok(json!({
