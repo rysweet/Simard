@@ -3,10 +3,30 @@
 ## Status
 
 - **Created**: 2026-06-14
-- **State**: DRAFT — opened for review with this PR; not yet ratified
+- **State**: RATIFIED — PM-architect approved 2026-06-20
 - **Consolidates goal slugs**: `adopt-tdd`, `adopt-tdd-for-new-modules`
-- **Tracking issue**: filed alongside this PR (see PR description)
+- **Tracking issue**: #2291
 - **Companion concept doc**: [`docs/concepts/prompt-driven-tdd-discipline.md`](../docs/concepts/prompt-driven-tdd-discipline.md)
+
+### Ratified decisions (PM-architect, 2026-06-20)
+
+The three policy items this spec opened for owner sign-off are hereby
+ratified. They are consistent with the documented owner stance (no bash CI
+gate per the #2150/#2151 closures, no coverage threshold per #1937, no
+retroactive backfill):
+
+1. **Pilot modules**: `src/engineer_loop/` and `src/goal_curation/` (§2.2).
+   Both sit at the top of the measured 60-day churn distribution and are
+   central to the loop that consumes the TDD instruction — a deliberate
+   dogfood property.
+2. **Four-layer enforcement model** (§3): prompt instruction → PR-description
+   attestation → periodic audit → reviewer culture. No bash CI git-log
+   parser, consistent with the #2150/#2151 rejections.
+3. **Attestation syntax** (§2 / §3 Layer 2): the `tdd:` / `tdd-exempt:`
+   PR-description rows are the ratified self-attestation format.
+
+This ratification clears Phase 0 (§4). Phases 1–3 remain separate follow-up
+cycles, each scoped to a single issue.
 
 This file is the **canonical written charter** for Test-Driven Development
 discipline in the Simard repository. It exists so that any future operator,
