@@ -518,9 +518,9 @@ pub fn reflection_memory_operations(
 
     // Store each extracted fact in semantic memory, deduplicating by concept
     // both within this session and across prior sessions.
-    let mut seen_concepts = std::collections::HashSet::<String>::new();
+    let mut seen_concepts = std::collections::HashSet::<&str>::new();
     for fact in facts {
-        if !seen_concepts.insert(fact.concept.clone()) {
+        if !seen_concepts.insert(fact.concept.as_str()) {
             continue;
         }
         // Cross-session dedup: skip if an existing fact has >= confidence.

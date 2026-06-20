@@ -182,14 +182,13 @@ pub fn distill_recent_episodes_with_runner(
     // fact's tag, matching the legacy `store_fact` call this replaced.
     let mut stored = 0u32;
     for fact in &facts {
-        let concepts = [fact.concept.clone()];
         let source = format!("distill:{}", fact.source_episode_id);
         memory.store_fact_with_provenance(
             &fact.concept,
             &fact.content,
             DISTILL_FACT_CONFIDENCE,
             &source,
-            Some(&concepts),
+            Some(std::slice::from_ref(&fact.concept)),
             None,
             std::slice::from_ref(&fact.source_episode_id),
         )?;
