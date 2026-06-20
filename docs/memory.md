@@ -26,12 +26,25 @@ For the full canonical specification (schema, consolidation rules, hive event bu
 ## Consolidation flow
 
 ```
+(intake)  ──(classify)───▶  Episodic    (noise dropped/down-scoped at the door, #2327)
 Sensory   ──(attention)──▶  Episodic
 Working   ──(task end)───▶  Episodic
-Episodic  ──(consolidate)─▶ Semantic    (DERIVES_FROM edge back to source episode, #2325)
+Episodic  ──(distill)────▶  Semantic    (DERIVES_FROM edge back to source episode, #2325)
+Episodic  ──(distill)────▶  Procedural  (PROCEDURE_DERIVES_FROM edge, #2327)
 OODA Act  ──(success)────▶  Procedural    (#2280)
 Goal put  ──(Active)─────▶  Prospective   (#2207/#2280)
 ```
+
+A deterministic **episode ingestion policy** runs before every
+`store_episode` write: it drops operational-noise episodes (session
+start/complete/persist markers, `flushing working memory`,
+`continue_skipping`) and down-scopes the unrecognised, while storing
+meaningful events with structured metadata — unless a failure signal
+overrides the drop (#2327). Promotion then runs **automatically** at the
+end of every OODA cycle (on a backlog threshold or cycle interval, not
+only when the brain chooses `ConsolidateMemory`), distilling recurring
+episodes into both facts and procedures. See
+[Episode ingestion policy & automatic promotion](architecture/episode-ingestion-policy.md).
 
 Facts (and procedures) written *with provenance* keep a typed
 `DERIVES_FROM` / `PROCEDURE_DERIVES_FROM` graph edge back to the
@@ -113,6 +126,10 @@ For multi-host coordination see [Distributed operations](distributed-operations.
 ## Related
 
 - [Cognitive Memory Architecture](architecture/cognitive-memory.md) (canonical, full detail)
+- [Episode ingestion policy & automatic promotion](architecture/episode-ingestion-policy.md) — the classifier that keeps episodic memory clean and the scheduler that promotes it automatically (#2327)
+- [Episode ingestion classifier API](reference/episode-ingestion-classifier.md) — `classify`, `sanitize_transcript`, the metadata taxonomy, and the intake wiring (#2327)
+- [Automatic distillation scheduler API](reference/automatic-distillation-scheduler.md) — `maybe_run_promotion`, the trigger predicate, config fields, and the procedures extension (#2327)
+- [Configure episode hygiene and promotion](howto/configure-episode-hygiene-and-promotion.md) — operator tuning and observability (#2327)
 - [Library-backed Cognitive Memory](architecture/cognitive-memory-library-adapter.md) — the `amplihack-memory-lib` backend, now the sole on-disk store (de-fork Phase 2b)
 - [Memory introspection CLI](reference/simard-memory-cli.md) — `simard memory stats` / `simard memory dump` for read-only, lock-safe per-type counts and sample rows
 - [OODA procedural memory](reference/ooda-procedural-memory.md) — how successful OODA outcomes become procedures
