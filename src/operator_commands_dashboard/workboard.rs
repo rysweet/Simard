@@ -3,9 +3,9 @@ use serde_json::{Value, json};
 
 use super::current_work::format_recent_actions_for_cycle;
 use super::current_work::read_recent_cycle_reports;
+use super::cycle_source;
 use super::dashboard_goal_board_snapshot;
 use super::routes::resolve_state_root;
-use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
 use crate::cognitive_memory::{CognitiveMemoryOps, NativeCognitiveMemory};
 
 // ---------------------------------------------------------------------------
@@ -62,11 +62,14 @@ pub(crate) async fn workboard() -> Json<Value> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok());
 
-    let cycle_number = daemon_health
-        .as_ref()
-        .and_then(|h| h.get("cycle_number"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let cycle_number = cycle_source::health_cycle_number(daemon_health.as_ref());
+
+    // The persistent, cross-restart cycle number shown in every "Cycle #N"
+    // widget. `cycle_number` above is process-local (resets to 1 on daemon
+    // restart) and is kept only for the uptime heuristic below; the displayed
+    // counter must agree with the Thinking tab and Recent Actions (#1680).
+    let display_cycle_number =
+        cycle_source::authoritative_cycle_number(&state_root, daemon_health.as_ref());
 
     let cycle_phase = daemon_health
         .as_ref()
@@ -139,7 +142,7 @@ pub(crate) async fn workboard() -> Json<Value> {
     };
 
     let cycle_info = json!({
-        "number": cycle_number,
+        "number": display_cycle_number,
         "phase": cycle_phase,
         "started_at": started_at_str,
         "duration_ms": cycle_duration_ms,
@@ -196,21 +199,37 @@ pub(crate) async fn workboard() -> Json<Value> {
         })
         .unwrap_or_default();
 
-    // --- 3. Spawned engineers from agent registry ---
-    let reg = FileBackedAgentRegistry::new(&state_root);
-    let spawned_engineers: Vec<Value> = reg
-        .list()
-        .unwrap_or_default()
+    // --- 3. Active engineers from the live subagent-session registry ---
+    // Read from the same source the Terminal tab uses
+    // (`/api/subagent-sessions`) so the Whiteboard's "Active Engineers" panel
+    // agrees with it. The agent registry used previously is empty for the
+    // running daemon, which produced the "No spawned engineers" contradiction
+    // (#1678). "Live" == no recorded end time, matching the Terminal tab.
+    let mut sessions: Vec<crate::subagent_sessions::SubagentSession> =
+        crate::subagent_sessions::load()
+            .sessions
+            .into_iter()
+            .filter(|s| s.ended_at.is_none())
+            .collect();
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+    let spawned_engineers: Vec<Value> = sessions
         .iter()
-        .map(|e| {
-            let alive = std::path::Path::new(&format!("/proc/{}", e.pid)).exists();
+        .map(|s| {
+            let alive = super::routes::is_pid_alive(s.pid);
+            let started_at = chrono::DateTime::from_timestamp(s.created_at, 0)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default();
+            let task = if !s.goal_id.is_empty() {
+                s.goal_id.clone()
+            } else {
+                s.session_name.clone()
+            };
             json!({
-                "pid": e.pid,
-                "task": format!("{} ({})", e.role, e.id),
+                "pid": s.pid,
+                "task": task,
                 "alive": alive,
-                "state": format!("{:?}", e.state),
-                "started_at": e.start_time.to_rfc3339(),
-                "last_heartbeat": e.last_heartbeat.to_rfc3339(),
+                "host": s.host,
+                "started_at": started_at,
             })
         })
         .collect();
@@ -219,15 +238,20 @@ pub(crate) async fn workboard() -> Json<Value> {
     let recent_reports = read_recent_cycle_reports(&state_root, 5);
     let mut recent_actions: Vec<Value> = Vec::new();
 
-    // Include current cycle's actions from daemon_health
+    // Include the current cycle's in-flight action from daemon_health. Skip
+    // the daemon's "Starting cycle #N" placeholder: it carries no action
+    // detail and embeds the process-local counter, which would re-introduce
+    // the #1680 contradiction (e.g. "#1159 · Starting cycle #6") right next to
+    // the persistent cycle number used everywhere else.
     if let Some(actions) = daemon_health
         .as_ref()
         .and_then(|h| h.get("actions_taken"))
         .and_then(|v| v.as_str())
         && !actions.is_empty()
+        && !actions.starts_with("Starting cycle #")
     {
         recent_actions.push(json!({
-            "cycle": cycle_number,
+            "cycle": display_cycle_number,
             "action": "current",
             "target": "",
             "result": actions,
@@ -265,29 +289,44 @@ pub(crate) async fn workboard() -> Json<Value> {
             }));
         }
 
-        // Working memory slots for each active goal (#1683: human-readable labels)
-        if let Some(board) = &goal_board {
-            for goal in &board.active {
-                if let Ok(slots) = mem.get_working(&goal.id) {
-                    for slot in slots {
-                        let type_label = human_slot_type(&slot.slot_type);
-                        let goal_label = &goal.description;
-                        let relevance_label = if slot.relevance >= 0.8 {
-                            "High"
-                        } else if slot.relevance >= 0.5 {
-                            "Medium"
-                        } else {
-                            "Low"
-                        };
-                        working_memory.push(json!({
-                            "type_label": type_label,
-                            "content": slot.content,
-                            "goal": goal_label,
-                            "relevance_label": relevance_label,
-                            "relevance": slot.relevance,
-                        }));
-                    }
-                }
+        // Working memory slots. Read *all* active slots from the same store
+        // the Memory tab counts (`working_count`) so the panel's slot count
+        // agrees with it instead of showing 0 (#1679). Slots are keyed by the
+        // task/session id that wrote them, which need not match a currently
+        // active goal; the per-goal lookup used previously therefore missed
+        // every populated slot. Map the slot's task id back to a goal
+        // description when one is active for a human-readable label (#1683).
+        let goal_desc: std::collections::HashMap<String, String> = goal_board
+            .as_ref()
+            .map(|board| {
+                board
+                    .active
+                    .iter()
+                    .map(|g| (g.id.clone(), g.description.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Ok(slots) = mem.get_all_working() {
+            for slot in slots {
+                let type_label = human_slot_type(&slot.slot_type);
+                let goal_label = goal_desc
+                    .get(&slot.task_id)
+                    .cloned()
+                    .unwrap_or_else(|| slot.task_id.clone());
+                let relevance_label = if slot.relevance >= 0.8 {
+                    "High"
+                } else if slot.relevance >= 0.5 {
+                    "Medium"
+                } else {
+                    "Low"
+                };
+                working_memory.push(json!({
+                    "type_label": type_label,
+                    "content": slot.content,
+                    "goal": goal_label,
+                    "relevance_label": relevance_label,
+                    "relevance": slot.relevance,
+                }));
             }
         }
 

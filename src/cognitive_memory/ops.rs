@@ -134,6 +134,22 @@ impl CognitiveMemoryOps for NativeCognitiveMemory {
             .collect())
     }
 
+    fn get_all_working(&self) -> SimardResult<Vec<CognitiveWorkingSlot>> {
+        let rows = self.query(
+            "MATCH (w:WorkingMemory) RETURN w.id, w.slot_type, w.content, w.relevance, w.task_id",
+        )?;
+        Ok(rows
+            .iter()
+            .map(|row| CognitiveWorkingSlot {
+                node_id: as_str(&row[0]).unwrap_or("").to_string(),
+                slot_type: as_str(&row[1]).unwrap_or("").to_string(),
+                content: as_str(&row[2]).unwrap_or("").to_string(),
+                relevance: as_f64(&row[3]).unwrap_or(0.0),
+                task_id: as_str(&row[4]).unwrap_or("").to_string(),
+            })
+            .collect())
+    }
+
     fn clear_working(&self, task_id: &str) -> SimardResult<usize> {
         #[cfg(test)]
         self.assert_hermetic_for("NativeCognitiveMemory::clear_working");
@@ -770,6 +786,36 @@ mod tests {
         let mem = test_mem();
         let slots = mem.get_working("nonexistent").unwrap();
         assert!(slots.is_empty());
+    }
+
+    #[test]
+    fn get_all_working_returns_slots_across_all_tasks() {
+        let mem = test_mem();
+        mem.push_working("goal", "g1", "task-A", 1.0).unwrap();
+        mem.push_working("ctx", "c1", "task-A", 0.5).unwrap();
+        mem.push_working("goal", "g2", "task-B", 0.9).unwrap();
+
+        let all = mem.get_all_working().unwrap();
+        assert_eq!(
+            all.len(),
+            3,
+            "get_all_working returns every slot regardless of task_id"
+        );
+        // Count must equal the working-memory statistic the Memory tab shows.
+        assert_eq!(
+            all.len() as u64,
+            mem.get_statistics().unwrap().working_count
+        );
+        let mut tasks: Vec<&str> = all.iter().map(|s| s.task_id.as_str()).collect();
+        tasks.sort_unstable();
+        tasks.dedup();
+        assert_eq!(tasks, vec!["task-A", "task-B"]);
+    }
+
+    #[test]
+    fn get_all_working_returns_empty_when_no_slots() {
+        let mem = test_mem();
+        assert!(mem.get_all_working().unwrap().is_empty());
     }
 
     #[test]

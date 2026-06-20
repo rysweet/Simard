@@ -4,6 +4,7 @@ mod auth;
 mod brain_failures;
 mod chat;
 mod current_work;
+mod cycle_source;
 mod distributed;
 mod goals;
 mod goals_status;

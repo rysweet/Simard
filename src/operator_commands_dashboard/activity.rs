@@ -2,6 +2,7 @@ use axum::Json;
 use serde_json::{Value, json};
 
 use super::current_work::read_recent_cycle_reports;
+use super::cycle_source;
 use super::logs::read_tail;
 use super::routes::{resolve_state_root, run_gh_json};
 
@@ -92,11 +93,17 @@ pub(crate) async fn activity() -> Json<Value> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok());
 
-    let current_cycle = daemon_health
-        .as_ref()
-        .and_then(|h| h.get("cycle_number"))
-        .cloned()
-        .unwrap_or(json!(null));
+    // Single authoritative cycle number: the persisted cumulative count, which
+    // survives daemon restarts, so the Overview header agrees with the
+    // Thinking tab and Recent Actions instead of showing the process-local
+    // "#1" from daemon_health after a restart (#1680). Computed unconditionally
+    // — including when the daemon is stopped and only persisted cycle reports
+    // remain — so this endpoint matches workboard()/current_work() in every
+    // state and the single-source invariant holds even in the degraded case.
+    let current_cycle = json!(cycle_source::authoritative_cycle_number(
+        &resolve_state_root(),
+        daemon_health.as_ref()
+    ));
 
     let daemon_status = daemon_health
         .as_ref()

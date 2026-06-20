@@ -44,6 +44,18 @@ pub trait CognitiveMemoryOps: Send + Sync {
 
     fn get_working(&self, task_id: &str) -> SimardResult<Vec<CognitiveWorkingSlot>>;
 
+    /// Return *all* working-memory slots, regardless of which task/session id
+    /// wrote them, newest-first where the backend can order them.
+    ///
+    /// Default impl returns empty so backends that cannot enumerate the full
+    /// set keep compiling. `NativeCognitiveMemory` overrides this with a
+    /// query over every `WorkingMemory` node. Used by the dashboard Workboard
+    /// so its working-memory panel agrees with the global `working_count`
+    /// statistic instead of showing 0 (issue #1679).
+    fn get_all_working(&self) -> SimardResult<Vec<CognitiveWorkingSlot>> {
+        Ok(vec![])
+    }
+
     fn clear_working(&self, task_id: &str) -> SimardResult<usize>;
 
     fn store_episode(
