@@ -225,6 +225,69 @@ for the full timing contract.
 
 ---
 
+## Ready-to-file issue stubs (`issues/`) — #2309
+
+On `/close`, the bundle writer renders each `MeetingDecision` and each
+`ActionItem` into a reviewable GitHub issue **draft** under
+`~/.simard/meetings/<meeting_id>/issues/`:
+
+```
+~/.simard/meetings/<meeting_id>/
+├── meeting_handoff.json   # canonical structured artifact
+├── meeting_handoff.md     # human-readable report (now links the stubs)
+├── transcript.json        # verbatim conversation
+└── issues/                # NEW (#2309) — one stub per decision / action item
+    ├── 01-adopt-structured-handoff-bundles.md
+    └── 02-wire-bundle-writer-into-close-flow.md
+```
+
+Stubs are the **reviewable middle ground** between re-typing decisions by hand
+and `simard act-on-decisions`, which auto-files issues immediately with no
+review step. Each stub is a ready-to-edit issue draft you file when (and if)
+you want to:
+
+```bash
+cd ~/.simard/meetings/<meeting_id>/issues
+gh issue create --title "$(head -1 01-*.md | sed 's/^# //')" --body-file 01-*.md
+```
+
+### What each stub contains
+
+- A clear title: `Action: <description>` or `Decision: <description>`.
+- **Context** — the decision/action text, plus a **Rationale** subsection for
+  decisions.
+- **Details** — owner/decided-by, priority, due date, and the meeting goal.
+- A starter **acceptance-criteria** checklist (`- [ ]` items) to refine before
+  filing.
+- **Provenance** — meeting id, topic, and closed-at timestamp.
+
+### Behavior and guarantees
+
+| Property | Behavior |
+|---|---|
+| Empty handoff | **No `issues/` directory** is created — mirrors the empty-handoff write guard ([#2268](#write-guard-for-empty-handoffs-2268)). |
+| Ordering | Decisions first, then action items, numbered `01`, `02`, … |
+| Filenames | Filesystem-safe slug (`[a-z0-9-]`, length-capped); the `NN-` prefix guarantees uniqueness. No path traversal — non-alphanumerics are collapsed to `-`, so `/`, `\`, and `.` can never appear. |
+| Idempotent | Regeneration clears stale `*.md` stubs first, so re-closing (or a partial-then-full close) never leaves orphaned stubs behind. |
+| Permissions | Each stub is written `0o600` on unix (operator-private), matching the other bundle files. |
+
+The bundle's `meeting_handoff.md` gains an **`## Issue stubs`** section listing
+the generated files with relative links (`issues/NN-slug.md`) so operators can
+find them from the report.
+
+> **Scope note**: issue stubs are a *handoff-enrichment* artifact only. They are
+> **not** filed automatically and do **not** affect OODA or engineer-loop
+> ingestion (which read `meeting_handoff.json`, not the stubs). Filing remains a
+> deliberate operator action via `gh` or `simard act-on-decisions`.
+
+The renderer lives in
+`src/meeting_facilitator/handoff/issue_stubs.rs`
+(`plan_issue_stubs` is a pure renderer; `write_issue_stubs` performs the I/O)
+and is wired into the single bundle chokepoint
+`write_meeting_bundle` so every close path emits stubs.
+
+---
+
 ## Ingestion by the OODA Daemon
 
 At the start of every OODA cycle, the daemon (see
@@ -442,6 +505,11 @@ and each `ActionItem` (titled `Action: ...`), then calls
 is stopped but you still want to surface a handoff to the GitHub
 issue tracker by hand.
 
+For a **reviewable** alternative that does *not* file anything
+automatically, see the per-meeting
+[issue stubs](#ready-to-file-issue-stubs-issues--2309) written into the
+bundle's `issues/` directory on `/close`.
+
 ---
 
 ## See Also
@@ -463,6 +531,8 @@ issue tracker by hand.
   — operator playbook when `handoff_partial=true` fires
 - `src/meeting_facilitator/handoff/mod.rs` — `MeetingHandoff` schema
   and helpers
+- `src/meeting_facilitator/handoff/issue_stubs.rs` — issue-stub renderer
+  (`plan_issue_stubs` / `write_issue_stubs`, #2309)
 - `src/ooda_loop/cycle.rs` — OODA-side ingestion
 - `src/ooda_loop/curate.rs` — batch processing and reaping
 - `src/engineer_loop/meeting_decisions.rs` — engineer-loop-side ingestion

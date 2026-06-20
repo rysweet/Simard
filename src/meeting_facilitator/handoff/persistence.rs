@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::issue_stubs::{self, ISSUES_SUBDIR, IssueStub};
 use super::{
     MEETING_HANDOFF_FILENAME, MEETING_SESSION_WIP_FILENAME, MeetingHandoff, derive_meeting_id,
 };
@@ -394,9 +395,11 @@ pub fn write_meeting_bundle(
         reason: format!("writing handoff: {e}"),
     })?;
 
-    // Write the human-readable markdown.
+    // Write the human-readable markdown. Compute the issue stubs first so the
+    // report can list them with relative links (#2309).
+    let stubs = issue_stubs::plan_issue_stubs(handoff);
     let md_path = dir.join(BUNDLE_HANDOFF_MD);
-    let md = render_bundle_markdown(handoff, transcript_lines);
+    let md = render_bundle_markdown(handoff, transcript_lines, &stubs);
     fs::write(&md_path, &md).map_err(|e| SimardError::ArtifactIo {
         path: md_path.clone(),
         reason: format!("writing markdown: {e}"),
@@ -413,6 +416,11 @@ pub fn write_meeting_bundle(
             }
         }
     }
+
+    // Write the ready-to-file GitHub issue stubs into `issues/` (#2309).
+    // No-op when the handoff has no decisions and no action items; idempotent
+    // and 0o600 are handled inside the writer.
+    issue_stubs::write_issue_stubs(&dir, handoff)?;
 
     tracing::info!(
         meeting_id = %handoff.meeting_id,
@@ -537,6 +545,7 @@ struct BundleTranscript {
 fn render_bundle_markdown(
     handoff: &MeetingHandoff,
     transcript_lines: &[BundleTranscriptLine],
+    stubs: &[IssueStub],
 ) -> String {
     use std::fmt::Write as _;
     let mut md = String::with_capacity(4096);
@@ -600,6 +609,23 @@ fn render_bundle_markdown(
         }
     }
     let _ = writeln!(md);
+
+    // Issue #2309 — ready-to-file GitHub issue stubs generated from the
+    // decisions and action items above. Omitted entirely when no stubs exist.
+    if !stubs.is_empty() {
+        let _ = writeln!(md, "## Issue stubs");
+        let _ = writeln!(md);
+        let _ = writeln!(
+            md,
+            "Ready-to-file GitHub issue drafts generated from the decisions and action items above. Review and edit before filing."
+        );
+        let _ = writeln!(md);
+        for stub in stubs {
+            let link_text = stub.title.replace('[', "(").replace(']', ")");
+            let _ = writeln!(md, "- [{}]({}/{})", link_text, ISSUES_SUBDIR, stub.filename);
+        }
+        let _ = writeln!(md);
+    }
 
     let _ = writeln!(md, "## Open questions");
     let _ = writeln!(md);
@@ -866,5 +892,68 @@ mod bundle_tests {
         // Should not panic; should produce a 16-char timestamp prefix even
         // when started_at is bad.
         assert!(id.len() >= 16);
+    }
+
+    #[test]
+    #[serial(simard_meetings_root_env)]
+    fn write_meeting_bundle_emits_issue_stubs_and_markdown_section() {
+        let root = temp_root("bundle-stubs");
+        unsafe {
+            std::env::set_var("SIMARD_MEETINGS_ROOT", &root);
+        }
+        let mut handoff = sample_handoff(); // 1 decision + 1 action item
+        let dir = write_meeting_bundle(&mut handoff, &sample_lines()).expect("write bundle");
+
+        let issues = dir.join("issues");
+        assert!(issues.is_dir(), "issues/ dir should be created");
+        let md_files = std::fs::read_dir(&issues)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
+            .count();
+        assert_eq!(md_files, 2, "one stub per decision + action item");
+
+        let md = std::fs::read_to_string(dir.join("meeting_handoff.md")).unwrap();
+        assert!(
+            md.contains("## Issue stubs"),
+            "markdown lacks Issue stubs section"
+        );
+        assert!(
+            md.contains("](issues/01-"),
+            "markdown lacks relative stub link"
+        );
+
+        unsafe {
+            std::env::remove_var("SIMARD_MEETINGS_ROOT");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[serial(simard_meetings_root_env)]
+    fn write_meeting_bundle_empty_handoff_writes_no_issue_stubs() {
+        let root = temp_root("bundle-stubs-empty");
+        unsafe {
+            std::env::set_var("SIMARD_MEETINGS_ROOT", &root);
+        }
+        let mut handoff = sample_handoff();
+        handoff.decisions = vec![];
+        handoff.action_items = vec![];
+        let dir = write_meeting_bundle(&mut handoff, &sample_lines()).expect("write bundle");
+
+        assert!(
+            !dir.join("issues").exists(),
+            "no issues/ dir for an empty handoff"
+        );
+        let md = std::fs::read_to_string(dir.join("meeting_handoff.md")).unwrap();
+        assert!(
+            !md.contains("## Issue stubs"),
+            "empty handoff markdown must omit the Issue stubs section"
+        );
+
+        unsafe {
+            std::env::remove_var("SIMARD_MEETINGS_ROOT");
+        }
+        std::fs::remove_dir_all(&root).ok();
     }
 }

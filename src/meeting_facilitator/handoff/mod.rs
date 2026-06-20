@@ -424,8 +424,12 @@ impl MeetingHandoff {
     }
 }
 
+/// Render ready-to-file GitHub issue stubs from a meeting handoff (#2309).
+mod issue_stubs;
 /// Write a meeting handoff artifact to a directory.
 mod persistence;
+
+pub use issue_stubs::{ISSUES_SUBDIR, IssueStub, plan_issue_stubs, write_issue_stubs};
 // `find_newest_handoff` is consumed by cfg(test) module `tests_handoff_extra`;
 // clippy flags it as unused in non-test compilation. Keep the re-export stable.
 #[allow(unused_imports)]
