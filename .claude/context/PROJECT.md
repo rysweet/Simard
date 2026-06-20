@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-2325-wire-simards-cognitive-memory-writes-to-record-pro
+## Project: issue-2323-eliminate-the-private-gymeval-fork-in-simard-by-ad
 
 ## Overview
 

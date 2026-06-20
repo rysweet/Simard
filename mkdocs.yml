@@ -54,6 +54,7 @@ nav:
     - Bridge Pattern: architecture/bridge-pattern.md
     - Cognitive Memory: architecture/cognitive-memory.md
     - Cognitive Memory — Library Adapter: architecture/cognitive-memory-library-adapter.md
+    - Gym Eval Engine — Library Adapter: architecture/gym-eval-library-adapter.md
     - Agent Composition: architecture/agent-composition.md
     - Implementation Plan: architecture/implementation-plan.md
   - Concepts:
