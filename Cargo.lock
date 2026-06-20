@@ -56,6 +56,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "amplihack-agent-eval"
+version = "0.11.1"
+source = "git+https://github.com/rysweet/amplihack-rs.git?rev=59548a96049ab8d558110bcaf9c82a4316f1bbf0#59548a96049ab8d558110bcaf9c82a4316f1bbf0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "amplihack-memory"
 version = "0.4.0"
 source = "git+https://github.com/rysweet/amplihack-memory-lib.git?rev=7b81590896f3a93399d3d29f2ada2601971c6864#7b81590896f3a93399d3d29f2ada2601971c6864"
@@ -3859,6 +3871,7 @@ dependencies = [
 name = "simard"
 version = "0.20.0"
 dependencies = [
+ "amplihack-agent-eval",
  "amplihack-memory",
  "assert_cmd",
  "axum 0.8.9",
