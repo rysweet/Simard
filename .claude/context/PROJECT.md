@@ -10,7 +10,7 @@ Replace the sections below with information about your project.
 
 ---
 
-## Project: issue-2307-de-fork-phase-2b-make-the-amplihack-memory-lib-lib
+## Project: issue-2299-fix-the-episodic-recall-returns-zero-defect-in-sim
 
 ## Overview
 
