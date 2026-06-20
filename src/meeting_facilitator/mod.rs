@@ -25,6 +25,7 @@ pub use handoff::{
     mark_meeting_handoff_processed, meeting_bundle_dir, remove_session_wip, save_session_wip,
     write_meeting_bundle, write_meeting_handoff,
 };
+pub use handoff::{ISSUES_SUBDIR, IssueStub, plan_issue_stubs, write_issue_stubs};
 pub use session::{
     add_note, add_question, close_meeting, edit_item, record_action_item, record_decision,
     remove_item, start_meeting,
