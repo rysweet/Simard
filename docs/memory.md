@@ -28,10 +28,16 @@ For the full canonical specification (schema, consolidation rules, hive event bu
 ```
 Sensory   ──(attention)──▶  Episodic
 Working   ──(task end)───▶  Episodic
-Episodic  ──(consolidate)─▶ Semantic
+Episodic  ──(consolidate)─▶ Semantic    (DERIVES_FROM edge back to source episode, #2325)
 OODA Act  ──(success)────▶  Procedural    (#2280)
 Goal put  ──(Active)─────▶  Prospective   (#2207/#2280)
 ```
+
+Facts (and procedures) written *with provenance* keep a typed
+`DERIVES_FROM` / `PROCEDURE_DERIVES_FROM` graph edge back to the
+episode(s) they were derived from, turning the flat node store into a
+connected graph that can be traversed both ways (#2325). See
+[Cognitive-memory provenance](reference/cognitive-memory-provenance.md).
 
 The OODA daemon dispatches a `consolidate-memory` action whenever working-memory pressure or recent-episode density crosses a threshold. Consolidation is idempotent and runs without spawning an engineer subprocess. Procedural memories are written inline during the OODA Act phase (not during consolidation) — each successful `ActionOutcome` produces an `ooda:{kind}` procedure. Prospective memories are written each cycle by a **board-sourced reconcile**: before every preparation pass the daemon mirrors each Active goal in the live `GoalBoard` into a prospective trigger via `store_prospective`, so `check_triggers` has something to match. See [Goal–prospective memory mirror](reference/goal-prospective-memory-mirror.md) for the original `CognitiveMemoryGoalStore` mirror and [Goal-board prospective reconcile](reference/goal-board-prospective-reconcile.md) for the per-cycle board-sourced step that the live daemon actually runs.
 
@@ -115,5 +121,6 @@ For multi-host coordination see [Distributed operations](distributed-operations.
 - [Goal-board prospective reconcile](reference/goal-board-prospective-reconcile.md) — the per-cycle board-sourced mirror the live daemon runs so triggers actually populate (#2308)
 - [Prospective-trigger firing](reference/prospective-trigger-firing.md) — how the OODA objective probe and case-insensitive match make stored triggers fire
 - [Episodic keyword recall](reference/cognitive-memory-episodic-recall.md) — how stored episodes surface for a matching objective
+- [Cognitive-memory provenance](reference/cognitive-memory-provenance.md) — DERIVES_FROM / PROCEDURE_DERIVES_FROM edges linking distilled facts and procedures back to their source episodes (#2325)
 - [Dashboard](dashboard.md) — Memory tab
 - [Daemon mode](daemon-mode.md) — when consolidation runs

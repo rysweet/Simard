@@ -508,8 +508,9 @@ pub fn reflection_memory_operations(
     session_id: &SessionId,
     bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
-    // Store the session transcript as an episodic memory.
-    bridge.store_episode(
+    // Store the session transcript as an episodic memory, capturing its id so
+    // each fact derived from this transcript can link back to it (issue #2325).
+    let episode_id = bridge.store_episode(
         &format!("Session {session_id} transcript: {transcript}"),
         "session-reflection",
         None,
@@ -529,12 +530,17 @@ pub fn reflection_memory_operations(
         if existing.iter().any(|f| f.confidence >= fact.confidence) {
             continue;
         }
-        bridge.store_fact(
+        // Provenance write (#2325): thread the transcript episode id so a
+        // `DERIVES_FROM` edge links this fact back to the transcript it was
+        // reflected from, instead of the legacy no-provenance `store_fact`.
+        bridge.store_fact_with_provenance(
             &fact.concept,
             &fact.content,
             fact.confidence,
-            &[],
             &format!("session:{session_id}"),
+            None,
+            None,
+            std::slice::from_ref(&episode_id),
         )?;
     }
 

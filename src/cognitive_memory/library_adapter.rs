@@ -245,6 +245,29 @@ fn recover_fact_seq(inner: &CognitiveMemory) -> u64 {
         .map_or(0, |m| m.saturating_add(1))
 }
 
+/// Strip the adapter's `{seq}_` ordering prefix (see [`FACT_SEQ_META_KEY`] /
+/// [`to_fact`]) from a fact id, yielding the raw library `node_id` the
+/// provenance graph is keyed on.
+///
+/// [`store_fact`](CognitiveMemoryOps::store_fact) /
+/// [`store_fact_with_provenance`](CognitiveMemoryOps::store_fact_with_provenance)
+/// return the raw library id, but [`search_facts`](CognitiveMemoryOps::search_facts)
+/// surfaces the composite `{20-digit seq}_{raw}` id. Accepting either here lets
+/// a caller pass the id from a recalled [`CognitiveFact`] straight into
+/// [`episodes_for_fact`](CognitiveMemoryOps::episodes_for_fact) and still hit the
+/// `DERIVES_FROM` edges, rather than silently getting an empty result.
+fn strip_seq_prefix(fact_id: &str) -> &str {
+    let bytes = fact_id.as_bytes();
+    if bytes.len() > FACT_SEQ_WIDTH
+        && bytes[FACT_SEQ_WIDTH] == b'_'
+        && bytes[..FACT_SEQ_WIDTH].iter().all(u8::is_ascii_digit)
+    {
+        &fact_id[FACT_SEQ_WIDTH + 1..]
+    } else {
+        fact_id
+    }
+}
+
 fn to_procedure(p: ProceduralMemory) -> CognitiveProcedure {
     CognitiveProcedure {
         node_id: p.node_id,
@@ -406,6 +429,40 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
             .map_err(|e| map_op_err("store_fact", e))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn store_fact_with_provenance(
+        &self,
+        concept: &str,
+        content: &str,
+        confidence: f64,
+        source_id: &str,
+        tags: Option<&[String]>,
+        metadata: Option<&HashMap<String, serde_json::Value>>,
+        source_episode_ids: &[String],
+    ) -> SimardResult<String> {
+        // Stamp the same process-wide monotonic sequence base `store_fact`
+        // injects (see `FACT_SEQ_META_KEY`) so the provenance write path keeps
+        // the "max node_id == newest fact" invariant the goal board / goal store
+        // / consolidation depend on. Fold it into the caller's metadata rather
+        // than replacing it, so caller-supplied keys survive. The fetch is done
+        // under the write lock so sequence order matches store order.
+        let mut guard = self.lock_write("store_fact_with_provenance")?;
+        let seq = self.fact_seq.fetch_add(1, Ordering::Relaxed);
+        let mut merged: HashMap<String, serde_json::Value> = metadata.cloned().unwrap_or_default();
+        merged.insert(FACT_SEQ_META_KEY.to_string(), serde_json::Value::from(seq));
+        guard
+            .store_fact_with_provenance(
+                concept,
+                content,
+                confidence,
+                source_id,
+                tags,
+                Some(&merged),
+                source_episode_ids,
+            )
+            .map_err(|e| map_op_err("store_fact_with_provenance", e))
+    }
+
     fn search_facts(
         &self,
         query: &str,
@@ -429,6 +486,16 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
             guard.search_facts(query, limit as usize, min_confidence)
         };
         Ok(facts.into_iter().map(to_fact).collect())
+    }
+
+    fn episodes_for_fact(&self, fact_id: &str) -> SimardResult<Vec<String>> {
+        // Read side of `store_fact_with_provenance`: traverse the fact's
+        // outgoing `DERIVES_FROM` edges. `fact_provenance` returns an empty
+        // vector (not an error) for an unknown id or a fact with no provenance,
+        // which matches the trait contract. `strip_seq_prefix` lets a caller
+        // pass either the raw id from the store call or the composite id from
+        // `search_facts`.
+        Ok(self.lock()?.fact_provenance(strip_seq_prefix(fact_id)))
     }
 
     fn store_procedure(
@@ -456,6 +523,33 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         if existed {
             // `recall_procedure` (mutating) increments the matched procedure's
             // persisted `usage_count` by one — the reinforcement signal.
+            let _ = guard.recall_procedure(name, usize::MAX);
+        }
+        Ok(id)
+    }
+
+    fn store_procedure_with_provenance(
+        &self,
+        name: &str,
+        steps: &[String],
+        prerequisites: &[String],
+        source_episode_ids: &[String],
+    ) -> SimardResult<String> {
+        // Same idempotent upsert-that-reinforces contract as `store_procedure`
+        // (#2298) — the library's `store_procedure_with_provenance` upserts by
+        // name but does NOT bump usage_count on update, so detect the duplicate
+        // and reinforce after the store — plus the `PROCEDURE_DERIVES_FROM`
+        // edges to `source_episode_ids` (#2325), which the library attaches to
+        // the single canonical node (re-storing the same name does not fork it).
+        let mut guard = self.lock_write("store_procedure_with_provenance")?;
+        let existed = guard
+            .search_procedures(name, usize::MAX)
+            .iter()
+            .any(|p| p.name == name);
+        let id = guard
+            .store_procedure_with_provenance(name, steps, Some(prerequisites), source_episode_ids)
+            .map_err(|e| map_op_err("store_procedure_with_provenance", e))?;
+        if existed {
             let _ = guard.recall_procedure(name, usize::MAX);
         }
         Ok(id)
