@@ -150,7 +150,13 @@ async fn status() -> Json<Value> {
         "timestamp": chrono::Utc::now().to_rfc3339(),
     });
 
-    if let Some(h) = daemon_health {
+    if let Some(mut h) = daemon_health {
+        // Reconcile the displayed cycle number to the durable counter so the
+        // Overview "System Status" line agrees with the Thinking tab (#1680).
+        let health_cycle = h.get("cycle_number").and_then(|v| v.as_u64()).unwrap_or(0);
+        let display_cycle =
+            super::current_work::resolve_display_cycle_number(&resolve_state_root(), health_cycle);
+        h["cycle_number"] = json!(display_cycle);
         status_json["daemon_health"] = h;
     }
 

@@ -3,9 +3,9 @@ use serde_json::{Value, json};
 
 use super::current_work::format_recent_actions_for_cycle;
 use super::current_work::read_recent_cycle_reports;
+use super::current_work::resolve_display_cycle_number;
 use super::dashboard_goal_board_snapshot;
 use super::routes::resolve_state_root;
-use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
 use crate::memory_ipc::open_reader_bridge;
 
 // ---------------------------------------------------------------------------
@@ -49,6 +49,34 @@ fn human_fact_category(concept: &str) -> &'static str {
     }
 }
 
+/// Build the Whiteboard "Active Engineers" rows from the live subagent-session
+/// registry — the same source the Terminal tab reads via `/api/subagent-sessions`
+/// (#1678). Only sessions without an `ended_at` are considered live, matching
+/// that endpoint's `live` filter, so the two panels can no longer disagree.
+fn live_engineers_json(reg: &crate::subagent_sessions::Registry) -> Vec<Value> {
+    let mut live: Vec<&crate::subagent_sessions::SubagentSession> = reg
+        .sessions
+        .iter()
+        .filter(|s| s.ended_at.is_none())
+        .collect();
+    live.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+    live.iter()
+        .map(|s| {
+            let alive = std::path::Path::new(&format!("/proc/{}", s.pid)).exists();
+            let started_at = chrono::DateTime::from_timestamp(s.created_at, 0)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default();
+            json!({
+                "pid": s.pid,
+                "task": format!("{} ({})", s.goal_id, s.agent_id),
+                "alive": alive,
+                "host": s.host,
+                "started_at": started_at,
+            })
+        })
+        .collect()
+}
+
 pub(crate) async fn workboard() -> Json<Value> {
     let state_root = resolve_state_root();
 
@@ -67,6 +95,11 @@ pub(crate) async fn workboard() -> Json<Value> {
         .and_then(|h| h.get("cycle_number"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+
+    // The value displayed as "Cycle #N" must be the durable counter (matching
+    // the Thinking tab), not the restart-scoped `cycle_number` from
+    // daemon_health, which is reused below only for the uptime estimate (#1680).
+    let display_cycle_number = resolve_display_cycle_number(&state_root, cycle_number);
 
     let cycle_phase = daemon_health
         .as_ref()
@@ -139,7 +172,7 @@ pub(crate) async fn workboard() -> Json<Value> {
     };
 
     let cycle_info = json!({
-        "number": cycle_number,
+        "number": display_cycle_number,
         "phase": cycle_phase,
         "started_at": started_at_str,
         "duration_ms": cycle_duration_ms,
@@ -196,24 +229,12 @@ pub(crate) async fn workboard() -> Json<Value> {
         })
         .unwrap_or_default();
 
-    // --- 3. Spawned engineers from agent registry ---
-    let reg = FileBackedAgentRegistry::new(&state_root);
-    let spawned_engineers: Vec<Value> = reg
-        .list()
-        .unwrap_or_default()
-        .iter()
-        .map(|e| {
-            let alive = std::path::Path::new(&format!("/proc/{}", e.pid)).exists();
-            json!({
-                "pid": e.pid,
-                "task": format!("{} ({})", e.role, e.id),
-                "alive": alive,
-                "state": format!("{:?}", e.state),
-                "started_at": e.start_time.to_rfc3339(),
-                "last_heartbeat": e.last_heartbeat.to_rfc3339(),
-            })
-        })
-        .collect();
+    // --- 3. Active engineers from the live subagent-session registry (#1678) ---
+    // Previously this read FileBackedAgentRegistry, a separate source that was
+    // routinely empty while live engineers ran — making the Whiteboard claim
+    // "No spawned engineers" while the Terminal tab listed several. Read the
+    // same registry the Terminal tab does so the two panels always agree.
+    let spawned_engineers = live_engineers_json(&crate::subagent_sessions::load());
 
     // --- 4. Recent actions from cycle reports ---
     let recent_reports = read_recent_cycle_reports(&state_root, 5);
@@ -334,4 +355,67 @@ pub(crate) async fn workboard() -> Json<Value> {
         "cognitive_statistics": cognitive_stats,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::subagent_sessions::{Registry, SubagentSession};
+
+    fn session(pid: u32, created_at: i64, ended_at: Option<i64>) -> SubagentSession {
+        SubagentSession {
+            agent_id: format!("engineer-self-serve-dashboard-improvement-{pid}"),
+            session_name: format!("simard-engineer-{pid}"),
+            host: "local".to_string(),
+            pid,
+            created_at,
+            ended_at,
+            goal_id: "self-serve-dashboard-improvement".to_string(),
+        }
+    }
+
+    #[test]
+    fn live_engineers_excludes_ended_sessions() {
+        let reg = Registry {
+            sessions: vec![
+                session(100, 10, None),
+                session(200, 20, Some(99)), // ended — must be filtered out
+                session(300, 30, None),
+            ],
+        };
+        let engineers = live_engineers_json(&reg);
+        assert_eq!(
+            engineers.len(),
+            2,
+            "only live (ended_at=None) sessions shown"
+        );
+        // Sorted newest-first by created_at, matching /api/subagent-sessions.
+        assert_eq!(engineers[0]["pid"], 300);
+        assert_eq!(engineers[1]["pid"], 100);
+    }
+
+    #[test]
+    fn live_engineers_render_expected_fields() {
+        let reg = Registry {
+            sessions: vec![session(2269169, 1781939412, None)],
+        };
+        let engineers = live_engineers_json(&reg);
+        assert_eq!(engineers.len(), 1);
+        let e = &engineers[0];
+        assert_eq!(e["pid"], 2269169);
+        assert!(
+            e["task"]
+                .as_str()
+                .unwrap()
+                .contains("self-serve-dashboard-improvement")
+        );
+        assert!(e["started_at"].as_str().unwrap().starts_with("2026-"));
+        assert!(e["alive"].is_boolean());
+    }
+
+    #[test]
+    fn live_engineers_empty_registry_yields_no_rows() {
+        let reg = Registry { sessions: vec![] };
+        assert!(live_engineers_json(&reg).is_empty());
+    }
 }

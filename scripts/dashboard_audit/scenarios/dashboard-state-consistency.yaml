@@ -1,0 +1,35 @@
+name: Dashboard state consistency (#1678, #1679, #1680)
+description: >
+  Verifies that the Whiteboard/Workboard and Overview panels report the same
+  state as the Terminal, Memory, and Thinking tabs. Drives the live dashboard
+  JSON APIs (and the served SPA) and asserts active-engineer count, the
+  working-memory count source, and the cycle number all agree across panels.
+  Regression guard for the three dashboard self-contradiction bugs in epic #1992.
+version: "1.0"
+tags: [dashboard, consistency, regression, audit-1662-followup]
+config:
+  timeout: 60000
+agents:
+  - name: cli-agent
+    type: cli
+    config:
+      shell: bash
+      workingDirectory: .
+      captureOutput: true
+steps:
+  - name: Verify dashboard panels agree across tabs
+    agent: cli-agent
+    action: run
+    params:
+      command: "bash scripts/dashboard_audit/verify_state_consistency.sh"
+    description: >
+      Authenticate to the running dashboard and compare /api/workboard against
+      /api/subagent-sessions, /api/memory/graph, /api/activity, and /api/status.
+verifications:
+  - type: output
+    target: stdout
+    expected: "PASS: Whiteboard/Overview agree with Terminal/Memory/Thinking"
+    operator: contains
+    description: >
+      The verifier prints PASS only when engineers, the working-memory count
+      source, and the cycle number are consistent across every panel.

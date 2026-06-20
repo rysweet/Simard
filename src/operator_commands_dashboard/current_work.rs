@@ -296,6 +296,32 @@ pub(crate) fn read_recent_cycle_reports(state_root: &std::path::Path, n: usize) 
         .collect()
 }
 
+/// The highest persisted cycle number from `cycle_*.json` reports, if any.
+///
+/// This is the durable, monotonic counter that survives daemon restarts — the
+/// same number the Thinking tab and the Recent Actions feed display. Returns
+/// `None` when no cycle reports exist yet (e.g. a fresh install).
+pub(crate) fn latest_persisted_cycle_number(state_root: &std::path::Path) -> Option<u64> {
+    read_recent_cycle_reports(state_root, 1)
+        .first()
+        .and_then(|r| r.get("cycle_number"))
+        .and_then(|v| v.as_u64())
+}
+
+/// Resolve the cycle number to *display* across every dashboard panel.
+///
+/// `daemon_health.json` carries a restart-scoped counter (`cycles_run + 1`)
+/// that resets to 1 each time the daemon process starts, while the persisted
+/// cycle reports carry the durable counter. Showing the restart-scoped value
+/// made Overview / Whiteboard / System Status disagree with Thinking and the
+/// Recent Actions feed (#1680). Prefer the durable counter; fall back to the
+/// health value only when no reports exist yet.
+pub(crate) fn resolve_display_cycle_number(state_root: &std::path::Path, health_cycle: u64) -> u64 {
+    latest_persisted_cycle_number(state_root)
+        .map(|persisted| persisted.max(health_cycle))
+        .unwrap_or(health_cycle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,6 +466,56 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let reports = read_recent_cycle_reports(dir.path(), 10);
         assert!(reports.is_empty());
+    }
+
+    // ---- resolve_display_cycle_number (#1680) ------------------------------
+
+    #[test]
+    fn latest_persisted_cycle_number_returns_highest() {
+        let dir = tempfile::tempdir().unwrap();
+        let cycle_dir = dir.path().join("cycle_reports");
+        std::fs::create_dir_all(&cycle_dir).unwrap();
+        for i in [1u32, 5, 3] {
+            std::fs::write(
+                cycle_dir.join(format!("cycle_{i}.json")),
+                format!(r#"{{"cycle_number":{i}}}"#),
+            )
+            .unwrap();
+        }
+        assert_eq!(latest_persisted_cycle_number(dir.path()), Some(5));
+    }
+
+    #[test]
+    fn latest_persisted_cycle_number_none_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(latest_persisted_cycle_number(dir.path()), None);
+    }
+
+    #[test]
+    fn resolve_display_prefers_persisted_over_restart_scoped() {
+        // Persistent reports reach 369 while the daemon_health restart-scoped
+        // counter is only 1 after a restart — the dashboard must show 369.
+        let dir = tempfile::tempdir().unwrap();
+        let cycle_dir = dir.path().join("cycle_reports");
+        std::fs::create_dir_all(&cycle_dir).unwrap();
+        std::fs::write(cycle_dir.join("cycle_369.json"), r#"{"cycle_number":369}"#).unwrap();
+        assert_eq!(resolve_display_cycle_number(dir.path(), 1), 369);
+    }
+
+    #[test]
+    fn resolve_display_falls_back_to_health_when_no_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(resolve_display_cycle_number(dir.path(), 7), 7);
+    }
+
+    #[test]
+    fn resolve_display_uses_health_when_higher_than_reports() {
+        // Defensive: never show a number lower than the latest health value.
+        let dir = tempfile::tempdir().unwrap();
+        let cycle_dir = dir.path().join("cycle_reports");
+        std::fs::create_dir_all(&cycle_dir).unwrap();
+        std::fs::write(cycle_dir.join("cycle_2.json"), r#"{"cycle_number":2}"#).unwrap();
+        assert_eq!(resolve_display_cycle_number(dir.path(), 9), 9);
     }
 
     #[test]

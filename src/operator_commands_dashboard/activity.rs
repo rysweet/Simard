@@ -1,7 +1,7 @@
 use axum::Json;
 use serde_json::{Value, json};
 
-use super::current_work::read_recent_cycle_reports;
+use super::current_work::{read_recent_cycle_reports, resolve_display_cycle_number};
 use super::logs::read_tail;
 use super::routes::{resolve_state_root, run_gh_json};
 
@@ -92,11 +92,13 @@ pub(crate) async fn activity() -> Json<Value> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok());
 
-    let current_cycle = daemon_health
+    // Restart-scoped counter from daemon_health; reconciled to the durable
+    // counter below once the state root is known (#1680).
+    let health_cycle = daemon_health
         .as_ref()
         .and_then(|h| h.get("cycle_number"))
-        .cloned()
-        .unwrap_or(json!(null));
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     let daemon_status = daemon_health
         .as_ref()
@@ -119,6 +121,10 @@ pub(crate) async fn activity() -> Json<Value> {
     // --- 2. Recent cycle reports ---
     let state_root = resolve_state_root();
     let recent_cycles = read_recent_cycle_reports(&state_root, 10);
+
+    // Display the durable cycle number so the Overview header agrees with the
+    // Thinking tab and Recent Actions feed instead of the restart-scoped one (#1680).
+    let current_cycle = json!(resolve_display_cycle_number(&state_root, health_cycle));
 
     // --- 3. Open PRs & assigned issues (concurrent) ---
     let (open_prs, assigned_issues) = tokio::join!(

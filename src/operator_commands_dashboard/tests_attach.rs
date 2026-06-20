@@ -60,3 +60,20 @@ fn index_html_has_attach_button_class_or_label() {
         "INDEX_HTML must render Attach buttons (class=\"attach-btn\" + label \"Attach\")"
     );
 }
+
+#[test]
+fn index_html_workboard_working_memory_count_uses_working_count() {
+    // #1679: the Workboard "Working Memory" count must read the authoritative
+    // working_count statistic (the same value the Memory tab shows), not the
+    // length of the per-active-goal working_memory array, so the two panels
+    // can no longer disagree.
+    assert!(
+        INDEX_HTML.contains("d.cognitive_statistics.working_count"),
+        "INDEX_HTML must bind the Workboard working-memory count to \
+         cognitive_statistics.working_count (#1679)"
+    );
+    assert!(
+        INDEX_HTML.contains("wmCount+' slots'"),
+        "INDEX_HTML must render the working-memory count from wmCount (#1679)"
+    );
+}

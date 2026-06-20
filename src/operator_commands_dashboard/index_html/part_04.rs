@@ -170,16 +170,20 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             return'<tr><td style="white-space:nowrap;color:var(--accent);font-weight:600;font-size:.8rem">'+cat+'</td><td style="font-size:.85rem">'+content+'</td><td style="text-align:center;font-size:.8rem">'+conf+'</td><td>'+tags+'</td></tr>';
           }).join('')+'</table>';
         }else{document.getElementById('wb-facts-list').innerHTML='<span style="color:#8b949e">No recent facts in memory</span>';}
-        // Working memory (human-readable — #1683)
+        // Working memory (human-readable — #1683).
+        // Count comes from the authoritative working_count statistic — the same
+        // value the Memory tab shows — so the two panels can no longer disagree
+        // (#1679). The list below shows the slots tied to active goals as detail.
         const wm=d.working_memory||[];
-        document.getElementById('wb-wm-count').textContent=wm.length+' slots';
+        const wmCount=(d.cognitive_statistics&&d.cognitive_statistics.working_count!=null)?d.cognitive_statistics.working_count:wm.length;
+        document.getElementById('wb-wm-count').textContent=wmCount+' slots';
         if(wm.length){
           document.getElementById('wb-wm-list').innerHTML='<table class="proc-table"><tr><th>Type</th><th>Content</th><th>Related Goal</th><th>Relevance</th></tr>'
             +wm.map(s=>{
             const relColor=s.relevance>=0.8?'var(--green)':s.relevance>=0.5?'var(--yellow)':'#8b949e';
             return'<tr><td style="white-space:nowrap;color:var(--accent);font-weight:600;font-size:.8rem">'+esc(s.type_label||'Note')+'</td><td style="font-size:.85rem">'+esc((s.content||'').substring(0,200))+'</td><td style="font-size:.8rem;color:#8b949e">'+esc(s.goal||'—')+'</td><td style="text-align:center"><span style="color:'+relColor+';font-weight:600;font-size:.8rem">'+esc(s.relevance_label||'—')+'</span></td></tr>';
           }).join('')+'</table>';
-        }else{document.getElementById('wb-wm-list').innerHTML='<span style="color:#8b949e">No active working memory</span>';}
+        }else{document.getElementById('wb-wm-list').innerHTML=wmCount>0?'<span style="color:#8b949e">'+wmCount+' working slot'+(wmCount===1?'':'s')+' in memory — open the Memory tab for details</span>':'<span style="color:#8b949e">No active working memory</span>';}
         // Cognitive statistics
         const cs=d.cognitive_statistics;
         if(cs){

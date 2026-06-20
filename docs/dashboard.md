@@ -32,7 +32,7 @@ The dashboard is a single-page app with the following tabs:
 | **Memory** | Cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters; full-text memory search; a **Memory Overview** with the live **Memory Store** counts; and a **Memory Files** panel showing the goals snapshot plus any non-empty legacy snapshot files. See [Memory architecture](memory.md). |
 | **Costs** | Per-provider, per-model token spend across the active session. |
 | **Chat** | Direct chat with Simard. |
-| **Workboard** | Shared scratch canvas. (Renamed from "Whiteboard" — see [Tab identity contract](#tab-identity-contract).) |
+| **Workboard** | Kanban view of current goals plus live mental-state panels — Active Engineers, Working Memory, and the OODA cycle counter — read from the same sources as the Terminal, Memory, and Thinking tabs so the panels stay consistent. (Renamed from "Whiteboard" — see [Tab identity contract](#tab-identity-contract).) |
 | **Thinking** | Live thinking-cycle stream (planner output before action dispatch). |
 | **Terminal** | Browser-attached PTY into the daemon host. |
 
