@@ -75,7 +75,9 @@ pub(crate) async fn ws_chat_handler(ws: WebSocketUpgrade) -> response::Response 
 }
 
 pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
-    use crate::meeting_backend::{MeetingBackend, MeetingCommand, parse_command};
+    use crate::meeting_backend::{
+        MeetingBackend, MeetingCommand, parse_command, render_help_plain, unknown_command_notice,
+    };
 
     // Use the full agent session (SessionBuilder) for chat.
     // The lightweight piped-subprocess path is disabled — it spawns
@@ -183,10 +185,27 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                         break;
                     }
                     MeetingCommand::Help => {
-                        let help = "Commands: /status, /template [name], /export, /theme <text>, /decision <text>, /action <text>, /question <text>, /owner <name>, /recap, /preview, /state, /close, /help. Everything else is natural conversation with Simard.";
+                        let help = render_help_plain();
                         let _ = socket
                             .send(Message::Text(
                                 json!({"role":"system","content": help}).to_string().into(),
+                            ))
+                            .await;
+                    }
+                    MeetingCommand::Unknown { input, suggestion } => {
+                        // Mistyped command: surface a did-you-mean hint (or the
+                        // full grouped help) instead of forwarding to the LLM.
+                        // Issue #2321.
+                        let mut content = unknown_command_notice(&input, suggestion.as_deref());
+                        if suggestion.is_none() {
+                            content.push_str("\n\n");
+                            content.push_str(&render_help_plain());
+                        }
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({"role":"system","content": content})
+                                    .to_string()
+                                    .into(),
                             ))
                             .await;
                     }
@@ -578,6 +597,27 @@ mod tests {
     fn chat_recognizes_help_command() {
         use crate::meeting_backend::{MeetingCommand, parse_command};
         assert!(matches!(parse_command("/help"), MeetingCommand::Help));
+    }
+
+    #[test]
+    fn chat_routes_unknown_command_with_suggestion() {
+        use crate::meeting_backend::{MeetingCommand, parse_command};
+        match parse_command("/colse") {
+            MeetingCommand::Unknown { input, suggestion } => {
+                assert_eq!(input, "/colse");
+                assert_eq!(suggestion.as_deref(), Some("/close"));
+            }
+            other => panic!("expected Unknown, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_help_uses_grouped_reference() {
+        use crate::meeting_backend::render_help_plain;
+        let help = render_help_plain();
+        assert!(help.contains("Meeting control"));
+        assert!(help.contains("Capture"));
+        assert!(help.contains("Templates"));
     }
 
     #[test]
