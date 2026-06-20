@@ -571,6 +571,96 @@ mod tests {
         );
     }
 
+    /// Regression for #1681. The Memory tab's "Memory Files" panel used to
+    /// render four fixed tiles — including legacy JSON snapshot files
+    /// (`memory_records`, `evidence_records`, `handoff`) — unconditionally.
+    /// When those retired files were empty the panel showed
+    /// "Memory Records 0 records 0 B / Evidence Records 0 records 0 B /
+    /// Latest Handoff 0 B" right next to a populated native Memory Store,
+    /// telling the operator memory was empty when it was rich. The fix only
+    /// surfaces a legacy file when it actually has bytes, always shows the
+    /// goals snapshot, and uses plain-language labels.
+    #[test]
+    fn index_html_memory_files_hides_empty_legacy_tiles() {
+        // The old jargon label and the unconditional four-tile array are gone.
+        assert!(
+            !INDEX_HTML.contains("Goal Records (agent memory)"),
+            "the legacy 'Goal Records (agent memory)' tile label must be \
+             replaced with plain language"
+        );
+
+        // Legacy tiles are gated on real content so empty files never render.
+        // The guard must reference size_bytes and the record count.
+        assert!(
+            INDEX_HTML.contains("legacyWithData"),
+            "memory panel must filter legacy files to those with content"
+        );
+        assert!(
+            INDEX_HTML.contains("(info.size_bytes||0)<=0"),
+            "legacy file tiles must be gated on non-zero size_bytes so empty \
+             '0 B' files never render (#1681)"
+        );
+        assert!(
+            INDEX_HTML.contains("info.count<=0"),
+            "legacy JSON files that report a count must have at least one \
+             record to render, so an empty '[]' never shows '0 records' (#1681)"
+        );
+
+        // The single collapsed disclosure replaces the always-on tiles, using
+        // plain language (no 'LadybugDB' jargon — it is the 'Memory Store').
+        assert!(
+            INDEX_HTML.contains("Legacy snapshots (superseded by the Memory Store)"),
+            "legacy files must collapse into a single plain-language disclosure"
+        );
+        assert!(
+            !INDEX_HTML.contains("superseded by LadybugDB"),
+            "operator-facing labels must avoid the 'LadybugDB' jargon"
+        );
+    }
+
+    /// #1681: the goals snapshot tile is always shown (it is sourced from
+    /// cognitive memory, not a disk file) and links back to the Goals tab so
+    /// an operator can reach the full board in one click.
+    #[test]
+    fn index_html_memory_files_goals_snapshot_links_to_goals_tab() {
+        assert!(
+            INDEX_HTML.contains("Goals (snapshot)"),
+            "the goals snapshot tile must use the plain 'Goals (snapshot)' label"
+        );
+        let pos = INDEX_HTML
+            .find("Goals (snapshot)")
+            .expect("'Goals (snapshot)' tile must exist on the Memory tab");
+        let window_end = (pos + 400).min(INDEX_HTML.len());
+        let window = &INDEX_HTML[pos..window_end];
+        assert!(
+            window.contains("data-tab=goals"),
+            "the goals snapshot tile must link to the Goals tab — window: {window:?}"
+        );
+    }
+
+    /// #1681: "Last Memory Compaction" must not display the literal "Never"
+    /// when no timestamp source exists — consolidation has demonstrably run,
+    /// so "Never" is anti-information. The honest fallback is "Not tracked
+    /// yet", and the absolute-timestamp branch still routes through formatTime.
+    #[test]
+    fn index_html_last_consolidation_not_never() {
+        let pos = INDEX_HTML
+            .find("Last Memory Compaction")
+            .expect("'Last Memory Compaction' stat must exist on the Memory tab");
+        let window_end = (pos + 400).min(INDEX_HTML.len());
+        let window = &INDEX_HTML[pos..window_end];
+        assert!(
+            !window.contains("'Never'"),
+            "Last Memory Compaction must not fall back to the literal 'Never' \
+             — window: {window:?}"
+        );
+        assert!(
+            window.contains("Not tracked yet"),
+            "Last Memory Compaction must fall back to 'Not tracked yet' when \
+             the timestamp source is missing — window: {window:?}"
+        );
+    }
+
     /// The cluster topology panel (part_05.rs) refresh timestamp must
     /// render via `formatTime`. This was the third migrated call site.
     #[test]
