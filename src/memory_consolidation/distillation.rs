@@ -173,19 +173,24 @@ pub fn distill_recent_episodes_with_runner(
         }
     };
 
-    // Store every fact. Each fact's source_id encodes the originating
-    // episode for provenance (search_facts can be filtered/grepped on
-    // the `distill:` prefix to identify machine-distilled facts).
+    // Store every fact via the provenance write path. Each fact's textual
+    // `source_id` retains the `distill:{episode}` prefix for back-compat
+    // (search_facts can be filtered/grepped on it to identify machine-distilled
+    // facts), while the originating episode id is ALSO threaded through as
+    // `source_episode_ids` so a `DERIVES_FROM` edge links the fact back to the
+    // episode it was distilled from (issue #2325). The concept doubles as the
+    // fact's tag, matching the legacy `store_fact` call this replaced.
     let mut stored = 0u32;
     for fact in &facts {
-        let concepts = [fact.concept.clone()];
         let source = format!("distill:{}", fact.source_episode_id);
-        memory.store_fact(
+        memory.store_fact_with_provenance(
             &fact.concept,
             &fact.content,
             DISTILL_FACT_CONFIDENCE,
-            &concepts,
             &source,
+            Some(std::slice::from_ref(&fact.concept)),
+            None,
+            std::slice::from_ref(&fact.source_episode_id),
         )?;
         stored += 1;
     }

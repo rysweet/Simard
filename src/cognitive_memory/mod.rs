@@ -8,6 +8,8 @@
 //! ([`CognitiveMemoryBridge`](crate::memory_bridge::CognitiveMemoryBridge)) and
 //! the IPC client also implement the trait so callers stay backend-agnostic.
 
+use std::collections::HashMap;
+
 use crate::error::SimardResult;
 use crate::memory_cognitive::{
     CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
@@ -154,6 +156,76 @@ pub trait CognitiveMemoryOps: Send + Sync {
 
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics>;
 
+    /// Store a semantic fact and record where it was distilled from.
+    ///
+    /// Identical to [`store_fact`](Self::store_fact) but additionally links the
+    /// new fact to each id in `source_episode_ids` with a `DERIVES_FROM` edge,
+    /// turning the flat fact store into a connected provenance graph (issue
+    /// #2325). The resulting fact is recallable back to its episodes via
+    /// [`episodes_for_fact`](Self::episodes_for_fact).
+    ///
+    /// Note the **library** argument order — `source_id` BEFORE `tags`, with
+    /// `tags`/`metadata` as `Option`s — which differs from the legacy
+    /// [`store_fact`](Self::store_fact) (tags before source_id). The returned
+    /// id is the one to hand to [`episodes_for_fact`](Self::episodes_for_fact).
+    ///
+    /// Default impl drops the provenance (and metadata) and delegates to
+    /// [`store_fact`](Self::store_fact) so non-graph backends (legacy Python
+    /// bridge, IPC client, test stubs) keep compiling and still store the fact;
+    /// only [`LibraryCognitiveMemory`] records the edges. Mirrors the
+    /// `mark_episode_distilled` / `list_undistilled_episodes` extension pattern.
+    #[allow(clippy::too_many_arguments)]
+    fn store_fact_with_provenance(
+        &self,
+        concept: &str,
+        content: &str,
+        confidence: f64,
+        source_id: &str,
+        tags: Option<&[String]>,
+        _metadata: Option<&HashMap<String, serde_json::Value>>,
+        _source_episode_ids: &[String],
+    ) -> SimardResult<String> {
+        self.store_fact(concept, content, confidence, tags.unwrap_or(&[]), source_id)
+    }
+
+    /// Store a procedure and record which episodes it was distilled from.
+    ///
+    /// Identical to [`store_procedure`](Self::store_procedure) — including the
+    /// idempotent upsert-by-name that reinforces `usage_count` (#2298) — but
+    /// additionally links the procedure to each id in `source_episode_ids` with
+    /// a `PROCEDURE_DERIVES_FROM` edge (issue #2325).
+    ///
+    /// Default impl drops the provenance and delegates to
+    /// [`store_procedure`](Self::store_procedure); only
+    /// [`LibraryCognitiveMemory`] records the edges.
+    fn store_procedure_with_provenance(
+        &self,
+        name: &str,
+        steps: &[String],
+        prerequisites: &[String],
+        _source_episode_ids: &[String],
+    ) -> SimardResult<String> {
+        self.store_procedure(name, steps, prerequisites)
+    }
+
+    /// Return the ids of the episodes a fact was distilled from (its
+    /// `DERIVES_FROM` provenance edges), the read side of
+    /// [`store_fact_with_provenance`](Self::store_fact_with_provenance).
+    ///
+    /// `fact_id` is the id returned by
+    /// [`store_fact_with_provenance`](Self::store_fact_with_provenance) (or the
+    /// `node_id` of a [`CognitiveFact`](crate::memory_cognitive::CognitiveFact)
+    /// from [`search_facts`](Self::search_facts)). An unknown id, or a fact with
+    /// no recorded provenance, yields an empty vector rather than an error —
+    /// callers tolerate facts that predate provenance wiring.
+    ///
+    /// Default impl returns empty so backends without a provenance graph
+    /// (legacy Python bridge, IPC client, test stubs) keep compiling;
+    /// [`LibraryCognitiveMemory`] overrides it to traverse the graph.
+    fn episodes_for_fact(&self, _fact_id: &str) -> SimardResult<Vec<String>> {
+        Ok(vec![])
+    }
+
     /// Search recent episodes by content prefix.
     ///
     /// Returns `(content, recorded_at)` pairs for episodes whose
@@ -256,3 +328,13 @@ mod tests_pr_2298_idempotency;
 // Guards "0 raw episodes" (#2299) and "0 triggers" (#2300) regressions.
 #[cfg(test)]
 mod tests_pr_2299_2300_recall_triggers;
+
+// Issue #2325: fact/procedure provenance. Pins the round-trip contract
+// for `store_fact_with_provenance` / `store_procedure_with_provenance` /
+// `episodes_for_fact` against `LibraryCognitiveMemory` — a fact stored
+// with a source episode must be recallable back to that episode
+// (DERIVES_FROM edge), while base `store_fact`/`store_procedure`
+// behaviour (searchability, `FACT_SEQ_META_KEY` stamping, idempotent
+// procedure upsert) is preserved.
+#[cfg(test)]
+mod tests_provenance;

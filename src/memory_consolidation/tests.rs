@@ -1,8 +1,11 @@
 use super::*;
 use crate::bridge_subprocess::InMemoryBridgeTransport;
 use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_cognitive::{CognitiveStatistics, CognitiveWorkingSlot};
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
@@ -96,6 +99,151 @@ fn reflection_deduplicates_facts_by_concept() {
     reflection_memory_operations("transcript...", &facts, &test_session_id(), &bridge).unwrap();
     // 1 store_episode + 1*(search_facts + store_fact) (second duplicate skipped) = 3
     assert_eq!(count.load(Ordering::SeqCst), 3);
+}
+
+/// Recording mock for the reflection-provenance contract (issue #2325).
+///
+/// Captures the episode id returned by `store_episode` and every
+/// `store_fact` / `store_fact_with_provenance` call so the test can assert
+/// that reflection threads the transcript episode id into the provenance
+/// write (creating a DERIVES_FROM edge), rather than using the legacy
+/// no-provenance `store_fact`.
+#[derive(Default)]
+struct ReflectionProvenanceMock {
+    episode_ids: Mutex<Vec<String>>,
+    /// concepts stored via the legacy `store_fact` (must stay empty for
+    /// reflection-derived facts once wiring lands).
+    base_fact_concepts: Mutex<Vec<String>>,
+    /// `(concept, source_episode_ids)` for each provenance write.
+    prov_fact_calls: Mutex<Vec<(String, Vec<String>)>>,
+}
+
+impl CognitiveMemoryOps for ReflectionProvenanceMock {
+    fn record_sensory(&self, _m: &str, _r: &str, _t: u64) -> SimardResult<String> {
+        Ok("sen_x".to_string())
+    }
+    fn prune_expired_sensory(&self) -> SimardResult<usize> {
+        Ok(0)
+    }
+    fn push_working(&self, _s: &str, _c: &str, _t: &str, _r: f64) -> SimardResult<String> {
+        Ok("wrk_x".to_string())
+    }
+    fn get_working(&self, _t: &str) -> SimardResult<Vec<CognitiveWorkingSlot>> {
+        Ok(vec![])
+    }
+    fn clear_working(&self, _t: &str) -> SimardResult<usize> {
+        Ok(0)
+    }
+    fn store_episode(
+        &self,
+        _c: &str,
+        _s: &str,
+        _m: Option<&serde_json::Value>,
+    ) -> SimardResult<String> {
+        let id = "epi_reflect_1".to_string();
+        self.episode_ids.lock().unwrap().push(id.clone());
+        Ok(id)
+    }
+    fn consolidate_episodes(&self, _b: u32) -> SimardResult<Option<String>> {
+        Ok(None)
+    }
+    fn store_fact(
+        &self,
+        concept: &str,
+        _content: &str,
+        _confidence: f64,
+        _tags: &[String],
+        _source_id: &str,
+    ) -> SimardResult<String> {
+        self.base_fact_concepts
+            .lock()
+            .unwrap()
+            .push(concept.to_string());
+        Ok("sem_base".to_string())
+    }
+    fn search_facts(&self, _q: &str, _l: u32, _c: f64) -> SimardResult<Vec<CognitiveFact>> {
+        Ok(vec![])
+    }
+    fn store_procedure(&self, _n: &str, _s: &[String], _p: &[String]) -> SimardResult<String> {
+        Ok("prc_x".to_string())
+    }
+    fn recall_procedure(&self, _q: &str, _l: u32) -> SimardResult<Vec<CognitiveProcedure>> {
+        Ok(vec![])
+    }
+    fn store_prospective(&self, _d: &str, _t: &str, _a: &str, _p: i64) -> SimardResult<String> {
+        Ok("pro_x".to_string())
+    }
+    fn check_triggers(&self, _c: &str) -> SimardResult<Vec<CognitiveProspective>> {
+        Ok(vec![])
+    }
+    fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
+        Ok(CognitiveStatistics::default())
+    }
+
+    // === Issue #2325 provenance override (library argument order) ===
+    fn store_fact_with_provenance(
+        &self,
+        concept: &str,
+        _content: &str,
+        _confidence: f64,
+        _source_id: &str,
+        _tags: Option<&[String]>,
+        _metadata: Option<&HashMap<String, serde_json::Value>>,
+        source_episode_ids: &[String],
+    ) -> SimardResult<String> {
+        self.prov_fact_calls
+            .lock()
+            .unwrap()
+            .push((concept.to_string(), source_episode_ids.to_vec()));
+        Ok("sem_prov".to_string())
+    }
+}
+
+/// Reflection provenance threading (issue #2325, RED): the transcript is
+/// stored as an episode, and each derived fact MUST be stored via
+/// `store_fact_with_provenance` with that episode's id as
+/// `source_episode_ids` — so distilled facts link back to the transcript
+/// they came from (DERIVES_FROM edge). Derived facts must NOT go through
+/// the legacy no-provenance `store_fact`.
+///
+/// Pre-wiring this FAILS: reflection calls `store_fact`, so
+/// `prov_fact_calls` is empty and `base_fact_concepts` is non-empty.
+#[test]
+fn reflection_threads_episode_id_as_fact_provenance() {
+    let mock = ReflectionProvenanceMock::default();
+    let facts = vec![FactExtraction {
+        concept: "rust".to_string(),
+        content: "Rust is safe".to_string(),
+        confidence: 0.9,
+    }];
+
+    reflection_memory_operations("transcript...", &facts, &test_session_id(), &mock).unwrap();
+
+    assert_eq!(
+        *mock.episode_ids.lock().unwrap(),
+        vec!["epi_reflect_1".to_string()],
+        "the transcript must be stored exactly once as an episode"
+    );
+
+    let prov = mock.prov_fact_calls.lock().unwrap().clone();
+    assert_eq!(
+        prov.len(),
+        1,
+        "the derived fact must be stored via store_fact_with_provenance; got {prov:?}"
+    );
+    assert_eq!(prov[0].0, "rust", "concept must be preserved");
+    assert_eq!(
+        prov[0].1,
+        vec!["epi_reflect_1".to_string()],
+        "reflection must thread the store_episode id as the fact's source_episode_ids"
+    );
+
+    assert!(
+        mock.base_fact_concepts.lock().unwrap().is_empty(),
+        "reflection-derived facts must NOT use the legacy no-provenance store_fact; \
+         base calls: {:?}",
+        mock.base_fact_concepts.lock().unwrap()
+    );
 }
 
 #[test]

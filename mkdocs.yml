@@ -82,6 +82,7 @@ nav:
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Memory introspection CLI: reference/simard-memory-cli.md
+    - Cognitive-memory provenance (DERIVES_FROM): reference/cognitive-memory-provenance.md
     - Goal-board prospective reconcile: reference/goal-board-prospective-reconcile.md
     - Runtime Contracts: reference/runtime-contracts.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
