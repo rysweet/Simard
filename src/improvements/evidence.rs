@@ -403,10 +403,14 @@ fn escape_segment(value: &str) -> String {
     out
 }
 
-/// Reverse [`escape_segment`]. Only the exact uppercase tokens this module
-/// emits are decoded; any other `%` sequence (e.g. a literal "50%" in a legacy,
-/// unescaped agent-authored evidence string) is preserved verbatim so legacy
-/// input is never corrupted.
+/// Reverse [`escape_segment`]. The four exact uppercase tokens this module
+/// emits (`%25 %2F %3A %40`) are reserved and always decoded; any other `%`
+/// sequence (e.g. a literal "50%") is preserved verbatim. As a result a string
+/// produced by [`escape_segment`] always decodes back exactly, and legacy
+/// agent-authored prose — which does not contain those exact uppercase tokens —
+/// is preserved unchanged. (A legacy *structured* string that happens to embed
+/// one of the reserved tokens in a field is decoded; this is the deliberate
+/// cost of a reversible scheme and is exercised by the tests below.)
 fn unescape_segment(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
@@ -693,42 +697,43 @@ mod tests {
         // Each field embeds the structural delimiters (`/ : @`), the escape
         // char (`%`), and the literal markers (`@session= @ms= @target=`); a
         // regression in escaping would silently corrupt or downgrade-to-Raw.
-        let nasty = "a/b:c@d%e@session=x@ms=9@target=z";
+        // Distinct per-field sentinels also catch any field-position swap.
+        let f = |tag: &str| format!("{tag}/a:b@c%d@session=e@ms=9@target=g");
         let cases = vec![
             EvidenceRef::Review {
-                review_id: nasty.to_string(),
-                target_label: Some(nasty.to_string()),
+                review_id: f("rev-id"),
+                target_label: Some(f("rev-target")),
             },
             EvidenceRef::BenchmarkScenario {
-                suite_id: nasty.to_string(),
-                scenario_id: nasty.to_string(),
-                session_id: Some(nasty.to_string()),
+                suite_id: f("bs-suite"),
+                scenario_id: f("bs-scenario"),
+                session_id: Some(f("bs-session")),
             },
             EvidenceRef::BenchmarkRunReport {
-                suite_id: nasty.to_string(),
-                scenario_id: nasty.to_string(),
-                session_id: nasty.to_string(),
+                suite_id: f("brr-suite"),
+                scenario_id: f("brr-scenario"),
+                session_id: f("brr-session"),
                 run_started_at_unix_ms: 1,
             },
             EvidenceRef::ScoreRecord {
-                suite_id: nasty.to_string(),
-                scenario_id: nasty.to_string(),
+                suite_id: f("sr-suite"),
+                scenario_id: f("sr-scenario"),
                 timestamp_unix_s: -5,
             },
             EvidenceRef::WeakDimension {
-                dimension: nasty.to_string(),
+                dimension: f("wd-dim"),
                 deficit: 0.25,
             },
             EvidenceRef::BenchmarkCheckFailure {
-                suite_id: nasty.to_string(),
-                scenario_id: nasty.to_string(),
-                check_id: nasty.to_string(),
-                detail: nasty.to_string(),
+                suite_id: f("cf-suite"),
+                scenario_id: f("cf-scenario"),
+                check_id: f("cf-check"),
+                detail: f("cf-detail"),
             },
             EvidenceRef::SessionFailure {
-                session_id: nasty.to_string(),
-                signal_id: nasty.to_string(),
-                detail: Some(nasty.to_string()),
+                session_id: f("sf-session"),
+                signal_id: f("sf-signal"),
+                detail: Some(f("sf-detail")),
             },
         ];
         for ev in cases {
@@ -814,15 +819,36 @@ mod tests {
     }
 
     #[test]
-    fn legacy_unescaped_percent_text_is_preserved_in_raw() {
-        // Legacy free-form evidence containing a bare `%` (not one of our
-        // tokens) must survive untouched through Raw.
-        let ev = EvidenceRef::parse_str("CPU spiked to 50% during run");
+    fn legacy_non_token_percent_text_is_preserved() {
+        // A bare `%` that is not one of our four uppercase tokens is preserved
+        // verbatim — both when the string falls through to Raw and when it sits
+        // in a structured field.
         assert_eq!(
-            ev,
+            EvidenceRef::parse_str("CPU spiked to 50% during run"),
             EvidenceRef::Raw {
                 label: "CPU spiked to 50% during run".to_string(),
             }
         );
+        match EvidenceRef::parse_str("check-failure:a/b/c:saw 50% drop") {
+            EvidenceRef::BenchmarkCheckFailure { detail, .. } => {
+                assert_eq!(detail, "saw 50% drop");
+            }
+            other => panic!("expected check failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_structured_string_with_reserved_token_is_decoded() {
+        // Pin the documented tradeoff: a legacy structured string whose field
+        // happens to contain one of the four reserved uppercase tokens is
+        // decoded (this is exactly what makes to_persisted_string -> parse_str a
+        // true inverse). Realistic legacy evidence is agent-authored prose that
+        // does not contain exact uppercase percent-tokens, so impact is nil.
+        match EvidenceRef::parse_str("check-failure:gym/echo/c:GET /a%2Fb returned 404") {
+            EvidenceRef::BenchmarkCheckFailure { detail, .. } => {
+                assert_eq!(detail, "GET /a/b returned 404");
+            }
+            other => panic!("expected check failure, got {other:?}"),
+        }
     }
 }
