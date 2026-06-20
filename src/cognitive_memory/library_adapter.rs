@@ -479,6 +479,15 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // / consolidation depend on. Fold it into the caller's metadata rather
         // than replacing it, so caller-supplied keys survive. The fetch is done
         // under the write lock so sequence order matches store order.
+        //
+        // Deliberately the non-strict library variant (over the available
+        // `store_fact_with_provenance_strict`): storing the fact is the primary
+        // operation and must never fail just because a `DERIVES_FROM` edge can't
+        // be drawn — provenance is additive. A `source_episode_id` that doesn't
+        // resolve skips only that edge (the library logs a `warn!`), so we keep
+        // the fact rather than losing it. Both call sites supply an episode that
+        // is expected to exist (reflection: just stored; distillation: the
+        // source episode the fact was distilled from).
         let mut guard = self.lock_write("store_fact_with_provenance")?;
         let seq = self.fact_seq.fetch_add(1, Ordering::Relaxed);
         let mut merged: HashMap<String, serde_json::Value> = metadata.cloned().unwrap_or_default();
@@ -553,7 +562,9 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // `store_procedure` (#2298, enforced by `store_procedure_reinforcing`),
         // plus `PROCEDURE_DERIVES_FROM` edges to `source_episode_ids` (#2325) —
         // which the library attaches to the single canonical node, so
-        // re-storing the same name does not fork it.
+        // re-storing the same name does not fork it. Non-strict variant for the
+        // same reason as `store_fact_with_provenance`: a missing source episode
+        // skips only that edge (logged), it never fails the procedure write.
         self.store_procedure_reinforcing("store_procedure_with_provenance", name, |m| {
             m.store_procedure_with_provenance(name, steps, Some(prerequisites), source_episode_ids)
         })
