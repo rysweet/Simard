@@ -14,8 +14,16 @@
 #       { "concept": "pr-pattern" | "bug-pattern" | "lesson-learned",
 #         "content": "<short, declarative summary>",
 #         "source_episode_id": "<id of the episode this fact derives from>" }
+#     ],
+#     "procedures": [
+#       { "name": "<short procedure name>",
+#         "steps": ["<step 1>", "<step 2>", ...],
+#         "source_episode_ids": ["<id>", "<id>", ...] }
 #     ]
 #   }
+#
+# `procedures` is optional (issue #2327): emit it only when the batch reveals
+# a RECURRING action sequence worth promoting into a reusable procedure.
 #
 # See docs/architecture/episode-distillation.md for the full contract,
 # concept-label semantics, and retry-safety invariants.
@@ -79,6 +87,24 @@ steps:
       that you saw them via a separate mechanism, so dropping low-value
       episodes is the correct call.
 
+      ### Procedures (optional)
+
+      If — and only if — the batch reveals a **recurring action
+      sequence** (the same multi-step workflow appearing across two or
+      more episodes), ALSO emit a `procedure` capturing it as a reusable
+      playbook:
+
+      - `name` — a short, stable handle (e.g. `ci-fix:auto`,
+        `pr:merge-flow`). Reuse the same name across batches for the same
+        workflow so the store reinforces rather than duplicates it.
+      - `steps` — the ordered steps of the workflow, each a short
+        imperative sentence.
+      - `source_episode_ids` — the `id`s of the episodes the procedure
+        was distilled from (≥ 1).
+
+      Do NOT invent procedures for one-off events. A batch with no
+      recurring workflow emits an empty `procedures` array.
+
       ## Output
 
       Return **only** the following JSON object — no surrounding prose,
@@ -92,11 +118,19 @@ steps:
             "content": "<short declarative sentence>",
             "source_episode_id": "<id from input>"
           }
+        ],
+        "procedures": [
+          {
+            "name": "<short procedure name>",
+            "steps": ["<step 1>", "<step 2>"],
+            "source_episode_ids": ["<id from input>"]
+          }
         ]
       }
       ```
 
-      If nothing in the batch is worth keeping, emit `{"facts": []}`.
+      If nothing in the batch is worth keeping, emit
+      `{"facts": [], "procedures": []}`.
 
       Do not invent new concept labels. Do not invent episode ids. Do
       not include the literal string `skip` in the `concept` field —

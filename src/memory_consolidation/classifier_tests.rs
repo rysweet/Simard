@@ -41,7 +41,7 @@
 //!   it also matches a drop marker (A7).
 
 use crate::memory_consolidation::classifier::{
-    EpisodeMetadata, EventKind, IntakeContext, IntakeDecision, classify,
+    EpisodeMetadata, EventKind, IntakeContext, classify,
 };
 
 // ───────────────────────────────────────────────────────────────────────────

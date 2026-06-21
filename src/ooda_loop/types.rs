@@ -63,6 +63,12 @@ pub struct OodaState {
     /// outcome is validated, or via `EngineerWorktree::Drop` if the entry is
     /// removed before explicit `cleanup()` runs.
     pub engineer_worktrees: HashMap<String, EngineerWorktree>,
+    /// Cycle number at which the automatic distillation scheduler last ran a
+    /// pass. The scheduler's interval trigger fires when
+    /// `cycle_count - last_distill_cycle >= distill_interval_cycles`. Not
+    /// persisted across restarts (resets to 0); worst case is an extra
+    /// distillation pass shortly after boot. Issue #2327, R4.
+    pub last_distill_cycle: u32,
 }
 
 impl OodaState {
@@ -79,6 +85,7 @@ impl OodaState {
             last_cycle_duration_secs: None,
             goal_failure_counts: HashMap::new(),
             engineer_worktrees: HashMap::new(),
+            last_distill_cycle: 0,
         }
     }
 
@@ -228,10 +235,28 @@ pub struct OodaConfig {
     pub daily_budget_usd: f64,
     /// Weekly budget in USD (from SIMARD_WEEKLY_BUDGET_USD env or dashboard).
     pub weekly_budget_usd: f64,
+    /// Automatic distillation scheduler: fire when the undistilled-episode
+    /// count reaches this value (`SIMARD_DISTILL_MIN_EPISODES`, default 25).
+    /// Issue #2327, R4.
+    #[serde(default = "default_distill_min_episodes")]
+    pub distill_min_episodes: u32,
+    /// Automatic distillation scheduler: fire when this many OODA cycles have
+    /// elapsed since the last pass (`SIMARD_DISTILL_INTERVAL_CYCLES`, default
+    /// 50). Issue #2327, R4.
+    #[serde(default = "default_distill_interval_cycles")]
+    pub distill_interval_cycles: u32,
     /// AIMD adaptive scaler. Populated when `SIMARD_SCALING=auto`.
     /// Skipped during (de)serialization — reconstructed from env on boot.
     #[serde(skip)]
     pub scaler: Option<std::sync::Arc<super::adaptive_scaling::AdaptiveScaler>>,
+}
+
+fn default_distill_min_episodes() -> u32 {
+    crate::memory_consolidation::scheduler::DistillSchedule::DEFAULT_MIN_EPISODES
+}
+
+fn default_distill_interval_cycles() -> u32 {
+    crate::memory_consolidation::scheduler::DistillSchedule::DEFAULT_INTERVAL_CYCLES
 }
 
 impl Default for OodaConfig {
@@ -256,6 +281,14 @@ impl Default for OodaConfig {
             gym_suite_id: "progressive".to_string(),
             daily_budget_usd: env_f64("SIMARD_DAILY_BUDGET_USD", 500.0),
             weekly_budget_usd: env_f64("SIMARD_WEEKLY_BUDGET_USD", 2500.0),
+            distill_min_episodes: env_u32(
+                "SIMARD_DISTILL_MIN_EPISODES",
+                default_distill_min_episodes(),
+            ),
+            distill_interval_cycles: env_u32(
+                "SIMARD_DISTILL_INTERVAL_CYCLES",
+                default_distill_interval_cycles(),
+            ),
             scaler,
         }
     }

@@ -1,6 +1,6 @@
 ---
 title: Automatic distillation scheduler API
-description: Rust API reference for Simard's automatic promotion scheduler that runs episode-to-fact/procedure distillation at the end of every OODA cycle — the maybe_run_promotion entry point, the should_distill pure predicate, the distill_min_episodes / distill_interval_cycles OodaConfig fields, the OodaState.last_distill_cycle field, and the distillation procedures extension (DistilledProcedure, DistillOutput, DistillRecipeRunner::run_full, DistillReport.procedure_count, the additive recipe schema, and store_procedure_with_provenance wiring).
+description: Rust API reference for Simard's automatic promotion scheduler that runs episode-to-fact/procedure distillation at the end of every OODA cycle — the run_scheduled_distillation entry point, the distill_trigger pure predicate and DistillSchedule, the distill_min_episodes / distill_interval_cycles OodaConfig fields, the OodaState.last_distill_cycle field, and the distillation procedures extension (DistilledProcedure, DistillOutput, DistillRecipeRunner::run_all, DistillReport.procedure_count, the additive recipe schema, and store_procedure_with_provenance wiring).
 last_updated: 2026-06-20
 owner: simard
 doc_type: reference
@@ -16,7 +16,8 @@ related:
 # Automatic distillation scheduler API
 
 > Shipped in issue [#2327](https://github.com/rysweet/Simard/issues/2327).
-> Scheduler: `src/ooda_loop/cycle.rs`; config: `src/ooda_loop/types.rs`;
+> Scheduler: `src/memory_consolidation/scheduler.rs`; end-of-cycle wiring:
+> `src/ooda_loop/cycle.rs`; config: `src/ooda_loop/types.rs`;
 > distillation extension: `src/memory_consolidation/distillation.rs`;
 > recipe: `prompt_assets/simard/recipes/distill-episodes.yaml`.
 
@@ -29,60 +30,117 @@ contract; for rationale see
 
 ---
 
-## Trigger predicate
+## Schedule + trigger
 
-### `should_distill`
+### `DistillSchedule`
+
+The scheduler's configuration, built each cycle from [`OodaConfig`](#configuration):
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DistillSchedule {
+    pub min_episodes: u32,    // undistilled-count threshold
+    pub interval_cycles: u32, // cycle-count interval
+}
+
+impl DistillSchedule {
+    pub const DEFAULT_MIN_EPISODES: u32 = 25;
+    pub const DEFAULT_INTERVAL_CYCLES: u32 = 50;
+}
+// `Default` yields { 25, 50 }.
+```
+
+### `distill_trigger`
 
 The pure, deterministic core — extracted so the trigger can be tested
 without standing up a full cycle:
 
 ```rust
-pub fn should_distill(backlog: u32, cycles_since: u32, config: &OodaConfig) -> bool {
-    backlog >= config.distill_min_episodes
-        || cycles_since >= config.distill_interval_cycles
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DistillTrigger { Threshold, Interval, None }
+
+pub fn distill_trigger(
+    undistilled_count: u32,
+    cycles_since_last: u32,
+    schedule: &DistillSchedule,
+) -> DistillTrigger {
+    if undistilled_count >= schedule.min_episodes {
+        DistillTrigger::Threshold
+    } else if cycles_since_last >= schedule.interval_cycles {
+        DistillTrigger::Interval
+    } else {
+        DistillTrigger::None
+    }
 }
 ```
 
-- **Backlog trigger** — promote eagerly once enough episodes accumulate.
+- **Threshold trigger** — promote eagerly once enough episodes accumulate
+  (takes precedence over the interval).
 - **Interval trigger** — guarantee forward progress on quiet runs. It is a
   **cycle-count** delta (`cycle_count − last_distill_cycle`), not
   wall-clock, so it is deterministic in tests.
 
-### `maybe_run_promotion`
+### `run_scheduled_distillation_with_runner`
 
-The cycle-boundary IO wrapper, invoked from `run_ooda_cycle` immediately
-after `state.cycle_count += 1`:
+The testable IO seam: evaluates the trigger against the (capped) undistilled
+count and runs the pass with an injected runner.
 
 ```rust
-fn maybe_run_promotion(
-    bridges: &OodaBridges,   // provides &dyn CognitiveMemoryOps + repo_root
-    config: &OodaConfig,
-    state: &mut OodaState,   // reads/updates last_distill_cycle
-) -> SimardResult<DistillReport>;
+pub fn run_scheduled_distillation_with_runner(
+    memory: &dyn CognitiveMemoryOps,
+    runner: &dyn DistillRecipeRunner,
+    schedule: &DistillSchedule,
+    cycles_since_last: u32,
+) -> SimardResult<Option<DistillReport>>;
 ```
 
 **Algorithm:**
 
-1. `let threshold = config.distill_min_episodes;`
-2. `let backlog = bridges.memory.list_undistilled_episodes(threshold).len() as u32;`
-   — the limit is capped at `threshold` so counting never forces a
+1. `let count = memory.list_undistilled_episodes(schedule.min_episodes).len() as u32;`
+   — the limit is capped at `min_episodes` so counting never forces a
    full-table scan; we only need to know whether the count *reaches* the
    threshold.
-3. `let cycles_since = state.cycle_count.saturating_sub(state.last_distill_cycle);`
-4. If `!should_distill(backlog, cycles_since, config)` → return
-   `Ok(DistillReport::skipped())`, no runner call.
-5. Otherwise run `distill_recent_episodes(&*bridges.memory, repo_root)`,
-   set `state.last_distill_cycle = state.cycle_count`, and log:
+2. `match distill_trigger(count, cycles_since_last, schedule)`:
+   - `None` → return `Ok(None)`; the runner is never invoked, no
+     facts/procedures stored, no episodes marked.
+   - `Threshold` / `Interval` → run
+     `distill_recent_episodes_with_runner(memory, runner)` and return
+     `Ok(Some(report))`.
 
-   ```
-   [simard] promotion: backlog=27 threshold=25 cycles_since=8 → 27 episodes, 4 facts, 1 procedure, 27 marked
-   ```
+### `run_scheduled_distillation` (production)
 
-6. **Best-effort.** A distillation `Err` is logged (`eprintln!`) and
-   **swallowed at the cycle boundary** — promotion must never abort the
-   OODA cycle (mirrors the existing consolidation error handling). The
-   retry-safety invariant inside distillation (no markers set on recipe
-   error) guarantees the batch is retried on the next interval.
+The production wrapper used by the cycle. Checks the trigger BEFORE
+constructing the (potentially expensive) `recipe-runner-rs` subprocess
+runner, and returns `Ok(None)` both when no trigger fires AND when the runner
+cannot be constructed (recipe-runner-rs absent, recipe file missing, no agent
+binary) — promotion must never block the OODA cycle.
+
+```rust
+pub fn run_scheduled_distillation(
+    memory: &dyn CognitiveMemoryOps,
+    repo_root: &Path,
+    schedule: &DistillSchedule,
+    cycles_since_last: u32,
+) -> SimardResult<Option<DistillReport>>;
+```
+
+### End-of-cycle wiring
+
+`run_ooda_cycle_inner` (`src/ooda_loop/cycle.rs`), immediately after
+`state.cycle_count += 1`, builds a `DistillSchedule` from `config`, computes
+`cycles_since_last = cycle_count − last_distill_cycle`, and calls
+`run_scheduled_distillation`. On `Ok(Some(report))` it sets
+`state.last_distill_cycle = state.cycle_count` and logs:
+
+```
+[simard] OODA distill scheduler: 27 episodes → 4 facts, 1 procedures, 27 marked
+```
+
+A distillation `Err` is logged (`eprintln!`) and **swallowed at the cycle
+boundary** — promotion must never abort the OODA cycle (mirrors the existing
+consolidation error handling). The retry-safety invariant inside distillation
+(no markers set on recipe error) guarantees the batch is retried on the next
+trigger.
 
 ### Relationship to `ConsolidateMemory`
 
@@ -132,10 +190,11 @@ pub struct OodaState {
 }
 ```
 
-Added to both `OodaState` and `OodaStateSnapshot` (with the two
-`From` / `apply_to` mappings) so the interval survives recipe-step
-round-trips. The scheduler reuses the existing `cycle_count`; there is no
-wall-clock dependency.
+Added to `OodaState` (it reuses the existing `cycle_count`; there is no
+wall-clock dependency). It is intentionally **not** part of
+`OodaStateSnapshot` — the interval resets to 0 across recipe-step round-trips
+and daemon restarts, whose only effect is at most one extra distillation pass
+shortly after boot.
 
 ---
 
@@ -156,7 +215,7 @@ pub struct DistilledProcedure {
 }
 
 /// Full distillation output. `run` keeps returning facts only;
-/// `run_full` is the superset entry the production path uses.
+/// `run_all` is the superset entry the production path uses.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DistillOutput {
     pub facts: Vec<DistilledFact>,
@@ -167,7 +226,7 @@ pub struct DistillOutput {
 ### Trait evolution — backward compatible
 
 `DistillRecipeRunner::run` is unchanged, so existing stubs compile
-untouched. A **defaulted** `run_full` is added:
+untouched. A **defaulted** `run_all` is added:
 
 ```rust
 pub trait DistillRecipeRunner {
@@ -175,13 +234,13 @@ pub trait DistillRecipeRunner {
 
     /// Default delegates to `run` and yields zero procedures, so every
     /// existing fact-only stub keeps working without edits.
-    fn run_full(&self, episodes: &[CognitiveEpisode]) -> SimardResult<DistillOutput> {
+    fn run_all(&self, episodes: &[CognitiveEpisode]) -> SimardResult<DistillOutput> {
         Ok(DistillOutput { facts: self.run(episodes)?, procedures: Vec::new() })
     }
 }
 ```
 
-`distill_recent_episodes_with_runner` calls `runner.run_full(&episodes)`.
+`distill_recent_episodes_with_runner` calls `runner.run_all(&episodes)`.
 After the existing fact-store loop it stores procedures with provenance:
 
 ```rust
@@ -259,16 +318,17 @@ existing fact-only stub runner) continues to work unchanged.
 ```
 cycle_count = 8, last_distill_cycle = 0
 distill_min_episodes = 25, distill_interval_cycles = 50
+schedule = DistillSchedule { min_episodes: 25, interval_cycles: 50 }
 
-backlog       = list_undistilled_episodes(25).len() = 27
+count         = list_undistilled_episodes(25).len() = 25 (capped)
 cycles_since  = 8
 
-should_distill(27, 8, config) = (27 >= 25) || (8 >= 50) = true
+distill_trigger(25, 8, &schedule) = Threshold   // 25 >= 25
   → distill_recent_episodes runs
   → 4 facts + 1 procedure stored with provenance, 27 episodes marked
   → last_distill_cycle = 8
 
-[simard] promotion: backlog=27 threshold=25 cycles_since=8 → 27 episodes, 4 facts, 1 procedure, 27 marked
+[simard] OODA distill scheduler: 27 episodes → 4 facts, 1 procedures, 27 marked
 ```
 
 ### Interval trigger fires on a quiet run
@@ -276,25 +336,26 @@ should_distill(27, 8, config) = (27 >= 25) || (8 >= 50) = true
 ```
 cycle_count = 60, last_distill_cycle = 5
 distill_min_episodes = 25, distill_interval_cycles = 50
+schedule = DistillSchedule { min_episodes: 25, interval_cycles: 50 }
 
-backlog       = 6      (below threshold)
+count         = 6      (below threshold)
 cycles_since  = 55
 
-should_distill(6, 55, config) = (6 >= 25) || (55 >= 50) = true
+distill_trigger(6, 55, &schedule) = Interval   // 55 >= 50
   → fires anyway; the trickle of 6 episodes is promoted
 ```
 
 ### Below both thresholds — skip
 
 ```
-backlog = 6, cycles_since = 10
-should_distill(6, 10, config) = false
-  → no runner call; DistillReport::skipped() returned
+count = 6, cycles_since = 10
+distill_trigger(6, 10, &schedule) = None
+  → no runner call; run_scheduled_distillation returns Ok(None)
 ```
 
 ### A distilled procedure with provenance
 
-A runner whose `run_full` yields:
+A runner whose `run_all` yields:
 
 ```rust
 DistillOutput {

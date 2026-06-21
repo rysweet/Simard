@@ -91,19 +91,22 @@ first match:
 
 1. **Failure override (highest priority).** If the content contains any
    of `error`, `failed`, `failure`, `panic`, `exception` (case-insensitive),
-   **or** the caller hints `ActionFailure` / `RecipeFailure`, the episode
-   is **stored** at `importance = 0.9` — even if it also looks like noise.
-   A failed "session complete" is still a failure worth keeping.
+   the episode is **stored** at `importance = 0.9` — even if it also looks
+   like noise. A failed "session complete" is still a failure worth
+   keeping. The kind is `RecipeFailure` when the content/source mentions a
+   recipe, `ActionFailure` otherwise.
 2. **Known-noise markers → Drop.** A small allowlist of substrings —
    `started with objective`, `completed and persisted`, `flushing working
-   memory`, `continue_skipping`, `no decision keyword`, and `hydrated …
-   prior-session facts` — is dropped.
-3. **Meaningful hint → Store.** A caller hint of `Handoff`,
-   `GoalArchival`, `GoalPromotion`, `UserDecision`, or `ActionCompleted`
-   stores the episode with the importance from the table below.
-4. **Default → DownScope.** Anything unrecognised is **stored
-   down-scoped**, never dropped. We never silently lose a novel event; we
-   only de-prioritise it.
+   memory`, `continue_skipping`, `no decision keyword` — is dropped.
+3. **Meaningful content → Store.** Content/source matching a durable
+   episodic event — user decisions, goal-board promotions/archival,
+   handoffs, durable completions (opened/merged PR), or any
+   `goal-curator` board summary — stores the episode with the importance
+   from the table below.
+4. **Default → DownScope.** Anything unrecognised — including the
+   cross-session hydration bookkeeping (`Hydrated N prior-session facts …`)
+   — is **stored down-scoped**, never dropped. We never silently lose a
+   novel event; we only de-prioritise it.
 
 The "default is down-scope, not drop" rule is the safety valve: `Drop` is
 restricted to the explicit known-noise allowlist, so an unforeseen event
@@ -146,7 +149,7 @@ wired through `store_episode_classified`:
 | Session intake | `Session … started with objective …` | **Drop** (unless failure override) |
 | Session reflection | concatenated cycle transcript | **Sanitize** (see below) |
 | Session persistence | `Session … completed and persisted` | **Drop** |
-| Hydration | `Hydrated N prior-session facts …` | **Drop** |
+| Hydration | `Hydrated N prior-session facts …` | **DownScope** (operational) |
 | Working-memory flush (per slot) | slot content | **Classify per content** |
 | Working-memory flush marker | `Session … flushing working memory …` | **Drop** |
 | Goal-curator persistence | active-goal board summary | **Store** (`goal_archival` when goals were force-removed) |
@@ -199,7 +202,8 @@ still works exactly as before; the scheduler is **additive**.
 run_ooda_cycle:
    … observe → orient → decide → act …
    state.cycle_count += 1
-   └─▶ maybe_run_promotion(bridges, config, state)   ◀── NEW end-of-cycle hook
+   └─▶ scheduler::run_scheduled_distillation(   ◀── NEW end-of-cycle hook
+          &*bridges.memory, &bridges.repo_root, &schedule, cycles_since_last)
 ```
 
 ### Trigger predicate
@@ -234,8 +238,8 @@ Two `OodaConfig` fields drive the scheduler, both env-overridable:
 | `distill_min_episodes` | `SIMARD_DISTILL_MIN_EPISODES` | 25 |
 | `distill_interval_cycles` | `SIMARD_DISTILL_INTERVAL_CYCLES` | 50 |
 
-`last_distill_cycle` lives on `OodaState` (and its snapshot) so the
-interval survives recipe-step round-trips.
+`last_distill_cycle` lives on `OodaState` (not its snapshot), so the interval
+resets across restarts — at most one extra pass shortly after boot.
 
 ### Distillation now emits procedures too
 
@@ -296,10 +300,10 @@ classifier. Each is independently testable and regeneratable.
   pipeline the scheduler drives
 - [Episode ingestion classifier reference](../reference/episode-ingestion-classifier.md) —
   `classify`, `sanitize_transcript`, `EventKind`, `EpisodeMetadata`,
-  `Decision`, `store_episode_classified`
+  `IntakeDecision`, `store_episode_classified`
 - [Automatic distillation scheduler reference](../reference/automatic-distillation-scheduler.md) —
-  `maybe_run_promotion`, `should_distill`, `DistilledProcedure`,
-  `DistillOutput`, config fields
+  `run_scheduled_distillation`, `distill_trigger`, `DistillSchedule`,
+  `DistilledProcedure`, `DistillOutput`, config fields
 - [Cognitive-memory provenance](../reference/cognitive-memory-provenance.md) —
   the `DERIVES_FROM` / `PROCEDURE_DERIVES_FROM` edges this feature writes
 - [Configure episode hygiene and promotion](../howto/configure-episode-hygiene-and-promotion.md) —

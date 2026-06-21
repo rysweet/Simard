@@ -128,7 +128,7 @@ For multi-host coordination see [Distributed operations](distributed-operations.
 - [Cognitive Memory Architecture](architecture/cognitive-memory.md) (canonical, full detail)
 - [Episode ingestion policy & automatic promotion](architecture/episode-ingestion-policy.md) — the classifier that keeps episodic memory clean and the scheduler that promotes it automatically (#2327)
 - [Episode ingestion classifier API](reference/episode-ingestion-classifier.md) — `classify`, `sanitize_transcript`, the metadata taxonomy, and the intake wiring (#2327)
-- [Automatic distillation scheduler API](reference/automatic-distillation-scheduler.md) — `maybe_run_promotion`, the trigger predicate, config fields, and the procedures extension (#2327)
+- [Automatic distillation scheduler API](reference/automatic-distillation-scheduler.md) — `run_scheduled_distillation`, the `distill_trigger` predicate, config fields, and the procedures extension (#2327)
 - [Configure episode hygiene and promotion](howto/configure-episode-hygiene-and-promotion.md) — operator tuning and observability (#2327)
 - [Library-backed Cognitive Memory](architecture/cognitive-memory-library-adapter.md) — the `amplihack-memory-lib` backend, now the sole on-disk store (de-fork Phase 2b)
 - [Memory introspection CLI](reference/simard-memory-cli.md) — `simard memory stats` / `simard memory dump` for read-only, lock-safe per-type counts and sample rows

@@ -1,6 +1,6 @@
 ---
 title: Episode ingestion classifier API
-description: Rust API reference for the deterministic episode-ingestion classifier that guards every store_episode intake site — the classify pure function, the sanitize_transcript helper, the EventKind / EpisodeMetadata / IntakeContext / Decision types, the store_episode_classified IO seam, and the IntakeCounters metric. Documents the strict-priority decision rules, the metadata JSON contract, and the per-site wiring.
+description: Rust API reference for the deterministic episode-ingestion classifier that guards every store_episode intake site — the classify pure function, the sanitize_transcript helper, the EventKind / EpisodeMetadata / IntakeContext / IntakeDecision types, the store_episode_classified IO seam, and the IntakeCounters metric. Documents the strict-priority decision rules, the metadata JSON contract, and the per-site wiring.
 last_updated: 2026-06-20
 owner: simard
 doc_type: reference
@@ -70,7 +70,7 @@ pub struct EpisodeMetadata {
 ### `IntakeContext`
 
 Caller-supplied context that the `content` / `source_label` strings alone
-cannot convey. Every field is optional; `Default` yields an all-`None`
+cannot convey. Both fields are optional; `Default` yields an all-`None`
 context.
 
 ```rust
@@ -78,24 +78,34 @@ context.
 pub struct IntakeContext {
     pub goal_id: Option<String>,
     pub cycle: Option<u32>,
-    pub event_kind_hint: Option<EventKind>,
 }
 ```
 
-`event_kind_hint` lets a call site assert a known kind (e.g. the
-goal-curator site hints `GoalArchival` when goals were force-removed). The
-hint participates in the failure override and the meaningful-hint rule.
+`goal_id` and `cycle` are threaded straight into the stored metadata so a
+distilled fact/procedure can be traced back to the goal and cycle that
+produced its source episode.
 
-### `Decision`
+### `IntakeDecision`
 
 The result of classification.
 
 ```rust
 #[derive(Clone, Debug, PartialEq)]
-pub enum Decision {
-    Drop,                    // do not store; increment `dropped`
-    Store(EpisodeMetadata),  // store with durable metadata
+pub enum IntakeDecision {
+    Drop,                       // do not store; increment `dropped`
     DownScope(EpisodeMetadata), // store, but operational/low-importance
+    Store(EpisodeMetadata),     // store with durable metadata
+}
+```
+
+Helper predicates make call sites and tests read cleanly:
+
+```rust
+impl IntakeDecision {
+    pub fn is_dropped(&self) -> bool;
+    pub fn is_store(&self) -> bool;
+    pub fn is_downscoped(&self) -> bool;
+    pub fn metadata(&self) -> Option<&EpisodeMetadata>; // None for Drop
 }
 ```
 
@@ -106,31 +116,42 @@ pub enum Decision {
 ### `classify`
 
 ```rust
-pub fn classify(content: &str, source_label: &str, ctx: &IntakeContext) -> Decision;
+pub fn classify(content: &str, source_label: &str, ctx: &IntakeContext) -> IntakeDecision;
 ```
 
-Pure, no IO — the fully unit-testable core. Evaluates four rules in
-**strict priority order** and returns on the first match:
+Pure, no IO — the fully unit-testable core. Classification is **content- and
+source-driven** (call sites do not have to pre-tag every event). Evaluates
+four rules in **strict priority order** and returns on the first match:
 
 1. **Failure override (highest).** If `content` contains any of `error`,
-   `failed`, `failure`, `panic`, `exception` (case-insensitive) **or**
-   `ctx.event_kind_hint ∈ {ActionFailure, RecipeFailure}`:
-   `Store(EpisodeMetadata { importance: 0.9, event_kind: <hint or
-   ActionFailure>, is_operational: false, goal_id, cycle })`.
-   Overrides every rule below — a noisy line that records a failure is
+   `failed`, `failure`, `panic`, `exception` (case-insensitive):
+   `Store(EpisodeMetadata { importance: 0.9, event_kind, is_operational:
+   false, goal_id, cycle })`, where `event_kind` is `RecipeFailure` when the
+   content/source mentions a recipe and `ActionFailure` otherwise. Overrides
+   every rule below — a noisy line that records a failure is
    still kept.
 2. **Known-noise markers → `Drop`.** Case-insensitive substring match on
    any of:
    `started with objective`, `completed and persisted`,
-   `flushing working memory`, `continue_skipping`, `no decision keyword`,
-   or both `hydrated ` and `prior-session facts`.
-3. **Meaningful hint → `Store`.** If `ctx.event_kind_hint ∈ {Handoff,
-   GoalArchival, GoalPromotion, UserDecision, ActionCompleted}`: `Store`
-   with the importance from the table below and `is_operational: false`.
-4. **Default → `DownScope`.** Anything unmatched is **stored
-   down-scoped**: `DownScope(EpisodeMetadata { importance: 0.1,
-   event_kind: Operational, is_operational: true, goal_id, cycle })`.
-   Unrecognised events are never dropped — only de-prioritised.
+   `flushing working memory`, `continue_skipping`, `no decision keyword`.
+3. **Meaningful content → `Store`.** Content/source matching a durable
+   episodic event, stored at the importance from the table below with
+   `is_operational: false`:
+   - user decisions (`user decided` / `user decision`, or the
+     `user-decision` source) → `UserDecision`;
+   - goal-board promotions (`promoted goal` / `from backlog to active`) →
+     `GoalPromotion`, archival (`archived goal` / `goal archival`) →
+     `GoalArchival`;
+   - handoffs (`handoff` in content or source) → `Handoff`;
+   - durable completions (`opened pr` / `pull request` / `merged`) →
+     `ActionCompleted`;
+   - any `goal-curator`-sourced board summary → `GoalArchival`.
+4. **Default → `DownScope`.** Anything unmatched — including cross-session
+   hydration bookkeeping (`Hydrated N prior-session facts …` from the
+   `consolidation-intake` site) — is **stored down-scoped**:
+   `DownScope(EpisodeMetadata { importance: 0.1, event_kind: Operational,
+   is_operational: true, goal_id, cycle })`. Unrecognised events are never
+   dropped — only de-prioritised.
 
 **Importance table:**
 
@@ -171,22 +192,28 @@ pub fn store_episode_classified(
     content: &str,
     source_label: &str,
     ctx: &IntakeContext,
-    counters: &IntakeCounters,
 ) -> SimardResult<Option<String>>;
 ```
 
 The IO seam every intake site calls instead of `bridge.store_episode`.
 
 1. `classify(content, source_label, ctx)`.
-2. On `Drop`: increment `counters.dropped`, return `Ok(None)` — never
-   touches the bridge.
-3. On `Store(meta)` / `DownScope(meta)`: serialize `meta` via
-   `serde_json::to_value`, call
-   `bridge.store_episode(content, source_label, Some(&value))`, increment
-   `stored` or `downscoped`, and return `Ok(Some(episode_id))`.
+2. Records the decision into the process-global [`IntakeCounters`]
+   (`global_intake_counters()`).
+3. On `Drop`: returns `Ok(None)` — never touches the bridge.
+4. On `Store(meta)` / `DownScope(meta)`: serializes `meta` via
+   `EpisodeMetadata::to_json`, calls
+   `bridge.store_episode(content, source_label, Some(&value))`, and returns
+   `Ok(Some(episode_id))`.
 
 The returned id is the same id used downstream for
 `store_fact_with_provenance` / `store_procedure_with_provenance`.
+
+A companion seam, `store_episode_for_provenance(bridge, content, source_label,
+ctx) -> SimardResult<String>`, ALWAYS stores and returns an id (a `Drop`
+decision is promoted to a down-scoped store) — used by the reflection site so
+the transcript episode id is available as the provenance anchor for the facts
+it derives, even when the transcript would otherwise be dropped as noise.
 
 > **Boundary observability.** `CognitiveEpisode` carries **no** metadata
 > field — metadata passed to `store_episode` is write-only (folded into
@@ -204,11 +231,17 @@ The returned id is the same id used downstream for
 pub struct IntakeCounters { /* AtomicU32: dropped, stored, downscoped */ }
 
 impl IntakeCounters {
-    pub fn log_summary(&self); // eprintln! + tracing, per cycle
+    pub fn record(&self, decision: &IntakeDecision);
+    pub fn snapshot(&self) -> (u32, u32, u32); // (dropped, stored, downscoped)
+    pub fn log_summary(&self); // eprintln! + tracing, per cycle; then resets
 }
+
+/// Process-global counters shared by every intake chokepoint within a cycle.
+pub fn global_intake_counters() -> &'static IntakeCounters;
 ```
 
-`log_summary` emits one aggregated line per cycle:
+The OODA cycle calls `global_intake_counters().log_summary()` once at the end
+of each cycle, which emits one aggregated line and resets the counters:
 
 ```
 [simard] episode-intake dropped=7 stored=3 downscoped=2
@@ -250,7 +283,7 @@ Each `store_episode` chokepoint routes through `store_episode_classified`:
 | `session-intake` | `Session … started with objective …` | Drop (unless failure override) |
 | `session-reflection` | cycle transcript | `sanitize_transcript` → Store/DownScope/Drop, id preserved when facts derived |
 | `session-persistence` | `Session … completed and persisted` | Drop |
-| `consolidation-intake` | `Hydrated N prior-session facts …` | Drop |
+| `consolidation-intake` | `Hydrated N prior-session facts …` | DownScope (operational bookkeeping) |
 | working-memory slot (`slot.slot_type`) | `slot.content` | classify per content |
 | `consolidation-persistence` | `Session … flushing working memory …` | Drop |
 | `goal-curator` | active-goal board summary (metadata `{active_count, backlog_count, force_removed}`) | Store; `event_kind = goal_archival` when `force_removed > 0` |
@@ -264,7 +297,7 @@ Each `store_episode` chokepoint routes through `store_episode_classified`:
 ```rust
 let ctx = IntakeContext::default();
 let d = classify("Session s1 started with objective: ship X", "session-intake", &ctx);
-assert_eq!(d, Decision::Drop);
+assert_eq!(d, IntakeDecision::Drop);
 // store_episode_classified(...) returns Ok(None); store_episode never called.
 ```
 
@@ -274,10 +307,9 @@ assert_eq!(d, Decision::Drop);
 let ctx = IntakeContext {
     goal_id: Some("improve-foo".into()),
     cycle: Some(42),
-    event_kind_hint: Some(EventKind::ActionCompleted),
 };
-match classify("Refactored bridge; tests green", "act", &ctx) {
-    Decision::Store(m) => {
+match classify("act: opened PR #7 and merged it", "act-outcome", &ctx) {
+    IntakeDecision::Store(m) => {
         assert_eq!(m.event_kind, EventKind::ActionCompleted);
         assert_eq!(m.importance, 0.70);
         assert_eq!(m.is_operational, false);
@@ -293,7 +325,7 @@ match classify("Refactored bridge; tests green", "act", &ctx) {
 ```rust
 let ctx = IntakeContext::default();
 match classify("Session s1 completed and persisted — error: disk full", "session-persistence", &ctx) {
-    Decision::Store(m) => {
+    IntakeDecision::Store(m) => {
         assert_eq!(m.importance, 0.9);          // failure override beats the drop marker
         assert_eq!(m.is_operational, false);
     }
@@ -306,7 +338,7 @@ match classify("Session s1 completed and persisted — error: disk full", "sessi
 ```rust
 let ctx = IntakeContext::default();
 match classify("some novel observation we did not anticipate", "obs", &ctx) {
-    Decision::DownScope(m) => {
+    IntakeDecision::DownScope(m) => {
         assert_eq!(m.importance, 0.1);
         assert!(m.is_operational);
         assert_eq!(m.event_kind, EventKind::Operational);

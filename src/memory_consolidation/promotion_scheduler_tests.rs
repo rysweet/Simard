@@ -42,6 +42,11 @@
 //!    Distillation stores procedures via `store_procedure_with_provenance`
 //!    (threading `source_episode_ids`) alongside provenance-linked facts.
 
+// The in-memory mock records provenance writes as explicit named tuples
+// (e.g. `(name, steps, source_episode_ids)`) rather than factoring them into
+// type aliases, so each assertion reads as the exact shape under test.
+#![allow(clippy::type_complexity)]
+
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardResult;
 use crate::memory_cognitive::{
@@ -230,7 +235,7 @@ impl CognitiveMemoryOps for EpisodeMock {
     fn list_undistilled_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
         let eps = self.episodes.lock().unwrap();
         let mut out: Vec<EpisodeRow> = eps.iter().filter(|e| !e.distilled).cloned().collect();
-        out.sort_by(|a, b| b.temporal_index.cmp(&a.temporal_index));
+        out.sort_by_key(|r| std::cmp::Reverse(r.temporal_index));
         out.truncate(limit as usize);
         Ok(out
             .into_iter()
