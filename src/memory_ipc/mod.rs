@@ -26,6 +26,8 @@ mod tests_default_state_root_1967;
 #[cfg(test)]
 mod tests_launcher;
 #[cfg(test)]
+mod tests_shared_store_2320;
+#[cfg(test)]
 mod tests_socket_path;
 
 use serde::{Deserialize, Serialize};
