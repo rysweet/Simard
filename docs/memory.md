@@ -166,7 +166,7 @@ edges / connections:
 | `SIMILAR_TO` | Fact↔fact similarity edges. |
 | `SUPERSEDES` | Edges left by caller-key dedup (new snapshot → archived prior). |
 | `facts with provenance: X / Y` | `X` of `Y` facts carry at least one `DERIVES_FROM` edge. |
-| `snapshot dedup: D / T` | `T` snapshot facts (live + superseded revisions) collapsed onto `D` distinct caller keys. `T` well above `D` is the visible dedup signal. |
+| `snapshot dedup: D / T` | `T` snapshot facts (live + superseded revisions) collapsed onto `D` distinct caller keys. `T` well above `D` is the visible dedup signal. Scoped to the `goal-board:snapshot` concept only — the per-goal `goal-store:record:{slug}` dedup family (above) is not counted here. |
 
 The `--json` output mirrors this under stable keys: an `edges` object
 (`derives_from`, `procedure_derives_from`, `similar_to`, `supersedes`), a
