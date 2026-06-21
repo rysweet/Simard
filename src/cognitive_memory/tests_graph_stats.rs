@@ -178,12 +178,14 @@ fn graph_stats_snapshot_dedup_groups_by_caller_key() {
         stats.distinct_snapshot_caller_keys, 1,
         "both writes share one caller key; got {stats:?}"
     );
-    assert!(
-        stats.snapshot_facts_total >= 1,
-        "snapshot facts must be counted; got {stats:?}"
+    assert_eq!(
+        stats.snapshot_facts_total, 2,
+        "the superseded rev:1 (archived, retained) and the live rev:2 must both \
+         be counted, so the dedup volume is visible; got {stats:?}"
     );
     assert!(
-        stats.snapshot_facts_total >= stats.distinct_snapshot_caller_keys,
-        "dedup volume cannot be below the distinct-key count; got {stats:?}"
+        stats.snapshot_facts_total > stats.distinct_snapshot_caller_keys,
+        "the operator-visible dedup signal is many revisions collapsing onto one \
+         caller key (volume strictly above the distinct-key count); got {stats:?}"
     );
 }

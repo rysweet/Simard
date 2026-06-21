@@ -63,6 +63,32 @@ fn count(json: &serde_json::Value, key: &str) -> u64 {
         .unwrap_or_else(|| panic!("counts.{key} missing/non-numeric in: {json}"))
 }
 
+/// Regression guard for the rev-`34d6a75` dependency bump: the `amplihack-memory`
+/// stack logs at `info` on store open (e.g. its "effective LadybugDB limits"
+/// line). Those diagnostics must go to **stderr**, never stdout, so
+/// `simard memory stats --json` stays pipe-safe (`… | jq`). Asserting that
+/// stdout is exactly one JSON document — with nothing before the leading `{`
+/// — fails fast if a future change reroutes logs back onto stdout.
+#[test]
+fn stats_json_stdout_is_pure_json_logs_routed_to_stderr() {
+    let tmp = TempDir::new().unwrap();
+    seed_all_types(tmp.path());
+
+    let assert = bin()
+        .args(["memory", "stats", tmp.path().to_str().unwrap(), "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let trimmed = stdout.trim();
+    assert!(
+        trimmed.starts_with('{') && trimmed.ends_with('}'),
+        "stats --json stdout must be pure JSON (diagnostic logs belong on \
+         stderr), got:\n{stdout}"
+    );
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .unwrap_or_else(|e| panic!("stats --json stdout must parse as JSON: {e}\n{stdout}"));
+}
+
 #[test]
 fn stats_json_reports_every_populated_type_via_direct_open() {
     let tmp = TempDir::new().unwrap();

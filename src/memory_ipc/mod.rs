@@ -36,7 +36,7 @@ use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::{
     CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
-    CognitiveWorkingSlot,
+    CognitiveWorkingSlot, GraphStats,
 };
 
 /// Standard socket path used by both server and clients.
@@ -438,6 +438,12 @@ impl CognitiveMemoryOps for SharedMemory {
     ) -> SimardResult<String> {
         self.0
             .store_procedure_with_provenance(name, steps, prerequisites, source_episode_ids)
+    }
+    fn graph_stats(&self) -> SimardResult<GraphStats> {
+        // Issue #2331: forward to the wrapped in-process store so a tier-0
+        // `open_reader_bridge` reader (same-process daemon writer) reports the
+        // real edge / dedup counts instead of the all-zero trait default.
+        self.0.graph_stats()
     }
 }
 
