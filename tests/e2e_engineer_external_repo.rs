@@ -11,6 +11,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 /// Resolve the Simard binary path from the build output.
 fn simard_binary() -> PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -25,6 +27,7 @@ fn simard_binary() -> PathBuf {
 
 /// Verify Simard's engineer loop can inspect an external workspace.
 #[test]
+#[ignore = "requires a real LLM provider/session; reported as `ignored` by default rather than passing by skipping (issue #2047)"]
 fn engineer_loop_inspects_external_repo() {
     // Use Simard's own repo (smaller, always available) to test external inspection.
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -50,21 +53,10 @@ fn engineer_loop_inspects_external_repo() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let combined = format!("{stdout}\n{stderr}");
 
-    // Skip when the CI environment lacks an LLM provider — the simard binary
-    // now refuses to start without explicit SIMARD_LLM_PROVIDER configuration.
-    // After the engineer-loop subprocess pivot (issue #1648), the loop also
-    // shells out to `amplihack RustyClawd --auto`, which cannot complete in CI.
-    if combined.contains("missing required configuration 'SIMARD_LLM_PROVIDER'")
-        || combined.contains("No API key found")
-        || combined.contains("LLM session but open() failed")
-        || combined.contains("amplihack RustyClawd")
-        || combined.contains("RustyClawd exited with status")
-        || combined.contains("failed to spawn `amplihack")
-        || combined.contains("agent session failed")
-    {
-        eprintln!("SKIP: no LLM provider available (CI environment)");
-        return;
-    }
+    // This test is `#[ignore]`d by default because it needs a real LLM
+    // provider/session (issue #2047). When force-run without one, fail loudly
+    // instead of silently passing by skipping.
+    common::require_llm_provider("engineer_loop_inspects_external_repo", &combined);
 
     // Engineer loop should at least complete inspection phase
     assert!(
@@ -113,8 +105,9 @@ fn meeting_repl_shows_greeting() {
 }
 
 /// Verify OODA daemon starts and seeds default goals.
-/// Skipped in CI when amplihack-memory-lib is unavailable.
+/// Requires the amplihack memory bridge and a real LLM session.
 #[test]
+#[ignore = "requires a real LLM provider/session (and amplihack memory bridge); reported as `ignored` by default rather than passing by skipping (issue #2047)"]
 fn ooda_daemon_seeds_five_goals() {
     let state_root = tempfile::tempdir().expect("temp dir for ooda test");
     let output = Command::new("timeout")
@@ -131,21 +124,12 @@ fn ooda_daemon_seeds_five_goals() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // Memory bridge requires amplihack-memory-lib; skip gracefully in CI
-    if stderr.contains("Cannot find amplihack-memory-lib") || stderr.contains("bridge unhealthy") {
-        eprintln!("SKIP: memory bridge not available (CI environment)");
-        return;
-    }
-
-    // OODA daemon requires an LLM session; skip in CI environments that lack
-    // ANTHROPIC_API_KEY or gh auth for Copilot SDK.
-    if stderr.contains("No API key found")
-        || stderr.contains("LLM session but open() failed")
-        || stderr.contains("missing required configuration 'SIMARD_LLM_PROVIDER'")
-    {
-        eprintln!("SKIP: no LLM provider available (CI environment)");
-        return;
-    }
+    // The OODA daemon requires both the amplihack memory bridge and a real LLM
+    // session. This test is `#[ignore]`d by default (issue #2047); when
+    // force-run without either dependency, fail loudly instead of silently
+    // passing by an early `return`.
+    common::require_memory_bridge("ooda_daemon_seeds_five_goals", &stderr);
+    common::require_llm_provider("ooda_daemon_seeds_five_goals", &stderr);
 
     assert!(
         stderr.contains("seeded 5 default goal"),

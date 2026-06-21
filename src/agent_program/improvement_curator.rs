@@ -184,6 +184,7 @@ mod tests {
             owner_identity: "test".to_string(),
             source_session_id: context.session_id.clone(),
             updated_in: crate::session::SessionPhase::Persistence,
+            evidence: Vec::new(),
         }];
         let input = program.plan_turn(&context).unwrap();
         assert!(input.objective.contains("Improve Scores"));
