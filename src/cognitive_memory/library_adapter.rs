@@ -40,11 +40,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use amplihack_memory::{
-    CognitiveMemory, EpisodicMemory, MemoryError, ProceduralMemory, ProspectiveMemory,
-    SemanticFact, WorkingMemorySlot,
+    CognitiveMemory, DedupMode, DedupOptions, EpisodicMemory, FactInput, MemoryError,
+    ProceduralMemory, ProspectiveMemory, RecallOptions, RecallWeights, RetentionPolicy,
+    SemanticFact, StoreFactOptions, WorkingMemorySlot,
 };
 
-use super::CognitiveMemoryOps;
+use super::{CognitiveMemoryOps, RecallWeightSet};
 use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::{
     CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
@@ -231,6 +232,20 @@ fn map_op_err(method: &str, err: MemoryError) -> SimardError {
         bridge: STORE_NAME.to_string(),
         method: method.to_string(),
         reason: err.to_string(),
+    }
+}
+
+/// Convert Simard's backend-agnostic [`RecallWeightSet`] into the library's
+/// [`RecallWeights`] (same six fields, same order). Issue #2329 — the trait
+/// stays backend-neutral, so this conversion is adapter-local.
+fn to_library_weights(w: RecallWeightSet) -> RecallWeights {
+    RecallWeights {
+        text_relevance: w.text_relevance,
+        confidence: w.confidence,
+        importance: w.importance,
+        recency: w.recency,
+        usage: w.usage,
+        graph: w.graph,
     }
 }
 
@@ -528,6 +543,108 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
             guard.search_facts(query, limit as usize, min_confidence)
         };
         Ok(facts.into_iter().map(to_fact).collect())
+    }
+
+    fn recall_facts_ranked(
+        &self,
+        query: &str,
+        limit: u32,
+        min_confidence: f64,
+        weights: RecallWeightSet,
+    ) -> SimardResult<Vec<CognitiveFact>> {
+        // Issue #2329: ranked recall. `record_access = false` keeps this a pure
+        // read — gathering `relevant_facts` to prepare a cycle must not bump a
+        // fact's usage/recency and skew later recalls. `include_archived` /
+        // `include_superseded = false` means superseded snapshot revisions
+        // (collapsed by `store_fact_with_caller_key`) never re-enter recall. The
+        // remaining knobs are the library defaults (limit/min_confidence here,
+        // 1-hop graph, 7-day recency half-life). The library takes `&mut self`
+        // (it *can* record access), so we lock for write even though this call
+        // mutates nothing.
+        let options = RecallOptions {
+            limit: limit as usize,
+            min_confidence,
+            include_archived: false,
+            include_superseded: false,
+            record_access: false,
+            weights: to_library_weights(weights),
+            ..RecallOptions::default()
+        };
+        let mut guard = self.lock_write("recall_facts_ranked")?;
+        let scored = guard
+            .recall_facts_ranked(query, options)
+            .map_err(|e| map_op_err("recall_facts_ranked", e))?;
+        // The library already sorted by descending score; preserve that order
+        // (ordering *is* the ranking — no score is surfaced on `CognitiveFact`).
+        Ok(scored.into_iter().map(|s| to_fact(s.item)).collect())
+    }
+
+    fn store_fact_with_caller_key(
+        &self,
+        caller_key: &str,
+        concept: &str,
+        content: &str,
+        confidence: f64,
+        tags: &[String],
+        source_id: &str,
+    ) -> SimardResult<String> {
+        // Issue #2329: CallerKey dedup. Stamp the same process-wide monotonic
+        // sequence `store_fact` injects (see `FACT_SEQ_META_KEY`) so the
+        // "max node_id == newest fact" invariant the goal board / goal store /
+        // consolidation depend on still holds for caller-key writes. The fetch is
+        // done under the write lock so sequence order matches store order.
+        //
+        // `DedupMode::CallerKey(k)`: an identical-content write for `k` is reused
+        // (no new node); a changed-content write supersedes the prior live fact
+        // (archive old + `superseded_by` + `SUPERSEDES` edge new -> old). Either
+        // way exactly one live fact survives per key. The returned id is the live
+        // fact after the call.
+        let mut guard = self.lock_write("store_fact_with_caller_key")?;
+        let seq = self.fact_seq.fetch_add(1, Ordering::Relaxed);
+        let mut metadata: HashMap<String, serde_json::Value> = HashMap::with_capacity(1);
+        metadata.insert(FACT_SEQ_META_KEY.to_string(), serde_json::Value::from(seq));
+        let input = FactInput {
+            concept: concept.to_string(),
+            content: content.to_string(),
+            confidence,
+            source_id: source_id.to_string(),
+            tags: tags.to_vec(),
+            metadata,
+            dedup_key: Some(caller_key.to_string()),
+            ..FactInput::default()
+        };
+        let options = StoreFactOptions {
+            dedup: DedupOptions {
+                mode: DedupMode::CallerKey(caller_key.to_string()),
+                ..DedupOptions::default()
+            },
+            ..StoreFactOptions::default()
+        };
+        let outcome = guard
+            .upsert_fact(input, &options)
+            .map_err(|e| map_op_err("store_fact_with_caller_key", e))?;
+        Ok(outcome.node_id)
+    }
+
+    fn prune_superseded(&self) -> SimardResult<usize> {
+        // Issue #2329: reclaim the superseded tail produced by caller-key dedup.
+        // `include_superseded = true` is what makes the archived revisions
+        // prunable; `max_facts_per_concept = None` and `min_importance_to_keep =
+        // 0.0` ensure no *live* fact is evicted (all goal records share one
+        // concept, so a per-concept cap would evict live records). The library
+        // protects provenance-bearing facts from deletion.
+        let policy = RetentionPolicy {
+            max_facts_per_concept: None,
+            min_importance_to_keep: 0.0,
+            include_superseded: true,
+            dry_run: false,
+            ..RetentionPolicy::default()
+        };
+        let report = self
+            .lock_write("prune_superseded")?
+            .prune_semantic_memory(&policy)
+            .map_err(|e| map_op_err("prune_superseded", e))?;
+        Ok(report.archived + report.deleted)
     }
 
     fn episodes_for_fact(&self, fact_id: &str) -> SimardResult<Vec<String>> {

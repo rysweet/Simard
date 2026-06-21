@@ -7,7 +7,7 @@ use crate::goal_curation::{load_goal_board, save_goal_board_with_removals};
 use crate::gym_bridge::ScoreDimensions;
 use crate::gym_scoring::GymSuiteScore;
 use crate::memory_consolidation;
-use crate::memory_consolidation::preparation_memory_operations_with_active_slugs;
+use crate::memory_consolidation::preparation_memory_operations_with_active_slugs_phased;
 use crate::self_improve::{ImprovementCycle, ImprovementPhase};
 
 use super::types::*;
@@ -255,11 +255,15 @@ fn run_ooda_cycle_inner(
         eprintln!("[simard] OODA cycle: board-sourced prospective reconcile failed: {e}");
     }
     // Reuse cycle_session_id established above — the entire cycle is one logical session.
-    let ctx = preparation_memory_operations_with_active_slugs(
+    // Issue #2329: gather `relevant_facts` with ranked recall biased toward the
+    // Observe phase (recency-favoring) so the freshest declarative state surfaces
+    // first each cycle.
+    let ctx = preparation_memory_operations_with_active_slugs_phased(
         &objective_summary,
         &cycle_session_id,
         &*bridges.memory,
         Some(&active_slugs),
+        crate::ooda_loop::phase_weights::weights_for_phase(OodaPhase::Observe),
     )?;
     eprintln!(
         "[simard] OODA cycle: prepared context ({} facts, {} triggers, {} procedures, {} episodes)",
