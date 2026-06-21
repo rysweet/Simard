@@ -749,6 +749,120 @@ mod tests {
         );
     }
 
+    // -------------------------------------------------------------------
+    // Issue #1682 — Traces-tab cost rows must be human-readable.
+    //
+    // Before this fix each `[cost]` row rendered as three indent-padded
+    // lines: the literal token `[cost]`, a raw ISO timestamp, and the
+    // adapter brand (`copilot`) — no cost amount, model, tokens, or
+    // attribution. These tests lock the readable replacement so a future
+    // refactor can't silently regress the operator's cost-burn view.
+    // -------------------------------------------------------------------
+
+    /// Helper: extract a JS function body from `INDEX_HTML`, bounded by the
+    /// next `function ` declaration (mirrors the formatTime/timeAgo tests).
+    fn js_fn_body(decl: &str) -> &'static str {
+        let start = INDEX_HTML
+            .find(decl)
+            .unwrap_or_else(|| panic!("expected JS helper `{decl}` in dashboard HTML"));
+        let after = &INDEX_HTML[start..];
+        let skip = decl.len();
+        let end_rel = after[skip..]
+            .find("function ")
+            .map(|n| skip + n)
+            .unwrap_or_else(|| after.len().min(1200));
+        &after[..end_rel]
+    }
+
+    /// The Traces list must dispatch cost-ledger spans to a dedicated
+    /// renderer (`renderCostTrace`) rather than the opaque generic row.
+    #[test]
+    fn index_html_traces_dispatch_cost_rows_to_dedicated_renderer() {
+        assert!(
+            INDEX_HTML.contains("s.source==='cost'?renderCostTrace(s.data):renderGenericTrace(s)"),
+            "fetchTraces must route cost-source spans to renderCostTrace and \
+             everything else to renderGenericTrace"
+        );
+        assert!(
+            INDEX_HTML.contains("function renderCostTrace(data)"),
+            "renderCostTrace(data) helper must exist"
+        );
+        assert!(
+            INDEX_HTML.contains("function renderGenericTrace(s)"),
+            "renderGenericTrace(s) helper must exist"
+        );
+    }
+
+    /// "When": cost rows show a relative time via `timeAgo` plus the
+    /// absolute timestamp via `formatTime` (surfaced as a hover title),
+    /// never the old raw-ISO `substring(0,19)` slice.
+    #[test]
+    fn index_html_cost_trace_renders_relative_and_absolute_time() {
+        let body = js_fn_body("function renderCostTrace(data){");
+        assert!(
+            body.contains("timeAgo(data.timestamp)"),
+            "cost rows must render relative time via timeAgo — body: {body:?}"
+        );
+        assert!(
+            body.contains("formatTime(data.timestamp)"),
+            "cost rows must expose the absolute timestamp via formatTime — body: {body:?}"
+        );
+        assert!(
+            !body.contains("substring(0,19)"),
+            "cost rows must NOT slice a raw ISO string — that was the #1682 bug. body: {body:?}"
+        );
+    }
+
+    /// "What": cost rows fold in the cost amount, token counts, and a
+    /// plain-language model label (not just the bare adapter brand).
+    #[test]
+    fn index_html_cost_trace_renders_cost_model_and_tokens() {
+        let body = js_fn_body("function renderCostTrace(data){");
+        assert!(
+            body.contains("fmtCostUsd(data.cost_usd_est)"),
+            "cost rows must show the estimated USD cost — body: {body:?}"
+        );
+        assert!(
+            body.contains("prompt_tokens_est") && body.contains("completion_tokens_est"),
+            "cost rows must show prompt/completion token counts — body: {body:?}"
+        );
+        assert!(
+            body.contains("costModelLabel(model)"),
+            "cost rows must map the model token to a plain-language label — body: {body:?}"
+        );
+        // The label map must translate the common `copilot` brand into prose.
+        assert!(
+            INDEX_HTML.contains("'copilot':'Copilot SDK call'"),
+            "costModelLabel must humanise the `copilot` adapter brand"
+        );
+    }
+
+    /// "Who": cost rows surface per-call attribution — the call context
+    /// and a shortened session id — so an operator can tell calls apart.
+    #[test]
+    fn index_html_cost_trace_renders_attribution() {
+        let body = js_fn_body("function renderCostTrace(data){");
+        assert!(
+            body.contains("data.context"),
+            "cost rows must surface the call context for attribution — body: {body:?}"
+        );
+        assert!(
+            body.contains("shortSession(data.session_id)"),
+            "cost rows must surface a shortened session id for attribution — body: {body:?}"
+        );
+    }
+
+    /// The fmtCostUsd helper keeps sub-cent estimates meaningful (4 dp)
+    /// while showing larger amounts at 2 dp.
+    #[test]
+    fn index_html_has_fmt_cost_usd_helper() {
+        let body = js_fn_body("function fmtCostUsd(v){");
+        assert!(
+            body.contains("toFixed(4)") && body.contains("toFixed(2)"),
+            "fmtCostUsd must use 4dp for sub-cent and 2dp otherwise — body: {body:?}"
+        );
+    }
+
     #[test]
     fn login_html_has_code_input() {
         assert!(crate::operator_commands_dashboard::auth::LOGIN_HTML.contains(r#"type="text""#));
