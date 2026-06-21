@@ -49,7 +49,7 @@ use super::{CognitiveMemoryOps, RecallWeightSet};
 use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::{
     CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
-    CognitiveWorkingSlot,
+    CognitiveWorkingSlot, GraphStats,
 };
 
 /// Agent name the persistent library store is scoped to. The library rejects an
@@ -82,6 +82,15 @@ const FACT_SEQ_META_KEY: &str = "_simard_seq";
 /// composite `node_id` matches numeric sequence order. 20 digits covers the full
 /// `u64` range.
 const FACT_SEQ_WIDTH: usize = 20;
+
+/// Concept under which goal-board snapshots are stored (issue #2331).
+///
+/// The goal-board snapshot write path (`goal_curation::operations`) stores facts
+/// under this concept via `store_fact_with_caller_key`, using the same string as
+/// the caller key. [`LibraryCognitiveMemory::graph_stats`] groups facts on this
+/// concept to surface the snapshot-dedup signal (many revisions collapsed onto a
+/// few caller keys). Kept in sync with the literal in `goal_curation::operations`.
+const SNAPSHOT_FACT_CONCEPT: &str = "goal-board:snapshot";
 
 /// Cognitive memory backed by the upstream `amplihack-memory-lib`
 /// [`CognitiveMemory`] (persistent, lbug-backed).
@@ -832,6 +841,64 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // the pinned commit), so this is a fixed `false` rather than a stored
         // flag — matching the trait's documented default.
         false
+    }
+
+    fn graph_stats(&self) -> SimardResult<GraphStats> {
+        // Issue #2331. Read-only aggregate over the cognitive-memory graph,
+        // computed under a single read lock so the snapshot is internally
+        // consistent. The pinned library rev exposes provenance readers
+        // (`fact_provenance` / `procedure_provenance`) but NO public per-type
+        // edge counter, so `SIMILAR_TO` / `SUPERSEDES` stay 0 (documented in
+        // `GraphStats` and `docs/memory.md`); the snapshot-dedup fields below
+        // give the operator a computed proxy for the `SUPERSEDES` activity.
+        let guard = self.lock()?;
+
+        // `get_all_facts` returns every `Semantic` node for this agent
+        // (live + archived/superseded — `get_statistics`'s semantic count is the
+        // same node set), so `facts_total` here matches the per-type table.
+        let facts = guard.get_all_facts(usize::MAX);
+
+        let mut derives_from_edges: u64 = 0;
+        let mut facts_with_provenance: u64 = 0;
+        let mut snapshot_facts_total: u64 = 0;
+        let mut snapshot_caller_keys: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        for fact in &facts {
+            // `fact_provenance` is keyed on the raw library `node_id`
+            // (`get_all_facts` surfaces the raw id, not the seq-prefixed
+            // composite, so no `strip_seq_prefix` is needed here).
+            let provenance = guard.fact_provenance(&fact.node_id);
+            if !provenance.is_empty() {
+                facts_with_provenance += 1;
+                derives_from_edges += provenance.len() as u64;
+            }
+            if fact.concept == SNAPSHOT_FACT_CONCEPT {
+                snapshot_facts_total += 1;
+                if let Some(key) = fact.dedup_key.as_deref().filter(|k| !k.is_empty()) {
+                    snapshot_caller_keys.insert(key.to_string());
+                }
+            }
+        }
+
+        // Procedures: sum `PROCEDURE_DERIVES_FROM` edges. The empty query maps to
+        // the library's "return all" path (same as `recall_procedure("*", …)`).
+        let mut procedure_derives_from_edges: u64 = 0;
+        for proc in guard.search_procedures("", usize::MAX) {
+            procedure_derives_from_edges += guard.procedure_provenance(&proc.node_id).len() as u64;
+        }
+
+        Ok(GraphStats {
+            derives_from_edges,
+            procedure_derives_from_edges,
+            // No public reader at the pinned rev — surfaced as 0; see doc above.
+            similar_to_edges: 0,
+            supersedes_edges: 0,
+            facts_with_provenance,
+            facts_total: facts.len() as u64,
+            distinct_snapshot_caller_keys: snapshot_caller_keys.len() as u64,
+            snapshot_facts_total,
+        })
     }
 
     fn checkpoint(&self) -> SimardResult<()> {

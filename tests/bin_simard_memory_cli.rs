@@ -142,6 +142,96 @@ fn stats_human_shows_count_table_and_access_banner() {
     }
 }
 
+/// Issue #2331: the "edges / connections" section must appear end-to-end over a
+/// direct on-disk open, surfacing the provenance edge and snapshot dedup it was
+/// seeded with — in both the human and `--json` renderings.
+#[test]
+fn stats_shows_edges_and_dedup_section_via_direct_open() {
+    let tmp = TempDir::new().unwrap();
+    {
+        let mem = LibraryCognitiveMemory::open(tmp.path()).expect("open store");
+        let ep = mem
+            .store_episode("ran cargo test; 0 failures", "engineer-cycle", None)
+            .expect("store_episode");
+        mem.store_fact_with_provenance(
+            "lesson",
+            "tests must stay green",
+            0.9,
+            "distill:cycle",
+            None,
+            None,
+            std::slice::from_ref(&ep),
+        )
+        .expect("store_fact_with_provenance");
+        // A caller-key snapshot fact so the dedup line has something to report.
+        mem.store_fact_with_caller_key(
+            "goal-board:snapshot",
+            "goal-board:snapshot",
+            "{\"rev\":1}",
+            1.0,
+            &["goal-board".to_string()],
+            "goal-curator",
+        )
+        .expect("store_fact_with_caller_key");
+        // `mem` drops here, releasing the lock before the child process opens it.
+    }
+
+    // Human rendering: the section labels and the seeded provenance coverage.
+    let assert = bin()
+        .args(["memory", "stats", tmp.path().to_str().unwrap()])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    for needle in [
+        "edges / connections",
+        "DERIVES_FROM",
+        "PROCEDURE_DERIVES_FROM",
+        "SIMILAR_TO",
+        "SUPERSEDES",
+        "facts with provenance:",
+        "snapshot dedup:",
+    ] {
+        assert!(
+            stdout.contains(needle),
+            "human edges section missing {needle:?}:\n{stdout}"
+        );
+    }
+
+    // JSON rendering: stable keys with the seeded DERIVES_FROM edge counted.
+    let assert = bin()
+        .args(["memory", "stats", tmp.path().to_str().unwrap(), "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stats --json must emit JSON");
+    assert!(
+        report["edges"]["derives_from"].as_u64().unwrap_or(0) >= 1,
+        "DERIVES_FROM edge must be counted via direct open: {report}"
+    );
+    assert_eq!(
+        report["provenance"]["facts_with_provenance"].as_u64(),
+        Some(1),
+        "exactly the one provenance-linked fact: {report}"
+    );
+    assert!(
+        report["snapshot_dedup"]["snapshot_facts"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1,
+        "snapshot fact must be counted: {report}"
+    );
+    assert_eq!(
+        report["snapshot_dedup"]["distinct_caller_keys"].as_u64(),
+        Some(1),
+        "the snapshot caller key must be grouped: {report}"
+    );
+    assert!(
+        report.get("edges_note").is_none(),
+        "direct open must compute the edges, not note them: {report}"
+    );
+}
+
 #[test]
 fn dump_facts_json_runs_against_on_disk_store() {
     let tmp = TempDir::new().unwrap();
