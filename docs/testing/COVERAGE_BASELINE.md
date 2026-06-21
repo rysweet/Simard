@@ -65,6 +65,36 @@ The seven `bin_simard_*` integration tests live under `tests/` and exercise
 each CLI's argument-parsing and error-envelope surface deterministically
 (no network, no external services).
 
+## Group: `trace_collector` — `src/trace_collector.rs`
+
+Tracking issue: [#1751](https://github.com/rysweet/Simard/issues/1751)
+(parent: [#1735](https://github.com/rysweet/Simard/issues/1735))
+
+| Metric             | Baseline (2026-05-14) | After #1751 |
+| ------------------ | --------------------: | ----------: |
+| Aggregate line cov |                42.68% |      95.51% |
+| Files in group     |                     1 |           1 |
+| Lines covered      |               35 / 82 |   149 / 156 |
+
+Per-file post-#1751 line coverage:
+
+| File                     | Line cov | Func cov | Region cov |
+| ------------------------ | -------: | -------: | ---------: |
+| `src/trace_collector.rs` |   95.51% |   90.91% |     95.49% |
+
+> The new unit tests drive a full span lifecycle through `SpanCollectorLayer`
+> (`on_new_span` → `on_close`), drain the ring buffer with real records, and
+> exercise the `SpanRecord` `Clone` / `Debug` / `Serialize` derives — all
+> deterministically (no network, no external services). The line total rises
+> from 82 to 156 because the in-file `#[cfg(test)]` module is counted.
+
+### How to reproduce locally
+
+```bash
+cargo llvm-cov --lib --summary-only
+# then read the `src/trace_collector.rs` row
+```
+
 ## Other groups
 
 Tracked, but not yet attacked by a landed PR:
@@ -72,7 +102,6 @@ Tracked, but not yet attacked by a landed PR:
 | Group        | Tracking issue                                                  |
 | ------------ | --------------------------------------------------------------- |
 | `engineer`   | [#1750](https://github.com/rysweet/Simard/issues/1750)          |
-| `operator`   | [#1751](https://github.com/rysweet/Simard/issues/1751)          |
 | `runtime`    | [#1752](https://github.com/rysweet/Simard/issues/1752)          |
 | `meeting`    | [#1753](https://github.com/rysweet/Simard/issues/1753)          |
 
