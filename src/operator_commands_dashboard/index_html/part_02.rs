@@ -39,12 +39,25 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
         }
       }catch(e){const dl=document.getElementById('daemon-log'); if(dl){dl.textContent='Failed to load logs — check /api/logs endpoint';}}
     }
+    // Detect the severity level of a single log line. Returns one of
+    // error|warn|info|debug|trace. tracing/journald lines carry an explicit
+    // uppercase token (e.g. "  INFO ", "[WARN]") or a structured "level=error"
+    // pair; plain "[simard] …" daemon lines carry no token and are treated as
+    // informational so the "Info" filter shows them (issue #1687).
+    function detectLogLevel(line){
+      const s=String(line);
+      const kv=/\blevel=(error|warn|warning|info|debug|trace)\b/i.exec(s);
+      if(kv){const lv=kv[1].toLowerCase();return lv==='warning'?'warn':lv;}
+      const tok=/(?:^|[\s\[(])(ERROR|WARN|WARNING|INFO|DEBUG|TRACE)(?:[\s\]:)]|$)/.exec(s);
+      if(tok){const lv=tok[1].toLowerCase();return lv==='warning'?'warn':lv;}
+      return 'info';
+    }
     function applyLogFilter(){
       const filter=(document.getElementById('log-filter')?.value||'').toLowerCase();
       const level=(document.getElementById('log-level-filter')?.value||'').toLowerCase();
       let lines=allLogLines;
       if(filter) lines=lines.filter(l=>l.toLowerCase().includes(filter));
-      if(level) lines=lines.filter(l=>l.toLowerCase().includes(level));
+      if(level) lines=lines.filter(l=>detectLogLevel(l)===level);
       const el=document.getElementById('daemon-log');
       el.textContent=lines.length?lines.join('\n'):'(no matching log lines)';
       el.scrollTop=el.scrollHeight;

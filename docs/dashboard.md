@@ -27,7 +27,7 @@ The dashboard is a single-page app with the following tabs:
 | **Overview** | Daemon status (OODA loop active / stopped), current cycle number, top-priority goal, last cycle's actions, recent actions stream, system status (version, OODA daemon state, active processes, disk usage), open PRs, and open issues. |
 | **Goals** | The full goal register: active top-N goals with priority, status, and current activity; the proposed backlog with promote/dismiss controls. |
 | **Traces** | Live-tailed engineer subprocess traces and OODA cycle traces (xterm.js terminal). |
-| **Logs** | Aggregated daemon and engineer logs. |
+| **Logs** | Aggregated daemon and engineer logs, the cost ledger, and per-cycle reports. A text box filters by substring and a **severity** dropdown (All levels / Errors / Warnings / Info) filters by per-line log level. Levels are read from the line's `ERROR`/`WARN`/`INFO`/`DEBUG`/`TRACE` token (tracing/journald format) or a `level=…` field; plain daemon lines with no level token are treated as **Info**. |
 | **Processes** | Live process tree under the daemon — engineer subprocesses, LLM sessions, and their resource usage. |
 | **Memory** | Cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters; full-text memory search; a **Memory Overview** with the live **Memory Store** counts; and a **Memory Files** panel showing the goals snapshot plus any non-empty legacy snapshot files. See [Memory architecture](memory.md). |
 | **Costs** | Per-provider, per-model token spend across the active session. |

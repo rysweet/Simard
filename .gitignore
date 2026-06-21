@@ -10,6 +10,7 @@ worktrees/
 worktrees
 node_modules/
 test-results/
+tests/e2e-dashboard/artifacts/
 gym-wave*-tmp/
 
 # Rust coverage artifacts (llvm-cov / cargo-llvm-cov)
