@@ -102,8 +102,8 @@ pub const TAB_METADATA: &[TabMeta] = &[
         label: "Logs",
         title: "Logs · Simard",
         h1: "Logs",
-        lede: "Raw daemon logs, the cost ledger, and per-cycle reports — the lowest-level view for debugging what the daemon did and why.",
-        tooltip: "Raw daemon logs and recent cycle reports for debugging",
+        lede: "Detailed activity from the always-on background service that runs Simard, plus the spending log and per-cycle reports — the most granular view for understanding exactly what Simard did and why.",
+        tooltip: "Background-service activity log and recent cycle reports for debugging",
     },
     TabMeta {
         slug: "processes",
