@@ -26,6 +26,8 @@ mod tests_default_state_root_1967;
 #[cfg(test)]
 mod tests_launcher;
 #[cfg(test)]
+mod tests_shared_store_2320;
+#[cfg(test)]
 mod tests_socket_path;
 
 use serde::{Deserialize, Serialize};
@@ -251,6 +253,7 @@ mod launcher;
 mod server;
 pub use client::RemoteCognitiveMemory;
 pub use launcher::clear_in_process_writer;
+pub use launcher::clear_tier2_store_cache;
 pub use launcher::{
     ReaderBridge, WriterBridge, launch_writer_bridge, open_reader_bridge,
     register_in_process_writer,
@@ -354,6 +357,87 @@ impl CognitiveMemoryOps for SharedMemory {
     }
     fn checkpoint(&self) -> SimardResult<()> {
         self.0.checkpoint()
+    }
+    fn mark_episode_distilled(&self, node_id: &str) -> SimardResult<()> {
+        self.0.mark_episode_distilled(node_id)
+    }
+    fn list_undistilled_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+        self.0.list_undistilled_episodes(limit)
+    }
+    fn procedure_exists(&self, name: &str) -> SimardResult<bool> {
+        self.0.procedure_exists(name)
+    }
+    fn search_episodes_by_keywords(
+        &self,
+        keywords: &[String],
+        limit: u32,
+    ) -> SimardResult<Vec<CognitiveEpisode>> {
+        self.0.search_episodes_by_keywords(keywords, limit)
+    }
+    fn search_episodes_starting_with(
+        &self,
+        prefix: &str,
+        limit: u32,
+    ) -> SimardResult<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
+        self.0.search_episodes_starting_with(prefix, limit)
+    }
+    fn recall_facts_ranked(
+        &self,
+        query: &str,
+        limit: u32,
+        min_confidence: f64,
+        weights: crate::cognitive_memory::RecallWeightSet,
+    ) -> SimardResult<Vec<CognitiveFact>> {
+        self.0
+            .recall_facts_ranked(query, limit, min_confidence, weights)
+    }
+    fn prune_superseded(&self) -> SimardResult<usize> {
+        self.0.prune_superseded()
+    }
+    fn episodes_for_fact(&self, fact_id: &str) -> SimardResult<Vec<String>> {
+        self.0.episodes_for_fact(fact_id)
+    }
+    fn store_fact_with_caller_key(
+        &self,
+        caller_key: &str,
+        concept: &str,
+        content: &str,
+        confidence: f64,
+        tags: &[String],
+        source_id: &str,
+    ) -> SimardResult<String> {
+        self.0
+            .store_fact_with_caller_key(caller_key, concept, content, confidence, tags, source_id)
+    }
+    fn store_fact_with_provenance(
+        &self,
+        concept: &str,
+        content: &str,
+        confidence: f64,
+        source_id: &str,
+        tags: Option<&[String]>,
+        metadata: Option<&std::collections::HashMap<String, serde_json::Value>>,
+        source_episode_ids: &[String],
+    ) -> SimardResult<String> {
+        self.0.store_fact_with_provenance(
+            concept,
+            content,
+            confidence,
+            source_id,
+            tags,
+            metadata,
+            source_episode_ids,
+        )
+    }
+    fn store_procedure_with_provenance(
+        &self,
+        name: &str,
+        steps: &[String],
+        prerequisites: &[String],
+        source_episode_ids: &[String],
+    ) -> SimardResult<String> {
+        self.0
+            .store_procedure_with_provenance(name, steps, prerequisites, source_episode_ids)
     }
 }
 
