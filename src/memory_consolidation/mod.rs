@@ -65,11 +65,15 @@ pub fn intake_memory_operations(
     // Push the objective into working memory for this session.
     bridge.push_working("objective", objective, session_id.as_str(), 1.0)?;
 
-    // Store as an episodic event so we have a record of what was asked.
-    bridge.store_episode(
+    // Store as an episodic event so we have a record of what was asked —
+    // routed through the ingestion classifier (issue #2327). The session-start
+    // marker is operational noise and is dropped unless it carries a failure
+    // summary.
+    classifier::store_episode_classified(
+        bridge,
         &format!("Session {session_id} started with objective: {objective}"),
         "session-intake",
-        None,
+        &classifier::IntakeContext::default(),
     )?;
 
     Ok(())
@@ -510,11 +514,41 @@ pub fn reflection_memory_operations(
 ) -> SimardResult<()> {
     // Store the session transcript as an episodic memory, capturing its id so
     // each fact derived from this transcript can link back to it (issue #2325).
-    let episode_id = bridge.store_episode(
-        &format!("Session {session_id} transcript: {transcript}"),
-        "session-reflection",
-        None,
-    )?;
+    //
+    // Issue #2327 (A1/A2): the transcript is sanitized of `continue_skipping` /
+    // no-decision-keyword noise before storage. A pure-noise transcript with no
+    // derived facts is dropped entirely; otherwise the (cleaned) transcript is
+    // stored. When facts ARE derived we keep the episode unconditionally — even
+    // pure noise — because its id is the provenance anchor for those facts.
+    let ctx = classifier::IntakeContext::default();
+    let has_facts = !facts.is_empty();
+    let sanitized = classifier::sanitize_transcript(transcript);
+    let episode_id = match (&sanitized, has_facts) {
+        // Pure noise and nothing derived from it → drop the reflection episode.
+        (None, false) => {
+            classifier::global_intake_counters().record(&classifier::IntakeDecision::Drop);
+            return Ok(());
+        }
+        _ => {
+            let body = sanitized.as_deref().unwrap_or(transcript);
+            let content = format!("Session {session_id} transcript: {body}");
+            if has_facts {
+                // Provenance anchor required — store even if down-scoped.
+                Some(classifier::store_episode_for_provenance(
+                    bridge,
+                    &content,
+                    "session-reflection",
+                    &ctx,
+                )?)
+            } else {
+                classifier::store_episode_classified(bridge, &content, "session-reflection", &ctx)?
+            }
+        }
+    };
+    // No episode (classified Drop) and no facts to link — nothing more to do.
+    let Some(episode_id) = episode_id else {
+        return Ok(());
+    };
 
     // Store each extracted fact in semantic memory, deduplicating by concept
     // both within this session and across prior sessions.
@@ -588,11 +622,14 @@ pub fn persistence_memory_operations_with_snapshot_dir(
     // Prune expired sensory items.
     bridge.prune_expired_sensory()?;
 
-    // Store a final episodic memory marking session end.
-    bridge.store_episode(
+    // Store a final episodic memory marking session end — routed through the
+    // ingestion classifier (issue #2327). The "completed and persisted" marker
+    // is operational noise and is dropped unless it carries a failure summary.
+    classifier::store_episode_classified(
+        bridge,
         &format!("Session {session_id} completed and persisted"),
         "session-persistence",
-        None,
+        &classifier::IntakeContext::default(),
     )?;
 
     // Save a JSON snapshot for durable cross-session recall.  Errors are
@@ -692,7 +729,15 @@ pub fn consolidation_intake(
     if count > 0 {
         let summary = format!("Hydrated {count} prior-session facts for cross-session recall");
         bridge.push_working("consolidation-intake", &summary, session_id.as_str(), 0.7)?;
-        bridge.store_episode(&summary, "consolidation-intake", None)?;
+        // Cross-session hydration bookkeeping is operational: the classifier
+        // down-scopes it (low importance, is_operational = true) rather than
+        // storing it at full importance (issue #2327).
+        classifier::store_episode_classified(
+            bridge,
+            &summary,
+            "consolidation-intake",
+            &classifier::IntakeContext::default(),
+        )?;
     }
     Ok(count)
 }
@@ -709,17 +754,23 @@ pub fn consolidation_persistence(
 ) -> SimardResult<()> {
     // Drain all working-memory slots into episodic store so they survive
     // session teardown.  Each slot is written as an episode using its
-    // slot_type as the source label, preserving the memory category.
+    // slot_type as the source label, preserving the memory category — routed
+    // through the ingestion classifier so per-slot noise is dropped/down-scoped
+    // by content (issue #2327).
+    let ctx = classifier::IntakeContext::default();
     let slots = bridge.get_working(session_id.as_str())?;
     for slot in &slots {
-        bridge.store_episode(&slot.content, &slot.slot_type, None)?;
+        classifier::store_episode_classified(bridge, &slot.content, &slot.slot_type, &ctx)?;
     }
 
-    // Store an episodic record capturing the consolidation event.
-    bridge.store_episode(
+    // Store an episodic record capturing the consolidation event. The
+    // "flushing working memory" marker is operational noise and is dropped
+    // unless it carries a failure summary (issue #2327).
+    classifier::store_episode_classified(
+        bridge,
         &format!("Session {session_id} flushing working memory to episodes"),
         "consolidation-persistence",
-        None,
+        &ctx,
     )?;
 
     // Consolidate any remaining episodes into long-term storage. Errors are
@@ -746,6 +797,17 @@ mod tests_pr_a;
 // recipe. See `docs/architecture/episode-distillation.md`.
 pub mod distillation;
 
+// Issue #2327: episode-ingestion classifier — the deterministic policy that
+// runs before every `store_episode` intake site, dropping operational noise,
+// down-scoping bookkeeping, and storing meaningful episodics with
+// {importance, event_kind, goal_id, cycle, is_operational} metadata.
+pub mod classifier;
+
+// Issue #2327: automatic promotion (distillation) scheduler — fires episode →
+// fact/procedure distillation on an undistilled-count threshold or a
+// cycle-count interval, decoupled from the OODA `ConsolidateMemory` action.
+pub mod scheduler;
+
 #[cfg(test)]
 mod distillation_tests;
 
@@ -755,3 +817,17 @@ mod distillation_tests;
 // behaviour.
 #[cfg(test)]
 mod tests_pr_c;
+
+// Issue #2327: TDD (RED) tests for the episode-ingestion classifier
+// (`classifier::classify`) that drops operational-noise episodes,
+// down-scopes bookkeeping, and stores meaningful episodics with
+// {importance, event_kind, goal_id, cycle, is_operational} metadata.
+#[cfg(test)]
+mod classifier_tests;
+
+// Issue #2327: TDD (RED) tests for the automatic promotion (distillation)
+// scheduler (`scheduler::distill_trigger` / `run_scheduled_distillation_*`)
+// and the procedure-distillation extension (DistilledProcedure / DistillOutput
+// / DistillReport.procedure_count) that stores procedures with provenance.
+#[cfg(test)]
+mod promotion_scheduler_tests;

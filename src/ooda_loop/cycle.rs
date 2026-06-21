@@ -570,15 +570,43 @@ fn run_ooda_cycle_inner(
                     &*bridges.memory,
                 )
                 .and_then(|()| {
-                    bridges.memory.store_episode(
-                        &state.active_goals.durable_summary(),
+                    // Goal-board curation with force-removals is a durable
+                    // goal-archival event (issue #2327): the classifier stores
+                    // it at full importance with the {importance, event_kind,
+                    // goal_id, cycle, is_operational} metadata, merged with the
+                    // existing board-count fields so neither signal is lost.
+                    let summary = state.active_goals.durable_summary();
+                    let ctx = crate::memory_consolidation::classifier::IntakeContext {
+                        goal_id: None,
+                        cycle: Some(state.cycle_count),
+                    };
+                    let decision = crate::memory_consolidation::classifier::classify(
+                        &summary,
                         "goal-curator",
-                        Some(&serde_json::json!({
-                            "active_count": state.active_goals.active.len(),
-                            "backlog_count": state.active_goals.backlog.len(),
-                            "force_removed": archived_goal_ids.len(),
-                        })),
-                    )?;
+                        &ctx,
+                    );
+                    crate::memory_consolidation::classifier::global_intake_counters()
+                        .record(&decision);
+                    if let Some(meta) = decision.metadata() {
+                        let mut json = meta.to_json();
+                        if let Some(obj) = json.as_object_mut() {
+                            obj.insert(
+                                "active_count".to_string(),
+                                serde_json::json!(state.active_goals.active.len()),
+                            );
+                            obj.insert(
+                                "backlog_count".to_string(),
+                                serde_json::json!(state.active_goals.backlog.len()),
+                            );
+                            obj.insert(
+                                "force_removed".to_string(),
+                                serde_json::json!(archived_goal_ids.len()),
+                            );
+                        }
+                        bridges
+                            .memory
+                            .store_episode(&summary, "goal-curator", Some(&json))?;
+                    }
                     Ok(())
                 })
             };
@@ -602,6 +630,45 @@ fn run_ooda_cycle_inner(
     }
 
     state.cycle_count += 1;
+
+    // --- Automatic promotion (distillation) scheduler (issue #2327, R4) ---
+    // Fire episode → fact/procedure distillation when the undistilled-episode
+    // count crosses the threshold OR the cycle-count interval elapses,
+    // decoupled from whether the brain picked `ConsolidateMemory`. Trigger
+    // gating is cheap; the recipe runner is only constructed when a trigger
+    // fires (and gracefully no-ops when recipe-runner-rs is unavailable).
+    {
+        let schedule = crate::memory_consolidation::scheduler::DistillSchedule {
+            min_episodes: config.distill_min_episodes,
+            interval_cycles: config.distill_interval_cycles,
+        };
+        let cycles_since_last = state.cycle_count.saturating_sub(state.last_distill_cycle);
+        match crate::memory_consolidation::scheduler::run_scheduled_distillation(
+            &*bridges.memory,
+            &bridges.repo_root,
+            &schedule,
+            cycles_since_last,
+        ) {
+            Ok(Some(report)) => {
+                state.last_distill_cycle = state.cycle_count;
+                eprintln!(
+                    "[simard] OODA distill scheduler: {} episodes → {} facts, {} procedures, {} marked",
+                    report.input_count,
+                    report.fact_count,
+                    report.procedure_count,
+                    report.marked_count
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("[simard] OODA distill scheduler: pass failed (non-fatal): {e}");
+            }
+        }
+    }
+
+    // Emit the per-cycle episode-intake hygiene summary (dropped/stored/
+    // down-scoped) accumulated by the ingestion classifier (issue #2327, R3).
+    crate::memory_consolidation::classifier::global_intake_counters().log_summary();
 
     // --- Post-cycle cleanup (issue #2167) ---
     // Prune goal_failure_counts entries for goals no longer on the board.

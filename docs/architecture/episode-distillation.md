@@ -6,11 +6,13 @@ owner: simard
 doc_type: concept
 related:
   - ./cognitive-memory.md
+  - ./episode-ingestion-policy.md
   - ../reference/cognitive-memory-preparation-filters.md
   - ../reference/cognitive-memory-episodic-recall.md
   - ../reference/ooda-procedural-memory.md
   - ../reference/cognitive-memory-procedural-idempotency.md
   - ../reference/cognitive-memory-provenance.md
+  - ../reference/automatic-distillation-scheduler.md
   - ../memory.md
 ---
 
@@ -33,6 +35,17 @@ same action the `__memory__` synthetic priority dispatches to. No new
 synthetic priority is added. The existing deterministic-brain routing
 locked in by issue [#2286](https://github.com/rysweet/Simard/issues/2286)
 is preserved.
+
+> **Now also automatic (#2327).** Since
+> [#2327](https://github.com/rysweet/Simard/issues/2327), distillation no
+> longer waits for the brain to choose `ConsolidateMemory`: an
+> [automatic promotion scheduler](./episode-ingestion-policy.md) also fires
+> this pass at the end of every OODA cycle once the undistilled backlog
+> reaches a threshold or a cycle-count interval elapses. The pass was also
+> extended to emit **procedures** (not just facts), both written with
+> provenance. See the
+> [automatic distillation scheduler reference](../reference/automatic-distillation-scheduler.md).
+> The fact pipeline described below is unchanged.
 
 ---
 
