@@ -189,6 +189,7 @@ Whenever an engineer cycle produces code changes, the cycle is NOT complete unti
    - **Quality-audit** — cycle count, commit SHAs, final cycle clean confirmation
    - **CI** — link to the green run for every required check
    - **Scope** — diff summary with confirmation of no unrelated edits
+   - **TDD attestation** — exactly one of: `tdd: test-first ordering verified — <link to commit>` (default for in-scope PRs), `tdd-exempt: <reason from §1.1>` (exception cases), or `tdd: not applicable — PR touches no in-scope paths` (ops/docs/prompt PRs). Per `Specs/TDD_ADOPTION.md` §3 Layer 2.
    - **Verdict** — explicit "ready to merge" / "draft" / "blocked" call with rationale
 4. **Drive to merge** — once CI is fully green and the PR has evidence headings, merge via `gh pr merge --squash --delete-branch <PR>`.
 
