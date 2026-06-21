@@ -63,6 +63,14 @@ simard goal remove fix-critical-infrastructure-smart-orchestrator-469f243a
 simard goal set-priority adopt-tdd 1
 ```
 
+> **Note — `adopt-tdd` is a ratified, consolidated goal.** The `adopt-tdd` and
+> `adopt-tdd-for-new-modules` slugs are governed by the ratified charter
+> `Specs/TDD_ADOPTION.md`. If a handoff or the operator re-surfaces "adopt TDD",
+> link that spec and follow its phased exit criteria — do **not** re-create the
+> goal from boilerplate or open a fresh planning cycle. Once the spec's Phase-1
+> deliverables have landed, re-tombstone the slugs with
+> `simard goal remove adopt-tdd adopt-tdd-for-new-modules`.
+
 When the operator says "drop goal X", "add a goal for Y", or "bump Z to p1", run the matching command and confirm the result. Do not defer to a later session or ask whether they're sure — the operator has full authority over goals.
 
 ## Conversation Commands
