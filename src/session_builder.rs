@@ -211,8 +211,18 @@ impl SessionBuilder {
         match self.provider {
             LlmProvider::Copilot => {
                 let tag = format!("{}-copilot", self.adapter_tag);
+                // Issue #1664: enable memory + knowledge enrichment on the live
+                // production adapter so each turn is enriched with relevant
+                // memory facts, procedures, and domain knowledge. This applies
+                // to every NON-meeting Copilot session (e.g. the OODA daemon's
+                // Orchestrator session and the review pipeline's Engineer
+                // session); meeting-mode sessions returned early above via
+                // PersistentAgentProxy and are out of scope here. Reads from the
+                // default state root (shared with the OODA daemon when running);
+                // a bridge launch failure degrades gracefully to no enrichment.
                 let factory = CopilotSdkAdapter::registered(&tag)
-                    .map_err(|e| format!("CopilotSdkAdapter::registered({}): {}", tag, e))?;
+                    .map_err(|e| format!("CopilotSdkAdapter::registered({}): {}", tag, e))?
+                    .with_enrichment(crate::memory_ipc::default_state_root());
                 let mut session = factory
                     .open_session(request)
                     .map_err(|e| format!("CopilotSdkAdapter::open_session({}): {}", tag, e))?;
