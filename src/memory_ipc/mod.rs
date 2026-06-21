@@ -381,6 +381,64 @@ impl CognitiveMemoryOps for SharedMemory {
     ) -> SimardResult<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
         self.0.search_episodes_starting_with(prefix, limit)
     }
+    fn recall_facts_ranked(
+        &self,
+        query: &str,
+        limit: u32,
+        min_confidence: f64,
+        weights: crate::cognitive_memory::RecallWeightSet,
+    ) -> SimardResult<Vec<CognitiveFact>> {
+        self.0
+            .recall_facts_ranked(query, limit, min_confidence, weights)
+    }
+    fn prune_superseded(&self) -> SimardResult<usize> {
+        self.0.prune_superseded()
+    }
+    fn episodes_for_fact(&self, fact_id: &str) -> SimardResult<Vec<String>> {
+        self.0.episodes_for_fact(fact_id)
+    }
+    fn store_fact_with_caller_key(
+        &self,
+        caller_key: &str,
+        concept: &str,
+        content: &str,
+        confidence: f64,
+        tags: &[String],
+        source_id: &str,
+    ) -> SimardResult<String> {
+        self.0
+            .store_fact_with_caller_key(caller_key, concept, content, confidence, tags, source_id)
+    }
+    fn store_fact_with_provenance(
+        &self,
+        concept: &str,
+        content: &str,
+        confidence: f64,
+        source_id: &str,
+        tags: Option<&[String]>,
+        metadata: Option<&std::collections::HashMap<String, serde_json::Value>>,
+        source_episode_ids: &[String],
+    ) -> SimardResult<String> {
+        self.0.store_fact_with_provenance(
+            concept,
+            content,
+            confidence,
+            source_id,
+            tags,
+            metadata,
+            source_episode_ids,
+        )
+    }
+    fn store_procedure_with_provenance(
+        &self,
+        name: &str,
+        steps: &[String],
+        prerequisites: &[String],
+        source_episode_ids: &[String],
+    ) -> SimardResult<String> {
+        self.0
+            .store_procedure_with_provenance(name, steps, prerequisites, source_episode_ids)
+    }
 }
 
 // ============================================================================
