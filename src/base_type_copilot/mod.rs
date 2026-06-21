@@ -8,7 +8,7 @@
 //! structured output into [`BaseTypeOutcome`].
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::NamedTempFile;
@@ -55,12 +55,36 @@ impl Default for CopilotAdapterConfig {
     }
 }
 
+/// Where a [`CopilotSdkSession`] sources its memory + knowledge enrichment
+/// bridges.
+///
+/// The default is [`EnrichmentSource::Disabled`] so that lightweight callers
+/// and unit tests incur no filesystem side effects (opening a cognitive-memory
+/// store, launching native bridges). The live production path
+/// ([`crate::session_builder::SessionBuilder`]) opts in via
+/// [`CopilotSdkAdapter::with_enrichment`], wiring the same cognitive-memory
+/// store and native knowledge bridge the rest of the runtime uses so each
+/// Copilot turn is enriched with relevant memory facts, procedures, and
+/// domain knowledge (issue #1664).
+#[derive(Clone, Debug, Default)]
+enum EnrichmentSource {
+    /// No enrichment bridges. `prepare_turn_context` runs with `None`/`None`,
+    /// emitting only the `## Objective` section.
+    #[default]
+    Disabled,
+    /// Launch the native cognitive-memory + knowledge bridges lazily on
+    /// `open_session`, reading memory from `state_root`. A launch failure logs
+    /// and degrades that bridge to `None` (never panics).
+    Native { state_root: PathBuf },
+}
+
 /// A base type factory that creates sessions driving `amplihack copilot`
 /// through the PTY infrastructure with memory and knowledge enrichment.
 #[derive(Debug)]
 pub struct CopilotSdkAdapter {
     descriptor: BaseTypeDescriptor,
     config: CopilotAdapterConfig,
+    enrichment: EnrichmentSource,
 }
 
 impl CopilotSdkAdapter {
@@ -95,12 +119,66 @@ impl CopilotSdkAdapter {
                 supported_topologies: [RuntimeTopology::SingleProcess].into_iter().collect(),
             },
             config,
+            enrichment: EnrichmentSource::default(),
         })
     }
 
     /// Access the adapter configuration.
     pub fn config(&self) -> &CopilotAdapterConfig {
         &self.config
+    }
+
+    /// Enable per-turn memory + knowledge enrichment for sessions opened by
+    /// this adapter, reading cognitive memory from `state_root`.
+    ///
+    /// Without this, sessions are created with both bridges set to `None` and
+    /// every turn runs `prepare_turn_context(objective, None, None)` — the
+    /// hardcoded-`None` regression of issue #1664 that silently dropped all
+    /// memory and knowledge enrichment in the primary production adapter.
+    ///
+    /// Bridges are launched lazily in [`BaseTypeFactory::open_session`]; a
+    /// launch failure logs and degrades to `None` so a missing knowledge pack
+    /// or an unavailable memory store never breaks turn dispatch (see
+    /// [`launch_enrichment_bridges`]).
+    #[must_use]
+    pub fn with_enrichment(mut self, state_root: PathBuf) -> Self {
+        self.enrichment = EnrichmentSource::Native { state_root };
+        self
+    }
+
+    /// Build a concrete [`CopilotSdkSession`], resolving enrichment bridges.
+    ///
+    /// Shared by [`BaseTypeFactory::open_session`] (which boxes the result)
+    /// and unit tests that need to inspect the wired bridges directly.
+    fn build_session(&self, request: BaseTypeSessionRequest) -> SimardResult<CopilotSdkSession> {
+        if !self.descriptor.supports_topology(request.topology) {
+            return Err(SimardError::UnsupportedTopology {
+                base_type: self.descriptor.id.to_string(),
+                topology: request.topology,
+            });
+        }
+
+        // Issue #1664: wire real memory + knowledge bridges instead of the
+        // previously-hardcoded `None`/`None`. When enrichment is configured
+        // the bridges are launched here (with graceful degradation) so that
+        // `prepare_turn_context` actually injects memory facts, procedures,
+        // and domain knowledge into every turn.
+        let (memory_bridge, knowledge_bridge) = match &self.enrichment {
+            EnrichmentSource::Disabled => (None, None),
+            EnrichmentSource::Native { state_root } => launch_enrichment_bridges(state_root),
+        };
+
+        Ok(CopilotSdkSession {
+            descriptor: self.descriptor.clone(),
+            config: self.config.clone(),
+            request,
+            memory_bridge,
+            knowledge_bridge,
+            is_open: false,
+            is_closed: false,
+            turn_count: 0,
+            session_uuid: None,
+        })
     }
 }
 
@@ -113,24 +191,7 @@ impl BaseTypeFactory for CopilotSdkAdapter {
         &self,
         request: BaseTypeSessionRequest,
     ) -> SimardResult<Box<dyn BaseTypeSession>> {
-        if !self.descriptor.supports_topology(request.topology) {
-            return Err(SimardError::UnsupportedTopology {
-                base_type: self.descriptor.id.to_string(),
-                topology: request.topology,
-            });
-        }
-
-        Ok(Box::new(CopilotSdkSession {
-            descriptor: self.descriptor.clone(),
-            config: self.config.clone(),
-            request,
-            memory_bridge: None,
-            knowledge_bridge: None,
-            is_open: false,
-            is_closed: false,
-            turn_count: 0,
-            session_uuid: None,
-        }))
+        Ok(Box::new(self.build_session(request)?))
     }
 }
 
@@ -202,6 +263,19 @@ impl CopilotSdkSession {
             turn_count: 0,
             session_uuid: None,
         }
+    }
+
+    /// Test-only builder that injects pre-constructed enrichment bridges so a
+    /// test can assert that `prepare_turn_context` consumes them (issue #1664).
+    #[cfg(test)]
+    fn with_test_bridges(
+        mut self,
+        memory_bridge: Option<Box<dyn CognitiveMemoryOps>>,
+        knowledge_bridge: Option<KnowledgeBridge>,
+    ) -> Self {
+        self.memory_bridge = memory_bridge;
+        self.knowledge_bridge = knowledge_bridge;
+        self
     }
 
     /// Build an enriched terminal objective from the turn input.
@@ -620,4 +694,45 @@ fn validate_command(command: &str) -> SimardResult<()> {
         });
     }
     Ok(())
+}
+
+/// Launch the cognitive-memory and knowledge bridges that enrich each Copilot
+/// turn, degrading gracefully when either is unavailable.
+///
+/// Memory is obtained via [`crate::ooda_loop::connect_memory`] (the same
+/// IPC-aware connector recipe steps use, sharing the daemon's live store when
+/// one is running and otherwise opening the library-backed store directly).
+/// Knowledge uses the in-process native transport from
+/// [`crate::bridge_launcher::launch_knowledge_bridge_native`].
+///
+/// Mirrors the honest-degradation contract of
+/// [`crate::bridge_launcher::launch_all_bridges`]: a launch failure is logged
+/// and yields `None` for that bridge so turn dispatch proceeds without that
+/// enrichment rather than aborting. Neither failure path panics.
+fn launch_enrichment_bridges(
+    state_root: &Path,
+) -> (Option<Box<dyn CognitiveMemoryOps>>, Option<KnowledgeBridge>) {
+    let memory = match crate::ooda_loop::connect_memory(state_root) {
+        Ok(memory) => Some(memory),
+        Err(error) => {
+            eprintln!(
+                "[simard] copilot adapter: cognitive-memory bridge unavailable — memory \
+                 enrichment disabled for this session: {error}"
+            );
+            None
+        }
+    };
+
+    let knowledge = match crate::bridge_launcher::launch_knowledge_bridge_native() {
+        Ok(knowledge) => Some(knowledge),
+        Err(error) => {
+            eprintln!(
+                "[simard] copilot adapter: knowledge bridge unavailable — knowledge \
+                 enrichment disabled for this session: {error}"
+            );
+            None
+        }
+    };
+
+    (memory, knowledge)
 }
