@@ -20,7 +20,7 @@
 
 use std::path::Path;
 
-use super::{launch_writer_bridge, open_reader_bridge};
+use super::{clear_tier2_store_cache, launch_writer_bridge, open_reader_bridge};
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, load_goal_board, save_goal_board};
 
 /// Three seeded goals with non-placeholder descriptions (so the board-integrity
@@ -131,5 +131,90 @@ fn tier2_writer_and_reader_share_one_store() {
         4,
         "a write through a sibling tier-2 bridge must be immediately visible to \
          an already-open reader bridge on the same state_root (shared store, #2320)",
+    );
+}
+
+/// Tier-2 bridges wrap the shared store in `SharedMemory`. That wrapper must
+/// forward *every* `CognitiveMemoryOps` method to the inner library handle —
+/// in particular the episodic-recall / distillation methods whose trait
+/// defaults are empty no-ops. If a method is not forwarded, a tier-2 caller
+/// silently reads empty episodes even though the store holds them.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn tier2_bridge_forwards_episodic_recall_through_sharedmemory() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+
+    // Store an episode through a writer bridge.
+    let writer = launch_writer_bridge(root).expect("writer bridge");
+    let node_id = writer
+        .ops()
+        .store_episode("engineer fixed the durable-recall race", "test", None)
+        .expect("store_episode through tier-2 writer");
+    assert!(!node_id.is_empty(), "store_episode must return a node id");
+
+    // A fresh reader bridge must recall it via the keyword search and list it as
+    // undistilled — both of which return `vec![]` if `SharedMemory` falls back
+    // to the trait defaults instead of forwarding to the library backend.
+    let reader = open_reader_bridge(root).expect("reader bridge");
+    let by_kw = reader
+        .ops()
+        .search_episodes_by_keywords(&["durable-recall".to_string()], 10)
+        .expect("search_episodes_by_keywords");
+    assert!(
+        by_kw.iter().any(|e| e.node_id == node_id),
+        "SharedMemory must forward search_episodes_by_keywords to the library \
+         backend; got {} episodes (a no-op default returns none)",
+        by_kw.len(),
+    );
+
+    let undistilled = reader
+        .ops()
+        .list_undistilled_episodes(10)
+        .expect("list_undistilled_episodes");
+    assert!(
+        undistilled.iter().any(|e| e.node_id == node_id),
+        "SharedMemory must forward list_undistilled_episodes to the library backend",
+    );
+
+    // mark_episode_distilled must also reach the backend: after marking, the
+    // episode drops out of the undistilled list.
+    reader
+        .ops()
+        .mark_episode_distilled(&node_id)
+        .expect("mark_episode_distilled");
+    let after = open_reader_bridge(root)
+        .expect("reader bridge")
+        .ops()
+        .list_undistilled_episodes(10)
+        .expect("list_undistilled_episodes after marking");
+    assert!(
+        !after.iter().any(|e| e.node_id == node_id),
+        "mark_episode_distilled must be forwarded; the episode should no longer be undistilled",
+    );
+}
+
+/// After [`clear_tier2_store_cache`] drops the shared handle (checkpointing via
+/// `Database::drop`), a fresh tier-2 open must cold-recall the persisted board
+/// from disk. Guards the lifetime argument: evicting a cached handle does not
+/// lose data, and the next open rebuilds it correctly.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn cold_reopen_after_cache_clear_recalls_persisted_board() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+
+    write_board(root, &GoalBoard::new());
+    write_board(root, &seeded_board());
+
+    // Drop every cached handle — forces the next open to read from disk.
+    clear_tier2_store_cache();
+
+    let board = read_board(root);
+    assert_eq!(
+        board.active.len(),
+        3,
+        "after clearing the tier-2 cache, a cold reopen must recall the 3 \
+         persisted goals from disk",
     );
 }

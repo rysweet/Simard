@@ -214,17 +214,26 @@ fn lookup_in_process_writer(state_root: &Path) -> Option<Arc<dyn CognitiveMemory
 // immediately visible to the next read with no reopen and no metadata-loss
 // race — the same single-handle guarantee the daemon already gets from tier 0.
 //
+// Scope of the guarantee: this provides **same-process** read-after-write
+// consistency for tier-2 callers. Cross-process visibility is unchanged — it
+// flows through the daemon IPC socket (tier 1) or, for a cold open in a later
+// process, the library's WAL replay. This cache deliberately makes tier-2 a
+// process-local single-owner of each `state_root`; a caller needing a fresh
+// on-disk view from another writer must go through the daemon socket.
+//
 // Lifetime / memory: the cache holds a strong `Arc`, so the handle survives
 // across the short-lived bridges that come and go between operations (that
 // persistence is the whole point). To bound growth — the test suite allocates a
-// fresh `TempDir` state_root per hermetic test — every lookup first prunes
-// entries whose directory no longer exists on disk. A `TempDir` is removed when
-// its owning test drops, so its cached handle is evicted on the next access;
+// fresh `TempDir` state_root per hermetic test — a lookup whose directory has
+// been removed falls through to the slow path, which prunes every entry whose
+// directory no longer exists. A `TempDir` is removed when its owning test
+// drops, so its cached handle is evicted on the next mismatching access;
 // dropping the last `Arc` runs `lbug::Database::drop`, which checkpoints the
 // WAL into the main file. Live state roots (the daemon is on tier 0, so this is
 // CLI / embedded callers) stay cached for the process lifetime; the library
 // replays any un-checkpointed WAL on the next open, so a process exit without an
-// explicit checkpoint is recoverable.
+// explicit checkpoint is recoverable. [`clear_tier2_store_cache`] drops every
+// handle deterministically (flushing via `Database::drop`) for shutdown/tests.
 // ---------------------------------------------------------------------------
 
 static TIER2_STORE_CACHE: RwLock<BTreeMap<PathBuf, Arc<LibraryCognitiveMemory>>> =
@@ -241,11 +250,22 @@ fn prune_dead_store_entries(cache: &mut BTreeMap<PathBuf, Arc<LibraryCognitiveMe
 /// per-operation reopen race (issue #2320). All tier-2 readers and writers for
 /// the same canonical `state_root` share this one handle.
 fn shared_tier2_store(state_root: &Path) -> SimardResult<Arc<LibraryCognitiveMemory>> {
+    // Materialise the directory before keying so the canonical path is stable
+    // regardless of whether the writer (which already `create_dir_all`s) or the
+    // reader reaches here first. Without this, a reader-first call on a not-yet-
+    // existing symlinked temp root would key under the raw path while a later
+    // writer keys under the resolved path — two keys, two live handles on one
+    // on-disk DB, which is exactly the double-open `SharedMemory` exists to avoid.
+    let _ = std::fs::create_dir_all(state_root);
     let key = canonical_or_self(state_root);
 
-    // Fast path: already cached.
+    // Fast path: already cached AND the backing directory still exists. The
+    // existence check guards the (test-only) case where a state_root dir is
+    // removed and a fresh dir is later created at the same path — we must not
+    // hand back the stale handle, so fall through to the pruning slow path.
     if let Ok(cache) = TIER2_STORE_CACHE.read()
         && let Some(arc) = cache.get(&key)
+        && key.exists()
     {
         return Ok(Arc::clone(arc));
     }
@@ -265,6 +285,20 @@ fn shared_tier2_store(state_root: &Path) -> SimardResult<Arc<LibraryCognitiveMem
     let mem = Arc::new(LibraryCognitiveMemory::open(state_root)?);
     cache.insert(key, Arc::clone(&mem));
     Ok(mem)
+}
+
+/// Drop every cached tier-2 store handle, flushing each via `Database::drop`
+/// (which checkpoints the WAL into the main file).
+///
+/// Shutdown / test helper: production code rarely needs this because the daemon
+/// path uses tier 0 and per-`state_root` handles are pruned as their temp dirs
+/// disappear. Call it at process shutdown for a deterministic checkpoint, or in
+/// a test that must force a genuine cold reopen of a still-live `state_root`.
+pub fn clear_tier2_store_cache() {
+    let mut cache = TIER2_STORE_CACHE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.clear();
 }
 
 /// Launch a cognitive-memory writer bridge against `state_root`.

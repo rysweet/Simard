@@ -253,6 +253,7 @@ mod launcher;
 mod server;
 pub use client::RemoteCognitiveMemory;
 pub use launcher::clear_in_process_writer;
+pub use launcher::clear_tier2_store_cache;
 pub use launcher::{
     ReaderBridge, WriterBridge, launch_writer_bridge, open_reader_bridge,
     register_in_process_writer,
@@ -356,6 +357,29 @@ impl CognitiveMemoryOps for SharedMemory {
     }
     fn checkpoint(&self) -> SimardResult<()> {
         self.0.checkpoint()
+    }
+    fn mark_episode_distilled(&self, node_id: &str) -> SimardResult<()> {
+        self.0.mark_episode_distilled(node_id)
+    }
+    fn list_undistilled_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+        self.0.list_undistilled_episodes(limit)
+    }
+    fn procedure_exists(&self, name: &str) -> SimardResult<bool> {
+        self.0.procedure_exists(name)
+    }
+    fn search_episodes_by_keywords(
+        &self,
+        keywords: &[String],
+        limit: u32,
+    ) -> SimardResult<Vec<CognitiveEpisode>> {
+        self.0.search_episodes_by_keywords(keywords, limit)
+    }
+    fn search_episodes_starting_with(
+        &self,
+        prefix: &str,
+        limit: u32,
+    ) -> SimardResult<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
+        self.0.search_episodes_starting_with(prefix, limit)
     }
 }
 
