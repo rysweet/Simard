@@ -67,7 +67,10 @@ fn rendered_output(output: &Output) -> String {
 // live here so they run once rather than once per including crate.
 #[cfg(test)]
 mod llm_provider_guard_tests {
-    use crate::common::{llm_provider_unavailable, require_llm_provider};
+    use crate::common::{
+        llm_provider_unavailable, memory_bridge_unavailable, require_llm_provider,
+        require_memory_bridge,
+    };
 
     #[test]
     fn detects_missing_simard_llm_provider_config() {
@@ -130,6 +133,42 @@ mod llm_provider_guard_tests {
             "example_test",
             "Probe mode: engineer-loop-run\noutcome=Success",
         );
+    }
+
+    #[test]
+    fn detects_missing_memory_bridge() {
+        // The OODA daemon surfaces these when the amplihack memory bridge is
+        // unavailable; an `#[ignore]`d test that needs it must not pass by
+        // skipping when force-run (issue #2047).
+        assert!(memory_bridge_unavailable(
+            "Error: Cannot find amplihack-memory-lib"
+        ));
+        assert!(memory_bridge_unavailable(
+            "memory bridge unhealthy: connection refused"
+        ));
+    }
+
+    #[test]
+    fn does_not_flag_memory_bridge_on_unrelated_output() {
+        assert!(
+            !memory_bridge_unavailable("ooda daemon: seeded 5 default goals"),
+            "must not false-positive on benign output"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires the amplihack memory bridge")]
+    fn require_memory_bridge_panics_when_unavailable() {
+        // Force-running an ignored bridge-dependent test without the bridge must
+        // fail loudly (issue #2047), never silently pass by an early `return`.
+        require_memory_bridge("example_test", "Error: Cannot find amplihack-memory-lib");
+    }
+
+    #[test]
+    fn require_memory_bridge_is_noop_when_available() {
+        // When the bridge is available the guard returns without panicking,
+        // letting the real assertions run.
+        require_memory_bridge("example_test", "ooda daemon: seeded 5 default goals");
     }
 }
 

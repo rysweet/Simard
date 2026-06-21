@@ -124,15 +124,11 @@ fn ooda_daemon_seeds_five_goals() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // Memory bridge requires amplihack-memory-lib; skip gracefully in CI
-    if stderr.contains("Cannot find amplihack-memory-lib") || stderr.contains("bridge unhealthy") {
-        eprintln!("SKIP: memory bridge not available (CI environment)");
-        return;
-    }
-
-    // OODA daemon requires a real LLM session. This test is `#[ignore]`d by
-    // default (issue #2047); when force-run without a provider, fail loudly
-    // instead of silently passing by skipping.
+    // The OODA daemon requires both the amplihack memory bridge and a real LLM
+    // session. This test is `#[ignore]`d by default (issue #2047); when
+    // force-run without either dependency, fail loudly instead of silently
+    // passing by an early `return`.
+    common::require_memory_bridge("ooda_daemon_seeds_five_goals", &stderr);
     common::require_llm_provider("ooda_daemon_seeds_five_goals", &stderr);
 
     assert!(

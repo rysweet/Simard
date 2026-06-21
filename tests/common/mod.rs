@@ -46,6 +46,35 @@ pub fn llm_provider_unavailable(rendered: &str) -> bool {
         || rendered.contains("agent session failed")
 }
 
+/// Returns true when the rendered output indicates the amplihack memory bridge
+/// (`amplihack-memory-lib`) is unavailable or unhealthy.
+///
+/// The OODA daemon opens this bridge at startup; CI hosts that lack the native
+/// library surface the "Cannot find amplihack-memory-lib"/"bridge unhealthy"
+/// errors instead of seeding goals.
+pub fn memory_bridge_unavailable(rendered: &str) -> bool {
+    rendered.contains("Cannot find amplihack-memory-lib") || rendered.contains("bridge unhealthy")
+}
+
+/// Fail-explicit guard for `#[ignore]`d tests that require the amplihack memory
+/// bridge. Mirrors [`require_llm_provider`] (issue #2047): when such a test is
+/// force-run (`cargo test -- --include-ignored`) but the bridge is unavailable,
+/// this panics with an actionable message so the run fails loudly instead of
+/// silently passing by an early `return`.
+pub fn require_memory_bridge(test_name: &str, rendered: &str) {
+    if memory_bridge_unavailable(rendered) {
+        panic!(
+            "{test_name}: requires the amplihack memory bridge (amplihack-memory-lib), \
+             but it is unavailable or unhealthy.\n\
+             This test is `#[ignore]`d by default; you force-ran it (e.g. \
+             `cargo test -- --include-ignored`). Provision the memory bridge then retry, \
+             or run the default `cargo test`, which honestly reports this test as `ignored` \
+             rather than passing it by skipping. See issue #2047.\n\
+             --- rendered probe output ---\n{rendered}"
+        );
+    }
+}
+
 /// Fail-explicit guard for the `#[ignore]`d integration tests that drive the
 /// full engineer loop and therefore require a real LLM provider/session.
 ///
