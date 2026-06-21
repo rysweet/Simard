@@ -194,6 +194,57 @@ fn tier2_bridge_forwards_episodic_recall_through_sharedmemory() {
     );
 }
 
+/// Issue #2331: `SharedMemory` must also forward `graph_stats`. Its trait
+/// default returns an all-zero [`GraphStats`], so a tier-0/2 reader that wraps
+/// the live library handle would otherwise report zero edges even when the
+/// store holds real provenance — making `simard memory stats` blind to the
+/// connections whenever a reader resolves through the shared in-process store.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn tier2_bridge_forwards_graph_stats_through_sharedmemory() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+
+    // Seed a DERIVES_FROM edge: a fact distilled from an episode.
+    let writer = launch_writer_bridge(root).expect("writer bridge");
+    let episode = writer
+        .ops()
+        .store_episode("ran cargo test; 0 failures", "test", None)
+        .expect("store_episode through tier-2 writer");
+    writer
+        .ops()
+        .store_fact_with_provenance(
+            "lesson",
+            "tests must stay green",
+            0.9,
+            "distill:cycle",
+            None,
+            None,
+            std::slice::from_ref(&episode),
+        )
+        .expect("store_fact_with_provenance through tier-2 writer");
+
+    // A reader resolving through the shared store wraps it in `SharedMemory`;
+    // `graph_stats` must reach the library backend, not the zeroed default.
+    let reader = open_reader_bridge(root).expect("reader bridge");
+    let stats = reader
+        .ops()
+        .graph_stats()
+        .expect("graph_stats via SharedMemory");
+    assert!(
+        stats.derives_from_edges >= 1,
+        "SharedMemory must forward graph_stats to the library backend; got \
+         derives_from_edges={} (a zeroed default means no forwarding)",
+        stats.derives_from_edges,
+    );
+    assert!(
+        stats.facts_with_provenance >= 1,
+        "forwarded graph_stats must reflect the seeded provenance coverage; got \
+         facts_with_provenance={}",
+        stats.facts_with_provenance,
+    );
+}
+
 /// After [`clear_tier2_store_cache`] drops the shared handle (checkpointing via
 /// `Database::drop`), a fresh tier-2 open must cold-recall the persisted board
 /// from disk. Guards the lifetime argument: evicting a cached handle does not

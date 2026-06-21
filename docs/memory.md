@@ -134,7 +134,53 @@ cognitive memory @ /home/azureuser/.simard/cognitive  (via daemon socket)
   prospective       5     (triggers)
   ---------------------
   total            44
+
+edges / connections:
+  (edges: run with daemon stopped for graph stats)
 ```
+
+### Edges / connections (graph-edge + dedup introspection)
+
+Per-type counts show how many *nodes* live in each memory; the **edges /
+connections** section (issue #2331) shows how those nodes are *wired together*,
+so an operator can watch the cognitive-memory graph forming:
+
+```text
+$ simard memory stats        # daemon stopped → direct on-disk open
+
+  ... per-type table ...
+
+edges / connections:
+  DERIVES_FROM                 12     (fact -> episode)
+  PROCEDURE_DERIVES_FROM        3     (procedure -> episode)
+  SIMILAR_TO                    0     (fact <-> fact)
+  SUPERSEDES                    0     (deduped snapshot)
+  facts with provenance:  4 / 5
+  snapshot dedup:         1 distinct caller keys / 6 snapshot facts
+```
+
+| Line | Meaning |
+|---|---|
+| `DERIVES_FROM` | Provenance edges from distilled facts back to their source episodes (the read side of `store_fact_with_provenance`). |
+| `PROCEDURE_DERIVES_FROM` | Provenance edges from procedures back to the episodes they were distilled from. |
+| `SIMILAR_TO` | Fact↔fact similarity edges. |
+| `SUPERSEDES` | Edges left by caller-key dedup (new snapshot → archived prior). |
+| `facts with provenance: X / Y` | `X` of `Y` facts carry at least one `DERIVES_FROM` edge. |
+| `snapshot dedup: D / T` | `T` snapshot facts (live + superseded revisions) collapsed onto `D` distinct caller keys. `T` well above `D` is the visible dedup signal. Scoped to the `goal-board:snapshot` concept only — the per-goal `goal-store:record:{slug}` dedup family (above) is not counted here. |
+
+The `--json` output mirrors this under stable keys: an `edges` object
+(`derives_from`, `procedure_derives_from`, `similar_to`, `supersedes`), a
+`provenance` object (`facts_with_provenance`, `facts_total`), and a
+`snapshot_dedup` object (`distinct_caller_keys`, `snapshot_facts`).
+
+**Limitations.** The pinned `amplihack-memory` rev exposes provenance readers
+but **no public per-type edge counter**, so `SIMILAR_TO` and `SUPERSEDES` are
+reported as `0`; the `snapshot dedup` line is the computed proxy for
+`SUPERSEDES` activity. The edge counts also require reading the graph directly,
+which the daemon's memory **socket does not expose** — when the daemon is up the
+section prints `(edges: run with daemon stopped for graph stats)`. Stop the
+daemon (or point `stats` at an idle state-root) for the real counts. The whole
+section is read-only and never fails the report.
 
 The `episodic` count here is the number of episodes **stored**; it is
 distinct from the `… episodes` figure in the per-cycle OODA log, which

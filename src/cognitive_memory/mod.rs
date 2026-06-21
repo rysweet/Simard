@@ -335,6 +335,23 @@ pub trait CognitiveMemoryOps: Send + Sync {
         Ok(vec![])
     }
 
+    /// Return edge / connection counts across the cognitive-memory graph
+    /// (issue #2331): provenance edges (`DERIVES_FROM` fact→episode,
+    /// `PROCEDURE_DERIVES_FROM` procedure→episode), `SIMILAR_TO` and
+    /// `SUPERSEDES` edges, fact-provenance coverage, and snapshot-dedup
+    /// grouping. This is the aggregate read side of
+    /// [`store_fact_with_provenance`](Self::store_fact_with_provenance) /
+    /// [`store_fact_with_caller_key`](Self::store_fact_with_caller_key) that
+    /// powers the "edges / connections" section of `simard memory stats`.
+    ///
+    /// Default impl returns an all-zero [`GraphStats`] so backends without a
+    /// provenance graph (IPC client, bridge clients, test stubs) keep
+    /// compiling; only [`LibraryCognitiveMemory`](crate::cognitive_memory::LibraryCognitiveMemory)
+    /// overrides it to traverse the graph. Read-only — never mutates the store.
+    fn graph_stats(&self) -> SimardResult<GraphStats> {
+        Ok(GraphStats::default())
+    }
+
     /// Search recent episodes by content prefix.
     ///
     /// Returns `(content, recorded_at)` pairs for episodes whose
@@ -399,6 +416,11 @@ pub mod metrics;
 mod library_adapter;
 pub use library_adapter::LibraryCognitiveMemory;
 
+// Issue #2331: re-export the graph-edge / dedup stats DTO at the module root so
+// callers reference `cognitive_memory::GraphStats` alongside the trait that
+// returns it.
+pub use crate::memory_cognitive::GraphStats;
+
 // PR-C (issue #2281): bootstrap procedural-memory seeding. Three
 // baseline procedures (`pr-merge:bootstrap`, `ci-fix:bootstrap`,
 // `run-tests:bootstrap`) are seeded into procedural memory on
@@ -455,3 +477,9 @@ mod tests_provenance;
 // contracts against `LibraryCognitiveMemory`.
 #[cfg(test)]
 mod tests_ranked_recall;
+
+// Issue #2331: graph-edge / dedup stats. Pins the new `graph_stats` aggregate
+// against `LibraryCognitiveMemory` — DERIVES_FROM / PROCEDURE_DERIVES_FROM edge
+// counts, fact-provenance coverage, and snapshot-dedup caller-key grouping.
+#[cfg(test)]
+mod tests_graph_stats;
