@@ -755,3 +755,17 @@ mod distillation_tests;
 // behaviour.
 #[cfg(test)]
 mod tests_pr_c;
+
+// Issue #2327: TDD (RED) tests for the episode-ingestion classifier
+// (`classifier::classify`) that drops operational-noise episodes,
+// down-scopes bookkeeping, and stores meaningful episodics with
+// {importance, event_kind, goal_id, cycle, is_operational} metadata.
+#[cfg(test)]
+mod classifier_tests;
+
+// Issue #2327: TDD (RED) tests for the automatic promotion (distillation)
+// scheduler (`scheduler::distill_trigger` / `run_scheduled_distillation_*`)
+// and the procedure-distillation extension (DistilledProcedure / DistillOutput
+// / DistillReport.procedure_count) that stores procedures with provenance.
+#[cfg(test)]
+mod promotion_scheduler_tests;

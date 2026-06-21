@@ -418,6 +418,25 @@ mod tests_ooda_config {
         );
     }
 
+    // Issue #2327 (RED): the automatic promotion scheduler is configured via
+    // two new OodaConfig fields. With the env overrides unset, they default to
+    // the canonical 25-episode threshold and 50-cycle interval.
+    #[test]
+    fn ooda_config_default_distill_thresholds() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("SIMARD_DISTILL_MIN_EPISODES") };
+        unsafe { std::env::remove_var("SIMARD_DISTILL_INTERVAL_CYCLES") };
+        let config = OodaConfig::default();
+        assert_eq!(
+            config.distill_min_episodes, 25,
+            "default distill threshold must be 25 episodes"
+        );
+        assert_eq!(
+            config.distill_interval_cycles, 50,
+            "default distill interval must be 50 cycles"
+        );
+    }
+
     #[test]
     fn ooda_config_auto_scaler_ceiling_is_4x_max() {
         let _lock = ENV_LOCK.lock().unwrap();
