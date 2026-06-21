@@ -44,7 +44,7 @@ fi
 echo "[recall] starting dashboard on :$PORT"
 "$BIN" dashboard serve --port="$PORT" >"$LOG" 2>&1 &
 DASH_PID=$!
-cleanup() { kill "$DASH_PID" 2>/dev/null || true; rm -rf "$STATE_DIR"; }
+cleanup() { kill "$DASH_PID" 2>/dev/null || true; rm -rf "$STATE_DIR" "$LOG"; }
 trap cleanup EXIT
 
 # Wait for the server to accept connections.
