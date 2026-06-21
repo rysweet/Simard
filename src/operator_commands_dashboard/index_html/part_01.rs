@@ -387,10 +387,12 @@ pub(crate) const PART_01: &str = r#"      </div>
 
     /* --- Logs --- */
     let allLogLines=[];
+    let allLogLevels=[];
     async function fetchLogs(){
       try{
         const d=await apiFetch('/api/logs');
         allLogLines=d.daemon_log_lines||[];
+        allLogLevels=d.daemon_log_levels||[];
         applyLogFilter();
         // Issue #928: guard each element access so a missing target on the
         // current tab does not abort the whole fetchLogs and leave every

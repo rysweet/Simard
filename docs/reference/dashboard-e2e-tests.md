@@ -17,8 +17,16 @@ tests/e2e-dashboard/
     ├── auth.spec.ts                  # Authentication flow (7 tests, @structural)
     ├── chat-lifecycle.spec.ts        # Chat UI and WS commands (8 tests, @structural)
     ├── multi-turn.spec.ts            # Context awareness (4 tests, @structural)
+    ├── logs-filter.spec.ts           # Logs level filter, #1687 (4 tests, @structural)
+    ├── dashboard-audit.spec.ts       # Per-tab screenshot + text audit (@structural, run on demand)
     └── meeting-content.spec.ts       # Real LLM validation (3 tests, @smoke)
 ```
+
+> The list above is illustrative, not exhaustive — see `tests/e2e-dashboard/specs/`
+> for the full set. `logs-filter.spec.ts` is mocked end-to-end and runs in CI
+> alongside `overview.spec.ts`; `dashboard-audit.spec.ts` walks every tab to
+> capture screenshots + visible text into the gitignored
+> `tests/e2e-dashboard/.audit-output/` and is run on demand, not in CI.
 
 **22 tests total** — 19 structural, 3 smoke.
 

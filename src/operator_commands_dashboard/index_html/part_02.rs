@@ -39,17 +39,35 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
         }
       }catch(e){const dl=document.getElementById('daemon-log'); if(dl){dl.textContent='Failed to load logs — check /api/logs endpoint';}}
     }
+    /* Infer a log line's severity from its text when the backend did not
+       attach a machine-readable level (issue #1687). Mirrors the server-side
+       classify_log_level heuristic: error vocabulary wins over warning
+       vocabulary, and everything else is informational. */
+    function classifyLogLevel(line){
+      const l=(line||'').toLowerCase();
+      if(/(error|failed|failure|fatal|panic|exception|traceback|did not emit|could not|cannot|unable to)/.test(l)) return 'error';
+      if(/(warn|warning|retry|retrying|degraded|timeout|timed out)/.test(l)) return 'warn';
+      return 'info';
+    }
+    function logLevelAt(i){
+      const provided=allLogLevels[i];
+      return (provided||classifyLogLevel(allLogLines[i])).toLowerCase();
+    }
     function applyLogFilter(){
       const filter=(document.getElementById('log-filter')?.value||'').toLowerCase();
       const level=(document.getElementById('log-level-filter')?.value||'').toLowerCase();
-      let lines=allLogLines;
-      if(filter) lines=lines.filter(l=>l.toLowerCase().includes(filter));
-      if(level) lines=lines.filter(l=>l.toLowerCase().includes(level));
+      const shown=[];
+      for(let i=0;i<allLogLines.length;i++){
+        const line=allLogLines[i];
+        if(filter && !line.toLowerCase().includes(filter)) continue;
+        if(level && logLevelAt(i)!==level) continue;
+        shown.push(line);
+      }
       const el=document.getElementById('daemon-log');
-      el.textContent=lines.length?lines.join('\n'):'(no matching log lines)';
+      el.textContent=shown.length?shown.join('\n'):'(no matching log lines)';
       el.scrollTop=el.scrollHeight;
       const countEl=document.getElementById('log-line-count');
-      if(countEl) countEl.textContent=`${lines.length}/${allLogLines.length} lines`;
+      if(countEl) countEl.textContent=`${shown.length}/${allLogLines.length} lines`;
     }
     document.getElementById('log-filter')?.addEventListener('input',applyLogFilter);
     document.getElementById('log-level-filter')?.addEventListener('change',applyLogFilter);
