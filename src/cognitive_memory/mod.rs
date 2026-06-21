@@ -16,6 +16,49 @@ use crate::memory_cognitive::{
     CognitiveWorkingSlot,
 };
 
+/// Per-signal weights for [`CognitiveMemoryOps::recall_facts_ranked`] (issue
+/// #2329).
+///
+/// A backend-agnostic mirror of the library's `RecallWeights` (same six fields,
+/// same order). It lives here — not in the adapter — so the trait never names a
+/// library type and every implementor/mock stays backend-neutral. The
+/// `RecallWeightSet -> amplihack_memory::RecallWeights` conversion is
+/// adapter-local. The per-[`OodaPhase`](crate::ooda_loop::OodaPhase) mapping
+/// lives in `ooda_loop::phase_weights` because only that layer knows about the
+/// OODA phases; `cognitive_memory` must stay a leaf module.
+///
+/// Each field scales one scoring term; weights are un-normalized (only relative
+/// magnitudes matter). [`Default`] is the library-balanced baseline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecallWeightSet {
+    /// Weight on keyword overlap between the query and the fact text.
+    pub text_relevance: f64,
+    /// Weight on the fact's confidence.
+    pub confidence: f64,
+    /// Weight on the fact's importance/salience.
+    pub importance: f64,
+    /// Weight on exponential recency decay of the last access / creation time.
+    pub recency: f64,
+    /// Weight on the sub-linear usage boost.
+    pub usage: f64,
+    /// Weight on graph-neighbor proximity (e.g. `DERIVES_FROM` neighbours).
+    pub graph: f64,
+}
+
+impl Default for RecallWeightSet {
+    /// Library-balanced default: `1.0, 0.7, 0.5, 0.4, 0.3, 0.6`.
+    fn default() -> Self {
+        Self {
+            text_relevance: 1.0,
+            confidence: 0.7,
+            importance: 0.5,
+            recency: 0.4,
+            usage: 0.3,
+            graph: 0.6,
+        }
+    }
+}
+
 /// Trait abstracting cognitive memory operations.
 ///
 /// Both [`LibraryCognitiveMemory`] (amplihack-memory-lib, lbug-backed) and
@@ -67,6 +110,72 @@ pub trait CognitiveMemoryOps: Send + Sync {
         limit: u32,
         min_confidence: f64,
     ) -> SimardResult<Vec<CognitiveFact>>;
+
+    /// Ranked (scored) recall over semantic facts (issue #2329).
+    ///
+    /// Scores every candidate fact across six signals — text relevance,
+    /// confidence, importance, recency, usage, and graph proximity — weighted by
+    /// `weights`, and returns the facts in **descending score order** (the first
+    /// element is the best match). Superseded/archived facts are excluded.
+    /// Ordering *is* the ranking; no numeric score is surfaced on
+    /// [`CognitiveFact`].
+    ///
+    /// `limit` and `min_confidence` mirror [`search_facts`](Self::search_facts).
+    ///
+    /// The default implementation delegates to
+    /// [`search_facts`](Self::search_facts) (ignoring `weights`) so non-library
+    /// backends (legacy Python bridge, IPC client, test mocks) keep working with
+    /// confidence-ranked keyword recall. Only [`LibraryCognitiveMemory`]
+    /// overrides this to call the library's ranked recall.
+    fn recall_facts_ranked(
+        &self,
+        query: &str,
+        limit: u32,
+        min_confidence: f64,
+        _weights: RecallWeightSet,
+    ) -> SimardResult<Vec<CognitiveFact>> {
+        self.search_facts(query, limit, min_confidence)
+    }
+
+    /// Store a fact under a stable `caller_key` so repeated logical records
+    /// deduplicate instead of accumulating (issue #2329).
+    ///
+    /// For a given `caller_key` the backend keeps **at most one live fact**:
+    /// identical content is **reused** (no duplicate node), changed content
+    /// **supersedes** the prior live fact (old archived, `superseded_by` set, a
+    /// typed `SUPERSEDES` edge new -> old). The remaining arguments mirror
+    /// [`store_fact`](Self::store_fact); `caller_key` leads so call sites read
+    /// `store_fact_with_caller_key(key, …)`.
+    ///
+    /// The default implementation ignores `caller_key` and delegates to
+    /// [`store_fact`](Self::store_fact), so backends without caller-key dedup
+    /// (legacy Python bridge, IPC client, test mocks) keep storing the fact
+    /// (without dedup). Only [`LibraryCognitiveMemory`] performs the dedup.
+    fn store_fact_with_caller_key(
+        &self,
+        _caller_key: &str,
+        concept: &str,
+        content: &str,
+        confidence: f64,
+        tags: &[String],
+        source_id: &str,
+    ) -> SimardResult<String> {
+        self.store_fact(concept, content, confidence, tags, source_id)
+    }
+
+    /// Prune superseded/archived facts, returning the number reclaimed
+    /// (issue #2329).
+    ///
+    /// Reclaims the superseded tail produced by
+    /// [`store_fact_with_caller_key`](Self::store_fact_with_caller_key) so the
+    /// snapshot/goal-record pile-up does not grow unbounded. Provenance-bearing
+    /// facts are protected by the backend.
+    ///
+    /// The default implementation is a no-op (`Ok(0)`) for backends without a
+    /// retention pass; only [`LibraryCognitiveMemory`] reclaims.
+    fn prune_superseded(&self) -> SimardResult<usize> {
+        Ok(0)
+    }
 
     fn store_procedure(
         &self,
@@ -338,3 +447,11 @@ mod tests_pr_2299_2300_recall_triggers;
 // procedure upsert) is preserved.
 #[cfg(test)]
 mod tests_provenance;
+
+// Issue #2329: ranked fact recall (phase-weighted) + snapshot retention/dedup.
+// Pins the new `recall_facts_ranked` (descending score order, default delegates
+// to `search_facts`), `store_fact_with_caller_key` (CallerKey reuse/supersede,
+// single live record), and `prune_superseded` (reclaims the superseded tail)
+// contracts against `LibraryCognitiveMemory`.
+#[cfg(test)]
+mod tests_ranked_recall;

@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cognitive_memory::CognitiveMemoryOps;
+use crate::cognitive_memory::{CognitiveMemoryOps, RecallWeightSet};
 use crate::error::SimardResult;
 use crate::goals::{GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, GoalRecord};
 use crate::memory_cognitive::{
@@ -132,6 +132,44 @@ pub fn preparation_memory_operations_with_active_slugs(
     bridge: &dyn CognitiveMemoryOps,
     active_slugs: Option<&std::collections::HashSet<&str>>,
 ) -> SimardResult<PreparedContext> {
+    // Back-compat entry point: balanced (Orient/library-default) ranked-recall
+    // weights. Phase-aware callers (the OODA cycle) use
+    // [`preparation_memory_operations_with_active_slugs_phased`] to bias the
+    // ranking per phase (issue #2329).
+    preparation_memory_operations_with_active_slugs_phased(
+        objective,
+        session_id,
+        bridge,
+        active_slugs,
+        RecallWeightSet::default(),
+    )
+}
+
+/// Preparation phase with explicit per-phase ranked-recall `weights`
+/// (issue #2329).
+///
+/// Identical to [`preparation_memory_operations_with_active_slugs`] but threads
+/// a [`RecallWeightSet`] into the ranked recall that gathers `relevant_facts`,
+/// so each OODA phase can bias the ranking toward what it cares about (Observe
+/// favors recency, Decide favors confidence). The OODA observe path calls this
+/// with [`crate::ooda_loop::phase_weights::weights_for_phase`]`(OodaPhase::Observe)`;
+/// the 3- and 4-arg entry points default to the balanced `Orient` weights for
+/// backward compatibility.
+///
+/// `relevant_facts` are gathered with the library's **ranked recall**
+/// (`recall_facts_ranked`) rather than a plain keyword `search_facts`: every
+/// candidate fact is scored across six signals and returned in descending score
+/// order, with superseded snapshot revisions excluded. The exhaustive goal-fact
+/// load and all PR-A filters (snapshot drop, `seen_ids` dedup, stale-slug drop,
+/// 10-fact cap) still run on the plain `search_facts` path *after* ranking.
+#[tracing::instrument(skip_all)]
+pub fn preparation_memory_operations_with_active_slugs_phased(
+    objective: &str,
+    session_id: &SessionId,
+    bridge: &dyn CognitiveMemoryOps,
+    active_slugs: Option<&std::collections::HashSet<&str>>,
+    weights: RecallWeightSet,
+) -> SimardResult<PreparedContext> {
     // Split compound objectives (joined with "; ") into individual fragments
     // and search each separately. The old code passed the full joined string to
     // search_facts() which uses Cypher CONTAINS — no fact matches a giant
@@ -146,7 +184,11 @@ pub fn preparation_memory_operations_with_active_slugs(
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for fragment in &fragments {
-        let per_fragment = bridge.search_facts(fragment, 10, 0.0)?;
+        // Issue #2329: gather candidate facts via ranked recall (relevance +
+        // recency + confidence + …, phase-weighted) instead of a plain
+        // confidence-sorted keyword `search_facts`. Facts come back in
+        // descending score order; superseded snapshot revisions are excluded.
+        let per_fragment = bridge.recall_facts_ranked(fragment, 10, 0.0, weights)?;
         for fact in per_fragment {
             // PR-A filter 1: drop goal-board:snapshot revisions even
             // when they surface from a per-fragment match. The live
@@ -778,11 +820,36 @@ pub fn consolidation_persistence(
     // rather than silently dropping data.
     bridge.consolidate_episodes(20)?;
 
+    // Issue #2329: reclaim the superseded tail left behind by caller-key snapshot
+    // dedup (goal-board snapshots, per-goal records). Pruning is housekeeping, so
+    // a failure is logged and never aborts teardown — it must not turn a
+    // successful consolidation into a failure.
+    match bridge.prune_superseded() {
+        Ok(reclaimed) if reclaimed > 0 => {
+            tracing::debug!(
+                reclaimed,
+                "consolidation_persistence: pruned superseded facts"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "consolidation_persistence: prune_superseded failed (non-fatal)"
+            );
+        }
+    }
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests;
+
+// Issue #2329: OODA preparation gathers `relevant_facts` via ranked recall
+// (relevance/recency/confidence) rather than a confidence-sorted `search_facts`.
+#[cfg(test)]
+mod tests_ranked_prep;
 
 // PR-A (issue #2281): preparation-phase memory filters. Tests assert
 // that `goal-board:snapshot` revisions are dropped from the prepared
