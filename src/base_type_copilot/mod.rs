@@ -13,7 +13,7 @@ use std::process::Command;
 
 use tempfile::NamedTempFile;
 
-use crate::base_type_turn::{format_turn_input, parse_turn_output, prepare_turn_context};
+use crate::base_type_turn::{EnrichmentBridges, TurnContext, format_turn_input, parse_turn_output};
 use crate::base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
     BaseTypeSession, BaseTypeSessionRequest, BaseTypeTurnInput, capability_set,
@@ -160,10 +160,11 @@ impl CopilotSdkAdapter {
 
         // Issue #1664: wire real memory + knowledge bridges instead of the
         // previously-hardcoded `None`/`None`. When enrichment is configured
-        // the bridges are launched here (with graceful degradation) so that
-        // `prepare_turn_context` actually injects memory facts, procedures,
-        // and domain knowledge into every turn.
-        let (memory_bridge, knowledge_bridge) = match &self.enrichment {
+        // the bridges are launched here (with graceful degradation) and stored
+        // in the normalized `EnrichmentBridges` bundle (issue #1665) so that
+        // the shared `enrich_input` entry point actually injects memory facts,
+        // procedures, and domain knowledge into every turn.
+        let (memory, knowledge) = match &self.enrichment {
             EnrichmentSource::Disabled => (None, None),
             EnrichmentSource::Native { state_root } => launch_enrichment_bridges(state_root),
         };
@@ -172,8 +173,7 @@ impl CopilotSdkAdapter {
             descriptor: self.descriptor.clone(),
             config: self.config.clone(),
             request,
-            memory_bridge,
-            knowledge_bridge,
+            enrichment: EnrichmentBridges { memory, knowledge },
             is_open: false,
             is_closed: false,
             turn_count: 0,
@@ -202,8 +202,7 @@ struct CopilotSdkSession {
     descriptor: BaseTypeDescriptor,
     config: CopilotAdapterConfig,
     request: BaseTypeSessionRequest,
-    memory_bridge: Option<Box<dyn CognitiveMemoryOps>>,
-    knowledge_bridge: Option<KnowledgeBridge>,
+    enrichment: EnrichmentBridges,
     is_open: bool,
     is_closed: bool,
     turn_count: u32,
@@ -256,8 +255,7 @@ impl CopilotSdkSession {
             },
             config: CopilotAdapterConfig::default(),
             request,
-            memory_bridge: None,
-            knowledge_bridge: None,
+            enrichment: EnrichmentBridges::new(),
             is_open: false,
             is_closed: false,
             turn_count: 0,
@@ -266,15 +264,17 @@ impl CopilotSdkSession {
     }
 
     /// Test-only builder that injects pre-constructed enrichment bridges so a
-    /// test can assert that `prepare_turn_context` consumes them (issue #1664).
+    /// test can assert that `enrich_input` consumes them (issues #1664/#1665).
     #[cfg(test)]
     fn with_test_bridges(
         mut self,
         memory_bridge: Option<Box<dyn CognitiveMemoryOps>>,
         knowledge_bridge: Option<KnowledgeBridge>,
     ) -> Self {
-        self.memory_bridge = memory_bridge;
-        self.knowledge_bridge = knowledge_bridge;
+        self.enrichment = EnrichmentBridges {
+            memory: memory_bridge,
+            knowledge: knowledge_bridge,
+        };
         self
     }
 
@@ -298,25 +298,46 @@ impl CopilotSdkSession {
         &self,
         input: &BaseTypeTurnInput,
     ) -> SimardResult<(String, NamedTempFile)> {
-        let mut parts = Vec::new();
-        if !input.prompt_preamble.is_empty() {
-            parts.push(input.prompt_preamble.as_str());
-        }
-        if !input.identity_context.is_empty() {
-            parts.push(input.identity_context.as_str());
-        }
-        parts.push(&input.objective);
-
-        let combined_objective = parts.join("\n\n");
-        let context = prepare_turn_context(
-            &combined_objective,
-            self.memory_bridge.as_deref(),
-            self.knowledge_bridge.as_ref(),
-        )?;
-        let formatted = format_turn_input(&context);
+        let formatted = self.render_enriched_prompt(input)?;
         let prompt_file = write_prompt_to_tempfile(&formatted)?;
         let objective = build_copilot_terminal_objective(&self.config, prompt_file.path());
         Ok((objective, prompt_file))
+    }
+
+    /// Render the enriched, formatted prompt string submitted to the copilot
+    /// subprocess.
+    ///
+    /// Routes the turn through the shared [`BaseTypeSession::enrich_input`]
+    /// entry point (issue #1665) — which recalls memory/knowledge into
+    /// `prompt_preamble` — then folds the preamble, identity context, and
+    /// objective into a single prompt body and wraps it with the standard
+    /// objective/instructions scaffold via [`format_turn_input`].
+    ///
+    /// With no bridges configured (the production default until #1664 wires
+    /// them through), `enrich_input` returns the input unchanged, so the output
+    /// is byte-identical to the pre-#1665 Copilot prompt.
+    fn render_enriched_prompt(&self, input: &BaseTypeTurnInput) -> SimardResult<String> {
+        let enriched = self.enrich_input(input)?;
+
+        let mut parts = Vec::new();
+        if !enriched.prompt_preamble.is_empty() {
+            parts.push(enriched.prompt_preamble.as_str());
+        }
+        if !enriched.identity_context.is_empty() {
+            parts.push(enriched.identity_context.as_str());
+        }
+        parts.push(enriched.objective.as_str());
+        let combined_objective = parts.join("\n\n");
+
+        // The enrichment is already folded into `combined_objective`; render the
+        // scaffold around it with empty context sections to avoid re-querying.
+        let context = TurnContext {
+            objective: combined_objective,
+            memory_facts: Vec::new(),
+            knowledge: Vec::new(),
+            procedures: Vec::new(),
+        };
+        Ok(format_turn_input(&context))
     }
 
     /// Build an enriched prompt for meeting mode (no PTY command wrapping).
@@ -326,22 +347,7 @@ impl CopilotSdkSession {
     /// preamble — since meeting mode invokes `copilot` directly via
     /// `std::process::Command`.
     fn build_meeting_prompt(&self, input: &BaseTypeTurnInput) -> SimardResult<NamedTempFile> {
-        let mut parts = Vec::new();
-        if !input.prompt_preamble.is_empty() {
-            parts.push(input.prompt_preamble.as_str());
-        }
-        if !input.identity_context.is_empty() {
-            parts.push(input.identity_context.as_str());
-        }
-        parts.push(&input.objective);
-
-        let combined_objective = parts.join("\n\n");
-        let context = prepare_turn_context(
-            &combined_objective,
-            self.memory_bridge.as_deref(),
-            self.knowledge_bridge.as_ref(),
-        )?;
-        let formatted = format_turn_input(&context);
+        let formatted = self.render_enriched_prompt(input)?;
         write_prompt_to_tempfile(&formatted)
     }
 
@@ -516,6 +522,14 @@ impl CopilotSdkSession {
 impl BaseTypeSession for CopilotSdkSession {
     fn descriptor(&self) -> &BaseTypeDescriptor {
         &self.descriptor
+    }
+
+    fn enrichment(&self) -> Option<&EnrichmentBridges> {
+        Some(&self.enrichment)
+    }
+
+    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentBridges> {
+        Some(&mut self.enrichment)
     }
 
     fn open(&mut self) -> SimardResult<()> {

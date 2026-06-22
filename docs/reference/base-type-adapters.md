@@ -1,7 +1,7 @@
 ---
 title: Base Type Adapters
 description: Reference for the pluggable agent execution substrates that Simard delegates work to — traits, shipped adapters, capability contracts, and topology support.
-last_updated: 2026-03-31
+last_updated: 2026-06-22
 owner: simard
 doc_type: reference
 ---
@@ -33,6 +33,13 @@ pub trait BaseTypeSession: Send {
     fn open(&mut self) -> SimardResult<()>;
     fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome>;
     fn close(&mut self) -> SimardResult<()>;
+
+    // Normalized memory + knowledge enrichment (issue #1665).
+    // Provided methods — default to "no enrichment configured"; adapters that
+    // support enrichment override `enrichment`/`enrichment_mut`.
+    fn enrichment(&self) -> Option<&EnrichmentBridges> { None }
+    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentBridges> { None }
+    fn enrich_input(&self, input: &BaseTypeTurnInput) -> SimardResult<BaseTypeTurnInput> { /* shared */ }
 }
 ```
 
@@ -85,13 +92,19 @@ A PTY-backed shell adapter that runs a configurable local command through the te
 |----------|-------|
 | Capabilities | PromptAssets, SessionLifecycle, Memory, Evidence, Reflection, TerminalSession |
 | Topologies | SingleProcess |
-| Memory enrichment | No (done at caller level) |
-| Knowledge enrichment | No (done at caller level) |
+| Memory enrichment | Exposed via shared `enrich_input` (not folded into shell command stream) |
+| Knowledge enrichment | Exposed via shared `enrich_input` (not folded into shell command stream) |
 
 **Configuration** (`HarnessConfig`):
 - `command` — shell command to run for each turn (optional; if absent, objective text passes directly to terminal session)
 - `shell` — shell override (default: `/usr/bin/bash`)
 - `working_directory` — working directory for command execution
+
+> **Enrichment note (#1665):** The harness exposes the normalized
+> `BaseTypeSession::enrich_input` entry point and stores `EnrichmentBridges`,
+> so it participates in the shared enrichment contract. Because it executes
+> *literal shell commands* rather than natural-language LLM prompts, it does
+> not fold memory/knowledge markdown into its command stream.
 
 ### `rusty-clawd` — `RustyClawdAdapter`
 
@@ -103,8 +116,14 @@ The RustyClawd session backend. Supports both single-process and multi-process t
 |----------|-------|
 | Capabilities | PromptAssets, SessionLifecycle, Memory, Evidence, Reflection |
 | Topologies | SingleProcess, MultiProcess |
-| Memory enrichment | At session level |
-| Knowledge enrichment | At session level |
+| Memory enrichment | Yes — automatic per-turn via shared `enrich_input` (#1665) |
+| Knowledge enrichment | Yes — automatic per-turn via shared `enrich_input` (#1665) |
+
+> **Enrichment note (#1665):** Each `run_turn` routes the input through the
+> shared `BaseTypeSession::enrich_input` entry point before dispatching to the
+> RustyClawd client, so recalled memory facts/procedures and domain knowledge
+> are folded into the turn objective. Prior to #1665 only the Copilot adapter
+> enriched its turns; this adapter ran with empty memory/knowledge context.
 
 ### `copilot-sdk` — `CopilotSdkAdapter`
 
@@ -112,7 +131,7 @@ The RustyClawd session backend. Supports both single-process and multi-process t
 
 Drives `amplihack copilot` through the PTY infrastructure with memory and knowledge context injection. Each turn:
 
-1. Gathers relevant memory facts (up to 10, confidence ≥ 0.3) and procedures (up to 5) from `CognitiveMemoryBridge`
+1. Routes the input through the shared `BaseTypeSession::enrich_input` entry point, which gathers relevant memory facts (up to 10, confidence ≥ 0.3) and procedures (up to 5) from `CognitiveMemoryBridge`
 2. Queries `KnowledgeBridge` for domain knowledge relevant to the objective
 3. Formats the enriched context via `base_type_turn::format_turn_input`
 4. Executes through `terminal_session::execute_terminal_turn`
@@ -151,7 +170,35 @@ Raw LLM output ← terminal PTY ← enriched prompt
 parse_turn_output() → TurnOutput { actions, explanation, confidence }
 ```
 
-**Honest degradation:** If a bridge call fails during enrichment, the failure is recorded in `TurnContext.degraded_sources` and the turn proceeds with partial context rather than failing entirely (Pillar 11).
+### Normalized enrichment entry point (issue #1665)
+
+Before #1665, only `CopilotSdkAdapter` called `prepare_turn_context`, so every
+other shipped adapter ran with empty memory/knowledge context even when bridges
+were configured. Enrichment is now centralized on **one shared call site** so it
+cannot silently diverge again:
+
+- `EnrichmentBridges` — a bundle of the optional `memory` (`CognitiveMemoryOps`)
+  and `knowledge` (`KnowledgeBridge`) bridges. Each session that supports
+  enrichment stores one and exposes it through `BaseTypeSession::enrichment()` /
+  `enrichment_mut()`.
+- `enrich_turn_input(input, memory, knowledge)` — folds the input's
+  `prompt_preamble`, `identity_context`, and `objective` into a single
+  objective, calls `prepare_turn_context`, and renders the result via
+  `format_turn_input`. Returns the formatted prompt string.
+- `BaseTypeSession::enrich_input(&self, input)` — the provided trait method
+  every adapter inherits. It delegates to the session's configured
+  `EnrichmentBridges` (or to a no-op enrichment when none are configured).
+
+| Adapter | `enrich_input` exposed | Applied in `run_turn` |
+|---------|------------------------|-----------------------|
+| `copilot-sdk` | Yes | Yes (PTY and meeting paths) |
+| `rusty-clawd` | Yes | Yes (folded into the turn objective) |
+| `terminal-shell` (harness) | Yes | No — runs literal shell commands |
+| `claude-agent-sdk` / `ms-agent-framework` | Yes | No — `run_turn` is unimplemented |
+
+**Honest degradation:** If a configured bridge call fails during enrichment, the
+error propagates rather than silently degrading (PHILOSOPHY.md). A `None` bridge
+is not a failure — it simply yields an unenriched, objective-only prompt.
 
 ## Bootstrap Wiring
 
