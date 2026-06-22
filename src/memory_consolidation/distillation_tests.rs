@@ -53,6 +53,7 @@ use crate::memory_cognitive::{
     CognitiveWorkingSlot,
 };
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -144,6 +145,11 @@ struct EpisodeMock {
     episodes: Mutex<Vec<EpisodeRow>>,
     facts: Mutex<Vec<(String, String, f64, Vec<String>, String)>>, // (concept, content, conf, tags, source)
     mark_calls: Mutex<Vec<String>>,
+    /// Issue #2325: records `store_fact_with_provenance` calls as
+    /// `(concept, source_id, source_episode_ids)` so the distillation
+    /// provenance test can assert the originating episode id was threaded
+    /// through to the provenance write (creating a DERIVES_FROM edge).
+    prov_calls: Mutex<Vec<(String, String, Vec<String>)>>,
 }
 
 #[derive(Clone)]
@@ -175,6 +181,12 @@ impl EpisodeMock {
 
     fn marks(&self) -> Vec<String> {
         self.mark_calls.lock().unwrap().clone()
+    }
+
+    /// `(concept, source_id, source_episode_ids)` for every
+    /// `store_fact_with_provenance` call observed (issue #2325).
+    fn provenance_calls(&self) -> Vec<(String, String, Vec<String>)> {
+        self.prov_calls.lock().unwrap().clone()
     }
 
     fn compressed_flags(&self) -> Vec<(String, bool)> {
@@ -279,6 +291,38 @@ impl CognitiveMemoryOps for EpisodeMock {
             e.distilled = true;
         }
         Ok(())
+    }
+
+    // === Issue #2325 provenance override ===
+    //
+    // Records into BOTH `facts` (so existing `facts_stored()` assertions
+    // keep working once distillation switches to the provenance write) and
+    // `prov_calls` (so the new test can assert the source episode id was
+    // threaded through). Note the LIBRARY argument order: `source_id`
+    // BEFORE `tags`, with `tags`/`metadata` as `Option`s.
+    fn store_fact_with_provenance(
+        &self,
+        concept: &str,
+        content: &str,
+        confidence: f64,
+        source_id: &str,
+        tags: Option<&[String]>,
+        _metadata: Option<&HashMap<String, serde_json::Value>>,
+        source_episode_ids: &[String],
+    ) -> SimardResult<String> {
+        self.facts.lock().unwrap().push((
+            concept.to_string(),
+            content.to_string(),
+            confidence,
+            tags.map(<[String]>::to_vec).unwrap_or_default(),
+            source_id.to_string(),
+        ));
+        self.prov_calls.lock().unwrap().push((
+            concept.to_string(),
+            source_id.to_string(),
+            source_episode_ids.to_vec(),
+        ));
+        Ok(format!("sem_{}", self.facts.lock().unwrap().len()))
     }
 }
 
@@ -503,4 +547,67 @@ fn distillation_does_not_touch_compressed_flag() {
         post, pre_compressed,
         "compressed flags must be identical before and after distillation"
     );
+}
+
+/// Provenance threading (issue #2325, RED): distillation already knows
+/// each fact's `source_episode_id`. After wiring, it MUST pass that id to
+/// `store_fact_with_provenance` as `source_episode_ids` so a DERIVES_FROM
+/// edge is created — while still encoding the textual `distill:{id}`
+/// `source_id` for back-compat.
+///
+/// Pre-wiring this FAILS: distillation calls the legacy `store_fact`,
+/// which the mock records under `facts` but NOT under `prov_calls`, so
+/// `provenance_calls()` is empty.
+#[test]
+fn distillation_passes_source_episode_id_as_provenance() {
+    let n = DISTILL_MIN_EPISODES as usize + 5;
+    let mock = EpisodeMock::with_episodes(n_episodes(n));
+    let runner = FixedFactsRunner {
+        facts: vec![
+            (
+                "pr-pattern".to_string(),
+                "enable auto-merge before final review".to_string(),
+                "epi_00003".to_string(),
+            ),
+            (
+                "bug-pattern".to_string(),
+                "empty outcome list panics cycle.rs".to_string(),
+                "epi_00009".to_string(),
+            ),
+        ],
+        call_count: AtomicU32::new(0),
+    };
+
+    let report = distill_recent_episodes_with_runner(&mock, &runner).unwrap();
+    assert_eq!(report.fact_count, 2, "two facts emitted by the stub");
+
+    let prov = mock.provenance_calls();
+    assert_eq!(
+        prov.len(),
+        2,
+        "every distilled fact must be stored via store_fact_with_provenance so a \
+         DERIVES_FROM edge is created; got {prov:?}"
+    );
+
+    let by_concept: std::collections::HashMap<&str, &(String, String, Vec<String>)> =
+        prov.iter().map(|c| (c.0.as_str(), c)).collect();
+
+    let pr = by_concept
+        .get("pr-pattern")
+        .expect("pr-pattern must be stored with provenance");
+    assert_eq!(
+        pr.1, "distill:epi_00003",
+        "textual source_id must retain the distill: prefix for back-compat"
+    );
+    assert_eq!(
+        pr.2,
+        vec!["epi_00003".to_string()],
+        "source_episode_ids must carry the originating episode id"
+    );
+
+    let bug = by_concept
+        .get("bug-pattern")
+        .expect("bug-pattern must be stored with provenance");
+    assert_eq!(bug.1, "distill:epi_00009");
+    assert_eq!(bug.2, vec!["epi_00009".to_string()]);
 }

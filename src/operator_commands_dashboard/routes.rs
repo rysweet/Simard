@@ -150,7 +150,16 @@ async fn status() -> Json<Value> {
         "timestamp": chrono::Utc::now().to_rfc3339(),
     });
 
-    if let Some(h) = daemon_health {
+    if let Some(mut h) = daemon_health {
+        // System Status reads `daemon_health.cycle_number`. Surface the
+        // persistent cumulative cycle number (issue #1680) so it agrees with
+        // the Thinking tab and Recent Actions instead of the process-local
+        // "#1" that daemon_health carries after a daemon restart.
+        let authoritative =
+            super::cycle_source::authoritative_cycle_number(&resolve_state_root(), Some(&h));
+        if let Some(obj) = h.as_object_mut() {
+            obj.insert("cycle_number".to_string(), json!(authoritative));
+        }
         status_json["daemon_health"] = h;
     }
 

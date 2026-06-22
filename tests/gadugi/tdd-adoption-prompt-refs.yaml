@@ -1,0 +1,55 @@
+name: "TDD adoption Phase 1 prompt references (#2317)"
+description: "Outside-in verification that the in-repo prompt assets encode the ratified TDD charter: prompt_assets/simard/meeting_system.md references Specs/TDD_ADOPTION.md near the `simard goal set-priority adopt-tdd 1` example line (so the facilitator links the spec instead of re-creating the goal from boilerplate), and prompt_assets/simard/engineer_system.md carries the `tdd:`/`tdd-exempt:` self-attestation row with all three ratified forms in its PR-evidence heading list."
+version: "1.0.0"
+
+config:
+  timeout: 120000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 120000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Prompt assets reference the ratified TDD spec"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/tdd-adoption-prompt-refs.sh"
+    timeout: 120000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "prompt-assets"
+    - "meeting"
+    - "engineer"
+    - "tdd"
+    - "outside-in"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
+  issue: "2317"

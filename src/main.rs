@@ -20,9 +20,21 @@ fn main() -> std::process::ExitCode {
 
 /// Initialize structured tracing with optional OTEL export.
 ///
+/// Diagnostic logs are written to **stderr** so that stdout carries only a
+/// command's actual output — e.g. `simard memory stats --json` must emit
+/// nothing but the JSON document so it stays pipe-safe (`… | jq`). The
+/// dependency stack (notably `amplihack-memory`) logs at `info` on store
+/// open; routing those to stderr keeps machine-readable stdout clean.
+///
 /// - `RUST_LOG` controls verbosity (default: info)
 /// - `SIMARD_LOG_JSON=1` enables JSON log output
 /// - `OTEL_EXPORTER_OTLP_ENDPOINT` enables OTLP span export (e.g. http://localhost:4317)
+///
+/// Human/JSON log lines are always written to **stderr** so that stdout carries
+/// only program output (e.g. the `--json` payloads emitted by `simard memory
+/// stats|dump`). Routing logs to stdout would interleave dependency log lines
+/// such as `amplihack_memory::graph::lbug_store: effective LadybugDB limits ...`
+/// ahead of the JSON, breaking machine-readable parsing (issue #2340).
 fn init_tracing() {
     let use_json = std::env::var("SIMARD_LOG_JSON")
         .map(|v| matches!(v.as_str(), "1" | "true"))
@@ -46,7 +58,12 @@ fn init_tracing() {
             .map(|t| tracing_opentelemetry::layer().with_tracer(t));
         tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().json().with_target(true))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_target(true)
+                    .with_writer(std::io::stderr),
+            )
             .with(otel)
             .with(simard::trace_collector::SpanCollectorLayer)
             .init();
@@ -57,7 +74,11 @@ fn init_tracing() {
             .map(|t| tracing_opentelemetry::layer().with_tracer(t));
         tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().with_target(true))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(true)
+                    .with_writer(std::io::stderr),
+            )
             .with(otel)
             .with(simard::trace_collector::SpanCollectorLayer)
             .init();

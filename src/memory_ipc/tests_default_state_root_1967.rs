@@ -14,6 +14,7 @@ use crate::state_root::simard_state_root;
 /// The single most important invariant for issue #1967: the two
 /// resolvers must return identical paths in every environment.
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn default_state_root_matches_canonical_simard_state_root() {
     let from_memory_ipc = default_state_root();
     let from_canonical = simard_state_root();
@@ -27,6 +28,7 @@ fn default_state_root_matches_canonical_simard_state_root() {
 /// When `SIMARD_STATE_ROOT` is set, both resolvers must honour it
 /// identically (no implicit subdirectory join on either side).
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn explicit_state_root_env_is_honoured_exactly() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().to_path_buf();

@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cognitive_memory::CognitiveMemoryOps;
+use crate::cognitive_memory::{CognitiveMemoryOps, RecallWeightSet};
 use crate::error::SimardResult;
 use crate::goals::{GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, GoalRecord};
 use crate::memory_cognitive::{
@@ -65,11 +65,15 @@ pub fn intake_memory_operations(
     // Push the objective into working memory for this session.
     bridge.push_working("objective", objective, session_id.as_str(), 1.0)?;
 
-    // Store as an episodic event so we have a record of what was asked.
-    bridge.store_episode(
+    // Store as an episodic event so we have a record of what was asked —
+    // routed through the ingestion classifier (issue #2327). The session-start
+    // marker is operational noise and is dropped unless it carries a failure
+    // summary.
+    classifier::store_episode_classified(
+        bridge,
         &format!("Session {session_id} started with objective: {objective}"),
         "session-intake",
-        None,
+        &classifier::IntakeContext::default(),
     )?;
 
     Ok(())
@@ -128,6 +132,44 @@ pub fn preparation_memory_operations_with_active_slugs(
     bridge: &dyn CognitiveMemoryOps,
     active_slugs: Option<&std::collections::HashSet<&str>>,
 ) -> SimardResult<PreparedContext> {
+    // Back-compat entry point: balanced (Orient/library-default) ranked-recall
+    // weights. Phase-aware callers (the OODA cycle) use
+    // [`preparation_memory_operations_with_active_slugs_phased`] to bias the
+    // ranking per phase (issue #2329).
+    preparation_memory_operations_with_active_slugs_phased(
+        objective,
+        session_id,
+        bridge,
+        active_slugs,
+        RecallWeightSet::default(),
+    )
+}
+
+/// Preparation phase with explicit per-phase ranked-recall `weights`
+/// (issue #2329).
+///
+/// Identical to [`preparation_memory_operations_with_active_slugs`] but threads
+/// a [`RecallWeightSet`] into the ranked recall that gathers `relevant_facts`,
+/// so each OODA phase can bias the ranking toward what it cares about (Observe
+/// favors recency, Decide favors confidence). The OODA observe path calls this
+/// with [`crate::ooda_loop::phase_weights::weights_for_phase`]`(OodaPhase::Observe)`;
+/// the 3- and 4-arg entry points default to the balanced `Orient` weights for
+/// backward compatibility.
+///
+/// `relevant_facts` are gathered with the library's **ranked recall**
+/// (`recall_facts_ranked`) rather than a plain keyword `search_facts`: every
+/// candidate fact is scored across six signals and returned in descending score
+/// order, with superseded snapshot revisions excluded. The exhaustive goal-fact
+/// load and all PR-A filters (snapshot drop, `seen_ids` dedup, stale-slug drop,
+/// 10-fact cap) still run on the plain `search_facts` path *after* ranking.
+#[tracing::instrument(skip_all)]
+pub fn preparation_memory_operations_with_active_slugs_phased(
+    objective: &str,
+    session_id: &SessionId,
+    bridge: &dyn CognitiveMemoryOps,
+    active_slugs: Option<&std::collections::HashSet<&str>>,
+    weights: RecallWeightSet,
+) -> SimardResult<PreparedContext> {
     // Split compound objectives (joined with "; ") into individual fragments
     // and search each separately. The old code passed the full joined string to
     // search_facts() which uses Cypher CONTAINS — no fact matches a giant
@@ -142,7 +184,11 @@ pub fn preparation_memory_operations_with_active_slugs(
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for fragment in &fragments {
-        let per_fragment = bridge.search_facts(fragment, 10, 0.0)?;
+        // Issue #2329: gather candidate facts via ranked recall (relevance +
+        // recency + confidence + …, phase-weighted) instead of a plain
+        // confidence-sorted keyword `search_facts`. Facts come back in
+        // descending score order; superseded snapshot revisions are excluded.
+        let per_fragment = bridge.recall_facts_ranked(fragment, 10, 0.0, weights)?;
         for fact in per_fragment {
             // PR-A filter 1: drop goal-board:snapshot revisions even
             // when they surface from a per-fragment match. The live
@@ -508,18 +554,49 @@ pub fn reflection_memory_operations(
     session_id: &SessionId,
     bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
-    // Store the session transcript as an episodic memory.
-    bridge.store_episode(
-        &format!("Session {session_id} transcript: {transcript}"),
-        "session-reflection",
-        None,
-    )?;
+    // Store the session transcript as an episodic memory, capturing its id so
+    // each fact derived from this transcript can link back to it (issue #2325).
+    //
+    // Issue #2327 (A1/A2): the transcript is sanitized of `continue_skipping` /
+    // no-decision-keyword noise before storage. A pure-noise transcript with no
+    // derived facts is dropped entirely; otherwise the (cleaned) transcript is
+    // stored. When facts ARE derived we keep the episode unconditionally — even
+    // pure noise — because its id is the provenance anchor for those facts.
+    let ctx = classifier::IntakeContext::default();
+    let has_facts = !facts.is_empty();
+    let sanitized = classifier::sanitize_transcript(transcript);
+    let episode_id = match (&sanitized, has_facts) {
+        // Pure noise and nothing derived from it → drop the reflection episode.
+        (None, false) => {
+            classifier::global_intake_counters().record(&classifier::IntakeDecision::Drop);
+            return Ok(());
+        }
+        _ => {
+            let body = sanitized.as_deref().unwrap_or(transcript);
+            let content = format!("Session {session_id} transcript: {body}");
+            if has_facts {
+                // Provenance anchor required — store even if down-scoped.
+                Some(classifier::store_episode_for_provenance(
+                    bridge,
+                    &content,
+                    "session-reflection",
+                    &ctx,
+                )?)
+            } else {
+                classifier::store_episode_classified(bridge, &content, "session-reflection", &ctx)?
+            }
+        }
+    };
+    // No episode (classified Drop) and no facts to link — nothing more to do.
+    let Some(episode_id) = episode_id else {
+        return Ok(());
+    };
 
     // Store each extracted fact in semantic memory, deduplicating by concept
     // both within this session and across prior sessions.
-    let mut seen_concepts = std::collections::HashSet::<String>::new();
+    let mut seen_concepts = std::collections::HashSet::<&str>::new();
     for fact in facts {
-        if !seen_concepts.insert(fact.concept.clone()) {
+        if !seen_concepts.insert(fact.concept.as_str()) {
             continue;
         }
         // Cross-session dedup: skip if an existing fact has >= confidence.
@@ -529,12 +606,17 @@ pub fn reflection_memory_operations(
         if existing.iter().any(|f| f.confidence >= fact.confidence) {
             continue;
         }
-        bridge.store_fact(
+        // Provenance write (#2325): thread the transcript episode id so a
+        // `DERIVES_FROM` edge links this fact back to the transcript it was
+        // reflected from, instead of the legacy no-provenance `store_fact`.
+        bridge.store_fact_with_provenance(
             &fact.concept,
             &fact.content,
             fact.confidence,
-            &[],
             &format!("session:{session_id}"),
+            None,
+            None,
+            std::slice::from_ref(&episode_id),
         )?;
     }
 
@@ -582,11 +664,14 @@ pub fn persistence_memory_operations_with_snapshot_dir(
     // Prune expired sensory items.
     bridge.prune_expired_sensory()?;
 
-    // Store a final episodic memory marking session end.
-    bridge.store_episode(
+    // Store a final episodic memory marking session end — routed through the
+    // ingestion classifier (issue #2327). The "completed and persisted" marker
+    // is operational noise and is dropped unless it carries a failure summary.
+    classifier::store_episode_classified(
+        bridge,
         &format!("Session {session_id} completed and persisted"),
         "session-persistence",
-        None,
+        &classifier::IntakeContext::default(),
     )?;
 
     // Save a JSON snapshot for durable cross-session recall.  Errors are
@@ -686,7 +771,15 @@ pub fn consolidation_intake(
     if count > 0 {
         let summary = format!("Hydrated {count} prior-session facts for cross-session recall");
         bridge.push_working("consolidation-intake", &summary, session_id.as_str(), 0.7)?;
-        bridge.store_episode(&summary, "consolidation-intake", None)?;
+        // Cross-session hydration bookkeeping is operational: the classifier
+        // down-scopes it (low importance, is_operational = true) rather than
+        // storing it at full importance (issue #2327).
+        classifier::store_episode_classified(
+            bridge,
+            &summary,
+            "consolidation-intake",
+            &classifier::IntakeContext::default(),
+        )?;
     }
     Ok(count)
 }
@@ -703,17 +796,23 @@ pub fn consolidation_persistence(
 ) -> SimardResult<()> {
     // Drain all working-memory slots into episodic store so they survive
     // session teardown.  Each slot is written as an episode using its
-    // slot_type as the source label, preserving the memory category.
+    // slot_type as the source label, preserving the memory category — routed
+    // through the ingestion classifier so per-slot noise is dropped/down-scoped
+    // by content (issue #2327).
+    let ctx = classifier::IntakeContext::default();
     let slots = bridge.get_working(session_id.as_str())?;
     for slot in &slots {
-        bridge.store_episode(&slot.content, &slot.slot_type, None)?;
+        classifier::store_episode_classified(bridge, &slot.content, &slot.slot_type, &ctx)?;
     }
 
-    // Store an episodic record capturing the consolidation event.
-    bridge.store_episode(
+    // Store an episodic record capturing the consolidation event. The
+    // "flushing working memory" marker is operational noise and is dropped
+    // unless it carries a failure summary (issue #2327).
+    classifier::store_episode_classified(
+        bridge,
         &format!("Session {session_id} flushing working memory to episodes"),
         "consolidation-persistence",
-        None,
+        &ctx,
     )?;
 
     // Consolidate any remaining episodes into long-term storage. Errors are
@@ -721,11 +820,36 @@ pub fn consolidation_persistence(
     // rather than silently dropping data.
     bridge.consolidate_episodes(20)?;
 
+    // Issue #2329: reclaim the superseded tail left behind by caller-key snapshot
+    // dedup (goal-board snapshots, per-goal records). Pruning is housekeeping, so
+    // a failure is logged and never aborts teardown — it must not turn a
+    // successful consolidation into a failure.
+    match bridge.prune_superseded() {
+        Ok(reclaimed) if reclaimed > 0 => {
+            tracing::debug!(
+                reclaimed,
+                "consolidation_persistence: pruned superseded facts"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "consolidation_persistence: prune_superseded failed (non-fatal)"
+            );
+        }
+    }
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests;
+
+// Issue #2329: OODA preparation gathers `relevant_facts` via ranked recall
+// (relevance/recency/confidence) rather than a confidence-sorted `search_facts`.
+#[cfg(test)]
+mod tests_ranked_prep;
 
 // PR-A (issue #2281): preparation-phase memory filters. Tests assert
 // that `goal-board:snapshot` revisions are dropped from the prepared
@@ -740,6 +864,17 @@ mod tests_pr_a;
 // recipe. See `docs/architecture/episode-distillation.md`.
 pub mod distillation;
 
+// Issue #2327: episode-ingestion classifier — the deterministic policy that
+// runs before every `store_episode` intake site, dropping operational noise,
+// down-scoping bookkeeping, and storing meaningful episodics with
+// {importance, event_kind, goal_id, cycle, is_operational} metadata.
+pub mod classifier;
+
+// Issue #2327: automatic promotion (distillation) scheduler — fires episode →
+// fact/procedure distillation on an undistilled-count threshold or a
+// cycle-count interval, decoupled from the OODA `ConsolidateMemory` action.
+pub mod scheduler;
+
 #[cfg(test)]
 mod distillation_tests;
 
@@ -749,3 +884,17 @@ mod distillation_tests;
 // behaviour.
 #[cfg(test)]
 mod tests_pr_c;
+
+// Issue #2327: TDD (RED) tests for the episode-ingestion classifier
+// (`classifier::classify`) that drops operational-noise episodes,
+// down-scopes bookkeeping, and stores meaningful episodics with
+// {importance, event_kind, goal_id, cycle, is_operational} metadata.
+#[cfg(test)]
+mod classifier_tests;
+
+// Issue #2327: TDD (RED) tests for the automatic promotion (distillation)
+// scheduler (`scheduler::distill_trigger` / `run_scheduled_distillation_*`)
+// and the procedure-distillation extension (DistilledProcedure / DistillOutput
+// / DistillReport.procedure_count) that stores procedures with provenance.
+#[cfg(test)]
+mod promotion_scheduler_tests;

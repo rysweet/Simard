@@ -9,6 +9,7 @@ related:
   - ../memory.md
   - ../operations/cognitive-memory-durability.md
   - ./episode-distillation.md
+  - ../reference/cognitive-memory-provenance.md
 ---
 
 # Library-backed Cognitive Memory (the sole backend)
@@ -86,6 +87,15 @@ callers (OODA, goals, consolidation, dashboards, bootstrap)
 prefers it when a live daemon socket exists (so writers do not contend for the
 single-writer store). When no socket is present, the direct backend is always
 `LibraryCognitiveMemory`. There is no third (native) implementor any more.
+
+> **Provenance (#2325).** `LibraryCognitiveMemory` additionally overrides the
+> defaulted provenance methods on `CognitiveMemoryOps` —
+> `store_fact_with_provenance`, `store_procedure_with_provenance`, and
+> `episodes_for_fact` — delegating to the library's `DERIVES_FROM` /
+> `PROCEDURE_DERIVES_FROM` edge API (rev `758e0a7…`). The other implementors
+> (`RemoteCognitiveMemory`, bridge/test stubs) inherit no-provenance defaults
+> and keep compiling unchanged. See
+> [Cognitive-memory provenance](../reference/cognitive-memory-provenance.md).
 
 `LibraryCognitiveMemory` is a thin adapter:
 

@@ -2,6 +2,7 @@ use std::fmt::{self, Display, Formatter};
 
 use serde::Serialize;
 
+use crate::gym_scoring::EvidenceQualityAssessment;
 use crate::runtime::RuntimeTopology;
 
 /// The V1 benchmark classes sanctioned by `Specs/ProductArchitecture.md`
@@ -86,10 +87,18 @@ pub struct BenchmarkHandoffReport {
     pub restored_session_objective: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BenchmarkScorecard {
     pub task_completed: bool,
+    /// Coarse legacy categorical (`sufficient`/`thin`) retained for the
+    /// reporting and run-comparison paths. Prefer [`Self::evidence_quality_assessment`]
+    /// for meaningful, comparable evidence-quality signal.
     pub evidence_quality: String,
+    /// Structured 5-dimension evidence-quality assessment. This is the key
+    /// scoring field per `Specs/ProductArchitecture.md` (lines 204-213): it
+    /// distinguishes quality differences between runs that the binary
+    /// categorical cannot.
+    pub evidence_quality_assessment: EvidenceQualityAssessment,
     pub correctness_checks_passed: usize,
     pub correctness_checks_total: usize,
     pub unnecessary_action_count: Option<u32>,
@@ -98,7 +107,7 @@ pub struct BenchmarkScorecard {
     pub measurement_notes: Vec<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BenchmarkRunReport {
     pub suite_id: String,
     pub scenario: BenchmarkScenario,

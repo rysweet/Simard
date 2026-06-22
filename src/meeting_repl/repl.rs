@@ -13,7 +13,8 @@ use crate::meeting_backend::persist::{
     extract_risks,
 };
 use crate::meeting_backend::{
-    MeetingBackend, MeetingCommand, Role, parse_command, strip_ansi_escapes,
+    HELP_GROUPS, MeetingBackend, MeetingCommand, Role, parse_command, strip_ansi_escapes,
+    unknown_command_notice,
 };
 use crate::meeting_facilitator::MeetingSession;
 
@@ -41,6 +42,27 @@ fn checkpoint_wip(backend: &MeetingBackend) {
 /// `color::cyan` helper which already honors `NO_COLOR`.
 fn prompt_string() -> String {
     cyan(PROMPT_TEXT)
+}
+
+/// Render the grouped, colorized `/help` reference.
+///
+/// Sources the command groups from `meeting_backend::HELP_GROUPS` (single
+/// source of truth) and colors each group title cyan in the same `── Title ──`
+/// style used by `/state` and `/recap`. Honors `NO_COLOR` via the `cyan`
+/// helper. Reused for the `/help` command and the no-suggestion branch of the
+/// unknown-command hint. Issue #2321.
+fn write_help<W: Write>(output: &mut W) {
+    for group in HELP_GROUPS {
+        writeln!(output, "\n{}", cyan(&format!("── {} ──", group.title))).ok();
+        for entry in group.entries {
+            writeln!(output, "  {} — {}", entry.usage, entry.description).ok();
+        }
+    }
+    writeln!(
+        output,
+        "\nEverything else is natural conversation with Simard."
+    )
+    .ok();
 }
 
 /// Render a structured backend-error banner to the operator.
@@ -196,11 +218,20 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
 
         match parse_command(&line) {
             MeetingCommand::Help => {
+                write_help(output);
+            }
+            MeetingCommand::Unknown { input, suggestion } => {
+                // A mistyped command (e.g. `/colse`). Surface a did-you-mean
+                // hint instead of forwarding the typo to the LLM. Issue #2321.
                 writeln!(
                     output,
-                    "Commands:\n  /status    — show session info\n  /state     — show current decisions, open questions, action items, risks, disagreements\n  /template  — list meeting templates\n  /template <name> — apply a template (standup, 1on1, retro, planning)\n  /theme <text>    — record a theme for this meeting\n  /decision <text> [--rationale <why>] — record a decision (optional rationale)\n  /action <text>   — record an action item (assignee/deadline parsed inline)\n  /question <text> — record an open question deterministically\n  /risk <text>     — record an identified risk\n  /disagree <text> — record a disagreement or dissenting view\n  /owner <name>    — name the next agent/persona/human expected to action this handoff\n  /goal <text>     — set the meeting's overarching objective\n  /recap     — show color-coded session recap\n  /preview   — preview the handoff artifact\n  /export    — export meeting as markdown\n  /close     — end meeting and persist\n  /help      — this message\n\nEverything else is natural conversation with Simard."
+                    "{}",
+                    yellow(&unknown_command_notice(&input, suggestion.as_deref()))
                 )
                 .ok();
+                if suggestion.is_none() {
+                    write_help(output);
+                }
             }
             MeetingCommand::Status => {
                 let status = backend.status();

@@ -132,18 +132,68 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
           <div class="stat"><span class="label">OTEL Status</span><span class="value">${status}</span></div>
           <div class="stat"><span class="label">Collected Entries</span><span class="value">${d.span_count}</span></div>`;
         if(d.spans?.length){
-          document.getElementById('trace-list').innerHTML=d.spans.map(s=>{
-            const data=s.data;
-            const ts=data.timestamp||data.__REALTIME_TIMESTAMP||data._SOURCE_REALTIME_TIMESTAMP||'';
-            const msg=data.MESSAGE||data.message||data.description||data.model||JSON.stringify(data).substring(0,200);
-            return`<div style="border-bottom:1px solid var(--border);padding:4px 0;font-size:.82rem">
-              <span style="color:#8b949e">[${esc(s.source)}]</span>
-              ${ts?'<span style="color:var(--accent);margin:0 .5rem">'+esc(String(ts).substring(0,19))+'</span>':''}
-              <span>${esc(String(msg))}</span>
-            </div>`;
-          }).join('');
+          document.getElementById('trace-list').innerHTML=d.spans.map(s=>s&&s.source==='cost'?renderCostTrace(s.data):renderGenericTrace(s)).join('');
         }else{document.getElementById('trace-list').innerHTML='<span style="color:#8b949e">No trace data yet. Run the agent daemon or make API calls to generate traces.</span>';}
       }catch(e){document.getElementById('trace-list').innerHTML='<span class="err">Failed to load traces — check /api/traces</span>';}
+    }
+
+    /* Map the raw cost-ledger `model` token to a plain-language call label. */
+    function costModelLabel(m){
+      const map={'copilot':'Copilot SDK call','copilot-meeting':'Copilot meeting turn','copilot-lightweight':'Copilot lightweight call','direct-invoke':'Direct agent call','session-builder':'Session-builder call','lightweight-chat':'Lightweight chat call'};
+      return map[m]||(m?('LLM call ('+m+')'):'LLM call');
+    }
+    /* Render an estimated USD cost with enough precision to stay meaningful. */
+    function fmtCostUsd(v){
+      if(typeof v!=='number'||!isFinite(v))return'—';
+      if(v===0)return'$0';
+      return v<0.01?('$'+v.toFixed(4)):('$'+v.toFixed(2));
+    }
+    function shortSession(id){
+      if(!id)return'';
+      return String(id).replace(/^session-/,'').slice(0,8);
+    }
+    /* A single cost-ledger trace row: When (relative+absolute), What
+       (call type / model / tokens / cost), and Who (context + session).
+       `abs` is parse-guarded (mirrors renderGenericTrace) so formatTime's
+       raw-passthrough branch can never feed an unescaped quote into the
+       double-quoted `title` attribute below (#2351). */
+    function renderCostTrace(data){
+      data=data||{};
+      const parsed=parseTs(data.timestamp);
+      const when=data.timestamp?timeAgo(data.timestamp):'—';
+      const abs=parsed?formatTime(data.timestamp):'';
+      const pt=Number(data.prompt_tokens_est)||0;
+      const ct=Number(data.completion_tokens_est)||0;
+      const total=pt+ct;
+      const model=data.model||'unknown';
+      const dot=' <span style="color:#6e7681">·</span> ';
+      let what='<strong>'+esc(costModelLabel(model))+'</strong>'+dot+esc(model);
+      if(total>0) what+=dot+'~'+total.toLocaleString()+' tokens';
+      what+=dot+'<span style="color:var(--green);font-weight:600">'+esc(fmtCostUsd(data.cost_usd_est))+'</span>';
+      const whenHtml='<span title="'+esc(abs)+'" style="color:#8b949e;font-size:.75rem;white-space:nowrap;margin-left:.5rem">'+esc(when)+'</span>';
+      let who=[];
+      if(data.context) who.push(esc(String(data.context)));
+      const sid=shortSession(data.session_id);
+      if(sid) who.push('session '+esc(sid));
+      if(total>0) who.push(pt.toLocaleString()+' in / '+ct.toLocaleString()+' out');
+      const whoHtml=who.length?'<div style="color:#6e7681;font-size:.72rem;margin-top:2px">'+who.join(' <span style="color:#30363d">·</span> ')+'</div>':'';
+      return '<div style="border-bottom:1px solid var(--border);padding:6px 0;font-size:.82rem;white-space:normal;line-height:1.5">'
+        +'<span style="display:inline-block;padding:0 6px;border-radius:8px;background:#1f6feb33;color:#58a6ff;font-size:.7rem;font-weight:600;vertical-align:middle">cost</span> '
+        +'<span style="vertical-align:middle">'+what+'</span> '+whenHtml+whoHtml+'</div>';
+    }
+    /* Non-cost trace rows (journald / in-process spans): keep the source
+       badge but route timestamps through the shared timeAgo/formatTime
+       helpers and drop the indent-padding that leaked into the pre-wrap box. */
+    function renderGenericTrace(s){
+      s=s||{};const data=s.data||{};
+      const rawTs=data.timestamp||data.timestamp_epoch_ms||data.__REALTIME_TIMESTAMP||data._SOURCE_REALTIME_TIMESTAMP||'';
+      const parsed=parseTs(rawTs);
+      const when=parsed?timeAgo(rawTs):(rawTs?String(rawTs).substring(0,19):'');
+      const abs=parsed?formatTime(rawTs):'';
+      const msg=data.MESSAGE||data.message||data.description||data.name||data.model||JSON.stringify(data).substring(0,200);
+      const whenHtml=when?'<span title="'+esc(abs)+'" style="color:var(--accent);margin:0 .5rem;font-size:.75rem;white-space:nowrap">'+esc(when)+'</span>':'';
+      return '<div style="border-bottom:1px solid var(--border);padding:6px 0;font-size:.82rem;white-space:normal;line-height:1.5">'
+        +'<span style="color:#8b949e">['+esc(s.source)+']</span>'+whenHtml+'<span>'+esc(String(msg))+'</span></div>';
     }
 
     /* --- Memory Growth History (#2136) --- */

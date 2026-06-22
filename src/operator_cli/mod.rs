@@ -100,7 +100,8 @@ Product modes:
   dashboard serve [--port=8080]
   memory stats [state-root] [--json]
                          — read-only per-type cognitive-memory counts +
-                           sample rows (safe while the daemon holds the store)
+                           graph-edge / dedup section + sample rows
+                           (safe while the daemon holds the store)
   memory dump [state-root] [--type=TYPE] [--limit=N] [--json]
                          — counts plus a larger set of sample rows per type
   spawn <agent-name> <goal> <worktree-path> [--depth=N]

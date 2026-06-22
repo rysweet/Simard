@@ -316,6 +316,28 @@ fn make_report(
     unnecessary: Option<u32>,
     retries: Option<u32>,
 ) -> BenchmarkRunReport {
+    let pass_rate = if checks_total > 0 {
+        checks_passed as f64 / checks_total as f64
+    } else {
+        0.0
+    };
+    let evidence_score = match evidence {
+        "sufficient" => 1.0,
+        "thin" => 0.5,
+        _ => 0.0,
+    };
+    let action_penalty = unnecessary
+        .map(|c| (c as f64 * 0.1).min(0.5))
+        .unwrap_or(0.0);
+    let retry_penalty = retries.map(|c| (c as f64 * 0.1).min(0.5)).unwrap_or(0.0);
+    let calibration = (1.0 - action_penalty - retry_penalty).max(0.0);
+    let assessment = EvidenceQualityAssessment::from_dimensions(ScoreDimensions {
+        factual_accuracy: pass_rate,
+        specificity: evidence_score,
+        temporal_awareness: pass_rate,
+        source_attribution: evidence_score,
+        confidence_calibration: calibration,
+    });
     BenchmarkRunReport {
         suite_id: suite.to_string(),
         scenario: BenchmarkScenario {
@@ -336,6 +358,7 @@ fn make_report(
         scorecard: BenchmarkScorecard {
             task_completed: passed,
             evidence_quality: evidence.to_string(),
+            evidence_quality_assessment: assessment,
             correctness_checks_passed: checks_passed,
             correctness_checks_total: checks_total,
             unnecessary_action_count: unnecessary,
@@ -376,6 +399,30 @@ fn make_report(
             review_json: String::new(),
         },
     }
+}
+
+#[test]
+fn suite_score_uses_structured_dimensions_not_legacy_string() {
+    // The legacy categorical says "sufficient" (which the old binary mapping
+    // would have turned into specificity 1.0), but the structured assessment
+    // deliberately carries low dimensions. suite_score must reflect the
+    // structured assessment, proving it is decoupled from the legacy string.
+    let mut report = make_report("s1", "sc1", true, 5, 10, "sufficient", 1000, None, None);
+    report.scorecard.evidence_quality_assessment =
+        EvidenceQualityAssessment::from_dimensions(ScoreDimensions {
+            factual_accuracy: 0.1,
+            specificity: 0.2,
+            temporal_awareness: 0.3,
+            source_attribution: 0.4,
+            confidence_calibration: 0.5,
+        });
+    let score = suite_score_from_benchmark_report(&report);
+    assert_eq!(report.scorecard.evidence_quality, "sufficient");
+    assert!((score.dimensions.factual_accuracy - 0.1).abs() < 1e-9);
+    assert!((score.dimensions.specificity - 0.2).abs() < 1e-9);
+    assert!((score.dimensions.temporal_awareness - 0.3).abs() < 1e-9);
+    assert!((score.dimensions.source_attribution - 0.4).abs() < 1e-9);
+    assert!((score.dimensions.confidence_calibration - 0.5).abs() < 1e-9);
 }
 
 #[test]
@@ -507,4 +554,304 @@ fn benchmark_report_flows_to_improvement_tracking() {
     let trend = track_improvement(&reports_over_time);
     assert_eq!(trend.run_count, 5);
     assert_eq!(trend.overall_direction, TrendDirection::Improving);
+}
+
+// ── assess_evidence_quality tests ───────────────────────────────────
+
+use crate::base_types::BaseTypeId;
+use crate::memory::MemoryScope;
+use crate::session::{SessionId, SessionPhase};
+use chrono::Utc;
+use uuid::Uuid;
+
+fn sid() -> SessionId {
+    SessionId::from_uuid(Uuid::nil())
+}
+
+fn evidence(detail: &str, source: EvidenceSource) -> EvidenceRecord {
+    EvidenceRecord {
+        id: "ev".to_string(),
+        session_id: sid(),
+        phase: SessionPhase::Execution,
+        detail: detail.to_string(),
+        source,
+    }
+}
+
+fn memory(timestamped: bool) -> MemoryRecord {
+    MemoryRecord {
+        key: "k".to_string(),
+        scope: MemoryScope::Benchmark,
+        value: "v".to_string(),
+        session_id: sid(),
+        recorded_in: SessionPhase::Execution,
+        created_at: if timestamped { Some(Utc::now()) } else { None },
+    }
+}
+
+#[test]
+fn evidence_quality_category_tiers() {
+    assert_eq!(evidence_quality_category(1.0), "strong");
+    assert_eq!(evidence_quality_category(0.75), "strong");
+    assert_eq!(evidence_quality_category(0.74), "moderate");
+    assert_eq!(evidence_quality_category(0.5), "moderate");
+    assert_eq!(evidence_quality_category(0.49), "weak");
+    assert_eq!(evidence_quality_category(0.0), "weak");
+}
+
+#[test]
+fn assessment_from_dimensions_computes_overall_and_category() {
+    let a = EvidenceQualityAssessment::from_dimensions(ScoreDimensions {
+        factual_accuracy: 1.0,
+        specificity: 1.0,
+        temporal_awareness: 1.0,
+        source_attribution: 1.0,
+        confidence_calibration: 1.0,
+    });
+    assert!((a.overall - 1.0).abs() < 1e-9);
+    assert_eq!(a.category, "strong");
+}
+
+#[test]
+fn assess_factual_accuracy_is_check_pass_rate() {
+    let inputs = EvidenceQualityInputs {
+        correctness_checks_passed: 3,
+        correctness_checks_total: 4,
+        evidence_records: &[],
+        memory_records: &[],
+        unnecessary_action_count: None,
+        retry_count: None,
+    };
+    let a = assess_evidence_quality(&inputs);
+    assert!((a.dimensions.factual_accuracy - 0.75).abs() < 1e-9);
+}
+
+#[test]
+fn assess_factual_accuracy_zero_checks_is_zero() {
+    let inputs = EvidenceQualityInputs {
+        correctness_checks_passed: 0,
+        correctness_checks_total: 0,
+        evidence_records: &[],
+        memory_records: &[],
+        unnecessary_action_count: None,
+        retry_count: None,
+    };
+    assert_eq!(
+        assess_evidence_quality(&inputs).dimensions.factual_accuracy,
+        0.0
+    );
+}
+
+#[test]
+fn assess_specificity_rewards_quantity_and_detail() {
+    let long = "x".repeat(80);
+    let rich: Vec<EvidenceRecord> = (0..4)
+        .map(|_| evidence(&long, EvidenceSource::Runtime))
+        .collect();
+    let inputs = EvidenceQualityInputs {
+        correctness_checks_passed: 0,
+        correctness_checks_total: 1,
+        evidence_records: &rich,
+        memory_records: &[],
+        unnecessary_action_count: None,
+        retry_count: None,
+    };
+    // 4 records, each 80-char detail -> 4 units / 4 target -> specificity 1.0
+    assert!((assess_evidence_quality(&inputs).dimensions.specificity - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn assess_specificity_penalizes_sparse_thin_evidence() {
+    let thin = vec![evidence("x", EvidenceSource::Runtime)];
+    let inputs = EvidenceQualityInputs {
+        correctness_checks_passed: 0,
+        correctness_checks_total: 1,
+        evidence_records: &thin,
+        memory_records: &[],
+        unnecessary_action_count: None,
+        retry_count: None,
+    };
+    // single 1-char record -> (1/80) unit / 4 target
+    let expected = (1.0 / 80.0) / 4.0;
+    assert!((assess_evidence_quality(&inputs).dimensions.specificity - expected).abs() < 1e-9);
+}
+
+#[test]
+fn assess_specificity_zero_without_evidence() {
+    let inputs = EvidenceQualityInputs {
+        correctness_checks_passed: 0,
+        correctness_checks_total: 1,
+        evidence_records: &[],
+        memory_records: &[],
+        unnecessary_action_count: None,
+        retry_count: None,
+    };
+    assert_eq!(assess_evidence_quality(&inputs).dimensions.specificity, 0.0);
+}
+
+#[test]
+fn assess_temporal_awareness_is_timestamp_fraction() {
+    let mems = vec![memory(true), memory(false), memory(true), memory(false)];
+    let inputs = EvidenceQualityInputs {
+        correctness_checks_passed: 0,
+        correctness_checks_total: 1,
+        evidence_records: &[],
+        memory_records: &mems,
+        unnecessary_action_count: None,
+        retry_count: None,
+    };
+    assert!(
+        (assess_evidence_quality(&inputs)
+            .dimensions
+            .temporal_awareness
+            - 0.5)
+            .abs()
+            < 1e-9
+    );
+}
+
+#[test]
+fn assess_temporal_awareness_zero_without_memory() {
+    let inputs = EvidenceQualityInputs {
+        correctness_checks_passed: 0,
+        correctness_checks_total: 1,
+        evidence_records: &[],
+        memory_records: &[],
+        unnecessary_action_count: None,
+        retry_count: None,
+    };
+    assert_eq!(
+        assess_evidence_quality(&inputs)
+            .dimensions
+            .temporal_awareness,
+        0.0
+    );
+}
+
+#[test]
+fn assess_source_attribution_weights_base_type_above_runtime() {
+    let recs = vec![
+        evidence(
+            "a",
+            EvidenceSource::BaseType(BaseTypeId::new("local-harness")),
+        ),
+        evidence("b", EvidenceSource::Runtime),
+    ];
+    let inputs = EvidenceQualityInputs {
+        correctness_checks_passed: 0,
+        correctness_checks_total: 1,
+        evidence_records: &recs,
+        memory_records: &[],
+        unnecessary_action_count: None,
+        retry_count: None,
+    };
+    // (1.0 + 0.5) / 2 = 0.75
+    assert!(
+        (assess_evidence_quality(&inputs)
+            .dimensions
+            .source_attribution
+            - 0.75)
+            .abs()
+            < 1e-9
+    );
+}
+
+#[test]
+fn assess_confidence_calibration_applies_capped_penalties() {
+    let inputs = EvidenceQualityInputs {
+        correctness_checks_passed: 1,
+        correctness_checks_total: 1,
+        evidence_records: &[],
+        memory_records: &[],
+        unnecessary_action_count: Some(3),
+        retry_count: Some(2),
+    };
+    // 0.3 + 0.2 penalty -> 0.5
+    assert!(
+        (assess_evidence_quality(&inputs)
+            .dimensions
+            .confidence_calibration
+            - 0.5)
+            .abs()
+            < 1e-9
+    );
+}
+
+#[test]
+fn assess_confidence_calibration_clamped_at_zero() {
+    let inputs = EvidenceQualityInputs {
+        correctness_checks_passed: 1,
+        correctness_checks_total: 1,
+        evidence_records: &[],
+        memory_records: &[],
+        unnecessary_action_count: Some(10),
+        retry_count: Some(10),
+    };
+    assert_eq!(
+        assess_evidence_quality(&inputs)
+            .dimensions
+            .confidence_calibration,
+        0.0
+    );
+}
+
+#[test]
+fn assess_confidence_calibration_unmeasured_is_neutral() {
+    let inputs = EvidenceQualityInputs {
+        correctness_checks_passed: 1,
+        correctness_checks_total: 1,
+        evidence_records: &[],
+        memory_records: &[],
+        unnecessary_action_count: None,
+        retry_count: None,
+    };
+    assert!(
+        (assess_evidence_quality(&inputs)
+            .dimensions
+            .confidence_calibration
+            - 1.0)
+            .abs()
+            < 1e-9
+    );
+}
+
+#[test]
+fn assess_distinguishes_strong_from_weak_runs() {
+    let long = "detailed runtime observation".repeat(4);
+    let strong_ev: Vec<EvidenceRecord> = (0..4)
+        .map(|_| {
+            evidence(
+                &long,
+                EvidenceSource::BaseType(BaseTypeId::new("local-harness")),
+            )
+        })
+        .collect();
+    let strong_mem = vec![memory(true), memory(true)];
+    let strong = assess_evidence_quality(&EvidenceQualityInputs {
+        correctness_checks_passed: 4,
+        correctness_checks_total: 4,
+        evidence_records: &strong_ev,
+        memory_records: &strong_mem,
+        unnecessary_action_count: Some(0),
+        retry_count: Some(0),
+    });
+
+    let weak_ev = vec![evidence("x", EvidenceSource::Runtime)];
+    let weak = assess_evidence_quality(&EvidenceQualityInputs {
+        correctness_checks_passed: 1,
+        correctness_checks_total: 4,
+        evidence_records: &weak_ev,
+        memory_records: &[memory(false)],
+        unnecessary_action_count: Some(3),
+        retry_count: Some(2),
+    });
+
+    assert!(
+        strong.overall > weak.overall,
+        "structured assessment must give the richer run a higher overall score: {} vs {}",
+        strong.overall,
+        weak.overall
+    );
+    assert_eq!(strong.category, "strong");
+    assert_eq!(weak.category, "weak");
 }

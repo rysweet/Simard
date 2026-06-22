@@ -1,0 +1,54 @@
+name: "Meeting REPL UX: suggestions + grouped /help (#2321)"
+description: "Outside-in verification of the deferred meeting-REPL UX prong of goal enhance-simard-meeting-experience: unknown-slash-command suggestions ('did you mean /close?') routed through the real run_meeting_repl dispatch instead of the LLM, and a grouped, colorized /help. Pins the narrow detection rules (Levenshtein <= 2, file paths and bare empty-payload commands stay conversation) and the grouped-help single source of truth shared by the CLI REPL and dashboard chat."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Meeting REPL suggests typos and renders grouped /help"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/meeting-repl-ux.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "meeting"
+    - "repl"
+    - "ux"
+    - "outside-in"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
+  issue: "2321"

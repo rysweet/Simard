@@ -1,4 +1,6 @@
 use super::types::*;
+use crate::gym_bridge::ScoreDimensions;
+use crate::gym_scoring::EvidenceQualityAssessment;
 use crate::runtime::RuntimeTopology;
 #[test]
 fn benchmark_class_display_all_variants() {
@@ -175,6 +177,13 @@ fn benchmark_scorecard_fields() {
     let s = BenchmarkScorecard {
         task_completed: true,
         evidence_quality: "sufficient".to_string(),
+        evidence_quality_assessment: EvidenceQualityAssessment::from_dimensions(ScoreDimensions {
+            factual_accuracy: 0.8,
+            specificity: 0.6,
+            temporal_awareness: 0.4,
+            source_attribution: 1.0,
+            confidence_calibration: 0.7,
+        }),
         correctness_checks_passed: 7,
         correctness_checks_total: 10,
         unnecessary_action_count: Some(2),
@@ -188,6 +197,9 @@ fn benchmark_scorecard_fields() {
     assert_eq!(s.retry_count, None);
     assert_eq!(s.human_review_notes.len(), 1);
     assert_eq!(s.measurement_notes.len(), 2);
+    assert!((s.evidence_quality_assessment.dimensions.factual_accuracy - 0.8).abs() < 1e-9);
+    assert!((s.evidence_quality_assessment.overall - 0.7).abs() < 1e-9);
+    assert_eq!(s.evidence_quality_assessment.category, "moderate");
 }
 
 #[test]
