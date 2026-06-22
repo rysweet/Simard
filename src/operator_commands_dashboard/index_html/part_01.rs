@@ -127,6 +127,50 @@ pub(crate) const PART_01: &str = r#"      </div>
       if(map[kind])return map[kind];
       return kind.replace(/[_-]+/g,' ').replace(/^./,c=>c.toUpperCase());
     }
+    /* Issue #2358: map synthetic OODA goal ids (the `__memory__` family from
+       priority_kind.rs) to human labels so they never render as raw machine
+       sentinels. Real goal slugs pass through unchanged. */
+    function humanizeGoalId(id){
+      if(!id)return'';
+      const map={'__memory__':'Memory consolidation','__improvement__':'Self-improvement cycle','__poll_activity__':'Developer-activity check','__extract_ideas__':'Idea mining','__eval_watchdog__':'Evaluation watchdog','__safe_update__':'Safe self-update'};
+      return map[id]||id;
+    }
+    /* Issue #2358: humanize raw cost "period" keys
+       (`daily:2026-06-22` → "Today (Jun 22)", `weekly:last-7-days` → "Last 7 days"). */
+    function humanizePeriod(v){
+      if(!v)return'';
+      const s=String(v);
+      if(s==='weekly:last-7-days'||s==='last-7-days')return'Last 7 days';
+      const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const m=s.match(/^daily:(\d{4})-(\d{2})-(\d{2})$/);
+      if(m){
+        const dt=new Date(Number(m[1]),Number(m[2])-1,Number(m[3]));
+        const label=months[dt.getMonth()]+' '+dt.getDate();
+        const now=new Date();
+        const isToday=now.getFullYear()===dt.getFullYear()&&now.getMonth()===dt.getMonth()&&now.getDate()===dt.getDate();
+        return isToday?('Today ('+label+')'):(label+', '+m[1]);
+      }
+      const idx=s.indexOf(':');
+      const tail=idx>=0?s.slice(idx+1):s;
+      return tail.replace(/[-_]+/g,' ').replace(/^./,c=>c.toUpperCase());
+    }
+    /* Issue #2358: extend the jargon ban from page ledes to rendered cycle
+       summaries. Strips the `OODA` acronym and `key=value` developer shorthand
+       (`tree=clean`, `goals=2`, `issues=20`) that leak from the persisted
+       cycle-report `summary` field into the Thinking / Logs tabs. Idempotent,
+       so summaries already free of jargon pass through unchanged. */
+    function humanizeCycleSummary(s){
+      if(s==null)return'';
+      let t=String(s);
+      t=t.replace(/OODA cycle #/gi,'Cycle #');
+      t=t.replace(/\bOODA\b/g,'decision-loop');
+      t=t.replace(/\btree=clean\b/g,'working tree clean');
+      t=t.replace(/\btree=dirty\b/g,'working tree has uncommitted changes');
+      t=t.replace(/\bgoals=(\d+)/g,'$1 goals');
+      t=t.replace(/\bissues=(\d+)/g,function(_,n){return n+' open issue'+(n==='1'?'':'s');});
+      t=t.replace(/\((\d+)\/(\d+) succeeded\)/g,'($1 of $2 succeeded)');
+      return t;
+    }
     function copyLogContent(id){
       const el=document.getElementById(id);if(!el)return;
       navigator.clipboard.writeText(el.textContent||'').then(
@@ -174,7 +218,7 @@ pub(crate) const PART_01: &str = r#"      </div>
         const cmd=attachCommandFor(s);
         return '<div style="display:flex;gap:.5rem;align-items:baseline;padding:.35rem 0;border-bottom:1px solid var(--border);font-size:.85rem">'
           +'<code style="min-width:14rem">'+esc(s.agent_id)+'</code>'
-          +'<span style="color:#8b949e;min-width:8rem">'+esc(s.goal_id||'')+'</span>'
+          +'<span style="color:#8b949e;min-width:8rem">'+esc(humanizeGoalId(s.goal_id||''))+'</span>'
           +'<span class="'+(status==='live'?'ok':'warn')+'" style="min-width:5rem">'+status+'</span>'
           +'<span style="flex:1;color:#8b949e;font-size:.75rem">pid '+s.pid+' · '+esc(s.host||'local')+'</span>'
           +'<button class="btn attach-btn" data-cmd="'+esc(cmd)+'" onclick="copyAttachCmd(this)">Attach →</button>'
@@ -303,7 +347,7 @@ pub(crate) const PART_01: &str = r#"      </div>
           const rpt=c.report||{};
           if(rpt.priorities?.length){
             const top=rpt.priorities[0];
-            currentFocus=`<strong>${esc(top.goal_id)}</strong> — ${esc(top.reason)} <span style="color:${top.urgency>0.7?'var(--red)':top.urgency>0.4?'var(--yellow)':'var(--green)'}">urgency ${top.urgency.toFixed(2)}</span>`;
+            currentFocus=`<strong>${esc(humanizeGoalId(top.goal_id))}</strong> — ${esc(top.reason)} <span style="color:${top.urgency>0.7?'var(--red)':top.urgency>0.4?'var(--yellow)':'var(--green)'}">urgency ${top.urgency.toFixed(2)}</span>`;
             break;
           }
         }

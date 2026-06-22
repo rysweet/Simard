@@ -253,7 +253,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <div style="display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap">
         <div style="text-align:center;min-width:120px">
           <div id="mem-recent-count" style="font-size:2.5rem;font-weight:700;color:#3fb950;line-height:1">—</div>
-          <div style="font-size:.85rem;color:#8b949e;margin-top:.25rem">items remembered<br>in the last hour</div>
+          <div id="mem-recent-label" style="font-size:.85rem;color:#8b949e;margin-top:.25rem">items remembered<br>in the last hour</div>
         </div>
         <div style="flex:1;min-width:200px">
           <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.5rem">
@@ -336,7 +336,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
 
   <div class="tab-content" id="tab-costs">
     <h1 class="page-h1">Costs</h1>
-    <p class="page-lede">Token and dollar spending by model and provider, plus your daily and weekly budget caps, computed from real provider invoices rather than estimates.</p>
+    <p class="page-lede">Token and dollar spending by model and provider, plus your daily and weekly budget caps, with dollar figures estimated from token counts rather than billed from provider invoices.</p>
     <div class="grid">
       <div class="card"><h2>Daily Costs <button class="btn" onclick="fetchCosts()">Refresh</button></h2><div id="costs-daily"><span class="loading">Loading…</span></div></div>
       <div class="card"><h2>Weekly Costs</h2><div id="costs-weekly"><span class="loading">Loading…</span></div></div>

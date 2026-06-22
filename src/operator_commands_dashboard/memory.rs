@@ -79,11 +79,19 @@ pub(crate) fn compute_deltas(older: &MemorySnapshot, newer: &MemorySnapshot) -> 
     }
 }
 
-/// Determine trend direction from long-term total delta.
-pub(crate) fn trend_label(deltas: &MemoryDeltas) -> &'static str {
-    if deltas.long_term_total > 0 {
+/// Determine trend direction from the *displayed* signed long-term growth
+/// rate (memories/hour).
+///
+/// Issue #2358: the trend badge and the growth-rate number are shown side by
+/// side on the Memory tab, so they must never contradict each other (a
+/// negative rate must never render an "↑ Growing" badge). Deriving the badge
+/// from the same signed rate the UI prints guarantees agreement. The
+/// `0.1`/hour dead-band mirrors the frontend, which rounds `|rate| < 0.1` down
+/// to `0` ("→ Stable").
+pub(crate) fn trend_label(long_term_rate_per_hour: f64) -> &'static str {
+    if long_term_rate_per_hour > 0.1 {
         "growing"
-    } else if deltas.long_term_total < 0 {
+    } else if long_term_rate_per_hour < -0.1 {
         "shrinking"
     } else {
         "stable"
@@ -206,9 +214,19 @@ pub(crate) async fn memory_history() -> Json<Value> {
         None
     };
 
-    let trend = deltas.as_ref().map(|d| trend_label(d)).unwrap_or("unknown");
-
     let rate = rate_per_hour(&history);
+
+    // Issue #2358: derive the trend badge from the same signed long-term rate
+    // the UI renders, so a negative rate can never show an "↑ Growing" badge.
+    let trend = if history.len() < 2 {
+        "unknown"
+    } else {
+        let lt_rate = rate
+            .get("long_term_total")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        trend_label(lt_rate)
+    };
 
     Json(json!({
         "schema_version": 1,
@@ -235,13 +253,30 @@ pub(crate) async fn memory_history() -> Json<Value> {
 /// rather than reading the abandoned native store. Aggregate counts remain
 /// available via `GET /api/memory/history`.
 pub(crate) async fn memory_recent() -> Json<Value> {
+    let state_root = resolve_state_root();
+
+    // Issue #2358: the per-item recent listing is unavailable on the library
+    // backend, but the *total* stored-memory count is. Surfacing it here stops
+    // the Memory tab from telling a human "nothing is remembered" while tens of
+    // thousands of entries are stored. `total` is `null` (not `0`) when the
+    // statistics cannot be read, so the UI can distinguish "empty" from
+    // "unknown".
+    let total = open_reader_bridge(&state_root)
+        .and_then(|reader| reader.ops().get_statistics())
+        .map(|s| s.total())
+        .ok();
+
     Json(json!({
         "items": [],
-        "total": 0,
-        "last_hour_count": 0,
+        "total": total,
+        // Per-item timestamps are unavailable on this backend, so a precise
+        // "in the last hour" count cannot be computed. `null` tells the UI to
+        // fall back to the total rather than render a misleading "0".
+        "last_hour_count": null,
         "available": false,
         "note": "Per-item recent-memory listing is unavailable on the library \
-                 backend (de-fork Phase 2b, #2307). See /api/memory/history for counts.",
+                 backend (de-fork Phase 2b, #2307). `total` reflects all stored \
+                 memories; see /api/memory/history for counts by type.",
         "server_time": chrono::Utc::now().to_rfc3339(),
     }))
 }
@@ -512,21 +547,17 @@ mod tests_memory_history {
 
     #[test]
     fn trend_label_directions() {
-        let growing = MemoryDeltas {
-            long_term_total: 5,
-            ..Default::default()
-        };
-        assert_eq!(trend_label(&growing), "growing");
-        let shrinking = MemoryDeltas {
-            long_term_total: -3,
-            ..Default::default()
-        };
-        assert_eq!(trend_label(&shrinking), "shrinking");
-        let stable = MemoryDeltas {
-            long_term_total: 0,
-            ..Default::default()
-        };
-        assert_eq!(trend_label(&stable), "stable");
+        // Issue #2358: trend is derived from the signed long-term rate so the
+        // badge always agrees with the displayed rate number.
+        assert_eq!(trend_label(5.0), "growing");
+        assert_eq!(trend_label(-3.0), "shrinking");
+        assert_eq!(trend_label(0.0), "stable");
+        // Within the 0.1/hr dead-band the badge reads "stable" to match the UI,
+        // which rounds |rate| < 0.1 down to 0.
+        assert_eq!(trend_label(0.05), "stable");
+        assert_eq!(trend_label(-0.05), "stable");
+        // A negative rate must never read "growing".
+        assert_ne!(trend_label(-2.6), "growing");
     }
 
     #[test]

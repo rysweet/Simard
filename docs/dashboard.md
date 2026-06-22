@@ -30,7 +30,7 @@ The dashboard is a single-page app with the following tabs:
 | **Logs** | Aggregated daemon and engineer logs. |
 | **Processes** | Live process tree under the daemon — engineer subprocesses, LLM sessions, and their resource usage. |
 | **Memory** | Cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters; full-text memory search; a **Memory Overview** with the live **Memory Store** counts; and a **Memory Files** panel showing the goals snapshot plus any non-empty legacy snapshot files. See [Memory architecture](memory.md). |
-| **Costs** | Per-provider, per-model token spend across the active session. |
+| **Costs** | Per-provider, per-model token spend across the active session, plus daily and weekly budget caps. Dollar figures are **estimates** derived from token counts (see `cost_tracking.rs`), not billed amounts from provider invoices — the metric is labelled "Estimated Cost" and the lede says so. Period buckets render in plain English ("Today (Jun 22)", "Last 7 days") rather than raw keys like `daily:2026-06-22`. |
 | **Chat** | Direct chat with Simard. |
 | **Workboard** | Shared scratch canvas. (Renamed from "Whiteboard" — see [Tab identity contract](#tab-identity-contract).) |
 | **Thinking** | Live thinking-cycle stream (planner output before action dispatch). |
@@ -74,6 +74,21 @@ holding thousands of facts told operators that memory was empty when it was
 rich. The panel now hides empty legacy tiles so the displayed numbers always
 match Simard's actual remembered state.
 
+### Memory tab: "What Simard Remembers" headline and growth trend
+
+The headline counter on the Memory Overview reports the **total stored memory
+count** ("32,342 memories stored"), not a recent-window count. A per-item
+"in the last hour" listing is unavailable on the library backend, so the
+panel never renders a misleading "0" or "No memories stored yet" while the
+store actually holds tens of thousands of entries (issue #2358). When the
+backend can compute a real last-hour count it is shown instead, labelled
+"in the last hour".
+
+The **Memory Growth** trend badge ("↑ Growing" / "↓ Shrinking" / "→ Stable")
+is derived from the same signed growth rate the card prints, so the badge and
+the rate can never contradict each other — a negative rate (`-2.6/hr`) always
+shows "↓ Shrinking", never "↑ Growing".
+
 ## Read-only
 
 The dashboard does not let operators force shell commands or edit code through the browser. Goal promotion, status changes, and refresh are the only state-changing operations. All other panels are observational.
@@ -88,6 +103,28 @@ The four invariants:
 2. **Unique, non-empty visible `<h1>`.** Each tab panel renders exactly one `<h1 class="page-h1">` immediately under the global brand bar. No two tabs share an H1.
 3. **Non-empty plain-English lede.** Each tab panel renders exactly one `<p class="page-lede">` immediately under its H1. The lede is a single sentence that explains what the page is for in language a non-expert can understand.
 4. **No banned jargon in any lede.** The strings `OODA`, `Observe-Orient-Decide-Act`, `synergize`, `leverage`, and `ideate` are forbidden anywhere in lede text — the goal is to ban consultant-speak that an operator without Simard context cannot decode. The blocklist is enforced at build time by a unit test and again at runtime by the Playwright smoke test. Simard-internal domain vocabulary (`facilitator`, `consolidation`, `episodic`, …) is *allowed* — those are legitimate terms a memory or goals page may need to use; the bar is "no corporate jargon", not "no jargon at all".
+
+### Plain-English rendering beyond ledes
+
+The jargon bar is not limited to ledes. Several panels render *dynamic* daemon
+output that would otherwise leak internal machine tokens; these are humanised at
+render time so an operator never sees raw state-machine vocabulary (issue #2358):
+
+- **Synthetic goal ids.** The `__memory__` family of priority sentinels
+  (`priority_kind.rs`) maps to human labels — `__memory__` → "Memory
+  consolidation", `__improvement__` → "Self-improvement cycle", etc. — wherever a
+  priority is shown (Overview "Top Priority", Thinking "Orient"/"Decide").
+- **Goal current activity.** The status chip already names the action, so leading
+  action-kind prefixes (`advance-goal:`, `no-action:`, …) are stripped from the
+  human-facing detail (`goals_status.rs`), and the click-to-expand control reads
+  "full log" rather than `[raw]`.
+- **Cycle summaries.** Persisted cycle-report summaries are stored in the
+  technical `OODA cycle #N: … goals=2, issues=20, tree=clean` form for logs and
+  agent memory, but every dashboard render routes them through
+  `humanizeCycleSummary` so the `OODA` acronym and `key=value` shorthand become
+  prose: `Cycle #N: … 2 goals, 20 open issues, working tree clean`. A unit test
+  in `tests_tab_meta.rs` enforces that the humaniser neutralises each banned
+  token, extending the lede blocklist to rendered cycle/summary text.
 
 The global header (`🌲 Simard Dashboard`) is intentionally demoted from `<h1>` to `<div class="brand">` so that every page has exactly one semantic `<h1>` — the page-specific one — when active.
 

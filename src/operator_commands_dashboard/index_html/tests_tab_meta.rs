@@ -345,3 +345,113 @@ fn rendered_html_tab_click_handler_swaps_document_title() {
         "tab-click handler must read window.__TAB_META"
     );
 }
+
+// ----- Issue #2358: jargon humanizers for rendered (non-lede) text -----
+
+#[test]
+fn rendered_html_defines_jargon_humanizers() {
+    for helper in [
+        "function humanizeGoalId(",
+        "function humanizePeriod(",
+        "function humanizeCycleSummary(",
+    ] {
+        assert!(
+            INDEX_HTML.contains(helper),
+            "dashboard must define JS helper `{helper}` (issue #2358)"
+        );
+    }
+}
+
+#[test]
+fn cycle_summary_render_sites_are_humanized() {
+    // The cycle-report `summary` field is persisted by the daemon in the
+    // technical "OODA cycle #N: … goals=2, issues=20, tree=clean" form. Every
+    // human-facing render site must route it through humanizeCycleSummary so
+    // the acronym and key=value shorthand never leak (issue #2358).
+    assert!(
+        INDEX_HTML.contains("humanizeCycleSummary(rpt.summary)"),
+        "Thinking-tab legacy summary must be humanized"
+    );
+    assert!(
+        INDEX_HTML.contains("humanizeCycleSummary(rpt.summary||'')"),
+        "Thinking-tab inline summary must be humanized"
+    );
+    assert!(
+        INDEX_HTML.contains("humanizeCycleSummary(c.summary"),
+        "Logs/history cycle summary must be humanized"
+    );
+    // No render site should pipe a raw cycle summary straight into esc().
+    assert!(
+        !INDEX_HTML.contains("esc(rpt.summary)"),
+        "a cycle summary is rendered without humanizeCycleSummary"
+    );
+}
+
+#[test]
+fn cycle_summary_humanizer_neutralizes_banned_jargon_and_shorthand() {
+    // Locate the humanizeCycleSummary body and assert it targets the acronym
+    // and the key=value shorthand the issue flagged. This extends the
+    // BANNED_JARGON guarantee from ledes to rendered cycle/summary text.
+    let start = INDEX_HTML
+        .find("function humanizeCycleSummary(")
+        .expect("humanizeCycleSummary must be defined");
+    let body = &INDEX_HTML[start..start + 700.min(INDEX_HTML.len() - start)];
+
+    // The OODA acronym (a BANNED_JARGON term) must be a replace target.
+    assert!(
+        BANNED_JARGON.contains(&"OODA"),
+        "OODA should remain in BANNED_JARGON"
+    );
+    assert!(
+        body.contains("OODA"),
+        "humanizeCycleSummary must rewrite the OODA acronym: {body}"
+    );
+    for shorthand in ["tree=clean", "tree=dirty", "goals=", "issues="] {
+        assert!(
+            body.contains(shorthand),
+            "humanizeCycleSummary must rewrite `{shorthand}` shorthand: {body}"
+        );
+    }
+}
+
+#[test]
+fn synthetic_goal_ids_are_humanized_at_render_sites() {
+    // The `__memory__` family of synthetic goal ids must be mapped to labels
+    // wherever a priority is shown to a human (issue #2358).
+    assert!(
+        INDEX_HTML.contains("humanizeGoalId(top.goal_id)"),
+        "overview top-priority must humanize the goal id"
+    );
+    assert!(
+        INDEX_HTML.contains("humanizeGoalId(p.goal_id)"),
+        "Thinking-tab priorities must humanize the goal id"
+    );
+    assert!(
+        INDEX_HTML.contains("'__memory__':"),
+        "humanizeGoalId must map the __memory__ sentinel"
+    );
+}
+
+#[test]
+fn cost_period_is_humanized_and_lede_is_honest() {
+    // The cost data is estimated (cost_tracking.rs), so the lede must not
+    // claim it comes from real provider invoices, and the raw period key must
+    // be humanized (issue #2358).
+    let costs_lede = TAB_METADATA
+        .iter()
+        .find(|t| t.slug == "costs")
+        .expect("costs tab present")
+        .lede;
+    assert!(
+        !costs_lede.contains("real provider invoices"),
+        "costs lede must not claim invoice-derived figures: {costs_lede}"
+    );
+    assert!(
+        costs_lede.contains("estimated"),
+        "costs lede should describe the figures as estimated: {costs_lede}"
+    );
+    assert!(
+        INDEX_HTML.contains("humanizePeriod(v)"),
+        "cost summary must humanize the raw period key"
+    );
+}

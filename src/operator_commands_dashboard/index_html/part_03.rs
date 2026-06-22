@@ -11,7 +11,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
               const detailHtml=detailText?'<span style="font-size:.8rem;margin-left:6px">'+esc(detailText)+'</span>':'';
               const full=g.detail_full||'';
               const isFailed=(chip==='Failed');
-              const expandHtml=(full&&full!==detailText)?'<details style="display:inline;margin-left:6px"'+(isFailed?' open':'')+' ><summary style="display:inline;cursor:pointer;color:'+(isFailed?'#f85149':'#8b949e')+';font-size:.7rem">'+(isFailed?'[error]':'[raw]')+'</summary><pre style="margin:.3rem 0 0;white-space:pre-wrap;font-size:.75rem;color:'+(isFailed?'#f85149':'#8b949e')+'">'+esc(full)+'</pre></details>':'';
+              const expandHtml=(full&&full!==detailText)?'<details style="display:inline;margin-left:6px"'+(isFailed?' open':'')+' ><summary style="display:inline;cursor:pointer;color:'+(isFailed?'#f85149':'#8b949e')+';font-size:.7rem">'+(isFailed?'error detail':'full log')+'</summary><pre style="margin:.3rem 0 0;white-space:pre-wrap;font-size:.75rem;color:'+(isFailed?'#f85149':'#8b949e')+'">'+esc(full)+'</pre></details>':'';
               let wipHtml='—';
               if(chip!=='Waiting'||detailText||g.wip_refs?.length){
                 let parts=[];
@@ -227,16 +227,36 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
     /* --- Recent Memories (plain-English view, #1997) --- */
     async function fetchRecentMemories(){
       const countEl=document.getElementById('mem-recent-count');
+      const labelEl=document.getElementById('mem-recent-label');
       const totalEl=document.getElementById('mem-recent-total');
       const listEl=document.getElementById('mem-recent-list');
       listEl.innerHTML='<span class="loading">Loading recent memories…</span>';
       try{
         const d=await apiFetch('/api/memory/recent');
         if(d.error){listEl.innerHTML='<span class="err">'+esc(d.error)+'</span>';countEl.textContent='—';return;}
-        countEl.textContent=d.last_hour_count;
-        totalEl.textContent=d.total+' total';
+        // Issue #2358: never tell a human "nothing is remembered" while the
+        // store holds tens of thousands of entries. The per-item recent
+        // listing is unavailable on the library backend (last_hour_count is
+        // null), so the headline falls back to the real total stored count.
+        const total=(typeof d.total==='number')?d.total:null;
+        const lastHour=(typeof d.last_hour_count==='number')?d.last_hour_count:null;
+        if(lastHour!=null){
+          countEl.textContent=lastHour.toLocaleString();
+          if(labelEl)labelEl.innerHTML='items remembered<br>in the last hour';
+          totalEl.textContent=(total!=null)?(total.toLocaleString()+' total stored'):'';
+        }else{
+          countEl.textContent=(total!=null)?total.toLocaleString():'0';
+          if(labelEl)labelEl.innerHTML='memories<br>stored';
+          totalEl.textContent=(total!=null)?'across all memory types':'';
+        }
         if(!d.items||d.items.length===0){
-          listEl.innerHTML='<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          if(total!=null&&total>0){
+            listEl.innerHTML=(lastHour!=null)
+              ?'<span style="color:#8b949e">No new memories in the last hour — '+total.toLocaleString()+' total stored.</span>'
+              :'<span style="color:#8b949e">'+total.toLocaleString()+' memories stored. A per-item recent-activity view isn\'t available on this backend yet — see Memory Growth below for live counts by type.</span>';
+          }else{
+            listEl.innerHTML='<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          }
           return;
         }
         const catColors={'Learned fact':'#58a6ff','Past event':'#3fb950','Current task context':'#f0883e','How-to knowledge':'#a371f7','Planned reminder':'#d29922','Recent observation':'#8b949e'};

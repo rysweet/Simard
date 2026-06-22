@@ -152,7 +152,52 @@ fn clean_detail(raw: &str) -> String {
     s = collapse_punctuation(&s);
 
     // 6. Collapse runs of whitespace into single spaces and trim.
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // 7. Strip leading machine action-kind prefixes (issue #2358): the status
+    //    chip already names the action, so `advance-goal:` / `no-action:` etc.
+    //    glued to the front are redundant noise for a human reader.
+    strip_leading_action_prefixes(&s)
+}
+
+/// Raw OODA action-kind verbs (and the `no-action` brain token) that prefix a
+/// `current_activity` line. The dashboard already renders the high-level state
+/// as a status chip, so these leading machine tokens are redundant for a human
+/// (issue #2358). Listed with trailing colon so only the `verb:` form is
+/// stripped, never a substring inside prose.
+const ACTION_PREFIXES: &[&str] = &[
+    "advance-goal:",
+    "no-action:",
+    "run-improvement:",
+    "consolidate-memory:",
+    "research-query:",
+    "run-gym-eval:",
+    "build-skill:",
+    "launch-session:",
+    "poll-developer-activity:",
+    "poll-activity:",
+    "extract-ideas:",
+    "safe-update:",
+];
+
+/// Strip any stacked leading action-kind prefixes, e.g.
+/// `advance-goal: no-action: NO ACTION …` → `NO ACTION …`.
+fn strip_leading_action_prefixes(s: &str) -> String {
+    let mut cur = s.trim_start();
+    loop {
+        let mut matched = false;
+        for p in ACTION_PREFIXES {
+            if let Some(rest) = cur.strip_prefix(p) {
+                cur = rest.trim_start();
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            break;
+        }
+    }
+    cur.to_string()
 }
 
 /// Remove top-level `(...)` groups whose body contains any noise marker.
@@ -382,7 +427,10 @@ mod tests {
             !detail.contains("brain-error fallback"),
             "detail still leaks 'brain-error fallback': {detail}"
         );
-        assert!(detail.starts_with("advance-goal"));
+        assert!(
+            !detail.contains("advance-goal:"),
+            "detail should strip the leading action-kind prefix (issue #2358): {detail}"
+        );
         assert_eq!(full, raw, "detail_full must preserve the original verbatim");
     }
 
@@ -438,8 +486,32 @@ mod tests {
     #[test]
     fn other_action_kinds_default_to_working() {
         let raw = "consolidate-memory: 42 facts merged into long-term store";
-        let (chip, _detail, _) = render_status_and_detail(Some(raw));
+        let (chip, detail, _) = render_status_and_detail(Some(raw));
         assert_eq!(chip, StatusChip::Working);
+        // Issue #2358: the leading action-kind prefix is stripped from the
+        // human-facing detail.
+        assert!(
+            !detail.contains("consolidate-memory:"),
+            "leading action prefix should be stripped: {detail}"
+        );
+        assert!(detail.contains("42 facts merged"));
+    }
+
+    #[test]
+    fn stacked_action_prefixes_are_stripped() {
+        // Issue #2358: the live Goals tab rendered
+        // "Working advance-goal: no-action: NO ACTION …" — the chip already
+        // says "Working", so both machine prefixes must be removed.
+        let raw = "advance-goal: no-action: NO ACTION Another subordinate is already \
+                   working this goal";
+        let (chip, detail, full) = render_status_and_detail(Some(raw));
+        assert_eq!(chip, StatusChip::Working);
+        assert!(
+            !detail.contains("advance-goal:") && !detail.contains("no-action:"),
+            "both leading prefixes must be stripped: {detail}"
+        );
+        assert!(detail.starts_with("NO ACTION"), "detail: {detail}");
+        assert_eq!(full, raw, "detail_full preserves the original verbatim");
     }
 
     // ---- Launcher-noise stripping ----------------------------------------

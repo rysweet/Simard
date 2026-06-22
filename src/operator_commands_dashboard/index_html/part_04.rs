@@ -1,5 +1,7 @@
 pub(crate) const PART_04: &str = r#"            let fmt;
-            if(typeof v==='number'){
+            if(k==='period'){
+              fmt=esc(humanizePeriod(v));
+            }else if(typeof v==='number'){
               if(isCost) fmt='$'+v.toFixed(4);
               else if(isTokens) fmt=v.toLocaleString()+' tokens';
               else fmt=v.toLocaleString();
@@ -201,7 +203,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
           if(rpt.legacy){
             return `<div class="thinking-cycle legacy">
               <div class="cycle-header"><span class="cycle-num">Cycle #${rpt.cycle_number}</span><span class="cycle-badge">legacy</span></div>
-              <div class="cycle-summary">${esc(rpt.summary)}</div>
+              <div class="cycle-summary">${esc(humanizeCycleSummary(rpt.summary))}</div>
             </div>`;
           }
           const phases=[];
@@ -223,7 +225,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
               <div class="phase-content">
                 ${rpt.priorities.map(p=>`<div class="priority-line">
                   <span class="urgency" style="color:${p.urgency>0.7?'var(--red)':p.urgency>0.4?'var(--yellow)':'var(--green)'}">●</span>
-                  <strong>${esc(p.goal_id)}</strong> (urgency: ${p.urgency.toFixed(2)}) — ${esc(p.reason)}
+                  <strong>${esc(humanizeGoalId(p.goal_id))}</strong> (urgency: ${p.urgency.toFixed(2)}) — ${esc(p.reason)}
                 </div>`).join('')}
               </div>
             </div>`);
@@ -232,7 +234,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             phases.push(`<div class="phase decide">
               <div class="phase-label">🎯 Decide</div>
               <div class="phase-content">
-                ${rpt.planned_actions.map(a=>`<div>→ <code>${esc(a.kind)}</code> ${a.goal_id?'['+esc(a.goal_id)+']':''} ${esc(a.description)}</div>`).join('')}
+                ${rpt.planned_actions.map(a=>`<div>→ <code>${esc(a.kind)}</code> ${a.goal_id?'['+esc(humanizeGoalId(a.goal_id))+']':''} ${esc(a.description)}</div>`).join('')}
               </div>
             </div>`);
           }
@@ -249,7 +251,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
                     const agentLink=agent?`<a href='javascript:void(0)' onclick="openAgentLog('${esc(agent)}');return false;"><code>${esc(agent)}</code></a>`:'<em>(no agent)</em>';
                     seBlock=`<div class="spawn-engineer-block" style="margin-top:.35rem;padding:.4rem .55rem;border-left:3px solid ${statusColor};background:rgba(255,255,255,0.03);border-radius:4px">
                       <div><span style="color:${statusColor}">●</span> <strong>Launched sub-agent</strong> · ${esc(se.last_action||'')} · <span style="color:${statusColor}">${esc(se.status||'')}</span></div>
-                      <div>subordinate: ${agentLink}${se.goal_id?` · goal <code>${esc(se.goal_id)}</code>`:''}</div>
+                      <div>subordinate: ${agentLink}${se.goal_id?` · goal <code>${esc(humanizeGoalId(se.goal_id))}</code>`:''}</div>
                       ${se.task_summary?`<div>task: ${esc(se.task_summary)}</div>`:''}
                     </div>`;
                   }
@@ -271,7 +273,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
           return `<div class="thinking-cycle">
             <div class="cycle-header">
               <span class="cycle-num">Cycle #${rpt.cycle_number}</span>
-              <span class="cycle-summary-inline">${esc(rpt.summary||'')}</span>
+              <span class="cycle-summary-inline">${esc(humanizeCycleSummary(rpt.summary||''))}</span>
             </div>
             <div class="cycle-phases">${phases.join('')}</div>
           </div>`;
@@ -344,7 +346,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             const phaseColors={act:'var(--green)',decide:'#a371f7',orient:'var(--yellow)',observe:'var(--accent)',unknown:'#8b949e'};
             const pColor=phaseColors[c.phase]||'#8b949e';
             const dur=c.duration_secs!=null?c.duration_secs+'s':'—';
-            const summary=c.summary||'';
+            const summary=humanizeCycleSummary(c.summary||'');
             const shortSummary=summary.length>120?summary.substring(0,120)+'…':summary;
             return `<tr>
               <td style="font-weight:600;color:var(--accent)">${c.cycle_number}</td>
