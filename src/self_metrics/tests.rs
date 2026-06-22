@@ -39,7 +39,7 @@ fn metric_entry_roundtrip() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn record_and_query_metric() {
     with_temp_home(|| {
         record_metric("bugs_fixed", 3.0, "test context").unwrap();
@@ -56,7 +56,7 @@ fn record_and_query_metric() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn query_metrics_with_since_filter() {
     with_temp_home(|| {
         record_metric("test_count", 10.0, "old").unwrap();
@@ -74,7 +74,7 @@ fn query_metrics_with_since_filter() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn query_metrics_empty_file() {
     with_temp_home(|| {
         let result = query_metrics("nonexistent", None).unwrap();
@@ -83,7 +83,7 @@ fn query_metrics_empty_file() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn daily_report_empty() {
     with_temp_home(|| {
         let report = daily_report().unwrap();
@@ -93,7 +93,7 @@ fn daily_report_empty() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn daily_report_with_data() {
     with_temp_home(|| {
         record_metric("bugs_fixed", 2.0, "ctx").unwrap();
@@ -112,7 +112,7 @@ fn daily_report_with_data() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn recent_metrics_limit() {
     with_temp_home(|| {
         for i in 0..10 {
@@ -126,7 +126,7 @@ fn recent_metrics_limit() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn collect_and_record_all_records_four_metrics() {
     with_temp_home(|| {
         // collect_and_record_all may fail on gh commands, but it should
@@ -141,7 +141,7 @@ fn collect_and_record_all_records_four_metrics() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn malformed_lines_skipped() {
     with_temp_home(|| {
         let dir = metrics_dir();

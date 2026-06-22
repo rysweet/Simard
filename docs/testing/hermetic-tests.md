@@ -6,6 +6,7 @@ review_schedule: at every cognitive-memory schema or socket-path change
 owner: simard
 doc_type: reference
 related:
+  - ./cognitive-memory-serial-isolation.md
   - ../reference/simard-cli.md
   - ../reference/goal-board-api.md
   - ../reference/cognitive-memory-bridge-helpers.md
@@ -203,6 +204,15 @@ tests in the same process would race on those vars and one would write
 into the other's TempDir, silently passing the hermetic guard while
 producing nonsense results.
 
+The same race is var-agnostic at the C level: a `set_var` on *any*
+variable (e.g. `HOME`) in a concurrent test can tear a handler's
+`std::env::var("SIMARD_STATE_ROOT")` read. Issue
+[#2360](https://github.com/rysweet/Simard/issues/2360) therefore extends
+the `cognitive_memory` key to **every** env-mutating lib-binary test and
+adds a regression-guard meta-test that enforces it. See
+[Complete serial(cognitive_memory) test isolation](./cognitive-memory-serial-isolation.md)
+for the whole-binary contract, the Annotation Decision Rule, and the guard.
+
 ## What NOT to do
 
 The following patterns *look* hermetic but trip the guard or leak. Each
@@ -256,6 +266,9 @@ list.
 
 ## Related reading
 
+- [Complete serial(cognitive_memory) test isolation](./cognitive-memory-serial-isolation.md)
+  — the whole-binary contract that keeps these serialized tests from racing
+  each other's process-global environment, plus the regression-guard meta-test.
 - [How to clean a fixture leak from the live goal board](../howto/clean-fixture-leaks.md)
   — the operator remediation for a leak that nevertheless reached
   production.
