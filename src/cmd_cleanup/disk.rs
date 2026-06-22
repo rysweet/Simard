@@ -316,9 +316,40 @@ pub fn cap_home_cargo_targets(report: &mut CleanupReport, cap_bytes: u64) {
 /// Maximum age (in days) of corrupted memory DB files before deletion.
 pub const CORRUPT_DB_MAX_AGE_DAYS: u64 = 7;
 
-/// Remove `~/.simard/cognitive_memory.corrupt-*` files older than the threshold.
-/// These are quarantined snapshots of corrupted DBs; useful briefly for forensics
-/// then pure dead weight.
+/// Returns `true` when `name` is a quarantined corrupt cognitive-memory
+/// artifact (safe to garbage-collect) and `false` for the live store.
+///
+/// Two backend generations leave quarantine files in `~/.simard`:
+///
+/// * **Native fork (pre-#2307).** A single-file store at
+///   `cognitive_memory.ladybug`; corrupt snapshots were renamed
+///   `cognitive_memory.corrupt-<ts>`.
+/// * **Library backend (de-fork Phase 2b, #2307).** The store lives at
+///   `cognitive` with a `cognitive.wal` write-ahead log. When LadybugDB
+///   detects corruption it quarantines the bad file in place, producing
+///   `cognitive.corrupt-<ts>`, `cognitive.wal.corrupt-<ts>`, recursively
+///   nested `…cognitive.wal.corrupt-<ts>` chains, `…cognitive.shadow`
+///   side-files, and `…corrupt-<ts>.bak` copies.
+///
+/// Every quarantine name carries the `.corrupt-<ts>` infix, while the live
+/// store files (`cognitive`, `cognitive.wal`, `cognitive.shadow`) never do.
+/// Matching on that infix — anchored to the `cognitive`/`cognitive_memory`
+/// store stem — therefore reclaims every stale quarantine generation without
+/// ever risking the live store. Before this generalization the cleanup only
+/// matched the native `cognitive_memory.corrupt-` prefix, so post-de-fork
+/// library quarantines accumulated unbounded (issue #2307 fallout).
+fn is_corrupt_quarantine_name(name: &str) -> bool {
+    (name.starts_with("cognitive.") || name.starts_with("cognitive_memory."))
+        && name.contains(".corrupt-")
+}
+
+/// Remove quarantined corrupt cognitive-memory snapshots in `~/.simard` older
+/// than [`CORRUPT_DB_MAX_AGE_DAYS`]. Covers both the native single-file
+/// `cognitive_memory.corrupt-*` snapshots and the library backend's
+/// `cognitive.corrupt-*` / `cognitive.wal.corrupt-*` / `*.cognitive.shadow`
+/// quarantines (see [`is_corrupt_quarantine_name`]). These are useful briefly
+/// for forensics then pure dead weight. The live store (`cognitive`,
+/// `cognitive.wal`) is never matched.
 pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
     let Some(home) = std::env::var_os("HOME") else {
         return;
@@ -331,7 +362,7 @@ pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
     let now = std::time::SystemTime::now();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("cognitive_memory.corrupt-") {
+        if !is_corrupt_quarantine_name(&name) {
             continue;
         }
         let path = entry.path();
@@ -342,13 +373,27 @@ pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
         if now.duration_since(modified).unwrap_or_default() < max_age {
             continue;
         }
-        let size = meta.len();
+        // A cognitive-memory store may be backed by a single file or a
+        // directory, so a quarantine snapshot can be either. Size and remove
+        // accordingly; `remove_file` on a directory would otherwise fail and
+        // leave the quarantine in place.
+        let is_dir = meta.is_dir();
+        let size = if is_dir {
+            dir_size(&path).unwrap_or(0)
+        } else {
+            meta.len()
+        };
         eprintln!(
             "  Removing old corrupt DB {} ({} MB)",
             path.display(),
             size / (1024 * 1024)
         );
-        if let Err(e) = std::fs::remove_file(&path) {
+        let removed = if is_dir {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if let Err(e) = removed {
             report
                 .errors
                 .push(format!("failed to remove {}: {e}", path.display()));
