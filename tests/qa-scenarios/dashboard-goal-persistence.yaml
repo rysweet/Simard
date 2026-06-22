@@ -1,0 +1,11 @@
+name: simard-dashboard-goal-persistence
+app_type: cli
+description: Standalone dashboard persists goals across multiple HTTP requests (no silent data loss)
+steps:
+  - action: run
+    command: "bash scripts/qa-dashboard-goal-persistence.sh"
+    timeout: 180s
+  - action: expect_stdout
+    contains: "QA-DASHBOARD-GOALS: PASS"
+  - action: expect_exit_code
+    code: 0
