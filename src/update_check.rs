@@ -336,6 +336,13 @@ mod tests {
     }
 
     #[test]
+    // #2360 (same class): these tests set/remove the process-global
+    // `SIMARD_NO_UPDATE_CHECK`, which `run_update_check[_background]` reads.
+    // cargo runs the lib tests multi-threaded and glibc getenv/setenv are not
+    // thread-safe, so a concurrent mutate/read tears (e.g. this `is_none()`
+    // assertion observing the var removed by `..._returns_some_when_enabled`).
+    // All tests touching the var share the `update_check_env` key.
+    #[serial_test::serial(update_check_env)]
     fn run_update_check_background_returns_receiver() {
         // With check disabled, returns None
         unsafe { std::env::set_var("SIMARD_NO_UPDATE_CHECK", "1") };
@@ -346,6 +353,7 @@ mod tests {
     // ── F1: fire-and-forget (no join) ──────────────────────────────
 
     #[test]
+    #[serial_test::serial(update_check_env)]
     fn run_update_check_returns_immediately_when_disabled() {
         unsafe { std::env::set_var("SIMARD_NO_UPDATE_CHECK", "1") };
         let start = std::time::Instant::now();
@@ -359,6 +367,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(update_check_env)]
     fn run_update_check_is_fire_and_forget() {
         // Even when enabled, run_update_check() must return immediately
         // because it spawns a detached thread (no join). If someone
@@ -375,6 +384,7 @@ mod tests {
     // ── F2: background channel returns Some when enabled ───────────
 
     #[test]
+    #[serial_test::serial(update_check_env)]
     fn run_update_check_background_returns_some_when_enabled() {
         unsafe { std::env::remove_var("SIMARD_NO_UPDATE_CHECK") };
         let rx = run_update_check_background();
