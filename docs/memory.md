@@ -195,6 +195,10 @@ distinction.
 
 Semantic, procedural, and prospective memory survive process restarts and are queried at the start of every engineer dispatch. When the daemon spawns a new engineer for a goal it seeds the engineer's working memory with the most relevant prior episodes for that goal-id, so engineers continue where the previous attempt left off.
 
+**Durability guarantee.** The library backend (`state_root/cognitive`) makes every acknowledged write durable on its own: each store operation issues a per-write `fsync` barrier into the write-ahead log, so a write that returned `Ok` survives even an *un-checkpointed* crash. A graceful `checkpoint()` (which the OODA loop runs at consolidation) folds the WAL into the main database file; a subsequent clean reopen then needs no replay. If a process is killed mid-write, the next `LibraryCognitiveMemory::open` routes through the library's `open_with_recovery` ladder (corrupt-WAL tail quarantine + good-prefix replay, and corrupt-catalog quarantine as a last resort — memory-lib #92–#97), so a later session never crash-loops on a damaged store.
+
+Because the store persists at a per-`state_root` path with no shared global state, recall is *cross-process*, not just cross-handle: a `simard` process started later (or a separate operator reading via `simard memory stats`) opens the same on-disk store through the tier-2 "direct open" path and observes every committed write — counts, the provenance / dedup graph edges, and literal fact content. This contract is gated end-to-end by `tests/cognitive_memory_cross_session_recall.rs` (driven by `tests/gadugi/cross-session-recall.yaml`): Session A writes through `LibraryCognitiveMemory` and a **separate real `simard` process** recalls via `simard memory stats --json` / `simard memory dump --type=facts --json`, including a crash-recovery step that reopens an un-checkpointed store.
+
 ## On-disk layout
 
 The library backend persists at `state_root/cognitive` (a LadybugDB `GraphStore`). In production `state_root` is `~/.simard`:
