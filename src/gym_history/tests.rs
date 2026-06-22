@@ -244,6 +244,7 @@ use crate::gym::{
     BenchmarkArtifactPaths, BenchmarkClass, BenchmarkHandoffReport, BenchmarkRunReport,
     BenchmarkRuntimeReport, BenchmarkScenario, BenchmarkScorecard,
 };
+use crate::gym_scoring::EvidenceQualityAssessment;
 use crate::runtime::RuntimeTopology;
 
 fn make_report(
@@ -275,6 +276,7 @@ fn make_report(
         scorecard: BenchmarkScorecard {
             task_completed: passed,
             evidence_quality: evidence.to_string(),
+            evidence_quality_assessment: EvidenceQualityAssessment::default(),
             correctness_checks_passed: checks_passed,
             correctness_checks_total: checks_total,
             unnecessary_action_count: None,

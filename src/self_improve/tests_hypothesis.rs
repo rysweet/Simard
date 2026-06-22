@@ -14,6 +14,7 @@ use crate::gym::{
     BenchmarkRunReport, BenchmarkRuntimeReport, BenchmarkScenario, BenchmarkScorecard,
 };
 use crate::gym_history::{GymSignal, ScenarioSignal};
+use crate::gym_scoring::EvidenceQualityAssessment;
 use crate::improvements::EvidenceRef;
 use crate::review::{ImprovementProposal, ReviewArtifact, ReviewEvidenceSummary, ReviewTargetKind};
 use crate::runtime::RuntimeTopology;
@@ -57,6 +58,7 @@ fn synthetic_report(
         scorecard: BenchmarkScorecard {
             task_completed: passed,
             evidence_quality: "ok".to_string(),
+            evidence_quality_assessment: EvidenceQualityAssessment::default(),
             correctness_checks_passed: 0,
             correctness_checks_total: failed_check_ids.len(),
             unnecessary_action_count: Some(2),
