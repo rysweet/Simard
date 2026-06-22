@@ -55,6 +55,12 @@ fn dispatch_legacy_gym_cli_list_rejects_extra_args() {
 }
 
 #[test]
+fn dispatch_legacy_gym_cli_list_extended_ok() {
+    assert!(dispatch_legacy_gym_cli(args(&["list", "extended"])).is_ok());
+    assert!(dispatch_legacy_gym_cli(args(&["list", "--extended"])).is_ok());
+}
+
+#[test]
 fn dispatch_legacy_gym_cli_run_rejects_extra_args() {
     let err = dispatch_legacy_gym_cli(args(&["run", "scenario-1", "extra"])).unwrap_err();
     assert!(err.to_string().contains("trailing arguments"));

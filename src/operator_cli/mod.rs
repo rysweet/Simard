@@ -92,10 +92,10 @@ Product modes:
                            inspect a probe-isolated sandbox instead
   improvement-curation run <base-type> <topology> <objective> [state-root]
   improvement-curation read <base-type> <topology> <state-root>
-  gym list
+  gym list [extended]
   gym run <scenario-id>
   gym compare <scenario-id>
-  gym run-suite <suite-id>
+  gym run-suite <suite-id>        (starter = core V1 set; extended = all)
   ooda run [--cycles=N] [--no-auto-reload] [state-root]
   dashboard serve [--port=8080]
   memory stats [state-root] [--json]

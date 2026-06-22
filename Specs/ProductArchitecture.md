@@ -214,6 +214,11 @@ Each benchmark run should record:
 V1 should prefer a small benchmark set with high signal over a large, noisy suite.
 The gym is successful when it changes engineering decisions, not when it creates dashboard theater.
 
+To honor this, the default gym surfaces (the `starter` suite and `gym list`)
+resolve to only the four core classes above. Additional benchmark classes are
+preserved in the registry but gated behind an explicit opt-in (`gym run-suite
+extended` / `gym list extended`) so they stay out of the default high-signal set.
+
 ## Interactive Terminal-Driven Engineer Behavior
 
 Engineer mode is the heart of Simard.

@@ -158,8 +158,8 @@ where
 
     match command.as_str() {
         "list" => {
-            reject_extra_args(args)?;
-            run_gym_list()?;
+            let set = parse_legacy_list_scenario_set(args)?;
+            run_gym_list(set)?;
         }
         "run" => {
             let scenario_id = next_required(&mut args, "scenario id")?;
@@ -183,7 +183,23 @@ where
 }
 
 pub fn gym_usage() -> &'static str {
-    "usage: simard-gym <list|run <scenario-id>|compare <scenario-id>|run-suite <suite-id>>"
+    "usage: simard-gym <list [extended]|run <scenario-id>|compare <scenario-id>|run-suite <suite-id>>"
+}
+
+/// Parses the optional selector for the legacy `simard-gym list` command. No
+/// argument resolves to the core V1 set; `extended`/`--extended` opts into the
+/// full registry. Other trailing args are rejected (strict-arg contract).
+fn parse_legacy_list_scenario_set(
+    args: impl Iterator<Item = String>,
+) -> Result<crate::BenchmarkScenarioSet, Box<dyn std::error::Error>> {
+    let rest: Vec<String> = args.collect();
+    match rest.as_slice() {
+        [] => Ok(crate::BenchmarkScenarioSet::Core),
+        [selector] if selector == "extended" || selector == "--extended" => {
+            Ok(crate::BenchmarkScenarioSet::Extended)
+        }
+        _ => Err(format!("unexpected trailing arguments: {}", rest.join(" ")).into()),
+    }
 }
 
 pub(super) fn next_required(

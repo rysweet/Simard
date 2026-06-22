@@ -1,12 +1,19 @@
 use crate::operator_commands::{print_display, print_text};
 use crate::{
-    benchmark_scenarios, compare_latest_benchmark_runs, default_output_root,
-    run_benchmark_scenario, run_benchmark_suite,
+    BenchmarkScenarioSet, benchmark_scenarios_for, compare_latest_benchmark_runs,
+    default_output_root, run_benchmark_scenario, run_benchmark_suite,
 };
 
-pub fn run_gym_list() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Simard benchmark scenarios:");
-    for scenario in benchmark_scenarios() {
+pub fn run_gym_list(set: BenchmarkScenarioSet) -> Result<(), Box<dyn std::error::Error>> {
+    match set {
+        BenchmarkScenarioSet::Core => {
+            println!("Simard benchmark scenarios (core V1 high-signal set):");
+        }
+        BenchmarkScenarioSet::Extended => {
+            println!("Simard benchmark scenarios (extended set — all classes):");
+        }
+    }
+    for scenario in benchmark_scenarios_for(set) {
         println!(
             "- {} | class={} | identity={} | base_type={} | topology={}",
             scenario.id, scenario.class, scenario.identity, scenario.base_type, scenario.topology
@@ -124,7 +131,7 @@ pub fn run_gym_suite(suite_id: &str) -> Result<(), Box<dyn std::error::Error>> {
             let reason = scenario
                 .skip_reason
                 .as_deref()
-                .unwrap_or("auth unavailable");
+                .unwrap_or("unavailable at gate-time");
             println!("- {}: SKIPPED ({})", scenario.scenario_id, reason);
         } else {
             println!(
@@ -138,7 +145,7 @@ pub fn run_gym_suite(suite_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     let skipped_count = report.scenarios.iter().filter(|s| s.skipped).count();
     if skipped_count > 0 {
         println!(
-            "WARN: {} scenario(s) skipped due to unavailable auth",
+            "WARN: {} scenario(s) skipped (unavailable auth or unsupported config; see per-scenario reasons above)",
             skipped_count
         );
     }
@@ -149,6 +156,7 @@ pub fn run_gym_suite(suite_id: &str) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::benchmark_scenarios;
 
     // ── benchmark_scenarios ─────────────────────────────────────────
 
@@ -215,7 +223,18 @@ mod tests {
     #[test]
     fn run_gym_list_succeeds() {
         // This function just prints to stdout, so we verify it does not error
-        let result = run_gym_list();
-        assert!(result.is_ok());
+        assert!(run_gym_list(BenchmarkScenarioSet::Core).is_ok());
+        assert!(run_gym_list(BenchmarkScenarioSet::Extended).is_ok());
+    }
+
+    #[test]
+    fn run_gym_list_core_is_subset_of_extended() {
+        let core = benchmark_scenarios_for(BenchmarkScenarioSet::Core).len();
+        let extended = benchmark_scenarios_for(BenchmarkScenarioSet::Extended).len();
+        assert!(core > 0, "core set must be non-empty");
+        assert!(
+            core < extended,
+            "core ({core}) must be a strict subset of extended ({extended})"
+        );
     }
 }

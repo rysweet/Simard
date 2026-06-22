@@ -1,0 +1,54 @@
+name: "Gym V1 Core Benchmark Set Gating"
+description: "Issue #2087: the default gym surface (gym list / starter suite) must resolve to only the four spec-mandated core V1 benchmark classes, while the additional classes are preserved and reachable only via an explicit `extended` opt-in. Fast, deterministic coverage exercising only the list command."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Default gym list resolves to the four core V1 classes; extended is opt-in"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/gym-core-default.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "benchmark-gym"
+    - "v1-minimalism"
+    - "issue-2087"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

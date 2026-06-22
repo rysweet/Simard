@@ -32,13 +32,17 @@ All runnable examples below use the canonical benchmark surface.
 
 ## Step 1: List the shipped benchmark scenarios
 
-The starter suite is intentionally small and curated.
+By default the gym lists only the **core V1 set** — the four spec-mandated,
+high-signal benchmark classes (`Specs/ProductArchitecture.md`, "Initial
+Benchmark Classes"): `repo-exploration`, `documentation`, `safe-code-change`,
+and `session-quality`. This keeps the default suite small and high-signal
+instead of a large, noisy one.
 
 ```bash
 cargo run --quiet -- gym list
 ```
 
-You should see five scenarios:
+The core set always includes these curated scenarios:
 
 - `repo-exploration-local`
 - `docs-refresh-copilot`
@@ -59,14 +63,29 @@ Together they cover:
 
 `interactive-terminal-driving` is intentionally a generic terminal-shell benchmark. It validates PTY-driven prompt/input sequencing without pretending to be a real `amplihack copilot` session.
 
-If you need exact legacy output for an older script, `cargo run --quiet --bin simard-gym -- list` still works as a compatibility surface.
+Additional benchmark classes (`chaos-engineering`, `event-sourcing`,
+`rate-limiting`, and many more) are preserved but **excluded from the default**.
+They are opt-in: pass `extended` to list them all.
+
+```bash
+cargo run --quiet -- gym list extended
+```
+
+If you need exact legacy output for an older script, `cargo run --quiet --bin simard-gym -- list` still works as a compatibility surface (and also accepts `list extended`).
 
 ## Step 2: Run the starter benchmark suite
 
-Run the full shipped suite like an operator would:
+Run the default (core V1) suite like an operator would:
 
 ```bash
 cargo run --quiet -- gym run-suite starter
+```
+
+The `starter` suite runs only the core V1 set. To run every preserved scenario
+across all classes, opt into the `extended` suite instead:
+
+```bash
+cargo run --quiet -- gym run-suite extended
 ```
 
 You should see output shaped like:

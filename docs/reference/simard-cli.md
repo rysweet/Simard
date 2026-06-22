@@ -49,10 +49,10 @@ simard
 |  |- run <base-type> <topology> <structured-objective> [state-root]
 |  `- read <base-type> <topology> <state-root>
 |- gym
-|  |- list
+|  |- list [extended]
 |  |- run <scenario-id>
 |  |- compare <scenario-id>
-|  `- run-suite <suite-id>
+|  `- run-suite <suite-id>          (starter = core V1 set; extended = all)
 |- review
 |  |- run <base-type> <topology> <objective> [state-root]
 |  `- read <base-type> <topology> <state-root>
@@ -916,9 +916,13 @@ Proposed goals: <none>
 Latest improvement record: review=review-... target=operator-review approvals=[p1 [active] Capture denser execution evidence] deferred=[Promote this pattern into a repeatable benchmark (hold this until the next benchmark planning pass)]
 ```
 
-### `simard gym list`
+### `simard gym list [extended]`
 
-Lists the shipped benchmark scenarios.
+Lists benchmark scenarios. By default it lists only the **core V1 set** — the
+four spec-mandated, high-signal benchmark classes (`repo-exploration`,
+`documentation`, `safe-code-change`, `session-quality`; see
+`Specs/ProductArchitecture.md`, "Initial Benchmark Classes"). Pass `extended`
+(or `--extended`) to list every preserved scenario across all classes.
 
 ### `simard gym run <scenario-id>`
 
@@ -1011,7 +1015,15 @@ Only comparisons that involve older artifacts should show `unmeasured` for those
 
 ### `simard gym run-suite <suite-id>`
 
-Runs a benchmark suite.
+Runs a benchmark suite. Two suites are available:
+
+- `starter` — the default high-signal **core V1 set** (the four spec-mandated
+  classes only). This is the suite the self-test gate runs.
+- `extended` — the opt-in suite spanning **every** registered scenario across
+  all classes. Use this when you explicitly want the full, larger suite. It is
+  long-running and may exercise auth-dependent backends (e.g. `copilot-sdk`,
+  `rusty-clawd`); scenarios whose backend auth is unavailable are skipped rather
+  than failing the suite.
 
 Artifacts are written under `target/simard-gym/`.
 

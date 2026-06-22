@@ -195,8 +195,9 @@ pub use goals::{
 pub use gym::{
     BenchmarkArtifactPaths, BenchmarkCheckResult, BenchmarkComparisonArtifactPaths,
     BenchmarkComparisonDelta, BenchmarkComparisonReport, BenchmarkComparisonRunSummary,
-    BenchmarkComparisonStatus, BenchmarkRunReport, BenchmarkScenario, BenchmarkSuiteReport,
-    BenchmarkSuiteScenarioSummary, benchmark_scenarios, compare_latest_benchmark_runs,
+    BenchmarkComparisonStatus, BenchmarkRunReport, BenchmarkScenario, BenchmarkScenarioSet,
+    BenchmarkSuiteReport, BenchmarkSuiteScenarioSummary, benchmark_scenarios,
+    benchmark_scenarios_for, compare_latest_benchmark_runs, core_benchmark_scenarios,
     default_output_root, run_benchmark_scenario, run_benchmark_suite,
 };
 pub use gym_bridge::{GymBridge, GymScenario, GymScenarioResult, GymSuiteResult, ScoreDimensions};

@@ -85,6 +85,42 @@ impl Display for BenchmarkClass {
     }
 }
 
+impl BenchmarkClass {
+    /// The four spec-mandated V1 *core* benchmark classes.
+    ///
+    /// `Specs/ProductArchitecture.md` ("Initial Benchmark Classes", line 214:
+    /// "V1 should prefer a small benchmark set with high signal over a large,
+    /// noisy suite.") names exactly these four classes. Every other variant is
+    /// an opt-in *extended* class that is excluded from the default suite.
+    pub const CORE: [BenchmarkClass; 4] = [
+        BenchmarkClass::RepoExploration,
+        BenchmarkClass::Documentation,
+        BenchmarkClass::SafeCodeChange,
+        BenchmarkClass::SessionQuality,
+    ];
+
+    /// Returns `true` when this class belongs to the V1 high-signal core set.
+    pub fn is_core(self) -> bool {
+        Self::CORE.contains(&self)
+    }
+}
+
+/// Selects which slice of the benchmark registry a gym surface operates on.
+///
+/// The default gym surfaces (the `starter` suite and `gym list`) resolve to
+/// [`BenchmarkScenarioSet::Core`] — the four spec-mandated high-signal classes.
+/// The remaining classes ship as an opt-in [`BenchmarkScenarioSet::Extended`]
+/// set so existing scenarios are preserved (not deleted) without polluting the
+/// V1 signal. See `Specs/ProductArchitecture.md` line 214.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BenchmarkScenarioSet {
+    /// The four spec-mandated V1 core classes (the default).
+    Core,
+    /// Every registered scenario across all classes (opt-in).
+    Extended,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct BenchmarkScenario {
     pub id: &'static str,

@@ -74,19 +74,41 @@ fn engineer_loop_inspects_external_repo() {
 }
 
 /// Verify Simard can list gym scenarios (no LLM needed).
+///
+/// The default `gym list` resolves to the high-signal V1 core set (the four
+/// spec-mandated classes). Extended classes are preserved but reachable only
+/// via the explicit `gym list extended` opt-in (issue #2087).
 #[test]
-fn gym_list_shows_all_scenarios() {
+fn gym_list_shows_core_scenarios_and_gates_extended() {
     let output = Command::new(simard_binary())
         .args(["gym", "list"])
         .output()
         .expect("failed to run simard gym list");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // Core (default) scenarios across the four spec-mandated classes.
     assert!(stdout.contains("repo-exploration-deep-scan"));
     assert!(stdout.contains("doc-generation-public-fn"));
     assert!(stdout.contains("safe-code-change-add-derive"));
-    assert!(stdout.contains("test-writing-unit-case"));
     assert!(stdout.contains("interactive-terminal-driving"));
+    // An extended-only scenario (class=test-writing) must NOT appear by default.
+    assert!(
+        !stdout.contains("test-writing-unit-case"),
+        "default gym list must exclude extended scenarios:\n{stdout}"
+    );
+
+    // The extended scenario becomes reachable via the explicit opt-in.
+    let extended = Command::new(simard_binary())
+        .args(["gym", "list", "extended"])
+        .output()
+        .expect("failed to run simard gym list extended");
+    let extended_stdout = String::from_utf8_lossy(&extended.stdout);
+    assert!(
+        extended_stdout.contains("test-writing-unit-case"),
+        "gym list extended must surface extended scenarios:\n{extended_stdout}"
+    );
+    // Extended is a strict superset: it still contains the core scenarios.
+    assert!(extended_stdout.contains("repo-exploration-deep-scan"));
 }
 
 /// Verify the meeting REPL launches and shows the greeting banner.

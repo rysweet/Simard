@@ -21,6 +21,8 @@ mod tests_reporting_extra;
 #[cfg(test)]
 mod tests_reporting_more;
 #[cfg(test)]
+mod tests_scenario_sets;
+#[cfg(test)]
 mod tests_scenarios;
 #[cfg(test)]
 mod tests_scenarios_10;
@@ -63,16 +65,34 @@ use crate::runtime::{
 use crate::session::UuidSessionIdGenerator;
 
 pub(crate) use reporting::{render_benchmark_count, render_benchmark_delta};
-pub use scenarios::benchmark_scenarios;
+pub use scenarios::{benchmark_scenarios, benchmark_scenarios_for, core_benchmark_scenarios};
 pub use types::{
     BenchmarkArtifactPaths, BenchmarkCheckResult, BenchmarkClass, BenchmarkComparisonArtifactPaths,
     BenchmarkComparisonDelta, BenchmarkComparisonReport, BenchmarkComparisonRunSummary,
     BenchmarkComparisonStatus, BenchmarkHandoffReport, BenchmarkRunReport, BenchmarkRuntimeReport,
-    BenchmarkScenario, BenchmarkScorecard, BenchmarkSuiteReport, BenchmarkSuiteScenarioSummary,
+    BenchmarkScenario, BenchmarkScenarioSet, BenchmarkScorecard, BenchmarkSuiteReport,
+    BenchmarkSuiteScenarioSummary,
 };
 
+/// The default high-signal V1 suite: the four spec-mandated core classes only
+/// (`Specs/ProductArchitecture.md` line 214). Used by the self-test gate.
 const STARTER_SUITE_ID: &str = "starter";
+/// The opt-in suite spanning every registered scenario across all classes.
+const EXTENDED_SUITE_ID: &str = "extended";
 const DEFAULT_OUTPUT_ROOT: &str = "target/simard-gym";
+
+/// Maps a suite id to the [`BenchmarkScenarioSet`] it runs.
+///
+/// `starter` resolves to the default high-signal core set; `extended` is the
+/// explicit opt-in that runs the full registry. Unknown ids are rejected by
+/// the caller.
+fn suite_scenario_set(suite_id: &str) -> Option<BenchmarkScenarioSet> {
+    match suite_id {
+        STARTER_SUITE_ID => Some(BenchmarkScenarioSet::Core),
+        EXTENDED_SUITE_ID => Some(BenchmarkScenarioSet::Extended),
+        _ => None,
+    }
+}
 
 pub fn run_benchmark_scenario(
     scenario_id: &str,
@@ -86,18 +106,20 @@ pub fn run_benchmark_suite(
     suite_id: &str,
     output_root: impl AsRef<Path>,
 ) -> SimardResult<BenchmarkSuiteReport> {
-    if suite_id != STARTER_SUITE_ID {
-        return Err(SimardError::BenchmarkSuiteNotFound {
+    let scenario_set =
+        suite_scenario_set(suite_id).ok_or_else(|| SimardError::BenchmarkSuiteNotFound {
             suite_id: suite_id.to_string(),
-        });
-    }
+        })?;
 
     let output_root = output_root.as_ref();
     let started_at_unix_ms = reporting::now_unix_ms()?;
     let mut scenario_summaries = Vec::new();
     let mut suite_passed = true;
 
-    for scenario in benchmark_scenarios().iter().copied() {
+    for scenario in scenarios::benchmark_scenarios_for(scenario_set)
+        .iter()
+        .copied()
+    {
         match executor::execute_scenario(scenario, suite_id, output_root) {
             Ok(report) => {
                 suite_passed &= report.passed;
@@ -110,25 +132,23 @@ pub fn run_benchmark_suite(
                     report_json: report.artifacts.report_json.clone(),
                 });
             }
-            Err(ref e) if is_skippable_auth_error(e, scenario.base_type) => {
-                eprintln!(
-                    "WARN: skipping scenario '{}' (base_type={}): \
-                     backend requires authentication that is not available at gate-time",
-                    scenario.id, scenario.base_type,
-                );
-                scenario_summaries.push(BenchmarkSuiteScenarioSummary {
-                    scenario_id: scenario.id.to_string(),
-                    passed: false,
-                    skipped: true,
-                    skip_reason: Some(format!(
-                        "backend '{}' requires authentication unavailable at gate-time",
-                        scenario.base_type,
-                    )),
-                    session_id: String::new(),
-                    report_json: String::new(),
-                });
-            }
-            Err(e) => return Err(e),
+            Err(e) => match gate_skip_reason(&e, scenario.base_type) {
+                Some(reason) => {
+                    eprintln!(
+                        "WARN: skipping scenario '{}' (base_type={}): {}",
+                        scenario.id, scenario.base_type, reason,
+                    );
+                    scenario_summaries.push(BenchmarkSuiteScenarioSummary {
+                        scenario_id: scenario.id.to_string(),
+                        passed: false,
+                        skipped: true,
+                        skip_reason: Some(reason),
+                        session_id: String::new(),
+                        report_json: String::new(),
+                    });
+                }
+                None => return Err(e),
+            },
         }
     }
 
@@ -222,6 +242,40 @@ pub fn compare_latest_benchmark_runs(
         reporting::render_text_comparison_report(&report),
     )?;
     Ok(report)
+}
+
+/// Returns `Some(reason)` when a scenario cannot run at gate-time and should be
+/// skipped rather than aborting the whole suite. A single mis-configured or
+/// environment-unavailable scenario must not nuke the entire run — the same
+/// resilience philosophy established for auth in issue #1743.
+///
+/// Two gate-time conditions are skippable:
+///   * the backend requires external auth that is unavailable, and
+///   * the scenario's runtime configuration (base_type / topology / identity /
+///     capability) is unsupported in this build or environment.
+fn gate_skip_reason(err: &SimardError, base_type: &str) -> Option<String> {
+    if is_skippable_auth_error(err, base_type) {
+        return Some(format!(
+            "backend '{base_type}' requires authentication unavailable at gate-time"
+        ));
+    }
+    unsupported_configuration_reason(err)
+}
+
+/// Returns `Some(reason)` for deterministic runtime-configuration mismatches
+/// (unsupported base_type/topology/identity/capability) that make a scenario
+/// un-runnable regardless of credentials. Reuses the error's own `Display`
+/// so the recorded skip reason matches the operator-facing message.
+fn unsupported_configuration_reason(err: &SimardError) -> Option<String> {
+    match err {
+        SimardError::UnsupportedTopology { .. }
+        | SimardError::UnsupportedBaseType { .. }
+        | SimardError::UnsupportedRuntimeTopology { .. }
+        | SimardError::MissingCapability { .. } => {
+            Some(format!("{err} (unsupported at gate-time)"))
+        }
+        _ => None,
+    }
 }
 
 /// Returns `true` when `err` is an auth-related invocation failure for a

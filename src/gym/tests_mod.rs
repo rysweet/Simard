@@ -1,5 +1,84 @@
 use super::*;
 use crate::error::SimardError;
+
+// --- gate-time skip logic (issue #1743 + #2087 suite resilience) ---
+
+#[test]
+fn unsupported_topology_is_skipped_not_fatal() {
+    let err = SimardError::UnsupportedTopology {
+        base_type: "copilot-sdk".to_string(),
+        topology: crate::runtime::RuntimeTopology::Distributed,
+    };
+    let reason = gate_skip_reason(&err, "copilot-sdk");
+    assert!(
+        reason.is_some(),
+        "unsupported topology must be gate-skippable"
+    );
+    assert!(reason.unwrap().contains("gate-time"));
+}
+
+#[test]
+fn unsupported_base_type_is_skipped_not_fatal() {
+    let err = SimardError::UnsupportedBaseType {
+        identity: "simard-gym".to_string(),
+        base_type: "terminal-shell".to_string(),
+    };
+    assert!(unsupported_configuration_reason(&err).is_some());
+    assert!(gate_skip_reason(&err, "terminal-shell").is_some());
+}
+
+#[test]
+fn unsupported_runtime_topology_is_skipped_not_fatal() {
+    let err = SimardError::UnsupportedRuntimeTopology {
+        topology: crate::runtime::RuntimeTopology::Distributed,
+        driver: "loopback-mesh".to_string(),
+    };
+    assert!(unsupported_configuration_reason(&err).is_some());
+}
+
+#[test]
+fn missing_capability_is_skipped_not_fatal() {
+    let err = SimardError::MissingCapability {
+        base_type: "local-harness".to_string(),
+        capability: crate::base_types::BaseTypeCapability::TerminalSession,
+    };
+    // Config mismatches are skippable even for local-harness (which is exempt
+    // from the auth-skip path).
+    assert!(unsupported_configuration_reason(&err).is_some());
+    assert!(gate_skip_reason(&err, "local-harness").is_some());
+}
+
+#[test]
+fn unrelated_errors_are_not_gate_skipped() {
+    let err = SimardError::BenchmarkSuiteNotFound {
+        suite_id: "nope".to_string(),
+    };
+    assert!(unsupported_configuration_reason(&err).is_none());
+    assert!(gate_skip_reason(&err, "local-harness").is_none());
+}
+
+#[test]
+fn auth_error_still_gate_skipped_for_external_backend() {
+    let err = SimardError::AdapterInvocationFailed {
+        base_type: "rusty-clawd".to_string(),
+        reason: "authentication required".to_string(),
+    };
+    let reason = gate_skip_reason(&err, "rusty-clawd");
+    assert!(reason.is_some());
+    assert!(reason.unwrap().contains("authentication"));
+}
+
+#[test]
+fn auth_like_error_on_local_harness_is_not_skipped() {
+    // local-harness never needs auth, so an auth-shaped error there is real and
+    // must NOT be skipped (and is not a config error either).
+    let err = SimardError::AdapterInvocationFailed {
+        base_type: "local-harness".to_string(),
+        reason: "authentication required".to_string(),
+    };
+    assert!(gate_skip_reason(&err, "local-harness").is_none());
+}
+
 #[test]
 fn default_output_root_returns_expected_path() {
     let path = default_output_root();
@@ -15,6 +94,45 @@ fn default_output_root_is_relative() {
 #[test]
 fn starter_suite_id_constant() {
     assert_eq!(STARTER_SUITE_ID, "starter");
+}
+
+#[test]
+fn extended_suite_id_constant() {
+    assert_eq!(EXTENDED_SUITE_ID, "extended");
+}
+
+#[test]
+fn starter_suite_maps_to_core_set() {
+    assert_eq!(
+        suite_scenario_set(STARTER_SUITE_ID),
+        Some(BenchmarkScenarioSet::Core)
+    );
+}
+
+#[test]
+fn extended_suite_maps_to_extended_set() {
+    assert_eq!(
+        suite_scenario_set(EXTENDED_SUITE_ID),
+        Some(BenchmarkScenarioSet::Extended)
+    );
+}
+
+#[test]
+fn unknown_suite_maps_to_none() {
+    assert_eq!(suite_scenario_set("bogus"), None);
+    assert_eq!(suite_scenario_set("Starter"), None);
+    assert_eq!(suite_scenario_set(""), None);
+}
+
+#[test]
+fn starter_suite_runs_fewer_scenarios_than_extended() {
+    // The default suite must be the smaller, high-signal core set.
+    let core = benchmark_scenarios_for(BenchmarkScenarioSet::Core).len();
+    let extended = benchmark_scenarios_for(BenchmarkScenarioSet::Extended).len();
+    assert!(
+        core < extended,
+        "starter (core={core}) must run fewer scenarios than extended ({extended})"
+    );
 }
 
 #[test]

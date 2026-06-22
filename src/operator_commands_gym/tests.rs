@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn gym_list_succeeds() {
-    let result = run_gym_list();
+    let result = run_gym_list(crate::BenchmarkScenarioSet::Core);
     assert!(result.is_ok());
 }
 
@@ -251,7 +251,8 @@ fn render_benchmark_count_u32_max() {
 
 #[test]
 fn gym_list_returns_ok() {
-    assert!(run_gym_list().is_ok());
+    assert!(run_gym_list(crate::BenchmarkScenarioSet::Core).is_ok());
+    assert!(run_gym_list(crate::BenchmarkScenarioSet::Extended).is_ok());
 }
 
 #[test]
