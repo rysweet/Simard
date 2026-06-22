@@ -388,12 +388,13 @@ pub(crate) struct AuditOptions {
     pub excluded_prefixes: Vec<String>,
 
     /// Which env-var mutations trip the rule. Default:
-    /// `EnvWatch::StateRootSurface` — the variables that actually feed
-    /// cognitive-memory state-root/socket resolution
-    /// (`SIMARD_STATE_ROOT`, `SIMARD_MEMORY_SOCKET`, and the `HOME` fallback
-    /// that `resolve_state_root()` reads). `EnvWatch::AnyVar` (fully
-    /// var-agnostic) and `EnvWatch::Vars(set)` are available for the tracked
-    /// follow-up that migrates the broader env-mutating surface.
+    /// `EnvWatch::StateRootSurface` — the cognitive-memory state-root,
+    /// provider, and meetings-resolver surface (`SIMARD_STATE_ROOT`,
+    /// `SIMARD_MEMORY_SOCKET`, `HOME`, `SIMARD_LLM_PROVIDER`,
+    /// `SIMARD_MEETINGS_DIR`, `SIMARD_MEETINGS_ROOT`; the rule-(C) read check
+    /// `READ_WATCHED_VARS` is the same set minus `HOME`). `EnvWatch::AnyVar`
+    /// (fully var-agnostic) and `EnvWatch::Vars(set)` remain for the tracked
+    /// #2375 follow-up that migrates every other env-mutating variable.
     pub watched: EnvWatch,
 
     /// Tests that are exempt with a written, machine-checked reason. Each
@@ -404,11 +405,12 @@ pub(crate) struct AuditOptions {
 ```
 
 `AuditOptions::default()` ships the production configuration: scan `src`,
-exclude `src/bin`, watch the **state-root surface**
-(`SIMARD_STATE_ROOT` / `SIMARD_MEMORY_SOCKET` / `HOME`), empty allowlist.
-Reads of the watched vars trigger only for `SIMARD_STATE_ROOT` /
-`SIMARD_MEMORY_SOCKET` (a torn `HOME` *read* is not the cognitive-memory race —
-only a `HOME` *write*, which can tear a `SIMARD_STATE_ROOT` read, is).
+exclude `src/bin`, watch the **state-root / provider / meetings surface**
+(mutations of `SIMARD_STATE_ROOT`, `SIMARD_MEMORY_SOCKET`, `HOME`,
+`SIMARD_LLM_PROVIDER`, `SIMARD_MEETINGS_DIR`, `SIMARD_MEETINGS_ROOT`), empty
+allowlist. The rule-(C) *read* check (`READ_WATCHED_VARS`) covers the same set
+**minus `HOME`** — a torn `HOME` *read* is not the cognitive-memory race; only a
+`HOME` *write*, which can tear a `SIMARD_STATE_ROOT` read, is.
 
 ### Reading a failure
 
