@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 
 use crate::base_types::{
     BaseTypeDescriptor, BaseTypeOutcome, BaseTypeSessionRequest, BaseTypeTurnInput,
@@ -7,8 +8,8 @@ use crate::error::{SimardError, SimardResult};
 use crate::sanitization::objective_metadata;
 
 use super::evidence::{
-    terminal_checkpoint_evidence, terminal_last_output_line, terminal_step_evidence,
-    transcript_preview,
+    terminal_checkpoint_evidence, terminal_failure_hint, terminal_last_output_line,
+    terminal_step_evidence, transcript_preview,
 };
 use super::session::PtyTerminalSession;
 use super::types::{TerminalStep, TerminalTurnSpec, TerminalWaitStatus};
@@ -123,14 +124,47 @@ fn run_terminal_script(
     if !capture.exit_status.success() {
         return Err(SimardError::AdapterInvocationFailed {
             base_type: base_type.to_string(),
-            reason: format!(
-                "terminal-shell session exited with status {}",
-                capture.exit_status
+            reason: describe_terminal_failure(
+                &capture.exit_status,
+                &capture.transcript,
+                &spec.steps,
             ),
         });
     }
 
     Ok(capture.transcript)
+}
+
+/// Build an actionable failure message for a non-zero terminal-shell exit.
+///
+/// A bare `exit status: 127` tells an operator nothing. This explains what the
+/// well-known shell exit codes mean (127 = command not found, 126 = not
+/// executable) and surfaces the shell's own diagnostic line (e.g.
+/// `bash: say: command not found`) — or the last terminal output — so the
+/// failure can be diagnosed without re-running the session.
+fn describe_terminal_failure(
+    exit_status: &ExitStatus,
+    transcript: &str,
+    steps: &[TerminalStep],
+) -> String {
+    let mut reason = format!("terminal-shell session exited with status {exit_status}");
+    match exit_status.code() {
+        Some(127) => reason.push_str(
+            " — exit code 127 means a command in the terminal session could not be found on PATH; \
+             verify the command is installed and on PATH, or invoke it with an absolute path",
+        ),
+        Some(126) => reason.push_str(
+            " — exit code 126 means a command was found but is not executable; \
+             check the file permissions",
+        ),
+        _ => {}
+    }
+    if let Some(hint) = terminal_failure_hint(transcript) {
+        reason.push_str(&format!(" (shell reported: {hint})"));
+    } else if let Some(last) = terminal_last_output_line(transcript, steps) {
+        reason.push_str(&format!(" (last terminal output: {last})"));
+    }
+    reason
 }
 
 pub(crate) fn resolve_working_directory(
@@ -166,7 +200,116 @@ pub(crate) fn resolve_working_directory(
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::TerminalTurnSpec;
     use super::*;
+
+    // -- run_terminal_script: failure diagnostics (regression for #2077) --
+
+    /// Regression for #2077: `engineer terminal "say hello"` exited 127 with a
+    /// bare `terminal-shell session exited with status exit status: 127` that
+    /// gave the operator no clue what failed. A missing-binary turn must now
+    /// surface an actionable message: the 127 meaning *and* the shell's own
+    /// "command not found" diagnostic naming the offending command.
+    #[test]
+    fn run_terminal_script_surfaces_command_not_found_for_missing_binary() {
+        let spec =
+            TerminalTurnSpec::parse("definitely-not-a-real-binary-2077 hello", "terminal-shell")
+                .unwrap();
+        let cwd = std::env::current_dir().unwrap();
+
+        let error = run_terminal_script("terminal-shell", &spec, &cwd)
+            .expect_err("a missing binary must fail the terminal turn");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("127"),
+            "error must report the exit code: {message}"
+        );
+        assert!(
+            message.contains("could not be found on PATH"),
+            "error must explain exit code 127: {message}"
+        );
+        assert!(
+            message.to_ascii_lowercase().contains("command not found")
+                || message.to_ascii_lowercase().contains("not found"),
+            "error must surface the shell diagnostic: {message}"
+        );
+        assert!(
+            message.contains("definitely-not-a-real-binary-2077"),
+            "error must name the offending command: {message}"
+        );
+        assert!(
+            !message.ends_with("exit status: 127"),
+            "error must not be the bare opaque 127 message: {message}"
+        );
+    }
+
+    /// The success path must remain intact: a valid command resolves on PATH
+    /// and completes the terminal turn, returning its transcript.
+    #[test]
+    fn run_terminal_script_succeeds_for_valid_command() {
+        let spec =
+            TerminalTurnSpec::parse("echo simard-terminal-2077-ok", "terminal-shell").unwrap();
+        let cwd = std::env::current_dir().unwrap();
+
+        let transcript = run_terminal_script("terminal-shell", &spec, &cwd)
+            .expect("a valid command should complete the terminal turn");
+        assert!(
+            transcript.contains("simard-terminal-2077-ok"),
+            "transcript should contain the echoed output: {transcript}"
+        );
+    }
+
+    // -- describe_terminal_failure --
+
+    fn exit_status_with_code(code: i32) -> ExitStatus {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            // Encode the code into the wait-status byte (code << 8).
+            ExitStatus::from_raw(code << 8)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = code;
+            unimplemented!("exit_status_with_code is only used on unix test targets");
+        }
+    }
+
+    #[test]
+    fn describe_terminal_failure_explains_127_with_shell_hint() {
+        let transcript = "bash-5.2$ say hello\nbash: say: command not found\nbash-5.2$ exit";
+        let steps = vec![TerminalStep::Input("say hello".to_string())];
+
+        let reason = describe_terminal_failure(&exit_status_with_code(127), transcript, &steps);
+
+        assert!(reason.contains("status"), "{reason}");
+        assert!(reason.contains("could not be found on PATH"), "{reason}");
+        assert!(reason.contains("bash: say: command not found"), "{reason}");
+    }
+
+    #[test]
+    fn describe_terminal_failure_explains_126_not_executable() {
+        let transcript = "bash: ./blocked.sh: Permission denied";
+        let reason = describe_terminal_failure(&exit_status_with_code(126), transcript, &[]);
+
+        assert!(reason.contains("not executable"), "{reason}");
+        assert!(
+            reason.to_ascii_lowercase().contains("permission denied"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn describe_terminal_failure_falls_back_to_last_output_without_marker() {
+        let transcript = "bash-5.2$ run-thing\nthing failed with code 3\nbash-5.2$ exit";
+        let steps = vec![TerminalStep::Input("run-thing".to_string())];
+
+        let reason = describe_terminal_failure(&exit_status_with_code(3), transcript, &steps);
+
+        assert!(reason.contains("last terminal output"), "{reason}");
+        assert!(reason.contains("thing failed with code 3"), "{reason}");
+    }
 
     // -- resolve_working_directory --
 

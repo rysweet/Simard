@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -7,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::{SimardError, SimardResult};
 
-use super::types::{PTY_LAUNCHER, TerminalSessionCapture, TerminalWaitStatus};
+use super::types::{DEFAULT_PATH, PTY_LAUNCHER, TerminalSessionCapture, TerminalWaitStatus};
 use super::workflow_guard::{WorkflowRestoreGuard, capture_workflow_restore_guards};
 
 struct TranscriptGuard {
@@ -88,9 +89,15 @@ impl PtyTerminalSession {
                 .arg(launch_command)
                 .arg(&transcript_path);
         }
+        command.current_dir(working_directory).env("TERM", "dumb");
+        // Ensure the child PTY has a usable PATH so ordinary commands resolve to
+        // real binaries instead of failing with exit code 127. Only override when
+        // the inherited PATH is missing or empty so operator-provided PATHs (and
+        // any PATH set by the launching service) are preserved untouched.
+        if let Some(path) = child_path_override(std::env::var_os("PATH").as_deref()) {
+            command.env("PATH", path);
+        }
         let mut child = command
-            .current_dir(working_directory)
-            .env("TERM", "dumb")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -396,6 +403,18 @@ impl PtyTerminalSession {
     }
 }
 
+/// Decide whether the child PTY needs an explicit `PATH` override.
+///
+/// Returns the fallback [`DEFAULT_PATH`] when the inherited value is missing or
+/// empty so ordinary commands resolve instead of failing with exit code 127;
+/// returns `None` when the inherited `PATH` is usable and must be preserved.
+fn child_path_override(inherited: Option<&OsStr>) -> Option<&'static str> {
+    match inherited {
+        Some(value) if !value.is_empty() => None,
+        _ => Some(DEFAULT_PATH),
+    }
+}
+
 /// Process names that indicate active LLM work is in progress.
 #[cfg(unix)]
 const WORK_PROCESS_NAMES: &[&str] = &["copilot", "node", "amplihack"];
@@ -517,6 +536,30 @@ fn env_secs(var: &str, default: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── child_path_override ───────────────────────────────────────────────────
+
+    #[test]
+    fn child_path_override_preserves_usable_path() {
+        assert_eq!(
+            child_path_override(Some(OsStr::new("/usr/bin:/bin"))),
+            None,
+            "a non-empty inherited PATH must be preserved untouched"
+        );
+    }
+
+    #[test]
+    fn child_path_override_falls_back_when_missing() {
+        assert_eq!(child_path_override(None), Some(DEFAULT_PATH));
+    }
+
+    #[test]
+    fn child_path_override_falls_back_when_empty() {
+        assert_eq!(
+            child_path_override(Some(OsStr::new(""))),
+            Some(DEFAULT_PATH)
+        );
+    }
 
     // ── has_active_work_processes ─────────────────────────────────────────────
 

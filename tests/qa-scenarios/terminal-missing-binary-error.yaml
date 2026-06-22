@@ -1,0 +1,29 @@
+name: simard-terminal-missing-binary-error
+app_type: cli
+description: |
+  Regression for #2077 — `simard engineer terminal "say hello"` previously
+  exited with a bare "terminal-shell session exited with status exit status:
+  127" that told the operator nothing. After the fix, a missing-binary
+  objective must surface an actionable error that (a) explains exit code 127
+  means a command could not be resolved on PATH, (b) includes the shell's own
+  "command not found" diagnostic, and (c) names the offending command.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner only fails a
+  scenario when a `run` step exits non-zero (its `validate_*` steps do not gate
+  pass/fail, and command text is read from `params.command`). The assertions
+  are therefore encoded in the exit code of a single `bash -lc` wrapper: it
+  prints the captured output for visibility and exits zero only when all three
+  required diagnostic fragments are present, so the scenario fails loudly if
+  the clear-error behaviour regresses.
+metadata:
+  tags:
+    - cli
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'OUT=$(cargo run --quiet -- engineer terminal single-process \"simard-nonexistent-cmd-2077 hi\" 2>&1); echo \"$OUT\"; echo \"$OUT\" | grep -q \"could not be found on PATH\" && echo \"$OUT\" | grep -q \"command not found\" && echo \"$OUT\" | grep -q \"simard-nonexistent-cmd-2077\"'"
+    timeout: 300000

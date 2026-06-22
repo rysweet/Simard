@@ -1,0 +1,24 @@
+name: simard-terminal-valid-command
+app_type: cli
+description: |
+  Companion to the #2077 missing-binary regression: a valid command must still
+  resolve on PATH and complete the bounded `engineer terminal` session
+  end-to-end through the PTY, returning its output with a successful phase.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner only gates on
+  `run`-step exit codes and reads command text from `params.command`, so the
+  assertion is encoded in the exit code of a `bash -lc` wrapper that exits zero
+  only when the session reports "Session phase: complete" and the echoed marker
+  is present in the captured output.
+metadata:
+  tags:
+    - cli
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'OUT=$(cargo run --quiet -- engineer terminal single-process \"echo simard-terminal-2077-ok\" 2>&1); echo \"$OUT\"; echo \"$OUT\" | grep -q \"Session phase: complete\" && echo \"$OUT\" | grep -q \"simard-terminal-2077-ok\"'"
+    timeout: 300000

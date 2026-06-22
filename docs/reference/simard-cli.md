@@ -561,6 +561,8 @@ Key behavior:
 - persists `latest_terminal_handoff.json` and compatibility `latest_handoff.json` under the shared root
 - fails visibly for unsupported topology and invalid state-root inputs
 - fails explicitly if a requested wait checkpoint never appears instead of pretending the terminal interaction succeeded
+- when the underlying shell exits non-zero, reports an actionable error instead of a bare status code: exit `127` is explained as a command that could not be found on `PATH` (and `126` as a found-but-not-executable command), and the shell's own diagnostic line (for example `bash: say: command not found`) is surfaced so the offending command is named
+- launches the child PTY with a usable `PATH` (falling back to the standard system bin directories when the inherited environment has none) and resolves the default shell against `$SHELL`/`/bin/bash`/`/bin/sh` when the platform default is absent, so ordinary commands do not silently fail with exit `127`
 - keeps `simard_operator_probe terminal-run ...` available for compatibility
 
 Example:
