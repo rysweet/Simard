@@ -784,6 +784,119 @@ fn repl_question_command_records_and_confirms() {
     );
 }
 
+// ── live capture-count tally (interactive parity with batch probe) ──
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_decision_emits_capture_tally() {
+    // After an explicit `/decision`, the REPL must print a running tally so
+    // the operator sees what the meeting has captured so far without running
+    // `/state`. The `[meeting] captured:` prefix is a stable greppable marker.
+    let _state = HermeticState::new();
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/decision Adopt TDD for new modules\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Tally test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str.contains("[meeting] captured:"),
+        "REPL should emit a capture tally after /decision: {output_str}"
+    );
+    // Singular form for exactly one decision; zero-count categories pluralize.
+    assert!(
+        output_str.contains("1 decision,"),
+        "tally should show one decision (singular): {output_str}"
+    );
+    assert!(
+        output_str.contains("0 risks"),
+        "tally should show zero risks (plural): {output_str}"
+    );
+    assert!(
+        output_str.contains("0 disagreements"),
+        "tally should show zero disagreements (plural): {output_str}"
+    );
+}
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_capture_tally_counts_each_category_and_pluralizes() {
+    // The tally must count every structured category independently and use
+    // correct singular/plural forms. Two decisions => "2 decisions"; one of
+    // each remaining category => singular.
+    let _state = HermeticState::new();
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/decision A\n/decision B\n/question Who owns rollout?\n/action Carol ships CI\n/risk API may slip\n/disagree Prefer Python\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Tally counts test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    // The final tally (printed after /disagree) reflects all six captures.
+    assert!(
+        output_str.contains(
+            "[meeting] captured: 2 decisions, 1 open question, 1 action item, 1 risk, 1 disagreement"
+        ),
+        "final tally should count every category with correct pluralization: {output_str}"
+    );
+}
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_capture_tally_is_plain_text_for_grep() {
+    // The tally line carries no ANSI escapes even when color is enabled, so
+    // `grep '\[meeting\] captured:'` works on raw terminal scrollback.
+    let _state = HermeticState::new();
+    // Ensure color is *not* globally suppressed for this assertion.
+    unsafe { std::env::remove_var("NO_COLOR") };
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/risk Dependency may slip\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Tally plain test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    let tally_line = output_str
+        .lines()
+        .find(|l| l.contains("[meeting] captured:"))
+        .expect("a capture tally line must be present");
+    assert!(
+        !tally_line.contains('\x1b'),
+        "tally line must be free of ANSI escapes for reliable grepping: {tally_line:?}"
+    );
+}
+
 #[test]
 #[serial(cognitive_memory)]
 fn repl_state_shows_explicit_items_immediately() {

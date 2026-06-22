@@ -1,7 +1,7 @@
 ---
 title: How to start a meeting with Simard
 description: Start a conversational meeting with Simard from the CLI or dashboard. Simard maintains conversation context, remembers past meetings, and persists outcomes on close.
-last_updated: 2026-05-30
+last_updated: 2026-06-22
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -70,15 +70,54 @@ Open the operator dashboard and click **Chat**. The WebSocket connection creates
 
 ## 3. Available commands
 
-Five slash commands are recognized during a meeting:
+Simard recognizes a set of slash commands during a meeting; everything else is
+natural conversation.
+
+### Session commands
 
 | Command   | What it does |
 |-----------|-------------|
-| `/help`   | Lists these commands |
+| `/help`   | Lists all commands |
 | `/status` | Shows topic, duration, and message count |
+| `/state`  | Shows the running list of decisions, open questions, action items, risks, and disagreements |
+| `/recap`  | Shows a color-coded recap of the session |
+| `/preview` | Previews the handoff artifact the meeting will produce on close |
 | `/template [name]` | Lists available templates, or applies one by name |
 | `/export` | Exports the meeting as a markdown file to `~/.simard/meetings/` |
 | `/close` (or `/done`)  | Ends the meeting, persists transcript, and generates a summary |
+
+### Structured capture commands
+
+Record structured outcomes deterministically so they can never be missed by
+post-hoc extraction:
+
+| Command | What it records |
+|---------|----------------|
+| `/decision <text> [--rationale <why>]` | A decision (optional rationale) |
+| `/action <text>` | An action item (assignee/deadline parsed inline) |
+| `/question <text>` | An open question |
+| `/risk <text>` | An identified risk |
+| `/disagree <text>` | A disagreement or dissenting view |
+| `/theme <text>` | A theme for the meeting |
+| `/owner <name>` | The next agent/persona/human expected to action the handoff |
+| `/goal <text>` | The meeting's overarching objective |
+
+### Live capture tally
+
+After each `/decision`, `/action`, `/question`, `/risk`, or `/disagree`, Simard
+prints a compact running tally so you always know what the meeting has captured
+so far — no need to run `/state`:
+
+```text
+simard:meeting> /decision Adopt TDD for new modules
+Decision recorded: Adopt TDD for new modules
+[meeting] captured: 1 decision, 0 open questions, 0 action items, 0 risks, 0 disagreements
+```
+
+The `[meeting] captured:` line is plain text (no color) so you can `grep` it
+from terminal scrollback. The counts come from the explicit capture commands
+above and mirror the capture-count summary the automated meeting probe emits,
+so the interactive and automated paths report outcomes the same way.
 
 Everything else is natural conversation.
 
