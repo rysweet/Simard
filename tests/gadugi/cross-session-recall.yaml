@@ -1,13 +1,19 @@
 name: "Cross-Session Cognitive Memory Recall"
 description: >
   Outside-in gate for issue #1916: verifies that cognitive memory written by
-  Session A survives process exit and is fully recallable by Session B via the
-  snapshot recovery ladder. Also covers the corruption-recovery path from
-  issue #1710 (backup-restore ordering fix).
-version: "1.0.0"
+  Session A survives process exit and is fully recallable by a *separate*
+  Session B process via the on-disk direct-open tier. Steps 1-2 drive the
+  process-boundary CLI tests in `tests/bin_simard_memory_cli.rs` — Session A
+  seeds a store and releases its lock, then a fresh `simard` process opens and
+  recalls every cognitive-memory type. Step 3 guards the corruption-recovery
+  path from issue #1710 (backup-restore ordering) against the surviving
+  library-backed `memory_backup` guard, after the native
+  `cognitive_memory_cross_session_recall` target was deleted by the de-fork in
+  #2308 (see issue #2344).
+version: "1.1.0"
 
 config:
-  timeout: 120000
+  timeout: 180000
   retries: 1
   parallel: false
 
@@ -19,7 +25,7 @@ agents:
     type: "cli"
     config:
       workingDirectory: "."
-      defaultTimeout: 120000
+      defaultTimeout: 180000
       executionMode: "spawn"
       captureOutput: true
       ioConfig:
@@ -31,30 +37,66 @@ agents:
         logLevel: "info"
 
 steps:
-  - name: "Cross-session recall — clean path (session A writes, session B reads)"
+  - name: "#1916 — clean path: Session B recalls all six types from Session A's store via direct open (JSON)"
     agent: "test-agent"
     action: "execute_command"
     params:
       command: >
-        cargo test --test cognitive_memory_cross_session_recall
-        cognitive_memory_cross_session_recall
+        cargo test --test bin_simard_memory_cli
+        stats_json_reports_every_populated_type_via_direct_open
         -- --nocapture --test-threads=1
-    timeout: 120000
+    timeout: 180000
     expect:
       exitCode: 0
       outputContains:
-        - "test cognitive_memory_cross_session_recall ... ok"
+        - "test stats_json_reports_every_populated_type_via_direct_open ... ok"
 
-  - name: "Cross-session recall — corruption-recovery path (#1710 + #1916)"
+  - name: "#1916 — clean path: cross-process access banner ('via direct open') with human count table"
     agent: "test-agent"
     action: "execute_command"
     params:
       command: >
-        cargo test --test cognitive_memory_cross_session_recall
-        cross_session_recall_survives_db_corruption_via_snapshot
+        cargo test --test bin_simard_memory_cli
+        stats_human_shows_count_table_and_access_banner
         -- --nocapture --test-threads=1
-    timeout: 120000
+    timeout: 180000
     expect:
       exitCode: 0
       outputContains:
-        - "test cross_session_recall_survives_db_corruption_via_snapshot ... ok"
+        - "test stats_human_shows_count_table_and_access_banner ... ok"
+
+  - name: "#1710 — corruption-recovery: restore refuses a tampered backup snapshot (library backup guard)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib
+        restore_rejects_corrupted_backup
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test memory_backup::tests::restore_rejects_corrupted_backup ... ok"
+
+assertions: []
+
+cleanup:
+  - name: "Test agent cleanup"
+    agent: "test-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "cognitive-memory"
+    - "cross-session-recall"
+    - "direct-open"
+    - "corruption-recovery"
+    - "regression"
+    - "issue-1916"
+    - "issue-1710"
+    - "issue-2344"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
