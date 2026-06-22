@@ -298,13 +298,31 @@ fn run_ooda_cycle_inner(
     // --- Decide ---
     state.current_phase = OodaPhase::Decide;
     eprintln!("[simard] OODA cycle: entering Decide phase");
-    let planned_actions = match bridges.decide_brain.as_ref() {
+    let mut planned_actions = match bridges.decide_brain.as_ref() {
         Some(brain) => decide_with_brain(&priorities, config, brain.as_ref())?,
         None => decide(&priorities, config)?,
     };
     eprintln!(
         "[simard] OODA cycle: Decide complete ({} actions)",
         planned_actions.len()
+    );
+
+    // --- Coverage (issue #2359, BUG 2) ---
+    // Make goal coverage a first-class allocation rule: ensure every
+    // incomplete active goal that lacks a live engineer gets exactly one,
+    // ahead of any extra parallelism for already-covered goals. The AIMD
+    // scaler stays a hard safety cap — `decide_with_brain` already called
+    // `scaler.adjust()`, so `current_max()` is the cap it used this cycle.
+    let coverage_cap = config
+        .scaler
+        .as_ref()
+        .map(|s| s.current_max() as usize)
+        .unwrap_or(config.max_concurrent_actions as usize);
+    let coverage_report =
+        crate::ooda_loop::coverage::ensure_goal_coverage(state, &mut planned_actions, coverage_cap);
+    eprintln!(
+        "[simard] OODA cycle: coverage — {} (cap {coverage_cap})",
+        coverage_report.log_line()
     );
 
     // --- Act ---
@@ -978,6 +996,7 @@ mod tests_sweep {
 
     fn make_goal(id: &str, session: Option<&str>) -> ActiveGoal {
         ActiveGoal {
+            repo: None,
             id: id.to_string(),
             description: format!("Goal {id}"),
             priority: 1,
@@ -1113,6 +1132,7 @@ mod tests_board_integrity {
 
     fn make_goal(id: &str, desc: &str) -> ActiveGoal {
         ActiveGoal {
+            repo: None,
             id: id.to_string(),
             description: desc.to_string(),
             priority: 1,
@@ -1394,6 +1414,7 @@ mod tests_objective_probe {
 
     fn active_goal(id: &str, description: &str) -> ActiveGoal {
         ActiveGoal {
+            repo: None,
             id: id.to_string(),
             description: description.to_string(),
             priority: 1,

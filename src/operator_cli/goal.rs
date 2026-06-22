@@ -45,7 +45,10 @@ Usage: simard goal <command> [args]
 
 Commands:
   list                        Print active + backlog goal snapshot.
-  add <priority> <description>  Add a new active goal at given priority (1-7).
+  add <priority> [--repo <slug>] <description>
+                              Add a new active goal at given priority (1-7).
+                              `--repo <slug>` routes the goal's engineer to
+                              ~/src/<slug> (default: the daemon's own repo).
   demote <goal-id>            Move an active goal to the backlog.
   set-priority <goal-id> <p>  Change an active goal's priority.
   unblock <goal-id>           Clear Blocked status (unconditional).
@@ -82,11 +85,15 @@ pub(super) fn dispatch_goal_command(
         }
         "add" => {
             let priority_str = next_required(&mut args, "priority (1-7)")?;
-            let description: String = args.collect::<Vec<_>>().join(" ");
+            let rest: Vec<String> = args.collect();
+            let (repo, desc_tokens) = extract_repo_flag(rest)?;
+            let description = desc_tokens.join(" ");
             if description.is_empty() {
-                return Err("usage: simard goal add <priority> <description>".into());
+                return Err(
+                    "usage: simard goal add <priority> [--repo <slug>] <description>".into(),
+                );
             }
-            handle_add(&priority_str, &description)
+            handle_add(&priority_str, &description, repo.as_deref())
         }
         "demote" => {
             let goal_id = next_required(&mut args, "goal id")?;
@@ -223,12 +230,22 @@ fn handle_unblock_all() -> Result<(), Box<dyn Error>> {
 }
 
 /// `simard goal add <priority> <description>` — add a new active goal.
-fn handle_add(priority_str: &str, description: &str) -> Result<(), Box<dyn Error>> {
+fn handle_add(
+    priority_str: &str,
+    description: &str,
+    repo: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
     let priority: u32 = priority_str
         .parse()
         .map_err(|_| format!("invalid priority '{priority_str}': must be 1-7"))?;
     if priority == 0 || priority > 7 {
         return Err(format!("priority must be 1-7, got {priority}").into());
+    }
+    // Issue #2359 (BUG 1): validate the target-repo slug at ingress (shape
+    // only — existence is checked later by `resolve_goal_repo` at spawn time).
+    if let Some(slug) = repo {
+        crate::ooda_actions::advance_goal::repo_resolver::validate_repo_slug(slug)
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
     }
     let id = crate::goals::goal_slug(description);
     let mut board = load_board()?;
@@ -248,13 +265,39 @@ fn handle_add(priority_str: &str, description: &str) -> Result<(), Box<dyn Error
         priority,
         status: GoalProgress::NotStarted,
         assigned_to: None,
+        repo: repo.map(str::to_string),
         current_activity: None,
         wip_refs: vec![],
         last_progress_update_at: None,
     });
     save_board(&board)?;
-    eprintln!("[simard] goal add: '{id}' added at p{priority}");
+    let repo_note = repo
+        .map(|r| format!(" -> repo '{r}'"))
+        .unwrap_or_else(|| " -> repo Simard (daemon)".to_string());
+    eprintln!("[simard] goal add: '{id}' added at p{priority}{repo_note}");
     Ok(())
+}
+
+/// Extract an optional `--repo <slug>` / `--repo=<slug>` flag from the trailing
+/// `goal add` tokens, returning the slug (if any) and the remaining tokens that
+/// form the goal description.
+fn extract_repo_flag(tokens: Vec<String>) -> Result<(Option<String>, Vec<String>), Box<dyn Error>> {
+    let mut repo: Option<String> = None;
+    let mut rest: Vec<String> = Vec::with_capacity(tokens.len());
+    let mut iter = tokens.into_iter();
+    while let Some(tok) = iter.next() {
+        if tok == "--repo" {
+            let slug = iter
+                .next()
+                .ok_or_else(|| -> Box<dyn Error> { "usage: --repo requires a <slug>".into() })?;
+            repo = Some(slug);
+        } else if let Some(slug) = tok.strip_prefix("--repo=") {
+            repo = Some(slug.to_string());
+        } else {
+            rest.push(tok);
+        }
+    }
+    Ok((repo, rest))
 }
 
 /// `simard goal demote <goal-id>` — move an active goal to the backlog.
@@ -546,21 +589,21 @@ mod tests {
 
     #[test]
     fn add_rejects_zero_priority() {
-        let result = handle_add("0", "test goal");
+        let result = handle_add("0", "test goal", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("1-7"));
     }
 
     #[test]
     fn add_rejects_priority_above_7() {
-        let result = handle_add("8", "test goal");
+        let result = handle_add("8", "test goal", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("1-7"));
     }
 
     #[test]
     fn add_rejects_non_numeric_priority() {
-        let result = handle_add("high", "test goal");
+        let result = handle_add("high", "test goal", None);
         assert!(result.is_err());
     }
 

@@ -154,6 +154,7 @@ fn observation_with_no_signals() -> Observation {
 fn board_with_one_goal(id: &str) -> GoalBoard {
     let mut board = GoalBoard::default();
     board.active.push(ActiveGoal {
+        repo: None,
         id: id.to_string(),
         description: format!("desc {id}"),
         priority: 1,

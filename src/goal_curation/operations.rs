@@ -656,6 +656,7 @@ pub fn promote_to_active(
         })?;
     let item = board.backlog.remove(position);
     board.active.push(ActiveGoal {
+        repo: None,
         id: item.id,
         description: item.description,
         priority,
@@ -1069,32 +1070,39 @@ pub fn verify_goal_carryover(
 /// The 5 default starter goals shared by both `seed_default_board` (GoalBoard)
 /// and `seed_default_goals` (GoalStore). Single source of truth.
 ///
-/// Each tuple: (priority, title, description).
-pub const DEFAULT_SEED_GOALS: [(u32, &str, &str); 5] = [
+/// Each tuple: (priority, title, description, target-repo slug). The repo slug
+/// is `None` for goals that target the daemon's own repo ("Simard") and
+/// `Some(slug)` for ecosystem-targeted goals (issue #2359, BUG 1).
+pub const DEFAULT_SEED_GOALS: [(u32, &str, &str, Option<&str>); 5] = [
     (
         1,
         "Improve amplihack test coverage",
         "Increase test coverage across the amplihack ecosystem to catch regressions early",
+        Some("amplihack-rs"),
     ),
     (
         2,
         "Enhance Simard meeting experience",
         "Improve the interactive meeting facilitator with better UX and richer handoffs",
+        None,
     ),
     (
         3,
         "Improve cognitive memory persistence",
         "Harden memory consolidation and ensure durable recall across sessions",
+        None,
     ),
     (
         4,
         "Fix broken features",
         "Analyze all Simard features against their specs and intended behavior. Identify features that are not working correctly (e.g., meeting REPL, any other broken functionality) and fix them. Prioritize by user impact. Start by auditing the Specs/ directory and comparing each spec against the actual implementation to find gaps and failures.",
+        None,
     ),
     (
         5,
         "Self-serve dashboard improvement",
         "Use your own dashboard (localhost:8080) with Playwright to understand your operations and memory. Continuously improve the dashboard until it is very useful for understanding your internal state. The dashboard must not use jargon and must remain useful to humans too. Login by reading the code from ~/.simard/.dashkey. Playwright is installed (playwright==1.59.0 with Chromium browser).",
+        None,
     ),
 ];
 
@@ -1105,7 +1113,7 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
         return 0;
     }
 
-    for (priority, id_source, description) in DEFAULT_SEED_GOALS {
+    for (priority, id_source, description, repo) in DEFAULT_SEED_GOALS {
         let id = crate::goals::goal_slug(id_source);
         board.active.push(ActiveGoal {
             id,
@@ -1113,6 +1121,7 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
             priority,
             status: GoalProgress::NotStarted,
             assigned_to: None,
+            repo: repo.map(str::to_string),
             current_activity: None,
             wip_refs: vec![],
             last_progress_update_at: None,

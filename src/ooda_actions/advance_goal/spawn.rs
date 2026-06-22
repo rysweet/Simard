@@ -248,15 +248,43 @@ pub fn dispatch_spawn_engineer(
     }
 
     let agent_name = build_engineer_name(goal_id);
-    let parent_repo = match std::env::current_dir() {
+
+    // Issue #2359 (BUG 1): route the engineer to the goal's TARGET repo, not
+    // the daemon's own working directory. Resolve the goal's `repo` slug to a
+    // local git repo path; `None`/"Simard" => the daemon's checkout. A
+    // missing or invalid target repo is a hard failure — we NEVER silently
+    // fall back to Simard (the original bug), which would open PRs in the
+    // wrong repository.
+    let goal_repo_slug = state
+        .active_goals
+        .active
+        .iter()
+        .find(|g| g.id == goal_id)
+        .and_then(|g| g.repo.clone());
+    let parent_repo = match super::repo_resolver::resolve_goal_repo(goal_repo_slug.as_deref()) {
         Ok(p) => p,
         Err(e) => {
+            let target = goal_repo_slug.as_deref().unwrap_or("Simard");
+            let reason = format!(
+                "target repo '{target}' could not be resolved: {e}; clone it under ~/src/ or correct the goal's repo, then `simard goal unblock {goal_id}`"
+            );
+            eprintln!("[simard] spawn_engineer FAILED for goal '{goal_id}': {reason}");
+            // Fail loud: mark the goal Blocked (a plain operator-set block — no
+            // OODA-SAFEGUARD sentinel, so `goal unblock-all` won't clear it)
+            // rather than silently editing Simard. No worktree, no assignment;
+            // the goal is parked until the operator makes the repo available.
+            if let Some(g) = state
+                .active_goals
+                .active
+                .iter_mut()
+                .find(|g| g.id == goal_id)
+            {
+                g.status = crate::goal_curation::GoalProgress::Blocked(reason.clone());
+            }
             return make_outcome(
                 action,
                 false,
-                format!(
-                    "spawn_engineer failed for goal '{goal_id}': cannot resolve current_dir: {e}"
-                ),
+                format!("spawn_engineer failed for goal '{goal_id}': {reason}"),
             );
         }
     };
@@ -285,9 +313,19 @@ pub fn dispatch_spawn_engineer(
     };
     let worktree_path = worktree.path().to_path_buf();
 
+    // Name the resolved target repo in the engineer's objective so the agent's
+    // plan and any explicit `gh` commands operate against the correct repo
+    // (issue #2359, BUG 1). The worktree's git remote is already authoritative
+    // for implicit `gh pr` calls; this makes the target explicit in the prompt.
+    let target_repo_label = goal_repo_slug.as_deref().unwrap_or("Simard");
+    let engineer_task = format!(
+        "{task}\n\n[target repo: {target_repo_label} — work in this worktree at {}; open any PRs against this repo, not Simard]",
+        worktree_path.display()
+    );
+
     let config = SubordinateConfig {
         agent_name: agent_name.clone(),
-        goal: task.to_string(),
+        goal: engineer_task,
         role: AgentRole::Engineer,
         worktree_path,
         current_depth,

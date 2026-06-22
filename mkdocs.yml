@@ -81,6 +81,7 @@ nav:
     - Configure Pluggable Identity: howto/configure-pluggable-identity.md
     - Configure Episode Hygiene and Promotion: howto/configure-episode-hygiene-and-promotion.md
     - Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
+    - Route a Goal to its Target Repo: howto/route-a-goal-to-its-target-repo.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Memory introspection CLI: reference/simard-memory-cli.md
@@ -95,6 +96,8 @@ nav:
     - Recipe Context Var Sanitization: reference/recipe-context-var-sanitization.md
     - File-backed Goal Store: reference/file-backed-goal-store.md
     - Adaptive Scaling API: reference/adaptive-scaling-api.md
+    - Goal Target-Repo Routing: reference/goal-target-repo-routing.md
+    - Goal Coverage Allocation: reference/goal-coverage-allocation.md
     - Pluggable Identity API: reference/pluggable-identity-api.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
     # Hidden from nav until issue #1590 implementation lands:

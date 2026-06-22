@@ -104,6 +104,36 @@ backlog: 0 item(s)
 Exits non-zero on bridge-open / persistence errors. An empty board prints
 `(none)` and exits zero.
 
+### `simard goal add`
+
+```text
+simard goal add <priority> <description> [--repo <slug>]
+```
+
+Add a new active goal at the given `<priority>` (1–7). The goal id is derived
+from `<description>` via `goal_slug`. Fails if a goal with the derived id is
+already active or the board is at `MAX_ACTIVE_GOALS` capacity.
+
+`--repo <slug>` (optional) routes the goal at a specific ecosystem repo under
+`~/src/`. The slug is the bare directory name (e.g. `amplihack-rs`) and is
+validated with `validate_repo_slug` (charset `^[A-Za-z0-9._-]{1,64}$`; no `..`,
+no leading `-` or `.`). When omitted, the goal targets the daemon's own repo
+("Simard", `repo = None`). The slug's **existence** as a git repo is checked
+later, at engineer-spawn time — see
+[Goal target-repo routing](./goal-target-repo-routing.md) (issue
+[#2359](https://github.com/rysweet/Simard/issues/2359)).
+
+```bash
+# Target the amplihack-rs ecosystem repo:
+simard goal add 2 "Raise amplihack-rs branch coverage to 80%" --repo amplihack-rs
+
+# Target Simard itself (default):
+simard goal add 3 "Tidy the meeting REPL help text"
+```
+
+The added id and priority are logged to stderr
+(`[simard] goal add: '<id>' added at p<priority>`).
+
 ### `simard goal unblock <goal-id>`
 
 Operator escape hatch — clears the goal's `Blocked` status

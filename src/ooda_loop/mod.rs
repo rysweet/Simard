@@ -8,6 +8,8 @@
 pub mod adaptive_scaling;
 mod bridge_factory;
 mod curate;
+// Issue #2359 (BUG 2): per-cycle goal coverage allocator.
+pub mod coverage;
 pub mod cycle;
 mod decide;
 mod observe;

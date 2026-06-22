@@ -27,6 +27,7 @@ fn isolated_state_root() -> (TempDir, std::path::PathBuf) {
 
 fn active_goal(id: &str, priority: u32) -> ActiveGoal {
     ActiveGoal {
+        repo: None,
         id: id.to_string(),
         description: format!("{id} description"),
         priority,

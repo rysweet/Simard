@@ -3,6 +3,7 @@ use super::types::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_
 
 fn make_goal(id: &str, priority: u32) -> ActiveGoal {
     ActiveGoal {
+        repo: None,
         id: id.to_string(),
         description: format!("Goal {id}"),
         priority,
@@ -345,6 +346,7 @@ fn load_goal_board_reads_from_cognitive_memory() {
     let root = tmp_state_root("mem-read");
     let mut mem_board = GoalBoard::new();
     mem_board.active.push(ActiveGoal {
+        repo: None,
         id: "memory-only-goal".to_string(),
         description: "Loaded straight from cognitive memory".to_string(),
         priority: 1,
@@ -400,6 +402,7 @@ fn load_goal_board_migrates_legacy_disk_file_into_memory_then_deletes_it() {
     let root = tmp_state_root("migrate");
     let mut legacy = GoalBoard::new();
     legacy.active.push(ActiveGoal {
+        repo: None,
         id: "legacy-goal".to_string(),
         description: "Originally on disk".to_string(),
         priority: 1,
@@ -475,6 +478,7 @@ fn load_goal_board_runs_migration_only_once_in_practice() {
     let root = tmp_state_root("migrate-once");
     let mut legacy = GoalBoard::new();
     legacy.active.push(ActiveGoal {
+        repo: None,
         id: "once-goal".to_string(),
         description: "Migrate exactly once".to_string(),
         priority: 1,
@@ -508,6 +512,7 @@ fn save_goal_board_persists_only_to_memory_and_writes_no_disk_file() {
     let root = tmp_state_root("save-mem-only");
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        repo: None,
         id: "memory-saved-goal".to_string(),
         description: "Persisted only to memory".to_string(),
         priority: 1,
@@ -541,6 +546,7 @@ fn save_goal_board_rejects_suspect_board_without_persisting() {
     let root = tmp_state_root("save-suspect");
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        repo: None,
         id: "g1".to_string(),
         description: "Goal g1".to_string(),
         priority: 1,
@@ -577,6 +583,7 @@ fn save_goal_board_accepts_a_well_formed_board() {
     let root = tmp_state_root("save-ok");
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        repo: None,
         id: "well-formed-goal".to_string(),
         description: "Improve test coverage on the goal curation module".to_string(),
         priority: 1,
@@ -615,6 +622,7 @@ fn is_placeholder_description_rejects_long_or_substantive_descriptions() {
 fn board_integrity_suspect_flags_short_ids_and_placeholder_descriptions() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        repo: None,
         id: "g1".to_string(),
         description: "Goal g1".to_string(),
         priority: 1,
@@ -631,6 +639,7 @@ fn board_integrity_suspect_flags_short_ids_and_placeholder_descriptions() {
 fn board_integrity_suspect_passes_well_formed_board() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        repo: None,
         id: "improve-amplihack-test-coverage".to_string(),
         description: "Increase test coverage across the amplihack ecosystem".to_string(),
         priority: 1,
@@ -649,6 +658,7 @@ fn board_integrity_suspect_passes_well_formed_board() {
 fn clear_goal_assignment_resets_status_and_clears_assigned_to() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        repo: None,
         id: "assigned-goal".to_string(),
         description: "Has an engineer".to_string(),
         priority: 1,
@@ -705,6 +715,7 @@ use super::operations::{merge_boards, read_latest_snapshot};
 /// All other fields default to `None` / `vec![]`.
 fn goal_with(id: &str, priority: u32, status: GoalProgress, desc: &str) -> ActiveGoal {
     ActiveGoal {
+        repo: None,
         id: id.to_string(),
         description: desc.to_string(),
         priority,

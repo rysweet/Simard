@@ -109,6 +109,7 @@ fn board_with_active_goals() -> GoalBoard {
     add_active_goal(
         &mut board,
         ActiveGoal {
+            repo: None,
             id: "goal-improve-tests".to_string(),
             description: "Improve test coverage for session_builder module".to_string(),
             priority: 1,
@@ -123,6 +124,7 @@ fn board_with_active_goals() -> GoalBoard {
     add_active_goal(
         &mut board,
         ActiveGoal {
+            repo: None,
             id: "goal-fix-docs".to_string(),
             description: "Update API documentation for meeting_facilitator".to_string(),
             priority: 2,
@@ -364,6 +366,7 @@ fn daemon_degrades_gracefully_when_no_provider() {
 #[test]
 fn goal_objective_contains_goal_id_and_description() {
     let goal = ActiveGoal {
+        repo: None,
         id: "goal-improve-tests".to_string(),
         description: "Improve test coverage for session_builder module".to_string(),
         priority: 1,
