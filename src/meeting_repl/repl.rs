@@ -56,6 +56,8 @@ fn plural(n: usize) -> &'static str {
 /// The `[meeting] captured:` prefix is a stable, greppable marker matching
 /// the `[meeting] …` convention used by the close banners — operators can
 /// `grep '\[meeting\] captured:'` terminal scrollback reliably.
+///
+/// Issue #2376 (child of #1154 Pillar 3/5; audit #1628).
 fn capture_tally(backend: &MeetingBackend) -> String {
     let decisions = backend.explicit_decisions().len();
     let questions = backend.explicit_questions().len();

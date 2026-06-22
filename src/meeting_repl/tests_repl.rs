@@ -785,6 +785,7 @@ fn repl_question_command_records_and_confirms() {
 }
 
 // ── live capture-count tally (interactive parity with batch probe) ──
+// Issue #2376 (child of #1154 Pillar 3/5; audit #1628).
 
 #[test]
 #[serial(cognitive_memory)]
