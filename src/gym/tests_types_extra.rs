@@ -15,61 +15,6 @@ fn test_benchmark_class_display() {
         BenchmarkClass::SessionQuality.to_string(),
         "session-quality"
     );
-    assert_eq!(BenchmarkClass::TestWriting.to_string(), "test-writing");
-    assert_eq!(BenchmarkClass::BugFix.to_string(), "bug-fix");
-    assert_eq!(BenchmarkClass::Refactoring.to_string(), "refactoring");
-    assert_eq!(
-        BenchmarkClass::DependencyAnalysis.to_string(),
-        "dependency-analysis"
-    );
-    assert_eq!(BenchmarkClass::ErrorHandling.to_string(), "error-handling");
-    assert_eq!(
-        BenchmarkClass::PerformanceAnalysis.to_string(),
-        "performance-analysis"
-    );
-    assert_eq!(BenchmarkClass::SecurityAudit.to_string(), "security-audit");
-    assert_eq!(BenchmarkClass::ApiDesign.to_string(), "api-design");
-    assert_eq!(BenchmarkClass::CodeReview.to_string(), "code-review");
-    assert_eq!(BenchmarkClass::Debugging.to_string(), "debugging");
-    assert_eq!(
-        BenchmarkClass::ConfigManagement.to_string(),
-        "config-management"
-    );
-    assert_eq!(
-        BenchmarkClass::ConcurrencyAnalysis.to_string(),
-        "concurrency-analysis"
-    );
-    assert_eq!(
-        BenchmarkClass::MigrationPlanning.to_string(),
-        "migration-planning"
-    );
-    assert_eq!(
-        BenchmarkClass::ObservabilityInstrumentation.to_string(),
-        "observability-instrumentation"
-    );
-    assert_eq!(BenchmarkClass::DataModeling.to_string(), "data-modeling");
-    assert_eq!(BenchmarkClass::DataMigration.to_string(), "data-migration");
-    assert_eq!(BenchmarkClass::CicdPipeline.to_string(), "cicd-pipeline");
-    assert_eq!(
-        BenchmarkClass::DependencyUpgrade.to_string(),
-        "dependency-upgrade"
-    );
-    assert_eq!(
-        BenchmarkClass::ReleaseManagement.to_string(),
-        "release-management"
-    );
-    assert_eq!(
-        BenchmarkClass::AccessibilityReview.to_string(),
-        "accessibility-review"
-    );
-    assert_eq!(
-        BenchmarkClass::InternationalizationReview.to_string(),
-        "internationalization-review"
-    );
-    assert_eq!(
-        BenchmarkClass::IncidentResponse.to_string(),
-        "incident-response"
-    );
 }
 
 #[test]
@@ -159,13 +104,19 @@ fn test_benchmark_comparison_delta_serialize() {
 
 #[test]
 fn test_benchmark_class_eq() {
-    assert_eq!(BenchmarkClass::BugFix, BenchmarkClass::BugFix);
-    assert_ne!(BenchmarkClass::BugFix, BenchmarkClass::Refactoring);
+    assert_eq!(
+        BenchmarkClass::SafeCodeChange,
+        BenchmarkClass::SafeCodeChange
+    );
+    assert_ne!(
+        BenchmarkClass::SafeCodeChange,
+        BenchmarkClass::SessionQuality
+    );
 }
 
 #[test]
 fn test_benchmark_class_copy() {
-    let a = BenchmarkClass::TestWriting;
+    let a = BenchmarkClass::Documentation;
     let b = a; // copy
     assert_eq!(a, b);
 }

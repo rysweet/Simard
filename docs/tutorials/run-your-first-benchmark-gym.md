@@ -32,22 +32,24 @@ All runnable examples below use the canonical benchmark surface.
 
 ## Step 1: List the shipped benchmark scenarios
 
-The starter suite is intentionally small and curated.
+The starter suite is intentionally small and curated: a high-signal set rather
+than a large, noisy one (see `Specs/ProductArchitecture.md` line 214). It holds
+twelve scenarios — three for each of the four sanctioned benchmark classes.
 
 ```bash
 cargo run --quiet -- gym list
 ```
 
-You should see five scenarios:
+You should see twelve scenarios grouped by class:
 
-- `repo-exploration-local`
-- `docs-refresh-copilot`
-- `safe-code-change-rusty-clawd`
-- `composite-session-review`
-- `interactive-terminal-driving`
+- `repo-exploration` — `repo-exploration-local`, `repo-exploration-deep-scan`, `repo-exploration-multi-process`
+- `documentation` — `docs-refresh-copilot`, `doc-generation-public-fn`, `doc-generation-multi-process`
+- `safe-code-change` — `safe-code-change-rusty-clawd`, `safe-code-change-add-derive`, `safe-change-add-enum-variant`
+- `session-quality` — `composite-session-review`, `interactive-terminal-driving`, `session-quality-memory-export`
 
 Together they cover:
 
+- the four V1 benchmark classes: `repo-exploration`, `documentation`, `safe-code-change`, `session-quality`
 - the dedicated `simard-gym` identity
 - the composite `simard-composite-engineer` identity
 - the primary `simard-engineer` identity on the terminal-backed substrate

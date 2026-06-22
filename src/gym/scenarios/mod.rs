@@ -2,44 +2,17 @@ use crate::error::{SimardError, SimardResult};
 
 use super::types::BenchmarkScenario;
 
-// NEEDLE-XYZ-GYM-MARKER: long-context-needle-in-haystack benchmark searches for this exact comment.
+mod data;
 
-mod data_1;
-mod data_10;
-mod data_2;
-mod data_3;
-mod data_4;
-mod data_5;
-mod data_6;
-mod data_7;
-mod data_8;
-mod data_9;
-
-use std::sync::OnceLock;
-
-static ALL_BENCHMARK_SCENARIOS: OnceLock<Vec<BenchmarkScenario>> = OnceLock::new();
-
-fn all_benchmark_scenarios() -> &'static [BenchmarkScenario] {
-    ALL_BENCHMARK_SCENARIOS
-        .get_or_init(|| {
-            let mut v = Vec::with_capacity(200);
-            v.extend_from_slice(&data_1::SCENARIOS);
-            v.extend_from_slice(&data_2::SCENARIOS);
-            v.extend_from_slice(&data_3::SCENARIOS);
-            v.extend_from_slice(&data_4::SCENARIOS);
-            v.extend_from_slice(&data_5::SCENARIOS);
-            v.extend_from_slice(&data_6::SCENARIOS);
-            v.extend_from_slice(&data_7::SCENARIOS);
-            v.extend_from_slice(&data_8::SCENARIOS);
-            v.extend_from_slice(&data_9::SCENARIOS);
-            v.extend_from_slice(&data_10::SCENARIOS);
-            v
-        })
-        .as_slice()
-}
-
+/// Returns the curated V1 benchmark scenarios.
+///
+/// The returned slice has `'static` lifetime and contains a small, high-signal
+/// set of [`BenchmarkScenario`]s covering the four sanctioned benchmark classes
+/// (`repo-exploration`, `documentation`, `safe-code-change`, `session-quality`).
+/// Per `Specs/ProductArchitecture.md` (line 214) V1 prefers a small benchmark
+/// set with high signal over a large, noisy suite (issue #2087).
 pub fn benchmark_scenarios() -> &'static [BenchmarkScenario] {
-    all_benchmark_scenarios()
+    &data::SCENARIOS
 }
 
 pub(super) fn resolve_benchmark_scenario(scenario_id: &str) -> SimardResult<BenchmarkScenario> {
@@ -53,14 +26,4 @@ pub(super) fn resolve_benchmark_scenario(scenario_id: &str) -> SimardResult<Benc
 }
 
 mod checks;
-mod checks_1;
-mod checks_10;
-mod checks_2;
-mod checks_3;
-mod checks_4;
-mod checks_5;
-mod checks_6;
-mod checks_7;
-mod checks_8;
-mod checks_9;
 pub(crate) use checks::class_specific_checks;

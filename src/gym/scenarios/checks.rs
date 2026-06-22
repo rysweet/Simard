@@ -1,4 +1,8 @@
-//! Class-specific check builders for `BenchmarkScenario`s.
+//! Class-specific check builders for the V1 `BenchmarkScenario` classes.
+//!
+//! Per `Specs/ProductArchitecture.md` (issue #2087) the gym scores only the
+//! four sanctioned benchmark classes, so this module dispatches and implements
+//! exactly those four check families.
 
 use super::super::types::{BenchmarkCheckResult, BenchmarkClass, BenchmarkScenario};
 use crate::handoff::RuntimeHandoffSnapshot;
@@ -12,93 +16,147 @@ pub(crate) fn class_specific_checks(
     let plan = outcome.plan.to_lowercase();
     let reflection = outcome.reflection.summary.to_lowercase();
     let combined = format!("{summary} {plan} {reflection}");
-    let _ = exported;
-    let _ = outcome;
 
     match scenario.class {
-        BenchmarkClass::RepoExploration => super::checks_5::checks_for_repo_exploration(&combined),
-        BenchmarkClass::Documentation => super::checks_3::checks_for_documentation(&combined),
-        BenchmarkClass::SafeCodeChange => super::checks_3::checks_for_safe_code_change(&combined),
-        BenchmarkClass::TestWriting => super::checks_6::checks_for_test_writing(&combined),
-        BenchmarkClass::SessionQuality => {
-            super::checks_5::checks_for_session_quality(&combined, outcome, exported)
-        }
-        BenchmarkClass::BugFix => super::checks_1::checks_for_bug_fix(&combined),
-        BenchmarkClass::Refactoring => super::checks_4::checks_for_refactoring(&combined),
-        BenchmarkClass::DependencyAnalysis => {
-            super::checks_1::checks_for_dependency_analysis(&combined)
-        }
-        BenchmarkClass::ErrorHandling => match scenario.id {
-            "error-handling-debug-stale-engineer-worktree"
-            | "error-handling-debug-pre-push-clippy-failure"
-            | "error-handling-debug-mkdocs-strict-broken-link"
-            | "error-handling-debug-recipe-runner-hollow-success" => {
-                super::checks_9::checks_for_error_handling_debug(scenario, &combined, exported)
-            }
-            _ => super::checks_4::checks_for_error_handling(&combined),
-        },
-        BenchmarkClass::PerformanceAnalysis => {
-            super::checks_3::checks_for_performance_analysis(&combined)
-        }
-        BenchmarkClass::SecurityAudit => super::checks_3::checks_for_security_audit(&combined),
-        BenchmarkClass::ApiDesign => super::checks_4::checks_for_api_design(&combined),
-        BenchmarkClass::CodeReview => super::checks_2::checks_for_code_review(&combined),
-        BenchmarkClass::Debugging => super::checks_6::checks_for_debugging(&combined),
-        BenchmarkClass::ConfigManagement => {
-            super::checks_6::checks_for_config_management(&combined)
-        }
-        BenchmarkClass::ConcurrencyAnalysis => {
-            super::checks_2::checks_for_concurrency_analysis(&combined)
-        }
-        BenchmarkClass::MigrationPlanning => {
-            super::checks_2::checks_for_migration_planning(&combined)
-        }
-        BenchmarkClass::ObservabilityInstrumentation => {
-            super::checks_5::checks_for_observability_instrumentation(&combined)
-        }
-        BenchmarkClass::DataModeling => super::checks_5::checks_for_data_modeling(&combined),
-        BenchmarkClass::DataMigration => super::checks_1::checks_for_data_migration(&combined),
-        BenchmarkClass::CicdPipeline => super::checks_2::checks_for_cicd_pipeline(&combined),
-        BenchmarkClass::DependencyUpgrade => {
-            super::checks_1::checks_for_dependency_upgrade(&combined)
-        }
-        BenchmarkClass::ReleaseManagement => {
-            super::checks_3::checks_for_release_management(&combined)
-        }
-        BenchmarkClass::AccessibilityReview => {
-            super::checks_2::checks_for_accessibility_review(&combined)
-        }
-        BenchmarkClass::InternationalizationReview => {
-            super::checks_1::checks_for_internationalization_review(&combined)
-        }
-        BenchmarkClass::IncidentResponse => {
-            super::checks_3::checks_for_incident_response(&combined)
-        }
-        BenchmarkClass::DatabaseSchemaChange => {
-            super::checks_4::checks_for_database_schema_change(&combined)
-        }
-        BenchmarkClass::CachingStrategy => super::checks_5::checks_for_caching_strategy(&combined),
-        BenchmarkClass::FeatureFlagging => super::checks_6::checks_for_feature_flagging(&combined),
-        BenchmarkClass::RateLimiting => super::checks_4::checks_for_rate_limiting(&combined),
-        BenchmarkClass::EventSourcing => super::checks_6::checks_for_event_sourcing(&combined),
-        BenchmarkClass::ChaosEngineering => {
-            super::checks_5::checks_for_chaos_engineering(&combined)
-        }
-        BenchmarkClass::KnowledgeRecall => match scenario.id {
-            "knowledge-recall-repo-ooda-loop-layout"
-            | "knowledge-recall-repo-cognitive-memory-store"
-            | "knowledge-recall-repo-engineer-worktree-pattern" => {
-                super::checks_7::checks_for_knowledge_recall_repo(scenario, &combined, exported)
-            }
-            "knowledge-recall-cross-session-fact" | "knowledge-recall-cross-session-preference" => {
-                super::checks_8::checks_for_knowledge_recall_cross_session(
-                    scenario, &combined, exported,
-                )
-            }
-            _ => super::checks_6::checks_for_knowledge_recall(scenario, &combined, exported),
-        },
-        BenchmarkClass::SelfIntrospection => {
-            super::checks_10::checks_for_self_introspection(scenario, &combined, exported)
-        }
+        BenchmarkClass::RepoExploration => checks_for_repo_exploration(&combined),
+        BenchmarkClass::Documentation => checks_for_documentation(&combined),
+        BenchmarkClass::SafeCodeChange => checks_for_safe_code_change(&combined),
+        BenchmarkClass::SessionQuality => checks_for_session_quality(outcome, exported),
     }
+}
+
+fn checks_for_repo_exploration(combined: &str) -> Vec<BenchmarkCheckResult> {
+    let structure_mentioned = combined.contains("src/")
+        || combined.contains("directory")
+        || combined.contains("structure")
+        || combined.contains("module");
+    let deps_mentioned = combined.contains("cargo.toml")
+        || combined.contains("dependenc")
+        || combined.contains("crate");
+    let entry_mentioned = combined.contains("main.rs")
+        || combined.contains("lib.rs")
+        || combined.contains("entry point")
+        || combined.contains("entry-point");
+    vec![
+        BenchmarkCheckResult {
+            id: "repo-structure-discovered".to_string(),
+            passed: structure_mentioned,
+            detail: format!(
+                "execution output {} project structure references",
+                if structure_mentioned {
+                    "contains"
+                } else {
+                    "lacks"
+                }
+            ),
+        },
+        BenchmarkCheckResult {
+            id: "repo-dependencies-identified".to_string(),
+            passed: deps_mentioned,
+            detail: format!(
+                "execution output {} dependency references",
+                if deps_mentioned { "contains" } else { "lacks" }
+            ),
+        },
+        BenchmarkCheckResult {
+            id: "repo-entry-points-found".to_string(),
+            passed: entry_mentioned,
+            detail: format!(
+                "execution output {} entry point references",
+                if entry_mentioned { "contains" } else { "lacks" }
+            ),
+        },
+    ]
+}
+
+fn checks_for_documentation(combined: &str) -> Vec<BenchmarkCheckResult> {
+    let has_doc_syntax = combined.contains("///")
+        || combined.contains("doc comment")
+        || combined.contains("rustdoc")
+        || combined.contains("documentation");
+    let mentions_params = combined.contains("param")
+        || combined.contains("argument")
+        || combined.contains("return")
+        || combined.contains("-> ");
+    vec![
+        BenchmarkCheckResult {
+            id: "doc-comment-syntax-valid".to_string(),
+            passed: has_doc_syntax,
+            detail: format!(
+                "execution output {} doc comment syntax",
+                if has_doc_syntax {
+                    "references"
+                } else {
+                    "lacks"
+                }
+            ),
+        },
+        BenchmarkCheckResult {
+            id: "doc-params-return-covered".to_string(),
+            passed: mentions_params,
+            detail: format!(
+                "execution output {} parameter/return documentation",
+                if mentions_params { "includes" } else { "lacks" }
+            ),
+        },
+    ]
+}
+
+fn checks_for_safe_code_change(combined: &str) -> Vec<BenchmarkCheckResult> {
+    let compilation_evidence = combined.contains("compil")
+        || combined.contains("cargo build")
+        || combined.contains("cargo check")
+        || combined.contains("build succeed")
+        || combined.contains("no errors");
+    let change_described = combined.contains("derive")
+        || combined.contains("change")
+        || combined.contains("modif")
+        || combined.contains("diff");
+    vec![
+        BenchmarkCheckResult {
+            id: "code-change-compilation-checked".to_string(),
+            passed: compilation_evidence,
+            detail: format!(
+                "execution output {} compilation verification",
+                if compilation_evidence {
+                    "includes"
+                } else {
+                    "lacks"
+                }
+            ),
+        },
+        BenchmarkCheckResult {
+            id: "code-change-described".to_string(),
+            passed: change_described,
+            detail: format!(
+                "execution output {} change description",
+                if change_described {
+                    "includes"
+                } else {
+                    "lacks"
+                }
+            ),
+        },
+    ]
+}
+
+fn checks_for_session_quality(
+    outcome: &crate::runtime::SessionOutcome,
+    exported: &RuntimeHandoffSnapshot,
+) -> Vec<BenchmarkCheckResult> {
+    let session_summary_present =
+        !outcome.execution_summary.trim().is_empty() && exported.memory_records.len() >= 2;
+    vec![BenchmarkCheckResult {
+        id: "session-quality-summary-adequate".to_string(),
+        passed: session_summary_present,
+        detail: format!(
+            "session produced {} memory records with {} execution summary",
+            exported.memory_records.len(),
+            if outcome.execution_summary.trim().is_empty() {
+                "empty"
+            } else {
+                "non-empty"
+            }
+        ),
+    }]
 }
