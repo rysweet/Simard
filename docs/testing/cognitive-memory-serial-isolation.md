@@ -51,7 +51,7 @@ pre-commit `cargo test`.
   provider, and the meetings-persistence directory. The guard's *mutation* watch
   (`EnvWatch::StateRootSurface` in `src/test_support/serial_guard.rs`) covers
   `SIMARD_STATE_ROOT`, `SIMARD_MEMORY_SOCKET`, `HOME`, `SIMARD_LLM_PROVIDER`,
-  `SIMARD_MEETINGS_DIR`, `SIMARD_MEETINGS_ROOT`; the *read* watch
+  `SIMARD_MEETINGS_DIR`, `SIMARD_MEETINGS_ROOT`, `SIMARD_HANDOFF_DIR`; the *read* watch
   (`READ_WATCHED_VARS`) is the same set **minus `HOME`** (a torn `HOME` read is
   not the race — only a `HOME` *write* is). **Every lib-binary test that mutates
   or reads that surface shares one serial key, `cognitive_memory`**, so no
@@ -140,7 +140,7 @@ assertion.
 > that mutates the guard's watched env surface — the cognitive-memory
 > state-root / LLM-provider / meetings-resolver variables (`SIMARD_STATE_ROOT`,
 > `SIMARD_MEMORY_SOCKET`, `HOME`, `SIMARD_LLM_PROVIDER`, `SIMARD_MEETINGS_DIR`,
-> `SIMARD_MEETINGS_ROOT`) — may run concurrently with any test that reads that
+> `SIMARD_MEETINGS_ROOT`, `SIMARD_HANDOFF_DIR`) — may run concurrently with any test that reads that
 > surface.** This is enforced by routing *every* such test through the single
 > serial key `cognitive_memory`.
 
@@ -168,7 +168,7 @@ if**, at run time, it does any of:
   the `serial_guard` meta-test currently auto-detects (B) only for its
   **mutation watch** `EnvWatch::StateRootSurface` (`SIMARD_STATE_ROOT`,
   `SIMARD_MEMORY_SOCKET`, `HOME`, `SIMARD_LLM_PROVIDER`, `SIMARD_MEETINGS_DIR`,
-  `SIMARD_MEETINGS_ROOT`; the rule-(C) *read* check uses `READ_WATCHED_VARS`,
+  `SIMARD_MEETINGS_ROOT`, `SIMARD_HANDOFF_DIR`; the rule-(C) *read* check uses `READ_WATCHED_VARS`,
   the same set minus `HOME`);
   for any other variable, rule (B) is an author obligation the guard does not
   yet check. Closing that gap (`EnvWatch::AnyVar`) is tracked as issue #2375 —
@@ -233,7 +233,7 @@ by [issue #2375](https://github.com/rysweet/Simard/issues/2375):
 
 1. **Cross-variable tears from other serial groups.** Lib-binary tests that
    mutate non-watched vars under a *different* serial key — e.g.
-   `SIMARD_HANDOFF_DIR` (`ooda_loop`), `SIMARD_SKIP_GYM` (`gym_runner_bridge`),
+   `SIMARD_SKIP_GYM` (`gym_runner_bridge`),
    `NO_COLOR` (`meeting_repl`), `ENV_OVERRIDE` (`prompt_delivery`,
    `prompt_delivery_env`), `SIMARD_NO_UPDATE_CHECK` (`update_check`,
    `update_check_env`) — can still run concurrently with the `cognitive_memory`
@@ -389,12 +389,13 @@ pub(crate) struct AuditOptions {
 
     /// Which env-var mutations trip the rule. Default:
     /// `EnvWatch::StateRootSurface` — the cognitive-memory state-root,
-    /// provider, and meetings-resolver surface (`SIMARD_STATE_ROOT`,
+    /// provider, and meeting artifact-dir surface (`SIMARD_STATE_ROOT`,
     /// `SIMARD_MEMORY_SOCKET`, `HOME`, `SIMARD_LLM_PROVIDER`,
-    /// `SIMARD_MEETINGS_DIR`, `SIMARD_MEETINGS_ROOT`; the rule-(C) read check
-    /// `READ_WATCHED_VARS` is the same set minus `HOME`). `EnvWatch::AnyVar`
-    /// (fully var-agnostic) and `EnvWatch::Vars(set)` remain for the tracked
-    /// #2375 follow-up that migrates every other env-mutating variable.
+    /// `SIMARD_MEETINGS_DIR`, `SIMARD_MEETINGS_ROOT`, `SIMARD_HANDOFF_DIR`; the
+    /// rule-(C) read check `READ_WATCHED_VARS` is the same set minus `HOME`).
+    /// `EnvWatch::AnyVar` (fully var-agnostic) and `EnvWatch::Vars(set)` remain
+    /// for the tracked #2375 follow-up that migrates every other env-mutating
+    /// variable.
     pub watched: EnvWatch,
 
     /// Tests that are exempt with a written, machine-checked reason. Each
@@ -407,7 +408,8 @@ pub(crate) struct AuditOptions {
 `AuditOptions::default()` ships the production configuration: scan `src`,
 exclude `src/bin`, watch the **state-root / provider / meetings surface**
 (mutations of `SIMARD_STATE_ROOT`, `SIMARD_MEMORY_SOCKET`, `HOME`,
-`SIMARD_LLM_PROVIDER`, `SIMARD_MEETINGS_DIR`, `SIMARD_MEETINGS_ROOT`), empty
+`SIMARD_LLM_PROVIDER`, `SIMARD_MEETINGS_DIR`, `SIMARD_MEETINGS_ROOT`,
+`SIMARD_HANDOFF_DIR`), empty
 allowlist. The rule-(C) *read* check (`READ_WATCHED_VARS`) covers the same set
 **minus `HOME`** — a torn `HOME` *read* is not the cognitive-memory race; only a
 `HOME` *write*, which can tear a `SIMARD_STATE_ROOT` read, is.
@@ -497,7 +499,7 @@ helper:
 // `std::env::var` read and send writes to HOME/.simard. The `serial_guard`
 // meta-test auto-enforces this for its watched surface (SIMARD_STATE_ROOT /
 // SIMARD_MEMORY_SOCKET / HOME / SIMARD_LLM_PROVIDER / SIMARD_MEETINGS_DIR /
-// SIMARD_MEETINGS_ROOT); keying any OTHER var is an author obligation the guard
+// SIMARD_MEETINGS_ROOT / SIMARD_HANDOFF_DIR); keying any OTHER var is an author obligation the guard
 // does not yet check (EnvWatch::AnyVar tracked as #2375).
 // See docs/testing/cognitive-memory-serial-isolation.md.
 ```
@@ -700,6 +702,30 @@ the audit gap:
 Validation: serial_guard green; the autosave reader, the bundle writers, and the
 persist mutators run together under the multi-threaded runner across 20 focused
 high-concurrency runs and four full runs with zero failures.
+
+#### Handoff-dir surface (completing the meetings migration)
+
+Moving `tests_meeting_decisions` into `cognitive_memory` exposed a coupled gap:
+those tests set **both** `SIMARD_MEETINGS_ROOT` **and** `SIMARD_HANDOFF_DIR`, and
+read the latter back through `load_carried_meeting_decisions()`. Their
+`SIMARD_HANDOFF_DIR` writers (`ooda_loop::tests_observe`,
+`operator_cli::meeting`, `meeting_facilitator::handoff::default_handoff_dir`)
+remained on a bare `#[serial]` / unkeyed — disjoint from `cognitive_memory` —
+so the reader could be torn by a concurrent handoff-dir write (the exact
+"cross-variable tear" formerly tracked as a blind spot). `SIMARD_HANDOFF_DIR` is
+therefore now part of the watched surface too:
+
+- It is added to the guard's mutation watch **and** `READ_WATCHED_VARS`, so the
+  handoff resolver/writers are enforced symmetrically with the meetings surface.
+- The remaining 10 handoff-dir writers (6 in `ooda_loop/tests_observe.rs`, 3 in
+  `operator_cli/meeting.rs`, 1 in `meeting_facilitator/handoff/mod.rs`) are
+  migrated into `cognitive_memory` (replacing bare `#[serial]` / adding the key
+  to the previously-unkeyed `default_handoff_dir_returns_path`). The
+  `meeting_backend` handoff writers already carried the key from the meetings
+  migration above.
+
+Validation: serial_guard green with all three meeting vars watched; 8 full
+`cargo test --lib --test-threads=16` runs (5799 passed, 0 failed each).
 
 > **Out of scope — `base_type_copilot` meeting tests.** These spawn the **real**
 > `copilot` subprocess and only run when the binary is on `PATH` (they skip in
