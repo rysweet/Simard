@@ -592,6 +592,42 @@ serializes tests *within* the group. A plain (unannotated) reader in cargo's
 parallel pool still overlaps the group's mutations, so the *readers* above must
 share the key too — not just the writers.
 
+### Meetings-persistence surface (#2360 follow-up, demonstrated in CI)
+
+A later `verify` run flaked on
+`meeting_backend::tests_persist_extra::write_auto_save_lands_under_simard_state_root`
+with `autosave parent must be $SIMARD_STATE_ROOT/meetings (got
+/tmp/bundle-stubs-…/…)`. Same root-cause class as #2360, a third variable pair:
+the meeting-persistence resolver `meetings_dir()` (used by `write_auto_save` /
+`write_transcript` / `write_meeting_bundle`) consults `SIMARD_MEETINGS_DIR`, then
+`SIMARD_MEETINGS_ROOT`, then falls through to `SIMARD_STATE_ROOT`. The
+`write_meeting_bundle_*` tests set `SIMARD_MEETINGS_ROOT` under their own
+`simard_meetings_root_env` key — disjoint from `cognitive_memory` — so they ran
+concurrently with the autosave reader and tore its narrow-override read, routing
+the autosave into the bundle test's directory.
+
+The guard had a blind spot: it watched `SIMARD_STATE_ROOT` but not the two
+`SIMARD_MEETINGS_*` overrides that shadow it. The fix closes both the race and
+the audit gap:
+
+- `SIMARD_MEETINGS_DIR` and `SIMARD_MEETINGS_ROOT` are added to the guard's
+  mutation watch **and** `READ_WATCHED_VARS`, and `write_auto_save` /
+  `write_transcript` / `write_meeting_bundle` are added to the env-reading
+  handler list, so every meetings reader/writer is enforced symmetrically.
+- The ~30 meetings-surface tests are migrated into `cognitive_memory` (appended
+  to their existing semantic key, never replacing it):
+
+| File | Previous key | Now |
+|------|--------------|-----|
+| `meeting_backend/tests_persist_extra.rs` | `meeting_persist` | `meeting_persist, cognitive_memory` |
+| `meeting_backend/persist/mod.rs`, `persist/markdown.rs` | `simard_meetings_dir_env` | `simard_meetings_dir_env, cognitive_memory` |
+| `meeting_facilitator/handoff/persistence.rs` | `simard_meetings_root_env` | `simard_meetings_root_env, cognitive_memory` |
+| `engineer_loop/tests_meeting_decisions.rs` | bare `#[serial]` | `#[serial(cognitive_memory)]` |
+
+Validation: serial_guard green; the autosave reader, the bundle writers, and the
+persist mutators run together under the multi-threaded runner across 20 focused
+high-concurrency runs and four full runs with zero failures.
+
 > **Out of scope — `base_type_copilot` meeting tests.** These spawn the **real**
 > `copilot` subprocess and only run when the binary is on `PATH` (they skip in
 > CI). They exhibit two distinct intermittent failures: (a) "No authentication

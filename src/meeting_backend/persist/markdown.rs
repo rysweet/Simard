@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_meetings_dir_env)]
+    #[serial(simard_meetings_dir_env, cognitive_memory)]
     fn write_markdown_export_creates_md_file() {
         let dir = temp_dir("export");
         unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", &dir) };
@@ -329,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_meetings_dir_env)]
+    #[serial(simard_meetings_dir_env, cognitive_memory)]
     fn write_markdown_export_empty_messages() {
         let dir = temp_dir("export-empty");
         unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", &dir) };
@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_meetings_dir_env)]
+    #[serial(simard_meetings_dir_env, cognitive_memory)]
     fn write_handoff_markdown_report_creates_report() {
         let dir = temp_dir("report");
         unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", &dir) };
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_meetings_dir_env)]
+    #[serial(simard_meetings_dir_env, cognitive_memory)]
     fn write_handoff_markdown_report_empty_sections() {
         let dir = temp_dir("report-empty");
         unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", &dir) };
@@ -423,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_meetings_dir_env)]
+    #[serial(simard_meetings_dir_env, cognitive_memory)]
     fn write_handoff_markdown_report_includes_templates() {
         let dir = temp_dir("report-tmpl");
         unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", &dir) };

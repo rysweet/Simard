@@ -40,7 +40,14 @@ const REQUIRED_KEY: &str = "cognitive_memory";
 /// `SIMARD_LLM_PROVIDER` is included because the dashboard agent-session
 /// resolver (`open_dashboard_agent_session`) and the
 /// `open_agent_session_returns_none_without_provider_config` test read it, and
-/// the `ooda_actions` / `self_improve` / `disk_health` tests mutate it. `HOME`
+/// the `ooda_actions` / `self_improve` / `disk_health` tests mutate it.
+/// `SIMARD_MEETINGS_DIR` / `SIMARD_MEETINGS_ROOT` are included because the
+/// meeting-persistence resolver (`meetings_dir`, used by `write_auto_save` /
+/// `write_transcript` / `write_meeting_bundle`) consults them *before* falling
+/// through to `SIMARD_STATE_ROOT`; a concurrent write to either (e.g. the
+/// `write_meeting_bundle_*` bundle tests) tears a meetings-resolver read and
+/// routed `write_auto_save_lands_under_simard_state_root`'s autosave into the
+/// wrong directory (the #2360 race class, re-surfaced in CI). `HOME`
 /// is NOT here: a torn *read* of `HOME` is not the cognitive-memory race; only
 /// a *write* to `HOME` (which can tear a `SIMARD_STATE_ROOT` read) is in scope,
 /// and writes are handled by [`EnvWatch`].
@@ -48,18 +55,28 @@ const READ_WATCHED_VARS: &[&str] = &[
     "SIMARD_STATE_ROOT",
     "SIMARD_MEMORY_SOCKET",
     "SIMARD_LLM_PROVIDER",
+    "SIMARD_MEETINGS_DIR",
+    "SIMARD_MEETINGS_ROOT",
 ];
 
 /// Env-reading async dashboard route handlers from
-/// `operator_commands_dashboard/goals.rs`. Each resolves the state root
-/// internally via `resolve_state_root()`, so calling one is an env read.
-const ENV_READING_GOAL_HANDLERS: &[&str] = &[
+/// `operator_commands_dashboard/goals.rs` (each resolves the state root
+/// internally via `resolve_state_root()`), plus the meeting-persistence
+/// resolvers from `meeting_backend/persist` (`write_auto_save` /
+/// `write_transcript` / `write_meeting_bundle` all resolve through
+/// `meetings_dir()` -> `SIMARD_MEETINGS_DIR` / `SIMARD_MEETINGS_ROOT` /
+/// `SIMARD_STATE_ROOT`). Calling one is an env read of the cognitive-memory
+/// state-root surface.
+const ENV_READING_HANDLERS: &[&str] = &[
     "seed_goals",
     "add_goal",
     "remove_goal",
     "update_goal_status",
     "promote_backlog_item",
     "demote_goal",
+    "write_auto_save",
+    "write_transcript",
+    "write_meeting_bundle",
 ];
 
 // ---------------------------------------------------------------------------
@@ -74,8 +91,12 @@ pub(crate) enum EnvWatch {
     /// (`SIMARD_STATE_ROOT`, `SIMARD_MEMORY_SOCKET`, and the `HOME` fallback),
     /// plus `SIMARD_LLM_PROVIDER` (the dashboard agent-session / provider
     /// resolution surface, whose readers race the provider mutators in
-    /// `ooda_actions` / `self_improve` / `disk_health`). This is the
-    /// demonstrated race surface for #2360.
+    /// `ooda_actions` / `self_improve` / `disk_health`) and
+    /// `SIMARD_MEETINGS_DIR` / `SIMARD_MEETINGS_ROOT` (the meeting-persistence
+    /// resolver `meetings_dir()`, which falls through to `SIMARD_STATE_ROOT`;
+    /// its writers — the `write_meeting_bundle_*` / `meetings_*` tests — race
+    /// the autosave/transcript readers). This is the demonstrated race surface
+    /// for #2360.
     StateRootSurface,
     /// Watch a specific set of variable names.
     Vars(BTreeSet<String>),
@@ -92,7 +113,12 @@ impl EnvWatch {
             EnvWatch::StateRootSurface => {
                 matches!(
                     var,
-                    "SIMARD_STATE_ROOT" | "SIMARD_MEMORY_SOCKET" | "HOME" | "SIMARD_LLM_PROVIDER"
+                    "SIMARD_STATE_ROOT"
+                        | "SIMARD_MEMORY_SOCKET"
+                        | "HOME"
+                        | "SIMARD_LLM_PROVIDER"
+                        | "SIMARD_MEETINGS_DIR"
+                        | "SIMARD_MEETINGS_ROOT"
                 )
             }
             EnvWatch::Vars(set) => set.contains(var),
@@ -140,8 +166,10 @@ pub(crate) enum Reason {
     /// Constructs a `HermeticState`, which sets `SIMARD_STATE_ROOT` and unsets
     /// `SIMARD_MEMORY_SOCKET` in process-global env.
     ConstructsHermeticState,
-    /// Invokes an env-reading async dashboard goal route handler.
-    CallsEnvReadingGoalHandler { handler: String },
+    /// Invokes an env-reading async dashboard goal route handler or a
+    /// meeting-persistence resolver (`write_auto_save` / `write_transcript` /
+    /// `write_meeting_bundle`).
+    CallsEnvReadingHandler { handler: String },
     /// An allowlist entry was added without a justification.
     EmptyAllowlistJustification,
 }
@@ -160,9 +188,9 @@ impl Reason {
                 "constructs HermeticState (sets SIMARD_STATE_ROOT / unsets SIMARD_MEMORY_SOCKET)"
                     .to_string()
             }
-            Reason::CallsEnvReadingGoalHandler { handler } => {
+            Reason::CallsEnvReadingHandler { handler } => {
                 format!(
-                    "calls env-reading goal route handler `{handler}` (reads resolve_state_root)"
+                    "calls env-reading handler `{handler}` (resolves the state-root / meetings surface)"
                 )
             }
             Reason::EmptyAllowlistJustification => {
@@ -178,7 +206,7 @@ impl Reason {
             Reason::EmptyAllowlistJustification => 0,
             Reason::MutatesEnv { .. } => 1,
             Reason::ConstructsHermeticState => 2,
-            Reason::CallsEnvReadingGoalHandler { .. } => 3,
+            Reason::CallsEnvReadingHandler { .. } => 3,
             Reason::ReadsStateRootDefault => 4,
         }
     }
@@ -483,10 +511,11 @@ impl<'a, 'ast> Visit<'ast> for BodyScan<'a> {
                 self.reasons.push(Reason::ReadsStateRootDefault);
             }
 
-            // (D) env-reading async goal route handlers.
-            if segs.len() == 1 && ENV_READING_GOAL_HANDLERS.contains(&last.as_str()) {
+            // (D) env-reading async goal route handlers and meeting-persistence
+            // resolvers (write_auto_save / write_transcript / write_meeting_bundle).
+            if segs.len() == 1 && ENV_READING_HANDLERS.contains(&last.as_str()) {
                 self.reasons
-                    .push(Reason::CallsEnvReadingGoalHandler { handler: last });
+                    .push(Reason::CallsEnvReadingHandler { handler: last });
             }
         }
         syn::visit::visit_expr_call(self, node);
