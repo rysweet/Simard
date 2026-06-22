@@ -47,7 +47,12 @@ const REQUIRED_KEY: &str = "cognitive_memory";
 /// through to `SIMARD_STATE_ROOT`; a concurrent write to either (e.g. the
 /// `write_meeting_bundle_*` bundle tests) tears a meetings-resolver read and
 /// routed `write_auto_save_lands_under_simard_state_root`'s autosave into the
-/// wrong directory (the #2360 race class, re-surfaced in CI). `HOME`
+/// wrong directory (the #2360 race class, re-surfaced in CI).
+/// `SIMARD_HANDOFF_DIR` is included for symmetry: the handoff resolver
+/// (`default_handoff_dir`, read by `load_carried_meeting_decisions`) consults
+/// it, and its writers in `ooda_loop` / `operator_cli` / `meeting_backend` race
+/// the `tests_meeting_decisions` reader (which joined `cognitive_memory` because
+/// it also writes `SIMARD_MEETINGS_ROOT`). `HOME`
 /// is NOT here: a torn *read* of `HOME` is not the cognitive-memory race; only
 /// a *write* to `HOME` (which can tear a `SIMARD_STATE_ROOT` read) is in scope,
 /// and writes are handled by [`EnvWatch`].
@@ -57,6 +62,7 @@ const READ_WATCHED_VARS: &[&str] = &[
     "SIMARD_LLM_PROVIDER",
     "SIMARD_MEETINGS_DIR",
     "SIMARD_MEETINGS_ROOT",
+    "SIMARD_HANDOFF_DIR",
 ];
 
 /// Env-reading async dashboard route handlers from
@@ -95,7 +101,12 @@ pub(crate) enum EnvWatch {
     /// `SIMARD_MEETINGS_DIR` / `SIMARD_MEETINGS_ROOT` (the meeting-persistence
     /// resolver `meetings_dir()`, which falls through to `SIMARD_STATE_ROOT`;
     /// its writers — the `write_meeting_bundle_*` / `meetings_*` tests — race
-    /// the autosave/transcript readers). This is the demonstrated race surface
+    /// the autosave/transcript readers), plus `SIMARD_HANDOFF_DIR` (the
+    /// `default_handoff_dir()` / handoff-bundle surface; its writers in
+    /// `ooda_loop` / `operator_cli` / `meeting_backend` race the
+    /// `load_carried_meeting_decisions` reader in `tests_meeting_decisions`,
+    /// which shares the `cognitive_memory` group because it also writes
+    /// `SIMARD_MEETINGS_ROOT`). This is the demonstrated race surface
     /// for #2360.
     StateRootSurface,
     /// Watch a specific set of variable names.
@@ -119,6 +130,7 @@ impl EnvWatch {
                         | "SIMARD_LLM_PROVIDER"
                         | "SIMARD_MEETINGS_DIR"
                         | "SIMARD_MEETINGS_ROOT"
+                        | "SIMARD_HANDOFF_DIR"
                 )
             }
             EnvWatch::Vars(set) => set.contains(var),
