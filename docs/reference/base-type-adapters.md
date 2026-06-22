@@ -181,10 +181,12 @@ cannot silently diverge again:
   and `knowledge` (`KnowledgeBridge`) bridges. Each session that supports
   enrichment stores one and exposes it through `BaseTypeSession::enrichment()` /
   `enrichment_mut()`.
-- `enrich_turn_input(input, memory, knowledge)` — folds the input's
-  `prompt_preamble`, `identity_context`, and `objective` into a single
-  objective, calls `prepare_turn_context`, and renders the result via
-  `format_turn_input`. Returns the formatted prompt string.
+- `enrich_turn_input(input, memory, knowledge)` — recalls memory facts/
+  procedures and domain knowledge for the input's `objective` via
+  `prepare_turn_context`, renders them with `render_enrichment_block`, and
+  returns a new `BaseTypeTurnInput` with that block injected into
+  `prompt_preamble` (the `objective` and `identity_context` are preserved
+  unchanged, so stateful adapters keep a clean conversation history).
 - `BaseTypeSession::enrich_input(&self, input)` — the provided trait method
   every adapter inherits. It delegates to the session's configured
   `EnrichmentBridges` (or to a no-op enrichment when none are configured).
