@@ -5,6 +5,14 @@ use serde::Serialize;
 use crate::gym_scoring::EvidenceQualityAssessment;
 use crate::runtime::RuntimeTopology;
 
+/// The V1 benchmark classes sanctioned by `Specs/ProductArchitecture.md`
+/// ("Initial Benchmark Classes", lines 196-201).
+///
+/// The spec is explicit (line 214): "V1 should prefer a small benchmark set
+/// with high signal over a large, noisy suite." The gym therefore exposes only
+/// these four high-signal classes. Additional speculative classes were removed
+/// (issue #2087) to keep the suite focused on changing engineering decisions
+/// rather than creating dashboard theater.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BenchmarkClass {
@@ -12,36 +20,6 @@ pub enum BenchmarkClass {
     Documentation,
     SafeCodeChange,
     SessionQuality,
-    TestWriting,
-    BugFix,
-    Refactoring,
-    DependencyAnalysis,
-    ErrorHandling,
-    PerformanceAnalysis,
-    SecurityAudit,
-    ApiDesign,
-    CodeReview,
-    Debugging,
-    ConfigManagement,
-    ConcurrencyAnalysis,
-    MigrationPlanning,
-    ObservabilityInstrumentation,
-    DataModeling,
-    DataMigration,
-    CicdPipeline,
-    DependencyUpgrade,
-    ReleaseManagement,
-    AccessibilityReview,
-    InternationalizationReview,
-    IncidentResponse,
-    DatabaseSchemaChange,
-    CachingStrategy,
-    FeatureFlagging,
-    RateLimiting,
-    EventSourcing,
-    ChaosEngineering,
-    KnowledgeRecall,
-    SelfIntrospection,
 }
 
 impl Display for BenchmarkClass {
@@ -51,36 +29,6 @@ impl Display for BenchmarkClass {
             Self::Documentation => "documentation",
             Self::SafeCodeChange => "safe-code-change",
             Self::SessionQuality => "session-quality",
-            Self::TestWriting => "test-writing",
-            Self::BugFix => "bug-fix",
-            Self::Refactoring => "refactoring",
-            Self::DependencyAnalysis => "dependency-analysis",
-            Self::ErrorHandling => "error-handling",
-            Self::PerformanceAnalysis => "performance-analysis",
-            Self::SecurityAudit => "security-audit",
-            Self::ApiDesign => "api-design",
-            Self::CodeReview => "code-review",
-            Self::Debugging => "debugging",
-            Self::ConfigManagement => "config-management",
-            Self::ConcurrencyAnalysis => "concurrency-analysis",
-            Self::MigrationPlanning => "migration-planning",
-            Self::ObservabilityInstrumentation => "observability-instrumentation",
-            Self::DataModeling => "data-modeling",
-            Self::DataMigration => "data-migration",
-            Self::CicdPipeline => "cicd-pipeline",
-            Self::DependencyUpgrade => "dependency-upgrade",
-            Self::ReleaseManagement => "release-management",
-            Self::AccessibilityReview => "accessibility-review",
-            Self::InternationalizationReview => "internationalization-review",
-            Self::IncidentResponse => "incident-response",
-            Self::DatabaseSchemaChange => "database-schema-change",
-            Self::CachingStrategy => "caching-strategy",
-            Self::FeatureFlagging => "feature-flagging",
-            Self::RateLimiting => "rate-limiting",
-            Self::EventSourcing => "event-sourcing",
-            Self::ChaosEngineering => "chaos-engineering",
-            Self::KnowledgeRecall => "knowledge-recall",
-            Self::SelfIntrospection => "self-introspection",
         };
         f.write_str(label)
     }

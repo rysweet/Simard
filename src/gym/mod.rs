@@ -23,23 +23,7 @@ mod tests_reporting_more;
 #[cfg(test)]
 mod tests_scenarios;
 #[cfg(test)]
-mod tests_scenarios_10;
-#[cfg(test)]
 mod tests_scenarios_2;
-#[cfg(test)]
-mod tests_scenarios_3;
-#[cfg(test)]
-mod tests_scenarios_4;
-#[cfg(test)]
-mod tests_scenarios_5;
-#[cfg(test)]
-mod tests_scenarios_6;
-#[cfg(test)]
-mod tests_scenarios_7;
-#[cfg(test)]
-mod tests_scenarios_8;
-#[cfg(test)]
-mod tests_scenarios_9;
 #[cfg(test)]
 mod tests_types;
 #[cfg(test)]

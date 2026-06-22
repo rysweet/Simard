@@ -9,7 +9,6 @@ related:
   - ../reference/bridge-wire-protocol.md
   - ./cognitive-memory-library-adapter.md
   - ../testing/ci-resilient-test-patterns.md
-  - ../concepts/gym-error-handling-debug.md
 ---
 
 # Library-backed Gym Evaluation Engine (the sole engine)
@@ -433,5 +432,3 @@ cargo build --release
   exact `gym.*` method contracts.
 - [Library-backed Cognitive Memory](cognitive-memory-library-adapter.md) — the
   earlier de-fork that established this adapter pattern.
-- [Gym error handling & debugging](../concepts/gym-error-handling-debug.md) —
-  how callers interpret degraded gym results.

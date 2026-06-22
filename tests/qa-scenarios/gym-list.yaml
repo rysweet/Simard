@@ -1,15 +1,35 @@
 name: simard-gym-list
 app_type: cli
-description: Verify simard lists benchmark scenarios
+description: Verify simard gym lists the curated V1 minimal benchmark set (issue #2087)
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
 steps:
   - action: run
     command: "cargo run --quiet -- gym list"
-    timeout: 30s
+    timeout: 60s
   - action: expect_stdout
     contains: "Simard benchmark scenarios:"
+  # One representative scenario from each of the four V1 benchmark classes.
   - action: expect_stdout
     contains: "repo-exploration-local"
   - action: expect_stdout
+    contains: "doc-generation-public-fn"
+  - action: expect_stdout
+    contains: "safe-change-add-enum-variant"
+  - action: expect_stdout
+    contains: "session-quality-memory-export"
+  - action: expect_stdout
     contains: "interactive-terminal-driving"
+  # The four sanctioned class labels are emitted for the curated scenarios.
+  - action: expect_stdout
+    contains: "repo-exploration"
+  - action: expect_stdout
+    contains: "documentation"
+  - action: expect_stdout
+    contains: "safe-code-change"
+  - action: expect_stdout
+    contains: "session-quality"
   - action: expect_exit_code
     code: 0
