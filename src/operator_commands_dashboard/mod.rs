@@ -64,6 +64,11 @@ pub(crate) fn dashboard_goal_board_snapshot(state_root: &Path) -> SimardResult<G
 pub(crate) fn dashboard_save_goal_board(state_root: &Path, board: &GoalBoard) -> SimardResult<()> {
     let writer = launch_writer_bridge(state_root)?;
     save_goal_board(board, writer.ops())
+    // Durability note (issue #2320): the direct-open writer bridge checkpoints
+    // the shared cached handle on drop (see `WriterBridge`), collapsing the WAL
+    // into the main DB file so a later session observes this write. When a
+    // daemon owns the store the bridge is its in-process writer and durability
+    // is handled by the daemon's own lifecycle instead.
 }
 
 /// Initialize dashboard auth and print the login code to stderr.

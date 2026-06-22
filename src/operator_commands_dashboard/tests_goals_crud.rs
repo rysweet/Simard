@@ -657,6 +657,66 @@ async fn full_goal_lifecycle_crud() {
     );
 }
 
+/// Regression for issue #2320.
+///
+/// The goal-CRUD handlers (`seed_goals`/`add_goal`/…) take no state argument;
+/// they resolve the durable state root from the process-global
+/// `SIMARD_STATE_ROOT` via `resolve_state_root()`. Before the fix, a
+/// *concurrently-running* test that mutated that env var under a different
+/// `serial_test` key would redirect the handlers' writes mid-flight, so the
+/// final read of `state.state_root()` came back empty and the assertion
+/// panicked with `left: 0 right: 3`.
+///
+/// `HermeticState` now pins a per-thread state-root override that
+/// `resolve_state_root()` honours ahead of the env var, so the handlers stay
+/// bound to this thread's hermetic root no matter what the global env var
+/// holds. This test reproduces the race deterministically (single-threaded):
+/// it overwrites the global env var with a *different* absolute root after
+/// `HermeticState::new()`, then drives the seed cycle through the handlers.
+/// Without the override this fails exactly like the flake; with it, it is
+/// stable.
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn goal_crud_handlers_ignore_concurrent_state_root_env_mutation() {
+    let state = HermeticState::new();
+    let _mem = init_empty_board(&state);
+
+    // Simulate a concurrent, non-`cognitive_memory` test flipping the global
+    // env var to its own root. A `TempDir` keeps the path hermetic (so the
+    // pre-fix path would silently write there rather than tripping the
+    // hermetic guard) and absolute (so it would pass state-root sanitization).
+    let rogue = tempfile::tempdir().expect("rogue tempdir");
+    let prev_env = std::env::var_os("SIMARD_STATE_ROOT");
+    // SAFETY: serialized via `#[serial(cognitive_memory)]`; restored below.
+    unsafe {
+        std::env::set_var("SIMARD_STATE_ROOT", rogue.path().as_os_str());
+    }
+
+    let r = seed_goals().await;
+    assert_eq!(r.0["status"], "ok");
+
+    // Restore the global env var immediately, before the read below — the read
+    // uses the explicit hermetic `state.state_root()` and does not consult the
+    // env. Keeping the mutation window to a single handler call minimises its
+    // visibility to any concurrently-running test that also reads the global
+    // `SIMARD_STATE_ROOT`.
+    unsafe {
+        match prev_env {
+            Some(v) => std::env::set_var("SIMARD_STATE_ROOT", v),
+            None => std::env::remove_var("SIMARD_STATE_ROOT"),
+        }
+    }
+
+    let board = dashboard_goal_board_snapshot(state.state_root()).unwrap();
+
+    assert_eq!(
+        board.active.len(),
+        3,
+        "handlers must write to the thread-pinned hermetic root, not the \
+         concurrently-mutated global SIMARD_STATE_ROOT (#2320)"
+    );
+}
+
 // -------------------------
 // Shared-writer wiring (regression for fresh-open goal-board data loss)
 // -------------------------

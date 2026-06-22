@@ -92,6 +92,24 @@ const FACT_SEQ_WIDTH: usize = 20;
 /// few caller keys). Kept in sync with the literal in `goal_curation::operations`.
 const SNAPSHOT_FACT_CONCEPT: &str = "goal-board:snapshot";
 
+/// Process-wide monotonic fact sequence counter.
+///
+/// Shared by every [`LibraryCognitiveMemory`] handle in the process so the
+/// sequence stamped into each fact's metadata ([`FACT_SEQ_META_KEY`]) is
+/// strictly increasing across the rapid open→write→close→open cycles the
+/// dashboard goal handlers perform — even when a freshly-opened handle cannot
+/// yet observe the just-closed handle's write.
+///
+/// The prior design stored this counter *per handle* and re-seeded it from a
+/// store read (`recover_fact_seq`) on every open. In the reopen window that
+/// read could lag the last write, so a later snapshot was stamped with an
+/// *earlier* sequence and `max_by(node_id)` then selected a stale board — the
+/// intermittent empty / stale goal board behind issue #2320. A single
+/// process-wide counter cannot regress in that window. On open it is only ever
+/// raised (via `fetch_max`) to the persisted floor, so ordering still continues
+/// correctly across separate processes / sessions.
+static FACT_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// Cognitive memory backed by the upstream `amplihack-memory-lib`
 /// [`CognitiveMemory`] (persistent, lbug-backed).
 ///
@@ -101,10 +119,6 @@ pub struct LibraryCognitiveMemory {
     /// The library memory, behind a `Mutex` for `&self` -> `&mut` interior
     /// mutability (see module docs, A2).
     inner: Mutex<CognitiveMemory>,
-    /// Process-wide monotonic fact sequence (see [`FACT_SEQ_META_KEY`]). Seeded
-    /// on open from the maximum sequence already persisted so it keeps advancing
-    /// across reopens.
-    fact_seq: AtomicU64,
     /// The `state_root` this handle was opened against (`None` for the
     /// in-memory test constructor). Used **only** by the `cfg(test)`
     /// hermetic-state-root guard in [`Self::lock_write`], which preserves the
@@ -138,10 +152,13 @@ impl LibraryCognitiveMemory {
                     reason: e.to_string(),
                 }
             })?;
-        let fact_seq = AtomicU64::new(recover_fact_seq(&inner));
+        let fact_seq = recover_fact_seq(&inner);
+        // Raise the process-wide counter to at least this store's persisted
+        // floor so this session's writes sort above facts written by earlier
+        // sessions, without ever lowering the in-process counter (issue #2320).
+        FACT_SEQ.fetch_max(fact_seq, Ordering::Relaxed);
         Ok(Self {
             inner: Mutex::new(inner),
-            fact_seq,
             state_root: Some(state_root.to_path_buf()),
         })
     }
@@ -171,7 +188,6 @@ impl LibraryCognitiveMemory {
         })?;
         Ok(Self {
             inner: Mutex::new(inner),
-            fact_seq: AtomicU64::new(0),
             state_root: None,
         })
     }
@@ -471,7 +487,7 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // done while holding the write lock so the sequence order matches the
         // store order.
         let mut guard = self.lock_write("store_fact")?;
-        let seq = self.fact_seq.fetch_add(1, Ordering::Relaxed);
+        let seq = FACT_SEQ.fetch_add(1, Ordering::Relaxed);
         let mut metadata: HashMap<String, serde_json::Value> = HashMap::with_capacity(1);
         metadata.insert(FACT_SEQ_META_KEY.to_string(), serde_json::Value::from(seq));
         guard
@@ -513,7 +529,7 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // is expected to exist (reflection: just stored; distillation: the
         // source episode the fact was distilled from).
         let mut guard = self.lock_write("store_fact_with_provenance")?;
-        let seq = self.fact_seq.fetch_add(1, Ordering::Relaxed);
+        let seq = FACT_SEQ.fetch_add(1, Ordering::Relaxed);
         let mut merged: HashMap<String, serde_json::Value> = metadata.cloned().unwrap_or_default();
         merged.insert(FACT_SEQ_META_KEY.to_string(), serde_json::Value::from(seq));
         guard
@@ -609,7 +625,7 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // way exactly one live fact survives per key. The returned id is the live
         // fact after the call.
         let mut guard = self.lock_write("store_fact_with_caller_key")?;
-        let seq = self.fact_seq.fetch_add(1, Ordering::Relaxed);
+        let seq = FACT_SEQ.fetch_add(1, Ordering::Relaxed);
         let mut metadata: HashMap<String, serde_json::Value> = HashMap::with_capacity(1);
         metadata.insert(FACT_SEQ_META_KEY.to_string(), serde_json::Value::from(seq));
         let input = FactInput {

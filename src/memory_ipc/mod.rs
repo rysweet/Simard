@@ -255,8 +255,8 @@ pub use client::RemoteCognitiveMemory;
 pub use launcher::clear_in_process_writer;
 pub use launcher::clear_tier2_store_cache;
 pub use launcher::{
-    ReaderBridge, WriterBridge, launch_writer_bridge, open_reader_bridge,
-    register_in_process_writer,
+    ReaderBridge, WriterBridge, evict_cached_direct_handle, launch_writer_bridge,
+    open_reader_bridge, register_in_process_writer,
 };
 pub use server::{ServerHandle, spawn_server};
 

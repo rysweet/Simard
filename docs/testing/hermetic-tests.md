@@ -1,7 +1,7 @@
 ---
 title: Writing hermetic tests against cognitive memory
 description: Test-author contract for the SIMARD_STATE_ROOT / SIMARD_MEMORY_SOCKET hermeticity guard, the helper APIs that satisfy it, and the regression check that prevents leaks into ~/.simard.
-last_updated: 2026-05-19
+last_updated: 2026-06-22
 review_schedule: at every cognitive-memory schema or socket-path change
 owner: simard
 doc_type: reference
@@ -181,6 +181,19 @@ RAII env-var guard. The `Drop` impl restores the previous env-var
 values, so two `HermeticState` instances in the same test file do not
 cross-contaminate.
 
+In addition to setting `SIMARD_STATE_ROOT`, `HermeticState` installs a
+**per-thread state-root override** for its lifetime. The state-root
+resolvers (`simard::state_root::simard_state_root` and the dashboard's
+`resolve_state_root`) consult this thread-local override ahead of the
+env var. Because `#[tokio::test]` runs on a current-thread runtime, the
+code under test executes on the same OS thread that constructed the
+helper and so reads this thread's pinned root — even if another test
+thread mutates the global `SIMARD_STATE_ROOT` env var concurrently. This
+closes the read-after-write race behind the flaky `full_goal_lifecycle_crud`
+([#2320](https://github.com/rysweet/Simard/issues/2320)). The override is
+never installed in production, so the resolvers fall straight through to
+the env-var ladder there.
+
 For tests that exercise multi-process daemon/client interactions in the
 same temp root, use `HermeticState::shared_for_subprocess()` — same
 contract, plus it exposes the socket path as an env var to spawned
@@ -199,9 +212,19 @@ fn …
 
 The serial group exists because `HermeticState` mutates process-wide
 env vars (`SIMARD_STATE_ROOT`, `SIMARD_MEMORY_SOCKET`). Two parallel
-tests in the same process would race on those vars and one would write
+tests in the same group would race on those vars and one would write
 into the other's TempDir, silently passing the hermetic guard while
 producing nonsense results.
+
+> **`serial_test` only excludes tests sharing the same key.** A test that
+> mutates `SIMARD_STATE_ROOT` under a *different* serial key (e.g.
+> `simard_state_root_env`), or under no key at all, still runs in parallel
+> with a `cognitive_memory` test and used to derail its lazily-resolving
+> handlers — the [#2320](https://github.com/rysweet/Simard/issues/2320)
+> flake. The per-thread state-root override described above is what makes
+> a `HermeticState`-based test robust against that cross-key race; the
+> serial group is still required to keep `SIMARD_MEMORY_SOCKET` and the
+> env-only resolvers consistent within the group.
 
 ## What NOT to do
 

@@ -42,7 +42,17 @@ use super::{RemoteCognitiveMemory, SharedMemory, reap_stale_open_lock, socket_pa
 /// Writer bridge to cognitive memory. Holds a `Box<dyn CognitiveMemoryOps>`
 /// underneath; callers should use [`WriterBridge::ops`] to access it.
 pub struct WriterBridge {
-    inner: Box<dyn CognitiveMemoryOps>,
+    /// `Option` so [`WriterBridge::into_box`] can move the inner handle out
+    /// even though this type has a `Drop` impl.
+    inner: Option<Box<dyn CognitiveMemoryOps>>,
+    /// When `true`, [`Drop`] checkpoints the handle so its writes reach the
+    /// main DB file. Set only for the direct-open cached handle (issue #2320):
+    /// because that handle is cached process-wide and never dropped, the
+    /// per-call `Database::drop` that used to checkpoint on the direct-open
+    /// path no longer runs, so the bridge checkpoints on drop instead. The
+    /// daemon (in-process Arc) and IPC bridges leave this `false` — durability
+    /// there is owned by the daemon's lifecycle / a no-op over IPC.
+    checkpoint_on_drop: bool,
 }
 
 impl WriterBridge {
@@ -63,20 +73,36 @@ impl WriterBridge {
             "WriterBridge: refusing to wrap a read-only handle (silent-degradation hazard — \
              writes against this bridge would no-op without surfacing an error)"
         );
-        Self { inner }
+        Self {
+            inner: Some(inner),
+            checkpoint_on_drop: false,
+        }
+    }
+
+    /// Like [`Self::checked_new`] but checkpoints the handle on drop. Used by
+    /// the direct-open cached path so writes are durable across sessions even
+    /// though the cached handle itself never drops (issue #2320).
+    fn checked_new_checkpointing(inner: Box<dyn CognitiveMemoryOps>) -> Self {
+        let mut bridge = Self::checked_new(inner);
+        bridge.checkpoint_on_drop = true;
+        bridge
     }
 
     /// Borrow the underlying ops object so it can be passed to
     /// `save_goal_board` / `load_goal_board` / etc.
     pub fn ops(&self) -> &dyn CognitiveMemoryOps {
-        &*self.inner
+        self.inner
+            .as_deref()
+            .expect("WriterBridge inner present until into_box")
     }
 
     /// Consume the bridge and return the underlying boxed ops. Used by
     /// legacy call sites (e.g. `launch_real_meeting_bridge`) that hold a
     /// `Box<dyn CognitiveMemoryOps>` directly.
-    pub fn into_box(self) -> Box<dyn CognitiveMemoryOps> {
+    pub fn into_box(mut self) -> Box<dyn CognitiveMemoryOps> {
         self.inner
+            .take()
+            .expect("WriterBridge inner present until into_box")
     }
 
     /// Test-only constructor that pins the read-only invariant. Panics
@@ -84,6 +110,19 @@ impl WriterBridge {
     #[cfg(test)]
     pub fn from_ops_for_test(inner: Box<dyn CognitiveMemoryOps>) -> Self {
         Self::checked_new(inner)
+    }
+}
+
+impl Drop for WriterBridge {
+    fn drop(&mut self) {
+        if self.checkpoint_on_drop
+            && let Some(inner) = self.inner.as_deref()
+        {
+            // Best-effort: a failed checkpoint must not panic in Drop. The
+            // write already succeeded; the worst case is the next session
+            // replays the WAL.
+            let _ = inner.checkpoint();
+        }
     }
 }
 
@@ -192,6 +231,7 @@ fn lookup_in_process_writer(state_root: &Path) -> Option<Arc<dyn CognitiveMemory
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Tier 2 shared store cache.
 //
 // When neither the daemon's in-process writer (tier 0) nor its IPC socket
@@ -229,11 +269,16 @@ fn lookup_in_process_writer(state_root: &Path) -> Option<Arc<dyn CognitiveMemory
 // directory no longer exists. A `TempDir` is removed when its owning test
 // drops, so its cached handle is evicted on the next mismatching access;
 // dropping the last `Arc` runs `lbug::Database::drop`, which checkpoints the
-// WAL into the main file. Live state roots (the daemon is on tier 0, so this is
-// CLI / embedded callers) stay cached for the process lifetime; the library
-// replays any un-checkpointed WAL on the next open, so a process exit without an
-// explicit checkpoint is recoverable. [`clear_tier2_store_cache`] drops every
-// handle deterministically (flushing via `Database::drop`) for shutdown/tests.
+// WAL into the main file. [`HermeticState::drop`] additionally evicts a test's
+// own entry eagerly via [`evict_cached_direct_handle`] so the handle is closed
+// (and checkpointed) before its `TempDir` is reaped (issue #2320). Live state
+// roots (the daemon is on tier 0, so this is CLI / embedded callers) stay
+// cached for the process lifetime; the library replays any un-checkpointed WAL
+// on the next open, and writer bridges checkpoint the shared handle on drop
+// (see [`WriterBridge::checked_new_checkpointing`]) so a just-written snapshot
+// is durable across sessions even though the cached handle itself never drops.
+// [`clear_tier2_store_cache`] drops every handle deterministically (flushing via
+// `Database::drop`) for shutdown/tests.
 // ---------------------------------------------------------------------------
 
 static TIER2_STORE_CACHE: RwLock<BTreeMap<PathBuf, Arc<LibraryCognitiveMemory>>> =
@@ -299,6 +344,22 @@ pub fn clear_tier2_store_cache() {
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     cache.clear();
+}
+
+/// Evict (and drop) the cached tier-2 store handle for `state_root`, if present.
+///
+/// Called by `HermeticState::drop` so a test's cached lbug handle is closed —
+/// dropping the last `Arc` runs `Database::drop`, which checkpoints the WAL into
+/// the main file — before its `TempDir` is reaped. Otherwise the handle would
+/// keep the store open on a soon-to-be-deleted directory and the existence-based
+/// prune would only release it on a later mismatching access. A no-op when
+/// nothing is cached for `state_root` (issue #2320).
+pub fn evict_cached_direct_handle(state_root: &Path) {
+    let key = canonical_or_self(state_root);
+    let mut cache = TIER2_STORE_CACHE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.remove(&key);
 }
 
 /// Launch a cognitive-memory writer bridge against `state_root`.
@@ -373,9 +434,13 @@ pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
             state_root.display()
         ),
     })?;
-    Ok(WriterBridge::checked_new(Box::new(SharedMemory(
-        mem as Arc<dyn CognitiveMemoryOps>,
-    ))))
+    // Checkpoint the shared handle on drop: it is cached process-wide and never
+    // drops, so the per-call `Database::drop` that would flush the WAL no longer
+    // runs. The bridge checkpoints explicitly so a CLI/meeting/engineer/goal-store
+    // write is durable across sessions (issue #2320).
+    Ok(WriterBridge::checked_new_checkpointing(Box::new(
+        SharedMemory(mem as Arc<dyn CognitiveMemoryOps>),
+    )))
 }
 
 /// Open a cognitive-memory reader bridge against `state_root`.

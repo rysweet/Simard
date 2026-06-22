@@ -20,6 +20,7 @@
 //! empty / relative / NUL-bearing values are silently ignored (with a WARN
 //! emitted at first use) so a malformed env var never crashes boot.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -33,12 +34,57 @@ pub const STATE_ROOT_ENV: &str = "SIMARD_STATE_ROOT";
 /// present. Lifted out of the function to keep the constant single-sourced.
 pub const DEFAULT_STATE_ROOT_DIRNAME: &str = ".simard";
 
+thread_local! {
+    /// Per-thread override of the resolved durable state root.
+    ///
+    /// The process-global `SIMARD_STATE_ROOT` env var is the production source
+    /// of truth, but it makes test isolation fragile: tests redirect the state
+    /// root by mutating this single global, and `serial_test` only serializes
+    /// tests that share the *same* key. A test reading the state root lazily
+    /// (e.g. an axum dashboard handler calling [`simard_state_root`] /
+    /// `resolve_state_root`) could therefore observe a value written by a
+    /// concurrently-running test that used a different serial key — the
+    /// read-after-write race behind the flaky `full_goal_lifecycle_crud`
+    /// (issue #2320).
+    ///
+    /// `HermeticState` installs this thread-local for the lifetime of the
+    /// helper. Because `#[tokio::test]` runs on a current-thread runtime, the
+    /// code under test executes on the same OS thread that constructed the
+    /// helper, so it reads this thread's pinned root regardless of what any
+    /// other thread does to the global env var. The override is never
+    /// installed in production, so the resolvers fall straight through to the
+    /// env-var ladder there.
+    static STATE_ROOT_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Install (or clear) the calling thread's state-root override, returning the
+/// previous value so callers can restore it on drop.
+///
+/// Test-support plumbing for [`crate::test_support::HermeticState`]; not used
+/// by production code paths.
+pub(crate) fn set_thread_state_root_override(path: Option<PathBuf>) -> Option<PathBuf> {
+    STATE_ROOT_OVERRIDE.with(|cell| cell.replace(path))
+}
+
+/// Read the calling thread's state-root override, if one is installed.
+pub(crate) fn thread_state_root_override() -> Option<PathBuf> {
+    STATE_ROOT_OVERRIDE.with(|cell| cell.borrow().clone())
+}
+
 /// Resolve the durable state-root directory.
 ///
 /// Returns the first valid match from the ladder in the module-level docs.
 /// Never panics; never creates the directory. The first writer is responsible
 /// for `create_dir_all` on the resolved subdirectory.
 pub fn simard_state_root() -> PathBuf {
+    // A per-thread test override (installed by `HermeticState`) wins over the
+    // process-global env var so a cognitive-memory test cannot be derailed by
+    // another test thread mutating `SIMARD_STATE_ROOT` concurrently. In
+    // production the override is never installed, so this is a no-op (issue
+    // #2320).
+    if let Some(p) = thread_state_root_override() {
+        return p;
+    }
     if let Some(p) = sanitized_env_state_root() {
         return p;
     }
@@ -221,6 +267,35 @@ mod tests {
         assert_eq!(
             resolve_subdir("goals"),
             PathBuf::from("/tmp/simard-rs-subdir-test/goals")
+        );
+    }
+
+    /// Issue #2320: a per-thread override (installed by `HermeticState`) must
+    /// win over the process-global `SIMARD_STATE_ROOT` env var, so a test's
+    /// lazily-resolving callers stay pinned to its hermetic root even when
+    /// another thread has mutated the env var to something else.
+    #[test]
+    #[serial(simard_state_root_env)]
+    fn thread_override_beats_env_var() {
+        let _g = EnvGuard::set(STATE_ROOT_ENV, "/tmp/simard-env-root-2320");
+        let prev = set_thread_state_root_override(Some(PathBuf::from("/tmp/simard-override-2320")));
+
+        let resolved = simard_state_root();
+
+        // Restore the override before asserting so a failure cannot leak into
+        // a later test reusing this OS thread.
+        set_thread_state_root_override(prev);
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/simard-override-2320"),
+            "thread-local override must take precedence over SIMARD_STATE_ROOT"
+        );
+        // With the override cleared, resolution falls back to the env var.
+        assert_eq!(
+            simard_state_root(),
+            PathBuf::from("/tmp/simard-env-root-2320"),
+            "clearing the override must restore env-var resolution"
         );
     }
 }

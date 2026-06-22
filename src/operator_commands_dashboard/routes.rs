@@ -235,6 +235,14 @@ async fn index() -> axum::response::Html<String> {
 }
 
 pub(crate) fn resolve_state_root() -> std::path::PathBuf {
+    // Honour a per-thread test override ahead of the env var so dashboard
+    // handlers driven from a hermetic test stay pinned to that test's state
+    // root even if another test thread mutates `SIMARD_STATE_ROOT`
+    // concurrently (issue #2320). No override is ever installed in
+    // production.
+    if let Some(p) = crate::state_root::thread_state_root_override() {
+        return p;
+    }
     std::env::var("SIMARD_STATE_ROOT")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {

@@ -37,11 +37,14 @@ use crate::state_root::STATE_ROOT_ENV;
 /// }
 /// ```
 pub struct HermeticState {
-    // Field order matters: env-var bindings are restored on Drop BEFORE
-    // the TempDir is reaped, so callers that hold a writer bridge still
-    // see SIMARD_STATE_ROOT == temp path while their writer drains.
+    // Field order matters: env-var bindings and the thread-local state-root
+    // override are restored on Drop BEFORE the TempDir is reaped, so callers
+    // that hold a writer bridge still see SIMARD_STATE_ROOT == temp path while
+    // their writer drains.
     _state_root_guard: EnvBinding,
     _socket_guard: EnvBinding,
+    _override_guard: ThreadStateRootGuard,
+    _direct_handle_evict: DirectHandleEvictGuard,
     state_root: PathBuf,
     _temp: TempDir,
 }
@@ -72,9 +75,22 @@ impl HermeticState {
         // leaves the env in its prior state.
         let state_root_guard = EnvBinding::set(STATE_ROOT_ENV, state_root.as_os_str());
         let socket_guard = EnvBinding::unset(MEMORY_SOCKET_ENV);
+        // Pin a per-thread state-root override in addition to the env var.
+        // The env var keeps cross-process and env-only resolvers working; the
+        // thread-local override makes same-thread, lazily-resolving callers
+        // (e.g. axum dashboard handlers under `#[tokio::test]`) immune to
+        // another test thread mutating `SIMARD_STATE_ROOT` concurrently —
+        // the read-after-write race behind the flaky `full_goal_lifecycle_crud`
+        // (issue #2320).
+        let override_guard = ThreadStateRootGuard::install(state_root.clone());
+        let evict_guard = DirectHandleEvictGuard {
+            state_root: state_root.clone(),
+        };
         Self {
             _state_root_guard: state_root_guard,
             _socket_guard: socket_guard,
+            _override_guard: override_guard,
+            _direct_handle_evict: evict_guard,
             state_root,
             _temp: temp,
         }
@@ -137,5 +153,40 @@ impl Drop for EnvBinding {
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+}
+
+/// RAII guard for the per-thread state-root override in
+/// [`crate::state_root`]. Installs the override on construction and restores
+/// the previous value on drop, so nested `HermeticState` instances (or thread
+/// reuse by the test harness) never leak a stale root.
+struct ThreadStateRootGuard {
+    prev: Option<PathBuf>,
+}
+
+impl ThreadStateRootGuard {
+    fn install(path: PathBuf) -> Self {
+        let prev = crate::state_root::set_thread_state_root_override(Some(path));
+        Self { prev }
+    }
+}
+
+impl Drop for ThreadStateRootGuard {
+    fn drop(&mut self) {
+        crate::state_root::set_thread_state_root_override(self.prev.take());
+    }
+}
+
+/// RAII guard that evicts the process-wide cached direct-open cognitive-memory
+/// handle for this hermetic state root on drop, so the handle is closed before
+/// the `TempDir` is reaped (issue #2320). Without this the cache would keep an
+/// lbug store open on a since-deleted temp directory.
+struct DirectHandleEvictGuard {
+    state_root: PathBuf,
+}
+
+impl Drop for DirectHandleEvictGuard {
+    fn drop(&mut self) {
+        crate::memory_ipc::evict_cached_direct_handle(&self.state_root);
     }
 }
