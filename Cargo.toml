@@ -1,6 +1,6 @@
 [package]
 name = "simard"
-version = "0.20.0"
+version = "0.21.0"
 edition = "2024"
 default-run = "simard"
 
@@ -49,9 +49,16 @@ path = "src/bin/simard_tui/main.rs"
 # behind Simard's `CognitiveMemoryOps` trait; the native LadybugDB fork has been
 # deleted. The `persistent` feature builds LadybugDB through the published
 # `lbug = "=0.15.3"` crate.
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "7b81590896f3a93399d3d29f2ada2601971c6864", features = ["persistent"] }
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "34d6a75cf922ec1b838a44bba8c5b6592342bcfd", features = ["persistent"] }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "43ebaa1c1b18a5630c53f0519989a2bacd42ef62" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "43ebaa1c1b18a5630c53f0519989a2bacd42ef62" }
+# De-fork (issue #2323): the gym/eval RUNNER is now the upstream
+# `amplihack-agent-eval` crate (native Rust GymRunner + scenario/result types),
+# replacing the private `src/native_gym.rs` reimplementation. Only the bridge
+# wiring (`src/gym_runner_bridge.rs`) and Simard-specific scoring/history stay
+# in this crate. The crate is a light workspace member (serde/serde_json/
+# thiserror/tracing/chrono only — no heavy workspace deps are transitive).
+amplihack-agent-eval = { git = "https://github.com/rysweet/amplihack-rs.git", rev = "59548a96049ab8d558110bcaf9c82a4316f1bbf0" }
 # De-fork phase 2b (issue #2307): the native cognitive-memory fork is gone, but
 # `lbug` is still a direct dependency of the standalone `simard-tui` binary
 # (`src/bin/simard_tui/goals.rs`), which opens a LadybugDB read-only to render

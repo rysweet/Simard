@@ -21,7 +21,7 @@ mod duration_millis {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RepoInspection {
     pub workspace_root: PathBuf,
     pub repo_root: PathBuf,
@@ -182,7 +182,7 @@ impl PhaseTrace {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EngineerLoopRun {
     pub state_root: PathBuf,
     pub execution_scope: String,
@@ -299,7 +299,7 @@ pub struct SessionErrorReflection {
 /// so that a failed session can resume from the last successful phase rather
 /// than restarting from scratch. Per spec line 579: "Session state must survive
 /// partial failure well enough to support recovery or retry."
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionCheckpoint {
     /// Session identifier for correlation.
     pub session_id: String,

@@ -205,8 +205,13 @@ impl GoalStore for CognitiveMemoryGoalStore {
         let content = Self::encode(&record)?;
         let writer = launch_writer_bridge(&self.state_root)?;
 
-        // Primary storage: semantic fact (authoritative record).
-        writer.ops().store_fact(
+        // Primary storage: semantic fact (authoritative record). Issue #2329:
+        // route through CallerKey dedup keyed per goal slug so each goal's record
+        // supersedes its own previous revision instead of appending a fresh fact
+        // every `put`. The read-side "max node_id per slug" dedup remains as a
+        // defensive guard.
+        writer.ops().store_fact_with_caller_key(
+            &format!("{GOAL_STORE_FACT_CONCEPT}:{}", record.slug),
             GOAL_STORE_FACT_CONCEPT,
             &content,
             1.0,

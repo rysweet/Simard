@@ -1,8 +1,11 @@
 use super::*;
 use crate::bridge_subprocess::InMemoryBridgeTransport;
 use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_cognitive::{CognitiveStatistics, CognitiveWorkingSlot};
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
@@ -44,8 +47,10 @@ fn test_session_id() -> SessionId {
 fn intake_records_sensory_working_and_episode() {
     let (bridge, count) = counting_bridge();
     intake_memory_operations("build feature X", &test_session_id(), &bridge).unwrap();
-    // Should make 3 calls: record_sensory, push_working, store_episode
-    assert_eq!(count.load(Ordering::SeqCst), 3);
+    // Issue #2327: the session-start lifecycle marker is operational noise and
+    // is now DROPPED by the ingestion classifier, so only 2 calls remain:
+    // record_sensory + push_working (store_episode is skipped).
+    assert_eq!(count.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -98,6 +103,151 @@ fn reflection_deduplicates_facts_by_concept() {
     assert_eq!(count.load(Ordering::SeqCst), 3);
 }
 
+/// Recording mock for the reflection-provenance contract (issue #2325).
+///
+/// Captures the episode id returned by `store_episode` and every
+/// `store_fact` / `store_fact_with_provenance` call so the test can assert
+/// that reflection threads the transcript episode id into the provenance
+/// write (creating a DERIVES_FROM edge), rather than using the legacy
+/// no-provenance `store_fact`.
+#[derive(Default)]
+struct ReflectionProvenanceMock {
+    episode_ids: Mutex<Vec<String>>,
+    /// concepts stored via the legacy `store_fact` (must stay empty for
+    /// reflection-derived facts once wiring lands).
+    base_fact_concepts: Mutex<Vec<String>>,
+    /// `(concept, source_episode_ids)` for each provenance write.
+    prov_fact_calls: Mutex<Vec<(String, Vec<String>)>>,
+}
+
+impl CognitiveMemoryOps for ReflectionProvenanceMock {
+    fn record_sensory(&self, _m: &str, _r: &str, _t: u64) -> SimardResult<String> {
+        Ok("sen_x".to_string())
+    }
+    fn prune_expired_sensory(&self) -> SimardResult<usize> {
+        Ok(0)
+    }
+    fn push_working(&self, _s: &str, _c: &str, _t: &str, _r: f64) -> SimardResult<String> {
+        Ok("wrk_x".to_string())
+    }
+    fn get_working(&self, _t: &str) -> SimardResult<Vec<CognitiveWorkingSlot>> {
+        Ok(vec![])
+    }
+    fn clear_working(&self, _t: &str) -> SimardResult<usize> {
+        Ok(0)
+    }
+    fn store_episode(
+        &self,
+        _c: &str,
+        _s: &str,
+        _m: Option<&serde_json::Value>,
+    ) -> SimardResult<String> {
+        let id = "epi_reflect_1".to_string();
+        self.episode_ids.lock().unwrap().push(id.clone());
+        Ok(id)
+    }
+    fn consolidate_episodes(&self, _b: u32) -> SimardResult<Option<String>> {
+        Ok(None)
+    }
+    fn store_fact(
+        &self,
+        concept: &str,
+        _content: &str,
+        _confidence: f64,
+        _tags: &[String],
+        _source_id: &str,
+    ) -> SimardResult<String> {
+        self.base_fact_concepts
+            .lock()
+            .unwrap()
+            .push(concept.to_string());
+        Ok("sem_base".to_string())
+    }
+    fn search_facts(&self, _q: &str, _l: u32, _c: f64) -> SimardResult<Vec<CognitiveFact>> {
+        Ok(vec![])
+    }
+    fn store_procedure(&self, _n: &str, _s: &[String], _p: &[String]) -> SimardResult<String> {
+        Ok("prc_x".to_string())
+    }
+    fn recall_procedure(&self, _q: &str, _l: u32) -> SimardResult<Vec<CognitiveProcedure>> {
+        Ok(vec![])
+    }
+    fn store_prospective(&self, _d: &str, _t: &str, _a: &str, _p: i64) -> SimardResult<String> {
+        Ok("pro_x".to_string())
+    }
+    fn check_triggers(&self, _c: &str) -> SimardResult<Vec<CognitiveProspective>> {
+        Ok(vec![])
+    }
+    fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
+        Ok(CognitiveStatistics::default())
+    }
+
+    // === Issue #2325 provenance override (library argument order) ===
+    fn store_fact_with_provenance(
+        &self,
+        concept: &str,
+        _content: &str,
+        _confidence: f64,
+        _source_id: &str,
+        _tags: Option<&[String]>,
+        _metadata: Option<&HashMap<String, serde_json::Value>>,
+        source_episode_ids: &[String],
+    ) -> SimardResult<String> {
+        self.prov_fact_calls
+            .lock()
+            .unwrap()
+            .push((concept.to_string(), source_episode_ids.to_vec()));
+        Ok("sem_prov".to_string())
+    }
+}
+
+/// Reflection provenance threading (issue #2325, RED): the transcript is
+/// stored as an episode, and each derived fact MUST be stored via
+/// `store_fact_with_provenance` with that episode's id as
+/// `source_episode_ids` — so distilled facts link back to the transcript
+/// they came from (DERIVES_FROM edge). Derived facts must NOT go through
+/// the legacy no-provenance `store_fact`.
+///
+/// Pre-wiring this FAILS: reflection calls `store_fact`, so
+/// `prov_fact_calls` is empty and `base_fact_concepts` is non-empty.
+#[test]
+fn reflection_threads_episode_id_as_fact_provenance() {
+    let mock = ReflectionProvenanceMock::default();
+    let facts = vec![FactExtraction {
+        concept: "rust".to_string(),
+        content: "Rust is safe".to_string(),
+        confidence: 0.9,
+    }];
+
+    reflection_memory_operations("transcript...", &facts, &test_session_id(), &mock).unwrap();
+
+    assert_eq!(
+        *mock.episode_ids.lock().unwrap(),
+        vec!["epi_reflect_1".to_string()],
+        "the transcript must be stored exactly once as an episode"
+    );
+
+    let prov = mock.prov_fact_calls.lock().unwrap().clone();
+    assert_eq!(
+        prov.len(),
+        1,
+        "the derived fact must be stored via store_fact_with_provenance; got {prov:?}"
+    );
+    assert_eq!(prov[0].0, "rust", "concept must be preserved");
+    assert_eq!(
+        prov[0].1,
+        vec!["epi_reflect_1".to_string()],
+        "reflection must thread the store_episode id as the fact's source_episode_ids"
+    );
+
+    assert!(
+        mock.base_fact_concepts.lock().unwrap().is_empty(),
+        "reflection-derived facts must NOT use the legacy no-provenance store_fact; \
+         base calls: {:?}",
+        mock.base_fact_concepts.lock().unwrap()
+    );
+}
+
 #[test]
 fn execution_truncates_multibyte_utf8_safely() {
     let (bridge, _) = counting_bridge();
@@ -119,9 +269,11 @@ fn execution_does_not_truncate_short_output() {
 fn persistence_clears_working_and_prunes() {
     let (bridge, count) = counting_bridge();
     persistence_memory_operations(&test_session_id(), &bridge).unwrap();
-    // clear_working + prune_expired_sensory + consolidate_episodes + store_episode = 4
-    // + snapshot: search_facts("*") + recall_procedure("*") = 2 more → 6 total
-    assert_eq!(count.load(Ordering::SeqCst), 6);
+    // clear_working + prune_expired_sensory + consolidate_episodes = 3
+    // Issue #2327: the "completed and persisted" lifecycle marker is now
+    // dropped (operational noise), so store_episode is no longer called.
+    // + snapshot: search_facts("*") + recall_procedure("*") = 2 more → 5 total
+    assert_eq!(count.load(Ordering::SeqCst), 5);
 }
 
 #[test]
@@ -169,8 +321,10 @@ fn consolidation_intake_with_facts_pushes_to_working_memory() {
 fn consolidation_persistence_flushes_and_consolidates() {
     let (bridge, count) = counting_bridge();
     consolidation_persistence(&test_session_id(), &bridge).unwrap();
-    // get_working + store_episode + consolidate_episodes = 3
-    assert_eq!(count.load(Ordering::SeqCst), 3);
+    // get_working + consolidate_episodes = 2
+    // Issue #2327: the "flushing working memory" lifecycle marker is now
+    // dropped (operational noise), so store_episode is no longer called.
+    assert_eq!(count.load(Ordering::SeqCst), 2);
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -205,6 +359,7 @@ fn goal_dedup_bridge() -> CognitiveMemoryBridge {
                         )
                         .unwrap(),
                         updated_in: crate::session::SessionPhase::Persistence,
+                        evidence: Vec::new(),
                     };
                     let alpha_v2 = GoalRecord {
                         slug: "alpha".to_string(),
@@ -218,6 +373,7 @@ fn goal_dedup_bridge() -> CognitiveMemoryBridge {
                         )
                         .unwrap(),
                         updated_in: crate::session::SessionPhase::Persistence,
+                        evidence: Vec::new(),
                     };
                     let beta = GoalRecord {
                         slug: "beta".to_string(),
@@ -231,6 +387,7 @@ fn goal_dedup_bridge() -> CognitiveMemoryBridge {
                         )
                         .unwrap(),
                         updated_in: crate::session::SessionPhase::Persistence,
+                        evidence: Vec::new(),
                     };
                     Ok(json!({
                         "facts": [
@@ -555,24 +712,37 @@ fn round_trip_execution_memory_recall() {
     let mem = LibraryCognitiveMemory::in_memory().expect("in-memory DB");
     let sid = test_session_id();
 
-    // 1. Intake — records objective as sensory + working + episode.
+    // 1. Intake — records objective as sensory + working. Issue #2327: the
+    //    session-start lifecycle marker is operational noise and is now
+    //    dropped by the ingestion classifier, so it no longer creates an
+    //    episode.
     intake_memory_operations("build feature X", &sid, &mem).unwrap();
+
+    // A meaningful episodic event (an action failure) IS stored by the
+    // ingestion classifier — store one through the classifier seam so the
+    // round-trip has a durable episode to recall.
+    crate::memory_consolidation::classifier::store_episode_classified(
+        &mem,
+        "act: cargo build failed with error E0432 unresolved import",
+        "act-outcome",
+        &crate::memory_consolidation::classifier::IntakeContext::default(),
+    )
+    .unwrap()
+    .expect("a failure episode must be stored, not dropped");
 
     // 2. Execution — records pty output as sensory + working.
     execution_memory_operations("compiled successfully in 1.2s", &sid, &mem).unwrap();
 
-    // 3. Persistence — flushes working memory and consolidates episodes.
+    // 3. Persistence — flushes working memory and consolidates episodes. The
+    //    session-end lifecycle marker is likewise dropped by the classifier.
     persistence_memory_operations(&sid, &mem).unwrap();
 
-    // 4. Verify: the execution output should have been pushed into
-    //    working memory under the session's task_id before persistence
-    //    cleared it. Confirm the episode store received entries by
-    //    checking statistics — intake stores 1 episode, persistence
-    //    stores 1 episode, so we expect ≥ 2 episodes total.
+    // 4. Verify: the meaningful failure episode survived intake/persistence
+    //    hygiene — lifecycle noise dropped, durable episodic kept.
     let stats = mem.get_statistics().unwrap();
     assert!(
-        stats.episodic_count >= 2,
-        "expected ≥2 episodes from intake+persistence, got {}",
+        stats.episodic_count >= 1,
+        "expected the meaningful failure episode to persist, got {}",
         stats.episodic_count
     );
 }

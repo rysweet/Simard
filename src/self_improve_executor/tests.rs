@@ -232,6 +232,7 @@ fn test_inspection() -> crate::engineer_loop::RepoInspection {
             owner_identity: "test".into(),
             source_session_id: SessionId::from_uuid(uuid::Uuid::nil()),
             updated_in: SessionPhase::Execution,
+            evidence: Vec::new(),
         }],
         carried_meeting_decisions: Vec::new(),
         architecture_gap_summary: String::new(),

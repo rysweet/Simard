@@ -164,7 +164,8 @@ fn migrate_legacy_disk_file_if_present(bridge: &dyn CognitiveMemoryOps) {
             return;
         }
     };
-    if let Err(e) = bridge.store_fact(
+    if let Err(e) = bridge.store_fact_with_caller_key(
+        "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
         1.0,
@@ -444,7 +445,11 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
         field: "board".to_string(),
         reason: format!("failed to serialize goal board: {e}"),
     })?;
-    bridge.store_fact(
+    // Issue #2329: route the board snapshot through CallerKey dedup so each save
+    // supersedes the prior board image instead of piling up a new revision every
+    // cycle. The caller key and the concept are the same stable string.
+    bridge.store_fact_with_caller_key(
+        "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
         1.0,
@@ -537,7 +542,9 @@ pub fn save_goal_board_with_removals(
         field: "board".to_string(),
         reason: format!("failed to serialize goal board: {e}"),
     })?;
-    bridge.store_fact(
+    // Issue #2329: CallerKey dedup — supersede the prior board image.
+    bridge.store_fact_with_caller_key(
+        "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
         1.0,
@@ -1179,6 +1186,7 @@ pub fn active_goals_as_records(board: &GoalBoard) -> Vec<crate::goals::GoalRecor
                 owner_identity,
                 source_session_id: SENTINEL_SESSION_ID.clone(),
                 updated_in: crate::session::SessionPhase::Persistence,
+                evidence: Vec::new(),
             }
         })
         .collect()

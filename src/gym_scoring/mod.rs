@@ -2,8 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::evidence::{EvidenceRecord, EvidenceSource};
 use crate::gym::BenchmarkRunReport;
 use crate::gym_bridge::{GymScenarioResult, GymSuiteResult, ScoreDimensions};
+use crate::memory::MemoryRecord;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GymSuiteScore {
@@ -56,6 +58,148 @@ pub struct ImprovementTrend {
     pub overall_direction: TrendDirection,
     pub overall_delta: f64,
     pub dimension_trends: Vec<DimensionTrend>,
+}
+
+/// Structured evidence-quality assessment carried by a benchmark scorecard.
+///
+/// Replaces the coarse binary `sufficient`/`thin` categorical with the five
+/// canonical scoring dimensions (see [`ScoreDimensions`]), an `overall` mean,
+/// and a human-readable `category`. This makes evidence quality a meaningful
+/// key scoring field that can distinguish quality differences between runs,
+/// as required by the scoring strategy in `Specs/ProductArchitecture.md`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceQualityAssessment {
+    pub dimensions: ScoreDimensions,
+    pub overall: f64,
+    pub category: String,
+}
+
+impl EvidenceQualityAssessment {
+    /// Build an assessment from dimensions, deriving `overall` (their mean) and
+    /// the human-readable `category`.
+    pub fn from_dimensions(dimensions: ScoreDimensions) -> Self {
+        let overall = dimensions.mean();
+        let category = evidence_quality_category(overall).to_string();
+        Self {
+            dimensions,
+            overall,
+            category,
+        }
+    }
+}
+
+/// Map an overall evidence-quality score in `[0.0, 1.0]` to a coarse tier.
+pub fn evidence_quality_category(overall: f64) -> &'static str {
+    if overall >= 0.75 {
+        "strong"
+    } else if overall >= 0.5 {
+        "moderate"
+    } else {
+        "weak"
+    }
+}
+
+/// Raw signals captured during a benchmark run, used to derive a structured
+/// [`EvidenceQualityAssessment`].
+pub struct EvidenceQualityInputs<'a> {
+    pub correctness_checks_passed: usize,
+    pub correctness_checks_total: usize,
+    pub evidence_records: &'a [EvidenceRecord],
+    pub memory_records: &'a [MemoryRecord],
+    pub unnecessary_action_count: Option<u32>,
+    pub retry_count: Option<u32>,
+}
+
+/// Evidence-record count at which the quantity signal saturates to `1.0`.
+const EVIDENCE_COUNT_TARGET: f64 = 4.0;
+/// Evidence `detail` length (chars) at which the richness signal saturates.
+const EVIDENCE_DETAIL_TARGET: f64 = 80.0;
+/// Penalty per unnecessary action / retry when deriving calibration.
+const CALIBRATION_PENALTY_PER_EVENT: f64 = 0.1;
+/// Maximum calibration penalty contributed by either actions or retries.
+const CALIBRATION_PENALTY_CAP: f64 = 0.5;
+
+/// Derive a structured [`EvidenceQualityAssessment`] from raw run signals.
+///
+/// Each dimension is bounded to `[0.0, 1.0]` and responds to a distinct,
+/// observable signal so two runs can be compared dimension-by-dimension:
+///
+/// - `factual_accuracy`: correctness-check pass rate.
+/// - `specificity`: total evidence "units" — each record contributes up to one
+///   unit scaled by its detail richness (saturating at [`EVIDENCE_DETAIL_TARGET`]
+///   characters), with the summed units saturating at [`EVIDENCE_COUNT_TARGET`].
+///   Empty-detail records contribute nothing.
+/// - `temporal_awareness`: fraction of memory records carrying a creation
+///   timestamp (temporal grounding).
+/// - `source_attribution`: how strongly evidence is attributed to a concrete
+///   source — base-type sources count fully, generic runtime sources partially.
+/// - `confidence_calibration`: `1.0` minus capped penalties for unnecessary
+///   actions and retries; unmeasured metrics incur no penalty.
+pub fn assess_evidence_quality(inputs: &EvidenceQualityInputs) -> EvidenceQualityAssessment {
+    let factual_accuracy = if inputs.correctness_checks_total > 0 {
+        inputs.correctness_checks_passed as f64 / inputs.correctness_checks_total as f64
+    } else {
+        0.0
+    };
+
+    let evidence_count = inputs.evidence_records.len();
+    // Each evidence record contributes up to one "evidence unit" scaled by its
+    // detail richness (saturating at EVIDENCE_DETAIL_TARGET chars); the summed
+    // units saturate at EVIDENCE_COUNT_TARGET. Empty-detail records contribute
+    // nothing, so neither sparse evidence nor many empty records score well.
+    let specificity = (inputs
+        .evidence_records
+        .iter()
+        .map(|record| {
+            (record.detail.trim().chars().count() as f64 / EVIDENCE_DETAIL_TARGET).min(1.0)
+        })
+        .sum::<f64>()
+        / EVIDENCE_COUNT_TARGET)
+        .min(1.0);
+
+    let temporal_awareness = if inputs.memory_records.is_empty() {
+        0.0
+    } else {
+        let grounded = inputs
+            .memory_records
+            .iter()
+            .filter(|record| record.created_at.is_some())
+            .count();
+        grounded as f64 / inputs.memory_records.len() as f64
+    };
+
+    let source_attribution = if evidence_count == 0 {
+        0.0
+    } else {
+        inputs
+            .evidence_records
+            .iter()
+            .map(|record| match record.source {
+                EvidenceSource::BaseType(_) => 1.0,
+                EvidenceSource::Runtime => 0.5,
+            })
+            .sum::<f64>()
+            / evidence_count as f64
+    };
+
+    let confidence_calibration =
+        (1.0 - penalty(inputs.unnecessary_action_count) - penalty(inputs.retry_count)).max(0.0);
+
+    EvidenceQualityAssessment::from_dimensions(ScoreDimensions {
+        factual_accuracy,
+        specificity,
+        temporal_awareness,
+        source_attribution,
+        confidence_calibration,
+    })
+}
+
+/// Capped calibration penalty for a measured event count. `None` (unmeasured)
+/// yields no penalty.
+fn penalty(count: Option<u32>) -> f64 {
+    count
+        .map(|c| (c as f64 * CALIBRATION_PENALTY_PER_EVENT).min(CALIBRATION_PENALTY_CAP))
+        .unwrap_or(0.0)
 }
 
 /// Aggregate scenario results into a suite-level score. Empty input yields zeroed score.
@@ -221,14 +365,17 @@ fn classify_trend(delta: f64) -> TrendDirection {
 ///
 /// Maps the benchmark scorecard into scoring dimensions so that
 /// [`detect_regression`] and [`track_improvement`] can consume executor output
-/// directly. The overall score is the correctness-check pass rate. Dimension
-/// values are derived from scorecard signals:
+/// directly. The overall score is the correctness-check pass rate. The five
+/// dimensions are taken from the scorecard's structured
+/// [`EvidenceQualityAssessment`] (see [`assess_evidence_quality`]), so the
+/// regression/improvement pipeline operates on the same meaningful assessment
+/// that the executor records.
 ///
-/// - `factual_accuracy`: correctness-check pass rate
-/// - `specificity`: evidence quality mapped to 0.0 / 0.5 / 1.0
-/// - `temporal_awareness`: correctness-check pass rate (benchmarks test temporal aspects)
-/// - `source_attribution`: evidence quality indicator
-/// - `confidence_calibration`: 1.0 minus penalty for unnecessary actions and retries
+/// Note: `GymSuiteScore.overall` remains the correctness-check pass rate (task
+/// correctness), which is intentionally distinct from
+/// `evidence_quality_assessment.overall`. Evidence-quality-only changes surface
+/// through the per-dimension values consumed by [`detect_regression`], not
+/// through `overall`.
 pub fn suite_score_from_benchmark_report(report: &BenchmarkRunReport) -> GymSuiteScore {
     let checks_total = report.scorecard.correctness_checks_total;
     let checks_passed = report.scorecard.correctness_checks_passed;
@@ -238,34 +385,14 @@ pub fn suite_score_from_benchmark_report(report: &BenchmarkRunReport) -> GymSuit
         0.0
     };
 
-    let evidence_score = match report.scorecard.evidence_quality.as_str() {
-        "sufficient" => 1.0,
-        "thin" => 0.5,
-        _ => 0.0,
-    };
-
-    let action_penalty = report
-        .scorecard
-        .unnecessary_action_count
-        .map(|c| (c as f64 * 0.1).min(0.5))
-        .unwrap_or(0.0);
-    let retry_penalty = report
-        .scorecard
-        .retry_count
-        .map(|c| (c as f64 * 0.1).min(0.5))
-        .unwrap_or(0.0);
-    let calibration = (1.0 - action_penalty - retry_penalty).max(0.0);
-
     GymSuiteScore {
         suite_id: report.suite_id.clone(),
         overall: pass_rate,
-        dimensions: ScoreDimensions {
-            factual_accuracy: pass_rate,
-            specificity: evidence_score,
-            temporal_awareness: pass_rate,
-            source_attribution: evidence_score,
-            confidence_calibration: calibration,
-        },
+        dimensions: report
+            .scorecard
+            .evidence_quality_assessment
+            .dimensions
+            .clone(),
         scenario_count: 1,
         scenarios_passed: if report.passed { 1 } else { 0 },
         pass_rate: if report.passed { 1.0 } else { 0.0 },

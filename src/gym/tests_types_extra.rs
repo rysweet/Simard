@@ -1,4 +1,5 @@
 use super::types::*;
+use crate::gym_scoring::EvidenceQualityAssessment;
 
 #[test]
 fn test_benchmark_class_display() {
@@ -131,6 +132,7 @@ fn test_benchmark_scorecard_serialize() {
     let scorecard = BenchmarkScorecard {
         task_completed: true,
         evidence_quality: "high".to_string(),
+        evidence_quality_assessment: EvidenceQualityAssessment::default(),
         correctness_checks_passed: 8,
         correctness_checks_total: 10,
         unnecessary_action_count: Some(2),
@@ -141,6 +143,7 @@ fn test_benchmark_scorecard_serialize() {
     let json = serde_json::to_string(&scorecard).unwrap();
     assert!(json.contains(r##""task_completed":true"##));
     assert!(json.contains(r##""correctness_checks_passed":8"##));
+    assert!(json.contains(r##""evidence_quality_assessment":"##));
 }
 
 #[test]

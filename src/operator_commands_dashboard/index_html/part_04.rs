@@ -170,15 +170,25 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             return'<tr><td style="white-space:nowrap;color:var(--accent);font-weight:600;font-size:.8rem">'+cat+'</td><td style="font-size:.85rem">'+content+'</td><td style="text-align:center;font-size:.8rem">'+conf+'</td><td>'+tags+'</td></tr>';
           }).join('')+'</table>';
         }else{document.getElementById('wb-facts-list').innerHTML='<span style="color:#8b949e">No recent facts in memory</span>';}
-        // Working memory (human-readable — #1683)
+        // Working memory (human-readable — #1683). The slot count comes from
+        // the global working_count statistic (the same value the Memory tab
+        // shows) rather than the length of the per-goal slot list, so the
+        // badge can no longer read "0 slots" while the Memory tab reports a
+        // populated working memory (#1679). The per-goal list below is a
+        // best-effort detail view; when it is empty but the global count is
+        // non-zero, point the operator at the Memory tab instead of claiming
+        // there is no working memory.
         const wm=d.working_memory||[];
-        document.getElementById('wb-wm-count').textContent=wm.length+' slots';
+        const wmCount=(d.cognitive_statistics&&d.cognitive_statistics.working_count!=null)?d.cognitive_statistics.working_count:wm.length;
+        document.getElementById('wb-wm-count').textContent=wmCount+' slot'+(wmCount===1?'':'s');
         if(wm.length){
           document.getElementById('wb-wm-list').innerHTML='<table class="proc-table"><tr><th>Type</th><th>Content</th><th>Related Goal</th><th>Relevance</th></tr>'
             +wm.map(s=>{
             const relColor=s.relevance>=0.8?'var(--green)':s.relevance>=0.5?'var(--yellow)':'#8b949e';
             return'<tr><td style="white-space:nowrap;color:var(--accent);font-weight:600;font-size:.8rem">'+esc(s.type_label||'Note')+'</td><td style="font-size:.85rem">'+esc((s.content||'').substring(0,200))+'</td><td style="font-size:.8rem;color:#8b949e">'+esc(s.goal||'—')+'</td><td style="text-align:center"><span style="color:'+relColor+';font-weight:600;font-size:.8rem">'+esc(s.relevance_label||'—')+'</span></td></tr>';
           }).join('')+'</table>';
+        }else if(wmCount>0){
+          document.getElementById('wb-wm-list').innerHTML='<span style="color:#8b949e">'+wmCount+' working-memory slot'+(wmCount===1?'':'s')+' active — open the Memory tab to inspect them.</span>';
         }else{document.getElementById('wb-wm-list').innerHTML='<span style="color:#8b949e">No active working memory</span>';}
         // Cognitive statistics
         const cs=d.cognitive_statistics;

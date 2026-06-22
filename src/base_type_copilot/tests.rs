@@ -896,3 +896,267 @@ fn build_copilot_terminal_objective_with_working_dir() {
         "got: {objective}"
     );
 }
+
+// ===========================================================================
+// Memory + knowledge enrichment wiring (issue #1664)
+// ===========================================================================
+//
+// Before this fix `CopilotSdkAdapter::open_session` hardcoded both bridges to
+// `None`, so every production turn ran `prepare_turn_context(objective, None,
+// None)` and the memory-facts / known-procedures / domain-knowledge prompt
+// blocks were never reached. These tests prove (1) that supplied bridges are
+// actually consumed, (2) that the absence of bridges still produces a valid
+// objective-only prompt, (3) that a supplied bridge whose query fails surfaces
+// the error rather than silently degrading, and (4) that the production
+// `launch_enrichment_bridges` helper wires real bridges and degrades cleanly.
+
+use super::CopilotSdkSession;
+use crate::bridge::BridgeErrorPayload;
+use crate::bridge_subprocess::InMemoryBridgeTransport;
+use crate::cognitive_memory::CognitiveMemoryOps;
+use crate::knowledge_bridge::KnowledgeBridge;
+use crate::memory_bridge::CognitiveMemoryBridge;
+use serde_json::json;
+
+/// Mock cognitive-memory bridge returning a single semantic fact for any
+/// `search_facts` query and no procedures.
+fn enrichment_memory() -> Box<dyn CognitiveMemoryOps> {
+    Box::new(CognitiveMemoryBridge::new(Box::new(
+        InMemoryBridgeTransport::new("test-copilot-mem", |method, _params| match method {
+            "memory.search_facts" => Ok(json!({
+                "facts": [{
+                    "node_id": "f1",
+                    "concept": "rust-ownership",
+                    "content": "values have a single owner",
+                    "confidence": 0.92,
+                    "source_id": "s1",
+                    "tags": []
+                }]
+            })),
+            "memory.recall_procedure" => Ok(json!({"procedures": []})),
+            other => Err(BridgeErrorPayload {
+                code: -32601,
+                message: format!("unknown method: {other}"),
+            }),
+        }),
+    )))
+}
+
+/// Mock cognitive-memory bridge whose calls always error — used to verify a
+/// supplied bridge's query failure surfaces (no silent swallow) per the
+/// `prepare_turn_context` contract.
+fn failing_memory() -> Box<dyn CognitiveMemoryOps> {
+    Box::new(CognitiveMemoryBridge::new(Box::new(
+        InMemoryBridgeTransport::new("test-copilot-mem-fail", |_method, _params| {
+            Err(BridgeErrorPayload {
+                code: -32000,
+                message: "simulated memory backend failure".to_string(),
+            })
+        }),
+    )))
+}
+
+/// Mock knowledge bridge with one pack that matches a "rust" objective and a
+/// canned non-empty query answer.
+fn enrichment_knowledge() -> KnowledgeBridge {
+    KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
+        "test-copilot-knowledge",
+        |method, _params| match method {
+            "knowledge.list_packs" => Ok(json!({"packs": [{
+                "name": "rust-expert",
+                "description": "Rust programming language knowledge",
+                "article_count": 100,
+                "section_count": 400
+            }]})),
+            "knowledge.query" => Ok(json!({
+                "answer": "Rust enforces ownership at compile time.",
+                "sources": [{"title": "Ownership", "section": "Basics"}],
+                "confidence": 0.88
+            })),
+            other => Err(BridgeErrorPayload {
+                code: -32601,
+                message: format!("unknown method: {other}"),
+            }),
+        },
+    )))
+}
+
+/// With both bridges supplied, the enriched prompt must include the memory
+/// facts and domain knowledge sections — proving the bridges are consumed.
+#[test]
+fn enrichment_injects_memory_facts_and_knowledge_into_prompt() {
+    let session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Engineer))
+        .with_test_bridges(Some(enrichment_memory()), Some(enrichment_knowledge()));
+    let input = BaseTypeTurnInput::objective_only("implement rust ownership feature");
+
+    let prompt_file = session
+        .build_meeting_prompt(&input)
+        .expect("prompt build must succeed with enrichment bridges");
+    let prompt = std::fs::read_to_string(prompt_file.path()).expect("read prompt file");
+
+    assert!(
+        prompt.contains("## Relevant Memory Facts"),
+        "enriched prompt must include the memory facts section: {prompt}"
+    );
+    assert!(
+        prompt.contains("values have a single owner"),
+        "enriched prompt must include the mock fact content: {prompt}"
+    );
+    assert!(
+        prompt.contains("## Domain Knowledge"),
+        "enriched prompt must include the domain knowledge section: {prompt}"
+    );
+    assert!(
+        prompt.contains("Rust enforces ownership at compile time."),
+        "enriched prompt must include the mock knowledge answer: {prompt}"
+    );
+}
+
+/// The PTY path also threads enrichment through `build_enriched_objective`:
+/// the on-disk prompt file (referenced by the terminal objective) must carry
+/// the same memory + knowledge sections.
+#[test]
+fn enrichment_reaches_pty_prompt_file() {
+    let session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Engineer))
+        .with_test_bridges(Some(enrichment_memory()), Some(enrichment_knowledge()));
+    let input = BaseTypeTurnInput::objective_only("implement rust ownership feature");
+
+    let (objective, prompt_file) = session
+        .build_enriched_objective(&input)
+        .expect("enriched objective build must succeed");
+    // The PTY objective references the prompt file by path; the enriched
+    // content lives in that file.
+    assert!(
+        objective.contains("cat"),
+        "objective should cat the prompt file"
+    );
+    let prompt = std::fs::read_to_string(prompt_file.path()).expect("read prompt file");
+    assert!(prompt.contains("## Relevant Memory Facts"), "got: {prompt}");
+    assert!(prompt.contains("## Domain Knowledge"), "got: {prompt}");
+}
+
+/// With no bridges, the prompt is objective-only — the clean degraded path
+/// that must never break turn dispatch.
+#[test]
+fn no_enrichment_produces_objective_only_prompt() {
+    let session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Engineer));
+    let input = BaseTypeTurnInput::objective_only("plain objective without enrichment");
+
+    let prompt_file = session
+        .build_meeting_prompt(&input)
+        .expect("prompt build must succeed without bridges");
+    let prompt = std::fs::read_to_string(prompt_file.path()).expect("read prompt file");
+
+    assert!(prompt.contains("plain objective without enrichment"));
+    assert!(
+        !prompt.contains("## Relevant Memory Facts"),
+        "no memory section without a memory bridge: {prompt}"
+    );
+    assert!(
+        !prompt.contains("## Domain Knowledge"),
+        "no knowledge section without a knowledge bridge: {prompt}"
+    );
+}
+
+/// A supplied bridge whose query fails must surface the error (the
+/// `prepare_turn_context` no-silent-degradation contract), not panic.
+#[test]
+fn enrichment_query_failure_propagates_not_panics() {
+    let session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Engineer))
+        .with_test_bridges(Some(failing_memory()), None);
+    let input = BaseTypeTurnInput::objective_only("objective triggering failing memory");
+
+    let result = session.build_meeting_prompt(&input);
+    assert!(
+        result.is_err(),
+        "a supplied bridge whose query fails must surface an error, not silently degrade"
+    );
+}
+
+/// The production launch helper wires both real bridges when the state root
+/// can back a cognitive-memory store.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn launch_enrichment_bridges_wires_real_bridges_for_valid_state_root() {
+    use tempfile::TempDir;
+    let tmp = TempDir::new().unwrap();
+    let state_root = tmp.path().join("state");
+    std::fs::create_dir_all(&state_root).unwrap();
+
+    let (memory, knowledge) = super::launch_enrichment_bridges(&state_root);
+    assert!(
+        memory.is_some(),
+        "cognitive-memory bridge must launch for a writable state_root"
+    );
+    assert!(
+        knowledge.is_some(),
+        "native knowledge bridge must launch in-process"
+    );
+}
+
+/// A state root that cannot back a store (a regular file) makes the memory
+/// launch fail; it must degrade to `None` without panicking, while the
+/// in-process knowledge bridge still launches.
+#[test]
+fn launch_enrichment_bridges_degrades_when_memory_unavailable() {
+    use tempfile::NamedTempFile;
+    // A regular file as `state_root` makes `<state_root>/cognitive` uncreatable.
+    let file = NamedTempFile::new().unwrap();
+
+    let (memory, knowledge) = super::launch_enrichment_bridges(file.path());
+    assert!(
+        memory.is_none(),
+        "memory bridge must degrade to None when the state_root cannot back a store"
+    );
+    assert!(
+        knowledge.is_some(),
+        "knowledge bridge must still launch when only memory is unavailable"
+    );
+}
+
+/// `open_session` (via `build_session`) must wire both bridges when the
+/// adapter has enrichment configured — the direct regression guard for the
+/// hardcoded-`None` defect of issue #1664 at the factory seam.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn open_session_with_native_enrichment_populates_bridges() {
+    use tempfile::TempDir;
+    let tmp = TempDir::new().unwrap();
+    let state_root = tmp.path().join("state");
+    std::fs::create_dir_all(&state_root).unwrap();
+
+    let adapter = CopilotSdkAdapter::registered("copilot-enrich-wire")
+        .unwrap()
+        .with_enrichment(state_root);
+    let session = adapter
+        .build_session(make_request(OperatingMode::Engineer))
+        .expect("session must open with enrichment");
+
+    assert!(
+        session.memory_bridge.is_some(),
+        "open_session must wire the memory bridge when enrichment is Native"
+    );
+    assert!(
+        session.knowledge_bridge.is_some(),
+        "open_session must wire the knowledge bridge when enrichment is Native"
+    );
+}
+
+/// The default adapter (no `with_enrichment`) must leave both bridges `None`
+/// so unit tests and lightweight callers incur no filesystem side effects.
+#[test]
+fn open_session_without_enrichment_leaves_bridges_none() {
+    let adapter = CopilotSdkAdapter::registered("copilot-no-enrich").unwrap();
+    let session = adapter
+        .build_session(make_request(OperatingMode::Engineer))
+        .expect("session must open without enrichment");
+
+    assert!(
+        session.memory_bridge.is_none(),
+        "default adapter must not wire a memory bridge"
+    );
+    assert!(
+        session.knowledge_bridge.is_none(),
+        "default adapter must not wire a knowledge bridge"
+    );
+}

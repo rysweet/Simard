@@ -69,6 +69,7 @@ fn update_progress_and_archive() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn load_empty_board_from_bridge() {
     // Point SIMARD_STATE_ROOT at a temp dir with no goal_records.json so the
     // disk-first tier misses and falls through to cognitive memory (also empty).
@@ -80,7 +81,8 @@ fn load_empty_board_from_bridge() {
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&tmp).unwrap();
-    // SAFETY: single-threaded test; no other threads are reading this env var.
+    // SAFETY: serialized via `#[serial(cognitive_memory)]` so no other test
+    // mutates or reads SIMARD_STATE_ROOT concurrently (issue #2316).
     unsafe {
         std::env::set_var("SIMARD_STATE_ROOT", &tmp);
     }

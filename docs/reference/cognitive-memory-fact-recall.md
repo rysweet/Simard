@@ -8,6 +8,7 @@ related:
   - ./cognitive-memory-preparation-filters.md
   - ./cognitive-memory-episodic-recall.md
   - ./cognitive-memory-goal-store.md
+  - ./cognitive-memory-ranked-recall.md
   - ./ooda-procedural-memory.md
   - ../memory.md
 doc_type: reference

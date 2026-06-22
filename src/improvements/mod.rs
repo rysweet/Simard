@@ -1,3 +1,4 @@
+pub mod evidence;
 mod parsing;
 mod persisted;
 mod promotion;
@@ -9,6 +10,7 @@ mod tests_parsing;
 mod tests_promotion;
 
 // Re-export all public items so `crate::improvements::X` still works.
+pub use evidence::EvidenceRef;
 pub use promotion::render_review_context_directives;
 pub use types::{
     DeferredImprovement, ImprovementDirective, ImprovementPromotionPlan, ImprovementProposalRecord,

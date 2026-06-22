@@ -4,6 +4,7 @@ use crate::error::{SimardError, SimardResult};
 use crate::goals::{GoalStatus, GoalUpdate};
 use crate::review::{ImprovementProposal, ReviewArtifact};
 
+use super::evidence::EvidenceRef;
 use super::types::{
     DeferredImprovement, ImprovementDirective, ImprovementPromotionPlan, ImprovementProposalRecord,
     default_if_empty, required_improvement_field, sanitize_directive_value,
@@ -113,19 +114,40 @@ impl ImprovementPromotionPlan {
                         ),
                     }
                 })?;
-                GoalUpdate::new(
+                let mut evidence: Vec<EvidenceRef> = proposal
+                    .evidence
+                    .iter()
+                    .map(|entry| EvidenceRef::parse_str(entry))
+                    .collect();
+                // The review and target are implicit context that justifies
+                // every promoted update from this plan. Recording them as
+                // structured evidence guarantees the spec's traceability
+                // requirement (line 696) even when the originating proposal
+                // shipped no evidence strings of its own.
+                let target_label = default_if_empty(&self.review_target, "unknown-target");
+                let review_label = if target_label.is_empty() || target_label == "unknown-target" {
+                    None
+                } else {
+                    Some(target_label.to_string())
+                };
+                evidence.push(EvidenceRef::Review {
+                    review_id: self.review_id.clone(),
+                    target_label: review_label,
+                });
+                Ok(GoalUpdate::new(
                     proposal.title.clone(),
                     format!(
                         "{}; review={} target={} category={} suggested_change={}",
                         directive.rationale,
                         self.review_id,
-                        default_if_empty(&self.review_target, "unknown-target"),
+                        target_label,
                         proposal.category,
                         proposal.suggested_change
                     ),
                     directive.status,
                     directive.priority,
-                )
+                )?
+                .with_evidence(evidence))
             })
             .collect()
     }
