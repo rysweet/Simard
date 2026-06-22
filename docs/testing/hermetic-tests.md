@@ -208,10 +208,17 @@ The same race is var-agnostic at the C level: a `set_var` on *any*
 variable (e.g. `HOME`) in a concurrent test can tear a handler's
 `std::env::var("SIMARD_STATE_ROOT")` read. Issue
 [#2360](https://github.com/rysweet/Simard/issues/2360) therefore extends
-the `cognitive_memory` key to **every** env-mutating lib-binary test and
-adds a regression-guard meta-test that enforces it. See
-[Complete serial(cognitive_memory) test isolation](./cognitive-memory-serial-isolation.md)
-for the whole-binary contract, the Annotation Decision Rule, and the guard.
+the `cognitive_memory` key to every lib-binary test that touches the guard's
+**watched env surface** — the state-root / LLM-provider / meetings-resolver
+variables (`SIMARD_STATE_ROOT`, `SIMARD_MEMORY_SOCKET`, `HOME`,
+`SIMARD_LLM_PROVIDER`, `SIMARD_MEETINGS_DIR`, `SIMARD_MEETINGS_ROOT`) — and adds
+a regression-guard meta-test that enforces it for that surface. (The guard does
+not yet auto-enforce other variables; extending it process-wide
+(`EnvWatch::AnyVar`) is tracked as
+[#2375](https://github.com/rysweet/Simard/issues/2375).) See
+[serial(cognitive_memory) test isolation — the watched env surface](./cognitive-memory-serial-isolation.md)
+for the whole-binary contract, the Annotation Decision Rule, the guard, and the
+residual class.
 
 ## What NOT to do
 
@@ -266,7 +273,7 @@ list.
 
 ## Related reading
 
-- [Complete serial(cognitive_memory) test isolation](./cognitive-memory-serial-isolation.md)
+- [serial(cognitive_memory) test isolation — the watched env surface](./cognitive-memory-serial-isolation.md)
   — the whole-binary contract that keeps these serialized tests from racing
   each other's process-global environment, plus the regression-guard meta-test.
 - [How to clean a fixture leak from the live goal board](../howto/clean-fixture-leaks.md)

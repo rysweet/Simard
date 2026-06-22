@@ -1,11 +1,13 @@
 ---
-title: Complete serial(cognitive_memory) test isolation
+title: serial(cognitive_memory) test isolation — the watched env surface
 description: >
   The whole-binary contract that prevents the process-global environment race
   behind the tests_goals_crud flake (issue #2360): every lib-binary test that
-  mutates or reads process env shares the cognitive_memory serial key, a
-  regression-guard meta-test enforces it, and the rule is documented at the
-  HermeticState source.
+  mutates or reads the guard's watched env surface (the cognitive-memory
+  state-root, LLM-provider, and meetings-resolver variables) shares the
+  cognitive_memory serial key, a regression-guard meta-test enforces it, and the
+  rule is documented at the HermeticState source. Extending enforcement to every
+  process-global variable is tracked follow-up (issue #2375).
 last_updated: 2026-06-22
 review_schedule: when a new process-global env var is read by a production handler, or when serial_test is upgraded
 owner: simard
@@ -18,7 +20,7 @@ related:
   - ../reference/cognitive-memory-bridge-helpers.md
 ---
 
-# Complete serial(cognitive_memory) test isolation
+# serial(cognitive_memory) test isolation — the watched env surface
 
 This page is the whole-binary companion to
 [Writing hermetic tests against cognitive memory](./hermetic-tests.md). The
@@ -44,12 +46,20 @@ pre-commit `cargo test`.
   in an unrelated test — including the dashboard handlers' read of
   `SIMARD_STATE_ROOT`. This is var-agnostic: the *writer* and the *reader* do
   not have to touch the same variable.
-- The fix is a single rule: **every lib-binary test that mutates or reads
-  process-global env shares one serial key, `cognitive_memory`**, so no env
-  mutation is ever concurrent with an env read.
+- The fix is a single rule for the guard's **watched env surface** — the
+  variables that resolve the cognitive-memory state root, the dashboard LLM
+  provider, and the meetings-persistence directory (`SIMARD_STATE_ROOT`,
+  `SIMARD_MEMORY_SOCKET`, `HOME`, `SIMARD_LLM_PROVIDER`, `SIMARD_MEETINGS_DIR`,
+  `SIMARD_MEETINGS_ROOT`; the canonical list is `READ_WATCHED_VARS` /
+  `EnvWatch::StateRootSurface` in `src/test_support/serial_guard.rs`): **every
+  lib-binary test that mutates or reads that surface shares one serial key,
+  `cognitive_memory`**, so no mutation of it is ever concurrent with a read of
+  it. (Test *authors* should apply the same key for any other env var they
+  touch — see rule (B) — but the guard auto-enforces only the watched surface;
+  process-wide `AnyVar` enforcement is tracked follow-up, issue #2375.)
 - A **regression-guard meta-test** parses the source tree (with `syn`) and
-  fails the build if a hand-written test breaks the rule, so an ordinary PR
-  cannot silently reintroduce the race.
+  fails the build if a hand-written test touches that watched surface without
+  the key, so an ordinary PR cannot silently reintroduce the race.
 - No production code changes. The handlers still resolve the state root from
   the environment exactly as before; the suite is simply prevented from
   racing on it.
@@ -124,15 +134,22 @@ assertion.
 
 ## The contract — the `cognitive_memory` serial group
 
-> **Invariant.** In the `cargo test --lib` binary, **no test that mutates a
-> process-global environment variable may run concurrently with any test that
-> reads one.** This is enforced by routing *every* such test through the single
+> **Invariant (enforced surface).** In the `cargo test --lib` binary, **no test
+> that mutates the guard's watched env surface — the cognitive-memory
+> state-root / LLM-provider / meetings-resolver variables (`SIMARD_STATE_ROOT`,
+> `SIMARD_MEMORY_SOCKET`, `HOME`, `SIMARD_LLM_PROVIDER`, `SIMARD_MEETINGS_DIR`,
+> `SIMARD_MEETINGS_ROOT`) — may run concurrently with any test that reads that
+> surface.** This is enforced by routing *every* such test through the single
 > serial key `cognitive_memory`.
 
 `cognitive_memory` is the **canonical key** for this property. It already
 guarded the `HermeticState` writers and the cognitive-memory readers; #2360
-extends it to cover *all* env-touching lib-binary tests so the guarantee is
-total rather than partial.
+extends it to cover every lib-binary test that touches the watched surface (see
+`READ_WATCHED_VARS` in `src/test_support/serial_guard.rs` for the canonical
+list), making the guarantee **total for that surface**. The race is
+fundamentally variable-agnostic (see *Residual class & follow-up* below), so
+test authors should also key any *other* env var they mutate; auto-enforcing
+that process-wide (`EnvWatch::AnyVar`) is tracked as issue #2375.
 
 ### Annotation Decision Rule
 
@@ -143,9 +160,14 @@ if**, at run time, it does any of:
 - **(A)** Constructs a `HermeticState` (`::new`, `::new_in`, `::default`,
   `new_with_temp`).
 - **(B)** Calls `set_var` / `remove_var` on **any** process-global variable.
-  The race is var-agnostic, so `HOME`, `CARGO_TARGET_DIR`,
-  `SIMARD_MEETINGS_DIR`, `TZ`, etc. all count — not only `SIMARD_STATE_ROOT`
-  and `SIMARD_MEMORY_SOCKET`.
+  The race is var-agnostic, so `HOME`, `CARGO_TARGET_DIR`, `TZ`, etc. all count
+  — not only `SIMARD_STATE_ROOT` and `SIMARD_MEMORY_SOCKET`. *Enforcement note:*
+  the `serial_guard` meta-test currently auto-detects (B) only for the **watched
+  surface** in `READ_WATCHED_VARS` (`SIMARD_STATE_ROOT`, `SIMARD_MEMORY_SOCKET`,
+  `HOME`, `SIMARD_LLM_PROVIDER`, `SIMARD_MEETINGS_DIR`, `SIMARD_MEETINGS_ROOT`);
+  for any other variable, rule (B) is an author obligation the guard does not
+  yet check. Closing that gap (`EnvWatch::AnyVar`) is tracked as issue #2375 —
+  see *Residual class & follow-up* below.
 - **(C)** Reads `SIMARD_STATE_ROOT` / `SIMARD_MEMORY_SOCKET` from the global
   env, directly or via `resolve_state_root()` / `memory_ipc::socket_path_for`
   default resolution.
@@ -192,6 +214,43 @@ binary with no in-process env mutators, so it is correctly left unannotated.
 
 ---
 
+## Residual class & follow-up
+
+The invariant above is enforced for the guard's **watched surface** only (the
+variables in `READ_WATCHED_VARS`). The underlying hazard is variable-agnostic:
+glibc `setenv` may `realloc` (and free) the whole `environ` array when a variable
+is first added, so a concurrent `getenv` anywhere in the process can read freed
+memory **even when the writer and reader touch different variable names**.
+
+Two consequences are therefore **not** closed by the #2360 work; both are tracked
+by [issue #2375](https://github.com/rysweet/Simard/issues/2375):
+
+1. **Cross-variable tears from other serial groups.** Lib-binary tests that
+   mutate non-watched vars under a *different* serial key — e.g.
+   `SIMARD_HANDOFF_DIR` (`ooda_loop`), `SIMARD_SKIP_GYM` (`gym_runner_bridge`),
+   `NO_COLOR` (`meeting_repl`), `ENV_OVERRIDE` (`prompt_delivery`,
+   `prompt_delivery_env`), `SIMARD_NO_UPDATE_CHECK` (`update_check`,
+   `update_check_env`) — can still run concurrently with the `cognitive_memory`
+   readers. The guard does not flag them because `EnvWatch::StateRootSurface`
+   does not watch those variables.
+2. **A net-new concurrency from the migration.** Moving the `cmd_cleanup` /
+   `self_metrics` `HOME`-writers from the default `#[serial]` key into
+   `cognitive_memory` means they are no longer mutually serialized with the
+   bare-`#[serial]` non-watched mutators in (1).
+
+Both are **much rarer** than the #2360 symptom. The watched-surface tears caused
+a frequent, deterministic mis-resolution (a write to the wrong root left an empty
+board and tripped `board.active.len() == 3`, or routed an autosave into the wrong
+meetings dir), whereas the residual is an infrequent `environ`-realloc read of a
+value the assertion does not depend on. The complete fix — switching the guard to
+`EnvWatch::AnyVar` and multi-keying every remaining env mutator into
+`cognitive_memory` — touches ~30 unrelated test modules, so the work is
+deliberately incremental (each #2360 follow-up folds in the next surface that
+actually flaked: goals → provider → meetings) and the general case is tracked as
+issue #2375.
+
+---
+
 ## Multi-key annotations — preserving semantic-group parallelism
 
 Some env-mutating tests already belong to a *semantic* serial group that exists
@@ -210,9 +269,10 @@ annotation is mutually exclusive with both the `simard_meetings_dir_env` group
 **and** the `cognitive_memory` group, while two `simard_meetings_dir_env`
 tests that do **not** also name `cognitive_memory` can still run in parallel
 with the cognitive-memory readers only if they touch no env — which, by the
-rule, they may not. The net effect: every env reader/writer is serialized
-against every other, but unrelated semantic groups keep whatever extra
-parallelism they had.
+rule, they may not. The net effect for the watched surface: every reader/writer
+of it is serialized against every other, while unrelated semantic groups keep
+whatever extra parallelism they had. (Mutators of *other* env vars in unrelated
+groups are not yet folded in — see *Residual class & follow-up* above.)
 
 > Rule of thumb: **never remove** an existing key when adding `cognitive_memory`.
 > Append it. Removing a key silently widens concurrency for the original group.
@@ -542,8 +602,9 @@ halves can never observe different roots.
 
 ## Migrated test inventory (finished state)
 
-The `cognitive_memory` key now covers the complete primary race surface — every
-unkeyed **env writer** the guard found. The 19 tests migrated by the #2360 fix
+The `cognitive_memory` key now covers the initial state-root / provider race
+surface — every unkeyed **env writer** the guard found. The 19 tests migrated by
+the #2360 fix
 (all of which write `HOME`, directly or through a same-file helper):
 
 | File | Test(s) | Previous annotation | Now |
