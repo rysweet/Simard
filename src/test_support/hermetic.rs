@@ -117,13 +117,17 @@ impl EnvBinding {
         // INVARIANT (issue #2360): EVERY test in the lib binary that touches
         // cognitive memory OR mutates/reads process-global env (SIMARD_STATE_ROOT
         // set + SIMARD_MEMORY_SOCKET unset here; HOME and any other var
-        // elsewhere) MUST be in the `serial(cognitive_memory)` group.
+        // elsewhere) MUST be keyed into the `serial(cognitive_memory)` group.
         // HermeticState mutates process-global env, and glibc setenv/getenv are
         // not thread-safe, so a concurrent env mutation in any other test can
         // tear a handler's `std::env::var("SIMARD_STATE_ROOT")` read and send
         // writes to HOME/.simard — the race behind the tests_goals_crud flake.
         // The `serial_guard` meta-test (src/test_support/serial_guard.rs)
-        // enforces this; see docs/testing/cognitive-memory-serial-isolation.md.
+        // auto-enforces this for its watched surface (SIMARD_STATE_ROOT /
+        // SIMARD_MEMORY_SOCKET / HOME / SIMARD_LLM_PROVIDER / SIMARD_MEETINGS_DIR
+        // / SIMARD_MEETINGS_ROOT); keying any OTHER var is an author obligation
+        // the guard does not yet check (EnvWatch::AnyVar tracked as #2375). See
+        // docs/testing/cognitive-memory-serial-isolation.md.
         //
         // SAFETY: tests using HermeticState are serialised via
         // `#[serial(cognitive_memory)]`, so concurrent env mutation is

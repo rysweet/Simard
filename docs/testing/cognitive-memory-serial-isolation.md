@@ -48,12 +48,14 @@ pre-commit `cargo test`.
   not have to touch the same variable.
 - The fix is a single rule for the guard's **watched env surface** — the
   variables that resolve the cognitive-memory state root, the dashboard LLM
-  provider, and the meetings-persistence directory (`SIMARD_STATE_ROOT`,
-  `SIMARD_MEMORY_SOCKET`, `HOME`, `SIMARD_LLM_PROVIDER`, `SIMARD_MEETINGS_DIR`,
-  `SIMARD_MEETINGS_ROOT`; the canonical list is `READ_WATCHED_VARS` /
-  `EnvWatch::StateRootSurface` in `src/test_support/serial_guard.rs`): **every
-  lib-binary test that mutates or reads that surface shares one serial key,
-  `cognitive_memory`**, so no mutation of it is ever concurrent with a read of
+  provider, and the meetings-persistence directory. The guard's *mutation* watch
+  (`EnvWatch::StateRootSurface` in `src/test_support/serial_guard.rs`) covers
+  `SIMARD_STATE_ROOT`, `SIMARD_MEMORY_SOCKET`, `HOME`, `SIMARD_LLM_PROVIDER`,
+  `SIMARD_MEETINGS_DIR`, `SIMARD_MEETINGS_ROOT`; the *read* watch
+  (`READ_WATCHED_VARS`) is the same set **minus `HOME`** (a torn `HOME` read is
+  not the race — only a `HOME` *write* is). **Every lib-binary test that mutates
+  or reads that surface shares one serial key, `cognitive_memory`**, so no
+  mutation of it is ever concurrent with a read of
   it. (Test *authors* should apply the same key for any other env var they
   touch — see rule (B) — but the guard auto-enforces only the watched surface;
   process-wide `AnyVar` enforcement is tracked follow-up, issue #2375.)
@@ -144,9 +146,10 @@ assertion.
 
 `cognitive_memory` is the **canonical key** for this property. It already
 guarded the `HermeticState` writers and the cognitive-memory readers; #2360
-extends it to cover every lib-binary test that touches the watched surface (see
-`READ_WATCHED_VARS` in `src/test_support/serial_guard.rs` for the canonical
-list), making the guarantee **total for that surface**. The race is
+extends it to cover every lib-binary test that touches the watched surface (its
+mutation watch `EnvWatch::StateRootSurface` and the read set `READ_WATCHED_VARS`
+in `src/test_support/serial_guard.rs`), making the guarantee **total for that
+surface**. The race is
 fundamentally variable-agnostic (see *Residual class & follow-up* below), so
 test authors should also key any *other* env var they mutate; auto-enforcing
 that process-wide (`EnvWatch::AnyVar`) is tracked as issue #2375.
@@ -162,9 +165,11 @@ if**, at run time, it does any of:
 - **(B)** Calls `set_var` / `remove_var` on **any** process-global variable.
   The race is var-agnostic, so `HOME`, `CARGO_TARGET_DIR`, `TZ`, etc. all count
   — not only `SIMARD_STATE_ROOT` and `SIMARD_MEMORY_SOCKET`. *Enforcement note:*
-  the `serial_guard` meta-test currently auto-detects (B) only for the **watched
-  surface** in `READ_WATCHED_VARS` (`SIMARD_STATE_ROOT`, `SIMARD_MEMORY_SOCKET`,
-  `HOME`, `SIMARD_LLM_PROVIDER`, `SIMARD_MEETINGS_DIR`, `SIMARD_MEETINGS_ROOT`);
+  the `serial_guard` meta-test currently auto-detects (B) only for its
+  **mutation watch** `EnvWatch::StateRootSurface` (`SIMARD_STATE_ROOT`,
+  `SIMARD_MEMORY_SOCKET`, `HOME`, `SIMARD_LLM_PROVIDER`, `SIMARD_MEETINGS_DIR`,
+  `SIMARD_MEETINGS_ROOT`; the rule-(C) *read* check uses `READ_WATCHED_VARS`,
+  the same set minus `HOME`);
   for any other variable, rule (B) is an author obligation the guard does not
   yet check. Closing that gap (`EnvWatch::AnyVar`) is tracked as issue #2375 —
   see *Residual class & follow-up* below.
@@ -216,8 +221,9 @@ binary with no in-process env mutators, so it is correctly left unannotated.
 
 ## Residual class & follow-up
 
-The invariant above is enforced for the guard's **watched surface** only (the
-variables in `READ_WATCHED_VARS`). The underlying hazard is variable-agnostic:
+The invariant above is enforced for the guard's **watched surface** only (its
+`EnvWatch::StateRootSurface` mutation watch and the `READ_WATCHED_VARS` reads).
+The underlying hazard is variable-agnostic:
 glibc `setenv` may `realloc` (and free) the whole `environ` array when a variable
 is first added, so a concurrent `getenv` anywhere in the process can read freed
 memory **even when the writer and reader touch different variable names**.
@@ -482,11 +488,15 @@ helper:
 ```rust
 // INVARIANT (issue #2360): EVERY test in the lib binary that touches cognitive
 // memory OR mutates/reads process-global env (SIMARD_STATE_ROOT set,
-// SIMARD_MEMORY_SOCKET unset here; HOME and any other var elsewhere) MUST be in
-// the `serial(cognitive_memory)` group. HermeticState mutates process-global
-// env, and glibc setenv/getenv are not thread-safe, so a concurrent env
-// mutation in any other test can tear a handler's `std::env::var` read and send
-// writes to HOME/.simard. The `serial_guard` meta-test enforces this.
+// SIMARD_MEMORY_SOCKET unset here; HOME and any other var elsewhere) MUST be
+// keyed into the `serial(cognitive_memory)` group. HermeticState mutates
+// process-global env, and glibc setenv/getenv are not thread-safe, so a
+// concurrent env mutation in any other test can tear a handler's
+// `std::env::var` read and send writes to HOME/.simard. The `serial_guard`
+// meta-test auto-enforces this for its watched surface (SIMARD_STATE_ROOT /
+// SIMARD_MEMORY_SOCKET / HOME / SIMARD_LLM_PROVIDER / SIMARD_MEETINGS_DIR /
+// SIMARD_MEETINGS_ROOT); keying any OTHER var is an author obligation the guard
+// does not yet check (EnvWatch::AnyVar tracked as #2375).
 // See docs/testing/cognitive-memory-serial-isolation.md.
 ```
 
