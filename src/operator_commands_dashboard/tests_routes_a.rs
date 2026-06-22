@@ -895,6 +895,57 @@ mod tests {
         );
     }
 
+    /// The Memory tab's recent-memories empty-state must distinguish "no NEW
+    /// memories in the last hour" from "nothing stored, ever". Regression guard
+    /// for the #2358 P1 finding: the panel told a human memory was empty
+    /// ("No memories stored yet") while the store actually held tens of
+    /// thousands of memories.
+    #[test]
+    fn index_html_recent_memories_empty_state_distinguishes_total() {
+        let body = js_fn_body("async function fetchRecentMemories(){");
+        // The empty branch is selected by the aggregate total, not shown blindly.
+        assert!(
+            body.contains("const total=d.total||0"),
+            "fetchRecentMemories empty-state must read the aggregate total before \
+             choosing copy (#2358) — body: {body:?}"
+        );
+        assert!(
+            body.contains("total>0"),
+            "fetchRecentMemories empty-state must branch on whether any memory is \
+             stored (total>0) (#2358) — body: {body:?}"
+        );
+        // total>0 → say there are no NEW memories this hour, not that nothing exists.
+        assert!(
+            body.contains("No new memories in the last hour"),
+            "when total>0 the empty-state must say there are no NEW memories in the \
+             last hour, surfacing the stored total (#2358) — body: {body:?}"
+        );
+        // total==0 → keep the truthful original copy.
+        assert!(
+            body.contains("No memories stored yet"),
+            "when total is zero the empty-state must still fall back to the \
+             truthful 'No memories stored yet' copy (#2358) — body: {body:?}"
+        );
+    }
+
+    /// The recent-memories aggregate total must render with thousands
+    /// separators so large stored counts read as e.g. "32,342 total" rather
+    /// than the raw, hard-to-scan "32342 total" (#2358).
+    #[test]
+    fn index_html_recent_memories_total_is_humanized() {
+        let body = js_fn_body("async function fetchRecentMemories(){");
+        assert!(
+            body.contains("(d.total||0).toLocaleString()+' total'"),
+            "the recent-memories stored total must be humanized via toLocaleString \
+             (#2358) — body: {body:?}"
+        );
+        assert!(
+            body.contains("'+total.toLocaleString()+' total stored.</span>'"),
+            "the empty-state stored-total readout must also be humanized via \
+             toLocaleString (#2358) — body: {body:?}"
+        );
+    }
+
     /// The fmtCostUsd helper keeps sub-cent estimates meaningful (4 dp)
     /// while showing larger amounts at 2 dp.
     #[test]
