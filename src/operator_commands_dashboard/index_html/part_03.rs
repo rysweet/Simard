@@ -11,11 +11,11 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
               const detailHtml=detailText?'<span style="font-size:.8rem;margin-left:6px">'+esc(detailText)+'</span>':'';
               const full=g.detail_full||'';
               const isFailed=(chip==='Failed');
-              const expandHtml=(full&&full!==detailText)?'<details style="display:inline;margin-left:6px"'+(isFailed?' open':'')+' ><summary style="display:inline;cursor:pointer;color:'+(isFailed?'#f85149':'#8b949e')+';font-size:.7rem">'+(isFailed?'[error]':'[raw]')+'</summary><pre style="margin:.3rem 0 0;white-space:pre-wrap;font-size:.75rem;color:'+(isFailed?'#f85149':'#8b949e')+'">'+esc(full)+'</pre></details>':'';
+              const expandHtml=(full&&full!==detailText)?'<details style="display:inline;margin-left:6px"'+(isFailed?' open':'')+' ><summary style="display:inline;cursor:pointer;color:'+(isFailed?'#f85149':'#8b949e')+';font-size:.7rem">'+(isFailed?'error details':'show full log')+'</summary><pre style="margin:.3rem 0 0;white-space:pre-wrap;font-size:.75rem;color:'+(isFailed?'#f85149':'#8b949e')+'">'+esc(full)+'</pre></details>':'';
               let wipHtml='—';
               if(chip!=='Waiting'||detailText||g.wip_refs?.length){
                 let parts=[];
-                parts.push('<div style="font-size:.8rem;line-height:1.4">'+chipHtml+detailHtml+expandHtml+'</div>');
+                parts.push('<div style="font-size:.8rem;line-height:1.4">'+chipHtml+' '+detailHtml+expandHtml+'</div>');
                 if(g.wip_refs?.length) parts.push(g.wip_refs.map(r=>{
                   const icon=r.kind==='pr'?'🔀':r.kind==='issue'?'🐛':r.kind==='branch'?'🌿':r.kind==='session'?'💻':'📌';
                   return r.url?'<a href="'+esc(r.url)+'" target="_blank" style="color:var(--accent);text-decoration:none;font-size:.8rem">'+icon+' '+esc(r.label)+'</a>':'<span style="font-size:.8rem">'+icon+' '+esc(r.label)+'</span>';
@@ -212,7 +212,15 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
         // Trend badge
         const trendIcons={growing:'↑ Growing',shrinking:'↓ Shrinking',stable:'→ Stable',unknown:'—'};
         const trendColors={growing:'#3fb950',shrinking:'#f85149',stable:'#d29922',unknown:'#8b949e'};
-        const trend=d.trend||'unknown';
+        // Derive the badge from the same signed long-term rate the panel shows
+        // below, so "↑ Growing" can never sit next to a negative rate (#2358).
+        const ltRate=(d.rate_per_hour&&typeof d.rate_per_hour.long_term_total==='number')?d.rate_per_hour.long_term_total:null;
+        let trend;
+        if(ltRate!==null){
+          trend=Math.abs(ltRate)<0.1?'stable':(ltRate>0?'growing':'shrinking');
+        }else{
+          trend=d.trend||'unknown';
+        }
         trendEl.textContent=trendIcons[trend]||'—';
         trendEl.style.color=trendColors[trend]||'#8b949e';
 
@@ -523,4 +531,5 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
             if(v==null)return'';
             if(typeof v==='object')return`<div class="stat"><span class="label">${esc(fmtLabel(k))}</span><span class="value" style="font-size:.8rem">${esc(JSON.stringify(v))}</span></div>`;
             const isCost=k.toLowerCase().includes('cost_usd');
-            const isTokens=k.toLowerCase().includes('token');"#;
+            const isTokens=k.toLowerCase().includes('token');
+            const isPeriod=k==='period';"#;
