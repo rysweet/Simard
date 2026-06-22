@@ -439,3 +439,33 @@ fn rendered_html_defines_token_humanizers() {
         );
     }
 }
+
+#[test]
+fn rendered_html_humanizes_p3_units_and_scales() {
+    // #2358 P3: durations and bare-float urgency scores must be humanized.
+    for needle in [
+        "function humanizeDuration(",
+        "function urgencyPhrase(",
+        "humanizeDuration(intervalSecs)",
+        "urgencyPhrase(top.urgency)",
+        "urgencyPhrase(p.urgency)",
+    ] {
+        assert!(
+            INDEX_HTML.contains(needle),
+            "rendered HTML missing P3 humanizer wiring: {needle}"
+        );
+    }
+    // The bare-minute interval label and bare urgency floats must be gone.
+    assert!(
+        !INDEX_HTML.contains("intervalMin"),
+        "memory growth interval still renders a bare minute count"
+    );
+    assert!(
+        !INDEX_HTML.contains("urgency ${top.urgency.toFixed(2)}"),
+        "Overview still renders a bare unexplained urgency float"
+    );
+    assert!(
+        !INDEX_HTML.contains("(urgency: ${p.urgency.toFixed(2)})"),
+        "Thinking priorities still render a bare unexplained urgency float"
+    );
+}
