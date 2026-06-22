@@ -35,6 +35,50 @@ fn checkpoint_wip(backend: &MeetingBackend) {
     }
 }
 
+/// Pluralization helper: returns `"s"` for any count other than 1, so the
+/// capture tally reads naturally ("1 decision" vs "2 decisions").
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Build a compact running tally of the structured items captured so far in
+/// the session: decisions, open questions, action items, risks, and
+/// disagreements.
+///
+/// Printed after each explicit `/decision`, `/action`, `/question`, `/risk`,
+/// and `/disagree` command so the operator gets live feedback on what the
+/// meeting has accumulated without having to run `/state`. This gives the
+/// interactive REPL live capture feedback analogous to the capture-count
+/// summary the batch meeting probe emits (see `agent_program::meeting_facilitator`),
+/// though the two surfaces intentionally differ: this tally covers the full
+/// structured-capture set shown by `/state` (decisions, open questions, action
+/// items, risks, disagreements), while the batch summary reports a narrower
+/// set. The counts are sourced from the deterministic explicit-capture stores
+/// (not heuristic transcript extraction) so the tally is exact and
+/// reproducible. The category order matches the `/state` view.
+///
+/// The `[meeting] captured:` prefix is a stable, greppable marker matching
+/// the `[meeting] …` convention used by the close banners — operators can
+/// `grep '\[meeting\] captured:'` terminal scrollback reliably.
+///
+/// Issue #2376 (child of #1154 Pillar 3/5; audit #1628).
+fn capture_tally(backend: &MeetingBackend) -> String {
+    let decisions = backend.explicit_decisions().len();
+    let questions = backend.explicit_questions().len();
+    let actions = backend.explicit_action_items().len();
+    let risks = backend.explicit_risks().len();
+    let disagreements = backend.explicit_disagreements().len();
+    format!(
+        "[meeting] captured: {decisions} decision{}, {questions} open question{}, \
+         {actions} action item{}, {risks} risk{}, {disagreements} disagreement{}",
+        plural(decisions),
+        plural(questions),
+        plural(actions),
+        plural(risks),
+        plural(disagreements),
+    )
+}
+
 /// Build the live REPL prompt, optionally color-coded.
 ///
 /// The literal text is always `simard:meeting> ` so non-TTY callers and tests
@@ -403,16 +447,19 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 };
                 writeln!(output, "{}", cyan(&msg)).ok();
                 checkpoint_wip(&backend);
+                writeln!(output, "{}", capture_tally(&backend)).ok();
             }
             MeetingCommand::Action(text) => {
                 backend.push_explicit_action_item(&text);
                 writeln!(output, "{}", green(&format!("Action recorded: {text}"))).ok();
                 checkpoint_wip(&backend);
+                writeln!(output, "{}", capture_tally(&backend)).ok();
             }
             MeetingCommand::Question(text) => {
                 backend.push_explicit_question(&text);
                 writeln!(output, "{}", yellow(&format!("Question recorded: {text}"))).ok();
                 checkpoint_wip(&backend);
+                writeln!(output, "{}", capture_tally(&backend)).ok();
             }
             MeetingCommand::Owner(text) => {
                 backend.push_next_owner(&text);
@@ -428,6 +475,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 backend.push_explicit_risk(&text);
                 writeln!(output, "{}", yellow(&format!("Risk recorded: {text}"))).ok();
                 checkpoint_wip(&backend);
+                writeln!(output, "{}", capture_tally(&backend)).ok();
             }
             MeetingCommand::Disagree(text) => {
                 backend.push_explicit_disagreement(&text);
@@ -438,6 +486,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 )
                 .ok();
                 checkpoint_wip(&backend);
+                writeln!(output, "{}", capture_tally(&backend)).ok();
             }
             MeetingCommand::Recap => {
                 let status = backend.status();
