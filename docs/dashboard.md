@@ -26,7 +26,7 @@ The dashboard is a single-page app with the following tabs:
 |-----|-------|
 | **Overview** | Daemon status (OODA loop active / stopped), current cycle number, top-priority goal, last cycle's actions, recent actions stream, system status (version, OODA daemon state, active processes, disk usage), open PRs, and open issues. |
 | **Goals** | The full goal register: active top-N goals with priority, status, and current activity; the proposed backlog with promote/dismiss controls. |
-| **Traces** | Live-tailed engineer subprocess traces and OODA cycle traces (xterm.js terminal). |
+| **Traces** | Recent agent traces collected from the cost ledger, journald, and in-process spans, plus OTEL status. Each cost row reads as plain language: **when** (relative time, absolute on hover), **what** (call type, model, estimated tokens, and dollar cost), and **who** (call context and session id) — so an operator can see which calls were most expensive without decoding raw `[cost]` lines. |
 | **Logs** | The **Background Service Log** (live activity from Simard's always-on background process), the cost ledger, and per-cycle reports. The level menu (All / Errors / Warnings / Info) filters the log to a single severity, and a free-text box searches within it. |
 | **Processes** | Live process tree under the daemon — engineer subprocesses, LLM sessions, and their resource usage. |
 | **Memory** | Cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters; full-text memory search; a **Memory Overview** with the live **Memory Store** counts; and a **Memory Files** panel showing the goals snapshot plus any non-empty legacy snapshot files. See [Memory architecture](memory.md). |
