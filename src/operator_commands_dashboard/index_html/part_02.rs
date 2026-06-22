@@ -12,7 +12,7 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
           if(d.cycle_reports?.length){
             crEl.innerHTML=d.cycle_reports.map(c=>{
               const num=c.cycle_number;
-              const text=c.summary||JSON.stringify(c.report||{});
+              const text=c.summary?humanizeCycleSummary(c.summary):JSON.stringify(c.report||{});
               return`<div class="transcript-item">
                 <h3>Cycle #${num}</h3>
                 <div class="log-box" style="max-height:100px">${esc(text)}</div>

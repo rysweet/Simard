@@ -1,5 +1,6 @@
 pub(crate) const PART_04: &str = r#"            let fmt;
-            if(typeof v==='number'){
+            if(isPeriod){fmt=humanizePeriod(String(v));}
+            else if(typeof v==='number'){
               if(isCost) fmt='$'+v.toFixed(4);
               else if(isTokens) fmt=v.toLocaleString()+' tokens';
               else fmt=v.toLocaleString();
@@ -211,7 +212,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
           if(rpt.legacy){
             return `<div class="thinking-cycle legacy">
               <div class="cycle-header"><span class="cycle-num">Cycle #${rpt.cycle_number}</span><span class="cycle-badge">legacy</span></div>
-              <div class="cycle-summary">${esc(rpt.summary)}</div>
+              <div class="cycle-summary">${esc(humanizeCycleSummary(rpt.summary))}</div>
             </div>`;
           }
           const phases=[];
@@ -233,7 +234,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
               <div class="phase-content">
                 ${rpt.priorities.map(p=>`<div class="priority-line">
                   <span class="urgency" style="color:${p.urgency>0.7?'var(--red)':p.urgency>0.4?'var(--yellow)':'var(--green)'}">●</span>
-                  <strong>${esc(p.goal_id)}</strong> (urgency: ${p.urgency.toFixed(2)}) — ${esc(p.reason)}
+                  <strong>${esc(humanizeGoalId(p.goal_id))}</strong> (urgency: ${p.urgency.toFixed(2)}) — ${esc(p.reason)}
                 </div>`).join('')}
               </div>
             </div>`);
@@ -281,7 +282,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
           return `<div class="thinking-cycle">
             <div class="cycle-header">
               <span class="cycle-num">Cycle #${rpt.cycle_number}</span>
-              <span class="cycle-summary-inline">${esc(rpt.summary||'')}</span>
+              <span class="cycle-summary-inline">${esc(humanizeCycleSummary(rpt.summary||''))}</span>
             </div>
             <div class="cycle-phases">${phases.join('')}</div>
           </div>`;
@@ -354,7 +355,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             const phaseColors={act:'var(--green)',decide:'#a371f7',orient:'var(--yellow)',observe:'var(--accent)',unknown:'#8b949e'};
             const pColor=phaseColors[c.phase]||'#8b949e';
             const dur=c.duration_secs!=null?c.duration_secs+'s':'—';
-            const summary=c.summary||'';
+            const summary=humanizeCycleSummary(c.summary||'');
             const shortSummary=summary.length>120?summary.substring(0,120)+'…':summary;
             return `<tr>
               <td style="font-weight:600;color:var(--accent)">${c.cycle_number}</td>
