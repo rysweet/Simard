@@ -69,35 +69,43 @@ pub fn ensure_goal_coverage(
 ) -> CoverageReport
 ```
 
-Ensures coverage by **prepending** one `AdvanceGoal` action per uncovered
-incomplete goal to the cycle's planned-action list, highest priority first,
-then truncating the whole list to `cap`.
+Guarantees coverage by giving every incomplete goal that lacks a live engineer
+exactly one `AdvanceGoal` action this cycle — ordered by priority and bounded by
+`cap`.
 
 **Algorithm:**
 
-1. **Find uncovered incomplete goals.** Filter `state.active_goals.active` to
-   goals that are incomplete (status `NotStarted` or `InProgress` — `Proposed`,
-   `Paused`, `Blocked`, and `Completed` excluded) **and** uncovered (no live
-   engineer, via the existing in-flight detection — never double-spawn).
-2. **Sort by priority.** Order the uncovered set by `ActiveGoal.priority`
+1. **Find incomplete goals.** Filter `state.active_goals.active` to goals that
+   are incomplete (status `NotStarted` or `InProgress` — `Proposed`, `Paused`,
+   `Blocked`, and `Completed` excluded).
+2. **Split by live engineer.** A goal with a live engineer (`assigned_to`, via
+   the existing in-flight detection) is already **covered**; any Decide-produced
+   `AdvanceGoal` for it is *extra parallelism*. A goal **without** a live engineer
+   **needs coverage**.
+3. **Sort by priority.** Order the needs-coverage goals by `ActiveGoal.priority`
    (lower number = higher priority), ascending. Coverage explicitly sorts by
    **priority**, not the urgency ordering the Decide phase uses, so the most
-   important uncovered goals are covered first.
-3. **Build coverage actions.** For each uncovered goal, build one
-   `PlannedAction { kind: AdvanceGoal, goal_id, .. }`. Skip any goal that the
-   already-planned actions (or a live engineer) already cover, so coverage and
-   Decide never produce two actions for the same goal.
-4. **Prepend, then cap.** Insert the coverage actions ahead of the
-   Decide-produced actions, then truncate the combined list to `cap`. Coverage
-   therefore wins every contested slot; extra parallelism for already-covered
+   important goals are covered first.
+4. **One action per needs-coverage goal.** Reuse that goal's Decide-produced
+   spawn when one was planned (so coverage and Decide never produce two actions
+   for the same goal — never double-spawn), otherwise synthesize one. Reusing the
+   planned spawn — rather than dropping it and prepending a separate action — is
+   what keeps an unassigned goal's own spawn from being evicted.
+5. **Order, then cap.** Place the priority-ordered coverage actions ahead of all
+   extra-parallelism and non-goal actions, then truncate the combined list to
+   `cap`. Coverage therefore wins every contested slot, and because a goal's own
+   spawn *is* its coverage action, a higher-priority goal's spawn is never evicted
+   by a lower-priority goal's coverage. Extra parallelism for already-covered
    goals is dropped first.
 
-**Returns** a `CoverageReport` (see below).
+**Returns** a `CoverageReport` (see below). `covered`/`deferred` are computed from
+the post-cap survivors, so the report never counts a goal whose action the cap
+dropped.
 
-> **Coverage precedes parallelism.** Because coverage actions are prepended and
-> the list is then truncated to `cap`, a slot is never spent on a *second*
-> engineer for an already-covered goal while any incomplete goal remains
-> uncovered.
+> **Coverage precedes parallelism.** Because coverage actions are ordered ahead of
+> extra parallelism and the list is then truncated to `cap`, a slot is never spent
+> on a *second* engineer for an already-covered goal while any incomplete goal
+> remains uncovered.
 
 > **The cap is a hard safety ceiling.** `ensure_goal_coverage` never emits more
 > than `cap` total actions. If the uncovered set exceeds `cap`, it covers the
@@ -134,7 +142,7 @@ impl CoverageReport {
 the Decide brain has produced its urgency-ordered actions and before `act`
 dispatches them. The existing `planned_actions` binding in `run_ooda_cycle`
 (`src/ooda_loop/cycle.rs`) changes from `let` to `let mut` so coverage can
-prepend to it:
+reorder and bound it:
 
 ```rust
 // --- Decide --- (existing branch; now bound with `let mut`)
@@ -187,9 +195,9 @@ Assume five active goals and `cap = max_concurrent_actions`.
 | `g-b` | 2 | NotStarted | no |
 | `g-c` | 3 | NotStarted | no |
 
-`cap = 5`. Uncovered incomplete: `g-b`, `g-c`. Coverage prepends `AdvanceGoal`
-for `g-b` and `g-c`; total ≤ 5. Result: all three covered.
-`covered 3/3 incomplete goals, deferred 0 due to cap`.
+`cap = 5`. Uncovered incomplete: `g-b`, `g-c`. Coverage adds an `AdvanceGoal`
+for `g-b` and `g-c` ahead of any extra parallelism; total ≤ 5. Result: all three
+covered. `covered 3/3 incomplete goals, deferred 0 due to cap`.
 
 ### Example 2 — cap forces a defer
 

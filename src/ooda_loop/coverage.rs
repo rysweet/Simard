@@ -14,7 +14,7 @@
 //! phase (the stubs panic via `unimplemented!()`). They **must pass** once the
 //! real allocator lands in the implementation step — without further test edits.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use super::types::{ActionKind, OodaState, PlannedAction};
 use crate::goal_curation::{ActiveGoal, GoalProgress};
@@ -53,17 +53,22 @@ fn is_incomplete(status: &GoalProgress) -> bool {
     )
 }
 
-/// Ensures coverage by **prepending** one `AdvanceGoal` action per uncovered
-/// incomplete goal to the cycle's planned-action list (highest priority first),
-/// then truncating the whole list to `cap`.
+/// Guarantees coverage: every incomplete goal that lacks a live engineer ends
+/// the cycle with exactly one `AdvanceGoal` action, ordered by goal priority and
+/// subject to `cap` as a hard ceiling.
 ///
 /// - **Incomplete** = status `NotStarted` or `InProgress` (`Proposed`,
 ///   `Paused`, `Blocked`, `Completed` excluded).
-/// - **Covered** = a live engineer already exists for the goal (reuse the
-///   existing in-flight detection; `assigned_to` set, or an action already
-///   planned for the goal) — never double-spawn.
+/// - A goal with a live engineer (`assigned_to` set) is already covered; any
+///   Decide-emitted action for it is *extra parallelism* and yields a contested
+///   slot to coverage.
+/// - A goal **without** a live engineer needs one surviving action: its
+///   Decide-emitted spawn is reused when present (never double-spawned),
+///   otherwise a coverage action is synthesized. These are ordered by priority
+///   so the highest-priority goals win contested slots and a goal's own spawn is
+///   never evicted by coverage of a lower-priority goal.
 /// - The `cap` is a hard ceiling: `planned.len() <= cap` on return.
-#[allow(clippy::ptr_arg)] // Needs &mut Vec: prepends coverage actions and truncates to cap.
+#[allow(clippy::ptr_arg)] // Needs &mut Vec: reorders coverage actions ahead of extra parallelism and truncates to cap.
 pub fn ensure_goal_coverage(
     state: &OodaState,
     planned: &mut Vec<PlannedAction>,
@@ -77,59 +82,82 @@ pub fn ensure_goal_coverage(
         .collect();
     let incomplete = incomplete_goals.len();
 
-    // Goals already covered by a Decide-emitted action this cycle. Reusing
-    // these (alongside `assigned_to`) is the in-flight de-dup that prevents a
-    // second engineer for the same goal.
-    let planned_goal_ids: HashSet<&str> = planned
+    // A live engineer (`assigned_to`) means the goal is already covered no
+    // matter what; any Decide-emitted action for it is extra parallelism.
+    let with_engineer = incomplete_goals
         .iter()
-        .filter(|a| a.kind == ActionKind::AdvanceGoal)
-        .filter_map(|a| a.goal_id.as_deref())
-        .collect();
+        .filter(|g| g.assigned_to.is_some())
+        .count();
 
-    let is_covered = |g: &ActiveGoal| -> bool {
-        g.assigned_to.is_some() || planned_goal_ids.contains(g.id.as_str())
-    };
-
-    let already_covered = incomplete_goals.iter().filter(|g| is_covered(g)).count();
-
-    // Uncovered incomplete goals, highest priority first (lower number = higher
-    // priority). `sort_by_key` is stable, so equal-priority goals keep board
-    // order.
-    let mut uncovered: Vec<&ActiveGoal> = incomplete_goals
+    // Goals without a live engineer each need exactly one surviving action this
+    // cycle. Order them by priority (lower number = higher priority); the stable
+    // sort keeps board order for equal priorities.
+    let mut needs_coverage: Vec<&ActiveGoal> = incomplete_goals
         .iter()
         .copied()
-        .filter(|g| !is_covered(g))
+        .filter(|g| g.assigned_to.is_none())
         .collect();
-    uncovered.sort_by_key(|g| g.priority);
+    needs_coverage.sort_by_key(|g| g.priority);
 
-    let total_uncovered = uncovered.len();
-    // Coverage actions sit at the FRONT of the list, so the first `cap` of them
-    // survive the truncation — coverage always wins a contested slot over extra
-    // parallelism for an already-covered goal.
-    let newly_covered = total_uncovered.min(cap);
-    let deferred = total_uncovered - newly_covered;
-
-    let coverage_actions: Vec<PlannedAction> = uncovered
+    // Claim each needs-coverage goal's first Decide-emitted `AdvanceGoal` as its
+    // coverage action — reusing the planned spawn rather than double-spawning.
+    // Every other planned action (extra parallelism, non-goal actions) keeps its
+    // relative order and sits behind coverage.
+    let slot_of: HashMap<&str, usize> = needs_coverage
         .iter()
-        .map(|g| PlannedAction {
-            kind: ActionKind::AdvanceGoal,
-            goal_id: Some(g.id.clone()),
-            description: format!(
-                "coverage: ensure a live engineer for incomplete goal '{}'",
-                g.id
-            ),
+        .enumerate()
+        .map(|(i, g)| (g.id.as_str(), i))
+        .collect();
+    let mut claimed: Vec<Option<PlannedAction>> = (0..needs_coverage.len()).map(|_| None).collect();
+    let mut other: Vec<PlannedAction> = Vec::new();
+    for action in std::mem::take(planned) {
+        let claim = if action.kind == ActionKind::AdvanceGoal {
+            action
+                .goal_id
+                .as_deref()
+                .and_then(|gid| slot_of.get(gid).copied())
+                .filter(|&slot| claimed[slot].is_none())
+        } else {
+            None
+        };
+        match claim {
+            Some(slot) => claimed[slot] = Some(action),
+            None => other.push(action),
+        }
+    }
+
+    // One coverage action per needs-coverage goal, in priority order: the reused
+    // Decide spawn or a synthesized one.
+    let coverage_actions: Vec<PlannedAction> = needs_coverage
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            claimed[i].take().unwrap_or_else(|| PlannedAction {
+                kind: ActionKind::AdvanceGoal,
+                goal_id: Some(g.id.clone()),
+                description: format!(
+                    "coverage: ensure a live engineer for incomplete goal '{}'",
+                    g.id
+                ),
+            })
         })
         .collect();
 
-    // Prepend coverage actions ahead of the Decide-emitted actions, then apply
-    // the AIMD cap as a hard ceiling.
+    // Coverage actions sit at the FRONT (highest priority first), so the first
+    // `cap` survive truncation — coverage always wins a contested slot over extra
+    // parallelism, and a higher-priority goal's spawn is never evicted by a
+    // lower-priority goal's coverage.
+    let total_needs_coverage = coverage_actions.len();
+    let newly_covered = total_needs_coverage.min(cap);
+    let deferred = total_needs_coverage - newly_covered;
+
     let mut combined = coverage_actions;
-    combined.append(planned);
+    combined.append(&mut other);
     combined.truncate(cap);
     *planned = combined;
 
     CoverageReport {
-        covered: already_covered + newly_covered,
+        covered: with_engineer + newly_covered,
         incomplete,
         deferred,
     }
@@ -375,6 +403,41 @@ mod tests {
             "g-a stays covered via its live engineer and g-b is newly covered"
         );
         assert_eq!(report.deferred, 0);
+    }
+
+    #[test]
+    fn unassigned_goal_decide_spawn_is_not_evicted_by_lower_priority_coverage() {
+        // Regression: a Decide-emitted AdvanceGoal for an UNASSIGNED incomplete
+        // goal is that goal's primary spawn, not extra parallelism. It must be
+        // ordered by the goal's priority alongside synthesized coverage actions
+        // — never unconditionally evicted by coverage of a lower-priority goal —
+        // and the report must not over-count it as covered after eviction.
+        let state = state_with(vec![
+            goal("g-hi", 1, GoalProgress::NotStarted, None), // Decide surfaced this
+            goal("g-mid", 2, GoalProgress::NotStarted, None), // unsurfaced, needs coverage
+            goal("g-lo", 3, GoalProgress::NotStarted, None), // unsurfaced, needs coverage
+        ]);
+        // Decide planned only the highest-priority unassigned goal's spawn.
+        let mut planned: Vec<PlannedAction> = vec![advance("g-hi")];
+
+        let report = ensure_goal_coverage(&state, &mut planned, 2);
+
+        assert_eq!(
+            advance_goal_ids(&planned),
+            vec!["g-hi".to_string(), "g-mid".to_string()],
+            "the unassigned goal Decide already surfaced (highest priority) must \
+             survive the cap; only the lowest-priority goal is deferred"
+        );
+        assert!(planned.len() <= 2, "cap is a hard ceiling");
+        assert_eq!(report.incomplete, 3);
+        assert_eq!(
+            report.covered, 2,
+            "exactly the two highest-priority goals are covered this cycle"
+        );
+        assert_eq!(
+            report.deferred, 1,
+            "the lowest-priority goal is deferred and re-covered next cycle"
+        );
     }
 
     #[test]
