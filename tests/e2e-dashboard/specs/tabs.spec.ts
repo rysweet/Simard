@@ -146,6 +146,25 @@ async function mockAllApis(page: import('@playwright/test').Page) {
       body: JSON.stringify({ items: [], total: 0, last_hour_count: 0, server_time: new Date().toISOString() }),
     }),
   );
+  await page.route('**/api/memory/history', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        schema_version: 1,
+        snapshots: [
+          { timestamp: new Date(Date.now() - 3600_000).toISOString(), epoch_secs: Date.now() / 1000 - 3600, sensory: 0, working: 0, episodic: 100, semantic: 50, procedural: 5, prospective: 2, total: 160, long_term_total: 157 },
+          { timestamp: new Date().toISOString(), epoch_secs: Date.now() / 1000, sensory: 0, working: 0, episodic: 110, semantic: 52, procedural: 5, prospective: 2, total: 172, long_term_total: 169 },
+        ],
+        deltas: { sensory: 0, working: 0, episodic: 10, semantic: 2, procedural: 0, prospective: 0, total: 12, long_term_total: 12, interval_secs: 3600 },
+        rate_per_hour: { total: 12.0, long_term_total: 12.0, episodic: 10.0, semantic: 2.0, procedural: 0.0, prospective: 0.0 },
+        trend: 'growing',
+        snapshot_count: 2,
+        sample_interval_seconds: 300,
+        timestamp: new Date().toISOString(),
+      }),
+    }),
+  );
   await page.route('**/api/memory/graph', (route) =>
     route.fulfill({
       status: 200,

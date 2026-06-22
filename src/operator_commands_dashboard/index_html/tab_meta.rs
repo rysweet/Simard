@@ -126,7 +126,7 @@ pub const TAB_METADATA: &[TabMeta] = &[
         label: "Costs",
         title: "Costs · Simard",
         h1: "Costs",
-        lede: "Token and dollar spending by model and provider, plus your daily and weekly budget caps, computed from real provider invoices rather than estimates.",
+        lede: "Token and dollar spending by model and provider, plus your daily and weekly budget caps. Figures are estimated from token counts and typical model pricing, not billed from provider invoices.",
         tooltip: "Token and dollar usage by model, plus daily and weekly budget",
     },
     TabMeta {

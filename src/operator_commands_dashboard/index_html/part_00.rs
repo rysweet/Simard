@@ -336,7 +336,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
 
   <div class="tab-content" id="tab-costs">
     <h1 class="page-h1">Costs</h1>
-    <p class="page-lede">Token and dollar spending by model and provider, plus your daily and weekly budget caps, computed from real provider invoices rather than estimates.</p>
+    <p class="page-lede">Token and dollar spending by model and provider, plus your daily and weekly budget caps. Figures are estimated from token counts and typical model pricing, not billed from provider invoices.</p>
     <div class="grid">
       <div class="card"><h2>Daily Costs <button class="btn" onclick="fetchCosts()">Refresh</button></h2><div id="costs-daily"><span class="loading">Loading…</span></div></div>
       <div class="card"><h2>Weekly Costs</h2><div id="costs-weekly"><span class="loading">Loading…</span></div></div>

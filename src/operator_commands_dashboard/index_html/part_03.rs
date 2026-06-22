@@ -159,12 +159,20 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
           trendEl.textContent='';
           return;
         }
-        // Trend badge
+        // Long-term growth rate over the observed window. Computed up front so the
+        // trend badge below is derived from the SAME number shown in the rate
+        // readout — the arrow direction can never contradict the rate sign (#2358).
+        const mgSnaps=d.snapshots||[];
+        const ltRate=(d.rate_per_hour&&d.rate_per_hour.long_term_total)||0;
+        const ltRateDisp=Math.abs(ltRate)<0.1?'0':ltRate.toFixed(1);
+
+        // Trend badge — direction follows the displayed rate sign.
         const trendIcons={growing:'↑ Growing',shrinking:'↓ Shrinking',stable:'→ Stable',unknown:'—'};
         const trendColors={growing:'#3fb950',shrinking:'#f85149',stable:'#d29922',unknown:'#8b949e'};
-        const trend=d.trend||'unknown';
-        trendEl.textContent=trendIcons[trend]||'—';
-        trendEl.style.color=trendColors[trend]||'#8b949e';
+        let trend='unknown';
+        if(mgSnaps.length>=2){trend=Math.abs(ltRate)<0.1?'stable':(ltRate>0?'growing':'shrinking');}
+        trendEl.textContent=trendIcons[trend];
+        trendEl.style.color=trendColors[trend];
 
         // Delta badges
         if(d.deltas){
@@ -190,15 +198,11 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
           deltasEl.innerHTML='<span style="color:#8b949e;font-size:.85rem">Not enough samples yet — growth data appears after two snapshots</span>';
         }
 
-        // Growth rate
-        if(d.rate_per_hour){
-          const r=d.rate_per_hour.long_term_total||0;
-          const rDisp=Math.abs(r)<0.1?'0':r.toFixed(1);
-          rateEl.innerHTML='<div style="font-size:1.5rem;font-weight:700;color:#58a6ff;line-height:1">'+rDisp+'</div><div style="font-size:.75rem;color:#8b949e;margin-top:.15rem">long-term mem/hr</div>';
-        }
+        // Growth rate readout — reuses the value the trend badge was derived from.
+        rateEl.innerHTML='<div style="font-size:1.5rem;font-weight:700;color:#58a6ff;line-height:1">'+ltRateDisp+'</div><div style="font-size:.75rem;color:#8b949e;margin-top:.15rem">long-term mem/hr</div>';
 
         // SVG sparkline from snapshots
-        const snaps=d.snapshots||[];
+        const snaps=mgSnaps;
         if(snaps.length>=2){
           const vals=snaps.map(s=>s.long_term_total||0);
           const minV=Math.min(...vals);
@@ -233,10 +237,24 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
       try{
         const d=await apiFetch('/api/memory/recent');
         if(d.error){listEl.innerHTML='<span class="err">'+esc(d.error)+'</span>';countEl.textContent='—';return;}
+        // Total stored memory. /api/memory/recent reports 0 on the library backend
+        // (per-item listing unavailable, #2307), so fall back to the authoritative
+        // total from /api/memory/history's newest snapshot — otherwise the panel
+        // claims "0 total / no memories" while tens of thousands are stored (#2358).
+        let totalStored=d.total||0;
+        if(!totalStored){
+          try{
+            const h=await apiFetch('/api/memory/history');
+            const hs=h.snapshots||[];
+            if(hs.length){totalStored=hs[hs.length-1].total||0;}
+          }catch(_){}
+        }
         countEl.textContent=d.last_hour_count;
-        totalEl.textContent=d.total+' total';
+        totalEl.textContent=totalStored>0?(totalStored.toLocaleString()+' total stored'):'';
         if(!d.items||d.items.length===0){
-          listEl.innerHTML='<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          listEl.innerHTML=totalStored>0
+            ?'<span style="color:#8b949e">No new memories in the last hour — '+totalStored.toLocaleString()+' total stored. Simard keeps remembering as it works.</span>'
+            :'<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
           return;
         }
         const catColors={'Learned fact':'#58a6ff','Past event':'#3fb950','Current task context':'#f0883e','How-to knowledge':'#a371f7','Planned reminder':'#d29922','Recent observation':'#8b949e'};
