@@ -167,8 +167,8 @@ pub(crate) fn register_dashboard_shared_writer(
         }
         Err(error) => {
             eprintln!(
-                "[simard] dashboard: cognitive memory unavailable at {} ({error}); \
-                 goal edits may not persist consistently across requests",
+                "[simard] dashboard: shared cognitive-memory handle not registered at {} \
+                 ({error}); handlers will use the IPC/tier-2 fallback",
                 state_root.display()
             );
             None

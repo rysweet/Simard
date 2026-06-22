@@ -665,8 +665,9 @@ async fn full_goal_lifecycle_crud() {
 /// save would persist that empty board, dropping every goal. That race is now
 /// prevented both by the shared tier-0 in-process writer the
 /// daemon/bootstrap/`dashboard serve` register and by the launcher's tier-2
-/// store cache (#2334); this test guards the handler-level persistence contract
-/// so a regression in either path is caught.
+/// store cache (#2334). With the tier-0 writer registered (as production does),
+/// every handler call short-circuits at tier-0, so this test guards the
+/// handler-level persistence contract on the tier-0 path the dashboard uses.
 #[tokio::test]
 #[serial_test::serial(cognitive_memory)]
 async fn repeated_handler_writes_never_silently_drop_goals() {
