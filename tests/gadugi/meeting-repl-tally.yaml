@@ -1,0 +1,54 @@
+name: "Meeting REPL capture-count tally (#2376)"
+description: "Outside-in verification that the interactive meeting REPL prints a compact, grep-safe running tally after every structured-capture command (/decision, /action, /question, /risk, /disagree), with correct per-category counts, singular/plural noun forms, /state category order, plain-text grep-safety, and accumulation across repeated captures."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Meeting REPL emits capture-count tally"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/meeting-repl-tally.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "meeting"
+    - "repl"
+    - "discoverability"
+    - "outside-in"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
+  issue: "2376"

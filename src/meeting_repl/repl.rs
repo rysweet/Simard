@@ -81,6 +81,64 @@ fn render_backend_error<W: Write>(output: &mut W, source: &str, err: &dyn std::f
     writeln!(output, "{}", yellow(&format!("  ↳ {hint}"))).ok();
 }
 
+/// Format a compact running tally of explicitly captured items.
+///
+/// Issue #2376. After every structured-capture command the interactive REPL
+/// prints this single line so the operator gets the same capture-count
+/// awareness the batch meeting probe already provides (it reports
+/// `captured N decisions, …`) without having to run `/state`.
+///
+/// Contract (deterministic, no LLM):
+/// - Counts come from the explicit-capture stores only, so the line is exact
+///   and reproducible.
+/// - Plain text with no ANSI escapes and a stable `[meeting] captured:` prefix
+///   so operators can `grep` terminal scrollback (matching the existing
+///   `[meeting] …` banner convention).
+/// - Category order matches the `/state` view: decisions → open questions →
+///   action items → risks → disagreements.
+/// - Singular/plural noun forms are chosen per count (`1 decision` vs
+///   `2 decisions`).
+pub(crate) fn format_capture_tally(
+    decisions: usize,
+    open_questions: usize,
+    action_items: usize,
+    risks: usize,
+    disagreements: usize,
+) -> String {
+    fn count(n: usize, singular: &str, plural: &str) -> String {
+        if n == 1 {
+            format!("{n} {singular}")
+        } else {
+            format!("{n} {plural}")
+        }
+    }
+
+    format!(
+        "[meeting] captured: {}, {}, {}, {}, {}",
+        count(decisions, "decision", "decisions"),
+        count(open_questions, "open question", "open questions"),
+        count(action_items, "action item", "action items"),
+        count(risks, "risk", "risks"),
+        count(disagreements, "disagreement", "disagreements"),
+    )
+}
+
+/// Print the live capture-count tally for the current meeting state.
+///
+/// Reads the deterministic explicit-capture stores from `backend` and writes
+/// the formatted tally line (see [`format_capture_tally`]) to `output`.
+/// Issue #2376.
+fn emit_capture_tally<W: Write>(output: &mut W, backend: &MeetingBackend) {
+    let tally = format_capture_tally(
+        backend.explicit_decisions().len(),
+        backend.explicit_questions().len(),
+        backend.explicit_action_items().len(),
+        backend.explicit_risks().len(),
+        backend.explicit_disagreements().len(),
+    );
+    writeln!(output, "{tally}").ok();
+}
+
 /// Heuristic: detect messages that look like implementation work rather than
 /// planning/alignment discussion. Used by the drift guard (issue #2084,
 /// spec line 643: "Meeting mode should not edit code unless the user
@@ -371,16 +429,19 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                     format!("Decision recorded: {text}")
                 };
                 writeln!(output, "{}", cyan(&msg)).ok();
+                emit_capture_tally(output, &backend);
                 checkpoint_wip(&backend);
             }
             MeetingCommand::Action(text) => {
                 backend.push_explicit_action_item(&text);
                 writeln!(output, "{}", green(&format!("Action recorded: {text}"))).ok();
+                emit_capture_tally(output, &backend);
                 checkpoint_wip(&backend);
             }
             MeetingCommand::Question(text) => {
                 backend.push_explicit_question(&text);
                 writeln!(output, "{}", yellow(&format!("Question recorded: {text}"))).ok();
+                emit_capture_tally(output, &backend);
                 checkpoint_wip(&backend);
             }
             MeetingCommand::Owner(text) => {
@@ -396,6 +457,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
             MeetingCommand::Risk(text) => {
                 backend.push_explicit_risk(&text);
                 writeln!(output, "{}", yellow(&format!("Risk recorded: {text}"))).ok();
+                emit_capture_tally(output, &backend);
                 checkpoint_wip(&backend);
             }
             MeetingCommand::Disagree(text) => {
@@ -406,6 +468,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                     yellow(&format!("Disagreement recorded: {text}"))
                 )
                 .ok();
+                emit_capture_tally(output, &backend);
                 checkpoint_wip(&backend);
             }
             MeetingCommand::Recap => {

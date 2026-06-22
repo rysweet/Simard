@@ -903,3 +903,182 @@ fn renders_structured_banner_on_agent_error() {
         "close banner should report orphan turn count: {output_str}"
     );
 }
+
+// ── Live capture-count tally (issue #2376) ───────────────────────────────
+//
+// After each structured-capture command (`/decision`, `/action`,
+// `/question`, `/risk`, `/disagree`) the interactive REPL prints a compact,
+// grep-safe running tally sourced from the deterministic explicit-capture
+// stores. These tests are fully deterministic (no LLM): the pure formatter
+// is asserted directly, and the emission/accumulation behaviour is driven
+// through `run_meeting_repl` with a `MockAgentSession`.
+
+#[test]
+fn format_capture_tally_all_zero_uses_plural_nouns() {
+    assert_eq!(
+        format_capture_tally(0, 0, 0, 0, 0),
+        "[meeting] captured: 0 decisions, 0 open questions, 0 action items, 0 risks, 0 disagreements"
+    );
+}
+
+#[test]
+fn format_capture_tally_uses_singular_nouns_for_one() {
+    assert_eq!(
+        format_capture_tally(1, 1, 1, 1, 1),
+        "[meeting] captured: 1 decision, 1 open question, 1 action item, 1 risk, 1 disagreement"
+    );
+}
+
+#[test]
+fn format_capture_tally_uses_plural_nouns_for_many() {
+    assert_eq!(
+        format_capture_tally(2, 3, 4, 5, 6),
+        "[meeting] captured: 2 decisions, 3 open questions, 4 action items, 5 risks, 6 disagreements"
+    );
+}
+
+#[test]
+fn format_capture_tally_orders_categories_like_state_view() {
+    // Distinct counts pin each category to its position so a reordering
+    // regression is caught. Order matches the `/state` view:
+    // decisions → open questions → action items → risks → disagreements.
+    let line = format_capture_tally(1, 2, 3, 4, 5);
+    let body = line
+        .strip_prefix("[meeting] captured: ")
+        .expect("tally must carry the stable banner prefix");
+    let parts: Vec<&str> = body.split(", ").collect();
+    assert_eq!(
+        parts,
+        vec![
+            "1 decision",
+            "2 open questions",
+            "3 action items",
+            "4 risks",
+            "5 disagreements",
+        ]
+    );
+}
+
+#[test]
+fn format_capture_tally_is_grep_safe_single_line_plain_text() {
+    let line = format_capture_tally(7, 0, 1, 0, 2);
+    // Stable, greppable banner prefix.
+    assert!(
+        line.starts_with("[meeting] captured: "),
+        "tally must start with the stable banner prefix: {line}"
+    );
+    // Single line — no embedded newlines that would split scrollback greps.
+    assert!(
+        !line.contains('\n') && !line.contains('\r'),
+        "tally must be a single line: {line:?}"
+    );
+    // No ANSI escape sequences regardless of color settings.
+    assert!(
+        !line.contains('\u{1b}'),
+        "tally must be plain text with no ANSI escapes: {line:?}"
+    );
+}
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_decision_command_emits_capture_tally() {
+    let _state = HermeticState::new();
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/decision Adopt TDD for new modules\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Tally after decision",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str.contains(
+            "[meeting] captured: 1 decision, 0 open questions, 0 action items, 0 risks, 0 disagreements"
+        ),
+        "REPL should print the live tally after /decision: {output_str}"
+    );
+}
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_emits_a_tally_after_every_structured_capture_command() {
+    let _state = HermeticState::new();
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    // One of each structured-capture command, in any order.
+    let input = b"/decision Use Rust for the CLI\n/action Carol will set up CI\n/question Who owns rollout?\n/risk CI flakiness blocks releases\n/disagree We should not ship on Fridays\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Tally after each command",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+
+    // Exactly one tally per capture command — five commands, five tallies.
+    let tally_count = output_str.matches("[meeting] captured:").count();
+    assert_eq!(
+        tally_count, 5,
+        "each of the 5 capture commands must emit exactly one tally: {output_str}"
+    );
+
+    // The final tally reflects one item recorded in every category.
+    assert!(
+        output_str.contains(
+            "[meeting] captured: 1 decision, 1 open question, 1 action item, 1 risk, 1 disagreement"
+        ),
+        "final tally should show one item per category: {output_str}"
+    );
+}
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_tally_counts_accumulate_within_a_category() {
+    let _state = HermeticState::new();
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/decision First decision\n/decision Second decision\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Tally accumulation",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    // First /decision → singular; second /decision → plural "2 decisions".
+    assert!(
+        output_str.contains(
+            "[meeting] captured: 1 decision, 0 open questions, 0 action items, 0 risks, 0 disagreements"
+        ),
+        "first /decision should tally 1 decision: {output_str}"
+    );
+    assert!(
+        output_str.contains(
+            "[meeting] captured: 2 decisions, 0 open questions, 0 action items, 0 risks, 0 disagreements"
+        ),
+        "second /decision should tally 2 decisions: {output_str}"
+    );
+}

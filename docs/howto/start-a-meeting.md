@@ -95,6 +95,33 @@ Use `/template` to list the 4 built-in templates, or `/template standup` to appl
 
 See [How to use meeting templates](./use-meeting-templates.md) for full details.
 
+### Structured capture and the live tally
+
+Beyond free-form conversation, five slash commands record items deterministically
+(exactly as typed, with no LLM inference) so they always land in the handoff:
+
+| Command | What it records |
+|---------|-----------------|
+| `/decision <text> [--rationale <why>]` | A decision, with an optional rationale |
+| `/action <text>` | An action item (assignee/deadline parsed inline) |
+| `/question <text>` | An open question |
+| `/risk <text>` | An identified risk |
+| `/disagree <text>` | A disagreement or dissenting view |
+
+After each of these commands, Simard prints a compact running tally so you can
+see how much the meeting has captured so far without running `/state`:
+
+```
+[meeting] captured: 1 decision, 0 open questions, 0 action items, 0 risks, 0 disagreements
+```
+
+The tally is plain text (no color) and always begins with the stable
+`[meeting] captured:` banner, so it is easy to `grep` out of terminal
+scrollback. The categories appear in the same order as the `/state` view —
+decisions, open questions, action items, risks, disagreements — and counts use
+singular or plural nouns (`1 decision` vs `2 decisions`). Run `/state` at any
+time to see the full list of captured items in each category.
+
 ### Markdown export
 
 Type `/export` at any point during a meeting to write a markdown snapshot to `~/.simard/meetings/`. The file includes YAML frontmatter (topic, date, duration, message count) and the full conversation history. See [How to export meeting markdown](./export-meeting-markdown.md).
