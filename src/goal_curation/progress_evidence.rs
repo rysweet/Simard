@@ -98,6 +98,7 @@ mod tests {
     #[test]
     fn noop_checker_always_accepts() {
         let g = ActiveGoal {
+            repo: None,
             id: "x".into(),
             description: "y".into(),
             priority: 1,

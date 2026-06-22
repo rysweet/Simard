@@ -222,6 +222,7 @@ mod tests {
         let mut board = crate::goal_curation::GoalBoard::new();
         for i in 1..=n {
             board.active.push(crate::goal_curation::ActiveGoal {
+                repo: None,
                 id: format!("dashboard-consistency-test-goal-{i:02}"),
                 description: format!("Dashboard consistency regression goal #{i}"),
                 priority: i,

@@ -85,6 +85,7 @@ fn init_board_with_goals(state: &HermeticState) -> SharedMemoryGuard {
     // Save the actual board through the dashboard helpers (tier-0 shared writer).
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
+        repo: None,
         id: "existing-goal".to_string(),
         description: "An existing active goal".to_string(),
         priority: 1,
@@ -252,6 +253,7 @@ async fn add_goal_rejects_when_at_max_active() {
     let mut board = GoalBoard::new();
     for i in 0..crate::goal_curation::MAX_ACTIVE_GOALS {
         board.active.push(crate::goal_curation::ActiveGoal {
+            repo: None,
             id: format!("max-goal-{i}"),
             description: format!("Max goal {i}"),
             priority: (i + 1) as u32,
@@ -463,6 +465,7 @@ async fn promote_backlog_item_rejects_when_at_max_active() {
     let mut board = GoalBoard::new();
     for i in 0..crate::goal_curation::MAX_ACTIVE_GOALS {
         board.active.push(crate::goal_curation::ActiveGoal {
+            repo: None,
             id: format!("full-{i}"),
             description: format!("Full board goal {i}"),
             priority: (i + 1) as u32,
@@ -572,6 +575,7 @@ async fn goals_includes_status_chip_for_active_goals() {
     save_goal_board(&GoalBoard::new(), mem.ops()).expect("init");
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
+        repo: None,
         id: "chip-test".to_string(),
         description: "Goal with current_activity".to_string(),
         priority: 1,

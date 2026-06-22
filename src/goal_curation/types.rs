@@ -63,6 +63,18 @@ pub struct ActiveGoal {
     pub priority: u32,
     pub status: GoalProgress,
     pub assigned_to: Option<String>,
+    /// Target repository slug for this goal (issue #2359, BUG 1).
+    ///
+    /// `None` (the default) routes the goal's engineer to the daemon's own
+    /// repo ("Simard"). A slug such as `"amplihack-rs"` routes the engineer's
+    /// worktree — and therefore its PRs — to `$HOME/src/amplihack-rs`. See
+    /// [`crate::ooda_actions::advance_goal`]'s `repo_resolver`.
+    ///
+    /// `skip_serializing_if` keeps pre-#2359 goal-board snapshots byte-
+    /// identical (the key is omitted entirely for repo-less goals), and
+    /// `serde(default)` deserializes legacy JSON that has no `repo` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     /// Current activity summary — what's happening right now toward this goal.
     #[serde(default)]
     pub current_activity: Option<String>,
@@ -80,6 +92,29 @@ pub struct ActiveGoal {
 }
 
 impl ActiveGoal {
+    /// Construct a new active goal in the `NotStarted` state with no assignee,
+    /// targeting the daemon's own repo (`repo = None`).
+    pub fn new(id: impl Into<String>, description: impl Into<String>, priority: u32) -> Self {
+        Self {
+            id: id.into(),
+            description: description.into(),
+            priority,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+            repo: None,
+            current_activity: None,
+            wip_refs: Vec::new(),
+            last_progress_update_at: None,
+        }
+    }
+
+    /// Builder: set (or clear, with `None`) the target-repo slug.
+    #[must_use]
+    pub fn with_repo(mut self, repo: Option<String>) -> Self {
+        self.repo = repo;
+        self
+    }
+
     /// Short label for display.
     pub fn concise_label(&self) -> String {
         format!("p{} [{}] {}", self.priority, self.status, self.description)
@@ -249,6 +284,7 @@ mod tests {
 
     fn sample_goal() -> ActiveGoal {
         ActiveGoal {
+            repo: None,
             id: "g-1".to_string(),
             description: "Ship MVP".to_string(),
             priority: 1,
@@ -280,6 +316,7 @@ mod tests {
     #[test]
     fn active_goal_assigned_to_none() {
         let g = ActiveGoal {
+            repo: None,
             id: "g-2".to_string(),
             description: "Unassigned".to_string(),
             priority: 3,
@@ -353,6 +390,7 @@ mod tests {
     fn goal_board_active_slots_remaining_full() {
         let goals: Vec<ActiveGoal> = (0..MAX_ACTIVE_GOALS)
             .map(|i| ActiveGoal {
+                repo: None,
                 id: format!("g-{i}"),
                 description: format!("Goal {i}"),
                 priority: 1,
@@ -374,6 +412,7 @@ mod tests {
     fn goal_board_active_slots_remaining_overflow_saturates() {
         let goals: Vec<ActiveGoal> = (0..MAX_ACTIVE_GOALS + 2)
             .map(|i| ActiveGoal {
+                repo: None,
                 id: format!("g-{i}"),
                 description: format!("Goal {i}"),
                 priority: 1,

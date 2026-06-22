@@ -919,6 +919,7 @@ mod tests {
 
         let mut board = GoalBoard::new();
         board.active.push(ActiveGoal {
+            repo: None,
             id: "fix-episode-recall".to_string(),
             description: "Fix episode recall during OODA preparation".to_string(),
             priority: 1,
@@ -977,6 +978,7 @@ mod tests {
 
         let mut board = GoalBoard::new();
         board.active.push(ActiveGoal {
+            repo: None,
             id: "ship-introspection-cli".to_string(),
             description: "Ship the memory introspection CLI".to_string(),
             priority: 2,
