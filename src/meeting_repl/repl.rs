@@ -46,11 +46,14 @@ fn plural(n: usize) -> &'static str {
 ///
 /// Printed after each explicit `/decision`, `/action`, `/question`, `/risk`,
 /// and `/disagree` command so the operator gets live feedback on what the
-/// meeting has accumulated without having to run `/state`. This mirrors the
-/// capture-count summary the batch meeting probe already emits (see
-/// `agent_program::meeting_facilitator`), bringing the interactive REPL to
-/// parity. The counts are sourced from the deterministic explicit-capture
-/// stores (not heuristic transcript extraction) so the tally is exact and
+/// meeting has accumulated without having to run `/state`. This gives the
+/// interactive REPL live capture feedback analogous to the capture-count
+/// summary the batch meeting probe emits (see `agent_program::meeting_facilitator`),
+/// though the two surfaces intentionally differ: this tally covers the full
+/// structured-capture set shown by `/state` (decisions, open questions, action
+/// items, risks, disagreements), while the batch summary reports a narrower
+/// set. The counts are sourced from the deterministic explicit-capture stores
+/// (not heuristic transcript extraction) so the tally is exact and
 /// reproducible. The category order matches the `/state` view.
 ///
 /// The `[meeting] captured:` prefix is a stable, greppable marker matching

@@ -116,8 +116,10 @@ Decision recorded: Adopt TDD for new modules
 
 The `[meeting] captured:` line is plain text (no color) so you can `grep` it
 from terminal scrollback. The counts come from the explicit capture commands
-above and mirror the capture-count summary the automated meeting probe emits,
-so the interactive and automated paths report outcomes the same way.
+above. This gives the interactive REPL live capture feedback analogous to the
+capture-count summary the automated meeting probe emits, though the two
+surfaces report independently (the interactive tally covers the full set shown
+by `/state`).
 
 Everything else is natural conversation.
 
