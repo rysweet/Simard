@@ -1,0 +1,53 @@
+name: "Dashboard Memory Headline + Cost Label Clarity (#2358 P1)"
+description: "Outside-in operator check that the Memory tab headline reflects TOTAL stored memory (not the always-zero recent-window count on the library backend), the empty recent-window copy reads 'No new memories in the last hour — N total stored', the Memory-Growth trend arrow agrees with the displayed per-hour rate sign, and the Costs tab label ('Estimated Cost') and lede tell one consistent story instead of claiming 'real provider invoices'. Boots the real dashboard binary, authenticates with ~/.simard/.dashkey, and asserts the served HTML."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Memory headline shows total stored and Cost label matches its lede"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/dashboard-memory-cost-clarity.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "dashboard"
+    - "memory"
+    - "costs"
+    - "usability"
+    - "issue-2358"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

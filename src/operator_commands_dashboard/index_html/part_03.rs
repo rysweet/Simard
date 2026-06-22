@@ -159,10 +159,20 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
           trendEl.textContent='';
           return;
         }
-        // Trend badge
+        // Trend badge — must agree with the growth-rate sign shown below.
+        // The server-supplied `trend` is the last-two-snapshot delta, which can
+        // disagree with the per-hour rate computed over the whole window (the
+        // "↑ Growing next to -2.6/hr" contradiction in #2358). Derive the badge
+        // from the displayed rate when one is available; only fall back to the
+        // server trend when no rate exists. The 0.1 threshold matches the rate
+        // display rounding below so the arrow and the number never disagree.
         const trendIcons={growing:'↑ Growing',shrinking:'↓ Shrinking',stable:'→ Stable',unknown:'—'};
         const trendColors={growing:'#3fb950',shrinking:'#f85149',stable:'#d29922',unknown:'#8b949e'};
-        const trend=d.trend||'unknown';
+        let trend=d.trend||'unknown';
+        const rph=(d.rate_per_hour&&typeof d.rate_per_hour.long_term_total==='number')?d.rate_per_hour.long_term_total:null;
+        if(rph!==null){
+          trend=rph>=0.1?'growing':(rph<=-0.1?'shrinking':'stable');
+        }
         trendEl.textContent=trendIcons[trend]||'—';
         trendEl.style.color=trendColors[trend]||'#8b949e';
 
@@ -232,11 +242,28 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
       listEl.innerHTML='<span class="loading">Loading recent memories…</span>';
       try{
         const d=await apiFetch('/api/memory/recent');
-        if(d.error){listEl.innerHTML='<span class="err">'+esc(d.error)+'</span>';countEl.textContent='—';return;}
-        countEl.textContent=d.last_hour_count;
-        totalEl.textContent=d.total+' total';
+        if(d.error){listEl.innerHTML='<span class="err">'+esc(d.error)+'</span>';countEl.textContent='—';totalEl.textContent='';return;}
+        const lastHour=d.last_hour_count||0;
+        // The recent endpoint reports total=0 on the library backend; the
+        // authoritative stored-memory total lives in /api/memory/history.
+        // Source the headline from there so a populated store never reads as
+        // "nothing remembered" (#2358).
+        let total=d.total||0;
+        if(!total){
+          try{
+            const h=await apiFetch('/api/memory/history');
+            const snaps=h&&h.snapshots;
+            if(snaps&&snaps.length){total=snaps[snaps.length-1].total||0;}
+          }catch(_){}
+        }
+        // Headline reflects total stored memory; recent-window activity is
+        // shown as a secondary, clearly-labelled count.
+        countEl.textContent=total;
+        totalEl.textContent=lastHour+' new in the last hour';
         if(!d.items||d.items.length===0){
-          listEl.innerHTML='<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          listEl.innerHTML=total>0
+            ?'<span style="color:#8b949e">No new memories in the last hour — '+total+' total stored.</span>'
+            :'<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
           return;
         }
         const catColors={'Learned fact':'#58a6ff','Past event':'#3fb950','Current task context':'#f0883e','How-to knowledge':'#a371f7','Planned reminder':'#d29922','Recent observation':'#8b949e'};

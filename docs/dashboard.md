@@ -30,7 +30,7 @@ The dashboard is a single-page app with the following tabs:
 | **Logs** | Aggregated daemon and engineer logs. |
 | **Processes** | Live process tree under the daemon — engineer subprocesses, LLM sessions, and their resource usage. |
 | **Memory** | Cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters; full-text memory search; a **Memory Overview** with the live **Memory Store** counts; and a **Memory Files** panel showing the goals snapshot plus any non-empty legacy snapshot files. See [Memory architecture](memory.md). |
-| **Costs** | Per-provider, per-model token spend across the active session. |
+| **Costs** | Per-provider, per-model token spend across the active session. Dollar figures are **estimates** derived from token counts (not exact provider invoices). |
 | **Chat** | Direct chat with Simard. |
 | **Workboard** | Shared scratch canvas. (Renamed from "Whiteboard" — see [Tab identity contract](#tab-identity-contract).) |
 | **Thinking** | Live thinking-cycle stream (planner output before action dispatch). |
@@ -73,6 +73,15 @@ Store. Rendering them as permanent "0 records / 0 B" tiles next to a store
 holding thousands of facts told operators that memory was empty when it was
 rich. The panel now hides empty legacy tiles so the displayed numbers always
 match Simard's actual remembered state.
+
+The **What Simard Remembers** headline card follows the same principle: its
+large counter shows the **total** number of items stored across all memory
+types, with recent activity ("N new in the last hour") shown as a secondary
+count. When the recent window is empty but the store is populated it reads
+"No new memories in the last hour — N total stored" rather than implying
+nothing has ever been remembered. The **Memory Growth** trend arrow is derived
+from the same per-hour growth rate shown beside it, so an "↑ Growing" badge is
+never displayed next to a negative rate.
 
 ## Read-only
 
