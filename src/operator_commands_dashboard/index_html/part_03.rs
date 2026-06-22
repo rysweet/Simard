@@ -153,11 +153,15 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
       return String(id).replace(/^session-/,'').slice(0,8);
     }
     /* A single cost-ledger trace row: When (relative+absolute), What
-       (call type / model / tokens / cost), and Who (context + session). */
+       (call type / model / tokens / cost), and Who (context + session).
+       `abs` is parse-guarded (mirrors renderGenericTrace) so formatTime's
+       raw-passthrough branch can never feed an unescaped quote into the
+       double-quoted `title` attribute below (#2351). */
     function renderCostTrace(data){
       data=data||{};
+      const parsed=parseTs(data.timestamp);
       const when=data.timestamp?timeAgo(data.timestamp):'—';
-      const abs=data.timestamp?formatTime(data.timestamp):'';
+      const abs=parsed?formatTime(data.timestamp):'';
       const pt=Number(data.prompt_tokens_est)||0;
       const ct=Number(data.completion_tokens_est)||0;
       const total=pt+ct;

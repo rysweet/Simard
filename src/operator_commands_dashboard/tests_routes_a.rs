@@ -852,6 +852,49 @@ mod tests {
         );
     }
 
+    /// Defense-in-depth (#2351): the cost row's hover `title` is a
+    /// double-quoted HTML attribute fed by `abs`. `esc()` escapes
+    /// `&<>` (element-content safe) but NOT `"`, so a quote-bearing
+    /// `abs` would break out of the attribute. `formatTime` only ever
+    /// returns its raw input on a parse failure, so `abs` MUST be
+    /// guarded by a successful `parseTs` (mirroring `renderGenericTrace`)
+    /// — never assigned unconditionally from `formatTime`. This makes
+    /// the raw-passthrough branch unreachable in the attribute context.
+    #[test]
+    fn index_html_cost_trace_title_attr_is_parse_guarded() {
+        let body = js_fn_body("function renderCostTrace(data){");
+        // The absolute timestamp must be computed up front via parseTs…
+        assert!(
+            body.contains("parseTs(data.timestamp)"),
+            "renderCostTrace must normalise the timestamp via parseTs so the \
+             title-attribute value can be parse-guarded — body: {body:?}"
+        );
+        // …and `abs` must only call formatTime when the parse succeeded,
+        // exactly like renderGenericTrace. The unguarded form
+        // `abs=data.timestamp?formatTime(...)` would let a raw, unparseable
+        // (possibly quote-bearing) timestamp reach the title attribute.
+        assert!(
+            body.contains("const abs=parsed?formatTime(data.timestamp):''"),
+            "renderCostTrace must guard `abs` with the parse result \
+             (`const abs=parsed?formatTime(data.timestamp):''`) so formatTime's \
+             raw-input passthrough can never feed an unescaped quote into the \
+             double-quoted title attribute (#2351) — body: {body:?}"
+        );
+        assert!(
+            !body.contains("const abs=data.timestamp?formatTime"),
+            "renderCostTrace must NOT assign `abs` directly from formatTime on a \
+             truthy-but-unparsed timestamp — that is the #2351 attribute-injection \
+             gap. body: {body:?}"
+        );
+        // The title attribute itself is still double-quoted and fed by `abs`,
+        // so the guard above is what keeps it safe.
+        assert!(
+            body.contains(r#"'<span title="'+esc(abs)+'"#),
+            "the cost-row hover title must remain a double-quoted attribute fed by \
+             the parse-guarded `abs` — body: {body:?}"
+        );
+    }
+
     /// The fmtCostUsd helper keeps sub-cent estimates meaningful (4 dp)
     /// while showing larger amounts at 2 dp.
     #[test]
