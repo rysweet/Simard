@@ -80,8 +80,13 @@ impl TerminalTurnSpec {
 /// (e.g. a distro that ships bash at `/bin/bash`, or a minimal image with only
 /// `/bin/sh`), falls back to `$SHELL` and then well-known POSIX shells so the
 /// terminal session does not strand on a missing interpreter and surface a bare
-/// exit code 127. Each candidate is validated with [`normalize_shell`] so only
-/// a safe, absolute, executable path is ever returned.
+/// exit code 127. Each candidate is validated with [`normalize_shell`], so the
+/// first returned value is always a safe, absolute, executable path.
+///
+/// If no candidate validates (an extremely broken host with neither bash nor
+/// sh), it returns [`DEFAULT_SHELL`] unchanged as a last resort — the launch
+/// will then fail loudly with the now-actionable "command not found" diagnostic
+/// rather than silently doing nothing.
 pub(crate) fn default_shell() -> String {
     let mut candidates = vec![DEFAULT_SHELL.to_string()];
     if let Ok(env_shell) = std::env::var("SHELL") {

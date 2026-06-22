@@ -260,6 +260,51 @@ mod tests {
         );
     }
 
+    /// An *external* binary (not a shell builtin) must resolve through the child
+    /// PTY's inherited PATH, exercising the PATH handling rather than relying on
+    /// a builtin like `echo`. `uname` lives on PATH on every supported target.
+    #[test]
+    fn run_terminal_script_resolves_external_binary_on_path() {
+        let spec = TerminalTurnSpec::parse("uname -s", "terminal-shell").unwrap();
+        let cwd = std::env::current_dir().unwrap();
+
+        let transcript = run_terminal_script("terminal-shell", &spec, &cwd)
+            .expect("an external PATH-resolved binary should complete the terminal turn");
+        let expected_os = if cfg!(target_os = "macos") {
+            "Darwin"
+        } else {
+            "Linux"
+        };
+        assert!(
+            transcript.contains(expected_os),
+            "transcript should contain `uname -s` output '{expected_os}': {transcript}"
+        );
+    }
+
+    /// A non-bash interpreter (`/bin/sh`) must launch successfully. The launch
+    /// path passes bash-specific `--noprofile --norc` only to bash; POSIX sh
+    /// gets a bare `-i`, so falling back to `/bin/sh` no longer aborts with the
+    /// very exit code this fix targets. Guards against regressing the
+    /// shell-aware launch flags.
+    #[cfg(unix)]
+    #[test]
+    fn run_terminal_script_succeeds_with_posix_sh() {
+        if !std::path::Path::new("/bin/sh").exists() {
+            return;
+        }
+        let spec =
+            TerminalTurnSpec::parse("shell: /bin/sh\necho sh-2077-ok", "terminal-shell").unwrap();
+        assert_eq!(spec.shell, "/bin/sh");
+        let cwd = std::env::current_dir().unwrap();
+
+        let transcript = run_terminal_script("terminal-shell", &spec, &cwd)
+            .expect("POSIX /bin/sh must launch and complete the terminal turn");
+        assert!(
+            transcript.contains("sh-2077-ok"),
+            "transcript should contain the echoed output: {transcript}"
+        );
+    }
+
     // -- describe_terminal_failure --
 
     fn exit_status_with_code(code: i32) -> ExitStatus {

@@ -55,7 +55,7 @@ impl PtyTerminalSession {
         shell: &str,
         working_directory: &Path,
     ) -> SimardResult<Self> {
-        let launch_command = format!("{shell} --noprofile --norc -i");
+        let launch_command = format!("{shell} {}", interactive_shell_flags(shell));
         Self::launch_command(base_type, &launch_command, working_directory)
     }
 
@@ -415,6 +415,27 @@ fn child_path_override(inherited: Option<&OsStr>) -> Option<&'static str> {
     }
 }
 
+/// Interactive launch flags appropriate for the given shell.
+///
+/// bash honours `--noprofile --norc` to skip startup files for a clean,
+/// deterministic PTY session. POSIX `sh`/dash reject those long options
+/// (`sh: Illegal option --`), so any non-bash interpreter — including the
+/// `/bin/sh`/`$SHELL` fallbacks resolved by `default_shell` — gets a bare
+/// interactive invocation instead. Without this, falling back to a non-bash
+/// shell would itself fail with the very exit code this fix is meant to
+/// eliminate.
+fn interactive_shell_flags(shell: &str) -> &'static str {
+    let name = Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if name == "bash" {
+        "--noprofile --norc -i"
+    } else {
+        "-i"
+    }
+}
+
 /// Process names that indicate active LLM work is in progress.
 #[cfg(unix)]
 const WORK_PROCESS_NAMES: &[&str] = &["copilot", "node", "amplihack"];
@@ -559,6 +580,29 @@ mod tests {
             child_path_override(Some(OsStr::new(""))),
             Some(DEFAULT_PATH)
         );
+    }
+
+    // ── interactive_shell_flags ───────────────────────────────────────────────
+
+    #[test]
+    fn interactive_shell_flags_uses_bash_options_for_bash() {
+        assert_eq!(
+            interactive_shell_flags("/usr/bin/bash"),
+            "--noprofile --norc -i"
+        );
+        assert_eq!(
+            interactive_shell_flags("/bin/bash"),
+            "--noprofile --norc -i"
+        );
+    }
+
+    #[test]
+    fn interactive_shell_flags_uses_posix_options_for_non_bash() {
+        // `--noprofile`/`--norc` are bash-specific; POSIX sh and other shells
+        // must get a bare interactive invocation or they abort on launch.
+        assert_eq!(interactive_shell_flags("/bin/sh"), "-i");
+        assert_eq!(interactive_shell_flags("/usr/bin/dash"), "-i");
+        assert_eq!(interactive_shell_flags("/usr/bin/zsh"), "-i");
     }
 
     // ── has_active_work_processes ─────────────────────────────────────────────
