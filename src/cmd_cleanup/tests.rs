@@ -599,3 +599,180 @@ fn kill_orphaned_cargo_processes_scans_cleanly() {
     kill_orphaned_cargo_processes(&mut report);
     assert!(report.errors.is_empty());
 }
+
+/// Set a path's modification time `days` into the past. Files are opened with
+/// write access (matching the helper above); directories must be opened
+/// read-only because a directory cannot be opened `write(true)` on Unix.
+fn backdate(path: &std::path::Path, days: u64) {
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 24 * 3600);
+    let times = std::fs::FileTimes::new().set_modified(when);
+    let f = if path.is_dir() {
+        std::fs::File::open(path).unwrap()
+    } else {
+        std::fs::File::options().write(true).open(path).unwrap()
+    };
+    f.set_times(times).unwrap();
+}
+
+/// Run `remove_old_corrupt_dbs` with `HOME` pointed at `home`, restoring the
+/// previous value afterward. Serialized by the caller's
+/// `#[serial(cognitive_memory)]` attribute so the process-wide `HOME` mutation
+/// cannot race other tests that read the cognitive-memory store.
+fn run_corrupt_cleanup_with_home(home: &std::path::Path) -> CleanupReport {
+    let old_home = std::env::var_os("HOME");
+    unsafe {
+        std::env::set_var("HOME", home);
+    }
+    let mut report = CleanupReport::default();
+    remove_old_corrupt_dbs(&mut report);
+    match old_home {
+        Some(h) => unsafe { std::env::set_var("HOME", h) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+    report
+}
+
+/// De-fork Phase 2b (#2307) moved the store from the native single-file
+/// `cognitive_memory.ladybug` to the library backend at `cognitive`. The
+/// library quarantines corruption as `cognitive.corrupt-*`,
+/// `cognitive.wal.corrupt-*`, recursively nested `…cognitive.wal.corrupt-*`
+/// chains, `…cognitive.shadow` side-files, and `…corrupt-*.bak` copies. All
+/// of these must be reclaimed once aged — the pre-fix matcher only knew the
+/// native `cognitive_memory.corrupt-` prefix, so they leaked forever.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_removes_aged_library_backend_quarantines() {
+    let tmp = tempfile::tempdir().unwrap();
+    let simard = tmp.path().join(".simard");
+    std::fs::create_dir_all(&simard).unwrap();
+
+    let quarantines = [
+        "cognitive.corrupt-1700000000",
+        "cognitive.wal.corrupt-1700000000",
+        "cognitive.corrupt-1700000000.cognitive.shadow",
+        "cognitive.corrupt-1700000000.bak",
+        "cognitive.corrupt-1700000000.cognitive.wal.corrupt-1700000001",
+        "cognitive_memory.corrupt-1700000000", // legacy native still covered
+    ];
+    for q in &quarantines {
+        let p = simard.join(q);
+        std::fs::write(&p, b"corrupt-bytes").unwrap();
+        backdate(&p, CORRUPT_DB_MAX_AGE_DAYS + 1);
+    }
+
+    // Live store files must survive untouched (recent mtime, no `.corrupt-`).
+    let live = simard.join("cognitive");
+    let live_wal = simard.join("cognitive.wal");
+    std::fs::write(&live, b"live-store").unwrap();
+    std::fs::write(&live_wal, b"wal").unwrap();
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    for q in &quarantines {
+        assert!(
+            !simard.join(q).exists(),
+            "aged library quarantine should be removed: {q}"
+        );
+    }
+    assert!(
+        live.exists(),
+        "live `cognitive` store must never be removed"
+    );
+    assert!(
+        live_wal.exists(),
+        "live `cognitive.wal` must never be removed"
+    );
+    assert!(
+        report.bytes_freed >= ("corrupt-bytes".len() as u64) * quarantines.len() as u64,
+        "freed bytes should account for every removed quarantine"
+    );
+    assert_eq!(
+        report.dirs_removed.len(),
+        quarantines.len(),
+        "every quarantine should be reported as removed"
+    );
+    assert!(report.errors.is_empty(), "no errors expected: {report:?}");
+}
+
+/// Safety invariant: a name without the `.corrupt-` infix is the live store and
+/// must NEVER be deleted — even if it is older than the threshold. Guards
+/// against a future over-broad matcher wiping `~/.simard/cognitive` and
+/// destroying all persistent memory.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_never_removes_live_store_even_when_aged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let simard = tmp.path().join(".simard");
+    std::fs::create_dir_all(&simard).unwrap();
+
+    let live_files = [
+        "cognitive",
+        "cognitive.wal",
+        "cognitive.shadow",
+        "cognitive_memory.ladybug",
+    ];
+    for f in &live_files {
+        let p = simard.join(f);
+        std::fs::write(&p, b"do-not-delete").unwrap();
+        backdate(&p, CORRUPT_DB_MAX_AGE_DAYS + 30);
+    }
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    for f in &live_files {
+        assert!(
+            simard.join(f).exists(),
+            "live store file must survive cleanup: {f}"
+        );
+    }
+    assert_eq!(report.bytes_freed, 0, "nothing should have been freed");
+    assert!(report.dirs_removed.is_empty(), "nothing should be removed");
+}
+
+/// A directory-backed store quarantine (the design documents the store as a
+/// LadybugDB `GraphStore` directory) must be removed recursively — a plain
+/// `remove_file` would fail and leak the directory.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_removes_aged_directory_quarantine() {
+    let tmp = tempfile::tempdir().unwrap();
+    let simard = tmp.path().join(".simard");
+    std::fs::create_dir_all(&simard).unwrap();
+
+    let dir_q = simard.join("cognitive.corrupt-1700000000");
+    std::fs::create_dir_all(&dir_q).unwrap();
+    std::fs::write(dir_q.join("data"), b"abcdef").unwrap();
+    std::fs::write(dir_q.join("data.wal"), b"ghij").unwrap();
+    backdate(&dir_q, CORRUPT_DB_MAX_AGE_DAYS + 1);
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    assert!(
+        !dir_q.exists(),
+        "aged directory quarantine should be removed recursively"
+    );
+    assert_eq!(
+        report.bytes_freed,
+        ("abcdef".len() + "ghij".len()) as u64,
+        "freed bytes should sum the directory contents"
+    );
+}
+
+/// Young library quarantines are kept for forensics — the age threshold applies
+/// to the new filename shapes exactly as it did to the native prefix.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_keeps_young_library_quarantine() {
+    let tmp = tempfile::tempdir().unwrap();
+    let simard = tmp.path().join(".simard");
+    std::fs::create_dir_all(&simard).unwrap();
+
+    let young = simard.join("cognitive.corrupt-1700000000");
+    std::fs::write(&young, b"recent").unwrap();
+    // No backdating: mtime is "now", inside the retention window.
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    assert!(young.exists(), "young library quarantine should survive");
+    assert_eq!(report.bytes_freed, 0);
+}
