@@ -1,13 +1,42 @@
 name: "Cross-Session Cognitive Memory Recall"
 description: >
   Outside-in gate for issue #1916: verifies that cognitive memory written by
-  Session A survives process exit and is fully recallable by Session B via the
-  snapshot recovery ladder. Also covers the corruption-recovery path from
-  issue #1710 (backup-restore ordering fix).
-version: "1.0.0"
+  one process survives process exit and is fully recallable by a *separate*
+  process via the on-disk "direct open" tier — the same path the operator uses
+  against a live store when the OODA daemon is down.
+
+  Repointed for issue #2344. The original two steps invoked the Cargo test
+  target `cognitive_memory_cross_session_recall`, which exercised the native
+  fork's snapshot-recovery ladder (`NativeCognitiveMemory::open_with_recovery`,
+  `load_latest_snapshot`). That entire native module — target, helper, and the
+  `backup.rs` snapshot ladder — was deleted by #2308 ("de-fork phase 2b: library
+  is the sole backend"), so the gate failed at step 1 with exit 101
+  ("no test target named cognitive_memory_cross_session_recall") and provided
+  zero coverage. These steps drive the live process-boundary recall gates in
+  `tests/bin_simard_memory_cli.rs` (a real `simard` process opening an on-disk
+  cognitive store written by a separate writer process), which are the genuine
+  cross-session-recall proofs post-de-fork.
+
+  Corruption-recovery (the deleted step 2,
+  `cross_session_recall_survives_db_corruption_via_snapshot`, from #1710/#1648):
+  intentionally dropped here, not restored. That path tested the native
+  snapshot-ladder restore (`open_with_recovery`), which #2308 removed and which
+  has no Simard-level equivalent — WAL/corruption recovery is now owned upstream
+  by amplihack-memory-lib (keystone de-fork #84 ported `backup.rs`/recovery into
+  the library; Simard rev-bump #2314 pulled in its "recover-from-corrupt-WAL +
+  checkpoint" durability). Empirically, at the pinned library rev Simard's
+  `LibraryCognitiveMemory::open` writes no snapshot ladder and, on a corrupt
+  store file, renames it aside (`cognitive.corrupt-<ts>`) and starts empty —
+  i.e. the corruption-recovery guarantee can only be faithfully asserted in
+  amplihack-memory-lib, where the recovery code lives. The open integration-level
+  durability regression is tracked by #1648; this Simard gate must not encode a
+  recovery assertion it cannot honestly satisfy. In-process edge/dedup recall
+  computation remains guarded by the `cognitive_memory::tests_graph_stats`
+  suite (6 unit tests).
+version: "1.1.0"
 
 config:
-  timeout: 120000
+  timeout: 180000
   retries: 1
   parallel: false
 
@@ -19,7 +48,7 @@ agents:
     type: "cli"
     config:
       workingDirectory: "."
-      defaultTimeout: 120000
+      defaultTimeout: 180000
       executionMode: "spawn"
       captureOutput: true
       ioConfig:
@@ -31,30 +60,30 @@ agents:
         logLevel: "info"
 
 steps:
-  - name: "Cross-session recall — clean path (session A writes, session B reads)"
+  - name: "Cross-session recall — all six memory types survive process exit (#2308 + #1916)"
     agent: "test-agent"
     action: "execute_command"
     params:
       command: >
-        cargo test --test cognitive_memory_cross_session_recall
-        cognitive_memory_cross_session_recall
+        cargo test --test bin_simard_memory_cli
+        stats_json_reports_every_populated_type_via_direct_open
         -- --nocapture --test-threads=1
-    timeout: 120000
+    timeout: 180000
     expect:
       exitCode: 0
       outputContains:
-        - "test cognitive_memory_cross_session_recall ... ok"
+        - "test stats_json_reports_every_populated_type_via_direct_open ... ok"
 
-  - name: "Cross-session recall — corruption-recovery path (#1710 + #1916)"
+  - name: "Cross-session recall — graph edges + dedup survive process exit (#2331/#2332 + #1916)"
     agent: "test-agent"
     action: "execute_command"
     params:
       command: >
-        cargo test --test cognitive_memory_cross_session_recall
-        cross_session_recall_survives_db_corruption_via_snapshot
+        cargo test --test bin_simard_memory_cli
+        stats_shows_edges_and_dedup_section_via_direct_open
         -- --nocapture --test-threads=1
-    timeout: 120000
+    timeout: 180000
     expect:
       exitCode: 0
       outputContains:
-        - "test cross_session_recall_survives_db_corruption_via_snapshot ... ok"
+        - "test stats_shows_edges_and_dedup_section_via_direct_open ... ok"
