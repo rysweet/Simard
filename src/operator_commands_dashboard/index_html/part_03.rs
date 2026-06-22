@@ -159,10 +159,17 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
           trendEl.textContent='';
           return;
         }
-        // Trend badge
+        // Trend badge — derived from the SAME long-term rate rendered below so
+        // the badge direction can never contradict the displayed mem/hr sign (#2358).
         const trendIcons={growing:'↑ Growing',shrinking:'↓ Shrinking',stable:'→ Stable',unknown:'—'};
         const trendColors={growing:'#3fb950',shrinking:'#f85149',stable:'#d29922',unknown:'#8b949e'};
-        const trend=d.trend||'unknown';
+        const ltRate=d.rate_per_hour?(d.rate_per_hour.long_term_total||0):null;
+        const ltRateDisp=ltRate===null?null:(Math.abs(ltRate)<0.1?0:ltRate);
+        // Whenever a long-term rate is shown the badge is derived from it (same
+        // gate as the rate render below) so the two can never disagree (#2358).
+        const trend=ltRateDisp!==null
+          ?(ltRateDisp>0?'growing':(ltRateDisp<0?'shrinking':'stable'))
+          :(d.trend||'unknown');
         trendEl.textContent=trendIcons[trend]||'—';
         trendEl.style.color=trendColors[trend]||'#8b949e';
 
@@ -190,10 +197,9 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
           deltasEl.innerHTML='<span style="color:#8b949e;font-size:.85rem">Not enough samples yet — growth data appears after two snapshots</span>';
         }
 
-        // Growth rate
+        // Growth rate (same value feeds the trend badge above)
         if(d.rate_per_hour){
-          const r=d.rate_per_hour.long_term_total||0;
-          const rDisp=Math.abs(r)<0.1?'0':r.toFixed(1);
+          const rDisp=ltRateDisp===0?'0':ltRate.toFixed(1);
           rateEl.innerHTML='<div style="font-size:1.5rem;font-weight:700;color:#58a6ff;line-height:1">'+rDisp+'</div><div style="font-size:.75rem;color:#8b949e;margin-top:.15rem">long-term mem/hr</div>';
         }
 
@@ -232,11 +238,24 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
       listEl.innerHTML='<span class="loading">Loading recent memories…</span>';
       try{
         const d=await apiFetch('/api/memory/recent');
-        if(d.error){listEl.innerHTML='<span class="err">'+esc(d.error)+'</span>';countEl.textContent='—';return;}
-        countEl.textContent=d.last_hour_count;
-        totalEl.textContent=d.total+' total';
+        if(d.error){listEl.innerHTML='<span class="err">'+esc(d.error)+'</span>';countEl.textContent='—';totalEl.textContent='';return;}
+        // Headline reflects TOTAL stored memory. The recent-window count is
+        // unavailable on the library backend, so a bare "0" here misreads as
+        // "nothing remembered" while tens of thousands of memories exist (#2358).
+        const memTotal=Number(d.total)||0;
+        countEl.textContent=memTotal;
+        totalEl.textContent='';
         if(!d.items||d.items.length===0){
-          listEl.innerHTML='<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          if(memTotal>0){
+            // Per-item recent listing is unavailable on the library backend, so
+            // we can't honestly claim the last hour was empty — state the total.
+            // The recent-window wording is used only when that window is known.
+            listEl.innerHTML=(d.available===false)
+              ?'<span style="color:#8b949e">Recent-memory list isn\'t available yet — '+memTotal+' total stored.</span>'
+              :'<span style="color:#8b949e">No new memories in the last hour — '+memTotal+' total stored.</span>';
+          }else{
+            listEl.innerHTML='<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          }
           return;
         }
         const catColors={'Learned fact':'#58a6ff','Past event':'#3fb950','Current task context':'#f0883e','How-to knowledge':'#a371f7','Planned reminder':'#d29922','Recent observation':'#8b949e'};

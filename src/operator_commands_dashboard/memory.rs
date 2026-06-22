@@ -235,9 +235,18 @@ pub(crate) async fn memory_history() -> Json<Value> {
 /// rather than reading the abandoned native store. Aggregate counts remain
 /// available via `GET /api/memory/history`.
 pub(crate) async fn memory_recent() -> Json<Value> {
+    // Per-item recent listing is unavailable on the library backend, but the
+    // aggregate total IS knowable via statistics. Surface it so the Memory tab
+    // headline can't read "nothing stored" while tens of thousands of memories
+    // exist (#2358).
+    let state_root = resolve_state_root();
+    let total = open_reader_bridge(&state_root)
+        .and_then(|reader| reader.ops().get_statistics())
+        .map(|s| s.total())
+        .unwrap_or(0);
     Json(json!({
         "items": [],
-        "total": 0,
+        "total": total,
         "last_hour_count": 0,
         "available": false,
         "note": "Per-item recent-memory listing is unavailable on the library \
