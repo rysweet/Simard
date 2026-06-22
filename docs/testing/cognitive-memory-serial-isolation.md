@@ -318,7 +318,7 @@ src/test_support/serial_guard.rs
 | `every_env_mutating_test_is_serialized()` | `#[test]` | The enforcement test. Calls `audit_env_mutating_tests` with the shipped `AuditOptions::default()` and asserts the offender list is empty, printing a remediation report when it is not. |
 | `AuditOptions` | `pub(crate) struct` | Configuration (watched variables, scanned roots, exclusions, allowlist). |
 | `Offender` | `pub(crate) struct` | `{ file: PathBuf, line: usize, test_name: String, reason: Reason }`. |
-| `Reason` | `pub(crate) enum` | `MutatesEnv { var }`, `ReadsStateRootDefault`, `ConstructsHermeticState`, `CallsEnvReadingGoalHandler { handler }`, `EmptyAllowlistJustification`. |
+| `Reason` | `pub(crate) enum` | `MutatesEnv { var }`, `ReadsStateRootDefault`, `ConstructsHermeticState`, `CallsEnvReadingHandler { handler }`, `EmptyAllowlistJustification`. |
 
 ### Parsing strategy
 
