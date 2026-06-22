@@ -1,13 +1,37 @@
 name: "Cross-Session Cognitive Memory Recall"
 description: >
   Outside-in gate for issue #1916: verifies that cognitive memory written by
-  Session A survives process exit and is fully recallable by Session B via the
-  snapshot recovery ladder. Also covers the corruption-recovery path from
-  issue #1710 (backup-restore ordering fix).
-version: "1.0.0"
+  one process (Session A) survives process exit and is fully recallable by a
+  *separate* process (Session B) through the on-disk "direct open" recovery
+  tier — the same path the operator uses against a live store when the OODA
+  memory daemon is down.
+
+  Repointed for issue #2344. The original target
+  `cargo test --test cognitive_memory_cross_session_recall` was deleted by the
+  de-fork (#2308 — native cognitive-memory fork removed, amplihack-memory-lib is
+  now the sole backend) and the scenario was never updated, leaving this gate
+  dead (it failed at step 1 with "no test target named …"). It now drives the
+  live process-boundary integration suite `tests/bin_simard_memory_cli.rs`: a
+  library writer seeds an on-disk store, drops it (releasing the file lock), and
+  a separate `simard` binary opens the same DB and recalls the data.
+
+  Step 1 proves the clean cross-session path: every one of the six cognitive
+  memory types written by the writer process is recalled by the reader process
+  via the direct-open tier. Step 2 proves durable graph edges (DERIVES_FROM
+  provenance) and snapshot dedup survive the same process boundary
+  (#2331 / #2332).
+
+  The raw byte-level corruption-recovery path formerly asserted here
+  (#1710, `cross_session_recall_survives_db_corruption_via_snapshot`) was a test
+  of the native store and was deleted with it by #2308. Catalog-corruption
+  recovery now lives in the amplihack-memory-lib durability suite (landed via
+  the #2335 dependency bump) and is no longer a Simard test target, so this gate
+  guards the durable-recall-survives-process-boundary capability that Simard
+  still owns directly.
+version: "1.1.0"
 
 config:
-  timeout: 120000
+  timeout: 300000
   retries: 1
   parallel: false
 
@@ -19,7 +43,7 @@ agents:
     type: "cli"
     config:
       workingDirectory: "."
-      defaultTimeout: 120000
+      defaultTimeout: 300000
       executionMode: "spawn"
       captureOutput: true
       ioConfig:
@@ -31,30 +55,52 @@ agents:
         logLevel: "info"
 
 steps:
-  - name: "Cross-session recall — clean path (session A writes, session B reads)"
+  - name: "Cross-session recall — clean path (writer process seeds, reader process recalls all six types)"
     agent: "test-agent"
     action: "execute_command"
     params:
       command: >
-        cargo test --test cognitive_memory_cross_session_recall
-        cognitive_memory_cross_session_recall
+        cargo test --test bin_simard_memory_cli
+        stats_json_reports_every_populated_type_via_direct_open
         -- --nocapture --test-threads=1
-    timeout: 120000
+    timeout: 300000
     expect:
       exitCode: 0
       outputContains:
-        - "test cognitive_memory_cross_session_recall ... ok"
+        - "test stats_json_reports_every_populated_type_via_direct_open ... ok"
 
-  - name: "Cross-session recall — corruption-recovery path (#1710 + #1916)"
+  - name: "Cross-session recall — durable edges + snapshot dedup survive the process boundary (#2331 / #2332)"
     agent: "test-agent"
     action: "execute_command"
     params:
       command: >
-        cargo test --test cognitive_memory_cross_session_recall
-        cross_session_recall_survives_db_corruption_via_snapshot
+        cargo test --test bin_simard_memory_cli
+        stats_shows_edges_and_dedup_section_via_direct_open
         -- --nocapture --test-threads=1
-    timeout: 120000
+    timeout: 300000
     expect:
       exitCode: 0
       outputContains:
-        - "test cross_session_recall_survives_db_corruption_via_snapshot ... ok"
+        - "test stats_shows_edges_and_dedup_section_via_direct_open ... ok"
+
+assertions: []
+
+cleanup:
+  - name: "Test agent cleanup"
+    agent: "test-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "cognitive-memory"
+    - "cross-session-recall"
+    - "durability"
+    - "graph-edges"
+    - "dedup"
+    - "regression"
+    - "issue-1916"
+    - "issue-2344"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
