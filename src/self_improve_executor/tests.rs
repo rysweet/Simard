@@ -180,6 +180,7 @@ fn run_autonomous_improvement_empty_proposals() {
     assert!(results.is_empty());
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn run_autonomous_improvement_planning_unavailable() {
     unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
@@ -200,6 +201,7 @@ fn run_autonomous_improvement_planning_unavailable() {
     }
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn run_autonomous_improvement_continues_on_non_critical_plan_failure() {
     unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
@@ -321,6 +323,7 @@ fn approval_policy_display_auto() {
     assert_eq!(p.to_string(), "auto-approve (justification: sandbox test)");
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn auto_approve_policy_allows_execution() {
     // When auto-approve is set, proposals should NOT get ApprovalRequired.

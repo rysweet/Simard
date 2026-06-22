@@ -342,7 +342,7 @@ mod tests {
     // thread-safe, so a concurrent mutate/read tears (e.g. this `is_none()`
     // assertion observing the var removed by `..._returns_some_when_enabled`).
     // All tests touching the var share the `update_check_env` key.
-    #[serial_test::serial(update_check_env)]
+    #[serial_test::serial(update_check_env, cognitive_memory)]
     fn run_update_check_background_returns_receiver() {
         // With check disabled, returns None
         unsafe { std::env::set_var("SIMARD_NO_UPDATE_CHECK", "1") };
@@ -353,7 +353,7 @@ mod tests {
     // ── F1: fire-and-forget (no join) ──────────────────────────────
 
     #[test]
-    #[serial_test::serial(update_check_env)]
+    #[serial_test::serial(update_check_env, cognitive_memory)]
     fn run_update_check_returns_immediately_when_disabled() {
         unsafe { std::env::set_var("SIMARD_NO_UPDATE_CHECK", "1") };
         let start = std::time::Instant::now();
@@ -384,7 +384,7 @@ mod tests {
     // ── F2: background channel returns Some when enabled ───────────
 
     #[test]
-    #[serial_test::serial(update_check_env)]
+    #[serial_test::serial(update_check_env, cognitive_memory)]
     fn run_update_check_background_returns_some_when_enabled() {
         unsafe { std::env::remove_var("SIMARD_NO_UPDATE_CHECK") };
         let rx = run_update_check_background();

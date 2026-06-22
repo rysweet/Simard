@@ -60,7 +60,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn green_with_no_color_returns_plain() {
         with_no_color(|| {
             assert_eq!(green("hello"), "hello");
@@ -68,7 +68,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn yellow_with_no_color_returns_plain() {
         with_no_color(|| {
             assert_eq!(yellow("warn"), "warn");
@@ -76,7 +76,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn cyan_with_no_color_returns_plain() {
         with_no_color(|| {
             assert_eq!(cyan("info"), "info");
@@ -84,7 +84,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn green_without_no_color_contains_escape() {
         without_no_color(|| {
             let result = green("ok");
@@ -98,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn yellow_without_no_color_contains_escape() {
         without_no_color(|| {
             let result = yellow("warn");
@@ -110,7 +110,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn cyan_without_no_color_contains_escape() {
         without_no_color(|| {
             let result = cyan("section");

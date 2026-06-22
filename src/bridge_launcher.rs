@@ -165,6 +165,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn resolve_packs_dir_uses_env_override() {
         let original = std::env::var("SIMARD_PACKS_DIR").ok();

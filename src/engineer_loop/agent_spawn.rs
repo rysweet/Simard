@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_amplihack_bin_env)]
+    #[serial(simard_amplihack_bin_env, cognitive_memory)]
     fn amplihack_binary_respects_env_override() {
         // Use a sentinel value that is not a real binary; verify the function
         // honours the override regardless of whether the file exists.
@@ -532,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_amplihack_bin_env)]
+    #[serial(simard_amplihack_bin_env, cognitive_memory)]
     fn run_rustyclawd_subprocess_propagates_spawn_failure() {
         // Override binary to a path that does not exist; spawn must fail with
         // ActionExecutionFailed (not panic, not block).
@@ -571,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_engineer_agent_env)]
+    #[serial(simard_engineer_agent_env, cognitive_memory)]
     fn agent_kind_from_env_defaults_to_copilot() {
         // Shares the `simard_engineer_agent_env` named lock with the sibling
         // tests below that also mutate `SIMARD_ENGINEER_AGENT`, so a
@@ -590,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_engineer_agent_env)]
+    #[serial(simard_engineer_agent_env, cognitive_memory)]
     fn agent_kind_from_env_recognises_rustyclawd_explicitly() {
         let original = std::env::var("SIMARD_ENGINEER_AGENT").ok();
         for raw in [
@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_engineer_agent_env)]
+    #[serial(simard_engineer_agent_env, cognitive_memory)]
     fn agent_kind_from_env_recognises_copilot_case_insensitive() {
         let original = std::env::var("SIMARD_ENGINEER_AGENT").ok();
         for raw in ["copilot", "Copilot", "COPILOT", "  copilot  "] {
@@ -632,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_engineer_agent_env)]
+    #[serial(simard_engineer_agent_env, cognitive_memory)]
     fn agent_kind_from_env_unknown_falls_back_to_default() {
         let original = std::env::var("SIMARD_ENGINEER_AGENT").ok();
         unsafe {

@@ -697,6 +697,7 @@ mod tests {
         assert!(!path.exists(), "default Drop must delete the transcript");
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn env_secs_returns_default_when_unset() {
         // Use a uniquely named env var so we know it's unset.
@@ -706,6 +707,7 @@ mod tests {
         assert_eq!(env_secs(&var, 42), 42);
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn env_secs_returns_parsed_value_when_set() {
         let var = format!("SIMARD_ENV_SECS_TEST_{}", uuid::Uuid::now_v7().simple());
@@ -714,6 +716,7 @@ mod tests {
         unsafe { std::env::remove_var(&var) };
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn env_secs_returns_default_when_unparseable() {
         let var = format!("SIMARD_ENV_SECS_TEST_{}", uuid::Uuid::now_v7().simple());

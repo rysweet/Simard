@@ -100,6 +100,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn install_hooks_skips_silently_when_binary_missing() {
         let dir = tempfile::tempdir().unwrap();

@@ -416,6 +416,7 @@ mod tests_ooda_config {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_creates_scaler_when_scaling_auto() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -428,6 +429,7 @@ mod tests_ooda_config {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_no_scaler_when_scaling_fixed() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -440,6 +442,7 @@ mod tests_ooda_config {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_no_scaler_when_scaling_unset() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -454,6 +457,7 @@ mod tests_ooda_config {
     // Issue #2327 (RED): the automatic promotion scheduler is configured via
     // two new OodaConfig fields. With the env overrides unset, they default to
     // the canonical 25-episode threshold and 50-cycle interval.
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_default_distill_thresholds() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -470,6 +474,7 @@ mod tests_ooda_config {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_auto_scaler_ceiling_is_4x_max() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -486,6 +491,7 @@ mod tests_ooda_config {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_auto_scaler_adjust_returns_within_bounds() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -504,6 +510,7 @@ mod tests_ooda_config {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_scaler_skipped_on_serde_roundtrip() {
         let _lock = ENV_LOCK.lock().unwrap();
