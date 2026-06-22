@@ -60,7 +60,7 @@ pre-commit `cargo test`.
 
 ### Mechanism
 
-`HermeticState` ([`src/test_support/hermetic.rs`](../../src/test_support/hermetic.rs))
+`HermeticState` (`src/test_support/hermetic.rs`)
 pins the process environment for its lifetime:
 
 ```text
@@ -178,7 +178,7 @@ if**, at run time, it does any of:
   explicit tempdir `state_root`, mutates and reads **no** process-global env,
   and the open API derives its socket purely from the passed path. Such a test
   is isolated by construction. (Threading the explicit path is the preferred
-  defense-in-depth — see [Explicit-path threading](#explicit-path-threading).)
+  defense-in-depth — see [Explicit-path threading](#4-explicit-path-threading).)
 
 ### Scope: which test binary
 
@@ -217,7 +217,7 @@ parallelism they had.
 > Rule of thumb: **never remove** an existing key when adding `cognitive_memory`.
 > Append it. Removing a key silently widens concurrency for the original group.
 
-### Bare `#[serial]` → keyed: the safety check {#bare-keyed-safety-check}
+### Bare `#[serial]` → keyed: the safety check
 
 Converting a bare `#[serial]` (key `""`) test to
 `#[serial(cognitive_memory)]` **drops** its mutual exclusion with the other
@@ -409,7 +409,7 @@ exemptions cannot be added silently.
 |-----|---------|
 | `cognitive_memory` | The canonical key for "this test touches process-global env and/or cognitive memory." Required by the Annotation Decision Rule. |
 | `simard_meetings_dir_env`, `prompt_delivery_env`, `simard_disk_pressure_env`, … | Pre-existing **semantic** groups. Keep them; **append** `cognitive_memory` rather than replacing. |
-| `""` (bare `#[serial]`) | Legacy catch-all. For env mutators, migrate to `cognitive_memory` after the [bare→keyed safety check](#bare-keyed-safety-check). |
+| `""` (bare `#[serial]`) | Legacy catch-all. For env mutators, migrate to `cognitive_memory` after the [bare→keyed safety check](#bare-serial-keyed-the-safety-check). |
 
 ---
 
@@ -438,7 +438,7 @@ The fix also corrects a **stale doc-comment** on the private `EnvBinding`
 helper. The comment that ships today claims tests can "drop their per-file
 `EnvGuard` copies and import this one instead" — but `EnvBinding` is
 module-private and stays that way, because the migration is **annotation-only**
-(see [Example 2](#annotate-home-only)). The corrected comment describes
+(see [Example 2](#2-annotate-a-test-that-only-mutates-home)). The corrected comment describes
 `EnvBinding` as the helper's *internal* env save/restore mechanism and no
 longer implies an importable shared guard, so the source matches reality: of
 the env helpers, `HermeticState` — not `EnvBinding` — is the one
@@ -470,7 +470,7 @@ fn promotes_backlog_item_into_active() {
 }
 ```
 
-### 2. Annotate a test that only mutates `HOME` {#annotate-home-only}
+### 2. Annotate a test that only mutates `HOME`
 
 A test that never touches cognitive memory but sets `HOME` is **still** in
 scope — its `set_var` can tear another test's `SIMARD_STATE_ROOT` read. The
@@ -500,7 +500,7 @@ fn cap_home_cargo_targets_under_cap_is_noop() {
 #[serial_test::serial(simard_meetings_dir_env, cognitive_memory)]
 ```
 
-### 4. Explicit-path threading {#explicit-path-threading}
+### 4. Explicit-path threading
 
 The preferred defense-in-depth: prefer the **explicit-`state_root`** entry
 points over the env-reading async route handlers, so the test no longer depends
@@ -532,7 +532,7 @@ halves can never observe different roots.
 1. Read the offender line — it names the file, line, test, and reason.
 2. If the test really touches env: add `#[serial_test::serial(cognitive_memory)]`
    (or append the key to an existing annotation), running the
-   [bare→keyed safety check](#bare-keyed-safety-check) if it was a
+   [bare→keyed safety check](#bare-serial-keyed-the-safety-check) if it was a
    bare `#[serial]`.
 3. If the test can be made isolated-by-construction instead: thread an explicit
    `state_root` and remove the env mutation, so it falls under the exclusions.
