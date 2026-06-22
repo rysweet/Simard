@@ -326,7 +326,7 @@ fn corrupt_db_removed_when_older_than_threshold() {
 // ── clean_simard_canaries ──
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn clean_simard_canaries_removes_old_matching_only() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
@@ -404,7 +404,7 @@ fn clean_simard_canaries_missing_base_is_noop() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn clean_simard_canaries_records_error_when_removal_fails() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();
@@ -444,7 +444,7 @@ fn clean_simard_canaries_records_error_when_removal_fails() {
 // ── clean_stale_cargo_targets ──
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn clean_stale_cargo_targets_skips_configured_target() {
     // Point CARGO_TARGET_DIR at one hard-coded candidate so the function
     // `continue`s past it; the other candidate ("/tmp/cargo-target") is

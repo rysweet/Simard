@@ -780,7 +780,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    #[serial(prompt_delivery_env)]
+    #[serial(prompt_delivery_env, cognitive_memory)]
     #[cfg_attr(miri, ignore)]
     fn select_mode_env_override_only_for_auto() {
         // SAFETY (Rust 2024): set_var / remove_var require `unsafe` because
@@ -1258,7 +1258,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    #[serial(prompt_delivery_env)]
+    #[serial(prompt_delivery_env, cognitive_memory)]
     fn select_mode_env_auto_falls_through_to_heuristic() {
         unsafe {
             std::env::set_var(ENV_OVERRIDE, "auto");
@@ -1275,7 +1275,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(prompt_delivery_env)]
+    #[serial(prompt_delivery_env, cognitive_memory)]
     fn select_mode_env_inline_with_nul_errors() {
         unsafe {
             std::env::set_var(ENV_OVERRIDE, "inline");

@@ -10,10 +10,14 @@
 //! `operator_commands_dashboard::tests_goals_crud::full_goal_lifecycle_crud`.
 //!
 //! The fix is a single rule (the "Annotation Decision Rule"): every lib-binary
-//! test that mutates or reads the cognitive-memory state-root environment, or
-//! opens cognitive memory at the env-derived default path, MUST carry the
-//! `cognitive_memory` serial key so env mutation is never concurrent with an
-//! env read.
+//! test that mutates *any* process-global environment variable, or reads the
+//! cognitive-memory state-root environment / opens cognitive memory at the
+//! env-derived default path, MUST carry the `cognitive_memory` serial key so an
+//! env mutation is never concurrent with an env read. Enforcement was widened
+//! from the state-root surface to every variable in issue
+//! [#2375](https://github.com/rysweet/Simard/issues/2375): a `setenv` on *any*
+//! name can `realloc(environ)` and free the array a concurrent `getenv` is
+//! mid-read, so the writer and reader need not touch the same variable to race.
 //!
 //! This module parses the source tree with `syn` (AST-based, robust to
 //! multi-line attributes, ordering, raw strings, and `#[cfg]` gating) and fails
@@ -92,7 +96,8 @@ const ENV_READING_HANDLERS: &[&str] = &[
 /// Which env-var mutations trip the rule.
 #[derive(Debug, Clone)]
 pub(crate) enum EnvWatch {
-    /// The shipped default: the cognitive-memory state-root resolution surface
+    /// The legacy narrower policy (the default before #2375): the
+    /// cognitive-memory state-root resolution surface
     /// — the variables `resolve_state_root()` / `socket_path_for` consult
     /// (`SIMARD_STATE_ROOT`, `SIMARD_MEMORY_SOCKET`, and the `HOME` fallback),
     /// plus `SIMARD_LLM_PROVIDER` (the dashboard agent-session / provider
@@ -111,9 +116,11 @@ pub(crate) enum EnvWatch {
     StateRootSurface,
     /// Watch a specific set of variable names.
     Vars(BTreeSet<String>),
-    /// Fully var-agnostic: any process-global mutation trips the rule. NOT the
-    /// default — enabling it requires migrating the broader env-mutating test
-    /// surface first (tracked follow-up; see the design doc).
+    /// Fully var-agnostic: any process-global mutation trips the rule. This is
+    /// the shipped default since issue #2375 — a `setenv` on any name may
+    /// `realloc`/free the whole `environ`, so every env writer must be mutually
+    /// exclusive with every cognitive-memory env reader, regardless of which
+    /// variable it touches.
     AnyVar,
 }
 
@@ -160,7 +167,7 @@ impl Default for AuditOptions {
         Self {
             roots: vec![PathBuf::from("src")],
             excluded_prefixes: vec!["src/bin".to_string()],
-            watched: EnvWatch::StateRootSurface,
+            watched: EnvWatch::AnyVar,
             allowlist: Vec::new(),
         }
     }
@@ -657,9 +664,10 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 // The enforcement test
 // ---------------------------------------------------------------------------
 
-/// Fails the build if any hand-written lib-binary test mutates or reads the
-/// cognitive-memory state-root environment (or opens cognitive memory at the
-/// env-derived default path) without the `cognitive_memory` serial key.
+/// Fails the build if any hand-written lib-binary test mutates *any*
+/// process-global env var, or reads the cognitive-memory state-root environment
+/// (or opens cognitive memory at the env-derived default path), without the
+/// `cognitive_memory` serial key.
 ///
 /// This meta-test reads source files only; it touches no env and no cognitive
 /// memory, so it intentionally carries NO serial key.
@@ -672,8 +680,8 @@ fn every_env_mutating_test_is_serialized() {
 
     let mut report = String::new();
     report.push_str(&format!(
-        "serial-guard: {} test(s) mutate or read the cognitive-memory state-root \
-env without the `{REQUIRED_KEY}` serial key.\n\
+        "serial-guard: {} test(s) mutate a process-global env var (or read the \
+cognitive-memory state-root env) without the `{REQUIRED_KEY}` serial key.\n\
 Every such test in the lib binary must share that key so env mutation is never \
 concurrent with an env read.\n\
 See docs/testing/cognitive-memory-serial-isolation.md.\n\n",
@@ -692,4 +700,80 @@ See docs/testing/cognitive-memory-serial-isolation.md.\n\n",
         ));
     }
     panic!("{report}");
+}
+
+/// Regression guard for issue
+/// [#2375](https://github.com/rysweet/Simard/issues/2375): the production audit
+/// must treat *every* process-global env mutation as a race against the
+/// cognitive-memory state-root reader (`EnvWatch::AnyVar`), not only the
+/// state-root surface — a `setenv` on any variable can `realloc`/free the whole
+/// `environ` array while a concurrent `getenv` of `SIMARD_STATE_ROOT`/`HOME` is
+/// mid-read. This pins the shipped default and proves an unrelated env writer in
+/// another concurrent test "session" is isolated from the cognitive-memory
+/// readers only when it shares the `cognitive_memory` serial key.
+///
+/// Reads in-memory source fixtures only; it mutates no env, so it carries no
+/// serial key (and the meta-test above does not flag it).
+#[test]
+fn anyvar_default_isolates_every_env_writer_across_sessions() {
+    // The shipped production policy must stay var-agnostic, so no future edit
+    // can silently narrow it back to the state-root surface.
+    assert!(
+        matches!(AuditOptions::default().watched, EnvWatch::AnyVar),
+        "production guard must watch AnyVar so no env writer can race a \
+         cognitive-memory state-root read"
+    );
+
+    // Two fixtures model a second concurrent session that mutates an *unrelated*
+    // (non-state-root) variable: one missing the key, one carrying it.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("fixture.rs"),
+        "#[test]\n\
+         #[serial]\n\
+         fn unrelated_writer_without_key() {\n\
+         unsafe { std::env::set_var(\"SOME_UNRELATED_VAR\", \"x\"); }\n\
+         }\n\
+         #[test]\n\
+         #[serial_test::serial(cognitive_memory)]\n\
+         fn unrelated_writer_with_key() {\n\
+         unsafe { std::env::set_var(\"SOME_UNRELATED_VAR\", \"x\"); }\n\
+         }\n",
+    )
+    .unwrap();
+
+    let opts = AuditOptions {
+        roots: vec![dir.path().to_path_buf()],
+        excluded_prefixes: Vec::new(),
+        watched: EnvWatch::AnyVar,
+        allowlist: Vec::new(),
+    };
+    let flagged: BTreeSet<String> = audit_env_mutating_tests(&opts)
+        .into_iter()
+        .map(|o| o.test_name)
+        .collect();
+    assert!(
+        flagged.contains("unrelated_writer_without_key"),
+        "AnyVar must flag an unrelated env writer lacking the key: {flagged:?}"
+    );
+    assert!(
+        !flagged.contains("unrelated_writer_with_key"),
+        "a writer sharing the cognitive_memory key must be accepted: {flagged:?}"
+    );
+
+    // Sanity: under the pre-#2375 state-root-only policy the same unrelated
+    // writer slipped through — this is precisely the residual class #2375 closes.
+    let legacy = AuditOptions {
+        watched: EnvWatch::StateRootSurface,
+        ..opts.clone()
+    };
+    let legacy_flagged: BTreeSet<String> = audit_env_mutating_tests(&legacy)
+        .into_iter()
+        .map(|o| o.test_name)
+        .collect();
+    assert!(
+        !legacy_flagged.contains("unrelated_writer_without_key"),
+        "pre-#2375 StateRootSurface policy must ignore unrelated vars: \
+         {legacy_flagged:?}"
+    );
 }

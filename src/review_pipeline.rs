@@ -352,6 +352,7 @@ mod tests {
         let deserialized: ReviewFinding = serde_json::from_str(&json).unwrap();
         assert_eq!(f, deserialized);
     }
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn review_session_open_without_api_key_does_not_panic() {
         unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };

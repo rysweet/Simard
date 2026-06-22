@@ -213,6 +213,7 @@ mod tests {
         assert!(matches!(err, SafeUpdateError::SwapFailed { .. }));
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn do_swap_writes_exec_handover_status_when_handover_skipped() {
         // Force the handover to be skipped so the test can observe state_dir.
