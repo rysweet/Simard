@@ -284,9 +284,12 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
         const d=await apiFetch('/api/memory/recent');
         if(d.error){listEl.innerHTML='<span class="err">'+esc(d.error)+'</span>';countEl.textContent='—';return;}
         countEl.textContent=d.last_hour_count;
-        totalEl.textContent=d.total+' total';
+        totalEl.textContent=(d.total||0).toLocaleString()+' total';
         if(!d.items||d.items.length===0){
-          listEl.innerHTML='<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          const total=d.total||0;
+          listEl.innerHTML=total>0
+            ?'<span style="color:#8b949e">No new memories in the last hour — '+total.toLocaleString()+' total stored.</span>'
+            :'<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
           return;
         }
         const catColors={'Learned fact':'#58a6ff','Past event':'#3fb950','Current task context':'#f0883e','How-to knowledge':'#a371f7','Planned reminder':'#d29922','Recent observation':'#8b949e'};
