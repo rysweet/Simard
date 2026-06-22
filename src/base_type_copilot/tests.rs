@@ -1133,11 +1133,11 @@ fn open_session_with_native_enrichment_populates_bridges() {
         .expect("session must open with enrichment");
 
     assert!(
-        session.memory_bridge.is_some(),
+        session.enrichment.memory.is_some(),
         "open_session must wire the memory bridge when enrichment is Native"
     );
     assert!(
-        session.knowledge_bridge.is_some(),
+        session.enrichment.knowledge.is_some(),
         "open_session must wire the knowledge bridge when enrichment is Native"
     );
 }
@@ -1152,11 +1152,11 @@ fn open_session_without_enrichment_leaves_bridges_none() {
         .expect("session must open without enrichment");
 
     assert!(
-        session.memory_bridge.is_none(),
+        session.enrichment.memory.is_none(),
         "default adapter must not wire a memory bridge"
     );
     assert!(
-        session.knowledge_bridge.is_none(),
+        session.enrichment.knowledge.is_none(),
         "default adapter must not wire a knowledge bridge"
     );
 }

@@ -146,8 +146,8 @@ pub use base_type_ms_agent::ms_agent_framework_adapter;
 pub use base_type_pending_sdk::PendingSdkAdapter;
 pub use base_type_rustyclawd::RustyClawdAdapter;
 pub use base_type_turn::{
-    ProposedAction, TurnContext, TurnOutput, format_turn_input, parse_turn_output,
-    prepare_turn_context,
+    EnrichmentBridges, ProposedAction, TurnContext, TurnOutput, enrich_turn_input,
+    format_turn_input, parse_turn_output, prepare_turn_context,
 };
 pub use base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
