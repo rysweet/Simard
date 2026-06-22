@@ -569,12 +569,23 @@ mod tests {
     // ---- open_dashboard_agent_session ------------------------------------
 
     #[test]
+    // #2360: `open_dashboard_agent_session()` resolves the LLM provider from the
+    // env-derived state root (`SIMARD_LLM_PROVIDER`, then
+    // `<state_root>/config.toml`). Two isolation needs:
+    //   1. A `HermeticState` points the state root at a fresh, empty temp dir so
+    //      the assertion is deterministic regardless of the host's real
+    //      `~/.simard/config.toml` (which on a dev box may set `llm_provider`).
+    //   2. The `cognitive_memory` key (required by `HermeticState`, and shared
+    //      with the provider-env mutators in ooda_actions / disk_health /
+    //      self_improve) keeps a concurrent `SIMARD_LLM_PROVIDER` mutation from
+    //      tearing this read.
+    #[serial_test::serial(cognitive_memory)]
     fn open_agent_session_returns_none_without_provider_config() {
-        // Without LLM configuration, the function should return None
-        // gracefully rather than panicking.
+        // Empty hermetic state root → no config.toml → no provider configured
+        // there. Combined with SIMARD_LLM_PROVIDER being unset, provider
+        // resolution must fail and the session must be None.
+        let _hermetic = crate::test_support::HermeticState::new();
         let session = open_dashboard_agent_session();
-        // In CI/test environments without SIMARD_LLM_PROVIDER set,
-        // this should be None. If configured, it may be Some.
         if std::env::var("SIMARD_LLM_PROVIDER").is_err() {
             assert!(
                 session.is_none(),

@@ -1,0 +1,52 @@
+name: "Goal-CRUD serial(cognitive_memory) isolation (#2360)"
+description: "QA-team evidence for PR #2365 — re-runs the previously-flaky operator_commands_dashboard goal-CRUD + records-migration suites under a 16-thread runner together with the syn-based serial_guard regression meta-test and the hermetic dashboard provider reader, asserting deterministic green. Proves the #2360 env-tear flake is eliminated by complete serial(cognitive_memory) isolation of the state-root + provider surface."
+version: "1.0.0"
+
+config:
+  timeout: 900000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 900000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Goal-CRUD flake surface stays green under concurrent env mutation"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/goal-crud-serial-isolation.sh"
+    timeout: 900000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "dashboard"
+    - "goals"
+    - "test-isolation"
+    - "issue-2360"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

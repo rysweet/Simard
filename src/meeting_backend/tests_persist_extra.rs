@@ -90,7 +90,7 @@ fn extract_themes_skips_system_messages() {
 // ── write_handoff completeness test ─────────────────────────────
 
 #[test]
-#[serial(meeting_persist)]
+#[serial(meeting_persist, cognitive_memory)]
 fn write_handoff_includes_structured_data() {
     let dir = tempfile::tempdir().unwrap();
     unsafe {
@@ -160,7 +160,7 @@ fn write_handoff_includes_structured_data() {
 }
 
 #[test]
-#[serial(meeting_persist)]
+#[serial(meeting_persist, cognitive_memory)]
 fn write_handoff_empty_data_uses_defaults() {
     let dir = tempfile::tempdir().unwrap();
     unsafe {
@@ -245,7 +245,7 @@ fn populated_decisions() -> Vec<MeetingDecision> {
 /// basename and a `.json` extension, in the same directory as the markdown
 /// report. Markdown remains the canonical artifact; JSON is a side-effect.
 #[test]
-#[serial(meeting_persist)]
+#[serial(meeting_persist, cognitive_memory)]
 fn markdown_handoff_writes_json_sibling_with_same_basename() {
     let dir = tempfile::tempdir().unwrap();
     unsafe {
@@ -300,7 +300,7 @@ fn markdown_handoff_writes_json_sibling_with_same_basename() {
 /// - open_questions (Vec<String>)
 /// - transcript_ref (String)
 #[test]
-#[serial(meeting_persist)]
+#[serial(meeting_persist, cognitive_memory)]
 fn json_sibling_round_trips_all_fields_via_serde_json() {
     let dir = tempfile::tempdir().unwrap();
     unsafe {
@@ -408,7 +408,7 @@ fn json_sibling_round_trips_all_fields_via_serde_json() {
 /// `null`. Consumers (dashboards, downstream tools) iterate over these
 /// arrays and would crash on `null`.
 #[test]
-#[serial(meeting_persist)]
+#[serial(meeting_persist, cognitive_memory)]
 fn json_sibling_with_empty_extraction_serializes_empty_arrays_not_null() {
     let dir = tempfile::tempdir().unwrap();
     unsafe {
@@ -474,7 +474,7 @@ fn json_sibling_with_empty_extraction_serializes_empty_arrays_not_null() {
 /// readable by other users on the same host.
 #[cfg(unix)]
 #[test]
-#[serial(meeting_persist)]
+#[serial(meeting_persist, cognitive_memory)]
 fn json_sibling_has_owner_only_permissions_on_unix() {
     use std::os::unix::fs::PermissionsExt;
 

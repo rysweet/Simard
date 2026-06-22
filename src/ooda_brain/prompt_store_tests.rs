@@ -115,6 +115,7 @@ fn unknown_prompt_name_returns_empty_when_no_disk_file() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn env_var_takes_precedence_over_home() {
     let _g = ENV_LOCK.lock().unwrap();
     let saved_env = std::env::var_os(ENV_VAR);
@@ -141,6 +142,7 @@ fn env_var_takes_precedence_over_home() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn home_used_when_env_var_unset() {
     let _g = ENV_LOCK.lock().unwrap();
     let saved_env = std::env::var_os(ENV_VAR);

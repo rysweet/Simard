@@ -107,6 +107,10 @@ fn improvement_patch_construction() {
 }
 
 #[test]
+// #2360: mutates SIMARD_LLM_PROVIDER and ANTHROPIC_API_KEY (process-global).
+// Keyed into the cognitive_memory serial group so the mutation is never
+// concurrent with a provider/state-root env reader.
+#[serial_test::serial(cognitive_memory)]
 fn generate_patch_without_api_key_returns_unavailable() {
     // Force RustyClawd provider without ANTHROPIC_API_KEY → session may open
     // but run_turn will fail.

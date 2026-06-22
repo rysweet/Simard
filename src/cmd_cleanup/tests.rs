@@ -174,7 +174,7 @@ fn corrupt_db_retention_at_least_a_day() {
 // ── rotate_simard_binary_backups ──
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn rotate_keeps_newest_n_backups() {
     let tmp = tempfile::tempdir().unwrap();
     let bin_dir = tmp.path().join(".simard").join("bin");
@@ -224,7 +224,7 @@ fn rotate_keeps_newest_n_backups() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn rotate_noop_when_under_threshold() {
     let tmp = tempfile::tempdir().unwrap();
     let bin_dir = tmp.path().join(".simard").join("bin");
@@ -248,7 +248,7 @@ fn rotate_noop_when_under_threshold() {
 // ── trim_simard_snapshots ──
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn trim_snapshots_keeps_newest_n() {
     let tmp = tempfile::tempdir().unwrap();
     let snap_dir = tmp.path().join(".simard").join("snapshots");
@@ -287,7 +287,7 @@ fn trim_snapshots_keeps_newest_n() {
 // ── remove_old_corrupt_dbs ──
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn corrupt_db_removed_when_older_than_threshold() {
     let tmp = tempfile::tempdir().unwrap();
     let simard = tmp.path().join(".simard");
@@ -465,7 +465,7 @@ fn clean_stale_cargo_targets_skips_configured_target() {
 // ── cap_home_cargo_targets ──
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn cap_home_cargo_targets_rotates_lru_over_cap() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(".cargo-targets");
@@ -502,7 +502,7 @@ fn cap_home_cargo_targets_rotates_lru_over_cap() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn cap_home_cargo_targets_under_cap_is_noop() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(".cargo-targets");
@@ -527,7 +527,7 @@ fn cap_home_cargo_targets_under_cap_is_noop() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn cap_home_cargo_targets_missing_root_is_noop() {
     let tmp = tempfile::tempdir().unwrap();
     // No ~/.cargo-targets directory -> read_dir Err -> early return.
@@ -545,7 +545,7 @@ fn cap_home_cargo_targets_missing_root_is_noop() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn cap_home_cargo_targets_records_error_on_unremovable_target() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();

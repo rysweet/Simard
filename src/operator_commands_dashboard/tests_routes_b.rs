@@ -385,6 +385,7 @@ mod tests_b {
     /// the synthetic entries — proving the tmux route would see the same
     /// host set as the Topology / Remote-VMs panels.
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn host_enumeration_reads_load_hosts() {
         use std::io::Write;
 

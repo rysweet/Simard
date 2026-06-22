@@ -9,6 +9,7 @@ owner: simard
 doc_type: reference
 related:
   - ./hermetic-tests.md
+  - ./cognitive-memory-serial-isolation.md
   - ./COVERAGE_BASELINE.md
   - ../reference/meeting-backend-api.md
   - ../operations/meeting-handoffs.md

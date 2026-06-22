@@ -103,6 +103,13 @@ dashboard-audit = ["dep:headless_chrome", "dep:regex", "dep:url"]
 assert_cmd = "=2.2.1"
 proptest = "=1.11.0"
 serial_test = "=3.4.0"
+# Used only by the `serial_guard` regression meta-test (issue #2360) to parse
+# the source tree and enforce the `serial(cognitive_memory)` contract. Both are
+# already in the dependency graph transitively (pinned to the locked versions);
+# this only promotes them to explicit dev-deps and enables the features the
+# AST scan needs. `span-locations` gives the scan accurate file:line offenders.
+syn = { version = "=2.0.117", features = ["full", "visit"] }
+proc-macro2 = { version = "=1.0.106", features = ["span-locations"] }
 
 [profile.release]
 lto = "thin"
