@@ -557,6 +557,51 @@ The `self_metrics` writers are reached only through the same-file
 `with_temp_home` helper; the guard's two-pass call-graph propagation is what
 surfaces them — a text scan of the test bodies would miss them.
 
+### Provider surface (#2360 follow-up, demonstrated)
+
+After the initial 19-writer migration, full-suite stress runs surfaced the
+`SIMARD_LLM_PROVIDER` surface as a second demonstrated race — adjacent to
+`SIMARD_STATE_ROOT` but driven by the provider-resolution path
+(`RuntimeConfig::load` → `SIMARD_LLM_PROVIDER`, then `<state_root>/config.toml`).
+These were demonstrated flakes, so they are migrated here and the guard is
+extended to enforce them symmetrically.
+
+| File | Test | Role | Now |
+|------|------|------|-----|
+| `ooda_actions/session.rs` | `dispatch_launch_session_fails_loud_on_unsupported_rustyclawd_1162` | writes `SIMARD_LLM_PROVIDER` (had a **false** "cargo is single-threaded" safety comment) | `#[serial_test::serial(cognitive_memory)]` |
+| `disk_health.rs` | `run_returns_error_when_recipe_runner_unavailable_or_recipe_invalid` | writes `SIMARD_LLM_PROVIDER` | bare `#[serial]` → `#[serial(cognitive_memory)]` |
+| `self_improve_executor/tests.rs` | `generate_patch_without_api_key_returns_unavailable` | writes `SIMARD_LLM_PROVIDER` / `ANTHROPIC_API_KEY` | `#[serial_test::serial(cognitive_memory)]` |
+| `operator_commands_dashboard/chat.rs` | `open_agent_session_returns_none_without_provider_config` | **reads** the provider surface via `open_dashboard_agent_session()` | `HermeticState` + `#[serial_test::serial(cognitive_memory)]` |
+
+The guard now watches `SIMARD_LLM_PROVIDER` on **both** sides (mutation and
+direct read), so all four tests are enforced symmetrically.
+
+**The chat reader needed more than a serial key.** Its assertion ("session is
+`None` when `SIMARD_LLM_PROVIDER` is unset") silently assumed *no* provider was
+configured anywhere — but `open_dashboard_agent_session()` also reads
+`<state_root>/config.toml`, and a developer box's real `~/.simard/config.toml`
+sets `llm_provider = "copilot"`. That made the test environment-dependent (it
+passed in clean CI but flaked locally). The fix gives it a `HermeticState`
+(fresh, empty state root → no `config.toml`), so the assertion is now
+deterministic everywhere; the `cognitive_memory` key additionally prevents a
+concurrent provider-env mutation from tearing the read. The assertion is
+unchanged — only its environment is made hermetic.
+
+**Why a serial key alone is not enough for a reader:** a keyed serial group only
+serializes tests *within* the group. A plain (unannotated) reader in cargo's
+parallel pool still overlaps the group's mutations, so the *readers* above must
+share the key too — not just the writers.
+
+> **Out of scope — `base_type_copilot` meeting tests.** These spawn the **real**
+> `copilot` subprocess and only run when the binary is on `PATH` (they skip in
+> CI). They exhibit two distinct intermittent failures: (a) "No authentication
+> information found" — a `HOME`-tear that the migrated `HOME` writers above
+> already prevent from overlapping; and (b) "Authentication failed (Request
+> ID …)" — a **live GitHub Copilot API rejection** (rate-limit / token), which
+> no test-isolation change can fix. Because they are live-integration tests that
+> skip in CI and carry an irreducible external-service flake, they are left
+> unannotated and out of #2360's scope.
+
 **Audited but deliberately NOT migrated** (the guard correctly leaves them
 unkeyed because they are isolated by construction, per the
 [exclusions](#annotation-decision-rule)):

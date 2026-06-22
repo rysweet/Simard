@@ -35,12 +35,20 @@ use syn::{Attribute, Expr, ExprCall, ExprStruct, ItemFn, Lit, Meta};
 /// The serial key that serializes every cognitive-memory env reader/writer.
 const REQUIRED_KEY: &str = "cognitive_memory";
 
-/// State-root / socket variables whose *read* can be torn by a concurrent
-/// mutation — the reads that actually surfaced the #2360 flake. `HOME` is NOT
-/// here: a torn *read* of `HOME` is not the cognitive-memory race; only a
-/// *write* to `HOME` (which can tear a `SIMARD_STATE_ROOT` read) is in scope,
+/// State-root / provider variables whose *read* can be torn by a concurrent
+/// mutation — the reads that actually surfaced the #2360 flake.
+/// `SIMARD_LLM_PROVIDER` is included because the dashboard agent-session
+/// resolver (`open_dashboard_agent_session`) and the
+/// `open_agent_session_returns_none_without_provider_config` test read it, and
+/// the `ooda_actions` / `self_improve` / `disk_health` tests mutate it. `HOME`
+/// is NOT here: a torn *read* of `HOME` is not the cognitive-memory race; only
+/// a *write* to `HOME` (which can tear a `SIMARD_STATE_ROOT` read) is in scope,
 /// and writes are handled by [`EnvWatch`].
-const READ_WATCHED_VARS: &[&str] = &["SIMARD_STATE_ROOT", "SIMARD_MEMORY_SOCKET"];
+const READ_WATCHED_VARS: &[&str] = &[
+    "SIMARD_STATE_ROOT",
+    "SIMARD_MEMORY_SOCKET",
+    "SIMARD_LLM_PROVIDER",
+];
 
 /// Env-reading async dashboard route handlers from
 /// `operator_commands_dashboard/goals.rs`. Each resolves the state root
@@ -62,9 +70,12 @@ const ENV_READING_GOAL_HANDLERS: &[&str] = &[
 #[derive(Debug, Clone)]
 pub(crate) enum EnvWatch {
     /// The shipped default: the cognitive-memory state-root resolution surface
-    /// — exactly the variables `resolve_state_root()` / `socket_path_for`
-    /// consult (`SIMARD_STATE_ROOT`, `SIMARD_MEMORY_SOCKET`, and the `HOME`
-    /// fallback). This is the demonstrated race surface for #2360.
+    /// — the variables `resolve_state_root()` / `socket_path_for` consult
+    /// (`SIMARD_STATE_ROOT`, `SIMARD_MEMORY_SOCKET`, and the `HOME` fallback),
+    /// plus `SIMARD_LLM_PROVIDER` (the dashboard agent-session / provider
+    /// resolution surface, whose readers race the provider mutators in
+    /// `ooda_actions` / `self_improve` / `disk_health`). This is the
+    /// demonstrated race surface for #2360.
     StateRootSurface,
     /// Watch a specific set of variable names.
     Vars(BTreeSet<String>),
@@ -79,7 +90,10 @@ impl EnvWatch {
         match self {
             EnvWatch::AnyVar => true,
             EnvWatch::StateRootSurface => {
-                matches!(var, "SIMARD_STATE_ROOT" | "SIMARD_MEMORY_SOCKET" | "HOME")
+                matches!(
+                    var,
+                    "SIMARD_STATE_ROOT" | "SIMARD_MEMORY_SOCKET" | "HOME" | "SIMARD_LLM_PROVIDER"
+                )
             }
             EnvWatch::Vars(set) => set.contains(var),
         }
