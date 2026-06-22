@@ -742,10 +742,20 @@ mod tests {
     /// terminal-shell session works even when the test process itself has **no
     /// controlling terminal** (`tty` reports "not a tty"), exactly as in CI /
     /// headless runners. `script` allocates its *own* PTY for the inner shell,
-    /// so an interactive (`-i`) bash still launches, echoes the command it
+    /// so an interactive (`-i`) bash still launches, executes the command it
     /// receives, and reports output back through the transcript without any
     /// parent TTY. This is the only test that exercises the real spawn /
     /// transcript-capture path the production recipe runner depends on.
+    ///
+    /// Because `script` runs bash on a PTY with terminal `ECHO` enabled, the
+    /// command line we type is copied verbatim into the transcript regardless
+    /// of whether bash ever runs it. To prove the shell genuinely *executed*
+    /// the command (not merely received and echoed it), the marker embeds a
+    /// shell arithmetic expansion: the typed line contains the literal
+    /// `$((20 + 22))`, whereas only successful execution yields the evaluated
+    /// `42`. Asserting on the evaluated form therefore cannot be satisfied by
+    /// the input echo alone — it requires real command execution plus output
+    /// capture.
     ///
     /// Skips (rather than fails) when `script` is not on PATH.
     #[test]
@@ -759,21 +769,27 @@ mod tests {
         }
 
         let workdir = tempfile::tempdir().expect("create temp working directory");
-        let marker = format!("notty-marker-{}", uuid::Uuid::now_v7().simple());
+        // Unique per-session token keeps the expected string specific to this
+        // run; the `$((20 + 22))` expansion guarantees the asserted form
+        // (`<token>-42-done`) can only come from executed output, never the
+        // verbatim PTY echo of the typed command (which carries `$((20 + 22))`).
+        let token = format!("notty-marker-{}", uuid::Uuid::now_v7().simple());
+        let typed_command = format!("echo {token}-$((20 + 22))-done");
+        let executed_output = format!("{token}-42-done");
 
         let mut session = PtyTerminalSession::launch("test-bt", DEFAULT_SHELL, workdir.path())
             .expect("launch PTY shell via script without a controlling terminal");
 
         session
-            .send_input(&format!("echo {marker}"))
+            .send_input(&typed_command)
             .expect("send echo command to PTY shell");
 
         let status = session
-            .wait_for_output(&marker, Duration::from_secs(15))
+            .wait_for_output(&executed_output, Duration::from_secs(15))
             .expect("poll transcript for expected output");
         assert!(
             matches!(status, TerminalWaitStatus::Satisfied),
-            "expected marker '{marker}' to appear in the transcript, got {status:?}"
+            "expected executed output '{executed_output}' to appear in the transcript, got {status:?}"
         );
 
         // Mirror the production recipe pattern: a trailing `exit 0` cleanly
@@ -789,8 +805,8 @@ mod tests {
             capture.exit_status
         );
         assert!(
-            capture.transcript.contains(&marker),
-            "final transcript must contain the marker '{marker}'; transcript was:\n{}",
+            capture.transcript.contains(&executed_output),
+            "final transcript must contain the executed output '{executed_output}'; transcript was:\n{}",
             capture.transcript
         );
     }
