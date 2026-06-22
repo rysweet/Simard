@@ -39,12 +39,10 @@ mod tests_routes_b;
 
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
 
-use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use crate::error::SimardResult;
 use crate::goal_curation::{GoalBoard, load_goal_board, save_goal_board};
-use crate::memory_ipc::{launch_writer_bridge, open_reader_bridge, register_in_process_writer};
+use crate::memory_ipc::{launch_writer_bridge, open_reader_bridge};
 
 /// Read the cognitive-memory `goal-board:snapshot` for the dashboard.
 ///
@@ -114,17 +112,17 @@ pub fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("  Open http://localhost:{port} and enter the code\n");
 
-    // Open the cognitive-memory store ONCE and register it as the shared tier-0
-    // in-process writer, mirroring the OODA daemon and bootstrap assembly (which
-    // standalone `dashboard serve` does not go through). The launcher's tier-2
-    // store cache (#2334, closing the #2320 goal-board read-after-write race)
-    // already shares one handle per `state_root`, so this registration is
-    // defense-in-depth and architectural consistency: the dashboard owns its
-    // handle on the same tier-0 path the daemon uses instead of relying solely on
-    // the tier-2 fallback. The strong Arc is held for the lifetime of `serve`
-    // (i.e. the whole process) so the registry's `Weak` stays upgradeable.
-    let state_root = routes::resolve_state_root();
-    let _shared_writer = register_dashboard_shared_writer(&state_root);
+    // Standalone `dashboard serve` does NOT open or register its own
+    // cognitive-memory handle. Every dashboard read/write goes through the
+    // launcher resolution ladder (`open_reader_bridge` / `launch_writer_bridge`),
+    // consulted per request: it routes to a running daemon's IPC socket (tier-1)
+    // when one is serving this `state_root`, and otherwise to the tier-2
+    // shared-store cache (#2334), which already gives this process a single
+    // handle per `state_root` with read-after-write consistency. Eagerly
+    // registering a dashboard-owned tier-0 handle here would shadow the tier-1
+    // socket for the whole process lifetime, turning the dashboard into a second
+    // concurrent cross-process writer that silently drops goals whenever a daemon
+    // runs on the same `state_root` (issue #2366).
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -140,38 +138,4 @@ pub fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         axum::serve(listener, app).await?;
         Ok::<(), Box<dyn std::error::Error>>(())
     })
-}
-
-/// Open the dashboard's cognitive-memory store and register it as the shared
-/// in-process writer, returning the strong `Arc` the caller must keep alive for
-/// as long as the dashboard serves requests.
-///
-/// Mirrors the OODA daemon and bootstrap assembly, which open the library-backed
-/// store once and register one shared handle. Registering the dashboard's handle
-/// on the same tier-0 in-process path keeps dashboard reads and writes on one
-/// store. Same-process read-after-write consistency is also guaranteed by the
-/// launcher's tier-2 store cache (added in #2334 to close the #2320 race), so
-/// this tier-0 registration is defense-in-depth: it aligns the dashboard with
-/// the daemon/bootstrap rather than relying solely on the tier-2 fallback.
-///
-/// Returns `None` (after logging) when the store cannot be opened, leaving
-/// handlers on their graceful tier-1/tier-2 fallback rather than failing to serve.
-pub(crate) fn register_dashboard_shared_writer(
-    state_root: &Path,
-) -> Option<Arc<dyn CognitiveMemoryOps>> {
-    match LibraryCognitiveMemory::open(state_root) {
-        Ok(memory) => {
-            let writer: Arc<dyn CognitiveMemoryOps> = Arc::new(memory);
-            register_in_process_writer(state_root.to_path_buf(), Arc::clone(&writer));
-            Some(writer)
-        }
-        Err(error) => {
-            eprintln!(
-                "[simard] dashboard: shared cognitive-memory handle not registered at {} \
-                 ({error}); handlers will use the IPC/tier-2 fallback",
-                state_root.display()
-            );
-            None
-        }
-    }
 }

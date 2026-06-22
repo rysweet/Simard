@@ -15,7 +15,7 @@ use crate::goal_curation::{GoalBoard, GoalProgress, save_goal_board};
 use crate::memory_ipc::{clear_in_process_writer, register_in_process_writer};
 use crate::operator_commands_dashboard::goals::*;
 use crate::operator_commands_dashboard::{
-    dashboard_goal_board_snapshot, dashboard_save_goal_board, register_dashboard_shared_writer,
+    dashboard_goal_board_snapshot, dashboard_save_goal_board,
 };
 use crate::test_support::HermeticState;
 
@@ -689,25 +689,4 @@ async fn repeated_handler_writes_never_silently_drop_goals() {
         12,
         "every goal added through the handler must persist (no silent drop)"
     );
-}
-
-/// `register_dashboard_shared_writer` returns a live writer for a writable
-/// state root, and the registered handle services subsequent bridge opens.
-#[test]
-#[serial_test::serial(cognitive_memory)]
-fn register_dashboard_shared_writer_registers_usable_handle() {
-    let state = HermeticState::new();
-    let writer = register_dashboard_shared_writer(state.state_root());
-    assert!(
-        writer.is_some(),
-        "a fresh hermetic state root must yield a usable cognitive-memory writer"
-    );
-
-    // The registered writer must serve a save+read through the dashboard path.
-    dashboard_save_goal_board(state.state_root(), &GoalBoard::new()).expect("save via shared");
-    let board = dashboard_goal_board_snapshot(state.state_root()).expect("read via shared");
-    assert!(board.active.is_empty());
-
-    drop(writer);
-    clear_in_process_writer();
 }
