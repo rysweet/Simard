@@ -237,24 +237,34 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
       try{
         const d=await apiFetch('/api/memory/recent');
         if(d.error){listEl.innerHTML='<span class="err">'+esc(d.error)+'</span>';countEl.textContent='—';return;}
-        // Total stored memory. /api/memory/recent reports 0 on the library backend
-        // (per-item listing unavailable, #2307), so fall back to the authoritative
-        // total from /api/memory/history's newest snapshot — otherwise the panel
-        // claims "0 total / no memories" while tens of thousands are stored (#2358).
+        // Total stored memory. /api/memory/recent reports only the last-hour window
+        // (0 and available:false on the library backend, where per-item listing is
+        // unavailable, #2307). Prefer the authoritative total from /api/memory/history's
+        // newest snapshot so the panel never claims "0 total / no memories" while
+        // tens of thousands are stored (#2358); never under-report (Math.max).
+        const recentAvailable=d.available!==false;
         let totalStored=d.total||0;
-        if(!totalStored){
+        if(!totalStored||!recentAvailable){
           try{
             const h=await apiFetch('/api/memory/history');
             const hs=h.snapshots||[];
-            if(hs.length){totalStored=hs[hs.length-1].total||0;}
+            if(hs.length){totalStored=Math.max(totalStored,hs[hs.length-1].total||0);}
           }catch(_){}
         }
-        countEl.textContent=d.last_hour_count;
+        // The big "last hour" count is only meaningful when the recent listing is
+        // actually available; show — (unknown) rather than a misleading 0 otherwise.
+        countEl.textContent=recentAvailable?d.last_hour_count:'—';
         totalEl.textContent=totalStored>0?(totalStored.toLocaleString()+' total stored'):'';
         if(!d.items||d.items.length===0){
-          listEl.innerHTML=totalStored>0
-            ?'<span style="color:#8b949e">No new memories in the last hour — '+totalStored.toLocaleString()+' total stored. Simard keeps remembering as it works.</span>'
-            :'<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          let msg;
+          if(totalStored>0){
+            msg=recentAvailable
+              ?'No new memories in the last hour — '+totalStored.toLocaleString()+' total stored. Simard keeps remembering as it works.'
+              :'Recent-memory listing is unavailable on this backend — '+totalStored.toLocaleString()+' total stored.';
+          }else{
+            msg='No memories stored yet. Simard will remember things as it works.';
+          }
+          listEl.innerHTML='<span style="color:#8b949e">'+msg+'</span>';
           return;
         }
         const catColors={'Learned fact':'#58a6ff','Past event':'#3fb950','Current task context':'#f0883e','How-to knowledge':'#a371f7','Planned reminder':'#d29922','Recent observation':'#8b949e'};

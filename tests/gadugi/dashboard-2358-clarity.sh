@@ -76,6 +76,8 @@ fi
 # ── P1.1 Memory total-stored semantics (served template) ─────────────────────
 grep -qF 'No new memories in the last hour' <<<"$HTML" \
   || fail "Memory empty-state must read 'No new memories in the last hour — N total stored'"
+grep -qF 'Recent-memory listing is unavailable on this backend' <<<"$HTML" \
+  || fail "Memory empty-state must surface total stored even when the recent listing is unavailable"
 grep -qF 'total stored' <<<"$HTML" \
   || fail "Memory panel must label the count as 'total stored'"
 grep -qF 'hs[hs.length-1].total' <<<"$HTML" \
