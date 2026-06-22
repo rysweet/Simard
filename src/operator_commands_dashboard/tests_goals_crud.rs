@@ -23,14 +23,17 @@ use crate::test_support::HermeticState;
 /// of a test and clears the global registration on drop (panic-safe).
 ///
 /// Production wires the dashboard against ONE shared `LibraryCognitiveMemory`
-/// handle: the OODA daemon, bootstrap assembly, and standalone `dashboard serve`
-/// all open the store once and register it via [`register_in_process_writer`].
-/// These handler tests must mirror that. Without a shared handle every
-/// `launch_writer_bridge` / `open_reader_bridge` call opens a *fresh*
-/// `LibraryCognitiveMemory`; because the lbug store holds an exclusive lock for
-/// a handle's lifetime, a reopen races the previous handle's lock release / WAL
-/// checkpoint and can observe an empty store — making these tests flaky and
-/// diverging from the real production read-after-write path.
+/// handle registered as the tier-0 in-process writer: the OODA daemon, bootstrap
+/// assembly, and standalone `dashboard serve` all open the store once and
+/// register it via [`register_in_process_writer`]. These handler tests mirror
+/// that tier-0 wiring so they exercise the same read/write path production uses.
+///
+/// Same-process read-after-write consistency is also guaranteed at the
+/// launcher's tier-2 store cache (`shared_tier2_store`, added in #2334 to close
+/// the #2320 goal-board read-after-write race), so the handlers persist
+/// correctly even without an explicit tier-0 registration. Registering the
+/// shared writer here keeps the tests aligned with the production tier-0 path
+/// rather than silently relying on the tier-2 fallback.
 struct SharedMemoryGuard {
     writer: Arc<dyn CognitiveMemoryOps>,
 }
@@ -654,15 +657,16 @@ async fn full_goal_lifecycle_crud() {
 // Shared-writer wiring (regression for fresh-open goal-board data loss)
 // -------------------------
 
-/// Regression for the silent goal-board data-loss race, exercised through the
-/// real handler path (each `add_goal` does load→modify→save, exactly like the
-/// production dashboard). With the shared in-process writer registered — as the
-/// daemon, bootstrap, and standalone `dashboard serve` all do — every write
-/// must persist. Before the fix, dashboard handlers opened a *fresh*
-/// `LibraryCognitiveMemory` per call; the lbug store's exclusive per-handle lock
-/// meant a reopen could race the previous handle's release and read an empty
-/// board, after which the next save persisted that empty board and silently
-/// dropped every goal.
+/// Exercises the real handler path (each `add_goal` does load→modify→save,
+/// exactly like the production dashboard) and asserts every write persists with
+/// no silent drop. The silent goal-board data-loss class (#1590 / #2320) came
+/// from per-call fresh `LibraryCognitiveMemory` opens racing the lbug store's
+/// exclusive per-handle lock: a reopen could read an empty board and the next
+/// save would persist that empty board, dropping every goal. That race is now
+/// prevented both by the shared tier-0 in-process writer the
+/// daemon/bootstrap/`dashboard serve` register and by the launcher's tier-2
+/// store cache (#2334); this test guards the handler-level persistence contract
+/// so a regression in either path is caught.
 #[tokio::test]
 #[serial_test::serial(cognitive_memory)]
 async fn repeated_handler_writes_never_silently_drop_goals() {

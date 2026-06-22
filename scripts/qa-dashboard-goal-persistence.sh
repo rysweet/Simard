@@ -4,14 +4,16 @@
 # End-to-end check for the standalone dashboard goal-board persistence fix:
 # `simard dashboard serve` must persist goals across multiple HTTP requests.
 #
-# Regression for the silent goal-board data-loss race: dashboard handlers used
-# to open a *fresh* `LibraryCognitiveMemory` per request. The lbug store holds
-# an exclusive lock for a handle's lifetime, so a per-request open/drop/reopen
-# cycle could race the previous handle's lock release, read an empty board, and
-# then persist that empty board on the next mutating request — dropping every
-# goal. `serve()` now opens the store once and shares one handle via the
-# in-process writer registry (mirroring the OODA daemon and bootstrap), so a
-# multi-request seed -> add -> promote -> read flow stays consistent.
+# End-to-end persistence regression for the goal-board: a multi-request
+# seed -> add -> promote -> read flow against a standalone dashboard must never
+# lose a goal. The silent data-loss class (#1590 / #2320) came from per-request
+# fresh `LibraryCognitiveMemory` opens racing the lbug store's exclusive
+# per-handle lock: a reopen could read an empty board and the next mutating
+# request would persist that empty board, dropping every goal. That race is now
+# prevented by the launcher's tier-2 store cache (#2334) and by `serve()`
+# registering one shared tier-0 handle (mirroring the OODA daemon and
+# bootstrap); this script guards the end-to-end persistence contract across
+# separate, hermetic HTTP requests.
 set -uo pipefail
 
 PORT="${QA_DASHBOARD_PORT:-18842}"

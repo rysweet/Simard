@@ -114,14 +114,15 @@ pub fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("  Open http://localhost:{port} and enter the code\n");
 
-    // Open the cognitive-memory store ONCE and share that single handle across
-    // every request via the in-process writer registry. Standalone `dashboard
-    // serve` does not go through bootstrap/daemon assembly (which already do
-    // this), so without it each handler opens a *fresh* `LibraryCognitiveMemory`
-    // and the per-request open/drop/reopen cycle races the lbug store's
-    // exclusive lock — a reopen can read an empty board and a mutating handler
-    // then persists that empty board, silently losing every goal. The strong
-    // Arc is held for the lifetime of `serve` (i.e. the whole process).
+    // Open the cognitive-memory store ONCE and register it as the shared tier-0
+    // in-process writer, mirroring the OODA daemon and bootstrap assembly (which
+    // standalone `dashboard serve` does not go through). The launcher's tier-2
+    // store cache (#2334, closing the #2320 goal-board read-after-write race)
+    // already shares one handle per `state_root`, so this registration is
+    // defense-in-depth and architectural consistency: the dashboard owns its
+    // handle on the same tier-0 path the daemon uses instead of relying solely on
+    // the tier-2 fallback. The strong Arc is held for the lifetime of `serve`
+    // (i.e. the whole process) so the registry's `Weak` stays upgradeable.
     let state_root = routes::resolve_state_root();
     let _shared_writer = register_dashboard_shared_writer(&state_root);
 
@@ -146,14 +147,15 @@ pub fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 /// as long as the dashboard serves requests.
 ///
 /// Mirrors the OODA daemon and bootstrap assembly, which open the library-backed
-/// store once and share one handle (the lbug store holds an exclusive lock for a
-/// handle's lifetime, so a second open of the same path within the process would
-/// fail). Sharing one handle makes dashboard reads and writes hit the same store
-/// — eliminating the fresh-open read-after-write race that otherwise lets a
-/// mutating handler persist an empty board and silently lose goals.
+/// store once and register one shared handle. Registering the dashboard's handle
+/// on the same tier-0 in-process path keeps dashboard reads and writes on one
+/// store. Same-process read-after-write consistency is also guaranteed by the
+/// launcher's tier-2 store cache (added in #2334 to close the #2320 race), so
+/// this tier-0 registration is defense-in-depth: it aligns the dashboard with
+/// the daemon/bootstrap rather than relying solely on the tier-2 fallback.
 ///
 /// Returns `None` (after logging) when the store cannot be opened, leaving
-/// handlers on their graceful direct-open fallback rather than failing to serve.
+/// handlers on their graceful tier-1/tier-2 fallback rather than failing to serve.
 pub(crate) fn register_dashboard_shared_writer(
     state_root: &Path,
 ) -> Option<Arc<dyn CognitiveMemoryOps>> {
