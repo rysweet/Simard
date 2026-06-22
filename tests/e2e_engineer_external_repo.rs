@@ -85,7 +85,7 @@ fn gym_list_shows_all_scenarios() {
     assert!(stdout.contains("repo-exploration-deep-scan"));
     assert!(stdout.contains("doc-generation-public-fn"));
     assert!(stdout.contains("safe-code-change-add-derive"));
-    assert!(stdout.contains("test-writing-unit-case"));
+    assert!(stdout.contains("session-quality-memory-export"));
     assert!(stdout.contains("interactive-terminal-driving"));
 }
 

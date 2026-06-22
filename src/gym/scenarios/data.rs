@@ -14,8 +14,6 @@
 use super::super::types::{BenchmarkClass, BenchmarkScenario};
 use crate::runtime::RuntimeTopology;
 
-// NEEDLE-XYZ-GYM-MARKER: long-context-needle-in-haystack benchmark searches for this exact comment.
-
 pub(super) static SCENARIOS: [BenchmarkScenario; 12] = [
     // --- RepoExploration ---
     BenchmarkScenario {
