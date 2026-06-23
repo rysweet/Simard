@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cognitive_memory::{CognitiveMemoryOps, RecallWeightSet};
+use crate::cognitive_memory::{CognitiveMemoryOps, MemoryKind, RecallWeightSet};
 use crate::error::SimardResult;
 use crate::goals::{GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, GoalRecord};
 use crate::memory_cognitive::{
@@ -286,21 +286,28 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
     let recalled_procedures =
         recall_procedures_for_objective_with_tokens(bridge, objective, &tokens, 5)?;
 
-    // PR-C (issue #2281, problem 4): episodic recall.
+    // PR-C (issue #2281, problem 4) + issue #2395: episodic recall.
     //
-    // Tokenize the objective into trigger keywords, ask the bridge for
-    // up to 5 recent matching episodes, then filter out self-session
-    // noise (`source_label.starts_with("session-")`) which is just the
-    // current session loop's own breath echoing back into the prompt.
+    // Tokenize the objective into trigger keywords, then ask the bridge for up
+    // to 5 matching episodes via **ranked recall** (`recall_episodes_ranked`)
+    // rather than the flat newest-first keyword scan: episodes are scored across
+    // relevance + recency + usage + graph proximity (phase-weighted) and gated
+    // to keyword relevance, so the most useful prior episode leads instead of
+    // merely the most recent. Then filter out self-session noise
+    // (`source_label.starts_with("session-")`) which is just the current session
+    // loop's own breath echoing back into the prompt.
     //
-    // When the tokenizer produces no usable keywords we skip the
-    // bridge call entirely — there is no cheap "match anything"
-    // fallback and a no-token query would surface arbitrary recent
-    // episodes that bear no relation to the objective.
+    // When the tokenizer produces no usable keywords we skip the bridge call
+    // entirely — there is no cheap "match anything" fallback and a no-token
+    // query would surface arbitrary episodes that bear no relation to the
+    // objective. The query handed to ranked recall is the space-joined tokens,
+    // so the non-library default impl (which splits the query back on
+    // whitespace) sees exactly the filtered keyword set.
     let (raw_recall_count, session_filtered_count, episodic_recall) = if tokens.is_empty() {
         (0usize, 0usize, Vec::<CognitiveEpisode>::new())
     } else {
-        let raw = bridge.search_episodes_by_keywords(&tokens, 5)?;
+        let query = tokens.join(" ");
+        let raw = bridge.recall_episodes_ranked(&query, 5, weights)?;
         let raw_len = raw.len();
         let kept: Vec<CognitiveEpisode> = raw
             .into_iter()
@@ -339,6 +346,41 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
         recalled_procedures,
         episodic_recall,
     })
+}
+
+/// Reinforce the memories that were actually surfaced into a cycle's working
+/// context (issue #2395).
+///
+/// Preparation recall is a deliberate **pure read** so the several recalls a
+/// single OODA cycle issues don't skew one another's ranking. Reinforcement
+/// instead happens here, at the point of **use** — when the recalled facts,
+/// procedures, and episodes in `ctx` are injected into the agent's prompt
+/// (see `ooda_actions` `advance.rs`). Each surfaced node's `usage_count` is
+/// bumped and its `last_accessed_at` stamped via the
+/// [`CognitiveMemoryOps::reinforce_access`] seam, feeding the ranked-recall
+/// usage/recency signals on subsequent cycles — resurrecting the procedural /
+/// declarative reinforcement that was previously dead (nothing incremented
+/// `usage_count` on recall).
+///
+/// Best-effort and non-fatal: reinforcement is additive, so a failed access
+/// write is logged and skipped rather than failing the cycle. Backends without
+/// access tracking (legacy bridge, mocks) get the trait's no-op default, so this
+/// is a silent no-op there.
+pub fn reinforce_prepared_context(memory: &dyn CognitiveMemoryOps, ctx: &PreparedContext) {
+    let reinforce = |node_id: &str, kind: MemoryKind| {
+        if let Err(e) = memory.reinforce_access(node_id, kind) {
+            tracing::warn!(node_id, ?kind, error = %e, "reinforce_access failed (non-fatal)");
+        }
+    };
+    for fact in &ctx.relevant_facts {
+        reinforce(&fact.node_id, MemoryKind::Fact);
+    }
+    for proc in &ctx.recalled_procedures {
+        reinforce(&proc.node_id, MemoryKind::Procedure);
+    }
+    for ep in &ctx.episodic_recall {
+        reinforce(&ep.node_id, MemoryKind::Episode);
+    }
 }
 
 /// Concept label for goal-board snapshot facts, filtered by PR-A
@@ -850,6 +892,19 @@ mod tests;
 // (relevance/recency/confidence) rather than a confidence-sorted `search_facts`.
 #[cfg(test)]
 mod tests_ranked_prep;
+
+// Issue #2395: OODA preparation gathers `episodic_recall` via the library's
+// ranked recall (not the flat newest-first keyword scan), and preparation recall
+// stays a pure read (no usage/recency reinforcement).
+#[cfg(test)]
+mod tests_ranked_episodic_prep;
+
+// Issue #2395: reinforcement is resurrected at the point of use —
+// `reinforce_prepared_context` bumps the surfaced facts'/procedures'
+// `usage_count` (+ `last_accessed_at`) via the `reinforce_access` seam, even
+// though preparation recall itself stays a pure read.
+#[cfg(test)]
+mod tests_reinforce_on_use;
 
 // PR-A (issue #2281): preparation-phase memory filters. Tests assert
 // that `goal-board:snapshot` revisions are dropped from the prepared

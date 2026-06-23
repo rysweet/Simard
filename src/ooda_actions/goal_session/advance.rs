@@ -205,7 +205,7 @@ pub(crate) fn advance_goal_with_session(
         // monotonically-increasing temporal index, and content
         // truncated to 200 characters with an ellipsis.
         if !ctx.episodic_recall.is_empty() {
-            objective.push_str("\n\n## Prior episodes (most-recent first)");
+            objective.push_str("\n\n## Prior episodes (ranked by relevance)");
             for ep in &ctx.episodic_recall {
                 let content = if ep.content.chars().count() > 200 {
                     let truncated: String = ep.content.chars().take(200).collect();
@@ -220,6 +220,13 @@ pub(crate) fn advance_goal_with_session(
                 );
             }
         }
+
+        // Issue #2395: reinforce-on-use. The recalled facts / procedures /
+        // episodes above were just surfaced into this cycle's prompt, so bump
+        // their usage/recency now. Preparation recall is a pure read (so the
+        // per-cycle recalls don't skew each other); this is the single point
+        // where the reinforcement signal the ranked recall feeds on is written.
+        crate::memory_consolidation::reinforce_prepared_context(memory, ctx);
     }
 
     const GOAL_SESSION_IDENTITY: &str =

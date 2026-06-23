@@ -8,6 +8,7 @@ related:
   - ../memory.md
   - ../architecture/cognitive-memory.md
   - ../architecture/cognitive-memory-library-adapter.md
+  - ./cognitive-memory-ranked-episodic-recall.md
   - ./cognitive-memory-fact-recall.md
   - ./cognitive-memory-preparation-filters.md
   - ./cognitive-memory-goal-store.md
@@ -39,6 +40,17 @@ retention pass reclaims the superseded tail.
 The library dependency rev is unchanged (`e3ea136`, `features =
 ["persistent"]`); both capabilities were already present in the library and
 are simply wired through the `CognitiveMemoryOps` trait.
+
+> **Extended by #2395.** The ranked-recall pattern documented here for facts is
+> extended to **episodes** in
+> [Ranked episodic recall & memory reinforcement](./cognitive-memory-ranked-episodic-recall.md),
+> which reuses this page's `RecallWeightSet` and per-OODA-phase weight mapping
+> unchanged. #2395 also adds the **usage/recency reinforcement** plumbing the
+> ranker scores: a `reinforce_access` seam for recording accesses at the point a
+> memory is used (not during preparation, preserving the `record_access = false`
+> rule below) and `usage_count` / `last_accessed_at` surfaced on `CognitiveFact`.
+> The seam is driven from the point recalled context is surfaced into a cycle's
+> prompt (`advance.rs`); per-action attribution is a future refinement.
 
 ---
 

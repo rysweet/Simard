@@ -245,6 +245,8 @@ fn fact(concept: &str, content: &str, confidence: f64) -> CognitiveFact {
         confidence,
         source_id: "mock".to_string(),
         tags: vec![],
+        usage_count: 0,
+        last_accessed_at: None,
     }
 }
 
