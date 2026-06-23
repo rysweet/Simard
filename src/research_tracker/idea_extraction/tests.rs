@@ -30,6 +30,8 @@ fn activity_fact(developer: &str, title: &str, idx: usize) -> CognitiveFact {
         confidence: 0.6,
         source_id: "activity-poller".to_string(),
         tags: vec!["developer-activity".to_string(), format!("dev:{developer}")],
+        usage_count: 0,
+        last_accessed_at: None,
     }
 }
 
@@ -147,6 +149,8 @@ fn is_activity_fact_matches_by_concept() {
         confidence: 0.5,
         source_id: "s".into(),
         tags: vec![],
+        usage_count: 0,
+        last_accessed_at: None,
     };
     assert!(is_activity_fact(&fact));
 }
@@ -160,6 +164,8 @@ fn is_activity_fact_matches_by_tag() {
         confidence: 0.5,
         source_id: "s".into(),
         tags: vec!["developer-activity".into()],
+        usage_count: 0,
+        last_accessed_at: None,
     };
     assert!(is_activity_fact(&fact));
 }
@@ -173,6 +179,8 @@ fn is_activity_fact_rejects_unrelated() {
         confidence: 0.5,
         source_id: "s".into(),
         tags: vec!["research".into()],
+        usage_count: 0,
+        last_accessed_at: None,
     };
     assert!(!is_activity_fact(&fact));
 }

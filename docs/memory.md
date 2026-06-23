@@ -1,7 +1,7 @@
 ---
 title: Memory architecture
-description: Top-level overview of Simard's six-type cognitive memory, consolidation flow, ranked fact recall, snapshot retention, and on-disk layout. Cross-links to the canonical architecture page.
-last_updated: 2026-06-21
+description: Top-level overview of Simard's six-type cognitive memory, consolidation flow, ranked fact and episodic recall, usage/recency reinforcement, snapshot retention, and on-disk layout. Cross-links to the canonical architecture page.
+last_updated: 2026-06-23
 owner: simard
 doc_type: concept
 ---
@@ -112,6 +112,53 @@ the consolidation persistence path and protects provenance-bearing facts.
 
 See [Phase-weighted ranked fact recall & snapshot retention](reference/cognitive-memory-ranked-recall.md)
 for the full API, examples, and invariants.
+
+## Ranked episodic recall & reinforcement
+
+Shipped in issue [#2395](https://github.com/rysweet/Simard/issues/2395). This
+extends the #2329 ranked-recall pattern from facts to **episodes**, and turns on
+the **usage/recency reinforcement** the ranker had always scored but Simard
+never recorded. The library dependency rev is unchanged (`285de92`, `lbug`
+pinned at `0.15.4`) — both capabilities were already present in the library and
+are simply wired through the `CognitiveMemoryOps` trait.
+
+### Ranked recall for episodes
+
+OODA preparation no longer recalls past episodes with a flat, newest-first
+keyword scan (`search_episodes_by_keywords`). It now uses the library's
+**`recall_episodes_ranked`**, scoring every candidate episode across the same
+six signals as facts — **text relevance + confidence + importance + recency +
+usage + graph proximity** — and returning them in **descending score order**.
+The per-OODA-phase `RecallWeightSet` already computed for fact recall is threaded
+into episode recall too, so a recency-biased Observe and a confidence-biased
+Decide can order the same episodes differently. Preparation recall stays a pure
+read (`record_access = false`), and the existing `session-` self-noise filter and
+`## Prior episodes` prompt block are preserved — only the *ordering* improves.
+
+**Compressed sources stay recallable.** The library ranker skips `compressed`
+episodes (those folded into a distilled summary), but Simard must keep
+consolidation **sources** recallable (the #2298 / distillation contract). Ranked
+episode recall therefore UNIONs the ranked live episodes with a compressed-only
+keyword backfill, merged by `node_id`, so live episodes get the upgraded ranking
+**and** distilled sources remain traceable.
+
+### Reinforcement at the point of use
+
+Recall during preparation is a pure read, so reinforcement belongs where a memory
+is actually **used** — when the recalled context is surfaced into a cycle's
+prompt — via a single `reinforce_access(node_id, kind)` seam over the library's
+`record_access`. This change ships that seam, makes fact reinforcement
+**observable** (`CognitiveFact` now carries `usage_count` and `last_accessed_at`),
+and **drives** it: when the goal-session path (`advance.rs`) flattens the prepared
+context into the prompt, it calls `reinforce_prepared_context`, which records an
+access for every recalled fact, procedure, and episode it surfaced. So repeatedly
+useful facts and procedures climb the **usage** signal and surface earlier next
+time. Procedure recall is already usage-ordered, so it feeds directly off that
+signal. Recording an access only for the *specific* memory that drove a committed
+action — rather than all surfaced memories — is a future refinement.
+
+See [Ranked episodic recall & memory reinforcement](reference/cognitive-memory-ranked-episodic-recall.md)
+for the full API, the UNION backfill, examples, and invariants.
 
 ## Inspecting memory from the CLI
 
@@ -249,5 +296,6 @@ For multi-host coordination see [Distributed operations](distributed-operations.
 - [Episodic keyword recall](reference/cognitive-memory-episodic-recall.md) — how stored episodes surface for a matching objective
 - [Cognitive-memory provenance](reference/cognitive-memory-provenance.md) — DERIVES_FROM / PROCEDURE_DERIVES_FROM edges linking distilled facts and procedures back to their source episodes (#2325)
 - [Phase-weighted ranked fact recall & snapshot retention](reference/cognitive-memory-ranked-recall.md) — multi-signal ranked recall with per-OODA-phase weights, plus CallerKey dedup/SUPERSEDES and pruning for snapshot/goal records (#2329)
+- [Ranked episodic recall & memory reinforcement](reference/cognitive-memory-ranked-episodic-recall.md) — extends ranked recall to episodes (with a UNION backfill that keeps compressed consolidation sources recallable) and adds a usage/recency reinforcement seam plus `CognitiveFact` observability, recording accesses at the point recalled memories are surfaced into a cycle (per-action attribution is a future refinement) (#2395)
 - [Dashboard](dashboard.md) — Memory tab
 - [Daemon mode](daemon-mode.md) — when consolidation runs

@@ -807,6 +807,8 @@ fn stateful_bridge() -> (
                     confidence,
                     source_id,
                     tags,
+                    usage_count: 0,
+                    last_accessed_at: None,
                 });
                 Ok(json!({ "id": node_id }))
             }

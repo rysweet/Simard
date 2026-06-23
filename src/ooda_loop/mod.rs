@@ -37,6 +37,12 @@ mod tests_types;
 #[cfg(test)]
 mod tests_phase_recall;
 
+// Issue #2395: parity for episodes — Observe-vs-Decide phase weights yield a
+// different ranked-recall ordering of the same episode set (driven through the
+// usage/text-relevance signals).
+#[cfg(test)]
+mod tests_phase_recall_episodes;
+
 // PR-C (issue #2281, problem 3): tests for the new `cycle.rs`
 // helpers (`pattern_for`, `compose_procedure_name`,
 // `derive_triggers_from_objective`).

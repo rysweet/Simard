@@ -40,12 +40,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use amplihack_memory::{
-    CognitiveMemory, DedupMode, DedupOptions, EpisodicMemory, FactInput, MemoryError,
+    AccessKind, CognitiveMemory, DedupMode, DedupOptions, EpisodicMemory, FactInput, MemoryError,
     ProceduralMemory, ProspectiveMemory, RecallOptions, RecallWeights, RetentionPolicy,
     SemanticFact, StoreFactOptions, WorkingMemorySlot,
 };
 
-use super::{CognitiveMemoryOps, RecallWeightSet};
+use super::{CognitiveMemoryOps, MemoryKind, RecallWeightSet};
 use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::{
     CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
@@ -279,6 +279,11 @@ fn to_fact(f: SemanticFact) -> CognitiveFact {
         confidence: f.confidence,
         source_id: f.source_id,
         tags: f.tags,
+        // Issue #2395: surface the library's reinforcement counters so callers
+        // (and ranked recall) can see usage/recency, and so the reinforce-on-use
+        // seam is observable after `reinforce_access`.
+        usage_count: f.usage_count,
+        last_accessed_at: f.last_accessed_at,
     }
 }
 
@@ -799,6 +804,90 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
             .map(to_episode)
             .collect();
         Ok(episodes)
+    }
+
+    fn recall_episodes_ranked(
+        &self,
+        query: &str,
+        limit: u32,
+        weights: RecallWeightSet,
+    ) -> SimardResult<Vec<CognitiveEpisode>> {
+        // Issue #2395: ranked episodic recall over the *keyword-relevant*
+        // episodes. The library scores recency/usage/graph for EVERY
+        // non-compressed episode, but Simard's episodic recall is
+        // relevance-gated (an unrelated-but-recent episode must not surface), so
+        // gate the ranked output to episodes that share a query keyword — this
+        // preserves the existing recall semantics while upgrading the *ordering*
+        // from newest-first to the multi-signal rank.
+        //
+        // `record_access = false` keeps this a pure read: the OODA cycle issues
+        // several recalls and reinforcement is the separate `reinforce_access`
+        // seam, so a recall must not skew later recalls. The library takes
+        // `&mut self`, so we still lock for write. `limit = usize::MAX` defers
+        // truncation until *after* the keyword gate, so a relevant episode
+        // ranked behind recent noise is not dropped before the gate runs.
+        let needles: Vec<String> = query
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if needles.is_empty() {
+            return Ok(vec![]);
+        }
+        let matches_kw = |content: &str| {
+            let c = content.to_lowercase();
+            needles.iter().any(|kw| c.contains(kw))
+        };
+
+        let options = RecallOptions {
+            limit: usize::MAX,
+            record_access: false,
+            weights: to_library_weights(weights),
+            ..RecallOptions::default()
+        };
+        let mut guard = self.lock_write("recall_episodes_ranked")?;
+        let scored = guard
+            .recall_episodes_ranked(query, options)
+            .map_err(|e| map_op_err("recall_episodes_ranked", e))?;
+
+        let mut out: Vec<CognitiveEpisode> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for s in scored {
+            let ep = to_episode(s.item);
+            if matches_kw(&ep.content) && seen.insert(ep.node_id.clone()) {
+                out.push(ep);
+            }
+        }
+        // UNION backfill: the library ranked path skips compressed episodes, but
+        // consolidation sources stay relevant — a distilled fact/procedure must
+        // remain traceable to the episodes it came from. Append the compressed
+        // keyword matches the ranked pass dropped (newest-first), deduped.
+        for e in guard.get_episodes(usize::MAX, true) {
+            if e.compressed && matches_kw(&e.content) {
+                let ep = to_episode(e);
+                if seen.insert(ep.node_id.clone()) {
+                    out.push(ep);
+                }
+            }
+        }
+        out.truncate(limit as usize);
+        Ok(out)
+    }
+
+    fn reinforce_access(&self, node_id: &str, kind: MemoryKind) -> SimardResult<()> {
+        // Issue #2395: reinforce-on-use. The library's `record_access` bumps
+        // `usage_count` (saturating) and stamps `last_accessed_at`, persisted
+        // across reopen. Fact ids surfaced by recall carry the adapter's
+        // monotonic sequence prefix (see `FACT_SEQ_META_KEY` / `to_fact`), so
+        // strip it to match the raw library node; episode / procedure ids are
+        // already raw.
+        let raw = match kind {
+            MemoryKind::Fact => strip_seq_prefix(node_id),
+            MemoryKind::Episode | MemoryKind::Procedure => node_id,
+        };
+        self.lock_write("reinforce_access")?
+            .record_access(raw, AccessKind::Recall)
+            .map_err(|e| map_op_err("reinforce_access", e))
     }
 
     fn search_episodes_starting_with(

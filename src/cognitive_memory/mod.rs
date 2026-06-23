@@ -59,6 +59,25 @@ impl Default for RecallWeightSet {
     }
 }
 
+/// Which cognitive-memory node kind a [`CognitiveMemoryOps::reinforce_access`]
+/// call targets (issue #2395).
+///
+/// The recall paths surface `node_id`s in slightly different shapes
+/// (`CognitiveFact` ids carry the adapter's monotonic sequence prefix, whereas
+/// `CognitiveEpisode` / `CognitiveProcedure` ids are the raw library ids), so
+/// the backend needs to know the kind to normalize the id before recording the
+/// access. Kept backend-neutral (no library type named) so every implementor /
+/// mock stays leaf-module-friendly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryKind {
+    /// A semantic fact (`CognitiveFact`).
+    Fact,
+    /// An episodic memory (`CognitiveEpisode`).
+    Episode,
+    /// A procedural memory (`CognitiveProcedure`).
+    Procedure,
+}
+
 /// Trait abstracting cognitive memory operations.
 ///
 /// Both [`LibraryCognitiveMemory`] (amplihack-memory-lib, lbug-backed) and
@@ -261,6 +280,52 @@ pub trait CognitiveMemoryOps: Send + Sync {
         _limit: u32,
     ) -> SimardResult<Vec<CognitiveEpisode>> {
         Ok(vec![])
+    }
+
+    /// Ranked (scored) recall over episodic memory (issue #2395).
+    ///
+    /// The episodic counterpart of [`recall_facts_ranked`](Self::recall_facts_ranked):
+    /// scores keyword-relevant episodes across the ranked signals (text
+    /// relevance, recency, usage, graph proximity — confidence/importance are
+    /// facts-only) weighted by `weights`, returning them in **descending score
+    /// order**. This is a **pure read** — it never reinforces usage/recency, so
+    /// the several recalls a single OODA cycle issues cannot skew one another;
+    /// reinforcement is the explicit, separate [`reinforce_access`](Self::reinforce_access)
+    /// seam applied at the point of use.
+    ///
+    /// The default implementation splits `query` on whitespace into keywords and
+    /// delegates to [`search_episodes_by_keywords`](Self::search_episodes_by_keywords)
+    /// (ignoring `weights`), so non-library backends (legacy Python bridge, IPC
+    /// client, test mocks) keep working with newest-first keyword recall. Only
+    /// [`LibraryCognitiveMemory`] overrides this to call the library's ranked
+    /// recall (relevance-gated, with a UNION backfill that keeps compressed
+    /// consolidation sources recallable).
+    fn recall_episodes_ranked(
+        &self,
+        query: &str,
+        limit: u32,
+        _weights: RecallWeightSet,
+    ) -> SimardResult<Vec<CognitiveEpisode>> {
+        let keywords: Vec<String> = query.split_whitespace().map(str::to_string).collect();
+        self.search_episodes_by_keywords(&keywords, limit)
+    }
+
+    /// Reinforce a recalled node: increment its `usage_count` and stamp
+    /// `last_accessed_at` (issue #2395).
+    ///
+    /// This is the "reinforce-at-use" seam the ranked-recall `usage` / `recency`
+    /// signals feed on. Preparation recall stays a pure read; the OODA loop
+    /// calls this when a recalled fact / procedure / episode is actually
+    /// surfaced into a cycle's working context (see
+    /// [`crate::memory_consolidation::reinforce_prepared_context`]). `kind` tells
+    /// the backend how to normalize `node_id` (fact ids carry the adapter's
+    /// sequence prefix; episode / procedure ids are raw).
+    ///
+    /// The default implementation is a no-op (`Ok(())`) for backends without
+    /// access tracking (legacy Python bridge, IPC client, test mocks); only
+    /// [`LibraryCognitiveMemory`] records the access.
+    fn reinforce_access(&self, _node_id: &str, _kind: MemoryKind) -> SimardResult<()> {
+        Ok(())
     }
 
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics>;
@@ -483,3 +548,11 @@ mod tests_ranked_recall;
 // counts, fact-provenance coverage, and snapshot-dedup caller-key grouping.
 #[cfg(test)]
 mod tests_graph_stats;
+
+// Issue #2395: ranked episodic recall (UNION-backfilled so compressed
+// consolidation sources stay recallable) and the `reinforce_access` usage/recency
+// reinforcement seam. Pins descending recall order, compressed-source recovery,
+// the default keyword-scan delegation, and fact/procedure reinforcement against
+// `LibraryCognitiveMemory`.
+#[cfg(test)]
+mod tests_ranked_episodic;

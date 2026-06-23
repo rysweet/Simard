@@ -220,6 +220,13 @@ pub(crate) fn advance_goal_with_session(
                 );
             }
         }
+
+        // Issue #2395: reinforce-on-use. The recalled facts / procedures /
+        // episodes above were just surfaced into this cycle's prompt, so bump
+        // their usage/recency now. Preparation recall is a pure read (so the
+        // per-cycle recalls don't skew each other); this is the single point
+        // where the reinforcement signal the ranked recall feeds on is written.
+        crate::memory_consolidation::reinforce_prepared_context(memory, ctx);
     }
 
     const GOAL_SESSION_IDENTITY: &str =

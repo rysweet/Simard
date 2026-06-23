@@ -64,6 +64,17 @@ pub struct CognitiveFact {
     pub confidence: f64,
     pub source_id: String,
     pub tags: Vec<String>,
+    /// Number of times this fact has been reinforced on recall/use (issue
+    /// #2395). Feeds the ranked-recall `usage` signal. `#[serde(default)]` so
+    /// facts serialized before this field existed deserialize to `0`.
+    #[serde(default)]
+    pub usage_count: i64,
+    /// When this fact was last reinforced via
+    /// [`CognitiveMemoryOps::reinforce_access`](crate::cognitive_memory::CognitiveMemoryOps::reinforce_access)
+    /// (issue #2395). `None` until first reinforced; feeds the ranked-recall
+    /// `recency` signal. `#[serde(default)]` for back-compat.
+    #[serde(default)]
+    pub last_accessed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Reusable step-by-step procedure from procedural memory.
@@ -175,6 +186,8 @@ mod tests {
             confidence: 0.95,
             source_id: "epi_xyz".to_string(),
             tags: vec!["language".to_string(), "systems".to_string()],
+            usage_count: 0,
+            last_accessed_at: None,
         };
         let json = serde_json::to_string(&fact).unwrap();
         let parsed: CognitiveFact = serde_json::from_str(&json).unwrap();
