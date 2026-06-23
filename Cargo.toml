@@ -153,3 +153,12 @@ strip = "debuginfo"
 
 [profile.test.package."*"]
 debug = false
+
+# CSR getGroup OOB SIGSEGV fix (LadybugDB #611 / amplihack-memory #100): pin the
+# `lbug` engine to a patched build of 0.15.4 so the crash fix is part of EVERY
+# Simard build (lbug 0.15.4 always compiles its bundled lbug-src from source, so
+# this patched bundled source is what gets linked). Version-matched to 0.15.4 to
+# avoid an on-disk store-format migration. Remove once the fix lands in an
+# upstream lbug release and the dep is bumped.
+[patch.crates-io]
+lbug = { git = "https://github.com/rysweet/lbug-patched", rev = "82da662e917ba44d43392f70e0a7a721b48e09b3" }
