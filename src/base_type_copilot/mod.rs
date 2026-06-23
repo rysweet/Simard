@@ -13,15 +13,19 @@ use std::process::Command;
 
 use tempfile::NamedTempFile;
 
-use crate::base_type_turn::{EnrichmentBridges, TurnContext, format_turn_input, parse_turn_output};
+use crate::base_type_turn::{
+    EnrichmentBridges, EnrichmentSource, TurnContext, format_turn_input, parse_turn_output,
+};
 use crate::base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
     BaseTypeSession, BaseTypeSessionRequest, BaseTypeTurnInput, capability_set,
     ensure_session_not_already_open, ensure_session_not_closed, ensure_session_open,
 };
+#[cfg(test)]
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
+#[cfg(test)]
 use crate::knowledge_bridge::KnowledgeBridge;
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::runtime::RuntimeTopology;
@@ -55,31 +59,15 @@ impl Default for CopilotAdapterConfig {
     }
 }
 
-/// Where a [`CopilotSdkSession`] sources its memory + knowledge enrichment
-/// bridges.
-///
-/// The default is [`EnrichmentSource::Disabled`] so that lightweight callers
-/// and unit tests incur no filesystem side effects (opening a cognitive-memory
-/// store, launching native bridges). The live production path
-/// ([`crate::session_builder::SessionBuilder`]) opts in via
-/// [`CopilotSdkAdapter::with_enrichment`], wiring the same cognitive-memory
-/// store and native knowledge bridge the rest of the runtime uses so each
-/// Copilot turn is enriched with relevant memory facts, procedures, and
-/// domain knowledge (issue #1664).
-#[derive(Clone, Debug, Default)]
-enum EnrichmentSource {
-    /// No enrichment bridges. `prepare_turn_context` runs with `None`/`None`,
-    /// emitting only the `## Objective` section.
-    #[default]
-    Disabled,
-    /// Launch the native cognitive-memory + knowledge bridges lazily on
-    /// `open_session`, reading memory from `state_root`. A launch failure logs
-    /// and degrades that bridge to `None` (never panics).
-    Native { state_root: PathBuf },
-}
-
 /// A base type factory that creates sessions driving `amplihack copilot`
 /// through the PTY infrastructure with memory and knowledge enrichment.
+///
+/// Enrichment is sourced via the shared [`EnrichmentSource`] policy
+/// ([`crate::base_type_turn`]): [`EnrichmentSource::Disabled`] by default so
+/// lightweight callers and unit tests incur no filesystem side effects, and
+/// [`EnrichmentSource::Native`] (opted into via [`CopilotSdkAdapter::with_enrichment`])
+/// for the live production path, wiring the same cognitive-memory store and
+/// native knowledge bridge the rest of the runtime uses (issue #1664).
 #[derive(Debug)]
 pub struct CopilotSdkAdapter {
     descriptor: BaseTypeDescriptor,
@@ -139,7 +127,7 @@ impl CopilotSdkAdapter {
     /// Bridges are launched lazily in [`BaseTypeFactory::open_session`]; a
     /// launch failure logs and degrades to `None` so a missing knowledge pack
     /// or an unavailable memory store never breaks turn dispatch (see
-    /// [`launch_enrichment_bridges`]).
+    /// [`crate::base_type_turn::launch_enrichment_bridges`]).
     #[must_use]
     pub fn with_enrichment(mut self, state_root: PathBuf) -> Self {
         self.enrichment = EnrichmentSource::Native { state_root };
@@ -160,20 +148,18 @@ impl CopilotSdkAdapter {
 
         // Issue #1664: wire real memory + knowledge bridges instead of the
         // previously-hardcoded `None`/`None`. When enrichment is configured
-        // the bridges are launched here (with graceful degradation) and stored
-        // in the normalized `EnrichmentBridges` bundle (issue #1665) so that
-        // the shared `enrich_input` entry point actually injects memory facts,
-        // procedures, and domain knowledge into every turn.
-        let (memory, knowledge) = match &self.enrichment {
-            EnrichmentSource::Disabled => (None, None),
-            EnrichmentSource::Native { state_root } => launch_enrichment_bridges(state_root),
-        };
+        // the bridges are launched here (with graceful degradation) via the
+        // shared [`EnrichmentSource::resolve`] and stored in the normalized
+        // `EnrichmentBridges` bundle (issue #1665) so that the shared
+        // `enrich_input` entry point actually injects memory facts, procedures,
+        // and domain knowledge into every turn.
+        let enrichment = self.enrichment.resolve();
 
         Ok(CopilotSdkSession {
             descriptor: self.descriptor.clone(),
             config: self.config.clone(),
             request,
-            enrichment: EnrichmentBridges { memory, knowledge },
+            enrichment,
             is_open: false,
             is_closed: false,
             turn_count: 0,
@@ -316,6 +302,15 @@ impl CopilotSdkSession {
     /// With no bridges configured (the production default until #1664 wires
     /// them through), `enrich_input` returns the input unchanged, so the output
     /// is byte-identical to the pre-#1665 Copilot prompt.
+    ///
+    /// Decision (issue #2383, MEDIUM observation): the current ordering folds
+    /// the recalled enrichment (carried in `prompt_preamble`) and identity
+    /// context ahead of the bare objective under a single `## Objective`
+    /// heading. This is intentionally kept as-is. It is well-formed, matches the
+    /// preamble→identity→objective layering every other adapter uses, and
+    /// reordering would alter the production prompt for every Copilot turn —
+    /// out of scope for the RustyClawd wiring fix and a model-behavior risk not
+    /// worth taking without evidence. KEEP.
     fn render_enriched_prompt(&self, input: &BaseTypeTurnInput) -> SimardResult<String> {
         let enriched = self.enrich_input(input)?;
 
@@ -708,45 +703,4 @@ fn validate_command(command: &str) -> SimardResult<()> {
         });
     }
     Ok(())
-}
-
-/// Launch the cognitive-memory and knowledge bridges that enrich each Copilot
-/// turn, degrading gracefully when either is unavailable.
-///
-/// Memory is obtained via [`crate::ooda_loop::connect_memory`] (the same
-/// IPC-aware connector recipe steps use, sharing the daemon's live store when
-/// one is running and otherwise opening the library-backed store directly).
-/// Knowledge uses the in-process native transport from
-/// [`crate::bridge_launcher::launch_knowledge_bridge_native`].
-///
-/// Mirrors the honest-degradation contract of
-/// [`crate::bridge_launcher::launch_all_bridges`]: a launch failure is logged
-/// and yields `None` for that bridge so turn dispatch proceeds without that
-/// enrichment rather than aborting. Neither failure path panics.
-fn launch_enrichment_bridges(
-    state_root: &Path,
-) -> (Option<Box<dyn CognitiveMemoryOps>>, Option<KnowledgeBridge>) {
-    let memory = match crate::ooda_loop::connect_memory(state_root) {
-        Ok(memory) => Some(memory),
-        Err(error) => {
-            eprintln!(
-                "[simard] copilot adapter: cognitive-memory bridge unavailable — memory \
-                 enrichment disabled for this session: {error}"
-            );
-            None
-        }
-    };
-
-    let knowledge = match crate::bridge_launcher::launch_knowledge_bridge_native() {
-        Ok(knowledge) => Some(knowledge),
-        Err(error) => {
-            eprintln!(
-                "[simard] copilot adapter: knowledge bridge unavailable — knowledge \
-                 enrichment disabled for this session: {error}"
-            );
-            None
-        }
-    };
-
-    (memory, knowledge)
 }

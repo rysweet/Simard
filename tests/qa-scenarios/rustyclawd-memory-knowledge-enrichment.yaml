@@ -1,0 +1,39 @@
+name: rustyclawd-memory-knowledge-enrichment
+app_type: cli
+description: |
+  Validates issue #2383: the RustyClawdAdapter now wires real memory + knowledge
+  bridges in production instead of constructing every session with an empty
+  EnrichmentBridges. #1665 routed RustyClawd::run_turn through the shared
+  enrich_input entry point, but SessionBuilder's RustyClawd arm never injected
+  bridges, so enrichment was a permanent no-op for the primary production
+  adapter. Each step shells out to the relevant tests; a non-zero cargo exit
+  fails the step. Green means:
+  - a RustyClawd session built via with_enrichment (the SessionBuilder seam)
+    has non-empty memory + knowledge bridges
+  - the default adapter (no with_enrichment) leaves both bridges None
+  - enrich_input injects the rendered "## Relevant Memory Facts" block into the
+    turn's prompt_preamble while keeping the objective bare
+  - enrichment is a no-op when no bridge is configured (no fabricated facts)
+  - the cross-adapter production-wiring parity gate holds: Copilot and RustyClawd
+    launch identical, non-empty bridges through their with_enrichment builders
+  - existing RustyClawd session-creation behaviour is unregressed
+agents:
+  - name: cargo
+    type: cli
+    command: cargo
+steps:
+  - action: run
+    params:
+      command: cargo
+      args: ["test", "--lib", "base_type_rustyclawd::adapter::tests", "--", "--test-threads=1"]
+    timeout: 300000
+  - action: run
+    params:
+      command: cargo
+      args: ["test", "--test", "base_type_enrichment", "production_wiring_launches_bridges_for_builder_adapters", "--", "--test-threads=1"]
+    timeout: 300000
+  - action: run
+    params:
+      command: cargo
+      args: ["test", "--lib", "base_type_turn::tests::enrichment_source"]
+    timeout: 300000

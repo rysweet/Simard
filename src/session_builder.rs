@@ -233,8 +233,19 @@ impl SessionBuilder {
             }
             LlmProvider::RustyClawd => {
                 let tag = format!("{}-rustyclawd", self.adapter_tag);
+                // Issue #2383: enable memory + knowledge enrichment on the
+                // RustyClawd production adapter, mirroring the Copilot path
+                // above (#1664). #1665 routed `RustyClawd::run_turn` through the
+                // shared `enrich_input` entry point, but production sessions
+                // were built with empty bridges, so enrichment was a permanent
+                // no-op. Wiring `with_enrichment` here populates the bridges so
+                // each turn recalls relevant memory facts, procedures, and
+                // domain knowledge. Reads from the default state root (shared
+                // with the OODA daemon when running); a bridge launch failure
+                // degrades gracefully to no enrichment.
                 let factory = RustyClawdAdapter::registered(&tag)
-                    .map_err(|e| format!("RustyClawdAdapter::registered({}): {}", tag, e))?;
+                    .map_err(|e| format!("RustyClawdAdapter::registered({}): {}", tag, e))?
+                    .with_enrichment(crate::memory_ipc::default_state_root());
                 let mut session = factory
                     .open_session(request)
                     .map_err(|e| format!("RustyClawdAdapter::open_session({}): {}", tag, e))?;

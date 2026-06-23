@@ -1073,47 +1073,6 @@ fn enrichment_query_failure_propagates_not_panics() {
     );
 }
 
-/// The production launch helper wires both real bridges when the state root
-/// can back a cognitive-memory store.
-#[test]
-#[serial_test::serial(cognitive_memory)]
-fn launch_enrichment_bridges_wires_real_bridges_for_valid_state_root() {
-    use tempfile::TempDir;
-    let tmp = TempDir::new().unwrap();
-    let state_root = tmp.path().join("state");
-    std::fs::create_dir_all(&state_root).unwrap();
-
-    let (memory, knowledge) = super::launch_enrichment_bridges(&state_root);
-    assert!(
-        memory.is_some(),
-        "cognitive-memory bridge must launch for a writable state_root"
-    );
-    assert!(
-        knowledge.is_some(),
-        "native knowledge bridge must launch in-process"
-    );
-}
-
-/// A state root that cannot back a store (a regular file) makes the memory
-/// launch fail; it must degrade to `None` without panicking, while the
-/// in-process knowledge bridge still launches.
-#[test]
-fn launch_enrichment_bridges_degrades_when_memory_unavailable() {
-    use tempfile::NamedTempFile;
-    // A regular file as `state_root` makes `<state_root>/cognitive` uncreatable.
-    let file = NamedTempFile::new().unwrap();
-
-    let (memory, knowledge) = super::launch_enrichment_bridges(file.path());
-    assert!(
-        memory.is_none(),
-        "memory bridge must degrade to None when the state_root cannot back a store"
-    );
-    assert!(
-        knowledge.is_some(),
-        "knowledge bridge must still launch when only memory is unavailable"
-    );
-}
-
 /// `open_session` (via `build_session`) must wire both bridges when the
 /// adapter has enrichment configured — the direct regression guard for the
 /// hardcoded-`None` defect of issue #1664 at the factory seam.

@@ -92,6 +92,20 @@ steps:
       outputContains:
         - "test enrichment_is_noop_without_configured_bridge ... ok"
 
+  - name: "Production wiring launches non-empty bridges for builder adapters (Copilot + RustyClawd, #2383)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test base_type_enrichment
+        production_wiring_launches_bridges_for_builder_adapters
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test production_wiring_launches_bridges_for_builder_adapters ... ok"
+
   - name: "Shared enrich_turn_input / render_enrichment_block unit coverage"
     agent: "test-agent"
     action: "execute_command"
@@ -121,6 +135,7 @@ metadata:
     - "knowledge-enrichment"
     - "regression"
     - "issue-1665"
+    - "issue-2383"
   priority: "high"
   author: "copilot"
   test_type: "outside-in"
