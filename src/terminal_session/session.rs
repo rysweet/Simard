@@ -429,10 +429,26 @@ fn interactive_shell_flags(shell: &str) -> &'static str {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
-    if name == "bash" {
+    if is_bash_shell(name) {
         "--noprofile --norc -i"
     } else {
         "-i"
+    }
+}
+
+/// Whether `name` is the bash interpreter, tolerating versioned basenames such
+/// as `bash5` or `bash-5.2` while excluding unrelated names that merely start
+/// with "bash" (e.g. `bashful`). The `--noprofile --norc` long options are
+/// bash-only; applying them to a non-bash shell makes the interactive launch
+/// abort with the very exit code this fix is meant to eliminate.
+fn is_bash_shell(name: &str) -> bool {
+    match name.strip_prefix("bash") {
+        Some("") => true,
+        Some(rest) => rest
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit() || c == '-'),
+        None => false,
     }
 }
 
@@ -597,12 +613,35 @@ mod tests {
     }
 
     #[test]
+    fn interactive_shell_flags_treats_versioned_bash_as_bash() {
+        // Versioned bash basenames still honour the bash-only startup-file
+        // options, so a `$SHELL`/distro fallback to e.g. `bash5` stays
+        // deterministic rather than silently running profile/rc files.
+        assert_eq!(
+            interactive_shell_flags("/usr/local/bin/bash5"),
+            "--noprofile --norc -i"
+        );
+        assert_eq!(
+            interactive_shell_flags("/opt/homebrew/bin/bash-5.2"),
+            "--noprofile --norc -i"
+        );
+        assert!(is_bash_shell("bash"));
+        assert!(is_bash_shell("bash5"));
+        assert!(is_bash_shell("bash-5.2"));
+    }
+
+    #[test]
     fn interactive_shell_flags_uses_posix_options_for_non_bash() {
         // `--noprofile`/`--norc` are bash-specific; POSIX sh and other shells
         // must get a bare interactive invocation or they abort on launch.
         assert_eq!(interactive_shell_flags("/bin/sh"), "-i");
         assert_eq!(interactive_shell_flags("/usr/bin/dash"), "-i");
         assert_eq!(interactive_shell_flags("/usr/bin/zsh"), "-i");
+        // Names that merely start with "bash" but are not bash must not get the
+        // bash-only options.
+        assert_eq!(interactive_shell_flags("/usr/games/bashful"), "-i");
+        assert!(!is_bash_shell("bashful"));
+        assert!(!is_bash_shell("sh"));
     }
 
     // ── has_active_work_processes ─────────────────────────────────────────────

@@ -99,19 +99,24 @@ fn run_terminal_script(
                 match session.wait_for_output(expected, spec.wait_timeout)? {
                     TerminalWaitStatus::Satisfied => {}
                     TerminalWaitStatus::ExitedEarly(status) => {
+                        let transcript = session.read_transcript().unwrap_or_default();
                         return Err(SimardError::AdapterInvocationFailed {
                             base_type: base_type.to_string(),
                             reason: format!(
-                                "terminal-shell session exited with status {status} before expected output '{expected}' appeared"
+                                "terminal-shell session exited with status {status} before expected output '{expected}' appeared{}{}",
+                                exit_code_guidance(&status),
+                                transcript_diagnostic_suffix(&transcript, &spec.steps),
                             ),
                         });
                     }
                     TerminalWaitStatus::TimedOut => {
+                        let transcript = session.read_transcript().unwrap_or_default();
                         return Err(SimardError::AdapterInvocationFailed {
                             base_type: base_type.to_string(),
                             reason: format!(
-                                "terminal-shell did not emit expected output '{expected}' within {}s",
-                                spec.wait_timeout.as_secs()
+                                "terminal-shell did not emit expected output '{expected}' within {}s{}",
+                                spec.wait_timeout.as_secs(),
+                                transcript_diagnostic_suffix(&transcript, &spec.steps),
                             ),
                         });
                     }
@@ -147,24 +152,44 @@ fn describe_terminal_failure(
     transcript: &str,
     steps: &[TerminalStep],
 ) -> String {
-    let mut reason = format!("terminal-shell session exited with status {exit_status}");
+    format!(
+        "terminal-shell session exited with status {exit_status}{}{}",
+        exit_code_guidance(exit_status),
+        transcript_diagnostic_suffix(transcript, steps),
+    )
+}
+
+/// Human-readable explanation for the well-known shell exit codes, or an empty
+/// string for codes without a canonical meaning (including signal-terminated
+/// processes, where `code()` is `None`).
+fn exit_code_guidance(exit_status: &ExitStatus) -> &'static str {
     match exit_status.code() {
-        Some(127) => reason.push_str(
+        Some(127) => {
             " — exit code 127 means a command in the terminal session could not be found on PATH; \
-             verify the command is installed and on PATH, or invoke it with an absolute path",
-        ),
-        Some(126) => reason.push_str(
+             verify the command is installed and on PATH, or invoke it with an absolute path"
+        }
+        Some(126) => {
             " — exit code 126 means a command was found but is not executable; \
-             check the file permissions",
-        ),
-        _ => {}
+             check the file permissions"
+        }
+        _ => "",
     }
+}
+
+/// Pull the most relevant diagnostic out of the transcript so terminal failures
+/// — including those surfaced while waiting for expected output — name the
+/// offending command instead of leaving the operator with a bare status or
+/// timeout. Prefers an explicit shell diagnostic (`command not found`,
+/// `permission denied`, …); otherwise falls back to the last terminal output.
+/// Returns an empty string when the transcript yields nothing useful.
+fn transcript_diagnostic_suffix(transcript: &str, steps: &[TerminalStep]) -> String {
     if let Some(hint) = terminal_failure_hint(transcript) {
-        reason.push_str(&format!(" (shell reported: {hint})"));
+        format!(" (shell reported: {hint})")
     } else if let Some(last) = terminal_last_output_line(transcript, steps) {
-        reason.push_str(&format!(" (last terminal output: {last})"));
+        format!(" (last terminal output: {last})")
+    } else {
+        String::new()
     }
-    reason
 }
 
 pub(crate) fn resolve_working_directory(
@@ -241,6 +266,38 @@ mod tests {
         assert!(
             !message.ends_with("exit status: 127"),
             "error must not be the bare opaque 127 message: {message}"
+        );
+    }
+
+    /// Regression for #2077 (wait-step path): a missing command paired with a
+    /// `wait-for` step must still surface the actionable diagnostic. Previously
+    /// this reported only a generic `did not emit expected output ... within Ns`
+    /// timeout, hiding the shell's own `command not found` line. The error must
+    /// now name the offending command and include the shell diagnostic.
+    #[test]
+    fn run_terminal_script_surfaces_diagnostic_when_wait_step_times_out() {
+        let spec = TerminalTurnSpec::parse(
+            "wait-timeout-seconds: 1\ncommand: definitely-not-a-real-binary-2077 hello\nwait-for: never-seen-marker-2077",
+            "terminal-shell",
+        )
+        .unwrap();
+        let cwd = std::env::current_dir().unwrap();
+
+        let error = run_terminal_script("terminal-shell", &spec, &cwd)
+            .expect_err("a missing binary before a wait-for must fail the terminal turn");
+        let message = error.to_string();
+
+        assert!(
+            message.to_ascii_lowercase().contains("not found"),
+            "wait-step failure must surface the shell diagnostic: {message}"
+        );
+        assert!(
+            message.contains("definitely-not-a-real-binary-2077"),
+            "wait-step failure must name the offending command: {message}"
+        );
+        assert!(
+            message.contains("shell reported:"),
+            "wait-step failure must include the transcript diagnostic suffix: {message}"
         );
     }
 

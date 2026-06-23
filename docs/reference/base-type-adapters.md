@@ -106,7 +106,7 @@ A PTY-backed shell adapter that runs a configurable local command through the te
 > *literal shell commands* rather than natural-language LLM prompts, it does
 > not fold memory/knowledge markdown into its command stream.
 
-**Failure diagnostics:** when the PTY shell exits non-zero, the adapter returns an actionable error rather than a bare status. Exit code `127` is reported as a command that could not be resolved on `PATH` (use an absolute path or install the command), `126` as a found-but-not-executable command, and the shell's own diagnostic line (e.g. `bash: say: command not found`) is included so the offending command is named. The child PTY is launched with a usable `PATH` (falling back to the standard system bin directories when the inherited environment has none).
+**Failure diagnostics:** when the PTY shell exits non-zero — or a `wait-for` checkpoint fails because the command was missing — the adapter returns an actionable error rather than a bare status. Exit code `127` is reported as a command that could not be resolved on `PATH` (use an absolute path or install the command), `126` as a found-but-not-executable command, and the shell's own diagnostic line (e.g. `bash: say: command not found`) is included so the offending command is named. The child PTY is launched with a usable `PATH` (falling back to the standard system bin directories when the inherited environment has none).
 
 ### `rusty-clawd` — `RustyClawdAdapter`
 
