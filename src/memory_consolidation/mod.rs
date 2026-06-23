@@ -369,7 +369,7 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
 pub fn reinforce_prepared_context(memory: &dyn CognitiveMemoryOps, ctx: &PreparedContext) {
     let reinforce = |node_id: &str, kind: MemoryKind| {
         if let Err(e) = memory.reinforce_access(node_id, kind) {
-            tracing::debug!(node_id, ?kind, error = %e, "reinforce_access failed (non-fatal)");
+            tracing::warn!(node_id, ?kind, error = %e, "reinforce_access failed (non-fatal)");
         }
     };
     for fact in &ctx.relevant_facts {

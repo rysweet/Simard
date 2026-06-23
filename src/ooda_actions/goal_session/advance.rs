@@ -205,7 +205,7 @@ pub(crate) fn advance_goal_with_session(
         // monotonically-increasing temporal index, and content
         // truncated to 200 characters with an ellipsis.
         if !ctx.episodic_recall.is_empty() {
-            objective.push_str("\n\n## Prior episodes (most-recent first)");
+            objective.push_str("\n\n## Prior episodes (ranked by relevance)");
             for ep in &ctx.episodic_recall {
                 let content = if ep.content.chars().count() > 200 {
                     let truncated: String = ep.content.chars().take(200).collect();
