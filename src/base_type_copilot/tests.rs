@@ -906,9 +906,12 @@ fn build_copilot_terminal_objective_with_working_dir() {
 // None)` and the memory-facts / known-procedures / domain-knowledge prompt
 // blocks were never reached. These tests prove (1) that supplied bridges are
 // actually consumed, (2) that the absence of bridges still produces a valid
-// objective-only prompt, (3) that a supplied bridge whose query fails surfaces
-// the error rather than silently degrading, and (4) that the production
-// `launch_enrichment_bridges` helper wires real bridges and degrades cleanly.
+// objective-only prompt, and (3) that a supplied bridge whose query fails
+// surfaces the error rather than silently degrading. The production
+// `launch_enrichment_bridges` helper now lives in `base_type_turn` (shared with
+// the RustyClawd adapter, issue #2383); its real-bridge / degradation tests
+// live there alongside it, and `open_session_with_native_enrichment_*` below
+// still guards the Copilot factory seam.
 
 use super::CopilotSdkSession;
 use crate::bridge::BridgeErrorPayload;
