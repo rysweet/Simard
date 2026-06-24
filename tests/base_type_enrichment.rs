@@ -196,10 +196,11 @@ fn enrichment_is_noop_without_configured_bridge() {
 /// empty bridges, so enrichment was inert in production.
 ///
 /// This drives both production-wired adapters through their `with_enrichment`
-/// builders (the same seam `SessionBuilder` uses) against a real, writable
-/// state root and asserts they launch identical, non-empty memory + knowledge
-/// bridges — the parity that must hold so RustyClawd cannot silently regress to
-/// no-enrichment again.
+/// builders against a real, writable state root and asserts they launch
+/// identical, non-empty memory + knowledge bridges — the parity that must hold
+/// so RustyClawd cannot silently regress to no-enrichment again. The
+/// `SessionBuilder`-level seam itself (the line that actually regressed) is
+/// covered by `session_builder`'s `*_provider_wires_enrichment_*` tests.
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn production_wiring_launches_bridges_for_builder_adapters() {
