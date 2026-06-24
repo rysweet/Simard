@@ -100,7 +100,58 @@ pub fn enter_validation_if_needed(state_dir: &Path) -> Result<ValidateMode, Safe
 /// process already marked `validated`), this is a no-op.
 ///
 /// `now_unix` is injected so tests can deterministically drive elapsed time.
+///
+/// Equivalent to [`record_cycle_with_parity`] with no item-count check.
 pub fn record_cycle(state_dir: &Path, now_unix: i64) -> Result<ValidateMode, SafeUpdateError> {
+    record_cycle_with_parity(state_dir, now_unix, None)
+}
+
+/// Verdict of the #107 memory item-count parity check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParityVerdict {
+    /// Parity holds, or cannot be judged (no baseline / no current count). The
+    /// upgrade is allowed to proceed — the lib's store-open gate is the hard
+    /// guarantee; this is defense in depth and never blocks on an *unknown* count.
+    Ok,
+    /// The post-upgrade count fell short of a non-zero pre-upgrade baseline — the
+    /// #107 silent-empty-read signature (e.g. `pre > 0`, `post == 0`). The upgrade
+    /// must NOT be validated.
+    Shortfall { pre: u64, post: u64 },
+}
+
+/// Compare a recorded pre-upgrade item count against the freshly-read
+/// post-upgrade count.
+///
+/// Returns [`ParityVerdict::Shortfall`] only when there is a **non-zero**
+/// baseline AND the post count is strictly smaller (the #107 signature: a
+/// populated store that read back empty, or any loss). A missing baseline or a
+/// missing current count yields [`ParityVerdict::Ok`] — we never block an upgrade
+/// on an *unknown* count.
+pub fn memory_parity_verdict(pre: Option<u64>, current: Option<u64>) -> ParityVerdict {
+    match (pre, current) {
+        (Some(p), Some(c)) if p > 0 && c < p => ParityVerdict::Shortfall { pre: p, post: c },
+        _ => ParityVerdict::Ok,
+    }
+}
+
+/// Record one clean OODA cycle, additionally enforcing **#107 memory item-count
+/// parity** before declaring the upgrade `validated`.
+///
+/// `current_item_count` is the cognitive-memory total the *incoming* binary reads
+/// now; pass `None` to skip the parity check (then this behaves exactly like
+/// [`record_cycle`]). When the Nth clean cycle would otherwise flip the phase to
+/// `validated`, the recorded pre-upgrade baseline
+/// ([`UpgradeStatus::pre_upgrade_item_count`](super::state::UpgradeStatus)) is
+/// compared against `current_item_count`. On a
+/// [`ParityVerdict::Shortfall`] the phase is forced to `validate_timeout` (with a
+/// parity reason) instead of `validated`, so the watchdog rolls the upgrade back.
+/// Clean OODA cycles alone are **not** evidence of a healthy upgrade — a silently
+/// empty store passes them.
+pub fn record_cycle_with_parity(
+    state_dir: &Path,
+    now_unix: i64,
+    current_item_count: Option<u64>,
+) -> Result<ValidateMode, SafeUpdateError> {
     let Some(mut status) = read_status(state_dir)? else {
         return Ok(ValidateMode::NotRequired);
     };
@@ -132,6 +183,24 @@ pub fn record_cycle(state_dir: &Path, now_unix: i64) -> Result<ValidateMode, Saf
     write_heartbeat(state_dir, status.validate_cycles_seen, remaining)?;
 
     if status.validate_cycles_seen >= required {
+        // #107 parity gate: clean cycles are necessary but not sufficient. Refuse
+        // to validate an upgrade whose post-swap item count fell short of the
+        // recorded pre-upgrade baseline (the silent empty-read signature), forcing
+        // a rollback instead of declaring the empty store healthy.
+        if let ParityVerdict::Shortfall { pre, post } =
+            memory_parity_verdict(status.pre_upgrade_item_count, current_item_count)
+        {
+            status.phase = UpgradePhase::ValidateTimeout;
+            status.reason = Some(format!(
+                "memory item-count parity FAILED after {} clean cycles: pre-upgrade {pre}, \
+                 post-upgrade {post} (#107 silent empty-read signature) — refusing to validate, \
+                 rolling back",
+                status.validate_cycles_seen
+            ));
+            write_status(state_dir, &status)?;
+            return Ok(ValidateMode::Timeout);
+        }
+
         status.phase = UpgradePhase::Validated;
         status.reason = Some(format!(
             "{} clean cycles within {}s",
@@ -199,6 +268,24 @@ mod tests {
         budget: u64,
         started_at: &str,
     ) {
+        write_handover_status_with_pre_count(
+            state,
+            cycles_seen,
+            required,
+            budget,
+            started_at,
+            None,
+        );
+    }
+
+    fn write_handover_status_with_pre_count(
+        state: &Path,
+        cycles_seen: u32,
+        required: u32,
+        budget: u64,
+        started_at: &str,
+        pre_upgrade_item_count: Option<u64>,
+    ) {
         use super::super::state::UpgradeStatus;
         let s = UpgradeStatus {
             phase: UpgradePhase::ExecHandover,
@@ -209,6 +296,7 @@ mod tests {
             validate_required_cycles: Some(required),
             validate_cycles_seen: cycles_seen,
             validate_budget_seconds: Some(budget),
+            pre_upgrade_item_count,
         };
         write_status(state, &s).unwrap();
     }
@@ -298,5 +386,103 @@ mod tests {
         let s = read_status(dir.path()).unwrap().unwrap();
         assert_eq!(s.phase, UpgradePhase::ValidateTimeout);
         assert!(s.reason.as_deref().unwrap().contains("watchdog"));
+    }
+
+    // ----- #107 memory item-count parity gate -----
+
+    #[test]
+    fn memory_parity_verdict_cases() {
+        // Shortfall: a non-zero baseline that reads back smaller (incl. empty).
+        assert_eq!(
+            memory_parity_verdict(Some(2813), Some(0)),
+            ParityVerdict::Shortfall { pre: 2813, post: 0 }
+        );
+        assert_eq!(
+            memory_parity_verdict(Some(2813), Some(2812)),
+            ParityVerdict::Shortfall {
+                pre: 2813,
+                post: 2812
+            }
+        );
+        // Parity holds (equal or grown), or no judgement possible.
+        assert_eq!(
+            memory_parity_verdict(Some(2813), Some(2813)),
+            ParityVerdict::Ok
+        );
+        assert_eq!(
+            memory_parity_verdict(Some(2813), Some(3000)),
+            ParityVerdict::Ok
+        );
+        assert_eq!(memory_parity_verdict(None, Some(0)), ParityVerdict::Ok); // no baseline
+        assert_eq!(memory_parity_verdict(Some(2813), None), ParityVerdict::Ok); // unknown current
+        assert_eq!(memory_parity_verdict(Some(0), Some(0)), ParityVerdict::Ok); // empty before & after
+    }
+
+    #[test]
+    fn parity_gate_blocks_validation_on_shortfall_and_rolls_back() {
+        // A populated pre-upgrade store (2813) that the incoming binary reads
+        // back as 0 must NOT validate, even after enough clean cycles — it must
+        // force validate_timeout so the watchdog rolls back.
+        let dir = tempdir().unwrap();
+        super::super::drain::mark_draining(dir.path()).unwrap();
+        write_handover_status_with_pre_count(
+            dir.path(),
+            0,
+            1,
+            600,
+            "2025-05-11T12:00:00Z",
+            Some(2813),
+        );
+        let t0 = unix(2025, 5, 11, 12, 0, 0);
+
+        // The single required clean cycle is reached, but parity fails (0 < 2813).
+        let r = record_cycle_with_parity(dir.path(), t0 + 1, Some(0)).unwrap();
+        assert_eq!(r, ValidateMode::Timeout);
+
+        let s = read_status(dir.path()).unwrap().unwrap();
+        assert_eq!(s.phase, UpgradePhase::ValidateTimeout);
+        assert!(
+            s.reason.as_deref().unwrap().contains("parity FAILED"),
+            "reason should name the parity failure, got: {:?}",
+            s.reason
+        );
+        // The engineer-dispatch gate is NOT reopened on a failed validation.
+        assert!(super::super::state::is_draining(dir.path()));
+    }
+
+    #[test]
+    fn parity_gate_allows_validation_when_count_matches() {
+        // A populated store that the incoming binary reads back at full parity
+        // must validate as normal.
+        let dir = tempdir().unwrap();
+        super::super::drain::mark_draining(dir.path()).unwrap();
+        write_handover_status_with_pre_count(
+            dir.path(),
+            0,
+            1,
+            600,
+            "2025-05-11T12:00:00Z",
+            Some(2813),
+        );
+        let t0 = unix(2025, 5, 11, 12, 0, 0);
+
+        let r = record_cycle_with_parity(dir.path(), t0 + 1, Some(2813)).unwrap();
+        assert_eq!(r, ValidateMode::Validated);
+        let s = read_status(dir.path()).unwrap().unwrap();
+        assert_eq!(s.phase, UpgradePhase::Validated);
+        // Healthy upgrade reopens engineer dispatch.
+        assert!(!super::super::state::is_draining(dir.path()));
+    }
+
+    #[test]
+    fn record_cycle_without_parity_baseline_is_unchanged() {
+        // No recorded baseline => the parity check is inert and the legacy
+        // clean-cycles-only behaviour holds.
+        let dir = tempdir().unwrap();
+        write_handover_status(dir.path(), 0, 1, 600, "2025-05-11T12:00:00Z");
+        let t0 = unix(2025, 5, 11, 12, 0, 0);
+        // Even with a 0 current count, no baseline means no block.
+        let r = record_cycle_with_parity(dir.path(), t0 + 1, Some(0)).unwrap();
+        assert_eq!(r, ValidateMode::Validated);
     }
 }

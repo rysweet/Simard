@@ -53,8 +53,9 @@ pub use state::{
 };
 pub use swap::{SwapOutcome, do_swap};
 pub use validate::{
-    ValidateMode, default_install_bin, default_validate_timeout, enter_validation_if_needed,
-    record_cycle, validation_required,
+    ParityVerdict, ValidateMode, default_install_bin, default_validate_timeout,
+    enter_validation_if_needed, memory_parity_verdict, record_cycle, record_cycle_with_parity,
+    validation_required,
 };
 
 /// User-tunable safe-update knobs. Defaults here are deliberately conservative;
@@ -84,6 +85,12 @@ pub struct UpdateConfig {
     /// `~/.simard/engineer-worktrees/`. Tests can override this so the
     /// drain phase doesn't depend on the live filesystem.
     pub engineer_worktrees_root: Option<PathBuf>,
+    /// #107 defense-in-depth: cognitive-memory item count read from the live
+    /// (outgoing) store before the swap, recorded into `upgrade-status.json` so
+    /// the incoming binary's validate phase can enforce item-count parity. Set
+    /// in-process by the brain (which has the store open); left `None` by the
+    /// operator CLI (which must NOT open the live store), disabling the check.
+    pub pre_upgrade_item_count: Option<u64>,
 }
 
 impl Default for UpdateConfig {
@@ -97,6 +104,7 @@ impl Default for UpdateConfig {
             validate_timeout_seconds: 600,
             state_dir: default_state_dir(),
             engineer_worktrees_root: None,
+            pre_upgrade_item_count: None,
         }
     }
 }
@@ -187,6 +195,7 @@ impl SafeUpdateOrchestrator {
             &snapshot,
             self.config.validate_timeout_cycles,
             self.config.validate_timeout_seconds,
+            self.config.pre_upgrade_item_count,
         )?;
 
         // Compose outcome (only reachable in tests where handover is stubbed).

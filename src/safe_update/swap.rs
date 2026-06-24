@@ -38,6 +38,7 @@ pub fn do_swap(
     snapshot: &BinarySnapshot,
     validate_required_cycles: u32,
     validate_budget_seconds: u64,
+    pre_upgrade_item_count: Option<u64>,
 ) -> Result<SwapOutcome, SafeUpdateError> {
     let outcome = atomic_install(new_bin, install_path)?;
 
@@ -48,7 +49,8 @@ pub fn do_swap(
         Some(snapshot.version.clone()),
         validate_required_cycles,
         validate_budget_seconds,
-    );
+    )
+    .with_pre_upgrade_item_count(pre_upgrade_item_count);
     write_status(state_dir, &status)?;
 
     if !test_skip_handover() {
@@ -233,7 +235,7 @@ mod tests {
             backup_path: dir.path().join("simard.bak.x"),
             captured_at: "now".into(),
         };
-        do_swap(&new_bin, &install, state.path(), &snap, 5, 600).unwrap();
+        do_swap(&new_bin, &install, state.path(), &snap, 5, 600, None).unwrap();
         let status = super::super::state::read_status(state.path())
             .unwrap()
             .unwrap();
