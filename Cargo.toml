@@ -54,9 +54,9 @@ path = "src/bin/simard_tui/main.rs"
 # bumps the persistent backend lbug 0.15.4 -> 0.17.1. lbug 0.17.x reads the live
 # v40 on-disk store in place (canReadStorageVersion(40) == true), upgrading to
 # v41 on the first checkpoint, so the cognitive store is NOT lost across the
-# binary swap. NOTE: re-pin this rev to the squash-merge SHA once
-# amplihack-memory-lib PR #105 lands on main.
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "b5e1dac54e2df984565fa01d2a5c22a829d2d317", features = ["persistent"] }
+# binary swap. Pinned to the squash-merge SHA of amplihack-memory-lib PR #105
+# (merged to main as 09998af6).
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "09998af6b925602feeba439095ac4601785b36d5", features = ["persistent"] }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "43ebaa1c1b18a5630c53f0519989a2bacd42ef62" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "43ebaa1c1b18a5630c53f0519989a2bacd42ef62" }
 # De-fork (issue #2323): the gym/eval RUNNER is now the upstream

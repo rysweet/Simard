@@ -70,7 +70,7 @@ dependencies = [
 [[package]]
 name = "amplihack-memory"
 version = "0.4.0"
-source = "git+https://github.com/rysweet/amplihack-memory-lib.git?rev=b5e1dac54e2df984565fa01d2a5c22a829d2d317#b5e1dac54e2df984565fa01d2a5c22a829d2d317"
+source = "git+https://github.com/rysweet/amplihack-memory-lib.git?rev=09998af6b925602feeba439095ac4601785b36d5#09998af6b925602feeba439095ac4601785b36d5"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
