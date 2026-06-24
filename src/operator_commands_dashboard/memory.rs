@@ -232,16 +232,27 @@ pub(crate) async fn memory_history() -> Json<Value> {
 /// node type with raw Cypher against the deleted native LadybugDB schema. The
 /// library backend exposes no equivalent "list all nodes by type" API through
 /// `CognitiveMemoryOps`, so the per-item listing is reported as unavailable
-/// rather than reading the abandoned native store. Aggregate counts remain
-/// available via `GET /api/memory/history`.
+/// rather than reading the abandoned native store.
+///
+/// The *aggregate* stored total, however, is available via the same
+/// `get_statistics()` path that `/api/memory/history` uses. We surface it as
+/// `total` so the Memory tab can stop telling a human "No memories stored yet"
+/// while tens of thousands of memories are actually held (#2358). The per-item
+/// list and the last-hour window stay empty/unavailable on this backend.
 pub(crate) async fn memory_recent() -> Json<Value> {
+    let state_root = resolve_state_root();
+    let total = open_reader_bridge(&state_root)
+        .and_then(|reader| reader.ops().get_statistics())
+        .map(|stats| stats.total())
+        .unwrap_or(0);
     Json(json!({
         "items": [],
-        "total": 0,
+        "total": total,
         "last_hour_count": 0,
         "available": false,
         "note": "Per-item recent-memory listing is unavailable on the library \
-                 backend (de-fork Phase 2b, #2307). See /api/memory/history for counts.",
+                 backend (de-fork Phase 2b, #2307); `total` is the live aggregate \
+                 stored count. See /api/memory/history for the per-type breakdown.",
         "server_time": chrono::Utc::now().to_rfc3339(),
     }))
 }

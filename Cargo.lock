@@ -56,9 +56,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "amplihack-agent-eval"
+version = "0.11.1"
+source = "git+https://github.com/rysweet/amplihack-rs.git?rev=59548a96049ab8d558110bcaf9c82a4316f1bbf0#59548a96049ab8d558110bcaf9c82a4316f1bbf0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "amplihack-memory"
 version = "0.4.0"
-source = "git+https://github.com/rysweet/amplihack-memory-lib.git?rev=ceb43189ff4b25699dfd930663f72ce355b26001#ceb43189ff4b25699dfd930663f72ce355b26001"
+source = "git+https://github.com/rysweet/amplihack-memory-lib.git?rev=26d49bf864ac2c03b80c4ab075c4a907c51f82a8#26d49bf864ac2c03b80c4ab075c4a907c51f82a8"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -3858,8 +3870,9 @@ dependencies = [
 
 [[package]]
 name = "simard"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
+ "amplihack-agent-eval",
  "amplihack-memory",
  "assert_cmd",
  "axum 0.8.9",
@@ -3875,6 +3888,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "proc-macro2",
  "proptest",
  "ratatui",
  "regex",
@@ -3885,6 +3899,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha2",
+ "syn",
  "tempfile",
  "tokio",
  "toml",

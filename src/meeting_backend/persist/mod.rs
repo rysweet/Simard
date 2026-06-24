@@ -630,7 +630,7 @@ mod tests {
     // ── write_transcript ────────────────────────────────────────────
 
     #[test]
-    #[serial(simard_meetings_dir_env)]
+    #[serial(simard_meetings_dir_env, cognitive_memory)]
     fn write_transcript_creates_json_file() {
         let dir = temp_meetings_dir("transcript");
         unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", &dir) };
@@ -657,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_meetings_dir_env)]
+    #[serial(simard_meetings_dir_env, cognitive_memory)]
     fn write_transcript_error_on_unwritable_dir() {
         unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", "/proc/1/nonexistent") };
         let transcript = crate::meeting_backend::types::MeetingTranscript {
@@ -675,7 +675,7 @@ mod tests {
     // ── write_auto_save ─────────────────────────────────────────────
 
     #[test]
-    #[serial(simard_meetings_dir_env)]
+    #[serial(simard_meetings_dir_env, cognitive_memory)]
     fn write_auto_save_overwrites_same_file() {
         let dir = temp_meetings_dir("autosave");
         unsafe { std::env::set_var("SIMARD_MEETINGS_DIR", &dir) };
@@ -703,7 +703,7 @@ mod tests {
     // ── write_handoff ───────────────────────────────────────────────
 
     #[test]
-    #[serial(simard_meetings_dir_env)]
+    #[serial(simard_meetings_dir_env, cognitive_memory)]
     fn write_handoff_success_writes_artifact() {
         let dir = temp_meetings_dir("handoff");
         unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", &dir) };
@@ -731,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_meetings_dir_env)]
+    #[serial(simard_meetings_dir_env, cognitive_memory)]
     fn write_handoff_error_on_read_only_dir() {
         unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", "/proc/1/no_such_dir") };
         // Supply a non-empty decision so the write guard doesn't skip the write.
@@ -745,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_meetings_dir_env)]
+    #[serial(simard_meetings_dir_env, cognitive_memory)]
     fn write_handoff_empty_messages() {
         let dir = temp_meetings_dir("handoff-empty");
         unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", &dir) };
@@ -760,7 +760,7 @@ mod tests {
     // ── write_handoff_bundle ────────────────────────────────────────
 
     #[test]
-    #[serial(simard_meetings_dir_env)]
+    #[serial(simard_meetings_dir_env, cognitive_memory)]
     fn write_handoff_bundle_creates_sibling_files() {
         let dir = temp_meetings_dir("bundle");
         unsafe { std::env::set_var("SIMARD_MEETINGS_ROOT", &dir) };
@@ -809,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(simard_meetings_dir_env)]
+    #[serial(simard_meetings_dir_env, cognitive_memory)]
     fn write_handoff_bundle_error_on_unwritable() {
         unsafe { std::env::set_var("SIMARD_MEETINGS_ROOT", "/proc/1/nowrite") };
 
@@ -862,7 +862,7 @@ mod tests {
     // ── write guard (#2268): skip empty handoff files ───────────────
 
     #[test]
-    #[serial(simard_meetings_dir_env)]
+    #[serial(simard_meetings_dir_env, cognitive_memory)]
     fn write_guard_skips_empty_handoff() {
         let dir = temp_meetings_dir("guard-empty");
         unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", &dir) };

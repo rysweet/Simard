@@ -8,10 +8,13 @@
 pub mod adaptive_scaling;
 mod bridge_factory;
 mod curate;
+// Issue #2359 (BUG 2): per-cycle goal coverage allocator.
+pub mod coverage;
 pub mod cycle;
 mod decide;
 mod observe;
 mod orient;
+pub mod phase_weights;
 mod priority_kind;
 mod review;
 mod summary;
@@ -28,6 +31,18 @@ mod tests_parse_failure_1890;
 #[cfg(test)]
 mod tests_types;
 
+// Issue #2329: Observe-vs-Decide phase weights yield different ranked-recall
+// ordering of the same fact set, exercised against the real lbug-backed
+// `LibraryCognitiveMemory` adapter.
+#[cfg(test)]
+mod tests_phase_recall;
+
+// Issue #2395: parity for episodes — Observe-vs-Decide phase weights yield a
+// different ranked-recall ordering of the same episode set (driven through the
+// usage/text-relevance signals).
+#[cfg(test)]
+mod tests_phase_recall_episodes;
+
 // PR-C (issue #2281, problem 3): tests for the new `cycle.rs`
 // helpers (`pattern_for`, `compose_procedure_name`,
 // `derive_triggers_from_objective`).
@@ -42,6 +57,7 @@ pub use curate::{
 pub use decide::{decide, decide_with_brain};
 pub use observe::{gather_environment, observe};
 pub use orient::{orient, orient_with_brain};
+pub use phase_weights::weights_for_phase;
 pub use priority_kind::{SyntheticPriorityKind, is_synthetic_id};
 pub use review::review_outcomes;
 pub use summary::summarize_cycle_report;

@@ -385,6 +385,7 @@ mod tests_b {
     /// the synthetic entries — proving the tmux route would see the same
     /// host set as the Topology / Remote-VMs panels.
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn host_enumeration_reads_load_hosts() {
         use std::io::Write;
 
@@ -436,5 +437,55 @@ mod tests_b {
 
         // Cleanup tempdir (best-effort).
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── Workboard "Active Engineers" reads the live subagent registry (#1678) ──
+    #[tokio::test]
+    #[serial_test::serial(cognitive_memory)]
+    async fn workboard_active_engineers_come_from_live_subagent_sessions() {
+        use crate::operator_commands_dashboard::workboard::workboard;
+        use crate::test_support::HermeticState;
+
+        let state = HermeticState::new();
+
+        // Write a subagent registry with one live (no ended_at) and one ended
+        // session — exactly what the Terminal tab reads via
+        // `/api/subagent-sessions`.
+        let reg_dir = state.state_root().join("state");
+        std::fs::create_dir_all(&reg_dir).unwrap();
+        let live_pid = std::process::id();
+        let registry = serde_json::json!({
+            "sessions": [
+                {
+                    "agent_id": "agent-live",
+                    "session_name": "engineer-live",
+                    "host": "local",
+                    "pid": live_pid,
+                    "created_at": 1_781_939_550_i64,
+                    "goal_id": "self-serve-dashboard-improvement"
+                },
+                {
+                    "agent_id": "agent-done",
+                    "session_name": "engineer-done",
+                    "host": "local",
+                    "pid": 999_999,
+                    "created_at": 1_781_900_000_i64,
+                    "ended_at": 1_781_900_100_i64,
+                    "goal_id": "old-goal"
+                }
+            ]
+        });
+        std::fs::write(reg_dir.join("subagent_sessions.json"), registry.to_string()).unwrap();
+
+        let result = workboard().await;
+        let engineers = result.0["spawned_engineers"].as_array().unwrap();
+        assert_eq!(
+            engineers.len(),
+            1,
+            "only the live (un-ended) subagent session must appear, not the empty agent registry"
+        );
+        assert_eq!(engineers[0]["pid"], live_pid);
+        assert_eq!(engineers[0]["task"], "self-serve-dashboard-improvement");
+        assert_eq!(engineers[0]["alive"], true);
     }
 }

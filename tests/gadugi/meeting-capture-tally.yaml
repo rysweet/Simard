@@ -1,0 +1,53 @@
+name: "Meeting live capture tally"
+description: "Outside-in verification that the interactive meeting REPL prints a running [meeting] captured: tally after each structured capture command (/decision, /action, /question, /risk, /disagree) with per-category counts, correct pluralization, and a plain-text grep-safe contract — bringing the interactive path to parity with the batch meeting probe's capture-count summary."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Meeting REPL emits live capture tally"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/meeting-capture-tally.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "meeting"
+    - "repl"
+    - "capture-tally"
+    - "outside-in"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

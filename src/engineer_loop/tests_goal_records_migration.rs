@@ -40,6 +40,7 @@ fn seed_active_only(state_root: &std::path::Path, n: usize) -> GoalBoard {
     let mut board = GoalBoard::new();
     for i in 0..n {
         board.active.push(ActiveGoal {
+            repo: None,
             id: format!("engineer-mig-active-goal-{i:02}"),
             description: format!("Engineer migration active goal #{i:02}"),
             priority: (i + 1) as u32,

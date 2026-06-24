@@ -11,6 +11,7 @@ related:
   - ../reference/cognitive-memory-bridge-helpers.md
   - ../howto/inspect-durable-goal-register.md
   - ../reference/simard-cli.md
+  - ../reference/goal-target-repo-routing.md
 ---
 
 # How to recover a corrupted or missing goal board
@@ -151,6 +152,15 @@ On the next OODA cycle the daemon detects the marker, removes it, skips
 five default goals from `DEFAULT_SEED_GOALS`. The `Curate` step at the end
 of that cycle persists the fresh snapshot to cognitive memory. All
 previous active goals and backlog items are discarded.
+
+> **Seed goals carry their target repos.** Since issue
+> [#2359](https://github.com/rysweet/Simard/issues/2359), `DEFAULT_SEED_GOALS`
+> records each goal's target repo slug. A reseed restores
+> `improve-amplihack-test-coverage` with `repo = "amplihack-rs"`, so its
+> engineer is routed back to `~/src/amplihack-rs` automatically — see
+> [Goal target-repo routing](../reference/goal-target-repo-routing.md). The
+> `repo` field also round-trips losslessly through
+> `simard goals inspect --json` / `simard goals restore`.
 
 > **Warning**: this permanently discards the current board. Use only as a
 > last resort.

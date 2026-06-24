@@ -1,0 +1,28 @@
+name: copilot-memory-knowledge-enrichment
+app_type: cli
+description: |
+  Validates issue #1664: the CopilotSdkAdapter now wires real memory + knowledge
+  bridges instead of hardcoding both to None. Each run step shells out to the
+  adapter's unit tests; a non-zero cargo exit fails the step. Green means:
+  - supplied bridges are consumed (memory facts + domain knowledge reach the
+    formatted turn prompt on both the meeting and PTY paths)
+  - absence of bridges still yields a valid objective-only prompt
+  - a supplied bridge whose query fails surfaces the error (no silent degrade)
+  - the production launch helper wires real bridges and degrades cleanly when
+    cognitive memory is unavailable
+  - existing session-creation behaviour is unregressed
+agents:
+  - name: cargo
+    type: cli
+    command: cargo
+steps:
+  - action: run
+    params:
+      command: cargo
+      args: ["test", "--lib", "enrichment"]
+    timeout: 300000
+  - action: run
+    params:
+      command: cargo
+      args: ["test", "--lib", "base_type_copilot::tests::session_creation_succeeds_for_engineer_mode"]
+    timeout: 300000

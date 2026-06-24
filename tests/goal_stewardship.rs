@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod common;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -11,29 +13,6 @@ fn rendered_output(output: &Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     format!("{stdout}{stderr}")
-}
-
-/// Returns true when the rendered output indicates the test cannot run
-/// because the CI environment lacks a configured LLM provider.
-/// Mirrors tests/engineer_loop.rs::skip_if_no_llm_provider — duplicated
-/// because tests/ files compile as separate crates and there is no shared
-/// test-support crate.
-fn skip_if_no_llm_provider(rendered: &str) -> bool {
-    if rendered.contains("No API key found")
-        || rendered.contains("LLM-based review is unavailable")
-        || rendered.contains("LLM session but open() failed")
-        || rendered.contains("base type 'review-pipeline-rustyclawd' failed")
-        || rendered.contains("missing required configuration 'SIMARD_LLM_PROVIDER'")
-        // After the engineer-loop subprocess pivot (issue #1648).
-        || rendered.contains("amplihack RustyClawd")
-        || rendered.contains("RustyClawd exited with status")
-        || rendered.contains("failed to spawn `amplihack")
-        || rendered.contains("agent session failed")
-    {
-        eprintln!("SKIP: no LLM provider available (CI environment)");
-        return true;
-    }
-    false
 }
 
 struct TempDirGuard {
@@ -102,6 +81,7 @@ goal: Track future remote orchestration | priority=6 | status=active | rationale
 }
 
 #[test]
+#[ignore = "requires a real LLM provider/session; reported as `ignored` by default rather than passing by skipping (issue #2047)"]
 fn meeting_goal_updates_flow_into_later_engineer_loop_runs() {
     let state_root = TempDirGuard::new("simard-goal-flow-state");
     let meeting_objective = "\
@@ -143,9 +123,10 @@ goal: Keep outside-in verification strong | priority=2 | status=active | rationa
         .expect("engineer loop probe should launch");
     let engineer_rendered = rendered_output(&engineer_output);
 
-    if skip_if_no_llm_provider(&engineer_rendered) {
-        return;
-    }
+    common::require_llm_provider(
+        "meeting_goal_updates_flow_into_later_engineer_loop_runs",
+        &engineer_rendered,
+    );
     assert!(
         engineer_output.status.success(),
         "engineer loop probe should succeed with shared goal state:\n{engineer_rendered}"
@@ -174,6 +155,7 @@ goal: Keep outside-in verification strong | priority=2 | status=active | rationa
 }
 
 #[test]
+#[ignore = "requires a real LLM provider/session; reported as `ignored` by default rather than passing by skipping (issue #2047)"]
 fn engineer_loop_only_carries_the_three_most_recent_meeting_records() {
     let state_root = TempDirGuard::new("simard-meeting-carry-limit");
     let handoff_dir = state_root.path().join("handoffs");
@@ -219,9 +201,10 @@ open-question: what changes after meeting {meeting_number}?"
         .expect("engineer loop probe should launch");
     let engineer_rendered = rendered_output(&engineer_output);
 
-    if skip_if_no_llm_provider(&engineer_rendered) {
-        return;
-    }
+    common::require_llm_provider(
+        "engineer_loop_only_carries_the_three_most_recent_meeting_records",
+        &engineer_rendered,
+    );
     assert!(
         engineer_output.status.success(),
         "engineer loop probe should succeed with bounded meeting carryover:\n{engineer_rendered}"

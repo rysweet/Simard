@@ -55,6 +55,8 @@ fn stateful_bridge() -> CognitiveMemoryBridge {
                     confidence: params["confidence"].as_f64().unwrap_or(1.0),
                     source_id: params["source_id"].as_str().unwrap_or("").into(),
                     tags,
+                    usage_count: 0,
+                    last_accessed_at: None,
                 });
                 Ok(json!({"id": id}))
             }

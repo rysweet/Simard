@@ -305,6 +305,16 @@ pub(super) fn register_builtin_base_type(
             Ok(())
         }
         COPILOT_SDK_BASE_TYPE => {
+            // Issue #1664: the live non-meeting Copilot turn path (the OODA
+            // daemon's Orchestrator session and the review pipeline's Engineer
+            // session) opts into memory + knowledge enrichment via
+            // `SessionBuilder` + `CopilotSdkAdapter::with_enrichment`.
+            // This registry feeds the `RuntimeKernel`/gym harness instead, which
+            // must run against a *caller-specific* (often hermetic) state root —
+            // wiring `default_state_root()` here would make gym evals read the
+            // operator's real memory store. Enrichment for that path therefore
+            // needs a threaded state_root and is intentionally a scoped
+            // fast-follow (tracked with #1665), not the hardcoded-None defect.
             base_types.register(crate::base_type_copilot::CopilotSdkAdapter::registered(
                 base_type.as_str(),
             )?);

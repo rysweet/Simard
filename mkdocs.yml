@@ -54,6 +54,8 @@ nav:
     - Bridge Pattern: architecture/bridge-pattern.md
     - Cognitive Memory: architecture/cognitive-memory.md
     - Cognitive Memory — Library Adapter: architecture/cognitive-memory-library-adapter.md
+    - Episode Ingestion Policy & Promotion: architecture/episode-ingestion-policy.md
+    - Gym Eval Engine — Library Adapter: architecture/gym-eval-library-adapter.md
     - Agent Composition: architecture/agent-composition.md
     - Implementation Plan: architecture/implementation-plan.md
   - Concepts:
@@ -77,10 +79,15 @@ nav:
     - Troubleshoot Goal Store: howto/troubleshoot-goal-store.md
     - Recover from Meeting Close Timeout: howto/recover-from-meeting-close-timeout.md
     - Configure Pluggable Identity: howto/configure-pluggable-identity.md
+    - Configure Episode Hygiene and Promotion: howto/configure-episode-hygiene-and-promotion.md
     - Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
+    - Route a Goal to its Target Repo: howto/route-a-goal-to-its-target-repo.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Memory introspection CLI: reference/simard-memory-cli.md
+    - Cognitive-memory provenance (DERIVES_FROM): reference/cognitive-memory-provenance.md
+    - Episode Ingestion Classifier API: reference/episode-ingestion-classifier.md
+    - Automatic Distillation Scheduler API: reference/automatic-distillation-scheduler.md
     - Goal-board prospective reconcile: reference/goal-board-prospective-reconcile.md
     - Runtime Contracts: reference/runtime-contracts.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
@@ -89,6 +96,8 @@ nav:
     - Recipe Context Var Sanitization: reference/recipe-context-var-sanitization.md
     - File-backed Goal Store: reference/file-backed-goal-store.md
     - Adaptive Scaling API: reference/adaptive-scaling-api.md
+    - Goal Target-Repo Routing: reference/goal-target-repo-routing.md
+    - Goal Coverage Allocation: reference/goal-coverage-allocation.md
     - Pluggable Identity API: reference/pluggable-identity-api.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
     # Hidden from nav until issue #1590 implementation lands:

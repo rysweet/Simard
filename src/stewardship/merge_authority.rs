@@ -1062,6 +1062,7 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn base_allowlist_from_env_default_is_main() {
         let _g = env_lock().lock().unwrap();
@@ -1073,6 +1074,7 @@ mod tests {
         assert_eq!(list, vec!["main".to_string()]);
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn base_allowlist_from_env_splits_and_trims() {
         let _g = env_lock().lock().unwrap();
@@ -1093,6 +1095,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn base_allowlist_from_env_empty_string_falls_back_to_default() {
         let _g = env_lock().lock().unwrap();

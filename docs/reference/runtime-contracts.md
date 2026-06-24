@@ -421,10 +421,30 @@ Fresh per-run reports expose these public scorecard fields under `scorecard`:
 - `correctness_checks_passed`
 - `correctness_checks_total`
 - `evidence_quality`
+- `evidence_quality_assessment`
 - `unnecessary_action_count`
 - `retry_count`
 - `human_review_notes`
 - `measurement_notes`
+
+`evidence_quality` is a coarse legacy categorical (`sufficient` when at least four
+evidence records were exported, otherwise `thin`) retained for the reporting and
+run-comparison paths. `evidence_quality_assessment` is the structured, comparable
+evidence-quality signal required by the scoring strategy and is the field to prefer
+when comparing changes to prompts and policies. It contains:
+
+- `dimensions`: the five canonical scoring dimensions, each in `[0.0, 1.0]`:
+  - `factual_accuracy`: correctness-check pass rate
+  - `specificity`: total evidence "units" — each record contributes up to one
+    unit scaled by detail richness (saturating at 80 characters), with the
+    summed units saturating at four; empty-detail records contribute nothing
+  - `temporal_awareness`: fraction of exported memory records carrying a creation timestamp
+  - `source_attribution`: how strongly evidence is attributed to a concrete source
+    (base-type sources count fully, generic runtime sources partially)
+  - `confidence_calibration`: `1.0` minus capped penalties for unnecessary actions and
+    retries; unmeasured metrics incur no penalty
+- `overall`: the mean of the five dimensions
+- `category`: a coarse tier derived from `overall` (`strong` ≥ 0.75, `moderate` ≥ 0.5, else `weak`)
 
 The current counting boundary is:
 

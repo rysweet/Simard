@@ -34,3 +34,8 @@ mod tests_carryover;
 mod tests_operations;
 #[cfg(test)]
 mod tests_save_with_removals;
+
+// Issue #2329 (SimPR4): repeated goal-board snapshot saves supersede via
+// CallerKey dedup instead of accumulating live duplicates.
+#[cfg(test)]
+mod tests_snapshot_dedup;

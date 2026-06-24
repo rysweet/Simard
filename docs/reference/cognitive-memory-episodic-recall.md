@@ -7,6 +7,7 @@ doc_type: reference
 related:
   - ../architecture/cognitive-memory.md
   - ../architecture/episode-distillation.md
+  - ./cognitive-memory-ranked-episodic-recall.md
   - ./cognitive-memory-preparation-filters.md
   - ./cognitive-memory-bootstrap-procedures.md
   - ./ooda-procedural-memory.md
@@ -43,6 +44,15 @@ injects them into the brain prompt under a `Prior episodes` section.
 This is the "did I encounter something similar in cycle N and do
 X?" signal that the OODA brain needs to avoid re-deriving from
 scratch every cycle.
+
+> **Superseded in preparation by #2395.** OODA preparation no longer orders
+> these episodes newest-first via `search_episodes_by_keywords`; it now ranks
+> them with the library's multi-signal `recall_episodes_ranked` (relevance +
+> confidence + importance + recency + usage + graph), reusing the per-phase
+> `RecallWeightSet`. The keyword path documented here is **retained** as the
+> default trait implementation and as the compressed-source UNION backfill, and
+> the `session-` filter / prompt block / observability counts are unchanged. See
+> [Ranked episodic recall & memory reinforcement](./cognitive-memory-ranked-episodic-recall.md).
 
 Episodic recall complements PR-B's distillation: distilled facts
 capture *patterns* across many episodes, while episodic recall

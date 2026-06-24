@@ -104,7 +104,7 @@ impl AgentProgram for GoalCuratorProgram {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct StructuredGoalPlan {
     goals: Vec<GoalUpdate>,
 }

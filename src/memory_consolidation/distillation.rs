@@ -55,13 +55,50 @@ pub struct DistilledFact {
     pub source_episode_id: String,
 }
 
+/// A recurring action sequence distilled from a batch of episodes
+/// (issue #2327, R5). Stored via `store_procedure_with_provenance` so a
+/// `PROCEDURE_DERIVES_FROM` edge links the procedure back to the episodes it
+/// was distilled from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistilledProcedure {
+    /// Procedure name (e.g. `ci-fix:auto`). Upsert-by-name on store.
+    pub name: String,
+    /// Ordered steps of the procedure.
+    pub steps: Vec<String>,
+    /// `node_id`s of the episodes this procedure was distilled from
+    /// (threaded as provenance).
+    pub source_episode_ids: Vec<String>,
+}
+
+/// The full output of one distillation pass: facts AND procedures
+/// (issue #2327, R5). Additive over the legacy fact-only shape — a
+/// fact-only runner yields an empty `procedures` vector.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DistillOutput {
+    pub facts: Vec<DistilledFact>,
+    pub procedures: Vec<DistilledProcedure>,
+}
+
 /// Pluggable LLM-side runner for the distillation recipe.
 ///
 /// The trait exists so tests can substitute a deterministic stub.
 /// Production code uses [`RecipeRunnerSubprocess`] which shells out
 /// to `recipe-runner-rs`.
 pub trait DistillRecipeRunner {
+    /// Legacy fact-only entry point. Required so existing fact-only
+    /// runners (and the subprocess runner's parse) keep working.
     fn run(&self, episodes: &[CognitiveEpisode]) -> SimardResult<Vec<DistilledFact>>;
+
+    /// Full entry point emitting BOTH facts and procedures (issue #2327,
+    /// R5). The default wraps [`run`](Self::run) with an empty procedure
+    /// list, so a runner that only implements `run` distils facts exactly
+    /// as before — back-compatible by construction.
+    fn run_all(&self, episodes: &[CognitiveEpisode]) -> SimardResult<DistillOutput> {
+        Ok(DistillOutput {
+            facts: self.run(episodes)?,
+            procedures: Vec::new(),
+        })
+    }
 }
 
 /// Report describing what one distillation pass actually did.
@@ -80,6 +117,8 @@ pub struct DistillReport {
     pub input_count: u32,
     /// Number of facts emitted by the recipe.
     pub fact_count: u32,
+    /// Number of procedures emitted by the recipe (issue #2327, R5).
+    pub procedure_count: u32,
     /// Number of episodes marked distilled after the pass.
     pub marked_count: u32,
 }
@@ -92,7 +131,10 @@ impl DistillReport {
 
     /// `true` when the pass did not fire (input/output/marks all zero).
     pub fn was_skipped(&self) -> bool {
-        self.input_count == 0 && self.fact_count == 0 && self.marked_count == 0
+        self.input_count == 0
+            && self.fact_count == 0
+            && self.procedure_count == 0
+            && self.marked_count == 0
     }
 
     /// Reduction ratio (`1 - fact_count / input_count`) as a fraction
@@ -157,8 +199,8 @@ pub fn distill_recent_episodes_with_runner(
     // any episodes — the batch is fully retry-eligible on the next
     // pass. This is the retry-safety invariant under test in
     // `distillation_handles_recipe_error_without_marking`.
-    let facts = match runner.run(&episodes) {
-        Ok(f) => f,
+    let output = match runner.run_all(&episodes) {
+        Ok(o) => o,
         Err(e) => {
             tracing::warn!(
                 target: "simard::distill",
@@ -172,22 +214,44 @@ pub fn distill_recent_episodes_with_runner(
             return Err(e);
         }
     };
+    let DistillOutput { facts, procedures } = output;
 
-    // Store every fact. Each fact's source_id encodes the originating
-    // episode for provenance (search_facts can be filtered/grepped on
-    // the `distill:` prefix to identify machine-distilled facts).
+    // Store every fact via the provenance write path. Each fact's textual
+    // `source_id` retains the `distill:{episode}` prefix for back-compat
+    // (search_facts can be filtered/grepped on it to identify machine-distilled
+    // facts), while the originating episode id is ALSO threaded through as
+    // `source_episode_ids` so a `DERIVES_FROM` edge links the fact back to the
+    // episode it was distilled from (issue #2325). The concept doubles as the
+    // fact's tag, matching the legacy `store_fact` call this replaced.
     let mut stored = 0u32;
     for fact in &facts {
-        let concepts = [fact.concept.clone()];
         let source = format!("distill:{}", fact.source_episode_id);
-        memory.store_fact(
+        memory.store_fact_with_provenance(
             &fact.concept,
             &fact.content,
             DISTILL_FACT_CONFIDENCE,
-            &concepts,
             &source,
+            Some(std::slice::from_ref(&fact.concept)),
+            None,
+            std::slice::from_ref(&fact.source_episode_id),
         )?;
         stored += 1;
+    }
+
+    // Store every procedure via the provenance write path (issue #2327, R5).
+    // `source_episode_ids` are threaded so a `PROCEDURE_DERIVES_FROM` edge links
+    // the procedure back to the recurring episodes it was distilled from. The
+    // upsert-by-name in the backend reinforces an existing procedure rather than
+    // duplicating it (#2298).
+    let mut stored_procs = 0u32;
+    for proc in &procedures {
+        memory.store_procedure_with_provenance(
+            &proc.name,
+            &proc.steps,
+            &[],
+            &proc.source_episode_ids,
+        )?;
+        stored_procs += 1;
     }
 
     // Mark EVERY input episode distilled — even those the recipe
@@ -206,15 +270,19 @@ pub fn distill_recent_episodes_with_runner(
         target: "simard::distill",
         pulled,
         stored,
+        stored_procs,
         marked,
         reduction_pct,
-        "distill: {pulled} episodes → {stored} facts, {marked} marked (reduction {reduction_pct:.0}%)"
+        "distill: {pulled} episodes → {stored} facts, {stored_procs} procedures, {marked} marked (reduction {reduction_pct:.0}%)"
     );
-    eprintln!("[simard] distill: {pulled} episodes → {stored} facts, {marked} marked");
+    eprintln!(
+        "[simard] distill: {pulled} episodes → {stored} facts, {stored_procs} procedures, {marked} marked"
+    );
 
     Ok(DistillReport {
         input_count: pulled,
         fact_count: stored,
+        procedure_count: stored_procs,
         marked_count: marked,
     })
 }
@@ -304,6 +372,21 @@ impl RecipeRunnerSubprocess {
 
 impl DistillRecipeRunner for RecipeRunnerSubprocess {
     fn run(&self, episodes: &[CognitiveEpisode]) -> SimardResult<Vec<DistilledFact>> {
+        let raw = self.invoke_recipe(episodes)?;
+        parse_recipe_output(&raw)
+    }
+
+    fn run_all(&self, episodes: &[CognitiveEpisode]) -> SimardResult<DistillOutput> {
+        let raw = self.invoke_recipe(episodes)?;
+        parse_recipe_output_full(&raw)
+    }
+}
+
+impl RecipeRunnerSubprocess {
+    /// Shell out to `recipe-runner-rs` with the episodes payload and return
+    /// the recipe's raw stdout. Shared by [`run`](DistillRecipeRunner::run)
+    /// and [`run_all`](DistillRecipeRunner::run_all).
+    fn invoke_recipe(&self, episodes: &[CognitiveEpisode]) -> SimardResult<String> {
         // Serialize episodes as a compact JSON array. Each entry
         // exposes the four fields the recipe prompt references:
         // `id`, `source_label`, `temporal_index`, `content`.
@@ -343,8 +426,7 @@ impl DistillRecipeRunner for RecipeRunnerSubprocess {
             )));
         }
 
-        let raw = String::from_utf8_lossy(&output.stdout).to_string();
-        parse_recipe_output(&raw)
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 }
 
@@ -359,19 +441,27 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Parse the recipe's stdout into a list of [`DistilledFact`].
 ///
-/// The recipe is expected to emit a JSON object of shape
-/// `{ "facts": [ { "concept": "...", "content": "...",
-/// "source_episode_id": "..." } ] }`. Because the underlying LLM may
-/// wrap the JSON in prose, we scan for the first balanced `{...}`
-/// substring containing a `"facts"` key and parse that.
-///
-/// Returns `Err` when no parseable object is found — the caller
-/// treats `Err` as the retry-safe "no markers set" path.
+/// Thin facts-only wrapper over [`parse_recipe_output_full`] retained for the
+/// legacy [`DistillRecipeRunner::run`] entry point and its unit tests.
 fn parse_recipe_output(raw: &str) -> SimardResult<Vec<DistilledFact>> {
+    parse_recipe_output_full(raw).map(|o| o.facts)
+}
+
+/// Parse the recipe's stdout into a [`DistillOutput`] (facts AND procedures).
+///
+/// The recipe is expected to emit a JSON object of shape
+/// `{ "facts": [ … ], "procedures": [ … ] }` — `procedures` is optional and
+/// defaults to empty for back-compat with fact-only recipe output. Because the
+/// underlying LLM may wrap the JSON in prose, we scan for the first balanced
+/// `{...}` substring that parses as the envelope.
+///
+/// Returns `Err` when no parseable object is found — the caller treats `Err`
+/// as the retry-safe "no markers set" path.
+fn parse_recipe_output_full(raw: &str) -> SimardResult<DistillOutput> {
     let trimmed = raw.trim();
     // Fast path — recipe stdout IS the JSON object.
     if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
-        return Ok(parsed.into_facts());
+        return Ok(parsed.into_output());
     }
     // Slow path — find the first balanced `{...}` substring and try
     // each one until something parses. Cheap because the output is
@@ -388,7 +478,7 @@ fn parse_recipe_output(raw: &str) -> SimardResult<Vec<DistilledFact>> {
                         && let Ok(parsed) =
                             serde_json::from_str::<RecipeEnvelope>(&trimmed[start..=i])
                     {
-                        return Ok(parsed.into_facts());
+                        return Ok(parsed.into_output());
                     }
                 }
                 _ => {}
@@ -404,6 +494,8 @@ fn parse_recipe_output(raw: &str) -> SimardResult<Vec<DistilledFact>> {
 #[derive(serde::Deserialize)]
 struct RecipeEnvelope {
     facts: Vec<RecipeFact>,
+    #[serde(default)]
+    procedures: Vec<RecipeProcedure>,
 }
 
 #[derive(serde::Deserialize)]
@@ -411,6 +503,15 @@ struct RecipeFact {
     concept: String,
     content: String,
     source_episode_id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RecipeProcedure {
+    name: String,
+    #[serde(default)]
+    steps: Vec<String>,
+    #[serde(default)]
+    source_episode_ids: Vec<String>,
 }
 
 impl RecipeEnvelope {
@@ -433,6 +534,39 @@ impl RecipeEnvelope {
             })
             .collect()
     }
+
+    fn into_procedures(self) -> Vec<DistilledProcedure> {
+        // Keep only procedures that name at least one source episode so a
+        // `PROCEDURE_DERIVES_FROM` edge can actually be drawn, and that carry
+        // at least one step. Unnamed / empty procedures are dropped.
+        self.procedures
+            .into_iter()
+            .filter(|p| {
+                !p.name.trim().is_empty() && !p.steps.is_empty() && !p.source_episode_ids.is_empty()
+            })
+            .map(|p| DistilledProcedure {
+                name: p.name,
+                steps: p.steps,
+                source_episode_ids: p.source_episode_ids,
+            })
+            .collect()
+    }
+
+    fn into_output(self) -> DistillOutput {
+        let RecipeEnvelope { facts, procedures } = self;
+        DistillOutput {
+            facts: RecipeEnvelope {
+                facts,
+                procedures: Vec::new(),
+            }
+            .into_facts(),
+            procedures: RecipeEnvelope {
+                facts: Vec::new(),
+                procedures,
+            }
+            .into_procedures(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -449,6 +583,7 @@ mod unit_tests {
         let r = DistillReport {
             input_count: 25,
             fact_count: 3,
+            procedure_count: 0,
             marked_count: 25,
         };
         assert!(!r.was_skipped());
@@ -464,6 +599,7 @@ mod unit_tests {
         let r = DistillReport {
             input_count: 25,
             fact_count: 3,
+            procedure_count: 0,
             marked_count: 25,
         };
         let pct = r.reduction() * 100.0;

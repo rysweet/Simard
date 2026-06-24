@@ -1,3 +1,4 @@
+use crate::base_type_turn::EnrichmentBridges;
 use crate::base_types::{
     BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeSession, BaseTypeSessionRequest,
     standard_session_capabilities,
@@ -60,6 +61,7 @@ impl BaseTypeFactory for RustyClawdAdapter {
             client: None,
             rt: None,
             conversation_history: Vec::new(),
+            enrichment: EnrichmentBridges::new(),
         }))
     }
 }

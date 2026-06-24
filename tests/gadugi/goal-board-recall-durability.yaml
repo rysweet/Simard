@@ -1,0 +1,54 @@
+name: "Goal-Board Durable Recall (#2320 / #2316)"
+description: "Outside-in regression for the post-de-fork durable-recall race. Boots the real dashboard binary standalone (no OODA daemon, so the tier-2 direct-open cognitive-memory path is exercised), seeds 3 active goals, then performs many write->read round-trips over the HTTP API — a status update on a seeded active goal plus a unique backlog append each iteration. After every write it asserts the board is durably recalled: the 3 seeded active goals are always present (never an empty or stale board) and every appended backlog item is read back. Targets the same open->write->reopen->read sequence behind the flaky `full_goal_lifecycle_crud` (left: 0, right: 3). Deliberately exercises the append/update recall path and does not assert goal removal, which is governed by a separate merge-on-write concern (#1923/#1925)."
+version: "1.0.0"
+
+config:
+  timeout: 420000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 420000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Goal board survives repeated CRUD lifecycle round-trips"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/goal-board-recall-durability.sh"
+    timeout: 420000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "dashboard"
+    - "goals"
+    - "cognitive-memory"
+    - "durable-recall"
+    - "issue-2320"
+    - "issue-2316"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

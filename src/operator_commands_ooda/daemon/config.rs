@@ -28,6 +28,7 @@ mod tests {
     /// Serialize tests that mutate `SIMARD_DASHBOARD_PORT`.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn default_values_without_env() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -37,6 +38,7 @@ mod tests {
         assert_eq!(cfg.port, 8080, "default port must be 8080");
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn env_override_sets_port() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -46,6 +48,7 @@ mod tests {
         unsafe { std::env::remove_var("SIMARD_DASHBOARD_PORT") };
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn invalid_env_falls_back_to_default_port() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -55,6 +58,7 @@ mod tests {
         unsafe { std::env::remove_var("SIMARD_DASHBOARD_PORT") };
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn empty_env_falls_back_to_default_port() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -74,6 +78,7 @@ mod tests {
         assert_eq!(cfg.port, 9999);
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn zero_port_is_valid() {
         let _g = ENV_LOCK.lock().unwrap();

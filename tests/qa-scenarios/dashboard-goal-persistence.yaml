@@ -1,0 +1,38 @@
+# Canonical agentic-test schema (name + agents[] + steps[] with params).
+#
+# The installed `gadugi-test` / `@gadugi/agentic-test` binary validates and runs
+# scenarios through `ScenarioLoader` (canonical format), which requires a `name`,
+# a `steps` array, and a non-empty `agents` array. A single `cli` agent runs the
+# hermetic regression script; the agent's command runner treats a non-zero exit
+# code as a step failure, so the script's own `exit 1` on any lost goal makes
+# this a real pass/fail gate (not a cosmetic assertion).
+#
+# This file doubles as the reusable canonical exemplar for the repo's other
+# qa scenarios, which still use the older `app_type` + `steps` shape the
+# installed binary rejects ("Scenario must have at least one agent").
+name: simard-dashboard-goal-persistence
+description: >-
+  Standalone dashboard persists goals across multiple HTTP requests
+  (no silent goal-board data loss).
+version: "1.0"
+config:
+  timeout: 240000
+environment:
+  requires: []
+agents:
+  - name: cli-agent
+    type: cli
+    config: {}
+metadata:
+  tags:
+    - cli
+  priority: high
+steps:
+  - name: Run the standalone dashboard goal-persistence regression script
+    agent: cli-agent
+    action: run
+    params:
+      command: bash
+      args:
+        - scripts/qa-dashboard-goal-persistence.sh
+    timeout: 240000

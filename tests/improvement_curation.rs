@@ -5,6 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
+mod common;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -13,29 +15,6 @@ fn rendered_output(output: &Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     format!("{stdout}{stderr}")
-}
-
-/// Returns true when the rendered output indicates the test cannot run
-/// because the CI environment lacks a configured LLM provider.
-/// Mirrors tests/engineer_loop.rs::skip_if_no_llm_provider — duplicated
-/// because tests/ files compile as separate crates and there is no shared
-/// test-support crate.
-fn skip_if_no_llm_provider(rendered: &str) -> bool {
-    if rendered.contains("No API key found")
-        || rendered.contains("LLM-based review is unavailable")
-        || rendered.contains("LLM session but open() failed")
-        || rendered.contains("base type 'review-pipeline-rustyclawd' failed")
-        || rendered.contains("missing required configuration 'SIMARD_LLM_PROVIDER'")
-        // After the engineer-loop subprocess pivot (issue #1648).
-        || rendered.contains("amplihack RustyClawd")
-        || rendered.contains("RustyClawd exited with status")
-        || rendered.contains("failed to spawn `amplihack")
-        || rendered.contains("agent session failed")
-    {
-        eprintln!("SKIP: no LLM provider available (CI environment)");
-        return true;
-    }
-    false
 }
 
 struct TempDirGuard {
@@ -72,6 +51,7 @@ fn load_json(path: impl AsRef<Path>) -> Value {
 }
 
 #[test]
+#[ignore = "requires a real LLM provider/session; reported as `ignored` by default rather than passing by skipping (issue #2047)"]
 fn review_artifacts_can_be_promoted_into_durable_improvement_goals() {
     let state_root = TempDirGuard::new("simard-improvement-curation-state");
 
@@ -137,9 +117,10 @@ approve: Promote this pattern into a repeatable benchmark | priority=2 | status=
         .expect("engineer loop probe should launch");
     let engineer_rendered = rendered_output(&engineer_output);
 
-    if skip_if_no_llm_provider(&engineer_rendered) {
-        return;
-    }
+    common::require_llm_provider(
+        "review_artifacts_can_be_promoted_into_durable_improvement_goals",
+        &engineer_rendered,
+    );
     assert!(
         engineer_output.status.success(),
         "engineer loop probe should succeed with promoted improvement goals:\n{engineer_rendered}"

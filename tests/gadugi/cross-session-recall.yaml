@@ -1,9 +1,16 @@
 name: "Cross-Session Cognitive Memory Recall"
 description: >
-  Outside-in gate for issue #1916: verifies that cognitive memory written by
-  Session A survives process exit and is fully recallable by Session B via the
-  snapshot recovery ladder. Also covers the corruption-recovery path from
-  issue #1710 (backup-restore ordering fix).
+  Outside-in gate proving durable cross-session recall against the library
+  cognitive-memory backend (sole backend after de-fork #2308) and the merged
+  graph-edge / dedup introspection surface (#2331, PR #2332). Session A writes
+  via LibraryCognitiveMemory; a SEPARATE real `simard` process recalls counts,
+  provenance / dedup graph edges, and literal fact content through
+  `simard memory stats --json` / `simard memory dump --type=facts --json`. Step
+  2 proves recall survives an abrupt reopen (Session A dropped without the app's
+  graceful checkpoint). Step 3 proves corruption resilience: the on-disk catalog
+  is overwritten with garbage and Session B self-heals via `open_with_recovery`
+  (quarantine + empty rebuild, no crash loop, memory-lib #95/#96). Drives
+  `tests/cognitive_memory_cross_session_recall.rs`.
 version: "1.0.0"
 
 config:
@@ -45,16 +52,30 @@ steps:
       outputContains:
         - "test cognitive_memory_cross_session_recall ... ok"
 
-  - name: "Cross-session recall — corruption-recovery path (#1710 + #1916)"
+  - name: "Cross-session recall — abrupt reopen (no app checkpoint, durable recall)"
     agent: "test-agent"
     action: "execute_command"
     params:
       command: >
         cargo test --test cognitive_memory_cross_session_recall
-        cross_session_recall_survives_db_corruption_via_snapshot
+        cross_session_recall_survives_abrupt_reopen
         -- --nocapture --test-threads=1
     timeout: 120000
     expect:
       exitCode: 0
       outputContains:
-        - "test cross_session_recall_survives_db_corruption_via_snapshot ... ok"
+        - "test cross_session_recall_survives_abrupt_reopen ... ok"
+
+  - name: "Cross-session recall — corrupt catalog self-heals without crash loop (memory-lib #95/#96)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test cognitive_memory_cross_session_recall
+        cross_session_recall_corrupt_catalog_self_heals
+        -- --nocapture --test-threads=1
+    timeout: 120000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test cross_session_recall_corrupt_catalog_self_heals ... ok"

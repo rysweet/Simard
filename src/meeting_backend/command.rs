@@ -56,9 +56,61 @@ pub enum MeetingCommand {
     /// falls through to conversation. Required by spec line 645
     /// ("surface disagreement and uncertainty"). Added in issue #2084.
     Disagree(String),
+    /// An argument-less slash token that resembles a command but matches no
+    /// known command (e.g. a typo like `/colse`). `input` echoes the
+    /// operator-typed token (original case preserved); `suggestion` is the
+    /// closest known command within Levenshtein distance 2, or `None` when
+    /// nothing is close. Rendered at the dispatch site as a "did you mean?"
+    /// hint instead of being forwarded to the LLM. Added for the meeting-REPL
+    /// UX prong (issue #2321).
+    Unknown {
+        input: String,
+        suggestion: Option<String>,
+    },
     /// Natural language — forwarded to the LLM.
     Conversation(String),
 }
+
+/// Canonical command tokens recognized by the meeting REPL. Used both as the
+/// "is this a known command?" set for unknown-command detection and as the
+/// candidate pool for did-you-mean suggestions. Includes the `/done` alias
+/// for `/close`. Kept in sync with [`HELP_GROUPS`] by a unit test.
+const KNOWN_COMMANDS: &[&str] = &[
+    "/help",
+    "/close",
+    "/done",
+    "/status",
+    "/export",
+    "/recap",
+    "/preview",
+    "/state",
+    "/template",
+    "/theme",
+    "/decision",
+    "/action",
+    "/question",
+    "/owner",
+    "/goal",
+    "/risk",
+    "/disagree",
+];
+
+/// Maximum Levenshtein distance for a typo to earn a did-you-mean suggestion.
+const SUGGESTION_MAX_DISTANCE: usize = 2;
+
+/// Well-known absolute filesystem path roots (the Filesystem Hierarchy
+/// Standard top-level directories). A bare single-component slash token that
+/// matches one of these (e.g. `/home`, `/tmp`) is almost certainly a path the
+/// operator typed, not a mistyped command — and some collide coincidentally
+/// with a command within edit distance 2 (`/home` vs `/done`). Excluding them
+/// keeps such paths as conversation instead of emitting a misleading
+/// "did you mean?" hint. None of these are themselves commands or plausible
+/// typos of commands, so the exclusion never suppresses a real suggestion.
+/// Issue #2321.
+const COMMON_PATH_ROOTS: &[&str] = &[
+    "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/media", "/mnt", "/opt", "/proc",
+    "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/var",
+];
 
 /// Parse a single line of input into a `MeetingCommand`.
 ///
@@ -153,7 +205,237 @@ pub fn parse_command(input: &str) -> MeetingCommand {
                 MeetingCommand::Disagree(arg)
             }
         }
-        _ => MeetingCommand::Conversation(trimmed.to_string()),
+        _ => classify_unrecognized(trimmed, &lower),
+    }
+}
+
+/// Classify a line that matched none of the explicit command arms.
+///
+/// A single command-like slash token (`/` followed only by ASCII letters,
+/// e.g. `/colse`) that is not a known command is treated as a mistyped
+/// command and routed to [`MeetingCommand::Unknown`] with a did-you-mean
+/// suggestion. Everything else — multi-token slash lines (`/foo bar`), file
+/// paths (`/home/user`, `/etc/hosts`, bare roots like `/tmp`), bare
+/// empty-payload known commands (`/decision`), and plain prose — stays
+/// [`MeetingCommand::Conversation`] so the operator's intent is never
+/// silently coerced.
+///
+/// Scope boundary (deliberate, per issue #2321): only *argument-less* single
+/// slash-tokens are treated as command attempts. A payload-bearing line such
+/// as `/decison Adopt TDD` is left as conversation rather than suggested,
+/// because distinguishing a typo+payload from an intentional `/word args`
+/// conversational line is ambiguous and would risk hijacking real input.
+/// Catching payload typos is tracked as a follow-up enhancement.
+fn classify_unrecognized(trimmed: &str, lower: &str) -> MeetingCommand {
+    if is_command_like(lower) && !KNOWN_COMMANDS.contains(&lower) {
+        MeetingCommand::Unknown {
+            input: trimmed.to_string(),
+            suggestion: closest_command(lower),
+        }
+    } else {
+        MeetingCommand::Conversation(trimmed.to_string())
+    }
+}
+
+/// True when `lower` is a single slash-prefixed token of ASCII letters, e.g.
+/// `/close` or `/colse`. Multi-token input (contains whitespace), file paths
+/// (extra `/`), tokens with digits or punctuation, and well-known absolute
+/// path roots (`/home`, `/tmp`, …) all return `false`, so operators can still
+/// type paths and markdown lists that start with `/`.
+///
+/// `lower` is assumed already trimmed and lowercased (as produced by
+/// [`parse_command`]).
+fn is_command_like(lower: &str) -> bool {
+    if COMMON_PATH_ROOTS.contains(&lower) {
+        return false;
+    }
+    match lower.strip_prefix('/') {
+        Some(rest) => !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphabetic()),
+        None => false,
+    }
+}
+
+/// Return the known command closest to `lower` within
+/// [`SUGGESTION_MAX_DISTANCE`], or `None` if nothing is close enough. Ties
+/// resolve to the earliest command in [`KNOWN_COMMANDS`] (so `/close` wins
+/// over its `/done` alias).
+fn closest_command(lower: &str) -> Option<String> {
+    KNOWN_COMMANDS
+        .iter()
+        .map(|&cmd| (cmd, levenshtein(lower, cmd)))
+        .filter(|&(_, dist)| dist <= SUGGESTION_MAX_DISTANCE)
+        .min_by_key(|&(_, dist)| dist)
+        .map(|(cmd, _)| cmd.to_string())
+}
+
+/// Classic Levenshtein edit distance (insertions, deletions, substitutions)
+/// using a two-row rolling buffer. Operates on `char`s so multi-byte input
+/// is counted correctly.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr: Vec<usize> = vec![0; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
+}
+
+/// One command shown in the grouped `/help` output.
+pub struct HelpEntry {
+    /// Canonical command token, e.g. `/decision`.
+    pub token: &'static str,
+    /// Full usage line shown to the operator, e.g.
+    /// `/decision <text> [--rationale <why>]`.
+    pub usage: &'static str,
+    /// One-line description of what the command does.
+    pub description: &'static str,
+}
+
+/// A titled group of related commands for the grouped `/help` output.
+pub struct HelpGroup {
+    pub title: &'static str,
+    pub entries: &'static [HelpEntry],
+}
+
+/// Grouped, ordered command reference rendered by `/help`. Single source of
+/// truth shared by the CLI REPL (colorized) and the dashboard chat (plain).
+/// Every user-facing command appears in exactly one group (the `/done` alias
+/// is intentionally omitted; it is documented under `/close`).
+pub const HELP_GROUPS: &[HelpGroup] = &[
+    HelpGroup {
+        title: "Meeting control",
+        entries: &[
+            HelpEntry {
+                token: "/help",
+                usage: "/help",
+                description: "Show this grouped command list",
+            },
+            HelpEntry {
+                token: "/close",
+                usage: "/close",
+                description: "End the meeting and persist the handoff (alias: /done)",
+            },
+            HelpEntry {
+                token: "/status",
+                usage: "/status",
+                description: "Show session info (topic, started_at, message count)",
+            },
+            HelpEntry {
+                token: "/export",
+                usage: "/export",
+                description: "Export the meeting transcript as markdown",
+            },
+            HelpEntry {
+                token: "/recap",
+                usage: "/recap",
+                description: "Show a color-coded session recap",
+            },
+            HelpEntry {
+                token: "/preview",
+                usage: "/preview",
+                description: "Preview the handoff artifact before closing",
+            },
+            HelpEntry {
+                token: "/state",
+                usage: "/state",
+                description: "Show current decisions, questions, actions, risks, disagreements",
+            },
+        ],
+    },
+    HelpGroup {
+        title: "Capture",
+        entries: &[
+            HelpEntry {
+                token: "/decision",
+                usage: "/decision <text> [--rationale <why>]",
+                description: "Record a decision (optional rationale)",
+            },
+            HelpEntry {
+                token: "/action",
+                usage: "/action <text>",
+                description: "Record an action item (assignee/deadline parsed inline)",
+            },
+            HelpEntry {
+                token: "/question",
+                usage: "/question <text>",
+                description: "Record an open question",
+            },
+            HelpEntry {
+                token: "/risk",
+                usage: "/risk <text>",
+                description: "Record an identified risk",
+            },
+            HelpEntry {
+                token: "/disagree",
+                usage: "/disagree <text>",
+                description: "Record a disagreement or dissenting view",
+            },
+            HelpEntry {
+                token: "/theme",
+                usage: "/theme <text>",
+                description: "Record a theme for this meeting",
+            },
+            HelpEntry {
+                token: "/owner",
+                usage: "/owner <name>",
+                description: "Name the next agent/persona/human to action this handoff",
+            },
+            HelpEntry {
+                token: "/goal",
+                usage: "/goal <text>",
+                description: "Set the meeting's overarching objective",
+            },
+        ],
+    },
+    HelpGroup {
+        title: "Templates",
+        entries: &[HelpEntry {
+            token: "/template",
+            usage: "/template [name]",
+            description: "List templates, or apply one (standup, 1on1, retro, planning)",
+        }],
+    },
+];
+
+/// Render the grouped `/help` reference as plain (uncolored) text. Used by the
+/// dashboard chat transport and as a colorless fallback. The CLI REPL applies
+/// ANSI color to the group titles separately.
+pub fn render_help_plain() -> String {
+    let mut out = String::new();
+    for (i, group) in HELP_GROUPS.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(group.title);
+        out.push_str(":\n");
+        for entry in group.entries {
+            out.push_str(&format!("  {} — {}\n", entry.usage, entry.description));
+        }
+    }
+    out.push_str("\nEverything else is natural conversation with Simard.");
+    out
+}
+
+/// Build the one-line notice shown when an operator types an unrecognized
+/// command. With a `suggestion`, offers a did-you-mean; otherwise points the
+/// operator at `/help`.
+pub fn unknown_command_notice(input: &str, suggestion: Option<&str>) -> String {
+    match suggestion {
+        Some(s) => format!("Unknown command '{input}'. Did you mean '{s}'?"),
+        None => format!("Unknown command '{input}'. Type /help for the full list."),
     }
 }
 
@@ -584,6 +866,279 @@ mod tests {
         assert_eq!(
             parse_command("/disagree    "),
             MeetingCommand::Conversation("/disagree".to_string()),
+        );
+    }
+
+    // ── Unknown-slash-command suggestions (issue #2321) ──────────────
+
+    #[test]
+    fn parse_exact_commands_are_not_unknown() {
+        // Every known no-arg command must keep parsing to its own variant,
+        // never to Unknown.
+        assert_eq!(parse_command("/help"), MeetingCommand::Help);
+        assert_eq!(parse_command("/close"), MeetingCommand::Close);
+        assert_eq!(parse_command("/done"), MeetingCommand::Close);
+        assert_eq!(parse_command("/status"), MeetingCommand::Status);
+        assert_eq!(parse_command("/export"), MeetingCommand::Export);
+        assert_eq!(parse_command("/recap"), MeetingCommand::Recap);
+        assert_eq!(parse_command("/preview"), MeetingCommand::Preview);
+        assert_eq!(parse_command("/state"), MeetingCommand::State);
+        assert_eq!(
+            parse_command("/template"),
+            MeetingCommand::Template(String::new())
+        );
+    }
+
+    #[test]
+    fn parse_typo_within_distance_two_suggests_closest() {
+        assert_eq!(
+            parse_command("/colse"),
+            MeetingCommand::Unknown {
+                input: "/colse".to_string(),
+                suggestion: Some("/close".to_string()),
+            },
+        );
+        assert_eq!(
+            parse_command("/clse"),
+            MeetingCommand::Unknown {
+                input: "/clse".to_string(),
+                suggestion: Some("/close".to_string()),
+            },
+        );
+        assert_eq!(
+            parse_command("/statsu"),
+            MeetingCommand::Unknown {
+                input: "/statsu".to_string(),
+                suggestion: Some("/status".to_string()),
+            },
+        );
+        assert_eq!(
+            parse_command("/recp"),
+            MeetingCommand::Unknown {
+                input: "/recp".to_string(),
+                suggestion: Some("/recap".to_string()),
+            },
+        );
+    }
+
+    #[test]
+    fn parse_unknown_preserves_typed_case_in_input() {
+        // The echoed `input` keeps the operator's original case; the
+        // suggestion is the canonical lowercase command.
+        assert_eq!(
+            parse_command("/COLSE"),
+            MeetingCommand::Unknown {
+                input: "/COLSE".to_string(),
+                suggestion: Some("/close".to_string()),
+            },
+        );
+    }
+
+    #[test]
+    fn parse_distant_garbage_is_unknown_with_no_suggestion() {
+        assert_eq!(
+            parse_command("/xyzzy"),
+            MeetingCommand::Unknown {
+                input: "/xyzzy".to_string(),
+                suggestion: None,
+            },
+        );
+        assert_eq!(
+            parse_command("/zzzzzzzz"),
+            MeetingCommand::Unknown {
+                input: "/zzzzzzzz".to_string(),
+                suggestion: None,
+            },
+        );
+    }
+
+    #[test]
+    fn parse_conversational_slash_with_args_is_untouched() {
+        // Multi-token slash lines remain conversation — never Unknown.
+        assert_eq!(
+            parse_command("/notarealcommand foo bar"),
+            MeetingCommand::Conversation("/notarealcommand foo bar".to_string()),
+        );
+        assert_eq!(
+            parse_command("/foo some text"),
+            MeetingCommand::Conversation("/foo some text".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_file_path_is_conversation_not_unknown() {
+        // Single tokens that are filesystem paths (extra `/`, dots, digits)
+        // must stay conversation so operators can type paths.
+        assert_eq!(
+            parse_command("/home/user/file.txt"),
+            MeetingCommand::Conversation("/home/user/file.txt".to_string()),
+        );
+        assert_eq!(
+            parse_command("/etc/hosts"),
+            MeetingCommand::Conversation("/etc/hosts".to_string()),
+        );
+        assert_eq!(
+            parse_command("/v2"),
+            MeetingCommand::Conversation("/v2".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_common_path_roots_stay_conversation() {
+        // Bare single-component absolute paths (FHS roots) must not be
+        // mistaken for commands — `/home` is within edit distance 2 of
+        // `/done`, so without the guard it would wrongly suggest `/done`.
+        for root in [
+            "/home", "/tmp", "/var", "/usr", "/etc", "/bin", "/dev", "/opt", "/proc", "/sys",
+            "/run", "/lib", "/srv", "/mnt", "/boot", "/root", "/sbin", "/media",
+        ] {
+            assert_eq!(
+                parse_command(root),
+                MeetingCommand::Conversation(root.to_string()),
+                "FHS path root {root} must stay conversation",
+            );
+        }
+        // Case-insensitive: the lowercased token still matches a known root.
+        assert_eq!(
+            parse_command("/HOME"),
+            MeetingCommand::Conversation("/HOME".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_command_typo_with_payload_stays_conversation() {
+        // Deliberate scope boundary (issue #2321): only argument-less single
+        // slash-tokens are treated as command attempts. A typo that carries a
+        // payload (`/decison Adopt TDD`) is multi-token, so it is left as
+        // conversation rather than producing a suggestion — distinguishing it
+        // from an intentional `/word args` line is ambiguous.
+        assert_eq!(
+            parse_command("/decison Adopt TDD"),
+            MeetingCommand::Conversation("/decison Adopt TDD".to_string()),
+        );
+        assert_eq!(
+            parse_command("/quesion Who owns this?"),
+            MeetingCommand::Conversation("/quesion Who owns this?".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_bare_empty_payload_commands_stay_conversation() {
+        // Known arg-requiring commands typed bare already fall through to
+        // conversation; the Unknown detection must not change that.
+        for cmd in [
+            "/decision",
+            "/action",
+            "/question",
+            "/owner",
+            "/goal",
+            "/risk",
+            "/disagree",
+            "/theme",
+        ] {
+            assert_eq!(
+                parse_command(cmd),
+                MeetingCommand::Conversation(cmd.to_string()),
+                "bare {cmd} must stay conversation",
+            );
+        }
+    }
+
+    #[test]
+    fn closest_command_respects_distance_threshold() {
+        assert_eq!(closest_command("/colse"), Some("/close".to_string()));
+        assert_eq!(closest_command("/templat"), Some("/template".to_string()));
+        // Distance 3+ → no suggestion.
+        assert_eq!(closest_command("/xyzzy"), None);
+        assert_eq!(closest_command("/qqqqqq"), None);
+    }
+
+    #[test]
+    fn levenshtein_basic_distances() {
+        assert_eq!(levenshtein("", ""), 0);
+        assert_eq!(levenshtein("close", "close"), 0);
+        assert_eq!(levenshtein("clse", "close"), 1);
+        assert_eq!(levenshtein("colse", "close"), 2);
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+    }
+
+    // ── Grouped /help (issue #2321) ──────────────────────────────────
+
+    #[test]
+    fn help_groups_have_expected_titles() {
+        let titles: Vec<&str> = HELP_GROUPS.iter().map(|g| g.title).collect();
+        assert_eq!(titles, vec!["Meeting control", "Capture", "Templates"]);
+    }
+
+    #[test]
+    fn help_groups_render_all_user_commands_exactly_once() {
+        // Every user-facing command (the canonical set minus the /done
+        // alias) must appear in exactly one group, exactly once.
+        let mut seen: Vec<&str> = Vec::new();
+        for group in HELP_GROUPS {
+            for entry in group.entries {
+                assert!(
+                    !seen.contains(&entry.token),
+                    "{} appears more than once in /help",
+                    entry.token,
+                );
+                seen.push(entry.token);
+            }
+        }
+        let mut expected: Vec<&str> = KNOWN_COMMANDS
+            .iter()
+            .copied()
+            .filter(|c| *c != "/done")
+            .collect();
+        seen.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            seen, expected,
+            "grouped /help must cover every command once"
+        );
+    }
+
+    #[test]
+    fn render_help_plain_contains_groups_and_commands() {
+        let help = render_help_plain();
+        assert!(help.contains("Meeting control"));
+        assert!(help.contains("Capture"));
+        assert!(help.contains("Templates"));
+        for group in HELP_GROUPS {
+            for entry in group.entries {
+                assert!(
+                    help.contains(entry.token),
+                    "plain help missing {}",
+                    entry.token,
+                );
+            }
+        }
+        assert!(help.contains("natural conversation"));
+    }
+
+    #[test]
+    fn known_commands_superset_of_help_tokens() {
+        // Guard against drift: every displayed command is a recognized token.
+        for group in HELP_GROUPS {
+            for entry in group.entries {
+                assert!(
+                    KNOWN_COMMANDS.contains(&entry.token),
+                    "{} shown in /help but not in KNOWN_COMMANDS",
+                    entry.token,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_command_notice_formats() {
+        assert_eq!(
+            unknown_command_notice("/colse", Some("/close")),
+            "Unknown command '/colse'. Did you mean '/close'?",
+        );
+        assert_eq!(
+            unknown_command_notice("/xyzzy", None),
+            "Unknown command '/xyzzy'. Type /help for the full list.",
         );
     }
 }

@@ -1,0 +1,54 @@
+name: "Dashboard Traces-Tab Cost Title-Attribute Escaping (#2351)"
+description: "Outside-in defense-in-depth check that the Traces tab's cost renderer cannot break out of the double-quoted title attribute. Boots the real dashboard binary, authenticates, and asserts the served HTML guards the absolute-timestamp value (`abs`) behind a successful parseTs — mirroring renderGenericTrace — so formatTime's raw-input passthrough can never feed an unescaped double-quote into the title attribute, while keeping the readable cost-row contract from #1682/#2345 intact."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Cost-row title attribute is parse-guarded (no quote break-out)"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/dashboard-traces-cost-title-escaping.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "dashboard"
+    - "traces"
+    - "cost"
+    - "security"
+    - "escaping"
+    - "issue-2351"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

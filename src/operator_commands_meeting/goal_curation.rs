@@ -222,6 +222,7 @@ mod tests {
         let mut board = crate::goal_curation::GoalBoard::new();
         for i in 1..=n {
             board.active.push(crate::goal_curation::ActiveGoal {
+                repo: None,
                 id: format!("dashboard-consistency-test-goal-{i:02}"),
                 description: format!("Dashboard consistency regression goal #{i}"),
                 priority: i,
@@ -363,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(simard_state_root)]
+    #[serial_test::serial(simard_state_root, cognitive_memory)]
     fn goal_curation_read_default_state_root_resolves_to_canonical_daemon_store() {
         use crate::memory_ipc::default_state_root;
 
@@ -376,7 +377,7 @@ mod tests {
             .canonicalize()
             .expect("tempdir must canonicalize");
 
-        // SAFETY: `serial_test::serial(simard_state_root)` ensures no other
+        // SAFETY: `serial_test::serial(simard_state_root, cognitive_memory)` ensures no other
         // test mutates `SIMARD_STATE_ROOT` concurrently.
         unsafe {
             std::env::set_var("SIMARD_STATE_ROOT", &canonical_path);

@@ -13,6 +13,10 @@ use super::make_outcome;
 // cross-module tests in `crate::ooda_actions::tests_advance_goal` and
 // `crate::operator_cli::tests_goal`.
 pub(crate) mod spawn;
+// Issue #2359 (BUG 1): goal target-repo resolver. `pub(crate)` so the slug
+// validator is reusable by the operator CLI and dashboard ingress points;
+// consumed by `spawn::dispatch_spawn_engineer` and exercised by inline tests.
+pub(crate) mod repo_resolver;
 mod subordinate;
 use spawn::{dispatch_spawn_engineer, is_brain_failure_marker};
 // Dispatch-dedup helper introduced by PR #1228; intentionally re-exported so

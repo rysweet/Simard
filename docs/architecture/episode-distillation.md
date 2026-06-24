@@ -6,10 +6,13 @@ owner: simard
 doc_type: concept
 related:
   - ./cognitive-memory.md
+  - ./episode-ingestion-policy.md
   - ../reference/cognitive-memory-preparation-filters.md
   - ../reference/cognitive-memory-episodic-recall.md
   - ../reference/ooda-procedural-memory.md
   - ../reference/cognitive-memory-procedural-idempotency.md
+  - ../reference/cognitive-memory-provenance.md
+  - ../reference/automatic-distillation-scheduler.md
   - ../memory.md
 ---
 
@@ -32,6 +35,17 @@ same action the `__memory__` synthetic priority dispatches to. No new
 synthetic priority is added. The existing deterministic-brain routing
 locked in by issue [#2286](https://github.com/rysweet/Simard/issues/2286)
 is preserved.
+
+> **Now also automatic (#2327).** Since
+> [#2327](https://github.com/rysweet/Simard/issues/2327), distillation no
+> longer waits for the brain to choose `ConsolidateMemory`: an
+> [automatic promotion scheduler](./episode-ingestion-policy.md) also fires
+> this pass at the end of every OODA cycle once the undistilled backlog
+> reaches a threshold or a cycle-count interval elapses. The pass was also
+> extended to emit **procedures** (not just facts), both written with
+> provenance. See the
+> [automatic distillation scheduler reference](../reference/automatic-distillation-scheduler.md).
+> The fact pipeline described below is unchanged.
 
 ---
 
@@ -80,13 +94,21 @@ Recipe output: { "facts": [ { concept, content, source_episode_id }, ... ] }
   │
   ▼
 For each fact:
-    store_fact(concept, content, confidence=0.7,
-               concepts=[concept], source=format!("distill:{source_episode_id}"))
+    store_fact_with_provenance(
+        concept, content, confidence=0.7,
+        source_id=format!("distill:{source_episode_id}"),   // textual id retained
+        tags=Some(&[concept]), metadata=None,
+        source_episode_ids=&[source_episode_id])             // DERIVES_FROM edge (#2325)
   │
   ▼
 For EVERY input episode (even those classified "skip"):
     mark_episode_distilled(node_id)
 ```
+
+Each distilled fact now also gets a `DERIVES_FROM` graph edge back to its
+source episode, in addition to the textual `distill:{id}` `source_id`
+which is retained for backward compatibility. See
+[Cognitive-memory provenance](../reference/cognitive-memory-provenance.md).
 
 The mark-everything rule prevents prompt-replay loops: an episode
 classified "skip" once will not be re-fed to the LLM on the next

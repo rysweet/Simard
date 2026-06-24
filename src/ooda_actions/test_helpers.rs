@@ -159,6 +159,7 @@ pub(crate) fn board_with_goal(
     add_active_goal(
         &mut board,
         ActiveGoal {
+            repo: None,
             id: id.to_string(),
             description: format!("Goal {id}"),
             priority: 1,

@@ -102,8 +102,8 @@ pub const TAB_METADATA: &[TabMeta] = &[
         label: "Logs",
         title: "Logs · Simard",
         h1: "Logs",
-        lede: "Raw daemon logs, the cost ledger, and per-cycle reports — the lowest-level view for debugging what the daemon did and why.",
-        tooltip: "Raw daemon logs and recent cycle reports for debugging",
+        lede: "Detailed activity from the always-on background service that runs Simard, plus the spending log and per-cycle reports — the most granular view for understanding exactly what Simard did and why.",
+        tooltip: "Background-service activity log and recent cycle reports for debugging",
     },
     TabMeta {
         slug: "processes",
@@ -126,7 +126,7 @@ pub const TAB_METADATA: &[TabMeta] = &[
         label: "Costs",
         title: "Costs · Simard",
         h1: "Costs",
-        lede: "Token and dollar spending by model and provider, plus your daily and weekly budget caps, computed from real provider invoices rather than estimates.",
+        lede: "Token and dollar spending by model and provider, plus your daily and weekly budget caps — the dollar figures are estimates based on each model's published token prices, not a provider invoice.",
         tooltip: "Token and dollar usage by model, plus daily and weekly budget",
     },
     TabMeta {
@@ -247,4 +247,18 @@ pub fn tab_meta_js() -> String {
     out.push_str(&payload);
     out.push_str(";</script>");
     out
+}
+
+/// Render the `{{BANNED_JARGON_JS}}` marker: a JSON array literal of
+/// [`BANNED_JARGON`] so the client-side `humanizeCycleSummary` strips the
+/// very same jargon the ledes are forbidden from containing. This keeps a
+/// single source of truth — the jargon ban now extends from the static
+/// ledes to the dynamically rendered cycle/summary text (#2358).
+pub fn banned_jargon_js() -> String {
+    // Mirror `tab_meta_js`'s `<` escaping so a future maintainer adding a term
+    // containing `</script>` cannot break out of the inline script (the terms
+    // are static constants today, so this is defense-in-depth).
+    serde_json::to_string(BANNED_JARGON)
+        .expect("BANNED_JARGON is JSON-safe")
+        .replace('<', "\\u003c")
 }

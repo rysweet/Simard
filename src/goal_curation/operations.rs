@@ -164,7 +164,8 @@ fn migrate_legacy_disk_file_if_present(bridge: &dyn CognitiveMemoryOps) {
             return;
         }
     };
-    if let Err(e) = bridge.store_fact(
+    if let Err(e) = bridge.store_fact_with_caller_key(
+        "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
         1.0,
@@ -444,7 +445,11 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
         field: "board".to_string(),
         reason: format!("failed to serialize goal board: {e}"),
     })?;
-    bridge.store_fact(
+    // Issue #2329: route the board snapshot through CallerKey dedup so each save
+    // supersedes the prior board image instead of piling up a new revision every
+    // cycle. The caller key and the concept are the same stable string.
+    bridge.store_fact_with_caller_key(
+        "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
         1.0,
@@ -537,7 +542,9 @@ pub fn save_goal_board_with_removals(
         field: "board".to_string(),
         reason: format!("failed to serialize goal board: {e}"),
     })?;
-    bridge.store_fact(
+    // Issue #2329: CallerKey dedup — supersede the prior board image.
+    bridge.store_fact_with_caller_key(
+        "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
         1.0,
@@ -649,6 +656,7 @@ pub fn promote_to_active(
         })?;
     let item = board.backlog.remove(position);
     board.active.push(ActiveGoal {
+        repo: None,
         id: item.id,
         description: item.description,
         priority,
@@ -1062,32 +1070,39 @@ pub fn verify_goal_carryover(
 /// The 5 default starter goals shared by both `seed_default_board` (GoalBoard)
 /// and `seed_default_goals` (GoalStore). Single source of truth.
 ///
-/// Each tuple: (priority, title, description).
-pub const DEFAULT_SEED_GOALS: [(u32, &str, &str); 5] = [
+/// Each tuple: (priority, title, description, target-repo slug). The repo slug
+/// is `None` for goals that target the daemon's own repo ("Simard") and
+/// `Some(slug)` for ecosystem-targeted goals (issue #2359, BUG 1).
+pub const DEFAULT_SEED_GOALS: [(u32, &str, &str, Option<&str>); 5] = [
     (
         1,
         "Improve amplihack test coverage",
         "Increase test coverage across the amplihack ecosystem to catch regressions early",
+        Some("amplihack-rs"),
     ),
     (
         2,
         "Enhance Simard meeting experience",
         "Improve the interactive meeting facilitator with better UX and richer handoffs",
+        None,
     ),
     (
         3,
         "Improve cognitive memory persistence",
         "Harden memory consolidation and ensure durable recall across sessions",
+        None,
     ),
     (
         4,
         "Fix broken features",
         "Analyze all Simard features against their specs and intended behavior. Identify features that are not working correctly (e.g., meeting REPL, any other broken functionality) and fix them. Prioritize by user impact. Start by auditing the Specs/ directory and comparing each spec against the actual implementation to find gaps and failures.",
+        None,
     ),
     (
         5,
         "Self-serve dashboard improvement",
         "Use your own dashboard (localhost:8080) with Playwright to understand your operations and memory. Continuously improve the dashboard until it is very useful for understanding your internal state. The dashboard must not use jargon and must remain useful to humans too. Login by reading the code from ~/.simard/.dashkey. Playwright is installed (playwright==1.59.0 with Chromium browser).",
+        None,
     ),
 ];
 
@@ -1098,7 +1113,7 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
         return 0;
     }
 
-    for (priority, id_source, description) in DEFAULT_SEED_GOALS {
+    for (priority, id_source, description, repo) in DEFAULT_SEED_GOALS {
         let id = crate::goals::goal_slug(id_source);
         board.active.push(ActiveGoal {
             id,
@@ -1106,6 +1121,7 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
             priority,
             status: GoalProgress::NotStarted,
             assigned_to: None,
+            repo: repo.map(str::to_string),
             current_activity: None,
             wip_refs: vec![],
             last_progress_update_at: None,
@@ -1179,6 +1195,7 @@ pub fn active_goals_as_records(board: &GoalBoard) -> Vec<crate::goals::GoalRecor
                 owner_identity,
                 source_session_id: SENTINEL_SESSION_ID.clone(),
                 updated_in: crate::session::SessionPhase::Persistence,
+                evidence: Vec::new(),
             }
         })
         .collect()
