@@ -37,8 +37,10 @@ fn init_tracing() {
         eprintln!("[simard] OTEL tracing enabled → {ep}");
     }
 
-    // Each branch creates the otel layer inline so Rust infers the subscriber
-    // type parameter correctly for the layered stack.
+    // Logs go to STDERR, not stdout, so they never corrupt a command's stdout
+    // result (e.g. `simard memory stats --json`, whose stdout must be parseable
+    // JSON). Without this, an INFO log emitted on a dependency's store-open path
+    // interleaves with the JSON and breaks downstream parsers.
     if use_json {
         let otel = endpoint
             .as_deref()
@@ -46,7 +48,12 @@ fn init_tracing() {
             .map(|t| tracing_opentelemetry::layer().with_tracer(t));
         tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().json().with_target(true))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_target(true)
+                    .with_writer(std::io::stderr),
+            )
             .with(otel)
             .with(simard::trace_collector::SpanCollectorLayer)
             .init();
@@ -57,7 +64,11 @@ fn init_tracing() {
             .map(|t| tracing_opentelemetry::layer().with_tracer(t));
         tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().with_target(true))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(true)
+                    .with_writer(std::io::stderr),
+            )
             .with(otel)
             .with(simard::trace_collector::SpanCollectorLayer)
             .init();
