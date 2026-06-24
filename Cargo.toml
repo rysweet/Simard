@@ -48,8 +48,13 @@ path = "src/bin/simard_tui/main.rs"
 # backend. `cognitive_memory::library_adapter::LibraryCognitiveMemory` drives it
 # behind Simard's `CognitiveMemoryOps` trait; the native LadybugDB fork has been
 # deleted. The `persistent` feature builds LadybugDB through the published
-# `lbug = "=0.15.4"` crate.
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "285de92b9895a6fba6b53b6be3c4c99134a2d0f6", features = ["persistent"] }
+# `lbug = "=0.17.1"` crate.
+#
+# Pinned to the amplihack-memory-lib commit that carries the lbug 0.15.4 -> 0.17.1
+# engine migration AND the issue #107 silent-empty-read fix (the `_deleted`
+# tombstone read-path fix + the empty-read safety gate). This rev is the
+# squash-merge commit of amplihack-memory-lib PR #108 on `main`.
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "26d49bf864ac2c03b80c4ab075c4a907c51f82a8", features = ["persistent"] }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "43ebaa1c1b18a5630c53f0519989a2bacd42ef62" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "43ebaa1c1b18a5630c53f0519989a2bacd42ef62" }
 # De-fork (issue #2323): the gym/eval RUNNER is now the upstream
@@ -63,8 +68,10 @@ amplihack-agent-eval = { git = "https://github.com/rysweet/amplihack-rs.git", re
 # `lbug` is still a direct dependency of the standalone `simard-tui` binary
 # (`src/bin/simard_tui/goals.rs`), which opens a LadybugDB read-only to render
 # the goal board. The cognitive-memory backend itself no longer uses lbug
-# directly — it goes through the amplihack-memory library.
-lbug = "=0.15.4"
+# directly — it goes through the amplihack-memory library. Bumped to 0.17.1 in
+# lockstep with the amplihack-memory pin so the final binary links exactly one
+# engine and one storage format (v41).
+lbug = "=0.17.1"
 rusqlite = { version = "=0.31.0", features = ["bundled"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
@@ -153,12 +160,3 @@ strip = "debuginfo"
 
 [profile.test.package."*"]
 debug = false
-
-# CSR getGroup OOB SIGSEGV fix (LadybugDB #611 / amplihack-memory #100): pin the
-# `lbug` engine to a patched build of 0.15.4 so the crash fix is part of EVERY
-# Simard build (lbug 0.15.4 always compiles its bundled lbug-src from source, so
-# this patched bundled source is what gets linked). Version-matched to 0.15.4 to
-# avoid an on-disk store-format migration. Remove once the fix lands in an
-# upstream lbug release and the dep is bumped.
-[patch.crates-io]
-lbug = { git = "https://github.com/rysweet/lbug-patched", rev = "82da662e917ba44d43392f70e0a7a721b48e09b3" }
