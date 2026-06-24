@@ -407,9 +407,18 @@ impl RecipeRunnerSubprocess {
             ))
         })?;
 
+        // `--output-format json` is REQUIRED: in the default `text` mode the
+        // runner's stdout is only a human status banner and the distill agent's
+        // `{ "facts": [...] }` payload never reaches us, so every parse fails and
+        // the pass silently no-ops (issue #2401). In `json` mode stdout carries a
+        // structured envelope whose `step_results[].output` holds the agent's
+        // output, which `parse_recipe_output_full` mines. The agent binary is
+        // still selected via the proven `AMPLIHACK_AGENT_BINARY` env var.
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            .arg("--output-format")
+            .arg("json")
             .arg("-c")
             .arg(format!("episodes={payload_json}"))
             .output()
@@ -418,11 +427,16 @@ impl RecipeRunnerSubprocess {
             })?;
 
         if !output.status.success() {
+            // On failure the runner exits non-zero AND emits the structured
+            // error inside the JSON envelope on stdout (stderr may be empty), so
+            // surface both — never a silent or context-free failure.
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             return Err(SimardError::BridgeError(format!(
-                "distill: recipe exited with {}: {}",
+                "distill: recipe exited with {}: stderr={} stdout={}",
                 output.status,
-                truncate(&stderr, 240)
+                truncate(stderr.trim(), 200),
+                truncate(stdout.trim(), 200)
             )));
         }
 
@@ -443,29 +457,68 @@ fn truncate(s: &str, max: usize) -> String {
 ///
 /// Thin facts-only wrapper over [`parse_recipe_output_full`] retained for the
 /// legacy [`DistillRecipeRunner::run`] entry point and its unit tests.
-fn parse_recipe_output(raw: &str) -> SimardResult<Vec<DistilledFact>> {
+pub(crate) fn parse_recipe_output(raw: &str) -> SimardResult<Vec<DistilledFact>> {
     parse_recipe_output_full(raw).map(|o| o.facts)
 }
 
-/// Parse the recipe's stdout into a [`DistillOutput`] (facts AND procedures).
+/// Parse `recipe-runner-rs`'s stdout into a [`DistillOutput`] (facts AND
+/// procedures).
 ///
-/// The recipe is expected to emit a JSON object of shape
-/// `{ "facts": [ … ], "procedures": [ … ] }` — `procedures` is optional and
-/// defaults to empty for back-compat with fact-only recipe output. Because the
-/// underlying LLM may wrap the JSON in prose, we scan for the first balanced
-/// `{...}` substring that parses as the envelope.
+/// Three tolerant tiers, in order (issue #2401):
 ///
-/// Returns `Err` when no parseable object is found — the caller treats `Err`
-/// as the retry-safe "no markers set" path.
-fn parse_recipe_output_full(raw: &str) -> SimardResult<DistillOutput> {
+/// 1. **Runner envelope (production path).** With `--output-format json` the
+///    runner emits `{ "recipe_name", "success", "step_results": [...], ... }`.
+///    We require `success == true`, select the `distill` step (or, if renamed,
+///    the last `completed` step), and mine the agent payload out of that
+///    step's `output` — which is itself a JSON *string* that may carry leading
+///    prose (e.g. a `NODE_OPTIONS` banner) before the `{ "facts": ... }`
+///    object, so we balanced-brace scan it. A future runner that emits `output`
+///    as a JSON object is handled too.
+/// 2. **Bare-object fallback.** If stdout is not a runner envelope, scan it
+///    directly for an embedded `{ "facts": ... }` object. Keeps the legacy
+///    fact-only mock/unit-test contract (and prose-wrapped agent output)
+///    working.
+/// 3. **Explicit failure.** If neither tier yields a facts object — including
+///    the `--output-format text` status banner and any `success == false`
+///    envelope — return `Err`. The caller treats `Err` as the retry-safe
+///    "no markers set" path; there is never a hollow `Ok`.
+pub(crate) fn parse_recipe_output_full(raw: &str) -> SimardResult<DistillOutput> {
     let trimmed = raw.trim();
-    // Fast path — recipe stdout IS the JSON object.
-    if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
-        return Ok(parsed.into_output());
+
+    // Tier 1 — recipe-runner-rs JSON envelope. `RecipeRunnerEnvelope` requires
+    // both `success` and `step_results`, so a bare `{ "facts": ... }` object
+    // (which has neither) fails this parse and falls through to Tier 2.
+    if let Ok(envelope) = serde_json::from_str::<RecipeRunnerEnvelope>(trimmed) {
+        return envelope.into_distill_output();
     }
-    // Slow path — find the first balanced `{...}` substring and try
-    // each one until something parses. Cheap because the output is
-    // small.
+
+    // Tier 2 — tolerant fallback: an embedded bare `{ "facts": ... }` object in
+    // arbitrary prose (legacy contract; also covers any non-envelope stdout).
+    if let Some(output) = scan_for_facts_object(trimmed) {
+        return Ok(output);
+    }
+
+    // Tier 3 — explicit, bounded failure.
+    Err(SimardError::BridgeError(format!(
+        "distill: recipe run did not yield a parseable {{ \"facts\": [...] }} object: {}",
+        truncate(raw, 200)
+    )))
+}
+
+/// Scan `text` for the first balanced `{...}` substring that deserializes as a
+/// [`RecipeEnvelope`] (a bare `{ "facts": [...], "procedures": [...] }` object),
+/// tolerating leading/trailing prose. Returns `None` if none is found.
+///
+/// The scan is iterative (no recursion) so pathologically deep brace nesting
+/// terminates without a stack overflow; serde's own recursion limit bounds the
+/// per-candidate parse.
+fn scan_for_facts_object(text: &str) -> Option<DistillOutput> {
+    let trimmed = text.trim();
+    // Fast path — the text IS the JSON object.
+    if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
+        return Some(parsed.into_output());
+    }
+    // Slow path — find the first balanced `{...}` substring that parses.
     if let Some(start) = trimmed.find('{') {
         let mut depth = 0i32;
         let bytes = trimmed.as_bytes();
@@ -478,17 +531,113 @@ fn parse_recipe_output_full(raw: &str) -> SimardResult<DistillOutput> {
                         && let Ok(parsed) =
                             serde_json::from_str::<RecipeEnvelope>(&trimmed[start..=i])
                     {
-                        return Ok(parsed.into_output());
+                        return Some(parsed.into_output());
                     }
                 }
                 _ => {}
             }
         }
     }
-    Err(SimardError::BridgeError(format!(
-        "distill: recipe output did not contain a parseable {{ \"facts\": [...] }} object; raw: {}",
-        truncate(raw, 200)
-    )))
+    None
+}
+
+/// The `recipe-runner-rs` 0.3.6 `--output-format json` envelope. Only the
+/// fields the parser needs are modelled; unknown fields (`recipe_name`,
+/// `duration`, `context`, …) are ignored. Both `success` and `step_results`
+/// are REQUIRED so this type does not accidentally match a bare facts object.
+#[derive(serde::Deserialize)]
+struct RecipeRunnerEnvelope {
+    success: bool,
+    step_results: Vec<RecipeRunnerStepResult>,
+}
+
+/// One entry of `step_results[]`. `output` is a [`serde_json::Value`] because
+/// the runner emits it as a JSON *string* today but a future version could emit
+/// it as an object — the parser handles both.
+#[derive(serde::Deserialize)]
+struct RecipeRunnerStepResult {
+    #[serde(default)]
+    step_id: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    output: serde_json::Value,
+    #[serde(default)]
+    error: String,
+}
+
+impl RecipeRunnerEnvelope {
+    /// Extract the distill agent's facts/procedures from the envelope.
+    ///
+    /// `success == false` short-circuits to `Err` BEFORE any step output is
+    /// read — a failed run is never trusted, even if it somehow carries a
+    /// well-formed payload.
+    fn into_distill_output(self) -> SimardResult<DistillOutput> {
+        if !self.success {
+            return Err(SimardError::BridgeError(format!(
+                "distill: recipe-runner reported failure (success=false): {}",
+                truncate(self.first_error().trim(), 200)
+            )));
+        }
+        let step = self.select_distill_step().ok_or_else(|| {
+            SimardError::BridgeError(
+                "distill: recipe envelope had no completed `distill` step".to_string(),
+            )
+        })?;
+        extract_step_output(&step.output).ok_or_else(|| {
+            SimardError::BridgeError(format!(
+                "distill: `distill` step output did not contain a parseable \
+                 {{ \"facts\": [...] }} object; output: {}",
+                truncate(step_output_excerpt(&step.output).trim(), 200)
+            ))
+        })
+    }
+
+    /// Select the step to read facts from: the one with `step_id == "distill"`,
+    /// or — tolerating a future step rename — the last `completed` step.
+    fn select_distill_step(&self) -> Option<&RecipeRunnerStepResult> {
+        self.step_results
+            .iter()
+            .find(|s| s.step_id == "distill")
+            .or_else(|| {
+                self.step_results
+                    .iter()
+                    .rev()
+                    .find(|s| s.status == "completed")
+            })
+    }
+
+    /// First non-empty step error, for failure messages.
+    fn first_error(&self) -> String {
+        self.step_results
+            .iter()
+            .map(|s| s.error.as_str())
+            .find(|e| !e.trim().is_empty())
+            .unwrap_or("<no step error reported>")
+            .to_string()
+    }
+}
+
+/// Mine a [`DistillOutput`] from a step's `output` value. A JSON *string* is
+/// balanced-brace scanned (it may carry leading prose); a JSON *object*
+/// carrying `facts` is deserialized directly.
+fn extract_step_output(output: &serde_json::Value) -> Option<DistillOutput> {
+    match output {
+        serde_json::Value::String(s) => scan_for_facts_object(s),
+        serde_json::Value::Object(_) => serde_json::from_value::<RecipeEnvelope>(output.clone())
+            .ok()
+            .map(|e| e.into_output()),
+        _ => None,
+    }
+}
+
+/// A bounded, human-readable excerpt of a step `output` value for error
+/// messages (avoids quoting/escaping a `Value::String` twice).
+fn step_output_excerpt(output: &serde_json::Value) -> String {
+    match output {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
 #[derive(serde::Deserialize)]

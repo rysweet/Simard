@@ -13,6 +13,7 @@ related:
   - ../reference/cognitive-memory-procedural-idempotency.md
   - ../reference/cognitive-memory-provenance.md
   - ../reference/automatic-distillation-scheduler.md
+  - ../reference/distill-recipe-output-capture.md
   - ../memory.md
 ---
 
@@ -168,26 +169,30 @@ recipe with a single LLM agent. It follows the same shape as
 - **Prompt**: instructs the agent to classify each episode into one
   of the three concept labels (or `skip`) and emit a JSON object
   `{ "facts": [ { "concept": "...", "content": "...",
-  "source_episode_id": "..." } ] }`.
-- **Output**: parsed by the Rust caller; non-conforming output causes
-  the caller to return `Err` (which then triggers the "no markers
-  set" retry behaviour above).
+  "source_episode_id": "..." } ], "procedures": [ ... ] }`.
+- **Output**: the runner is invoked with `--output-format json`, so the
+  agent's JSON object arrives inside `recipe-runner-rs`'s structured
+  envelope at `step_results[].output`. The Rust caller extracts it with a
+  tolerant three-tier parser; non-conforming output or a failed run
+  causes the caller to return `Err` (which then triggers the "no markers
+  set" retry behaviour above). See
+  [Distill recipe output capture](../reference/distill-recipe-output-capture.md)
+  for the full envelope contract, the parser, and failure semantics.
 
-The Rust-side invocation reuses the existing
-`Command::new("recipe-runner-rs")` shape demonstrated by
-`stewardship::recipe_merge_judge::RecipeMergeJudge`
-(`src/stewardship/recipe_merge_judge.rs`)
-and
-`goal_curation::recipe_progress_checker::RecipeProgressChecker`
-(`src/goal_curation/recipe_progress_checker.rs`):
-the binary takes the recipe path as a positional arg followed by
-zero or more `-c key=value` pairs and `AMPLIHACK_AGENT_BINARY` in
-the environment. The episodes payload is passed as a single context
-entry; whether it is inlined as `-c episodes=<json>` or written to a
-temp file and passed as `-c episodes_path=<path>` is an
-implementation detail decided at PR-B coding time by what
-`recipe-runner-rs` actually supports for array values. Both shapes
-satisfy the contract documented here.
+The Rust-side invocation shells out to `recipe-runner-rs` with an
+argv-vector (no shell): the recipe path as a positional arg,
+`--output-format json`, and the episodes batch inlined as a single
+`-c episodes=<json>` context entry, with `AMPLIHACK_AGENT_BINARY` in the
+environment. `--output-format json` is **required** — in the default
+`text` mode the runner's stdout is only a human status banner and the
+agent's facts object never reaches the caller, which is exactly the
+latent bug that
+[#2401](https://github.com/rysweet/Simard/issues/2401) fixes. The same
+`Command::new("recipe-runner-rs")` argv construction — minus
+`--output-format json` — is used by
+`stewardship::recipe_merge_judge::RecipeMergeJudge` and
+`goal_curation::recipe_progress_checker::RecipeProgressChecker`, which
+still parse the default text banner and are intentionally left unchanged.
 
 The recipe is loaded with the same resolution order Simard uses
 elsewhere:
@@ -422,14 +427,17 @@ distill: 8 episodes pulled, below min 20, skipped
 
 ### Example 3 — recipe error
 
-Recipe runner exits non-zero or returns malformed JSON:
+The runner exits non-zero, the envelope reports `success: false`, or the
+captured `step_results[].output` carries no parseable facts object:
 
 ```
-distill: 40 episodes pulled, recipe error: invalid JSON output, no markers set, retry next pass
+distill: 40 episodes pulled, recipe error: <message>, no markers set, retry next pass
 ```
 
 `mark_episode_distilled` is **not** called. The same 40 episodes are
-eligible on the next pass.
+eligible on the next pass. See
+[Distill recipe output capture](../reference/distill-recipe-output-capture.md#failure-semantics)
+for the exact failure matrix.
 
 ---
 

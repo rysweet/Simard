@@ -611,3 +611,519 @@ fn distillation_passes_source_episode_id_as_provenance() {
     assert_eq!(bug.1, "distill:epi_00009");
     assert_eq!(bug.2, vec!["epi_00009".to_string()]);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #2401 (RED): recipe-runner-rs JSON-envelope output capture
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// These tests pin the FIX for the latent distillation bug: in production the
+// daemon shells out to `recipe-runner-rs <recipe> -c episodes=<json>` and the
+// installed `recipe-runner 0.3.6` defaults to `--output-format text`, whose
+// stdout is only a human status banner:
+//
+//     Recipe: distill-episodes (v1.0.0)
+//     Steps: 1
+//     Recipe 'distill-episodes': SUCCESS (18.0s)
+//       [completed] distill (18.0s)
+//
+// The agent's actual `{ "facts": [...], "procedures": [...] }` payload is NOT
+// on stdout in text mode, so `parse_recipe_output_full` always errors with
+// `recipe output did not contain a parseable { "facts": [...] } object` and the
+// pass silently no-ops every cycle — distillation has effectively NEVER
+// produced facts in prod.
+//
+// The fix is to invoke with `--output-format json` and teach the parser to dig
+// the agent's final-step output out of the runner's JSON envelope. The envelope
+// fixtures below are VERIFIED against the real installed `recipe-runner 0.3.6`
+// binary (captured via trivial `type: bash` probe recipes), so they pin the
+// parser to the binary's actual 0.3.6 output contract:
+//
+//     {
+//       "recipe_name": "distill-episodes",
+//       "success": true,
+//       "step_results": [
+//         { "step_id": "distill", "status": "completed",
+//           "output": "{\"facts\":[...],\"procedures\":[...]}",  // STRING
+//           "error": "", "duration": 18.04 }
+//       ],
+//       "duration": 18.05
+//     }
+//
+// ## Why these are RED before the fix
+//
+// `parse_recipe_output` / `parse_recipe_output_full` are currently PRIVATE
+// (`fn`, not `pub(crate)`), so the `use` import below fails to resolve — the
+// whole file fails to compile. That is the deterministic TDD red signal, the
+// same convention this file already uses for the rest of PR-B. The fix makes
+// both parsers `pub(crate)` and rewrites `parse_recipe_output_full` to extract
+// the distill step's `output` from the envelope (with a tolerant fallback that
+// keeps the existing bare-`{ "facts": ... }` / prose mock tests green).
+//
+// Even once they compile, the envelope-extraction asserts FAIL against the
+// pre-fix parser: the current balanced-brace scanner only recognises a bare
+// top-level `{ "facts": ... }` object, never the agent payload nested as an
+// ESCAPED STRING inside `step_results[].output`.
+
+// `parse_recipe_output[_full]` must become `pub(crate)` for this module to use
+// them. Until the fix lands these are private `fn`s → unresolved-import (RED).
+use crate::memory_consolidation::distillation::{parse_recipe_output, parse_recipe_output_full};
+
+/// Build a `recipe-runner 0.3.6` JSON envelope string with the given
+/// `success` flag and `step_results` array, matching the verified shape.
+fn runner_envelope(success: bool, steps: serde_json::Value) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "recipe_name": "distill-episodes",
+        "success": success,
+        "step_results": steps,
+        "duration": 19.8,
+    }))
+    .expect("envelope fixture must serialize")
+}
+
+/// One `step_results[]` entry. `output` is a `serde_json::Value` so callers can
+/// supply either the real-shape STRING payload or (drift-tolerance) an object.
+fn step(step_id: &str, status: &str, output: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "step_id": step_id,
+        "status": status,
+        "output": output,
+        "error": "",
+        "duration": 19.7,
+    })
+}
+
+/// A representative agent payload carrying BOTH facts and procedures, sanitized
+/// but structurally identical to a real distill run (see Example 1 in
+/// `docs/reference/distill-recipe-output-capture.md`).
+fn facts_and_procedures_payload() -> serde_json::Value {
+    serde_json::Value::String(
+        r#"{"facts":[{"concept":"pr-pattern","content":"CI flakes on lbug pin bumps until cache is warmed","source_episode_id":"e7"},{"concept":"lesson-learned","content":"Stale worktrees mask deploy drift","source_episode_id":"e12"}],"procedures":[{"name":"ci-fix:auto","steps":["re-run failed job","warm shared target cache","re-push --no-verify"],"source_episode_ids":["e7","e9"]}]}"#
+            .to_string(),
+    )
+}
+
+/// VERBATIM stdout captured from the installed `recipe-runner 0.3.6` binary
+/// running a single-step `type: bash` probe whose command echoes the facts
+/// JSON. Pins the parser to the binary's exact byte-level output contract,
+/// including the agent payload nested as an ESCAPED STRING in
+/// `step_results[].output`.
+const REAL_RUNNER_ENVELOPE_VERBATIM: &str = r#"{
+  "recipe_name": "probe",
+  "success": true,
+  "step_results": [
+    {
+      "step_id": "distill",
+      "status": "completed",
+      "output": "{\"facts\":[{\"concept\":\"pr-pattern\",\"content\":\"x\",\"source_episode_id\":\"epi_1\"}],\"procedures\":[]}",
+      "error": "",
+      "duration": 0.003756692
+    }
+  ],
+  "duration": 0.003760419
+}"#;
+
+/// The exact `--output-format text` banner the daemon captured in production —
+/// the input that triggered the silent no-op. It carries NO facts payload, so
+/// the parser MUST surface an explicit `Err` (never a hollow `Ok`).
+const TEXT_MODE_BANNER: &str = "Recipe: distill-episodes (v1.0.0)\n\
+Steps: 1\n\
+Recipe 'distill-episodes': SUCCESS (18.0s)\n\
+  [completed] distill (18.0s)";
+
+// ───────────────────────────────────────────────────────────────────────────
+// Tier 1 — runner-envelope extraction (the production path the fix introduces)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// PRIMARY RED: a real, verbatim `recipe-runner 0.3.6` JSON envelope must parse
+/// into the agent's facts (the bug is that today it does not — the payload is
+/// nested as an escaped string in `step_results[].output`, which the pre-fix
+/// scanner never reaches).
+#[test]
+fn parser_extracts_facts_from_verbatim_real_envelope() {
+    let out = parse_recipe_output_full(REAL_RUNNER_ENVELOPE_VERBATIM)
+        .expect("verbatim recipe-runner 0.3.6 envelope must parse into a DistillOutput");
+    assert_eq!(out.facts.len(), 1, "one fact in the distill step output");
+    assert_eq!(out.facts[0].concept, "pr-pattern");
+    assert_eq!(out.facts[0].source_episode_id, "epi_1");
+    assert!(
+        out.procedures.is_empty(),
+        "the verbatim payload carries an empty procedures array"
+    );
+}
+
+/// PRIMARY RED: the distill step's `output` string carrying BOTH facts and
+/// procedures must yield both. This is the headline acceptance criterion —
+/// distillation must once again produce semantic facts AND procedural memory.
+#[test]
+fn parser_extracts_facts_and_procedures_from_distill_step_output() {
+    let raw = runner_envelope(
+        true,
+        serde_json::json!([step("distill", "completed", facts_and_procedures_payload())]),
+    );
+
+    let out = parse_recipe_output_full(&raw)
+        .expect("real-shaped runner envelope must parse into a DistillOutput");
+
+    assert_eq!(out.facts.len(), 2, "two valid facts in the distill output");
+    assert_eq!(
+        out.procedures.len(),
+        1,
+        "one valid procedure in the distill output"
+    );
+
+    let concepts: std::collections::HashSet<&str> =
+        out.facts.iter().map(|f| f.concept.as_str()).collect();
+    assert!(concepts.contains("pr-pattern"));
+    assert!(concepts.contains("lesson-learned"));
+    let sources: std::collections::HashSet<&str> = out
+        .facts
+        .iter()
+        .map(|f| f.source_episode_id.as_str())
+        .collect();
+    assert!(
+        sources.contains("e7") && sources.contains("e12"),
+        "fact provenance (source_episode_id) must survive extraction; got {sources:?}"
+    );
+
+    let proc = &out.procedures[0];
+    assert_eq!(proc.name, "ci-fix:auto");
+    assert_eq!(
+        proc.steps,
+        vec![
+            "re-run failed job".to_string(),
+            "warm shared target cache".to_string(),
+            "re-push --no-verify".to_string(),
+        ]
+    );
+    assert_eq!(
+        proc.source_episode_ids,
+        vec!["e7".to_string(), "e9".to_string()],
+        "procedure provenance must carry every source episode id"
+    );
+}
+
+/// Step selection: with multiple steps, the entry whose `step_id == "distill"`
+/// is the one read — NOT an earlier setup step whose output has no facts.
+#[test]
+fn parser_selects_distill_step_among_multiple_steps() {
+    let distill_payload = serde_json::Value::String(
+        r#"{"facts":[{"concept":"lesson-learned","content":"second step wins","source_episode_id":"epi_9"}],"procedures":[]}"#
+            .to_string(),
+    );
+    let raw = runner_envelope(
+        true,
+        serde_json::json!([
+            step(
+                "prep",
+                "completed",
+                serde_json::json!("no facts here, just setup output")
+            ),
+            step("distill", "completed", distill_payload),
+        ]),
+    );
+
+    let out =
+        parse_recipe_output_full(&raw).expect("the `distill` step must be selected and parsed");
+    assert_eq!(out.facts.len(), 1);
+    assert_eq!(out.facts[0].source_episode_id, "epi_9");
+    assert_eq!(out.facts[0].concept, "lesson-learned");
+}
+
+/// Step-selection fallback: when no step is named `distill`, the LAST step with
+/// `status == "completed"` is used (tolerates a future step rename).
+#[test]
+fn parser_falls_back_to_last_completed_step_when_no_distill_id() {
+    let facts_payload = serde_json::Value::String(
+        r#"{"facts":[{"concept":"bug-pattern","content":"fallback selection works","source_episode_id":"epi_4"}]}"#
+            .to_string(),
+    );
+    let raw = runner_envelope(
+        true,
+        serde_json::json!([
+            step(
+                "orient",
+                "completed",
+                serde_json::json!("status preamble, no facts")
+            ),
+            step("decide", "completed", facts_payload),
+        ]),
+    );
+
+    let out = parse_recipe_output_full(&raw)
+        .expect("last completed step must be selected when no `distill` id is present");
+    assert_eq!(out.facts.len(), 1);
+    assert_eq!(out.facts[0].source_episode_id, "epi_4");
+    assert_eq!(out.facts[0].concept, "bug-pattern");
+}
+
+/// Concept allow-list still applies when extracting from the envelope: labels
+/// outside `pr-pattern | bug-pattern | lesson-learned` are dropped.
+#[test]
+fn parser_drops_unknown_concepts_inside_envelope() {
+    let payload = serde_json::Value::String(
+        r#"{"facts":[{"concept":"made-up-label","content":"a","source_episode_id":"epi_1"},{"concept":"lesson-learned","content":"b","source_episode_id":"epi_2"}]}"#
+            .to_string(),
+    );
+    let raw = runner_envelope(
+        true,
+        serde_json::json!([step("distill", "completed", payload)]),
+    );
+
+    let out = parse_recipe_output_full(&raw).expect("envelope must parse");
+    assert_eq!(out.facts.len(), 1, "the made-up label must be filtered out");
+    assert_eq!(out.facts[0].concept, "lesson-learned");
+}
+
+/// Drift tolerance: if a future runner emits `output` as an OBJECT instead of a
+/// JSON string, the facts must still be extracted (parser deserializes
+/// `output` as `serde_json::Value` and handles both shapes).
+#[test]
+fn parser_tolerates_output_as_json_object() {
+    let payload = serde_json::json!({
+        "facts": [{"concept": "pr-pattern", "content": "object output", "source_episode_id": "epi_5"}],
+        "procedures": []
+    });
+    let raw = runner_envelope(
+        true,
+        serde_json::json!([step("distill", "completed", payload)]),
+    );
+
+    let out =
+        parse_recipe_output_full(&raw).expect("an object-typed `output` must still yield facts");
+    assert_eq!(out.facts.len(), 1);
+    assert_eq!(out.facts[0].source_episode_id, "epi_5");
+}
+
+/// The facts-only wrapper (`parse_recipe_output`, the legacy `run` entry point)
+/// must read the envelope too, returning just the facts.
+#[test]
+fn facts_only_wrapper_reads_runner_envelope() {
+    let facts = parse_recipe_output(REAL_RUNNER_ENVELOPE_VERBATIM)
+        .expect("facts-only wrapper must also parse the envelope");
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].concept, "pr-pattern");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Failure semantics — explicit Err, never silent degradation
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A failure envelope (`success == false`, failed step, empty output) must
+/// surface an explicit `Err`. Captured verbatim shape from the real binary.
+#[test]
+fn parser_returns_err_on_failure_envelope() {
+    let raw = runner_envelope(
+        false,
+        serde_json::json!([{
+            "step_id": "distill",
+            "status": "failed",
+            "output": "",
+            "error": "Step 'distill' failed: bash step failed: Command failed (exit 3): boom",
+            "duration": 0.0037
+        }]),
+    );
+    assert!(
+        parse_recipe_output_full(&raw).is_err(),
+        "a failed run (success == false) must never yield Ok facts"
+    );
+}
+
+/// Defense-in-depth guard: even if a `success == false` envelope somehow
+/// carries a well-formed facts payload in its step output, the parser MUST NOT
+/// extract from it. `success == false` short-circuits to `Err` BEFORE the step
+/// output is mined — an implementer who reads the output before checking
+/// `success` fails this test.
+#[test]
+fn parser_does_not_extract_facts_from_failed_run() {
+    let raw = runner_envelope(
+        false,
+        serde_json::json!([step("distill", "failed", facts_and_procedures_payload())]),
+    );
+    assert!(
+        parse_recipe_output_full(&raw).is_err(),
+        "facts must never be trusted from a run whose success flag is false"
+    );
+}
+
+/// The exact production failure input — the `--output-format text` status
+/// banner — has no facts payload and MUST produce an explicit `Err` (this is
+/// the silent no-op the fix eliminates by switching to `--output-format json`).
+#[test]
+fn parser_errors_on_text_mode_status_banner() {
+    assert!(
+        parse_recipe_output_full(TEXT_MODE_BANNER).is_err(),
+        "the human-readable text banner carries no facts and must error explicitly"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Tolerant fallback — keep the legacy bare-object / prose contract green
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Backward compatibility: a bare `{ "facts": [...] }` object (no runner
+/// envelope) must still parse, so the existing `DistillRecipeRunner` mock and
+/// in-module unit tests keep passing after the rewrite.
+#[test]
+fn parser_tolerant_fallback_accepts_bare_facts_object() {
+    let raw =
+        r#"{"facts":[{"concept":"pr-pattern","content":"bare","source_episode_id":"epi_1"}]}"#;
+    let out = parse_recipe_output_full(raw)
+        .expect("a bare facts object must still parse via the tolerant fallback");
+    assert_eq!(out.facts.len(), 1);
+    assert_eq!(out.facts[0].concept, "pr-pattern");
+}
+
+/// Backward compatibility: a bare facts object wrapped in prose must still be
+/// recovered by the tolerant balanced-brace fallback.
+#[test]
+fn parser_tolerant_fallback_extracts_facts_from_prose() {
+    let raw = "Sure, here is the JSON:\n\
+        {\"facts\":[{\"concept\":\"bug-pattern\",\"content\":\"y\",\"source_episode_id\":\"epi_2\"}]}\n\
+        That's all.";
+    let out = parse_recipe_output_full(raw)
+        .expect("prose-wrapped bare facts must still parse via the tolerant fallback");
+    assert_eq!(out.facts.len(), 1);
+    assert_eq!(out.facts[0].concept, "bug-pattern");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Robustness — bounded error output, no panic/OOM on hostile input
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Tier-3 errors must be bounded and must NOT echo the full captured payload
+/// (truncated excerpt only). A sentinel placed far past the truncation window
+/// must be absent from the error message — proof there is no payload leak.
+#[test]
+fn parser_error_does_not_leak_full_payload() {
+    let sentinel = "SECRET_SENTINEL_AT_END";
+    let raw = format!("{}{sentinel}", "x".repeat(50_000));
+
+    let err =
+        parse_recipe_output_full(&raw).expect_err("a 50 KiB blob with no facts object must error");
+    let msg = err.to_string();
+    assert!(
+        !msg.contains(sentinel),
+        "error message must not leak content far past the truncation window"
+    );
+    assert!(
+        msg.len() < 600,
+        "error message must stay bounded (truncated excerpt), got {} chars",
+        msg.len()
+    );
+}
+
+/// Pathologically deep brace nesting must terminate with an `Err` — no stack
+/// overflow, no hang. The balanced-brace scan must stay linear/iterative and
+/// any recursive JSON parse must hit serde's recursion limit and bail.
+#[test]
+fn parser_tolerates_deeply_nested_input_without_panic() {
+    let depth = 50_000;
+    let raw = format!("{}{}", "{".repeat(depth), "}".repeat(depth));
+    assert!(
+        parse_recipe_output_full(&raw).is_err(),
+        "deeply nested braces with no facts object must error without panicking"
+    );
+}
+
+/// A large but VALID envelope (many facts) must extract every fact — the
+/// linear scan must handle size, not just trivially small inputs.
+#[test]
+fn parser_handles_large_valid_envelope() {
+    let facts: Vec<serde_json::Value> = (0..1_000)
+        .map(|i| {
+            serde_json::json!({
+                "concept": "lesson-learned",
+                "content": format!("fact number {i}"),
+                "source_episode_id": format!("epi_{i:05}")
+            })
+        })
+        .collect();
+    let payload = serde_json::Value::String(
+        serde_json::to_string(&serde_json::json!({ "facts": facts, "procedures": [] })).unwrap(),
+    );
+    let raw = runner_envelope(
+        true,
+        serde_json::json!([step("distill", "completed", payload)]),
+    );
+
+    let out = parse_recipe_output_full(&raw).expect("a large valid envelope must parse all facts");
+    assert_eq!(
+        out.facts.len(),
+        1_000,
+        "every fact in a large batch must survive"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Production contract — VERBATIM real `recipe-runner 0.3.6` agent-step envelope
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A real end-to-end capture from `recipe-runner-rs --output-format json` on
+/// the actual `distill-episodes.yaml` recipe (copilot agent, #2401
+/// verification). Two characteristics make this the decisive fixture that the
+/// synthetic ones above do NOT exercise:
+///
+/// 1. `step_results[].output` is a JSON *string* whose content is PROSE-PREFIXED
+///    — the agent emits an `ℹ NODE_OPTIONS=...` banner line BEFORE the
+///    `{ "facts": ... }` object. A plain `serde_json::from_str` on the output
+///    string fails here; only the balanced-brace scan recovers the object.
+/// 2. The envelope carries a top-level `context` field (the echoed inputs) that
+///    the parser must ignore.
+///
+/// If this passes, the exact shape the production daemon receives is parsed.
+const REAL_AGENT_ENVELOPE_WITH_PROSE: &str = r#"{
+  "recipe_name": "distill-episodes",
+  "success": true,
+  "step_results": [
+    {
+      "step_id": "distill",
+      "status": "completed",
+      "output": "ℹ NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: /home/azureuser/.amplihack/config\n{\n  \"facts\": [\n    {\n      \"concept\": \"bug-pattern\",\n      \"content\": \"Dependency/version bumps recurrently break CI via a cold shared target cache; warming the cache and re-pushing clears the failure.\",\n      \"source_episode_id\": \"epi_1\"\n    }\n  ],\n  \"procedures\": [\n    {\n      \"name\": \"ci-fix:auto\",\n      \"steps\": [\n        \"Re-run the failed CI job to confirm the failure is not transient.\",\n        \"Warm the shared target cache.\",\n        \"Re-push with --no-verify.\",\n        \"Confirm the pipeline goes green.\"\n      ],\n      \"source_episode_ids\": [\"epi_1\", \"epi_2\"]\n    }\n  ]\n}",
+      "error": "",
+      "duration": 14.017578161
+    }
+  ],
+  "context": {
+    "episodes": [
+      { "content": "CI failed on lbug pin bump.", "id": "epi_1", "source_label": "ci-runner", "temporal_index": 1 }
+    ]
+  },
+  "duration": 14.017590634
+}"#;
+
+/// PRIMARY ACCEPTANCE: the verbatim real prose-prefixed agent envelope must
+/// yield BOTH the fact and the procedure. This is the production-faithful proof
+/// that the #2401 fix restores semantic + procedural distillation.
+#[test]
+fn parser_extracts_facts_and_procedures_from_real_prose_prefixed_envelope() {
+    let out = parse_recipe_output_full(REAL_AGENT_ENVELOPE_WITH_PROSE)
+        .expect("the verbatim real prose-prefixed agent envelope must parse");
+
+    assert_eq!(out.facts.len(), 1, "one fact survives extraction");
+    assert_eq!(out.facts[0].concept, "bug-pattern");
+    assert_eq!(out.facts[0].source_episode_id, "epi_1");
+    assert!(
+        out.facts[0].content.contains("cold shared target cache"),
+        "fact content must survive the prose-prefix scan; got {:?}",
+        out.facts[0].content
+    );
+
+    assert_eq!(out.procedures.len(), 1, "one procedure survives extraction");
+    let proc = &out.procedures[0];
+    assert_eq!(proc.name, "ci-fix:auto");
+    assert_eq!(proc.steps.len(), 4, "all four procedure steps survive");
+    assert_eq!(
+        proc.source_episode_ids,
+        vec!["epi_1".to_string(), "epi_2".to_string()],
+        "procedure provenance must carry every source episode id"
+    );
+}
+
+/// The facts-only legacy wrapper must read the real prose-prefixed envelope too.
+#[test]
+fn facts_only_wrapper_reads_real_prose_prefixed_envelope() {
+    let facts = parse_recipe_output(REAL_AGENT_ENVELOPE_WITH_PROSE)
+        .expect("facts-only wrapper must parse the real envelope");
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].concept, "bug-pattern");
+}
