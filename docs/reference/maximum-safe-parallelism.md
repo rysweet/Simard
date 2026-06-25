@@ -86,9 +86,11 @@ Pressure is `max(cpu_pressure, mem_pressure)` from `/proc/stat` and
 **Production bounds.** `OodaConfig::default()` constructs the scaler as
 `AdaptiveScaler::new(base, 1, ceiling)` where `base =
 SIMARD_MAX_CONCURRENT_ACTIONS` (default **5**) and `ceiling = base × 4` (default
-**20**). The live log line `cap N` shows `current_max()`, which **starts at
-`base` and climbs additively** toward the ceiling under low pressure — so the
-machine fills over a few cycles rather than all at once. The ceiling of 20 is
+**20**). Once per cycle the daemon logs the cap it used in the coverage line
+`[simard] OODA cycle: coverage — … (cap N)`, where `N` is the scaler's
+`current_max()` (or `max_concurrent_actions` when `SIMARD_SCALING` is off). That
+cap **starts at `base` and climbs additively** toward the ceiling under low
+pressure — so the machine fills over a few cycles rather than all at once. The ceiling of 20 is
 already ample for "fill the machine"; raise both the base and ceiling together
 by setting `SIMARD_MAX_CONCURRENT_ACTIONS` (the ceiling tracks at 4× the base).
 The additive-increase + pressure/error backoff behavior is unchanged by this.
