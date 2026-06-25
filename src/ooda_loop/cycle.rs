@@ -329,7 +329,9 @@ fn run_ooda_cycle_inner(
     state.current_phase = OodaPhase::Act;
     eprintln!("[simard] OODA cycle: entering Act phase");
     let act_start = Instant::now();
-    let outcomes = act(&planned_actions, bridges, state)?;
+    // Bound concurrent engineer starts to the same AIMD cap coverage used to
+    // allocate them, so dispatch concurrency stays resource-aware.
+    let outcomes = act(&planned_actions, bridges, state, coverage_cap)?;
     let act_elapsed = act_start.elapsed();
     eprintln!(
         "[simard] OODA cycle: Act complete ({} outcomes, {:.1}s)",
