@@ -27,3 +27,6 @@ scripts/dashboard_audit/out/
 tests/e2e-dashboard/.audit-output/
 .simard/bin/simard.bak.*
 .local/
+
+# mkdocs build output
+/site/

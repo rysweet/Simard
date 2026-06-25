@@ -16,6 +16,12 @@ will execute.
 Be conservative: prefer `advance_goal` for ordinary goal IDs unless a clear
 signal in the goal_id or reason indicates a special routing.
 
+If the `reason` indicates the goal has been advanced for many cycles with no new
+progress (a suspected stuck loop — repeated triage, no new commits/PRs/closed
+issues, a completion-% parked high), still route to `advance_goal` (the action
+*kind* does not change), but name the suspected loop in your rationale so the
+goal-action brain re-scopes or executes rather than re-triaging the same state.
+
 ## CONTEXT
 
 A single priority entry produced by the Orient phase:

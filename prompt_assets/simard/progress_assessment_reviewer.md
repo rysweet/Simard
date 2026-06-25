@@ -48,6 +48,21 @@ A **decrease** in percent (claimed < prior) is always acceptable — the brain
 is correcting a prior overestimate and we want to encourage that. Return
 accept with a rationale that notes the self-correction.
 
+### Stalled progress and open-ended goals
+
+Watch for goals that never finish. If `{prior_pct}` is already high (roughly
+≥ 90) and `{claimed_pct}` re-asserts about the same high percent while the
+`{plan}` describes only repeated triage / re-reading / re-reinforcement with
+**no new shipped artifact** in the plan or `{wip_summary}`, treat the claim as
+stalled rather than honest progress: **reject**, with a rationale noting that the
+goal is parked and should be decomposed into a concrete completable sub-goal,
+completed, or demoted — not re-asserted at the same percent.
+
+This is the open-ended-goal failure mode (a goal with no reachable 100%
+plateaued at a high percent for several cycles with only re-triage to show for
+it). It is distinct from a genuine, evidence-backed high percent — a real
+shipped PR named in the plan or WIP — which you should still **accept**.
+
 When in genuine doubt, prefer **accept** with a cautionary rationale. The
 goal of this reviewer is to catch hallucinated jumps, not to gatekeep every
 small movement.
