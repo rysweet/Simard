@@ -137,6 +137,7 @@ If you are changing architecture, start with the [architecture overview](./archi
 - [Adaptive scaling](./concepts/adaptive-scaling.md) — AIMD concurrency control for the OODA cycle.
 - [Goal board API reference](./reference/goal-board-api.md) — `active_goals_as_records` adapter and load/save semantics.
 - [Adaptive scaling API reference](./reference/adaptive-scaling-api.md) — AdaptiveScaler Rust API and integration.
+- [Maximum safe parallelism](./reference/maximum-safe-parallelism.md) — how the OODA daemon fills spare capacity with concurrent engineers on distinct work items, bounded by the AIMD safety cap.
 
 - [Agent composition](./architecture/agent-composition.md) - How Simard composes subordinate agents with goal assignment, supervision, and crash recovery.
 - [Cognitive memory](./architecture/cognitive-memory.md) - Six-type memory model, session lifecycle mapping, and hive mind integration.
