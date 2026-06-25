@@ -69,6 +69,21 @@ steps:
         3. `minutes_since_last_update_attempt >= 30`
         4. Current goal's engineer is healthy
 
+      ## Detecting churn vs. progress
+
+      A high `consecutive_skip_count`, or a `cycle_number` that has advanced many
+      times on the same goal, is only acceptable while the engineer log tail shows
+      **new, concrete progress** — fresh commit SHAs, a PR opened or updated, an
+      issue closed. If the log tail shows the engineer repeating the same step
+      every cycle — re-triaging the same PRs, re-reading the same issue,
+      re-reinforcing the same procedure — with no new artifact, that is a **stuck
+      loop**, not healthy work. Re-triaging the same state is not progress; do not
+      let a goal churn indefinitely just because the engineer process is alive.
+      Prefer `deprioritize` so the goal yields budget and the failure penalty
+      re-thinks it next cycle, or `open_tracking_issue` when the loop needs a human
+      to re-scope an **open-ended goal** (no reachable 100%, parked at a high
+      completion-% for many cycles) into concrete, completable work.
+
       ## OUTPUT FORMAT
 
       Output the variant name as the very first word of your response.

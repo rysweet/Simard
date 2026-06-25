@@ -64,6 +64,7 @@ nav:
     - Improvement context — denser execution evidence: concepts/improvement-context-execution-evidence-gap.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
+    - OODA Loop Self-Detection: concepts/ooda-loop-self-detection.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md

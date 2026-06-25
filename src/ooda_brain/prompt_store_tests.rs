@@ -381,3 +381,137 @@ fn goal_session_objective_mentions_self_update() {
         "goal_session_objective.md must mention self-update awareness for Simard repo merges"
     );
 }
+
+// --- Loop / stuck self-detection + proactivity (issue #2403) ----------------
+//
+// These tests pin the prompt CONTENT that makes Simard reason about whether she
+// is making real progress or spinning in a loop, break the loop by changing
+// strategy, keep open-ended goals bounded, and proactively backfill work. They
+// assert wording only — no Rust logic or output-contract change.
+
+#[test]
+fn goal_session_objective_has_loop_self_detection() {
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("loop"),
+        "goal_session_objective.md must make Simard reason about being in a loop"
+    );
+    assert!(
+        lower.contains("real progress") && lower.contains("not progress"),
+        "goal_session_objective.md must distinguish real progress from non-progress signals"
+    );
+    assert!(
+        lower.contains("change strategy") || lower.contains("stop repeating"),
+        "goal_session_objective.md must tell Simard to break the loop / change strategy when stuck"
+    );
+}
+
+#[test]
+fn goal_session_objective_loop_check_precedes_priority_order() {
+    // The self-detection section must come BEFORE Priority Order so Simard
+    // decides whether she is looping before defaulting to re-triage.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    let loop_pos = lower
+        .find("looping")
+        .or_else(|| lower.find("are you making progress"));
+    let priority_pos = lower.find("priority order");
+    assert!(
+        loop_pos.is_some() && priority_pos.is_some(),
+        "both the loop-detection section and Priority Order must exist"
+    );
+    assert!(
+        loop_pos.unwrap() < priority_pos.unwrap(),
+        "loop self-detection must appear before Priority Order"
+    );
+}
+
+#[test]
+fn goal_session_objective_triage_is_quick_first_pass_not_gate() {
+    // Rebalance: triage must be a quick first pass, not a perpetual gate that
+    // blocks executing new work.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("quick first pass") && lower.contains("not a perpetual gate"),
+        "Priority Order must frame triage as a quick first pass, not a perpetual gate"
+    );
+}
+
+#[test]
+fn goal_session_objective_biases_toward_executing() {
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("decompose") && lower.contains("shipping"),
+        "goal_session_objective.md must bias toward decomposing open-ended goals and shipping"
+    );
+}
+
+#[test]
+fn ooda_decide_notes_stuck_loop_in_rationale() {
+    let content = embedded_fallback("ooda_decide.md").expect("ooda_decide.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("stuck loop") || lower.contains("suspected loop"),
+        "ooda_decide.md must instruct surfacing a suspected stuck loop in the rationale"
+    );
+    // The action KIND must remain advance_goal (output contract unchanged).
+    assert!(
+        content.contains("advance_goal"),
+        "ooda_decide.md must keep routing stuck goals to advance_goal (kind unchanged)"
+    );
+}
+
+#[test]
+fn progress_reviewer_escalates_stalled_open_ended_goals() {
+    let content = embedded_fallback("progress_assessment_reviewer.md")
+        .expect("progress_assessment_reviewer.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("stalled") && lower.contains("open-ended"),
+        "progress_assessment_reviewer.md must call out stalled / open-ended goals"
+    );
+    assert!(
+        lower.contains("decompose") || lower.contains("demote"),
+        "progress reviewer must push parked goals toward decompose/complete/demote"
+    );
+}
+
+#[test]
+fn ooda_brain_detects_churn_vs_progress() {
+    let prompt = include_str!("../../prompt_assets/simard/ooda_brain.md");
+    let lower = prompt.to_lowercase();
+    assert!(
+        lower.contains("churn") && lower.contains("stuck loop"),
+        "ooda_brain.md must distinguish churn from progress (stuck-loop detection)"
+    );
+    // Loop-breaking must route through existing variants — no new variants.
+    assert!(
+        prompt.contains("deprioritize") && prompt.contains("open_tracking_issue"),
+        "ooda_brain.md must break loops via existing deprioritize / open_tracking_issue variants"
+    );
+}
+
+#[test]
+fn goal_curator_has_open_ended_hygiene_and_proactive_backfill() {
+    let prompt = include_str!("../../prompt_assets/simard/goal_curator_system.md");
+    let lower = prompt.to_lowercase();
+    assert!(
+        lower.contains("open-ended goal hygiene"),
+        "goal_curator_system.md must teach open-ended goal hygiene (decompose to completable sub-goals)"
+    );
+    assert!(
+        lower.contains("done-when"),
+        "open-ended goals must require explicit done-when criteria"
+    );
+    assert!(
+        lower.contains("proactive backfill") && lower.contains("open github issues"),
+        "goal_curator_system.md must teach proactive backfill from own open GitHub issues"
+    );
+}
