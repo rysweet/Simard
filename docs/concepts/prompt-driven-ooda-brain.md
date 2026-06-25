@@ -101,6 +101,7 @@ for the normative grammar of each format.
 
 ## See Also
 
+* [Concept: OODA loop self-detection, reflectiveness, and proactivity](./ooda-loop-self-detection.md) — how the engineer-lifecycle brain treats churn with no new artifact as a stuck loop
 * [How-to: spawn engineers from the OODA daemon](../howto/spawn-engineers-from-ooda-daemon.md)
 * [How-to: edit the OODA brain prompt](../howto/edit-the-ooda-brain-prompt.md)
 * [Reference: `OodaBrain` API](../reference/ooda-brain-api.md)

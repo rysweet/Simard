@@ -249,5 +249,6 @@ construction.
 * [Reference: text-parsing wire formats](text-parsing-wire-formats.md) — normative grammar
 * [Reference: `OodaBrain` API](ooda-brain-api.md) — trait and type definitions
 * [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md) — design rationale
+* [Concept: OODA loop self-detection](../concepts/ooda-loop-self-detection.md) — why the decide rationale names a suspected loop while keeping `advance_goal`
 * [How-to: edit the OODA brain prompt](../howto/edit-the-ooda-brain-prompt.md) — editing guide
 * [How-to: diagnose decide/orient parse failures](../howto/diagnose-decide-orient-parse-failures.md) — operator runbook
