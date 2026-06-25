@@ -515,3 +515,57 @@ fn goal_curator_has_open_ended_hygiene_and_proactive_backfill() {
         "goal_curator_system.md must teach proactive backfill from own open GitHub issues"
     );
 }
+
+#[test]
+fn goal_session_objective_enumerates_concrete_progress_signals() {
+    // Behavior A: the loop self-detection must DEFINE concrete progress signals
+    // (a new commit SHA, an opened/merged PR, a closed issue, a completion-%
+    // increase backed by a shipped artifact) and an explicit non-progress list
+    // (re-triaging, re-reading the same thing). Loose "real progress" wording is
+    // not enough — the enumerated signals are what make the check actionable.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+
+    for signal in [
+        "commit sha",
+        "pr opened",
+        "merged",
+        "issue closed",
+        "shipped artifact",
+    ] {
+        assert!(
+            lower.contains(signal),
+            "goal_session_objective.md must enumerate the concrete progress signal {signal:?}"
+        );
+    }
+    for non_signal in ["re-triaging", "re-reading"] {
+        assert!(
+            lower.contains(non_signal),
+            "goal_session_objective.md must list {non_signal:?} as a non-progress (loop) signal"
+        );
+    }
+}
+
+#[test]
+fn progress_reviewer_rejects_reasserted_stalled_high_pct() {
+    // Behavior E: the per-cycle progress reviewer must judge whether the cycle
+    // produced real progress. The enforceable verdict is that a high percent
+    // re-asserted with NO new shipped artifact is REJECTED (not parked), which
+    // is what feeds the demote/decompose decision next cycle.
+    let content = embedded_fallback("progress_assessment_reviewer.md")
+        .expect("progress_assessment_reviewer.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("re-asserts about the same high percent"),
+        "progress_assessment_reviewer.md must detect a high percent re-asserted with no new work"
+    );
+    assert!(
+        lower.contains("no new shipped artifact"),
+        "the stalled-progress rule must hinge on the absence of a new shipped artifact"
+    );
+    assert!(
+        lower.contains("reject"),
+        "a re-asserted stalled high percent must be rejected, not accepted as progress"
+    );
+}
