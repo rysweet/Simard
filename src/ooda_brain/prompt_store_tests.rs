@@ -569,3 +569,305 @@ fn progress_reviewer_rejects_reasserted_stalled_high_pct() {
         "a re-asserted stalled high percent must be rejected, not accepted as progress"
     );
 }
+
+// ── Maximum safe parallelism — fill spare capacity (Step 6) ──────────────
+//
+// These tests pin the prompt guidance that makes Simard fill spare machine
+// capacity with concurrent engineers on DISTINCT work items, bounded by the
+// existing AIMD safety cap. The fan-out is prompt-driven (decompose an umbrella
+// goal into distinct per-issue goals via `simard goal add`); the coverage
+// allocator + AIMD cap then parallelize them. The Rust output contracts the
+// parsers depend on (DECISION marker, Spawn-an-engineer / NO ACTION shapes)
+// must remain intact.
+
+#[test]
+fn goal_session_objective_teaches_maximum_safe_parallelism() {
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("maximum safe parallelism"),
+        "goal_session_objective.md must teach a Maximum-safe-parallelism strategy"
+    );
+    // Fan-out is via decomposing an umbrella into distinct per-issue goals,
+    // created with `simard goal add`, so coverage can parallelize them.
+    assert!(
+        lower.contains("simard goal add"),
+        "the fan-out must create concrete per-issue goals via `simard goal add`"
+    );
+    assert!(
+        lower.contains("decompose") && lower.contains("distinct"),
+        "must decompose an umbrella goal into distinct per-issue goals"
+    );
+    // Bounded by the EXISTING AIMD safety cap — not an unbounded spawn.
+    assert!(
+        lower.contains("aimd cap") || lower.contains("aimd safety cap"),
+        "fan-out must stay bounded by the AIMD safety cap"
+    );
+    // The operator override that widens the resource-bounded ceiling.
+    assert!(
+        content.contains("SIMARD_MAX_CONCURRENT_ACTIONS"),
+        "must point to SIMARD_MAX_CONCURRENT_ACTIONS for widening the ceiling"
+    );
+}
+
+#[test]
+fn goal_session_objective_parallelism_is_collision_safe() {
+    // Parallel engineers must work DISTINCT items — never duplicate or re-triage
+    // the same issue (preserves the #2404 loop-awareness).
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("one goal per issue"),
+        "collision guard: exactly one goal per distinct issue"
+    );
+    assert!(
+        lower.contains("never two engineers on the same issue"),
+        "collision guard: never two engineers on the same issue"
+    );
+    // The umbrella delegates to per-issue goals rather than duplicating them.
+    assert!(
+        lower.contains("delegate"),
+        "the umbrella must delegate to per-issue goals, not duplicate their work"
+    );
+}
+
+#[test]
+fn goal_session_objective_parallelism_keeps_response_shapes() {
+    // The fan-out must reuse the existing "Spawn an engineer" response shape and
+    // must NOT invent a new shape the Rust parser cannot read. Both documented
+    // shapes (Spawn an engineer / NO ACTION) remain intact.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("spawn an engineer"),
+        "fan-out must use the existing Spawn-an-engineer response shape"
+    );
+    assert!(
+        content.contains("NO ACTION"),
+        "the NO ACTION response shape must remain documented"
+    );
+}
+
+#[test]
+fn ooda_decide_explains_parallelism_without_new_variant() {
+    let content = embedded_fallback("ooda_decide.md").expect("ooda_decide.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("parallelism"),
+        "ooda_decide.md must explain how per-cycle parallelism is achieved"
+    );
+    // Parallelism comes from routing each DISTINCT goal to advance_goal — there
+    // is NO new parallel/spawn-N variant (output contract unchanged).
+    assert!(
+        content.contains("advance_goal") && lower.contains("invent one"),
+        "parallelism must route distinct goals to advance_goal with no invented variant"
+    );
+    assert!(
+        lower.contains("aimd safety cap") || lower.contains("aimd cap"),
+        "parallelism must be bounded by the AIMD safety cap"
+    );
+}
+
+#[test]
+fn ooda_decide_first_line_decision_contract_preserved() {
+    // The Rust parser reads the FIRST non-blank line for a `DECISION:` marker.
+    // Body additions must not disturb that contract.
+    let content = embedded_fallback("ooda_decide.md").expect("ooda_decide.md must be registered");
+    let first_non_blank = content
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .expect("ooda_decide.md must have a non-blank line");
+    assert!(
+        first_non_blank.contains("DECISION:"),
+        "first non-blank line must still assert the DECISION contract, got: {first_non_blank:?}"
+    );
+}
+
+#[test]
+fn ooda_decide_recipe_mirrors_parallelism_note() {
+    // The runtime recipe (recipe-runner-rs path) must stay in sync with the
+    // embedded ooda_decide.md prompt on the parallelism guidance.
+    let recipe = include_str!("../../prompt_assets/simard/recipes/ooda-decide.yaml");
+    let lower = recipe.to_lowercase();
+    assert!(
+        lower.contains("parallelism") && recipe.contains("advance_goal"),
+        "ooda-decide.yaml must mirror the parallelism note routing distinct goals to advance_goal"
+    );
+    assert!(
+        lower.contains("aimd safety cap") || lower.contains("aimd cap"),
+        "ooda-decide.yaml parallelism note must reference the AIMD safety cap"
+    );
+    assert!(
+        lower.contains("invent one"),
+        "ooda-decide.yaml must forbid inventing a new parallel action variant"
+    );
+}
+
+// ── Maximum safe parallelism — additional outcome/constraint coverage (Step 7) ──
+//
+// The six tests above pin the headline guidance and the preserved output
+// contracts. These tests pin the remaining REQUIRED OUTCOME points and HARD
+// CONSTRAINTS so they cannot silently regress when the prompts are edited:
+//   * fill spare capacity — no engineer slot idle while parallelizable work remains
+//   * resource-aware AIMD backoff (additive-increase + halve under pressure) survives
+//   * each parallel engineer gets a DISTINCT, BOUNDED work item
+//   * the `rysweet`-only operator gate (Priority Order tier 0) is preserved per-issue
+//   * #2404 loop-awareness is preserved (decompose-and-ship, do not re-triage)
+//   * failures are surfaced, never silently re-looped (no silent degradation)
+
+/// Collapse all runs of whitespace to single spaces so assertions on a phrase
+/// are not defeated by Markdown line-wrapping.
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn goal_session_objective_fills_spare_capacity_no_idle() {
+    // REQUIRED OUTCOME #1: when live engineers < the AIMD cap and parallelizable
+    // work exists, fill the slots — no idle capacity while work remains.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("fill spare capacity"),
+        "must teach filling spare capacity"
+    );
+    assert!(
+        lower.contains("below the aimd cap"),
+        "fan-out must trigger when live engineers are below the AIMD cap (spare capacity)"
+    );
+    assert!(
+        lower.contains("sits idle") && lower.contains("parallelizable work remains"),
+        "must assert no engineer slot sits idle while parallelizable work remains"
+    );
+}
+
+#[test]
+fn goal_session_objective_parallelism_assigns_distinct_bounded_work() {
+    // REQUIRED OUTCOME #1 & #5: each parallel engineer works a DISTINCT, BOUNDED
+    // item (one issue / one bounded file-set per goal) — never duplicating work.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("done-when") || lower.contains("done when"),
+        "each per-issue goal must carry an explicit done-when criterion (bounded work)"
+    );
+    assert!(
+        lower.contains("distinct work only"),
+        "must state the distinct-work-only rule"
+    );
+    assert!(
+        lower.contains("one issue") && lower.contains("per goal"),
+        "must bound each goal to one issue (or one bounded file-set) per goal"
+    );
+}
+
+#[test]
+fn goal_session_objective_parallelism_is_resource_aware() {
+    // HARD CONSTRAINT: "fill the machine" must stay resource-aware — the AIMD cap
+    // raises additively while there is headroom and BACKS OFF under CPU / memory /
+    // 429 pressure. The prompt must keep describing that safety behavior so the
+    // "safe" in "maximum safe parallelism" is never lost.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("additively"),
+        "must describe additive increase of the cap while there is headroom"
+    );
+    assert!(
+        lower.contains("backs off") && lower.contains("pressure"),
+        "must describe the cap backing off under pressure"
+    );
+    assert!(
+        content.contains("429"),
+        "must name the 429 / rate-limit backoff signal"
+    );
+    assert!(
+        lower.contains("shrinks automatically under load"),
+        "the AIMD ceiling must shrink automatically under load (never hard-thrash)"
+    );
+}
+
+#[test]
+fn goal_session_objective_parallelism_preserves_rysweet_gate() {
+    // REQUIRED OUTCOME #5: the per-issue fan-out must NOT bypass the operator's
+    // `rysweet`-only author gate (Priority Order tier 0). Each spawned engineer
+    // verifies the issue author before acting.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("priority order tier 0"),
+        "the parallel fan-out must still honor Priority Order tier 0"
+    );
+    assert!(
+        lower.contains("rysweet"),
+        "the per-issue fan-out must keep the rysweet-only gate"
+    );
+    assert!(
+        content.contains("gh issue view"),
+        "each engineer must verify the issue author (gh issue view) before acting"
+    );
+}
+
+#[test]
+fn goal_session_objective_preserves_loop_awareness() {
+    // REQUIRED OUTCOME #5 (#2404): parallel engineers must not all re-triage the
+    // same thing. The decomposition IS the loop-break: decompose and ship rather
+    // than re-triaging the same list every cycle.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("loop awareness still applies"),
+        "loop-awareness (#2404) must be preserved in the parallelism strategy"
+    );
+    assert!(
+        lower.contains("loop-break"),
+        "the decomposition must be framed as the loop-break"
+    );
+    assert!(
+        lower.contains("re-triage"),
+        "must warn against re-triaging the same list every cycle"
+    );
+}
+
+#[test]
+fn goal_session_objective_surfaces_not_silently_reloops() {
+    // HARD CONSTRAINT: surface failures explicitly; no silent degradation. The
+    // pull-fresh-work strategy must surface the proposal and never silently
+    // re-loop. (Phrase spans wrapped lines, so normalize whitespace first.)
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("surface the proposal"),
+        "must surface the proposal to the operator"
+    );
+    assert!(
+        norm.contains("never silently re-loop"),
+        "must never silently re-loop (no silent degradation)"
+    );
+}
+
+#[test]
+fn ooda_decide_parallelism_is_resource_aware() {
+    // The Decide note must also frame parallelism as resource-aware: the coverage
+    // allocator spawns up to the AIMD cap, which backs off under pressure.
+    let content = embedded_fallback("ooda_decide.md").expect("ooda_decide.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("backs off") && lower.contains("pressure"),
+        "ooda_decide.md parallelism note must describe the cap backing off under pressure"
+    );
+    assert!(
+        content.contains("429"),
+        "ooda_decide.md must name the 429 backoff signal in the parallelism note"
+    );
+}

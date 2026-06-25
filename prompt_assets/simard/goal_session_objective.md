@@ -43,10 +43,14 @@ your choice through one of the two response shapes defined later in this prompt
    (the work is genuinely done, or the goal can never complete as written),
    record it complete via `PROGRESS: 100` with a note, or recommend demoting it.
    Do not park a goal at 99% forever.
-3. **Pull fresh concrete work.** If active goals are below the cap and the
-   backlog is empty, propose pulling a specific open GitHub issue you own (you
-   track ~20) into a new concrete goal instead of spinning on this one. Honor
-   any operator gating, but **surface the proposal** — never silently re-loop.
+3. **Pull fresh concrete work — and fan it out to fill spare capacity.** If
+   live engineers are below the AIMD cap and this goal is an umbrella over
+   several *independent* open issues you own (you track ~20), do **not** spin
+   one engineer serially triaging them — decompose it into one distinct
+   concrete goal per issue so the coverage allocator spawns a separate engineer
+   for each, in parallel, up to the cap. See **Maximum safe parallelism** below.
+   Honor any operator gating, but **surface the proposal** — never silently
+   re-loop.
 
 A goal sitting at a high completion-% with stalled progress across several
 cycles is a signal to decompose, complete, or demote it — not to triage it
@@ -96,6 +100,59 @@ in order:
    resolved, duplicates closed), start a new implementation. If a recent cycle
    already triaged this goal with no actionable result, skip straight here and
    execute — do not re-triage the same state.
+
+# Maximum safe parallelism — fill spare capacity, never idle while work remains
+
+Simard runs **many engineers at once** when there is parallelizable work and the
+machine has room. The daemon already spawns **one engineer per incomplete goal
+each cycle, up to the AIMD safety cap** — the resource-aware ceiling that raises
+itself additively while CPU/memory are free and backs off (halves) under
+CPU / memory / rate-limit (429) pressure. Your job here is to make sure there is
+enough *distinct, bounded* work on the board to fill that capacity, so no
+engineer slot sits idle while parallelizable work remains.
+
+**When this goal is an umbrella over several independent work items** — e.g.
+"find and fix the recent rysweet-filed amplihack-rs issues" covering issues
+`#804`, `#807`, `#808`, `#809`, `#810`, `#815` — do **not** keep one engineer
+serially triaging all of them. That leaves the machine idle. Instead,
+**decompose the umbrella into one distinct concrete goal per independent issue**
+so the coverage allocator spawns a separate engineer for each, in parallel,
+bounded by the AIMD cap.
+
+Use the normal **Spawn an engineer** response shape; the engineer's **bounded**
+task is:
+
+1. Enumerate the independent, still-open, `rysweet`-filed issues this umbrella
+   covers (verify each author with `gh issue view <N> --json author --jq
+   '.author.login'` — Priority Order tier 0 still applies; skip anything not
+   filed by `rysweet`).
+2. For **each distinct** issue, create exactly one concrete goal with an
+   explicit done-when criterion, e.g.
+   `simard goal add 2 --repo <owner/repo> "fix amplihack-rs issue #808: <one-line scope>; done when the fix is merged"`.
+   Create **one goal per issue** — never two goals for the same issue, and
+   never two engineers on the same issue.
+3. Then **stop**. The umbrella engineer does **not** fix the issues itself —
+   each per-issue goal gets its own engineer next cycle. This is the collision
+   guard: distinct engineers work distinct issues, so they never duplicate each
+   other or re-triage the same state.
+
+After you fan the umbrella out, **delegate** to the per-issue goals: on later
+cycles prefer `NO ACTION` for the umbrella (record `PROGRESS: NN` toward "all
+child issues closed") while the per-issue goals do the work, and mark the
+umbrella complete once every issue it covers is closed.
+
+**Bounds and safety — do not bypass these:**
+
+- The **AIMD cap is a hard ceiling.** It governs how many engineers actually run
+  at once and shrinks automatically under load. You never throttle goal creation
+  by hand; just keep every goal genuinely independent and bounded.
+- **Distinct work only.** One issue (or one bounded file-set) per goal. Parallel
+  engineers must work distinct items, never the same one.
+- **Loop awareness still applies.** This decomposition *is* the loop-break for a
+  "find-and-fix-N-issues" umbrella that keeps re-triaging: decompose and ship,
+  don't re-triage the same list every cycle.
+- The operator can widen the ceiling with `SIMARD_MAX_CONCURRENT_ACTIONS` (the
+  AIMD ceiling is 4× this base value); the pressure/error backoff is unchanged.
 
 # Self-update awareness
 
