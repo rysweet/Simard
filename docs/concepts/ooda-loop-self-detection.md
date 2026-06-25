@@ -28,8 +28,13 @@ This document describes the prompt-level design that makes Simard **reflective**
 (judging whether a cycle produced real progress), **loop-aware** (noticing when
 she is repeating herself), and **proactive** (pulling fresh work instead of
 idling). It is implemented entirely in the prompt assets under
-`prompt_assets/simard/` — there are **no Rust logic changes**, and the prompt
-content hot-reloads onto the live daemon.
+`prompt_assets/simard/` — there are **no Rust logic changes**. Because
+`PromptStore` resolves each prompt from its on-disk override
+(`~/.simard/prompt_assets/simard/`) before falling back to the `include_str!`
+copy baked into the binary, the new content **hot-reloads onto the live daemon
+once the assets are synced to that directory** — no rebuild required. Until they
+are synced, the embedded fallback applies and the change lands on the next
+build/redeploy.
 
 ## The loop in one picture
 
