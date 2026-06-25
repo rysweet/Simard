@@ -569,3 +569,140 @@ fn progress_reviewer_rejects_reasserted_stalled_high_pct() {
         "a re-asserted stalled high percent must be rejected, not accepted as progress"
     );
 }
+
+// ── Maximum safe parallelism — fill spare capacity (Step 6) ──────────────
+//
+// These tests pin the prompt guidance that makes Simard fill spare machine
+// capacity with concurrent engineers on DISTINCT work items, bounded by the
+// existing AIMD safety cap. The fan-out is prompt-driven (decompose an umbrella
+// goal into distinct per-issue goals via `simard goal add`); the coverage
+// allocator + AIMD cap then parallelize them. The Rust output contracts the
+// parsers depend on (DECISION marker, Spawn-an-engineer / NO ACTION shapes)
+// must remain intact.
+
+#[test]
+fn goal_session_objective_teaches_maximum_safe_parallelism() {
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("maximum safe parallelism"),
+        "goal_session_objective.md must teach a Maximum-safe-parallelism strategy"
+    );
+    // Fan-out is via decomposing an umbrella into distinct per-issue goals,
+    // created with `simard goal add`, so coverage can parallelize them.
+    assert!(
+        lower.contains("simard goal add"),
+        "the fan-out must create concrete per-issue goals via `simard goal add`"
+    );
+    assert!(
+        lower.contains("decompose") && lower.contains("distinct"),
+        "must decompose an umbrella goal into distinct per-issue goals"
+    );
+    // Bounded by the EXISTING AIMD safety cap — not an unbounded spawn.
+    assert!(
+        lower.contains("aimd cap") || lower.contains("aimd safety cap"),
+        "fan-out must stay bounded by the AIMD safety cap"
+    );
+    // The operator override that widens the resource-bounded ceiling.
+    assert!(
+        content.contains("SIMARD_MAX_CONCURRENT_ACTIONS"),
+        "must point to SIMARD_MAX_CONCURRENT_ACTIONS for widening the ceiling"
+    );
+}
+
+#[test]
+fn goal_session_objective_parallelism_is_collision_safe() {
+    // Parallel engineers must work DISTINCT items — never duplicate or re-triage
+    // the same issue (preserves the #2404 loop-awareness).
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("one goal per issue"),
+        "collision guard: exactly one goal per distinct issue"
+    );
+    assert!(
+        lower.contains("never two engineers on the same issue"),
+        "collision guard: never two engineers on the same issue"
+    );
+    // The umbrella delegates to per-issue goals rather than duplicating them.
+    assert!(
+        lower.contains("delegate"),
+        "the umbrella must delegate to per-issue goals, not duplicate their work"
+    );
+}
+
+#[test]
+fn goal_session_objective_parallelism_keeps_response_shapes() {
+    // The fan-out must reuse the existing "Spawn an engineer" response shape and
+    // must NOT invent a new shape the Rust parser cannot read. Both documented
+    // shapes (Spawn an engineer / NO ACTION) remain intact.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("spawn an engineer"),
+        "fan-out must use the existing Spawn-an-engineer response shape"
+    );
+    assert!(
+        content.contains("NO ACTION"),
+        "the NO ACTION response shape must remain documented"
+    );
+}
+
+#[test]
+fn ooda_decide_explains_parallelism_without_new_variant() {
+    let content = embedded_fallback("ooda_decide.md").expect("ooda_decide.md must be registered");
+    let lower = content.to_lowercase();
+    assert!(
+        lower.contains("parallelism"),
+        "ooda_decide.md must explain how per-cycle parallelism is achieved"
+    );
+    // Parallelism comes from routing each DISTINCT goal to advance_goal — there
+    // is NO new parallel/spawn-N variant (output contract unchanged).
+    assert!(
+        content.contains("advance_goal") && lower.contains("invent one"),
+        "parallelism must route distinct goals to advance_goal with no invented variant"
+    );
+    assert!(
+        lower.contains("aimd safety cap") || lower.contains("aimd cap"),
+        "parallelism must be bounded by the AIMD safety cap"
+    );
+}
+
+#[test]
+fn ooda_decide_first_line_decision_contract_preserved() {
+    // The Rust parser reads the FIRST non-blank line for a `DECISION:` marker.
+    // Body additions must not disturb that contract.
+    let content = embedded_fallback("ooda_decide.md").expect("ooda_decide.md must be registered");
+    let first_non_blank = content
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .expect("ooda_decide.md must have a non-blank line");
+    assert!(
+        first_non_blank.contains("DECISION:"),
+        "first non-blank line must still assert the DECISION contract, got: {first_non_blank:?}"
+    );
+}
+
+#[test]
+fn ooda_decide_recipe_mirrors_parallelism_note() {
+    // The runtime recipe (recipe-runner-rs path) must stay in sync with the
+    // embedded ooda_decide.md prompt on the parallelism guidance.
+    let recipe = include_str!("../../prompt_assets/simard/recipes/ooda-decide.yaml");
+    let lower = recipe.to_lowercase();
+    assert!(
+        lower.contains("parallelism") && recipe.contains("advance_goal"),
+        "ooda-decide.yaml must mirror the parallelism note routing distinct goals to advance_goal"
+    );
+    assert!(
+        lower.contains("aimd safety cap") || lower.contains("aimd cap"),
+        "ooda-decide.yaml parallelism note must reference the AIMD safety cap"
+    );
+    assert!(
+        lower.contains("invent one"),
+        "ooda-decide.yaml must forbid inventing a new parallel action variant"
+    );
+}

@@ -254,6 +254,9 @@ de-dups against both live engineers and already-planned actions.
 
 ## Related reading
 
+- [Maximum safe parallelism](./maximum-safe-parallelism.md) — how coverage,
+  the AIMD cap, and goal decomposition combine to fill spare machine capacity
+  with concurrent engineers on distinct work items.
 - [Adaptive scaling API](./adaptive-scaling-api.md) — the AIMD scaler that
   supplies the safety cap.
 - [Goal target-repo routing](./goal-target-repo-routing.md) — the companion

@@ -71,6 +71,22 @@ Unknown variant tokens or a missing `DECISION:` marker cause the daemon to
 fall back to the deterministic prefix mapping (`__memory__` →
 consolidate_memory etc., else `advance_goal`).
 
+## Parallelism — how the machine gets filled
+
+You judge **one** priority per call and emit **one** `DECISION:` — that contract
+is unchanged. Per-cycle parallelism comes from the daemon dispatching MANY
+priorities at once: the Orient phase surfaces one priority per incomplete goal,
+you route each to `advance_goal`, and the coverage allocator spawns one engineer
+per goal **up to the AIMD safety cap** (the resource-aware ceiling that backs off
+under CPU / memory / 429 pressure). So when several distinct goals are
+parallelizable, routing each to `advance_goal` is exactly what fills the machine
+— there is no separate "parallel" or "spawn N" variant to emit, and you must not
+invent one. If a single goal bundles many independent work items, the
+goal-action brain (`goal_session_objective.md`) decomposes it into distinct
+per-issue goals; each then arrives here as its own priority and you route it to
+`advance_goal`. Never route two priorities to the same work item — distinct
+goals mean distinct engineers on distinct items.
+
 ## OUTPUT_FORMAT
 
 Use the **prose-first DECISION marker protocol** (matching the format the
