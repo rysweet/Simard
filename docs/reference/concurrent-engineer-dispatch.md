@@ -82,7 +82,7 @@ pub trait OrchestratorSessionFactory: Send + Sync {
 }
 ```
 
-- `OodaBridges.session_factory: Option<Box<dyn OrchestratorSessionFactory>>`.
+- `OodaBridges.session_factory: Option<Arc<dyn OrchestratorSessionFactory>>`.
   The daemon wires `ProviderSessionFactory` (built via `SessionBuilder`), so
   each spawn-candidate goal mints its **own** session and the `run_turn` calls
   run in parallel.
