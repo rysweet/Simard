@@ -871,3 +871,156 @@ fn ooda_decide_parallelism_is_resource_aware() {
         "ooda_decide.md must name the 429 backoff signal in the parallelism note"
     );
 }
+
+// ── Own PRs to landing — finish in-flight PRs, merged-AND-closed done-gate ──
+//
+// These tests pin the prompt guidance that makes Simard DRIVE the PRs she/her
+// engineers open all the way to landing (CI-green → squash-merge → close the
+// issue) instead of leaving them open and stalled. They are ADDITIVE to the
+// #2404 (loop-awareness) and #2405 (parallel fan-out) guidance — start in
+// parallel, don't loop, and now FINISH/land. The Rust output contracts the
+// parsers depend on (prose-only goal_session, single-line verdict JSON) stay
+// intact. Phrases are checked after `normalize_ws` so Markdown line-wrapping
+// cannot defeat the assertions.
+
+#[test]
+fn goal_session_objective_owns_open_prs_to_landing() {
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("finish what you started")
+            && norm.contains("own your open prs all the way to landing"),
+        "goal_session_objective.md must teach owning open PRs all the way to landing"
+    );
+    assert!(
+        norm.contains("own-pr-to-landing priority"),
+        "must declare an own-PR-to-landing priority for goals that already have an open PR"
+    );
+    assert!(
+        norm.contains("drive that pr to landing"),
+        "the next action for a goal with an open PR must be to drive that PR to landing"
+    );
+    // Use her existing merge authority to merge it herself, then close the issue.
+    assert!(
+        norm.contains("merge it yourself"),
+        "must direct her to merge the PR herself using her existing merge authority"
+    );
+    assert!(
+        norm.contains("close the linked issue"),
+        "must direct her to close the linked issue after merging"
+    );
+    // Finishing in-flight work is preferred over starting new work.
+    assert!(
+        norm.contains("prefer finishing an in-flight pr you own over starting a fresh one"),
+        "must prefer finishing an in-flight PR over starting new work"
+    );
+}
+
+#[test]
+fn goal_session_objective_done_gate_requires_merge_and_close() {
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("done-gate"),
+        "must contain an explicit Done-gate section"
+    );
+    assert!(
+        norm.contains("complete only when its pr is merged and the linked issue is closed"),
+        "done-gate: a fix/implement goal is complete ONLY when its PR is merged AND the issue is closed"
+    );
+    // A genuine external blocker is surfaced as Blocked + reason, not silently re-looped.
+    assert!(
+        norm.contains("record the goal as blocked with the concrete reason"),
+        "an external blocker must be recorded as Blocked with a concrete reason"
+    );
+    assert!(
+        norm.contains("silently re-loop"),
+        "must forbid silently re-looping on a blocked goal"
+    );
+}
+
+#[test]
+fn goal_session_objective_ci_fix_priority_over_new_pr() {
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("ci-fix priority"),
+        "must declare a CI-fix priority section"
+    );
+    assert!(
+        norm.contains("higher priority than opening a new pr"),
+        "fixing an own red/BLOCKED PR must outrank opening a new PR for a different issue"
+    );
+}
+
+#[test]
+fn engineer_system_continues_existing_pr_no_duplicate() {
+    // engineer_system.md is not registered for embedded_fallback (no prompt_store
+    // logic change), so assert its content directly via include_str!.
+    let content = include_str!("../../prompt_assets/simard/engineer_system.md");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("continue it, never duplicate it"),
+        "engineer_system.md must teach continuing the dispatched issue's PR, never duplicating it"
+    );
+    assert!(
+        norm.contains("continue that pr"),
+        "a dispatched engineer must continue an existing open PR for its issue"
+    );
+    assert!(
+        norm.contains("never open a second pr for an issue that already has one"),
+        "engineer must never open a duplicate PR for an issue that already has one"
+    );
+    assert!(
+        norm.contains("not done until its pr is merged and the linked issue is closed"),
+        "engineer cycle is not done until its PR is merged and the linked issue is closed"
+    );
+}
+
+#[test]
+fn progress_reviewer_open_pr_is_not_done() {
+    let content = embedded_fallback("progress_assessment_reviewer.md")
+        .expect("progress_assessment_reviewer.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("done means merged-and-closed, not merely opened"),
+        "progress reviewer must encode the merged-and-closed done-gate"
+    );
+    assert!(
+        norm.contains("open, un-merged pr is not completion"),
+        "an open, un-merged PR must not count as completion"
+    );
+    assert!(
+        norm.contains("reject"),
+        "a near-100% completion claim on an open PR must be rejected"
+    );
+    // Output contract preserved: single-line verdict JSON.
+    assert!(
+        content.contains("\"verdict\""),
+        "single-line verdict JSON output contract must be preserved"
+    );
+}
+
+#[test]
+fn progress_assessment_recipe_mirrors_done_gate() {
+    // The runtime recipe-runner recipe must stay in sync with the embedded
+    // progress_assessment_reviewer.md on the open-PR-not-done gate.
+    let recipe = include_str!("../../prompt_assets/simard/recipes/progress-assessment.yaml");
+    let norm = normalize_ws(recipe).to_lowercase();
+    assert!(
+        norm.contains("done means merged-and-closed, not merely opened"),
+        "progress-assessment.yaml must mirror the merged-and-closed done-gate"
+    );
+    assert!(
+        norm.contains("open, un-merged pr is not completion"),
+        "recipe mirror: an open, un-merged PR is not completion"
+    );
+    // Verdict JSON output contract preserved.
+    assert!(
+        recipe.contains("\"verdict\""),
+        "progress-assessment.yaml must keep the verdict JSON output contract"
+    );
+}

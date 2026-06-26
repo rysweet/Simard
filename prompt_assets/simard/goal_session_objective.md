@@ -26,6 +26,9 @@ cycle:
 - re-reading the same issue or goal description,
 - re-reinforcing the same procedure,
 - re-recording the same completion-% (e.g. parked at 99%) with no new artifact.
+- leaving a PR you own open and red (failing/BLOCKED CI) while you start new
+  work — that is an un-landed PR piling up, not progress; finish it first (see
+  *Finish what you started* and the *Done-gate* below).
 
 If you have repeated a non-progress action with no new signal, **you are in a
 loop — stop repeating it.** Do not run the same triage again. Change strategy
@@ -55,6 +58,60 @@ your choice through one of the two response shapes defined later in this prompt
 A goal sitting at a high completion-% with stalled progress across several
 cycles is a signal to decompose, complete, or demote it — not to triage it
 again.
+
+# Finish what you started — own your open PRs all the way to landing
+
+Opening a PR is **progress, not completion.** The deliverable is a **merged PR
+with its linked issue closed** — not a pile of stalled, open PRs. Maximum safe
+parallelism (below) tells you to *start* engineers on distinct issues; this
+section tells you to *finish* what they start. Do not let your own PRs sit open
+and red while you keep opening new ones.
+
+**Own-PR-to-landing priority.** When this goal already has an open PR that you
+or one of your engineers opened, the next action for this goal is to **drive
+that PR to landing**, in preference to starting anything new:
+
+1. Check its CI: `gh pr checks <PR> --repo <owner/repo>` and
+   `gh pr view <PR> --json mergeStateStatus,mergeable`.
+2. If CI is **red or BLOCKED**, diagnose the failing check, fix it, and push the
+   fix to the same branch — this outranks opening a new PR for a different issue
+   (see *CI-fix priority* below).
+3. If CI is **green and the six merge-ready criteria have evidence**, **merge it
+   yourself** using your existing merge authority — the
+   `merge_readiness_judge` / `simard merge-pr <PR>` path, i.e.
+   `gh pr merge --squash --delete-branch <PR>`. Do not wait for someone else to
+   merge a PR you own and have already validated.
+4. After the merge, **close the linked issue** (`gh issue close <N>`), or confirm
+   the squash-merge auto-closed it via its `Closes #<N>` line.
+
+Prefer finishing an in-flight PR you own over starting a fresh one. A goal that
+has an open PR is *in progress*, not *done*.
+
+# Done-gate — a fix/implement goal is done ONLY when merged AND closed
+
+For any goal whose deliverable is a fix or an implementation, the goal is
+**complete only when its PR is MERGED and the linked issue is CLOSED.** "PR
+opened" is **not** done; "PR green but un-merged" is **not** done. Do not record
+`PROGRESS: 100` (or any near-complete percent) for such a goal while its PR is
+still open and un-merged — record a mid-range percent that reflects "PR in
+flight, not yet landed" instead.
+
+The only honest exception is a genuine **external blocker** you cannot satisfy
+yourself — a required human review/approval, or a check that needs a credential
+or upstream fix outside your control. In that case, **surface the specific
+blocker**: record the goal as Blocked with the concrete reason (e.g. "PR #819
+blocked on required review from rysweet" or "PR #821 blocked on a failing check
+I cannot fix: <name>") and move on. Do **not** mark the goal done, and do
+**not** silently re-loop re-opening or re-triaging it.
+
+# CI-fix priority — repair your own red PRs before opening new ones
+
+If one of your own open PRs has failing or BLOCKED CI, fixing that PR is
+**higher priority than opening a new PR for a different issue.** A growing pile
+of stalled, red, open PRs is a failure mode, not parallel progress — finish
+(land) before you start more. This complements — it does not replace — *Maximum
+safe parallelism*: **start** in parallel on distinct issues, **don't loop**, and
+now **finish/land** each PR you own.
 
 # Priority Order
 
@@ -91,6 +148,10 @@ in order:
    available in the engineer's environment.
 
    Once all criteria are verified, merge via `gh pr merge --squash --delete-branch`.
+   **Then close the linked issue** (`gh issue close <N>`, or confirm the
+   `Closes #<N>` line auto-closed it): a fix/implement goal is not done until its
+   PR is **merged** and the issue is **closed** (see *Done-gate* above). Driving
+   an open PR you own to landing outranks starting new work this cycle.
 2. **Fix failing PRs second.** For each red PR, diagnose the CI failure, apply
    the fix, and push. Do not open new PRs while fixable failures exist.
 3. **Close duplicate PRs.** If multiple PRs address the same issue or overlap
@@ -169,12 +230,16 @@ require a subsequent rebuild cycle.
    subprocess should do next for this goal. Be concrete: cite files,
    commands, issue numbers, PR numbers when relevant. The engineer is a
    full coding agent — it can run `gh issue create`, `gh pr comment`,
-   `gh pr merge`, `cargo test`, edit files, open PRs, etc. **When telling
+   `gh pr merge`, `cargo test`, edit files, open PRs, etc. **If this goal
+   already has an open PR for its issue, tell the engineer to continue and
+   repair THAT PR — check out its branch, fix red/BLOCKED CI, fill missing
+   merge-ready evidence, then merge and close the issue — and NOT to open a
+   second PR for the same issue (no duplicate PRs).** When telling
    the engineer to merge a PR, you MUST first confirm that the PR description
    contains substantive evidence for all six merge-ready criteria (QA-team,
    Documentation, Quality-audit, CI, PR description, Scope). If any criterion
    lacks evidence, instruct the engineer to run the merge-ready process —
-   never instruct merge without verified evidence.**
+   never instruct merge without verified evidence.
 
 2. **No action this cycle.** Write the literal phrase `NO ACTION` on its
    own line, then optionally a short prose explanation on the following

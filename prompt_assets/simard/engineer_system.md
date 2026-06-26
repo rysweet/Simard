@@ -193,6 +193,28 @@ Whenever an engineer cycle produces code changes, the cycle is NOT complete unti
    - **Verdict** — explicit "ready to merge" / "draft" / "blocked" call with rationale
 4. **Drive to merge** — once CI is fully green and the PR has evidence headings, merge via `gh pr merge --squash --delete-branch <PR>`.
 
+### Own the PR you were dispatched for — continue it, never duplicate it
+
+Before opening a new PR, check whether the issue you were dispatched for already
+has an open PR (yours or a prior engineer's):
+`gh pr list --repo <owner/repo> --state open --search "<issue ref or branch>"`.
+
+- **If an open PR already exists for this issue, continue THAT PR — do not open a
+  second one.** Check out its branch, inspect CI with
+  `gh pr checks <PR> --repo <owner/repo>`, diagnose any red or BLOCKED checks,
+  fix the failing checks, fill in any missing merge-ready evidence, and push to
+  the same branch. **Never open a second PR for an issue that already has one** —
+  duplicate PRs waste a review slot and a CI run and will be closed.
+- **Drive it to landing.** Once CI is green and all six merge-ready criteria have
+  evidence, merge it (`gh pr merge --squash --delete-branch <PR>`) and then
+  **close the linked issue** (`gh issue close <N>`, or confirm the `Closes #<N>`
+  line auto-closed it). A fix/implement cycle is **not done until its PR is
+  merged and the linked issue is closed** — "PR opened" is not the deliverable.
+- **If the PR is genuinely blocked** on a required human review/approval or a
+  check you cannot satisfy, record that specific blocker in
+  `cycle_summary.engineer_summary` (e.g. "PR #819 blocked on required review
+  from rysweet") and stop — do not open a fresh PR and do not silently re-loop.
+
 ### Allowed exceptions (must be recorded in `cycle_summary.engineer_summary`)
 
 A code-producing cycle MAY end without a merged PR only in the following cases — and only if the cycle's `engineer_summary` field explicitly records which case applied and the supporting evidence:
