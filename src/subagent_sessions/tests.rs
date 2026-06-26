@@ -12,7 +12,8 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Barrier, Mutex};
+use std::thread;
 
 use super::*;
 
@@ -131,6 +132,48 @@ fn record_spawn_appends_to_registry() {
         let ids: HashSet<_> = reg.sessions.iter().map(|s| s.agent_id.clone()).collect();
         assert!(ids.contains("engineer-1"));
         assert!(ids.contains("engineer-2"));
+    });
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn record_spawn_is_atomic_under_concurrency() {
+    // Regression: engineers are now spawned concurrently within one OODA
+    // round, so record_spawn can run in parallel. Without serialization the
+    // load->push->save cycle loses updates (the last writer clobbers others).
+    // All concurrently-recorded sessions must survive.
+    const N: usize = 16;
+    with_state_root("concurrent", |_root| {
+        let barrier = Arc::new(Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    // Release all threads at once to maximize contention on
+                    // the shared registry file.
+                    barrier.wait();
+                    record_spawn(sample(&format!("engineer-{i}"), None)).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let reg = load();
+        let ids: HashSet<_> = reg.sessions.iter().map(|s| s.agent_id.clone()).collect();
+        assert_eq!(
+            ids.len(),
+            N,
+            "all {N} concurrently-recorded sessions must be present, got {}: {ids:?}",
+            ids.len(),
+        );
+        for i in 0..N {
+            assert!(
+                ids.contains(&format!("engineer-{i}")),
+                "engineer-{i} was lost under concurrent record_spawn",
+            );
+        }
     });
 }
 
