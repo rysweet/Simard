@@ -1024,3 +1024,300 @@ fn progress_assessment_recipe_mirrors_done_gate() {
         "progress-assessment.yaml must keep the verdict JSON output contract"
     );
 }
+
+// ── PR-finalization review pipeline (#2410 follow-on) ───────────────────────
+//
+// These tests pin the prompt-content contract for the new, bounded, ordered
+// PR-finalization pipeline every engineer runs at the end of a PR, AFTER the
+// fix is implemented and the PR is opened/updated but BEFORE merge-ready:
+//
+//   1. CRUSTY REVIEW→FIX LOOP on a HIGH-END model (`$SIMARD_REVIEW_MODEL`,
+//      default `gpt-5.4`), fixing every actionable finding and re-reviewing the
+//      LATEST PR state until crusty emits the sentinel `NO BLOCKING FINDINGS`
+//      or a bounded cap (`$SIMARD_REVIEW_MAX_ITERS`, default 3) is reached.
+//   2. PR-GUIDE illustrated walkthrough (graceful-skip where unavailable).
+//   3. FINAL REVIEW — one lightweight pass, no loop.
+//   4. MERGE-READY → merge → close issue (the pre-existing #2410 landing path).
+//
+// The spec is `docs/reference/pr-finalization-pipeline.md`. The pipeline is
+// PROMPT-ONLY: it is added to `engineer_system.md` (engineer PR-finalization
+// instructions) with a short cross-reference note in `goal_session_objective.md`
+// (so the OODA brain knows finalization runs INSIDE the engineer and must not
+// spin the goal-action cycle — preserving #2404 loop-awareness, #2405 fan-out,
+// and #2410 own-PRs-to-landing). These assertions FAIL until the prompt edits
+// land. `engineer_system.md` is not registered for `embedded_fallback` (no
+// prompt_store logic change), so it is asserted via `include_str!` exactly like
+// `engineer_system_continues_existing_pr_no_duplicate` above. Phrases are
+// checked after `normalize_ws` so Markdown line-wrapping cannot defeat them.
+
+/// The engineer system prompt, read at compile time (not registered for
+/// `embedded_fallback`, so assert its content directly like the existing
+/// `engineer_system_continues_existing_pr_no_duplicate` test).
+fn engineer_system_md() -> &'static str {
+    include_str!("../../prompt_assets/simard/engineer_system.md")
+}
+
+#[test]
+fn engineer_system_has_pr_finalization_pipeline_section() {
+    // A discrete, named PR-finalization pipeline section that names every skill
+    // it orchestrates, in order.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("pr-finalization pipeline"),
+        "engineer_system.md must add an explicit, named PR-finalization pipeline section"
+    );
+    assert!(
+        norm.contains("crusty-old-engineer"),
+        "the pipeline must name the crusty-old-engineer review skill"
+    );
+    assert!(
+        norm.contains("pr-guide"),
+        "the pipeline must name the pr-guide illustrated-walkthrough skill"
+    );
+    assert!(
+        norm.contains("merge-ready"),
+        "the pipeline must name the existing merge-ready final gate"
+    );
+}
+
+#[test]
+fn engineer_system_crusty_loop_uses_high_end_model() {
+    // Stage 1 runs crusty on a HIGH-END reasoning model, pinned via a configurable
+    // env var with a verified high-end default, invoked through a pinned subprocess
+    // (the engineer itself runs the default/auto model).
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("review→fix loop"),
+        "stage 1 must be described as a crusty review→fix loop"
+    );
+    assert!(
+        norm.contains("high-end"),
+        "the crusty loop must run on a high-end reasoning model"
+    );
+    assert!(
+        norm.contains("$simard_review_model"),
+        "the high-end model must be configurable via $SIMARD_REVIEW_MODEL"
+    );
+    assert!(
+        norm.contains("gpt-5.4"),
+        "the high-end model must default to the verified gpt-5.4"
+    );
+    assert!(
+        norm.contains("copilot --model"),
+        "crusty must be pinned to the high-end model via a copilot --model subprocess"
+    );
+}
+
+#[test]
+fn engineer_system_crusty_loop_is_bounded() {
+    // The loop MUST terminate: a bounded, configurable iteration cap.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("$simard_review_max_iters"),
+        "the iteration cap must be configurable via $SIMARD_REVIEW_MAX_ITERS"
+    );
+    assert!(
+        norm.contains("default 3"),
+        "the iteration cap must have a sensible default of 3"
+    );
+    assert!(
+        norm.contains("cap"),
+        "the loop must declare a bounded cap to prevent infinite review→fix loops"
+    );
+}
+
+#[test]
+fn engineer_system_crusty_loop_reviews_latest_state() {
+    // Each iteration operates on the freshly-pushed PR state, gated by a
+    // structural sentinel verdict (not free text) — no TOCTOU on a stale diff.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("latest pr state"),
+        "each loop iteration must review the latest PR state"
+    );
+    assert!(
+        norm.contains("stale diff"),
+        "the loop must never re-review a stale diff"
+    );
+    assert!(
+        norm.contains("no blocking findings"),
+        "the satisfied signal must be the structural sentinel verdict NO BLOCKING FINDINGS"
+    );
+}
+
+#[test]
+fn engineer_system_crusty_loop_fixes_every_finding() {
+    // Fix discipline: every actionable finding is fixed and pushed before the
+    // next review, then crusty re-runs.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("every actionable finding"),
+        "the loop must fix every actionable finding crusty raises"
+    );
+    assert!(
+        norm.contains("same pr branch"),
+        "fixes must be pushed to the same PR branch before re-review"
+    );
+    assert!(
+        norm.contains("re-review"),
+        "the loop must re-review after pushing fixes"
+    );
+}
+
+#[test]
+fn engineer_system_cap_reached_surfaces_blocker_not_merge() {
+    // Bounded + honest: if the cap is hit with findings still open, record them
+    // on the PR AND surface a goal blocker — never silently merge.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("remaining findings as a pr comment"),
+        "cap-reached must post the remaining findings as a PR comment"
+    );
+    assert!(
+        norm.contains("blocker"),
+        "cap-reached-with-findings must surface a goal blocker"
+    );
+    assert!(
+        norm.contains("engineer_summary"),
+        "the blocker must be surfaced in cycle_summary.engineer_summary"
+    );
+    assert!(
+        norm.contains("do not merge"),
+        "the engineer must NOT merge past unsatisfied crusty findings"
+    );
+}
+
+#[test]
+fn engineer_system_trivial_pr_filter_is_cost_aware() {
+    // Cost awareness: the full high-end loop runs only on non-trivial PRs; a
+    // trivial PR gets a single lightweight pass.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("non-trivial pr"),
+        "the full crusty loop must run only on non-trivial PRs"
+    );
+    assert!(
+        norm.contains("single lightweight pass"),
+        "a trivial PR must get a single lightweight pass, not the full loop"
+    );
+    assert!(
+        norm.contains("cost"),
+        "the pipeline must note cost awareness (high-end review is expensive)"
+    );
+}
+
+#[test]
+fn engineer_system_pr_guide_degrades_gracefully() {
+    // Stage 2: run pr-guide; if unavailable in the target repo, log a note and
+    // continue. This is the ONLY sanctioned skip — it must not hard-fail.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("pr-guide unavailable"),
+        "the pipeline must handle pr-guide being unavailable in the target repo"
+    );
+    assert!(
+        norm.contains("skipping illustrated guide"),
+        "pr-guide unavailability must be a logged skip of the illustrated guide"
+    );
+    assert!(
+        norm.contains("does not hard-fail"),
+        "a missing pr-guide must degrade gracefully, not hard-fail the pipeline"
+    );
+}
+
+#[test]
+fn engineer_system_final_review_is_one_pass_no_loop() {
+    // Stage 3: a single, lightweight final correctness/consistency pass after the
+    // guide — explicitly NOT a second review→fix loop.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("final review"),
+        "the pipeline must include a final review pass after pr-guide"
+    );
+    assert!(
+        norm.contains("one pass, no loop"),
+        "the final review must be one lightweight pass, not a second loop"
+    );
+}
+
+#[test]
+fn engineer_system_pipeline_gates_merge_ready() {
+    // The pipeline runs BEFORE merge-ready, and the merge step is gated on the
+    // pipeline having run — order-independent, semantic assertions.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("before merge-ready"),
+        "stages 1–3 must run before the merge-ready gate"
+    );
+    assert!(
+        norm.contains("only after the pr-finalization pipeline"),
+        "the merge step must be gated on the PR-finalization pipeline having run"
+    );
+}
+
+#[test]
+fn engineer_system_pipeline_preserves_2410_landing() {
+    // Regression guard: the new pipeline builds ON TOP of #2410 — the
+    // own-PR-to-landing and merged-AND-closed done-gate guidance must remain.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("continue it, never duplicate it"),
+        "must preserve #2410 continue-existing-PR-never-duplicate guidance"
+    );
+    assert!(
+        norm.contains("not done until its pr is merged and the linked issue is closed"),
+        "must preserve the #2410 merged-AND-closed done-gate"
+    );
+}
+
+#[test]
+fn goal_session_objective_finalization_runs_inside_engineer() {
+    // The OODA brain must know finalization runs INSIDE the engineer's cycle: the
+    // goal-action only dispatches/checks and must not spin while an engineer is
+    // mid-finalization (preserving #2404 loop-awareness).
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("pr-finalization pipeline"),
+        "goal_session_objective.md must reference the engineer's PR-finalization pipeline"
+    );
+    assert!(
+        norm.contains("finalization runs inside the engineer"),
+        "the note must state finalization runs inside the engineer's cycle"
+    );
+    assert!(
+        norm.contains("only dispatches and checks"),
+        "the goal-action brain only dispatches and checks; it does not run the loop"
+    );
+    assert!(
+        norm.contains("does not run that loop"),
+        "the brain must not run the review loop itself"
+    );
+    assert!(
+        norm.contains("while its engineer is finalizing"),
+        "the brain must not re-dispatch/re-loop a goal while its engineer is finalizing"
+    );
+    assert!(
+        norm.contains("#2404"),
+        "the note must tie back to #2404 loop-awareness it preserves"
+    );
+}
+
+#[test]
+fn goal_session_objective_finalization_preserves_prose_contract() {
+    // The cross-reference note must stay additive prose: it must NOT introduce a
+    // JSON verdict shape into the prose-only goal-action output, and it must not
+    // regress the #2410 own-open-PRs-to-landing guidance it builds on.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("own your open prs all the way to landing"),
+        "the finalization note must not regress the #2410 own-PRs-to-landing guidance"
+    );
+    assert!(
+        !content.contains("\"verdict\""),
+        "goal_session_objective.md is prose-only — it must not gain a JSON verdict contract"
+    );
+}

@@ -191,7 +191,66 @@ Whenever an engineer cycle produces code changes, the cycle is NOT complete unti
    - **Scope** — diff summary with confirmation of no unrelated edits
    - **TDD attestation** — exactly one of: `tdd: test-first ordering verified — <link to commit>` (default for in-scope PRs), `tdd-exempt: <reason from §1.1>` (exception cases), or `tdd: not applicable — PR touches no in-scope paths` (ops/docs/prompt PRs). Per `Specs/TDD_ADOPTION.md` §3 Layer 2.
    - **Verdict** — explicit "ready to merge" / "draft" / "blocked" call with rationale
-4. **Drive to merge** — once CI is fully green and the PR has evidence headings, merge through the gated authority. For a `rysweet/Simard` PR the merge verb is `simard merge-pr <PR>`, which re-checks the objective gates (base-branch allow-list, `mergeable == MERGEABLE`, all required checks green) and the merge-readiness judge before it invokes the underlying `gh pr merge --squash --delete-branch` — do not run `gh pr merge` directly to bypass those gates. For a PR in another repo (e.g. amplihack-rs) `simard merge-pr` does not apply; verify the six criteria yourself, then `gh pr merge --squash --delete-branch <PR> --repo <owner/repo>`.
+4. **PR-finalization pipeline** — before the merge-ready gate, run the ordered, bounded **PR-finalization pipeline** on the open PR: a **crusty-old-engineer** review→fix loop on a high-end model → **pr-guide** → a final review. It runs **before merge-ready**; the merge step (step 5) runs **only after the PR-finalization pipeline** has completed. See [PR-finalization pipeline](#pr-finalization-pipeline) below for the full, bounded contract.
+5. **Drive to merge** — once CI is fully green, the PR has evidence headings, AND the PR-finalization pipeline has run, merge through the gated authority. For a `rysweet/Simard` PR the merge verb is `simard merge-pr <PR>`, which re-checks the objective gates (base-branch allow-list, `mergeable == MERGEABLE`, all required checks green) and the merge-readiness judge before it invokes the underlying `gh pr merge --squash --delete-branch` — do not run `gh pr merge` directly to bypass those gates. For a PR in another repo (e.g. amplihack-rs) `simard merge-pr` does not apply; verify the six criteria yourself, then `gh pr merge --squash --delete-branch <PR> --repo <owner/repo>`.
+
+### PR-finalization pipeline
+
+Every PR you open runs through an **ordered, bounded PR-finalization pipeline**
+**before merge-ready** — after the fix is implemented and the PR is opened/updated,
+but before you drive it to merge (step 5 above). The merge step runs **only after the
+PR-finalization pipeline** has completed. The pipeline orchestrates three named skills
+in order — **crusty-old-engineer**, then **pr-guide**, then a **final review** — and
+only then the existing **merge-ready** gate. Full reference:
+`docs/reference/pr-finalization-pipeline.md`.
+
+The full pipeline runs on a **non-trivial PR**. A **trivial** PR (docs/comments-only,
+or roughly < 3 files / < ~30 changed lines) gets a **single lightweight pass** instead
+of the loop — a high-end review is expensive, so be **cost**-aware. (This stays well
+inside the daemon-wide `SIMARD_DAILY_BUDGET_USD`, default 500, which this pipeline does
+not itself read; the trivial filter and the iteration cap are what bound this loop's
+spend.)
+
+**Stage 1 — crusty review→fix loop (high-end model).** Invoke the
+**crusty-old-engineer** skill to review the PR's diff/changes on a **high-end**
+reasoning model. The engineer itself runs the Copilot default/auto model, so crusty
+MUST be pinned to the high-end model via a `copilot --model "$SIMARD_REVIEW_MODEL"`
+subprocess. The model is configurable via **`$SIMARD_REVIEW_MODEL`** and defaults to the
+verified **gpt-5.4** (confirmed accepted by `copilot --model gpt-5.4`). Each iteration,
+in order:
+
+1. Re-fetch the **latest PR state** (`gh pr diff <PR>`) — never re-review a **stale diff**.
+2. Run crusty on the high-end model over that latest diff.
+3. Fix **every actionable finding** crusty raises in code and push to the **same PR branch**.
+4. **Re-review** the freshly-pushed state.
+
+Loop until crusty emits the structural sentinel verdict `NO BLOCKING FINDINGS`
+(satisfied) OR the bounded iteration **cap** is reached. The cap is configurable via
+**`$SIMARD_REVIEW_MAX_ITERS`** (**default 3**, bounded to `[1, 5]`); it MUST terminate
+the loop so a review→fix loop can never run forever. Each iteration operates on the
+freshly-pushed PR state — no TOCTOU on a stale diff.
+
+**If the cap is reached with findings still open:** post the **remaining findings as a
+PR comment** (so they are visible on the PR), surface a goal **blocker** in
+`cycle_summary.engineer_summary` (e.g. "PR #819 blocked: crusty review not satisfied
+after 3 iterations — remaining findings posted on the PR"), and **do not merge.**
+Silently merging past unsatisfied crusty findings is forbidden.
+
+**Stage 2 — pr-guide (illustrated walkthrough).** Run the **pr-guide** skill to
+generate/update the PR's illustrated guide. **Graceful degradation — the only sanctioned
+skip:** if **pr-guide unavailable** in the target repo, log a note ("pr-guide unavailable
+in `<owner/repo>`, **skipping illustrated guide**") and continue. A missing pr-guide
+**does not hard-fail** the pipeline. Every other failure (crusty, merge) surfaces as a
+blocker, never a silent skip.
+
+**Stage 3 — final review (one pass, no loop).** After the guide is generated, review the
+PR once more — a single, lightweight correctness/consistency **final review** on your
+default model (a single crusty pass or the existing `review_pipeline`). This is **one
+pass, no loop** — a final sanity check, not a second review→fix loop.
+
+**Stage 4 — merge-ready.** Only after stages 1–3 do you run the existing **merge-ready**
+gate (step 5) and land the PR: merge through the gated authority, then close the linked
+issue.
 
 ### Own the PR you were dispatched for — continue it, never duplicate it
 
