@@ -280,6 +280,56 @@ has an open PR (yours or a prior engineer's):
   `cycle_summary.engineer_summary` (e.g. "PR #819 blocked on required review
   from rysweet") and stop — do not open a fresh PR and do not silently re-loop.
 
+### After landing an upstream build-dependency change — bump your own pin
+
+Simard's root `Cargo.toml` pins the tools she maintains by **exact git rev**:
+`amplihack-agent-eval` → `rysweet/amplihack-rs`, `amplihack-memory` →
+`rysweet/amplihack-memory-lib`, and `rustyclawd-core` / `rustyclawd-tools` →
+`rysweet/RustyClawd`. Those pins are **frozen**: a fix you merge upstream is
+**not** in Simard's own build until the matching pin is moved. So when your cycle
+**lands a change in one of those upstream build-dependency repos, you are not
+done when the upstream PR merges** — follow through in the **same cycle** and
+**bump your own pin**:
+
+1. Edit the matching `rev = ...` line in the root **`Cargo.toml`** to the merged
+  upstream `main` commit SHA.
+2. Re-verify with **`cargo build`** (use the low-space variant
+  `scripts/cargo-low-space build` when disk is tight). A bump that does **not**
+  build is rolled back, not shipped.
+3. Open — or update — a **bump PR** against **`rysweet/Simard`** and drive it to
+  landing through the same merge-ready gate as any other PR.
+
+**Bump-PR convention (deterministic, keyed on the upstream repo) and de-dup.** To
+avoid duplicate bump PRs across concurrent engineers, key the bump on the
+**upstream repo**, not the crate:
+
+- Branch: `chore/bump-<upstream-repo>-pin` (e.g. `chore/bump-rustyclawd-pin`).
+- PR title: `chore(deps): bump <upstream-repo> pin to <short-sha>`.
+- Base: `rysweet/Simard` `main`.
+
+Before opening, check for an existing one:
+`gh pr list --repo rysweet/Simard --state open --head "chore/bump-<upstream-repo>-pin"`.
+If a bump PR for that repo is **already open**, **update it** (re-point the rev,
+re-run `cargo build`, refresh the branch and body) — never open a second.
+
+**Bump shared crates atomically.** When several crates pin the **same** upstream
+repo, re-point them **together in one commit**: `rustyclawd-core` and
+`rustyclawd-tools` both pin `RustyClawd`, so a `RustyClawd` bump moves both in the
+same PR — never split one upstream commit across two PRs. The daemon **redeploy**
+stays operator-gated; landing the bump PR is your finish line, not redeploying.
+
+### Proactive dependency-drift self-maintenance (low-priority)
+
+As **low-priority** self-maintenance that fills spare idle/research time (and
+never preempts an active goal), watch for **dependency-drift**: a pinned rev that
+has **fallen behind** its upstream default branch. Detect it with runtime git
+tooling — no new Rust subsystem — e.g.
+`git ls-remote https://github.com/<owner>/<repo>.git main` compared against the
+pinned rev (or `gh api repos/<owner>/<repo>/compare/<pinned>...main --jq .behind_by`).
+When a pin has drifted, open or update the same **bump PR** as above to re-point
+the rev, `cargo build`-verify, and land it. Full reference:
+`docs/howto/self-maintain-dependency-pins.md`.
+
 ### Allowed exceptions (must be recorded in `cycle_summary.engineer_summary`)
 
 A code-producing cycle MAY end without a merged PR only in the following cases — and only if the cycle's `engineer_summary` field explicitly records which case applied and the supporting evidence:

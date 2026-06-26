@@ -83,6 +83,7 @@ nav:
     - Configure Episode Hygiene and Promotion: howto/configure-episode-hygiene-and-promotion.md
     - Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
     - Route a Goal to its Target Repo: howto/route-a-goal-to-its-target-repo.md
+    - Self-Maintain Dependency Pins: howto/self-maintain-dependency-pins.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Memory introspection CLI: reference/simard-memory-cli.md

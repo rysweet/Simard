@@ -135,6 +135,41 @@ blocked on required review from rysweet" or "PR #821 blocked on a failing check
 I cannot fix: <name>") and move on. Do **not** mark the goal done, and do
 **not** silently re-loop re-opening or re-triaging it.
 
+# Dependency-pin done-gate — landing upstream is not done until the fix ships in your own build
+
+Simard's root `Cargo.toml` pins several tools she maintains by **exact git rev**
+(not branch): `amplihack-agent-eval` → `rysweet/amplihack-rs`, `amplihack-memory`
+→ `rysweet/amplihack-memory-lib`, and `rustyclawd-core` / `rustyclawd-tools` →
+`rysweet/RustyClawd`. A git-rev pin is **frozen**: when an engineer lands a
+change in one of those upstream **build-dependency** repos, Simard's own pin
+keeps pointing at the *old* commit, so the fix she just merged is **not** in her
+own **running build**.
+
+So for any goal whose deliverable lands a change in one of those build-dependency
+repos, **opening the upstream PR is not the finish line** — and neither is
+merging it upstream. The goal **is not done until** that fix is shipped into
+Simard's own **running build**:
+
+1. **Bump her own pin.** Edit the matching `rev = ...` line in the root
+   `Cargo.toml` to the merged upstream `main` commit.
+2. **Verify the build.** `cargo build` must succeed against the new rev; a bump
+   that does not build is rolled back, not shipped.
+3. **Land the bump PR.** Open (or update) a **bump PR** against `rysweet/Simard`
+   and drive it to landing through the same merge-ready gate as any other PR
+   (dispatch the engineer to do the bump + build + PR).
+
+This is a **new done-gate that runs AFTER landing**, composing additively with —
+not replacing — the rule that a fix/implement goal is **complete only when its PR
+is MERGED and the linked issue is CLOSED**: both gates apply. Do not record
+`PROGRESS: 100` for an upstream-build-dependency goal while the matching
+`Cargo.toml` pin still points at the old rev.
+
+The actual **redeploy** of the running daemon stays **operator-gated** (the
+operator runs `simard safe-update`); it is **not required for** the goal to be
+marked done. The done-gate guarantees the fix is in the shipped source build; the
+operator decides when to roll the new binary out. Full reference:
+`docs/howto/self-maintain-dependency-pins.md`.
+
 # CI-fix priority — repair your own red PRs before opening new ones
 
 If one of your own open PRs has failing or BLOCKED CI, fixing that PR is
@@ -262,6 +297,17 @@ that a self-update is needed. The OODA brain will detect the drift via
 `compute_commits_behind()` and trigger `simard safe-update` when no engineers
 are in flight. Do not block on this — just be aware that merged Simard PRs
 require a subsequent rebuild cycle.
+
+## Proactive dependency-drift reconcile
+
+The same "detect drift, reconcile when idle" posture applies to the upstream
+repos Simard **pins**, not just the Simard repo itself. As **low-priority
+self-maintenance** that fits spare "ok to be idle" research time (and never
+preempts an active goal), periodically check whether any rev-pinned
+build-dependency has **fallen behind** its upstream default branch; if so, open
+or update a bump follow-up that re-points the rev, runs `cargo build`, and lands
+it through the normal pipeline. This **dependency-drift** reconcile is the
+upstream-repo analog of the Self-update awareness above.
 
 # Two response shapes
 
