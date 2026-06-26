@@ -78,6 +78,8 @@ nav:
     - Recover from Meeting Close Timeout: howto/recover-from-meeting-close-timeout.md
     - Configure Pluggable Identity: howto/configure-pluggable-identity.md
     - Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
+  - Research:
+    - Brain decision-keyword parse-failure rate: research/brain-decision-keyword-failure-rate.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Memory introspection CLI: reference/simard-memory-cli.md

@@ -163,6 +163,7 @@ proceeding:
 
 ## See Also
 
+* [Research: Brain decision-keyword parse-failure rate](../research/brain-decision-keyword-failure-rate.md)
 * [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md)
 * [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md)
 * [Reference: OODA Brain Decision Protocol](../reference/ooda-brain-decision-protocol.md)
