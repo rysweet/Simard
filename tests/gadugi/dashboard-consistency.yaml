@@ -1,0 +1,55 @@
+name: "Dashboard Self-Consistency"
+description: "Outside-in checks that the Simard dashboard reports a single source of truth for the cycle counter (#1680), active engineers (#1678), and working-memory slot count (#1679). Each panel must agree with the live store the sibling tabs already read, so the dashboard no longer contradicts itself about Simard's internal state (epic #1992)."
+version: "1.0.0"
+
+config:
+  timeout: 120000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 120000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Dashboard cycle/engineers/working-memory agree across tabs"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/dashboard-consistency.sh"
+    timeout: 120000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "dashboard"
+    - "consistency"
+    - "issue-1678"
+    - "issue-1679"
+    - "issue-1680"
+    - "epic-1992"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

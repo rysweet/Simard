@@ -697,6 +697,7 @@ mod tests {
         assert!(!path.exists(), "default Drop must delete the transcript");
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn env_secs_returns_default_when_unset() {
         // Use a uniquely named env var so we know it's unset.
@@ -706,6 +707,7 @@ mod tests {
         assert_eq!(env_secs(&var, 42), 42);
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn env_secs_returns_parsed_value_when_set() {
         let var = format!("SIMARD_ENV_SECS_TEST_{}", uuid::Uuid::now_v7().simple());
@@ -714,11 +716,101 @@ mod tests {
         unsafe { std::env::remove_var(&var) };
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn env_secs_returns_default_when_unparseable() {
         let var = format!("SIMARD_ENV_SECS_TEST_{}", uuid::Uuid::now_v7().simple());
         unsafe { std::env::set_var(&var, "not-a-number") };
         assert_eq!(env_secs(&var, 42), 42);
         unsafe { std::env::remove_var(&var) };
+    }
+
+    // ── PtyTerminalSession end-to-end (no controlling terminal) ───────────────
+
+    /// `which`-style probe for the PTY launcher (`script`). Used to skip the
+    /// end-to-end test gracefully when the binary is absent, matching the
+    /// project convention for tests that depend on an external binary
+    /// (see `engineer_worktree::precommit` and `meeting_backend::agent_proxy`).
+    #[cfg(unix)]
+    fn pty_launcher_available() -> bool {
+        std::process::Command::new("which")
+            .arg(PTY_LAUNCHER)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    /// End-to-end smoke test of the full session lifecycle —
+    /// `launch` → `send_input` → `wait_for_output` → `finish` — proving the
+    /// terminal-shell session works even when the test process itself has **no
+    /// controlling terminal** (`tty` reports "not a tty"), exactly as in CI /
+    /// headless runners. `script` allocates its *own* PTY for the inner shell,
+    /// so an interactive (`-i`) bash still launches, executes the command it
+    /// receives, and reports output back through the transcript without any
+    /// parent TTY. This is the only test that exercises the real spawn /
+    /// transcript-capture path the production recipe runner depends on.
+    ///
+    /// Because `script` runs bash on a PTY with terminal `ECHO` enabled, the
+    /// command line we type is copied verbatim into the transcript regardless
+    /// of whether bash ever runs it. To prove the shell genuinely *executed*
+    /// the command (not merely received and echoed it), the marker embeds a
+    /// shell arithmetic expansion: the typed line contains the literal
+    /// `$((20 + 22))`, whereas only successful execution yields the evaluated
+    /// `42`. Asserting on the evaluated form therefore cannot be satisfied by
+    /// the input echo alone — it requires real command execution plus output
+    /// capture.
+    ///
+    /// Skips (rather than fails) when `script` is not on PATH.
+    #[test]
+    #[cfg(unix)]
+    fn pty_session_runs_end_to_end_without_controlling_terminal() {
+        use crate::terminal_session::types::DEFAULT_SHELL;
+
+        if !pty_launcher_available() {
+            eprintln!("skipping: PTY launcher '{PTY_LAUNCHER}' not on PATH");
+            return;
+        }
+
+        let workdir = tempfile::tempdir().expect("create temp working directory");
+        // Unique per-session token keeps the expected string specific to this
+        // run; the `$((20 + 22))` expansion guarantees the asserted form
+        // (`<token>-42-done`) can only come from executed output, never the
+        // verbatim PTY echo of the typed command (which carries `$((20 + 22))`).
+        let token = format!("notty-marker-{}", uuid::Uuid::now_v7().simple());
+        let typed_command = format!("echo {token}-$((20 + 22))-done");
+        let executed_output = format!("{token}-42-done");
+
+        let mut session = PtyTerminalSession::launch("test-bt", DEFAULT_SHELL, workdir.path())
+            .expect("launch PTY shell via script without a controlling terminal");
+
+        session
+            .send_input(&typed_command)
+            .expect("send echo command to PTY shell");
+
+        let status = session
+            .wait_for_output(&executed_output, Duration::from_secs(15))
+            .expect("poll transcript for expected output");
+        assert!(
+            matches!(status, TerminalWaitStatus::Satisfied),
+            "expected executed output '{executed_output}' to appear in the transcript, got {status:?}"
+        );
+
+        // Mirror the production recipe pattern: a trailing `exit 0` cleanly
+        // terminates the inner shell so `finish` observes a success status.
+        session
+            .send_input("exit 0")
+            .expect("send exit command to PTY shell");
+
+        let capture = session.finish().expect("finish PTY shell session");
+        assert!(
+            capture.exit_status.success(),
+            "inner shell should exit successfully, got {:?}",
+            capture.exit_status
+        );
+        assert!(
+            capture.transcript.contains(&executed_output),
+            "final transcript must contain the executed output '{executed_output}'; transcript was:\n{}",
+            capture.transcript
+        );
     }
 }

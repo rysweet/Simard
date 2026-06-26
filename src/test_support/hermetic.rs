@@ -100,9 +100,12 @@ impl Default for HermeticState {
     }
 }
 
-/// Local RAII env-binding helper. Identical contract to the one tests
-/// use directly, but routed through this module so production tests can
-/// drop their per-file `EnvGuard` copies and import this one instead.
+/// Internal RAII env save/restore used by [`HermeticState`]: it records a
+/// variable's prior value, sets/unsets it, and restores it on `Drop`. It is
+/// module-private and intentionally NOT re-exported — among the env helpers,
+/// `HermeticState` is the one `test_support` exposes; tests must not reach for
+/// a shared env guard. The migration that closed issue #2360 is annotation-only
+/// (add the serial key), not a body rewrite to import a guard.
 struct EnvBinding {
     key: &'static str,
     prev: Option<OsString>,
@@ -111,9 +114,25 @@ struct EnvBinding {
 impl EnvBinding {
     fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
         let prev = std::env::var_os(key);
+        // INVARIANT (issue #2360): EVERY test in the lib binary that touches
+        // cognitive memory OR mutates/reads process-global env (SIMARD_STATE_ROOT
+        // set + SIMARD_MEMORY_SOCKET unset here; HOME and any other var
+        // elsewhere) MUST be keyed into the `serial(cognitive_memory)` group.
+        // HermeticState mutates process-global env, and glibc setenv/getenv are
+        // not thread-safe, so a concurrent env mutation in any other test can
+        // tear a handler's `std::env::var("SIMARD_STATE_ROOT")` read and send
+        // writes to HOME/.simard — the race behind the tests_goals_crud flake.
+        // The `serial_guard` meta-test (src/test_support/serial_guard.rs)
+        // auto-enforces this for its watched surface (SIMARD_STATE_ROOT /
+        // SIMARD_MEMORY_SOCKET / HOME / SIMARD_LLM_PROVIDER / SIMARD_MEETINGS_DIR
+        // / SIMARD_MEETINGS_ROOT); keying any OTHER var is an author obligation
+        // the guard does not yet check (EnvWatch::AnyVar tracked as #2375). See
+        // docs/testing/cognitive-memory-serial-isolation.md.
+        //
         // SAFETY: tests using HermeticState are serialised via
         // `#[serial(cognitive_memory)]`, so concurrent env mutation is
-        // excluded by the harness.
+        // excluded by the harness — the invariant above is what makes this
+        // `set_var` sound.
         unsafe {
             std::env::set_var(key, value);
         }

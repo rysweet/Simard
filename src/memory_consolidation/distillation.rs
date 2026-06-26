@@ -55,13 +55,50 @@ pub struct DistilledFact {
     pub source_episode_id: String,
 }
 
+/// A recurring action sequence distilled from a batch of episodes
+/// (issue #2327, R5). Stored via `store_procedure_with_provenance` so a
+/// `PROCEDURE_DERIVES_FROM` edge links the procedure back to the episodes it
+/// was distilled from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistilledProcedure {
+    /// Procedure name (e.g. `ci-fix:auto`). Upsert-by-name on store.
+    pub name: String,
+    /// Ordered steps of the procedure.
+    pub steps: Vec<String>,
+    /// `node_id`s of the episodes this procedure was distilled from
+    /// (threaded as provenance).
+    pub source_episode_ids: Vec<String>,
+}
+
+/// The full output of one distillation pass: facts AND procedures
+/// (issue #2327, R5). Additive over the legacy fact-only shape — a
+/// fact-only runner yields an empty `procedures` vector.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DistillOutput {
+    pub facts: Vec<DistilledFact>,
+    pub procedures: Vec<DistilledProcedure>,
+}
+
 /// Pluggable LLM-side runner for the distillation recipe.
 ///
 /// The trait exists so tests can substitute a deterministic stub.
 /// Production code uses [`RecipeRunnerSubprocess`] which shells out
 /// to `recipe-runner-rs`.
 pub trait DistillRecipeRunner {
+    /// Legacy fact-only entry point. Required so existing fact-only
+    /// runners (and the subprocess runner's parse) keep working.
     fn run(&self, episodes: &[CognitiveEpisode]) -> SimardResult<Vec<DistilledFact>>;
+
+    /// Full entry point emitting BOTH facts and procedures (issue #2327,
+    /// R5). The default wraps [`run`](Self::run) with an empty procedure
+    /// list, so a runner that only implements `run` distils facts exactly
+    /// as before — back-compatible by construction.
+    fn run_all(&self, episodes: &[CognitiveEpisode]) -> SimardResult<DistillOutput> {
+        Ok(DistillOutput {
+            facts: self.run(episodes)?,
+            procedures: Vec::new(),
+        })
+    }
 }
 
 /// Report describing what one distillation pass actually did.
@@ -80,6 +117,8 @@ pub struct DistillReport {
     pub input_count: u32,
     /// Number of facts emitted by the recipe.
     pub fact_count: u32,
+    /// Number of procedures emitted by the recipe (issue #2327, R5).
+    pub procedure_count: u32,
     /// Number of episodes marked distilled after the pass.
     pub marked_count: u32,
 }
@@ -92,7 +131,10 @@ impl DistillReport {
 
     /// `true` when the pass did not fire (input/output/marks all zero).
     pub fn was_skipped(&self) -> bool {
-        self.input_count == 0 && self.fact_count == 0 && self.marked_count == 0
+        self.input_count == 0
+            && self.fact_count == 0
+            && self.procedure_count == 0
+            && self.marked_count == 0
     }
 
     /// Reduction ratio (`1 - fact_count / input_count`) as a fraction
@@ -157,8 +199,8 @@ pub fn distill_recent_episodes_with_runner(
     // any episodes — the batch is fully retry-eligible on the next
     // pass. This is the retry-safety invariant under test in
     // `distillation_handles_recipe_error_without_marking`.
-    let facts = match runner.run(&episodes) {
-        Ok(f) => f,
+    let output = match runner.run_all(&episodes) {
+        Ok(o) => o,
         Err(e) => {
             tracing::warn!(
                 target: "simard::distill",
@@ -172,22 +214,44 @@ pub fn distill_recent_episodes_with_runner(
             return Err(e);
         }
     };
+    let DistillOutput { facts, procedures } = output;
 
-    // Store every fact. Each fact's source_id encodes the originating
-    // episode for provenance (search_facts can be filtered/grepped on
-    // the `distill:` prefix to identify machine-distilled facts).
+    // Store every fact via the provenance write path. Each fact's textual
+    // `source_id` retains the `distill:{episode}` prefix for back-compat
+    // (search_facts can be filtered/grepped on it to identify machine-distilled
+    // facts), while the originating episode id is ALSO threaded through as
+    // `source_episode_ids` so a `DERIVES_FROM` edge links the fact back to the
+    // episode it was distilled from (issue #2325). The concept doubles as the
+    // fact's tag, matching the legacy `store_fact` call this replaced.
     let mut stored = 0u32;
     for fact in &facts {
-        let concepts = [fact.concept.clone()];
         let source = format!("distill:{}", fact.source_episode_id);
-        memory.store_fact(
+        memory.store_fact_with_provenance(
             &fact.concept,
             &fact.content,
             DISTILL_FACT_CONFIDENCE,
-            &concepts,
             &source,
+            Some(std::slice::from_ref(&fact.concept)),
+            None,
+            std::slice::from_ref(&fact.source_episode_id),
         )?;
         stored += 1;
+    }
+
+    // Store every procedure via the provenance write path (issue #2327, R5).
+    // `source_episode_ids` are threaded so a `PROCEDURE_DERIVES_FROM` edge links
+    // the procedure back to the recurring episodes it was distilled from. The
+    // upsert-by-name in the backend reinforces an existing procedure rather than
+    // duplicating it (#2298).
+    let mut stored_procs = 0u32;
+    for proc in &procedures {
+        memory.store_procedure_with_provenance(
+            &proc.name,
+            &proc.steps,
+            &[],
+            &proc.source_episode_ids,
+        )?;
+        stored_procs += 1;
     }
 
     // Mark EVERY input episode distilled — even those the recipe
@@ -206,15 +270,19 @@ pub fn distill_recent_episodes_with_runner(
         target: "simard::distill",
         pulled,
         stored,
+        stored_procs,
         marked,
         reduction_pct,
-        "distill: {pulled} episodes → {stored} facts, {marked} marked (reduction {reduction_pct:.0}%)"
+        "distill: {pulled} episodes → {stored} facts, {stored_procs} procedures, {marked} marked (reduction {reduction_pct:.0}%)"
     );
-    eprintln!("[simard] distill: {pulled} episodes → {stored} facts, {marked} marked");
+    eprintln!(
+        "[simard] distill: {pulled} episodes → {stored} facts, {stored_procs} procedures, {marked} marked"
+    );
 
     Ok(DistillReport {
         input_count: pulled,
         fact_count: stored,
+        procedure_count: stored_procs,
         marked_count: marked,
     })
 }
@@ -304,6 +372,21 @@ impl RecipeRunnerSubprocess {
 
 impl DistillRecipeRunner for RecipeRunnerSubprocess {
     fn run(&self, episodes: &[CognitiveEpisode]) -> SimardResult<Vec<DistilledFact>> {
+        let raw = self.invoke_recipe(episodes)?;
+        parse_recipe_output(&raw)
+    }
+
+    fn run_all(&self, episodes: &[CognitiveEpisode]) -> SimardResult<DistillOutput> {
+        let raw = self.invoke_recipe(episodes)?;
+        parse_recipe_output_full(&raw)
+    }
+}
+
+impl RecipeRunnerSubprocess {
+    /// Shell out to `recipe-runner-rs` with the episodes payload and return
+    /// the recipe's raw stdout. Shared by [`run`](DistillRecipeRunner::run)
+    /// and [`run_all`](DistillRecipeRunner::run_all).
+    fn invoke_recipe(&self, episodes: &[CognitiveEpisode]) -> SimardResult<String> {
         // Serialize episodes as a compact JSON array. Each entry
         // exposes the four fields the recipe prompt references:
         // `id`, `source_label`, `temporal_index`, `content`.
@@ -324,9 +407,18 @@ impl DistillRecipeRunner for RecipeRunnerSubprocess {
             ))
         })?;
 
+        // `--output-format json` is REQUIRED: in the default `text` mode the
+        // runner's stdout is only a human status banner and the distill agent's
+        // `{ "facts": [...] }` payload never reaches us, so every parse fails and
+        // the pass silently no-ops (issue #2401). In `json` mode stdout carries a
+        // structured envelope whose `step_results[].output` holds the agent's
+        // output, which `parse_recipe_output_full` mines. The agent binary is
+        // still selected via the proven `AMPLIHACK_AGENT_BINARY` env var.
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            .arg("--output-format")
+            .arg("json")
             .arg("-c")
             .arg(format!("episodes={payload_json}"))
             .output()
@@ -335,16 +427,20 @@ impl DistillRecipeRunner for RecipeRunnerSubprocess {
             })?;
 
         if !output.status.success() {
+            // On failure the runner exits non-zero AND emits the structured
+            // error inside the JSON envelope on stdout (stderr may be empty), so
+            // surface both — never a silent or context-free failure.
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             return Err(SimardError::BridgeError(format!(
-                "distill: recipe exited with {}: {}",
+                "distill: recipe exited with {}: stderr={} stdout={}",
                 output.status,
-                truncate(&stderr, 240)
+                truncate(stderr.trim(), 200),
+                truncate(stdout.trim(), 200)
             )));
         }
 
-        let raw = String::from_utf8_lossy(&output.stdout).to_string();
-        parse_recipe_output(&raw)
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 }
 
@@ -359,23 +455,70 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Parse the recipe's stdout into a list of [`DistilledFact`].
 ///
-/// The recipe is expected to emit a JSON object of shape
-/// `{ "facts": [ { "concept": "...", "content": "...",
-/// "source_episode_id": "..." } ] }`. Because the underlying LLM may
-/// wrap the JSON in prose, we scan for the first balanced `{...}`
-/// substring containing a `"facts"` key and parse that.
+/// Thin facts-only wrapper over [`parse_recipe_output_full`] retained for the
+/// legacy [`DistillRecipeRunner::run`] entry point and its unit tests.
+pub(crate) fn parse_recipe_output(raw: &str) -> SimardResult<Vec<DistilledFact>> {
+    parse_recipe_output_full(raw).map(|o| o.facts)
+}
+
+/// Parse `recipe-runner-rs`'s stdout into a [`DistillOutput`] (facts AND
+/// procedures).
 ///
-/// Returns `Err` when no parseable object is found — the caller
-/// treats `Err` as the retry-safe "no markers set" path.
-fn parse_recipe_output(raw: &str) -> SimardResult<Vec<DistilledFact>> {
+/// Three tolerant tiers, in order (issue #2401):
+///
+/// 1. **Runner envelope (production path).** With `--output-format json` the
+///    runner emits `{ "recipe_name", "success", "step_results": [...], ... }`.
+///    We require `success == true`, select the `distill` step (or, if renamed,
+///    the last `completed` step), and mine the agent payload out of that
+///    step's `output` — which is itself a JSON *string* that may carry leading
+///    prose (e.g. a `NODE_OPTIONS` banner) before the `{ "facts": ... }`
+///    object, so we balanced-brace scan it. A future runner that emits `output`
+///    as a JSON object is handled too.
+/// 2. **Bare-object fallback.** If stdout is not a runner envelope, scan it
+///    directly for an embedded `{ "facts": ... }` object. Keeps the legacy
+///    fact-only mock/unit-test contract (and prose-wrapped agent output)
+///    working.
+/// 3. **Explicit failure.** If neither tier yields a facts object — including
+///    the `--output-format text` status banner and any `success == false`
+///    envelope — return `Err`. The caller treats `Err` as the retry-safe
+///    "no markers set" path; there is never a hollow `Ok`.
+pub(crate) fn parse_recipe_output_full(raw: &str) -> SimardResult<DistillOutput> {
     let trimmed = raw.trim();
-    // Fast path — recipe stdout IS the JSON object.
-    if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
-        return Ok(parsed.into_facts());
+
+    // Tier 1 — recipe-runner-rs JSON envelope. `RecipeRunnerEnvelope` requires
+    // both `success` and `step_results`, so a bare `{ "facts": ... }` object
+    // (which has neither) fails this parse and falls through to Tier 2.
+    if let Ok(envelope) = serde_json::from_str::<RecipeRunnerEnvelope>(trimmed) {
+        return envelope.into_distill_output();
     }
-    // Slow path — find the first balanced `{...}` substring and try
-    // each one until something parses. Cheap because the output is
-    // small.
+
+    // Tier 2 — tolerant fallback: an embedded bare `{ "facts": ... }` object in
+    // arbitrary prose (legacy contract; also covers any non-envelope stdout).
+    if let Some(output) = scan_for_facts_object(trimmed) {
+        return Ok(output);
+    }
+
+    // Tier 3 — explicit, bounded failure.
+    Err(SimardError::BridgeError(format!(
+        "distill: recipe run did not yield a parseable {{ \"facts\": [...] }} object: {}",
+        truncate(raw, 200)
+    )))
+}
+
+/// Scan `text` for the first balanced `{...}` substring that deserializes as a
+/// [`RecipeEnvelope`] (a bare `{ "facts": [...], "procedures": [...] }` object),
+/// tolerating leading/trailing prose. Returns `None` if none is found.
+///
+/// The scan is iterative (no recursion) so pathologically deep brace nesting
+/// terminates without a stack overflow; serde's own recursion limit bounds the
+/// per-candidate parse.
+fn scan_for_facts_object(text: &str) -> Option<DistillOutput> {
+    let trimmed = text.trim();
+    // Fast path — the text IS the JSON object.
+    if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
+        return Some(parsed.into_output());
+    }
+    // Slow path — find the first balanced `{...}` substring that parses.
     if let Some(start) = trimmed.find('{') {
         let mut depth = 0i32;
         let bytes = trimmed.as_bytes();
@@ -388,22 +531,120 @@ fn parse_recipe_output(raw: &str) -> SimardResult<Vec<DistilledFact>> {
                         && let Ok(parsed) =
                             serde_json::from_str::<RecipeEnvelope>(&trimmed[start..=i])
                     {
-                        return Ok(parsed.into_facts());
+                        return Some(parsed.into_output());
                     }
                 }
                 _ => {}
             }
         }
     }
-    Err(SimardError::BridgeError(format!(
-        "distill: recipe output did not contain a parseable {{ \"facts\": [...] }} object; raw: {}",
-        truncate(raw, 200)
-    )))
+    None
+}
+
+/// The `recipe-runner-rs` 0.3.6 `--output-format json` envelope. Only the
+/// fields the parser needs are modelled; unknown fields (`recipe_name`,
+/// `duration`, `context`, …) are ignored. Both `success` and `step_results`
+/// are REQUIRED so this type does not accidentally match a bare facts object.
+#[derive(serde::Deserialize)]
+struct RecipeRunnerEnvelope {
+    success: bool,
+    step_results: Vec<RecipeRunnerStepResult>,
+}
+
+/// One entry of `step_results[]`. `output` is a [`serde_json::Value`] because
+/// the runner emits it as a JSON *string* today but a future version could emit
+/// it as an object — the parser handles both.
+#[derive(serde::Deserialize)]
+struct RecipeRunnerStepResult {
+    #[serde(default)]
+    step_id: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    output: serde_json::Value,
+    #[serde(default)]
+    error: String,
+}
+
+impl RecipeRunnerEnvelope {
+    /// Extract the distill agent's facts/procedures from the envelope.
+    ///
+    /// `success == false` short-circuits to `Err` BEFORE any step output is
+    /// read — a failed run is never trusted, even if it somehow carries a
+    /// well-formed payload.
+    fn into_distill_output(self) -> SimardResult<DistillOutput> {
+        if !self.success {
+            return Err(SimardError::BridgeError(format!(
+                "distill: recipe-runner reported failure (success=false): {}",
+                truncate(self.first_error().trim(), 200)
+            )));
+        }
+        let step = self.select_distill_step().ok_or_else(|| {
+            SimardError::BridgeError(
+                "distill: recipe envelope had no completed `distill` step".to_string(),
+            )
+        })?;
+        extract_step_output(&step.output).ok_or_else(|| {
+            SimardError::BridgeError(format!(
+                "distill: `distill` step output did not contain a parseable \
+                 {{ \"facts\": [...] }} object; output: {}",
+                truncate(step_output_excerpt(&step.output).trim(), 200)
+            ))
+        })
+    }
+
+    /// Select the step to read facts from: the one with `step_id == "distill"`,
+    /// or — tolerating a future step rename — the last `completed` step.
+    fn select_distill_step(&self) -> Option<&RecipeRunnerStepResult> {
+        self.step_results
+            .iter()
+            .find(|s| s.step_id == "distill")
+            .or_else(|| {
+                self.step_results
+                    .iter()
+                    .rev()
+                    .find(|s| s.status == "completed")
+            })
+    }
+
+    /// First non-empty step error, for failure messages.
+    fn first_error(&self) -> String {
+        self.step_results
+            .iter()
+            .map(|s| s.error.as_str())
+            .find(|e| !e.trim().is_empty())
+            .unwrap_or("<no step error reported>")
+            .to_string()
+    }
+}
+
+/// Mine a [`DistillOutput`] from a step's `output` value. A JSON *string* is
+/// balanced-brace scanned (it may carry leading prose); a JSON *object*
+/// carrying `facts` is deserialized directly.
+fn extract_step_output(output: &serde_json::Value) -> Option<DistillOutput> {
+    match output {
+        serde_json::Value::String(s) => scan_for_facts_object(s),
+        serde_json::Value::Object(_) => serde_json::from_value::<RecipeEnvelope>(output.clone())
+            .ok()
+            .map(|e| e.into_output()),
+        _ => None,
+    }
+}
+
+/// A bounded, human-readable excerpt of a step `output` value for error
+/// messages (avoids quoting/escaping a `Value::String` twice).
+fn step_output_excerpt(output: &serde_json::Value) -> String {
+    match output {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
 #[derive(serde::Deserialize)]
 struct RecipeEnvelope {
     facts: Vec<RecipeFact>,
+    #[serde(default)]
+    procedures: Vec<RecipeProcedure>,
 }
 
 #[derive(serde::Deserialize)]
@@ -411,6 +652,15 @@ struct RecipeFact {
     concept: String,
     content: String,
     source_episode_id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RecipeProcedure {
+    name: String,
+    #[serde(default)]
+    steps: Vec<String>,
+    #[serde(default)]
+    source_episode_ids: Vec<String>,
 }
 
 impl RecipeEnvelope {
@@ -433,6 +683,39 @@ impl RecipeEnvelope {
             })
             .collect()
     }
+
+    fn into_procedures(self) -> Vec<DistilledProcedure> {
+        // Keep only procedures that name at least one source episode so a
+        // `PROCEDURE_DERIVES_FROM` edge can actually be drawn, and that carry
+        // at least one step. Unnamed / empty procedures are dropped.
+        self.procedures
+            .into_iter()
+            .filter(|p| {
+                !p.name.trim().is_empty() && !p.steps.is_empty() && !p.source_episode_ids.is_empty()
+            })
+            .map(|p| DistilledProcedure {
+                name: p.name,
+                steps: p.steps,
+                source_episode_ids: p.source_episode_ids,
+            })
+            .collect()
+    }
+
+    fn into_output(self) -> DistillOutput {
+        let RecipeEnvelope { facts, procedures } = self;
+        DistillOutput {
+            facts: RecipeEnvelope {
+                facts,
+                procedures: Vec::new(),
+            }
+            .into_facts(),
+            procedures: RecipeEnvelope {
+                facts: Vec::new(),
+                procedures,
+            }
+            .into_procedures(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -449,6 +732,7 @@ mod unit_tests {
         let r = DistillReport {
             input_count: 25,
             fact_count: 3,
+            procedure_count: 0,
             marked_count: 25,
         };
         assert!(!r.was_skipped());
@@ -464,6 +748,7 @@ mod unit_tests {
         let r = DistillReport {
             input_count: 25,
             fact_count: 3,
+            procedure_count: 0,
             marked_count: 25,
         };
         let pct = r.reduction() * 100.0;

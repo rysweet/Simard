@@ -1,0 +1,93 @@
+name: "Ranked Episodic Recall + Reinforce-on-Use"
+description: >
+  Outside-in gate for issue #2395 / PR #2396: Simard's OODA preparation must
+  recall episodes via the library's *ranked* recall (ordered by relevance +
+  recency + usage + graph-proximity, not insertion order), keep compressed
+  consolidation-source episodes recallable via a UNION backfill, and keep
+  preparation recall a PURE READ. Usage/recency reinforcement happens only at
+  the point of use (`reinforce_prepared_context`), which increments
+  `usage_count` / `last_accessed_at` for the facts, procedures, and episodes
+  surfaced into the cycle. Different OODA phase weights must yield a different
+  ranked ordering of the same episode set. Drives the Rust unit gates added in
+  this PR (`recall_episodes_ranked_*`, `reinforce_*`, `preparation_*`,
+  `observe_and_decide_weights_change_episode_recall_ordering`).
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Ranked episodic recall orders by relevance, recovers compressed sources, and falls back for non-library backends"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib recall_episodes_ranked -- --nocapture --test-threads=1
+    timeout: 600000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "recall_episodes_ranked_orders_by_relevance_not_recency ... ok"
+        - "recall_episodes_ranked_recovers_compressed_consolidation_source ... ok"
+        - "recall_episodes_ranked_default_delegates_to_keyword_scan ... ok"
+
+  - name: "Reinforce-on-use bumps usage_count / last_accessed_at for surfaced facts and procedures"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib reinforce -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "reinforce_access_increments_fact_usage_and_last_accessed ... ok"
+        - "reinforce_access_increments_procedure_usage_count ... ok"
+        - "reinforce_prepared_context_bumps_surfaced_fact_and_procedure_usage ... ok"
+
+  - name: "OODA preparation gathers episodes in ranked order and stays a pure read"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib preparation_ -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "preparation_gathers_episodes_in_ranked_order ... ok"
+        - "preparation_episodic_recall_is_read_only ... ok"
+
+  - name: "Observe vs Decide phase weights change the ranked episode ordering"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib observe_and_decide_weights_change_episode_recall_ordering
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "observe_and_decide_weights_change_episode_recall_ordering ... ok"

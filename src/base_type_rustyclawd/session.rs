@@ -4,6 +4,7 @@ use rustyclawd_core::client::{
     Client as RcClient, ClientError, Config as RcConfig, Message as RcMessage,
 };
 
+use crate::base_type_turn::EnrichmentBridges;
 use crate::base_types::{
     BaseTypeDescriptor, BaseTypeOutcome, BaseTypeSession, BaseTypeSessionRequest,
     BaseTypeTurnInput, ensure_session_not_already_open, ensure_session_not_closed,
@@ -47,6 +48,10 @@ pub(super) struct RustyClawdSession {
     pub(super) rt: Option<tokio::runtime::Runtime>,
     /// Accumulated conversation history for multi-turn sessions (meetings, etc.).
     pub(super) conversation_history: Vec<RcMessage>,
+    /// Memory + knowledge bridges applied to every turn through the shared
+    /// enrichment entry point (issue #1665). `None`/empty until the runtime
+    /// injects configured bridges via [`BaseTypeSession::enrichment_mut`].
+    pub(super) enrichment: EnrichmentBridges,
 }
 
 impl fmt::Debug for RustyClawdSession {
@@ -63,6 +68,14 @@ impl fmt::Debug for RustyClawdSession {
 impl BaseTypeSession for RustyClawdSession {
     fn descriptor(&self) -> &BaseTypeDescriptor {
         &self.descriptor
+    }
+
+    fn enrichment(&self) -> Option<&EnrichmentBridges> {
+        Some(&self.enrichment)
+    }
+
+    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentBridges> {
+        Some(&mut self.enrichment)
     }
 
     fn open(&mut self) -> SimardResult<()> {
@@ -150,6 +163,14 @@ impl BaseTypeSession for RustyClawdSession {
         ensure_session_not_closed(&self.descriptor, self.is_closed, "run_turn")?;
         ensure_session_open(&self.descriptor, self.is_open, "run_turn")?;
 
+        // Apply memory + knowledge enrichment through the shared, normalized
+        // entry point (issue #1665). The enrichment is injected into the
+        // returned input's `prompt_preamble` (which feeds the backend system
+        // prompt); the `objective` is left as the bare user message so the
+        // persistent conversation history stays clean and identity context is
+        // preserved.
+        let enriched_input = self.enrich_input(&input)?;
+
         let prompt_ids = joined_prompt_ids(&self.request.prompt_assets);
         let objective_summary = objective_metadata(&input.objective);
 
@@ -165,7 +186,7 @@ impl BaseTypeSession for RustyClawdSession {
             execute_rustyclawd_client(
                 client,
                 rt,
-                &input,
+                &enriched_input,
                 &self.descriptor,
                 &self.request,
                 &mut self.conversation_history,
@@ -244,6 +265,7 @@ mod tests {
             client: None,
             rt: None,
             conversation_history: Vec::new(),
+            enrichment: EnrichmentBridges::default(),
         };
         let debug_str = format!("{session:?}");
         assert!(debug_str.contains("RustyClawdSession"));
@@ -273,6 +295,7 @@ mod tests {
             client: None,
             rt: None,
             conversation_history: Vec::new(),
+            enrichment: EnrichmentBridges::default(),
         };
         let debug_str = format!("{session:?}");
         assert!(debug_str.contains("false")); // is_open and is_closed

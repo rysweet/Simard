@@ -1,0 +1,52 @@
+name: "Dashboard Jargon & Clarity Fixes (#2358)"
+description: "Outside-in operator check that the dashboard's P1/P2 usability fixes from issue #2358 hold: the Costs lede no longer contradicts its 'Estimated Cost' label, the cycle/summary and token humanizers are wired in (so OODA, key=value shorthand and sentinel goal ids never leak), the Memory panel surfaces the live stored total without claiming it is empty, and the Goals 'Current Activity' raw [raw] marker is gone. Boots the real dashboard binary, authenticates, and asserts the served HTML and the live /api/memory/recent response."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Dashboard humanizes machine jargon and reconciles contradictory copy"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/dashboard-jargon-clarity.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "dashboard"
+    - "usability"
+    - "jargon"
+    - "issue-2358"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

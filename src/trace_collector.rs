@@ -117,6 +117,8 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanCollectorLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_subscriber::Registry;
+    use tracing_subscriber::layer::SubscriberExt;
 
     #[test]
     fn drain_recent_empty_returns_empty() {
@@ -133,5 +135,118 @@ mod tests {
     #[test]
     fn ring_size_is_reasonable() {
         const { assert!(RING_SIZE >= 64) };
+    }
+
+    /// Drive a full span lifecycle through the layer so that `on_new_span`
+    /// records a start `Instant`, `on_close` builds a `SpanRecord` (covering
+    /// both `map_or` closures and the ring write), and `drain_recent` then
+    /// returns the cloned record. The span is given a unique name so the
+    /// assertion is robust against the shared global ring buffer.
+    #[test]
+    fn span_lifecycle_is_recorded_and_drained() {
+        let subscriber = Registry::default().with(SpanCollectorLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("tc_lifecycle_marker", answer = 42, label = "probe");
+            span.in_scope(|| {});
+            drop(span);
+        });
+
+        let records = drain_recent(RING_SIZE);
+        let marker = records
+            .iter()
+            .find(|r| r.name == "tc_lifecycle_marker")
+            .expect("closed span should be recorded in the ring buffer");
+
+        assert_eq!(marker.level, "INFO");
+        assert!(
+            marker.target.starts_with("simard"),
+            "unexpected target: {}",
+            marker.target
+        );
+        // `on_close` populates `timestamp_epoch_ms` from the system clock.
+        assert!(marker.timestamp_epoch_ms > 0);
+        // `span.fields()` exposes the static `FieldSet` (the field *names*),
+        // which `on_close` captures via its Debug representation.
+        assert!(
+            marker.fields.contains("answer") && marker.fields.contains("label"),
+            "fields should list the span's field names, got: {}",
+            marker.fields
+        );
+    }
+
+    /// Opening and closing a span through the layer must produce a drainable,
+    /// cloneable record. This complements the lifecycle test by asserting the
+    /// non-empty drain path (the `push` branch in `drain_recent`) and the
+    /// `SpanRecord::clone` derive.
+    #[test]
+    fn drain_recent_returns_non_empty_after_span() {
+        let subscriber = Registry::default().with(SpanCollectorLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::warn_span!("tc_nonempty_probe");
+            span.in_scope(|| {});
+            drop(span);
+        });
+
+        let records = drain_recent(RING_SIZE);
+        assert!(
+            records.iter().any(|r| r.name == "tc_nonempty_probe"),
+            "expected the recorded span to be drained"
+        );
+        // Exercise SpanRecord::clone explicitly (drain already clones, but make
+        // the dependency on Clone explicit and verify equality of cloned data).
+        if let Some(r) = records.first() {
+            let cloned = r.clone();
+            assert_eq!(cloned.name, r.name);
+            assert_eq!(cloned.level, r.level);
+        }
+    }
+
+    /// Cover the derived `Debug` and `serde::Serialize` implementations on
+    /// `SpanRecord`, which are part of the file's public surface and otherwise
+    /// never exercised by the layer paths.
+    #[test]
+    fn span_record_debug_and_serialize() {
+        let record = SpanRecord {
+            name: "unit".to_string(),
+            target: "simard::trace_collector".to_string(),
+            level: "INFO".to_string(),
+            duration_us: 1234,
+            fields: "{key=value}".to_string(),
+            timestamp_epoch_ms: 99,
+        };
+
+        let debug = format!("{record:?}");
+        assert!(debug.contains("unit"));
+        assert!(debug.contains("1234"));
+
+        let json = serde_json::to_string(&record).expect("SpanRecord should serialize");
+        assert!(json.contains("\"name\":\"unit\""));
+        assert!(json.contains("\"duration_us\":1234"));
+        assert!(json.contains("\"timestamp_epoch_ms\":99"));
+
+        // Clone derive coverage.
+        let cloned = record.clone();
+        assert_eq!(cloned.duration_us, record.duration_us);
+    }
+
+    /// `drain_recent` must cap the returned count at the requested limit even
+    /// when more records are present, and never panic for a zero limit.
+    #[test]
+    fn drain_recent_respects_limit_bounds() {
+        let subscriber = Registry::default().with(SpanCollectorLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..3 {
+                let span = tracing::info_span!("tc_limit_probe");
+                span.in_scope(|| {});
+                drop(span);
+            }
+        });
+
+        // A zero limit yields nothing and must not panic.
+        assert!(drain_recent(0).is_empty());
+
+        // A small limit returns at most that many records.
+        let limited = drain_recent(2);
+        assert!(limited.len() <= 2);
     }
 }

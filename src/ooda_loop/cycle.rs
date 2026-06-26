@@ -7,7 +7,7 @@ use crate::goal_curation::{load_goal_board, save_goal_board_with_removals};
 use crate::gym_bridge::ScoreDimensions;
 use crate::gym_scoring::GymSuiteScore;
 use crate::memory_consolidation;
-use crate::memory_consolidation::preparation_memory_operations_with_active_slugs;
+use crate::memory_consolidation::preparation_memory_operations_with_active_slugs_phased;
 use crate::self_improve::{ImprovementCycle, ImprovementPhase};
 
 use super::types::*;
@@ -255,11 +255,15 @@ fn run_ooda_cycle_inner(
         eprintln!("[simard] OODA cycle: board-sourced prospective reconcile failed: {e}");
     }
     // Reuse cycle_session_id established above — the entire cycle is one logical session.
-    let ctx = preparation_memory_operations_with_active_slugs(
+    // Issue #2329: gather `relevant_facts` with ranked recall biased toward the
+    // Observe phase (recency-favoring) so the freshest declarative state surfaces
+    // first each cycle.
+    let ctx = preparation_memory_operations_with_active_slugs_phased(
         &objective_summary,
         &cycle_session_id,
         &*bridges.memory,
         Some(&active_slugs),
+        crate::ooda_loop::phase_weights::weights_for_phase(OodaPhase::Observe),
     )?;
     eprintln!(
         "[simard] OODA cycle: prepared context ({} facts, {} triggers, {} procedures, {} episodes)",
@@ -294,7 +298,7 @@ fn run_ooda_cycle_inner(
     // --- Decide ---
     state.current_phase = OodaPhase::Decide;
     eprintln!("[simard] OODA cycle: entering Decide phase");
-    let planned_actions = match bridges.decide_brain.as_ref() {
+    let mut planned_actions = match bridges.decide_brain.as_ref() {
         Some(brain) => decide_with_brain(&priorities, config, brain.as_ref())?,
         None => decide(&priorities, config)?,
     };
@@ -303,11 +307,31 @@ fn run_ooda_cycle_inner(
         planned_actions.len()
     );
 
+    // --- Coverage (issue #2359, BUG 2) ---
+    // Make goal coverage a first-class allocation rule: ensure every
+    // incomplete active goal that lacks a live engineer gets exactly one,
+    // ahead of any extra parallelism for already-covered goals. The AIMD
+    // scaler stays a hard safety cap — `decide_with_brain` already called
+    // `scaler.adjust()`, so `current_max()` is the cap it used this cycle.
+    let coverage_cap = config
+        .scaler
+        .as_ref()
+        .map(|s| s.current_max() as usize)
+        .unwrap_or(config.max_concurrent_actions as usize);
+    let coverage_report =
+        crate::ooda_loop::coverage::ensure_goal_coverage(state, &mut planned_actions, coverage_cap);
+    eprintln!(
+        "[simard] OODA cycle: coverage — {} (cap {coverage_cap})",
+        coverage_report.log_line()
+    );
+
     // --- Act ---
     state.current_phase = OodaPhase::Act;
     eprintln!("[simard] OODA cycle: entering Act phase");
     let act_start = Instant::now();
-    let outcomes = act(&planned_actions, bridges, state)?;
+    // Bound concurrent engineer starts to the same AIMD cap coverage used to
+    // allocate them, so dispatch concurrency stays resource-aware.
+    let outcomes = act(&planned_actions, bridges, state, coverage_cap)?;
     let act_elapsed = act_start.elapsed();
     eprintln!(
         "[simard] OODA cycle: Act complete ({} outcomes, {:.1}s)",
@@ -570,15 +594,43 @@ fn run_ooda_cycle_inner(
                     &*bridges.memory,
                 )
                 .and_then(|()| {
-                    bridges.memory.store_episode(
-                        &state.active_goals.durable_summary(),
+                    // Goal-board curation with force-removals is a durable
+                    // goal-archival event (issue #2327): the classifier stores
+                    // it at full importance with the {importance, event_kind,
+                    // goal_id, cycle, is_operational} metadata, merged with the
+                    // existing board-count fields so neither signal is lost.
+                    let summary = state.active_goals.durable_summary();
+                    let ctx = crate::memory_consolidation::classifier::IntakeContext {
+                        goal_id: None,
+                        cycle: Some(state.cycle_count),
+                    };
+                    let decision = crate::memory_consolidation::classifier::classify(
+                        &summary,
                         "goal-curator",
-                        Some(&serde_json::json!({
-                            "active_count": state.active_goals.active.len(),
-                            "backlog_count": state.active_goals.backlog.len(),
-                            "force_removed": archived_goal_ids.len(),
-                        })),
-                    )?;
+                        &ctx,
+                    );
+                    crate::memory_consolidation::classifier::global_intake_counters()
+                        .record(&decision);
+                    if let Some(meta) = decision.metadata() {
+                        let mut json = meta.to_json();
+                        if let Some(obj) = json.as_object_mut() {
+                            obj.insert(
+                                "active_count".to_string(),
+                                serde_json::json!(state.active_goals.active.len()),
+                            );
+                            obj.insert(
+                                "backlog_count".to_string(),
+                                serde_json::json!(state.active_goals.backlog.len()),
+                            );
+                            obj.insert(
+                                "force_removed".to_string(),
+                                serde_json::json!(archived_goal_ids.len()),
+                            );
+                        }
+                        bridges
+                            .memory
+                            .store_episode(&summary, "goal-curator", Some(&json))?;
+                    }
                     Ok(())
                 })
             };
@@ -602,6 +654,45 @@ fn run_ooda_cycle_inner(
     }
 
     state.cycle_count += 1;
+
+    // --- Automatic promotion (distillation) scheduler (issue #2327, R4) ---
+    // Fire episode → fact/procedure distillation when the undistilled-episode
+    // count crosses the threshold OR the cycle-count interval elapses,
+    // decoupled from whether the brain picked `ConsolidateMemory`. Trigger
+    // gating is cheap; the recipe runner is only constructed when a trigger
+    // fires (and gracefully no-ops when recipe-runner-rs is unavailable).
+    {
+        let schedule = crate::memory_consolidation::scheduler::DistillSchedule {
+            min_episodes: config.distill_min_episodes,
+            interval_cycles: config.distill_interval_cycles,
+        };
+        let cycles_since_last = state.cycle_count.saturating_sub(state.last_distill_cycle);
+        match crate::memory_consolidation::scheduler::run_scheduled_distillation(
+            &*bridges.memory,
+            &bridges.repo_root,
+            &schedule,
+            cycles_since_last,
+        ) {
+            Ok(Some(report)) => {
+                state.last_distill_cycle = state.cycle_count;
+                eprintln!(
+                    "[simard] OODA distill scheduler: {} episodes → {} facts, {} procedures, {} marked",
+                    report.input_count,
+                    report.fact_count,
+                    report.procedure_count,
+                    report.marked_count
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("[simard] OODA distill scheduler: pass failed (non-fatal): {e}");
+            }
+        }
+    }
+
+    // Emit the per-cycle episode-intake hygiene summary (dropped/stored/
+    // down-scoped) accumulated by the ingestion classifier (issue #2327, R3).
+    crate::memory_consolidation::classifier::global_intake_counters().log_summary();
 
     // --- Post-cycle cleanup (issue #2167) ---
     // Prune goal_failure_counts entries for goals no longer on the board.
@@ -907,6 +998,7 @@ mod tests_sweep {
 
     fn make_goal(id: &str, session: Option<&str>) -> ActiveGoal {
         ActiveGoal {
+            repo: None,
             id: id.to_string(),
             description: format!("Goal {id}"),
             priority: 1,
@@ -1042,6 +1134,7 @@ mod tests_board_integrity {
 
     fn make_goal(id: &str, desc: &str) -> ActiveGoal {
         ActiveGoal {
+            repo: None,
             id: id.to_string(),
             description: desc.to_string(),
             priority: 1,
@@ -1323,6 +1416,7 @@ mod tests_objective_probe {
 
     fn active_goal(id: &str, description: &str) -> ActiveGoal {
         ActiveGoal {
+            repo: None,
             id: id.to_string(),
             description: description.to_string(),
             priority: 1,

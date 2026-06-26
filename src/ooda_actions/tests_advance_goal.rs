@@ -528,4 +528,69 @@ mod inflight_tests {
         // Goal "fo" does NOT match (prefix is "fo-" which doesn't match "foo-1234").
         assert!(find_live_engineer_for_goal(tmp.path(), "fo").is_none());
     }
+
+    #[test]
+    fn find_live_engineer_returns_none_when_claim_unparseable() {
+        // A non-numeric first line is not a recycled-but-dead PID (covered by
+        // `..._when_claim_dead`); it exercises the *parse-failure* `continue`
+        // branch where the sentinel is corrupt rather than stale.
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join(crate::engineer_worktree::WORKTREES_SUBDIR);
+        fs::create_dir_all(&root).unwrap();
+        let corrupt = root.join("corrupt-goal-1-ff");
+        fs::create_dir_all(&corrupt).unwrap();
+        fs::write(
+            corrupt.join(crate::engineer_worktree::ENGINEER_CLAIM_FILE),
+            "not-a-pid\n",
+        )
+        .unwrap();
+        assert!(find_live_engineer_for_goal(tmp.path(), "corrupt-goal").is_none());
+    }
+
+    #[test]
+    fn find_live_engineer_rejects_starttime_mismatch() {
+        // Live PID but a recorded starttime that can never match a real
+        // process (`1` jiffies). This drives the starttime-guard branch that
+        // the existing PID-only sentinels never reach: on Linux the /proc
+        // lookup mismatches and on /proc-less platforms it returns None — both
+        // `continue`, so no live engineer is reported.
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join(crate::engineer_worktree::WORKTREES_SUBDIR);
+        fs::create_dir_all(&root).unwrap();
+        let recycled = root.join("recycled-goal-1-aa");
+        fs::create_dir_all(&recycled).unwrap();
+        fs::write(
+            recycled.join(crate::engineer_worktree::ENGINEER_CLAIM_FILE),
+            format!("{}\n1\n", std::process::id()),
+        )
+        .unwrap();
+        assert!(find_live_engineer_for_goal(tmp.path(), "recycled-goal").is_none());
+    }
+
+    #[test]
+    fn find_live_engineer_accepts_matching_starttime_when_recorded() {
+        // The success arm of the starttime guard: a live PID whose recorded
+        // starttime matches the live process. Only meaningful where /proc
+        // exposes the starttime (Linux CI); elsewhere the PID-only success
+        // path already covers acceptance, so skip rather than model a platform
+        // we can't observe.
+        let live = std::process::id() as i32;
+        let Some(starttime) = crate::engineer_worktree::read_pid_starttime_public(live) else {
+            return;
+        };
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join(crate::engineer_worktree::WORKTREES_SUBDIR);
+        fs::create_dir_all(&root).unwrap();
+        let wt = root.join("verified-goal-1-bb");
+        fs::create_dir_all(&wt).unwrap();
+        fs::write(
+            wt.join(crate::engineer_worktree::ENGINEER_CLAIM_FILE),
+            format!("{live}\n{starttime}\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            find_live_engineer_for_goal(tmp.path(), "verified-goal"),
+            Some(wt)
+        );
+    }
 }

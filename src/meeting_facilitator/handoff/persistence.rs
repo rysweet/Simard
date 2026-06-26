@@ -768,7 +768,7 @@ mod bundle_tests {
     }
 
     #[test]
-    #[serial(simard_meetings_root_env)]
+    #[serial(simard_meetings_root_env, cognitive_memory)]
     fn write_meeting_bundle_creates_canonical_files() {
         let root = temp_root("bundle-canonical");
         // SAFETY: tests in this binary that touch SIMARD_MEETINGS_ROOT serialize
@@ -800,7 +800,7 @@ mod bundle_tests {
     }
 
     #[test]
-    #[serial(simard_meetings_root_env)]
+    #[serial(simard_meetings_root_env, cognitive_memory)]
     fn write_meeting_bundle_round_trips_handoff_json() {
         let root = temp_root("bundle-roundtrip");
         unsafe {
@@ -840,7 +840,7 @@ mod bundle_tests {
     }
 
     #[test]
-    #[serial(simard_meetings_root_env)]
+    #[serial(simard_meetings_root_env, cognitive_memory)]
     fn write_meeting_bundle_markdown_contains_sections() {
         let root = temp_root("bundle-md");
         unsafe {
@@ -903,7 +903,7 @@ mod bundle_tests {
     }
 
     #[test]
-    #[serial(simard_meetings_root_env)]
+    #[serial(simard_meetings_root_env, cognitive_memory)]
     fn write_meeting_bundle_emits_issue_stubs_and_markdown_section() {
         let root = temp_root("bundle-stubs");
         unsafe {
@@ -938,7 +938,7 @@ mod bundle_tests {
     }
 
     #[test]
-    #[serial(simard_meetings_root_env)]
+    #[serial(simard_meetings_root_env, cognitive_memory)]
     fn write_meeting_bundle_empty_handoff_writes_no_issue_stubs() {
         let root = temp_root("bundle-stubs-empty");
         unsafe {

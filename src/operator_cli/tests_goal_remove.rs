@@ -59,6 +59,7 @@ fn isolated_state_root() -> (TempDir, PathBuf) {
 
 fn active_goal_with_desc(id: &str, description: &str) -> ActiveGoal {
     ActiveGoal {
+        repo: None,
         id: id.to_string(),
         description: description.to_string(),
         priority: 1,

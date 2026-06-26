@@ -127,6 +127,7 @@ mod tests {
 
     // ── resolve_operator_name ───────────────────────────────────────
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn resolve_operator_name_default() {
         let _lock = ENV_MUTEX.lock().unwrap();
@@ -135,6 +136,7 @@ mod tests {
         assert_eq!(name, "operator");
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn resolve_operator_name_from_env() {
         let _lock = ENV_MUTEX.lock().unwrap();
@@ -144,6 +146,7 @@ mod tests {
         unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn resolve_operator_name_empty_env_falls_back() {
         let _lock = ENV_MUTEX.lock().unwrap();
@@ -192,6 +195,7 @@ mod tests {
 
     // ── build_live_meeting_context ──────────────────────────────────
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn build_context_empty_memory() {
         let _lock = ENV_MUTEX.lock().unwrap();
@@ -202,6 +206,7 @@ mod tests {
         assert!(ctx.contains("operator"));
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn build_context_failing_bridge_propagates_error() {
         let _lock = ENV_MUTEX.lock().unwrap();

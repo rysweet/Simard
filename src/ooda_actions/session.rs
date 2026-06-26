@@ -187,12 +187,19 @@ mod tests {
     /// Forcing the provider via env var keeps the test deterministic
     /// regardless of the host's `~/.simard/config.toml` contents.
     #[test]
+    // #2360: process-global env mutation. cargo runs tests MULTI-threaded, so
+    // this `set_var("SIMARD_LLM_PROVIDER")` can tear a concurrent reader (e.g.
+    // operator_commands_dashboard::chat). Every cognitive-memory/provider env
+    // reader and writer shares this key so mutation is never concurrent with a
+    // read. See docs/testing/cognitive-memory-serial-isolation.md.
+    #[serial_test::serial(cognitive_memory)]
     fn dispatch_launch_session_fails_loud_on_unsupported_rustyclawd_1162() {
-        // SAFETY: tests are single-threaded by default in cargo (--test-threads=1
-        // unless the suite opts out), and this env mutation is local and
-        // restored before the test exits.
+        // The `serial(cognitive_memory)` key (not cargo single-threading)
+        // guarantees no concurrent reader; the prior value is still restored
+        // before the test exits.
         let prev = std::env::var("SIMARD_LLM_PROVIDER").ok();
-        // Safety: setting an env var is safe in single-threaded test context.
+        // SAFETY: serialised via `serial(cognitive_memory)`, so no other test
+        // mutates or reads SIMARD_LLM_PROVIDER concurrently with this set_var.
         unsafe {
             std::env::set_var("SIMARD_LLM_PROVIDER", "rustyclawd");
         }

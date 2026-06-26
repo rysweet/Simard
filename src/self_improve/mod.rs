@@ -10,6 +10,7 @@
 
 pub(crate) mod cycle;
 pub mod history;
+pub mod hypothesis;
 pub mod prioritization;
 pub mod trend;
 mod types;
@@ -30,11 +31,19 @@ mod tests_prioritization;
 #[cfg(test)]
 mod tests_trend;
 
+#[cfg(test)]
+mod tests_hypothesis;
+
 // Re-export all public items so `crate::self_improve::X` still works.
 pub use cycle::{
     apply_improvements, decide, find_weak_dimensions, run_improvement_cycle, summarize_cycle,
 };
 pub use history::{CURRENT_SCHEMA_VERSION, HistoryMeta, ImprovementHistory};
+pub use hypothesis::{
+    ImprovementHypothesis, aggregate_hypotheses, form_hypotheses_from_benchmark_reports,
+    form_hypotheses_from_review, form_hypotheses_from_session_failures,
+    form_hypotheses_from_signals, form_hypotheses_from_weak_dimensions,
+};
 pub use prioritization::{
     PrioritizedDimension, PriorityWeights, find_weak_dimensions_detailed, prioritize_dimensions,
     prioritize_dimensions_default,

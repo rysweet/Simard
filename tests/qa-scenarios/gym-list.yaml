@@ -1,15 +1,67 @@
 name: simard-gym-list
 app_type: cli
-description: Verify simard lists benchmark scenarios
+description: Verify simard gym lists the curated V1 minimal benchmark set (issue #2087)
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
 steps:
+  # Execute `simard gym list`. The CLI runner rejects any non-zero exit, so this
+  # step already enforces a clean exit 0 and proves the trimmed gym still emits a
+  # benchmark listing.
   - action: run
-    command: "cargo run --quiet -- gym list"
-    timeout: 30s
-  - action: expect_stdout
-    contains: "Simard benchmark scenarios:"
-  - action: expect_stdout
-    contains: "repo-exploration-local"
-  - action: expect_stdout
-    contains: "interactive-terminal-driving"
-  - action: expect_exit_code
-    code: 0
+    params:
+      command: "cargo run --quiet -- gym list"
+    # Generous timeout: `cargo run` performs a freshness check and the gym
+    # initialises its lbug-backed graph store before listing, which can take a
+    # few minutes on a loaded machine even when the binary is already built.
+    timeout: 600000
+  # Header proves the command produced the benchmark listing. Each
+  # wait_for_output step fails the scenario if its pattern is absent.
+  - action: wait_for_output
+    params:
+      value: "Simard benchmark scenarios:"
+    timeout: 8000
+  # One representative scenario from each of the four V1 benchmark classes.
+  - action: wait_for_output
+    params:
+      value: "repo-exploration-local"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "doc-generation-public-fn"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "safe-change-add-enum-variant"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "session-quality-memory-export"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "interactive-terminal-driving"
+    timeout: 8000
+  # The four sanctioned class labels are emitted for the curated scenarios.
+  - action: wait_for_output
+    params:
+      value: "class=repo-exploration"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "class=documentation"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "class=safe-code-change"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "class=session-quality"
+    timeout: 8000
+  # Re-confirm the listing command exited cleanly (exit code 0).
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

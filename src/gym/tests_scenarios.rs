@@ -14,8 +14,11 @@ use crate::session::{SessionId, SessionPhase, SessionRecord};
 // --- benchmark_scenarios ---
 
 #[test]
-fn benchmark_scenarios_returns_nine_scenarios() {
-    assert_eq!(benchmark_scenarios().len(), 200);
+fn benchmark_scenarios_returns_minimal_high_signal_set() {
+    // V1 prefers a small, high-signal set over a large, noisy suite
+    // (Specs/ProductArchitecture.md line 214, issue #2087): three scenarios
+    // for each of the four sanctioned benchmark classes.
+    assert_eq!(benchmark_scenarios().len(), 12);
 }
 
 #[test]
@@ -44,26 +47,22 @@ fn benchmark_scenarios_all_have_nonempty_fields() {
 #[test]
 fn benchmark_scenarios_contains_known_ids() {
     let ids: Vec<&str> = benchmark_scenarios().iter().map(|s| s.id).collect();
+    // RepoExploration
     assert!(ids.contains(&"repo-exploration-local"));
+    assert!(ids.contains(&"repo-exploration-deep-scan"));
+    assert!(ids.contains(&"repo-exploration-multi-process"));
+    // Documentation
     assert!(ids.contains(&"docs-refresh-copilot"));
+    assert!(ids.contains(&"doc-generation-public-fn"));
+    assert!(ids.contains(&"doc-generation-multi-process"));
+    // SafeCodeChange
     assert!(ids.contains(&"safe-code-change-rusty-clawd"));
+    assert!(ids.contains(&"safe-code-change-add-derive"));
+    assert!(ids.contains(&"safe-change-add-enum-variant"));
+    // SessionQuality
     assert!(ids.contains(&"composite-session-review"));
     assert!(ids.contains(&"interactive-terminal-driving"));
-    assert!(ids.contains(&"doc-generation-multi-process"));
-    assert!(ids.contains(&"bug-fix-distributed"));
-    assert!(ids.contains(&"dep-analysis-cargo-audit"));
-    assert!(ids.contains(&"dep-analysis-module-coupling"));
-    assert!(ids.contains(&"error-handling-unwrap-audit"));
-    assert!(ids.contains(&"error-handling-propagation-chain"));
-    assert!(ids.contains(&"a11y-aria-audit-local"));
-    assert!(ids.contains(&"a11y-keyboard-nav-multiprocess-copilot"));
-    assert!(ids.contains(&"a11y-color-contrast-distributed-terminal"));
-    assert!(ids.contains(&"i18n-string-extraction-local"));
-    assert!(ids.contains(&"i18n-locale-routing-multiprocess-rusty-clawd"));
-    assert!(ids.contains(&"i18n-pluralization-rtl-distributed-copilot"));
-    assert!(ids.contains(&"incident-response-postmortem-local"));
-    assert!(ids.contains(&"incident-response-runbook-multiprocess-terminal"));
-    assert!(ids.contains(&"incident-response-pager-rotation-distributed-copilot"));
+    assert!(ids.contains(&"session-quality-memory-export"));
 }
 
 #[test]
@@ -74,29 +73,16 @@ fn benchmark_scenarios_covers_all_classes() {
     assert!(has_class(BenchmarkClass::Documentation));
     assert!(has_class(BenchmarkClass::SafeCodeChange));
     assert!(has_class(BenchmarkClass::SessionQuality));
-    assert!(has_class(BenchmarkClass::TestWriting));
-    assert!(has_class(BenchmarkClass::BugFix));
-    assert!(has_class(BenchmarkClass::Refactoring));
-    assert!(has_class(BenchmarkClass::DependencyAnalysis));
-    assert!(has_class(BenchmarkClass::ErrorHandling));
-    assert!(has_class(BenchmarkClass::PerformanceAnalysis));
-    assert!(has_class(BenchmarkClass::SecurityAudit));
-    assert!(has_class(BenchmarkClass::ApiDesign));
-    assert!(has_class(BenchmarkClass::CodeReview));
-    assert!(has_class(BenchmarkClass::Debugging));
-    assert!(has_class(BenchmarkClass::ConfigManagement));
-    assert!(has_class(BenchmarkClass::ConcurrencyAnalysis));
-    assert!(has_class(BenchmarkClass::MigrationPlanning));
-    assert!(has_class(BenchmarkClass::ObservabilityInstrumentation));
-    assert!(has_class(BenchmarkClass::DataModeling));
-    assert!(has_class(BenchmarkClass::DataMigration));
-    assert!(has_class(BenchmarkClass::CicdPipeline));
-    assert!(has_class(BenchmarkClass::DependencyUpgrade));
-    assert!(has_class(BenchmarkClass::ReleaseManagement));
-    assert!(has_class(BenchmarkClass::AccessibilityReview));
-    assert!(has_class(BenchmarkClass::InternationalizationReview));
-    assert!(has_class(BenchmarkClass::IncidentResponse));
-    assert!(has_class(BenchmarkClass::SelfIntrospection));
+}
+
+#[test]
+fn benchmark_scenarios_balanced_across_classes() {
+    let scenarios = benchmark_scenarios();
+    let count = |class: BenchmarkClass| scenarios.iter().filter(|s| s.class == class).count();
+    assert_eq!(count(BenchmarkClass::RepoExploration), 3);
+    assert_eq!(count(BenchmarkClass::Documentation), 3);
+    assert_eq!(count(BenchmarkClass::SafeCodeChange), 3);
+    assert_eq!(count(BenchmarkClass::SessionQuality), 3);
 }
 
 // --- resolve_benchmark_scenario ---
@@ -364,35 +350,40 @@ fn class_checks_safe_code_change_fails_without_keywords() {
     }
 }
 
-// -- TestWriting checks --
+// -- SessionQuality checks --
 
 #[test]
-fn class_checks_test_writing_passes_with_keywords() {
+fn class_checks_session_quality_passes_with_summary_and_memory() {
     let scenario = BenchmarkScenario {
-        class: BenchmarkClass::TestWriting,
+        class: BenchmarkClass::SessionQuality,
         ..repo_exploration_scenario()
     };
     let outcome = dummy_outcome(
-        "write #[test] function to call target",
-        "unit test with assert_eq validates input/output",
-        "test covers basic case and result verification",
+        "plan the bounded session",
+        "executed coherently and summarized evidence",
+        "session reflection complete",
     );
+    let exported = dummy_handoff(2);
+    let checks = class_specific_checks(&scenario, &outcome, &exported);
+    assert_eq!(checks.len(), 1);
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.id == "session-quality-summary-adequate" && c.passed)
+    );
+}
+
+#[test]
+fn class_checks_session_quality_fails_without_memory() {
+    let scenario = BenchmarkScenario {
+        class: BenchmarkClass::SessionQuality,
+        ..repo_exploration_scenario()
+    };
+    let outcome = dummy_outcome("plan", "non-empty summary", "reflection");
     let exported = dummy_handoff(0);
     let checks = class_specific_checks(&scenario, &outcome, &exported);
-    assert_eq!(checks.len(), 3);
-    assert!(
-        checks
-            .iter()
-            .any(|c| c.id == "test-structure-valid" && c.passed)
-    );
-    assert!(
-        checks
-            .iter()
-            .any(|c| c.id == "test-has-assertions" && c.passed)
-    );
-    assert!(
-        checks
-            .iter()
-            .any(|c| c.id == "test-covers-basic-case" && c.passed)
-    );
+    assert_eq!(checks.len(), 1);
+    for check in &checks {
+        assert!(!check.passed, "check '{}' should have failed", check.id);
+    }
 }

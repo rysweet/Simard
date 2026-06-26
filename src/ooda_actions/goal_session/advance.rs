@@ -113,6 +113,11 @@ pub(crate) fn assess_only_outcome(
 /// Simard acts as a PM architect: she assesses the goal, decides whether to
 /// delegate to an engineer subprocess, and tracks progress based on the
 /// engineer's reported outcome — never by auto-incrementing.
+///
+/// Thin wrapper that builds the turn input, runs the (slow) LLM turn, and
+/// applies the result. Concurrent dispatch (see `ooda_actions::concurrent`)
+/// calls [`build_goal_advance_input`] and [`apply_goal_advance_result`]
+/// directly so the slow `run_turn` happens with no lock held.
 pub(crate) fn advance_goal_with_session(
     action: &PlannedAction,
     memory: &dyn crate::cognitive_memory::CognitiveMemoryOps,
@@ -121,6 +126,28 @@ pub(crate) fn advance_goal_with_session(
     state: &mut OodaState,
     goal: &crate::goal_curation::ActiveGoal,
 ) -> GoalSessionResult {
+    let input = build_goal_advance_input(memory, state.prepared_context.as_ref(), goal);
+    let run_result = session.run_turn(input);
+    apply_goal_advance_result(
+        action,
+        memory,
+        checker,
+        &mut state.active_goals,
+        goal,
+        run_result,
+    )
+}
+
+/// Build the goal-advance turn input from the goal, recalled context, and
+/// fresh environment snapshot. Reinforces the surfaced memory context as a
+/// side effect (issue #2395). Pure with respect to [`OodaState`] — takes the
+/// recalled `prepared_context` by reference so the caller can hold the state
+/// lock only briefly.
+pub(crate) fn build_goal_advance_input(
+    memory: &dyn crate::cognitive_memory::CognitiveMemoryOps,
+    prepared_context: Option<&crate::memory_consolidation::PreparedContext>,
+    goal: &crate::goal_curation::ActiveGoal,
+) -> crate::base_types::BaseTypeTurnInput {
     use crate::base_types::BaseTypeTurnInput;
     use std::fmt::Write;
 
@@ -180,7 +207,7 @@ pub(crate) fn advance_goal_with_session(
     }
 
     // Append recalled memory context (facts, prospectives, procedures) when available.
-    if let Some(ref ctx) = state.prepared_context {
+    if let Some(ctx) = prepared_context {
         if !ctx.relevant_facts.is_empty() {
             objective.push_str("\n\nRelevant facts from memory:");
             for fact in &ctx.relevant_facts {
@@ -205,7 +232,7 @@ pub(crate) fn advance_goal_with_session(
         // monotonically-increasing temporal index, and content
         // truncated to 200 characters with an ellipsis.
         if !ctx.episodic_recall.is_empty() {
-            objective.push_str("\n\n## Prior episodes (most-recent first)");
+            objective.push_str("\n\n## Prior episodes (ranked by relevance)");
             for ep in &ctx.episodic_recall {
                 let content = if ep.content.chars().count() > 200 {
                     let truncated: String = ep.content.chars().take(200).collect();
@@ -220,19 +247,41 @@ pub(crate) fn advance_goal_with_session(
                 );
             }
         }
+
+        // Issue #2395: reinforce-on-use. The recalled facts / procedures /
+        // episodes above were just surfaced into this cycle's prompt, so bump
+        // their usage/recency now. Preparation recall is a pure read (so the
+        // per-cycle recalls don't skew each other); this is the single point
+        // where the reinforcement signal the ranked recall feeds on is written.
+        crate::memory_consolidation::reinforce_prepared_context(memory, ctx);
     }
 
     const GOAL_SESSION_IDENTITY: &str =
         include_str!("../../../prompt_assets/simard/goal_session_identity.md");
     let identity_context = GOAL_SESSION_IDENTITY.trim().to_string();
 
-    let input = BaseTypeTurnInput {
+    BaseTypeTurnInput {
         objective,
         identity_context,
         prompt_preamble: String::new(),
-    };
+    }
+}
 
-    match session.run_turn(input) {
+/// Apply the result of a goal-advance `run_turn` to the goal board.
+///
+/// Splits the post-turn logic out of [`advance_goal_with_session`] so
+/// concurrent dispatch can run the slow `run_turn` with no lock held, then
+/// take a short lock to apply the parsed decision here. Mutates only the
+/// supplied `board` (never the whole [`OodaState`]).
+pub(crate) fn apply_goal_advance_result(
+    action: &PlannedAction,
+    memory: &dyn crate::cognitive_memory::CognitiveMemoryOps,
+    checker: &dyn crate::goal_curation::progress_evidence::ProgressEvidenceChecker,
+    board: &mut GoalBoard,
+    goal: &crate::goal_curation::ActiveGoal,
+    run_result: crate::error::SimardResult<crate::base_types::BaseTypeOutcome>,
+) -> GoalSessionResult {
+    match run_result {
         Ok(outcome) => {
             let parsed = parse_orchestrator_response(&outcome.execution_summary);
 
@@ -263,7 +312,7 @@ pub(crate) fn advance_goal_with_session(
                         action,
                         memory,
                         checker,
-                        &mut state.active_goals,
+                        board,
                         &goal.id,
                         reason,
                         progress_pct,
@@ -301,7 +350,7 @@ pub(crate) fn advance_goal_with_session(
                             }
                         };
                         match update_goal_progress_with_evidence(
-                            &mut state.active_goals,
+                            board,
                             &goal.id,
                             new_progress,
                             checker,

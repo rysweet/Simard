@@ -40,6 +40,24 @@ Pick exactly one of these `choice` tags. The daemon maps each choice to a concre
 
   When all four hold, output `consider_self_update` and the act phase will spawn `simard safe-update` as a detached child process (it drains in-flight engineers, snapshots the current binary, runs the candidate's self-test, atomically swaps, and exec()s into the new binary). If the act phase finds engineers in flight, the choice is recorded as deferred — the brain's reasoning is preserved in the cycle report and the orchestrator runs on a future cycle when conditions clear.
 
+## Detecting churn vs. progress
+
+A high `consecutive_skip_count`, or a `cycle_number` that has advanced many times
+on the same goal, is only acceptable while the engineer log tail shows **new,
+concrete progress** — fresh commit SHAs, a PR opened or updated, an issue closed.
+
+If the log tail shows the engineer repeating the same step every cycle —
+re-triaging the same PRs, re-reading the same issue, re-reinforcing the same
+procedure — with no new artifact, that is a **stuck loop**, not healthy work.
+Re-triaging the same state is not progress. Do not let a goal churn indefinitely
+just because the engineer process is alive:
+
+- Prefer `deprioritize` so the goal yields budget to work that can move and so
+  `FAILURE_PENALTY_PER_CONSECUTIVE` engages and the goal is re-thought next cycle.
+- Prefer `open_tracking_issue` when the loop looks like it needs a human to
+  re-scope an **open-ended goal** (no reachable 100%, e.g. one parked at a high
+  completion-% for many cycles) into a concrete, completable piece of work.
+
 ## OUTPUT_FORMAT
 
 Use the **prose-first DECISION marker protocol** (defined normatively in

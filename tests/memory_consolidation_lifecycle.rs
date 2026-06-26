@@ -63,9 +63,14 @@ fn full_session_lifecycle_triggers_all_consolidation_phases() {
     // Phase 1: Intake
     intake_memory_operations(objective, &sid, &bridge).unwrap();
     let after_intake = call_count.load(Ordering::SeqCst);
+    // Intake makes two bridge calls: record_sensory + push_working. The
+    // session-start episode ("started with objective: ...") is now classified
+    // as operational noise and dropped by the #2327 ingestion classifier, so
+    // it no longer issues a store_episode call.
     assert!(
-        after_intake >= 3,
-        "intake should make at least 3 bridge calls"
+        after_intake >= 2,
+        "intake should make at least 2 bridge calls (sensory + working; \
+         session-start episode is dropped by the #2327 ingestion classifier)"
     );
 
     // Phase 1b: Cross-session recall
@@ -173,6 +178,7 @@ fn ooda_cycle_runs_with_consolidation_wired_in() {
             },
         ))),
         session: None,
+        session_factory: None,
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
         decide_brain: None,
         orient_brain: None,
@@ -184,6 +190,7 @@ fn ooda_cycle_runs_with_consolidation_wired_in() {
 
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        repo: None,
         id: "test-goal".to_string(),
         description: "Test goal for lifecycle".to_string(),
         priority: 1,
@@ -256,11 +263,13 @@ fn cross_session_recall_hydrates_prior_facts() {
     let hydrated = consolidation_intake(&sid, "continue prior work", &bridge).unwrap();
     assert_eq!(hydrated, 2, "should hydrate 2 prior-session facts");
 
-    // Verify bridge calls: intake (3) + consolidation_intake with facts (3)
+    // Verify bridge calls: intake (2: sensory + working; the session-start
+    // episode is dropped by the #2327 ingestion classifier) +
+    // consolidation_intake with facts (3) = 5.
     let total = call_count.load(Ordering::SeqCst);
     assert!(
-        total >= 6,
-        "intake + consolidation_intake should make >= 6 calls, got {total}"
+        total >= 5,
+        "intake + consolidation_intake should make >= 5 calls, got {total}"
     );
 }
 
@@ -324,6 +333,7 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
             },
         ))),
         session: None,
+        session_factory: None,
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
         decide_brain: None,
         orient_brain: None,
@@ -335,6 +345,7 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
 
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        repo: None,
         id: "g1".to_string(),
         description: "Accumulation test".to_string(),
         priority: 1,

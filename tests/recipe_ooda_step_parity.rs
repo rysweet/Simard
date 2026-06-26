@@ -67,6 +67,7 @@ fn snapshot_with_goals(goals: Vec<ActiveGoal>) -> OodaStateSnapshot {
 
 fn make_goal(id: &str, status: GoalProgress) -> ActiveGoal {
     ActiveGoal {
+        repo: None,
         id: id.to_string(),
         description: format!("desc-{id}"),
         priority: 1,

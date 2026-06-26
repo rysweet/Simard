@@ -20,11 +20,14 @@ pub(crate) async fn current_work() -> Json<Value> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok());
 
-    let cycle_number = daemon_health
-        .as_ref()
-        .and_then(|h| h.get("cycle_number"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    // Persistent cumulative cycle number (issue #1680): survives daemon
+    // restarts so this endpoint reports the same "Cycle #N" as the Thinking
+    // tab and Recent Actions rather than the process-local "#1" in
+    // daemon_health.
+    let cycle_number = super::cycle_source::authoritative_cycle_number(
+        &resolve_state_root(),
+        daemon_health.as_ref(),
+    );
 
     let cycle_phase = daemon_health
         .as_ref()

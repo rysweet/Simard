@@ -11,6 +11,7 @@
 
 use std::fmt::Write;
 
+use crate::base_types::BaseTypeTurnInput;
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::knowledge_bridge::{KnowledgeBridge, KnowledgeQueryResult};
@@ -107,6 +108,32 @@ pub fn format_turn_input(context: &TurnContext) -> String {
     let _ = writeln!(prompt, "## Objective\n");
     let _ = writeln!(prompt, "{}\n", context.objective);
 
+    prompt.push_str(&render_enrichment_block(context));
+
+    let _ = writeln!(
+        prompt,
+        "## Instructions\n\n\
+         Respond with:\n\
+         1. ACTIONS: one per line, formatted as `ACTION: <kind> — <description>`\n\
+         2. EXPLANATION: a brief rationale\n\
+         3. CONFIDENCE: a decimal between 0.0 and 1.0"
+    );
+
+    prompt
+}
+
+/// Render only the memory/knowledge enrichment sections of a [`TurnContext`]
+/// — the relevant memory facts, known procedures, and domain knowledge —
+/// without the surrounding `## Objective` / `## Instructions` scaffold.
+///
+/// Returns an empty string when no enrichment is present. This is the shared
+/// rendering used both by [`format_turn_input`] (which wraps it with the
+/// objective + instructions) and by [`enrich_turn_input`] (which injects it
+/// into a turn's prompt preamble / system prompt). Centralizing the rendering
+/// keeps every adapter's enrichment output identical (issue #1665).
+pub fn render_enrichment_block(context: &TurnContext) -> String {
+    let mut prompt = String::with_capacity(1024);
+
     if !context.memory_facts.is_empty() {
         let _ = writeln!(prompt, "## Relevant Memory Facts\n");
         for (i, fact) in context.memory_facts.iter().enumerate() {
@@ -156,16 +183,97 @@ pub fn format_turn_input(context: &TurnContext) -> String {
         let _ = writeln!(prompt);
     }
 
-    let _ = writeln!(
-        prompt,
-        "## Instructions\n\n\
-         Respond with:\n\
-         1. ACTIONS: one per line, formatted as `ACTION: <kind> — <description>`\n\
-         2. EXPLANATION: a brief rationale\n\
-         3. CONFIDENCE: a decimal between 0.0 and 1.0"
-    );
-
     prompt
+}
+
+/// A bundle of optional memory + knowledge bridges used to enrich a turn.
+///
+/// This is the single, normalized home for the enrichment bridges. Every
+/// base-type adapter routes its turn through the same call site
+/// ([`EnrichmentBridges::enrich`] / [`enrich_turn_input`]), eliminating the
+/// divergence flagged in issue #1665 where only the Copilot adapter queried
+/// memory and knowledge.
+///
+/// Both bridges are optional: `None` means "not configured", which is fine and
+/// yields an unenriched (objective-only) prompt. When a bridge IS configured
+/// but its call fails, the error propagates — no silent degradation, per
+/// PHILOSOPHY.md.
+#[derive(Default)]
+pub struct EnrichmentBridges {
+    pub memory: Option<Box<dyn CognitiveMemoryOps>>,
+    pub knowledge: Option<KnowledgeBridge>,
+}
+
+impl EnrichmentBridges {
+    /// Create an empty bundle (no bridges configured).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether any enrichment bridge is configured.
+    pub fn is_configured(&self) -> bool {
+        self.memory.is_some() || self.knowledge.is_some()
+    }
+
+    /// Enrich `input` with recalled memory + knowledge using the configured
+    /// bridges, returning a new [`BaseTypeTurnInput`].
+    pub fn enrich(&self, input: &BaseTypeTurnInput) -> SimardResult<BaseTypeTurnInput> {
+        enrich_turn_input(input, self.memory.as_deref(), self.knowledge.as_ref())
+    }
+}
+
+impl std::fmt::Debug for EnrichmentBridges {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The bridges are not `Debug`; surface only whether each is configured.
+        f.debug_struct("EnrichmentBridges")
+            .field("memory", &self.memory.is_some())
+            .field("knowledge", &self.knowledge.is_some())
+            .finish()
+    }
+}
+
+/// Enrich a turn input with recalled memory facts/procedures and domain
+/// knowledge, returning a new [`BaseTypeTurnInput`] with the rendered
+/// enrichment block appended to its `prompt_preamble`.
+///
+/// This is the single normalized enrichment entry point shared by every
+/// base-type adapter (issue #1665). The memory + knowledge are recalled for the
+/// turn's `objective`, rendered via [`render_enrichment_block`], and injected
+/// into `prompt_preamble` — the field adapters surface to the model as
+/// per-turn system/preamble context. The `objective` and `identity_context`
+/// are preserved unchanged, so:
+///
+/// * stateful adapters (e.g. RustyClawd) keep a clean conversation history
+///   (the user message stays the bare objective) while the enrichment rides
+///   along in the system prompt, and
+/// * prompt-folding adapters (e.g. Copilot) pick the enrichment up
+///   automatically because they already fold `prompt_preamble` into the
+///   submitted prompt.
+///
+/// When no bridges are configured (or they return nothing) the input is
+/// returned unchanged — identical to the previous unenriched behavior, just
+/// reachable from every adapter.
+pub fn enrich_turn_input(
+    input: &BaseTypeTurnInput,
+    memory_bridge: Option<&dyn CognitiveMemoryOps>,
+    knowledge_bridge: Option<&KnowledgeBridge>,
+) -> SimardResult<BaseTypeTurnInput> {
+    let context = prepare_turn_context(&input.objective, memory_bridge, knowledge_bridge)?;
+    let block = render_enrichment_block(&context);
+
+    let prompt_preamble = if block.is_empty() {
+        input.prompt_preamble.clone()
+    } else if input.prompt_preamble.is_empty() {
+        block.trim_end().to_string()
+    } else {
+        format!("{}\n\n{}", input.prompt_preamble, block.trim_end())
+    };
+
+    Ok(BaseTypeTurnInput {
+        objective: input.objective.clone(),
+        identity_context: input.identity_context.clone(),
+        prompt_preamble,
+    })
 }
 
 /// Sentinel that marks the start of the actions block.
@@ -289,6 +397,8 @@ mod tests {
                 confidence: 0.9,
                 source_id: "s1".to_string(),
                 tags: vec![],
+                usage_count: 0,
+                last_accessed_at: None,
             }],
             knowledge: vec![],
             procedures: vec![],
@@ -337,5 +447,96 @@ CONFIDENCE: 0.85";
         let raw = "CONFIDENCE: 1.5";
         let output = parse_turn_output(raw).unwrap();
         assert!((output.confidence.unwrap() - 1.0).abs() < f64::EPSILON);
+    }
+
+    // ── enrich_turn_input / EnrichmentBridges ───────────────────────
+
+    #[test]
+    fn enrich_turn_input_without_bridges_returns_input_unchanged() {
+        let input = BaseTypeTurnInput::objective_only("implement the widget");
+        let enriched = enrich_turn_input(&input, None, None).unwrap();
+        // No bridges => objective + preamble unchanged, no memory block.
+        assert_eq!(enriched.objective, "implement the widget");
+        assert!(enriched.prompt_preamble.is_empty());
+        assert!(
+            !enriched
+                .prompt_preamble
+                .contains("## Relevant Memory Facts")
+        );
+    }
+
+    #[test]
+    fn enrich_turn_input_preserves_objective_and_identity() {
+        let input = BaseTypeTurnInput {
+            objective: "do the task".to_string(),
+            identity_context: "you are an engineer".to_string(),
+            prompt_preamble: "conversation so far".to_string(),
+        };
+        let enriched = enrich_turn_input(&input, None, None).unwrap();
+        // Without bridges the input is returned verbatim.
+        assert_eq!(enriched.objective, "do the task");
+        assert_eq!(enriched.identity_context, "you are an engineer");
+        assert_eq!(enriched.prompt_preamble, "conversation so far");
+    }
+
+    #[test]
+    fn render_enrichment_block_is_empty_without_context() {
+        let ctx = TurnContext {
+            objective: "x".to_string(),
+            memory_facts: vec![],
+            knowledge: vec![],
+            procedures: vec![],
+        };
+        assert!(render_enrichment_block(&ctx).is_empty());
+    }
+
+    #[test]
+    fn render_enrichment_block_renders_memory_facts() {
+        let ctx = TurnContext {
+            objective: "x".to_string(),
+            memory_facts: vec![CognitiveFact {
+                node_id: "n1".to_string(),
+                concept: "rust".to_string(),
+                content: "systems language".to_string(),
+                confidence: 0.9,
+                source_id: "s1".to_string(),
+                tags: vec![],
+                usage_count: 0,
+                last_accessed_at: None,
+            }],
+            knowledge: vec![],
+            procedures: vec![],
+        };
+        let block = render_enrichment_block(&ctx);
+        assert!(block.contains("## Relevant Memory Facts"));
+        assert!(block.contains("[rust]"));
+        assert!(block.contains("systems language"));
+        // The block is only the enrichment sections — no objective/instructions.
+        assert!(!block.contains("## Objective"));
+        assert!(!block.contains("## Instructions"));
+    }
+
+    #[test]
+    fn enrichment_bridges_default_is_unconfigured() {
+        let bridges = EnrichmentBridges::new();
+        assert!(!bridges.is_configured());
+        // enrich() with no bridges returns the input unchanged.
+        let input = BaseTypeTurnInput::objective_only("hello");
+        let enriched = bridges.enrich(&input).unwrap();
+        assert_eq!(enriched.objective, "hello");
+        assert!(
+            !enriched
+                .prompt_preamble
+                .contains("## Relevant Memory Facts")
+        );
+    }
+
+    #[test]
+    fn enrichment_bridges_debug_hides_bridge_internals() {
+        let bridges = EnrichmentBridges::new();
+        let debug = format!("{bridges:?}");
+        assert!(debug.contains("EnrichmentBridges"));
+        assert!(debug.contains("memory: false"));
+        assert!(debug.contains("knowledge: false"));
     }
 }

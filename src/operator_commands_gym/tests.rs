@@ -269,3 +269,153 @@ fn gym_scenario_distinct_error_for_each_bad_id() {
 fn default_output_root_is_relative() {
     assert!(crate::default_output_root().is_relative());
 }
+
+// ── run_gym_compare success path ────────────────────────────────────
+//
+// `run_gym_compare` resolves a real scenario, loads the two most-recent
+// stored run reports from `default_output_root()/<scenario>/<run>/report.json`,
+// renders a comparison, and prints every summary/delta field. The error
+// branch (fewer than two runs / unknown id) is already covered above; these
+// tests cover the success branch hermetically by seeding two report fixtures
+// on disk — no network, no sleeps, no live runtime, and no cognitive-memory
+// writes (the comparison path only touches plain JSON artifacts).
+
+fn seed_run_report(
+    run_dir: &std::path::Path,
+    scenario_id: &str,
+    session_id: &str,
+    run_started_at_unix_ms: u64,
+    passed: bool,
+    checks_passed: usize,
+) {
+    std::fs::create_dir_all(run_dir).expect("create run fixture dir");
+    let report = serde_json::json!({
+        "suite_id": "starter",
+        "scenario": { "id": scenario_id, "title": "Compare-coverage fixture scenario" },
+        "session_id": session_id,
+        "run_started_at_unix_ms": run_started_at_unix_ms,
+        "passed": passed,
+        "scorecard": {
+            "correctness_checks_passed": checks_passed,
+            "correctness_checks_total": 3,
+            "evidence_quality": "sufficient",
+            "unnecessary_action_count": 0,
+            "retry_count": 0
+        },
+        "handoff": {
+            "exported_memory_records": 2,
+            "exported_evidence_records": 2
+        }
+    });
+    std::fs::write(
+        run_dir.join("report.json"),
+        serde_json::to_string_pretty(&report).expect("serialize report fixture"),
+    )
+    .expect("write report.json fixture");
+}
+
+/// Seed exactly two run-report fixtures under `default_output_root()` for the
+/// scenario at `scenario_index`, returning the scenario id and its directory.
+/// The directory is removed first so the fixture set is deterministic.
+fn seed_two_runs(
+    scenario_index: usize,
+    older_passed: bool,
+    older_checks: usize,
+    newer_passed: bool,
+    newer_checks: usize,
+) -> (&'static str, std::path::PathBuf) {
+    let scenario_id = crate::benchmark_scenarios()
+        .get(scenario_index)
+        .expect("scenario index within registered scenarios")
+        .id;
+    let scenario_dir = crate::default_output_root().join(scenario_id);
+    let _ = std::fs::remove_dir_all(&scenario_dir);
+    seed_run_report(
+        &scenario_dir.join("run-older"),
+        scenario_id,
+        "session-older",
+        1_000,
+        older_passed,
+        older_checks,
+    );
+    seed_run_report(
+        &scenario_dir.join("run-newer"),
+        scenario_id,
+        "session-newer",
+        2_000,
+        newer_passed,
+        newer_checks,
+    );
+    (scenario_id, scenario_dir)
+}
+
+fn cleanup_compare_fixtures(scenario_id: &str, scenario_dir: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(scenario_dir);
+    let _ = std::fs::remove_dir_all(
+        crate::default_output_root()
+            .join("comparisons")
+            .join(scenario_id),
+    );
+}
+
+#[test]
+fn gym_compare_succeeds_with_two_seeded_runs_improved() {
+    // Scenario index 1 keeps this isolated from the other compare test and
+    // from the run-scenario test (which owns index 0). `run_gym_compare` only
+    // resolves the id and reads the seeded fixtures, so the scenario's base
+    // type is irrelevant here.
+    let (scenario_id, scenario_dir) = seed_two_runs(1, false, 1, true, 3);
+
+    let result = run_gym_compare(scenario_id);
+
+    cleanup_compare_fixtures(scenario_id, &scenario_dir);
+    assert!(
+        result.is_ok(),
+        "compare should succeed with two seeded runs: {result:?}"
+    );
+}
+
+#[test]
+fn gym_compare_succeeds_with_two_seeded_runs_unchanged() {
+    // Identical metrics across both runs exercise the "unchanged" comparison
+    // branch while still driving every print line in run_gym_compare.
+    let (scenario_id, scenario_dir) = seed_two_runs(2, true, 3, true, 3);
+
+    let result = run_gym_compare(scenario_id);
+
+    cleanup_compare_fixtures(scenario_id, &scenario_dir);
+    assert!(
+        result.is_ok(),
+        "compare should succeed for two identical seeded runs: {result:?}"
+    );
+}
+
+// ── run_gym_scenario success path ───────────────────────────────────
+//
+// `run_gym_scenario` runs a benchmark scenario end-to-end and prints the
+// resulting report. The error branch (unknown id) is covered above. This
+// test covers the success branch hermetically using the single-process
+// `local-harness` scenario `repo-exploration-local` — the same scenario the
+// existing `tests/review.rs` suite drives through `run_benchmark_scenario`.
+// The harness runs entirely in-process with `InMemory*` stores (no network,
+// no external services, no cognitive-memory writes); artifacts land under the
+// crate-relative `default_output_root()` and are cleaned up afterward.
+
+#[test]
+fn gym_scenario_succeeds_for_local_harness_scenario() {
+    // `repo-exploration-local` is the single-process local-harness scenario
+    // that `tests/review.rs` also drives through `run_benchmark_scenario`; it
+    // is registered first and is owned exclusively by this test (the compare
+    // tests use scenarios 1 and 2), so there is no fixture-directory race.
+    let scenario_id = "repo-exploration-local";
+    let scenario_dir = crate::default_output_root().join(scenario_id);
+    let _ = std::fs::remove_dir_all(&scenario_dir);
+
+    let result = run_gym_scenario(scenario_id);
+
+    let _ = std::fs::remove_dir_all(&scenario_dir);
+    assert!(
+        result.is_ok(),
+        "run_gym_scenario should succeed for the local-harness scenario: {result:?}"
+    );
+}

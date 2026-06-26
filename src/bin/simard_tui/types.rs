@@ -59,6 +59,9 @@ pub struct ActiveGoal {
     pub status: GoalProgress,
     #[serde(default)]
     pub assigned_to: Option<String>,
+    /// Target repository slug (issue #2359). `None` = the daemon's own repo.
+    #[serde(default)]
+    pub repo: Option<String>,
     #[serde(default)]
     pub current_activity: Option<String>,
     #[serde(default)]
@@ -183,6 +186,7 @@ mod tests {
 
     fn sample_active_goal() -> ActiveGoal {
         ActiveGoal {
+            repo: None,
             id: "g-1".to_string(),
             description: "Ship MVP".to_string(),
             priority: 1,

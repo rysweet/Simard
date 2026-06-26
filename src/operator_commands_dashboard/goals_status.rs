@@ -60,6 +60,8 @@ const NOISE_PHRASES: &[&str] = &[
     "goal-action parse failed",
     "spawn_engineer dispatched",
     "continue_skipping",
+    "advance-goal:",
+    "no-action:",
     "ooda-brain",
     "brain:",
 ];
@@ -382,8 +384,40 @@ mod tests {
             !detail.contains("brain-error fallback"),
             "detail still leaks 'brain-error fallback': {detail}"
         );
-        assert!(detail.starts_with("advance-goal"));
+        assert!(
+            !detail.contains("advance-goal"),
+            "detail still leaks the raw 'advance-goal:' action prefix: {detail}"
+        );
         assert_eq!(full, raw, "detail_full must preserve the original verbatim");
+    }
+
+    // ---- Raw OODA action-verb prefixes are stripped (#2358) ---------------
+
+    #[test]
+    fn advance_goal_prefix_is_stripped() {
+        let raw = "advance-goal: opened PR #1685 to fix the Current Activity column";
+        let (chip, detail, _) = render_status_and_detail(Some(raw));
+        assert_eq!(chip, StatusChip::Working);
+        assert!(
+            !detail.contains("advance-goal:"),
+            "detail still leaks 'advance-goal:' prefix: {detail}"
+        );
+        assert!(detail.starts_with("opened PR #1685"), "detail: {detail}");
+    }
+
+    #[test]
+    fn no_action_prefix_is_stripped() {
+        let raw = "no-action: Another subordinate is mid-implementation on #2097";
+        let (chip, detail, _) = render_status_and_detail(Some(raw));
+        assert_eq!(chip, StatusChip::Working);
+        assert!(
+            !detail.contains("no-action:"),
+            "detail still leaks 'no-action:' prefix: {detail}"
+        );
+        assert!(
+            detail.contains("Another subordinate is mid-implementation"),
+            "detail: {detail}"
+        );
     }
 
     // ---- Failed branch ----------------------------------------------------

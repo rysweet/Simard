@@ -101,7 +101,7 @@ impl AgentProgram for MeetingFacilitatorProgram {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct StructuredMeetingNotes {
     agenda: String,
     updates: Vec<String>,

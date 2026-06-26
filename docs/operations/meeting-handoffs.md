@@ -64,22 +64,88 @@ the most recent in-progress session if one exists.
 ## REPL Commands
 
 The REPL is a thin loop over `MeetingBackend` (see
-`src/meeting_repl/repl.rs` and `src/meeting_backend/`). The following
-commands are recognized; everything else is treated as natural
-conversation with the bound LLM agent.
+`src/meeting_repl/repl.rs` and `src/meeting_backend/`). Commands are grouped
+below by purpose; everything that is **not** a recognized command is treated
+as natural conversation with the bound LLM agent. The command set is the
+single source of truth in `src/meeting_backend/command.rs` (`HELP_GROUPS`),
+shared by the CLI REPL and the dashboard chat.
+
+**Meeting control**
 
 | Command | Effect |
 |---|---|
-| (any text) | Sent to the brain as a prompt; response printed inline |
-| `/help` | Show the command list |
+| `/help` | Show the grouped, colorized command list |
+| `/close` (alias `/done`) | Finalize and write `meeting_handoff.json`; exit the REPL |
 | `/status` | Show session info (topic, started_at, current decision/action counts) |
-| `/template` | List meeting templates |
-| `/template <name>` | Apply a template (`standup`, `1on1`, `retro`, `planning`) |
-| `/theme <text>` | Record a theme for this meeting |
+| `/export` | Export the meeting transcript as markdown |
 | `/recap` | Color-coded session recap |
 | `/preview` | Preview the handoff artifact before closing |
-| `/export` | Export the meeting as markdown |
-| `/close` | Finalize and write `meeting_handoff.json`; exit the REPL |
+| `/state` | Show current decisions, questions, actions, risks, disagreements |
+
+**Capture**
+
+| Command | Effect |
+|---|---|
+| `/decision <text> [--rationale <why>]` | Record a decision (optional rationale) |
+| `/action <text>` | Record an action item (assignee/deadline parsed inline) |
+| `/question <text>` | Record an open question |
+| `/risk <text>` | Record an identified risk |
+| `/disagree <text>` | Record a disagreement or dissenting view |
+| `/theme <text>` | Record a theme for this meeting |
+| `/owner <name>` | Name the next agent/persona/human to action this handoff |
+| `/goal <text>` | Set the meeting's overarching objective |
+
+**Templates**
+
+| Command | Effect |
+|---|---|
+| `/template` | List meeting templates |
+| `/template <name>` | Apply a template (`standup`, `1on1`, `retro`, `planning`) |
+
+Any other text is sent to the brain as a prompt and the response is printed
+inline.
+
+### Grouped, colorized `/help` and unknown-command suggestions (#2321)
+
+`/help` renders the three groups above as titled, color-coded sections (the
+titles honor `NO_COLOR` via `src/meeting_repl/color.rs`, matching how `/recap`
+and `/state` colorize their headers).
+
+If you type a single slash token that looks like a command but matches none
+(e.g. a typo), the REPL **does not** forward it to the LLM. Instead it prints a
+"did you mean?" hint, suggesting the closest known command within Levenshtein
+distance 2:
+
+```text
+simard:meeting> /colse
+Unknown command '/colse'. Did you mean '/close'?
+```
+
+When nothing is close enough, it lists the available commands instead:
+
+```text
+simard:meeting> /zzzz
+Unknown command '/zzzz'. Type /help for the full list.
+
+── Meeting control ──
+  ...
+```
+
+This affordance is deliberately narrow so normal input is never hijacked:
+
+- Multi-token slash lines (`/foo some text`) stay conversation.
+- File paths and markdown that start with `/` (e.g. `/home/user/notes.md`,
+  `/etc/hosts`) stay conversation — only a `/` followed solely by ASCII
+  letters is treated as a command attempt.
+- Bare single-component absolute paths that are well-known filesystem roots
+  (`/home`, `/tmp`, `/var`, …, the FHS top-level directories) stay
+  conversation, so a path like `/home` is never mistaken for a `/done` typo.
+- Bare, argument-requiring commands typed without a payload (`/decision`,
+  `/theme`, …) still fall through to conversation, unchanged.
+- Only *argument-less* single slash-tokens are treated as command attempts.
+  A typo that carries a payload (e.g. `/decison Adopt TDD`) is left as
+  conversation rather than suggested — distinguishing a typo+payload from an
+  intentional `/word args` line is ambiguous and could hijack real input.
 
 The brain implicitly extracts decisions, action items, and open
 questions from free-form discussion; explicit operator intent

@@ -140,6 +140,7 @@ pub(crate) fn test_bridges() -> OodaBridges {
         knowledge: mock_knowledge(),
         gym: mock_gym(),
         session: None,
+        session_factory: None,
         brain: std::sync::Arc::new(crate::ooda_brain::DeterministicLifecycleBrain),
         decide_brain: None,
         orient_brain: None,
@@ -159,6 +160,7 @@ pub(crate) fn board_with_goal(
     add_active_goal(
         &mut board,
         ActiveGoal {
+            repo: None,
             id: id.to_string(),
             description: format!("Goal {id}"),
             priority: 1,
@@ -173,6 +175,22 @@ pub(crate) fn board_with_goal(
     board
 }
 
+/// Build a single unassigned, NotStarted [`ActiveGoal`] for tests that need to
+/// assemble multi-goal boards.
+pub(crate) fn active_goal(id: &str) -> ActiveGoal {
+    ActiveGoal {
+        repo: None,
+        id: id.to_string(),
+        description: format!("Goal {id}"),
+        priority: 1,
+        status: GoalProgress::NotStarted,
+        assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
+        last_progress_update_at: None,
+    }
+}
+
 #[allow(dead_code)] // Kept for future integration tests that drive the full dispatch path.
 pub(crate) fn bridges_with_session(session: MockSession) -> OodaBridges {
     OodaBridges {
@@ -180,6 +198,7 @@ pub(crate) fn bridges_with_session(session: MockSession) -> OodaBridges {
         knowledge: mock_knowledge(),
         gym: mock_gym(),
         session: Some(Box::new(session)),
+        session_factory: None,
         brain: std::sync::Arc::new(crate::ooda_brain::DeterministicLifecycleBrain),
         decide_brain: None,
         orient_brain: None,
