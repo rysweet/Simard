@@ -105,6 +105,19 @@ that PR to landing**, in preference to starting anything new:
 Prefer finishing an in-flight PR you own over starting a fresh one. A goal that
 has an open PR is *in progress*, not *done*.
 
+## Finalization runs inside the engineer — don't spin the goal-action on it
+
+Each engineer drives an ordered **PR-finalization pipeline** on its own PR before
+merge — a high-end crusty review→fix loop, then pr-guide, then a final review, then
+merge-ready (full reference: `docs/reference/pr-finalization-pipeline.md`).
+**Finalization runs inside the engineer**'s own cycle: the goal-action brain (you)
+**only dispatches and checks** — it **does not run that loop** itself. So when a goal
+already has a live engineer mid-finalization, do **not** re-dispatch it or re-loop on it
+**while its engineer is finalizing** its PR — that would just spin the OODA cycle. Treat
+"engineer is finalizing PR #<n>" as *in progress*: check back next cycle, and spend this
+cycle's spare capacity on a *different* goal. This preserves the **#2404** loop-awareness
+contract — the engineer owns the review→fix loop; the brain dispatches and waits.
+
 # Done-gate — a fix/implement goal is done ONLY when merged AND closed
 
 For any goal whose deliverable is a fix or an implementation, the goal is

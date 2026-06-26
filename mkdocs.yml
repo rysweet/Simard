@@ -101,6 +101,7 @@ nav:
     - Goal Coverage Allocation: reference/goal-coverage-allocation.md
     - Maximum Safe Parallelism: reference/maximum-safe-parallelism.md
     - Concurrent Engineer Dispatch: reference/concurrent-engineer-dispatch.md
+    - PR-Finalization Review Pipeline: reference/pr-finalization-pipeline.md
     - Pluggable Identity API: reference/pluggable-identity-api.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
