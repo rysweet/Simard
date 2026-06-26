@@ -160,8 +160,10 @@ let cap = config
 let report = ensure_goal_coverage(state, &mut planned_actions, cap);
 eprintln!("[simard] OODA cycle: coverage — {}", report.log_line());
 
-// --- Act ---
-let outcomes = act(&planned_actions, bridges, state)?;
+// --- Act (now dispatches the planned spawn-path `AdvanceGoal` actions
+//     concurrently, bounded by this same `cap` — see
+//     reference/concurrent-engineer-dispatch.md) ---
+let outcomes = act(&planned_actions, bridges, state, cap)?;
 ```
 
 **Cap source.** Coverage reads `scaler.current_max()` — the value the Decide
@@ -257,6 +259,9 @@ de-dups against both live engineers and already-planned actions.
 - [Maximum safe parallelism](./maximum-safe-parallelism.md) — how coverage,
   the AIMD cap, and goal decomposition combine to fill spare machine capacity
   with concurrent engineers on distinct work items.
+- [Concurrent engineer dispatch](./concurrent-engineer-dispatch.md) — how the
+  Act phase dispatches the spawn-path `AdvanceGoal` actions coverage plans
+  **concurrently**, each with its own LLM session, bounded by this same cap.
 - [Adaptive scaling API](./adaptive-scaling-api.md) — the AIMD scaler that
   supplies the safety cap.
 - [Goal target-repo routing](./goal-target-repo-routing.md) — the companion

@@ -1,11 +1,12 @@
 ---
 title: Maximum safe parallelism reference
 description: How the OODA daemon fills spare machine capacity with concurrent engineers on distinct work items, bounded by the AIMD safety cap — and how a parallelizable goal is decomposed so coverage can parallelize it.
-last_updated: 2026-06-25
+last_updated: 2026-06-26
 owner: simard
 doc_type: reference
 status: reference
 related:
+  - ./concurrent-engineer-dispatch.md
   - ./goal-coverage-allocation.md
   - ./adaptive-scaling-api.md
   - ./ooda-decide-prompt.md
@@ -43,6 +44,16 @@ behind a serial triage loop. The operator expectation is the opposite: *spawn
 enough engineers to fill the machine as long as there is more independent work
 to do, and stop adding them when the machine is under pressure.*
 
+There were two distinct causes. First, a single umbrella goal bundling many
+issues yields only **one** engineer (the unit of parallelism is the goal), so it
+must be **decomposed** into distinct per-issue goals — the prompt-driven #2405
+fix this page covers. Second, even once several distinct goals are planned, the
+Act phase **dispatched them serially**: it held a global lock and the single
+shared LLM session across each goal-action `run_turn` (~30–90 s), so the
+planned-parallel actions serialized and only ~1 engineer started per round. That
+second cause is fixed by
+[concurrent engineer dispatch](./concurrent-engineer-dispatch.md).
+
 ## How per-cycle parallelism actually works
 
 Each OODA cycle runs Observe → Orient → Decide → **Coverage** → Act. Parallelism
@@ -54,7 +65,7 @@ one becomes one spawned engineer.
 | **Orient** (`orient` / `orient_with_brain`) | **One `Priority` per active goal** (plus a few synthetic priorities) | The number of priorities is the number of goals — Orient does not fan a single goal into many. |
 | **Decide** (`decide_with_brain`) | **One `PlannedAction` per priority** — the brain returns a single `DECISION: <variant>` per call | Caps the action list at `scaler.adjust()` (the AIMD cap). Cannot express "spawn N for this one goal" — the output schema is one decision per priority. |
 | **Coverage** (`ensure_goal_coverage`) | Guarantees **one engineer per incomplete unassigned goal**, preserves extra parallelism behind coverage, truncates to `cap` | Parallelizes across *distinct goals*, up to the cap. See [goal coverage allocation](./goal-coverage-allocation.md). |
-| **Act** (`dispatch_advance_goal`) | Spawns/heartbeats the engineer for each action | **Short-circuits when the goal already has a live engineer** (`assigned_to`), and spawning is de-duplicated per goal (`find_live_engineer_for_goal`). |
+| **Act** (`dispatch_actions_bounded` → `concurrent::dispatch_advance_concurrent`) | Spawns/heartbeats the engineer for each action | **Dispatches the unassigned spawn-path `AdvanceGoal` actions concurrently** — each with its own LLM session, bounded by the AIMD `cap` — so all planned engineers start in **one** round. Heartbeat actions (`assigned_to` set) stay serialized; spawning is de-duplicated per goal (`find_live_engineer_for_goal`) and per round (atomic claim). |
 
 **Key consequence — the unit of parallelism is the goal.** A goal has a single
 `assigned_to` slot, the Act phase heart-beats (rather than re-spawns) a goal that
@@ -65,6 +76,15 @@ goal yields **one** engineer no matter how many `AdvanceGoal` actions name it.
 Multi-*goal* parallelism therefore already works: with several incomplete goals,
 coverage spawns one engineer per goal, up to the cap. The missing piece is the
 single-goal-with-many-issues case.
+
+> **Dispatch is concurrent, not serial.** Planning N distinct `AdvanceGoal`
+> actions is necessary but not sufficient — the Act phase must also *dispatch*
+> them concurrently, and it does (see
+> [concurrent engineer dispatch](./concurrent-engineer-dispatch.md)). Earlier the
+> dispatcher held a global lock and the single shared LLM session across each
+> goal-action `run_turn`, so even a planned-parallel batch serialized and only
+> ~1 engineer started per round. Spawn-path `AdvanceGoal` actions now run
+> concurrently, each with its own session, bounded by the same AIMD cap.
 
 ## The AIMD safety cap (do not remove or weaken)
 
@@ -104,10 +124,13 @@ The additive-increase + pressure/error backoff behavior is unchanged by this.
 Because the unit of parallelism is the goal and the Decide schema is one
 decision per priority, the way to fill spare capacity for a single multi-issue
 goal is to turn it into **multiple distinct goals**, which coverage then
-parallelizes. This is a prompt-driven behavior of the goal-action brain
-(`goal_session_objective.md`) — no change to the AIMD cap or the dispatch
-core — so it hot-reloads from `~/.simard/prompt_assets/simard/` without a binary
-rebuild.
+parallelizes. The decomposition itself is a prompt-driven behavior of the
+goal-action brain (`goal_session_objective.md`) — it changes neither the AIMD
+cap nor the dispatch core, so it hot-reloads from
+`~/.simard/prompt_assets/simard/` without a binary rebuild. (Dispatching the
+resulting per-issue goals *concurrently* is a separate Rust change to the
+dispatch core that **does** require a binary rebuild — see
+[concurrent engineer dispatch](./concurrent-engineer-dispatch.md).)
 
 When a goal is an umbrella over several **independent** open issues and live
 engineers are below the cap, the goal-action brain spawns one engineer whose
@@ -173,11 +196,18 @@ The Rust parsers are untouched; the prompts keep their existing shapes:
   decomposed goal; no duplicate work.
 - **No idle capacity while parallelizable work remains** — given enough distinct,
   bounded goals on the board, coverage fills every free slot up to the cap.
-- **Hot-reloadable.** The fill behavior is prompt-only; it requires no binary
-  rebuild and does not alter the AIMD cap or the dispatch core.
+- **Hot-reloadable decomposition.** The goal-*decomposition* fill behavior is
+  prompt-only; it requires no binary rebuild and does not alter the AIMD cap or
+  the dispatch core. (Dispatching the planned actions *concurrently* is a
+  separate dispatch-core change that does need a rebuild — see
+  [concurrent engineer dispatch](./concurrent-engineer-dispatch.md).)
 
 ## Related reading
 
+- [Concurrent engineer dispatch](./concurrent-engineer-dispatch.md) — how the
+  Act phase dispatches the planned spawn-path `AdvanceGoal` actions concurrently
+  (per-goal LLM sessions, atomic claim, semaphore cap) so N planned engineers
+  actually start in one round.
 - [Goal coverage allocation](./goal-coverage-allocation.md) — the per-cycle
   allocator that guarantees one engineer per incomplete goal and parallelizes
   distinct goals up to the cap.
