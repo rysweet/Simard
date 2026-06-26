@@ -30,3 +30,6 @@ tests/e2e-dashboard/.audit-output/
 
 # mkdocs build output
 /site/
+
+# Generated dashboard-audit screenshots/reports (regenerated locally; not source)
+scripts/dashboard-audit/out/
