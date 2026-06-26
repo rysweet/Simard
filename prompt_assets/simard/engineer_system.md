@@ -214,10 +214,16 @@ spend.)
 **Stage 1 — crusty review→fix loop (high-end model).** Invoke the
 **crusty-old-engineer** skill to review the PR's diff/changes on a **high-end**
 reasoning model. The engineer itself runs the Copilot default/auto model, so crusty
-MUST be pinned to the high-end model via a `copilot --model "$SIMARD_REVIEW_MODEL"`
-subprocess. The model is configurable via **`$SIMARD_REVIEW_MODEL`** and defaults to the
-verified **gpt-5.4** (confirmed accepted by `copilot --model gpt-5.4`). Each iteration,
-in order:
+MUST be pinned to the high-end model via a
+`copilot --model "$SIMARD_REVIEW_MODEL" --reasoning-effort high --context long_context`
+subprocess — the **high** reasoning-effort level and the **1M-token `long_context`**
+tier are required so the review reasons hard over the full diff. The model is
+configurable via **`$SIMARD_REVIEW_MODEL`** and defaults to the verified **gpt-5.5**;
+the sanctioned high-end allowlist is **`gpt-5.5`** and **`claude-opus-4.8`** (both
+confirmed accepted by `copilot --model <m> --reasoning-effort high --context long_context`;
+`claude-opus-4.8` is the premium, higher-cost option). An unrecognized
+`$SIMARD_REVIEW_MODEL` falls back to the default rather than failing the pipeline.
+Each iteration, in order:
 
 1. Re-fetch the **latest PR state** (`gh pr diff <PR>`) — never re-review a **stale diff**.
 2. Run crusty on the high-end model over that latest diff.

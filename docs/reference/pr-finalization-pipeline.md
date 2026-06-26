@@ -85,7 +85,7 @@ until crusty is satisfied or the cap is reached.
 | Property | Behavior |
 |----------|----------|
 | **Reviewer** | `crusty-old-engineer` skill — a curmudgeonly senior-engineer reviewer that surfaces correctness, maintainability, and long-term-consequence findings. |
-| **Model** | A **high-end reasoning model**, pinned explicitly (the engineer itself runs the Copilot CLI default/auto model, so crusty is invoked through a `copilot --model "$SIMARD_REVIEW_MODEL"` subprocess to force the high-end model). Default `gpt-5.4`; see [Configuration](#configuration). |
+| **Model** | A **high-end reasoning model**, pinned explicitly (the engineer itself runs the Copilot CLI default/auto model, so crusty is invoked through a `copilot --model "$SIMARD_REVIEW_MODEL" --reasoning-effort high --context long_context` subprocess to force the high-end model at **high** reasoning effort over the **1M-token** context tier). Default `gpt-5.5`; see [Configuration](#configuration). |
 | **Per-iteration input** | The **latest** PR state — the engineer re-fetches the current diff each iteration (`gh pr diff <PR>`); it never re-reviews a stale diff. |
 | **Fix discipline** | Every **actionable / blocking** finding is fixed in code and pushed to the **same PR branch** before the next review. |
 | **Termination** | Crusty reports **no blocking/actionable findings** (satisfied), OR the iteration cap is reached. See [Bounded loop & blocker semantics](#bounded-loop--blocker-semantics). |
@@ -165,32 +165,34 @@ OODA loop) shown here for context only; this pipeline does not read it.
 
 | Variable | New? | Default | Range / Allowlist | Purpose |
 |----------|------|---------|-------------------|---------|
-| `SIMARD_REVIEW_MODEL` | **net-new** | `gpt-5.4` | Validated against an allowlist (`gpt-5.4`, `gpt-5.4-mini`, …) before being passed to `copilot --model`; an unrecognized value falls back to the default. | The high-end reasoning model the crusty review loop runs on. Defined and read by the new engineer-prompt section. |
+| `SIMARD_REVIEW_MODEL` | **net-new** | `gpt-5.5` | Validated against an allowlist (`gpt-5.5`, `claude-opus-4.8`) before being passed to `copilot --model … --reasoning-effort high --context long_context`; an unrecognized value falls back to the default. | The high-end reasoning model the crusty review loop runs on. Defined and read by the new engineer-prompt section. |
 | `SIMARD_REVIEW_MAX_ITERS` | **net-new** | `3` | Integer, bounded to `[1, 5]`. | Hard cap on crusty review→fix iterations before the loop must terminate. Defined and read by the new engineer-prompt section. |
 | `SIMARD_DAILY_BUDGET_USD` | pre-existing | `500` | — | **Pre-existing** Simard knob, read by the OODA-loop budget tracker (`src/ooda_loop/types.rs`, default `500.0`) — **not** introduced or consumed by this pipeline. It is the daemon-wide spend ceiling, not a per-pipeline gate; the trivial-PR filter and the iteration cap are what actually bound *this* loop's spend. |
 
-> **Model verification.** `gpt-5.4` is the verified high-end default — it is
-> accepted by `copilot --model gpt-5.4` on the enterprise Copilot endpoint. If
-> you change `SIMARD_REVIEW_MODEL`, confirm the new string is accepted by the CLI
-> (`copilot --model <X> -p "reply OK"`) before deploying; an unaccepted value
+> **Model verification.** `gpt-5.5` is the verified high-end default and
+> `claude-opus-4.8` is the verified premium alternative — both are accepted by
+> `copilot --model <m> --reasoning-effort high --context long_context` on the
+> enterprise Copilot endpoint. If you change `SIMARD_REVIEW_MODEL`, confirm the new
+> string is accepted by the CLI (`copilot --model <X> --reasoning-effort high
+> --context long_context -p "reply OK"`) before deploying; an unaccepted value
 > falls back to the default rather than failing the pipeline.
 
 ### Examples
 
-Run the default pipeline (high-end crusty review on `gpt-5.4`, cap 3) — no
-configuration needed; this is the shipped default.
+Run the default pipeline (high-end crusty review on `gpt-5.5` at high reasoning
+effort + 1M context, cap 3) — no configuration needed; this is the shipped default.
 
-Pin a different high-end model and widen the cap to 5 for a session:
+Pin the premium model and widen the cap to 5 for a session:
 
 ```bash
-export SIMARD_REVIEW_MODEL=gpt-5.4
+export SIMARD_REVIEW_MODEL=claude-opus-4.8
 export SIMARD_REVIEW_MAX_ITERS=5
 ```
 
 Confirm a candidate model string before adopting it:
 
 ```bash
-copilot --model gpt-5.4 -p "Reply with exactly: OK" --allow-all-tools
+copilot --model gpt-5.5 --reasoning-effort high --context long_context -p "Reply with exactly: OK" --allow-all-tools
 # expect: OK
 ```
 
@@ -285,7 +287,8 @@ the next engineer cycle.
 - **Latest-state.** Each loop iteration reviews the freshly-pushed PR state, never
   a stale diff.
 - **High-end.** The crusty pass runs on the pinned `SIMARD_REVIEW_MODEL`
-  (default `gpt-5.4`), independent of the engineer's default model.
+  (default `gpt-5.5`, at `--reasoning-effort high --context long_context`),
+  independent of the engineer's default model.
 - **Cost-aware.** Trivial PRs get a single pass; the trivial filter and the
   iteration cap keep the high-end model's spend bounded, well inside the
   daemon-wide `SIMARD_DAILY_BUDGET_USD` (which this pipeline does not itself

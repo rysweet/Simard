@@ -1032,7 +1032,8 @@ fn progress_assessment_recipe_mirrors_done_gate() {
 // fix is implemented and the PR is opened/updated but BEFORE merge-ready:
 //
 //   1. CRUSTY REVIEW→FIX LOOP on a HIGH-END model (`$SIMARD_REVIEW_MODEL`,
-//      default `gpt-5.4`), fixing every actionable finding and re-reviewing the
+//      default `gpt-5.5`, run with --reasoning-effort high --context long_context),
+//      fixing every actionable finding and re-reviewing the
 //      LATEST PR state until crusty emits the sentinel `NO BLOCKING FINDINGS`
 //      or a bounded cap (`$SIMARD_REVIEW_MAX_ITERS`, default 3) is reached.
 //   2. PR-GUIDE illustrated walkthrough (graceful-skip where unavailable).
@@ -1099,8 +1100,12 @@ fn engineer_system_crusty_loop_uses_high_end_model() {
         "the high-end model must be configurable via $SIMARD_REVIEW_MODEL"
     );
     assert!(
-        norm.contains("gpt-5.4"),
-        "the high-end model must default to the verified gpt-5.4"
+        norm.contains("gpt-5.5"),
+        "the high-end model must default to the verified gpt-5.5"
+    );
+    assert!(
+        norm.contains("reasoning-effort high") && norm.contains("long_context"),
+        "crusty must run with --reasoning-effort high and --context long_context"
     );
     assert!(
         norm.contains("copilot --model"),
