@@ -1,0 +1,55 @@
+name: "ADO ACL self-escalation guard (#809)"
+description: "Outside-in verification that the default-workflow can no longer self-grant an Azure DevOps ForcePush ACL to bypass a push denial, that ACL-mutation commands are refused by default while read-only inspection is allowed, and that any opt-in temporary grant is crash-safe and idempotent so an interrupted or failed run can never leave a shared repo with elevated permissions."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "ADO ACL guard refuses self-escalation and revokes crash-safely"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/ado-acl-self-escalation-guard.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "security"
+    - "guardrail"
+    - "azure-devops"
+    - "acl"
+    - "crash-safety"
+    - "issue-809"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

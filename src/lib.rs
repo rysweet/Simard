@@ -1,3 +1,4 @@
+pub mod ado_acl_guard;
 pub mod agent_goal_assignment;
 pub mod agent_program;
 pub mod agent_registry;

@@ -103,6 +103,7 @@ nav:
     - Concurrent Engineer Dispatch: reference/concurrent-engineer-dispatch.md
     - Pluggable Identity API: reference/pluggable-identity-api.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
+    - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     # Hidden from nav until issue #1590 implementation lands:
     #   - reference/cognitive-memory-bridge-helpers.md
     #   - reference/goal-board-api.md
