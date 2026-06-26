@@ -191,7 +191,7 @@ Whenever an engineer cycle produces code changes, the cycle is NOT complete unti
    - **Scope** — diff summary with confirmation of no unrelated edits
    - **TDD attestation** — exactly one of: `tdd: test-first ordering verified — <link to commit>` (default for in-scope PRs), `tdd-exempt: <reason from §1.1>` (exception cases), or `tdd: not applicable — PR touches no in-scope paths` (ops/docs/prompt PRs). Per `Specs/TDD_ADOPTION.md` §3 Layer 2.
    - **Verdict** — explicit "ready to merge" / "draft" / "blocked" call with rationale
-4. **Drive to merge** — once CI is fully green and the PR has evidence headings, merge via `gh pr merge --squash --delete-branch <PR>`.
+4. **Drive to merge** — once CI is fully green and the PR has evidence headings, merge through the gated authority. For a `rysweet/Simard` PR the merge verb is `simard merge-pr <PR>`, which re-checks the objective gates (base-branch allow-list, `mergeable == MERGEABLE`, all required checks green) and the merge-readiness judge before it invokes the underlying `gh pr merge --squash --delete-branch` — do not run `gh pr merge` directly to bypass those gates. For a PR in another repo (e.g. amplihack-rs) `simard merge-pr` does not apply; verify the six criteria yourself, then `gh pr merge --squash --delete-branch <PR> --repo <owner/repo>`.
 
 ### Own the PR you were dispatched for — continue it, never duplicate it
 
@@ -206,10 +206,16 @@ has an open PR (yours or a prior engineer's):
   the same branch. **Never open a second PR for an issue that already has one** —
   duplicate PRs waste a review slot and a CI run and will be closed.
 - **Drive it to landing.** Once CI is green and all six merge-ready criteria have
-  evidence, merge it (`gh pr merge --squash --delete-branch <PR>`) and then
-  **close the linked issue** (`gh issue close <N>`, or confirm the `Closes #<N>`
-  line auto-closed it). A fix/implement cycle is **not done until its PR is
-  merged and the linked issue is closed** — "PR opened" is not the deliverable.
+  evidence, merge it — `simard merge-pr <PR>` for a `rysweet/Simard` PR (the
+  gated path that runs the objective gates + judge before invoking
+  `gh pr merge --squash --delete-branch`), or, for a PR in another repo where that
+  wrapper does not apply, `gh pr merge --squash --delete-branch <PR> --repo
+  <owner/repo>` once you have verified the six criteria yourself. Then **close the
+  linked issue**: a same-repo merge may auto-close it via `Closes #<N>`, but a
+  cross-repo issue (e.g. amplihack-rs) is not auto-closed and needs an explicit
+  `gh issue close <N> --repo <owner/repo>`. A fix/implement cycle is **not done
+  until its PR is merged and the linked issue is closed** — "PR opened" is not the
+  deliverable.
 - **If the PR is genuinely blocked** on a required human review/approval or a
   check you cannot satisfy, record that specific blocker in
   `cycle_summary.engineer_summary` (e.g. "PR #819 blocked on required review

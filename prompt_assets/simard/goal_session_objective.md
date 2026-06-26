@@ -77,12 +77,30 @@ that PR to landing**, in preference to starting anything new:
    fix to the same branch — this outranks opening a new PR for a different issue
    (see *CI-fix priority* below).
 3. If CI is **green and the six merge-ready criteria have evidence**, **merge it
-   yourself** using your existing merge authority — the
-   `merge_readiness_judge` / `simard merge-pr <PR>` path, i.e.
-   `gh pr merge --squash --delete-branch <PR>`. Do not wait for someone else to
-   merge a PR you own and have already validated.
-4. After the merge, **close the linked issue** (`gh issue close <N>`), or confirm
-   the squash-merge auto-closed it via its `Closes #<N>` line.
+   yourself** through your *gated* merge authority — never wait for an outside
+   party to merge a PR you own and have already validated:
+   - **For a `rysweet/Simard` PR,** the merge verb is `simard merge-pr <PR>`
+     (library entry point `stewardship::merge_pr_if_merge_ready`). It re-checks
+     the deterministic objective gates at call time — base-branch allow-list (the
+     #1549 wrong-base guard), `mergeable == MERGEABLE`, every required check green
+     — then runs the agentic merge-readiness judge, and **only if all gates pass**
+     does it invoke the underlying `gh pr merge --squash --delete-branch`. **Do
+     not run `gh pr merge` directly to skip those gates;** call `simard merge-pr`.
+   - **For a PR in another repo** (e.g. an amplihack-rs PR), `simard merge-pr`
+     does not apply — it only operates on `rysweet/Simard`. Walk the six criteria
+     yourself, confirm CI is green and `mergeable == MERGEABLE`, then
+     `gh pr merge --squash --delete-branch <PR> --repo <owner/repo>`.
+   - The brain has no `merge_pr` action of its own, so "yourself" means the
+     **dispatched engineer** runs the merge from its CLI; when you cannot
+     dispatch one, surface "PR #<n> is merge-ready; run `simard merge-pr <n>`" in
+     your `rationale` and route to `advance_goal`. Either way the merge runs
+     through the gated path, not by waiting on someone else.
+4. After the merge, **close the linked issue**. A *same-repo* squash-merge can
+   auto-close it via its `Closes #<N>` line, but GitHub does **not** auto-close an
+   issue that lives in a *different* repo (e.g. an amplihack-rs issue a
+   Simard-repo merge cannot reach) — for any cross-repo issue you must run
+   `gh issue close <N> --repo <owner/repo>` explicitly. Confirm the issue is
+   actually CLOSED before recording the goal done.
 
 Prefer finishing an in-flight PR you own over starting a fresh one. A goal that
 has an open PR is *in progress*, not *done*.
