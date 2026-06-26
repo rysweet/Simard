@@ -165,11 +165,19 @@ in order:
    `gadugi-test` and `Skill(skill="quality-audit")` on it — these tools ARE
    available in the engineer's environment.
 
-   Once all criteria are verified, merge via `gh pr merge --squash --delete-branch`.
+   Once all criteria are verified, merge through your *gated* merge authority,
+   not a raw `gh pr merge`: for a `rysweet/Simard` PR call `simard merge-pr <PR>`
+   (it re-checks the objective gates + merge-readiness judge before invoking
+   `gh pr merge --squash --delete-branch`); for a PR in another repo (e.g.
+   amplihack-rs), where `simard merge-pr` does not apply, `gh pr merge --squash
+   --delete-branch <PR> --repo <owner/repo>` once you have verified the six
+   criteria yourself (see *Finish what you started* above for the full gated path).
    **Then close the linked issue** (`gh issue close <N>`, or confirm the
-   `Closes #<N>` line auto-closed it): a fix/implement goal is not done until its
-   PR is **merged** and the issue is **closed** (see *Done-gate* above). Driving
-   an open PR you own to landing outranks starting new work this cycle.
+   `Closes #<N>` line auto-closed it — a *cross-repo* issue is **not** auto-closed,
+   so run `gh issue close <N> --repo <owner/repo>` explicitly): a fix/implement
+   goal is not done until its PR is **merged** and the issue is **closed** (see
+   *Done-gate* above). Driving an open PR you own to landing outranks starting new
+   work this cycle.
 2. **Fix failing PRs second.** For each red PR, diagnose the CI failure, apply
    the fix, and push. Do not open new PRs while fixable failures exist.
 3. **Close duplicate PRs.** If multiple PRs address the same issue or overlap
