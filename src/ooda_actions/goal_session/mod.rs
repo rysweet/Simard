@@ -176,7 +176,9 @@ pub(super) fn truncate_for_outcome(s: &str) -> String {
 
 mod advance;
 
-pub(crate) use advance::advance_goal_with_session;
+pub(crate) use advance::{
+    advance_goal_with_session, apply_goal_advance_result, build_goal_advance_input,
+};
 
 #[cfg(test)]
 mod tests {

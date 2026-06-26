@@ -100,6 +100,7 @@ nav:
     - Goal Target-Repo Routing: reference/goal-target-repo-routing.md
     - Goal Coverage Allocation: reference/goal-coverage-allocation.md
     - Maximum Safe Parallelism: reference/maximum-safe-parallelism.md
+    - Concurrent Engineer Dispatch: reference/concurrent-engineer-dispatch.md
     - Pluggable Identity API: reference/pluggable-identity-api.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
     # Hidden from nav until issue #1590 implementation lands:

@@ -374,6 +374,26 @@ impl OodaStateSnapshot {
     }
 }
 
+/// Mints fresh, independent LLM sessions for concurrent `AdvanceGoal`
+/// dispatch.
+///
+/// The slow goal-action `run_turn` call (~30-90s) used to serialize on the
+/// single shared [`OodaBridges::session`], so only ~1 engineer started per
+/// OODA round even when coverage planned many. A factory lets the Act phase
+/// mint one session per spawn-candidate goal so those `run_turn` calls run
+/// concurrently. `Send + Sync` so it can be shared across the dispatch
+/// threads spawned by `dispatch_actions`.
+pub trait OrchestratorSessionFactory: Send + Sync {
+    /// Open a fresh orchestrator session for a single goal-advance turn.
+    ///
+    /// The caller owns the returned session and is responsible for closing
+    /// it. Each call must return an independent session that can run a turn
+    /// concurrently with sessions returned by other calls.
+    fn open_session(
+        &self,
+    ) -> crate::error::SimardResult<Box<dyn crate::base_types::BaseTypeSession>>;
+}
+
 /// All bridges needed by the OODA loop.
 pub struct OodaBridges {
     pub memory: Box<dyn CognitiveMemoryOps>,
@@ -404,6 +424,17 @@ pub struct OodaBridges {
     /// [`crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker`].
     pub progress_evidence:
         std::sync::Arc<dyn crate::goal_curation::progress_evidence::ProgressEvidenceChecker>,
+    /// Optional factory that mints a fresh, independent LLM session per
+    /// concurrent `AdvanceGoal` dispatch.
+    ///
+    /// When `Some`, the Act phase opens one session per spawn-candidate goal
+    /// so their slow goal-action `run_turn` calls run concurrently instead of
+    /// serializing on the single shared [`Self::session`]. When `None`,
+    /// concurrent dispatch falls back to the shared [`Self::session`] under a
+    /// lock (serialized) — preserving today's behavior for tests and
+    /// non-daemon callers. Bounded by the AIMD `cap` (`scaler.current_max()`)
+    /// so concurrency stays resource-aware.
+    pub session_factory: Option<std::sync::Arc<dyn OrchestratorSessionFactory>>,
 }
 
 // ---------------------------------------------------------------------------

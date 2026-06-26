@@ -247,6 +247,44 @@ impl SessionBuilder {
     }
 }
 
+/// [`OrchestratorSessionFactory`] backed by [`SessionBuilder`].
+///
+/// Mints a fresh `Orchestrator`-mode session per call using the resolved
+/// [`LlmProvider`], so concurrent `AdvanceGoal` dispatches each get their own
+/// independent LLM session instead of serializing on a single shared session.
+///
+/// Each `open_session` opens a brand-new per-turn adapter session (closed by
+/// the caller after the turn), so calls are safe to run on separate threads.
+pub struct ProviderSessionFactory {
+    provider: LlmProvider,
+    adapter_tag: String,
+}
+
+impl ProviderSessionFactory {
+    /// Create a factory that opens `Orchestrator`-mode sessions for the given
+    /// provider, tagged with `adapter_tag` (e.g. `"ooda"`).
+    pub fn new(provider: LlmProvider, adapter_tag: impl Into<String>) -> Self {
+        Self {
+            provider,
+            adapter_tag: adapter_tag.into(),
+        }
+    }
+}
+
+impl crate::ooda_loop::OrchestratorSessionFactory for ProviderSessionFactory {
+    fn open_session(&self) -> SimardResult<Box<dyn BaseTypeSession>> {
+        SessionBuilder::new(OperatingMode::Orchestrator, self.provider)
+            .node_id("ooda-daemon-engineer")
+            .address("ooda-daemon-engineer://local")
+            .adapter_tag(&self.adapter_tag)
+            .open()
+            .map_err(|e| crate::error::SimardError::BridgeTransportError {
+                bridge: "ooda-session-factory".to_string(),
+                reason: e,
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
