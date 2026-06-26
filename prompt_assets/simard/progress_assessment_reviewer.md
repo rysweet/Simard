@@ -89,6 +89,20 @@ This does **not** block honest *partial* deltas while a PR is in flight (e.g.
 prior 60% → claimed 70% with an open PR is fine). It blocks only **completion**
 claims that an un-merged PR cannot support.
 
+### Landing upstream is not done until the own-pin bump ships
+
+Simard pins several **build-dependency** repos (`amplihack-rs`,
+`amplihack-memory-lib`, `RustyClawd`) by exact git rev in her own `Cargo.toml`,
+so a fix she merges *upstream* is not in her own build until that pin is bumped.
+You cannot diff git revs yourself, so apply this as an **evidence-absence** rule:
+when the `{problem}` or `{plan}` describes **landing an upstream change to a
+Simard build-dependency repo** and `{claimed_pct}` is at or near 100, but the
+`{plan}` / `{wip_summary}` show **no evidence** of *both* (a) the own
+`Cargo.toml` rev bumped to the merged commit and (b) a verified `cargo build`,
+then **reject**: **landing upstream is not done** until the fix ships in Simard's
+own build. If the WIP summary *does* show the own-pin bump landed and the build
+passed, accept as normal.
+
 When in genuine doubt, prefer **accept** with a cautionary rationale. The
 goal of this reviewer is to catch hallucinated jumps, not to gatekeep every
 small movement.

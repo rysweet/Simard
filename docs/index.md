@@ -33,6 +33,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to recover a corrupted or missing goal board](./howto/recover-goal-board.md) — cognitive-memory-only recovery commands.
 - [How to troubleshoot the file-backed goal store](./howto/troubleshoot-goal-store.md) — operator playbook for goal_store.json issues.
 - [How to configure adaptive scaling](./howto/configure-adaptive-scaling.md) — enable and tune AIMD concurrency scaling.
+- [How to keep Simard's own dependency pins up to date](./howto/self-maintain-dependency-pins.md) — the reactive done-gate and proactive reconcile that bump Simard's own `Cargo.toml` git-rev pins after she lands a change upstream, so the fix runs in her own build (companion to [Safe Self-Update](./safe-self-update.md)).
 
 - [How to run the OODA daemon](./howto/run-ooda-daemon.md) - Start the continuous OODA loop for autonomous goal-driven operation and act on meeting decisions.
 - [How to diagnose OODA decide/orient brain parse failures](./howto/diagnose-decide-orient-parse-failures.md) - Runbook for the silent-fallback fix (#1890): find the ERROR log, read the `parse_failure` cycle-report block, and remediate.

@@ -1321,3 +1321,378 @@ fn goal_session_objective_finalization_preserves_prose_contract() {
         "goal_session_objective.md is prose-only — it must not gain a JSON verdict contract"
     );
 }
+
+// ── Self-maintaining dependency pins (#2403 follow-on, prompt-only) ──────────
+//
+// Simard's root `Cargo.toml` pins several tools she maintains by EXACT git rev,
+// not by branch:
+//
+//   amplihack-agent-eval -> rysweet/amplihack-rs        (rev = 59548a96…)
+//   amplihack-memory     -> rysweet/amplihack-memory-lib (rev = 26d49bf8…)
+//   rustyclawd-core      -> rysweet/RustyClawd          (rev = 43ebaa1c…)
+//   rustyclawd-tools     -> rysweet/RustyClawd          (rev = 43ebaa1c…)
+//
+// A git-rev pin is FROZEN: when Simard lands a fix in one of those upstream
+// repos, her own pin keeps pointing at the OLD commit, so the fix she just
+// merged is NOT in her own running build. (The motivating case: amplihack-agent-eval
+// pinned ~22 commits behind amplihack-rs main → ~9 merged PRs absent from her
+// own daemon.)
+//
+// The fix is two prompt-only behaviours, fully specified in
+// `docs/howto/self-maintain-dependency-pins.md`:
+//
+//   (A) REACTIVE done-gate — when an engineer LANDS an upstream change to a
+//       build-dependency repo, the SAME goal is not "done" until Simard has also
+//       bumped the matching `Cargo.toml` rev to the merged commit, verified
+//       `cargo build`, and LANDED that bump PR against `rysweet/Simard`. Opening
+//       the upstream PR is NOT the finish line; shipping it into her own running
+//       build is. (Daemon redeploy stays operator-gated.)
+//   (B) PROACTIVE reconcile — as low-priority idle/research-time self-maintenance,
+//       detect when a pinned rev has fallen behind its upstream default branch and
+//       open/update a bump follow-up.
+//
+// These assertions FAIL until the prompt edits land. The feature is PROMPT-ONLY
+// (no Rust logic change) and must COMPOSE additively with #2404 loop-awareness,
+// #2405 per-issue fan-out, #2410 own-PRs-to-landing, and #2413 finalization — the
+// dep-bump is a NEW done-gate that runs AFTER landing, alongside #2410. Output
+// contracts are PRESERVED: `goal_session_objective.md` stays prose-only (NO ACTION
+// / PROGRESS markers intact); `progress_assessment_reviewer.md` and its recipe
+// mirror keep the single-line `{"verdict": …}` JSON the Rust parser reads. Phrases
+// are checked after `normalize_ws` + lowercase so Markdown wrapping cannot defeat
+// them. `engineer_system.md` is asserted via `engineer_system_md()` (include_str!),
+// exactly like the existing engineer-system pins above.
+
+/// The progress-assessment recipe-runner recipe, read at compile time — the
+/// runtime mirror of `progress_assessment_reviewer.md` (asserted inline exactly
+/// like `progress_assessment_recipe_mirrors_done_gate`).
+fn progress_assessment_recipe() -> &'static str {
+    include_str!("../../prompt_assets/simard/recipes/progress-assessment.yaml")
+}
+
+// ── (A) Reactive done-gate in goal_session_objective.md ──────────────────────
+
+#[test]
+fn goal_session_objective_has_dependency_pin_done_gate() {
+    // The OODA brain must carry an explicit dependency-pin done-gate: landing an
+    // upstream change to a build-dependency is not the finish line; the fix must
+    // ship into Simard's own running build.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("dependency-pin done-gate"),
+        "goal_session_objective.md must declare an explicit dependency-pin done-gate"
+    );
+    assert!(
+        norm.contains("build-dependency"),
+        "the gate must scope to Simard's build-dependency (git-rev-pinned) repos"
+    );
+    assert!(
+        norm.contains("opening the upstream pr is not the finish line"),
+        "must teach that opening/merging the UPSTREAM PR is not the finish line"
+    );
+    assert!(
+        norm.contains("running build"),
+        "the deliverable is the fix shipping into Simard's own running build"
+    );
+}
+
+#[test]
+fn goal_session_objective_dep_gate_requires_bump_build_and_landing() {
+    // The gate's concrete steps: bump the own Cargo.toml rev, verify `cargo build`,
+    // and LAND the bump PR — the goal is not done until all three hold.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("is not done until"),
+        "the gate must state the goal is not done until the own-pin bump ships"
+    );
+    assert!(
+        norm.contains("cargo.toml"),
+        "the gate must direct bumping the matching rev in the root Cargo.toml"
+    );
+    assert!(
+        norm.contains("bump"),
+        "the gate must direct a rev bump of the own dependency pin"
+    );
+    assert!(
+        norm.contains("cargo build"),
+        "the gate must require `cargo build` to verify the new rev before shipping"
+    );
+    assert!(
+        norm.contains("bump pr"),
+        "the gate must require opening/landing a bump PR for the own pin change"
+    );
+}
+
+#[test]
+fn goal_session_objective_dep_gate_redeploy_is_operator_gated() {
+    // The done-gate guarantees the fix is in the SOURCE build; the actual daemon
+    // redeploy stays operator-gated and is NOT required for the goal to be done.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("operator-gated"),
+        "the daemon redeploy must be described as operator-gated"
+    );
+    assert!(
+        norm.contains("not required for") || norm.contains("not required to"),
+        "the operator redeploy must be explicitly NOT required for the goal to be done"
+    );
+}
+
+#[test]
+fn goal_session_objective_has_proactive_dependency_drift_note() {
+    // (B) Proactive reconcile must be NOTED as acceptable low-priority idle/research
+    // self-maintenance — the upstream-repo analog of the existing Self-update awareness.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("dependency-drift"),
+        "must note a proactive dependency-drift reconcile activity"
+    );
+    assert!(
+        norm.contains("fallen behind"),
+        "drift means a pinned rev has fallen behind its upstream default branch"
+    );
+    assert!(
+        norm.contains("low-priority"),
+        "the proactive reconcile must be framed as LOW-priority (never preempts real work)"
+    );
+    assert!(
+        norm.contains("self-maintenance"),
+        "the proactive reconcile is self-maintenance / idle-time work"
+    );
+}
+
+#[test]
+fn goal_session_objective_dep_gate_preserves_prose_contract() {
+    // Output-contract guard: the new gate must stay additive PROSE — it must NOT
+    // introduce a JSON verdict shape, and must keep the NO ACTION / PROGRESS
+    // markers the goal-session parser reads. (Combined with a new-behaviour
+    // assertion so the test fails until the gate lands.)
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("dependency-pin done-gate"),
+        "precondition: the dependency-pin done-gate must be present"
+    );
+    assert!(
+        !content.contains("\"verdict\""),
+        "goal_session_objective.md is prose-only — the dep-gate must not add a JSON verdict contract"
+    );
+    assert!(
+        content.contains("NO ACTION"),
+        "the prose `NO ACTION` marker the parser reads must be preserved"
+    );
+    assert!(
+        content.contains("PROGRESS:"),
+        "the prose `PROGRESS: NN` marker the parser reads must be preserved"
+    );
+}
+
+#[test]
+fn goal_session_objective_dep_gate_composes_with_2410_done_gate() {
+    // Regression/compose guard: the dep-pin done-gate builds ON TOP of the #2410
+    // merged-AND-closed done-gate — both must coexist, not replace one another.
+    let content = embedded_fallback("goal_session_objective.md")
+        .expect("goal_session_objective.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("complete only when its pr is merged and the linked issue is closed"),
+        "must preserve the #2410 merged-AND-closed done-gate"
+    );
+    assert!(
+        norm.contains("dependency-pin done-gate"),
+        "the new dependency-pin done-gate must compose alongside the #2410 done-gate"
+    );
+}
+
+// ── (A) Engineer follow-through + (B) drift directive in engineer_system.md ──
+
+#[test]
+fn engineer_system_bumps_own_pin_after_landing_upstream() {
+    // The engineer that LANDED an upstream change must follow through in the same
+    // cycle: bump the own Cargo.toml rev and re-verify the build.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("bump your own pin"),
+        "engineer_system.md must direct bumping Simard's own pin after landing upstream"
+    );
+    assert!(
+        norm.contains("not done when the upstream pr merges"),
+        "the engineer is not done when the upstream PR merges — the fix isn't in her build yet"
+    );
+    assert!(
+        norm.contains("cargo.toml"),
+        "the engineer must edit the matching rev in the root Cargo.toml"
+    );
+    assert!(
+        norm.contains("cargo build"),
+        "the engineer must re-verify with `cargo build` (a bump that does not build is rolled back)"
+    );
+}
+
+#[test]
+fn engineer_system_dep_bump_pr_convention_and_dedup() {
+    // The bump PR uses a deterministic, upstream-repo-keyed naming convention and
+    // is de-duplicated: an already-open bump PR is UPDATED, never duplicated.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("chore/bump-"),
+        "must use the deterministic `chore/bump-<upstream-repo>-pin` branch convention"
+    );
+    assert!(
+        norm.contains("chore(deps): bump"),
+        "must use the `chore(deps): bump <upstream-repo> pin to <short-sha>` title convention"
+    );
+    assert!(
+        norm.contains("rysweet/simard"),
+        "the bump PR is opened against rysweet/Simard (where Cargo.toml lives)"
+    );
+    assert!(
+        norm.contains("already open") && norm.contains("update it"),
+        "an already-open bump PR for that repo must be UPDATED, not duplicated"
+    );
+}
+
+#[test]
+fn engineer_system_dep_bump_atomic_for_shared_repo() {
+    // Crates that pin the SAME upstream repo must be bumped together in one commit:
+    // rustyclawd-core and rustyclawd-tools both pin RustyClawd, so a bump moves both
+    // in the same PR — never split one upstream commit across two PRs.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("rustyclawd-core") && norm.contains("rustyclawd-tools"),
+        "must name the two crates that share the RustyClawd repo pin"
+    );
+    assert!(
+        norm.contains("together in one commit"),
+        "crates sharing an upstream repo must be re-pointed together in one commit"
+    );
+}
+
+#[test]
+fn engineer_system_has_proactive_dependency_drift_directive() {
+    // (B) The proactive reconcile lives as a low-priority dependency-drift directive
+    // in engineer_system.md: compare each pinned rev to the upstream default branch.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("dependency-drift"),
+        "engineer_system.md must carry a dependency-drift self-maintenance directive"
+    );
+    assert!(
+        norm.contains("fallen behind"),
+        "drift detection means a pinned rev has fallen behind its upstream default branch"
+    );
+    assert!(
+        norm.contains("ls-remote"),
+        "drift detection must use runtime git tooling (e.g. `git ls-remote`) — no new Rust subsystem"
+    );
+    assert!(
+        norm.contains("low-priority"),
+        "the drift directive must be low-priority and never preempt an active goal"
+    );
+}
+
+#[test]
+fn engineer_system_dep_bump_preserves_2410_landing() {
+    // Regression/compose guard: the dep-bump follow-through builds ON TOP of #2410 —
+    // the continue-existing-PR-never-duplicate guidance must remain.
+    let norm = normalize_ws(engineer_system_md()).to_lowercase();
+    assert!(
+        norm.contains("continue it, never duplicate it"),
+        "must preserve the #2410 continue-existing-PR-never-duplicate guidance"
+    );
+    assert!(
+        norm.contains("bump your own pin"),
+        "the new dep-bump follow-through must compose alongside the #2410 landing guidance"
+    );
+}
+
+// ── (A) Reviewer enforcement in progress_assessment_reviewer.md (+ recipe) ───
+
+#[test]
+fn progress_reviewer_rejects_unbumped_dep_after_upstream_landing() {
+    // The reviewer cannot diff git revs (text-only, fails open on unknown verdicts),
+    // so the rule is EVIDENCE-ABSENCE: reject a done/100% claim that describes landing
+    // an upstream build-dependency change but shows no evidence of BOTH the own
+    // Cargo.toml rev bump AND a verified `cargo build`.
+    let content = embedded_fallback("progress_assessment_reviewer.md")
+        .expect("progress_assessment_reviewer.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("build-dependency"),
+        "the reviewer must recognise an upstream build-dependency landing claim"
+    );
+    assert!(
+        norm.contains("landing upstream is not done"),
+        "the reviewer must encode that landing upstream is not done until the own-pin bump ships"
+    );
+    assert!(
+        norm.contains("cargo.toml") && norm.contains("cargo build"),
+        "the rejection must hinge on missing evidence of the Cargo.toml rev bump + cargo build"
+    );
+    assert!(
+        norm.contains("no evidence"),
+        "the rule must be phrased as evidence-absence (the reviewer cannot diff revs)"
+    );
+    assert!(
+        norm.contains("reject"),
+        "a premature done/100% upstream-landing claim must be rejected"
+    );
+}
+
+#[test]
+fn progress_reviewer_dep_gate_preserves_json_contract() {
+    // Output-contract guard: the new rule must NOT change the single-line verdict
+    // JSON the Rust reviewer parser reads. Combined with a new-behaviour assertion
+    // so the test fails until the rule lands.
+    let content = embedded_fallback("progress_assessment_reviewer.md")
+        .expect("progress_assessment_reviewer.md must be registered");
+    let norm = normalize_ws(content).to_lowercase();
+    assert!(
+        norm.contains("landing upstream is not done"),
+        "precondition: the dep-bump rejection rule must be present"
+    );
+    assert!(
+        content.contains("\"verdict\""),
+        "the single-line verdict JSON output contract must be preserved"
+    );
+    assert!(
+        content.contains("\"accept\"") && content.contains("\"reject\""),
+        "the verdict tokens must stay exactly \"accept\" / \"reject\" for the Rust parser"
+    );
+}
+
+#[test]
+fn progress_assessment_recipe_mirrors_dep_bump_gate() {
+    // The runtime recipe-runner recipe must stay in sync with the embedded
+    // progress_assessment_reviewer.md on the dep-bump evidence gate.
+    let recipe = progress_assessment_recipe();
+    let norm = normalize_ws(recipe).to_lowercase();
+    assert!(
+        norm.contains("build-dependency"),
+        "progress-assessment.yaml must mirror the upstream build-dependency landing gate"
+    );
+    assert!(
+        norm.contains("landing upstream is not done"),
+        "recipe mirror: landing upstream is not done until the own-pin bump ships"
+    );
+    assert!(
+        norm.contains("cargo.toml") && norm.contains("cargo build"),
+        "recipe mirror: the gate hinges on the Cargo.toml rev bump + cargo build evidence"
+    );
+    assert!(
+        norm.contains("no evidence"),
+        "recipe mirror: evidence-absence formulation must be preserved"
+    );
+    assert!(
+        recipe.contains("\"verdict\""),
+        "progress-assessment.yaml must keep the verdict JSON output contract"
+    );
+}
