@@ -228,6 +228,20 @@ ladder is exhausted**. Each rung is logged loudly (`BRAIN ESCALATION …`).
 * A genuine recipe-runner failure (spawn/exit/envelope) still surfaces as a
   hard `error` — only a *parse-miss on a successful run* escalates.
 
+* **Termination `cause`**: each `brain_lifecycle_decision` row also carries a
+  `cause` label recording *why* the ladder stopped, so an early stop is not
+  mistaken for genuine exhaustion:
+
+  | `cause`               | Meaning                                                            |
+  | --------------------- | ------------------------------------------------------------------ |
+  | `ladder_recovered`    | a rung produced a parseable decision (`repaired` / `escalated`)    |
+  | `ladder_exhausted`    | every configured rung was tried; none parsed → deterministic default |
+  | `ladder_invoke_error` | a rung's own invocation failed; ladder stopped early → default      |
+  | `ladder_disabled`     | `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS=0`; no rung attempted          |
+
+  A spike of `ladder_invoke_error` points at recipe-runner/adapter health, not
+  at the model's parse quality — diagnose those separately from `ladder_exhausted`.
+
 ## See Also
 
 * [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md)
