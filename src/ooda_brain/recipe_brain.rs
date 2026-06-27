@@ -299,6 +299,38 @@ impl Default for EscalationConfig {
     }
 }
 
+/// Why the confidence-gated escalation ladder stopped. Drives a precise
+/// `cause` label on the `brain_lifecycle_decision` metric so the three
+/// non-recovery terminations are distinguishable in telemetry: a ladder that
+/// genuinely ran out of rungs (`Exhausted`) reads differently from one cut
+/// short because a rung's own invocation failed (`InvokeError`) or one that
+/// was switched off by configuration (`Disabled`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LadderTermination {
+    /// A rung produced a parseable decision — `Repaired` / `Escalated`.
+    Recovered,
+    /// Every configured rung was tried; none parsed. Deterministic default.
+    Exhausted,
+    /// A rung's own invocation failed; the ladder stopped early and fell to
+    /// the deterministic default (the successful base attempt already gave a
+    /// usable, if low-confidence, signal — this is NOT a hard error).
+    InvokeError,
+    /// The ladder was disabled (`max_escalations == 0`); no rung was tried.
+    Disabled,
+}
+
+impl LadderTermination {
+    /// The `cause` label recorded on the lifecycle-decision metric.
+    pub fn cause_label(self) -> &'static str {
+        match self {
+            LadderTermination::Recovered => "ladder_recovered",
+            LadderTermination::Exhausted => "ladder_exhausted",
+            LadderTermination::InvokeError => "ladder_invoke_error",
+            LadderTermination::Disabled => "ladder_disabled",
+        }
+    }
+}
+
 /// Seam over the raw lifecycle recipe invocation so the escalation ladder is
 /// unit-testable without a live `recipe-runner-rs`. Production wires
 /// [`RecipeBrain`]; tests wire a scripted stub. Returns the raw decision text
@@ -316,7 +348,10 @@ pub trait LifecycleInvoker {
 /// `base_raw` is the (already-invoked) base attempt's raw output and
 /// `base_outcome` its parse-miss classification. Returns the final decision,
 /// its outcome (`Repaired`/`Escalated` on recovery, else the original
-/// parse-miss), and the total number of brain invocations made (base + rungs).
+/// parse-miss), the total number of brain invocations made (base + rungs), and
+/// the [`LadderTermination`] reason (so the caller can record a precise `cause`
+/// — distinguishing true exhaustion from an early stop caused by a rung's own
+/// invocation failure, or a disabled ladder).
 ///
 /// Bounded by `cfg.max_escalations`; each rung is logged loudly; the
 /// deterministic `continue_skipping` default is returned only when every rung
@@ -327,9 +362,15 @@ pub fn run_escalation_ladder(
     base_raw: &str,
     base_outcome: LifecycleParseOutcome,
     cfg: &EscalationConfig,
-) -> (EngineerLifecycleDecision, LifecycleParseOutcome, u32) {
+) -> (
+    EngineerLifecycleDecision,
+    LifecycleParseOutcome,
+    u32,
+    LadderTermination,
+) {
     let mut prior = base_raw.to_string();
     let mut attempts = 1u32; // the base attempt already happened
+    let mut invoke_failed = false;
 
     for rung_idx in 1..=cfg.max_escalations {
         let rung = if rung_idx == 1 {
@@ -369,6 +410,7 @@ pub fn run_escalation_ladder(
                     "[simard] BRAIN ESCALATION goal={} rung={:?} invoke failed: {e} — falling back to default",
                     ctx.goal_id, rung
                 );
+                invoke_failed = true;
                 break;
             }
             Ok(raw2) => {
@@ -394,7 +436,7 @@ pub fn run_escalation_ladder(
                         rung,
                         attempts
                     );
-                    return (decision, recovered, attempts);
+                    return (decision, recovered, attempts, LadderTermination::Recovered);
                 }
                 // Still a parse-miss — feed the latest malformed output into the
                 // next rung's repair note.
@@ -405,21 +447,36 @@ pub fn run_escalation_ladder(
 
     // Ladder exhausted, disabled, or an escalation invoke failed: fall to the
     // deterministic default, preserving the original parse-miss outcome for the
-    // metric numerator.
+    // metric numerator. The `termination` reason records *which* of those three
+    // paths we took so the metric `cause` label stays accurate.
+    let termination = if cfg.max_escalations == 0 {
+        LadderTermination::Disabled
+    } else if invoke_failed {
+        LadderTermination::InvokeError
+    } else {
+        LadderTermination::Exhausted
+    };
     if cfg.max_escalations > 0 {
         tracing::warn!(
             target: "simard::ooda_brain",
             goal = %ctx.goal_id,
             attempts,
             base_outcome = base_outcome.label(),
-            "brain escalation ladder exhausted without a parseable decision; deterministic default"
+            termination = ?termination,
+            "brain escalation ladder ended without a parseable decision; deterministic default"
         );
         eprintln!(
-            "[simard] BRAIN ESCALATION goal={} ladder exhausted after {attempts} attempts — deterministic default",
-            ctx.goal_id
+            "[simard] BRAIN ESCALATION goal={} ladder ended ({}) after {attempts} attempts — deterministic default",
+            ctx.goal_id,
+            termination.cause_label()
         );
     }
-    (default_continue_skipping(), base_outcome, attempts)
+    (
+        default_continue_skipping(),
+        base_outcome,
+        attempts,
+        termination,
+    )
 }
 
 /// Resolve the recipe YAML path. Checks, in order:
@@ -759,19 +816,20 @@ impl OodaBrain for RecipeBrain {
         // Parse-miss → confidence-gated escalation ladder (issue #2432). Spend
         // extra compute ONLY on this weak case.
         let cfg = EscalationConfig::from_env();
-        let (final_decision, final_outcome, attempts) =
+        let (final_decision, final_outcome, attempts, termination) =
             run_escalation_ladder(self, ctx, &base_raw, outcome, &cfg);
-        let cause = if final_outcome.is_parse_failure() {
-            "ladder_exhausted"
-        } else {
-            "ladder_recovered"
-        };
+        // NOTE: `first_word` intentionally always reflects the *base* attempt's
+        // token — it is the diagnostic record of what the cheap first pass
+        // produced (e.g. the banner regression or a malformed reply), even on a
+        // recovered row where `decision` reflects the recovering rung's choice.
+        // `termination.cause_label()` distinguishes recovered / exhausted /
+        // invoke-error / disabled so the two fields read unambiguously together.
         record_lifecycle_decision_metric(
             ctx,
             final_outcome,
             &lifecycle_first_word(&base_raw),
             lifecycle_decision_choice(&final_decision),
-            cause,
+            termination.cause_label(),
             attempts,
         );
         Ok(final_decision)
@@ -2830,6 +2888,33 @@ mod tests {
             assert!(!LifecycleParseOutcome::Escalated.is_parse_failure());
         }
 
+        #[test]
+        fn ladder_termination_cause_labels_are_distinct() {
+            assert_eq!(
+                LadderTermination::Recovered.cause_label(),
+                "ladder_recovered"
+            );
+            assert_eq!(
+                LadderTermination::Exhausted.cause_label(),
+                "ladder_exhausted"
+            );
+            assert_eq!(
+                LadderTermination::InvokeError.cause_label(),
+                "ladder_invoke_error"
+            );
+            assert_eq!(LadderTermination::Disabled.cause_label(), "ladder_disabled");
+            // The four non-equal terminations must yield four distinct labels so
+            // telemetry can tell exhaustion apart from an invoke-error stop.
+            let labels = [
+                LadderTermination::Recovered.cause_label(),
+                LadderTermination::Exhausted.cause_label(),
+                LadderTermination::InvokeError.cause_label(),
+                LadderTermination::Disabled.cause_label(),
+            ];
+            let unique: std::collections::BTreeSet<_> = labels.iter().collect();
+            assert_eq!(unique.len(), labels.len(), "cause labels must be distinct");
+        }
+
         // --- config bound ---
 
         #[test]
@@ -2861,7 +2946,7 @@ mod tests {
         fn ladder_recovers_via_schema_repair() {
             let invoker =
                 ScriptedInvoker::new(vec![Ok("reclaim_and_redispatch worktree idle 7h".into())]);
-            let (decision, outcome, attempts) = run_escalation_ladder(
+            let (decision, outcome, attempts, termination) = run_escalation_ladder(
                 &invoker,
                 &sample_ctx(),
                 "OK the engineer looks fine", // base parse-miss text
@@ -2869,6 +2954,7 @@ mod tests {
                 &EscalationConfig::default(),
             );
             assert_eq!(outcome, LifecycleParseOutcome::Repaired);
+            assert_eq!(termination, LadderTermination::Recovered);
             assert!(!outcome.is_parse_failure());
             assert_eq!(attempts, 2, "base + one schema-repair rung");
             assert!(matches!(
@@ -2886,7 +2972,7 @@ mod tests {
                 Ok("still not a variant word".into()), // schema-repair misses
                 Ok("deprioritize stale goal".into()),  // escalate recovers
             ]);
-            let (decision, outcome, attempts) = run_escalation_ladder(
+            let (decision, outcome, attempts, termination) = run_escalation_ladder(
                 &invoker,
                 &sample_ctx(),
                 "garbage",
@@ -2894,6 +2980,7 @@ mod tests {
                 &EscalationConfig::default(),
             );
             assert_eq!(outcome, LifecycleParseOutcome::Escalated);
+            assert_eq!(termination, LadderTermination::Recovered);
             assert_eq!(attempts, 3, "base + schema-repair + escalate");
             assert!(matches!(
                 decision,
@@ -2911,7 +2998,7 @@ mod tests {
         #[test]
         fn ladder_bounded_cap_exhausts_to_default() {
             let invoker = ScriptedInvoker::new(vec![Ok("nope".into()), Ok("still nope".into())]);
-            let (decision, outcome, attempts) = run_escalation_ladder(
+            let (decision, outcome, attempts, termination) = run_escalation_ladder(
                 &invoker,
                 &sample_ctx(),
                 "banner noise",
@@ -2919,6 +3006,7 @@ mod tests {
                 &EscalationConfig::default(), // 2 rungs
             );
             assert_eq!(outcome, LifecycleParseOutcome::DefaultMalformed);
+            assert_eq!(termination, LadderTermination::Exhausted);
             assert!(outcome.is_parse_failure());
             assert_eq!(attempts, 3, "base + exactly 2 bounded rungs");
             assert!(matches!(
@@ -2933,7 +3021,7 @@ mod tests {
         #[test]
         fn ladder_disabled_runs_no_escalations() {
             let invoker = ScriptedInvoker::new(vec![]);
-            let (decision, outcome, attempts) = run_escalation_ladder(
+            let (decision, outcome, attempts, termination) = run_escalation_ladder(
                 &invoker,
                 &sample_ctx(),
                 "banner noise",
@@ -2941,6 +3029,7 @@ mod tests {
                 &EscalationConfig { max_escalations: 0 },
             );
             assert_eq!(outcome, LifecycleParseOutcome::DefaultEmpty);
+            assert_eq!(termination, LadderTermination::Disabled);
             assert_eq!(attempts, 1, "only the base attempt");
             assert!(matches!(
                 decision,
@@ -2955,7 +3044,7 @@ mod tests {
         #[test]
         fn ladder_invoke_error_falls_back_to_default() {
             let invoker = ScriptedInvoker::new(vec![Err(())]);
-            let (decision, outcome, attempts) = run_escalation_ladder(
+            let (decision, outcome, attempts, termination) = run_escalation_ladder(
                 &invoker,
                 &sample_ctx(),
                 "garbage",
@@ -2964,6 +3053,12 @@ mod tests {
             );
             assert_eq!(outcome, LifecycleParseOutcome::DefaultMalformed);
             assert_eq!(attempts, 2, "base + the failed rung, then stop");
+            assert_eq!(
+                termination,
+                LadderTermination::InvokeError,
+                "an early stop caused by a rung's own invoke failure must be \
+                 distinguishable from true exhaustion in the metric cause"
+            );
             assert!(matches!(
                 decision,
                 EngineerLifecycleDecision::ContinueSkipping { .. }
