@@ -11,7 +11,12 @@
 //! 3. Otherwise invokes a pluggable [`DistillRecipeRunner`] that
 //!    classifies each episode into one of three concept labels
 //!    (`pr-pattern`, `bug-pattern`, `lesson-learned`) or `skip`.
-//! 4. Stores each emitted fact via `store_fact`.
+//! 4. Self-assesses each candidate fact's reliability (issue #2433,
+//!    BGML's ISAO) and GATES on `Fact.confidence`: low-reliability facts
+//!    are quarantined (not promoted) and a weaker new fact never clobbers
+//!    a stronger existing fact on the same concept. Surviving facts are
+//!    stored via `store_fact_with_provenance` with the *computed*
+//!    confidence rather than a constant.
 //! 5. Marks EVERY input episode (including those classified `skip`) as
 //!    distilled so the same low-value batch is not re-fed to the LLM.
 //!
@@ -34,11 +39,26 @@ pub const DISTILL_BATCH_SIZE: u32 = 50;
 /// episodes wastes an LLM call for little quality gain.
 pub const DISTILL_MIN_EPISODES: u32 = 20;
 
-/// Default per-fact confidence written via `store_fact`. The recipe
-/// itself does not produce confidence scores; this is the canonical
-/// "moderately confident, machine-distilled" value used by all PR-B
-/// facts so downstream filtering can recognize the source.
+/// Legacy per-fact confidence baseline. Before issue #2433 every distilled
+/// fact was written with this exact constant, so `Fact.confidence` carried no
+/// information. It is retained as the **nominal baseline**: a fully-grounded,
+/// known-concept, well-formed fact scores at or above this value under
+/// [`assess_fact_reliability`], preserving downstream filtering behaviour for
+/// good facts while letting weak ones drop below the gate.
 pub const DISTILL_FACT_CONFIDENCE: f64 = 0.7;
+
+/// ISAO reliability gate threshold (issue #2433). Candidate facts whose
+/// self-assessed reliability score is below this are **quarantined** — not
+/// promoted into semantic memory — rather than written with a blind constant
+/// confidence. Tuned so a fact with valid in-batch provenance, a known
+/// concept label, and non-trivial content clears the bar, while a fact with
+/// hallucinated provenance or empty content does not.
+pub const DISTILL_RELIABILITY_THRESHOLD: f64 = 0.5;
+
+/// The closed concept-label set the distillation recipe is constrained to.
+/// A fact whose concept is outside this set is off-spec and loses the
+/// concept-validity component of its reliability score.
+pub const KNOWN_DISTILL_CONCEPTS: &[&str] = &["pr-pattern", "bug-pattern", "lesson-learned"];
 
 /// A single semantic fact emitted by the recipe runner for one batch
 /// of episodes.
@@ -121,6 +141,12 @@ pub struct DistillReport {
     pub procedure_count: u32,
     /// Number of episodes marked distilled after the pass.
     pub marked_count: u32,
+    /// Number of candidate facts blocked by the ISAO reliability gate
+    /// (issue #2433): quarantined for low self-assessed reliability OR
+    /// skipped to avoid clobbering a higher-confidence existing fact.
+    /// `fact_count + quarantined_count` is the total candidate count the
+    /// recipe emitted for this pass.
+    pub quarantined_count: u32,
 }
 
 impl DistillReport {
@@ -135,6 +161,7 @@ impl DistillReport {
             && self.fact_count == 0
             && self.procedure_count == 0
             && self.marked_count == 0
+            && self.quarantined_count == 0
     }
 
     /// Reduction ratio (`1 - fact_count / input_count`) as a fraction
@@ -216,20 +243,69 @@ pub fn distill_recent_episodes_with_runner(
     };
     let DistillOutput { facts, procedures } = output;
 
-    // Store every fact via the provenance write path. Each fact's textual
-    // `source_id` retains the `distill:{episode}` prefix for back-compat
-    // (search_facts can be filtered/grepped on it to identify machine-distilled
-    // facts), while the originating episode id is ALSO threaded through as
-    // `source_episode_ids` so a `DERIVES_FROM` edge links the fact back to the
-    // episode it was distilled from (issue #2325). The concept doubles as the
-    // fact's tag, matching the legacy `store_fact` call this replaced.
+    // ISAO-style reliability gate (issue #2433, BGML §IV). Before promoting a
+    // distilled fact into semantic memory we SELF-ASSESS its reliability and
+    // gate on `Fact.confidence` instead of writing a blind constant:
+    //   * low-reliability candidates are QUARANTINED (not stored) so they can
+    //     never corrupt the integrity of past experience, and
+    //   * a weaker new fact never CLOBBERS a higher-confidence existing fact on
+    //     the same concept (mirrors the cross-session dedup guard in
+    //     `memory_consolidation::mod`).
+    // Surviving facts are written with the *computed* confidence, turning the
+    // formerly-dormant `confidence` column into a live consolidation→recall
+    // signal. The originating episode id is still threaded through as
+    // provenance (`source_episode_ids`) for the DERIVES_FROM edge (issue #2325).
     let mut stored = 0u32;
+    let mut quarantined = 0u32;
     for fact in &facts {
+        let confidence = assess_fact_reliability(fact, &episodes, &facts);
+
+        if confidence < DISTILL_RELIABILITY_THRESHOLD {
+            quarantined += 1;
+            tracing::warn!(
+                target: "simard::distill",
+                concept = %fact.concept,
+                source_episode_id = %fact.source_episode_id,
+                confidence,
+                threshold = DISTILL_RELIABILITY_THRESHOLD,
+                "distill: quarantined low-reliability fact (below threshold), not promoted"
+            );
+            eprintln!(
+                "[simard] distill: quarantined low-reliability fact concept={} confidence={:.2} < {:.2}",
+                fact.concept, confidence, DISTILL_RELIABILITY_THRESHOLD
+            );
+            continue;
+        }
+
+        // Protect past experience: do not let a weaker new fact supersede a
+        // stronger existing fact on the same concept (BGML ISAO integrity).
+        // `search_facts` is queried with the new confidence as `min_confidence`
+        // so it returns only the priors that would block; the explicit
+        // comparison is belt-and-suspenders against a backend that ignores the
+        // filter.
+        let existing = memory
+            .search_facts(&fact.concept, 5, confidence)
+            .unwrap_or_default();
+        if existing.iter().any(|f| f.confidence >= confidence) {
+            quarantined += 1;
+            tracing::info!(
+                target: "simard::distill",
+                concept = %fact.concept,
+                confidence,
+                "distill: existing fact on concept has >= confidence; not clobbering prior"
+            );
+            eprintln!(
+                "[simard] distill: kept stronger prior on concept={} (new confidence={:.2} would clobber)",
+                fact.concept, confidence
+            );
+            continue;
+        }
+
         let source = format!("distill:{}", fact.source_episode_id);
         memory.store_fact_with_provenance(
             &fact.concept,
             &fact.content,
-            DISTILL_FACT_CONFIDENCE,
+            confidence,
             &source,
             Some(std::slice::from_ref(&fact.concept)),
             None,
@@ -237,6 +313,11 @@ pub fn distill_recent_episodes_with_runner(
         )?;
         stored += 1;
     }
+
+    // Before/after measurement of the gate's block-rate (issue #2433
+    // acceptance). Best-effort, no-op under `cfg!(test)` so unit tests never
+    // append to the operator's real metrics file.
+    record_reliability_gate_metric(facts.len() as u32, quarantined, stored);
 
     // Store every procedure via the provenance write path (issue #2327, R5).
     // `source_episode_ids` are threaded so a `PROCEDURE_DERIVES_FROM` edge links
@@ -284,7 +365,113 @@ pub fn distill_recent_episodes_with_runner(
         fact_count: stored,
         procedure_count: stored_procs,
         marked_count: marked,
+        quarantined_count: quarantined,
     })
+}
+
+/// Self-assess the reliability of one distilled fact (issue #2433, BGML's
+/// *information self-assessment ownership*, §IV). Returns a confidence score in
+/// `[0.0, 1.0]` from cheap, locally-available signals — no extra LLM call:
+///
+/// | Signal | Weight | Rationale |
+/// |--------|--------|-----------|
+/// | **Provenance grounding** | 0.5 | The cited `source_episode_id` must be one of the episodes actually fed to the recipe this pass. A source outside the batch is unverifiable / hallucinated provenance — the strongest unreliability signal. |
+/// | **Content quality** | ≤0.3 | Empty content carries no information; ≥3 words is the minimum for a usable fact. |
+/// | **Concept validity** | 0.1 | The recipe is constrained to [`KNOWN_DISTILL_CONCEPTS`]; an off-set concept means the model went off-spec. |
+/// | **Corroboration** | 0.1 | Multiple distilled facts agreeing on the same concept this pass is independent agreement across source episodes. |
+///
+/// A nominal fact (grounded, ≥3 words, known concept) scores `0.9` — at or
+/// above the legacy [`DISTILL_FACT_CONFIDENCE`] baseline — so good facts keep
+/// their downstream behaviour, while a hallucinated-provenance or empty fact
+/// scores ≤`0.4` and is quarantined by [`DISTILL_RELIABILITY_THRESHOLD`].
+pub fn assess_fact_reliability(
+    fact: &DistilledFact,
+    episodes: &[CognitiveEpisode],
+    batch_facts: &[DistilledFact],
+) -> f64 {
+    let mut score = 0.0_f64;
+
+    // (1) Provenance grounding.
+    let grounded = episodes.iter().any(|e| e.node_id == fact.source_episode_id);
+    if grounded {
+        score += 0.5;
+    }
+
+    // (2) Content quality.
+    let words = fact.content.split_whitespace().count();
+    if words >= 3 {
+        score += 0.3;
+    } else if words >= 1 {
+        score += 0.15;
+    }
+
+    // (3) Concept validity.
+    let concept = fact.concept.trim();
+    if KNOWN_DISTILL_CONCEPTS
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(concept))
+    {
+        score += 0.1;
+    }
+
+    // (4) Corroboration: ≥2 facts this pass agreeing on the same concept.
+    let corroboration = batch_facts
+        .iter()
+        .filter(|f| f.concept.eq_ignore_ascii_case(&fact.concept))
+        .count();
+    if corroboration >= 2 {
+        score += 0.1;
+    }
+
+    score.clamp(0.0, 1.0)
+}
+
+/// Build the JSON `context` payload for the `distill_reliability_gate` metric.
+/// Separated from the I/O so the payload shape is unit-testable without
+/// touching the real `metrics.jsonl`.
+fn build_reliability_gate_context(candidate_facts: u32, quarantined: u32, promoted: u32) -> String {
+    let block_rate = if candidate_facts == 0 {
+        0.0
+    } else {
+        quarantined as f64 / candidate_facts as f64
+    };
+    serde_json::json!({
+        "candidate_facts": candidate_facts,
+        "promoted": promoted,
+        "quarantined": quarantined,
+        "block_rate": block_rate,
+        "threshold": DISTILL_RELIABILITY_THRESHOLD,
+    })
+    .to_string()
+}
+
+/// Record one `distill_reliability_gate` metric event per distillation pass so
+/// the block-rate (`quarantined / candidate_facts`) is measurable from
+/// `metrics.jsonl` (issue #2433 acceptance: a before/after measurement of the
+/// gate). The metric `value` is the block-rate fraction.
+///
+/// Best-effort: a metrics-write failure is logged, never propagated. No-op
+/// under `cfg!(test)` so unit tests never append to the operator's real
+/// `~/.simard/metrics/metrics.jsonl`.
+fn record_reliability_gate_metric(candidate_facts: u32, quarantined: u32, promoted: u32) {
+    if cfg!(test) {
+        return;
+    }
+    let block_rate = if candidate_facts == 0 {
+        0.0
+    } else {
+        quarantined as f64 / candidate_facts as f64
+    };
+    let context = build_reliability_gate_context(candidate_facts, quarantined, promoted);
+    if let Err(e) =
+        crate::self_metrics::record_metric("distill_reliability_gate", block_rate, &context)
+    {
+        tracing::warn!(
+            target: "simard::distill",
+            error = %e,
+            "failed to record distill_reliability_gate metric (distillation unaffected)",
+        );
+    }
 }
 
 /// Production entry point: run one distillation pass using the
@@ -723,6 +910,25 @@ mod unit_tests {
     use super::*;
 
     #[test]
+    fn reliability_gate_metric_context_shape() {
+        // 5 candidates, 2 quarantined → block_rate 0.4.
+        let payload = build_reliability_gate_context(5, 2, 3);
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["candidate_facts"], 5);
+        assert_eq!(v["promoted"], 3);
+        assert_eq!(v["quarantined"], 2);
+        assert_eq!(v["block_rate"], 0.4);
+        assert_eq!(v["threshold"], DISTILL_RELIABILITY_THRESHOLD);
+    }
+
+    #[test]
+    fn reliability_gate_metric_context_zero_candidates_is_zero_rate() {
+        let payload = build_reliability_gate_context(0, 0, 0);
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["block_rate"], 0.0);
+    }
+
+    #[test]
     fn report_skipped_is_was_skipped() {
         assert!(DistillReport::skipped().was_skipped());
     }
@@ -734,6 +940,7 @@ mod unit_tests {
             fact_count: 3,
             procedure_count: 0,
             marked_count: 25,
+            quarantined_count: 0,
         };
         assert!(!r.was_skipped());
     }
@@ -750,6 +957,7 @@ mod unit_tests {
             fact_count: 3,
             procedure_count: 0,
             marked_count: 25,
+            quarantined_count: 0,
         };
         let pct = r.reduction() * 100.0;
         assert!((pct - 88.0).abs() < 0.1, "expected ~88%, got {pct}");
