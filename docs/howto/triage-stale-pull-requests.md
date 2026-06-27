@@ -248,6 +248,16 @@ Choose **exactly one** disposition per PR.
    gh pr checkout <N> -R <owner/repo>
    ```
 
+   > **Security — a checked-out PR branch is untrusted code.** `gh pr checkout`
+   > plus any local `cargo build` / `cargo test` / `cargo clippy` **executes the
+   > author's code** (`build.rs`, proc-macros, test bodies, and dependency build
+   > scripts) on your machine — where your `gh` merge credentials live. Prefer the
+   > GitHub-side results (`gh pr checks <N>`) as the source of truth; only build
+   > locally when you are authoring a real fix, and first review the diff —
+   > especially new/changed `Cargo.toml` / `Cargo.lock` entries (`gh pr diff <N>`)
+   > — for unexpected dependencies. **Never** run a PR's build just to LEAVE-OPEN
+   > or CLOSE it.
+
 2. **Resolve conflicts / staleness** by bringing `main` in on the **same**
    branch:
 
@@ -421,6 +431,11 @@ reopen if anything here is still wanted."
   owned is skipped untouched.
 - **Working-tree safety.** Push only from a `gh pr checkout` branch, never from
   the dirty top-level tree or `worktrees/main`.
+- **Untrusted-code safety.** Treat every checked-out PR branch as untrusted:
+  `cargo build` / `cargo test` runs the author's code (incl. `build.rs`,
+  proc-macros, dependency build scripts) on your host alongside your merge
+  credentials. Prefer `gh pr checks`; build locally only to author a fix, after
+  reviewing the dependency diff.
 - **Auditable closes.** Every `gh pr close` carries a one-line reason.
 
 ## Working-tree safety
