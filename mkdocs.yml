@@ -58,6 +58,7 @@ nav:
     - Gym Eval Engine — Library Adapter: architecture/gym-eval-library-adapter.md
     - Agent Composition: architecture/agent-composition.md
     - Implementation Plan: architecture/implementation-plan.md
+    - Brain Introspection + Memory Hygiene: architecture/brain-introspection.md
   - Concepts:
     - Truthful Runtime Metadata: concepts/truthful-runtime-metadata.md
     - Prompt-driven Brain Iteration: concepts/prompt-driven-brain-iteration.md
@@ -88,6 +89,7 @@ nav:
     - Self-Maintain Dependency Pins: howto/self-maintain-dependency-pins.md
     - Verify and Roll Back a Self-Deploy: howto/verify-and-roll-back-a-self-deploy.md
     - Diagnose a Rejected Goal Completion: howto/diagnose-a-rejected-goal-completion.md
+    - Configure Brain Introspection: howto/configure-brain-introspection.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Self-Deploy API: reference/self-deploy-api.md
@@ -112,6 +114,7 @@ nav:
     - Pluggable Identity API: reference/pluggable-identity-api.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
+    - Brain Introspection API: reference/brain-introspection-api.md
     # Hidden from nav until issue #1590 implementation lands:
     #   - reference/cognitive-memory-bridge-helpers.md
     #   - reference/goal-board-api.md

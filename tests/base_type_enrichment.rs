@@ -185,3 +185,61 @@ fn enrichment_is_noop_without_configured_bridge() {
         );
     }
 }
+
+/// Production-wiring parity gate (issue #2383).
+///
+/// The cross-adapter tests above inject a *mock* bridge through
+/// `enrichment_mut`, which proves `enrich_input` consumes bridges but not that
+/// the production factory seam (`with_enrichment` + `open_session`) actually
+/// launches them. Before #2383 only `CopilotSdkAdapter` exposed
+/// `with_enrichment`; RustyClawd's `SessionBuilder` arm built sessions with
+/// empty bridges, so enrichment was inert in production.
+///
+/// This drives both production-wired adapters through their `with_enrichment`
+/// builders against a real, writable state root and asserts they launch
+/// identical, non-empty memory + knowledge bridges — the parity that must hold
+/// so RustyClawd cannot silently regress to no-enrichment again. The
+/// `SessionBuilder`-level seam itself (the line that actually regressed) is
+/// covered by `session_builder`'s `*_provider_wires_enrichment_*` tests.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn production_wiring_launches_bridges_for_builder_adapters() {
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let state_root = tmp.path().join("state");
+    std::fs::create_dir_all(&state_root).unwrap();
+
+    fn assert_wired(name: &str, session: &dyn BaseTypeSession) {
+        let bridges = session
+            .enrichment()
+            .unwrap_or_else(|| panic!("adapter '{name}' must expose enrichment bridges"));
+        assert!(
+            bridges.memory.is_some(),
+            "adapter '{name}' production wiring must launch the memory bridge"
+        );
+        assert!(
+            bridges.knowledge.is_some(),
+            "adapter '{name}' production wiring must launch the knowledge bridge"
+        );
+    }
+
+    let build = |state_root: PathBuf| -> Vec<(&'static str, Box<dyn BaseTypeSession>)> {
+        let copilot = CopilotSdkAdapter::registered("copilot-sdk")
+            .unwrap()
+            .with_enrichment(state_root.clone())
+            .open_session(test_request())
+            .unwrap();
+        let rustyclawd = RustyClawdAdapter::registered("rusty-clawd")
+            .unwrap()
+            .with_enrichment(state_root)
+            .open_session(test_request())
+            .unwrap();
+        vec![("copilot-sdk", copilot), ("rusty-clawd", rustyclawd)]
+    };
+
+    for (name, session) in build(state_root) {
+        assert_wired(name, session.as_ref());
+    }
+}

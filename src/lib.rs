@@ -24,6 +24,13 @@ pub mod cmd_ensure_deps;
 pub mod cmd_install;
 pub mod cmd_self_update;
 pub mod cognitive_memory;
+// Issue #2419: periodic brain self-examination + memory-hygiene pass — a
+// higher-level introspection layer that reuses the existing distillation /
+// statistics / expired-sensory infra (mirrors `disk_health`). Tests live in a
+// `#[cfg(test)]` sibling so release/debug builds never compile them.
+pub mod brain_introspection;
+#[cfg(test)]
+mod brain_introspection_tests;
 mod copilot_status_probe;
 mod copilot_task_submit;
 pub mod cost_tracking;

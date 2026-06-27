@@ -413,6 +413,23 @@ pub fn run_ooda_daemon(
     );
     // -------------------------------------------------------------------
 
+    // --- periodic brain introspection + memory hygiene state (issue #2419) ---
+    let brain_introspection_interval_secs: u64 = crate::brain_introspection::interval_secs_from_env(
+        std::env::var("SIMARD_BRAIN_INTROSPECTION_INTERVAL_SECS")
+            .ok()
+            .as_deref(),
+    );
+    // NOT back-dated like disk-health: the first introspection runs one full
+    // interval after start (nothing useful to say at t=0; baseline is empty).
+    let mut last_brain_introspection = Instant::now();
+    daemon_log(
+        &state_root,
+        &format!(
+            "[simard] OODA daemon: brain introspection interval = {brain_introspection_interval_secs}s"
+        ),
+    );
+    // -------------------------------------------------------------------
+
     let mut cycles_run = 0u32;
 
     loop {
@@ -553,6 +570,34 @@ pub fn run_ooda_daemon(
                 }
             }
             last_worktree_sweep = Instant::now();
+        }
+        // -------------------------------------------------------------------
+
+        // ── Periodic brain introspection + memory hygiene (issue #2419) ──
+        // Higher-level self-examination pass: safe RPC-backed memory hygiene
+        // (expired-sensory prune + additive consolidation) plus an agentic
+        // recipe that surfaces brain-health/patterns, recommends bounded prunes,
+        // and writes findings to a dedup'd GitHub issue. Best-effort: a recipe
+        // failure WARNs and the safe hygiene still ran.
+        if crate::brain_introspection::should_run_introspection(
+            last_brain_introspection.elapsed(),
+            brain_introspection_interval_secs,
+        ) {
+            match crate::brain_introspection::run_brain_introspection(
+                &*bridges.memory,
+                &bridges.repo_root,
+                &state_root,
+                None,
+            ) {
+                Ok(report) => {
+                    daemon_log(&state_root, &format!("[simard] {}", report.summary()));
+                }
+                Err(e) => daemon_log(
+                    &state_root,
+                    &format!("[simard] WARN: brain introspection failed: {e}"),
+                ),
+            }
+            last_brain_introspection = Instant::now();
         }
         // -------------------------------------------------------------------
 

@@ -235,8 +235,8 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
             {key:'working',label:'Working',color:'#f0883e'},
             {key:'sensory',label:'Sensory',color:'#8b949e'},
           ];
-          const intervalMin=Math.round((dl.interval_secs||0)/60);
-          const intervalLabel=intervalMin>0?' ('+intervalMin+'m)':'';
+          const intervalSecs=dl.interval_secs||0;
+          const intervalLabel=intervalSecs>0?' ('+humanizeDuration(intervalSecs)+')':'';
           deltasEl.innerHTML=cats.map(c=>{
             const v=dl[c.key]||0;
             const sign=v>0?'+':'';

@@ -7,6 +7,11 @@ pub(crate) const DEFAULT_SHELL: &str = "/bin/bash";
 #[cfg(not(target_os = "macos"))]
 pub(crate) const DEFAULT_SHELL: &str = "/usr/bin/bash";
 pub(crate) const PTY_LAUNCHER: &str = "script";
+/// Fallback `PATH` for the child PTY when the inherited environment has none.
+/// Prevents ordinary commands from failing with exit code 127 in stripped
+/// service environments where `PATH` is unset or empty.
+pub(crate) const DEFAULT_PATH: &str =
+    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 pub(crate) const WAIT_STEP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,6 +56,16 @@ mod tests {
     #[test]
     fn pty_launcher_constant() {
         assert_eq!(PTY_LAUNCHER, "script");
+    }
+
+    #[test]
+    fn default_path_lists_standard_bin_directories() {
+        for dir in ["/usr/bin", "/bin"] {
+            assert!(
+                DEFAULT_PATH.split(':').any(|entry| entry == dir),
+                "DEFAULT_PATH must include {dir}: {DEFAULT_PATH}"
+            );
+        }
     }
 
     #[test]

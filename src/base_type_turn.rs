@@ -10,6 +10,7 @@
 //! 3. **Parse** — extract structured [`TurnOutput`] from raw LLM text output.
 
 use std::fmt::Write;
+use std::path::{Path, PathBuf};
 
 use crate::base_types::BaseTypeTurnInput;
 use crate::cognitive_memory::CognitiveMemoryOps;
@@ -230,6 +231,95 @@ impl std::fmt::Debug for EnrichmentBridges {
             .field("knowledge", &self.knowledge.is_some())
             .finish()
     }
+}
+
+/// Where a base-type session sources its memory + knowledge enrichment bridges.
+///
+/// The default is [`EnrichmentSource::Disabled`] so that lightweight callers and
+/// unit tests incur no filesystem side effects (opening a cognitive-memory
+/// store, launching native bridges). The live production path
+/// ([`crate::session_builder::SessionBuilder`]) opts in via each adapter's
+/// `with_enrichment` builder, wiring the same cognitive-memory store and native
+/// knowledge bridge the rest of the runtime uses so each turn is enriched with
+/// relevant memory facts, procedures, and domain knowledge.
+///
+/// This is the single, shared home for the enrichment-source policy used by
+/// every adapter that supports production enrichment (Copilot — issue #1664;
+/// RustyClawd — issue #2383). Centralizing it here keeps the launch + degrade
+/// behavior identical across adapters instead of being duplicated per adapter.
+#[derive(Clone, Debug, Default)]
+pub enum EnrichmentSource {
+    /// No enrichment bridges. [`EnrichmentSource::resolve`] yields an empty
+    /// [`EnrichmentBridges`], so `enrich_input` returns the input unchanged and
+    /// only the `## Objective` section is emitted.
+    #[default]
+    Disabled,
+    /// Launch the native cognitive-memory + knowledge bridges lazily (on
+    /// `open_session`), reading memory from `state_root`. A launch failure logs
+    /// and degrades that bridge to `None` (never panics).
+    Native { state_root: PathBuf },
+}
+
+impl EnrichmentSource {
+    /// Resolve this source into concrete [`EnrichmentBridges`].
+    ///
+    /// [`EnrichmentSource::Disabled`] yields an empty bundle (no side effects).
+    /// [`EnrichmentSource::Native`] launches the native cognitive-memory +
+    /// knowledge bridges via [`launch_enrichment_bridges`], degrading any
+    /// unavailable bridge to `None` without panicking.
+    pub fn resolve(&self) -> EnrichmentBridges {
+        match self {
+            EnrichmentSource::Disabled => EnrichmentBridges::new(),
+            EnrichmentSource::Native { state_root } => {
+                let (memory, knowledge) = launch_enrichment_bridges(state_root);
+                EnrichmentBridges { memory, knowledge }
+            }
+        }
+    }
+}
+
+/// Launch the cognitive-memory and knowledge bridges that enrich each turn,
+/// degrading gracefully when either is unavailable.
+///
+/// Memory is obtained via [`crate::ooda_loop::connect_memory`] (the same
+/// IPC-aware connector recipe steps use, sharing the daemon's live store when
+/// one is running and otherwise opening the library-backed store directly).
+/// Knowledge uses the in-process native transport from
+/// [`crate::bridge_launcher::launch_knowledge_bridge_native`].
+///
+/// Mirrors the honest-degradation contract of
+/// [`crate::bridge_launcher::launch_all_bridges`]: a launch failure is logged
+/// and yields `None` for that bridge so turn dispatch proceeds without that
+/// enrichment rather than aborting. Neither failure path panics.
+///
+/// Shared by every adapter that supports production enrichment (Copilot —
+/// issue #1664; RustyClawd — issue #2383) so the launcher exists exactly once.
+pub fn launch_enrichment_bridges(
+    state_root: &Path,
+) -> (Option<Box<dyn CognitiveMemoryOps>>, Option<KnowledgeBridge>) {
+    let memory = match crate::ooda_loop::connect_memory(state_root) {
+        Ok(memory) => Some(memory),
+        Err(error) => {
+            eprintln!(
+                "[simard] base-type adapter: cognitive-memory bridge unavailable — memory \
+                 enrichment disabled for this session: {error}"
+            );
+            None
+        }
+    };
+
+    let knowledge = match crate::bridge_launcher::launch_knowledge_bridge_native() {
+        Ok(knowledge) => Some(knowledge),
+        Err(error) => {
+            eprintln!(
+                "[simard] base-type adapter: knowledge bridge unavailable — knowledge \
+                 enrichment disabled for this session: {error}"
+            );
+            None
+        }
+    };
+
+    (memory, knowledge)
 }
 
 /// Enrich a turn input with recalled memory facts/procedures and domain
@@ -538,5 +628,79 @@ CONFIDENCE: 0.85";
         assert!(debug.contains("EnrichmentBridges"));
         assert!(debug.contains("memory: false"));
         assert!(debug.contains("knowledge: false"));
+    }
+
+    // ── EnrichmentSource / launch_enrichment_bridges ────────────────
+
+    #[test]
+    fn enrichment_source_default_is_disabled() {
+        let source = EnrichmentSource::default();
+        assert!(matches!(source, EnrichmentSource::Disabled));
+        // Disabled resolves to an empty, unconfigured bundle (no side effects).
+        let bridges = source.resolve();
+        assert!(!bridges.is_configured());
+    }
+
+    /// The production launch helper wires both real bridges when the state root
+    /// can back a cognitive-memory store. Shared by Copilot (#1664) and
+    /// RustyClawd (#2383); lives with the launcher it exercises.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn launch_enrichment_bridges_wires_real_bridges_for_valid_state_root() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let state_root = tmp.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let (memory, knowledge) = launch_enrichment_bridges(&state_root);
+        assert!(
+            memory.is_some(),
+            "cognitive-memory bridge must launch for a writable state_root"
+        );
+        assert!(
+            knowledge.is_some(),
+            "native knowledge bridge must launch in-process"
+        );
+    }
+
+    /// `EnrichmentSource::Native` resolves into a fully-configured bundle for a
+    /// writable state root — the policy seam shared by every production adapter.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn enrichment_source_native_resolves_configured_bridges() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let state_root = tmp.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+
+        let bridges = EnrichmentSource::Native { state_root }.resolve();
+        assert!(
+            bridges.memory.is_some(),
+            "Native source must wire the memory bridge for a writable state_root"
+        );
+        assert!(
+            bridges.knowledge.is_some(),
+            "Native source must wire the knowledge bridge in-process"
+        );
+    }
+
+    /// A state root that cannot back a store (a regular file) makes the memory
+    /// launch fail; it must degrade to `None` without panicking, while the
+    /// in-process knowledge bridge still launches.
+    #[test]
+    fn launch_enrichment_bridges_degrades_when_memory_unavailable() {
+        use tempfile::NamedTempFile;
+        // A regular file as `state_root` makes `<state_root>/cognitive` uncreatable.
+        let file = NamedTempFile::new().unwrap();
+
+        let (memory, knowledge) = launch_enrichment_bridges(file.path());
+        assert!(
+            memory.is_none(),
+            "memory bridge must degrade to None when the state_root cannot back a store"
+        );
+        assert!(
+            knowledge.is_some(),
+            "knowledge bridge must still launch when only memory is unavailable"
+        );
     }
 }

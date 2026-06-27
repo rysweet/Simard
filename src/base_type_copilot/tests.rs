@@ -906,9 +906,12 @@ fn build_copilot_terminal_objective_with_working_dir() {
 // None)` and the memory-facts / known-procedures / domain-knowledge prompt
 // blocks were never reached. These tests prove (1) that supplied bridges are
 // actually consumed, (2) that the absence of bridges still produces a valid
-// objective-only prompt, (3) that a supplied bridge whose query fails surfaces
-// the error rather than silently degrading, and (4) that the production
-// `launch_enrichment_bridges` helper wires real bridges and degrades cleanly.
+// objective-only prompt, and (3) that a supplied bridge whose query fails
+// surfaces the error rather than silently degrading. The production
+// `launch_enrichment_bridges` helper now lives in `base_type_turn` (shared with
+// the RustyClawd adapter, issue #2383); its real-bridge / degradation tests
+// live there alongside it, and `open_session_with_native_enrichment_*` below
+// still guards the Copilot factory seam.
 
 use super::CopilotSdkSession;
 use crate::bridge::BridgeErrorPayload;
@@ -1070,47 +1073,6 @@ fn enrichment_query_failure_propagates_not_panics() {
     assert!(
         result.is_err(),
         "a supplied bridge whose query fails must surface an error, not silently degrade"
-    );
-}
-
-/// The production launch helper wires both real bridges when the state root
-/// can back a cognitive-memory store.
-#[test]
-#[serial_test::serial(cognitive_memory)]
-fn launch_enrichment_bridges_wires_real_bridges_for_valid_state_root() {
-    use tempfile::TempDir;
-    let tmp = TempDir::new().unwrap();
-    let state_root = tmp.path().join("state");
-    std::fs::create_dir_all(&state_root).unwrap();
-
-    let (memory, knowledge) = super::launch_enrichment_bridges(&state_root);
-    assert!(
-        memory.is_some(),
-        "cognitive-memory bridge must launch for a writable state_root"
-    );
-    assert!(
-        knowledge.is_some(),
-        "native knowledge bridge must launch in-process"
-    );
-}
-
-/// A state root that cannot back a store (a regular file) makes the memory
-/// launch fail; it must degrade to `None` without panicking, while the
-/// in-process knowledge bridge still launches.
-#[test]
-fn launch_enrichment_bridges_degrades_when_memory_unavailable() {
-    use tempfile::NamedTempFile;
-    // A regular file as `state_root` makes `<state_root>/cognitive` uncreatable.
-    let file = NamedTempFile::new().unwrap();
-
-    let (memory, knowledge) = super::launch_enrichment_bridges(file.path());
-    assert!(
-        memory.is_none(),
-        "memory bridge must degrade to None when the state_root cannot back a store"
-    );
-    assert!(
-        knowledge.is_some(),
-        "knowledge bridge must still launch when only memory is unavailable"
     );
 }
 

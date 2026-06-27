@@ -299,7 +299,7 @@ fn archive_leaves_non_complete_goals_untouched() {
 // --- kill-switch ------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(simard_completion_evidence_env)]
+#[serial_test::serial(simard_completion_evidence_env, cognitive_memory)]
 fn kill_switch_off_disables_gate() {
     let prev = std::env::var("SIMARD_COMPLETION_EVIDENCE").ok();
 

@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -7,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::{SimardError, SimardResult};
 
-use super::types::{PTY_LAUNCHER, TerminalSessionCapture, TerminalWaitStatus};
+use super::types::{DEFAULT_PATH, PTY_LAUNCHER, TerminalSessionCapture, TerminalWaitStatus};
 use super::workflow_guard::{WorkflowRestoreGuard, capture_workflow_restore_guards};
 
 struct TranscriptGuard {
@@ -54,7 +55,7 @@ impl PtyTerminalSession {
         shell: &str,
         working_directory: &Path,
     ) -> SimardResult<Self> {
-        let launch_command = format!("{shell} --noprofile --norc -i");
+        let launch_command = format!("{shell} {}", interactive_shell_flags(shell));
         Self::launch_command(base_type, &launch_command, working_directory)
     }
 
@@ -88,9 +89,15 @@ impl PtyTerminalSession {
                 .arg(launch_command)
                 .arg(&transcript_path);
         }
+        command.current_dir(working_directory).env("TERM", "dumb");
+        // Ensure the child PTY has a usable PATH so ordinary commands resolve to
+        // real binaries instead of failing with exit code 127. Only override when
+        // the inherited PATH is missing or empty so operator-provided PATHs (and
+        // any PATH set by the launching service) are preserved untouched.
+        if let Some(path) = child_path_override(std::env::var_os("PATH").as_deref()) {
+            command.env("PATH", path);
+        }
         let mut child = command
-            .current_dir(working_directory)
-            .env("TERM", "dumb")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -396,6 +403,55 @@ impl PtyTerminalSession {
     }
 }
 
+/// Decide whether the child PTY needs an explicit `PATH` override.
+///
+/// Returns the fallback [`DEFAULT_PATH`] when the inherited value is missing or
+/// empty so ordinary commands resolve instead of failing with exit code 127;
+/// returns `None` when the inherited `PATH` is usable and must be preserved.
+fn child_path_override(inherited: Option<&OsStr>) -> Option<&'static str> {
+    match inherited {
+        Some(value) if !value.is_empty() => None,
+        _ => Some(DEFAULT_PATH),
+    }
+}
+
+/// Interactive launch flags appropriate for the given shell.
+///
+/// bash honours `--noprofile --norc` to skip startup files for a clean,
+/// deterministic PTY session. POSIX `sh`/dash reject those long options
+/// (`sh: Illegal option --`), so any non-bash interpreter — including the
+/// `/bin/sh`/`$SHELL` fallbacks resolved by `default_shell` — gets a bare
+/// interactive invocation instead. Without this, falling back to a non-bash
+/// shell would itself fail with the very exit code this fix is meant to
+/// eliminate.
+fn interactive_shell_flags(shell: &str) -> &'static str {
+    let name = Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if is_bash_shell(name) {
+        "--noprofile --norc -i"
+    } else {
+        "-i"
+    }
+}
+
+/// Whether `name` is the bash interpreter, tolerating versioned basenames such
+/// as `bash5` or `bash-5.2` while excluding unrelated names that merely start
+/// with "bash" (e.g. `bashful`). The `--noprofile --norc` long options are
+/// bash-only; applying them to a non-bash shell makes the interactive launch
+/// abort with the very exit code this fix is meant to eliminate.
+fn is_bash_shell(name: &str) -> bool {
+    match name.strip_prefix("bash") {
+        Some("") => true,
+        Some(rest) => rest
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit() || c == '-'),
+        None => false,
+    }
+}
+
 /// Process names that indicate active LLM work is in progress.
 #[cfg(unix)]
 const WORK_PROCESS_NAMES: &[&str] = &["copilot", "node", "amplihack"];
@@ -517,6 +573,76 @@ fn env_secs(var: &str, default: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── child_path_override ───────────────────────────────────────────────────
+
+    #[test]
+    fn child_path_override_preserves_usable_path() {
+        assert_eq!(
+            child_path_override(Some(OsStr::new("/usr/bin:/bin"))),
+            None,
+            "a non-empty inherited PATH must be preserved untouched"
+        );
+    }
+
+    #[test]
+    fn child_path_override_falls_back_when_missing() {
+        assert_eq!(child_path_override(None), Some(DEFAULT_PATH));
+    }
+
+    #[test]
+    fn child_path_override_falls_back_when_empty() {
+        assert_eq!(
+            child_path_override(Some(OsStr::new(""))),
+            Some(DEFAULT_PATH)
+        );
+    }
+
+    // ── interactive_shell_flags ───────────────────────────────────────────────
+
+    #[test]
+    fn interactive_shell_flags_uses_bash_options_for_bash() {
+        assert_eq!(
+            interactive_shell_flags("/usr/bin/bash"),
+            "--noprofile --norc -i"
+        );
+        assert_eq!(
+            interactive_shell_flags("/bin/bash"),
+            "--noprofile --norc -i"
+        );
+    }
+
+    #[test]
+    fn interactive_shell_flags_treats_versioned_bash_as_bash() {
+        // Versioned bash basenames still honour the bash-only startup-file
+        // options, so a `$SHELL`/distro fallback to e.g. `bash5` stays
+        // deterministic rather than silently running profile/rc files.
+        assert_eq!(
+            interactive_shell_flags("/usr/local/bin/bash5"),
+            "--noprofile --norc -i"
+        );
+        assert_eq!(
+            interactive_shell_flags("/opt/homebrew/bin/bash-5.2"),
+            "--noprofile --norc -i"
+        );
+        assert!(is_bash_shell("bash"));
+        assert!(is_bash_shell("bash5"));
+        assert!(is_bash_shell("bash-5.2"));
+    }
+
+    #[test]
+    fn interactive_shell_flags_uses_posix_options_for_non_bash() {
+        // `--noprofile`/`--norc` are bash-specific; POSIX sh and other shells
+        // must get a bare interactive invocation or they abort on launch.
+        assert_eq!(interactive_shell_flags("/bin/sh"), "-i");
+        assert_eq!(interactive_shell_flags("/usr/bin/dash"), "-i");
+        assert_eq!(interactive_shell_flags("/usr/bin/zsh"), "-i");
+        // Names that merely start with "bash" but are not bash must not get the
+        // bash-only options.
+        assert_eq!(interactive_shell_flags("/usr/games/bashful"), "-i");
+        assert!(!is_bash_shell("bashful"));
+        assert!(!is_bash_shell("sh"));
+    }
 
     // ── has_active_work_processes ─────────────────────────────────────────────
 
