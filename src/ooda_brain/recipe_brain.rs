@@ -132,6 +132,16 @@ pub enum LifecycleParseOutcome {
     /// could be obtained. Produced on the error path of
     /// `decide_engineer_lifecycle`, not by the pure parser.
     Error,
+    /// A real decision was recovered by a SCHEMA-REPAIR re-prompt after the
+    /// base attempt produced a parse-miss (issue #2432, BGML progress-aware
+    /// escalation). Counts as a success — it is the whole point of the ladder:
+    /// it converts what would have been a silent `default_*` into a real
+    /// decision, dropping the parse-failure rate.
+    Repaired,
+    /// A real decision was recovered by a higher-effort ESCALATED re-prompt
+    /// (schema-repair + step-by-step reasoning tier) after schema-repair alone
+    /// still parse-missed (issue #2432). Also a success.
+    Escalated,
 }
 
 impl LifecycleParseOutcome {
@@ -142,14 +152,269 @@ impl LifecycleParseOutcome {
             LifecycleParseOutcome::DefaultEmpty => "default_empty",
             LifecycleParseOutcome::DefaultMalformed => "default_malformed",
             LifecycleParseOutcome::Error => "error",
+            LifecycleParseOutcome::Repaired => "repaired",
+            LifecycleParseOutcome::Escalated => "escalated",
         }
     }
 
     /// Whether this outcome counts toward the parse-failure numerator
-    /// (everything except a real parsed decision).
+    /// (everything except a real decision). `Repaired` and `Escalated` are
+    /// real decisions recovered by the ladder, so they do NOT count as
+    /// failures — that is how the escalation ladder reduces the measured
+    /// default/parse-failure rate (issue #2432).
     pub fn is_parse_failure(self) -> bool {
-        !matches!(self, LifecycleParseOutcome::Parsed)
+        matches!(
+            self,
+            LifecycleParseOutcome::DefaultEmpty
+                | LifecycleParseOutcome::DefaultMalformed
+                | LifecycleParseOutcome::Error
+        )
     }
+}
+
+// ---------------------------------------------------------------------------
+// Confidence-gated escalation ladder (issue #2432, BGML progress-aware module)
+//
+// On a base parse-miss (`DefaultEmpty`/`DefaultMalformed` — the brain's coarse
+// judgment was unparseable, i.e. low confidence) we spend EXTRA compute ONLY on
+// that weak case: a bounded sequence of re-prompts that (1) feed the malformed
+// output back asking for a valid first-word variant (schema-repair) and (2)
+// escalate to a higher-effort reasoning tier. The deterministic
+// `continue_skipping` default is reached only AFTER the ladder is exhausted —
+// replacing the previous silent default-on-first-miss behaviour (#2419 family).
+// ---------------------------------------------------------------------------
+
+/// One rung of the escalation ladder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LadderRung {
+    /// Base attempt — cheap parse, exactly as the #2419 path.
+    Base,
+    /// Schema-repair re-prompt: feed the malformed prior output back asking for
+    /// a valid first-word variant. Same reasoning tier.
+    SchemaRepair,
+    /// Schema-repair PLUS a higher-effort, step-by-step reasoning tier bump.
+    Escalate,
+}
+
+/// Parameters for a single lifecycle recipe invocation. `prior_output` is the
+/// malformed text fed back on repair/escalate rungs (empty on `Base`).
+pub struct LadderAttempt<'a> {
+    pub rung: LadderRung,
+    pub prior_output: &'a str,
+}
+
+impl LadderAttempt<'_> {
+    /// The base (cheap) attempt — no repair note.
+    pub fn base() -> LadderAttempt<'static> {
+        LadderAttempt {
+            rung: LadderRung::Base,
+            prior_output: "",
+        }
+    }
+
+    /// The `escalation_note` context var fed to the recipe for this rung.
+    /// Empty on `Base` so base behaviour is byte-identical to pre-#2432.
+    pub fn escalation_note(&self) -> String {
+        build_escalation_note(self.rung, self.prior_output)
+    }
+}
+
+/// The closed variant token list, echoed into the schema-repair note so the
+/// model is reminded of the exact accepted first words. Kept in sync with the
+/// recipe `OPTIONS` section and `rustyclawd::VALID_VARIANTS`.
+const LIFECYCLE_VARIANT_LIST: &str = "continue_skipping, reclaim_and_redispatch, deprioritize, open_tracking_issue, mark_goal_blocked, consider_self_update";
+
+/// Build the `escalation_note` injected into the recipe prompt for a given
+/// rung. Pinned wording — see the `escalation_note_*` content-pin tests.
+pub fn build_escalation_note(rung: LadderRung, prior_output: &str) -> String {
+    if matches!(rung, LadderRung::Base) {
+        return String::new();
+    }
+    let prior = truncate(prior_output.trim(), MAX_RATIONALE_CHARS);
+    let repair = format!(
+        "## ⚠️ SCHEMA REPAIR (retry) ## \
+         Your previous response could not be parsed: its FIRST WORD was not a valid decision variant. \
+         Previous response: <<<{prior}>>> \
+         Respond again now. The VERY FIRST WORD of your reply MUST be exactly one of: {LIFECYCLE_VARIANT_LIST}. \
+         Output that variant word first, then your rationale."
+    );
+    match rung {
+        LadderRung::Base => String::new(),
+        LadderRung::SchemaRepair => repair,
+        LadderRung::Escalate => format!(
+            "{repair} ## HIGH-EFFORT RETRY ## \
+             This is a final, higher-effort attempt. Reason carefully, step by step, about the \
+             engineer's state BEFORE answering, then output the single variant word first."
+        ),
+    }
+}
+
+/// Bound on how far the escalation ladder climbs. Configurable via
+/// `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS`, hard-capped so a misconfiguration
+/// can never turn the brain into an unbounded retry loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EscalationConfig {
+    /// Number of escalation rungs attempted AFTER a base parse-miss. `0`
+    /// disables the ladder (pre-#2432 default-on-first-miss behaviour).
+    pub max_escalations: u32,
+}
+
+impl EscalationConfig {
+    /// Default rungs: schema-repair, then schema-repair + high-effort.
+    pub const DEFAULT_MAX_ESCALATIONS: u32 = 2;
+    /// Absolute ceiling regardless of env configuration.
+    pub const HARD_CAP: u32 = 3;
+    /// Env var that overrides [`DEFAULT_MAX_ESCALATIONS`](Self::DEFAULT_MAX_ESCALATIONS).
+    pub const ENV_VAR: &'static str = "SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS";
+
+    /// Read the cap from the environment, clamped to `[0, HARD_CAP]`.
+    pub fn from_env() -> Self {
+        Self {
+            max_escalations: parse_max_escalations(std::env::var(Self::ENV_VAR).ok().as_deref()),
+        }
+    }
+}
+
+/// Parse the `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS` value into a bounded rung
+/// count. Unset / unparseable → [`EscalationConfig::DEFAULT_MAX_ESCALATIONS`];
+/// always clamped to [`EscalationConfig::HARD_CAP`] so no configuration can
+/// produce an unbounded retry loop. Pure so it is unit-testable without env
+/// mutation.
+fn parse_max_escalations(raw: Option<&str>) -> u32 {
+    raw.and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(EscalationConfig::DEFAULT_MAX_ESCALATIONS)
+        .min(EscalationConfig::HARD_CAP)
+}
+
+impl Default for EscalationConfig {
+    fn default() -> Self {
+        Self {
+            max_escalations: Self::DEFAULT_MAX_ESCALATIONS,
+        }
+    }
+}
+
+/// Seam over the raw lifecycle recipe invocation so the escalation ladder is
+/// unit-testable without a live `recipe-runner-rs`. Production wires
+/// [`RecipeBrain`]; tests wire a scripted stub. Returns the raw decision text
+/// (the recipe's final step output); errors propagate.
+pub trait LifecycleInvoker {
+    fn invoke_lifecycle(
+        &self,
+        ctx: &EngineerLifecycleCtx,
+        attempt: &LadderAttempt,
+    ) -> SimardResult<String>;
+}
+
+/// Drive the confidence-gated escalation ladder after a base parse-miss.
+///
+/// `base_raw` is the (already-invoked) base attempt's raw output and
+/// `base_outcome` its parse-miss classification. Returns the final decision,
+/// its outcome (`Repaired`/`Escalated` on recovery, else the original
+/// parse-miss), and the total number of brain invocations made (base + rungs).
+///
+/// Bounded by `cfg.max_escalations`; each rung is logged loudly; the
+/// deterministic `continue_skipping` default is returned only when every rung
+/// is exhausted (or an escalation invocation itself fails).
+pub fn run_escalation_ladder(
+    invoker: &dyn LifecycleInvoker,
+    ctx: &EngineerLifecycleCtx,
+    base_raw: &str,
+    base_outcome: LifecycleParseOutcome,
+    cfg: &EscalationConfig,
+) -> (EngineerLifecycleDecision, LifecycleParseOutcome, u32) {
+    let mut prior = base_raw.to_string();
+    let mut attempts = 1u32; // the base attempt already happened
+
+    for rung_idx in 1..=cfg.max_escalations {
+        let rung = if rung_idx == 1 {
+            LadderRung::SchemaRepair
+        } else {
+            LadderRung::Escalate
+        };
+        attempts += 1;
+
+        tracing::warn!(
+            target: "simard::ooda_brain",
+            goal = %ctx.goal_id,
+            rung = ?rung,
+            attempt = attempts,
+            base_outcome = base_outcome.label(),
+            "brain decision parse-miss → escalating (confidence-gated ladder, issue #2432)"
+        );
+        eprintln!(
+            "[simard] BRAIN ESCALATION goal={} rung={:?} attempt={} (parse-miss recovery)",
+            ctx.goal_id, rung, attempts
+        );
+
+        let attempt = LadderAttempt {
+            rung,
+            prior_output: &prior,
+        };
+        match invoker.invoke_lifecycle(ctx, &attempt) {
+            Err(e) => {
+                tracing::warn!(
+                    target: "simard::ooda_brain",
+                    goal = %ctx.goal_id,
+                    rung = ?rung,
+                    error = %e,
+                    "brain escalation attempt failed to invoke; stopping ladder, using deterministic default"
+                );
+                eprintln!(
+                    "[simard] BRAIN ESCALATION goal={} rung={:?} invoke failed: {e} — falling back to default",
+                    ctx.goal_id, rung
+                );
+                break;
+            }
+            Ok(raw2) => {
+                let (decision, oc) = parse_lifecycle_outcome(&raw2);
+                if !oc.is_parse_failure() {
+                    let recovered = match rung {
+                        LadderRung::SchemaRepair => LifecycleParseOutcome::Repaired,
+                        LadderRung::Escalate => LifecycleParseOutcome::Escalated,
+                        LadderRung::Base => oc,
+                    };
+                    tracing::info!(
+                        target: "simard::ooda_brain",
+                        goal = %ctx.goal_id,
+                        rung = ?rung,
+                        attempt = attempts,
+                        decision = lifecycle_decision_choice(&decision),
+                        "brain decision RECOVERED via escalation ladder (issue #2432)"
+                    );
+                    eprintln!(
+                        "[simard] BRAIN ESCALATION goal={} RECOVERED decision={} via {:?} (attempt {})",
+                        ctx.goal_id,
+                        lifecycle_decision_choice(&decision),
+                        rung,
+                        attempts
+                    );
+                    return (decision, recovered, attempts);
+                }
+                // Still a parse-miss — feed the latest malformed output into the
+                // next rung's repair note.
+                prior = raw2;
+            }
+        }
+    }
+
+    // Ladder exhausted, disabled, or an escalation invoke failed: fall to the
+    // deterministic default, preserving the original parse-miss outcome for the
+    // metric numerator.
+    if cfg.max_escalations > 0 {
+        tracing::warn!(
+            target: "simard::ooda_brain",
+            goal = %ctx.goal_id,
+            attempts,
+            base_outcome = base_outcome.label(),
+            "brain escalation ladder exhausted without a parseable decision; deterministic default"
+        );
+        eprintln!(
+            "[simard] BRAIN ESCALATION goal={} ladder exhausted after {attempts} attempts — deterministic default",
+            ctx.goal_id
+        );
+    }
+    (default_continue_skipping(), base_outcome, attempts)
 }
 
 /// Resolve the recipe YAML path. Checks, in order:
@@ -318,11 +583,22 @@ impl OodaOrientBrain for RecipeBrain {
     }
 }
 
-impl OodaBrain for RecipeBrain {
-    fn decide_engineer_lifecycle(
+impl RecipeBrain {
+    /// Invoke the engineer-lifecycle recipe once for the given ladder rung and
+    /// return the raw decision text (the recipe's final step output). On
+    /// failure returns the error PLUS a stable `cause` label
+    /// (`spawn_failed` / `nonzero_exit` / `envelope_decode_failed`) for the
+    /// `brain_lifecycle_decision` metric.
+    ///
+    /// The `escalation_note` context var (empty on `LadderRung::Base`) carries
+    /// the schema-repair / high-effort instruction; it is rendered by the
+    /// recipe's `{{escalation_note}}` placeholder. Passing it on every call
+    /// keeps base behaviour byte-identical to the #2419 path.
+    fn invoke_lifecycle_raw(
         &self,
         ctx: &EngineerLifecycleCtx,
-    ) -> SimardResult<EngineerLifecycleDecision> {
+        attempt: &LadderAttempt,
+    ) -> Result<String, (SimardError, &'static str)> {
         let sentinel = ctx
             .sentinel_pid
             .map(|p| p.to_string())
@@ -332,6 +608,7 @@ impl OodaBrain for RecipeBrain {
         } else {
             ctx.minutes_since_last_update_attempt.to_string()
         };
+        let escalation_note = attempt.escalation_note();
 
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
@@ -385,67 +662,114 @@ impl OodaBrain for RecipeBrain {
             ))
             .arg("-c")
             .arg(format!("minutes_since_last_update_attempt={minutes}"))
+            // issue #2432: the (possibly empty) escalation/schema-repair note.
+            .arg("-c")
+            .arg(format!(
+                "escalation_note={}",
+                sanitize_context_var(&escalation_note, 4000)
+            ))
             .output();
 
         let output = match output {
             Ok(o) => o,
             Err(e) => {
-                record_lifecycle_decision_metric(
-                    ctx,
-                    LifecycleParseOutcome::Error,
-                    "",
-                    "none",
+                return Err((
+                    SimardError::AdapterInvocationFailed {
+                        base_type: self.adapter_tag.to_string(),
+                        reason: format!("recipe-runner-rs spawn failed: {e}"),
+                    },
                     "spawn_failed",
-                );
-                return Err(SimardError::AdapterInvocationFailed {
-                    base_type: self.adapter_tag.to_string(),
-                    reason: format!("recipe-runner-rs spawn failed: {e}"),
-                });
+                ));
             }
         };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            record_lifecycle_decision_metric(
-                ctx,
-                LifecycleParseOutcome::Error,
-                "",
-                "none",
+            return Err((
+                SimardError::AdapterInvocationFailed {
+                    base_type: self.adapter_tag.to_string(),
+                    reason: format!(
+                        "recipe exited with {}: {}",
+                        output.status,
+                        truncate(&stderr, MAX_RATIONALE_CHARS)
+                    ),
+                },
                 "nonzero_exit",
-            );
-            return Err(SimardError::AdapterInvocationFailed {
-                base_type: self.adapter_tag.to_string(),
-                reason: format!(
-                    "recipe exited with {}: {}",
-                    output.status,
-                    truncate(&stderr, MAX_RATIONALE_CHARS)
-                ),
-            });
+            ));
         }
 
-        let raw = match extract_recipe_decision_output(&output.stdout, self.adapter_tag) {
-            Ok(s) => s,
-            Err(e) => {
+        extract_recipe_decision_output(&output.stdout, self.adapter_tag)
+            .map_err(|e| (e, "envelope_decode_failed"))
+    }
+}
+
+impl LifecycleInvoker for RecipeBrain {
+    fn invoke_lifecycle(
+        &self,
+        ctx: &EngineerLifecycleCtx,
+        attempt: &LadderAttempt,
+    ) -> SimardResult<String> {
+        self.invoke_lifecycle_raw(ctx, attempt).map_err(|(e, _)| e)
+    }
+}
+
+impl OodaBrain for RecipeBrain {
+    fn decide_engineer_lifecycle(
+        &self,
+        ctx: &EngineerLifecycleCtx,
+    ) -> SimardResult<EngineerLifecycleDecision> {
+        // Base (cheap) attempt — identical to the #2419 path. A genuine
+        // recipe-runner failure still surfaces loudly as `Err` (it must NOT be
+        // masked by the ladder): only a *parse-miss* on a successful run is
+        // low-confidence enough to escalate.
+        let base_raw = match self.invoke_lifecycle_raw(ctx, &LadderAttempt::base()) {
+            Ok(raw) => raw,
+            Err((e, cause)) => {
                 record_lifecycle_decision_metric(
                     ctx,
                     LifecycleParseOutcome::Error,
                     "",
                     "none",
-                    "envelope_decode_failed",
+                    cause,
+                    1,
                 );
                 return Err(e);
             }
         };
 
-        let (decision, outcome) = parse_lifecycle_outcome(&raw);
+        let (decision, outcome) = parse_lifecycle_outcome(&base_raw);
+        if !outcome.is_parse_failure() {
+            // Parsed on the first try — no extra compute spent.
+            record_lifecycle_decision_metric(
+                ctx,
+                outcome,
+                &lifecycle_first_word(&base_raw),
+                lifecycle_decision_choice(&decision),
+                "ok",
+                1,
+            );
+            return Ok(decision);
+        }
+
+        // Parse-miss → confidence-gated escalation ladder (issue #2432). Spend
+        // extra compute ONLY on this weak case.
+        let cfg = EscalationConfig::from_env();
+        let (final_decision, final_outcome, attempts) =
+            run_escalation_ladder(self, ctx, &base_raw, outcome, &cfg);
+        let cause = if final_outcome.is_parse_failure() {
+            "ladder_exhausted"
+        } else {
+            "ladder_recovered"
+        };
         record_lifecycle_decision_metric(
             ctx,
-            outcome,
-            &lifecycle_first_word(&raw),
-            lifecycle_decision_choice(&decision),
-            "ok",
+            final_outcome,
+            &lifecycle_first_word(&base_raw),
+            lifecycle_decision_choice(&final_decision),
+            cause,
+            attempts,
         );
-        Ok(decision)
+        Ok(final_decision)
     }
 }
 
@@ -682,6 +1006,7 @@ fn build_lifecycle_metric_context(
     first_word: &str,
     decision_choice: &str,
     cause: &str,
+    attempts: u32,
 ) -> String {
     serde_json::json!({
         "goal_id": ctx.goal_id,
@@ -691,6 +1016,8 @@ fn build_lifecycle_metric_context(
         "consecutive_skip_count": ctx.consecutive_skip_count,
         "decision": decision_choice,
         "cause": cause,
+        // issue #2432: total brain invocations spent (base + escalation rungs).
+        "attempts": attempts,
     })
     .to_string()
 }
@@ -698,6 +1025,8 @@ fn build_lifecycle_metric_context(
 /// Record one `brain_lifecycle_decision` metric event (value `1.0`) per
 /// `decide_engineer_lifecycle` invocation so the parse-failure rate
 /// (`outcome != "parsed"`) is measurable from `metrics.jsonl` (issue #2419).
+/// The `attempts` field (issue #2432) records how many brain invocations the
+/// escalation ladder spent.
 ///
 /// Best-effort: a metrics-write failure is logged, never propagated — the
 /// brain decision must not fail because telemetry could not be persisted.
@@ -711,8 +1040,10 @@ fn record_lifecycle_decision_metric(
     first_word: &str,
     decision_choice: &str,
     cause: &str,
+    attempts: u32,
 ) {
-    let context = build_lifecycle_metric_context(ctx, outcome, first_word, decision_choice, cause);
+    let context =
+        build_lifecycle_metric_context(ctx, outcome, first_word, decision_choice, cause, attempts);
     if cfg!(test) {
         return;
     }
@@ -2329,6 +2660,7 @@ mod tests {
                 "reclaim_and_redispatch",
                 "reclaim_and_redispatch",
                 "ok",
+                1,
             );
             let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
             assert_eq!(v["goal_id"], "fix-the-thing");
@@ -2338,6 +2670,7 @@ mod tests {
             assert_eq!(v["consecutive_skip_count"], 12);
             assert_eq!(v["decision"], "reclaim_and_redispatch");
             assert_eq!(v["cause"], "ok");
+            assert_eq!(v["attempts"], 1);
         }
 
         #[test]
@@ -2349,7 +2682,7 @@ mod tests {
                 LifecycleParseOutcome::Error,
             ] {
                 let payload =
-                    build_lifecycle_metric_context(&ctx, outcome, "", "continue_skipping", "ok");
+                    build_lifecycle_metric_context(&ctx, outcome, "", "continue_skipping", "ok", 1);
                 let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
                 assert_eq!(v["outcome"], outcome.label());
                 assert_eq!(
@@ -2366,6 +2699,293 @@ mod tests {
             let huge = format!("{} rest of response", "z".repeat(500));
             let fw = lifecycle_first_word(&huge);
             assert!(fw.chars().count() <= METRIC_FIRST_WORD_CHARS + 1);
+        }
+    }
+
+    // ===================================================================
+    // Issue #2432 — confidence-gated escalation ladder (schema-repair +
+    // higher-effort tier bump) replacing the zero-retry parse→default.
+    // ===================================================================
+
+    mod issue_2432_tests {
+        use super::super::*;
+        use crate::ooda_brain::EngineerLifecycleCtx;
+        use std::collections::VecDeque;
+        use std::path::PathBuf;
+        use std::sync::Mutex;
+
+        fn sample_ctx() -> EngineerLifecycleCtx {
+            EngineerLifecycleCtx {
+                goal_id: "fix-the-thing".into(),
+                goal_description: "desc".into(),
+                cycle_number: 7,
+                consecutive_skip_count: 12,
+                failure_count: 0,
+                worktree_path: PathBuf::from("/tmp/wt"),
+                worktree_mtime_secs_ago: 60,
+                sentinel_pid: Some(42),
+                last_engineer_log_tail: "tail".into(),
+                commits_behind: 0,
+                in_flight_engineer_count: 1,
+                minutes_since_last_update_attempt: u64::MAX,
+            }
+        }
+
+        /// A scripted [`LifecycleInvoker`]: each call pops the next queued
+        /// response (`Ok(text)` or a synthesized adapter error) and records the
+        /// rung + rendered escalation note it was asked for.
+        struct ScriptedInvoker {
+            responses: Mutex<VecDeque<Result<String, ()>>>,
+            seen_rungs: Mutex<Vec<LadderRung>>,
+            seen_notes: Mutex<Vec<String>>,
+        }
+
+        impl ScriptedInvoker {
+            fn new(responses: Vec<Result<String, ()>>) -> Self {
+                Self {
+                    responses: Mutex::new(responses.into_iter().collect()),
+                    seen_rungs: Mutex::new(Vec::new()),
+                    seen_notes: Mutex::new(Vec::new()),
+                }
+            }
+            fn rungs(&self) -> Vec<LadderRung> {
+                self.seen_rungs.lock().unwrap().clone()
+            }
+            fn notes(&self) -> Vec<String> {
+                self.seen_notes.lock().unwrap().clone()
+            }
+        }
+
+        impl LifecycleInvoker for ScriptedInvoker {
+            fn invoke_lifecycle(
+                &self,
+                _ctx: &EngineerLifecycleCtx,
+                attempt: &LadderAttempt,
+            ) -> SimardResult<String> {
+                self.seen_rungs.lock().unwrap().push(attempt.rung);
+                self.seen_notes
+                    .lock()
+                    .unwrap()
+                    .push(attempt.escalation_note());
+                match self.responses.lock().unwrap().pop_front() {
+                    Some(Ok(s)) => Ok(s),
+                    Some(Err(())) => Err(SimardError::AdapterInvocationFailed {
+                        base_type: "test".into(),
+                        reason: "scripted invoke failure".into(),
+                    }),
+                    None => panic!("ScriptedInvoker called more times than scripted"),
+                }
+            }
+        }
+
+        // --- escalation note (pinned wording) ---
+
+        #[test]
+        fn escalation_note_base_is_empty() {
+            assert_eq!(build_escalation_note(LadderRung::Base, "anything"), "");
+        }
+
+        #[test]
+        fn escalation_note_schema_repair_pins_wording() {
+            let note = build_escalation_note(LadderRung::SchemaRepair, "OK looks fine to me");
+            assert!(note.contains("SCHEMA REPAIR"), "note: {note}");
+            assert!(
+                note.contains("FIRST WORD"),
+                "note must remind about first word"
+            );
+            assert!(
+                note.contains("continue_skipping")
+                    && note.contains("reclaim_and_redispatch")
+                    && note.contains("consider_self_update"),
+                "note must echo the full variant list"
+            );
+            assert!(
+                note.contains("OK looks fine to me"),
+                "note must feed the malformed prior output back"
+            );
+        }
+
+        #[test]
+        fn escalation_note_escalate_adds_high_effort() {
+            let note = build_escalation_note(LadderRung::Escalate, "junk");
+            assert!(note.contains("SCHEMA REPAIR"), "escalate still repairs");
+            assert!(
+                note.contains("HIGH-EFFORT"),
+                "escalate adds the effort tier"
+            );
+        }
+
+        // --- outcome semantics ---
+
+        #[test]
+        fn repaired_and_escalated_are_not_parse_failures() {
+            assert_eq!(LifecycleParseOutcome::Repaired.label(), "repaired");
+            assert_eq!(LifecycleParseOutcome::Escalated.label(), "escalated");
+            assert!(!LifecycleParseOutcome::Repaired.is_parse_failure());
+            assert!(!LifecycleParseOutcome::Escalated.is_parse_failure());
+        }
+
+        // --- config bound ---
+
+        #[test]
+        fn config_parse_defaults_and_clamps() {
+            assert_eq!(
+                parse_max_escalations(None),
+                EscalationConfig::DEFAULT_MAX_ESCALATIONS
+            );
+            assert_eq!(
+                parse_max_escalations(Some("garbage")),
+                EscalationConfig::DEFAULT_MAX_ESCALATIONS
+            );
+            assert_eq!(parse_max_escalations(Some("0")), 0);
+            assert_eq!(parse_max_escalations(Some("1")), 1);
+            // Hard cap: no configuration can produce an unbounded loop.
+            assert_eq!(
+                parse_max_escalations(Some("99")),
+                EscalationConfig::HARD_CAP
+            );
+            assert_eq!(parse_max_escalations(Some("  2 ")), 2);
+        }
+
+        // --- ladder behaviour ---
+
+        /// A parse-miss recovered by the FIRST (schema-repair) rung yields a
+        /// real decision, the `Repaired` outcome, and exactly 2 invocations
+        /// (base + 1 rung).
+        #[test]
+        fn ladder_recovers_via_schema_repair() {
+            let invoker =
+                ScriptedInvoker::new(vec![Ok("reclaim_and_redispatch worktree idle 7h".into())]);
+            let (decision, outcome, attempts) = run_escalation_ladder(
+                &invoker,
+                &sample_ctx(),
+                "OK the engineer looks fine", // base parse-miss text
+                LifecycleParseOutcome::DefaultMalformed,
+                &EscalationConfig::default(),
+            );
+            assert_eq!(outcome, LifecycleParseOutcome::Repaired);
+            assert!(!outcome.is_parse_failure());
+            assert_eq!(attempts, 2, "base + one schema-repair rung");
+            assert!(matches!(
+                decision,
+                EngineerLifecycleDecision::ReclaimAndRedispatch { .. }
+            ));
+            assert_eq!(invoker.rungs(), vec![LadderRung::SchemaRepair]);
+        }
+
+        /// A parse-miss that survives schema-repair is recovered by the SECOND
+        /// (higher-effort) rung → `Escalated`, 3 invocations.
+        #[test]
+        fn ladder_escalates_to_second_rung() {
+            let invoker = ScriptedInvoker::new(vec![
+                Ok("still not a variant word".into()), // schema-repair misses
+                Ok("deprioritize stale goal".into()),  // escalate recovers
+            ]);
+            let (decision, outcome, attempts) = run_escalation_ladder(
+                &invoker,
+                &sample_ctx(),
+                "garbage",
+                LifecycleParseOutcome::DefaultMalformed,
+                &EscalationConfig::default(),
+            );
+            assert_eq!(outcome, LifecycleParseOutcome::Escalated);
+            assert_eq!(attempts, 3, "base + schema-repair + escalate");
+            assert!(matches!(
+                decision,
+                EngineerLifecycleDecision::Deprioritize { .. }
+            ));
+            assert_eq!(
+                invoker.rungs(),
+                vec![LadderRung::SchemaRepair, LadderRung::Escalate]
+            );
+        }
+
+        /// Bounded cap: when every rung still parse-misses, the ladder is
+        /// exhausted and falls to the deterministic default — and never
+        /// invokes more than `max_escalations` rungs.
+        #[test]
+        fn ladder_bounded_cap_exhausts_to_default() {
+            let invoker = ScriptedInvoker::new(vec![Ok("nope".into()), Ok("still nope".into())]);
+            let (decision, outcome, attempts) = run_escalation_ladder(
+                &invoker,
+                &sample_ctx(),
+                "banner noise",
+                LifecycleParseOutcome::DefaultMalformed,
+                &EscalationConfig::default(), // 2 rungs
+            );
+            assert_eq!(outcome, LifecycleParseOutcome::DefaultMalformed);
+            assert!(outcome.is_parse_failure());
+            assert_eq!(attempts, 3, "base + exactly 2 bounded rungs");
+            assert!(matches!(
+                decision,
+                EngineerLifecycleDecision::ContinueSkipping { .. }
+            ));
+            assert_eq!(invoker.rungs().len(), 2, "no more than the configured cap");
+        }
+
+        /// Ladder disabled (`max_escalations == 0`): no escalation invocations,
+        /// straight to default — the pre-#2432 behaviour.
+        #[test]
+        fn ladder_disabled_runs_no_escalations() {
+            let invoker = ScriptedInvoker::new(vec![]);
+            let (decision, outcome, attempts) = run_escalation_ladder(
+                &invoker,
+                &sample_ctx(),
+                "banner noise",
+                LifecycleParseOutcome::DefaultEmpty,
+                &EscalationConfig { max_escalations: 0 },
+            );
+            assert_eq!(outcome, LifecycleParseOutcome::DefaultEmpty);
+            assert_eq!(attempts, 1, "only the base attempt");
+            assert!(matches!(
+                decision,
+                EngineerLifecycleDecision::ContinueSkipping { .. }
+            ));
+            assert!(invoker.rungs().is_empty(), "no rungs invoked when disabled");
+        }
+
+        /// An escalation invocation that itself FAILS must not surface as a hard
+        /// error — the ladder stops and uses the deterministic default (a base
+        /// success already gave us a usable, if low-confidence, signal).
+        #[test]
+        fn ladder_invoke_error_falls_back_to_default() {
+            let invoker = ScriptedInvoker::new(vec![Err(())]);
+            let (decision, outcome, attempts) = run_escalation_ladder(
+                &invoker,
+                &sample_ctx(),
+                "garbage",
+                LifecycleParseOutcome::DefaultMalformed,
+                &EscalationConfig::default(),
+            );
+            assert_eq!(outcome, LifecycleParseOutcome::DefaultMalformed);
+            assert_eq!(attempts, 2, "base + the failed rung, then stop");
+            assert!(matches!(
+                decision,
+                EngineerLifecycleDecision::ContinueSkipping { .. }
+            ));
+            assert_eq!(invoker.rungs(), vec![LadderRung::SchemaRepair]);
+        }
+
+        /// The schema-repair rung feeds the exact malformed prior output back
+        /// into its note so the model can fix it.
+        #[test]
+        fn ladder_feeds_prior_output_into_repair_note() {
+            let invoker = ScriptedInvoker::new(vec![Ok("continue_skipping healthy".into())]);
+            let cfg = EscalationConfig { max_escalations: 1 };
+            let _ = run_escalation_ladder(
+                &invoker,
+                &sample_ctx(),
+                "the model rambled without a variant word",
+                LifecycleParseOutcome::DefaultMalformed,
+                &cfg,
+            );
+            let notes = invoker.notes();
+            assert_eq!(notes.len(), 1);
+            assert!(
+                notes[0].contains("the model rambled without a variant word"),
+                "repair note must carry the prior output; got {}",
+                notes[0]
+            );
         }
     }
 }

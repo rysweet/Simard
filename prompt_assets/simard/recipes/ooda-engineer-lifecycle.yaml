@@ -12,7 +12,11 @@
 #   goal_id, goal_description, cycle_number, consecutive_skip_count,
 #   failure_count, worktree_path, worktree_mtime_secs_ago, sentinel_pid,
 #   last_engineer_log_tail, commits_behind, in_flight_engineer_count,
-#   minutes_since_last_update_attempt
+#   minutes_since_last_update_attempt, escalation_note
+#
+# `escalation_note` (issue #2432) is empty on the base attempt and carries a
+# schema-repair / higher-effort instruction on escalation-ladder retries. When
+# empty it renders to nothing, so base behaviour is unchanged.
 #
 # Output: agent stdout — variant name as first word, followed by rationale
 
@@ -30,6 +34,8 @@ steps:
     agent: "default"
     prompt: |
       # OODA Brain — Engineer Lifecycle Decision
+
+      {{escalation_note}}
 
       ## ROLE
 
