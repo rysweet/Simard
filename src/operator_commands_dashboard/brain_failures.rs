@@ -103,7 +103,8 @@ pub(crate) async fn brain_failures() -> Json<Value> {
                 let phase = j.get("phase").and_then(|v| v.as_str()).unwrap_or("unknown");
                 let decision = j.get("decision").and_then(|v| v.as_str()).unwrap_or("");
                 let rationale = j.get("rationale").and_then(|v| v.as_str()).unwrap_or("");
-                let confidence = j.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let confidence_opt = j.get("confidence").and_then(|v| v.as_f64());
+                let confidence = confidence_opt.unwrap_or(0.0);
 
                 let failure_type = if has_parse_failure {
                     "parse_failure"
@@ -132,13 +133,7 @@ pub(crate) async fn brain_failures() -> Json<Value> {
                         err_msg
                     )
                 } else {
-                    format!(
-                        "The {} phase used its deterministic fallback instead of the language model brain. \
-                         Decision: {} (confidence: {:.0}%).",
-                        phase,
-                        decision,
-                        confidence * 100.0
-                    )
+                    fallback_description(phase, decision, confidence_opt)
                 };
 
                 let recovery_succeeded = true; // fallback always recovers
@@ -178,7 +173,7 @@ pub(crate) async fn brain_failures() -> Json<Value> {
                         _ => "Unknown phase",
                     },
                     "decision": decision,
-                    "rationale": rationale,
+                    "rationale": humanize_rationale(rationale),
                     "confidence": confidence,
                     "cycle_number": cycle_number,
                     "timestamp": timestamp,
@@ -221,6 +216,74 @@ fn count_brain_parse_failure_metrics(path: &std::path::Path) -> u64 {
         .count() as u64
 }
 
+/// Humanize a raw machine decision token (e.g. `consolidate_memory`) into
+/// plain words (`consolidate memory`) for operator display. P3 of #2358 —
+/// keeps bare snake/kebab identifiers out of the human-facing Brain Failures
+/// description. Returns an empty string for an empty/whitespace input.
+fn humanize_decision(raw: &str) -> String {
+    let d = raw.trim();
+    if d.is_empty() {
+        return String::new();
+    }
+    d.replace(['_', '-'], " ")
+}
+
+/// Build the plain-English Brain Failures description for a deterministic
+/// (non-parse) fallback. P3 of #2358 — no machine jargon (`deterministic
+/// fallback`, snake_case decision tokens), and the confidence figure is only
+/// shown when it was actually recorded so an absent value never reads as a
+/// real "0%".
+fn fallback_description(phase: &str, decision: &str, confidence: Option<f64>) -> String {
+    let decision_human = humanize_decision(decision);
+    let chose = if decision_human.is_empty() {
+        String::new()
+    } else {
+        format!(" It chose to {decision_human}.")
+    };
+    let conf = match confidence {
+        Some(c) => format!(
+            " The rules were {:.0}% confident in that choice.",
+            c * 100.0
+        ),
+        None => String::new(),
+    };
+    format!(
+        "The {phase} phase used its built-in safety rules instead of the language model.{chose}{conf}"
+    )
+}
+
+/// Humanize a raw brain `rationale` marker for operator display. P3 of #2358 —
+/// the canonical rationale strings (set in `ooda_brain`) are insider shorthand
+/// like `deterministic-brain: prefix-routed`; this maps them to plain English
+/// at the display layer only. The persisted/canonical rationale is unchanged so
+/// logs and `ooda_brain` tests stay green. Unknown rationales are passed
+/// through with the machine `<x>-brain:` prefix stripped and common shorthand
+/// expanded, so no raw token reaches the operator.
+fn humanize_rationale(raw: &str) -> String {
+    let r = raw.trim();
+    if r.is_empty() {
+        return String::new();
+    }
+    match r {
+        "deterministic-brain: prefix-routed" | "fallback-brain: prefix-routed" => {
+            "Chosen by Simard's built-in routing rules (no language model was needed).".to_string()
+        }
+        "deterministic-brain: no LLM configured" => {
+            "Used the built-in rules because no language model is configured.".to_string()
+        }
+        other => {
+            let body = other
+                .split_once("-brain:")
+                .map(|(_, rest)| rest.trim())
+                .unwrap_or(other);
+            body.replace("prefix-routed", "chosen by built-in routing rules")
+                .replace("no LLM configured", "no language model configured")
+                .trim()
+                .to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +316,88 @@ mod tests {
     fn count_brain_parse_failure_metrics_missing_file() {
         let path = std::path::Path::new("/nonexistent/metrics.jsonl");
         assert_eq!(count_brain_parse_failure_metrics(path), 0);
+    }
+
+    #[test]
+    fn humanize_decision_spaces_machine_tokens() {
+        assert_eq!(
+            humanize_decision("consolidate_memory"),
+            "consolidate memory"
+        );
+        assert_eq!(humanize_decision("run-improvement"), "run improvement");
+        assert_eq!(humanize_decision("  "), "");
+        assert_eq!(humanize_decision(""), "");
+        // No machine separators -> unchanged.
+        assert_eq!(humanize_decision("continue"), "continue");
+    }
+
+    #[test]
+    fn humanize_rationale_maps_known_markers() {
+        assert_eq!(
+            humanize_rationale("deterministic-brain: prefix-routed"),
+            "Chosen by Simard's built-in routing rules (no language model was needed)."
+        );
+        assert_eq!(
+            humanize_rationale("fallback-brain: prefix-routed"),
+            "Chosen by Simard's built-in routing rules (no language model was needed)."
+        );
+        assert_eq!(
+            humanize_rationale("deterministic-brain: no LLM configured"),
+            "Used the built-in rules because no language model is configured."
+        );
+    }
+
+    #[test]
+    fn humanize_rationale_strips_brain_prefix_and_passes_prose() {
+        // Unknown "<x>-brain:" markers get the machine prefix stripped and
+        // shorthand expanded; no raw "*-brain:" / "prefix-routed" token leaks.
+        let out = humanize_rationale("orient-brain: prefix-routed");
+        assert!(!out.contains("-brain:"), "leaked machine prefix: {out}");
+        assert!(!out.contains("prefix-routed"), "leaked shorthand: {out}");
+        // Plain-English rationale (already human) passes through unchanged.
+        assert_eq!(
+            humanize_rationale("llm-brain: high-leverage progress"),
+            "high-leverage progress"
+        );
+        assert_eq!(humanize_rationale(""), "");
+    }
+
+    #[test]
+    fn fallback_description_is_plain_and_jargon_free() {
+        let d = fallback_description("decide", "consolidate_memory", Some(0.5));
+        assert_eq!(
+            d,
+            "The decide phase used its built-in safety rules instead of the language model. \
+             It chose to consolidate memory. The rules were 50% confident in that choice."
+        );
+        // No machine jargon survives.
+        for banned in [
+            "deterministic fallback",
+            "language model brain",
+            "consolidate_memory",
+        ] {
+            assert!(
+                !d.contains(banned),
+                "description leaked jargon {banned:?}: {d}"
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_description_omits_absent_confidence_and_empty_decision() {
+        // Absent confidence must NOT render as a real "0%".
+        let d = fallback_description("orient", "", None);
+        assert_eq!(
+            d,
+            "The orient phase used its built-in safety rules instead of the language model."
+        );
+        assert!(
+            !d.contains('%'),
+            "absent confidence must not show a percentage: {d}"
+        );
+        assert!(
+            !d.contains("It chose to"),
+            "empty decision must omit the choice clause: {d}"
+        );
     }
 }

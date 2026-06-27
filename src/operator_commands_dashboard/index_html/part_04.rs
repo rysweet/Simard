@@ -234,7 +234,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
               <div class="phase-content">
                 ${rpt.priorities.map(p=>`<div class="priority-line">
                   <span class="urgency" style="color:${p.urgency>0.7?'var(--red)':p.urgency>0.4?'var(--yellow)':'var(--green)'}">●</span>
-                  <strong>${esc(humanizeGoalId(p.goal_id))}</strong> (urgency: ${p.urgency.toFixed(2)}) — ${esc(p.reason)}
+                  <strong>${esc(humanizeGoalId(p.goal_id))}</strong> · ${urgencyPhrase(p.urgency)} — ${esc(p.reason)}
                 </div>`).join('')}
               </div>
             </div>`);

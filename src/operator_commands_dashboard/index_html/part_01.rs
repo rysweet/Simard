@@ -178,6 +178,26 @@ pub(crate) const PART_01: &str = r#"      </div>
       for(const j of (BANNED_JARGON||[])){if(j)s=s.split(j).join('');}
       return s.replace(/\s{2,}/g,' ').trim();
     }
+    // P3 (#2358): render a raw second count as a human duration, e.g.
+    // 37440s -> "10h 24m", 624m worth of seconds -> "10h 24m", 90s -> "1m".
+    function humanizeDuration(secs){
+      let s=Math.round(Number(secs)||0);
+      if(s<=0)return'0m';
+      if(s<60)return s+'s';
+      const m=Math.floor(s/60);
+      if(m<60)return m+'m';
+      const h=Math.floor(m/60),rm=m%60;
+      if(h<24)return rm?h+'h '+rm+'m':h+'h';
+      const days=Math.floor(h/24),rh=h%24;
+      return rh?days+'d '+rh+'h':days+'d';
+    }
+    // P3 (#2358): turn a bare 0-1 urgency float into a qualitative phrase with
+    // an explicit scale, e.g. 0.50 -> "medium urgency (0.50 of 1.0)".
+    function urgencyPhrase(u){
+      const n=(typeof u==='number'&&isFinite(u))?u:0;
+      const word=n>0.7?'high':n>0.4?'medium':'low';
+      return word+' urgency ('+n.toFixed(2)+' of 1.0)';
+    }
     function copyLogContent(id){
       const el=document.getElementById(id);if(!el)return;
       navigator.clipboard.writeText(el.textContent||'').then(
@@ -354,7 +374,7 @@ pub(crate) const PART_01: &str = r#"      </div>
           const rpt=c.report||{};
           if(rpt.priorities?.length){
             const top=rpt.priorities[0];
-            currentFocus=`<strong>${esc(humanizeGoalId(top.goal_id))}</strong> — ${esc(top.reason)} <span style="color:${top.urgency>0.7?'var(--red)':top.urgency>0.4?'var(--yellow)':'var(--green)'}">urgency ${top.urgency.toFixed(2)}</span>`;
+            currentFocus=`<strong>${esc(humanizeGoalId(top.goal_id))}</strong> — ${esc(top.reason)} <span style="color:${top.urgency>0.7?'var(--red)':top.urgency>0.4?'var(--yellow)':'var(--green)'}">${urgencyPhrase(top.urgency)}</span>`;
             break;
           }
         }
