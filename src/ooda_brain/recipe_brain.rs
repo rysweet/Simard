@@ -18,6 +18,7 @@ use super::decide::{DecideContext, DecideJudgment, OodaDecideBrain};
 use super::orient::{
     FAILURE_PENALTY_PER_CONSECUTIVE, OodaOrientBrain, OrientContext, OrientJudgment,
 };
+use super::parse_outcome::{ParseOutcome, ParsePath, record_parse_outcome};
 use super::sanitize::sanitize_context_var;
 use super::{EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain};
 use crate::error::{SimardError, SimardResult};
@@ -323,9 +324,15 @@ pub fn parse_action_from_text(text: &str) -> DecideJudgment {
     ];
     for (kw, ctor) in pairs {
         if first_word.eq_ignore_ascii_case(kw) {
+            record_parse_outcome(ParsePath::DecideAction, ParseOutcome::KeywordParsed, kw);
             return ctor(truncate(trimmed, MAX_RATIONALE_CHARS));
         }
     }
+    record_parse_outcome(
+        ParsePath::DecideAction,
+        ParseOutcome::DefaultFallthrough,
+        "no_action_keyword",
+    );
     DecideJudgment::AdvanceGoal {
         rationale: format!(
             "{DECIDE_ADAPTER_TAG}: no action keyword found in recipe output; defaulting to advance_goal"
@@ -361,6 +368,11 @@ pub fn parse_orient_from_text(text: &str, base_urgency: f64, failure_count: u32)
                 {
                     // Inline validation before allocating rationale string.
                     if val.is_finite() && (0.0..=1.0).contains(&val) && val <= base_urgency + 1e-9 {
+                        record_parse_outcome(
+                            ParsePath::Orient,
+                            ParseOutcome::KeywordParsed,
+                            "float",
+                        );
                         return OrientJudgment {
                             adjusted_urgency: val,
                             rationale: truncate(trimmed, MAX_RATIONALE_CHARS),
@@ -374,6 +386,11 @@ pub fn parse_orient_from_text(text: &str, base_urgency: f64, failure_count: u32)
         }
         i += 1;
     }
+    record_parse_outcome(
+        ParsePath::Orient,
+        ParseOutcome::DefaultFallthrough,
+        "no_urgency_float",
+    );
     deterministic_floor(base_urgency, failure_count)
 }
 
@@ -407,7 +424,7 @@ pub fn parse_lifecycle_from_text(text: &str) -> EngineerLifecycleDecision {
 
     // Use eq_ignore_ascii_case instead of to_ascii_lowercase() — avoids a
     // heap-allocated String on every call.
-    if first_word.eq_ignore_ascii_case("continue_skipping") {
+    let decision = if first_word.eq_ignore_ascii_case("continue_skipping") {
         let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
         EngineerLifecycleDecision::ContinueSkipping { rationale: rest }
     } else if first_word.eq_ignore_ascii_case("deprioritize") {
@@ -436,11 +453,24 @@ pub fn parse_lifecycle_from_text(text: &str) -> EngineerLifecycleDecision {
             rationale: rest,
         }
     } else {
-        default_continue_skipping()
-    }
+        return default_continue_skipping();
+    };
+    // A matched first word is a cooperative parse — the #2419 signal is the
+    // fallthrough branches above, recorded inside default_continue_skipping().
+    record_parse_outcome(
+        ParsePath::Lifecycle,
+        ParseOutcome::KeywordParsed,
+        first_word,
+    );
+    decision
 }
 
 fn default_continue_skipping() -> EngineerLifecycleDecision {
+    record_parse_outcome(
+        ParsePath::Lifecycle,
+        ParseOutcome::DefaultFallthrough,
+        "no_decision_keyword",
+    );
     EngineerLifecycleDecision::ContinueSkipping {
         rationale: format!(
             "{LIFECYCLE_ADAPTER_TAG}: no decision keyword found in recipe output; defaulting to continue_skipping"
@@ -1070,6 +1100,48 @@ mod tests {
             assert_eq!(j.action_kind(), ActionKind::AdvanceGoal);
         }
 
+        // === Parse-outcome instrumentation (issue #2419) ===
+        // Thread-local counters are immune to other tests' increments because
+        // cargo runs each test on its own thread.
+
+        #[test]
+        fn fallthrough_increments_default_fallthrough_counter() {
+            use crate::ooda_brain::parse_outcome::{
+                ParseOutcome, ParsePath, reset_thread_local_counts, thread_local_count,
+            };
+            reset_thread_local_counts();
+            let _ = parse_action_from_text("I think the goal should proceed normally.");
+            assert_eq!(
+                thread_local_count(ParsePath::DecideAction, ParseOutcome::DefaultFallthrough),
+                1,
+                "a prose response with no leading keyword must count as a fallthrough"
+            );
+            assert_eq!(
+                thread_local_count(ParsePath::DecideAction, ParseOutcome::KeywordParsed),
+                0,
+                "fallthrough must not also be counted as a parsed keyword"
+            );
+        }
+
+        #[test]
+        fn parsed_first_word_increments_keyword_counter() {
+            use crate::ooda_brain::parse_outcome::{
+                ParseOutcome, ParsePath, reset_thread_local_counts, thread_local_count,
+            };
+            reset_thread_local_counts();
+            let _ = parse_action_from_text("advance_goal proceed with the goal");
+            assert_eq!(
+                thread_local_count(ParsePath::DecideAction, ParseOutcome::KeywordParsed),
+                1,
+                "a leading keyword must count as a parsed keyword"
+            );
+            assert_eq!(
+                thread_local_count(ParsePath::DecideAction, ParseOutcome::DefaultFallthrough),
+                0,
+                "a parsed keyword must not also be counted as a fallthrough"
+            );
+        }
+
         // === Keyword NOT first word => default (new behavior) ===
 
         #[test]
@@ -1254,6 +1326,45 @@ mod tests {
             let text = "0.35 because of transient failures";
             let j = parse_orient_from_text(text, 0.8, 2);
             assert!(j.rationale.contains("transient") || j.rationale.contains("0.35"));
+        }
+
+        // === Parse-outcome instrumentation (issue #2419) ===
+
+        #[test]
+        fn parsed_float_increments_keyword_counter() {
+            use crate::ooda_brain::parse_outcome::{
+                ParseOutcome, ParsePath, reset_thread_local_counts, thread_local_count,
+            };
+            reset_thread_local_counts();
+            let _ = parse_orient_from_text("0.42", 0.8, 1);
+            assert_eq!(
+                thread_local_count(ParsePath::Orient, ParseOutcome::KeywordParsed),
+                1,
+                "a valid urgency float must count as a parsed keyword"
+            );
+            assert_eq!(
+                thread_local_count(ParsePath::Orient, ParseOutcome::DefaultFallthrough),
+                0
+            );
+        }
+
+        #[test]
+        fn floor_fallthrough_increments_default_fallthrough_counter() {
+            use crate::ooda_brain::parse_outcome::{
+                ParseOutcome, ParsePath, reset_thread_local_counts, thread_local_count,
+            };
+            reset_thread_local_counts();
+            // No float at all -> deterministic floor -> fallthrough.
+            let _ = parse_orient_from_text("no number here, just prose", 0.8, 2);
+            assert_eq!(
+                thread_local_count(ParsePath::Orient, ParseOutcome::DefaultFallthrough),
+                1,
+                "missing urgency float must count as a fallthrough to the floor"
+            );
+            assert_eq!(
+                thread_local_count(ParsePath::Orient, ParseOutcome::KeywordParsed),
+                0
+            );
         }
 
         // === Clamping: float above base_urgency or out of range ===
@@ -1632,6 +1743,65 @@ mod tests {
                 EngineerLifecycleDecision::ContinueSkipping { .. } => {}
                 other => panic!("whitespace-only -> ContinueSkipping; got {other:?}"),
             }
+        }
+
+        // === Parse-outcome instrumentation (issue #2419) ===
+        // This is the headline #2419 signal: distinguish a *parsed*
+        // continue_skipping (model emitted the keyword first) from a *default*
+        // continue_skipping (no decision keyword found). Both yield the same
+        // decision variant, so only the counter can tell them apart.
+
+        #[test]
+        fn fallthrough_increments_default_fallthrough_counter() {
+            use crate::ooda_brain::parse_outcome::{
+                ParseOutcome, ParsePath, reset_thread_local_counts, thread_local_count,
+            };
+            reset_thread_local_counts();
+            let _ = parse_lifecycle_from_text("The engineer appears to be making progress.");
+            assert_eq!(
+                thread_local_count(ParsePath::Lifecycle, ParseOutcome::DefaultFallthrough),
+                1,
+                "prose with no leading keyword must count as a fallthrough"
+            );
+            assert_eq!(
+                thread_local_count(ParsePath::Lifecycle, ParseOutcome::KeywordParsed),
+                0
+            );
+        }
+
+        #[test]
+        fn empty_text_increments_default_fallthrough_counter() {
+            use crate::ooda_brain::parse_outcome::{
+                ParseOutcome, ParsePath, reset_thread_local_counts, thread_local_count,
+            };
+            reset_thread_local_counts();
+            let _ = parse_lifecycle_from_text("");
+            assert_eq!(
+                thread_local_count(ParsePath::Lifecycle, ParseOutcome::DefaultFallthrough),
+                1,
+                "empty recipe output must count as a fallthrough"
+            );
+        }
+
+        #[test]
+        fn parsed_keyword_increments_keyword_counter_not_fallthrough() {
+            use crate::ooda_brain::parse_outcome::{
+                ParseOutcome, ParsePath, reset_thread_local_counts, thread_local_count,
+            };
+            reset_thread_local_counts();
+            // An *explicit* continue_skipping keyword is a cooperative parse,
+            // NOT a fallthrough — even though the decision variant matches.
+            let _ = parse_lifecycle_from_text("continue_skipping engineer is healthy");
+            assert_eq!(
+                thread_local_count(ParsePath::Lifecycle, ParseOutcome::KeywordParsed),
+                1,
+                "a leading keyword (even continue_skipping) is a parsed keyword"
+            );
+            assert_eq!(
+                thread_local_count(ParsePath::Lifecycle, ParseOutcome::DefaultFallthrough),
+                0,
+                "an explicit continue_skipping keyword must not count as a fallthrough"
+            );
         }
 
         // === Keyword NOT first word => default (new behavior) ===

@@ -138,6 +138,68 @@ the goal genuinely should keep skipping, a `continue_skipping`
 log with a substantive rationale (not the `"deterministic fallback"`
 sentinel).
 
+## Measuring the fallthrough rate (issue #2419)
+
+Steps 1–5 above tell you how to diagnose **one** stuck goal. To answer the
+fleet-wide question — *how often does any brain fall through to its
+deterministic default?* — read the `brain_parse_outcome` metric. Before
+[#2419](https://github.com/rysweet/Simard/issues/2419) this rate was anecdotal;
+now every call to the three parse functions in
+`src/ooda_brain/recipe_brain.rs` records exactly one outcome.
+
+Each parse records a `(parse_path, outcome)` pair:
+
+| `parse_path`    | parse function              | `keyword_parsed` means…            | `default_fallthrough` means…                       |
+|-----------------|-----------------------------|------------------------------------|----------------------------------------------------|
+| `decide_action` | `parse_action_from_text`    | first word was a known action      | no action keyword → `advance_goal`                 |
+| `orient`        | `parse_orient_from_text`    | a valid urgency float was found    | no float → deterministic floor                     |
+| `lifecycle`     | `parse_lifecycle_from_text` | first word was a known variant     | no decision keyword → `continue_skipping` (#2419)  |
+
+> **Why the distinction matters:** an *explicit* `continue_skipping` keyword
+> and a *default* `continue_skipping` produce the **same** decision variant.
+> Only the `outcome` label separates "the model chose to skip" from "the model
+> emitted something unparseable and we skipped by default."
+
+### Channel 1 — `tracing` (live tail)
+
+A fallthrough logs at `WARN` (target `simard::ooda_brain`), a parsed keyword at
+`DEBUG`:
+
+```bash
+tail -F ~/.simard/logs/rustyclawd.log \
+  | grep -E 'brain parse fell through|parse_path='
+```
+
+### Channel 2 — `metrics.jsonl` (rate over time)
+
+Every outcome appends a line to `~/.simard/metrics/metrics.jsonl` with
+`metric_name = "brain_parse_outcome"` and a context blob carrying `parse_path`
+and `outcome`. Compute the lifecycle fallthrough rate over the whole file with:
+
+```bash
+jq -c 'select(.metric_name=="brain_parse_outcome")
+       | (.context|fromjson)
+       | select(.parse_path=="lifecycle")
+       | .outcome' ~/.simard/metrics/metrics.jsonl \
+  | sort | uniq -c
+```
+
+The two counts (`"keyword_parsed"` vs `"default_fallthrough"`) give the rate
+directly: `fallthrough / (parsed + fallthrough)`. These entries also flow into
+`self_metrics::daily_report` automatically, so the daemon can aggregate them
+without bespoke parsing.
+
+### Channel 3 — in-process counters
+
+For a live, allocation-free snapshot (e.g. from a future `simard ooda status`
+subcommand), call `ooda_brain::fallthrough_rate(ParsePath::Lifecycle)`, which
+returns `Some(rate)` once at least one outcome has been recorded, or
+`outcome_count(path, outcome)` for the raw atomics.
+
+> **This metric measures; it does not fix.** A persistently high
+> `lifecycle` fallthrough rate still points at the prompt, per the
+> [remediation table](#step-4-pick-a-remediation) — see #2419 for the fix track.
+
 ## Anti-patterns
 
 The following patterns indicate the operator is **fighting** the protocol

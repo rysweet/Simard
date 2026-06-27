@@ -21,6 +21,7 @@ mod fallback;
 mod judgment_record;
 mod orient;
 pub mod parse_failure;
+pub mod parse_outcome;
 pub mod prompt_store;
 mod recipe_brain;
 mod rustyclawd;
@@ -51,6 +52,7 @@ pub use orient::{
     build_rustyclawd_orient_brain,
 };
 pub use parse_failure::ParseFailureRecord;
+pub use parse_outcome::{ParseOutcome, ParsePath, fallthrough_rate, outcome_count};
 pub use recipe_brain::RecipeBrain;
 /// Backward-compatible type aliases (issue #2132).
 pub type RecipeDecideBrain = RecipeBrain;
