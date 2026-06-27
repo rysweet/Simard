@@ -64,8 +64,11 @@ ok "doc is registered in the mkdocs nav"
 
 head -1 "$DOC" | grep -Eq '^---$' \
   || fail "$DOC does not open with a YAML front-matter fence"
+# Extract the front-matter block once, then validate keys against it in memory
+# (avoids re-scanning the whole doc with a fresh awk pass for every key).
+FRONT_MATTER="$(awk 'NR>1 && /^---$/{exit} NR>1' "$DOC")"
 for key in title description owner doc_type; do
-  awk 'NR>1 && /^---$/{exit} NR>1' "$DOC" | grep -Eq "^${key}:" \
+  grep -Eq "^${key}:" <<< "$FRONT_MATTER" \
     || fail "$DOC front-matter missing required key '${key}:'"
 done
 python3 - "$DOC" <<'PY' || fail "front-matter is not valid YAML"
