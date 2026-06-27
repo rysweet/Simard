@@ -86,6 +86,7 @@ nav:
     - Route a Goal to its Target Repo: howto/route-a-goal-to-its-target-repo.md
     - Self-Maintain Dependency Pins: howto/self-maintain-dependency-pins.md
     - Configure Brain Introspection: howto/configure-brain-introspection.md
+    - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Memory introspection CLI: reference/simard-memory-cli.md
