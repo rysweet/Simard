@@ -1,0 +1,152 @@
+# brain-introspection.yaml — Agent-based periodic brain self-examination +
+# memory-hygiene pass (issue #2419).
+#
+# Invoked by src/brain_introspection.rs via recipe-runner-rs on its own daemon
+# interval (SIMARD_BRAIN_INTROSPECTION_INTERVAL_SECS, default 24h). The Rust
+# hook has ALREADY performed the verified, RPC-backed memory operations
+# (expired-sensory prune + additive consolidation) and recorded baseline
+# metrics; this recipe owns the LLM judgment layer + the GitHub-issue output.
+#
+# It REUSES the existing distillation/statistics/expired-sensory infra (the
+# numbers arrive via `-c stats`) and does NOT duplicate per-cycle distillation.
+#
+# Context vars (passed via -c):
+#   state_root     — path to ~/.simard (metrics, logs, memory live here)
+#   repo_path      — repository root
+#   max_prune      — HARD cap on value-bearing prune *recommendations* per run
+#   baseline_runs  — rolling window (prior runs) used as the regression baseline
+#   stats          — JSON the hook measured this run: live_memories,
+#                    sensory_pruned, consolidated_facts
+#
+# Output: text markers to stdout (one per line), parsed by
+# `parse_brain_introspection_text` in src/brain_introspection.rs:
+#   BRAIN_HEALTH: <line>        (>=1 REQUIRED)
+#   PATTERN: <line>             (0..n)
+#   REGRESSION: <line>          (0..n)
+#   PRUNE_CANDIDATE: <line>     (0..n, <= max_prune)
+#   PRUNE_REQUESTED=<count>     (<= max_prune; defaults to 0)
+#   CONSOLIDATED_FACTS=<count>  (advisory echo only)
+#   ISSUE_URL=<url>
+#
+# Design: a single agent step (mirrors disk-health-check.yaml) — the LLM runs
+# bash/gh internally to read metrics/logs, mine patterns, recommend SAFE BOUNDED
+# prunes, and create/update the dedup'd brain-introspection issue. Pruning is
+# RECOMMENDATION-ONLY in this increment; the only deletion (expired-sensory) and
+# the additive consolidation already happened safely in the daemon hook.
+
+name: "brain-introspection"
+description: "Periodic brain self-examination + memory hygiene (health, patterns, safe prune, consolidate, issue)"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "memory", "introspection", "self-examination", "hygiene"]
+
+context:
+  state_root: "~/.simard"
+  repo_path: "/home/azureuser/src/Simard/worktrees/main"
+  max_prune: "25"
+  baseline_runs: "7"
+  stats: "{}"
+
+steps:
+  - id: "brain-introspection"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are Simard's **brain-introspection** agent. On a regular cadence you
+      perform a higher-level self-examination + memory-hygiene pass over your own
+      cognition. You REUSE the existing per-cycle infrastructure (distillation,
+      statistics, expired-sensory cleanup) — you do NOT duplicate per-cycle
+      distillation. The Rust daemon hook has already performed the verified,
+      RPC-backed memory operations and handed you the measured numbers in
+      `stats`. Your job is the judgment layer. You have bash + gh tools.
+
+      ## Context
+
+      - state_root: `{{state_root}}` (metrics, logs, memory)
+      - repo_path: `{{repo_path}}`
+      - max_prune: `{{max_prune}}` — HARD cap on prune candidates you may
+        recommend. Never exceed it. Pruning here is SAFE and BOUNDED.
+      - baseline_runs: `{{baseline_runs}}` — rolling window for regressions.
+      - stats (hook-measured this run): `{{stats}}` — has `live_memories`,
+        `sensory_pruned`, `consolidated_facts`. Reason over these real numbers.
+
+      ## Phase 1 — BRAIN HEALTH
+
+      Examine OODA brain decision quality across phases (orient / decide / act +
+      engineer-lifecycle). Read `{{state_root}}/metrics/metrics.jsonl` and the
+      daemon log (`{{state_root}}/ooda.log` or `{{state_root}}/daemon.log`).
+      Compute and report:
+        - `record_fallback` rate (fallback decisions / total decisions),
+        - `brain_lifecycle_decision` parse-failure rate (issue #2419 metric),
+        - SIGTERM / degraded / quarantine events,
+        - cycles with 0 of N succeeded actions.
+      Compare each to the rolling baseline of the previous `{{baseline_runs}}`
+      runs (the `brain_introspection_*` metric series). Surface anomalies and
+      regressions. If there is no prior baseline (first run), emit
+      `BRAIN_HEALTH: no prior baseline`.
+
+      ## Phase 2 — PATTERNS
+
+      Mine recent episodes / cycle-reports for recurring patterns: repeated
+      failures or blockers, goal types that consistently land vs. stall,
+      repeated tool/recipe errors, and what correlates with successful PR
+      landings.
+
+      ## Phase 3 — OPTIMIZE / PRUNE (SAFE, BOUNDED — recommendation only)
+
+      Identify stale, low-value, redundant, or superseded memories (superseded
+      facts, low-confidence/low-usage facts past a threshold, duplicate
+      procedures, expired prospectives). DO NOT delete anything — this increment
+      is recommendation-only. Emit at most `{{max_prune}}` `PRUNE_CANDIDATE:`
+      lines and set `PRUNE_REQUESTED=` to the count. NEVER recommend pruning
+      provenance-bearing, high-value, or high-usage memories. Respect the cap.
+
+      ## Phase 4 — CONSOLIDATE
+
+      The hook already ran additive distillation (episodic -> semantic /
+      procedural) this cycle; `stats.consolidated_facts` reports how many it
+      promoted. Summarize what was consolidated and flag high-value episodes
+      worth promoting to durable facts/procedures (dedup via caller keys). Echo
+      the count as `CONSOLIDATED_FACTS=` (advisory).
+
+      ## Phase 5 — OUTPUT (GitHub issue + metrics, NO snapshot doc)
+
+      Per the no-point-in-time-docs rule, write findings to a GitHub issue, never
+      a committed snapshot markdown file. Use a STABLE title and the
+      `brain-introspection` label so repeated runs UPDATE (dedup) rather than
+      spam:
+
+        TITLE="Brain introspection — standing self-examination"
+        gh issue list --repo rysweet/Simard --label brain-introspection \
+          --state open --search "$TITLE in:title" --json number,url
+        # If an open issue exists, update it (gh issue comment / gh issue edit);
+        # otherwise create it:
+        gh issue create --repo rysweet/Simard --label brain-introspection \
+          --title "$TITLE" --body-file <body-file>
+
+      The issue body must contain: the brain-health summary (with baseline
+      deltas), detected patterns, the prune candidates, the consolidation
+      summary, and concrete actionable follow-ups (metrics to add, prompts to
+      fix, memories to prune) — as checklist items or spun-out issues. Emit the
+      resulting issue URL as `ISSUE_URL=`.
+
+      ## Required output markers
+
+      Your FINAL output must contain these plain-text markers, each on its own
+      line (printed as plain text, NOT inside code fences). Any other lines are
+      ignored by the Rust shim.
+
+      ```
+      BRAIN_HEALTH: <one finding per line>      # at least one REQUIRED
+      PATTERN: <one pattern per line>           # zero or more
+      REGRESSION: <one regression per line>     # zero or more
+      PRUNE_CANDIDATE: <one candidate per line> # zero or more, <= max_prune
+      PRUNE_REQUESTED=<count, <= max_prune>     # defaults to 0
+      CONSOLIDATED_FACTS=<count>                # advisory echo only
+      ISSUE_URL=<url of the created/updated issue>
+      ```
+
+      `BRAIN_HEALTH:` is REQUIRED (at least one non-empty line). `PRUNE_REQUESTED`
+      must be `<= {{max_prune}}`. Never emit a snapshot doc — route everything to
+      the brain-introspection issue and/or metrics.
+    output: "brain_introspection_report"
