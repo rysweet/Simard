@@ -223,9 +223,9 @@ jobs:
 
       - name: Provision lbug native static library link path (#2426 / #2423)
         # `cargo test --test install_real` (and the `cargo install` it shells
-        # out to) build lbug in the release profile and hit the same evicted
-        # registry-src prebuilt as the pre-commit clippy gate. Pin the link path
-        # for the whole job so both link lbug deterministically.
+        # out to) build lbug and hit the same evicted registry-src prebuilt as
+        # the pre-commit clippy gate. Pin the link path for the whole job so
+        # both link lbug deterministically, regardless of profile.
         shell: bash
         run: |
           lib_dir="$HOME/.cache/simard-lbug-precommit/lib"
