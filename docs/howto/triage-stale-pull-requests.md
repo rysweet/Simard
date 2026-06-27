@@ -342,11 +342,9 @@ unresolved conflict.
 | `SIMARD_MERGE_BASE_ALLOWLIST` | `main` | Comma-separated list of base branches `simard merge-pr` will accept. The first gate; a PR targeting a base outside this list is refused before any other check. |
 | `NODE_OPTIONS` | `--max-old-space-size=32768` (operator preference) | Raises the V8 heap for Node-backed lint/build steps run while fixing a PR, so large steps do not OOM. Set in `~/.amplihack/config`. |
 
-The "environmental" classification (`cargo-audit`, `install-real`) is a
-**human-judgment operational convention**, not an env knob and not something the
-merge gate honours. `simard merge-pr` blocks on these reds like any other; only a
-human may decide a specific red is infra/dependency noise and clear it via the
-recorded [operator override](#stage-d-act).
+There is deliberately **no** config knob for the "environmental" classification:
+`simard merge-pr` blocks on `cargo-audit` / `install-real` like any other red.
+Clearing one is a human [operator override](#stage-d-act), not a setting.
 
 ## Worked example — landing one stalled PR
 
