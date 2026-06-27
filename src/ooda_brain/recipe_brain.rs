@@ -227,24 +227,26 @@ const LIFECYCLE_VARIANT_LIST: &str = "continue_skipping, reclaim_and_redispatch,
 /// Build the `escalation_note` injected into the recipe prompt for a given
 /// rung. Pinned wording — see the `escalation_note_*` content-pin tests.
 pub fn build_escalation_note(rung: LadderRung, prior_output: &str) -> String {
-    if matches!(rung, LadderRung::Base) {
-        return String::new();
-    }
-    let prior = truncate(prior_output.trim(), MAX_RATIONALE_CHARS);
-    let repair = format!(
-        "## ⚠️ SCHEMA REPAIR (retry) ## \
-         Your previous response could not be parsed: its FIRST WORD was not a valid decision variant. \
-         Previous response: <<<{prior}>>> \
-         Respond again now. The VERY FIRST WORD of your reply MUST be exactly one of: {LIFECYCLE_VARIANT_LIST}. \
-         Output that variant word first, then your rationale."
-    );
+    // Built lazily so the Base rung allocates nothing — base behaviour stays
+    // byte-identical to pre-#2432.
+    let schema_repair = || {
+        let prior = truncate(prior_output.trim(), MAX_RATIONALE_CHARS);
+        format!(
+            "## ⚠️ SCHEMA REPAIR (retry) ## \
+             Your previous response could not be parsed: its FIRST WORD was not a valid decision variant. \
+             Previous response: <<<{prior}>>> \
+             Respond again now. The VERY FIRST WORD of your reply MUST be exactly one of: {LIFECYCLE_VARIANT_LIST}. \
+             Output that variant word first, then your rationale."
+        )
+    };
     match rung {
         LadderRung::Base => String::new(),
-        LadderRung::SchemaRepair => repair,
+        LadderRung::SchemaRepair => schema_repair(),
         LadderRung::Escalate => format!(
-            "{repair} ## HIGH-EFFORT RETRY ## \
+            "{} ## HIGH-EFFORT RETRY ## \
              This is a final, higher-effort attempt. Reason carefully, step by step, about the \
-             engineer's state BEFORE answering, then output the single variant word first."
+             engineer's state BEFORE answering, then output the single variant word first.",
+            schema_repair()
         ),
     }
 }
