@@ -62,8 +62,15 @@ fn record_and_query_metric() {
 /// into glued/blank lines that the line-by-line readers silently dropped —
 /// undercutting the `brain_lifecycle_decision` parse-failure measurement this
 /// metric exists to provide. With the fix, every record is one atomic append.
+///
+/// Uses the `cognitive_memory` serial key (not a bare `#[serial]`): this test
+/// mutates `HOME` via `with_temp_home`, so it must share the same lock as every
+/// other `HOME`/state-root test to keep env writes off-limits during concurrent
+/// env reads (see `test_support::serial_guard`). A bare `#[serial]` would run on
+/// a *different* lock, letting this test's 2000 appends race other tests' temp
+/// `HOME` and pollute their metrics files.
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn concurrent_record_metric_no_corruption_or_loss() {
     with_temp_home(|| {
         const THREADS: usize = 8;
