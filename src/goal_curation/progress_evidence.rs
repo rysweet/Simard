@@ -98,6 +98,7 @@ mod tests {
     #[test]
     fn noop_checker_always_accepts() {
         let g = ActiveGoal {
+            parent_goal_id: None,
             repo: None,
             id: "x".into(),
             description: "y".into(),

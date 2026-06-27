@@ -30,7 +30,7 @@
 use std::error::Error;
 
 use crate::goal_curation::{
-    GoalProgress, load_goal_board, save_goal_board, save_goal_board_with_removals,
+    GoalDecomposer, GoalProgress, load_goal_board, save_goal_board, save_goal_board_with_removals,
     simard_state_root,
 };
 use crate::memory_ipc::launch_writer_bridge;
@@ -54,6 +54,12 @@ Commands:
   unblock <goal-id>           Clear Blocked status (unconditional).
   unblock-all                 Bulk-clear brain-failure-marker blocks only.
   remove <id>...              Drop one or more goal ids (variadic, idempotent).
+  decompose <goal-id> [--max-children <N>] [--dry-run]
+                              Break a large goal into 2-6 linked sub-goals
+                              (writes parent->child edges into the graph).
+                              --max-children caps the fan-out (clamped to 2-6);
+                              --dry-run prints the proposed sub-goals without
+                              writing anything.
   cleanup --placeholders      Sweep placeholder goals (description = 'Goal <id>').
   help, -h, --help            Show this help message and exit.
 ";
@@ -109,6 +115,11 @@ pub(super) fn dispatch_goal_command(
         "remove" => {
             let ids: Vec<String> = args.collect();
             handle_remove(&ids)
+        }
+        "decompose" => {
+            let goal_id = next_required(&mut args, "goal id")?;
+            let flags: Vec<String> = args.collect();
+            handle_decompose(&goal_id, &flags)
         }
         "cleanup" => {
             let flags: Vec<String> = args.collect();
@@ -260,6 +271,7 @@ fn handle_add(
         .into());
     }
     board.active.push(crate::goal_curation::ActiveGoal {
+        parent_goal_id: None,
         id: id.clone(),
         description: description.to_string(),
         priority,
@@ -361,6 +373,112 @@ fn handle_remove(ids: &[String]) -> Result<(), Box<dyn Error>> {
         ids.join(", "),
     );
     Ok(())
+}
+
+/// `simard goal decompose <goal-id> [--max-children <N>] [--dry-run]` — break a
+/// large active goal into 2-6 bounded sub-goals (issue #2405). Routes through
+/// the same cognitive-memory **writer bridge** as `goal add` / `goal remove`,
+/// so the write is serialized by the daemon when one is running and takes the
+/// local writer lock otherwise. The parent->child `decomposes_into` edges are
+/// written into the graph (and are queryable back), then the mutated board is
+/// persisted. `--dry-run` prints the proposed sub-goals without writing.
+fn handle_decompose(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn Error>> {
+    crate::engineer_worktree::validate_goal_id(goal_id)
+        .map_err(|e| -> Box<dyn Error> { format!("invalid goal id '{goal_id}': {e}").into() })?;
+
+    let mut max_children = crate::goal_curation::MAX_SUBGOALS;
+    let mut dry_run = false;
+    let mut iter = flags.iter();
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--dry-run" => dry_run = true,
+            "--max-children" => {
+                let n = iter.next().ok_or_else(|| -> Box<dyn Error> {
+                    "usage: --max-children requires a number".into()
+                })?;
+                max_children = parse_max_children(n)?;
+            }
+            other if other.starts_with("--max-children=") => {
+                let n = other.trim_start_matches("--max-children=");
+                max_children = parse_max_children(n)?;
+            }
+            other => {
+                return Err(format!(
+                    "unsupported flag '{other}' for goal decompose (expected --max-children <N> or --dry-run)"
+                )
+                .into());
+            }
+        }
+    }
+
+    let state_root = simard_state_root();
+    let bridge = launch_writer_bridge(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
+    let ops = bridge.ops();
+
+    let mut board = load_goal_board(ops)
+        .map_err(|e| format!("failed to read goal board from cognitive memory: {e}"))?;
+    let parent = board
+        .active
+        .iter()
+        .find(|g| g.id == goal_id)
+        .cloned()
+        .ok_or_else(|| -> Box<dyn Error> {
+            format!("goal '{goal_id}' not found on active board; cannot decompose").into()
+        })?;
+
+    let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let decomposer = crate::goal_curation::RecipeGoalDecomposer::new(&repo_root).ok_or_else(
+        || -> Box<dyn Error> {
+            "decomposition is unavailable: recipe-runner-rs and the goal-decomposition recipe must \
+             be installed (or run decomposition via the OODA daemon)"
+                .into()
+        },
+    )?;
+
+    if dry_run {
+        let proposals = decomposer
+            .propose_subgoals(&parent, max_children)
+            .map_err(|e| format!("decomposition failed: {e}"))?;
+        eprintln!(
+            "[simard] goal decompose --dry-run: '{goal_id}' would produce {} sub-goal(s) (clamped to 2-6 on apply); nothing written:",
+            proposals.len()
+        );
+        for (i, p) in proposals.iter().enumerate() {
+            eprintln!(
+                "  {}. {} (done: {})",
+                i + 1,
+                p.description,
+                p.done_criterion
+            );
+        }
+        return Ok(());
+    }
+
+    let outcome =
+        crate::goal_curation::decompose_goal(ops, &mut board, goal_id, &decomposer, max_children)
+            .map_err(|e| format!("decomposition failed: {e}"))?;
+
+    save_goal_board(&board, ops)
+        .map_err(|e| format!("failed to persist decomposed goal board: {e}"))?;
+
+    eprintln!(
+        "[simard] goal decompose: '{}' -> {} child goal(s) [{:?}]: {}",
+        outcome.parent_id,
+        outcome.child_ids.len(),
+        outcome.placement,
+        outcome.child_ids.join(", "),
+    );
+    Ok(())
+}
+
+/// Parse and validate the `--max-children` value (must be a positive integer;
+/// the decompose driver clamps it into `[2, 6]`).
+fn parse_max_children(raw: &str) -> Result<usize, Box<dyn Error>> {
+    let n: usize = raw.parse().map_err(|_| -> Box<dyn Error> {
+        format!("invalid --max-children '{raw}': must be a non-negative integer").into()
+    })?;
+    Ok(n)
 }
 
 /// `simard goal cleanup --placeholders` — sweeps every active / backlog
@@ -547,6 +665,36 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("goal id"), "expected 'goal id' in: {msg}");
+    }
+
+    // ---- decompose verb (issue #2405, RED) --------------------------------
+
+    #[test]
+    fn goal_help_documents_decompose() {
+        assert!(
+            GOAL_HELP.contains("decompose"),
+            "the goal help text must document the `decompose` verb"
+        );
+    }
+
+    #[test]
+    fn dispatch_decompose_requires_goal_id() {
+        // `decompose` must be a recognized verb that requires a goal id —
+        // NOT fall through to the `unsupported command` arm. Reaching the
+        // missing-id error proves the verb is wired without touching the
+        // cognitive-memory writer bridge.
+        let args = vec!["decompose".to_string()];
+        let result = dispatch_goal_command(args.into_iter());
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("goal id"),
+            "expected a missing-'goal id' error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("unsupported command"),
+            "`decompose` must be a recognized verb, got: {msg}"
+        );
     }
 
     // ---- handle_remove ----------------------------------------------------

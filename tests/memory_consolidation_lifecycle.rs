@@ -190,6 +190,7 @@ fn ooda_cycle_runs_with_consolidation_wired_in() {
 
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
         repo: None,
         id: "test-goal".to_string(),
         description: "Test goal for lifecycle".to_string(),
@@ -345,6 +346,7 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
 
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
         repo: None,
         id: "g1".to_string(),
         description: "Accumulation test".to_string(),

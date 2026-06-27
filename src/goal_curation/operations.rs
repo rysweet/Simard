@@ -29,6 +29,65 @@ use super::types::{
 static SAVE_GOAL_BOARD_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 // ---------------------------------------------------------------------------
+// Parent-progress roll-up (issue #2405)
+// ---------------------------------------------------------------------------
+
+/// Roll a parent goal's progress up from its `children` (issue #2405), so the
+/// board never shows a large goal parked at a stale percent while its slices
+/// move. See `docs/reference/goal-decomposition.md`.
+///
+/// Returns:
+/// - `None` when there are no children — the parent keeps its own
+///   directly-tracked status (the signal is "keep own").
+/// - `Some(Blocked(..))` when **any** child is `Blocked` — the block surfaces on
+///   the parent so the operator and the brain see the umbrella is gated.
+/// - `Some(Completed)` only when **every** child is `Completed`.
+/// - `Some(InProgress { percent })` otherwise, where `percent` is the rounded
+///   mean of the children's percents (`Completed` → 100, `InProgress { p }` →
+///   `p`, and `NotStarted` / `Proposed` / `Paused` → 0).
+pub fn rollup_parent_progress(children: &[ActiveGoal]) -> Option<GoalProgress> {
+    if children.is_empty() {
+        return None;
+    }
+
+    let blocked: Vec<String> = children
+        .iter()
+        .filter_map(|child| match &child.status {
+            GoalProgress::Blocked(reason) => Some(reason.clone()),
+            _ => None,
+        })
+        .collect();
+    if !blocked.is_empty() {
+        return Some(GoalProgress::Blocked(format!(
+            "{} child goal(s) blocked: {}",
+            blocked.len(),
+            blocked.join("; ")
+        )));
+    }
+
+    if children
+        .iter()
+        .all(|child| child.status == GoalProgress::Completed)
+    {
+        return Some(GoalProgress::Completed);
+    }
+
+    let sum: u32 = children
+        .iter()
+        .map(|child| match &child.status {
+            GoalProgress::Completed => 100,
+            GoalProgress::InProgress { percent } => *percent,
+            GoalProgress::NotStarted | GoalProgress::Proposed | GoalProgress::Paused => 0,
+            // `Blocked` is handled above; unreachable here but mapped to 0 for
+            // totality.
+            GoalProgress::Blocked(_) => 0,
+        })
+        .sum();
+    let percent = (f64::from(sum) / children.len() as f64).round() as u32;
+    Some(GoalProgress::InProgress { percent })
+}
+
+// ---------------------------------------------------------------------------
 // Validation helpers
 // ---------------------------------------------------------------------------
 
@@ -656,6 +715,7 @@ pub fn promote_to_active(
         })?;
     let item = board.backlog.remove(position);
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
         repo: None,
         id: item.id,
         description: item.description,
@@ -1116,6 +1176,7 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
     for (priority, id_source, description, repo) in DEFAULT_SEED_GOALS {
         let id = crate::goals::goal_slug(id_source);
         board.active.push(ActiveGoal {
+            parent_goal_id: None,
             id,
             description: description.to_string(),
             priority,

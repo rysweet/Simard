@@ -160,6 +160,7 @@ pub(crate) fn board_with_goal(
     add_active_goal(
         &mut board,
         ActiveGoal {
+            parent_goal_id: None,
             repo: None,
             id: id.to_string(),
             description: format!("Goal {id}"),
@@ -179,6 +180,7 @@ pub(crate) fn board_with_goal(
 /// assemble multi-goal boards.
 pub(crate) fn active_goal(id: &str) -> ActiveGoal {
     ActiveGoal {
+        parent_goal_id: None,
         repo: None,
         id: id.to_string(),
         description: format!("Goal {id}"),

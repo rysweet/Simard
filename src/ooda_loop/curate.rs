@@ -179,6 +179,7 @@ pub fn check_meeting_handoffs(
             if board.active.len() < crate::goal_curation::MAX_ACTIVE_GOALS {
                 let priority = (i as u32).saturating_add(1).min(5);
                 board.active.push(ActiveGoal {
+                    parent_goal_id: None,
                     repo: None,
                     id: goal_id,
                     description,
@@ -631,6 +632,7 @@ mod tests {
         let mut board = GoalBoard::new();
         for i in 0..crate::goal_curation::MAX_ACTIVE_GOALS {
             board.active.push(ActiveGoal {
+                parent_goal_id: None,
                 repo: None,
                 id: format!("g-{i}"),
                 description: format!("Goal {i}"),
