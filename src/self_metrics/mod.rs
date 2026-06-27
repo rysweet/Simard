@@ -49,8 +49,19 @@ pub fn record_metric(
     fs::create_dir_all(&dir)?;
     let path = metrics_file_path();
     let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-    let line = serde_json::to_string(&entry)?;
-    writeln!(file, "{line}")?;
+    let mut line = serde_json::to_string(&entry)?;
+    line.push('\n');
+    // Write the whole record (body + newline) in a single `write_all` so it is
+    // ONE `O_APPEND` `write()` syscall, not the two that `writeln!` on an
+    // unbuffered file emits (the JSON body, then "\n"). Engineer subprocesses
+    // share `$HOME` and append to this file concurrently; a two-syscall write
+    // lets records interleave into glued/blank lines, which the line-by-line
+    // readers (`query_metrics`/`recent_metrics`/`daily_report`) then silently
+    // `continue` past — dropping records. Records are well under `PIPE_BUF`, so
+    // a single append write is atomic. Newly consequential now that
+    // `brain_lifecycle_decision` is emitted per decision per in-flight engineer
+    // (issue #2419), making this the dominant writer to `metrics.jsonl`.
+    file.write_all(line.as_bytes())?;
     Ok(())
 }
 
