@@ -66,6 +66,22 @@ jobs:
           cache-directories: |
             ~/.cache/simard-lbug-precommit
 
+      - name: Provision lbug native static library link path (#2426 / #2423)
+        # Pin the lbug native-static-lib path for every cargo invocation in this
+        # job. lbug 0.17.1 caches its prebuilt `liblbug.a` under registry/src,
+        # which this cache restores around but evicts — so the cached release
+        # build-script output points at a missing archive. Provision a stable
+        # copy, point lbug at it via its external-lib interface, and drop the
+        # stale cached lbug build outputs so the build script re-runs and adopts
+        # the pinned path. Runs after the cache restore on purpose.
+        shell: bash
+        run: |
+          lib_dir="$HOME/.cache/simard-lbug-precommit/lib"
+          scripts/provision-lbug-prebuilt.sh "$lib_dir" >/dev/null
+          echo "LBUG_LIBRARY_DIR=$lib_dir" >> "$GITHUB_ENV"
+          echo "LBUG_INCLUDE_DIR=$lib_dir" >> "$GITHUB_ENV"
+          rm -rf target/*/build/lbug-* target/*/.fingerprint/lbug-* 2>/dev/null || true
+
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -202,6 +218,21 @@ jobs:
           # the single writer to avoid cache contention.
           save-if: false
           cache-on-failure: true
+          cache-directories: |
+            ~/.cache/simard-lbug-precommit
+
+      - name: Provision lbug native static library link path (#2426 / #2423)
+        # `cargo test --test install_real` (and the `cargo install` it shells
+        # out to) build lbug in the release profile and hit the same evicted
+        # registry-src prebuilt as the pre-commit clippy gate. Pin the link path
+        # for the whole job so both link lbug deterministically.
+        shell: bash
+        run: |
+          lib_dir="$HOME/.cache/simard-lbug-precommit/lib"
+          scripts/provision-lbug-prebuilt.sh "$lib_dir" >/dev/null
+          echo "LBUG_LIBRARY_DIR=$lib_dir" >> "$GITHUB_ENV"
+          echo "LBUG_INCLUDE_DIR=$lib_dir" >> "$GITHUB_ENV"
+          rm -rf target/*/build/lbug-* target/*/.fingerprint/lbug-* 2>/dev/null || true
 
       - name: Run install verification (cargo install + --version + ensure-deps + self-install)
         env:
