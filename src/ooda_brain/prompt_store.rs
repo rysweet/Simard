@@ -69,6 +69,8 @@ const EMBEDDED_GOAL_SESSION_OBJECTIVE: &str =
     include_str!("../../prompt_assets/simard/goal_session_objective.md");
 const EMBEDDED_GOAL_DECOMPOSITION: &str =
     include_str!("../../prompt_assets/simard/goal_decomposition.md");
+const EMBEDDED_BRAIN_INTROSPECTION: &str =
+    include_str!("../../prompt_assets/simard/brain_introspection.md");
 
 /// Look up the embedded fallback for a known prompt name. Returns `None` for
 /// unknown names so callers can surface a configuration error rather than
@@ -82,6 +84,7 @@ pub fn embedded_fallback(name: &str) -> Option<&'static str> {
         "progress_assessment_reviewer.md" => Some(EMBEDDED_PROGRESS_REVIEWER),
         "goal_session_objective.md" => Some(EMBEDDED_GOAL_SESSION_OBJECTIVE),
         "goal_decomposition.md" => Some(EMBEDDED_GOAL_DECOMPOSITION),
+        "brain_introspection.md" => Some(EMBEDDED_BRAIN_INTROSPECTION),
         _ => None,
     }
 }
