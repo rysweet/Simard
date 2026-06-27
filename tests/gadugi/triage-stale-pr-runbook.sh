@@ -10,9 +10,13 @@
 #
 # It pins, in particular, the two corrections the architect review demanded:
 #   1. Check-name accuracy — the runbook must classify the ACTUAL CI rollup
-#      checks (`pre-commit`, `coverage`, `cargo-audit`, `install-real`,
-#      `e2e-dashboard`) and must NOT invent non-existent `build` / `fmt` jobs or
-#      the mislabeled `lbug-clippy` prefix.
+#      checks enumerated live from the workflow YAMLs: `pre-commit`,
+#      `cargo-audit`, `install-real`, `e2e-dashboard` (verify.yml), `coverage`
+#      (coverage.yml), and `build` — the `mkdocs build --strict` job from
+#      docs.yml that fires on docs/`mkdocs.yml`/`Specs/**` PRs. It must NOT
+#      invent a Rust `fmt` job (fmt/clippy/compile run inside `pre-commit`) or
+#      carry the mislabeled `lbug-clippy` prefix, and it must NOT deny the real
+#      `build` check that docs.yml contributes on documentation PRs.
 #   2. Honest gate framing — the runbook must describe the `gh pr merge` env-red
 #      path as an AUDITED OPERATOR OVERRIDE layered on top of the gate, never as
 #      a tooling-sanctioned bypass (the deterministic gate refuses on any
@@ -30,6 +34,7 @@ DOC="docs/howto/triage-stale-pull-requests.md"
 MKDOCS="mkdocs.yml"
 VERIFY=".github/workflows/verify.yml"
 COVERAGE=".github/workflows/coverage.yml"
+DOCS=".github/workflows/docs.yml"
 
 PASS=0
 fail() {
@@ -55,6 +60,7 @@ lacks() {  # lacks <needle> <message> — fixed-string MUST be absent
 [ -f "$MKDOCS" ]   || fail "$MKDOCS not found"
 [ -f "$VERIFY" ]   || fail "$VERIFY (CI source of truth) not found"
 [ -f "$COVERAGE" ] || fail "$COVERAGE (CI source of truth) not found"
+[ -f "$DOCS" ]     || fail "$DOCS (CI source of truth) not found"
 ok "all ground-truth files present"
 
 # --- Group 1: registration + front-matter -----------------------------------
@@ -83,7 +89,7 @@ ok "front-matter is valid YAML with the required keys"
 # --- Group 2: check-name accuracy, derived from the LIVE workflows -----------
 # The set of real CI checks is read from the workflow files themselves so the
 # runbook fails this gate the moment CI and the doc drift apart.
-LIVE_CHECKS="$(python3 - "$VERIFY" "$COVERAGE" <<'PY'
+LIVE_CHECKS="$(python3 - "$VERIFY" "$COVERAGE" "$DOCS" <<'PY'
 import sys, yaml
 names = []
 for path in sys.argv[1:]:
@@ -105,12 +111,20 @@ has "install-real" "runbook must name install-real as a candidate environmental 
 # pre-commit must be classified as a REAL hard gate, never environmental.
 hasre "pre-commit.*(real|hard gate)|(real|hard gate).*pre-commit" \
   "runbook must classify pre-commit as a REAL hard gate"
-# The architect correction: there is NO build/fmt check; that must be stated and
-# the mislabeled lbug-clippy prefix must be gone entirely.
+# Correction #1 (refined): the runbook must (a) explain that there is no SEPARATE
+# Rust build/fmt check — fmt/clippy/compile all run inside `pre-commit` — and
+# (b) correctly document the docs.yml `build` job (`mkdocs build --strict`) that
+# DOES surface as a real gate on docs/`Specs` PRs. The mislabeled `lbug-clippy`
+# prefix must be gone, and the doc must NOT deny the real docs `build` check.
 lacks "lbug-clippy" "stale 'lbug-clippy' check name must not appear"
-hasre "no .?build.? or .?fmt.? check|There is no .build. or .fmt." \
-  "runbook must state there is no standalone build/fmt check"
-ok "check-name classification matches the live workflows (correction #1)"
+lacks "no \`build\` or \`fmt\` check" \
+  "runbook must not deny the real docs.yml 'build' check"
+hasre "[Nn]o separate Rust .build. or .fmt." \
+  "runbook must state there is no SEPARATE Rust build/fmt check (folded into pre-commit)"
+has "docs.yml" "runbook must attribute the 'build' check to docs.yml"
+hasre "mkdocs build --strict" \
+  "runbook must document the docs.yml 'build' job as 'mkdocs build --strict'"
+ok "check-name classification matches the live workflows incl. docs.yml build (correction #1)"
 
 # --- Group 3: honest operator-override framing (correction #2) ---------------
 hasre "never silently fall back|never silently falls back" \

@@ -151,23 +151,30 @@ Classify along four axes:
 
 The triage classifies each `statusCheckRollup` entry by its **actual check
 name**. The live Simard CI checks are `pre-commit`, `coverage`, `cargo-audit`,
-`install-real`, and `e2e-dashboard`. Classify them like this:
+`install-real`, `e2e-dashboard`, and `build` (the MkDocs `--strict` job from
+`docs.yml`, present only when the PR touches `docs/**`, `mkdocs.yml`, or
+`Specs/**`). Classify them like this:
 
 | Class | Checks (actual rollup names) | Blocks merge? |
 |-------|------------------------------|---------------|
-| **Real** (hard gate) | `pre-commit`, `coverage` (present only when the PR touches `src/**`), `e2e-dashboard`, and **every** PR-specific job | **Yes** — must be `SUCCESS` / `NEUTRAL` / `SKIPPED`. |
+| **Real** (hard gate) | `pre-commit`, `coverage` (present only when the PR touches `src/**`), `build` (present only when the PR touches `docs/**`, `mkdocs.yml`, or `Specs/**`), `e2e-dashboard`, and **every** PR-specific job | **Yes** — must be `SUCCESS` / `NEUTRAL` / `SKIPPED`. |
 | **Environmental** (candidate non-blocking) | `cargo-audit`, `install-real` | **Only after a human confirms** the red is dependency/infra noise unrelated to this PR's diff — never automatically. |
 | **Pending / unknown** | any check in `PENDING` / `QUEUED` / `IN_PROGRESS`, or an unrecognised name | **Yes** — blocks until it resolves green. |
 
 Naming pitfalls that matter when you read a real rollup:
 
-- **There is no `build` or `fmt` check.** Formatting (`cargo fmt`), linting
-  (`clippy`), and compilation (`cargo test` plus the binary build) all run
-  **inside the single `pre-commit` job**. A formatting or build break surfaces
+- **There is no separate Rust `build` or `fmt` check.** Formatting (`cargo fmt`),
+  linting (`clippy`), and compilation (`cargo test` plus the binary build) all run
+  **inside the single `pre-commit` job**. A formatting or Rust build break surfaces
   as a red **`pre-commit`**, which you fix locally (`cargo fmt --all`, then fix
   the lint/compile error) and push to the same branch. `pre-commit` is a **real
   hard gate** — `verify.yml` explicitly treats a `pre-commit` failure as a real
   regression — so it is **never** environmental.
+- **A `build` check *does* appear on docs PRs.** When the PR touches `docs/**`,
+  `mkdocs.yml`, or `Specs/**`, `docs.yml` runs a job named **`build`** that
+  executes `mkdocs build --strict`. It is a **real hard gate** (a broken link or
+  malformed Markdown reds it); reproduce it locally with `mkdocs build --strict`
+  and push to the same branch. Don't mistake it for a Rust compile check.
 - **`cargo-audit`** goes red on RUSTSEC advisories in transitive dependencies,
   which are frequently unrelated to the PR's diff.
 - **`install-real`** is a ~25-minute from-scratch `cargo install` that can flake
