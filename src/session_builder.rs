@@ -199,6 +199,32 @@ impl SessionBuilder {
             return Ok(Box::new(proxy));
         }
 
+        // Non-meeting: build the per-turn adapter session — with production
+        // memory + knowledge enrichment wired in — then open it. The build and
+        // open steps are separated so the enrichment wiring (which needs no
+        // auth) is testable without a live backend; see `build_enriched_session`.
+        let (mut session, adapter) = self.build_enriched_session()?;
+        session
+            .open()
+            .map_err(|e| format!("{adapter}::session.open: {e}"))?;
+        Ok(session)
+    }
+
+    /// Build the per-turn adapter session and populate its memory + knowledge
+    /// enrichment bridges, returning the **unopened** session plus the adapter
+    /// name (for diagnostics).
+    ///
+    /// `session.open()` is intentionally left to the caller because it requires
+    /// a live backend / credentials. The enrichment bridges, by contrast, are
+    /// wired here in `open_session` and need no auth — so this is the exact
+    /// production seam that regressed in #2383 (the `RustyClawd` arm built
+    /// sessions with empty bridges). The `*_provider_wires_enrichment_*` tests
+    /// assert against this method, so dropping a `with_enrichment` call is
+    /// caught without standing up a live backend.
+    ///
+    /// Not called for [`OperatingMode::Meeting`] — [`SessionBuilder::open`]
+    /// handles meeting mode via [`PersistentAgentProxy`] before reaching here.
+    fn build_enriched_session(self) -> Result<(Box<dyn BaseTypeSession>, &'static str), String> {
         // Inline request construction to move prompt_assets instead of cloning.
         let request = BaseTypeSessionRequest {
             session_id: SessionId::from_uuid(uuid::Uuid::now_v7()),
@@ -223,25 +249,30 @@ impl SessionBuilder {
                 let factory = CopilotSdkAdapter::registered(&tag)
                     .map_err(|e| format!("CopilotSdkAdapter::registered({}): {}", tag, e))?
                     .with_enrichment(crate::memory_ipc::default_state_root());
-                let mut session = factory
+                let session = factory
                     .open_session(request)
                     .map_err(|e| format!("CopilotSdkAdapter::open_session({}): {}", tag, e))?;
-                session
-                    .open()
-                    .map_err(|e| format!("CopilotSdkAdapter::session.open({}): {}", tag, e))?;
-                Ok(session)
+                Ok((session, "CopilotSdkAdapter"))
             }
             LlmProvider::RustyClawd => {
                 let tag = format!("{}-rustyclawd", self.adapter_tag);
+                // Issue #2383: enable memory + knowledge enrichment on the
+                // RustyClawd production adapter, mirroring the Copilot path
+                // above (#1664). #1665 routed `RustyClawd::run_turn` through the
+                // shared `enrich_input` entry point, but production sessions
+                // were built with empty bridges, so enrichment was a permanent
+                // no-op. Wiring `with_enrichment` here populates the bridges so
+                // each turn recalls relevant memory facts, procedures, and
+                // domain knowledge. Reads from the default state root (shared
+                // with the OODA daemon when running); a bridge launch failure
+                // degrades gracefully to no enrichment.
                 let factory = RustyClawdAdapter::registered(&tag)
-                    .map_err(|e| format!("RustyClawdAdapter::registered({}): {}", tag, e))?;
-                let mut session = factory
+                    .map_err(|e| format!("RustyClawdAdapter::registered({}): {}", tag, e))?
+                    .with_enrichment(crate::memory_ipc::default_state_root());
+                let session = factory
                     .open_session(request)
                     .map_err(|e| format!("RustyClawdAdapter::open_session({}): {}", tag, e))?;
-                session
-                    .open()
-                    .map_err(|e| format!("RustyClawdAdapter::session.open({}): {}", tag, e))?;
-                Ok(session)
+                Ok((session, "RustyClawdAdapter"))
             }
         }
     }
@@ -363,5 +394,70 @@ mod tests {
     #[test]
     fn rustyclawd_agent_binary_value_returns_rustyclawd() {
         assert_eq!(LlmProvider::RustyClawd.agent_binary_value(), "rustyclawd");
+    }
+
+    // ------------------------------------------------------------------
+    // Production enrichment wiring through SessionBuilder (issue #2383)
+    //
+    // These assert against the exact production seam that regressed: the
+    // `with_enrichment(...)` call inside `SessionBuilder`'s provider arms.
+    // Deleting that call (the #2383 defect) drops both bridges to None, so
+    // `is_configured()` flips to false and these tests fail — unlike the
+    // adapter-level tests, which exercise the builder method directly and
+    // would stay green. `build_enriched_session` stops before the
+    // auth-requiring `session.open()`, so no live backend is needed.
+    // ------------------------------------------------------------------
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn rustyclawd_provider_wires_enrichment_through_session_builder() {
+        // Hermetic: pin SIMARD_STATE_ROOT to a TempDir so `default_state_root()`
+        // (hardcoded inside `build_enriched_session`) resolves under temp_dir
+        // rather than $HOME/.simard — keeping cognitive-memory writes off the
+        // operator's live store and clear of the hermetic-test guard.
+        let _hermetic = crate::test_support::HermeticState::new();
+
+        let (session, adapter) =
+            SessionBuilder::new(OperatingMode::Engineer, LlmProvider::RustyClawd)
+                .node_id("test-node")
+                .address("test://local")
+                .adapter_tag("test-adapter")
+                .build_enriched_session()
+                .expect("build_enriched_session must succeed for RustyClawd");
+
+        assert_eq!(adapter, "RustyClawdAdapter");
+        let bridges = session
+            .enrichment()
+            .expect("RustyClawd session must expose enrichment bridges");
+        assert!(
+            bridges.is_configured(),
+            "SessionBuilder must wire memory + knowledge enrichment for the \
+             RustyClawd provider (issue #2383); empty bridges means the \
+             with_enrichment(...) call was dropped"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn copilot_provider_wires_enrichment_through_session_builder() {
+        // Hermetic: see the RustyClawd variant above.
+        let _hermetic = crate::test_support::HermeticState::new();
+
+        let (session, adapter) = SessionBuilder::new(OperatingMode::Engineer, LlmProvider::Copilot)
+            .node_id("test-node")
+            .address("test://local")
+            .adapter_tag("test-adapter")
+            .build_enriched_session()
+            .expect("build_enriched_session must succeed for Copilot");
+
+        assert_eq!(adapter, "CopilotSdkAdapter");
+        let bridges = session
+            .enrichment()
+            .expect("Copilot session must expose enrichment bridges");
+        assert!(
+            bridges.is_configured(),
+            "SessionBuilder must wire memory + knowledge enrichment for the \
+             Copilot provider (issue #1664)"
+        );
     }
 }

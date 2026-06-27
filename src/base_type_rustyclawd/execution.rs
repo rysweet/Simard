@@ -22,6 +22,13 @@ const DEFAULT_SYSTEM_PROMPT: &str =
 /// injected into `prompt_preamble`, so an otherwise-empty turn (no identity, no
 /// caller preamble) must still retain the default base prompt rather than being
 /// replaced by the bare enrichment block.
+///
+/// Decision (issue #2383, MEDIUM observation): the no-identity + non-empty
+/// preamble case intentionally renders `"{DEFAULT_SYSTEM_PROMPT}\n\n{preamble}"`
+/// (keeping the base prompt, dropping the dangling `---` the older form left
+/// behind). This is the correct, intended behavior — it was already adopted on
+/// `main` by #2361/#1665 and is pinned by the `system_prompt_*` tests below — so
+/// no change is made here.
 fn compose_system_prompt(prompt_preamble: &str, identity_context: &str) -> String {
     if identity_context.is_empty() {
         let base = DEFAULT_SYSTEM_PROMPT.trim();
