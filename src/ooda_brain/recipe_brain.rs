@@ -88,7 +88,7 @@ struct RecipeStepResult {
 /// This keeps a broken recipe-runner visible instead of masquerading as a
 /// `default_empty` parse.
 fn extract_recipe_decision_output(stdout: &[u8], adapter_tag: &str) -> SimardResult<String> {
-    let envelope: RecipeEnvelope =
+    let mut envelope: RecipeEnvelope =
         serde_json::from_slice(stdout).map_err(|e| SimardError::AdapterInvocationFailed {
             base_type: adapter_tag.to_string(),
             reason: format!("failed to deserialize recipe JSON output: {e}"),
@@ -101,10 +101,13 @@ fn extract_recipe_decision_output(stdout: &[u8], adapter_tag: &str) -> SimardRes
         });
     }
 
+    // `pop()` moves the terminal step's `output` out of the owned envelope
+    // (dropped on return anyway) instead of cloning the (potentially multi-KB)
+    // decision text on every brain invocation.
     envelope
         .step_results
-        .last()
-        .map(|s| s.output.clone())
+        .pop()
+        .map(|s| s.output)
         .ok_or_else(|| SimardError::AdapterInvocationFailed {
             base_type: adapter_tag.to_string(),
             reason: "no step results in recipe JSON output".to_string(),
