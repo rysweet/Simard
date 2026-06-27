@@ -42,8 +42,9 @@
 
 // `distillation` module does not exist yet (PR-B introduces it).
 use crate::memory_consolidation::distillation::{
-    DISTILL_BATCH_SIZE, DISTILL_MIN_EPISODES, DistillRecipeRunner,
-    distill_recent_episodes_with_runner,
+    DISTILL_BATCH_SIZE, DISTILL_FACT_CONFIDENCE, DISTILL_MIN_EPISODES,
+    DISTILL_RELIABILITY_THRESHOLD, DistillRecipeRunner, DistilledFact, KNOWN_DISTILL_CONCEPTS,
+    assess_fact_reliability, distill_recent_episodes_with_runner,
 };
 
 use crate::cognitive_memory::CognitiveMemoryOps;
@@ -150,6 +151,11 @@ struct EpisodeMock {
     /// provenance test can assert the originating episode id was threaded
     /// through to the provenance write (creating a DERIVES_FROM edge).
     prov_calls: Mutex<Vec<(String, String, Vec<String>)>>,
+    /// Issue #2433: pre-existing facts returned by `search_facts`, keyed by
+    /// concept, so the reliability gate's "don't clobber a stronger prior"
+    /// guard can be exercised. Empty by default → existing tests are
+    /// unaffected (the gate finds no prior to protect).
+    seeded_facts: Mutex<Vec<CognitiveFact>>,
 }
 
 #[derive(Clone)]
@@ -168,6 +174,29 @@ impl EpisodeMock {
             episodes: Mutex::new(rows),
             ..Self::default()
         }
+    }
+
+    /// Like [`with_episodes`](Self::with_episodes) but pre-seeds the facts that
+    /// `search_facts` will return, so the reliability gate's don't-clobber
+    /// guard (issue #2433) can be tested.
+    fn with_episodes_and_seeded_facts(rows: Vec<EpisodeRow>, seeded: Vec<CognitiveFact>) -> Self {
+        Self {
+            episodes: Mutex::new(rows),
+            seeded_facts: Mutex::new(seeded),
+            ..Self::default()
+        }
+    }
+
+    /// Every stored fact as `(concept, content, confidence)` — unlike
+    /// [`facts_stored`](Self::facts_stored) this keeps the confidence so the
+    /// reliability-gate tests can assert the *computed* (non-constant) score.
+    fn stored_facts_full(&self) -> Vec<(String, String, f64)> {
+        self.facts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(c, content, conf, _, _)| (c.clone(), content.clone(), *conf))
+            .collect()
     }
 
     fn facts_stored(&self) -> Vec<(String, String)> {
@@ -243,8 +272,39 @@ impl CognitiveMemoryOps for EpisodeMock {
         ));
         Ok(format!("sem_{}", self.facts.lock().unwrap().len()))
     }
-    fn search_facts(&self, _q: &str, _l: u32, _c: f64) -> SimardResult<Vec<CognitiveFact>> {
-        Ok(vec![])
+    fn search_facts(&self, q: &str, _l: u32, min_conf: f64) -> SimardResult<Vec<CognitiveFact>> {
+        // Issue #2433: model the production library faithfully — `search_facts`
+        // matches the concept label and reads the SAME live graph that
+        // `store_fact*` writes to. So return BOTH seeded priors AND facts
+        // already stored earlier in this same pass, filtered by concept == query
+        // and confidence >= min_conf. Reflecting in-pass writes is exactly what
+        // lets the don't-clobber guard's identity check observe an in-batch
+        // sibling (the case the earlier concept-only guard silently regressed
+        // on). Default (no seed, nothing stored yet) → empty, preserving the
+        // pre-#2433 behaviour the other tests rely on.
+        let mut out: Vec<CognitiveFact> = self
+            .seeded_facts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|f| f.concept == q && f.confidence >= min_conf)
+            .cloned()
+            .collect();
+        for (concept, content, conf, _tags, source) in self.facts.lock().unwrap().iter() {
+            if concept == q && *conf >= min_conf {
+                out.push(CognitiveFact {
+                    node_id: format!("sem_stored_{concept}"),
+                    concept: concept.clone(),
+                    content: content.clone(),
+                    confidence: *conf,
+                    source_id: source.clone(),
+                    tags: vec![concept.clone()],
+                    usage_count: 0,
+                    last_accessed_at: None,
+                });
+            }
+        }
+        Ok(out)
     }
     fn store_procedure(&self, _n: &str, _s: &[String], _p: &[String]) -> SimardResult<String> {
         Ok("prc_x".to_string())
@@ -1126,4 +1186,377 @@ fn facts_only_wrapper_reads_real_prose_prefixed_envelope() {
         .expect("facts-only wrapper must parse the real envelope");
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].concept, "bug-pattern");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #2433: ISAO-style reliability gate on consolidation
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Distillation now SELF-ASSESSES each candidate fact's reliability and gates on
+// `Fact.confidence` instead of writing a blind constant (BGML's ISAO, §IV):
+//   * low-reliability candidates are quarantined (not promoted), and
+//   * a weaker new fact never clobbers a stronger existing fact on the concept.
+
+/// Build a pre-existing `CognitiveFact` for seeding the mock's `search_facts`.
+fn seeded_fact(concept: &str, content: &str, confidence: f64) -> CognitiveFact {
+    CognitiveFact {
+        node_id: format!("sem_seed_{concept}"),
+        concept: concept.to_string(),
+        content: content.to_string(),
+        confidence,
+        source_id: "prior".to_string(),
+        tags: vec![concept.to_string()],
+        usage_count: 0,
+        last_accessed_at: None,
+    }
+}
+
+/// A nominal fact — valid in-batch provenance, ≥3 words, known concept —
+/// scores at or above the legacy baseline (0.9) so good facts keep their
+/// downstream behaviour.
+#[test]
+fn reliability_score_nominal_fact_is_above_baseline() {
+    let episodes = vec![CognitiveEpisode {
+        node_id: "epi_00001".to_string(),
+        content: "event 1".to_string(),
+        source_label: "goal-curator".to_string(),
+        temporal_index: 1,
+        compressed: false,
+    }];
+    let fact = DistilledFact {
+        concept: "pr-pattern".to_string(),
+        content: "enable auto-merge before final review".to_string(),
+        source_episode_id: "epi_00001".to_string(),
+    };
+    let score = assess_fact_reliability(&fact, &episodes, std::slice::from_ref(&fact));
+    assert!(
+        (score - 0.9).abs() < 1e-9,
+        "grounded + ≥3 words + known concept must score 0.9; got {score}"
+    );
+    assert!(
+        score >= DISTILL_FACT_CONFIDENCE,
+        "a nominal fact must clear the legacy baseline for continuity"
+    );
+    assert!(score >= DISTILL_RELIABILITY_THRESHOLD);
+}
+
+/// Hallucinated provenance (source episode NOT in the batch) loses the 0.5
+/// grounding weight and drops below the gate even with good content.
+#[test]
+fn reliability_score_ungrounded_fact_is_below_threshold() {
+    let episodes = vec![CognitiveEpisode {
+        node_id: "epi_00001".to_string(),
+        content: "event 1".to_string(),
+        source_label: "goal-curator".to_string(),
+        temporal_index: 1,
+        compressed: false,
+    }];
+    let fact = DistilledFact {
+        concept: "bug-pattern".to_string(),
+        content: "this content looks plausible enough".to_string(),
+        source_episode_id: "epi_99999".to_string(), // not in batch
+    };
+    let score = assess_fact_reliability(&fact, &episodes, std::slice::from_ref(&fact));
+    assert!(
+        score < DISTILL_RELIABILITY_THRESHOLD,
+        "ungrounded provenance must fall below the gate; got {score}"
+    );
+    assert!(
+        (score - 0.4).abs() < 1e-9,
+        "0.3 content + 0.1 concept = 0.4; got {score}"
+    );
+}
+
+/// Corroboration: ≥2 facts agreeing on the same concept this pass adds a 0.1
+/// independent-agreement bonus, taking a nominal fact to a perfect 1.0.
+#[test]
+fn reliability_score_corroboration_bonus_applies() {
+    let episodes = vec![
+        CognitiveEpisode {
+            node_id: "epi_00001".to_string(),
+            content: "event 1".to_string(),
+            source_label: "goal-curator".to_string(),
+            temporal_index: 1,
+            compressed: false,
+        },
+        CognitiveEpisode {
+            node_id: "epi_00002".to_string(),
+            content: "event 2".to_string(),
+            source_label: "goal-curator".to_string(),
+            temporal_index: 2,
+            compressed: false,
+        },
+    ];
+    let batch = vec![
+        DistilledFact {
+            concept: "pr-pattern".to_string(),
+            content: "small PRs merge faster".to_string(),
+            source_episode_id: "epi_00001".to_string(),
+        },
+        DistilledFact {
+            concept: "pr-pattern".to_string(),
+            content: "auto-merge avoids stale reviews".to_string(),
+            source_episode_id: "epi_00002".to_string(),
+        },
+    ];
+    let score = assess_fact_reliability(&batch[0], &episodes, &batch);
+    assert!(
+        (score - 1.0).abs() < 1e-9,
+        "corroborated nominal fact = 1.0; got {score}"
+    );
+    assert!(KNOWN_DISTILL_CONCEPTS.contains(&"pr-pattern"));
+}
+
+/// An off-spec concept loses the concept-validity component.
+#[test]
+fn reliability_score_unknown_concept_loses_weight() {
+    let episodes = vec![CognitiveEpisode {
+        node_id: "epi_00001".to_string(),
+        content: "event 1".to_string(),
+        source_label: "goal-curator".to_string(),
+        temporal_index: 1,
+        compressed: false,
+    }];
+    let fact = DistilledFact {
+        concept: "made-up-concept".to_string(),
+        content: "grounded but off spec concept".to_string(),
+        source_episode_id: "epi_00001".to_string(),
+    };
+    let score = assess_fact_reliability(&fact, &episodes, std::slice::from_ref(&fact));
+    assert!(
+        (score - 0.8).abs() < 1e-9,
+        "0.5 grounded + 0.3 content = 0.8; got {score}"
+    );
+}
+
+/// Hallucinated provenance must not ride on a same-concept sibling's
+/// corroboration to clear the gate: an ungrounded fact stays at 0.4 (content +
+/// concept only) even when corroboration is present, because the corroboration
+/// bonus is awarded only to grounded facts (issue #2433).
+#[test]
+fn reliability_score_ungrounded_corroborated_still_below_threshold() {
+    let episodes = vec![CognitiveEpisode {
+        node_id: "epi_00001".to_string(),
+        content: "event 1".to_string(),
+        source_label: "goal-curator".to_string(),
+        temporal_index: 1,
+        compressed: false,
+    }];
+    // Two same-concept facts → corroboration is present in the batch, but the
+    // fact under test cites an episode NOT in the batch (hallucinated provenance).
+    let batch = vec![
+        DistilledFact {
+            concept: "bug-pattern".to_string(),
+            content: "looks plausible but provenance is fake".to_string(),
+            source_episode_id: "epi_99999".to_string(), // ungrounded
+        },
+        DistilledFact {
+            concept: "bug-pattern".to_string(),
+            content: "a grounded sibling on the same concept".to_string(),
+            source_episode_id: "epi_00001".to_string(),
+        },
+    ];
+    let score = assess_fact_reliability(&batch[0], &episodes, &batch);
+    assert!(
+        (score - 0.4).abs() < 1e-9,
+        "ungrounded + corroborated must stay at 0.3 content + 0.1 concept = 0.4; got {score}"
+    );
+    assert!(
+        score < DISTILL_RELIABILITY_THRESHOLD,
+        "hallucinated provenance must be quarantined regardless of corroboration"
+    );
+}
+
+/// Empty / whitespace-only content is quarantined unconditionally — even with
+/// valid provenance and a known concept it scores 0.0 (issue #2433 hard gate).
+#[test]
+fn reliability_score_empty_content_is_zero() {
+    let episodes = vec![CognitiveEpisode {
+        node_id: "epi_00001".to_string(),
+        content: "event 1".to_string(),
+        source_label: "goal-curator".to_string(),
+        temporal_index: 1,
+        compressed: false,
+    }];
+    let fact = DistilledFact {
+        concept: "pr-pattern".to_string(),
+        content: "   ".to_string(),                 // whitespace only
+        source_episode_id: "epi_00001".to_string(), // grounded, but empty
+    };
+    let score = assess_fact_reliability(&fact, &episodes, std::slice::from_ref(&fact));
+    assert_eq!(
+        score, 0.0,
+        "empty content must score 0.0 regardless of provenance"
+    );
+    assert!(score < DISTILL_RELIABILITY_THRESHOLD);
+}
+
+/// End-to-end gate: a hallucinated-provenance fact is QUARANTINED — not stored
+/// — while the grounded fact in the same batch is promoted. Every episode is
+/// still marked distilled (the quarantine does not break the replay guard).
+#[test]
+fn distillation_quarantines_low_reliability_fact() {
+    let n = DISTILL_MIN_EPISODES as usize + 5;
+    let mock = EpisodeMock::with_episodes(n_episodes(n));
+    let runner = FixedFactsRunner {
+        facts: vec![
+            (
+                "pr-pattern".to_string(),
+                "enable auto-merge before final review".to_string(),
+                "epi_00001".to_string(), // grounded → promoted
+            ),
+            (
+                "bug-pattern".to_string(),
+                "looks plausible but provenance is fake".to_string(),
+                "epi_99999".to_string(), // NOT in batch → quarantined
+            ),
+        ],
+        call_count: AtomicU32::new(0),
+    };
+
+    let report = distill_recent_episodes_with_runner(&mock, &runner).unwrap();
+
+    assert_eq!(report.fact_count, 1, "only the grounded fact is promoted");
+    assert_eq!(
+        report.quarantined_count, 1,
+        "the hallucinated-provenance fact is gated"
+    );
+    assert_eq!(
+        report.marked_count as usize, n,
+        "all episodes still marked distilled"
+    );
+
+    let stored: Vec<String> = mock.facts_stored().into_iter().map(|(c, _)| c).collect();
+    assert!(stored.contains(&"pr-pattern".to_string()));
+    assert!(
+        !stored.contains(&"bug-pattern".to_string()),
+        "the low-reliability fact must NOT be promoted into semantic memory"
+    );
+}
+
+/// Integrity guard: a weaker new fact must not downgrade a stronger existing
+/// copy of the SAME fact (identity = concept + content). The seeded 0.95 prior
+/// has identical content to the candidate the recipe re-emits at a computed
+/// 0.9, so it is blocked; a distinct fact on another concept is promoted.
+#[test]
+fn distillation_does_not_clobber_stronger_prior() {
+    let n = DISTILL_MIN_EPISODES as usize + 5;
+    let mock = EpisodeMock::with_episodes_and_seeded_facts(
+        n_episodes(n),
+        // Same concept AND same content as the candidate below, but stronger.
+        vec![seeded_fact(
+            "pr-pattern",
+            "enable auto-merge before final review",
+            0.95,
+        )],
+    );
+    let runner = FixedFactsRunner {
+        facts: vec![
+            (
+                "pr-pattern".to_string(),
+                "enable auto-merge before final review".to_string(),
+                "epi_00001".to_string(), // computed 0.9 < identical 0.95 prior → blocked
+            ),
+            (
+                "bug-pattern".to_string(),
+                "empty outcome list panics cycle.rs".to_string(),
+                "epi_00007".to_string(), // no prior → promoted
+            ),
+        ],
+        call_count: AtomicU32::new(0),
+    };
+
+    let report = distill_recent_episodes_with_runner(&mock, &runner).unwrap();
+
+    assert_eq!(
+        report.fact_count, 1,
+        "only the un-conflicted fact is promoted"
+    );
+    assert_eq!(
+        report.quarantined_count, 1,
+        "the weaker identical pr-pattern candidate is blocked"
+    );
+
+    let stored: Vec<(String, String, f64)> = mock.stored_facts_full();
+    assert!(
+        !stored.iter().any(|(c, content, _)| c == "pr-pattern"
+            && content == "enable auto-merge before final review"),
+        "the stronger 0.95 prior must be preserved, not downgraded by the 0.9 candidate"
+    );
+    assert!(stored.iter().any(|(c, _, _)| c == "bug-pattern"));
+}
+
+/// Regression (issue #2433): two DISTINCT facts that share a concept label must
+/// BOTH be promoted. The recipe emits only three concept labels and every
+/// grounded, well-formed fact scores identically, so an earlier concept-level
+/// don't-clobber guard quarantined every same-concept fact after the first —
+/// silently neutering distillation. The identity-level guard, plus a mock whose
+/// `search_facts` reflects in-pass writes (as production does), proves distinct
+/// same-concept facts accumulate. This test FAILS under the concept-only guard.
+#[test]
+fn distillation_promotes_distinct_same_concept_facts() {
+    let n = DISTILL_MIN_EPISODES as usize + 5;
+    let mock = EpisodeMock::with_episodes(n_episodes(n));
+    let runner = FixedFactsRunner {
+        facts: vec![
+            (
+                "pr-pattern".to_string(),
+                "enable auto-merge before final review".to_string(),
+                "epi_00001".to_string(),
+            ),
+            (
+                "pr-pattern".to_string(),
+                "rebase onto main before requesting review".to_string(),
+                "epi_00002".to_string(),
+            ),
+        ],
+        call_count: AtomicU32::new(0),
+    };
+
+    let report = distill_recent_episodes_with_runner(&mock, &runner).unwrap();
+
+    assert_eq!(
+        report.fact_count, 2,
+        "two distinct pr-pattern facts must both be promoted, not deduped by label"
+    );
+    assert_eq!(
+        report.quarantined_count, 0,
+        "distinct same-concept facts must not be quarantined as clobbering priors"
+    );
+
+    let contents: Vec<String> = mock
+        .stored_facts_full()
+        .into_iter()
+        .map(|(_, content, _)| content)
+        .collect();
+    assert!(contents.contains(&"enable auto-merge before final review".to_string()));
+    assert!(contents.contains(&"rebase onto main before requesting review".to_string()));
+}
+
+/// Confidence written to semantic memory is the *computed* reliability score,
+/// not the legacy constant — turning `confidence` into a live signal.
+#[test]
+fn distilled_fact_confidence_is_computed_not_constant() {
+    let n = DISTILL_MIN_EPISODES as usize + 5;
+    let mock = EpisodeMock::with_episodes(n_episodes(n));
+    let runner = FixedFactsRunner {
+        facts: vec![(
+            "pr-pattern".to_string(),
+            "enable auto-merge before final review".to_string(),
+            "epi_00001".to_string(),
+        )],
+        call_count: AtomicU32::new(0),
+    };
+
+    let report = distill_recent_episodes_with_runner(&mock, &runner).unwrap();
+    assert_eq!(report.fact_count, 1);
+
+    let stored = mock.stored_facts_full();
+    assert_eq!(stored.len(), 1);
+    let (concept, _, confidence) = &stored[0];
+    assert_eq!(concept, "pr-pattern");
+    assert!(
+        (confidence - 0.9).abs() < 1e-9,
+        "confidence must be the computed score 0.9, not a constant; got {confidence}"
+    );
 }
