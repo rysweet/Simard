@@ -446,10 +446,8 @@ fn handle_decompose(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn Error
         );
         for (i, p) in proposals.iter().enumerate() {
             eprintln!(
-                "  {}. {} (done: {})",
-                i + 1,
-                p.description,
-                p.done_criterion
+                "{}",
+                render_dry_run_proposal(i + 1, &p.description, &p.done_criterion)
             );
         }
         return Ok(());
@@ -470,6 +468,26 @@ fn handle_decompose(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn Error
         outcome.child_ids.join(", "),
     );
     Ok(())
+}
+
+/// Render one `--dry-run` preview line for a proposed sub-goal.
+///
+/// `description` / `done_criterion` are **untrusted** LLM-authored text (issue
+/// [#2405](https://github.com/rysweet/Simard/issues/2405) review finding F1):
+/// the apply path only ever echoes charset-validated ids, but the dry-run
+/// preview is the one place raw model output reaches the operator's terminal.
+/// Sanitize it first — strip terminal control/escape sequences and redact
+/// secret-shaped lines via [`crate::sanitization::sanitize_terminal_text`] —
+/// then fold any residual newlines/tabs to spaces so a single proposal cannot
+/// spoof extra numbered rows in the preview.
+fn render_dry_run_proposal(index: usize, description: &str, done_criterion: &str) -> String {
+    let clean =
+        |raw: &str| crate::sanitization::sanitize_terminal_text(raw).replace(['\n', '\t'], " ");
+    format!(
+        "  {index}. {} (done: {})",
+        clean(description),
+        clean(done_criterion)
+    )
 }
 
 /// Parse and validate the `--max-children` value (must be a positive integer;
@@ -790,5 +808,49 @@ mod tests {
         let args = vec!["set-priority".to_string(), "some-goal".to_string()];
         let result = dispatch_goal_command(args.into_iter());
         assert!(result.is_err());
+    }
+
+    // ---- render_dry_run_proposal (#2405 F1: sanitize untrusted LLM text) ----
+
+    #[test]
+    fn dry_run_proposal_renders_plain_text_unchanged() {
+        assert_eq!(
+            render_dry_run_proposal(1, "Add a parser", "parser round-trips fixtures"),
+            "  1. Add a parser (done: parser round-trips fixtures)"
+        );
+    }
+
+    #[test]
+    fn dry_run_proposal_strips_terminal_control_sequences() {
+        // A malicious model could embed ANSI/OSC escapes to recolor, hide, or
+        // hyperlink-spoof the operator's console. They must be stripped.
+        let line = render_dry_run_proposal(
+            2,
+            "\u{1b}[31mwipe the disk\u{1b}[0m",
+            "\u{1b}]8;;https://evil.invalid\u{7}done\u{1b}]8;;\u{7}",
+        );
+        assert_eq!(line, "  2. wipe the disk (done: done)");
+        assert!(!line.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn dry_run_proposal_redacts_secret_shaped_text() {
+        // Secret-looking lines in untrusted output are redacted, not echoed.
+        let line = render_dry_run_proposal(3, "token=sk_live_abc123", "ok");
+        assert_eq!(line, "  3. token=[REDACTED] (done: ok)");
+    }
+
+    #[test]
+    fn dry_run_proposal_folds_newlines_to_prevent_row_spoofing() {
+        // Newlines/tabs survive sanitize_terminal_text; fold them so a single
+        // proposal cannot forge an extra "  7. ..." preview row.
+        let line =
+            render_dry_run_proposal(4, "real goal\n  7. forged sibling", "criterion\twith tab");
+        assert_eq!(
+            line,
+            "  4. real goal   7. forged sibling (done: criterion with tab)"
+        );
+        assert!(!line.contains('\n'));
+        assert!(!line.contains('\t'));
     }
 }
