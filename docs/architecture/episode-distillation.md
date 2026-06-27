@@ -353,17 +353,27 @@ candidate in `[0.0, 1.0]` from cheap local signals (no extra LLM call):
 
 | Signal | Weight | Meaning |
 |--------|--------|---------|
-| Provenance grounding | 0.5 | `source_episode_id` is one of the episodes fed to the recipe this pass (not hallucinated). |
-| Content quality | ≤0.3 | Non-empty; ≥3 words. |
+| Provenance grounding | 0.5 | `source_episode_id` is one of the episodes fed to the recipe this pass (not hallucinated). **Necessary**: without it a fact tops out at 0.4 and is always quarantined. |
+| Content quality | ≤0.3 | Empty / whitespace-only content is a **hard gate** (score `0.0`); otherwise ≥3 words earns the full 0.3. |
 | Concept validity | 0.1 | Concept is one of `pr-pattern` / `bug-pattern` / `lesson-learned`. |
-| Corroboration | 0.1 | ≥2 facts agree on the same concept this pass. |
+| Corroboration | 0.1 | ≥2 facts agree on the same concept this pass — awarded **only to grounded facts** so hallucinated provenance can't ride on a sibling's corroboration. |
 
 A candidate scoring below `DISTILL_RELIABILITY_THRESHOLD` (0.5) is **quarantined**
-— not written. A surviving candidate is written with its *computed* confidence,
-but never **clobbers** a higher-confidence existing fact on the same concept
-(`search_facts(concept, _, score)` is consulted first). A nominal grounded,
+— not written. Because grounding (0.5) is necessary to reach the threshold, a
+hallucinated-provenance fact scores at most `0.4` (even with corroboration) and
+an empty fact scores `0.0`; both are quarantined. A nominal grounded,
 known-concept, ≥3-word fact scores `0.9` — at or above the legacy baseline — so
 good facts keep their prior behaviour.
+
+A surviving candidate is written with its *computed* confidence, but never
+**downgrades** a stronger existing copy of the **same fact**. The don't-clobber
+guard matches on fact *identity* (concept **and** content), not the concept
+label alone: the recipe emits only three concept labels and every good fact
+scores identically, so a concept-only guard would quarantine every distinct fact
+after the first one stored under a label and silently neuter distillation.
+Identity matching blocks only a genuine re-distillation of the same content at a
+lower-or-equal confidence, while distinct lessons that share a label accumulate
+(`search_facts(concept, _, score)` is consulted, then filtered on content).
 
 Each pass records a `distill_reliability_gate` metric whose value is the
 block-rate (`quarantined / candidate_facts`), with the counts in the context

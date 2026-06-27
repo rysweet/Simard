@@ -278,24 +278,42 @@ pub fn distill_recent_episodes_with_runner(
         }
 
         // Protect past experience: do not let a weaker new fact supersede a
-        // stronger existing fact on the same concept (BGML ISAO integrity).
-        // `search_facts` is queried with the new confidence as `min_confidence`
-        // so it returns only the priors that would block; the explicit
-        // comparison is belt-and-suspenders against a backend that ignores the
-        // filter.
+        // stronger existing *version of the same fact* (BGML ISAO integrity).
+        //
+        // The match is on fact IDENTITY (concept + content), NOT the concept
+        // label alone. The distillation recipe emits at most three concept
+        // labels (`pr-pattern` / `bug-pattern` / `lesson-learned`) and every
+        // grounded, well-formed fact scores identically, so a concept-only
+        // guard would treat each distilled fact as a duplicate of the first one
+        // stored under that label and quarantine every subsequent DISTINCT fact
+        // — silently neutering distillation after the first pass (issue #2433).
+        // Identity matching instead blocks only a genuine re-distillation of the
+        // *same* content at a lower-or-equal confidence, while letting distinct
+        // lessons that happen to share a label accumulate.
+        //
+        // `search_facts` is queried with the new confidence as `min_confidence`,
+        // so it returns only priors strong enough to block; production
+        // `search_facts` matches the concept label against the same live graph
+        // these writes target, so an in-pass sibling is visible here too. The
+        // explicit `>=` comparison is belt-and-suspenders against a backend that
+        // ignores the `min_confidence` filter.
         let existing = memory
             .search_facts(&fact.concept, 5, confidence)
             .unwrap_or_default();
-        if existing.iter().any(|f| f.confidence >= confidence) {
+        let new_content = fact.content.trim();
+        if existing
+            .iter()
+            .any(|f| f.content.trim() == new_content && f.confidence >= confidence)
+        {
             quarantined += 1;
             tracing::info!(
                 target: "simard::distill",
                 concept = %fact.concept,
                 confidence,
-                "distill: existing fact on concept has >= confidence; not clobbering prior"
+                "distill: an equal-or-stronger copy of this fact already exists; not downgrading prior"
             );
             eprintln!(
-                "[simard] distill: kept stronger prior on concept={} (new confidence={:.2} would clobber)",
+                "[simard] distill: kept stronger prior for concept={} (new confidence={:.2} would downgrade an identical fact)",
                 fact.concept, confidence
             );
             continue;
@@ -376,32 +394,47 @@ pub fn distill_recent_episodes_with_runner(
 /// | Signal | Weight | Rationale |
 /// |--------|--------|-----------|
 /// | **Provenance grounding** | 0.5 | The cited `source_episode_id` must be one of the episodes actually fed to the recipe this pass. A source outside the batch is unverifiable / hallucinated provenance — the strongest unreliability signal. |
-/// | **Content quality** | ≤0.3 | Empty content carries no information; ≥3 words is the minimum for a usable fact. |
+/// | **Content quality** | ≤0.3 | Empty / whitespace-only content carries no information and is a HARD gate (score `0.0`); otherwise ≥3 words earns the full weight. |
 /// | **Concept validity** | 0.1 | The recipe is constrained to [`KNOWN_DISTILL_CONCEPTS`]; an off-set concept means the model went off-spec. |
-/// | **Corroboration** | 0.1 | Multiple distilled facts agreeing on the same concept this pass is independent agreement across source episodes. |
+/// | **Corroboration** | 0.1 | ≥2 distilled facts agreeing on the same concept this pass — independent agreement across source episodes. Awarded ONLY to grounded facts so hallucinated provenance can't ride on a sibling's corroboration. |
 ///
 /// A nominal fact (grounded, ≥3 words, known concept) scores `0.9` — at or
 /// above the legacy [`DISTILL_FACT_CONFIDENCE`] baseline — so good facts keep
-/// their downstream behaviour, while a hallucinated-provenance or empty fact
-/// scores ≤`0.4` and is quarantined by [`DISTILL_RELIABILITY_THRESHOLD`].
+/// their downstream behaviour. Because grounding (0.5) is necessary to clear
+/// [`DISTILL_RELIABILITY_THRESHOLD`] (0.5), a hallucinated-provenance fact tops
+/// out at `0.4` (content + concept) — even WITH corroboration — and an empty
+/// fact scores `0.0`; both are quarantined.
 pub fn assess_fact_reliability(
     fact: &DistilledFact,
     episodes: &[CognitiveEpisode],
     batch_facts: &[DistilledFact],
 ) -> f64 {
+    // (0) Hard gate: empty / whitespace-only content carries no information and
+    // is quarantined unconditionally, regardless of how trustworthy its
+    // provenance looks (issue #2433). Without this, a grounded-but-empty fact
+    // (0.5 grounding + 0.1 concept = 0.6) would clear the gate, violating the
+    // documented "empty content is quarantined" invariant.
+    let words = fact.content.split_whitespace().count();
+    if words == 0 {
+        return 0.0;
+    }
+
     let mut score = 0.0_f64;
 
-    // (1) Provenance grounding.
+    // (1) Provenance grounding — the dominant, *necessary* signal. A source
+    // outside the batch is unverifiable / hallucinated provenance. The weights
+    // below are tuned so that WITHOUT this 0.5 a fact can never reach
+    // `DISTILL_RELIABILITY_THRESHOLD` (0.5): an ungrounded fact tops out at
+    // 0.3 content + 0.1 concept = 0.4 and is always quarantined.
     let grounded = episodes.iter().any(|e| e.node_id == fact.source_episode_id);
     if grounded {
         score += 0.5;
     }
 
-    // (2) Content quality.
-    let words = fact.content.split_whitespace().count();
+    // (2) Content quality (content is non-empty here — see the hard gate above).
     if words >= 3 {
         score += 0.3;
-    } else if words >= 1 {
+    } else {
         score += 0.15;
     }
 
@@ -415,12 +448,17 @@ pub fn assess_fact_reliability(
     }
 
     // (4) Corroboration: ≥2 facts this pass agreeing on the same concept.
-    let corroboration = batch_facts
-        .iter()
-        .filter(|f| f.concept.eq_ignore_ascii_case(&fact.concept))
-        .count();
-    if corroboration >= 2 {
-        score += 0.1;
+    // Awarded ONLY to grounded facts — an ungrounded (hallucinated-provenance)
+    // fact must not ride on the corroboration of legitimate same-concept facts
+    // to sneak over the gate (it would otherwise reach 0.3 + 0.1 + 0.1 = 0.5).
+    if grounded {
+        let corroboration = batch_facts
+            .iter()
+            .filter(|f| f.concept.eq_ignore_ascii_case(&fact.concept))
+            .count();
+        if corroboration >= 2 {
+            score += 0.1;
+        }
     }
 
     score.clamp(0.0, 1.0)
