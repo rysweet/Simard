@@ -266,6 +266,28 @@ pub fn run_ooda_daemon(
         }
     };
 
+    // Deploy-aware done-gate (issue #2419). Honors the `SIMARD_COMPLETION_EVIDENCE=off`
+    // kill switch; otherwise a completed goal is archived only with hard
+    // evidence (merged PR + closed issue + — for self-affecting changes — a
+    // verified deploy), resolved via `gh` and the reconciliation detector.
+    let completion_evidence: Option<
+        std::sync::Arc<dyn crate::goal_curation::completion_gate::EvidenceSource>,
+    > = if crate::goal_curation::completion_evidence_enabled() {
+        daemon_log(
+            &state_root,
+            "[simard] completion-evidence: enabled (GhCliEvidenceSource -- merged+closed+deployed gate)",
+        );
+        Some(std::sync::Arc::new(
+            crate::goal_curation::GhCliEvidenceSource::new(repo_root.clone()),
+        ))
+    } else {
+        daemon_log(
+            &state_root,
+            "[simard] completion-evidence: DISABLED (legacy archive -- SIMARD_COMPLETION_EVIDENCE=off)",
+        );
+        None
+    };
+
     let mut bridges = OodaBridges {
         memory,
         knowledge,
@@ -277,6 +299,7 @@ pub fn run_ooda_daemon(
         orient_brain,
         repo_root,
         progress_evidence,
+        completion_evidence,
     };
 
     let board = load_goal_board(&*bridges.memory).unwrap_or_default();
@@ -797,6 +820,7 @@ mod tests {
             progress_evidence: Arc::new(
                 crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
             ),
+            completion_evidence: None,
         }
     }
 

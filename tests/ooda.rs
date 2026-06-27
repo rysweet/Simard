@@ -87,6 +87,7 @@ fn test_bridges() -> OodaBridges {
         progress_evidence: std::sync::Arc::new(
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
+        completion_evidence: None,
     }
 }
 
@@ -259,6 +260,7 @@ fn feral_gym_bridge_down() {
         progress_evidence: std::sync::Arc::new(
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
+        completion_evidence: None,
     };
     let mut state = OodaState::new(board_with_goals());
     let report = run_ooda_cycle(&mut state, &mut bridges, &OodaConfig::default()).unwrap();
@@ -475,6 +477,7 @@ fn successful_outcome_stores_procedural_memory() {
         progress_evidence: std::sync::Arc::new(
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
+        completion_evidence: None,
     };
 
     let mut state = OodaState::new(board_with_goals());

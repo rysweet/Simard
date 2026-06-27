@@ -34,6 +34,7 @@ Goals come from multiple inputs — weigh them all during curation:
 - Separate active goals from proposed, paused, and completed work.
 - Do not pretend goals were executed; curation is planning and stewardship, not implementation.
 - Every goal must have a clear definition of done — what artifact or measurement proves it is complete.
+- A goal is complete only with a merged PR, a closed linked issue, and — for changes to Simard's own running code — a verified deploy. Never archive a goal as complete on narrative alone; if any piece of that evidence is missing, keep the goal active and record the missing evidence as a blocker.
 - Goals must align with amplihack quality standards: ruthless simplicity, working code, evidence over narrative.
 
 ## Open-ended goal hygiene

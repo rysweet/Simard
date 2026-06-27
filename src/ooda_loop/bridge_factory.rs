@@ -106,6 +106,7 @@ pub fn bridges_from_state_root(state_root: &Path) -> SimardResult<OodaBridges> {
         progress_evidence: std::sync::Arc::new(
             crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
+        completion_evidence: None,
     })
 }
 

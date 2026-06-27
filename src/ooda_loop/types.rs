@@ -424,6 +424,16 @@ pub struct OodaBridges {
     /// [`crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker`].
     pub progress_evidence:
         std::sync::Arc<dyn crate::goal_curation::progress_evidence::ProgressEvidenceChecker>,
+    /// Deploy-aware done-gate for the curate phase (issue #2419). When `Some`,
+    /// completed goals are archived only with hard evidence (merged PR, closed
+    /// issue, and — for self-affecting changes — a verified deploy); blocked
+    /// goals stay active with a recorded blocker. Production boot wires
+    /// [`crate::goal_curation::GhCliEvidenceSource`] unless
+    /// `SIMARD_COMPLETION_EVIDENCE=off`; tests and non-daemon callers leave it
+    /// `None`, preserving the legacy unguarded
+    /// [`archive_completed`](crate::goal_curation::archive_completed).
+    pub completion_evidence:
+        Option<std::sync::Arc<dyn crate::goal_curation::completion_gate::EvidenceSource>>,
     /// Optional factory that mints a fresh, independent LLM session per
     /// concurrent `AdvanceGoal` dispatch.
     ///

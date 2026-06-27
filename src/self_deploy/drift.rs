@@ -1,0 +1,248 @@
+//! Deploy-drift detection: is the running daemon stale relative to merged `main`?
+//!
+//! See `docs/reference/self-deploy-api.md#deploydrift` and
+//! `docs/concepts/reconcile-and-self-deploy.md`. The `git`/`Cargo.lock` reads
+//! are injected through [`DeploySource`] so drift detection runs hermetically
+//! with no network and no live repo.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::process::Command;
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::{SimardError, SimardResult};
+
+/// Deploy drift between the merged `main` tree and the running binary.
+///
+/// `needs_deploy` is the authoritative "is the running daemon stale?" signal.
+/// It is reused verbatim by the deploy-aware done-gate (Workstream B) as the
+/// "deployed-and-running" evidence for self-affecting goals.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeployDrift {
+    /// Commits the running binary is behind `origin/main`. `0` when current.
+    pub behind_commits: usize,
+    /// Names of pinned deps whose merged rev differs from the running rev
+    /// (e.g. `["amplihack-memory", "rustyclawd-core"]`). Empty when current.
+    pub drifted_pins: Vec<String>,
+    /// `behind_commits > 0 || !drifted_pins.is_empty()`.
+    pub needs_deploy: bool,
+}
+
+impl DeployDrift {
+    /// Construct from raw counts, deriving `needs_deploy` as the documented
+    /// invariant: `behind_commits > 0 || !drifted_pins.is_empty()`.
+    pub fn from_parts(behind_commits: usize, drifted_pins: Vec<String>) -> Self {
+        let needs_deploy = behind_commits > 0 || !drifted_pins.is_empty();
+        Self {
+            behind_commits,
+            drifted_pins,
+            needs_deploy,
+        }
+    }
+
+    /// A current (no-drift) deploy state — the running binary is at HEAD with
+    /// every pin matching.
+    pub fn current() -> Self {
+        Self::from_parts(0, Vec::new())
+    }
+}
+
+/// Source of the merged-vs-running facts the [`ReconcileDetector`] compares.
+///
+/// The `git`/`Cargo.lock` reads are injected so tests run hermetically with no
+/// network and no live repo.
+pub trait DeploySource: Send + Sync {
+    /// Latest merged commit on the default branch of the owned repo.
+    fn merged_head(&self) -> SimardResult<String>;
+    /// Build commit embedded in the running binary.
+    fn running_commit(&self) -> SimardResult<String>;
+    /// Count of commits `running_commit..merged_head`.
+    fn behind_count(&self) -> SimardResult<usize>;
+    /// Pinned dep revs in the merged tree, keyed by crate name.
+    fn merged_pins(&self) -> SimardResult<BTreeMap<String, String>>;
+    /// Pinned dep revs compiled into the running binary, keyed by crate name.
+    fn running_pins(&self) -> SimardResult<BTreeMap<String, String>>;
+}
+
+/// Computes [`DeployDrift`] once per OODA cycle from an injected [`DeploySource`].
+pub struct ReconcileDetector<S: DeploySource> {
+    source: S,
+}
+
+impl<S: DeploySource> ReconcileDetector<S> {
+    pub fn new(source: S) -> Self {
+        Self { source }
+    }
+
+    /// Returns [`DeployDrift`]. Never panics; on a source error returns a
+    /// `needs_deploy: false` drift (fail-safe: a transient git failure must not
+    /// spuriously trigger a deploy).
+    pub fn detect(&self) -> DeployDrift {
+        let behind = match self.source.behind_count() {
+            Ok(n) => n,
+            Err(_) => return DeployDrift::current(),
+        };
+        let merged = match self.source.merged_pins() {
+            Ok(m) => m,
+            Err(_) => return DeployDrift::current(),
+        };
+        let running = match self.source.running_pins() {
+            Ok(m) => m,
+            Err(_) => return DeployDrift::current(),
+        };
+
+        // A pin has drifted when its merged rev differs from the running rev
+        // (including a pin present in the merged tree but absent from the
+        // running binary). Sorted for deterministic ordering.
+        let mut drifted: Vec<String> = merged
+            .iter()
+            .filter(|(name, merged_rev)| running.get(*name) != Some(*merged_rev))
+            .map(|(name, _)| name.clone())
+            .collect();
+        drifted.sort();
+
+        DeployDrift::from_parts(behind, drifted)
+    }
+}
+
+/// Production [`DeploySource`] backed by `git` in a source checkout and the
+/// running binary's embedded build commit (`SIMARD_GIT_HASH`).
+///
+/// **First-increment scope:** the commit-drift dimension is fully wired (this is
+/// the headline "running binary is hours behind merged `main`" signal). Pinned
+/// dependency-rev drift is reported as **empty** for both merged and running
+/// (so it never produces a *false* drift); wiring running pins from build
+/// metadata is tracked as a follow-up. The detector's fail-safe contract means a
+/// missing/!git checkout simply reports "no drift".
+pub struct GitDeploySource {
+    /// Source checkout to run `git` in.
+    repo_dir: PathBuf,
+    /// Default-branch ref to compare against (e.g. `origin/main`).
+    default_branch_ref: String,
+}
+
+impl Default for GitDeploySource {
+    fn default() -> Self {
+        Self {
+            repo_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            default_branch_ref: "origin/main".to_string(),
+        }
+    }
+}
+
+impl GitDeploySource {
+    /// A source rooted at the current working directory comparing to `origin/main`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A source rooted at an explicit checkout (for tests / non-cwd installs).
+    pub fn at(repo_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            repo_dir: repo_dir.into(),
+            ..Self::default()
+        }
+    }
+
+    fn git(&self, args: &[&str]) -> SimardResult<String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.repo_dir)
+            .args(args)
+            .output()
+            .map_err(|e| SimardError::GitCommandFailed {
+                command: format!("git {}", args.join(" ")),
+                reason: format!("spawn failed: {e}"),
+            })?;
+        if !out.status.success() {
+            return Err(SimardError::GitCommandFailed {
+                command: format!("git {}", args.join(" ")),
+                reason: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+}
+
+impl DeploySource for GitDeploySource {
+    fn merged_head(&self) -> SimardResult<String> {
+        // Prefer the tracked default branch; fall back to local HEAD when the
+        // remote ref is absent (e.g. a shallow or detached checkout).
+        self.git(&["rev-parse", &self.default_branch_ref])
+            .or_else(|_| self.git(&["rev-parse", "HEAD"]))
+    }
+
+    fn running_commit(&self) -> SimardResult<String> {
+        let commit = env!("SIMARD_GIT_HASH");
+        if commit.is_empty() || commit == "unknown" {
+            return Err(SimardError::GitCommandFailed {
+                command: "SIMARD_GIT_HASH".to_string(),
+                reason: "running binary has no embedded build commit".to_string(),
+            });
+        }
+        Ok(commit.to_string())
+    }
+
+    fn behind_count(&self) -> SimardResult<usize> {
+        let running = self.running_commit()?;
+        let merged = self.merged_head()?;
+        let range = format!("{running}..{merged}");
+        let count = self.git(&["rev-list", "--count", &range])?;
+        count
+            .trim()
+            .parse::<usize>()
+            .map_err(|e| SimardError::GitCommandFailed {
+                command: format!("git rev-list --count {range}"),
+                reason: format!("unparseable count {count:?}: {e}"),
+            })
+    }
+
+    fn merged_pins(&self) -> SimardResult<BTreeMap<String, String>> {
+        // First-increment: commit-drift only (see type docs). Empty == no pin
+        // drift, never a false positive.
+        Ok(BTreeMap::new())
+    }
+
+    fn running_pins(&self) -> SimardResult<BTreeMap<String, String>> {
+        Ok(BTreeMap::new())
+    }
+}
+
+/// Convenience: the production reconcile detector over [`GitDeploySource`].
+pub fn production_reconcile_detector() -> ReconcileDetector<GitDeploySource> {
+    ReconcileDetector::new(GitDeploySource::new())
+}
+
+#[cfg(test)]
+mod prod_source_tests {
+    use super::*;
+
+    #[test]
+    fn git_source_constructs_with_defaults() {
+        let s = GitDeploySource::new();
+        assert_eq!(s.default_branch_ref, "origin/main");
+    }
+
+    #[test]
+    fn running_commit_is_embedded_build_hash() {
+        // In CI the build embeds a real SIMARD_GIT_HASH; assert it round-trips
+        // (or that the documented error fires when unknown).
+        let s = GitDeploySource::new();
+        match s.running_commit() {
+            Ok(c) => assert!(!c.is_empty()),
+            Err(SimardError::GitCommandFailed { .. }) => {}
+            Err(other) => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn detect_on_nonexistent_repo_is_failsafe_no_deploy() {
+        let detector = ReconcileDetector::new(GitDeploySource::at("/no-such-repo-xyz-123"));
+        let drift = detector.detect();
+        assert!(
+            !drift.needs_deploy,
+            "a missing checkout must fail safe (no spurious deploy)"
+        );
+    }
+}

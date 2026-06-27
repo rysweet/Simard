@@ -102,6 +102,7 @@ fn test_bridges() -> OodaBridges {
         progress_evidence: std::sync::Arc::new(
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
+        completion_evidence: None,
     }
 }
 
