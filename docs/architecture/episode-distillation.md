@@ -6,10 +6,14 @@ owner: simard
 doc_type: concept
 related:
   - ./cognitive-memory.md
+  - ./episode-ingestion-policy.md
   - ../reference/cognitive-memory-preparation-filters.md
   - ../reference/cognitive-memory-episodic-recall.md
   - ../reference/ooda-procedural-memory.md
   - ../reference/cognitive-memory-procedural-idempotency.md
+  - ../reference/cognitive-memory-provenance.md
+  - ../reference/automatic-distillation-scheduler.md
+  - ../reference/distill-recipe-output-capture.md
   - ../memory.md
 ---
 
@@ -32,6 +36,17 @@ same action the `__memory__` synthetic priority dispatches to. No new
 synthetic priority is added. The existing deterministic-brain routing
 locked in by issue [#2286](https://github.com/rysweet/Simard/issues/2286)
 is preserved.
+
+> **Now also automatic (#2327).** Since
+> [#2327](https://github.com/rysweet/Simard/issues/2327), distillation no
+> longer waits for the brain to choose `ConsolidateMemory`: an
+> [automatic promotion scheduler](./episode-ingestion-policy.md) also fires
+> this pass at the end of every OODA cycle once the undistilled backlog
+> reaches a threshold or a cycle-count interval elapses. The pass was also
+> extended to emit **procedures** (not just facts), both written with
+> provenance. See the
+> [automatic distillation scheduler reference](../reference/automatic-distillation-scheduler.md).
+> The fact pipeline described below is unchanged.
 
 ---
 
@@ -80,13 +95,21 @@ Recipe output: { "facts": [ { concept, content, source_episode_id }, ... ] }
   │
   ▼
 For each fact:
-    store_fact(concept, content, confidence=0.7,
-               concepts=[concept], source=format!("distill:{source_episode_id}"))
+    store_fact_with_provenance(
+        concept, content, confidence=0.7,
+        source_id=format!("distill:{source_episode_id}"),   // textual id retained
+        tags=Some(&[concept]), metadata=None,
+        source_episode_ids=&[source_episode_id])             // DERIVES_FROM edge (#2325)
   │
   ▼
 For EVERY input episode (even those classified "skip"):
     mark_episode_distilled(node_id)
 ```
+
+Each distilled fact now also gets a `DERIVES_FROM` graph edge back to its
+source episode, in addition to the textual `distill:{id}` `source_id`
+which is retained for backward compatibility. See
+[Cognitive-memory provenance](../reference/cognitive-memory-provenance.md).
 
 The mark-everything rule prevents prompt-replay loops: an episode
 classified "skip" once will not be re-fed to the LLM on the next
@@ -146,26 +169,30 @@ recipe with a single LLM agent. It follows the same shape as
 - **Prompt**: instructs the agent to classify each episode into one
   of the three concept labels (or `skip`) and emit a JSON object
   `{ "facts": [ { "concept": "...", "content": "...",
-  "source_episode_id": "..." } ] }`.
-- **Output**: parsed by the Rust caller; non-conforming output causes
-  the caller to return `Err` (which then triggers the "no markers
-  set" retry behaviour above).
+  "source_episode_id": "..." } ], "procedures": [ ... ] }`.
+- **Output**: the runner is invoked with `--output-format json`, so the
+  agent's JSON object arrives inside `recipe-runner-rs`'s structured
+  envelope at `step_results[].output`. The Rust caller extracts it with a
+  tolerant three-tier parser; non-conforming output or a failed run
+  causes the caller to return `Err` (which then triggers the "no markers
+  set" retry behaviour above). See
+  [Distill recipe output capture](../reference/distill-recipe-output-capture.md)
+  for the full envelope contract, the parser, and failure semantics.
 
-The Rust-side invocation reuses the existing
-`Command::new("recipe-runner-rs")` shape demonstrated by
-`stewardship::recipe_merge_judge::RecipeMergeJudge`
-(`src/stewardship/recipe_merge_judge.rs`)
-and
-`goal_curation::recipe_progress_checker::RecipeProgressChecker`
-(`src/goal_curation/recipe_progress_checker.rs`):
-the binary takes the recipe path as a positional arg followed by
-zero or more `-c key=value` pairs and `AMPLIHACK_AGENT_BINARY` in
-the environment. The episodes payload is passed as a single context
-entry; whether it is inlined as `-c episodes=<json>` or written to a
-temp file and passed as `-c episodes_path=<path>` is an
-implementation detail decided at PR-B coding time by what
-`recipe-runner-rs` actually supports for array values. Both shapes
-satisfy the contract documented here.
+The Rust-side invocation shells out to `recipe-runner-rs` with an
+argv-vector (no shell): the recipe path as a positional arg,
+`--output-format json`, and the episodes batch inlined as a single
+`-c episodes=<json>` context entry, with `AMPLIHACK_AGENT_BINARY` in the
+environment. `--output-format json` is **required** — in the default
+`text` mode the runner's stdout is only a human status banner and the
+agent's facts object never reaches the caller, which is exactly the
+latent bug that
+[#2401](https://github.com/rysweet/Simard/issues/2401) fixes. The same
+`Command::new("recipe-runner-rs")` argv construction — minus
+`--output-format json` — is used by
+`stewardship::recipe_merge_judge::RecipeMergeJudge` and
+`goal_curation::recipe_progress_checker::RecipeProgressChecker`, which
+still parse the default text banner and are intentionally left unchanged.
 
 The recipe is loaded with the same resolution order Simard uses
 elsewhere:
@@ -400,14 +427,17 @@ distill: 8 episodes pulled, below min 20, skipped
 
 ### Example 3 — recipe error
 
-Recipe runner exits non-zero or returns malformed JSON:
+The runner exits non-zero, the envelope reports `success: false`, or the
+captured `step_results[].output` carries no parseable facts object:
 
 ```
-distill: 40 episodes pulled, recipe error: invalid JSON output, no markers set, retry next pass
+distill: 40 episodes pulled, recipe error: <message>, no markers set, retry next pass
 ```
 
 `mark_episode_distilled` is **not** called. The same 40 episodes are
-eligible on the next pass.
+eligible on the next pass. See
+[Distill recipe output capture](../reference/distill-recipe-output-capture.md#failure-semantics)
+for the exact failure matrix.
 
 ---
 

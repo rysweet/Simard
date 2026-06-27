@@ -64,6 +64,17 @@ pub struct CognitiveFact {
     pub confidence: f64,
     pub source_id: String,
     pub tags: Vec<String>,
+    /// Number of times this fact has been reinforced on recall/use (issue
+    /// #2395). Feeds the ranked-recall `usage` signal. `#[serde(default)]` so
+    /// facts serialized before this field existed deserialize to `0`.
+    #[serde(default)]
+    pub usage_count: i64,
+    /// When this fact was last reinforced via
+    /// [`CognitiveMemoryOps::reinforce_access`](crate::cognitive_memory::CognitiveMemoryOps::reinforce_access)
+    /// (issue #2395). `None` until first reinforced; feeds the ranked-recall
+    /// `recency` signal. `#[serde(default)]` for back-compat.
+    #[serde(default)]
+    pub last_accessed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Reusable step-by-step procedure from procedural memory.
@@ -119,6 +130,49 @@ impl CognitiveStatistics {
     }
 }
 
+/// Edge / connection counts across the cognitive-memory graph (issue #2331).
+///
+/// Where [`CognitiveStatistics`] reports per-type *node* counts, `GraphStats`
+/// surfaces the *connections* between those nodes so an operator can SEE the
+/// cognitive-memory graph forming: provenance edges (a fact / procedure points
+/// back at the episode it was distilled from), similarity edges, and the
+/// `SUPERSEDES` chain left behind by caller-key snapshot dedup.
+///
+/// Returned by [`CognitiveMemoryOps::graph_stats`](crate::cognitive_memory::CognitiveMemoryOps::graph_stats).
+/// Backends without a provenance graph (IPC client, bridge, stubs) return an
+/// all-zero value via the trait default, so callers stay backend-agnostic.
+///
+/// `similar_to_edges` and `supersedes_edges` are present for completeness but
+/// the pinned library rev exposes no public reader for them, so the library
+/// adapter reports `0`; the snapshot-dedup fields below give the operator a
+/// computed proxy for the `SUPERSEDES` activity instead.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GraphStats {
+    /// `DERIVES_FROM` edges (fact → source episode), summed over all facts.
+    pub derives_from_edges: u64,
+    /// `PROCEDURE_DERIVES_FROM` edges (procedure → source episode).
+    pub procedure_derives_from_edges: u64,
+    /// `SIMILAR_TO` edges (fact ↔ fact). `0` on the library backend — no public
+    /// reader at the pinned rev.
+    pub similar_to_edges: u64,
+    /// `SUPERSEDES` edges (new snapshot → archived prior). `0` on the library
+    /// backend — no public reader at the pinned rev; see the snapshot-dedup
+    /// fields for a computed proxy.
+    pub supersedes_edges: u64,
+    /// Facts that carry at least one `DERIVES_FROM` edge.
+    pub facts_with_provenance: u64,
+    /// Total semantic facts considered (matches the `semantic` node count).
+    pub facts_total: u64,
+    /// Distinct caller keys (`dedup_key`) seen among snapshot facts. After
+    /// dedup each key keeps one live fact, so this is the number of logical
+    /// snapshot streams.
+    pub distinct_snapshot_caller_keys: u64,
+    /// Snapshot facts in the store (live + superseded revisions). A value well
+    /// above `distinct_snapshot_caller_keys` is the visible dedup signal: many
+    /// revisions collapsed onto a few caller keys.
+    pub snapshot_facts_total: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +186,8 @@ mod tests {
             confidence: 0.95,
             source_id: "epi_xyz".to_string(),
             tags: vec!["language".to_string(), "systems".to_string()],
+            usage_count: 0,
+            last_accessed_at: None,
         };
         let json = serde_json::to_string(&fact).unwrap();
         let parsed: CognitiveFact = serde_json::from_str(&json).unwrap();

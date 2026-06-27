@@ -1,0 +1,54 @@
+name: "Memory Stats Edges / Dedup Introspection (#2331)"
+description: "Outside-in operator coverage for the graph-edge / dedup ('edges / connections') section added to `simard memory stats`. Drives the real binary at the process boundary and asserts the section renders in the human and --json output, that --json stdout stays pure JSON (diagnostics on stderr), that the daemon-IPC tier surfaces the run-with-daemon-stopped note instead of zero edges."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Edges / connections + dedup section (human, JSON, daemon-note, seeded)"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/memory-stats-edges.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "memory"
+    - "cognitive-memory"
+    - "graph-edges"
+    - "dedup"
+    - "issue-2331"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

@@ -39,7 +39,12 @@ repos:
 
       - id: cargo-clippy-precommit
         name: cargo clippy --release --no-deps -- -D warnings (pre-commit)
-        entry: cargo clippy --release --no-deps -- -D warnings
+        # Runs through a wrapper that guarantees the `lbug` native static lib is
+        # on the linker search path. CI's cargo cache evicts lbug's registry-src
+        # prebuilt while the cached release build-script output still references
+        # it, which otherwise reds `cargo clippy --release` on every Rust PR
+        # (issue #2426). The wrapper is a no-op for warm local checks.
+        entry: scripts/clippy-precommit-release.sh
         language: system
         pass_filenames: false
         always_run: true

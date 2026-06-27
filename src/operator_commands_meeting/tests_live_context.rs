@@ -7,6 +7,7 @@ static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // ── build_live_meeting_context ──────────────────────────────────────
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn defaults_with_empty_bridge() {
     let _lock = ENV_MUTEX.lock().unwrap();
@@ -40,6 +41,7 @@ fn defaults_with_empty_bridge() {
     );
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn empty_bridge_uses_env_var_operator_name() {
     let _lock = ENV_MUTEX.lock().unwrap();
@@ -59,6 +61,7 @@ fn empty_bridge_uses_env_var_operator_name() {
     );
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn empty_env_var_falls_back_to_generic() {
     let _lock = ENV_MUTEX.lock().unwrap();

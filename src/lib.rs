@@ -1,3 +1,4 @@
+pub mod ado_acl_guard;
 pub mod agent_goal_assignment;
 pub mod agent_program;
 pub mod agent_registry;
@@ -40,6 +41,7 @@ pub mod greeting_banner;
 pub mod gym;
 pub mod gym_bridge;
 pub mod gym_history;
+pub mod gym_runner_bridge;
 pub mod gym_scoring;
 pub mod handoff;
 pub mod hive_event_bus;
@@ -65,7 +67,6 @@ pub mod memory_hive;
 pub mod memory_ipc;
 pub mod memory_snapshot;
 pub mod metadata;
-pub mod native_gym;
 pub mod native_knowledge;
 pub mod ooda_actions;
 pub mod ooda_brain;
@@ -146,8 +147,8 @@ pub use base_type_ms_agent::ms_agent_framework_adapter;
 pub use base_type_pending_sdk::PendingSdkAdapter;
 pub use base_type_rustyclawd::RustyClawdAdapter;
 pub use base_type_turn::{
-    ProposedAction, TurnContext, TurnOutput, format_turn_input, parse_turn_output,
-    prepare_turn_context,
+    EnrichmentBridges, ProposedAction, TurnContext, TurnOutput, enrich_turn_input,
+    format_turn_input, parse_turn_output, prepare_turn_context,
 };
 pub use base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
@@ -226,8 +227,8 @@ pub use identity_composition::{
 };
 pub use identity_precedence::{ConflictEntry, ConflictLog, PrecedenceResolver, ResolvedIdentity};
 pub use improvements::{
-    ImprovementPromotionPlan, PersistedImprovementApproval, PersistedImprovementRecord,
-    render_review_context_directives,
+    EvidenceRef, ImprovementPromotionPlan, PersistedImprovementApproval,
+    PersistedImprovementRecord, render_review_context_directives,
 };
 pub use knowledge_bridge::{
     KnowledgeBridge, KnowledgePackInfo, KnowledgeQueryResult, KnowledgeSource,
@@ -326,8 +327,11 @@ pub use runtime_reflection::{
     LocalReflector, ResourceSnapshot, RuntimeReflection, RuntimeSnapshot, snapshot,
 };
 pub use self_improve::{
-    ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,
-    apply_improvements, run_improvement_cycle, summarize_cycle,
+    ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementHypothesis,
+    ImprovementPhase, ProposedChange, aggregate_hypotheses, apply_improvements,
+    form_hypotheses_from_benchmark_reports, form_hypotheses_from_review,
+    form_hypotheses_from_session_failures, form_hypotheses_from_signals,
+    form_hypotheses_from_weak_dimensions, run_improvement_cycle, summarize_cycle,
 };
 pub use self_improve_executor::{
     ApplyResult, ApprovalPolicy, ImprovementPatch, apply_and_review, generate_patch,

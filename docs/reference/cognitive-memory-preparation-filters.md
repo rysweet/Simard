@@ -10,6 +10,7 @@ related:
   - ./prospective-trigger-firing.md
   - ./ooda-procedural-memory.md
   - ./cognitive-memory-episodic-recall.md
+  - ./cognitive-memory-ranked-recall.md
   - ../memory.md
 ---
 

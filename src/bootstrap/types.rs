@@ -254,6 +254,7 @@ mod tests {
 
     // ── BootstrapInputs default ──
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn bootstrap_inputs_default_all_none() {
         use super::BootstrapInputs;

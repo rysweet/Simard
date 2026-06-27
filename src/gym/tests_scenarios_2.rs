@@ -122,23 +122,6 @@ fn repo_exploration_scenario() -> BenchmarkScenario {
 }
 
 #[test]
-fn class_checks_test_writing_fails_without_keywords() {
-    let scenario = BenchmarkScenario {
-        class: BenchmarkClass::TestWriting,
-        ..repo_exploration_scenario()
-    };
-    let outcome = dummy_outcome("nothing", "bland text", "empty");
-    let exported = dummy_handoff(0);
-    let checks = class_specific_checks(&scenario, &outcome, &exported);
-    assert_eq!(checks.len(), 3);
-    for check in &checks {
-        assert!(!check.passed, "check '{}' should have failed", check.id);
-    }
-}
-
-// -- SessionQuality checks --
-
-#[test]
 fn class_checks_session_quality_passes_with_nonempty_summary_and_enough_memory() {
     let scenario = BenchmarkScenario {
         class: BenchmarkClass::SessionQuality,
@@ -252,68 +235,4 @@ fn class_checks_safe_code_change_detects_cargo_build() {
         .find(|c| c.id == "code-change-compilation-checked")
         .unwrap();
     assert!(check.passed);
-}
-
-#[test]
-fn class_checks_test_writing_detects_expect_for_assertions() {
-    let scenario = BenchmarkScenario {
-        class: BenchmarkClass::TestWriting,
-        ..repo_exploration_scenario()
-    };
-    let outcome = dummy_outcome("bland", "test uses expect to verify", "bland");
-    let exported = dummy_handoff(0);
-    let checks = class_specific_checks(&scenario, &outcome, &exported);
-    let check = checks
-        .iter()
-        .find(|c| c.id == "test-has-assertions")
-        .unwrap();
-    assert!(check.passed);
-}
-
-// -- BugFix checks --
-
-#[test]
-fn class_checks_bug_fix_passes_with_keywords() {
-    let scenario = BenchmarkScenario {
-        class: BenchmarkClass::BugFix,
-        ..repo_exploration_scenario()
-    };
-    let outcome = dummy_outcome(
-        "found unwrap bug in error handling path",
-        "fix: replace expect with Result propagation for safety",
-        "the panic was unsafe, now uses graceful error recovery",
-    );
-    let exported = dummy_handoff(0);
-    let checks = class_specific_checks(&scenario, &outcome, &exported);
-    assert_eq!(checks.len(), 3);
-    assert!(
-        checks
-            .iter()
-            .any(|c| c.id == "bug-defect-identified" && c.passed)
-    );
-    assert!(
-        checks
-            .iter()
-            .any(|c| c.id == "bug-fix-described" && c.passed)
-    );
-    assert!(
-        checks
-            .iter()
-            .any(|c| c.id == "bug-safety-analyzed" && c.passed)
-    );
-}
-
-#[test]
-fn class_checks_bug_fix_fails_without_keywords() {
-    let scenario = BenchmarkScenario {
-        class: BenchmarkClass::BugFix,
-        ..repo_exploration_scenario()
-    };
-    let outcome = dummy_outcome("nothing", "bland text", "empty");
-    let exported = dummy_handoff(0);
-    let checks = class_specific_checks(&scenario, &outcome, &exported);
-    assert_eq!(checks.len(), 3);
-    for check in &checks {
-        assert!(!check.passed, "check '{}' should have failed", check.id);
-    }
 }

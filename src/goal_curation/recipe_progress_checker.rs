@@ -218,6 +218,8 @@ mod tests {
 
     fn goal_with_activity(activity: Option<&str>) -> ActiveGoal {
         ActiveGoal {
+            parent_goal_id: None,
+            repo: None,
             id: "test-goal".to_string(),
             description: "do the thing".to_string(),
             priority: 1,

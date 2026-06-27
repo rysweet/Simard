@@ -12,7 +12,8 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Barrier, Mutex};
+use std::thread;
 
 use super::*;
 
@@ -57,7 +58,7 @@ fn sample(agent_id: &str, ended_at: Option<i64>) -> SubagentSession {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn registry_path_honors_state_root_env() {
     with_state_root("path-env", |root| {
         let p = registry_path();
@@ -73,7 +74,7 @@ fn registry_path_honors_state_root_env() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn load_returns_empty_when_missing() {
     with_state_root("empty", |_root| {
         let reg = load();
@@ -82,7 +83,7 @@ fn load_returns_empty_when_missing() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn save_atomic_round_trips_and_creates_parent_dir() {
     with_state_root("rt", |_root| {
         let reg = Registry {
@@ -98,7 +99,7 @@ fn save_atomic_round_trips_and_creates_parent_dir() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn save_atomic_leaves_no_tmp_siblings() {
     with_state_root("atomic", |_root| {
         let reg = Registry {
@@ -122,7 +123,7 @@ fn save_atomic_leaves_no_tmp_siblings() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn record_spawn_appends_to_registry() {
     with_state_root("rec", |_root| {
         record_spawn(sample("engineer-1", None)).unwrap();
@@ -131,6 +132,48 @@ fn record_spawn_appends_to_registry() {
         let ids: HashSet<_> = reg.sessions.iter().map(|s| s.agent_id.clone()).collect();
         assert!(ids.contains("engineer-1"));
         assert!(ids.contains("engineer-2"));
+    });
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn record_spawn_is_atomic_under_concurrency() {
+    // Regression: engineers are now spawned concurrently within one OODA
+    // round, so record_spawn can run in parallel. Without serialization the
+    // load->push->save cycle loses updates (the last writer clobbers others).
+    // All concurrently-recorded sessions must survive.
+    const N: usize = 16;
+    with_state_root("concurrent", |_root| {
+        let barrier = Arc::new(Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    // Release all threads at once to maximize contention on
+                    // the shared registry file.
+                    barrier.wait();
+                    record_spawn(sample(&format!("engineer-{i}"), None)).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let reg = load();
+        let ids: HashSet<_> = reg.sessions.iter().map(|s| s.agent_id.clone()).collect();
+        assert_eq!(
+            ids.len(),
+            N,
+            "all {N} concurrently-recorded sessions must be present, got {}: {ids:?}",
+            ids.len(),
+        );
+        for i in 0..N {
+            assert!(
+                ids.contains(&format!("engineer-{i}")),
+                "engineer-{i} was lost under concurrent record_spawn",
+            );
+        }
     });
 }
 
@@ -147,7 +190,7 @@ impl SessionProbe for StubProbe {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn poll_and_gc_marks_dead_sessions_with_ended_at() {
     with_state_root("poll", |_root| {
         record_spawn(sample("engineer-live", None)).unwrap();
@@ -185,7 +228,7 @@ fn poll_and_gc_marks_dead_sessions_with_ended_at() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn poll_and_gc_drops_entries_ended_more_than_24h_ago() {
     with_state_root("gc", |_root| {
         let now = std::time::SystemTime::now()
@@ -225,7 +268,7 @@ fn poll_and_gc_drops_entries_ended_more_than_24h_ago() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn sanitize_id_replaces_unsafe_chars_with_dash() {
     assert_eq!(sanitize_id("engineer-abc_123"), "engineer-abc_123");
     assert_eq!(sanitize_id("engineer/with spaces"), "engineer-with-spaces");
@@ -233,13 +276,13 @@ fn sanitize_id_replaces_unsafe_chars_with_dash() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn sanitize_id_empty_input_becomes_engineer() {
     assert_eq!(sanitize_id(""), "engineer");
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn sanitize_id_output_matches_safe_charset() {
     let out = sanitize_id("weird!@#$%^&*()chars");
     assert!(
@@ -255,7 +298,7 @@ fn sanitize_id_output_matches_safe_charset() {
 // -----------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn record_spawn_enforces_max_sessions_cap() {
     with_state_root("cap", |_root| {
         // Pre-populate with MAX_SESSIONS ended sessions.
@@ -293,7 +336,7 @@ fn record_spawn_enforces_max_sessions_cap() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn cap_preserves_active_sessions() {
     with_state_root("cap-active", |_root| {
         // Fill with active (ended_at=None) sessions at the cap.
@@ -323,7 +366,7 @@ fn cap_preserves_active_sessions() {
 // -----------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn gc_with_retention_uses_tight_threshold() {
     with_state_root("gc-tight", |_root| {
         let now = std::time::SystemTime::now()

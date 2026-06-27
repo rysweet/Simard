@@ -5,6 +5,8 @@ pub mod hermetic;
 #[cfg(test)]
 pub(crate) mod hermetic_guard;
 #[cfg(test)]
+mod serial_guard;
+#[cfg(test)]
 mod tests_hermetic_state;
 
 pub use hermetic::HermeticState;

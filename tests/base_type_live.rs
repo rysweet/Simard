@@ -151,6 +151,8 @@ fn format_full_context() {
             confidence: 0.92,
             source_id: "s1".into(),
             tags: vec!["database".into()],
+            usage_count: 0,
+            last_accessed_at: None,
         }],
         knowledge: vec![KnowledgeQueryResult {
             answer: "Use EXPLAIN to analyze query plans.".into(),

@@ -9,6 +9,32 @@ use super::MAX_HISTORY_MESSAGES;
 use super::tool_executor::execute_tool_locally;
 use super::tools::rustyclawd_tool_definitions;
 
+/// The default RustyClawd system prompt used when a turn supplies no explicit
+/// identity context.
+const DEFAULT_SYSTEM_PROMPT: &str =
+    include_str!("../../prompt_assets/simard/rustyclawd_default_system.md");
+
+/// Compose the backend system prompt from a turn's preamble and identity.
+///
+/// When no explicit `identity_context` is supplied the default RustyClawd
+/// system instructions are kept as the base, with the preamble appended if
+/// present. This matters for #1665 enrichment: recalled memory/knowledge is
+/// injected into `prompt_preamble`, so an otherwise-empty turn (no identity, no
+/// caller preamble) must still retain the default base prompt rather than being
+/// replaced by the bare enrichment block.
+fn compose_system_prompt(prompt_preamble: &str, identity_context: &str) -> String {
+    if identity_context.is_empty() {
+        let base = DEFAULT_SYSTEM_PROMPT.trim();
+        if prompt_preamble.is_empty() {
+            base.to_string()
+        } else {
+            format!("{base}\n\n{prompt_preamble}")
+        }
+    } else {
+        format!("{prompt_preamble}\n---\n{identity_context}")
+    }
+}
+
 /// Execute a turn using the RustyClawd crate Client API and tool loop.
 ///
 /// This is the primary execution path when an API key is available. It builds
@@ -22,13 +48,7 @@ pub(super) fn execute_rustyclawd_client(
     request: &BaseTypeSessionRequest,
     conversation_history: &mut Vec<RcMessage>,
 ) -> SimardResult<(String, Vec<String>)> {
-    let system_prompt = if input.identity_context.is_empty() && input.prompt_preamble.is_empty() {
-        include_str!("../../prompt_assets/simard/rustyclawd_default_system.md")
-            .trim()
-            .to_string()
-    } else {
-        format!("{}\n---\n{}", input.prompt_preamble, input.identity_context)
-    };
+    let system_prompt = compose_system_prompt(&input.prompt_preamble, &input.identity_context);
 
     // Append user message to conversation history
     conversation_history.push(RcMessage::user(&input.objective));
@@ -138,32 +158,36 @@ mod tests {
 
     #[test]
     fn system_prompt_uses_default_when_both_empty() {
-        let identity_context = "";
-        let prompt_preamble = "";
-        let system_prompt = if identity_context.is_empty() && prompt_preamble.is_empty() {
-            include_str!("../../prompt_assets/simard/rustyclawd_default_system.md")
-                .trim()
-                .to_string()
-        } else {
-            format!("{prompt_preamble}\n---\n{identity_context}")
-        };
+        let system_prompt = compose_system_prompt("", "");
         assert!(!system_prompt.is_empty());
         assert!(!system_prompt.contains("\n---\n"));
+        // The default base prompt is used verbatim.
+        assert_eq!(system_prompt, DEFAULT_SYSTEM_PROMPT.trim());
     }
 
     #[test]
-    fn system_prompt_uses_custom_when_provided() {
-        let identity_context = "You are a test agent";
-        let prompt_preamble = "Be concise";
-        let system_prompt = if identity_context.is_empty() && prompt_preamble.is_empty() {
-            include_str!("../../prompt_assets/simard/rustyclawd_default_system.md")
-                .trim()
-                .to_string()
-        } else {
-            format!("{prompt_preamble}\n---\n{identity_context}")
-        };
+    fn system_prompt_uses_custom_when_identity_provided() {
+        let system_prompt = compose_system_prompt("Be concise", "You are a test agent");
         assert!(system_prompt.contains("Be concise"));
         assert!(system_prompt.contains("You are a test agent"));
+        assert!(system_prompt.contains("\n---\n"));
+    }
+
+    #[test]
+    fn system_prompt_keeps_default_base_when_only_preamble_present() {
+        // #1665: enrichment injects memory/knowledge into prompt_preamble. With
+        // no explicit identity, the default base prompt must be retained and the
+        // enrichment appended — not replaced.
+        let enrichment = "## Relevant Memory Facts\n\n1. [x] y (confidence: 0.90)";
+        let system_prompt = compose_system_prompt(enrichment, "");
+        assert!(
+            system_prompt.contains(DEFAULT_SYSTEM_PROMPT.trim()),
+            "default base prompt must be retained"
+        );
+        assert!(
+            system_prompt.contains("## Relevant Memory Facts"),
+            "enrichment must be appended"
+        );
     }
 
     // -- RUSTYCLAWD_BIN env override --

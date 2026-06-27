@@ -1,6 +1,7 @@
 //! [`PendingSdkSession`] – session that always returns an explicit
 //! "not-yet-implemented" error on `run_turn`.
 
+use crate::base_type_turn::EnrichmentBridges;
 use crate::base_types::{
     BaseTypeDescriptor, BaseTypeOutcome, BaseTypeSession, BaseTypeSessionRequest,
     BaseTypeTurnInput, ensure_session_not_already_open, ensure_session_not_closed,
@@ -13,6 +14,11 @@ pub(crate) struct PendingSdkSession {
     pub(crate) descriptor: BaseTypeDescriptor,
     pub(crate) request: BaseTypeSessionRequest,
     pub(crate) not_implemented_reason: String,
+    /// Enrichment bridges exposed through the shared entry point (#1665). The
+    /// pending adapter always errors on `run_turn` (the SDK is unimplemented),
+    /// so the bridges are surfaced only for [`BaseTypeSession::enrich_input`]
+    /// contract uniformity.
+    pub(crate) enrichment: EnrichmentBridges,
     pub(crate) is_open: bool,
     pub(crate) is_closed: bool,
 }
@@ -30,6 +36,14 @@ impl std::fmt::Debug for PendingSdkSession {
 impl BaseTypeSession for PendingSdkSession {
     fn descriptor(&self) -> &BaseTypeDescriptor {
         &self.descriptor
+    }
+
+    fn enrichment(&self) -> Option<&EnrichmentBridges> {
+        Some(&self.enrichment)
+    }
+
+    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentBridges> {
+        Some(&mut self.enrichment)
     }
 
     fn open(&mut self) -> SimardResult<()> {
@@ -103,6 +117,7 @@ mod tests {
                 mailbox_address: crate::runtime::RuntimeAddress::new("a"),
             },
             not_implemented_reason: adapter.not_implemented_reason.clone(),
+            enrichment: EnrichmentBridges::default(),
             is_open: false,
             is_closed: false,
         }

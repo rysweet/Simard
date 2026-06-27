@@ -236,6 +236,7 @@ mod tests {
         unsafe { std::env::remove_var(ENV_LLM_PROVIDER) };
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn load_from_env_wins_when_set() {
         let tmp = TempDir::new().unwrap();
@@ -247,6 +248,7 @@ mod tests {
         });
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn load_from_file_when_env_unset() {
         let tmp = TempDir::new().unwrap();
@@ -261,6 +263,7 @@ mod tests {
         });
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn load_errors_when_neither_source_present() {
         let tmp = TempDir::new().unwrap();
@@ -273,6 +276,7 @@ mod tests {
         });
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn load_rejects_unknown_provider_value() {
         let tmp = TempDir::new().unwrap();
@@ -290,6 +294,7 @@ mod tests {
         });
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn bootstrap_from_env_writes_when_missing() {
         let tmp = TempDir::new().unwrap();
@@ -304,6 +309,7 @@ mod tests {
         });
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn bootstrap_from_env_skips_when_file_exists() {
         let tmp = TempDir::new().unwrap();
@@ -322,6 +328,7 @@ mod tests {
         });
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn bootstrap_from_env_noop_when_env_unset_and_no_file() {
         let tmp = TempDir::new().unwrap();
@@ -365,6 +372,7 @@ mod tests {
         assert_eq!(LlmProvider::RustyClawd.agent_binary_value(), "rustyclawd");
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn config_load_provides_usable_agent_binary_value() {
         let tmp = TempDir::new().unwrap();

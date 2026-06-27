@@ -1,5 +1,28 @@
 use super::*;
 
+/// Set a path's mtime to roughly `days` days in the past (plus an hour of
+/// slack so age comparisons are unambiguous). Works for both files and
+/// directories on Unix via a read-only handle owned by the test.
+fn set_mtime_days_ago(path: &Path, days: u64) {
+    let mtime =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(days * 24 * 3600 + 3600);
+    let times = std::fs::FileTimes::new().set_modified(mtime);
+    std::fs::File::open(path).unwrap().set_times(times).unwrap();
+}
+
+/// Restore a previously-captured environment variable to its prior value
+/// (or remove it if it was originally unset).
+fn restore_env(key: &str, prev: Option<std::ffi::OsString>) {
+    // SAFETY: callers run under `#[serial_test::serial]`, so no other thread
+    // touches the process environment concurrently.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+}
+
 #[test]
 fn cleanup_report_display_includes_stats() {
     let report = CleanupReport {
@@ -151,7 +174,7 @@ fn corrupt_db_retention_at_least_a_day() {
 // ── rotate_simard_binary_backups ──
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn rotate_keeps_newest_n_backups() {
     let tmp = tempfile::tempdir().unwrap();
     let bin_dir = tmp.path().join(".simard").join("bin");
@@ -201,7 +224,7 @@ fn rotate_keeps_newest_n_backups() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn rotate_noop_when_under_threshold() {
     let tmp = tempfile::tempdir().unwrap();
     let bin_dir = tmp.path().join(".simard").join("bin");
@@ -225,7 +248,7 @@ fn rotate_noop_when_under_threshold() {
 // ── trim_simard_snapshots ──
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn trim_snapshots_keeps_newest_n() {
     let tmp = tempfile::tempdir().unwrap();
     let snap_dir = tmp.path().join(".simard").join("snapshots");
@@ -264,7 +287,7 @@ fn trim_snapshots_keeps_newest_n() {
 // ── remove_old_corrupt_dbs ──
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn corrupt_db_removed_when_older_than_threshold() {
     let tmp = tempfile::tempdir().unwrap();
     let simard = tmp.path().join(".simard");
@@ -298,4 +321,458 @@ fn corrupt_db_removed_when_older_than_threshold() {
     assert!(!old.exists(), "old corrupt DB should be removed");
     assert!(young.exists(), "young corrupt DB should survive");
     assert!(unrelated.exists(), "non-corrupt DB must never be touched");
+}
+
+// ── clean_simard_canaries ──
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn clean_simard_canaries_removes_old_matching_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+
+    // Old + matching directory with content -> removed via remove_dir_all.
+    let old_dir = base.join("simard-canary-old");
+    std::fs::create_dir_all(&old_dir).unwrap();
+    std::fs::write(old_dir.join("payload"), vec![0u8; 2048]).unwrap();
+    set_mtime_days_ago(&old_dir, 3);
+
+    // Old + matching file with content -> removed via remove_file.
+    let old_file = base.join("amplihack-old.bin");
+    std::fs::write(&old_file, vec![0u8; 4096]).unwrap();
+    set_mtime_days_ago(&old_file, 3);
+
+    // Old + matching but empty -> the `size > 0` guard leaves it in place.
+    let empty = base.join("ia2-empty");
+    std::fs::write(&empty, b"").unwrap();
+    set_mtime_days_ago(&empty, 3);
+
+    // Old + matching but pointed at by CARGO_TARGET_DIR -> never touched.
+    let protected = base.join("simard-protected");
+    std::fs::create_dir_all(&protected).unwrap();
+    std::fs::write(protected.join("payload"), vec![0u8; 2048]).unwrap();
+    set_mtime_days_ago(&protected, 3);
+
+    // Fresh + matching -> the age check keeps it.
+    let young = base.join("amplihack-young");
+    std::fs::create_dir_all(&young).unwrap();
+    std::fs::write(young.join("payload"), vec![0u8; 2048]).unwrap();
+
+    // Old but non-matching name -> ignored.
+    let unrelated = base.join("unrelated-old.bin");
+    std::fs::write(&unrelated, vec![0u8; 2048]).unwrap();
+    set_mtime_days_ago(&unrelated, 3);
+
+    let prev = std::env::var_os("CARGO_TARGET_DIR");
+    // SAFETY: serialized via serial_test; restored immediately after the call.
+    unsafe {
+        std::env::set_var("CARGO_TARGET_DIR", &protected);
+    }
+    let mut report = CleanupReport::default();
+    clean_simard_canaries(base, &mut report);
+    restore_env("CARGO_TARGET_DIR", prev);
+
+    assert!(!old_dir.exists(), "old matching dir should be removed");
+    assert!(!old_file.exists(), "old matching file should be removed");
+    assert!(empty.exists(), "zero-byte match must be left in place");
+    assert!(protected.exists(), "CARGO_TARGET_DIR must never be removed");
+    assert!(young.exists(), "fresh artifacts must be left alone");
+    assert!(unrelated.exists(), "non-matching names must be ignored");
+
+    assert_eq!(
+        report.dirs_removed.len(),
+        2,
+        "exactly two artifacts removed"
+    );
+    assert!(report.dirs_removed.contains(&old_dir));
+    assert!(report.dirs_removed.contains(&old_file));
+    assert_eq!(report.bytes_freed, 2048 + 4096);
+    assert!(report.errors.is_empty());
+}
+
+#[test]
+fn clean_simard_canaries_missing_base_is_noop() {
+    let mut report = CleanupReport::default();
+    // read_dir on a non-existent path returns Err -> early return.
+    clean_simard_canaries(
+        Path::new("/nonexistent-simard-canary-xyz-987654"),
+        &mut report,
+    );
+    assert_eq!(report.bytes_freed, 0);
+    assert!(report.dirs_removed.is_empty());
+    assert!(report.errors.is_empty());
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn clean_simard_canaries_records_error_when_removal_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join("scan");
+    std::fs::create_dir_all(&base).unwrap();
+    let old_dir = base.join("simard-stuck");
+    std::fs::create_dir_all(&old_dir).unwrap();
+    std::fs::write(old_dir.join("payload"), vec![0u8; 2048]).unwrap();
+    set_mtime_days_ago(&old_dir, 3);
+
+    // A read-only parent makes unlinking the matched child fail for a
+    // non-root user, exercising the error-recording branch.
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let prev = std::env::var_os("CARGO_TARGET_DIR");
+    // SAFETY: serialized via serial_test; restored immediately after the call.
+    unsafe {
+        std::env::remove_var("CARGO_TARGET_DIR");
+    }
+    let mut report = CleanupReport::default();
+    clean_simard_canaries(&base, &mut report);
+    restore_env("CARGO_TARGET_DIR", prev);
+
+    // Restore write permission so the tempdir can be cleaned up.
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    if report.errors.is_empty() {
+        // Suite running as root bypasses the read-only bit; removal succeeds.
+        assert!(!old_dir.exists());
+    } else {
+        assert!(old_dir.exists(), "removal must have failed");
+        assert_eq!(report.bytes_freed, 0);
+        assert!(report.dirs_removed.is_empty());
+    }
+}
+
+// ── clean_stale_cargo_targets ──
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn clean_stale_cargo_targets_skips_configured_target() {
+    // Point CARGO_TARGET_DIR at one hard-coded candidate so the function
+    // `continue`s past it; the other candidate ("/tmp/cargo-target") is
+    // absent on the test host, exercising the existence check. Nothing real
+    // is deleted.
+    let prev = std::env::var_os("CARGO_TARGET_DIR");
+    // SAFETY: serialized via serial_test; restored immediately after the call.
+    unsafe {
+        std::env::set_var("CARGO_TARGET_DIR", "/tmp/simard-canary");
+    }
+    let mut report = CleanupReport::default();
+    clean_stale_cargo_targets(&mut report);
+    restore_env("CARGO_TARGET_DIR", prev);
+
+    assert!(report.errors.is_empty());
+}
+
+// ── cap_home_cargo_targets ──
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn cap_home_cargo_targets_rotates_lru_over_cap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".cargo-targets");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let make = |name: &str, days: u64| -> PathBuf {
+        let p = root.join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("payload"), vec![0u8; 6 * 1024 * 1024]).unwrap();
+        set_mtime_days_ago(&p, days);
+        p
+    };
+    let oldest = make("wt-oldest", 3);
+    let middle = make("wt-middle", 2);
+    let newest = make("wt-newest", 1);
+
+    let prev = std::env::var_os("HOME");
+    // SAFETY: serialized via serial_test; restored immediately after the call.
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+    let mut report = CleanupReport::default();
+    // Total 18 MB, cap 10 MB, drain target is 8 MB: drop oldest (->12 MB),
+    // then middle (->6 MB <= 8 MB) and stop, keeping the newest.
+    cap_home_cargo_targets(&mut report, 10 * 1024 * 1024);
+    restore_env("HOME", prev);
+
+    assert!(!oldest.exists(), "oldest target should be rotated out");
+    assert!(!middle.exists(), "middle target should be rotated out");
+    assert!(newest.exists(), "newest target must be kept");
+    assert_eq!(report.dirs_removed.len(), 2);
+    assert!(report.bytes_freed >= 12 * 1024 * 1024);
+    assert!(report.errors.is_empty());
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn cap_home_cargo_targets_under_cap_is_noop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".cargo-targets");
+    std::fs::create_dir_all(&root).unwrap();
+    let p = root.join("wt-small");
+    std::fs::create_dir_all(&p).unwrap();
+    std::fs::write(p.join("payload"), vec![0u8; 1024]).unwrap();
+
+    let prev = std::env::var_os("HOME");
+    // SAFETY: serialized via serial_test; restored immediately after the call.
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+    let mut report = CleanupReport::default();
+    cap_home_cargo_targets(&mut report, u64::MAX);
+    restore_env("HOME", prev);
+
+    assert!(p.exists(), "nothing should be rotated when under cap");
+    assert_eq!(report.dirs_removed.len(), 0);
+    assert_eq!(report.bytes_freed, 0);
+    assert!(report.errors.is_empty());
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn cap_home_cargo_targets_missing_root_is_noop() {
+    let tmp = tempfile::tempdir().unwrap();
+    // No ~/.cargo-targets directory -> read_dir Err -> early return.
+    let prev = std::env::var_os("HOME");
+    // SAFETY: serialized via serial_test; restored immediately after the call.
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+    let mut report = CleanupReport::default();
+    cap_home_cargo_targets(&mut report, 1024);
+    restore_env("HOME", prev);
+
+    assert_eq!(report.dirs_removed.len(), 0);
+    assert!(report.errors.is_empty());
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn cap_home_cargo_targets_records_error_on_unremovable_target() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".cargo-targets");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let big = root.join("wt-big");
+    std::fs::create_dir_all(&big).unwrap();
+    std::fs::write(big.join("payload"), vec![0u8; 6 * 1024 * 1024]).unwrap();
+    set_mtime_days_ago(&big, 3);
+    let small = root.join("wt-small");
+    std::fs::create_dir_all(&small).unwrap();
+    std::fs::write(small.join("payload"), vec![0u8; 1024 * 1024]).unwrap();
+    set_mtime_days_ago(&small, 1);
+
+    // Read-only parent makes the rotation's remove_dir_all fail for a
+    // non-root user, exercising the error-recording branch.
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let prev = std::env::var_os("HOME");
+    // SAFETY: serialized via serial_test; restored immediately after the call.
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+    let mut report = CleanupReport::default();
+    // 7 MB total, cap 5 MB, drain target 4 MB: only the 6 MB oldest is rotated.
+    cap_home_cargo_targets(&mut report, 5 * 1024 * 1024);
+    restore_env("HOME", prev);
+
+    // Restore write permission so the tempdir can be cleaned up.
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    if report.errors.is_empty() {
+        // Suite running as root bypasses the read-only bit; removal succeeds.
+        assert!(!big.exists());
+    } else {
+        assert!(big.exists(), "removal must have failed");
+        assert_eq!(report.bytes_freed, 0);
+        assert!(report.dirs_removed.is_empty());
+    }
+}
+
+// ── kill_orphaned_cargo_processes ──
+
+#[test]
+fn kill_orphaned_cargo_processes_scans_cleanly() {
+    // No `cargo test`/`cargo build` has been running for over 30 minutes
+    // during this suite, so the scan kills nothing. We only assert it
+    // completes without recording an error.
+    let mut report = CleanupReport::default();
+    kill_orphaned_cargo_processes(&mut report);
+    assert!(report.errors.is_empty());
+}
+
+/// Set a path's modification time `days` into the past. Files are opened with
+/// write access (matching the helper above); directories must be opened
+/// read-only because a directory cannot be opened `write(true)` on Unix.
+fn backdate(path: &std::path::Path, days: u64) {
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 24 * 3600);
+    let times = std::fs::FileTimes::new().set_modified(when);
+    let f = if path.is_dir() {
+        std::fs::File::open(path).unwrap()
+    } else {
+        std::fs::File::options().write(true).open(path).unwrap()
+    };
+    f.set_times(times).unwrap();
+}
+
+/// Run `remove_old_corrupt_dbs` with `HOME` pointed at `home`, restoring the
+/// previous value afterward. Serialized by the caller's
+/// `#[serial(cognitive_memory)]` attribute so the process-wide `HOME` mutation
+/// cannot race other tests that read the cognitive-memory store.
+fn run_corrupt_cleanup_with_home(home: &std::path::Path) -> CleanupReport {
+    let old_home = std::env::var_os("HOME");
+    unsafe {
+        std::env::set_var("HOME", home);
+    }
+    let mut report = CleanupReport::default();
+    remove_old_corrupt_dbs(&mut report);
+    match old_home {
+        Some(h) => unsafe { std::env::set_var("HOME", h) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+    report
+}
+
+/// De-fork Phase 2b (#2307) moved the store from the native single-file
+/// `cognitive_memory.ladybug` to the library backend at `cognitive`. The
+/// library quarantines corruption as `cognitive.corrupt-*`,
+/// `cognitive.wal.corrupt-*`, recursively nested `…cognitive.wal.corrupt-*`
+/// chains, `…cognitive.shadow` side-files, and `…corrupt-*.bak` copies. All
+/// of these must be reclaimed once aged — the pre-fix matcher only knew the
+/// native `cognitive_memory.corrupt-` prefix, so they leaked forever.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_removes_aged_library_backend_quarantines() {
+    let tmp = tempfile::tempdir().unwrap();
+    let simard = tmp.path().join(".simard");
+    std::fs::create_dir_all(&simard).unwrap();
+
+    let quarantines = [
+        "cognitive.corrupt-1700000000",
+        "cognitive.wal.corrupt-1700000000",
+        "cognitive.corrupt-1700000000.cognitive.shadow",
+        "cognitive.corrupt-1700000000.bak",
+        "cognitive.corrupt-1700000000.cognitive.wal.corrupt-1700000001",
+        "cognitive_memory.corrupt-1700000000", // legacy native still covered
+    ];
+    for q in &quarantines {
+        let p = simard.join(q);
+        std::fs::write(&p, b"corrupt-bytes").unwrap();
+        backdate(&p, CORRUPT_DB_MAX_AGE_DAYS + 1);
+    }
+
+    // Live store files must survive untouched (recent mtime, no `.corrupt-`).
+    let live = simard.join("cognitive");
+    let live_wal = simard.join("cognitive.wal");
+    std::fs::write(&live, b"live-store").unwrap();
+    std::fs::write(&live_wal, b"wal").unwrap();
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    for q in &quarantines {
+        assert!(
+            !simard.join(q).exists(),
+            "aged library quarantine should be removed: {q}"
+        );
+    }
+    assert!(
+        live.exists(),
+        "live `cognitive` store must never be removed"
+    );
+    assert!(
+        live_wal.exists(),
+        "live `cognitive.wal` must never be removed"
+    );
+    assert!(
+        report.bytes_freed >= ("corrupt-bytes".len() as u64) * quarantines.len() as u64,
+        "freed bytes should account for every removed quarantine"
+    );
+    assert_eq!(
+        report.dirs_removed.len(),
+        quarantines.len(),
+        "every quarantine should be reported as removed"
+    );
+    assert!(report.errors.is_empty(), "no errors expected: {report:?}");
+}
+
+/// Safety invariant: a name without the `.corrupt-` infix is the live store and
+/// must NEVER be deleted — even if it is older than the threshold. Guards
+/// against a future over-broad matcher wiping `~/.simard/cognitive` and
+/// destroying all persistent memory.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_never_removes_live_store_even_when_aged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let simard = tmp.path().join(".simard");
+    std::fs::create_dir_all(&simard).unwrap();
+
+    let live_files = [
+        "cognitive",
+        "cognitive.wal",
+        "cognitive.shadow",
+        "cognitive_memory.ladybug",
+    ];
+    for f in &live_files {
+        let p = simard.join(f);
+        std::fs::write(&p, b"do-not-delete").unwrap();
+        backdate(&p, CORRUPT_DB_MAX_AGE_DAYS + 30);
+    }
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    for f in &live_files {
+        assert!(
+            simard.join(f).exists(),
+            "live store file must survive cleanup: {f}"
+        );
+    }
+    assert_eq!(report.bytes_freed, 0, "nothing should have been freed");
+    assert!(report.dirs_removed.is_empty(), "nothing should be removed");
+}
+
+/// A directory-backed store quarantine (the design documents the store as a
+/// LadybugDB `GraphStore` directory) must be removed recursively — a plain
+/// `remove_file` would fail and leak the directory.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_removes_aged_directory_quarantine() {
+    let tmp = tempfile::tempdir().unwrap();
+    let simard = tmp.path().join(".simard");
+    std::fs::create_dir_all(&simard).unwrap();
+
+    let dir_q = simard.join("cognitive.corrupt-1700000000");
+    std::fs::create_dir_all(&dir_q).unwrap();
+    std::fs::write(dir_q.join("data"), b"abcdef").unwrap();
+    std::fs::write(dir_q.join("data.wal"), b"ghij").unwrap();
+    backdate(&dir_q, CORRUPT_DB_MAX_AGE_DAYS + 1);
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    assert!(
+        !dir_q.exists(),
+        "aged directory quarantine should be removed recursively"
+    );
+    assert_eq!(
+        report.bytes_freed,
+        ("abcdef".len() + "ghij".len()) as u64,
+        "freed bytes should sum the directory contents"
+    );
+}
+
+/// Young library quarantines are kept for forensics — the age threshold applies
+/// to the new filename shapes exactly as it did to the native prefix.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_keeps_young_library_quarantine() {
+    let tmp = tempfile::tempdir().unwrap();
+    let simard = tmp.path().join(".simard");
+    std::fs::create_dir_all(&simard).unwrap();
+
+    let young = simard.join("cognitive.corrupt-1700000000");
+    std::fs::write(&young, b"recent").unwrap();
+    // No backdating: mtime is "now", inside the retention window.
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    assert!(young.exists(), "young library quarantine should survive");
+    assert_eq!(report.bytes_freed, 0);
 }

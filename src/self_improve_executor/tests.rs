@@ -107,6 +107,10 @@ fn improvement_patch_construction() {
 }
 
 #[test]
+// #2360: mutates SIMARD_LLM_PROVIDER and ANTHROPIC_API_KEY (process-global).
+// Keyed into the cognitive_memory serial group so the mutation is never
+// concurrent with a provider/state-root env reader.
+#[serial_test::serial(cognitive_memory)]
 fn generate_patch_without_api_key_returns_unavailable() {
     // Force RustyClawd provider without ANTHROPIC_API_KEY → session may open
     // but run_turn will fail.
@@ -176,6 +180,7 @@ fn run_autonomous_improvement_empty_proposals() {
     assert!(results.is_empty());
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn run_autonomous_improvement_planning_unavailable() {
     unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
@@ -196,6 +201,7 @@ fn run_autonomous_improvement_planning_unavailable() {
     }
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn run_autonomous_improvement_continues_on_non_critical_plan_failure() {
     unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
@@ -232,6 +238,7 @@ fn test_inspection() -> crate::engineer_loop::RepoInspection {
             owner_identity: "test".into(),
             source_session_id: SessionId::from_uuid(uuid::Uuid::nil()),
             updated_in: SessionPhase::Execution,
+            evidence: Vec::new(),
         }],
         carried_meeting_decisions: Vec::new(),
         architecture_gap_summary: String::new(),
@@ -316,6 +323,7 @@ fn approval_policy_display_auto() {
     assert_eq!(p.to_string(), "auto-approve (justification: sandbox test)");
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn auto_approve_policy_allows_execution() {
     // When auto-approve is set, proposals should NOT get ApprovalRequired.

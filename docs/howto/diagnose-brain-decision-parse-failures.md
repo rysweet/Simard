@@ -26,6 +26,35 @@ what to do.
 For the full protocol definition see the
 [OODA Brain Decision Protocol reference](../reference/ooda-brain-decision-protocol.md).
 
+> **Fixed in [#2419](https://github.com/rysweet/Simard/issues/2419):** The
+> lifecycle brain previously parsed `recipe-runner-rs`'s **default `text`
+> output**, which prints only a summary banner (`Recipe: … SUCCESS …`) to
+> stdout — the agent's decision text is not on stdout in text mode. First-word
+> extraction always saw `Recipe:`, so ~99.6% of decisions silently defaulted
+> to `ContinueSkipping`. The brain now invokes `--output-format json` and
+> extracts the real decision from the JSON envelope, and emits one
+> `brain_lifecycle_decision` metric per call. **Before reaching for the log
+> triage below, measure the parse-failure rate directly from the metric** (see
+> [Measure the parse-failure rate](#measure-the-parse-failure-rate)).
+
+## Measure the parse-failure rate
+
+Each `decide_engineer_lifecycle` call appends a `brain_lifecycle_decision`
+event to `~/.simard/metrics/metrics.jsonl`. The `outcome` label is the signal:
+`parsed` (a real decision) vs `default_empty` / `default_malformed` / `error`
+(a parse failure). To compute the rate over the recorded window:
+
+```bash
+jq -rc 'select(.metric_name=="brain_lifecycle_decision") | .context | fromjson | .outcome' \
+  ~/.simard/metrics/metrics.jsonl \
+  | sort | uniq -c
+```
+
+A healthy lifecycle brain shows a mix of `parsed` outcomes (including genuine
+`continue_skipping`); a regression shows `default_malformed` dominating again
+(the symptom #2419 fixed). `is_parse_failure` in each context is `true` for any
+non-`parsed` outcome, so `count(is_parse_failure==true)/count(*)` is the rate.
+
 ## Step 1: Find the failing cycle
 
 Symptoms that justify reading parse-failure logs:

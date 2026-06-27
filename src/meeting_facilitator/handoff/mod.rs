@@ -502,9 +502,13 @@ mod tests {
     // ── default_handoff_dir ─────────────────────────────────────────
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn default_handoff_dir_returns_path() {
         // Pin SIMARD_HANDOFF_DIR so parallel tests that unsafely set env vars
-        // don't race against the env reads inside default_handoff_dir().
+        // don't race against the env reads inside default_handoff_dir(). The
+        // `cognitive_memory` serial key is the durable guard (see
+        // docs/testing/cognitive-memory-serial-isolation.md); the pin is
+        // belt-and-braces.
         let tmp = tempfile::tempdir().unwrap();
         let pinned = tmp.path().join("meeting_handoffs");
         unsafe { std::env::set_var("SIMARD_HANDOFF_DIR", &pinned) };

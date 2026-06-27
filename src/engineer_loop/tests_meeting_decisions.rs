@@ -67,7 +67,7 @@ fn setup_state_root(dir: &Path) {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn bundle_present_yields_bundle_path_line() {
     let tmp = tempfile::tempdir().unwrap();
     let state_root = tmp.path().join("state");
@@ -112,7 +112,7 @@ fn bundle_present_yields_bundle_path_line() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn legacy_handoff_without_bundle_still_works() {
     let tmp = tempfile::tempdir().unwrap();
     let state_root = tmp.path().join("state");
@@ -145,7 +145,7 @@ fn legacy_handoff_without_bundle_still_works() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn oldest_unprocessed_wins_over_newer() {
     let tmp = tempfile::tempdir().unwrap();
     let state_root = tmp.path().join("state");
@@ -187,7 +187,7 @@ fn oldest_unprocessed_wins_over_newer() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn load_meeting_bundle_returns_none_for_missing_dir() {
     let tmp = tempfile::tempdir().unwrap();
     // SAFETY (Rust 2024): set_var requires unsafe — tests only, serialized.
@@ -202,7 +202,7 @@ fn load_meeting_bundle_returns_none_for_missing_dir() {
 }
 
 #[test]
-#[serial]
+#[serial(cognitive_memory)]
 fn load_meeting_bundle_reads_all_files() {
     let tmp = tempfile::tempdir().unwrap();
     let bundle_root = tmp.path().join("meetings");

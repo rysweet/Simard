@@ -75,7 +75,7 @@ a summary, not the source of truth.
 | Hook id | Stage(s) | Command |
 |---|---|---|
 | `cargo-fmt` | `pre-commit`, `pre-push`, `manual` | `cargo fmt --all -- --check` |
-| `cargo-clippy-precommit` | `pre-commit`, `manual` | `cargo clippy --release --no-deps -- -D warnings` |
+| `cargo-clippy-precommit` | `pre-commit`, `manual` | `cargo clippy --release --no-deps -- -D warnings` (via [`scripts/clippy-precommit-release.sh`](scripts/clippy-precommit-release.sh)) |
 | `cargo-clippy` | `pre-push`, `manual` | `cargo clippy --all-targets --all-features --locked -- -D warnings` |
 | `cargo-test-race-subset` | `pre-push`, `manual` | `cargo test --release --lib -- --test-threads=$(nproc) cognitive_memory bootstrap memory_ipc memory_consolidation` |
 
@@ -83,6 +83,19 @@ The two-tier clippy gate is intentional: the `--release --no-deps`
 hook gives instant feedback at commit time; the `--all-targets
 --all-features --locked` hook reuses the warm `target/` after the
 race-test compile and runs at push time, mirroring CI exactly.
+
+The `cargo-clippy-precommit` hook runs through a thin wrapper,
+[`scripts/clippy-precommit-release.sh`](scripts/clippy-precommit-release.sh),
+which guarantees the `lbug` (LadybugDB) native static library is on the linker
+search path before invoking `cargo clippy --release` (issue #2426). `lbug`
+0.17.1 caches its prebuilt `liblbug.a` inside the cargo *registry source*
+directory; CI's cargo cache persists `target/` but not `registry/src`, so on a
+cache restore the cached release build-script output points at an evicted
+archive and clippy fails with `could not find native static library `lbug``.
+The wrapper provisions a stable copy of `liblbug.a` (reusing an existing
+registry prebuilt, otherwise downloading the same release asset the `build` and
+`coverage` jobs use) and points `lbug` at it via `LBUG_LIBRARY_DIR`. It is a
+no-op for warm local checks, so the budgets below still hold.
 
 Realistic budgets (warm caches, dev host with the workspace already
 built):

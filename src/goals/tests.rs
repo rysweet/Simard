@@ -135,6 +135,7 @@ fn goal_record_from_update_with_manually_empty_slug_is_rejected() {
         rationale: "Valid rationale".into(),
         status: GoalStatus::Active,
         priority: 1,
+        evidence: Vec::new(),
     };
     let err = GoalRecord::from_update(
         update,
@@ -154,6 +155,7 @@ fn goal_record_from_update_with_manually_empty_title_is_rejected() {
         rationale: "Valid rationale".into(),
         status: GoalStatus::Active,
         priority: 1,
+        evidence: Vec::new(),
     };
     let err = GoalRecord::from_update(
         update,
@@ -173,6 +175,7 @@ fn goal_record_from_update_with_manually_empty_rationale_is_rejected() {
         rationale: String::new(),
         status: GoalStatus::Active,
         priority: 1,
+        evidence: Vec::new(),
     };
     let err = GoalRecord::from_update(
         update,

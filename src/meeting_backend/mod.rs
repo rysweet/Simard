@@ -33,7 +33,10 @@ use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardResult;
 
 pub use close_guard::{PartialReason, Timeout, with_timeout};
-pub use command::{MeetingCommand, parse_command};
+pub use command::{
+    HELP_GROUPS, HelpEntry, HelpGroup, MeetingCommand, parse_command, render_help_plain,
+    unknown_command_notice,
+};
 pub use types::{
     AppliedTemplate, ConversationMessage, HandoffActionItem, MeetingResponse, MeetingSummary,
     MeetingTranscript, Role, SessionStatus,

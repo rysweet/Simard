@@ -42,6 +42,8 @@ fn mock_bridge() -> CognitiveMemoryBridge {
 
 fn sample_active(id: &str, priority: u32) -> ActiveGoal {
     ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: id.to_string(),
         description: format!("Goal {id}"),
         priority,
@@ -303,6 +305,8 @@ fn meeting_decisions_feed_goal_board() {
         add_active_goal(
             &mut board,
             ActiveGoal {
+                parent_goal_id: None,
+                repo: None,
                 id: format!("from-meeting-{i}"),
                 description: decision.description.clone(),
                 priority: (i + 1) as u32,

@@ -108,8 +108,18 @@ pub(crate) async fn logs() -> Json<Value> {
         }
     }
 
+    // Attach a machine-readable severity to every daemon log line so the
+    // Logs tab level filter has something to match on. The daemon emits
+    // human-readable lines without a level field (#1687), so without this the
+    // "Errors" / "Warnings" / "Info" filter matched nothing and looked inert.
+    let daemon_log_levels: Vec<&str> = combined_log
+        .iter()
+        .map(|line| classify_log_level(line))
+        .collect();
+
     Json(json!({
         "daemon_log_lines": combined_log,
+        "daemon_log_levels": daemon_log_levels,
         "ooda_transcripts": transcripts,
         "terminal_transcripts": terminal_transcripts,
         "cost_log_lines": cost_log,
@@ -123,6 +133,51 @@ pub(crate) fn read_tail(path: &str, max_lines: usize) -> Option<Vec<String>> {
     let lines: Vec<String> = content.lines().map(String::from).collect();
     let start = lines.len().saturating_sub(max_lines);
     Some(lines[start..].to_vec())
+}
+
+/// Heuristically classify a daemon log line into a severity level.
+///
+/// The daemon emits human-readable lines without a machine-parseable level
+/// field (issue #1687), so the Logs tab level filter previously had nothing
+/// to match on and appeared inert. We infer the level from well-known
+/// error/warning vocabulary, defaulting to "info" — the level the daemon's
+/// own routine lines imply. Error vocabulary wins over warning vocabulary so a
+/// line like "WARN: operation failed" is reported as an error.
+///
+/// Returns one of `"error"`, `"warn"`, or `"info"`.
+pub(crate) fn classify_log_level(line: &str) -> &'static str {
+    let l = line.to_lowercase();
+
+    const ERROR_MARKERS: &[&str] = &[
+        "error",
+        "failed",
+        "failure",
+        "fatal",
+        "panic",
+        "exception",
+        "traceback",
+        "did not emit",
+        "could not",
+        "cannot",
+        "unable to",
+    ];
+    const WARN_MARKERS: &[&str] = &[
+        "warn",
+        "warning",
+        "retry",
+        "retrying",
+        "degraded",
+        "timeout",
+        "timed out",
+    ];
+
+    if ERROR_MARKERS.iter().any(|m| l.contains(m)) {
+        "error"
+    } else if WARN_MARKERS.iter().any(|m| l.contains(m)) {
+        "warn"
+    } else {
+        "info"
+    }
 }
 
 /// Read recent log entries from systemd journal for simard-related units (#414).
@@ -343,5 +398,71 @@ mod tests {
 
         let lines = read_tail(&path.to_string_lossy(), 3).unwrap();
         assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
+    // ---- classify_log_level ----------------------------------------------
+
+    #[test]
+    fn classify_error_lines() {
+        // Real Simard error vocabulary surfaced by the Goals tab (#1687).
+        assert_eq!(
+            classify_log_level("2026-06-20T17:52:33Z [simard] brain-error fallback engaged"),
+            "error"
+        );
+        assert_eq!(
+            classify_log_level("[simard] goal-action parse failed for goal abc"),
+            "error"
+        );
+        assert_eq!(
+            classify_log_level("[simard] LLM did not emit a recognised JSON action"),
+            "error"
+        );
+        assert_eq!(
+            classify_log_level("thread 'main' panicked at src/foo.rs:1"),
+            "error"
+        );
+    }
+
+    #[test]
+    fn classify_warn_lines() {
+        assert_eq!(
+            classify_log_level("2026-06-20T18:00:00Z WARN retrying request"),
+            "warn"
+        );
+        assert_eq!(
+            classify_log_level("[simard] connection degraded, retry scheduled"),
+            "warn"
+        );
+        assert_eq!(classify_log_level("request timed out after 30s"), "warn");
+    }
+
+    #[test]
+    fn classify_info_lines_default() {
+        // Routine daemon lines carry no level token and must default to info.
+        assert_eq!(
+            classify_log_level(
+                "2026-06-20T17:52:33Z [simard] OODA cycle #48: 4 actions (4/4 succeeded)"
+            ),
+            "info"
+        );
+        assert_eq!(
+            classify_log_level(
+                "2026-06-20T17:58:32Z [simard] disk health: 82% used, freed 0 bytes"
+            ),
+            "info"
+        );
+        assert_eq!(
+            classify_log_level("[simard] reaped 1 zombie engineer process(es)"),
+            "info"
+        );
+    }
+
+    #[test]
+    fn classify_error_takes_precedence_over_warn() {
+        // A line containing both warn and error vocabulary is an error.
+        assert_eq!(
+            classify_log_level("WARN: operation failed permanently"),
+            "error"
+        );
     }
 }

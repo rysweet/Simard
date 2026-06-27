@@ -1,0 +1,49 @@
+name: cognitive-memory-serial-isolation-anyvar
+app_type: cli
+description: |
+  Verify the process-wide `serial(cognitive_memory)` env-race guard introduced by
+  issue #2375. The guard's production watch was widened from
+  `EnvWatch::StateRootSurface` to `EnvWatch::AnyVar`, so EVERY lib-binary test
+  that mutates ANY process-global env var must share the `cognitive_memory`
+  serial key — otherwise a `setenv` that `realloc`/frees `environ` can tear a
+  concurrent `getenv` of the cognitive-memory state root in another test. This
+  scenario drives the two hermetic meta-tests that enforce and prove the
+  invariant; both run source-only (they mutate no real env) so they are safe on
+  the live host.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # Green-after: with AnyVar the default and all 84 env mutators multi-keyed into
+  # `cognitive_memory`, the serial-guard meta-test must report zero offenders.
+  # First invocation may compile the test binary; the second filter reuses it.
+  - action: run
+    params:
+      command: "cargo test --locked --lib test_support::serial_guard::every_env_mutating_test_is_serialized"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Regression proof: the AnyVar default is pinned, and an unrelated-variable
+  # env writer is isolated from the cognitive-memory readers ONLY when it carries
+  # the `cognitive_memory` key (and the pre-#2375 StateRootSurface policy ignored
+  # it). Guards against a silent narrowing back to the state-root surface.
+  - action: run
+    params:
+      command: "cargo test --locked --lib test_support::serial_guard::anyvar_default_isolates_every_env_writer_across_sessions"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

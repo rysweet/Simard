@@ -164,7 +164,7 @@ fn human_bytes_renders_iec_units() {
 // ------------------------------------------------------------------
 
 #[test]
-#[serial(simard_disk_pressure_env)]
+#[serial(simard_disk_pressure_env, cognitive_memory)]
 fn configured_min_free_gb_uses_default_when_unset() {
     // SAFETY: tests live in a single process; reset the var around
     // assertions. Use a unique name per test so concurrent tests can
@@ -178,7 +178,7 @@ fn configured_min_free_gb_uses_default_when_unset() {
 }
 
 #[test]
-#[serial(simard_disk_pressure_env)]
+#[serial(simard_disk_pressure_env, cognitive_memory)]
 fn configured_min_free_gb_parses_valid_value() {
     // SAFETY: env var mutation is process-wide; tests in this module
     // may race, but cargo test is the sole writer.
@@ -189,7 +189,7 @@ fn configured_min_free_gb_parses_valid_value() {
 }
 
 #[test]
-#[serial(simard_disk_pressure_env)]
+#[serial(simard_disk_pressure_env, cognitive_memory)]
 fn configured_min_free_gb_rejects_zero_and_falls_back() {
     // SAFETY: see above.
     unsafe { std::env::set_var("SIMARD_DISK_PRESSURE_MIN_FREE_GB", "0") };
@@ -199,7 +199,7 @@ fn configured_min_free_gb_rejects_zero_and_falls_back() {
 }
 
 #[test]
-#[serial(simard_disk_pressure_env)]
+#[serial(simard_disk_pressure_env, cognitive_memory)]
 fn configured_min_free_gb_rejects_garbage_and_falls_back() {
     // SAFETY: see above.
     unsafe { std::env::set_var("SIMARD_DISK_PRESSURE_MIN_FREE_GB", "twenty") };
