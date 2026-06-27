@@ -90,6 +90,7 @@ nav:
     - Verify and Roll Back a Self-Deploy: howto/verify-and-roll-back-a-self-deploy.md
     - Diagnose a Rejected Goal Completion: howto/diagnose-a-rejected-goal-completion.md
     - Configure Brain Introspection: howto/configure-brain-introspection.md
+    - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Self-Deploy API: reference/self-deploy-api.md
