@@ -173,6 +173,7 @@ mod tests {
 
     fn goal(id: &str, priority: u32, status: GoalProgress, assigned: Option<&str>) -> ActiveGoal {
         ActiveGoal {
+            parent_goal_id: None,
             repo: None,
             id: id.to_string(),
             description: format!("desc for {id}"),

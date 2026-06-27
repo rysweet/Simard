@@ -863,6 +863,7 @@ mod tests {
         let shared_mem = mock_shared_mem();
         let mut board = GoalBoard::new();
         board.active.push(crate::goal_curation::ActiveGoal {
+            parent_goal_id: None,
             repo: None,
             id: "test-goal-01".to_string(),
             description: "Test goal for shutdown".to_string(),

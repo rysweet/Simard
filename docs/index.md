@@ -32,6 +32,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to inspect the durable goal register](./howto/inspect-durable-goal-register.md) - Read back the active top-5 goals and backlog without mutation.
 - [How to recover a corrupted or missing goal board](./howto/recover-goal-board.md) — cognitive-memory-only recovery commands.
 - [How to troubleshoot the file-backed goal store](./howto/troubleshoot-goal-store.md) — operator playbook for goal_store.json issues.
+- [How to decompose a large goal into linked sub-goals](./howto/decompose-a-large-goal.md) — break one umbrella goal into 2–6 bounded sub-goals with `simard goal decompose`, verify the parent↔child edges round-trip in the graph, and read parent progress as a roll-up (#2405).
 - [How to configure adaptive scaling](./howto/configure-adaptive-scaling.md) — enable and tune AIMD concurrency scaling.
 - [How to keep Simard's own dependency pins up to date](./howto/self-maintain-dependency-pins.md) — the reactive done-gate and proactive reconcile that bump Simard's own `Cargo.toml` git-rev pins after she lands a change upstream, so the fix runs in her own build (companion to [Safe Self-Update](./safe-self-update.md)).
 
@@ -137,6 +138,7 @@ If you are changing architecture, start with the [architecture overview](./archi
 - [File-backed goal store simplification](./concepts/file-backed-goal-store-simplification.md) — why GoalStore uses a plain JSON file instead of IPC.
 - [Adaptive scaling](./concepts/adaptive-scaling.md) — AIMD concurrency control for the OODA cycle.
 - [Goal board API reference](./reference/goal-board-api.md) — `active_goals_as_records` adapter and load/save semantics.
+- [Goal decomposition & the goal graph](./reference/goal-decomposition.md) — break a large goal into 2–6 bounded sub-goals and record parent↔child structure as typed, queryable edges in the cognitive-memory graph, with parent-progress roll-up and the `simard goal decompose` verb (#2405).
 - [Adaptive scaling API reference](./reference/adaptive-scaling-api.md) — AdaptiveScaler Rust API and integration.
 - [Maximum safe parallelism](./reference/maximum-safe-parallelism.md) — how the OODA daemon fills spare capacity with concurrent engineers on distinct work items, bounded by the AIMD safety cap.
 - [Concurrent engineer dispatch](./reference/concurrent-engineer-dispatch.md) — how the Act phase dispatches spawn-path AdvanceGoal actions concurrently (per-goal LLM sessions, atomic claim, semaphore cap) so multiple engineers start in a single OODA round.

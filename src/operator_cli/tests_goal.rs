@@ -58,6 +58,7 @@ fn marker_reason(consecutive: u32) -> String {
 
 fn active_goal(id: &str, status: GoalProgress) -> ActiveGoal {
     ActiveGoal {
+        parent_goal_id: None,
         repo: None,
         id: id.to_string(),
         description: format!("Goal {id}"),

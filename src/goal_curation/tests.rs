@@ -18,6 +18,7 @@ fn mock_bridge() -> CognitiveMemoryBridge {
 
 fn sample_goal(id: &str, priority: u32) -> ActiveGoal {
     ActiveGoal {
+        parent_goal_id: None,
         repo: None,
         id: id.to_string(),
         description: format!("Goal {id}"),
@@ -102,6 +103,7 @@ fn rejects_zero_priority() {
     let err = add_active_goal(
         &mut board,
         ActiveGoal {
+            parent_goal_id: None,
             repo: None,
             id: "bad".to_string(),
             description: "Zero priority".to_string(),
@@ -183,6 +185,7 @@ fn rejects_empty_goal_id() {
     let err = add_active_goal(
         &mut board,
         ActiveGoal {
+            parent_goal_id: None,
             repo: None,
             id: "  ".to_string(),
             description: "Has description".to_string(),

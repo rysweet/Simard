@@ -149,6 +149,7 @@ fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
 
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
+        parent_goal_id: None,
         repo: None,
         id: "tdd-roundtrip-active-goal".to_string(),
         description: "Goal saved via WriterBridge then loaded again".to_string(),
@@ -180,6 +181,7 @@ fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
 
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
+        parent_goal_id: None,
         repo: None,
         id: "tdd-no-disk-file-goal".to_string(),
         description: "Saving a goal must not produce goal_records.json".to_string(),

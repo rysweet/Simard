@@ -1701,3 +1701,57 @@ fn progress_assessment_recipe_mirrors_dep_bump_gate() {
         "progress-assessment.yaml must keep the verdict JSON output contract"
     );
 }
+
+// ── Goal-decomposition prompt content-pin (issue #2405) ────────────────────
+//
+// The `decompose_goal` driver parses this prompt's output, so its wording is a
+// hard contract: the prompt must instruct the model to emit a bounded set of
+// sub-goals, each carrying a `done_criterion` and an optional `depends_on`
+// ordering. This guards the embedded fallback for `goal_decomposition.md`
+// (the prompt asset + `embedded_fallback` arm).
+
+#[test]
+fn goal_decomposition_prompt_is_embedded() {
+    assert!(
+        embedded_fallback("goal_decomposition.md").is_some(),
+        "the goal_decomposition.md prompt must be compiled in as an embedded fallback"
+    );
+}
+
+#[test]
+fn goal_decomposition_prompt_pins_output_contract() {
+    let prompt =
+        embedded_fallback("goal_decomposition.md").expect("goal_decomposition.md embedded prompt");
+    let lower = prompt.to_lowercase();
+
+    // Intent.
+    assert!(
+        lower.contains("decompose"),
+        "prompt must describe decomposition"
+    );
+    assert!(
+        lower.contains("sub-goal") || lower.contains("sub goal") || lower.contains("subgoal"),
+        "prompt must talk about sub-goals"
+    );
+
+    // Fan-out bound 2..=6.
+    assert!(
+        prompt.contains('2') && prompt.contains('6'),
+        "prompt must pin the 2-to-6 fan-out bound"
+    );
+
+    // JSON output contract the parser depends on (these keys map to
+    // SubGoalProposal fields).
+    assert!(
+        prompt.contains("done_criterion"),
+        "each sub-goal must carry a done_criterion"
+    );
+    assert!(
+        prompt.contains("depends_on"),
+        "the prompt must allow an optional depends_on ordering between sub-goals"
+    );
+    assert!(
+        prompt.contains("description"),
+        "each sub-goal must carry a description"
+    );
+}

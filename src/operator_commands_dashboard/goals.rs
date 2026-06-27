@@ -173,6 +173,7 @@ pub(crate) async fn seed_goals() -> Json<Value> {
     let mut board = GoalBoard::new();
     let now = chrono::Utc::now().to_rfc3339();
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
         repo: None,
         id: "self-improvement".to_string(),
         description:
@@ -186,6 +187,7 @@ pub(crate) async fn seed_goals() -> Json<Value> {
         last_progress_update_at: None,
     });
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
         repo: None,
         id: "knowledge-growth".to_string(),
         description:
@@ -199,6 +201,7 @@ pub(crate) async fn seed_goals() -> Json<Value> {
         last_progress_update_at: None,
     });
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
             repo: None,
         id: "operational-health".to_string(),
         description: "Maintain system health: budget compliance, resource usage, and error rates within thresholds".to_string(),
@@ -279,6 +282,7 @@ pub(crate) async fn add_goal(Json(body): Json<Value>) -> Json<Value> {
             _ => None,
         };
         board.active.push(ActiveGoal {
+            parent_goal_id: None,
             repo,
             id: id.clone(),
             description: desc,
@@ -382,6 +386,7 @@ pub(crate) async fn promote_backlog_item(Path(id): Path<String>) -> Json<Value> 
     };
 
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
         repo: None,
         id: item.id,
         description: item.description,
