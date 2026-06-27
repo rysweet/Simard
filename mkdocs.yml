@@ -66,6 +66,8 @@ nav:
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
     - OODA Loop Self-Detection: concepts/ooda-loop-self-detection.md
+    - Reconcile-and-Self-Deploy: concepts/reconcile-and-self-deploy.md
+    - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
@@ -85,9 +87,13 @@ nav:
     - Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
     - Route a Goal to its Target Repo: howto/route-a-goal-to-its-target-repo.md
     - Self-Maintain Dependency Pins: howto/self-maintain-dependency-pins.md
+    - Verify and Roll Back a Self-Deploy: howto/verify-and-roll-back-a-self-deploy.md
+    - Diagnose a Rejected Goal Completion: howto/diagnose-a-rejected-goal-completion.md
     - Configure Brain Introspection: howto/configure-brain-introspection.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
+    - Self-Deploy API: reference/self-deploy-api.md
+    - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
     - Memory introspection CLI: reference/simard-memory-cli.md
     - Cognitive-memory provenance (DERIVES_FROM): reference/cognitive-memory-provenance.md
     - Episode Ingestion Classifier API: reference/episode-ingestion-classifier.md

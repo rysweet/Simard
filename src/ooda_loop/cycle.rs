@@ -535,7 +535,32 @@ fn run_ooda_cycle_inner(
     }
 
     // --- Curate: archive completed goals, promote from backlog ---
-    let archived = crate::goal_curation::archive_completed(&mut state.active_goals);
+    // With a deploy-aware done-gate installed (production daemon, issue #2419),
+    // a completed goal archives only with hard evidence — merged PR, closed
+    // issue, and (for self-affecting changes) a verified deploy; blocked goals
+    // stay active with a recorded blocker. Without one (tests / non-daemon
+    // callers), this is the legacy unguarded archive.
+    let archived = match &bridges.completion_evidence {
+        Some(source) => {
+            let (archived, blocked) = crate::goal_curation::archive_completed_evidence_aware(
+                &mut state.active_goals,
+                source.as_ref(),
+            );
+            for (goal, missing) in &blocked {
+                eprintln!(
+                    "[simard] OODA curate: completion BLOCKED for goal '{}' — missing {}",
+                    goal.id,
+                    missing
+                        .iter()
+                        .map(crate::goal_curation::MissingEvidence::label)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                );
+            }
+            archived
+        }
+        None => crate::goal_curation::archive_completed(&mut state.active_goals),
+    };
     if !archived.is_empty() {
         eprintln!(
             "[simard] OODA curate: archived {} completed goal(s): {}",

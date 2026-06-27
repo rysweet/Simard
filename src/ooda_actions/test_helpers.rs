@@ -148,6 +148,7 @@ pub(crate) fn test_bridges() -> OodaBridges {
         progress_evidence: std::sync::Arc::new(
             crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
+        completion_evidence: None,
     }
 }
 
@@ -208,5 +209,6 @@ pub(crate) fn bridges_with_session(session: MockSession) -> OodaBridges {
         progress_evidence: std::sync::Arc::new(
             crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
+        completion_evidence: None,
     }
 }

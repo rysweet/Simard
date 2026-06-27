@@ -91,6 +91,22 @@ pub struct UpdateConfig {
     /// in-process by the brain (which has the store open); left `None` by the
     /// operator CLI (which must NOT open the live store), disabling the check.
     pub pre_upgrade_item_count: Option<u64>,
+
+    // --- Self-deploy fields (Workstream A; see
+    // docs/reference/self-deploy-api.md#updateconfig-self-deploy-fields) ------
+    /// Whether the candidate is built from merged source (the merged-but-
+    /// unreleased `main` case) or downloaded as a tagged release.
+    pub deploy_source: crate::self_deploy::DeploySourceKind,
+    /// When `true`, a failed cognitive-memory protective backup aborts the
+    /// self-deploy (the daemon is never mutated without a verified backup).
+    pub memory_backup_required: bool,
+    /// SIGTERM→SIGKILL window for the engineer-orphan reaper.
+    pub orphan_kill_grace_seconds: u64,
+    /// OODA cycles observed for the "brains LLM-backed" health probe.
+    pub health_probe_cycles: u32,
+    /// Allowed shortfall of `live_facts` below `baseline_facts` before the
+    /// "memory intact" health probe fails.
+    pub memory_count_tolerance: u64,
 }
 
 impl Default for UpdateConfig {
@@ -105,6 +121,11 @@ impl Default for UpdateConfig {
             state_dir: default_state_dir(),
             engineer_worktrees_root: None,
             pre_upgrade_item_count: None,
+            deploy_source: crate::self_deploy::DeploySourceKind::BuildFromSource,
+            memory_backup_required: true,
+            orphan_kill_grace_seconds: 10,
+            health_probe_cycles: 1,
+            memory_count_tolerance: 0,
         }
     }
 }

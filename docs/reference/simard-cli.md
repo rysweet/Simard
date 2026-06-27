@@ -302,6 +302,27 @@ Self-update the binary to the latest GitHub release. Downloads the release asset
 
 Install the Simard binary to `~/.simard/bin`. Used by the npx wrapper (`npx github:rysweet/Simard install`) to persist the binary for direct CLI use.
 
+### `simard self-health [--json] [--pre-deploy-facts=N]`
+
+Run the post-deploy health probe against the live store and print a report. The
+five probes are `version_advanced`, `memory_intact`, `goal_board_intact`,
+`brains_llm_backed`, and `no_quarantine`; the report is healthy only when every
+probe is. `--json` emits the structured `SelfHealthReport`; `--pre-deploy-facts=N`
+supplies the memory baseline the self-deploy orchestrator captures before the
+swap. Exit code is `0` when healthy, non-zero otherwise. See the
+[self-deploy API reference](self-deploy-api.md#simard-self-health).
+
+### `simard self-deploy [--check] [--json]`
+
+Close the merged-but-not-running gap on demand (operator-only — the recipe never
+live-redeploys the daemon). With `--check` it reports deploy drift
+(running-vs-merged) and makes no changes; `--json` emits the `DeployDrift` JSON.
+Without `--check` it drives the full build-from-source self-deploy — build →
+gate → dual protective backup → drain → orphan-reap → atomic swap → systemd
+restart → health check, rolling back to the previous binary on a failed health
+check. See [reconcile-and-self-deploy](../concepts/reconcile-and-self-deploy.md)
+and [verify and roll back a self-deploy](../howto/verify-and-roll-back-a-self-deploy.md).
+
 ## Compatibility mapping
 
 | Canonical command | Compatibility surface |

@@ -6,6 +6,7 @@
 //! board: typed parent↔child edges ([`edges`]) and a decomposition driver
 //! ([`decompose`]) that breaks one large goal into bounded sub-goals.
 
+pub mod completion_gate;
 mod operations;
 pub mod progress_evidence;
 pub mod progress_reviewer;
@@ -35,6 +36,12 @@ pub use decompose::{
     RecipeGoalDecomposer, SubGoalProposal, decompose_goal, parse_subgoals_json,
 };
 pub use edges::{children_of, edges_of_type, node_of, parse_goal_edge, write_edge, write_node};
+
+pub use completion_gate::{
+    CompletionEvidence, CompletionEvidenceGate, CompletionVerdict, EvidenceSource,
+    GhCliEvidenceSource, MissingEvidence, archive_completed_evidence_aware,
+    archive_completed_with_evidence, completion_evidence_enabled, is_self_affecting,
+};
 
 #[cfg(test)]
 mod tests;

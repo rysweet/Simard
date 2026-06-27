@@ -22,6 +22,10 @@ issues, a completion-% parked high), still route to `advance_goal` (the action
 *kind* does not change), but name the suspected loop in your rationale so the
 goal-action brain re-scopes or executes rather than re-triaging the same state.
 
+## Done-gate guardrail
+
+Completion is evidence-gated, never narrative-gated. Do not propose STATUS: ACHIEVED without merged + closed + (if self-affecting) deployed evidence. A self-affecting change (Simard's own running code, or a bump to a dependency rev pinned in Simard's `Cargo.toml`) is not done until the new binary is built, deployed, and verified running — a merged PR alone does not make it ACHIEVED.
+
 ## CONTEXT
 
 A single priority entry produced by the Orient phase:
