@@ -14,6 +14,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde::Deserialize;
+
 use super::decide::{DecideContext, DecideJudgment, OodaDecideBrain};
 use super::orient::{
     FAILURE_PENALTY_PER_CONSECUTIVE, OodaOrientBrain, OrientContext, OrientJudgment,
@@ -32,6 +34,123 @@ const LIFECYCLE_ADAPTER_TAG: &str = "recipe-engineer-lifecycle-brain";
 
 /// Cap on raw response text embedded in error messages and rationale fields.
 const MAX_RATIONALE_CHARS: usize = 500;
+
+/// Metric name emitted once per `decide_engineer_lifecycle` invocation so the
+/// lifecycle-brain parse-failure rate is measurable from `metrics.jsonl`
+/// (issue #2419). `value` is always `1.0`; the `outcome` label in the context
+/// JSON is the numerator/denominator signal.
+const LIFECYCLE_DECISION_METRIC: &str = "brain_lifecycle_decision";
+
+/// Cap on the `first_word` token recorded in the metric context. Generous
+/// enough to capture any legitimate variant name plus stray punctuation, but
+/// bounded so a runaway model response can't bloat the metrics file.
+const METRIC_FIRST_WORD_CHARS: usize = 64;
+
+// ---------------------------------------------------------------------------
+// recipe-runner-rs JSON envelope (issue #2419)
+//
+// recipe-runner-rs in its DEFAULT `text` output mode prints only a human
+// summary banner ("Recipe: <name> ... SUCCESS ...") to stdout — the agent
+// step's actual decision text is NOT on stdout. Parsing the first word of
+// that banner always yields "Recipe:", which matches no lifecycle variant, so
+// every decision silently defaulted to `continue_skipping` (~99.6% of calls).
+//
+// The fix mirrors the already-correct `disk_health.rs` path: invoke with
+// `--output-format json` and pull the real decision text out of the JSON
+// envelope's final step result before first-word extraction.
+// ---------------------------------------------------------------------------
+
+/// JSON envelope returned by `recipe-runner-rs --output-format json`.
+#[derive(Debug, Deserialize)]
+struct RecipeEnvelope {
+    success: bool,
+    #[serde(default)]
+    step_results: Vec<RecipeStepResult>,
+}
+
+/// A single step's result inside the [`RecipeEnvelope`].
+#[derive(Debug, Deserialize)]
+struct RecipeStepResult {
+    #[allow(dead_code)] // Part of the JSON contract; asserted in tests.
+    #[serde(default)]
+    step_id: String,
+    #[serde(default)]
+    output: String,
+}
+
+/// Extract the decision text the agent actually produced from the
+/// `recipe-runner-rs --output-format json` stdout envelope.
+///
+/// Returns the FINAL step's `output` (the decision step is always terminal in
+/// the OODA brain recipes). Surfaces an [`SimardError::AdapterInvocationFailed`]
+/// — rather than silently returning empty text — when the envelope cannot be
+/// decoded, the recipe reported `success=false`, or no step produced output.
+/// This keeps a broken recipe-runner visible instead of masquerading as a
+/// `default_empty` parse.
+fn extract_recipe_decision_output(stdout: &[u8], adapter_tag: &str) -> SimardResult<String> {
+    let envelope: RecipeEnvelope =
+        serde_json::from_slice(stdout).map_err(|e| SimardError::AdapterInvocationFailed {
+            base_type: adapter_tag.to_string(),
+            reason: format!("failed to deserialize recipe JSON output: {e}"),
+        })?;
+
+    if !envelope.success {
+        return Err(SimardError::AdapterInvocationFailed {
+            base_type: adapter_tag.to_string(),
+            reason: "recipe reported success=false in JSON output".to_string(),
+        });
+    }
+
+    envelope
+        .step_results
+        .last()
+        .map(|s| s.output.clone())
+        .ok_or_else(|| SimardError::AdapterInvocationFailed {
+            base_type: adapter_tag.to_string(),
+            reason: "no step results in recipe JSON output".to_string(),
+        })
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle decision outcome classification (issue #2419)
+// ---------------------------------------------------------------------------
+
+/// Outcome of a single `decide_engineer_lifecycle` parse, used as the
+/// `outcome` label on the [`LIFECYCLE_DECISION_METRIC`] metric so the
+/// parse-failure rate (`outcome != parsed`) is measurable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleParseOutcome {
+    /// First word matched a known variant — a real decision was parsed.
+    Parsed,
+    /// Recipe output was empty/whitespace-only → defaulted to
+    /// `continue_skipping`.
+    DefaultEmpty,
+    /// Recipe output was non-empty but the first word matched no variant →
+    /// defaulted to `continue_skipping`.
+    DefaultMalformed,
+    /// recipe-runner-rs invocation or envelope decoding failed — no decision
+    /// could be obtained. Produced on the error path of
+    /// `decide_engineer_lifecycle`, not by the pure parser.
+    Error,
+}
+
+impl LifecycleParseOutcome {
+    /// Stable label string recorded in the metric context.
+    pub fn label(self) -> &'static str {
+        match self {
+            LifecycleParseOutcome::Parsed => "parsed",
+            LifecycleParseOutcome::DefaultEmpty => "default_empty",
+            LifecycleParseOutcome::DefaultMalformed => "default_malformed",
+            LifecycleParseOutcome::Error => "error",
+        }
+    }
+
+    /// Whether this outcome counts toward the parse-failure numerator
+    /// (everything except a real parsed decision).
+    pub fn is_parse_failure(self) -> bool {
+        !matches!(self, LifecycleParseOutcome::Parsed)
+    }
+}
 
 /// Resolve the recipe YAML path. Checks, in order:
 ///   1. `~/.simard/prompt_assets/simard/recipes/<recipe_filename>` (hot-reload)
@@ -103,6 +222,13 @@ impl RecipeBrain {
 
 impl OodaDecideBrain for RecipeBrain {
     fn judge_decision(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment> {
+        // KNOWN LIMITATION (issue #2421): this phase still reads recipe-runner-rs
+        // DEFAULT `text` stdout (the summary banner), so `parse_action_from_text`
+        // always sees `Recipe:` and silently defaults to `AdvanceGoal`. It shares
+        // the exact root cause fixed for the lifecycle phase in issue #2419 but is
+        // deferred there to bound the behavioral blast radius (top-level action
+        // routing). Tracked + to be fixed via `--output-format json` + envelope
+        // extraction in #2421.
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
@@ -141,6 +267,12 @@ impl OodaDecideBrain for RecipeBrain {
 
 impl OodaOrientBrain for RecipeBrain {
     fn judge_orientation(&self, ctx: &OrientContext) -> SimardResult<OrientJudgment> {
+        // KNOWN LIMITATION (issue #2421): like `judge_decision` above, this reads
+        // recipe-runner-rs DEFAULT `text` stdout. Worse than a benign default —
+        // `parse_orient_from_text` scans the banner for the first decimal in
+        // [0, base_urgency] and the banner's timing string (e.g. `(0.0s)`) yields
+        // `0.0`, silently demoting urgency to a scraped timing value rather than
+        // the LLM's judgment. Same #2419 root cause; fix tracked in #2421.
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
@@ -203,6 +335,10 @@ impl OodaBrain for RecipeBrain {
 
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
+            // issue #2419: text mode prints only a summary banner to stdout —
+            // the agent decision text is only exposed via the JSON envelope.
+            .arg("--output-format")
+            .arg("json")
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
             .arg("-c")
             .arg(format!(
@@ -249,14 +385,34 @@ impl OodaBrain for RecipeBrain {
             ))
             .arg("-c")
             .arg(format!("minutes_since_last_update_attempt={minutes}"))
-            .output()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: self.adapter_tag.to_string(),
-                reason: format!("recipe-runner-rs spawn failed: {e}"),
-            })?;
+            .output();
+
+        let output = match output {
+            Ok(o) => o,
+            Err(e) => {
+                record_lifecycle_decision_metric(
+                    ctx,
+                    LifecycleParseOutcome::Error,
+                    "",
+                    "none",
+                    "spawn_failed",
+                );
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: self.adapter_tag.to_string(),
+                    reason: format!("recipe-runner-rs spawn failed: {e}"),
+                });
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            record_lifecycle_decision_metric(
+                ctx,
+                LifecycleParseOutcome::Error,
+                "",
+                "none",
+                "nonzero_exit",
+            );
             return Err(SimardError::AdapterInvocationFailed {
                 base_type: self.adapter_tag.to_string(),
                 reason: format!(
@@ -267,9 +423,29 @@ impl OodaBrain for RecipeBrain {
             });
         }
 
-        let raw = String::from_utf8(output.stdout)
-            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-        Ok(parse_lifecycle_from_text(&raw))
+        let raw = match extract_recipe_decision_output(&output.stdout, self.adapter_tag) {
+            Ok(s) => s,
+            Err(e) => {
+                record_lifecycle_decision_metric(
+                    ctx,
+                    LifecycleParseOutcome::Error,
+                    "",
+                    "none",
+                    "envelope_decode_failed",
+                );
+                return Err(e);
+            }
+        };
+
+        let (decision, outcome) = parse_lifecycle_outcome(&raw);
+        record_lifecycle_decision_metric(
+            ctx,
+            outcome,
+            &lifecycle_first_word(&raw),
+            lifecycle_decision_choice(&decision),
+            "ok",
+        );
+        Ok(decision)
     }
 }
 
@@ -398,46 +574,72 @@ fn deterministic_floor(base_urgency: f64, failure_count: u32) -> OrientJudgment 
 
 /// Parse recipe output for a lifecycle decision variant as the first word.
 /// Case-insensitive match. Defaults to `ContinueSkipping`.
+///
+/// Thin decision-only wrapper over [`parse_lifecycle_outcome`]. Retained as
+/// the documented parser entry point used by the operator replay runbook
+/// (`docs/howto/diagnose-brain-decision-parse-failures.md`, Step 3) and the
+/// `parse_*_from_text` reference trio. Production now routes through
+/// [`parse_lifecycle_outcome`] to capture the parse outcome for the
+/// `brain_lifecycle_decision` metric, so in non-test builds this wrapper has
+/// no internal caller.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_lifecycle_from_text(text: &str) -> EngineerLifecycleDecision {
+    parse_lifecycle_outcome(text).0
+}
+
+/// Parse recipe output into a lifecycle decision AND a
+/// [`LifecycleParseOutcome`] classification.
+///
+/// The outcome distinguishes a genuinely parsed decision (`Parsed`) from the
+/// two distinct ways the parser falls back to `ContinueSkipping`:
+/// `DefaultEmpty` (no text at all) and `DefaultMalformed` (text present but
+/// the first word is not a known variant). This is what makes the
+/// parse-failure rate measurable per issue #2419 — before this split, a real
+/// `continue_skipping` decision and a silent fallback were indistinguishable.
+pub fn parse_lifecycle_outcome(text: &str) -> (EngineerLifecycleDecision, LifecycleParseOutcome) {
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return default_continue_skipping();
+        return (
+            default_continue_skipping(),
+            LifecycleParseOutcome::DefaultEmpty,
+        );
     }
     let first_word = trimmed.split_whitespace().next().unwrap_or("");
+    let rest = || truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
 
     // Use eq_ignore_ascii_case instead of to_ascii_lowercase() — avoids a
     // heap-allocated String on every call.
-    if first_word.eq_ignore_ascii_case("continue_skipping") {
-        let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
-        EngineerLifecycleDecision::ContinueSkipping { rationale: rest }
+    let decision = if first_word.eq_ignore_ascii_case("continue_skipping") {
+        EngineerLifecycleDecision::ContinueSkipping { rationale: rest() }
     } else if first_word.eq_ignore_ascii_case("deprioritize") {
-        let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
-        EngineerLifecycleDecision::Deprioritize { rationale: rest }
+        EngineerLifecycleDecision::Deprioritize { rationale: rest() }
     } else if first_word.eq_ignore_ascii_case("consider_self_update") {
-        let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
-        EngineerLifecycleDecision::ConsiderSelfUpdate { rationale: rest }
+        EngineerLifecycleDecision::ConsiderSelfUpdate { rationale: rest() }
     } else if first_word.eq_ignore_ascii_case("reclaim_and_redispatch") {
-        let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
         EngineerLifecycleDecision::ReclaimAndRedispatch {
-            rationale: rest,
+            rationale: rest(),
             redispatch_context: String::new(),
         }
     } else if first_word.eq_ignore_ascii_case("open_tracking_issue") {
-        let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
+        let rest = rest();
         EngineerLifecycleDecision::OpenTrackingIssue {
             title: "OODA stuck".to_string(),
             body: rest.clone(),
             rationale: rest,
         }
     } else if first_word.eq_ignore_ascii_case("mark_goal_blocked") {
-        let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
+        let rest = rest();
         EngineerLifecycleDecision::MarkGoalBlocked {
             reason: rest.clone(),
             rationale: rest,
         }
     } else {
-        default_continue_skipping()
-    }
+        return (
+            default_continue_skipping(),
+            LifecycleParseOutcome::DefaultMalformed,
+        );
+    };
+    (decision, LifecycleParseOutcome::Parsed)
 }
 
 fn default_continue_skipping() -> EngineerLifecycleDecision {
@@ -445,6 +647,82 @@ fn default_continue_skipping() -> EngineerLifecycleDecision {
         rationale: format!(
             "{LIFECYCLE_ADAPTER_TAG}: no decision keyword found in recipe output; defaulting to continue_skipping"
         ),
+    }
+}
+
+/// The first whitespace-delimited token of `text`, bounded for metric storage.
+fn lifecycle_first_word(text: &str) -> String {
+    truncate(
+        text.split_whitespace().next().unwrap_or(""),
+        METRIC_FIRST_WORD_CHARS,
+    )
+}
+
+/// The snake_case `choice` tag of a decision, matching the
+/// `EngineerLifecycleDecision` serde representation. Used as the `decision`
+/// field of the metric context.
+fn lifecycle_decision_choice(decision: &EngineerLifecycleDecision) -> &'static str {
+    match decision {
+        EngineerLifecycleDecision::ContinueSkipping { .. } => "continue_skipping",
+        EngineerLifecycleDecision::ReclaimAndRedispatch { .. } => "reclaim_and_redispatch",
+        EngineerLifecycleDecision::Deprioritize { .. } => "deprioritize",
+        EngineerLifecycleDecision::OpenTrackingIssue { .. } => "open_tracking_issue",
+        EngineerLifecycleDecision::MarkGoalBlocked { .. } => "mark_goal_blocked",
+        EngineerLifecycleDecision::ConsiderSelfUpdate { .. } => "consider_self_update",
+    }
+}
+
+/// Build the JSON `context` payload for the `brain_lifecycle_decision` metric.
+///
+/// Separated from the I/O so the payload shape can be unit-tested without
+/// touching the real `metrics.jsonl`.
+fn build_lifecycle_metric_context(
+    ctx: &EngineerLifecycleCtx,
+    outcome: LifecycleParseOutcome,
+    first_word: &str,
+    decision_choice: &str,
+    cause: &str,
+) -> String {
+    serde_json::json!({
+        "goal_id": ctx.goal_id,
+        "outcome": outcome.label(),
+        "is_parse_failure": outcome.is_parse_failure(),
+        "first_word": first_word,
+        "consecutive_skip_count": ctx.consecutive_skip_count,
+        "decision": decision_choice,
+        "cause": cause,
+    })
+    .to_string()
+}
+
+/// Record one `brain_lifecycle_decision` metric event (value `1.0`) per
+/// `decide_engineer_lifecycle` invocation so the parse-failure rate
+/// (`outcome != "parsed"`) is measurable from `metrics.jsonl` (issue #2419).
+///
+/// Best-effort: a metrics-write failure is logged, never propagated — the
+/// brain decision must not fail because telemetry could not be persisted.
+///
+/// No-op under `cfg!(test)` so unit tests never append to the operator's real
+/// `~/.simard/metrics/metrics.jsonl` (which would corrupt the very
+/// before/after measurement this metric exists to capture).
+fn record_lifecycle_decision_metric(
+    ctx: &EngineerLifecycleCtx,
+    outcome: LifecycleParseOutcome,
+    first_word: &str,
+    decision_choice: &str,
+    cause: &str,
+) {
+    let context = build_lifecycle_metric_context(ctx, outcome, first_word, decision_choice, cause);
+    if cfg!(test) {
+        return;
+    }
+    if let Err(e) = crate::self_metrics::record_metric(LIFECYCLE_DECISION_METRIC, 1.0, &context) {
+        tracing::warn!(
+            target: "simard::ooda_brain",
+            error = %e,
+            outcome = outcome.label(),
+            "failed to record brain_lifecycle_decision metric (decision unaffected)",
+        );
     }
 }
 
@@ -1841,6 +2119,253 @@ mod tests {
                 minutes.to_string()
             };
             assert_eq!(rendered, "42");
+        }
+    }
+
+    // ===================================================================
+    // Issue #2419 — outcome classification, JSON envelope extraction, and
+    // the brain_lifecycle_decision metric context.
+    // ===================================================================
+
+    mod issue_2419_tests {
+        use super::super::*;
+        use crate::ooda_brain::EngineerLifecycleCtx;
+        use std::path::PathBuf;
+
+        fn sample_ctx() -> EngineerLifecycleCtx {
+            EngineerLifecycleCtx {
+                goal_id: "fix-the-thing".into(),
+                goal_description: "desc".into(),
+                cycle_number: 7,
+                consecutive_skip_count: 12,
+                failure_count: 0,
+                worktree_path: PathBuf::from("/tmp/wt"),
+                worktree_mtime_secs_ago: 60,
+                sentinel_pid: Some(42),
+                last_engineer_log_tail: "tail".into(),
+                commits_behind: 0,
+                in_flight_engineer_count: 1,
+                minutes_since_last_update_attempt: u64::MAX,
+            }
+        }
+
+        // --- Outcome branch 1: parsed (happy-path keyword extraction) ---
+
+        #[test]
+        fn outcome_parsed_real_decision() {
+            let (decision, outcome) =
+                parse_lifecycle_outcome("reclaim_and_redispatch worktree idle 7h, log truncated");
+            assert_eq!(outcome, LifecycleParseOutcome::Parsed);
+            assert!(!outcome.is_parse_failure());
+            assert_eq!(outcome.label(), "parsed");
+            match decision {
+                EngineerLifecycleDecision::ReclaimAndRedispatch { rationale, .. } => {
+                    assert!(rationale.contains("idle"));
+                }
+                other => panic!("expected ReclaimAndRedispatch, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn outcome_parsed_for_every_variant() {
+            let cases = [
+                ("continue_skipping healthy", "continue_skipping"),
+                ("reclaim_and_redispatch wedged", "reclaim_and_redispatch"),
+                ("deprioritize stale", "deprioritize"),
+                ("open_tracking_issue panic", "open_tracking_issue"),
+                ("mark_goal_blocked no key", "mark_goal_blocked"),
+                ("consider_self_update behind", "consider_self_update"),
+            ];
+            for (text, choice) in cases {
+                let (decision, outcome) = parse_lifecycle_outcome(text);
+                assert_eq!(
+                    outcome,
+                    LifecycleParseOutcome::Parsed,
+                    "'{text}' must classify as parsed"
+                );
+                assert_eq!(lifecycle_decision_choice(&decision), choice);
+            }
+        }
+
+        // --- Outcome branch 2: default_empty ---
+
+        #[test]
+        fn outcome_default_empty_for_empty_string() {
+            let (decision, outcome) = parse_lifecycle_outcome("");
+            assert_eq!(outcome, LifecycleParseOutcome::DefaultEmpty);
+            assert!(outcome.is_parse_failure());
+            assert_eq!(outcome.label(), "default_empty");
+            assert!(matches!(
+                decision,
+                EngineerLifecycleDecision::ContinueSkipping { .. }
+            ));
+        }
+
+        #[test]
+        fn outcome_default_empty_for_whitespace_only() {
+            let (_, outcome) = parse_lifecycle_outcome("   \n\t  ");
+            assert_eq!(outcome, LifecycleParseOutcome::DefaultEmpty);
+        }
+
+        // --- Outcome branch 3: default_malformed ---
+
+        #[test]
+        fn outcome_default_malformed_for_unknown_first_word() {
+            let (decision, outcome) = parse_lifecycle_outcome("OK the engineer looks fine to me");
+            assert_eq!(outcome, LifecycleParseOutcome::DefaultMalformed);
+            assert!(outcome.is_parse_failure());
+            assert_eq!(outcome.label(), "default_malformed");
+            assert!(matches!(
+                decision,
+                EngineerLifecycleDecision::ContinueSkipping { .. }
+            ));
+        }
+
+        #[test]
+        fn outcome_default_malformed_for_text_mode_banner_regression() {
+            // This is the EXACT shape recipe-runner-rs emits to stdout in its
+            // default `text` mode. Before issue #2419 the brain parsed this
+            // banner directly, so the first word was always "Recipe:" → every
+            // decision silently defaulted. This regression test pins that the
+            // banner classifies as a parse failure (so the metric counts it),
+            // and the JSON-envelope fix below proves the real decision is
+            // recovered instead.
+            let banner = "Recipe: ooda-engineer-lifecycle (v1.0.0)\nSteps: 1\n\n\
+                          Recipe 'ooda-engineer-lifecycle': SUCCESS (0.0s)\n  \
+                          [completed] engineer-lifecycle-decision (0.0s)\n";
+            let (decision, outcome) = parse_lifecycle_outcome(banner);
+            assert_eq!(outcome, LifecycleParseOutcome::DefaultMalformed);
+            assert_eq!(lifecycle_first_word(banner), "Recipe:");
+            assert!(matches!(
+                decision,
+                EngineerLifecycleDecision::ContinueSkipping { .. }
+            ));
+        }
+
+        // --- Outcome branch 4: error (label + numerator semantics) ---
+
+        #[test]
+        fn outcome_error_label_and_failure_semantics() {
+            assert_eq!(LifecycleParseOutcome::Error.label(), "error");
+            assert!(LifecycleParseOutcome::Error.is_parse_failure());
+        }
+
+        // --- JSON envelope extraction (the root-cause fix) ---
+
+        #[test]
+        fn envelope_extraction_recovers_real_decision() {
+            // A realistic --output-format json envelope. The decision text the
+            // banner hid is in step_results[].output; extracting it and parsing
+            // yields a real (non-default) decision.
+            let json = r#"{
+                "recipe_name": "ooda-engineer-lifecycle",
+                "success": true,
+                "step_results": [
+                    {"step_id": "engineer-lifecycle-decision",
+                     "output": "reclaim_and_redispatch worktree idle 7h",
+                     "error": "", "duration": 0.01}
+                ],
+                "context": {"lifecycle_result": "reclaim_and_redispatch worktree idle 7h"}
+            }"#;
+            let extracted =
+                extract_recipe_decision_output(json.as_bytes(), LIFECYCLE_ADAPTER_TAG).unwrap();
+            assert_eq!(extracted, "reclaim_and_redispatch worktree idle 7h");
+            let (_, outcome) = parse_lifecycle_outcome(&extracted);
+            assert_eq!(
+                outcome,
+                LifecycleParseOutcome::Parsed,
+                "the JSON-envelope fix must recover a parseable decision"
+            );
+        }
+
+        #[test]
+        fn envelope_extraction_uses_final_step() {
+            // Multi-step recipe: the decision is the terminal step's output.
+            let json = r#"{
+                "success": true,
+                "step_results": [
+                    {"step_id": "pre", "output": "prelude noise", "error": "", "duration": 0.0},
+                    {"step_id": "decide", "output": "deprioritize stale goal", "error": "", "duration": 0.0}
+                ]
+            }"#;
+            let extracted =
+                extract_recipe_decision_output(json.as_bytes(), LIFECYCLE_ADAPTER_TAG).unwrap();
+            assert_eq!(extracted, "deprioritize stale goal");
+        }
+
+        #[test]
+        fn envelope_extraction_errors_on_success_false() {
+            let json = r#"{"success": false, "step_results": []}"#;
+            let err =
+                extract_recipe_decision_output(json.as_bytes(), LIFECYCLE_ADAPTER_TAG).unwrap_err();
+            assert!(matches!(err, SimardError::AdapterInvocationFailed { .. }));
+        }
+
+        #[test]
+        fn envelope_extraction_errors_on_empty_step_results() {
+            let json = r#"{"success": true, "step_results": []}"#;
+            let err =
+                extract_recipe_decision_output(json.as_bytes(), LIFECYCLE_ADAPTER_TAG).unwrap_err();
+            assert!(matches!(err, SimardError::AdapterInvocationFailed { .. }));
+        }
+
+        #[test]
+        fn envelope_extraction_errors_on_garbage() {
+            // The text-mode banner is NOT valid JSON — decoding must fail
+            // loudly (error outcome) rather than be mistaken for empty output.
+            let banner = b"Recipe: x\nSUCCESS\n";
+            let err = extract_recipe_decision_output(banner, LIFECYCLE_ADAPTER_TAG).unwrap_err();
+            assert!(matches!(err, SimardError::AdapterInvocationFailed { .. }));
+        }
+
+        // --- Metric context payload ---
+
+        #[test]
+        fn metric_context_has_required_fields() {
+            let ctx = sample_ctx();
+            let payload = build_lifecycle_metric_context(
+                &ctx,
+                LifecycleParseOutcome::Parsed,
+                "reclaim_and_redispatch",
+                "reclaim_and_redispatch",
+                "ok",
+            );
+            let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(v["goal_id"], "fix-the-thing");
+            assert_eq!(v["outcome"], "parsed");
+            assert_eq!(v["is_parse_failure"], false);
+            assert_eq!(v["first_word"], "reclaim_and_redispatch");
+            assert_eq!(v["consecutive_skip_count"], 12);
+            assert_eq!(v["decision"], "reclaim_and_redispatch");
+            assert_eq!(v["cause"], "ok");
+        }
+
+        #[test]
+        fn metric_context_marks_failures() {
+            let ctx = sample_ctx();
+            for outcome in [
+                LifecycleParseOutcome::DefaultEmpty,
+                LifecycleParseOutcome::DefaultMalformed,
+                LifecycleParseOutcome::Error,
+            ] {
+                let payload =
+                    build_lifecycle_metric_context(&ctx, outcome, "", "continue_skipping", "ok");
+                let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+                assert_eq!(v["outcome"], outcome.label());
+                assert_eq!(
+                    v["is_parse_failure"],
+                    true,
+                    "{} must count toward the parse-failure numerator",
+                    outcome.label()
+                );
+            }
+        }
+
+        #[test]
+        fn first_word_is_bounded() {
+            let huge = format!("{} rest of response", "z".repeat(500));
+            let fw = lifecycle_first_word(&huge);
+            assert!(fw.chars().count() <= METRIC_FIRST_WORD_CHARS + 1);
         }
     }
 }

@@ -55,6 +55,68 @@ fn record_and_query_metric() {
     });
 }
 
+/// Regression test (issue #2419): concurrent `record_metric` appends from many
+/// threads must not corrupt or drop records. Before the single-`write_all`
+/// fix, `writeln!` on the unbuffered `O_APPEND` file emitted two `write()`
+/// syscalls per record (body, then newline), so concurrent writers interleaved
+/// into glued/blank lines that the line-by-line readers silently dropped —
+/// undercutting the `brain_lifecycle_decision` parse-failure measurement this
+/// metric exists to provide. With the fix, every record is one atomic append.
+///
+/// Uses the `cognitive_memory` serial key (not a bare `#[serial]`): this test
+/// mutates `HOME` via `with_temp_home`, so it must share the same lock as every
+/// other `HOME`/state-root test to keep env writes off-limits during concurrent
+/// env reads (see `test_support::serial_guard`). A bare `#[serial]` would run on
+/// a *different* lock, letting this test's 2000 appends race other tests' temp
+/// `HOME` and pollute their metrics files.
+#[test]
+#[serial(cognitive_memory)]
+fn concurrent_record_metric_no_corruption_or_loss() {
+    with_temp_home(|| {
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 250;
+
+        let mut handles = Vec::with_capacity(THREADS);
+        for t in 0..THREADS {
+            handles.push(std::thread::spawn(move || {
+                for i in 0..PER_THREAD {
+                    // Non-trivial context (stringified JSON) mirrors the real
+                    // brain_lifecycle_decision payload shape and width.
+                    let ctx = format!(
+                        r#"{{"thread":{t},"seq":{i},"outcome":"parsed","goal_id":"g-{t}-{i}"}}"#
+                    );
+                    record_metric("brain_lifecycle_decision", 1.0, &ctx).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Every record must be present and parseable — no glued/dropped lines.
+        let entries = query_metrics("brain_lifecycle_decision", None).unwrap();
+        assert_eq!(
+            entries.len(),
+            THREADS * PER_THREAD,
+            "all concurrent records must survive intact (no corruption/loss)"
+        );
+
+        // The raw file must contain no blank/glued lines either: every
+        // non-empty line parses as exactly one MetricEntry.
+        let raw = fs::read_to_string(metrics_file_path()).unwrap();
+        let mut clean = 0usize;
+        for line in raw.lines() {
+            if line.trim().is_empty() {
+                panic!("found a blank line — indicates an interleaved append");
+            }
+            serde_json::from_str::<MetricEntry>(line)
+                .expect("every line must be a single well-formed MetricEntry");
+            clean += 1;
+        }
+        assert_eq!(clean, THREADS * PER_THREAD);
+    });
+}
+
 #[test]
 #[serial(cognitive_memory)]
 fn query_metrics_with_since_filter() {
