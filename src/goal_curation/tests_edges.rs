@@ -1,4 +1,4 @@
-//! TDD (issue #2405, RED): the typed goal-graph edge model.
+//! Tests (issue #2405): the typed goal-graph edge model.
 //!
 //! These tests pin the **durable contract** for goal-decomposition edges and
 //! prove that a parent→child edge written through
@@ -6,8 +6,7 @@
 //! cognitive-memory graph — the acceptance bar that the edges are *real and
 //! queryable*, not a stub.
 //!
-//! They are written **before** the implementation exists, so this module is
-//! expected to FAIL TO COMPILE until the increment lands:
+//! They pin the implemented surface:
 //!   - `super::types::{GoalEdge, GoalEdgeType, GoalNode}`
 //!   - `super::edges::{write_edge, children_of, edges_of_type, parse_goal_edge}`
 //!

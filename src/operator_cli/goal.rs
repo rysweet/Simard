@@ -667,7 +667,7 @@ mod tests {
         assert!(msg.contains("goal id"), "expected 'goal id' in: {msg}");
     }
 
-    // ---- decompose verb (issue #2405, RED) --------------------------------
+    // ---- decompose verb (issue #2405) -------------------------------------
 
     #[test]
     fn goal_help_documents_decompose() {

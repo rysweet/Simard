@@ -1702,13 +1702,13 @@ fn progress_assessment_recipe_mirrors_dep_bump_gate() {
     );
 }
 
-// ── Goal-decomposition prompt content-pin (issue #2405, RED) ───────────────
+// ── Goal-decomposition prompt content-pin (issue #2405) ────────────────────
 //
 // The `decompose_goal` driver parses this prompt's output, so its wording is a
 // hard contract: the prompt must instruct the model to emit a bounded set of
 // sub-goals, each carrying a `done_criterion` and an optional `depends_on`
-// ordering. This test fails until the embedded fallback for
-// `goal_decomposition.md` exists (the prompt asset + `embedded_fallback` arm).
+// ordering. This guards the embedded fallback for `goal_decomposition.md`
+// (the prompt asset + `embedded_fallback` arm).
 
 #[test]
 fn goal_decomposition_prompt_is_embedded() {

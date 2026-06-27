@@ -1,8 +1,7 @@
-//! TDD (issue #2405, RED): `decompose_goal`, the parent-linkage data model,
+//! Tests (issue #2405): `decompose_goal`, the parent-linkage data model,
 //! and parent-progress roll-up.
 //!
-//! Written **before** the implementation, so this module is expected to FAIL
-//! TO COMPILE until the increment lands:
+//! These pin the behavior of the shipped increment:
 //!   - `ActiveGoal::parent_goal_id` + `ActiveGoal::with_parent`
 //!   - `super::decompose::{decompose_goal, GoalDecomposer, SubGoalProposal,
 //!      ChildPlacement, DecomposeOutcome}`

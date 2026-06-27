@@ -354,15 +354,13 @@ impl GoalEdge {
 
     /// Canonical compact JSON content:
     /// `{"from":..,"to":..,"edge_type":..}` (field order = declaration order).
+    ///
+    /// Serialization is infallible — every field is a `String` or a `Copy`
+    /// enum — so a failure here is a real invariant violation that must surface
+    /// loudly rather than be papered over with a hand-built (and unescaped)
+    /// fallback string.
     pub fn content(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| {
-            format!(
-                r#"{{"from":"{}","to":"{}","edge_type":"{}"}}"#,
-                self.from,
-                self.to,
-                self.edge_type.as_str()
-            )
-        })
+        serde_json::to_string(self).expect("GoalEdge (String/enum fields) always serializes")
     }
 }
 

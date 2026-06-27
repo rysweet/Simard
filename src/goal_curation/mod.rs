@@ -53,9 +53,8 @@ mod tests_save_with_removals;
 mod tests_snapshot_dedup;
 
 // Issue #2405: goal decomposition + the typed goal-graph edge model. These
-// are TDD (RED) tests written before the implementation; they pin the durable
-// edge format, the parent-linkage data model, `decompose_goal`, and the
-// parent-progress roll-up.
+// tests pin the durable edge format, the parent-linkage data model,
+// `decompose_goal`, and the parent-progress roll-up.
 #[cfg(test)]
 mod tests_decompose;
 #[cfg(test)]
