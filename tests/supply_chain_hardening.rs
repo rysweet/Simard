@@ -280,6 +280,28 @@ fn release_workflow_signs_artifacts_with_cosign_keyless() {
 }
 
 #[test]
+fn release_workflow_signs_the_sbom_not_only_the_tarball() {
+    // The SBOM is the dependency inventory consumers rely on to spot a malicious
+    // or vulnerable crate. Publishing it unsigned alongside a signed tarball
+    // leaves the one security-relevant artifact tamper-able, so the release must
+    // sign the SBOM with the same cosign keyless flow and publish its detached
+    // signature + certificate (#2261).
+    let release = release_yml();
+    assert!(
+        contains_ci(&release, ".cdx.json.sig"),
+        "release.yml (#2261) must publish a cosign signature for the SBOM \
+         (simard-<version>.cdx.json.sig), not only for the tarball — otherwise \
+         the dependency inventory ships with no integrity protection."
+    );
+    assert!(
+        contains_ci(&release, ".cdx.json.pem"),
+        "release.yml (#2261) must publish the SBOM signing certificate \
+         (simard-<version>.cdx.json.pem) so `cosign verify-blob` can check the \
+         SBOM the same way it checks the tarball."
+    );
+}
+
+#[test]
 fn release_integrity_doc_documents_keyless_verification() {
     let doc = read_required("docs/reference/release-integrity.md", "#2261");
     for anchor in [

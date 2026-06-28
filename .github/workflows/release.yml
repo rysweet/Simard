@@ -24,19 +24,20 @@ jobs:
         with:
           fetch-depth: 0
           submodules: false
+          # This job holds id-token:write + contents:write while `cargo build`
+          # runs ~every dependency's build script as arbitrary code. Don't leave
+          # the GITHUB_TOKEN persisted in .git/config where that code could read
+          # it: nothing here pushes via git (the release is cut with `gh release
+          # create`, which uses GH_TOKEN; the tag-existence check is a local
+          # `git rev-parse`), so the persisted credential is pure attack surface.
+          persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Cache cargo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-
+      # Resolve the version and whether its tag already exists BEFORE any
+      # toolchain install or cache restore. Most pushes to main don't bump the
+      # version, so the tag already exists and every build step below is a
+      # no-op. Gating the Rust toolchain install and the (multi-GB `target`)
+      # cache restore on `exists == 'false'` skips that wasted setup on those
+      # runs instead of paying for it only to short-circuit immediately after.
       - name: Extract version
         id: version
         run: |
@@ -52,6 +53,20 @@ jobs:
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Install Rust toolchain
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release binary
         if: steps.tag_check.outputs.exists == 'false'
@@ -135,6 +150,25 @@ jobs:
           test -s simard-linux-x86_64.tar.gz.sig || { echo "::error::cosign produced no signature"; exit 1; }
           test -s simard-linux-x86_64.tar.gz.pem || { echo "::error::cosign produced no certificate"; exit 1; }
 
+      - name: Sign SBOM (cosign keyless)
+        if: steps.tag_check.outputs.exists == 'false'
+        # The SBOM is the dependency inventory consumers rely on to spot a
+        # malicious or vulnerable crate; publishing it unsigned next to a signed
+        # tarball would leave the one security-relevant artifact tamper-able. Sign
+        # it with the SAME keyless identity as the tarball. Runs in the repo root,
+        # where cargo-cyclonedx wrote simard-<version>.cdx.json.
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          SBOM="simard-${VERSION}.cdx.json"
+          cosign sign-blob --yes \
+            --output-signature "${SBOM}.sig" \
+            --output-certificate "${SBOM}.pem" \
+            "$SBOM"
+          # Fail-closed: both the SBOM signature and certificate must exist.
+          test -s "${SBOM}.sig" || { echo "::error::cosign produced no SBOM signature"; exit 1; }
+          test -s "${SBOM}.pem" || { echo "::error::cosign produced no SBOM certificate"; exit 1; }
+
       - name: Create release
         if: steps.tag_check.outputs.exists == 'false'
         env:
@@ -156,20 +190,32 @@ jobs:
 
           ## Verify (cosign keyless + SBOM)
 
-          This release is signed with cosign (keyless) and ships a CycloneDX SBOM.
+          This release is signed with cosign (keyless) and ships a CycloneDX SBOM
+          that is **also** signed with the same identity.
           See [Release integrity](https://github.com/rysweet/Simard/blob/main/docs/reference/release-integrity.md)
           for full verification steps.
 
           \`\`\`bash
+          # Verify the binary tarball:
           cosign verify-blob \\
             --certificate simard-linux-x86_64.tar.gz.pem \\
             --signature   simard-linux-x86_64.tar.gz.sig \\
-            --certificate-identity-regexp 'https://github.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main' \\
+            --certificate-identity-regexp '^https://github\.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main$' \\
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\
             simard-linux-x86_64.tar.gz
+
+          # Verify the SBOM the same way (proves the dependency inventory is untampered):
+          cosign verify-blob \\
+            --certificate simard-${{ steps.version.outputs.version }}.cdx.json.pem \\
+            --signature   simard-${{ steps.version.outputs.version }}.cdx.json.sig \\
+            --certificate-identity-regexp '^https://github\.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main$' \\
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\
+            simard-${{ steps.version.outputs.version }}.cdx.json
           \`\`\`" \
             target/release/simard-linux-x86_64.tar.gz \
             target/release/simard-linux-x86_64.tar.gz.sha256 \
             target/release/simard-linux-x86_64.tar.gz.sig \
             target/release/simard-linux-x86_64.tar.gz.pem \
-            "simard-${VERSION}.cdx.json"
+            "simard-${VERSION}.cdx.json" \
+            "simard-${VERSION}.cdx.json.sig" \
+            "simard-${VERSION}.cdx.json.pem"
