@@ -24,8 +24,8 @@ pub(crate) struct InstallReport {
 }
 
 /// Private temp directory the self-update flow downloads and extracts into.
-/// Shared by `download_to_temp` (which fills it) and `download_and_replace`
-/// (which discovers the extracted binary set inside it).
+/// Filled by `download_and_extract`; both `download_to_temp` and
+/// `download_and_replace` then discover the extracted binary set inside it.
 fn update_tmp_dir() -> PathBuf {
     std::env::temp_dir().join(format!("simard-update-{}", std::process::id()))
 }
@@ -46,13 +46,10 @@ pub(crate) fn download_and_replace(
         .ok_or("Cannot determine install directory from current executable")?
         .to_path_buf();
 
-    // Download → verify checksum → extract into the private temp dir. The
-    // returned path is the main `simard` candidate; the rest of the extracted
-    // tree stays in the temp dir for discovery below.
-    let _main_candidate = download_to_temp(url, version)?;
-    let tmp_dir = update_tmp_dir();
-
-    // Discover EVERY executable in the extracted tree (main + auxiliaries).
+    // Download → verify checksum → extract into the private temp dir, then
+    // discover EVERY executable in the extracted tree (main + auxiliaries) with
+    // a single filesystem walk.
+    let tmp_dir = download_and_extract(url, version)?;
     let binaries = find_all_binaries_in_dir(&tmp_dir)?;
 
     println!("Replacing {} binary(ies)...", binaries.len());
@@ -78,16 +75,12 @@ pub(crate) fn download_and_replace(
     Ok(report)
 }
 
-/// Download and extract the simard release into a temp directory, returning
-/// the path to the extracted **main** `simard` binary. Used by both
-/// `download_and_replace` (which then installs the full binary set) and the
-/// safe-update flow (which copies the main candidate to an install path and
-/// runs a pre-test before swapping). Its signature is a hard contract: it
-/// must keep returning a single `PathBuf` to the main candidate.
-pub(crate) fn download_to_temp(
-    url: &str,
-    version: &str,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
+/// Download → verify checksum → extract the release into the private temp dir,
+/// returning the populated temp directory. Shared by `download_to_temp` and
+/// `download_and_replace` so the download/verify/extract work runs once and the
+/// binary-discovery walk that follows it also runs exactly once per update
+/// (previously `download_and_replace` walked the extracted tree twice).
+fn download_and_extract(url: &str, version: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let tmp_dir = update_tmp_dir();
     fs::create_dir_all(&tmp_dir)?;
     let archive_path = tmp_dir.join("simard.tar.gz");
@@ -171,6 +164,19 @@ pub(crate) fn download_to_temp(
         return Err("Extraction failed".into());
     }
 
+    Ok(tmp_dir)
+}
+
+/// Download and extract the simard release into a temp directory, returning
+/// the path to the extracted **main** `simard` binary. Used by the
+/// `safe-update` flow (which copies the main candidate to an install path and
+/// runs a pre-test before swapping). Its signature is a hard contract: it must
+/// keep returning a single `PathBuf` to the main candidate.
+pub(crate) fn download_to_temp(
+    url: &str,
+    version: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let tmp_dir = download_and_extract(url, version)?;
     // Return the main `simard` candidate (discovery guarantees it sorts first).
     let binaries = find_all_binaries_in_dir(&tmp_dir)?;
     binaries
