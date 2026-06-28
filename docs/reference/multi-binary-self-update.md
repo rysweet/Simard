@@ -113,26 +113,36 @@ At the time of writing the producer packages these Cargo `bin` targets:
 | `simard-engineer-step` | Engineer-step helper | Auxiliary — best-effort |
 | `simard-self-improve-recipe` | Self-improve recipe driver | Auxiliary — best-effort |
 | `simard-engineer-loop-recipe` | Engineer-loop recipe driver | Auxiliary — best-effort |
-| `simard-audit-pass01` | Audit pass-1 tool | Auxiliary — best-effort |
-| `simard-audit-dashboard` | Audit dashboard | Auxiliary — best-effort |
 | `simard_operator_probe` | Operator self-probe helper (note: underscore-named) | Auxiliary — best-effort |
 
+> **Feature-gated targets are NOT shipped.** Cargo `bin` targets carrying a
+> non-default `required-features` (for example `simard-audit-pass01` and
+> `simard-audit-dashboard`, gated behind the `dashboard-audit` feature) are
+> **excluded** from the release tarball, because the release job builds with the
+> default feature set and never compiles them. The producer filter drops any
+> target whose `required-features` is non-empty (see
+> [Release packaging contract](#release-packaging-contract)). To ship such a
+> tool, the release build must first enable its feature.
+
 The table is **illustrative, not authoritative**. The authoritative set is
-whatever `cargo metadata` reports as `bin` targets at release time (see
+whatever `cargo metadata` reports as `bin` targets *buildable with the release
+feature set* at release time (see
 [Release packaging contract](#release-packaging-contract)) and, on the consumer
 side, whatever executables the downloaded tarball contains. `simard` is the only
 name with special status: it is the **main** binary and its replacement is
 fatal. Every other extracted executable is **auxiliary** and best-effort.
 
 > **Design note — which targets ship.** The `cargo metadata` enumeration ships
-> **every** `bin` target, including helper/probe binaries such as
-> `simard_operator_probe` (and any future test-only or internal helper bins). If
-> some targets should not be distributed to operators, the producer `jq` filter
-> must gain an explicit exclude list — discovery alone will ship them. Decide
-> the ship/no-ship policy as part of this change rather than leaving it implicit.
-> Note also that target names are not uniformly hyphenated (`simard_operator_probe`
-> uses underscores), so the consumer's basename match and de-duplication must be
-> name-agnostic.
+> every `bin` target **whose `required-features` are satisfied by the release
+> build**, including helper/probe binaries such as `simard_operator_probe` (and
+> any future test-only or internal helper bins). Targets gated behind a
+> non-default feature are filtered out (see the
+> [Release packaging contract](#release-packaging-contract)). If some
+> default-built targets should additionally not be distributed to operators, the
+> producer `jq` filter must gain an explicit exclude list — discovery alone will
+> ship them. Note also that target names are not uniformly hyphenated
+> (`simard_operator_probe` uses underscores), so the consumer's basename match
+> and de-duplication must be name-agnostic.
 
 ### Install location
 
@@ -166,11 +176,17 @@ What changed is the breadth of the swap and the order of operations:
 2. **Download** the platform tarball over https-only transport.
 3. **Verify** the tarball against the published `.sha256` **before** extraction.
    A mismatch aborts and cleans up the temp directory.
-4. **Extract** into a private temp directory with zip-slip defenses.
-5. **Discover** every executable in the extracted tree.
-6. **Install** the main binary (fatal on error), then each auxiliary binary
+4. **Authenticate** the tarball's cosign keyless signature against this repo's
+   pinned release-workflow identity **before** extraction (defense-in-depth
+   beyond the same-origin checksum). A present-but-invalid signature aborts; an
+   absent signature or a host without `cosign` warns and continues. See
+   [R8](#security-model).
+5. **Extract** into a private, exclusively-created temp directory with zip-slip
+   defenses and `--no-same-owner --no-same-permissions`.
+6. **Discover** every executable in the extracted tree.
+7. **Install** the main binary (fatal on error), then each auxiliary binary
    (best-effort).
-7. **Confirm** each installed binary is present on disk — a post-install
+8. **Confirm** each installed binary is present on disk — a post-install
    existence check over exactly what discovery installed; there is no external
    "expected" manifest, since the set is dynamic — then print the
    `InstallReport`.
@@ -347,7 +363,7 @@ daemon.
 ## Security model
 
 The multi-binary discovery widens the attack surface (more files written from a
-downloaded archive), so the path is hardened on three axes. All apply to the
+downloaded archive), so the path is hardened on several axes. All apply to the
 main binary too — they are not aux-only.
 
 | # | Control | What it prevents |
@@ -355,9 +371,11 @@ main binary too — they are not aux-only.
 | R1 | **SHA-256 verification before extraction.** Compute the digest of the downloaded tarball, compare to the published `.sha256`, abort + clean up on mismatch. | Unauthenticated / tampered code execution. Previously the producer published the `.sha256` sidecar but the consumer never fetched **or** verified it (the self-update code had no checksum logic at all). |
 | R2 | **Zip-slip defense.** Install by **basename only** into the trusted install dir; canonicalize within the install root; reject any entry that is an absolute path, contains `..`, or is a symlink. | A malicious archive writing outside the install directory or following a symlink to overwrite an arbitrary file. |
 | R3 | **https-only transport.** Enforce an `https://` URL and, because the download follows redirects (`curl -L`), pass `curl --proto =https --proto-redir =https --tlsv1.2` so a redirect can never downgrade to `http://`. | Protocol downgrade and redirect-to-http MITM. |
-| R4 | **Scoped `chmod`.** `0o755` is applied only to executables chosen by discovery, never to arbitrary extracted files. | Granting execute to attacker-planted data files. |
+| R4 | **Scoped `chmod` + no archive-supplied perms.** `0o755` is applied only to executables chosen by discovery; extraction passes `tar --no-same-owner --no-same-permissions` so the archive can never restore its own ownership/permission bits. | Granting execute to attacker-planted data files; setuid/world-writable bits smuggled in via the tarball. |
 | R5 | **Strict asset matching.** Keep the exact platform-suffix + `.tar.gz` asset match when selecting the release asset. | Asset spoofing via look-alike asset names. |
 | R6 | **SHA-pinned Actions.** The release workflow keeps every GitHub Action pinned by commit SHA. | Supply-chain compromise of a tag-mutable action. |
+| R7 | **Private, exclusively-created temp dir.** The download/extract directory uses an unpredictable random suffix and is created with `create_dir` (fails if the path already exists) at mode `0700`, replacing the predictable `simard-update-<pid>` name created with `create_dir_all`. | A local attacker on a shared host pre-creating or symlinking the temp path to redirect the `curl -o` write or smuggle a rogue executable into discovery. |
+| R8 | **cosign keyless signature verification.** After R1, fetch the `.sig`/`.pem` sidecars and run `cosign verify-blob` pinning the certificate identity to this repo's `release.yml` workflow on `main` and the GitHub OIDC issuer. A present-but-invalid signature **aborts**; when `cosign` or the sidecars are absent the update warns and continues (the R1 checksum still applies). | A compromised release host swapping **both** the tarball and its same-origin `.sha256`: the attacker cannot forge a Fulcio certificate for this repo's workflow identity. |
 
 No secrets ever appear in logs or issue comments. The "try `sudo`, fail cleanly"
 behaviour is preserved — the update path never auto-escalates; it installs into
@@ -370,16 +388,29 @@ set** into each platform tarball, instead of only `simard`. Without this, the
 consumer refactor installs nothing extra.
 
 The "Package binary" step enumerates Cargo `bin` targets dynamically rather than
-naming a literal `simard`:
+naming a literal `simard`. It also filters out targets gated behind a non-default
+`required-features` (such as the `dashboard-audit` audit tools), because the
+release build uses the default feature set and never compiles them — packaging a
+never-built target would make `tar` fail:
 
 ```bash
-# Enumerate every [[bin]] target name from cargo metadata.
+set -euo pipefail
+# Enumerate the [[bin]] target names that the default release build produces.
 mapfile -t BIN_TARGETS < <(
   cargo metadata --no-deps --format-version 1 \
-    | jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name'
+    | jq -r '
+        .packages[].targets[]
+        | select(.kind[] == "bin")
+        | select((."required-features" // []) | length == 0)
+        | .name
+      '
 )
 
 cd target/release
+# Fail loudly if the build did not produce an expected binary.
+for bin in "${BIN_TARGETS[@]}"; do
+  [ -f "$bin" ] || { echo "::error::missing built binary: $bin"; exit 1; }
+done
 # Tar exactly the built binaries that exist for this platform.
 TARBALL="simard-${PLATFORM_SUFFIX}.tar.gz"
 tar czf "$TARBALL" "${BIN_TARGETS[@]}"
@@ -397,8 +428,9 @@ sha256sum "$TARBALL" > "$TARBALL.sha256"
 
 Contract guarantees:
 
-- The tarball contains **every** built `bin` target, with `simard` always
-  present.
+- The tarball contains **every** `bin` target buildable with the release
+  feature set (targets gated behind a non-default `required-features` are
+  excluded), with `simard` always present.
 - A `<asset>.tar.gz.sha256` sidecar is published next to every tarball (already
   true; the consumer now verifies it — see [R1](#security-model)).
 - The platform suffix (`linux-x86_64`, `linux-aarch64`, `macos-x86_64`,
