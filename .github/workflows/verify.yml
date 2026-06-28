@@ -196,6 +196,61 @@ jobs:
       - name: Run cargo audit
         run: cargo audit
 
+  cargo-deny:
+    # Supply-chain policy gate (issue #2260): advisories + licenses + bans +
+    # sources, enforced by the repo-root deny.toml. Lockfile-only — it reads
+    # Cargo.lock + deny.toml and never compiles the crate, so it is a separate
+    # job (not folded into the memory-sensitive pre-commit build) and never
+    # writes the shared rust-cache.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install cargo-deny
+        # SHA pins the per-tool `cargo-deny` tag of taiki-e/install-action
+        # (same pattern as the cargo-audit job above). The `tool:` input also
+        # pins the cargo-deny VERSION: deny.toml uses the 0.19.x advisories
+        # schema, so an unpinned bump could reinterpret the policy.
+        uses: taiki-e/install-action@4e4e4d1450e58bef95d6f394ac20d46ad7d24ebf # cargo-deny
+        with:
+          tool: cargo-deny@0.19.9
+
+      - name: Run cargo deny check
+        # `--locked` is a top-level flag (before the subcommand): it fails on a
+        # dirty Cargo.lock so the check always reflects the committed graph.
+        run: cargo deny --locked check
+
+  cargo-vet:
+    # Transitive-dependency trust gate (issue #2262): every third-party crate
+    # in the locked graph must be covered by an audit (imported or local) or an
+    # explicit exemption recorded under supply-chain/. Lockfile-only, like the
+    # cargo-audit and cargo-deny jobs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install cargo-vet
+        # SHA pins the per-tool `cargo-vet` tag of taiki-e/install-action.
+        uses: taiki-e/install-action@7b51dc7487ebab790625f16f2c5f541029a3b0ab # cargo-vet
+        with:
+          tool: cargo-vet
+
+      - name: Run cargo vet
+        # `--locked` fails on a dirty Cargo.lock; the baseline under
+        # supply-chain/ records the current graph as exemptions so this is
+        # green on day one and ratchets forward.
+        run: cargo vet --locked
+
   install-real:
     runs-on: ubuntu-latest
     timeout-minutes: 120

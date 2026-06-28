@@ -1,0 +1,114 @@
+# cargo-deny policy for Simard — supply-chain guardrail (issue #2260).
+#
+# This file is the single source of truth for the `cargo-deny` CI job in
+# .github/workflows/verify.yml. It enforces four independent policies:
+# advisories, licenses, bans (duplicate/wildcard versions), and sources
+# (which registries / git remotes a crate may come from). A new, un-reviewed
+# dependency, license, or source fails CI rather than entering the graph
+# silently.
+#
+# Schema: cargo-deny 0.19.x (pinned in the CI job). Run `cargo deny --locked
+# check` locally to reproduce the CI gate.
+
+# ── Graph scope ──────────────────────────────────────────────────────────────
+[graph]
+# Only Linux x86_64 ships today; scope the check to the target the release
+# binary is built for so platform-specific crates elsewhere don't skew bans.
+# Default features only — this mirrors the shipped `cargo build --release`
+# binary; the optional `dashboard-audit` feature (headless_chrome) is opt-in
+# and not part of the released artifact.
+targets = [{ triple = "x86_64-unknown-linux-gnu" }]
+
+# ── Advisories (RUSTSEC) ─────────────────────────────────────────────────────
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Yanked crate versions always fail — they signal a withdrawn release.
+yanked = "deny"
+# Unmaintained advisories that reach the graph only transitively are surfaced
+# in the report but do not fail CI; an unmaintained crate pulled in *directly*
+# by the workspace would fail and force an explicit decision.
+unmaintained = "workspace"
+# Every entry below is a security-sensitive exemption: it names the advisory
+# ID, says why it is not exploitable in Simard's usage, and links upstream.
+# The acceptance criterion is "no remaining unmitigated advisories" — i.e.
+# every advisory that cargo-deny *fails* on (vulnerabilities, yanked) is either
+# resolved or carries a justified ignore here. The transitive unmaintained /
+# unsound advisories reported by `cargo audit` (paste, proc-macro-error2, git2,
+# lru) are non-failing — unmaintained is gated to "workspace" scope above, and
+# cargo-deny does not fail on informational `unsound` advisories — so they are
+# tracked for an upstream bump (see docs/reference/dependency-trust-policy.md)
+# rather than ignored per-ID here, keeping them visible in `cargo audit`.
+ignore = [
+    # rsa — Marvin Attack (timing side-channel). NO fixed upstream release.
+    # A *vulnerability*, so it fails by default and must be exempted explicitly.
+    # Transitive: rustyclawd-tools -> octocrab -> jsonwebtoken -> rsa, used only
+    # to VERIFY GitHub-issued JWTs, never to decrypt attacker-controlled
+    # ciphertext, so the timing oracle is unreachable here. Mirrors the same
+    # exemption in .cargo/audit.toml. Tracked:
+    # https://github.com/RustCrypto/RSA/issues/19
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing side-channel; no upstream fix; transitive JWT-verify only (rustyclawd-tools->octocrab->jsonwebtoken). Tracked: https://github.com/RustCrypto/RSA/issues/19" },
+]
+
+# ── Licenses ─────────────────────────────────────────────────────────────────
+[licenses]
+# Permissive OSI allowlist. A dependency under any license outside this set —
+# or with no license at all — fails `cargo deny check licenses`.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unlicense",
+]
+# Confidence required for a license to be detected from text (0.0-1.0).
+confidence-threshold = 0.8
+# Per-crate exceptions. The global allowlist stays strictly permissive; a
+# copyleft or otherwise non-permissive crate is allowed ONLY by an explicit,
+# justified, per-crate exception here so it stays visible in every CI run —
+# the licensing analogue of the advisory `ignore` list above.
+#
+# html2md is GPL-3.0-or-later (copyleft). It reaches the graph transitively as
+# a *direct* dependency of the first-party git crate `rustyclawd-tools`
+# (html2md -> rustyclawd-tools -> simard) and is used only for server-side
+# HTML->Markdown conversion of fetched content. Patching it out is upstream
+# (rustyclawd-tools) work and tracked there; until then it is allowed
+# explicitly rather than via the global allowlist. See the licensing note in
+# docs/reference/supply-chain-audit.md.
+[[licenses.exceptions]]
+crate = "html2md"
+allow = ["GPL-3.0-or-later"]
+
+# ── Bans (duplicate / wildcard / explicitly-blocked crates) ──────────────────
+[bans]
+# Duplicate versions of a crate bloat the tree; surface (warn) without blocking
+# a routine transitive bump.
+multiple-versions = "warn"
+# Wildcard ("*") version requirements are surfaced. Simard's own crates.io deps
+# pin exact "=" versions; the only wildcards are the four first-party git
+# dependencies, which carry no semver because they are pinned by exact `rev`
+# instead. Their integrity is enforced by exact-rev pins (Cargo.toml) plus the
+# [sources] git allowlist below, so this is "warn", not "deny".
+wildcards = "warn"
+# No crate is hard-banned today. This is how a crate would be blocked outright
+# if a future advisory had no acceptable mitigation.
+deny = []
+
+# ── Sources (registries + git remotes) ───────────────────────────────────────
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Git sources are an explicit allowlist. Simard pins four crates by exact rev
+# across THREE upstream repositories (rustyclawd-core + rustyclawd-tools share
+# one). Any other git source — a typosquat or hijacked transitive dep — fails.
+allow-git = [
+    "https://github.com/rysweet/RustyClawd.git",
+    "https://github.com/rysweet/amplihack-memory-lib.git",
+    "https://github.com/rysweet/amplihack-rs.git",
+]
