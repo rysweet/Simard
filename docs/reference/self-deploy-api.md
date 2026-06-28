@@ -1,15 +1,17 @@
 ---
 title: Self-deploy API reference
 description: Reference for the reconciliation detector, build-from-source self-deploy orchestrator extensions, the DaemonRestarter abstraction, the dual protective backup, the engineer-orphan reaper, the simard self-health probe, and the UpdateConfig fields that govern self-deploy.
-last_updated: 2026-06-27
+last_updated: 2026-06-28
 review_schedule: as-needed
 owner: simard
 doc_type: reference
 status: implemented
 related:
   - ../concepts/reconcile-and-self-deploy.md
+  - ./self-deploy-source-prep.md
   - ../safe-self-update.md
   - ../howto/verify-and-roll-back-a-self-deploy.md
+  - ../howto/run-self-deploy-from-any-directory.md
   - ../reference/simard-cli.md
   - ../../src/self_deploy/mod.rs
   - ../../src/safe_update/mod.rs
@@ -199,15 +201,33 @@ the incoming daemon are never killed.
 pub struct SelfDeployOrchestrator {
     config: UpdateConfig,
     restarter: Box<dyn DaemonRestarter>,
-    // … memory handle, install path, target commit …
+    target_commit: String,
+    install_path: PathBuf,
+    /// `None` → legacy `build_canary` from the cwd checkout (unchanged).
+    /// `Some` → fetch + checkout the merged head, then build it into the warm
+    /// target dir. See self-deploy-source-prep.md.
+    build_source: Option<Box<dyn SelfDeploySourcePreparer>>,
 }
 
 impl SelfDeployOrchestrator {
+    /// Unchanged. `build_source = None` (legacy cwd build).
     pub fn new(
         config: UpdateConfig,
         restarter: Box<dyn DaemonRestarter>,
         target_commit: String,
         install_path: PathBuf,
+    ) -> Self;
+
+    /// Opt into the autonomous path: `build_candidate` (step 1) prepares the
+    /// merged head via the source preparer and builds it into the warm target
+    /// dir, so the deploy works from any cwd. Additive — see
+    /// self-deploy-source-prep.md.
+    pub fn with_source(
+        config: UpdateConfig,
+        restarter: Box<dyn DaemonRestarter>,
+        target_commit: String,
+        install_path: PathBuf,
+        source: Box<dyn SelfDeploySourcePreparer>,
     ) -> Self;
 
     /// Execute: build → gate → backup → drain → reap → swap → restart →
@@ -224,6 +244,15 @@ pub struct SelfDeployOutcome {
     pub restarter_kind: &'static str,
 }
 ```
+
+When wired with `with_source`, **step 1** (`build_candidate`) fetches and checks
+out the merged commit in a cwd-independent repo and builds it into a persistent
+warm target dir — so `simard self-deploy` works from any directory and is fast
+on repeat runs. The remaining steps and the rollback tail are unchanged; only
+the build *source* and *target dir* differ. See the
+[self-deploy source-prep reference](./self-deploy-source-prep.md) for the
+`SelfDeploySourcePreparer` trait, the warm-dir path helpers, and the security
+model.
 
 ## `simard self-health`
 
@@ -274,6 +303,19 @@ their defaults and meaning.
 | `health_probe_cycles` | `1` | OODA cycles observed for the "brains LLM-backed" probe. |
 | `memory_count_tolerance` | `0` | Allowed shortfall of `live_facts` below `baseline_facts` before the probe fails. |
 
+### Source & warm-dir environment
+
+The cwd-independent build source and the warm target directory are governed by
+environment, not `UpdateConfig`:
+
+| Variable | Effect | Default |
+| --- | --- | --- |
+| `SIMARD_SELF_DEPLOY_REPO` | Absolute path to an existing git work-tree to build from, bypassing the managed clone. | resolve via precedence (env → `~/.simard/self-deploy-src/` → clone) |
+| `SIMARD_STATE_ROOT` | Relocates `~/.simard/self-deploy-src/` and `~/.simard/self-deploy-target/`. | `~/.simard` |
+
+See the [self-deploy source-prep reference](./self-deploy-source-prep.md) for
+the path helpers, resolution precedence, and security model.
+
 ## Error variants
 
 Added to `SafeUpdateError`:
@@ -281,6 +323,9 @@ Added to `SafeUpdateError`:
 | Variant | Raised when |
 | --- | --- |
 | `BuildFailed { detail }` | The candidate `cargo build --release` failed. Install path untouched. |
+| `SourceResolveFailed { detail }` | (autonomous path) The cwd-independent source repo could not be resolved — invalid `SIMARD_SELF_DEPLOY_REPO`, undiscoverable origin, or a failed first-time clone. Pre-sequence abort; install path untouched. |
+| `FetchFailed { detail }` | (autonomous path) `git fetch origin` failed and the merged object is not cached locally. Pre-sequence abort. |
+| `CheckoutFailed { detail }` | (autonomous path) SHA validation or `git checkout --detach`/clean of the merged head failed. Pre-sequence abort. |
 | `GateFailed { gate, detail }` | A relaunch gate or the candidate `self-test` failed. |
 | `BackupFailed { which, detail }` | The memory **or** binary protective backup failed. No swap performed. |
 | `OrphanReapTimeout { pid }` | An engineer orphan survived SIGTERM + SIGKILL within the grace window. |
@@ -294,5 +339,7 @@ cycle report; none is swallowed.
 ## See also
 
 - [reconcile-and-self-deploy concept](../concepts/reconcile-and-self-deploy.md)
+- [Self-deploy source-prep reference](./self-deploy-source-prep.md)
+- [How to run self-deploy from any directory](../howto/run-self-deploy-from-any-directory.md)
 - [How to verify and roll back a self-deploy](../howto/verify-and-roll-back-a-self-deploy.md)
 - [Safe Self-Update](../safe-self-update.md)

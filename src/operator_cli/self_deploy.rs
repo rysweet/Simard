@@ -12,7 +12,7 @@
 //! `docs/howto/verify-and-roll-back-a-self-deploy.md`.
 
 use crate::self_deploy::{
-    DeploySource, GitDeploySource, ReconcileDetector, SelfDeployOrchestrator,
+    DeploySource, GitDeploySource, GitSourcePreparer, ReconcileDetector, SelfDeployOrchestrator,
     SystemdOrExecRestarter,
 };
 
@@ -103,9 +103,22 @@ fn report_drift(json: bool) -> Result<(), Box<dyn std::error::Error>> {
 /// Full operator self-deploy. Effectful: builds from source and restarts the
 /// daemon. Returns an error (loudly) on build/gate/backup/health failure; a
 /// failed health check rolls back to the previous binary.
+///
+/// Issue #2467: cwd-independent. The canonical source repo is resolved via
+/// `SIMARD_SELF_DEPLOY_REPO` → persistent `~/.simard/self-deploy-src` →
+/// clone-from-origin, then fetched so the merged head we read (and deploy) is
+/// the real one — regardless of the directory the operator runs from. The
+/// orchestrator then builds that fetched+checked-out merged commit into the
+/// warm target dir.
 fn run_self_deploy() -> Result<(), Box<dyn std::error::Error>> {
-    let source = GitDeploySource::new();
-    let drift = ReconcileDetector::new(GitDeploySource::new()).detect();
+    // Resolve the build source independent of the cwd, and fetch so
+    // `origin/main` (the merged head) is current before we read it.
+    let preparer = GitSourcePreparer::new();
+    let repo = preparer.resolve_repo()?;
+    preparer.fetch_origin(&repo)?;
+
+    let source = GitDeploySource::at(&repo);
+    let drift = ReconcileDetector::new(GitDeploySource::at(&repo)).detect();
     if !drift.needs_deploy {
         println!("simard self-deploy: running binary is already at merged head — nothing to do.");
         return Ok(());
@@ -120,11 +133,12 @@ fn run_self_deploy() -> Result<(), Box<dyn std::error::Error>> {
         drift.behind_commits
     );
 
-    let orchestrator = SelfDeployOrchestrator::new(
+    let orchestrator = SelfDeployOrchestrator::with_source(
         crate::safe_update::UpdateConfig::default(),
         Box::new(SystemdOrExecRestarter::new()),
         target_commit,
         install_path,
+        Box::new(GitSourcePreparer::new()),
     );
 
     match orchestrator.run() {

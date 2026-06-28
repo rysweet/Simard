@@ -18,6 +18,7 @@ use crate::safe_update::{SafeUpdateError, UpdateConfig};
 use super::backup::ProtectiveBackup;
 use super::health::SelfHealthReport;
 use super::restart::DaemonRestarter;
+use super::source_prep::SelfDeploySourcePreparer;
 
 /// Whether the candidate binary is built from merged source or downloaded as a
 /// tagged release. Self-deploy of a merged-but-unreleased `main` commit uses
@@ -167,6 +168,12 @@ pub struct SelfDeployOrchestrator {
     restarter: Box<dyn DaemonRestarter>,
     target_commit: String,
     install_path: PathBuf,
+    /// Optional cwd-independent source preparer (issue #2467). When `None`
+    /// (the default via [`SelfDeployOrchestrator::new`]) the legacy build path
+    /// is used; when `Some` (via [`SelfDeployOrchestrator::with_source`]) the
+    /// candidate is built from the fetched+checked-out merged commit into the
+    /// persistent warm target dir. Additive — preserves the existing contract.
+    build_source: Option<Box<dyn SelfDeploySourcePreparer>>,
 }
 
 impl SelfDeployOrchestrator {
@@ -181,7 +188,37 @@ impl SelfDeployOrchestrator {
             restarter,
             target_commit,
             install_path,
+            build_source: None,
         }
+    }
+
+    /// Like [`new`](Self::new) but injects a cwd-independent
+    /// [`SelfDeploySourcePreparer`] (issue #2467) so the candidate is built
+    /// from the fetched+checked-out merged commit — not the cwd HEAD — into the
+    /// persistent warm target dir. Additive: `new` is unchanged and the default
+    /// (no-source) build path is byte-for-byte preserved.
+    pub fn with_source(
+        config: UpdateConfig,
+        restarter: Box<dyn DaemonRestarter>,
+        target_commit: String,
+        install_path: PathBuf,
+        source: Box<dyn SelfDeploySourcePreparer>,
+    ) -> Self {
+        Self {
+            config,
+            restarter,
+            target_commit,
+            install_path,
+            build_source: Some(source),
+        }
+    }
+
+    /// The injected source preparer, if any. `None` for the legacy path.
+    // Used by the orchestrator tests to assert the additive `with_source` seam;
+    // `run()` consumes the field directly, so this accessor is test-only.
+    #[allow(dead_code)]
+    pub(crate) fn build_source(&self) -> Option<&dyn SelfDeploySourcePreparer> {
+        self.build_source.as_deref()
     }
 
     /// Execute: build → gate → backup → drain → reap → swap → restart →
@@ -195,6 +232,7 @@ impl SelfDeployOrchestrator {
             restarter: self.restarter.as_ref(),
             target_commit: &self.target_commit,
             install_path: &self.install_path,
+            build_source: self.build_source.as_deref(),
         };
         run_sequence(&effects)
     }
@@ -208,6 +246,10 @@ struct ProdDeployEffects<'a> {
     restarter: &'a dyn DaemonRestarter,
     target_commit: &'a str,
     install_path: &'a Path,
+    /// Cwd-independent source preparer (issue #2467). `Some` => build the
+    /// fetched+checked-out merged commit into the persistent warm target dir;
+    /// `None` => the legacy `build_canary` path (cwd checkout, cold temp dir).
+    build_source: Option<&'a dyn SelfDeploySourcePreparer>,
 }
 
 impl ProdDeployEffects<'_> {
@@ -226,6 +268,14 @@ impl ProdDeployEffects<'_> {
 
 impl DeployEffects for ProdDeployEffects<'_> {
     fn build_candidate(&self) -> Result<PathBuf, SafeUpdateError> {
+        // Issue #2467: with an injected source preparer, build the
+        // fetched+checked-out merged commit (the SHA `--check` reports) into the
+        // persistent warm target dir — cwd-independent and incremental. The
+        // legacy path (no source) is byte-for-byte preserved.
+        if let Some(source) = self.build_source {
+            let warm = super::source_prep::self_deploy_target_dir();
+            return super::source_prep::prepare_and_build(source, self.target_commit, &warm);
+        }
         crate::self_relaunch::build_canary(&crate::self_relaunch::RelaunchConfig::default())
             .map_err(|e| SafeUpdateError::BuildFailed {
                 detail: e.to_string(),

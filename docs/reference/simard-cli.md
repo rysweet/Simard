@@ -317,11 +317,20 @@ swap. Exit code is `0` when healthy, non-zero otherwise. See the
 Close the merged-but-not-running gap on demand (operator-only — the recipe never
 live-redeploys the daemon). With `--check` it reports deploy drift
 (running-vs-merged) and makes no changes; `--json` emits the `DeployDrift` JSON.
-Without `--check` it drives the full build-from-source self-deploy — build →
-gate → dual protective backup → drain → orphan-reap → atomic swap → systemd
-restart → health check, rolling back to the previous binary on a failed health
-check. See [reconcile-and-self-deploy](../concepts/reconcile-and-self-deploy.md)
-and [verify and roll back a self-deploy](../howto/verify-and-roll-back-a-self-deploy.md).
+Without `--check` it drives the full build-from-source self-deploy. It runs from
+**any working directory**: it first `git fetch`es and checks out the **merged
+head** (not the cwd's `HEAD`) in a cwd-independent source repo, then builds that
+commit into a persistent **warm** target dir (`~/.simard/self-deploy-target/`,
+incremental ~2–3 min) before the unchanged safety sequence — build → gate →
+dual protective backup → drain → orphan-reap → atomic swap → systemd restart →
+health check, rolling back to the previous binary on a failed health check. A
+source-resolution, fetch, or checkout failure aborts loudly *before* the daemon
+is touched (never a cwd-`HEAD` fallback). `SIMARD_SELF_DEPLOY_REPO` overrides the
+source repo. See
+[reconcile-and-self-deploy](../concepts/reconcile-and-self-deploy.md),
+[run self-deploy from any directory](../howto/run-self-deploy-from-any-directory.md),
+[self-deploy source-prep](self-deploy-source-prep.md), and
+[verify and roll back a self-deploy](../howto/verify-and-roll-back-a-self-deploy.md).
 
 ## Compatibility mapping
 

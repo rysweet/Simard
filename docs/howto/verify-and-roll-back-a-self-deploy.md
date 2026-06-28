@@ -9,6 +9,8 @@ status: implemented
 related:
   - ../concepts/reconcile-and-self-deploy.md
   - ../reference/self-deploy-api.md
+  - ../reference/self-deploy-source-prep.md
+  - ../howto/run-self-deploy-from-any-directory.md
   - ../safe-self-update.md
   - ../howto/inspect-and-clean-engineer-worktrees.md
 ---
@@ -40,8 +42,10 @@ Ask the daemon directly whether merged work is still un-deployed:
 simard self-health --json | jq '.probes.version_advanced'
 ```
 
-`"healthy": true` with `running` equal to (or ahead of) `target` means the
-running binary carries the latest merged commit. A `false` means there is deploy
+`"healthy": true` means the running binary's embedded SHA is **compatible** with
+the target — equal, or one is a case-insensitive prefix of the other (the
+abbreviation tolerance in `commits_compatible`); after a normal self-deploy the
+two full SHAs are exactly equal. A `false` means there is deploy
 drift — a merged self-change is not yet running. The reconciliation detector
 reports the same drift to the brain each cycle (see
 [`DeployDrift`](../reference/self-deploy-api.md#deploydrift)).
@@ -122,5 +126,7 @@ closed.
 ## See also
 
 - [reconcile-and-self-deploy concept](../concepts/reconcile-and-self-deploy.md)
+- [How to run self-deploy from any directory](../howto/run-self-deploy-from-any-directory.md)
 - [Self-deploy API reference](../reference/self-deploy-api.md)
+- [Self-deploy source-prep reference](../reference/self-deploy-source-prep.md)
 - [Safe Self-Update](../safe-self-update.md)

@@ -108,6 +108,29 @@ pub enum SafeUpdateError {
     RollbackFailed {
         detail: String,
     },
+
+    // --- Self-deploy source-preparation variants (issue #2467) ---------------
+    // These all abort *before* the load-bearing safety sequence starts (no
+    // backup/drain/swap has run), and are fail-loud: self-deploy must never
+    // silently fall back to building the cwd HEAD when it cannot make the
+    // merged commit available.
+    /// The canonical self-deploy source repo could not be resolved (a bad
+    /// `SIMARD_SELF_DEPLOY_REPO`, a missing persistent checkout, or a failed
+    /// clone). Aborts before the safety sequence; never builds cwd HEAD.
+    SourceResolveFailed {
+        detail: String,
+    },
+    /// `git fetch` of the canonical source repo failed. Aborts before the
+    /// safety sequence (loud; never a cwd-HEAD fallback).
+    FetchFailed {
+        detail: String,
+    },
+    /// Checking out the target merged commit failed (object missing or git
+    /// error). Aborts before the safety sequence (loud; never a cwd-HEAD
+    /// fallback).
+    CheckoutFailed {
+        detail: String,
+    },
 }
 
 impl Display for SafeUpdateError {
@@ -228,6 +251,18 @@ impl Display for SafeUpdateError {
             Self::RollbackFailed { detail } => write!(
                 f,
                 "self-deploy: ROLLBACK FAILED — critical operator alert: {detail}"
+            ),
+            Self::SourceResolveFailed { detail } => write!(
+                f,
+                "self-deploy: cannot resolve the source repo to build from (no cwd-HEAD fallback): {detail}"
+            ),
+            Self::FetchFailed { detail } => write!(
+                f,
+                "self-deploy: git fetch of the source repo failed (no cwd-HEAD fallback): {detail}"
+            ),
+            Self::CheckoutFailed { detail } => write!(
+                f,
+                "self-deploy: checkout of the target merged commit failed (no cwd-HEAD fallback): {detail}"
             ),
         }
     }
