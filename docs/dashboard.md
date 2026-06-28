@@ -51,6 +51,21 @@ classifier. This is required because the daemon emits human-readable lines with
 no level token of their own — without classification, selecting any level
 (even *Info*) matched nothing and the control appeared inert.
 
+### Overview tab: plain-English action details (#2358)
+
+The Overview tab's **Last Cycle Actions** and **Recent actions** lists show the
+daemon's raw `outcome.detail` strings, which are written for machines
+(`brain: continue_skipping (brain-error fallback: no decision keyword found…)`).
+Both lists now route those strings through the client-side
+`humanizeActionDetail` helper, which strips the `brain:` / `advance-goal:` /
+`<x>-brain:` prefixes, maps known decision tokens to plain phrases
+(`continue_skipping` → *continued without acting*), drops brain-fallback
+boilerplate, and applies the shared `BANNED_JARGON` strip — while preserving any
+`agent='engineer-…'` reference verbatim so the inline **Attach →** button still
+works. The transform is render-layer only: the canonical `brain` / `ooda_brain`
+strings, logs, and API responses are unchanged. See
+[Overview action-detail humanization](reference/dashboard-action-detail-humanization.md).
+
 ## Screenshots
 
 Overview — what the daemon did this cycle, top priority, recent actions, open PRs, system status, open issues:
@@ -179,7 +194,7 @@ Two complementary test layers enforce the Tab Identity Contract:
 Run with:
 
 ```bash
-cargo test -p simard_operator_commands_dashboard
+cargo test -p simard operator_commands_dashboard
 ```
 
 ### Python Playwright smoke test
@@ -229,3 +244,4 @@ The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (def
 - [Memory architecture](memory.md)
 - [Run the OODA daemon](howto/run-ooda-daemon.md)
 - [Dashboard E2E tests](reference/dashboard-e2e-tests.md)
+- [Overview action-detail humanization](reference/dashboard-action-detail-humanization.md)

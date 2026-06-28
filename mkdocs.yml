@@ -123,6 +123,7 @@ nav:
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     - Brain Introspection API: reference/brain-introspection-api.md
+    - Dashboard Action-Detail Humanization: reference/dashboard-action-detail-humanization.md
     - Supply-Chain Audit & Guardrails: reference/supply-chain-audit.md
     - Dependency Trust Policy: reference/dependency-trust-policy.md
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
