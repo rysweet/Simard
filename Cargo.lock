@@ -3892,7 +3892,7 @@ dependencies = [
 
 [[package]]
 name = "simard"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "amplihack-agent-eval",
  "amplihack-memory",

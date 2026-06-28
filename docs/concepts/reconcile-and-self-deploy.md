@@ -8,7 +8,9 @@ doc_type: concept
 related:
   - ../safe-self-update.md
   - ../reference/self-deploy-api.md
+  - ../reference/self-deploy-source-prep.md
   - ../howto/verify-and-roll-back-a-self-deploy.md
+  - ../howto/run-self-deploy-from-any-directory.md
   - ../howto/self-maintain-dependency-pins.md
   - deploy-aware-done-gate.md
   - ../reference/ooda-brain-parse-failure-record.md
@@ -121,10 +123,18 @@ flowchart TD
     RV -->|fails| CRIT[(critical operator alert)]
 ```
 
-1. **Build the candidate from merged source.** `self_relaunch::build_canary`
-   runs `cargo build --release` at the target commit in an isolated worktree. A
-   failed build **aborts loudly** and never touches the install path — no
-   half-deploy.
+1. **Build the candidate from merged source.** The operator self-deploy first
+   *prepares* a **cwd-independent** source checkout — `git fetch origin` then
+   `git checkout --detach <target commit>` in a persistent clone under
+   `~/.simard/self-deploy-src/` — and builds **that merged commit** (never the
+   cwd's `HEAD`) into a persistent **warm** target dir
+   (`~/.simard/self-deploy-target/`) so repeat builds are incremental
+   (~2–3 min instead of ~10+). A failed source resolution, fetch, checkout, or
+   build **aborts loudly** — before any backup or swap — and never touches the
+   install path. This is what makes `simard self-deploy` work from *any*
+   directory; see the
+   [self-deploy source-prep reference](../reference/self-deploy-source-prep.md)
+   and [how to run self-deploy from any directory](../howto/run-self-deploy-from-any-directory.md).
 2. **Gate the candidate.** The existing relaunch gates run in order — Smoke →
    UnitTest → GymBaseline → BridgeHealth — followed by the candidate's own
    `simard self-test`. Any failure aborts.
@@ -211,6 +221,8 @@ reconciliation detector chooses build-from-source whenever drift is against
 ## See also
 
 - [Self-deploy API reference](../reference/self-deploy-api.md) — types, config, CLI, JSON schemas.
+- [Self-deploy source-prep reference](../reference/self-deploy-source-prep.md) — cwd-independent fetch/checkout + warm target dir.
+- [How to run self-deploy from any directory](../howto/run-self-deploy-from-any-directory.md) — operator runbook for the autonomous path.
 - [How to verify and roll back a self-deploy](../howto/verify-and-roll-back-a-self-deploy.md) — operator runbook.
 - [Safe Self-Update](../safe-self-update.md) — the underlying drain/snapshot/swap orchestrator this extends.
 - [Deploy-aware done-gate](deploy-aware-done-gate.md) — the completion gate that consumes `DeployDrift`.
