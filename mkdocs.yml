@@ -116,6 +116,9 @@ nav:
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     - Brain Introspection API: reference/brain-introspection-api.md
+    - Supply-Chain Audit & Guardrails: reference/supply-chain-audit.md
+    - Dependency Trust Policy: reference/dependency-trust-policy.md
+    - Release Integrity (SBOM + Signing): reference/release-integrity.md
     # Hidden from nav until issue #1590 implementation lands:
     #   - reference/cognitive-memory-bridge-helpers.md
     #   - reference/goal-board-api.md
