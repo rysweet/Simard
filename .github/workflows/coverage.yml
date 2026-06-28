@@ -45,6 +45,29 @@ jobs:
           shared-key: simard-coverage
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
+          # Persist the stable lbug prebuilt outside the cargo registry/src tree
+          # so the version-pinned download happens once per cache lifetime, the
+          # same way verify.yml does (#2426 / #2423).
+          cache-directories: |
+            ~/.cache/simard-lbug-precommit
+
+      - name: Provision lbug native static library link path (#2426 / #2423)
+        # `cargo +nightly llvm-cov --workspace` runs a fresh build that compiles
+        # lbug and hits the same evicted registry-src prebuilt as the pre-commit
+        # clippy gate and verify.yml's install-real job: the cargo cache restores
+        # around the registry archive but evicts it, while keeping the cached
+        # build-script output that references it — so the link fails with "could
+        # not find native static library `lbug`". Provision a stable copy, point
+        # lbug at it via LBUG_LIBRARY_DIR/LBUG_INCLUDE_DIR, and drop the stale
+        # cached lbug build outputs so the build script re-runs and adopts the
+        # pinned path. Runs after the cache restore on purpose, before coverage.
+        shell: bash
+        run: |
+          lib_dir="$HOME/.cache/simard-lbug-precommit/lib"
+          scripts/provision-lbug-prebuilt.sh "$lib_dir" >/dev/null
+          echo "LBUG_LIBRARY_DIR=$lib_dir" >> "$GITHUB_ENV"
+          echo "LBUG_INCLUDE_DIR=$lib_dir" >> "$GITHUB_ENV"
+          rm -rf target/*/build/lbug-* target/*/.fingerprint/lbug-* 2>/dev/null || true
 
       - name: Run coverage
         run: |

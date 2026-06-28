@@ -4,30 +4,40 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
+# Deny-by-default at the workflow level; the release job grants exactly the
+# scopes it needs (issue #2261). This *narrows* the previous workflow-wide
+# `contents: write`.
+permissions: {}
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      # Create the GitHub Release and upload assets (relocated from the old
+      # workflow-level grant — only this job has write scope now).
+      contents: write
+      # Request the Fulcio OIDC token for cosign keyless signing. This is the
+      # only NEW permission; keyless signing introduces no secrets or PATs.
+      id-token: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
           submodules: false
+          # This job holds id-token:write + contents:write while `cargo build`
+          # runs ~every dependency's build script as arbitrary code. Don't leave
+          # the GITHUB_TOKEN persisted in .git/config where that code could read
+          # it: nothing here pushes via git (the release is cut with `gh release
+          # create`, which uses GH_TOKEN; the tag-existence check is a local
+          # `git rev-parse`), so the persisted credential is pure attack surface.
+          persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Cache cargo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-
+      # Resolve the version and whether its tag already exists BEFORE any
+      # toolchain install or cache restore. Most pushes to main don't bump the
+      # version, so the tag already exists and every build step below is a
+      # no-op. Gating the Rust toolchain install and the (multi-GB `target`)
+      # cache restore on `exists == 'false'` skips that wasted setup on those
+      # runs instead of paying for it only to short-circuit immediately after.
       - name: Extract version
         id: version
         run: |
@@ -44,21 +54,151 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Install Rust toolchain
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Build release binary
         if: steps.tag_check.outputs.exists == 'false'
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Package binary
         if: steps.tag_check.outputs.exists == 'false'
         run: |
+          set -euo pipefail
+          # Enumerate the [[bin]] target names from cargo metadata so the tarball
+          # ships the FULL Simard binary set (simard plus simard-tui, simard-gym,
+          # and the rest) — not just the main daemon binary. Without this, the
+          # consumer-side multi-binary self-update (#2252) would have nothing
+          # extra to install.
+          #
+          # CRITICAL: only ship targets the release build actually produces. The
+          # "Build release binary" step runs `cargo build --release` with the
+          # DEFAULT feature set, so bin targets gated behind a non-default
+          # `required-features` (e.g. the `dashboard-audit` audit tools
+          # simard-audit-pass01 / simard-audit-dashboard) are NOT compiled. They
+          # must be filtered out here; otherwise `tar` aborts trying to stat a
+          # binary that was never built (exit 2, every release).
+          mapfile -t BIN_TARGETS < <(
+            cargo metadata --no-deps --format-version 1 \
+              | jq -r '
+                  .packages[].targets[]
+                  | select(.kind[] == "bin")
+                  | select((."required-features" // []) | length == 0)
+                  | .name
+                '
+          )
+          if [ "${#BIN_TARGETS[@]}" -eq 0 ]; then
+            echo "::error::No buildable [[bin]] targets found in cargo metadata" >&2
+            exit 1
+          fi
+          echo "Packaging binaries: ${BIN_TARGETS[*]}"
           cd target/release
-          tar czf simard-linux-x86_64.tar.gz simard
+          # Fail loudly with a precise message if the release build did not
+          # produce an expected binary, rather than relying on tar's terse
+          # "Cannot stat" error.
+          missing=()
+          for bin in "${BIN_TARGETS[@]}"; do
+            [ -f "$bin" ] || missing+=("$bin")
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "::error::Release build did not produce expected binaries: ${missing[*]}" >&2
+            exit 1
+          fi
+          # Tar exactly the built binaries that exist for this platform.
+          tar czf simard-linux-x86_64.tar.gz "${BIN_TARGETS[@]}"
           sha256sum simard-linux-x86_64.tar.gz > simard-linux-x86_64.tar.gz.sha256
+
+      # ---- SBOM (CycloneDX) — issue #2261 -------------------------------------
+      - name: Install cargo-cyclonedx
+        if: steps.tag_check.outputs.exists == 'false'
+        # SHA pins the per-tool `cargo-cyclonedx` tag of taiki-e/install-action.
+        uses: taiki-e/install-action@8cb326bacc2c357f28b43e3d7b25996496e729c1 # cargo-cyclonedx
+        with:
+          tool: cargo-cyclonedx
+
+      - name: Generate CycloneDX SBOM
+        if: steps.tag_check.outputs.exists == 'false'
+        # cargo-cyclonedx sources the graph from `cargo metadata` over the
+        # committed Cargo.lock (it has no --locked flag). `--override-filename`
+        # sets the BASE name; the `.json` extension is appended, producing
+        # exactly simard-<version>.cdx.json.
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          cargo cyclonedx --format json \
+            --override-filename "simard-${VERSION}.cdx" \
+            --target x86_64-unknown-linux-gnu
+
+      - name: Validate SBOM (fail-closed)
+        if: steps.tag_check.outputs.exists == 'false'
+        # A missing, empty, or component-less SBOM FAILS the release rather than
+        # publishing a binary with no bill of materials.
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          SBOM="simard-${VERSION}.cdx.json"
+          test -s "$SBOM" || { echo "::error::SBOM $SBOM is missing or empty"; exit 1; }
+          jq -e 'type == "object" and (.components | type == "array") and (.components | length) > 0' \
+            "$SBOM" >/dev/null \
+            || { echo "::error::SBOM $SBOM is malformed or has no components"; exit 1; }
+          echo "SBOM OK: $SBOM ($(jq '.components | length' "$SBOM") components)"
+
+      # ---- Keyless signing (cosign) — issue #2261 ----------------------------
+      - name: Install cosign
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign release tarball (cosign keyless)
+        if: steps.tag_check.outputs.exists == 'false'
+        # Keyless: cosign obtains a short-lived Fulcio certificate bound to this
+        # workflow's GitHub OIDC identity (id-token: write) and records the
+        # signature in the public Rekor transparency log. No long-lived key.
+        run: |
+          set -euo pipefail
+          cd target/release
+          cosign sign-blob --yes \
+            --output-signature simard-linux-x86_64.tar.gz.sig \
+            --output-certificate simard-linux-x86_64.tar.gz.pem \
+            simard-linux-x86_64.tar.gz
+          # Fail-closed: both the signature and the certificate must exist.
+          test -s simard-linux-x86_64.tar.gz.sig || { echo "::error::cosign produced no signature"; exit 1; }
+          test -s simard-linux-x86_64.tar.gz.pem || { echo "::error::cosign produced no certificate"; exit 1; }
+
+      - name: Sign SBOM (cosign keyless)
+        if: steps.tag_check.outputs.exists == 'false'
+        # The SBOM is the dependency inventory consumers rely on to spot a
+        # malicious or vulnerable crate; publishing it unsigned next to a signed
+        # tarball would leave the one security-relevant artifact tamper-able. Sign
+        # it with the SAME keyless identity as the tarball. Runs in the repo root,
+        # where cargo-cyclonedx wrote simard-<version>.cdx.json.
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          SBOM="simard-${VERSION}.cdx.json"
+          cosign sign-blob --yes \
+            --output-signature "${SBOM}.sig" \
+            --output-certificate "${SBOM}.pem" \
+            "$SBOM"
+          # Fail-closed: both the SBOM signature and certificate must exist.
+          test -s "${SBOM}.sig" || { echo "::error::cosign produced no SBOM signature"; exit 1; }
+          test -s "${SBOM}.pem" || { echo "::error::cosign produced no SBOM certificate"; exit 1; }
 
       - name: Create release
         if: steps.tag_check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           gh release create "${{ steps.version.outputs.tag }}" \
             --title "Simard ${{ steps.version.outputs.tag }}" \
@@ -71,6 +211,36 @@ jobs:
           Or with cargo:
           \`\`\`bash
           cargo install --git https://github.com/rysweet/Simard.git --tag ${{ steps.version.outputs.tag }}
+          \`\`\`
+
+          ## Verify (cosign keyless + SBOM)
+
+          This release is signed with cosign (keyless) and ships a CycloneDX SBOM
+          that is **also** signed with the same identity.
+          See [Release integrity](https://github.com/rysweet/Simard/blob/main/docs/reference/release-integrity.md)
+          for full verification steps.
+
+          \`\`\`bash
+          # Verify the binary tarball:
+          cosign verify-blob \\
+            --certificate simard-linux-x86_64.tar.gz.pem \\
+            --signature   simard-linux-x86_64.tar.gz.sig \\
+            --certificate-identity-regexp '^https://github\.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main$' \\
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\
+            simard-linux-x86_64.tar.gz
+
+          # Verify the SBOM the same way (proves the dependency inventory is untampered):
+          cosign verify-blob \\
+            --certificate simard-${{ steps.version.outputs.version }}.cdx.json.pem \\
+            --signature   simard-${{ steps.version.outputs.version }}.cdx.json.sig \\
+            --certificate-identity-regexp '^https://github\.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main$' \\
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\
+            simard-${{ steps.version.outputs.version }}.cdx.json
           \`\`\`" \
             target/release/simard-linux-x86_64.tar.gz \
-            target/release/simard-linux-x86_64.tar.gz.sha256
+            target/release/simard-linux-x86_64.tar.gz.sha256 \
+            target/release/simard-linux-x86_64.tar.gz.sig \
+            target/release/simard-linux-x86_64.tar.gz.pem \
+            "simard-${VERSION}.cdx.json" \
+            "simard-${VERSION}.cdx.json.sig" \
+            "simard-${VERSION}.cdx.json.pem"

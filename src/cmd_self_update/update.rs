@@ -69,7 +69,28 @@ pub fn handle_self_update() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("New version available: v{CURRENT_VERSION} → v{version}");
-    download_and_replace(&url, &version)?;
+    let report = download_and_replace(&url, &version)?;
+
+    // Surface the full-binary-set outcome. The main binary is guaranteed
+    // installed here (a main failure aborts inside download_and_replace);
+    // auxiliary failures are non-fatal and only warned about.
+    if report.aux_installed.is_empty() {
+        println!("Updated binaries: simard");
+    } else {
+        println!(
+            "Updated binaries: simard, {}",
+            report.aux_installed.join(", ")
+        );
+    }
+    if !report.aux_failed.is_empty() {
+        eprintln!(
+            "WARNING: {} auxiliary binary(ies) could not be updated (the core update still succeeded):",
+            report.aux_failed.len()
+        );
+        for (name, reason) in &report.aux_failed {
+            eprintln!("  - {name}: {reason}");
+        }
+    }
 
     // The new binary is now at current_exe(). Run self-test before relaunching.
     let current_exe =

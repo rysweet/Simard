@@ -5,7 +5,11 @@
 # {var} → double-brace {{var}} for recipe-runner substitution).
 #
 # Context vars (passed via -c):
-#   pr_number, repo, pr_body
+#   pr_number, repo, pr_body, escalation_note
+#
+# `escalation_note` (issue #2432 / #2428) is empty on the base attempt and
+# carries a schema-repair / higher-effort instruction on escalation-ladder
+# retries. When empty it renders to nothing, so base behaviour is unchanged.
 #
 # Output: agent stdout — raw text containing a JSON object:
 #   {"verdict": "ready"|"not_ready"|"unclear", "rationale": "...", "blockers": [...]}
@@ -23,6 +27,8 @@ steps:
     type: "agent"
     agent: "default"
     prompt: |
+      {{escalation_note}}
+
       You are the merge-readiness judge for the Simard repository. Your single job is
       to read a pull request body and the surrounding context, then return a structured
       JSON verdict on whether the PR satisfies the merge-ready skill.

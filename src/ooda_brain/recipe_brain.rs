@@ -21,7 +21,7 @@ use super::orient::{
     FAILURE_PENALTY_PER_CONSECUTIVE, OodaOrientBrain, OrientContext, OrientJudgment,
 };
 use super::sanitize::sanitize_context_var;
-use super::{EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain};
+use super::{BrainPhase, EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain};
 use crate::error::{SimardError, SimardResult};
 
 #[cfg(test)]
@@ -40,6 +40,18 @@ const MAX_RATIONALE_CHARS: usize = 500;
 /// (issue #2419). `value` is always `1.0`; the `outcome` label in the context
 /// JSON is the numerator/denominator signal.
 const LIFECYCLE_DECISION_METRIC: &str = "brain_lifecycle_decision";
+
+/// Shared metric emitted once per recipe-backed brain phase invocation
+/// (decide / orient / merge-judge) so the verdict/decision parse-success rate
+/// is measurable across the whole class from `metrics.jsonl` (issue #2429).
+///
+/// `value` is always `1.0`; the context JSON carries `{phase, outcome, …}` where
+/// `outcome` is `"parsed"` (a real verdict/decision was extracted — including a
+/// ladder recovery) or `"defaulted"` (no parseable verdict; a deterministic
+/// fallback was applied — the bug surface). The derived
+/// `parse_success_rate{phase} = parsed / (parsed + defaulted)` is what the
+/// monitoring path alerts on.
+const VERDICT_PARSE_METRIC: &str = "brain_verdict_parsed_total";
 
 /// Cap on the `first_word` token recorded in the metric context. Generous
 /// enough to capture any legitimate variant name plus stray punctuation, but
@@ -87,7 +99,10 @@ struct RecipeStepResult {
 /// decoded, the recipe reported `success=false`, or no step produced output.
 /// This keeps a broken recipe-runner visible instead of masquerading as a
 /// `default_empty` parse.
-fn extract_recipe_decision_output(stdout: &[u8], adapter_tag: &str) -> SimardResult<String> {
+pub(crate) fn extract_recipe_decision_output(
+    stdout: &[u8],
+    adapter_tag: &str,
+) -> SimardResult<String> {
     let mut envelope: RecipeEnvelope =
         serde_json::from_slice(stdout).map_err(|e| SimardError::AdapterInvocationFailed {
             base_type: adapter_tag.to_string(),
@@ -254,6 +269,73 @@ pub fn build_escalation_note(rung: LadderRung, prior_output: &str) -> String {
     }
 }
 
+/// Generic `escalation_note` builder shared by the decide / orient / merge-judge
+/// phases (issue #2419 family / #2429). Same three-rung structure as the
+/// lifecycle [`build_escalation_note`] — empty on `Base` (byte-identical base
+/// behaviour), a schema-repair note on `SchemaRepair`, and schema-repair plus a
+/// higher-effort tier on `Escalate` — but parameterised by the phase's own
+/// output contract so each brain reminds the model of the correct shape (an
+/// action word / a bare decimal / a `{"verdict": …}` JSON object).
+///
+/// `repair_instruction` describes the required output shape; `high_effort` is
+/// the extra reasoning instruction appended on the final rung.
+pub(crate) fn build_phase_escalation_note(
+    rung: LadderRung,
+    prior_output: &str,
+    repair_instruction: &str,
+    high_effort: &str,
+) -> String {
+    // Built lazily so the Base rung allocates nothing.
+    let schema_repair = || {
+        let prior = truncate(prior_output.trim(), MAX_RATIONALE_CHARS);
+        format!(
+            "## ⚠️ SCHEMA REPAIR (retry) ## \
+             Your previous response could not be parsed. \
+             Previous response: <<<{prior}>>> \
+             Respond again now. {repair_instruction}"
+        )
+    };
+    match rung {
+        LadderRung::Base => String::new(),
+        LadderRung::SchemaRepair => schema_repair(),
+        LadderRung::Escalate => format!(
+            "{} ## HIGH-EFFORT RETRY ## This is a final, higher-effort attempt. {high_effort}",
+            schema_repair()
+        ),
+    }
+}
+
+/// Closed action-keyword list echoed into the decide schema-repair note. Kept in
+/// sync with the `parse_action_outcome` match and the `ooda-decide.yaml` OPTIONS.
+const DECIDE_VARIANT_LIST: &str = "poll_developer_activity, consolidate_memory, run_improvement, extract_ideas, safe_update, research_query, run_gym_eval, build_skill, launch_session, advance_goal";
+
+/// Build the decide-phase `escalation_note` for a ladder rung (issue #2421).
+fn build_decide_escalation_note(rung: LadderRung, prior_output: &str) -> String {
+    build_phase_escalation_note(
+        rung,
+        prior_output,
+        &format!(
+            "The VERY FIRST WORD of your reply MUST be exactly one of: {DECIDE_VARIANT_LIST}. \
+             Output that action word first, then your rationale."
+        ),
+        "Reason carefully about the goal_id and reason BEFORE answering, then output the single \
+         action word first.",
+    )
+}
+
+/// Build the orient-phase `escalation_note` for a ladder rung (issue #2421).
+fn build_orient_escalation_note(rung: LadderRung, prior_output: &str) -> String {
+    build_phase_escalation_note(
+        rung,
+        prior_output,
+        "The VERY FIRST TOKEN of your reply MUST be a bare decimal number between 0.0 and the \
+         base urgency (e.g. `0.42`) — the adjusted urgency. Output that decimal first, then your \
+         rationale. Do NOT output a timing value or any other number first.",
+        "Reason carefully about the failure history BEFORE answering, then output the single bare \
+         decimal first.",
+    )
+}
+
 /// Bound on how far the escalation ladder climbs. Configurable via
 /// `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS`, hard-capped so a misconfiguration
 /// can never turn the brain into an unbounded retry loop.
@@ -368,6 +450,65 @@ pub fn run_escalation_ladder(
     u32,
     LadderTermination,
 ) {
+    // Thin lifecycle-specific wrapper over the generic [`run_brain_ladder`]
+    // backbone (issue #2419 family / #2429): the lifecycle phase owns the
+    // invoke (recipe-runner `LadderAttempt`), the parser
+    // ([`parse_lifecycle_outcome`]), the deterministic default
+    // ([`default_continue_skipping`]), and the decision-label closure; the
+    // generic core owns the bounded rung loop, the loud logging, and the
+    // [`LadderTermination`] accounting. This keeps the decide / orient /
+    // merge-judge phases on the SAME ladder rather than reinventing it.
+    run_brain_ladder(
+        &ctx.goal_id,
+        base_raw,
+        base_outcome,
+        cfg,
+        |rung, prior| {
+            let attempt = LadderAttempt {
+                rung,
+                prior_output: prior,
+            };
+            invoker.invoke_lifecycle(ctx, &attempt)
+        },
+        parse_lifecycle_outcome,
+        default_continue_skipping,
+        |d| lifecycle_decision_choice(d).to_string(),
+    )
+}
+
+/// Generic confidence-gated escalation ladder backbone shared by every
+/// recipe-backed brain phase (engineer-lifecycle, decide, orient, merge-judge —
+/// issue #2419 family / #2429).
+///
+/// On a base parse-miss the phase spends EXTRA compute ONLY on that weak case: a
+/// bounded sequence of re-prompts (schema-repair, then a higher-effort tier)
+/// driven by `invoke(rung, prior_output)`. The deterministic, *loud* `default()`
+/// is reached only AFTER every rung is exhausted (or a rung's own invocation
+/// fails) — never a silent default-on-first-miss.
+///
+/// Phase-specific behaviour is injected via closures so the core stays
+/// decision-type-agnostic:
+/// - `invoke(rung, prior_output)` runs the recipe for a rung (it owns building
+///   the phase's `escalation_note`) and returns the raw final-step output;
+/// - `parse(raw)` classifies the output into `(decision, outcome)`; an outcome
+///   for which `is_parse_failure()` holds drives escalation;
+/// - `default()` is the deterministic fallback decision;
+/// - `decision_label(&decision)` is a short tag used only for logging.
+///
+/// Returns the final decision, its outcome (`Repaired`/`Escalated` on recovery,
+/// else the original parse-miss), the total brain invocations (base + rungs),
+/// and the [`LadderTermination`] reason.
+#[allow(clippy::too_many_arguments)]
+pub fn run_brain_ladder<D>(
+    goal_id: &str,
+    base_raw: &str,
+    base_outcome: LifecycleParseOutcome,
+    cfg: &EscalationConfig,
+    invoke: impl Fn(LadderRung, &str) -> SimardResult<String>,
+    parse: impl Fn(&str) -> (D, LifecycleParseOutcome),
+    default: impl Fn() -> D,
+    decision_label: impl Fn(&D) -> String,
+) -> (D, LifecycleParseOutcome, u32, LadderTermination) {
     let mut prior = base_raw.to_string();
     let mut attempts = 1u32; // the base attempt already happened
     let mut invoke_failed = false;
@@ -382,7 +523,7 @@ pub fn run_escalation_ladder(
 
         tracing::warn!(
             target: "simard::ooda_brain",
-            goal = %ctx.goal_id,
+            goal = %goal_id,
             rung = ?rung,
             attempt = attempts,
             base_outcome = base_outcome.label(),
@@ -390,51 +531,45 @@ pub fn run_escalation_ladder(
         );
         eprintln!(
             "[simard] BRAIN ESCALATION goal={} rung={:?} attempt={} (parse-miss recovery)",
-            ctx.goal_id, rung, attempts
+            goal_id, rung, attempts
         );
 
-        let attempt = LadderAttempt {
-            rung,
-            prior_output: &prior,
-        };
-        match invoker.invoke_lifecycle(ctx, &attempt) {
+        match invoke(rung, &prior) {
             Err(e) => {
                 tracing::warn!(
                     target: "simard::ooda_brain",
-                    goal = %ctx.goal_id,
+                    goal = %goal_id,
                     rung = ?rung,
                     error = %e,
                     "brain escalation attempt failed to invoke; stopping ladder, using deterministic default"
                 );
                 eprintln!(
                     "[simard] BRAIN ESCALATION goal={} rung={:?} invoke failed: {e} — falling back to default",
-                    ctx.goal_id, rung
+                    goal_id, rung
                 );
                 invoke_failed = true;
                 break;
             }
             Ok(raw2) => {
-                let (decision, oc) = parse_lifecycle_outcome(&raw2);
+                let (decision, oc) = parse(&raw2);
                 if !oc.is_parse_failure() {
                     let recovered = match rung {
                         LadderRung::SchemaRepair => LifecycleParseOutcome::Repaired,
                         LadderRung::Escalate => LifecycleParseOutcome::Escalated,
                         LadderRung::Base => oc,
                     };
+                    let label = decision_label(&decision);
                     tracing::info!(
                         target: "simard::ooda_brain",
-                        goal = %ctx.goal_id,
+                        goal = %goal_id,
                         rung = ?rung,
                         attempt = attempts,
-                        decision = lifecycle_decision_choice(&decision),
+                        decision = %label,
                         "brain decision RECOVERED via escalation ladder (issue #2432)"
                     );
                     eprintln!(
                         "[simard] BRAIN ESCALATION goal={} RECOVERED decision={} via {:?} (attempt {})",
-                        ctx.goal_id,
-                        lifecycle_decision_choice(&decision),
-                        rung,
-                        attempts
+                        goal_id, label, rung, attempts
                     );
                     return (decision, recovered, attempts, LadderTermination::Recovered);
                 }
@@ -459,7 +594,7 @@ pub fn run_escalation_ladder(
     if cfg.max_escalations > 0 {
         tracing::warn!(
             target: "simard::ooda_brain",
-            goal = %ctx.goal_id,
+            goal = %goal_id,
             attempts,
             base_outcome = base_outcome.label(),
             termination = ?termination,
@@ -467,23 +602,27 @@ pub fn run_escalation_ladder(
         );
         eprintln!(
             "[simard] BRAIN ESCALATION goal={} ladder ended ({}) after {attempts} attempts — deterministic default",
-            ctx.goal_id,
+            goal_id,
             termination.cause_label()
         );
     }
-    (
-        default_continue_skipping(),
-        base_outcome,
-        attempts,
-        termination,
-    )
+    (default(), base_outcome, attempts, termination)
 }
 
 /// Resolve the recipe YAML path. Checks, in order:
 ///   1. `~/.simard/prompt_assets/simard/recipes/<recipe_filename>` (hot-reload)
 ///   2. `<repo_root>/prompt_assets/simard/recipes/<recipe_filename>` (in-tree)
-pub fn resolve_recipe_path(repo_root: &Path, recipe_filename: &str) -> Option<PathBuf> {
-    if let Some(home) = dirs::home_dir() {
+///
+/// `home_override` lets tests supply a fake home directory without mutating the
+/// process-wide `HOME` env var (mirrors `disk_health::resolve_recipe_path`).
+/// Production passes `None`, falling back to [`dirs::home_dir`].
+pub fn resolve_recipe_path(
+    repo_root: &Path,
+    recipe_filename: &str,
+    home_override: Option<&Path>,
+) -> Option<PathBuf> {
+    let home = home_override.map(PathBuf::from).or_else(dirs::home_dir);
+    if let Some(home) = home {
         let hot = home
             .join(".simard")
             .join("prompt_assets/simard/recipes")
@@ -527,7 +666,19 @@ impl RecipeBrain {
     /// `recipe_filename` selects the YAML (e.g. `"ooda-decide.yaml"`).
     /// `adapter_tag` appears in error messages and logs (e.g. `"recipe-decide-brain"`).
     pub fn new(repo_root: &Path, recipe_filename: &str, adapter_tag: &'static str) -> Option<Self> {
-        let recipe_path = resolve_recipe_path(repo_root, recipe_filename)?;
+        Self::new_with_home(repo_root, recipe_filename, adapter_tag, None)
+    }
+
+    /// Like [`RecipeBrain::new`], but accepts a `home_override` for the
+    /// hot-reload lookup so tests stay hermetic against the ambient
+    /// `~/.simard/prompt_assets` directory. Production calls `new` (`None`).
+    fn new_with_home(
+        repo_root: &Path,
+        recipe_filename: &str,
+        adapter_tag: &'static str,
+        home_override: Option<&Path>,
+    ) -> Option<Self> {
+        let recipe_path = resolve_recipe_path(repo_root, recipe_filename, home_override)?;
         let agent_binary = crate::session_builder::LlmProvider::resolve_agent_binary()?;
         if Command::new("recipe-runner-rs")
             .arg("--version")
@@ -548,16 +699,101 @@ impl RecipeBrain {
 }
 
 impl OodaDecideBrain for RecipeBrain {
+    /// Decide-phase action routing.
+    ///
+    /// Issue #2421 / #2429: invoke `recipe-runner-rs --output-format json` and
+    /// parse the agent's REAL decision text (the JSON envelope's final step
+    /// output) — not the text-mode SUCCESS banner whose first word `Recipe:`
+    /// always silently defaulted to `advance_goal`, ignoring the LLM every
+    /// cycle. On a base parse-miss, spend extra compute on the confidence-gated
+    /// escalation ladder (schema-repair → high-effort) before falling — loudly —
+    /// to the deterministic `advance_goal` default. A `brain_verdict_parsed_total`
+    /// metric is emitted on both the parsed and the defaulted branch.
     fn judge_decision(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment> {
-        // KNOWN LIMITATION (issue #2421): this phase still reads recipe-runner-rs
-        // DEFAULT `text` stdout (the summary banner), so `parse_action_from_text`
-        // always sees `Recipe:` and silently defaults to `AdvanceGoal`. It shares
-        // the exact root cause fixed for the lifecycle phase in issue #2419 but is
-        // deferred there to bound the behavioral blast radius (top-level action
-        // routing). Tracked + to be fixed via `--output-format json` + envelope
-        // extraction in #2421.
+        let invoke = |rung: LadderRung, prior: &str| self.invoke_decide_raw(ctx, rung, prior);
+
+        // Base (cheap) attempt. A genuine recipe-runner failure (spawn / nonzero
+        // exit / envelope decode) still surfaces loudly as `Err` — only a
+        // *parse-miss* on a successful run is low-confidence enough to escalate.
+        let base_raw = invoke(LadderRung::Base, "")?;
+        let (decision, outcome) = parse_action_outcome(&base_raw);
+        if !outcome.is_parse_failure() {
+            record_verdict_parse_metric(BrainPhase::Decide, &ctx.goal_id, outcome, 1);
+            return Ok(decision);
+        }
+
+        let cfg = EscalationConfig::from_env();
+        let (final_decision, final_outcome, attempts, _termination) = run_brain_ladder(
+            &ctx.goal_id,
+            &base_raw,
+            outcome,
+            &cfg,
+            invoke,
+            parse_action_outcome,
+            default_advance_goal,
+            |d| decide_decision_choice(d).to_string(),
+        );
+        record_verdict_parse_metric(BrainPhase::Decide, &ctx.goal_id, final_outcome, attempts);
+        Ok(final_decision)
+    }
+}
+
+impl OodaOrientBrain for RecipeBrain {
+    /// Orient-phase failure-penalty demotion.
+    ///
+    /// Issue #2421 / #2429: invoke `recipe-runner-rs --output-format json` and
+    /// parse the agent's REAL urgency decimal (the JSON envelope's final step
+    /// output) — not the text-mode banner, whose timing string `(0.0s)` was
+    /// scraped as a finite, in-range `0.0` and ACTIVELY demoted the goal's
+    /// urgency to a value mined from the banner rather than the LLM's judgment.
+    /// On a base parse-miss, run the escalation ladder, then fall — loudly — to
+    /// the deterministic floor (`base_urgency − 0.2 × failure_count`). Emits the
+    /// shared `brain_verdict_parsed_total` metric on both branches.
+    fn judge_orientation(&self, ctx: &OrientContext) -> SimardResult<OrientJudgment> {
+        let invoke = |rung: LadderRung, prior: &str| self.invoke_orient_raw(ctx, rung, prior);
+        let parse = |raw: &str| parse_orient_outcome(raw, ctx.base_urgency, ctx.failure_count);
+        let default = || deterministic_floor(ctx.base_urgency, ctx.failure_count);
+
+        let base_raw = invoke(LadderRung::Base, "")?;
+        let (judgment, outcome) = parse(&base_raw);
+        if !outcome.is_parse_failure() {
+            record_verdict_parse_metric(BrainPhase::Orient, &ctx.goal_id, outcome, 1);
+            return Ok(judgment);
+        }
+
+        let cfg = EscalationConfig::from_env();
+        let (final_judgment, final_outcome, attempts, _termination) = run_brain_ladder(
+            &ctx.goal_id,
+            &base_raw,
+            outcome,
+            &cfg,
+            invoke,
+            parse,
+            default,
+            |j| format!("urgency={:.3}", j.adjusted_urgency),
+        );
+        record_verdict_parse_metric(BrainPhase::Orient, &ctx.goal_id, final_outcome, attempts);
+        Ok(final_judgment)
+    }
+}
+
+impl RecipeBrain {
+    /// Invoke the decide recipe once for a ladder rung, returning the agent's
+    /// raw decision text (the JSON envelope's final step output). Genuine
+    /// recipe-runner failures propagate as `Err` (issue #2421).
+    fn invoke_decide_raw(
+        &self,
+        ctx: &DecideContext,
+        rung: LadderRung,
+        prior_output: &str,
+    ) -> SimardResult<String> {
+        let escalation_note = build_decide_escalation_note(rung, prior_output);
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
+            // issue #2421: text mode prints only a summary banner to stdout —
+            // the agent decision text is only exposed via the JSON envelope.
+            .arg("--output-format")
+            .arg("json")
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
             .arg("-c")
             .arg(format!(
@@ -568,6 +804,12 @@ impl OodaDecideBrain for RecipeBrain {
             .arg(format!("urgency={:.3}", ctx.urgency))
             .arg("-c")
             .arg(format!("reason={}", sanitize_context_var(&ctx.reason, 500)))
+            // issue #2432: the (possibly empty) escalation/schema-repair note.
+            .arg("-c")
+            .arg(format!(
+                "escalation_note={}",
+                sanitize_context_var(&escalation_note, 4000)
+            ))
             .output()
             .map_err(|e| SimardError::AdapterInvocationFailed {
                 base_type: self.adapter_tag.to_string(),
@@ -581,27 +823,28 @@ impl OodaDecideBrain for RecipeBrain {
                 reason: format!(
                     "recipe exited with {}: {}",
                     output.status,
-                    truncate(&stderr, 500)
+                    truncate(&stderr, MAX_RATIONALE_CHARS)
                 ),
             });
         }
 
-        let raw = String::from_utf8(output.stdout)
-            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-        Ok(parse_action_from_text(&raw))
+        extract_recipe_decision_output(&output.stdout, self.adapter_tag)
     }
-}
 
-impl OodaOrientBrain for RecipeBrain {
-    fn judge_orientation(&self, ctx: &OrientContext) -> SimardResult<OrientJudgment> {
-        // KNOWN LIMITATION (issue #2421): like `judge_decision` above, this reads
-        // recipe-runner-rs DEFAULT `text` stdout. Worse than a benign default —
-        // `parse_orient_from_text` scans the banner for the first decimal in
-        // [0, base_urgency] and the banner's timing string (e.g. `(0.0s)`) yields
-        // `0.0`, silently demoting urgency to a scraped timing value rather than
-        // the LLM's judgment. Same #2419 root cause; fix tracked in #2421.
+    /// Invoke the orient recipe once for a ladder rung, returning the agent's
+    /// raw urgency text (the JSON envelope's final step output). Genuine
+    /// recipe-runner failures propagate as `Err` (issue #2421).
+    fn invoke_orient_raw(
+        &self,
+        ctx: &OrientContext,
+        rung: LadderRung,
+        prior_output: &str,
+    ) -> SimardResult<String> {
+        let escalation_note = build_orient_escalation_note(rung, prior_output);
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
+            .arg("--output-format")
+            .arg("json")
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
             .arg("-c")
             .arg(format!(
@@ -617,6 +860,11 @@ impl OodaOrientBrain for RecipeBrain {
             ))
             .arg("-c")
             .arg(format!("failure_count={}", ctx.failure_count))
+            .arg("-c")
+            .arg(format!(
+                "escalation_note={}",
+                sanitize_context_var(&escalation_note, 4000)
+            ))
             .output()
             .map_err(|e| SimardError::AdapterInvocationFailed {
                 base_type: self.adapter_tag.to_string(),
@@ -630,18 +878,12 @@ impl OodaOrientBrain for RecipeBrain {
                 reason: format!(
                     "recipe exited with {}: {}",
                     output.status,
-                    truncate(&stderr, 500)
+                    truncate(&stderr, MAX_RATIONALE_CHARS)
                 ),
             });
         }
 
-        let raw = String::from_utf8(output.stdout)
-            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-        Ok(parse_orient_from_text(
-            &raw,
-            ctx.base_urgency,
-            ctx.failure_count,
-        ))
+        extract_recipe_decision_output(&output.stdout, self.adapter_tag)
     }
 }
 
@@ -845,8 +1087,30 @@ impl OodaBrain for RecipeBrain {
 /// Parse recipe stdout for an action keyword as the first word (decide phase).
 /// Case-insensitive match on the first whitespace-delimited token.
 /// Defaults to `advance_goal` if the first word is unrecognised.
+///
+/// Thin decision-only wrapper over [`parse_action_outcome`]; production routes
+/// through the latter to capture the parse outcome for the escalation ladder
+/// and the `brain_verdict_parsed_total` metric (issue #2421 / #2429).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_action_from_text(text: &str) -> DecideJudgment {
+    parse_action_outcome(text).0
+}
+
+/// Parse recipe output into a decide action AND a [`LifecycleParseOutcome`]
+/// classification (issue #2421 / #2429).
+///
+/// The outcome distinguishes a genuinely parsed action (`Parsed` — including a
+/// real `advance_goal`) from the two ways the parser falls back to
+/// `AdvanceGoal`: `DefaultEmpty` (no text at all) and `DefaultMalformed` (text
+/// present but the first word is not a known action). Before this split a real
+/// `advance_goal` decision and a silent banner-misparse fallback were
+/// indistinguishable — which is exactly what let the text-mode banner masquerade
+/// as "working" (the first word `Recipe:` always defaulted to `AdvanceGoal`).
+pub fn parse_action_outcome(text: &str) -> (DecideJudgment, LifecycleParseOutcome) {
     let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return (default_advance_goal(), LifecycleParseOutcome::DefaultEmpty);
+    }
     let first_word = trimmed.split_whitespace().next().unwrap_or("");
 
     // Rationale allocation is deferred into the match arm — avoids a
@@ -886,13 +1150,43 @@ pub fn parse_action_from_text(text: &str) -> DecideJudgment {
     ];
     for (kw, ctor) in pairs {
         if first_word.eq_ignore_ascii_case(kw) {
-            return ctor(truncate(trimmed, MAX_RATIONALE_CHARS));
+            return (
+                ctor(truncate(trimmed, MAX_RATIONALE_CHARS)),
+                LifecycleParseOutcome::Parsed,
+            );
         }
     }
+    (
+        default_advance_goal(),
+        LifecycleParseOutcome::DefaultMalformed,
+    )
+}
+
+/// The loud deterministic decide default — `advance_goal` with a rationale that
+/// names the parse-miss so a defaulted row is never mistaken for a real LLM
+/// `advance_goal` decision.
+fn default_advance_goal() -> DecideJudgment {
     DecideJudgment::AdvanceGoal {
         rationale: format!(
             "{DECIDE_ADAPTER_TAG}: no action keyword found in recipe output; defaulting to advance_goal"
         ),
+    }
+}
+
+/// The snake_case action tag of a decide judgment, used only as the `decision`
+/// label in escalation-ladder logging.
+fn decide_decision_choice(decision: &DecideJudgment) -> &'static str {
+    match decision {
+        DecideJudgment::AdvanceGoal { .. } => "advance_goal",
+        DecideJudgment::RunImprovement { .. } => "run_improvement",
+        DecideJudgment::ConsolidateMemory { .. } => "consolidate_memory",
+        DecideJudgment::ResearchQuery { .. } => "research_query",
+        DecideJudgment::RunGymEval { .. } => "run_gym_eval",
+        DecideJudgment::BuildSkill { .. } => "build_skill",
+        DecideJudgment::LaunchSession { .. } => "launch_session",
+        DecideJudgment::PollDeveloperActivity { .. } => "poll_developer_activity",
+        DecideJudgment::ExtractIdeas { .. } => "extract_ideas",
+        DecideJudgment::SafeUpdate { .. } => "safe_update",
     }
 }
 
@@ -902,7 +1196,28 @@ pub fn parse_action_from_text(text: &str) -> DecideJudgment {
 
 /// Parse recipe output for the first decimal float (e.g. `0.42`).
 /// Falls to the deterministic floor when no valid float is found.
+///
+/// Thin judgment-only wrapper over [`parse_orient_outcome`]; production routes
+/// through the latter to capture the parse outcome for the escalation ladder
+/// and the `brain_verdict_parsed_total` metric (issue #2421 / #2429).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_orient_from_text(text: &str, base_urgency: f64, failure_count: u32) -> OrientJudgment {
+    parse_orient_outcome(text, base_urgency, failure_count).0
+}
+
+/// Parse recipe output into an orient judgment AND a [`LifecycleParseOutcome`]
+/// classification (issue #2421 / #2429).
+///
+/// `Parsed` when a valid in-range decimal was extracted; otherwise the
+/// deterministic floor is returned and the outcome is `DefaultEmpty` (no text)
+/// or `DefaultMalformed` (text present but no valid decimal). This is what makes
+/// the orient banner-misparse measurable: the text-mode banner's `(0.0s)` timing
+/// would otherwise be scraped as a real `0.0` urgency and counted as `Parsed`.
+pub fn parse_orient_outcome(
+    text: &str,
+    base_urgency: f64,
+    failure_count: u32,
+) -> (OrientJudgment, LifecycleParseOutcome) {
     // Hoist trim above the scanner — avoids re-trimming on each candidate.
     let trimmed = text.trim();
     let bytes = text.as_bytes();
@@ -924,12 +1239,15 @@ pub fn parse_orient_from_text(text: &str, base_urgency: f64, failure_count: u32)
                 {
                     // Inline validation before allocating rationale string.
                     if val.is_finite() && (0.0..=1.0).contains(&val) && val <= base_urgency + 1e-9 {
-                        return OrientJudgment {
-                            adjusted_urgency: val,
-                            rationale: truncate(trimmed, MAX_RATIONALE_CHARS),
-                            confidence: 1.0,
-                            demotion_applied: base_urgency - val,
-                        };
+                        return (
+                            OrientJudgment {
+                                adjusted_urgency: val,
+                                rationale: truncate(trimmed, MAX_RATIONALE_CHARS),
+                                confidence: 1.0,
+                                demotion_applied: base_urgency - val,
+                            },
+                            LifecycleParseOutcome::Parsed,
+                        );
                     }
                 }
             }
@@ -937,7 +1255,12 @@ pub fn parse_orient_from_text(text: &str, base_urgency: f64, failure_count: u32)
         }
         i += 1;
     }
-    deterministic_floor(base_urgency, failure_count)
+    let miss = if trimmed.is_empty() {
+        LifecycleParseOutcome::DefaultEmpty
+    } else {
+        LifecycleParseOutcome::DefaultMalformed
+    };
+    (deterministic_floor(base_urgency, failure_count), miss)
 }
 
 /// Compute the deterministic floor judgment.
@@ -1120,6 +1443,73 @@ fn record_lifecycle_decision_metric(
     }
 }
 
+/// The `outcome` label for the [`VERDICT_PARSE_METRIC`]: `"parsed"` when a real
+/// verdict/decision was extracted (base parse, or a ladder `Repaired`/
+/// `Escalated` recovery), `"defaulted"` when a deterministic fallback was
+/// applied (`DefaultEmpty`/`DefaultMalformed`/`Error` — the bug surface).
+fn verdict_outcome_label(outcome: LifecycleParseOutcome) -> &'static str {
+    if outcome.is_parse_failure() {
+        "defaulted"
+    } else {
+        "parsed"
+    }
+}
+
+/// Build the JSON `context` payload for the shared `brain_verdict_parsed_total`
+/// metric. Separated from the I/O so the payload shape can be unit-tested
+/// without touching the real `metrics.jsonl`.
+fn build_verdict_parse_context(
+    phase: BrainPhase,
+    goal_id: &str,
+    outcome: LifecycleParseOutcome,
+    attempts: u32,
+) -> String {
+    serde_json::json!({
+        "phase": phase.as_str(),
+        // Coarse parsed/defaulted signal — the numerator/denominator for
+        // `parse_success_rate{phase}` (issue #2429).
+        "outcome": verdict_outcome_label(outcome),
+        // Fine-grained classification (parsed / repaired / escalated /
+        // default_empty / default_malformed / error) for drill-down.
+        "outcome_detail": outcome.label(),
+        "is_parse_failure": outcome.is_parse_failure(),
+        "goal_id": goal_id,
+        // Total brain invocations spent (base + escalation rungs).
+        "attempts": attempts,
+    })
+    .to_string()
+}
+
+/// Record one `brain_verdict_parsed_total` metric event (value `1.0`) per
+/// recipe-backed brain phase invocation, on BOTH the parsed and the defaulted
+/// branch, so the per-phase parse-success rate has a denominator (issue #2429).
+///
+/// Best-effort: a metrics-write failure is logged, never propagated — the brain
+/// decision must not fail because telemetry could not be persisted.
+///
+/// No-op under `cfg!(test)` so unit tests never append to the operator's real
+/// `~/.simard/metrics/metrics.jsonl`.
+pub(crate) fn record_verdict_parse_metric(
+    phase: BrainPhase,
+    goal_id: &str,
+    outcome: LifecycleParseOutcome,
+    attempts: u32,
+) {
+    let context = build_verdict_parse_context(phase, goal_id, outcome, attempts);
+    if cfg!(test) {
+        return;
+    }
+    if let Err(e) = crate::self_metrics::record_metric(VERDICT_PARSE_METRIC, 1.0, &context) {
+        tracing::warn!(
+            target: "simard::ooda_brain",
+            error = %e,
+            phase = phase.as_str(),
+            outcome = outcome.label(),
+            "failed to record brain_verdict_parsed_total metric (decision unaffected)",
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests — behavioral contracts for the unified RecipeBrain struct.
 // ---------------------------------------------------------------------------
@@ -1138,7 +1528,12 @@ mod tests {
 
     #[test]
     fn resolve_recipe_path_returns_none_for_nonexistent_repo() {
-        let result = resolve_recipe_path(Path::new("/nonexistent"), "ooda-decide.yaml");
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let result = resolve_recipe_path(
+            Path::new("/nonexistent"),
+            "ooda-decide.yaml",
+            Some(home.path()),
+        );
         assert!(
             result.is_none(),
             "must return None when neither hot-reload nor in-tree path exists"
@@ -1147,7 +1542,9 @@ mod tests {
 
     #[test]
     fn resolve_recipe_path_returns_none_for_nonexistent_filename() {
-        let result = resolve_recipe_path(Path::new("/tmp"), "does-not-exist.yaml");
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let result =
+            resolve_recipe_path(Path::new("/tmp"), "does-not-exist.yaml", Some(home.path()));
         assert!(
             result.is_none(),
             "must return None when the recipe filename doesn't match any file"
@@ -1162,7 +1559,7 @@ mod tests {
         let recipe_file = recipe_dir.join("ooda-decide.yaml");
         std::fs::write(&recipe_file, "# test recipe").unwrap();
 
-        let result = resolve_recipe_path(tmp.path(), "ooda-decide.yaml");
+        let result = resolve_recipe_path(tmp.path(), "ooda-decide.yaml", Some(tmp.path()));
         assert_eq!(
             result,
             Some(recipe_file),
@@ -1181,8 +1578,8 @@ mod tests {
         std::fs::write(recipe_dir.join("ooda-decide.yaml"), "# decide").unwrap();
         std::fs::write(recipe_dir.join("ooda-orient.yaml"), "# orient").unwrap();
 
-        let decide_path = resolve_recipe_path(tmp.path(), "ooda-decide.yaml");
-        let orient_path = resolve_recipe_path(tmp.path(), "ooda-orient.yaml");
+        let decide_path = resolve_recipe_path(tmp.path(), "ooda-decide.yaml", Some(tmp.path()));
+        let orient_path = resolve_recipe_path(tmp.path(), "ooda-orient.yaml", Some(tmp.path()));
 
         assert_ne!(
             decide_path, orient_path,
@@ -1212,30 +1609,36 @@ mod tests {
 
     #[test]
     fn new_returns_none_when_decide_recipe_missing() {
-        let brain = RecipeBrain::new(
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let brain = RecipeBrain::new_with_home(
             Path::new("/nonexistent"),
             "ooda-decide.yaml",
             "recipe-decide-brain",
+            Some(home.path()),
         );
         assert!(brain.is_none());
     }
 
     #[test]
     fn new_returns_none_when_orient_recipe_missing() {
-        let brain = RecipeBrain::new(
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let brain = RecipeBrain::new_with_home(
             Path::new("/nonexistent"),
             "ooda-orient.yaml",
             "recipe-orient-brain",
+            Some(home.path()),
         );
         assert!(brain.is_none());
     }
 
     #[test]
     fn new_returns_none_when_lifecycle_recipe_missing() {
-        let brain = RecipeBrain::new(
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let brain = RecipeBrain::new_with_home(
             Path::new("/nonexistent"),
             "ooda-engineer-lifecycle.yaml",
             "recipe-engineer-lifecycle-brain",
+            Some(home.path()),
         );
         assert!(brain.is_none());
     }
@@ -1504,7 +1907,7 @@ mod tests {
         std::fs::create_dir_all(&recipe_dir).unwrap();
         std::fs::write(recipe_dir.join("ooda-decide.yaml"), "# decide").unwrap();
 
-        let path = resolve_recipe_path(tmp.path(), "ooda-decide.yaml");
+        let path = resolve_recipe_path(tmp.path(), "ooda-decide.yaml", Some(tmp.path()));
         assert!(path.is_some());
         assert!(path.unwrap().to_str().unwrap().contains("ooda-decide.yaml"));
     }
@@ -1516,7 +1919,7 @@ mod tests {
         std::fs::create_dir_all(&recipe_dir).unwrap();
         std::fs::write(recipe_dir.join("ooda-orient.yaml"), "# orient").unwrap();
 
-        let path = resolve_recipe_path(tmp.path(), "ooda-orient.yaml");
+        let path = resolve_recipe_path(tmp.path(), "ooda-orient.yaml", Some(tmp.path()));
         assert!(path.is_some());
         assert!(path.unwrap().to_str().unwrap().contains("ooda-orient.yaml"));
     }
@@ -1532,7 +1935,8 @@ mod tests {
         )
         .unwrap();
 
-        let path = resolve_recipe_path(tmp.path(), "ooda-engineer-lifecycle.yaml");
+        let path =
+            resolve_recipe_path(tmp.path(), "ooda-engineer-lifecycle.yaml", Some(tmp.path()));
         assert!(path.is_some());
         assert!(
             path.unwrap()
@@ -3086,6 +3490,395 @@ mod tests {
                 "repair note must carry the prior output; got {}",
                 notes[0]
             );
+        }
+    }
+
+    // =================================================================
+    // issue_2421_tests — decide + orient verdict/decision parse cluster
+    //
+    // The decide (`judge_decision`) and orient (`judge_orientation`) trait
+    // impls share the EXACT #2419 root cause: they read recipe-runner-rs
+    // DEFAULT `text` stdout (the SUCCESS banner) instead of the
+    // `--output-format json` envelope's final step output.
+    //
+    //   - decide: the banner's first word is always `Recipe:`, which matches
+    //     no action keyword, so `parse_action_from_text` silently defaults to
+    //     `AdvanceGoal` every cycle (the LLM is ignored).
+    //   - orient: WORSE than a benign default — `parse_orient_from_text` scans
+    //     the banner for the first in-range decimal, and the timing string
+    //     `(0.0s)` yields `0.0`, ACTIVELY demoting the goal's urgency to a
+    //     value scraped from the banner rather than the LLM's judgment.
+    //
+    // These tests pin both the banner misparse (the bug) and the JSON-envelope
+    // recovery (the fix) at the parse seam, using the existing
+    // `extract_recipe_decision_output` helper. The live recipe-runner boundary
+    // is covered by `tests/gadugi/decide-orient-brain-parse.sh`.
+    // =================================================================
+    mod issue_2421_tests {
+        use super::super::*;
+        use crate::ooda_loop::ActionKind;
+
+        const DECIDE_BANNER: &str = "Recipe: ooda-decide (v1.0.0)\nSteps: 1\n\nRecipe 'ooda-decide': SUCCESS (0.0s)\n  [completed] decide-action (0.0s)\n\n";
+        const ORIENT_BANNER: &str = "Recipe: ooda-orient (v1.0.0)\nSteps: 1\n\nRecipe 'ooda-orient': SUCCESS (0.0s)\n  [completed] orient-decision (0.0s)\n\n";
+
+        // --- decide: banner misparse pin + JSON-envelope recovery -----------
+
+        #[test]
+        fn decide_banner_first_word_is_never_a_valid_action() {
+            // Regression pin for the silent-`AdvanceGoal` half of #2421: the
+            // banner's first word `Recipe:` matches no action, so the parser
+            // falls back to AdvanceGoal with the explicit "no action keyword"
+            // rationale. This proves the caller MUST NOT feed it the banner.
+            let j = parse_action_from_text(DECIDE_BANNER);
+            assert_eq!(j.action_kind(), ActionKind::AdvanceGoal);
+            assert!(
+                j.rationale().contains("no action keyword"),
+                "banner must classify as a default, not a real decision; got: {}",
+                j.rationale()
+            );
+        }
+
+        #[test]
+        fn decide_json_envelope_recovers_real_action() {
+            // The fix: extract the final step output from the json envelope and
+            // parse THAT — recovering a real (non-default) action the banner
+            // hid.
+            let envelope = r#"{
+                "recipe_name": "ooda-decide",
+                "success": true,
+                "step_results": [
+                    {"step_id": "decide-action",
+                     "output": "consolidate_memory context overhead is high this cycle",
+                     "error": "", "duration": 0.0}
+                ]
+            }"#;
+            let extracted =
+                extract_recipe_decision_output(envelope.as_bytes(), DECIDE_ADAPTER_TAG).unwrap();
+            let j = parse_action_from_text(&extracted);
+            assert_eq!(
+                j.action_kind(),
+                ActionKind::ConsolidateMemory,
+                "the JSON-envelope fix must recover the LLM's real action, not AdvanceGoal"
+            );
+        }
+
+        #[test]
+        fn decide_banner_is_not_a_valid_json_envelope() {
+            // Proves the decide phase must pass `--output-format json`: the
+            // text banner can never decode as an envelope, so a missing flag
+            // fails loudly instead of silently defaulting.
+            let err = extract_recipe_decision_output(DECIDE_BANNER.as_bytes(), DECIDE_ADAPTER_TAG)
+                .unwrap_err();
+            assert!(matches!(err, SimardError::AdapterInvocationFailed { .. }));
+        }
+
+        // --- orient: active urgency corruption pin + JSON-envelope recovery -
+
+        #[test]
+        fn orient_banner_timing_actively_corrupts_urgency() {
+            // Regression pin for the WORST half of #2421: the banner's `(0.0s)`
+            // timing yields a finite, in-range `0.0`, so the parser returns
+            // `adjusted_urgency = 0.0`, demoting the goal to a value scraped
+            // from the banner. Critically, 0.0 is NOT the deterministic floor
+            // (which would be base_urgency 0.8 for 0 failures) — proving the
+            // value was scraped from the banner, not computed.
+            let base_urgency = 0.8;
+            let failure_count = 0;
+            let j = parse_orient_from_text(ORIENT_BANNER, base_urgency, failure_count);
+            assert_eq!(
+                j.adjusted_urgency, 0.0,
+                "banner '(0.0s)' timing is scraped as urgency 0.0 — the bug"
+            );
+            // The deterministic floor for 0 failures would have preserved the
+            // base urgency; 0.0 != 0.8 confirms active corruption (not a floor).
+            assert!(
+                (j.adjusted_urgency - base_urgency).abs() > 1e-9,
+                "corrupted 0.0 must differ from the deterministic floor (0.8)"
+            );
+        }
+
+        #[test]
+        fn orient_json_envelope_recovers_real_urgency() {
+            // The fix: extract the final step output (the LLM's real decimal)
+            // from the json envelope rather than scraping the banner timing.
+            let envelope = r#"{
+                "recipe_name": "ooda-orient",
+                "success": true,
+                "step_results": [
+                    {"step_id": "orient-decision",
+                     "output": "0.65 goal remains high urgency despite one transient failure",
+                     "error": "", "duration": 0.0}
+                ]
+            }"#;
+            let extracted =
+                extract_recipe_decision_output(envelope.as_bytes(), ORIENT_ADAPTER_TAG).unwrap();
+            let j = parse_orient_from_text(&extracted, 0.8, 0);
+            assert!(
+                (j.adjusted_urgency - 0.65).abs() < 1e-9,
+                "must recover the LLM urgency 0.65, got {}",
+                j.adjusted_urgency
+            );
+        }
+
+        #[test]
+        fn orient_extraction_isolates_llm_decimal_from_timing_banner() {
+            // The envelope JSON text itself contains a `(0.0s)` timing string
+            // (in an earlier step's output), but extraction returns ONLY the
+            // FINAL step output `0.7`, so the parsed urgency is the LLM's
+            // decimal — never the timing noise.
+            let envelope = r#"{
+                "success": true,
+                "step_results": [
+                    {"step_id": "prep", "output": "ran in (0.0s)", "error": "", "duration": 0.0},
+                    {"step_id": "orient-decision", "output": "0.7", "error": "", "duration": 0.0}
+                ]
+            }"#;
+            let extracted =
+                extract_recipe_decision_output(envelope.as_bytes(), ORIENT_ADAPTER_TAG).unwrap();
+            assert_eq!(extracted, "0.7");
+            let j = parse_orient_from_text(&extracted, 0.8, 0);
+            assert!(
+                (j.adjusted_urgency - 0.7).abs() < 1e-9,
+                "extraction must isolate the LLM decimal from timing noise; got {}",
+                j.adjusted_urgency
+            );
+        }
+    }
+
+    // =================================================================
+    // issue_2419_family_phase_tests — production wiring for the decide /
+    // orient / merge-judge structured-transport fix (#2421 / #2428 / #2429).
+    //
+    // The `issue_2421_tests` above pin the PARSE seam (banner misparse vs.
+    // JSON-envelope recovery). These pin the rest of the production contract:
+    //   - parse-OUTCOME classification (Parsed vs DefaultEmpty/DefaultMalformed)
+    //     that drives the escalation ladder and the `brain_verdict_parsed_total`
+    //     metric numerator/denominator;
+    //   - the phase escalation-note builders (the `{{escalation_note}}` seam);
+    //   - the shared verdict-parse metric context shape;
+    //   - the generic `run_brain_ladder` backbone working for an ARBITRARY
+    //     decision type (proving decide/orient/merge ride the same ladder the
+    //     lifecycle phase does, rather than a reinvented one).
+    // =================================================================
+    mod issue_2419_family_phase_tests {
+        use super::super::*;
+        use crate::ooda_brain::{BrainPhase, DecideJudgment};
+
+        // --- decide parse-outcome classification (#2421 / #2429) ----------
+
+        #[test]
+        fn decide_outcome_empty_is_default_empty() {
+            let (j, oc) = parse_action_outcome("   ");
+            assert!(matches!(j, DecideJudgment::AdvanceGoal { .. }));
+            assert_eq!(oc, LifecycleParseOutcome::DefaultEmpty);
+            assert!(oc.is_parse_failure());
+        }
+
+        #[test]
+        fn decide_outcome_banner_first_word_is_default_malformed() {
+            // The text-mode banner first word `Recipe:` defaults to advance_goal
+            // — but it must be classified DefaultMalformed (a parse-miss), NOT
+            // counted as a real `advance_goal` decision.
+            let (j, oc) = parse_action_outcome("Recipe: ooda-decide SUCCESS (0.0s)");
+            assert!(matches!(j, DecideJudgment::AdvanceGoal { .. }));
+            assert_eq!(oc, LifecycleParseOutcome::DefaultMalformed);
+            assert!(oc.is_parse_failure());
+        }
+
+        #[test]
+        fn decide_outcome_real_advance_goal_is_parsed_not_default() {
+            // A genuine `advance_goal` LLM decision must read as Parsed — the
+            // whole reason the outcome is split out from the judgment.
+            let (j, oc) = parse_action_outcome("advance_goal engineer assigned, continue");
+            assert!(matches!(j, DecideJudgment::AdvanceGoal { .. }));
+            assert_eq!(oc, LifecycleParseOutcome::Parsed);
+            assert!(!oc.is_parse_failure());
+        }
+
+        #[test]
+        fn decide_outcome_known_keyword_is_parsed() {
+            let (j, oc) = parse_action_outcome("consolidate_memory overhead high");
+            assert!(matches!(j, DecideJudgment::ConsolidateMemory { .. }));
+            assert_eq!(oc, LifecycleParseOutcome::Parsed);
+        }
+
+        #[test]
+        fn decide_decision_choice_covers_all_variants() {
+            assert_eq!(
+                decide_decision_choice(&DecideJudgment::AdvanceGoal {
+                    rationale: String::new()
+                }),
+                "advance_goal"
+            );
+            assert_eq!(
+                decide_decision_choice(&DecideJudgment::ConsolidateMemory {
+                    rationale: String::new()
+                }),
+                "consolidate_memory"
+            );
+            assert_eq!(
+                decide_decision_choice(&DecideJudgment::SafeUpdate {
+                    rationale: String::new()
+                }),
+                "safe_update"
+            );
+        }
+
+        // --- orient parse-outcome classification (#2421 / #2429) ----------
+
+        #[test]
+        fn orient_outcome_valid_decimal_is_parsed() {
+            let (j, oc) = parse_orient_outcome("0.65 still urgent", 0.8, 0);
+            assert!((j.adjusted_urgency - 0.65).abs() < 1e-9);
+            assert_eq!(oc, LifecycleParseOutcome::Parsed);
+        }
+
+        #[test]
+        fn orient_outcome_no_decimal_is_default_malformed_floor() {
+            let (j, oc) = parse_orient_outcome("high urgency, no number here", 0.8, 1);
+            assert_eq!(oc, LifecycleParseOutcome::DefaultMalformed);
+            assert!(oc.is_parse_failure());
+            // Deterministic floor for 1 failure: 0.8 − 0.2 = 0.6.
+            assert!((j.adjusted_urgency - 0.6).abs() < 1e-9);
+        }
+
+        #[test]
+        fn orient_outcome_empty_is_default_empty_floor() {
+            let (_, oc) = parse_orient_outcome("   ", 0.8, 0);
+            assert_eq!(oc, LifecycleParseOutcome::DefaultEmpty);
+        }
+
+        // --- escalation-note builders (the {{escalation_note}} seam) -------
+
+        #[test]
+        fn decide_escalation_note_empty_on_base() {
+            assert_eq!(
+                build_decide_escalation_note(LadderRung::Base, "anything"),
+                ""
+            );
+        }
+
+        #[test]
+        fn decide_escalation_note_repair_lists_actions_and_prior() {
+            let n = build_decide_escalation_note(LadderRung::SchemaRepair, "Recipe: banner");
+            assert!(n.contains("SCHEMA REPAIR"), "note: {n}");
+            assert!(
+                n.contains("advance_goal") && n.contains("consolidate_memory"),
+                "note must echo the action list"
+            );
+            assert!(
+                n.contains("Recipe: banner"),
+                "note must feed prior output back"
+            );
+        }
+
+        #[test]
+        fn orient_escalation_note_repair_demands_decimal() {
+            let n = build_orient_escalation_note(LadderRung::SchemaRepair, "junk");
+            assert!(n.contains("SCHEMA REPAIR"), "note: {n}");
+            assert!(
+                n.to_lowercase().contains("decimal"),
+                "note must demand a decimal"
+            );
+            assert!(n.contains("junk"), "note must feed prior output back");
+        }
+
+        #[test]
+        fn phase_escalation_note_escalate_adds_high_effort() {
+            let n =
+                build_phase_escalation_note(LadderRung::Escalate, "p", "REPAIR_INSTR", "HE_INSTR");
+            assert!(n.contains("SCHEMA REPAIR"), "escalate still repairs");
+            assert!(n.contains("HIGH-EFFORT"), "escalate adds the effort tier");
+            assert!(n.contains("REPAIR_INSTR") && n.contains("HE_INSTR"));
+        }
+
+        // --- shared verdict-parse metric context (#2429) ------------------
+
+        #[test]
+        fn verdict_metric_context_parsed_defaulted_and_recovered() {
+            let parsed = build_verdict_parse_context(
+                BrainPhase::Decide,
+                "g1",
+                LifecycleParseOutcome::Parsed,
+                1,
+            );
+            let v: serde_json::Value = serde_json::from_str(&parsed).unwrap();
+            assert_eq!(v["phase"], "decide");
+            assert_eq!(v["outcome"], "parsed");
+            assert_eq!(v["is_parse_failure"], false);
+            assert_eq!(v["attempts"], 1);
+
+            let defaulted = build_verdict_parse_context(
+                BrainPhase::MergeJudge,
+                "pr-9",
+                LifecycleParseOutcome::DefaultMalformed,
+                3,
+            );
+            let v2: serde_json::Value = serde_json::from_str(&defaulted).unwrap();
+            assert_eq!(v2["phase"], "merge_judge");
+            assert_eq!(v2["outcome"], "defaulted");
+            assert_eq!(v2["is_parse_failure"], true);
+            assert_eq!(v2["outcome_detail"], "default_malformed");
+
+            // A ladder recovery counts as parsed — that is how the ladder drops
+            // the measured default rate.
+            let repaired = build_verdict_parse_context(
+                BrainPhase::Orient,
+                "g",
+                LifecycleParseOutcome::Repaired,
+                2,
+            );
+            let v3: serde_json::Value = serde_json::from_str(&repaired).unwrap();
+            assert_eq!(v3["outcome"], "parsed");
+            assert_eq!(v3["outcome_detail"], "repaired");
+        }
+
+        // --- generic ladder backbone for an ARBITRARY decision type -------
+
+        #[test]
+        fn generic_ladder_recovers_for_arbitrary_decision_type() {
+            // run_brain_ladder is decision-type-agnostic: a String decision that
+            // only "parses" when the text is "good". The first rung returns it.
+            let cfg = EscalationConfig { max_escalations: 2 };
+            let (decision, outcome, attempts, term) = run_brain_ladder(
+                "g",
+                "bad-base",
+                LifecycleParseOutcome::DefaultMalformed,
+                &cfg,
+                |_rung, _prior| Ok("good".to_string()),
+                |raw: &str| {
+                    if raw == "good" {
+                        ("GOOD".to_string(), LifecycleParseOutcome::Parsed)
+                    } else {
+                        ("DEF".to_string(), LifecycleParseOutcome::DefaultMalformed)
+                    }
+                },
+                || "DEF".to_string(),
+                |d: &String| d.clone(),
+            );
+            assert_eq!(decision, "GOOD");
+            assert_eq!(outcome, LifecycleParseOutcome::Repaired);
+            assert_eq!(attempts, 2, "base + 1 recovering rung");
+            assert_eq!(term, LadderTermination::Recovered);
+        }
+
+        #[test]
+        fn generic_ladder_exhausts_to_loud_default_for_arbitrary_type() {
+            let cfg = EscalationConfig { max_escalations: 2 };
+            let (decision, outcome, attempts, term) = run_brain_ladder(
+                "g",
+                "bad",
+                LifecycleParseOutcome::DefaultMalformed,
+                &cfg,
+                |_r, _p| Ok("still-bad".to_string()),
+                |_raw: &str| ("DEF".to_string(), LifecycleParseOutcome::DefaultMalformed),
+                || "DEF".to_string(),
+                |d: &String| d.clone(),
+            );
+            assert_eq!(decision, "DEF");
+            assert!(outcome.is_parse_failure());
+            assert_eq!(attempts, 3, "base + 2 exhausted rungs");
+            assert_eq!(term, LadderTermination::Exhausted);
         }
     }
 }

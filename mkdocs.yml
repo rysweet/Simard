@@ -68,6 +68,8 @@ nav:
     - OODA Loop Self-Detection: concepts/ooda-loop-self-detection.md
     - Reconcile-and-Self-Deploy: concepts/reconcile-and-self-deploy.md
     - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
+    - Closing the Procedural-Learning Loop: concepts/procedural-learning-loop.md
+    - Trustworthy Confidence + External Completion: concepts/trustworthy-confidence-and-external-completion.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
@@ -90,17 +92,23 @@ nav:
     - Verify and Roll Back a Self-Deploy: howto/verify-and-roll-back-a-self-deploy.md
     - Run Self-Deploy from Any Directory: howto/run-self-deploy-from-any-directory.md
     - Diagnose a Rejected Goal Completion: howto/diagnose-a-rejected-goal-completion.md
+    - Interpret Brain Confidence and Verify Completion: howto/interpret-brain-confidence-and-verify-completion.md
     - Configure Brain Introspection: howto/configure-brain-introspection.md
     - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
+    - Diagnose merge-pr Verdict-Parse Failures: howto/diagnose-merge-pr-verdict-parse-failures.md
+    - Inspect the Procedural-Learning Loop: howto/inspect-the-procedural-learning-loop.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Self-Deploy API: reference/self-deploy-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
     - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
+    - Trustworthy-Confidence API: reference/trustworthy-confidence-api.md
+    - External-Signal Completion Gate: reference/external-signal-completion-gate.md
     - Memory introspection CLI: reference/simard-memory-cli.md
     - Cognitive-memory provenance (DERIVES_FROM): reference/cognitive-memory-provenance.md
     - Episode Ingestion Classifier API: reference/episode-ingestion-classifier.md
     - Automatic Distillation Scheduler API: reference/automatic-distillation-scheduler.md
+    - Procedural-Learning Loop API: reference/procedural-learning-loop.md
     - Goal-board prospective reconcile: reference/goal-board-prospective-reconcile.md
     - Runtime Contracts: reference/runtime-contracts.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
@@ -118,6 +126,11 @@ nav:
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     - Brain Introspection API: reference/brain-introspection-api.md
+    - Dashboard Action-Detail Humanization: reference/dashboard-action-detail-humanization.md
+    - Supply-Chain Audit & Guardrails: reference/supply-chain-audit.md
+    - Dependency Trust Policy: reference/dependency-trust-policy.md
+    - Release Integrity (SBOM + Signing): reference/release-integrity.md
+    - Recipe-brain Verdict/Decision Parsing: reference/recipe-brain-verdict-parsing.md
     # Hidden from nav until issue #1590 implementation lands:
     #   - reference/cognitive-memory-bridge-helpers.md
     #   - reference/goal-board-api.md

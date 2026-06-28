@@ -90,4 +90,16 @@ grep -qF 'No new memories in the last hour' <<<"$HTML" \
 grep -q '"total"' <<<"$RECENT" \
   || fail "/api/memory/recent must expose a total stored count"
 
+# ── P2 item 3: Overview raw brain-action-detail is humanized ─────────────────
+grep -qF 'function humanizeActionDetail(' <<<"$HTML" \
+  || fail "humanizeActionDetail must be defined so Overview action details stop leaking raw brain strings"
+grep -qF 'esc(humanizeActionDetail(o.detail).substring(0,120))' <<<"$HTML" \
+  || fail "Last Cycle Actions must humanize o.detail before the terminal esc() (escape-last)"
+grep -qF 'humanizeActionDetail(a.detail' <<<"$HTML" \
+  || fail "Recent actions must humanize a.detail before renderActionDetail()"
+grep -qF 'esc(o.detail.substring(0,120))' <<<"$HTML" \
+  && fail "Last Cycle Actions still renders the raw, un-humanized detail string"
+grep -qF 'renderActionDetail(esc(' <<<"$HTML" \
+  && fail "Recent actions must not double-escape before renderActionDetail()"
+
 echo "[jargon] PASS: dashboard jargon/clarity fixes hold (#2358 P1/P2)"

@@ -8,7 +8,11 @@
 # token and matches it case-insensitively to the 10 known action kinds.
 #
 # Context vars (passed via -c):
-#   goal_id, urgency, reason
+#   goal_id, urgency, reason, escalation_note
+#
+# `escalation_note` (issue #2432 / #2421) is empty on the base attempt and
+# carries a schema-repair / higher-effort instruction on escalation-ladder
+# retries. When empty it renders to nothing, so base behaviour is unchanged.
 #
 # Output: agent stdout — action keyword as first word, followed by rationale
 
@@ -25,6 +29,8 @@ steps:
     type: "agent"
     agent: "default"
     prompt: |
+      {{escalation_note}}
+
       # OODA Brain — Decide Phase: Action-Kind Routing
 
       ## ROLE

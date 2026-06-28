@@ -178,6 +178,52 @@ pub(crate) const PART_01: &str = r#"      </div>
       for(const j of (BANNED_JARGON||[])){if(j)s=s.split(j).join('');}
       return s.replace(/\s{2,}/g,' ').trim();
     }
+    /* P2 (#2358): humanize a raw cycle-outcome action-detail string for the
+       Overview tab. Strips machine routing prefixes (advance-goal:, no-action:,
+       <x>-brain:, brain:), drops parenthetical brain-error noise, maps known
+       decision tokens to plain English, removes the "no decision keyword
+       found...defaulting to..." boilerplate, and applies the shared
+       BANNED_JARGON ban. The agent='engineer-...' substring the Attach button
+       keys off is preserved verbatim. Returns PLAIN TEXT only — callers must
+       escape it last (escape-last invariant). */
+    function humanizeActionDetail(detail){
+      if(detail==null)return'';
+      let s=String(detail);
+      // 1) Drop any (...) group whose body is pure machine noise, mirroring the
+      //    server-side goals_status cleanup. Single linear scan -> ReDoS-immune.
+      //    A group carrying an agent='engineer-...' reference is always kept so
+      //    the Attach-button contract survives (SR-D5).
+      const NOISE=['brain-error fallback','goal-action parse failed','ooda-brain','brain:'];
+      let out='';
+      for(let i=0;i<s.length;i++){
+        if(s.charAt(i)==='('){
+          let depth=1,j=i+1;
+          for(;j<s.length&&depth>0;j++){
+            const cj=s.charAt(j);
+            if(cj==='(')depth++;else if(cj===')')depth--;
+          }
+          const body=s.slice(i+1,depth===0?j-1:j);
+          const noisy=NOISE.some(m=>body.indexOf(m)>=0)&&body.indexOf("agent='engineer-")<0;
+          if(noisy){out+=' ';i=j-1;continue;}
+        }
+        out+=s.charAt(i);
+      }
+      s=out;
+      // 2) Drop the verbose "no decision keyword found ... defaulting to X"
+      //    boilerplate (bounded, non-backtracking).
+      s=s.replace(/no decision keyword found[^()]{0,80}?defaulting to\s*\S*/i,' ');
+      // 3) Map known machine decision tokens to plain English (allowlist).
+      const MAP={'continue_skipping':'continued without acting','spawn_engineer dispatched':'launched a sub-agent','prefix-routed':'chosen by built-in routing rules','no LLM configured':'no language model configured'};
+      for(const k in MAP){if(Object.prototype.hasOwnProperty.call(MAP,k))s=s.split(k).join(MAP[k]);}
+      // 4) Strip fixed machine routing prefixes / residual markers. The generic
+      //    <x>-brain: form is bounded ({1,20}) so it stays non-backtracking.
+      s=s.replace(/\b[a-z]{1,20}-brain:\s*/gi,' ');
+      for(const t of ['advance-goal:','no-action:','ooda-brain','brain:']){s=s.split(t).join(' ');}
+      // 5) Extend the static-lede jargon ban to this dynamic text.
+      for(const j of (BANNED_JARGON||[])){if(j)s=s.split(j).join('');}
+      // 6) Tidy orphaned punctuation and collapse whitespace.
+      return s.replace(/\(\s*\)/g,'').replace(/\s{2,}/g,' ').replace(/^[\s:;,.-]+/,'').trim();
+    }
     // P3 (#2358): render a raw second count as a human duration, e.g.
     // 37440s -> "10h 24m", 624m worth of seconds -> "10h 24m", 90s -> "1m".
     function humanizeDuration(secs){
@@ -393,7 +439,7 @@ pub(crate) const PART_01: &str = r#"      </div>
                   <span>${o.success?'✅':'❌'}</span>
                   <code style="color:var(--accent)">${esc(humanizeActionKind(o.action_kind))}</code>
                   <span>${esc(o.action_description||'')}</span>
-                  ${o.detail?'<span style="color:#8b949e;font-size:.8rem;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block">'+esc(o.detail.substring(0,120))+'</span>':''}
+                  ${o.detail?'<span style="color:#8b949e;font-size:.8rem;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block">'+esc(humanizeActionDetail(o.detail).substring(0,120))+'</span>':''}
                 </div>`).join('')}
             </div>`:'<div style="color:#8b949e">No recent actions recorded.</div>'}`;
 
@@ -428,7 +474,7 @@ pub(crate) const PART_01: &str = r#"      </div>
               <span style="color:var(--accent);min-width:2rem;font-weight:600">#${a.cycle}</span>
               <span>${a.success?'✅':'❌'}</span>
               <code>${esc(humanizeActionKind(a.action_kind))}</code>
-              <span style="flex:1">${renderActionDetail((function(){var arr=Array.from(a.detail||'');var d=arr.length>200?arr.slice(0,200).join('')+'…':arr.join('');return d||a.action_description||'';})())}</span>
+              <span style="flex:1">${renderActionDetail((function(){var arr=Array.from(humanizeActionDetail(a.detail));var d=arr.length>200?arr.slice(0,200).join('')+'…':arr.join('');return d||a.action_description||'';})())}</span>
             </div>`).join('');
         }else{
           actEl.innerHTML='<span style="color:#8b949e">No structured action history yet. The agent daemon records actions each cycle.</span>';
