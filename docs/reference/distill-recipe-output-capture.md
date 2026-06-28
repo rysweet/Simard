@@ -300,7 +300,7 @@ first that yields a facts object:
 
 If stdout does not parse as a `RecipeRunnerEnvelope` at all (e.g. a unit
 test or mock that emits a bare `{ "facts": … }` object, or prose with the
-object embedded), scan the **raw stdout** directly for the first balanced
+object embedded), scan the **raw stdout** directly for a balanced
 `{ "facts": … }` object. This keeps all existing `DistillRecipeRunner`
 mock tests and the plain-object / prose-wrapped tests green.
 
@@ -329,18 +329,23 @@ is surfaced upstream.
 Tiers 1 and 2 share one helper:
 
 ```rust
-/// Locate and parse the first balanced `{ "facts": … }` object in `s`.
-/// Single-pass and iterative (no recursion in the scan itself), so deeply
-/// nested input cannot grow the stack; each candidate parse is bounded by
-/// `serde_json`'s own recursion limit, which rejects pathological nesting.
+/// Locate and parse a balanced `{ "facts": … }` object in `s`, returning the
+/// facts from the LAST balanced object that parses (so a leading banner or
+/// thinking object does not shadow the agent's answer — issue #2461).
+/// Iterative (no recursion in the scan itself), so deeply nested input cannot
+/// grow the stack; each candidate parse is bounded by `serde_json`'s own
+/// recursion limit, which rejects pathological nesting.
 fn scan_for_facts_object(s: &str) -> Option<DistillOutput>;
 ```
 
-It first tries the fast path (the whole string is the object), then walks
-the bytes tracking brace depth, attempting a parse at each balanced
-`{...}` close. The scan is linear in the input length; pathologically
-nested braces parse to an `Err` (via serde's recursion limit) rather than
-panicking — see `parser_tolerates_deeply_nested_input_without_panic`.
+It first tries the fast path (the whole string is the object), then collects
+every balanced top-level `{...}` substring with a **string-aware** brace
+scan (braces inside JSON string literals are ignored, so a brace in a fact's
+`content` cannot corrupt depth accounting) and returns the facts from the
+**last non-empty** one that parses (falling back to an empty `{"facts":[]}`
+only when no object carries facts/procedures). The scan is linear in the input
+length; pathologically nested braces parse to an `Err` (via serde's recursion
+limit) rather than panicking — see `parser_tolerates_deeply_nested_input_without_panic`.
 
 ---
 

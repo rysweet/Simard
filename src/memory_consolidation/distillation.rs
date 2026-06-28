@@ -238,6 +238,10 @@ pub fn distill_recent_episodes_with_runner(
             eprintln!(
                 "[simard] distill: {pulled} episodes pulled, recipe error: {e}, no markers set, retry next pass"
             );
+            // Make the previously-silent non-fatal failure visible (#2461).
+            // Recorded BEFORE the early return; episodes stay unmarked, so the
+            // retry-safety invariant is unaffected.
+            record_distill_success_metric(false, Some(classify_distill_error(&e)), pulled, 0);
             return Err(e);
         }
     };
@@ -378,6 +382,13 @@ pub fn distill_recent_episodes_with_runner(
         "[simard] distill: {pulled} episodes → {stored} facts, {stored_procs} procedures, {marked} marked"
     );
 
+    // The recipe ran and its output parsed (#2461): record a success event so
+    // distill_success_rate / distill_parse_success_rate are measurable. NOTE:
+    // this point is only reached after the storage writes above succeeded; a
+    // downstream memory-write failure propagates as `Err` (a separate subsystem,
+    // out of this recipe-stage metric's scope — see record_distill_success_metric).
+    record_distill_success_metric(true, None, pulled, stored);
+
     Ok(DistillReport {
         input_count: pulled,
         fact_count: stored,
@@ -508,6 +519,182 @@ fn record_reliability_gate_metric(candidate_facts: u32, quarantined: u32, promot
             target: "simard::distill",
             error = %e,
             "failed to record distill_reliability_gate metric (distillation unaffected)",
+        );
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// distill_success_rate instrumentation (issue #2461)
+// ───────────────────────────────────────────────────────────────────────────
+//
+// A distillation failure is *non-fatal*: `dispatch_consolidate_memory` folds
+// the `Err` into a human-readable string and still reports the action
+// successful. Without a counter the failure frequency — and therefore the
+// silent degradation of semantic recall — is invisible. We record a
+// `distill_success_rate` metric event per pass that actually ran the recipe so
+// both the success rate and the parse-success rate are measurable from
+// `metrics.jsonl`, mirroring `record_reliability_gate_metric` (#2433).
+
+/// Machine-readable class of a distillation failure, derived from the stable
+/// leading prefix of the `SimardError::BridgeError` message emitted at each
+/// runner/parse site in this module. Covers every `Err` `run_all` can surface,
+/// including the **production** `--output-format json` envelope path (where a
+/// parse failure manifests as a *step-output* parse error, not the legacy
+/// bare-stdout one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DistillFailureClass {
+    /// `recipe-runner-rs` could not be spawned (binary missing/structural).
+    SpawnFailure,
+    /// The recipe **process** exited non-zero (#2461 t=7411 case).
+    CopilotTerminalFailure,
+    /// The recipe process exited 0 but the run did not yield a usable
+    /// completed `distill` step (envelope `success=false`, or no completed
+    /// step). The recipe ran but produced no parseable agent output to parse.
+    RecipeReportedFailure,
+    /// The recipe process exited 0 and a step ran, but its output had no
+    /// parseable `{ "facts": [...] }` object (#2461 t=7517 case). This is the
+    /// only failure class that actually *reached* output parsing.
+    ParseFailure,
+    /// The episodes payload failed to serialize (structural; ~unreachable
+    /// since the payload is built from infallible `json!` values).
+    SerializeFailure,
+    /// Any other error (e.g. a backend error surfaced through the runner).
+    Other,
+}
+
+impl DistillFailureClass {
+    /// Stable label used in the metric context.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SpawnFailure => "spawn-failure",
+            Self::CopilotTerminalFailure => "copilot-terminal-failure",
+            Self::RecipeReportedFailure => "recipe-reported-failure",
+            Self::ParseFailure => "parse-failure",
+            Self::SerializeFailure => "serialize-failure",
+            Self::Other => "other",
+        }
+    }
+
+    /// `true` when the recipe **process** exited 0. False for spawn/terminal
+    /// (never started / non-zero exit) and serialize (never spawned).
+    pub fn recipe_exited_ok(self) -> bool {
+        matches!(self, Self::ParseFailure | Self::RecipeReportedFailure)
+    }
+
+    /// `true` when the run actually *reached output parsing* (a step ran and
+    /// its output was parsed). This is the denominator gate for
+    /// `distill_parse_success_rate` — only `ParseFailure` qualifies among
+    /// failures (`RecipeReportedFailure` exited 0 but produced no step output
+    /// to parse).
+    pub fn reached_parsing(self) -> bool {
+        matches!(self, Self::ParseFailure)
+    }
+}
+
+/// Classify a distillation `SimardError` into a [`DistillFailureClass`].
+///
+/// Discrimination anchors on the **stable leading prefix** this module emits
+/// for each class (`SimardError::BridgeError(msg)` → `msg.starts_with(...)`),
+/// NOT on `contains`. Several messages embed foreign text (terminal failures
+/// carry up to 200 chars each of recipe stderr/stdout; parse failures carry the
+/// agent output excerpt), and that variable tail always trails the fixed prefix
+/// — so anchoring keeps a non-zero exit from being misread as a parse-failure
+/// and corrupting `distill_parse_success_rate`.
+///
+/// The prefixes mirror the seven `BridgeError` sites in this file; the
+/// production `--output-format json` path's step-output parse error
+/// (`distill: \`distill\` step output did not contain a parseable …`) is the
+/// t=7517 manifestation and MUST map to `ParseFailure`, since production never
+/// reaches the legacy bare-stdout `did not yield a parseable` path.
+pub fn classify_distill_error(err: &SimardError) -> DistillFailureClass {
+    let SimardError::BridgeError(msg) = err else {
+        return DistillFailureClass::Other;
+    };
+    if msg.starts_with("distill: recipe-runner-rs spawn failed") {
+        DistillFailureClass::SpawnFailure
+    } else if msg.starts_with("distill: recipe exited with") {
+        DistillFailureClass::CopilotTerminalFailure
+    } else if msg.starts_with("distill: failed to serialize episodes payload") {
+        DistillFailureClass::SerializeFailure
+    } else if msg.starts_with("distill: recipe-runner reported failure")
+        || msg.starts_with("distill: recipe envelope had no completed")
+    {
+        DistillFailureClass::RecipeReportedFailure
+    } else if msg.starts_with("distill: `distill` step output did not contain a parseable")
+        || msg.starts_with("distill: recipe run did not yield a parseable")
+    {
+        DistillFailureClass::ParseFailure
+    } else {
+        DistillFailureClass::Other
+    }
+}
+
+/// Build the `distill_success_rate` metric context for one pass that ran the
+/// recipe. `class` is `None` on success, `Some(_)` on failure.
+fn build_distill_success_context(
+    success: bool,
+    class: Option<DistillFailureClass>,
+    input_count: u32,
+    fact_count: u32,
+) -> String {
+    let recipe_exited_ok = success || class.is_some_and(|c| c.recipe_exited_ok());
+    // Parsing was attempted iff a step ran and its output was parsed — true on
+    // success and for a parse-failure, but NOT for a recipe-reported failure
+    // that exited 0 without producing step output.
+    let parse_attempted = success || class.is_some_and(|c| c.reached_parsing());
+    serde_json::json!({
+        "outcome": if success { "success" } else { "failure" },
+        "recipe_exited_ok": recipe_exited_ok,
+        "parse_attempted": parse_attempted,
+        "parse_success": success,
+        "failure_class": class.map(|c| c.as_str()),
+        "input_count": input_count,
+        "fact_count": fact_count,
+    })
+    .to_string()
+}
+
+/// Record one `distill_success_rate` metric event for one distillation pass.
+///
+/// **Scope: the recipe + output-parse stage** — exactly the failure surface of
+/// issue #2461 (the distill *recipe* exiting non-zero, or exiting 0 with
+/// unparseable output). It is recorded for every pass that ran the recipe
+/// (success OR a recipe/parse failure); below-threshold skips are excluded.
+/// Downstream memory-write failures (`store_fact_with_provenance`,
+/// `store_procedure_with_provenance`, `mark_episode_distilled`) are a *separate*
+/// subsystem and are intentionally NOT folded into this metric: they propagate
+/// as `Err` from `distill_recent_episodes_with_runner` and are surfaced through
+/// the normal error path, so counting them here would conflate backend-write
+/// reliability with recipe reliability. (This mirrors the placement of
+/// `record_reliability_gate_metric`, which likewise covers only the recipe pass.)
+///
+/// The metric `value` is `1.0` on success and `0.0` on a recipe/parse failure,
+/// so the mean over passes is the success rate. The context's `parse_attempted`
+/// / `parse_success` flags additionally yield `distill_parse_success_rate`,
+/// isolating the "exited 0 but unparseable" mode (#2461 t=7517) from the
+/// "exited non-zero" mode (t=7411). This makes the previously-silent non-fatal
+/// distill failures visible in `metrics.jsonl` without committing any
+/// point-in-time findings.
+///
+/// Best-effort: a metrics-write failure is logged, never propagated. No-op
+/// under `cfg!(test)` so unit tests never append to the operator's real
+/// `~/.simard/metrics/metrics.jsonl`.
+fn record_distill_success_metric(
+    success: bool,
+    class: Option<DistillFailureClass>,
+    input_count: u32,
+    fact_count: u32,
+) {
+    if cfg!(test) {
+        return;
+    }
+    let value = if success { 1.0 } else { 0.0 };
+    let context = build_distill_success_context(success, class, input_count, fact_count);
+    if let Err(e) = crate::self_metrics::record_metric("distill_success_rate", value, &context) {
+        tracing::warn!(
+            target: "simard::distill",
+            error = %e,
+            "failed to record distill_success_rate metric (distillation unaffected)",
         );
     }
 }
@@ -730,40 +917,96 @@ pub(crate) fn parse_recipe_output_full(raw: &str) -> SimardResult<DistillOutput>
     )))
 }
 
-/// Scan `text` for the first balanced `{...}` substring that deserializes as a
+/// Scan `text` for a balanced `{...}` substring that deserializes as a
 /// [`RecipeEnvelope`] (a bare `{ "facts": [...], "procedures": [...] }` object),
 /// tolerating leading/trailing prose. Returns `None` if none is found.
 ///
+/// When several balanced objects are present the **last non-empty** one that
+/// parses wins: a leading banner/status object (e.g. a `NODE_OPTIONS` notice,
+/// or a thinking trace the agent emitted before its answer) no longer shadows
+/// the real facts object that trails it — this is the t=7517 / #2461
+/// parse-failure mode where a first-object scan locked onto the banner and the
+/// whole pass silently no-opped. Preferring the last *non-empty* object (and
+/// only falling back to an empty `{"facts":[]}` when none carry
+/// facts/procedures) keeps a legitimate "nothing worth distilling" answer while
+/// preventing an accidental trailing empty object from discarding earlier facts.
+///
 /// The scan is iterative (no recursion) so pathologically deep brace nesting
 /// terminates without a stack overflow; serde's own recursion limit bounds the
-/// per-candidate parse.
+/// per-candidate parse. Brace scanning is string-aware (it ignores `{`/`}`
+/// inside JSON string literals, respecting `\"` escapes) so a brace inside a
+/// fact's `content` cannot corrupt depth accounting.
 fn scan_for_facts_object(text: &str) -> Option<DistillOutput> {
     let trimmed = text.trim();
     // Fast path — the text IS the JSON object.
     if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
         return Some(parsed.into_output());
     }
-    // Slow path — find the first balanced `{...}` substring that parses.
-    if let Some(start) = trimmed.find('{') {
-        let mut depth = 0i32;
-        let bytes = trimmed.as_bytes();
-        for i in start..bytes.len() {
-            match bytes[i] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0
-                        && let Ok(parsed) =
-                            serde_json::from_str::<RecipeEnvelope>(&trimmed[start..=i])
-                    {
-                        return Some(parsed.into_output());
-                    }
-                }
-                _ => {}
+    // Slow path — among every balanced top-level `{...}` substring, prefer the
+    // facts from the LAST *non-empty* one that parses (the agent's final answer
+    // trails any banner/thinking output). Falling back to the last parseable
+    // object only when none carry facts/procedures preserves a legitimate
+    // `{"facts":[]}` "nothing worth distilling" answer while never letting an
+    // accidental trailing empty object shadow an earlier populated one.
+    let mut empty_fallback: Option<DistillOutput> = None;
+    for (start, end) in balanced_object_spans(trimmed).into_iter().rev() {
+        if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(&trimmed[start..end]) {
+            let output = parsed.into_output();
+            if !output.facts.is_empty() || !output.procedures.is_empty() {
+                return Some(output);
+            }
+            if empty_fallback.is_none() {
+                empty_fallback = Some(output);
             }
         }
     }
-    None
+    empty_fallback
+}
+
+/// Return the byte spans `[start, end)` of every top-level balanced `{...}`
+/// object in `s`, in source order.
+///
+/// String-aware **inside objects**: once a `{` has opened (depth > 0), `{`/`}`
+/// bytes inside a JSON string literal (respecting `\"` escapes) are ignored.
+/// Quotes encountered at depth 0 (e.g. an unmatched quote in leading prose)
+/// are treated as ordinary characters so they cannot swallow the object's `{`
+/// opener. Unbalanced trailing `{` are silently dropped.
+fn balanced_object_spans(s: &str) -> Vec<(usize, usize)> {
+    let bytes = s.as_bytes();
+    let mut spans = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' if depth > 0 => in_string = true,
+            b'{' => {
+                if depth == 0 {
+                    start = i;
+                }
+                depth += 1;
+            }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    spans.push((start, i + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    spans
 }
 
 /// The `recipe-runner-rs` 0.3.6 `--output-format json` envelope. Only the
@@ -1035,5 +1278,251 @@ mod unit_tests {
     fn parse_recipe_output_errors_when_no_object() {
         let raw = "no json here at all";
         assert!(parse_recipe_output(raw).is_err());
+    }
+
+    // ── issue #2461: last-object-wins + string-aware extraction ──────────
+
+    #[test]
+    fn parse_recipe_output_prefers_last_facts_object_over_leading_banner() {
+        // The t=7517 / #2461 failure mode: a leading non-facts JSON banner
+        // precedes the real facts object. A first-object scan locked onto the
+        // banner and the pass silently no-opped; "last object wins" recovers it.
+        let raw = r#"{"recipe_name":"distill","status":"starting","note":"banner"}
+            {"facts":[{"concept":"lesson-learned","content":"prefer last object","source_episode_id":"epi_3"}]}"#;
+        let facts = parse_recipe_output(raw).unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "lesson-learned");
+        assert_eq!(facts[0].content, "prefer last object");
+    }
+
+    #[test]
+    fn parse_recipe_output_tolerates_braces_inside_fact_content() {
+        // A fact whose content contains literal braces must not corrupt the
+        // string-aware brace scanner.
+        let raw = r#"thinking... {"facts":[{"concept":"bug-pattern","content":"handler for {req} leaks }","source_episode_id":"epi_4"}]}"#;
+        let facts = parse_recipe_output(raw).unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].content, "handler for {req} leaks }");
+    }
+
+    #[test]
+    fn parse_recipe_output_handles_unmatched_quote_in_leading_prose() {
+        // A stray double-quote in prose BEFORE the JSON must not put the
+        // scanner into string mode and swallow the object's `{` opener.
+        let raw = "He said \"the answer is below:\n{\"facts\":[{\"concept\":\"pr-pattern\",\"content\":\"x\",\"source_episode_id\":\"epi_9\"}]}";
+        let facts = parse_recipe_output(raw).unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "pr-pattern");
+    }
+
+    #[test]
+    fn balanced_object_spans_finds_multiple_and_ignores_string_braces() {
+        assert_eq!(
+            balanced_object_spans(r#"{"a":1} junk {"b":{"c":2}}"#).len(),
+            2
+        );
+        assert_eq!(
+            balanced_object_spans(r#"{"k":"a } b { c"}"#).len(),
+            1,
+            "string braces must not split the object"
+        );
+    }
+
+    // ── issue #2461: failure classification ─────────────────────────────
+
+    #[test]
+    fn classify_distill_error_buckets_each_failure_mode() {
+        use DistillFailureClass::*;
+        let cases = [
+            (
+                "distill: recipe-runner-rs spawn failed: no such file",
+                SpawnFailure,
+            ),
+            (
+                "distill: recipe exited with exit status: 1: stderr= stdout=",
+                CopilotTerminalFailure,
+            ),
+            // Production `--output-format json` parse failure (t=7517): the
+            // envelope parsed, the step ran, but its output was unparseable.
+            (
+                "distill: `distill` step output did not contain a parseable { \"facts\": [...] } object; output: hi",
+                ParseFailure,
+            ),
+            // Legacy bare-stdout parse failure (non-envelope `run()` / mocks).
+            (
+                "distill: recipe run did not yield a parseable { \"facts\": [...] } object: hi",
+                ParseFailure,
+            ),
+            // Envelope present but the run self-reported failure / no step.
+            (
+                "distill: recipe-runner reported failure (success=false): boom",
+                RecipeReportedFailure,
+            ),
+            (
+                "distill: recipe envelope had no completed `distill` step",
+                RecipeReportedFailure,
+            ),
+            (
+                "distill: failed to serialize episodes payload: oops",
+                SerializeFailure,
+            ),
+            ("something unexpected", Other),
+        ];
+        for (msg, expected) in cases {
+            let err = SimardError::BridgeError(msg.to_string());
+            assert_eq!(classify_distill_error(&err), expected, "msg: {msg}");
+        }
+    }
+
+    #[test]
+    fn classify_anchors_on_prefix_not_embedded_stdout() {
+        // A terminal failure embeds the recipe's stdout, which may itself
+        // contain the parse-failure phrase; prefix anchoring must keep it a
+        // terminal failure so recipe_exited_ok stays false.
+        let terminal = SimardError::BridgeError(
+            "distill: recipe exited with exit status: 1: stderr= stdout=recipe run did not \
+             yield a parseable object"
+                .to_string(),
+        );
+        assert_eq!(
+            classify_distill_error(&terminal),
+            DistillFailureClass::CopilotTerminalFailure
+        );
+        assert!(!classify_distill_error(&terminal).recipe_exited_ok());
+    }
+
+    #[test]
+    fn classify_non_bridge_error_is_other() {
+        let err = SimardError::PlanningUnavailable {
+            reason: "backend down".to_string(),
+        };
+        assert_eq!(classify_distill_error(&err), DistillFailureClass::Other);
+    }
+
+    #[test]
+    fn parse_failure_is_the_only_class_that_reached_parsing() {
+        use DistillFailureClass::*;
+        // recipe_exited_ok: process exited 0 → parse-failure AND recipe-reported.
+        assert!(ParseFailure.recipe_exited_ok());
+        assert!(RecipeReportedFailure.recipe_exited_ok());
+        assert!(!CopilotTerminalFailure.recipe_exited_ok());
+        assert!(!SpawnFailure.recipe_exited_ok());
+        assert!(!SerializeFailure.recipe_exited_ok());
+        // reached_parsing: only parse-failure actually parsed step output.
+        assert!(ParseFailure.reached_parsing());
+        assert!(!RecipeReportedFailure.reached_parsing());
+        assert!(!CopilotTerminalFailure.reached_parsing());
+    }
+
+    // ── issue #2461: distill_success_rate metric context ────────────────
+
+    #[test]
+    fn success_metric_context_marks_parse_attempted_and_parse_success() {
+        let payload = build_distill_success_context(true, None, 25, 3);
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["outcome"], "success");
+        assert_eq!(v["recipe_exited_ok"], true);
+        assert_eq!(v["parse_attempted"], true);
+        assert_eq!(v["parse_success"], true);
+        assert!(v["failure_class"].is_null());
+        assert_eq!(v["input_count"], 25);
+        assert_eq!(v["fact_count"], 3);
+    }
+
+    #[test]
+    fn parse_failure_metric_context_attempted_parsing_but_failed() {
+        let payload =
+            build_distill_success_context(false, Some(DistillFailureClass::ParseFailure), 40, 0);
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["outcome"], "failure");
+        assert_eq!(v["recipe_exited_ok"], true, "parse failure means exit 0");
+        assert_eq!(v["parse_attempted"], true);
+        assert_eq!(v["parse_success"], false);
+        assert_eq!(v["failure_class"], "parse-failure");
+    }
+
+    #[test]
+    fn terminal_failure_metric_context_did_not_reach_parsing() {
+        let payload = build_distill_success_context(
+            false,
+            Some(DistillFailureClass::CopilotTerminalFailure),
+            40,
+            0,
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["recipe_exited_ok"], false);
+        assert_eq!(v["parse_attempted"], false);
+        assert_eq!(v["parse_success"], false);
+        assert_eq!(v["failure_class"], "copilot-terminal-failure");
+    }
+
+    #[test]
+    fn recipe_reported_failure_exited_ok_but_did_not_reach_parsing() {
+        // Envelope present (process exited 0) but the run self-reported failure
+        // or had no completed step: counts as a recipe attempt that exited 0,
+        // but it must NOT inflate the parse-rate denominator (no step output
+        // was parsed).
+        let payload = build_distill_success_context(
+            false,
+            Some(DistillFailureClass::RecipeReportedFailure),
+            40,
+            0,
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["recipe_exited_ok"], true, "envelope present → exit 0");
+        assert_eq!(
+            v["parse_attempted"], false,
+            "no step output reached parsing"
+        );
+        assert_eq!(v["parse_success"], false);
+        assert_eq!(v["failure_class"], "recipe-reported-failure");
+    }
+
+    #[test]
+    fn production_envelope_step_output_parse_failure_is_counted_in_parse_rate() {
+        // Regression for the production t=7517 path: the `--output-format json`
+        // step-output parse error MUST classify as parse-failure so it lands in
+        // the distill_parse_success_rate denominator (parse_attempted = true).
+        let err = SimardError::BridgeError(
+            "distill: `distill` step output did not contain a parseable \
+             { \"facts\": [...] } object; output: NODE_OPTIONS banner..."
+                .to_string(),
+        );
+        assert_eq!(
+            classify_distill_error(&err),
+            DistillFailureClass::ParseFailure
+        );
+        let payload =
+            build_distill_success_context(false, Some(classify_distill_error(&err)), 40, 0);
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["parse_attempted"], true);
+        assert_eq!(v["parse_success"], false);
+        assert_eq!(v["failure_class"], "parse-failure");
+    }
+
+    #[test]
+    fn scan_prefers_populated_facts_over_trailing_empty_object() {
+        // A populated facts object followed by an accidental trailing empty
+        // object must NOT silently discard the real facts (data-loss guard).
+        let raw = concat!(
+            r#"{"facts":[{"concept":"lesson-learned","content":"real","source_episode_id":"epi_1"}]}"#,
+            "\n",
+            r#"{"facts":[]}"#
+        );
+        let facts = parse_recipe_output(raw).unwrap();
+        assert_eq!(
+            facts.len(),
+            1,
+            "populated object must win over empty trailer"
+        );
+        assert_eq!(facts[0].content, "real");
+    }
+
+    #[test]
+    fn scan_accepts_bare_empty_facts_as_nothing_to_distill() {
+        // A lone `{"facts":[]}` is a legitimate "nothing worth distilling"
+        // answer and must parse to zero facts (not an error).
+        let facts = parse_recipe_output(r#"{"facts":[]}"#).unwrap();
+        assert!(facts.is_empty());
     }
 }
