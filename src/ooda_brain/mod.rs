@@ -15,6 +15,7 @@ use crate::error::SimardResult;
 use crate::ooda_loop::OodaState;
 use std::path::PathBuf;
 
+pub mod confidence;
 mod context;
 mod decide;
 mod fallback;
@@ -35,6 +36,12 @@ mod prompt_store_tests;
 #[cfg(test)]
 mod tests;
 
+pub use confidence::{
+    CalibrationWindow, ECE_BINS, ECE_METRIC, ECE_WINDOW, HIGH_STAKES_URGENCY, JudgedDecision,
+    JudgedLifecycle, LOW_TRUST_CONFIDENCE, SELF_CONSISTENCY_K, Vote, confidence_or_low_trust,
+    effective_k, is_high_stakes, is_irreversible_lifecycle, lifecycle_conservative_rank,
+    self_consistency_vote, should_self_consistency_sample, validate_confidence,
+};
 pub use context::{count_live_engineer_claims, gather_engineer_lifecycle_ctx, redact_secrets};
 pub use decide::{
     DecideContext, DecideJudgment, DeterministicDecideBrain, OodaDecideBrain,
