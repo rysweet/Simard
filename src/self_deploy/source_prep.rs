@@ -9,9 +9,12 @@
 //!    [`self_deploy_src_dir`] → clone-from-origin. The build source is *never*
 //!    the cwd.
 //! 2. **Fetch + checkout** of the target merged commit before building
-//!    ([`SelfDeploySourcePreparer::prepare`]): `git fetch origin`, validate the
-//!    target is a full 40-hex SHA, then `git checkout --detach <sha>` so the
-//!    embedded `SIMARD_GIT_HASH` equals the deployed commit.
+//!    ([`SelfDeploySourcePreparer::prepare`]): validate the target is a full
+//!    40-hex SHA, `git fetch origin` **only when the commit is not already
+//!    present locally** (the `self-deploy` CLI fetches the same repo to read the
+//!    merged head, so the object is usually already in the object store — the
+//!    second network round-trip is skipped), then `git checkout --detach <sha>`
+//!    so the embedded `SIMARD_GIT_HASH` equals the deployed commit.
 //! 3. **Warm target dir** ([`self_deploy_target_dir`]): a persistent cargo
 //!    target under the state root so self-deploys are incremental, not cold.
 //!
@@ -134,7 +137,8 @@ fn is_scp_like(url: &str) -> bool {
 /// fake to drive the orchestrator and the [`prepare_and_build`] composition
 /// hermetically.
 pub trait SelfDeploySourcePreparer: Send + Sync {
-    /// Resolve the canonical source repo, `git fetch origin`, and
+    /// Resolve the canonical source repo, ensure `target_commit` is present
+    /// locally (fetching from `origin` **only when the object is missing**), and
     /// `git checkout --detach <target_commit>`, returning the prepared repo
     /// directory (whose HEAD is now `target_commit`).
     ///
@@ -201,11 +205,12 @@ impl GitSourcePreparer {
     /// `git fetch origin` in the resolved/owned source repo so its
     /// remote-tracking refs (and thus the merged head) are current.
     ///
-    /// The first dedicated git-fetch helper in `src/` (issue #2467). Shared by
-    /// [`prepare`](SelfDeploySourcePreparer::prepare) and the `self-deploy` CLI
-    /// (which fetches before reading the merged head to deploy). Loud on
-    /// failure: returns [`SafeUpdateError::FetchFailed`], never a silent
-    /// fallback.
+    /// The first dedicated git-fetch helper in `src/` (issue #2467). Called by
+    /// the `self-deploy` CLI (which fetches before reading the merged head to
+    /// deploy) and by [`prepare`](SelfDeploySourcePreparer::prepare) — the latter
+    /// **only when the target commit is not already present locally**, so the
+    /// CLI's fetch is not redundantly repeated. Loud on failure: returns
+    /// [`SafeUpdateError::FetchFailed`], never a silent fallback.
     pub fn fetch_origin(&self, repo: &Path) -> Result<(), SafeUpdateError> {
         git_capture(repo, &["fetch", "origin"])
             .map(|_| ())
@@ -219,11 +224,22 @@ impl SelfDeploySourcePreparer for GitSourcePreparer {
         // (leading `-`) can never reach a git argv (SEC-I2).
         validate_full_sha(target_commit)?;
 
-        // Resolve the canonical repo (never the cwd), fetch so the object is
-        // present, then check out the exact merged commit detached so the
+        // Resolve the canonical repo (never the cwd), make sure the exact merged
+        // commit is in the object store, then check it out detached so the
         // embedded `SIMARD_GIT_HASH` equals the deployed commit.
         let repo = self.resolve_repo()?;
-        self.fetch_origin(&repo)?;
+        // Perf (issue #2467): the merged commit is almost always already present
+        // — the `self-deploy` CLI `git fetch`es this same canonical repo to read
+        // the merged head before handing it to the orchestrator. Re-fetching it
+        // here is a redundant network round-trip, so skip it when the object is
+        // already in the store (a fast, offline `cat-file` check) and only hit
+        // the network when the commit is genuinely missing. `checkout --detach`
+        // is pinned to the validated full SHA, so a skipped fetch can never check
+        // out a different/stale tree — and the deploy survives a transient
+        // network blip after the head was read.
+        if !commit_present(&repo, target_commit) {
+            self.fetch_origin(&repo)?;
+        }
         git_capture(&repo, &["checkout", "--detach", target_commit])
             .map(|_| ())
             .map_err(|detail| SafeUpdateError::CheckoutFailed { detail })?;
@@ -357,6 +373,18 @@ fn scrub_git_env(cmd: &mut Command) {
     if let Ok(home) = std::env::var("HOME") {
         cmd.env("HOME", home);
     }
+}
+
+/// Whether the commit `sha` is already present in `repo`'s object store — a
+/// fast, **offline** check (`git cat-file -e <sha>^{commit}`) used to skip a
+/// redundant network `git fetch` when the merged commit was already fetched
+/// (e.g. by the `self-deploy` CLI before it read the merged head). `sha` must
+/// already have passed [`validate_full_sha`]; the `^{commit}` peel ensures the
+/// object resolves to a commit so the subsequent `checkout --detach` succeeds
+/// without the network. A missing object (or any git error) returns `false`,
+/// so the caller falls back to fetching — never a false "present".
+fn commit_present(repo: &Path, sha: &str) -> bool {
+    git_capture(repo, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_ok()
 }
 
 /// Run a `git` subcommand in `repo` (scrubbed env) and return stdout, or an

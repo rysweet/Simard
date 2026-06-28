@@ -382,6 +382,49 @@ fn prepare_fetches_and_checks_out_merged_head_not_cwd_head() {
 }
 
 #[test]
+fn prepare_skips_fetch_when_commit_already_present_offline() {
+    // Perf/resilience (issue #2467): when the target merged commit is already
+    // in the canonical repo's object store (e.g. the `self-deploy` CLI fetched
+    // it before reading the merged head, then handed it to the orchestrator),
+    // prepare() must NOT make a second, redundant network fetch. We prove it by
+    // making `origin` unreachable AFTER cloning: a present commit must still
+    // check out — whereas an unconditional `git fetch origin` would fail loudly.
+    let root = tempfile::tempdir().unwrap();
+    let origin = root.path().join("origin");
+    let canonical = root.path().join("canonical");
+
+    let (_origin, c1) = init_origin(&origin);
+    clone_local(&origin, &canonical);
+    // c1 is already present in the clone's object store. Destroy origin so any
+    // attempted fetch would fail — the only way prepare() can succeed is by
+    // skipping the fetch for the already-present commit.
+    std::fs::remove_dir_all(&origin).unwrap();
+
+    let prepared = GitSourcePreparer::at(&canonical)
+        .prepare(&c1)
+        .expect("a locally-present commit must prepare without re-fetching");
+
+    assert_eq!(
+        std::fs::canonicalize(&prepared).unwrap(),
+        std::fs::canonicalize(&canonical).unwrap(),
+        "prepare must return the canonical repo"
+    );
+    assert_eq!(
+        git_out(&canonical, &["rev-parse", "HEAD"]),
+        c1,
+        "prepared HEAD must be the (already-present) target commit"
+    );
+    // Detached HEAD at the exact commit (so SIMARD_GIT_HASH == c1).
+    assert!(
+        !git_cmd(&canonical, &["symbolic-ref", "-q", "HEAD"])
+            .status()
+            .unwrap()
+            .success(),
+        "HEAD must be detached at the present commit"
+    );
+}
+
+#[test]
 fn prepare_is_loud_when_target_commit_is_absent_no_cwd_fallback() {
     let root = tempfile::tempdir().unwrap();
     let origin = root.path().join("origin");
