@@ -796,16 +796,18 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // acquisition) and then reinforces each returned fact through
         // `reinforce_access`, which re-acquires the write lock ONCE PER fact —
         // `1 + N` lock acquisitions and `N` separate `record_access`
-        // transactions for a `limit`-sized recall on the hot recall-intent
-        // read path. Here we score AND reinforce the top-k under a SINGLE
-        // write-lock acquisition: identical returned set and order, identical
-        // best-effort per-fact reinforcement, but one lock and one critical
-        // section. The scored items carry the raw library `node_id`, so we
-        // reinforce on that directly (no seq-prefix round-trip via
-        // `strip_seq_prefix` the default pays). Holding the lock across the
-        // batch also closes the scoring→reinforcement window the default's
-        // contract calls out, so a concurrent forgetting pass can't delete a
-        // just-recalled fact mid-batch.
+        // transactions for a `limit`-sized recall on a direct recall-intent
+        // read path. (Staged #2440 API: no production caller is wired yet — see
+        // the trait doc — so this override's win is realized once one is.) Here
+        // we score AND reinforce the top-k under a SINGLE write-lock
+        // acquisition: identical returned set and order, identical best-effort
+        // per-fact reinforcement, but one lock and one critical section. The
+        // scored items carry the raw library `node_id`, so we reinforce on that
+        // directly (no seq-prefix round-trip via `strip_seq_prefix` the default
+        // pays). Holding the lock across the batch also closes the
+        // scoring→reinforcement window the default's contract calls out, so a
+        // concurrent forgetting pass can't delete a just-recalled fact
+        // mid-batch.
         let options = RecallOptions {
             limit: limit as usize,
             min_confidence,

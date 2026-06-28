@@ -260,14 +260,28 @@ pub trait CognitiveMemoryOps: Send + Sync {
 
     /// Reinforcing ranked recall (issue #2440, A3 / AC#2): score like
     /// [`recall_facts_ranked`](Self::recall_facts_ranked) and, after scoring,
-    /// reinforce (`reinforce_access`) ONLY the returned top-k so recall-intent
-    /// reads feed the `usage` / `recency` signals on later cycles.
+    /// reinforce (`reinforce_access`) ONLY the returned top-k, so a **direct**
+    /// recall-intent caller that consumes the returned set as-is feeds the
+    /// `usage` / `recency` signals on later cycles in a single call.
     ///
-    /// This is the entry point recall-intent call sites (reasoning / context
-    /// retrieval) use; the pure [`recall_facts_ranked`](Self::recall_facts_ranked)
-    /// stays non-reinforcing for structural / index reads that must not inflate
-    /// usage. Reinforcement is best-effort per fact — it never changes the
-    /// returned set, only the persisted access signal.
+    /// This is the single-call recall+reinforce convenience for such direct
+    /// callers. It is deliberately NOT used by the OODA reasoning / context-prep
+    /// path: that path gathers candidates with the pure
+    /// [`recall_facts_ranked`](Self::recall_facts_ranked), filters / dedups / caps
+    /// them into a [`PreparedContext`](crate::memory_consolidation::PreparedContext),
+    /// then reinforces only the *surviving* nodes at the point of use via
+    /// [`reinforce_prepared_context`](crate::memory_consolidation::reinforce_prepared_context)
+    /// — so usage/recency reflect what actually reached reasoning, not every raw
+    /// hit, and the two reinforcement seams never double-count. The pure
+    /// [`recall_facts_ranked`](Self::recall_facts_ranked) likewise stays
+    /// non-reinforcing for structural / index reads that must not inflate usage.
+    ///
+    /// No production call site is wired to this method yet; it is staged #2440
+    /// (A3 / AC#2) API surface. The [`LibraryCognitiveMemory`] override exists so
+    /// that when a direct recall-intent caller IS wired, scoring and the per-fact
+    /// reinforcement happen under a single write-lock acquisition instead of the
+    /// default's `1 + N`. Reinforcement is best-effort per fact — it never changes
+    /// the returned set, only the persisted access signal.
     ///
     /// The default implementation works for every backend: it delegates scoring
     /// to [`recall_facts_ranked`](Self::recall_facts_ranked) and bumps each hit
@@ -744,8 +758,9 @@ mod tests_ranked_episodic;
 
 // Issue #2440 (PR-2): ranked multi-signal recall + forgetting signal. Pins the
 // pure `forgetting_score` helper (bounded, recency/usage/confidence ordering),
-// the reinforcing `recall_facts_ranked_reinforced` entry point (bumps the
-// returned top-k), and usage-ordered `recall_procedure` against
+// the reinforcing `recall_facts_ranked_reinforced` recall+reinforce API (bumps
+// the returned top-k; see its doc — staged API, not yet wired to a production
+// caller), and usage-ordered `recall_procedure` against
 // `LibraryCognitiveMemory`.
 #[cfg(test)]
 mod tests_recall_forgetting;
