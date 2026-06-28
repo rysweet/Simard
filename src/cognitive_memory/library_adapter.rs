@@ -784,6 +784,62 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         Ok(scored.into_iter().map(|s| to_fact(s.item)).collect())
     }
 
+    fn recall_facts_ranked_reinforced(
+        &self,
+        query: &str,
+        limit: u32,
+        min_confidence: f64,
+        weights: RecallWeightSet,
+    ) -> SimardResult<Vec<CognitiveFact>> {
+        // Issue #2440 (perf): library-backend override of the default trait
+        // impl. The default scores via `recall_facts_ranked` (one write-lock
+        // acquisition) and then reinforces each returned fact through
+        // `reinforce_access`, which re-acquires the write lock ONCE PER fact —
+        // `1 + N` lock acquisitions and `N` separate `record_access`
+        // transactions for a `limit`-sized recall on the hot recall-intent
+        // read path. Here we score AND reinforce the top-k under a SINGLE
+        // write-lock acquisition: identical returned set and order, identical
+        // best-effort per-fact reinforcement, but one lock and one critical
+        // section. The scored items carry the raw library `node_id`, so we
+        // reinforce on that directly (no seq-prefix round-trip via
+        // `strip_seq_prefix` the default pays). Holding the lock across the
+        // batch also closes the scoring→reinforcement window the default's
+        // contract calls out, so a concurrent forgetting pass can't delete a
+        // just-recalled fact mid-batch.
+        let options = RecallOptions {
+            limit: limit as usize,
+            min_confidence,
+            include_archived: false,
+            include_superseded: false,
+            record_access: false,
+            weights: to_library_weights(weights),
+            ..RecallOptions::default()
+        };
+        let mut guard = self.lock_write("recall_facts_ranked_reinforced")?;
+        let scored = guard
+            .recall_facts_ranked(query, options)
+            .map_err(|e| map_op_err("recall_facts_ranked_reinforced", e))?;
+        let facts = scored
+            .into_iter()
+            .map(|s| {
+                let item = s.item;
+                // Best-effort per the trait contract: a failed usage/recency
+                // bump must never drop the returned set or turn a successful
+                // recall into an error.
+                if let Err(e) = guard.record_access(&item.node_id, AccessKind::Recall) {
+                    tracing::debug!(
+                        target: "simard::memory",
+                        node_id = %item.node_id,
+                        error = %e,
+                        "recall_facts_ranked_reinforced: record_access failed (non-fatal, recall unaffected)"
+                    );
+                }
+                to_fact(item)
+            })
+            .collect();
+        Ok(facts)
+    }
+
     fn store_fact_with_caller_key(
         &self,
         caller_key: &str,
