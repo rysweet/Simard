@@ -5,12 +5,11 @@
 //! the release tarball), not just the main daemon binary (issue #2252). See
 //! `docs/reference/multi-binary-self-update.md` for the full contract.
 
+use super::platform::{RELEASE_CERT_IDENTITY_REGEXP, RELEASE_CERT_OIDC_ISSUER};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-use super::platform::CURRENT_VERSION;
 
 /// Outcome of installing the full binary set from an extracted tarball.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -25,16 +24,95 @@ pub(crate) struct InstallReport {
     pub aux_failed: Vec<(String, String)>,
 }
 
-/// Private temp directory the self-update flow downloads and extracts into.
-/// Shared by `download_to_temp` (which fills it) and `download_and_replace`
-/// (which discovers the extracted binary set inside it).
-fn update_tmp_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("simard-update-{}", std::process::id()))
+/// Create a fresh, private (mode `0700`) temp directory for the self-update
+/// download/extract, returning its path.
+///
+/// R7 (hardening): the directory name carries an unpredictable random suffix and
+/// is created with `create_dir` semantics that FAIL if the path already exists,
+/// replacing the previous predictable `simard-update-<pid>` name created with
+/// `create_dir_all`. On a shared host this defeats a local attacker who
+/// pre-creates (or symlinks) the directory to redirect our `curl -o` write or to
+/// smuggle a rogue executable into the discovery walk. The exclusive create is
+/// what guarantees safety; the random suffix only makes the name hard to guess.
+pub(crate) fn create_update_tmp_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let base = std::env::temp_dir();
+    let mut last_err: Option<std::io::Error> = None;
+    for _ in 0..32 {
+        let dir = base.join(format!("simard-update-{}", random_token()));
+        match create_private_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => return Err(format!("Failed to create update temp dir: {e}").into()),
+        }
+    }
+    Err(format!(
+        "Failed to create a unique update temp dir after 32 attempts: {}",
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown error".to_string())
+    )
+    .into())
+}
+
+/// Create `dir` with `create_dir` semantics (fails if it already exists) and, on
+/// Unix, restrictive `0700` permissions so only the current user can read, write
+/// or traverse it.
+#[cfg(unix)]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o700).create(dir)
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    fs::DirBuilder::new().create(dir)
+}
+
+/// 16 bytes of hex from the OS CSPRNG (`/dev/urandom`), falling back to a mix of
+/// pid + high-resolution time if the CSPRNG is unavailable. The EXCLUSIVE create
+/// in [`create_update_tmp_dir`] is what guarantees safety; this only makes the
+/// directory name hard to guess and collision-resistant.
+fn random_token() -> String {
+    let mut bytes = [0u8; 16];
+    if !fill_random(&mut bytes) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seed = (nanos as u64) ^ ((std::process::id() as u64) << 32);
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = ((seed >> ((i % 8) * 8)) as u8) ^ (i as u8);
+        }
+    }
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+#[cfg(unix)]
+fn fill_random(buf: &mut [u8]) -> bool {
+    use std::io::Read;
+    fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(buf))
+        .is_ok()
+}
+
+#[cfg(not(unix))]
+fn fill_random(_buf: &mut [u8]) -> bool {
+    false
 }
 
 /// Download and extract the release, replacing the full set of installed
 /// Simard binaries. The main `simard` swap is fatal; auxiliary binaries are
-/// installed best-effort.
+/// installed best-effort. Returns the `InstallReport` for the caller to
+/// surface to the operator — this function only prints progress, never the
+/// final summary, so the outcome is reported exactly once.
 pub(crate) fn download_and_replace(
     url: &str,
     version: &str,
@@ -46,13 +124,10 @@ pub(crate) fn download_and_replace(
         .ok_or("Cannot determine install directory from current executable")?
         .to_path_buf();
 
-    // Download → verify checksum → extract into the private temp dir. The
-    // returned path is the main `simard` candidate; the rest of the extracted
-    // tree stays in the temp dir for discovery below.
-    let _main_candidate = download_to_temp(url, version)?;
-    let tmp_dir = update_tmp_dir();
-
-    // Discover EVERY executable in the extracted tree (main + auxiliaries).
+    // Download → verify checksum → extract into the private temp dir, then
+    // discover EVERY executable in the extracted tree (main + auxiliaries) with
+    // a single filesystem walk.
+    let tmp_dir = download_and_extract(url, version)?;
     let binaries = find_all_binaries_in_dir(&tmp_dir)?;
 
     println!("Replacing {} binary(ies)...", binaries.len());
@@ -75,29 +150,16 @@ pub(crate) fn download_and_replace(
     // Clean up the temp directory (archive + any leftover extracted files).
     let _ = fs::remove_dir_all(&tmp_dir);
 
-    if report.aux_installed.is_empty() {
-        println!("Updated simard: {CURRENT_VERSION} → {version}");
-    } else {
-        println!(
-            "Updated simard + {} auxiliary binary(ies): {CURRENT_VERSION} → {version}",
-            report.aux_installed.len()
-        );
-    }
     Ok(report)
 }
 
-/// Download and extract the simard release into a temp directory, returning
-/// the path to the extracted **main** `simard` binary. Used by both
-/// `download_and_replace` (which then installs the full binary set) and the
-/// safe-update flow (which copies the main candidate to an install path and
-/// runs a pre-test before swapping). Its signature is a hard contract: it
-/// must keep returning a single `PathBuf` to the main candidate.
-pub(crate) fn download_to_temp(
-    url: &str,
-    version: &str,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let tmp_dir = update_tmp_dir();
-    fs::create_dir_all(&tmp_dir)?;
+/// Download → verify checksum → extract the release into the private temp dir,
+/// returning the populated temp directory. Shared by `download_to_temp` and
+/// `download_and_replace` so the download/verify/extract work runs once and the
+/// binary-discovery walk that follows it also runs exactly once per update
+/// (previously `download_and_replace` walked the extracted tree twice).
+fn download_and_extract(url: &str, version: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let tmp_dir = create_update_tmp_dir()?;
     let archive_path = tmp_dir.join("simard.tar.gz");
 
     println!("Downloading simard v{version}...");
@@ -132,6 +194,9 @@ pub(crate) fn download_to_temp(
                 "2",
                 "-o",
                 archive_str,
+                // `--` terminates option parsing so a URL beginning with `-`
+                // can never be reinterpreted as a curl flag (arg injection).
+                "--",
                 url,
             ])
             .status()
@@ -157,6 +222,15 @@ pub(crate) fn download_to_temp(
         return Err(format!("Checksum verification failed: {e}").into());
     }
 
+    // R8: authenticate the tarball's cosign keyless signature — defense-in-depth
+    // beyond the same-origin sha256 (a host that swaps both the tarball and its
+    // `.sha256` defeats the checksum alone). A present-but-invalid signature
+    // ABORTS; an absent signature or missing cosign warns and continues.
+    if let Err(e) = verify_signature(&archive_path, url, &tmp_dir) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(format!("Signature verification failed: {e}").into());
+    }
+
     println!("Extracting...");
     let tar_status = std::process::Command::new("tar")
         .args([
@@ -167,6 +241,11 @@ pub(crate) fn download_to_temp(
                     archive_path.display()
                 )
             })?,
+            // R4: never let the archive restore its own ownership or permission
+            // bits onto extracted files. Discovery applies a scoped `chmod 0755`
+            // only to the binaries it chooses to install (see `install_into`).
+            "--no-same-owner",
+            "--no-same-permissions",
             "-C",
             tmp_dir.to_str().ok_or_else(|| {
                 format!("temp dir path is not valid UTF-8: {}", tmp_dir.display())
@@ -179,6 +258,19 @@ pub(crate) fn download_to_temp(
         return Err("Extraction failed".into());
     }
 
+    Ok(tmp_dir)
+}
+
+/// Download and extract the simard release into a temp directory, returning
+/// the path to the extracted **main** `simard` binary. Used by the
+/// `safe-update` flow (which copies the main candidate to an install path and
+/// runs a pre-test before swapping). Its signature is a hard contract: it must
+/// keep returning a single `PathBuf` to the main candidate.
+pub(crate) fn download_to_temp(
+    url: &str,
+    version: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let tmp_dir = download_and_extract(url, version)?;
     // Return the main `simard` candidate (discovery guarantees it sorts first).
     let binaries = find_all_binaries_in_dir(&tmp_dir)?;
     binaries
@@ -437,6 +529,9 @@ pub(crate) fn verify_sha256(
             "15",
             "--max-time",
             "60",
+            // `--` terminates option parsing so the sidecar URL can never be
+            // reinterpreted as a curl flag (arg injection).
+            "--",
             &sidecar_url,
         ])
         .output()
@@ -464,4 +559,134 @@ pub(crate) fn verify_sha256(
         return Err(format!("Checksum mismatch: expected {expected}, got {actual}").into());
     }
     Ok(())
+}
+
+/// Verify the release tarball's cosign keyless signature (R8, issue #2261).
+///
+/// Defense-in-depth on top of [`verify_sha256`]: the sha256 sidecar is fetched
+/// from the same origin as the tarball, so a compromised host that swaps both
+/// the tarball and its `.sha256` defeats it. The cosign signature is bound to a
+/// short-lived Fulcio certificate whose Subject Alternative Name is pinned to
+/// THIS repo's release-workflow identity ([`RELEASE_CERT_IDENTITY_REGEXP`]) and
+/// issuer ([`RELEASE_CERT_OIDC_ISSUER`]) — an identity an attacker cannot forge.
+///
+/// Policy (fail-closed where it counts, non-breaking otherwise):
+///   * cosign present AND both sidecars (`.sig`, `.pem`) fetch as non-empty →
+///     run `cosign verify-blob`; a verification FAILURE ABORTS the update.
+///   * cosign not installed, OR a signature sidecar is absent (e.g. an older,
+///     pre-signing release) → emit a prominent warning and continue, so updates
+///     are not broken on hosts without cosign or for legacy releases. The R1
+///     sha256 gate still applies in every case.
+///
+/// R3: signature material is only ever fetched over https-only transport.
+pub(crate) fn verify_signature(
+    archive_path: &Path,
+    asset_url: &str,
+    tmp_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !asset_url.starts_with("https://") {
+        return Err(format!("Refusing non-https release asset URL: {asset_url}").into());
+    }
+
+    if !cosign_available() {
+        eprintln!(
+            "WARNING: cosign not found — skipping release signature verification. \
+             Install cosign to authenticate releases (the sha256 checksum was still verified)."
+        );
+        return Ok(());
+    }
+
+    let sig_path = tmp_dir.join("simard.tar.gz.sig");
+    let cert_path = tmp_dir.join("simard.tar.gz.pem");
+    let sig_ok = fetch_sidecar(&format!("{asset_url}.sig"), &sig_path);
+    let cert_ok = fetch_sidecar(&format!("{asset_url}.pem"), &cert_path);
+    if !sig_ok || !cert_ok {
+        let _ = fs::remove_file(&sig_path);
+        let _ = fs::remove_file(&cert_path);
+        eprintln!(
+            "WARNING: signature material (.sig/.pem) is not available for this release — \
+             skipping cosign verification (the sha256 checksum was still verified)."
+        );
+        return Ok(());
+    }
+
+    println!("Verifying cosign signature...");
+    let status = std::process::Command::new("cosign")
+        .args([
+            "verify-blob",
+            "--certificate",
+            cert_path
+                .to_str()
+                .ok_or("certificate path is not valid UTF-8")?,
+            "--signature",
+            sig_path
+                .to_str()
+                .ok_or("signature path is not valid UTF-8")?,
+            "--certificate-identity-regexp",
+            RELEASE_CERT_IDENTITY_REGEXP,
+            "--certificate-oidc-issuer",
+            RELEASE_CERT_OIDC_ISSUER,
+            // `--` terminates option parsing so the archive path can never be
+            // reinterpreted as a cosign flag (arg injection).
+            "--",
+            archive_path
+                .to_str()
+                .ok_or("archive path is not valid UTF-8")?,
+        ])
+        .status()
+        .map_err(|e| format!("Failed to run cosign: {e}"))?;
+
+    let _ = fs::remove_file(&sig_path);
+    let _ = fs::remove_file(&cert_path);
+
+    if !status.success() {
+        return Err(format!(
+            "cosign signature verification FAILED ({status}) — refusing to install this release"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Whether a usable `cosign` binary is on `PATH`.
+fn cosign_available() -> bool {
+    std::process::Command::new("cosign")
+        .arg("version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Fetch a signature sidecar over https-only transport into `dest`. Returns
+/// `true` only when curl succeeded AND the written file is non-empty.
+fn fetch_sidecar(url: &str, dest: &Path) -> bool {
+    let Some(dest_str) = dest.to_str() else {
+        return false;
+    };
+    let ok = std::process::Command::new("curl")
+        .args([
+            "-sS",
+            "-L",
+            // R3: https-only transport — refuse plaintext and never downgrade.
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--tlsv1.2",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "60",
+            "-o",
+            dest_str,
+            // `--` terminates option parsing (arg-injection guard).
+            "--",
+            url,
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    ok && dest.metadata().map(|m| m.len() > 0).unwrap_or(false)
 }

@@ -1,7 +1,6 @@
-//! TDD contract for the multi-binary self-update path (issue #2252).
+//! Behavioural contract for the multi-binary self-update path (issue #2252).
 //!
-//! These tests specify the behaviour of the not-yet-implemented multi-binary
-//! self-update API documented in
+//! These tests pin down the multi-binary self-update API documented in
 //! `docs/reference/multi-binary-self-update.md`:
 //!
 //!   * `find_all_binaries_in_dir` — dynamic discovery of every executable in an
@@ -15,13 +14,12 @@
 //!   * shared-primitive regression guards for `download_to_temp` and the
 //!     `safe-update` download-only path.
 //!
-//! They are written FIRST and are expected to FAIL (the symbols do not exist on
-//! the default branch yet) until the implementation lands. Everything here is
-//! hermetic: no network, no live release, no reliance on a real GitHub asset.
+//! Everything here is hermetic: no network, no live release, and no reliance on
+//! a real GitHub asset.
 
 use super::download::{
-    InstallReport, find_all_binaries_in_dir, install_binaries, install_binary, sha256_file,
-    verify_sha256,
+    InstallReport, create_update_tmp_dir, find_all_binaries_in_dir, install_binaries,
+    install_binary, sha256_file, verify_sha256, verify_signature,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -587,6 +585,74 @@ fn verify_sha256_rejects_non_https_url() {
             "verify_sha256 must refuse non-https asset URL: {url}"
         );
     }
+}
+
+// ===========================================================================
+// verify_signature — R8 cosign keyless authenticity gate (transport guard)
+// ===========================================================================
+
+#[test]
+fn verify_signature_rejects_non_https_url() {
+    // R3/R8: signature material (.sig/.pem) is fetched over https-only transport.
+    // A non-https asset URL is refused before any cosign or network work, so the
+    // result is deterministic regardless of whether cosign is installed.
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("simard-linux-x86_64.tar.gz");
+    fs::write(&archive, b"tarball").unwrap();
+
+    for url in [
+        "http://example.com/simard-linux-x86_64.tar.gz",
+        "ftp://example.com/simard-linux-x86_64.tar.gz",
+        "file:///tmp/simard-linux-x86_64.tar.gz",
+    ] {
+        let result = verify_signature(&archive, url, dir.path());
+        assert!(
+            result.is_err(),
+            "verify_signature must refuse non-https asset URL: {url}"
+        );
+    }
+}
+
+// ===========================================================================
+// create_update_tmp_dir — R7 private, unpredictable, exclusive temp dir
+// ===========================================================================
+
+#[test]
+fn create_update_tmp_dir_makes_fresh_private_dir() {
+    // R7: the download/extract dir must be freshly created (never a pre-existing
+    // path an attacker could have seeded or symlinked) and, on Unix, private.
+    let dir = create_update_tmp_dir().expect("should create a temp dir");
+    assert!(
+        dir.exists() && dir.is_dir(),
+        "update temp dir must exist as a directory"
+    );
+    assert_eq!(
+        fs::read_dir(&dir).unwrap().count(),
+        0,
+        "freshly created update temp dir must be empty"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "update temp dir must be private (0700), got {mode:o}"
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn create_update_tmp_dir_returns_unique_paths() {
+    // The randomized suffix must make two updates pick different directories,
+    // replacing the predictable `simard-update-<pid>` name that a local attacker
+    // could anticipate.
+    let a = create_update_tmp_dir().unwrap();
+    let b = create_update_tmp_dir().unwrap();
+    assert_ne!(a, b, "two update temp dirs must not collide");
+    let _ = fs::remove_dir_all(&a);
+    let _ = fs::remove_dir_all(&b);
 }
 
 // ===========================================================================
