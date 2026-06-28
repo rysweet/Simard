@@ -54,7 +54,19 @@ One pass:
    (`prune_corrupt_artifacts`). Pruning is gated on a good fresh backup so a bad
    write can never delete the prior good copy.
 
-`ScheduledBackupOutcome::summary()` produces the one-line daemon log entry.
+`ScheduledBackupOutcome::summary()` produces the one-line daemon log entry,
+which reports both the **captured** counts and the **total** live-memory count.
+
+> **What the backup captures (scope).** The snapshot is a logical backup of the
+> **durable** cognitive subset — semantic *facts* and *procedures*. The derived
+> or transient categories (sensory, working, episodic, prospective) are **not**
+> snapshotted; episodes are continuously distilled into facts, and the others
+> are short-lived. So "restore round-trips the current memory count" means the
+> durable facts + procedures, not the raw episodic event count. To keep this
+> honest, every `BackupManifest` records the full per-category
+> [`CognitiveStatistics`](cognitive-memory-durability.md) (`store_statistics`)
+> alongside the captured counts, so the gap is always visible in the manifest
+> and the daemon log.
 
 ### `remote_transfer::export_full_memory_snapshot`
 
@@ -78,23 +90,36 @@ out of scope (derived/transient).
 pub fn prune_corrupt_artifacts(state_root: &Path, keep: usize) -> SimardResult<usize>
 ```
 
-Bounds the corrupt/shadow quarantine artifacts the library's corrupt-WAL
-recovery leaves under `state_root` — `*.corrupt-*`, `*.shadow`, and the
-concatenated rename chains
-(`cognitive.wal.corrupt-…cognitive.corrupt-…cognitive.shadow`, issue #2420 gap
-#2). It keeps the newest `keep` (default `CORRUPT_ARTIFACTS_KEEP = 5`) for
-forensics and removes the rest (files **and** directories). The live store file
-`cognitive` and its active sidecars are never eligible; any genuinely-active
-shadow file is the newest artifact and is shielded by keep-newest-N.
+Bounds the corrupt quarantine artifacts the library's corrupt-WAL recovery
+leaves under `state_root`. It matches **only** the library's definitive
+`.corrupt-<timestamp>` marker — `*.corrupt-*` and the concatenated rename
+chains (`cognitive.wal.corrupt-…cognitive.corrupt-…cognitive.shadow`, which
+still contain the marker; issue #2420 gap #2). It keeps the newest `keep`
+(default `CORRUPT_ARTIFACTS_KEEP = 5`) for forensics and removes the rest
+(files **and** directories).
+
+The live store file `cognitive` and its active sidecars — including lbug's
+shadow-paging file `cognitive.shadow` (`SHADOWING_SUFFIX = "shadow"`) and WAL
+`cognitive.wal` — are **never** eligible. A *bare* `*.shadow` (no `.corrupt-`
+marker) is deliberately left alone so an active shadow file can never be
+deleted by a backup pass.
+
+> **Scope of this PR vs. the library.** This function *bounds* the accumulated
+> quarantine artifacts (caps their count). The root cause of the *concatenated
+> rename* (issue #2420 gap #2) lives in the LadybugDB engine and is the
+> library's responsibility; the lbug `0.15.3 → 0.17.1` bump below moves the
+> engine forward but Simard does not itself rewrite the quarantine-rename path.
 
 ### Engine pin (lbug 0.17.1)
 
-`amplihack-memory` is pinned to `26d49bf8` and `lbug` to `=0.17.1` to match.
-This rev carries the lbug 0.15.4 → 0.17.1 engine migration (the v40→v41 on-disk
-format the live store already uses) and the empty-read data-loss fix that
-targets the recurring main-store corruption. The previous pin (lbug 0.15.4) was
-*behind* the deployed on-disk format — the version skew was itself a corruption
-vector.
+`amplihack-memory` is pinned to `26d49bf8` and Simard's direct `lbug` pin moves
+`0.15.3 → 0.17.1` to match. The bumped library carries the LadybugDB engine
+migration to `lbug 0.17.1` (the v40→v41 on-disk format the live store already
+uses) and the empty-read data-loss fix that targets the recurring main-store
+corruption. The previous engine (lbug 0.15.x) was *behind* the deployed on-disk
+format — the version skew was itself a corruption vector. Pinning Simard's
+direct `lbug` to the same `0.17.1` keeps a single LadybugDB build (no
+duplicate-symbol clash from compiling the C++ engine twice).
 
 ---
 

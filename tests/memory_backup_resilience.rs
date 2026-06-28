@@ -53,20 +53,24 @@ fn live_store_backup_round_trips_and_bounds_corrupt_artifacts() {
         "live store file must exist after checkpoint"
     );
 
-    // --- seed corrupt/shadow quarantine artifacts -----------------------
-    let artifact_names = [
+    // --- seed corrupt quarantine artifacts + a protected live shadow ----
+    // Seven artifacts carry the `.corrupt-` marker (eligible for pruning);
+    // the concatenated rename chain counts because it contains the marker.
+    let corrupt_names = [
         "cognitive.corrupt-1000",
         "cognitive.corrupt-1001",
         "cognitive.corrupt-1002",
-        "cognitive.shadow",
         "cognitive.wal.corrupt-1.cognitive.corrupt-2.cognitive.shadow",
         "cognitive_memory.corrupt-9",
         "cognitive.corrupt-1003",
         "cognitive.corrupt-1004",
     ];
-    for name in artifact_names {
+    for name in corrupt_names {
         fs::write(state_root.join(name), b"junk").unwrap();
     }
+    // A *bare* shadow file (lbug's active shadow-paging sidecar, no `.corrupt-`
+    // marker) MUST be protected and survive the prune.
+    fs::write(state_root.join("cognitive.shadow"), b"ACTIVE-SHADOW").unwrap();
 
     // --- back up the LIVE store -----------------------------------------
     let config = BackupConfig {
@@ -83,6 +87,11 @@ fn live_store_backup_round_trips_and_bounds_corrupt_artifacts() {
         "backup must capture every fact (no replication-cap truncation)"
     );
     assert_eq!(manifest.cognitive_procedures_count, PROCS);
+    // The manifest is honest about total live memories vs. captured subset.
+    assert!(
+        manifest.store_statistics.total() >= (FACTS + PROCS) as u64,
+        "manifest must record full live-store statistics"
+    );
 
     let verification = verify_backup(&manifest.backup_dir).unwrap();
     assert!(
@@ -91,26 +100,27 @@ fn live_store_backup_round_trips_and_bounds_corrupt_artifacts() {
         verification.status
     );
 
-    // --- bound the corrupt/shadow artifacts -----------------------------
+    // --- bound the corrupt artifacts ------------------------------------
     let pruned = prune_corrupt_artifacts(state_root, CORRUPT_ARTIFACTS_KEEP).unwrap();
     assert_eq!(
         pruned,
-        artifact_names.len() - CORRUPT_ARTIFACTS_KEEP,
+        corrupt_names.len() - CORRUPT_ARTIFACTS_KEEP,
         "must prune all but the newest CORRUPT_ARTIFACTS_KEEP"
     );
-    let remaining = fs::read_dir(state_root)
+    let remaining_corrupt = fs::read_dir(state_root)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            let n = e.file_name().to_string_lossy().to_string();
-            n.contains(".corrupt-") || n.ends_with(".shadow")
-        })
+        .filter(|e| e.file_name().to_string_lossy().contains(".corrupt-"))
         .count();
-    assert_eq!(remaining, CORRUPT_ARTIFACTS_KEEP);
-    // The live store must survive the prune untouched.
+    assert_eq!(remaining_corrupt, CORRUPT_ARTIFACTS_KEEP);
+    // The live store AND the bare shadow sidecar must survive the prune.
     assert!(
         state_root.join("cognitive").exists(),
         "prune must never remove the live store"
+    );
+    assert!(
+        state_root.join("cognitive.shadow").exists(),
+        "prune must never remove the live shadow sidecar"
     );
 
     // --- restore round-trips the live counts ----------------------------

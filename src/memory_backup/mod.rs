@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::memory::{FileBackedMemoryStore, MemoryRecord, MemoryStore};
+use crate::memory_cognitive::CognitiveStatistics;
 use crate::remote_transfer::MemorySnapshot;
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,14 @@ pub struct BackupManifest {
     pub cognitive_facts_count: usize,
     pub cognitive_procedures_count: usize,
     pub memory_records_count: usize,
+    /// Full per-category counts of the live store at backup time, captured via
+    /// `get_statistics()`. This makes the backup honest about its scope: it
+    /// snapshots the **durable** subset (semantic facts + procedures); the
+    /// derived/transient categories (sensory, working, episodic, prospective)
+    /// recorded here are NOT in the snapshot. Defaults to zeroed counts for
+    /// manifests written before this field existed.
+    #[serde(default)]
+    pub store_statistics: CognitiveStatistics,
     /// SHA-256 hex digest of concatenated backup file contents.
     pub checksum: String,
 }
@@ -115,6 +124,10 @@ fn read_bytes(path: &Path) -> SimardResult<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 /// Create a timestamped backup of cognitive and file-backed memory.
+///
+/// On any failure after the backup directory is created, the partial directory
+/// is removed (best effort) so repeated failures cannot accumulate junk — which
+/// matters most under the low-disk conditions where writes fail.
 pub fn backup_memory(
     bridge: &dyn CognitiveMemoryOps,
     store: &dyn MemoryStore,
@@ -128,7 +141,31 @@ pub fn backup_memory(
     fs::create_dir_all(&backup_dir)
         .map_err(|e| store_error("create-dir", &backup_dir, e.to_string()))?;
 
-    // Export the FULL cognitive snapshot (no replication truncation caps) so a
+    match backup_into_dir(bridge, store, agent_name, &backup_dir, now) {
+        Ok(manifest) => Ok(manifest),
+        Err(e) => {
+            // Clean up the partial backup so a failed write leaves no residue.
+            let _ = fs::remove_dir_all(&backup_dir);
+            Err(e)
+        }
+    }
+}
+
+/// Inner body of [`backup_memory`]: writes the snapshot, records, and manifest
+/// into an already-created `backup_dir`. Kept separate so the caller can remove
+/// the directory on any error.
+fn backup_into_dir(
+    bridge: &dyn CognitiveMemoryOps,
+    store: &dyn MemoryStore,
+    agent_name: &str,
+    backup_dir: &Path,
+    now: DateTime<Utc>,
+) -> SimardResult<BackupManifest> {
+    // Full per-category counts of the live store, so the manifest is honest
+    // about what exists vs. what the snapshot captures.
+    let store_statistics = bridge.get_statistics().unwrap_or_default();
+
+    // Export the FULL durable snapshot (no replication truncation caps) so a
     // store larger than MAX_EXPORT_FACTS is captured faithfully (issue #2420).
     let snapshot = crate::remote_transfer::export_full_memory_snapshot(bridge, agent_name)?;
     let snapshot_path = backup_dir.join(SNAPSHOT_FILE);
@@ -142,13 +179,14 @@ pub fn backup_memory(
     let checksum = sha256_hex(&[&snapshot_bytes, &records_bytes]);
 
     let manifest = BackupManifest {
-        backup_dir: backup_dir.clone(),
+        backup_dir: backup_dir.to_path_buf(),
         created_at: now,
         cognitive_snapshot_path: snapshot_path,
         memory_records_path: records_path,
         cognitive_facts_count: snapshot.facts.len(),
         cognitive_procedures_count: snapshot.procedures.len(),
         memory_records_count: records.len(),
+        store_statistics,
         checksum,
     };
 
@@ -171,6 +209,7 @@ pub fn verify_backup(backup_dir: &Path) -> SimardResult<BackupVerification> {
                 cognitive_facts_count: 0,
                 cognitive_procedures_count: 0,
                 memory_records_count: 0,
+                store_statistics: CognitiveStatistics::default(),
                 checksum: String::new(),
             },
             status: BackupStatus::Incomplete {
@@ -420,11 +459,12 @@ impl ScheduledBackupOutcome {
             }
         };
         format!(
-            "memory backup {status}: {} facts, {} procedures, {} records -> {} \
-             (pruned {} old backup(s), {} corrupt artifact(s))",
+            "memory backup {status}: {} facts + {} procedures + {} records captured \
+             ({} total live memories) -> {} (pruned {} old backup(s), {} corrupt artifact(s))",
             self.manifest.cognitive_facts_count,
             self.manifest.cognitive_procedures_count,
             self.manifest.memory_records_count,
+            self.manifest.store_statistics.total(),
             self.manifest.backup_dir.display(),
             self.backups_pruned,
             self.corrupt_artifacts_pruned,
@@ -452,7 +492,14 @@ pub fn run_scheduled_backup(
     state_root: &Path,
     agent_name: &str,
 ) -> SimardResult<ScheduledBackupOutcome> {
-    let config = BackupConfig::default();
+    // Keep backups co-located with the state root they belong to, so daemons
+    // running against distinct state roots under one HOME never mix or prune
+    // each other's backup sets. In production `state_root` is `~/.simard`, so
+    // this resolves to the canonical `~/.simard/backups`.
+    let config = BackupConfig {
+        backup_dir: state_root.join("backups"),
+        ..BackupConfig::default()
+    };
     let store = FileBackedMemoryStore::try_new(state_root.join(MEMORY_RECORDS_FILENAME))?;
     run_scheduled_backup_with(bridge, &store, state_root, agent_name, &config)
 }
@@ -488,39 +535,51 @@ pub(crate) fn run_scheduled_backup_with(
     })
 }
 
-/// Names that belong to the **live** lbug store and must never be pruned, even
-/// if a future naming scheme makes one of them look quarantine-like. The live
-/// store (lbug 0.17.x) is a single file `cognitive`; its active write sidecars
-/// are listed defensively. Transient checkpoint shadow files (`cognitive.shadow`)
-/// are deliberately *not* protected here — stale `.shadow` leftovers are exactly
-/// the cruft issue #2420 asks to bound, and any genuinely-active shadow file is
-/// the newest artifact and is shielded by the keep-newest-N retention instead.
+/// Names that belong to the **live** lbug store and must never be pruned. The
+/// live store (lbug 0.17.x) is a single file `cognitive`; its active write
+/// sidecars are listed defensively. Per lbug's `StorageUtils`, the shadow-paging
+/// file uses `SHADOWING_SUFFIX = "shadow"` (`cognitive.shadow`) and the WAL uses
+/// `WAL_FILE_SUFFIX = "wal"` (`cognitive.wal`) — both are live and protected.
 fn is_live_store_name(name: &str) -> bool {
     matches!(
         name,
-        "cognitive" | "cognitive.wal" | "cognitive.shm" | "cognitive-wal" | "cognitive-shm"
+        "cognitive"
+            | "cognitive.wal"
+            | "cognitive.shm"
+            | "cognitive.shadow"
+            | "cognitive-wal"
+            | "cognitive-shm"
     )
 }
 
-/// Whether `name` is a corrupt/shadow quarantine artifact left behind by the
-/// library's corrupt-WAL recovery (quarantine + rebuild). Matched as substrings
-/// so concatenated rename chains — e.g.
+/// Whether `name` is a corrupt quarantine artifact left behind by the library's
+/// corrupt-WAL recovery (quarantine + rebuild).
+///
+/// We match **only** the library's definitive `.corrupt-<timestamp>` quarantine
+/// marker. A file carrying that marker has already been renamed *out* of the
+/// active store path and is dead weight, so removing it is always safe.
+/// Concatenated rename chains — e.g.
 /// `cognitive.wal.corrupt-…cognitive.corrupt-…cognitive.shadow` (issue #2420
-/// gap #2) — are caught regardless of how deeply the name has been chained.
+/// gap #2) — still contain the marker and are caught.
+///
+/// A *bare* `*.shadow` (no `.corrupt-` marker) is deliberately NOT matched: it
+/// is lbug's active shadow-paging file of the live store, and deleting it would
+/// be exactly the backup-induced corruption this feature must avoid.
 fn is_corrupt_artifact(name: &str) -> bool {
     if is_live_store_name(name) {
         return false;
     }
-    name.contains(".corrupt-") || name.contains(".corrupt.") || name.ends_with(".shadow")
+    name.contains(".corrupt-") || name.contains(".corrupt.")
 }
 
-/// Bound corrupt/shadow quarantine artifacts directly under `state_root`,
-/// retaining the `keep` newest (by mtime) for forensics and removing the rest.
+/// Bound corrupt quarantine artifacts directly under `state_root`, retaining
+/// the `keep` newest (by mtime) for forensics and removing the rest.
 ///
-/// Handles both files and directories (the migrated lbug store quarantines as a
-/// flat file today, but historic native stores quarantined directories). The
-/// live store file and its active sidecars are never eligible. Returns the
-/// number of artifacts removed.
+/// Only files/dirs carrying the library's definitive `.corrupt-` quarantine
+/// marker are eligible (see [`is_corrupt_artifact`]); the live store and bare
+/// shadow files are never touched. Handles both files and directories (the
+/// migrated lbug store quarantines as a flat file today, but historic native
+/// stores quarantined directories). Returns the number of artifacts removed.
 pub fn prune_corrupt_artifacts(state_root: &Path, keep: usize) -> SimardResult<usize> {
     if !state_root.exists() {
         return Ok(0);

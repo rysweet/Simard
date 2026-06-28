@@ -19,9 +19,10 @@ Durability today rests on three things:
 3. **Scheduled verified snapshot backups** (issue #2420) — the OODA daemon
    takes a periodic, *verified, logical* snapshot of the **live** store through
    the same `CognitiveMemoryOps` bridge it writes to (`memory_backup::run_scheduled_backup`,
-   every `SIMARD_BACKUP_INTERVAL_SECS`, default hourly). Each pass verifies the
-   fresh backup, prunes old backups, and bounds the corrupt/shadow quarantine
-   artifacts. See [Backup pruning API](../reference/backup-pruning-api.md#current-implementation-issue-2420).
+   every `SIMARD_BACKUP_INTERVAL_SECS`, default hourly). It snapshots the durable
+   subset (semantic facts + procedures); each pass verifies the fresh backup,
+   prunes old backups, and bounds the corrupt quarantine artifacts. See
+   [Backup pruning API](../reference/backup-pruning-api.md#current-implementation-issue-2420).
 
 > **Removed in Phase 2b.** The native fork's per-write `fsync` barrier
 > (issue #1973) and its lbug-WAL "verified backup" loop

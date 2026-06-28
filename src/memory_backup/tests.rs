@@ -355,18 +355,21 @@ fn touch_file(path: &Path, bytes: &[u8]) {
 
 #[test]
 fn is_corrupt_artifact_matches_quarantine_names() {
-    // Migrated lbug store quarantine names.
+    // Migrated lbug store quarantine names (carry the `.corrupt-` marker).
     assert!(super::is_corrupt_artifact(
         "cognitive.corrupt-1782585794318985440"
     ));
     assert!(super::is_corrupt_artifact(
         "cognitive_memory.corrupt-1781915091"
     ));
-    assert!(super::is_corrupt_artifact("cognitive.shadow"));
-    // Concatenated rename chain (issue #2420 gap #2).
+    // Concatenated rename chain (issue #2420 gap #2) still carries the marker.
     assert!(super::is_corrupt_artifact(
         "cognitive.wal.corrupt-1782585794318721438.cognitive.wal.corrupt-1782444638849049543.cognitive.shadow"
     ));
+    // A *bare* shadow file (no `.corrupt-` marker) is NOT a prune target: it
+    // could be an active shadow-paging file of the live store.
+    assert!(!super::is_corrupt_artifact("cognitive.shadow"));
+    assert!(!super::is_corrupt_artifact("snapshot.shadow"));
 }
 
 #[test]
@@ -375,6 +378,7 @@ fn is_corrupt_artifact_never_matches_live_store() {
     assert!(!super::is_corrupt_artifact("cognitive"));
     assert!(!super::is_corrupt_artifact("cognitive.wal"));
     assert!(!super::is_corrupt_artifact("cognitive.shm"));
+    assert!(!super::is_corrupt_artifact("cognitive.shadow"));
     // Unrelated files are left alone.
     assert!(!super::is_corrupt_artifact("memory_records.json"));
     assert!(!super::is_corrupt_artifact("config.toml"));
@@ -386,9 +390,10 @@ fn prune_corrupt_artifacts_keeps_newest_n_and_protects_live_store() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
 
-    // The live store and an active sidecar — must survive.
+    // The live store, an active sidecar, and a bare shadow file — all survive.
     touch_file(&root.join("cognitive"), b"LIVE-STORE");
     touch_file(&root.join("cognitive.wal"), b"LIVE-WAL");
+    touch_file(&root.join("cognitive.shadow"), b"ACTIVE-SHADOW");
     // An unrelated file — must survive.
     touch_file(&root.join("memory_records.json"), b"[]");
 
@@ -403,13 +408,17 @@ fn prune_corrupt_artifacts_keeps_newest_n_and_protects_live_store() {
     fs::create_dir_all(&dir).unwrap();
     touch_file(&dir.join("inner"), b"x");
 
-    // 9 artifacts total, keep 5 -> prune 4.
+    // 9 corrupt artifacts total, keep 5 -> prune 4.
     let pruned = prune_corrupt_artifacts(root, 5).unwrap();
     assert_eq!(pruned, 4);
 
-    // Live store + sidecar + unrelated file untouched.
+    // Live store + sidecar + bare shadow + unrelated file untouched.
     assert!(root.join("cognitive").exists());
     assert!(root.join("cognitive.wal").exists());
+    assert!(
+        root.join("cognitive.shadow").exists(),
+        "bare shadow must survive"
+    );
     assert!(root.join("memory_records.json").exists());
 
     // Exactly 5 corrupt artifacts remain, and they are the newest ones.
@@ -439,11 +448,11 @@ fn prune_corrupt_artifacts_noop_when_under_cap() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     touch_file(&root.join("cognitive.corrupt-1"), b"a");
-    touch_file(&root.join("cognitive.shadow"), b"b");
-    // 2 artifacts, keep 5 -> prune nothing.
+    touch_file(&root.join("cognitive.corrupt-2"), b"b");
+    // 2 corrupt artifacts, keep 5 -> prune nothing.
     assert_eq!(prune_corrupt_artifacts(root, 5).unwrap(), 0);
     assert!(root.join("cognitive.corrupt-1").exists());
-    assert!(root.join("cognitive.shadow").exists());
+    assert!(root.join("cognitive.corrupt-2").exists());
 }
 
 #[test]
