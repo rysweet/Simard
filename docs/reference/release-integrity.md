@@ -38,6 +38,8 @@ Each GitHub Release publishes the following, for every platform target:
 | `simard-<version>.cdx.json` | `cargo cyclonedx` | **CycloneDX SBOM** — full dependency inventory. |
 | `simard-<platform>.tar.gz.sig` | `cosign sign-blob` | **Detached cosign signature** over the tarball. |
 | `simard-<platform>.tar.gz.pem` | `cosign sign-blob` | The signing **certificate** (Fulcio-issued, carries the OIDC identity). |
+| `simard-<version>.cdx.json.sig` | `cosign sign-blob` | **Detached cosign signature** over the SBOM. |
+| `simard-<version>.cdx.json.pem` | `cosign sign-blob` | The SBOM signing **certificate** (same Fulcio identity as the tarball). |
 
 `<platform>` follows the existing naming convention (`linux-x86_64`, etc.;
 see [the update-check platform table](./update-check.md#platform-asset-detection)).
@@ -73,6 +75,10 @@ Properties:
   JSON with a non-empty `.components` array before attaching it; a missing,
   empty, or malformed SBOM fails the release rather than publishing a binary
   with no bill of materials.
+- **Signed.** The SBOM is signed with the **same cosign keyless identity** as
+  the tarball, and its `.sig` + `.pem` are published alongside it, so a tampered
+  bill of materials is detectable — verify it exactly as you verify the tarball
+  (see [signature verification](#signature-verification-cosign-keyless)).
 - **No sensitive paths.** The SBOM is reviewed to contain only public crate
   coordinates (name, version, source) — no local filesystem paths, usernames,
   hostnames, or internal URLs.
@@ -120,6 +126,20 @@ security-critical part — **always pin both**:
   Without this flag, any valid Sigstore certificate would pass.
 - `--certificate-oidc-issuer` requires the identity to come from
   **GitHub Actions' OIDC issuer** (`token.actions.githubusercontent.com`).
+
+The **SBOM is signed with the same keyless identity**, so verify it the same
+way — this is what proves the dependency inventory itself was not swapped for a
+falsified one that hides a malicious or vulnerable crate:
+
+```bash
+cosign verify-blob \
+  --certificate        simard-0.22.0.cdx.json.pem \
+  --signature          simard-0.22.0.cdx.json.sig \
+  --certificate-identity-regexp \
+      'https://github.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  simard-0.22.0.cdx.json
+```
 
 > **Verify, then trust.** The `.sha256` checksum proves the file was not
 > corrupted in transit; the cosign signature proves it was *produced by this
@@ -208,8 +228,9 @@ Because `tar`/gzip metadata (ordering, mtime, compression level) can affect the
 archive hash, the **stable comparison target is the binary's own hash**
 (`sha256sum target/release/simard`) at a fixed commit and toolchain; the
 tarball hash is reproducible additionally when the packaging environment
-matches. The published `.sha256` covers the tarball; the SBOM + signature cover
-provenance regardless of archive-level packaging differences.
+matches. The published `.sha256` covers the tarball; the cosign signatures over
+the tarball **and** the SBOM cover provenance regardless of archive-level
+packaging differences.
 
 ## See also
 
