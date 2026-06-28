@@ -1,7 +1,7 @@
 ---
 title: Text-parsing wire formats
 description: Normative reference for every text-based wire format Simard's Rust code parses from LLM and recipe output. Replaces the former JSON-based contracts.
-last_updated: 2026-05-24
+last_updated: 2026-06-28
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -75,6 +75,15 @@ No `serde_json`. No regex. No keyword scanning. Only `str::split_whitespace()`,
 Extracts the first whitespace-delimited word, lowercases it, and matches
 against the 10 action keywords. Defaults to `AdvanceGoal`.
 
+> **Transport (fixed in [#2421](https://github.com/rysweet/Simard/issues/2421)):**
+> the `text` passed to this parser is the agent output extracted from the
+> `recipe-runner-rs --output-format json` envelope (`step_results[].output`),
+> **not** the text-mode summary banner. `judge_decision` parses it via
+> `parse_action_outcome` (the outcome-classifying variant of this function) and
+> runs the escalation ladder on a parse-miss before the loud `AdvanceGoal`
+> default. See
+> [Recipe-brain verdict/decision parsing](./recipe-brain-verdict-parsing.md).
+
 **Keywords:**
 
 | First word | Maps to |
@@ -107,6 +116,16 @@ consolidate_memory Memory hasn't been consolidated in 12 hours.
 **Struct:** `OrientJudgment`
 
 **Parser:** `parse_orient_from_text(text, base_urgency, failure_count) -> OrientJudgment`
+
+> **Transport (fixed in [#2421](https://github.com/rysweet/Simard/issues/2421)):**
+> the `text` is the agent output extracted from the `--output-format json`
+> envelope, **not** the text-mode banner. The envelope carries no banner, so the
+> first float is the model's real decimal and the deterministic floor below is
+> the only fallback — the banner's `(0.0s)` timing string can no longer be
+> scraped as `adjusted_urgency`, so urgency `0.0` from a banner can no longer
+> happen. `judge_orientation` parses via `parse_orient_outcome` (the
+> outcome-classifying variant) and runs the escalation ladder on a parse-miss.
+> See [Recipe-brain verdict/decision parsing](./recipe-brain-verdict-parsing.md).
 
 2-tier parse:
 
@@ -270,49 +289,49 @@ Parser result: `EvidenceDecision::Accept { reason: "After reviewing the plan and
 
 ### 2b. Merge judge (`recipe_merge_judge.rs`)
 
-**Keywords:**
+> **Transport (fixed in [#2428](https://github.com/rysweet/Simard/issues/2428) /
+> [#2430](https://github.com/rysweet/Simard/issues/2430) /
+> [#2435](https://github.com/rysweet/Simard/issues/2435) /
+> [#2462](https://github.com/rysweet/Simard/issues/2462) /
+> [#2463](https://github.com/rysweet/Simard/issues/2463)):**
+> `RecipeMergeJudge::judge` invokes `recipe-runner-rs` with `--output-format
+> json` and parses the agent verdict text extracted from the envelope
+> (`step_results[].output`), **not** the text-mode summary banner. It parses via
+> `parse_merge_outcome`, runs the escalation ladder on a parse-miss, and **fails
+> closed to `Unclear`** when no verdict parses. See
+> [Recipe-brain verdict/decision parsing](./recipe-brain-verdict-parsing.md#merge-judge-phase-2462)
+> and the [operator runbook](../howto/diagnose-merge-pr-verdict-parse-failures.md).
 
-| Keyword | Maps to | Priority |
-|---------|---------|----------|
-| `not_ready` | `Verdict::NotReady` | Checked first (prevents `ready` substring match) |
-| `unclear` | `Verdict::NotReady` | Checked second (conservative — unclear is not ready) |
+**Parser:** `parse_merge_outcome(text) -> (JudgeOutcome, LifecycleParseOutcome)`,
+which composes two parsers over the envelope-extracted agent output:
+
+1. `merge_judge::parse_judge_response` — structured `{"verdict":…}` JSON
+   (fenced ` ```json ` block → first brace-balanced `{…}` that parses →
+   outermost `{…}`), which **does** populate structured `Blocker` entries.
+   Tried **first**.
+2. `parse_merge_verdict_from_text` — the case-insensitive substring keyword scan
+   below, used as a **prose fallback** when no structured JSON is present.
+
+**Keyword scan (`parse_merge_verdict_from_text`)** — the prose fallback:
+
+| Keyword (substring) | Maps to | Priority |
+|---------------------|---------|----------|
+| `not_ready` / `not ready` | `Verdict::NotReady` | Checked first (prevents `ready` substring match) |
+| `unclear` | `Verdict::Unclear` | Checked second (treated as not-ready at the call site) |
 | `ready` | `Verdict::Ready` | Checked third |
 
-**Default (no keyword):** `Verdict::NotReady` — fail-closed. A PR that
-cannot be judged is not merged.
+**On no verdict from either parser, `parse_merge_outcome` fails CLOSED to
+`Verdict::Unclear`** (classified as a parse-miss in the returned
+`LifecycleParseOutcome`). The merge authority treats `Unclear` as a refusal, so
+an unparseable verdict can never become `Ready`. Genuine infrastructure failures
+— spawn failure, nonzero exit, or an undecodable JSON envelope — still propagate
+from `RecipeMergeJudge::judge` as `SimardError::AdapterInvocationFailed`; they
+are distinct from a successful run whose verdict merely fails to parse (which
+drives the ladder, then the fail-closed `Unclear`).
 
-**Example recipe stdout:**
-
-```
-Reviewing PR #2023 against merge criteria:
-
-- CI status: all checks passing
-- Code review: approved by 1 reviewer
-- Test coverage: new tests added for all changed modules
-- No breaking API changes
-
-The PR meets all merge-readiness criteria.
-
-ready
-```
-
-Parser result: `JudgeOutcome { verdict: Verdict::Ready, rationale: "Reviewing PR #2023 against merge criteria: ...", blockers: [] }`
-
-**Note on blockers:** The keyword verdict parser does not extract structured
-`Blocker` entries. `JudgeOutcome.blockers` is always empty when parsed from
-text. The recipe agent's prose rationale contains the equivalent information
-in human-readable form. If structured blockers are needed in the future, the
-recipe prompt can be updated to emit `BLOCKER:` labeled lines.
-
-**Changes from prior implementation:**
-
-- `parse_judge_response` (which parsed JSON) is removed from `merge_judge.rs`.
-- `LlmMergeJudge` is removed from `merge_judge.rs`.
-- Helper functions `extract_fenced_blocks`, `extract_balanced_objects`, and
-  `truncate_for_log` are removed from `merge_judge.rs`.
-- `build_merge_judge()` chain is now: `RecipeMergeJudge` →
-  `RefusingMergeJudge` (was: `RecipeMergeJudge` → `LlmMergeJudge` →
-  `RefusingMergeJudge`).
+**Note on blockers:** the structured `parse_judge_response` path populates
+`JudgeOutcome.blockers`; the keyword-scan prose fallback does not (`blockers`
+empty, rationale = truncated raw text).
 
 ---
 
@@ -435,7 +454,7 @@ Each parser has inline `#[cfg(test)]` tests in its source file:
 | `orient.rs` | 8+ | Float parsing, validation, extra fields, empty/invalid responses |
 | `rustyclawd.rs` | 15+ (T1–T15) | Full behavior matrix per decision protocol reference |
 | `recipe_progress_checker.rs` | 4+ | Accept, reject, no keyword (default), mixed case |
-| `recipe_merge_judge.rs` | 5+ | Ready, not_ready, unclear, no keyword (default), substring safety |
+| `recipe_merge_judge.rs` | 5+ | `parse_merge_outcome`: structured `parse_judge_response` JSON (populates blockers), prose keyword scan (ready / not_ready / unclear; substring safety), JSON-envelope extraction, and fail-closed `Verdict::Unclear` on an unparseable verdict. |
 | `disk_health.rs` | 3+ | Full output, no-cleanup output, malformed lines |
 
 ---

@@ -356,11 +356,7 @@ fn maybe_escalate_to_gh_issue(record: &ParseFailureRecord) {
 }
 
 fn phase_to_string(phase: BrainPhase) -> String {
-    match phase {
-        BrainPhase::Act => "act".to_string(),
-        BrainPhase::Decide => "decide".to_string(),
-        BrainPhase::Orient => "orient".to_string(),
-    }
+    phase.as_str().to_string()
 }
 
 #[cfg(test)]

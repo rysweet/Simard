@@ -94,6 +94,7 @@ nav:
     - Interpret Brain Confidence and Verify Completion: howto/interpret-brain-confidence-and-verify-completion.md
     - Configure Brain Introspection: howto/configure-brain-introspection.md
     - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
+    - Diagnose merge-pr Verdict-Parse Failures: howto/diagnose-merge-pr-verdict-parse-failures.md
     - Inspect the Procedural-Learning Loop: howto/inspect-the-procedural-learning-loop.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
@@ -127,6 +128,7 @@ nav:
     - Supply-Chain Audit & Guardrails: reference/supply-chain-audit.md
     - Dependency Trust Policy: reference/dependency-trust-policy.md
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
+    - Recipe-brain Verdict/Decision Parsing: reference/recipe-brain-verdict-parsing.md
     # Hidden from nav until issue #1590 implementation lands:
     #   - reference/cognitive-memory-bridge-helpers.md
     #   - reference/goal-board-api.md
