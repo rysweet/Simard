@@ -27,8 +27,8 @@ use crate::state_root::{STATE_ROOT_ENV, simard_state_root};
 
 use super::source_prep::{
     GitSourcePreparer, SELF_DEPLOY_SRC_DIRNAME, SELF_DEPLOY_TARGET_DIRNAME,
-    SelfDeploySourcePreparer, prepare_and_build, redact_credentials, self_deploy_src_dir,
-    self_deploy_target_dir, validate_full_sha, validate_origin_transport,
+    SelfDeploySourcePreparer, prepare_and_build, redact_credentials, remove_stale_checkout,
+    self_deploy_src_dir, self_deploy_target_dir, validate_full_sha, validate_origin_transport,
 };
 
 const SELF_DEPLOY_REPO_ENV: &str = "SIMARD_SELF_DEPLOY_REPO";
@@ -327,6 +327,27 @@ fn validate_origin_transport_rejects_command_transports() {
         assert!(
             validate_origin_transport(url).is_err(),
             "arbitrary-command transport must be rejected: {url}"
+        );
+    }
+}
+
+#[test]
+fn validate_origin_transport_rejects_leading_dash_argv_injection() {
+    // A '-'-leading origin URL would be parsed by `git clone` as an *option*
+    // (e.g. `--upload-pack=…`, `-c core.pager=…`) rather than a positional —
+    // the same argv option-injection class `validate_full_sha` blocks (SEC-I2),
+    // and exactly the "run code on clone" threat `validate_origin_transport`
+    // exists to stop (SEC-I3). All of these `is_scp_like`-shaped strings begin
+    // with '-' and MUST be refused.
+    for url in [
+        "-uevil@example.com:repo.git",
+        "--upload-pack=evil@example.com:repo.git",
+        "-ccore.pager=evil@example.com:repo.git",
+        "  -uevil@example.com:repo.git", // leading whitespace is trimmed first
+    ] {
+        assert!(
+            validate_origin_transport(url).is_err(),
+            "leading-dash origin URL must be rejected (argv option injection): {url:?}"
         );
     }
 }
@@ -673,4 +694,66 @@ fn build_self_deploy_candidate_creates_warm_dir_and_fails_loudly_on_bad_repo() {
         "a missing source manifest must make the build fail loudly"
     );
     let _ = std::fs::remove_dir_all(&warm);
+}
+
+// ---------------------------------------------------------------------------
+// remove_stale_checkout(): self-heal a wedged persistent source checkout
+// (issue #2467 review). A clone is only attempted when the persistent dir is
+// NOT a valid work tree, so a leftover partial/non-git path (or dangling
+// symlink) must be removed first — otherwise `git clone <dest>` fails forever
+// ("destination path already exists and is not an empty directory") and every
+// future self-deploy is permanently wedged.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn remove_stale_checkout_clears_partial_non_git_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let dest = root.path().join("self-deploy-src");
+    // A clone killed mid-way leaves a non-empty, non-git directory.
+    std::fs::create_dir_all(dest.join(".git")).unwrap();
+    std::fs::write(dest.join("partial"), b"half-written").unwrap();
+    assert!(dest.exists());
+
+    remove_stale_checkout(&dest).expect("a partial checkout must be removed, not error");
+    assert!(
+        !dest.exists(),
+        "the wedged checkout dir must be gone so a fresh clone can recreate it"
+    );
+}
+
+#[test]
+fn remove_stale_checkout_clears_leftover_file() {
+    let root = tempfile::tempdir().unwrap();
+    let dest = root.path().join("self-deploy-src");
+    std::fs::write(&dest, b"not a directory").unwrap();
+
+    remove_stale_checkout(&dest).expect("a leftover file at the checkout path must be removed");
+    assert!(!dest.exists(), "the leftover file must be gone");
+}
+
+#[cfg(unix)]
+#[test]
+fn remove_stale_checkout_removes_symlink_without_following_it() {
+    let root = tempfile::tempdir().unwrap();
+    // The symlink target holds data that MUST survive (we delete the link only).
+    let target = root.path().join("real-contents");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("keep"), b"precious").unwrap();
+
+    let dest = root.path().join("self-deploy-src");
+    std::os::unix::fs::symlink(&target, &dest).unwrap();
+
+    remove_stale_checkout(&dest).expect("a symlink at the checkout path must be removed");
+    assert!(!dest.exists(), "the symlink itself must be removed");
+    assert!(
+        target.join("keep").exists(),
+        "removal must not follow the symlink into its target"
+    );
+}
+
+#[test]
+fn remove_stale_checkout_is_noop_when_absent() {
+    let root = tempfile::tempdir().unwrap();
+    let dest = root.path().join("does-not-exist");
+    remove_stale_checkout(&dest).expect("a missing checkout path must be a no-op, not an error");
 }

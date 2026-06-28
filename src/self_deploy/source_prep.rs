@@ -25,9 +25,9 @@
 //! *before* the load-bearing safety sequence — it never silently falls back to
 //! building the cwd HEAD.
 //!
-//! All git is run via the `env_clear()` + selective `PATH`/`HOME` re-injection
-//! discipline (mirroring [`crate::engineer_worktree`]) so a hostile ambient env
-//! cannot hijack the build source.
+//! All git is run via the `env_clear()` + selective `PATH`/`HOME`/`SSH_AUTH_SOCK`
+//! re-injection discipline (mirroring [`crate::engineer_worktree`]) so a hostile
+//! ambient env cannot hijack the build source.
 //!
 //! See `docs/reference/self-deploy-source-prep.md` and
 //! `docs/howto/run-self-deploy-from-any-directory.md`.
@@ -103,6 +103,20 @@ pub fn validate_full_sha(sha: &str) -> Result<(), SafeUpdateError> {
 /// poisoned remote URL run code during a clone/fetch.
 pub fn validate_origin_transport(url: &str) -> Result<(), SafeUpdateError> {
     let trimmed = url.trim();
+    // A leading '-' would let git parse the URL as an *option* rather than a
+    // positional (e.g. `--upload-pack=…`, `-c core.pager=…`) — the same argv
+    // option-injection class `validate_full_sha` guards against (SEC-I2). The
+    // origin URL comes from the cwd's `git remote get-url origin`, the very
+    // untrusted input this control exists for, so reject it before the
+    // transport check (and `clone_from_origin` additionally passes `--`).
+    if trimmed.starts_with('-') {
+        return Err(SafeUpdateError::SourceResolveFailed {
+            detail: redact_credentials(&format!(
+                "refusing origin URL {url:?}: must not begin with '-' \
+                 (guards against argv option injection into git clone)"
+            )),
+        });
+    }
     let allowed =
         trimmed.starts_with("https://") || trimmed.starts_with("ssh://") || is_scp_like(trimmed);
     if allowed {
@@ -158,7 +172,10 @@ pub(crate) fn redact_credentials(text: &str) -> String {
 /// remote-helper transport. Rejects any `scheme::address` form (e.g. `ext::`,
 /// `fd::`) — a `::` is the giveaway of a remote helper that can run a command.
 fn is_scp_like(url: &str) -> bool {
-    if url.contains("://") || url.contains("::") {
+    // A leading '-' is never a valid host and would be parsed as a `git clone`
+    // option (argv option injection); reject it here too so the helper is safe
+    // independent of its callers.
+    if url.starts_with('-') || url.contains("://") || url.contains("::") {
         return false;
     }
     match (url.find('@'), url.find(':')) {
@@ -358,6 +375,15 @@ fn clone_from_origin(dest: &Path) -> Result<PathBuf, SafeUpdateError> {
     let origin_url = discover_origin_url()?;
     validate_origin_transport(&origin_url)?;
 
+    // Self-heal a wedged persistent checkout (issue #2467 review). A clone is
+    // only reached when `dest` is NOT a valid git work tree (`resolve_repo`
+    // branch 3 returns early when it is), so any path here is stale: a clone
+    // killed mid-way, a leftover non-git directory, or a dangling symlink. Left
+    // in place it would make `git clone <dest>` fail forever ("destination path
+    // already exists and is not an empty directory"), permanently wedging every
+    // future self-deploy. Remove it so the clone can recreate a clean checkout.
+    remove_stale_checkout(dest)?;
+
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| SafeUpdateError::SourceResolveFailed {
             detail: format!("cannot create state dir {}: {e}", parent.display()),
@@ -365,7 +391,13 @@ fn clone_from_origin(dest: &Path) -> Result<PathBuf, SafeUpdateError> {
     }
 
     let mut cmd = Command::new("git");
-    cmd.arg("clone").arg("--quiet").arg(&origin_url).arg(dest);
+    // `--` terminates options so a (validated, but defense-in-depth) origin URL
+    // can never be parsed as a `git clone` flag (SEC-I3).
+    cmd.arg("clone")
+        .arg("--quiet")
+        .arg("--")
+        .arg(&origin_url)
+        .arg(dest);
     scrub_git_env(&mut cmd);
     let out = cmd
         .output()
@@ -384,6 +416,32 @@ fn clone_from_origin(dest: &Path) -> Result<PathBuf, SafeUpdateError> {
     Ok(dest.to_path_buf())
 }
 
+/// Remove a stale/partial path at `dest` (dangling symlink, leftover file, or
+/// non-git directory) so a fresh `git clone` can recreate it. Only called from
+/// [`clone_from_origin`], which is reached only when `dest` is not a valid git
+/// work tree, so deleting it can never discard a usable checkout. A symlink is
+/// removed itself (never followed into its target). A non-existent path is a
+/// no-op.
+pub(crate) fn remove_stale_checkout(dest: &Path) -> Result<(), SafeUpdateError> {
+    let meta = match dest.symlink_metadata() {
+        Ok(m) => m,
+        // Nothing present (or unreadable) — let the clone proceed and report.
+        Err(_) => return Ok(()),
+    };
+    let ft = meta.file_type();
+    let result = if ft.is_symlink() || ft.is_file() {
+        std::fs::remove_file(dest)
+    } else {
+        std::fs::remove_dir_all(dest)
+    };
+    result.map_err(|e| SafeUpdateError::SourceResolveFailed {
+        detail: format!(
+            "cannot remove stale self-deploy source checkout {}: {e}",
+            dest.display()
+        ),
+    })
+}
+
 /// Discover the `origin` remote URL of the current checkout (read-only).
 fn discover_origin_url() -> Result<String, SafeUpdateError> {
     let cwd = std::env::current_dir().map_err(|e| SafeUpdateError::SourceResolveFailed {
@@ -399,16 +457,22 @@ fn discover_origin_url() -> Result<String, SafeUpdateError> {
         })
 }
 
-/// `env_clear()` + selective `PATH`/`HOME` re-injection for every `git`
-/// subprocess, mirroring [`crate::engineer_worktree`]: a hostile ambient env
-/// (`GIT_DIR`, `GIT_WORK_TREE`, `LD_PRELOAD`, …) cannot hijack the build source.
+/// `env_clear()` + selective `PATH`/`HOME`/`SSH_AUTH_SOCK` re-injection for every
+/// `git` subprocess, mirroring [`crate::engineer_worktree`]: a hostile ambient
+/// env (`GIT_DIR`, `GIT_WORK_TREE`, `LD_PRELOAD`, …) cannot hijack the build
+/// source.
+///
+/// `SSH_AUTH_SOCK` is forwarded so the `ssh://`/scp-like transports permitted by
+/// [`validate_origin_transport`] can authenticate via a running ssh-agent
+/// (encrypted or agent-only keys) rather than failing. `GIT_SSH_COMMAND` is
+/// **deliberately not** forwarded: it executes an arbitrary command, which is
+/// exactly the hijack class this scrub exists to strip.
 fn scrub_git_env(cmd: &mut Command) {
     cmd.env_clear();
-    if let Ok(path) = std::env::var("PATH") {
-        cmd.env("PATH", path);
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        cmd.env("HOME", home);
+    for var in ["PATH", "HOME", "SSH_AUTH_SOCK"] {
+        if let Ok(val) = std::env::var(var) {
+            cmd.env(var, val);
+        }
     }
 }
 
