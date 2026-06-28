@@ -8,4 +8,17 @@ ignore = [
     # rustyclawd-tools → octocrab → jsonwebtoken → rsa.
     # Tracked upstream: https://github.com/RustCrypto/RSA/issues/19
     "RUSTSEC-2023-0071",
+    # RUSTSEC-2026-0187: Stack overflow in `lopdf` via deeply nested PDF
+    # objects (DoS on maliciously-crafted PDF input only). Pre-existing on
+    # main, unrelated to this change. Transitive: pdf-extract 0.10.0 →
+    # lopdf 0.38.0. Fix requires lopdf >=0.42.0, which pdf-extract 0.10.0 does
+    # not yet depend on (needs an upstream pdf-extract release). Tracked for a
+    # follow-up dependency-bump PR.
+    "RUSTSEC-2026-0187",
+    # RUSTSEC-2026-0185: Remote memory exhaustion in `quinn-proto` from
+    # unbounded out-of-order stream reassembly. Pre-existing on main, unrelated
+    # to this change. Transitive: reqwest 0.13.2 → quinn 0.11.9 →
+    # quinn-proto 0.11.14. Fix is quinn-proto >=0.11.15; tracked for a
+    # follow-up dependency-bump PR.
+    "RUSTSEC-2026-0185",
 ]
