@@ -109,12 +109,49 @@ pub fn validate_origin_transport(url: &str) -> Result<(), SafeUpdateError> {
         Ok(())
     } else {
         Err(SafeUpdateError::SourceResolveFailed {
-            detail: format!(
+            detail: redact_credentials(&format!(
                 "refusing origin URL {url:?}: only https:// and ssh:// transports are permitted \
                  (arbitrary-command transports like ext::/fd:: can run code on clone)"
-            ),
+            )),
         })
     }
+}
+
+/// Redact URL userinfo (e.g. an embedded access token) from any text before it
+/// is surfaced in an error, log, recipe output, or PR (SEC-D2).
+///
+/// Git error output and remote URLs can embed credentials as
+/// `scheme://x-access-token:<TOKEN>@host/…` or `scheme://user:pass@host/…` (the
+/// project uses token-bearing remotes). This replaces the userinfo between
+/// `://` and the authority-terminating `@` with `***`, so a surfaced
+/// [`SafeUpdateError`] (and the operator terminal / logs that display it) never
+/// carries a live token. Tokenless URLs and non-URL text pass through
+/// unchanged. Multiple URLs in one string are each redacted.
+pub(crate) fn redact_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(scheme_pos) = rest.find("://") {
+        let after_scheme = scheme_pos + 3;
+        out.push_str(&rest[..after_scheme]);
+        let authority = &rest[after_scheme..];
+        // The authority component ends at the first path/query/fragment
+        // delimiter, quote, or whitespace.
+        let auth_end = authority
+            .find(|c: char| matches!(c, '/' | '?' | '#' | '\'' | '"') || c.is_whitespace())
+            .unwrap_or(authority.len());
+        let authority_component = &authority[..auth_end];
+        // The last '@' in the authority separates userinfo from host (a host
+        // never contains '@'); redact everything before it.
+        if let Some(at) = authority_component.rfind('@') {
+            out.push_str("***");
+            out.push_str(&authority_component[at..]);
+        } else {
+            out.push_str(authority_component);
+        }
+        rest = &authority[auth_end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Whether `url` is an scp-like SSH remote (`user@host:path`) and *not* a
@@ -337,11 +374,11 @@ fn clone_from_origin(dest: &Path) -> Result<PathBuf, SafeUpdateError> {
         })?;
     if !out.status.success() {
         return Err(SafeUpdateError::SourceResolveFailed {
-            detail: format!(
+            detail: redact_credentials(&format!(
                 "git clone of {origin_url:?} into {} failed: {}",
                 dest.display(),
                 String::from_utf8_lossy(&out.stderr).trim()
-            ),
+            )),
         });
     }
     Ok(dest.to_path_buf())
@@ -398,12 +435,15 @@ fn git_capture(repo: &Path, args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|e| format!("spawn git {args:?} in {}: {e}", repo.display()))?;
     if !out.status.success() {
-        return Err(format!(
+        // Redact any credentials git prints (e.g. a token-bearing remote URL in
+        // a "fatal: unable to access 'https://<token>@…'" message) before the
+        // detail is surfaced to the operator terminal or logs (SEC-D2).
+        return Err(redact_credentials(&format!(
             "git {:?} failed in {}: {}",
             args,
             repo.display(),
             String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        )));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }

@@ -27,8 +27,8 @@ use crate::state_root::{STATE_ROOT_ENV, simard_state_root};
 
 use super::source_prep::{
     GitSourcePreparer, SELF_DEPLOY_SRC_DIRNAME, SELF_DEPLOY_TARGET_DIRNAME,
-    SelfDeploySourcePreparer, prepare_and_build, self_deploy_src_dir, self_deploy_target_dir,
-    validate_full_sha, validate_origin_transport,
+    SelfDeploySourcePreparer, prepare_and_build, redact_credentials, self_deploy_src_dir,
+    self_deploy_target_dir, validate_full_sha, validate_origin_transport,
 };
 
 const SELF_DEPLOY_REPO_ENV: &str = "SIMARD_SELF_DEPLOY_REPO";
@@ -329,6 +329,62 @@ fn validate_origin_transport_rejects_command_transports() {
             "arbitrary-command transport must be rejected: {url}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Credential redaction in surfaced errors (SEC-D2: never leak a token in a
+// git error / log / PR). The project uses token-bearing remotes, so a fetch or
+// clone failure must not echo `https://<token>@host` to the operator.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn redact_credentials_strips_userinfo_from_urls() {
+    let cases = [
+        (
+            "https://x-access-token:ghp_SECRET123@github.com/rysweet/Simard.git",
+            "https://***@github.com/rysweet/Simard.git",
+        ),
+        (
+            "ssh://git:p4ssw0rd@github.com/rysweet/Simard.git",
+            "ssh://***@github.com/rysweet/Simard.git",
+        ),
+        (
+            "fatal: unable to access 'https://user:tok@github.com/o/r/': 403",
+            "fatal: unable to access 'https://***@github.com/o/r/': 403",
+        ),
+    ];
+    for (raw, want) in cases {
+        let got = redact_credentials(raw);
+        assert_eq!(got, want, "redaction mismatch for {raw:?}");
+        assert!(
+            !got.contains("ghp_SECRET123") && !got.contains("p4ssw0rd") && !got.contains(":tok@"),
+            "token must not survive redaction: {got:?}"
+        );
+    }
+}
+
+#[test]
+fn redact_credentials_leaves_tokenless_and_plain_text_unchanged() {
+    for s in [
+        "https://github.com/rysweet/Simard.git",
+        "git@github.com:rysweet/Simard.git",
+        "git [\"fetch\", \"origin\"] failed in /home/op/.simard/self-deploy-src: timeout",
+        "no urls here at all",
+    ] {
+        assert_eq!(
+            redact_credentials(s),
+            s,
+            "must pass through unchanged: {s:?}"
+        );
+    }
+}
+
+#[test]
+fn redact_credentials_handles_multiple_urls() {
+    let raw = "from https://a:b@h1/x to https://c:d@h2/y";
+    let got = redact_credentials(raw);
+    assert_eq!(got, "from https://***@h1/x to https://***@h2/y");
+    assert!(!got.contains("a:b@") && !got.contains("c:d@"));
 }
 
 // ---------------------------------------------------------------------------
