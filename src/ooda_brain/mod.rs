@@ -52,6 +52,14 @@ pub use orient::{
 };
 pub use parse_failure::ParseFailureRecord;
 pub use recipe_brain::RecipeBrain;
+/// Shared escalation-ladder backbone + verdict-parse instrumentation reused by
+/// the recipe-backed merge-judge (issue #2419 family / #2429). Exposed
+/// crate-wide so `stewardship::recipe_merge_judge` runs on the SAME ladder /
+/// transport / metric as the OODA brains rather than reinventing them.
+pub(crate) use recipe_brain::{
+    EscalationConfig, LadderRung, LifecycleParseOutcome, build_phase_escalation_note,
+    extract_recipe_decision_output, record_verdict_parse_metric, run_brain_ladder,
+};
 /// Backward-compatible type aliases (issue #2132).
 pub type RecipeDecideBrain = RecipeBrain;
 pub type RecipeEngineerLifecycleBrain = RecipeBrain;

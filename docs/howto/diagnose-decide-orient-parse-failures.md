@@ -1,7 +1,7 @@
 ---
 title: Diagnose OODA decide/orient brain parse failures
 description: Operator runbook for text-based OODA brain parse failures. Find, classify, and remediate parse failures from the decide and orient phases.
-last_updated: 2026-05-24
+last_updated: 2026-06-28
 review_schedule: as-needed
 owner: simard
 ---
@@ -24,6 +24,16 @@ owner: simard
 > traditional sense (format rejected) **cannot occur** — the first-word
 > parser always returns a valid action kind. If no keyword matches, the
 > default `advance_goal` is used.
+>
+> **Transport (fixed in [#2421](https://github.com/rysweet/Simard/issues/2421)).**
+> The decide brain reads the agent decision from the `recipe-runner-rs
+> --output-format json` envelope (`step_results[].output`), **not** the
+> text-mode summary banner. On a parse-miss it runs the escalation ladder and
+> only then falls back **loudly** to `advance_goal`, and each invocation emits a
+> `brain_verdict_parsed_total` metric (`phase=decide`). The banner first word
+> `Recipe:` can no longer be mistaken for the decision. See
+> [Recipe-brain verdict/decision parsing](../reference/recipe-brain-verdict-parsing.md#decide-phase-2421).
+
 
 ### Decide-brain failure modes
 
@@ -60,6 +70,16 @@ WARN simard::operator_commands_ooda: [ooda] recipe-runner-rs not found; using de
 > The orient brain now extracts the first bare decimal from the recipe output
 > instead of parsing a JSON object. Parse failures still fire four visibility
 > channels. If no float is found, the deterministic floor applies.
+>
+> **Transport (fixed in [#2421](https://github.com/rysweet/Simard/issues/2421)).**
+> The decimal is read from the `--output-format json` envelope's agent output,
+> **not** the text-mode banner. Because the envelope carries no banner, the
+> banner's `(0.0s)` timing string can no longer be scraped as `adjusted_urgency`
+> — urgency can no longer be silently demoted to `0.0`. On a parse-miss the
+> escalation ladder runs and the deterministic floor (`base_urgency − 0.2 ×
+> failure_count`) is the only fallback; each invocation emits a
+> `brain_verdict_parsed_total` metric (`phase=orient`). See
+> [Recipe-brain verdict/decision parsing](../reference/recipe-brain-verdict-parsing.md#orient-phase-2421).
 
 For the wire format specifications, see
 [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md).
