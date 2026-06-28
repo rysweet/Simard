@@ -937,7 +937,16 @@ pub(crate) fn parse_recipe_output_full(raw: &str) -> SimardResult<DistillOutput>
 /// inside JSON string literals, respecting `\"` escapes) so a brace inside a
 /// fact's `content` cannot corrupt depth accounting.
 fn scan_for_facts_object(text: &str) -> Option<DistillOutput> {
-    let trimmed = text.trim();
+    // Strip ANSI escape sequences first. `recipe-runner-rs` / the agent binary
+    // render their tracing logs into the captured step `output` with ANSI colour
+    // codes — the t=7919 distill parse-failure's step output began with a dimmed
+    // `\x1b[2m<RFC3339 timestamp>` prefix. A raw `ESC` (`0x1b`) byte is invalid
+    // inside a JSON document, so when those codes colourise or interleave the
+    // agent's `{ "facts": [...] }` answer `serde_json` rejects the span and the
+    // whole 20-episode batch silently defers. Removing the escapes before the
+    // balanced-brace scan recovers the buried payload (issues #2461 / #2401).
+    let cleaned = strip_ansi_escapes(text);
+    let trimmed = cleaned.trim();
     // Fast path — the text IS the JSON object.
     if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
         return Some(parsed.into_output());
@@ -1007,6 +1016,75 @@ fn balanced_object_spans(s: &str) -> Vec<(usize, usize)> {
         }
     }
     spans
+}
+
+/// Strip ANSI escape sequences (CSI/SGR colour codes, OSC strings, and other
+/// simple `ESC x` two-byte escapes) from `s`.
+///
+/// `recipe-runner-rs` and the agent binary render their tracing logs into the
+/// captured step `output` with ANSI colour codes — the t=7919 distill
+/// parse-failure's step output began with a dimmed `\x1b[2m<RFC3339 timestamp>`
+/// prefix. A raw `ESC` (`0x1b`) byte is never valid inside a JSON document, so
+/// when those codes colourise or interleave the agent's `{ "facts": [...] }`
+/// answer, `serde_json` rejects the span and the batch silently defers (the
+/// "step output did not contain a parseable { facts } object" parse-failure).
+/// Removing the escapes before the balanced-brace scan recovers the payload.
+///
+/// Only RAW `0x1b` bytes are removed: a legitimately JSON-escaped `\u001b`
+/// inside fact content is the ASCII run `\`,`u`,`0`,`0`,`1`,`b` (no raw ESC) and
+/// is left untouched. Multi-byte UTF-8 content is preserved verbatim because
+/// every byte that is not part of an ASCII escape sequence is copied as-is.
+/// Returns the input unchanged (borrowed, no allocation) when it carries no
+/// `ESC` byte — the overwhelmingly common clean-output case.
+fn strip_ansi_escapes(s: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = s.as_bytes();
+    if !bytes.contains(&0x1b) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != 0x1b {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        // Consume the `ESC` and classify the sequence that follows.
+        i += 1;
+        match bytes.get(i) {
+            // CSI: `ESC [` params/intermediates until a final byte 0x40..=0x7e
+            // (e.g. `\x1b[2m`, `\x1b[0m`, `\x1b[38;5;245m`).
+            Some(b'[') => {
+                i += 1;
+                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1; // consume the final byte
+                }
+            }
+            // OSC: `ESC ]` … terminated by BEL (`0x07`) or ST (`ESC \`).
+            Some(b']') => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == 0x07 {
+                        i += 1;
+                        break;
+                    }
+                    if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'\\') {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            // Any other two-byte escape (charset select, etc.) — drop `ESC` + 1.
+            Some(_) => i += 1,
+            // Trailing lone `ESC` — nothing else to drop.
+            None => {}
+        }
+    }
+    std::borrow::Cow::Owned(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// The `recipe-runner-rs` 0.3.6 `--output-format json` envelope. Only the
@@ -1524,5 +1602,79 @@ mod unit_tests {
         // answer and must parse to zero facts (not an error).
         let facts = parse_recipe_output(r#"{"facts":[]}"#).unwrap();
         assert!(facts.is_empty());
+    }
+
+    // ── t=7919: ANSI-coded tracing-log noise in step output ──────────────
+
+    #[test]
+    fn strip_ansi_escapes_removes_csi_and_preserves_text_and_utf8() {
+        let esc = '\u{1b}';
+        let input = format!("{esc}[2mdim{esc}[0m plain {esc}[38;5;245mgrey{esc}[0m — café");
+        assert_eq!(strip_ansi_escapes(&input), "dim plain grey — café");
+        // No ESC byte → returned borrowed with no allocation.
+        assert!(matches!(
+            strip_ansi_escapes("no escapes here"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // A JSON-escaped `\u001b` in content is an ASCII run (not a raw ESC) and
+        // must be left untouched so legitimate fact content is never mangled.
+        assert_eq!(
+            strip_ansi_escapes(r"literal \u001b stays"),
+            r"literal \u001b stays"
+        );
+    }
+
+    #[test]
+    fn parse_recipe_output_recovers_facts_from_ansi_log_noise() {
+        // The t=7919 cycle: the distill step output carried ANSI-coded tracing
+        // log lines (the failing excerpt began `\x1b[2m2026-06-28T06:38:25…`)
+        // with the agent's facts object colourised inline. The raw ESC bytes
+        // interleaved with the JSON made `serde_json` reject the span, so the
+        // whole batch silently deferred. ANSI stripping recovers it.
+        let esc = '\u{1b}';
+        let raw = format!(
+            "{esc}[2m2026-06-28T06:38:25.928376Z{esc}[0m {esc}[36m DEBUG{esc}[0m thinking…\n\
+             {{\"facts\":[{{\"concept\":\"{esc}[33mbug-pattern{esc}[0m\",\
+             \"content\":\"ansi noise must be stripped\",\"source_episode_id\":\"epi_7\"}}]}}"
+        );
+        let facts = parse_recipe_output(&raw).expect("must recover facts past ANSI noise");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "bug-pattern");
+        assert_eq!(facts[0].content, "ansi noise must be stripped");
+    }
+
+    #[test]
+    fn parse_recipe_output_full_recovers_facts_from_ansi_coded_step_output() {
+        // Exact production t=7919 path: the `--output-format json` envelope's
+        // `distill` step `output` string is ANSI-coded tracing log noise
+        // (begins with the dimmed `\x1b[2m<timestamp>` prefix from the failing
+        // cycle) with the agent's facts object colourised inline. Before ANSI
+        // stripping this raised "step output did not contain a parseable
+        // { facts } object" and the 20-episode batch deferred for a full cycle;
+        // now the buried object is mined out of the step output and parsed.
+        let esc = '\u{1b}';
+        let step_output = format!(
+            "{esc}[2m2026-06-28T06:38:25.928376Z{esc}[0m {esc}[32m INFO{esc}[0m \
+             {esc}[2msimard::distill{esc}[0m: distilling 20 episodes\n\
+             {{{esc}[0m\"facts\":[{{\"concept\":\"{esc}[33mlesson-learned{esc}[0m\",\
+             \"content\":\"strip ansi before the facts scan\",\
+             \"source_episode_id\":\"epi_42\"}}]}}\n"
+        );
+        let envelope = serde_json::json!({
+            "recipe_name": "distill-episodes",
+            "success": true,
+            "step_results": [{
+                "step_id": "distill",
+                "status": "completed",
+                "output": step_output,
+                "error": ""
+            }]
+        })
+        .to_string();
+        let out = parse_recipe_output_full(&envelope).expect("ANSI-coded step output must parse");
+        assert_eq!(out.facts.len(), 1);
+        assert_eq!(out.facts[0].concept, "lesson-learned");
+        assert_eq!(out.facts[0].content, "strip ansi before the facts scan");
+        assert_eq!(out.facts[0].source_episode_id, "epi_42");
     }
 }
