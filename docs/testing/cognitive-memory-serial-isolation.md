@@ -15,6 +15,7 @@ doc_type: reference
 related:
   - ./hermetic-tests.md
   - ./ci-resilient-test-patterns.md
+  - ./deflaking-known-flaky-tests.md
   - ./COVERAGE_BASELINE.md
   - ../reference/goal-board-api.md
   - ../reference/cognitive-memory-bridge-helpers.md

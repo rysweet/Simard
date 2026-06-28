@@ -698,3 +698,316 @@ async fn repeated_handler_writes_never_silently_drop_goals() {
         "every goal added through the handler must persist (no silent drop)"
     );
 }
+
+// ===========================================================================
+// PR B — issues #2408 / #2384: env-free `_at` cores (state-root isolation)
+// ===========================================================================
+//
+// Root cause of the `full_goal_lifecycle_crud` /
+// `operator_commands_dashboard::tests_goals_crud::full_*` flake: the goal-CRUD
+// handlers resolve their state root *ambiently* via `resolve_state_root()` →
+// `std::env::var("SIMARD_STATE_ROOT")`. glibc getenv/setenv are not
+// thread-safe, so a concurrent env mutation in ANOTHER test — even in a
+// different file of the same lib-test binary — can tear a handler's read
+// mid-flight and send writes to `$HOME/.simard` instead of the hermetic temp
+// root, corrupting the board the test then reads back. `add_goal` is doubly
+// exposed: it resolves the env once directly AND again inside
+// `load_board_or_empty`.
+//
+// The fix threads an EXPLICIT `state_root: &Path` through each handler via an
+// `*_at` core; the ambient `resolve_state_root()` survives only in a thin
+// wrapper, and `add_goal`'s second resolve is killed with `load_board_or_empty_at`.
+//
+// These tests pin that contract. Each registers a shared writer + seeds a
+// board at an explicit `target` root, then constructs a SECOND `HermeticState`
+// so the ambient `SIMARD_STATE_ROOT` points at a `decoy` directory that DIFFERS
+// from `target`. A correct env-free `_at` core uses the explicit `target` it is
+// handed; an ambient one would touch the `decoy`, and the assertions below
+// fail.
+//
+// Local-binding drop order makes this sound: bindings drop in reverse
+// declaration order, so `decoy` (declared last) restores `SIMARD_STATE_ROOT`
+// to `target`'s value, then the writer guard clears, then `target` restores the
+// original env — no stale pin leaks past the test.
+//
+// This is the TDD red phase: the `*_at` functions do not exist yet, so the
+// lib-test binary will not compile until #2408/#2384's fix lands. Once the
+// cores exist and honor their explicit root, every assertion passes under
+// parallel `cargo test`.
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn seed_goals_at_writes_to_explicit_root_not_ambient_env() {
+    let target = HermeticState::new();
+    let _mem = init_empty_board(&target);
+    let decoy = HermeticState::new(); // ambient SIMARD_STATE_ROOT now != target
+
+    let r = seed_goals_at(target.state_root()).await;
+    assert_eq!(
+        r.0["status"], "ok",
+        "seed_goals_at must seed the explicit root, got: {}",
+        r.0
+    );
+
+    let board = dashboard_goal_board_snapshot(target.state_root()).unwrap();
+    assert_eq!(
+        board.active.len(),
+        3,
+        "seeded goals must land in the explicit target root"
+    );
+
+    let decoy_board = dashboard_goal_board_snapshot(decoy.state_root()).unwrap_or_default();
+    assert!(
+        decoy_board.active.is_empty() && decoy_board.backlog.is_empty(),
+        "seed_goals_at must NOT touch the ambient SIMARD_STATE_ROOT (decoy) root"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn add_goal_at_loads_and_saves_explicit_root_not_ambient_env() {
+    // Guards the #2408 double-resolution in `add_goal`: BOTH the load
+    // (`load_board_or_empty_at`) and the save must honor the explicit root.
+    let target = HermeticState::new();
+    let _mem = init_board_with_goals(&target); // 1 active "existing-goal" + 1 backlog
+    let decoy = HermeticState::new();
+
+    let r = add_goal_at(
+        target.state_root(),
+        Json(json!({"description": "Explicit root goal", "type": "backlog"})),
+    )
+    .await;
+    assert_eq!(
+        r.0["status"], "ok",
+        "add_goal_at must succeed, got: {}",
+        r.0
+    );
+
+    let board = dashboard_goal_board_snapshot(target.state_root()).unwrap();
+    // Pre-existing active goal preserved => the LOAD read the explicit root,
+    // not the empty decoy (an ambient load would drop "existing-goal").
+    assert_eq!(
+        board.active.len(),
+        1,
+        "existing active goal must survive — load must honor the explicit root"
+    );
+    // Seeded backlog item + the new one => the SAVE wrote the explicit root.
+    assert_eq!(
+        board.backlog.len(),
+        2,
+        "new backlog item must persist to the explicit root alongside the seeded one"
+    );
+
+    let decoy_board = dashboard_goal_board_snapshot(decoy.state_root()).unwrap_or_default();
+    assert!(
+        decoy_board.active.is_empty() && decoy_board.backlog.is_empty(),
+        "add_goal_at must NOT touch the ambient (decoy) root"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn remove_goal_at_uses_explicit_root() {
+    let target = HermeticState::new();
+    let _mem = init_board_with_goals(&target);
+    let _decoy = HermeticState::new();
+
+    // If remove loaded from the empty decoy it would 404; success proves the
+    // load read the explicit root.
+    let r = remove_goal_at(target.state_root(), Path("existing-goal".to_string())).await;
+    assert_eq!(
+        r.0["status"], "ok",
+        "remove_goal_at must find+remove via the explicit root, got: {}",
+        r.0
+    );
+
+    let board = dashboard_goal_board_snapshot(target.state_root()).unwrap();
+    assert!(
+        board.active.iter().all(|g| g.id != "existing-goal"),
+        "removed goal must be gone from the explicit root"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn update_goal_status_at_uses_explicit_root() {
+    let target = HermeticState::new();
+    let _mem = init_board_with_goals(&target);
+    let _decoy = HermeticState::new();
+
+    let r = update_goal_status_at(
+        target.state_root(),
+        Path("existing-goal".to_string()),
+        Json(json!({"status": "completed"})),
+    )
+    .await;
+    assert_eq!(
+        r.0["status"], "ok",
+        "update_goal_status_at must update via the explicit root, got: {}",
+        r.0
+    );
+
+    let board = dashboard_goal_board_snapshot(target.state_root()).unwrap();
+    assert!(
+        matches!(board.active[0].status, GoalProgress::Completed),
+        "status change must persist to the explicit root; got {:?}",
+        board.active[0].status
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn promote_backlog_item_at_uses_explicit_root() {
+    let target = HermeticState::new();
+    let _mem = init_board_with_goals(&target); // backlog "backlog-item-1"
+    let _decoy = HermeticState::new();
+
+    let r = promote_backlog_item_at(target.state_root(), Path("backlog-item-1".to_string())).await;
+    assert_eq!(
+        r.0["status"], "ok",
+        "promote_backlog_item_at must find the backlog item via the explicit root, got: {}",
+        r.0
+    );
+
+    let board = dashboard_goal_board_snapshot(target.state_root()).unwrap();
+    assert!(
+        board.active.iter().any(|g| g.id == "backlog-item-1"),
+        "promoted item must be active in the explicit root"
+    );
+    assert!(
+        board.backlog.iter().all(|g| g.id != "backlog-item-1"),
+        "promoted item must leave the backlog in the explicit root"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn demote_goal_at_uses_explicit_root() {
+    let target = HermeticState::new();
+    let _mem = init_board_with_goals(&target); // active "existing-goal"
+    let _decoy = HermeticState::new();
+
+    let r = demote_goal_at(target.state_root(), Path("existing-goal".to_string())).await;
+    assert_eq!(
+        r.0["status"], "ok",
+        "demote_goal_at must find the active goal via the explicit root, got: {}",
+        r.0
+    );
+
+    let board = dashboard_goal_board_snapshot(target.state_root()).unwrap();
+    assert!(
+        board.backlog.iter().any(|g| g.id == "existing-goal"),
+        "demoted goal must be in the backlog in the explicit root"
+    );
+    assert!(
+        board.active.iter().all(|g| g.id != "existing-goal"),
+        "demoted goal must leave the active list in the explicit root"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn goals_at_reads_explicit_root_not_ambient_env() {
+    let target = HermeticState::new();
+    let _mem = init_board_with_goals(&target);
+    let _decoy = HermeticState::new();
+
+    let r = goals_at(target.state_root()).await;
+    let v = &r.0;
+    assert_eq!(
+        v["active_count"], 1,
+        "goals_at must read the explicit root's active goals, got: {v}"
+    );
+    assert!(
+        v["active"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["id"] == "existing-goal"),
+        "goals_at must surface the seeded goal from the explicit root, got: {v}"
+    );
+}
+
+/// Deterministic, env-independent twin of `full_goal_lifecycle_crud` (the
+/// #2408 / #2384 flake): drive the entire CRUD lifecycle through the
+/// explicit-root `_at` cores while the ambient `SIMARD_STATE_ROOT` points at a
+/// DECOY directory. A correct fix makes every step touch only `target`.
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn full_goal_lifecycle_crud_via_at_is_env_independent() {
+    let target = HermeticState::new();
+    let _mem = init_empty_board(&target);
+    let decoy = HermeticState::new();
+    let root = target.state_root();
+
+    // 1. Seed initial goals.
+    assert_eq!(seed_goals_at(root).await.0["status"], "ok");
+
+    // 2. Add a backlog item.
+    let r = add_goal_at(
+        root,
+        Json(json!({"description": "New backlog idea", "type": "backlog"})),
+    )
+    .await;
+    assert_eq!(r.0["status"], "ok");
+    let backlog_id = r.0["id"].as_str().unwrap().to_string();
+
+    // 3. Promote backlog -> active.
+    assert_eq!(
+        promote_backlog_item_at(root, Path(backlog_id.clone()))
+            .await
+            .0["status"],
+        "ok"
+    );
+
+    // 4. In-progress.
+    assert_eq!(
+        update_goal_status_at(
+            root,
+            Path(backlog_id.clone()),
+            Json(json!({"status": "in-progress"})),
+        )
+        .await
+        .0["status"],
+        "ok"
+    );
+
+    // 5. Completed.
+    assert_eq!(
+        update_goal_status_at(
+            root,
+            Path(backlog_id.clone()),
+            Json(json!({"status": "completed"})),
+        )
+        .await
+        .0["status"],
+        "ok"
+    );
+
+    // 6. Demote back to backlog.
+    assert_eq!(
+        demote_goal_at(root, Path(backlog_id.clone())).await.0["status"],
+        "ok"
+    );
+
+    // 7. Remove.
+    assert_eq!(
+        remove_goal_at(root, Path(backlog_id)).await.0["status"],
+        "ok"
+    );
+
+    // 8. Only the 3 seeded goals remain, all in the explicit root.
+    let board = dashboard_goal_board_snapshot(root).unwrap();
+    assert_eq!(
+        board.active.len(),
+        3,
+        "only the seeded goals should remain active in the explicit root"
+    );
+
+    // The ambient/decoy root must never have been written.
+    let decoy_board = dashboard_goal_board_snapshot(decoy.state_root()).unwrap_or_default();
+    assert!(
+        decoy_board.active.is_empty() && decoy_board.backlog.is_empty(),
+        "no CRUD step may touch the ambient (decoy) SIMARD_STATE_ROOT"
+    );
+}

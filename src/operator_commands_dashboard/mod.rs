@@ -41,7 +41,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use crate::error::SimardResult;
-use crate::goal_curation::{GoalBoard, load_goal_board, save_goal_board};
+use crate::goal_curation::{
+    GoalBoard, load_goal_board, save_goal_board, save_goal_board_with_removals,
+};
 use crate::memory_ipc::{launch_writer_bridge, open_reader_bridge};
 
 /// Read the cognitive-memory `goal-board:snapshot` for the dashboard.
@@ -64,6 +66,26 @@ pub(crate) fn dashboard_goal_board_snapshot(state_root: &Path) -> SimardResult<G
 pub(crate) fn dashboard_save_goal_board(state_root: &Path, board: &GoalBoard) -> SimardResult<()> {
     let writer = launch_writer_bridge(state_root)?;
     save_goal_board(board, writer.ops())
+}
+
+/// Persist a `GoalBoard` from a dashboard write handler while force-removing
+/// `force_remove_ids` from the merged snapshot.
+///
+/// Plain [`dashboard_save_goal_board`] uses merge-on-write semantics that
+/// re-add any goal *absent* from the in-flight board, so a concurrent writer's
+/// goals are never lost (#1915). That same merge resurrects a goal an operator
+/// explicitly removed: its id is absent from the in-flight board, so
+/// [`merge_boards`](crate::goal_curation) keeps the persisted copy. Routing an
+/// explicit removal through [`save_goal_board_with_removals`] filters those ids
+/// out of the merged result so the removal actually persists — matching the CLI
+/// `simard goal remove` path (#1923 / #1925 / #1926).
+pub(crate) fn dashboard_save_goal_board_with_removals(
+    state_root: &Path,
+    board: &GoalBoard,
+    force_remove_ids: &[String],
+) -> SimardResult<()> {
+    let writer = launch_writer_bridge(state_root)?;
+    save_goal_board_with_removals(board, force_remove_ids, writer.ops())
 }
 
 /// Initialize dashboard auth and print the login code to stderr.
