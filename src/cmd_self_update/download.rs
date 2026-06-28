@@ -117,6 +117,9 @@ fn download_and_extract(url: &str, version: &str) -> Result<PathBuf, Box<dyn std
                 "2",
                 "-o",
                 archive_str,
+                // `--` terminates option parsing so a URL beginning with `-`
+                // can never be reinterpreted as a curl flag (arg injection).
+                "--",
                 url,
             ])
             .status()
@@ -435,6 +438,9 @@ pub(crate) fn verify_sha256(
             "15",
             "--max-time",
             "60",
+            // `--` terminates option parsing so the sidecar URL can never be
+            // reinterpreted as a curl flag (arg injection).
+            "--",
             &sidecar_url,
         ])
         .output()
