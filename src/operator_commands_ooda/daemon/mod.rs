@@ -350,8 +350,27 @@ pub fn run_ooda_daemon(
     // De-fork Phase 2b (issue #2307): the native lbug-WAL file-copy backup
     // (`create_verified_backup` / `prune_old_backups`) has been removed. The
     // library backend owns its own durability (WAL flush on `checkpoint` /
-    // drop). File-level snapshot backups remain available via the trait-based
-    // `memory_backup` module.
+    // drop).
+    //
+    // Issue #2420: resilience is restored at the daemon level by a periodic,
+    // *verified, logical* snapshot of the LIVE store (`memory_backup`), taken
+    // through the same `shared_mem` bridge the daemon writes to — never a stale
+    // on-disk path. Each pass also bounds the corrupt/shadow quarantine
+    // artifacts the library's corrupt-WAL recovery leaves behind.
+    let backup_interval_secs: u64 = std::env::var("SIMARD_BACKUP_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3600); // hourly by default
+    // Take the first backup on the first loop iteration (like the disk-health
+    // check) so a recovery point exists almost immediately after boot, rather
+    // than one full interval later. The export is a fast logical query.
+    let mut last_backup = Instant::now()
+        .checked_sub(Duration::from_secs(backup_interval_secs))
+        .unwrap_or_else(Instant::now);
+    daemon_log(
+        &state_root,
+        &format!("[simard] OODA daemon: memory backup interval = {backup_interval_secs}s"),
+    );
 
     // --- periodic disk health check state ---------------------------------
     let disk_health_interval_secs: u64 = std::env::var("SIMARD_DISK_HEALTH_INTERVAL_SECS")
@@ -519,6 +538,32 @@ pub fn run_ooda_daemon(
                 }
             }
             last_worktree_sweep = Instant::now();
+        }
+        // -------------------------------------------------------------------
+
+        // ── Periodic verified backup of the LIVE cognitive store (#2420) ──
+        if last_backup.elapsed() >= Duration::from_secs(backup_interval_secs) {
+            match crate::memory_backup::run_scheduled_backup(
+                shared_mem.as_ref(),
+                &state_root,
+                crate::memory_backup::BACKUP_AGENT_NAME,
+            ) {
+                Ok(outcome) => {
+                    daemon_log(&state_root, &format!("[simard] {}", outcome.summary()));
+                    if !outcome.is_valid() {
+                        daemon_log(
+                            &state_root,
+                            "[simard] WARN: fresh memory backup did NOT verify clean — \
+                             prior backups + corrupt artifacts left intact",
+                        );
+                    }
+                }
+                Err(e) => daemon_log(
+                    &state_root,
+                    &format!("[simard] WARN: scheduled memory backup failed: {e}"),
+                ),
+            }
+            last_backup = Instant::now();
         }
         // -------------------------------------------------------------------
 

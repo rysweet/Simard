@@ -128,15 +128,17 @@ amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git"
 
 # Retained for ONE remaining direct reader: src/bin/simard_tui/goals.rs.
 # Not used by the cognitive-memory backend, which goes through amplihack-memory.
-lbug = "=0.15.3"
+lbug = "=0.17.1"
 ```
 
 - The library's `persistent` feature compiles **LadybugDB from source**, which
   requires a working **CMake + C++ toolchain** and noticeably longer build
   times. Because the library backend is now the only backend, every build pays
   this cost — budget extra time for `cargo build --release --bin simard`.
-- Both Simard and the library pin `lbug = "=0.15.3"`, so they share one
-  LadybugDB build.
+- Both Simard and the library pin `lbug = "=0.17.1"` (issue #2420; previously
+  `=0.15.3`), so they share one LadybugDB build — keeping a single version also
+  avoids compiling the C++ engine twice and the resulting duplicate-symbol link
+  clash.
 
 ### No cargo feature, no env switch
 

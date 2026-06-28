@@ -114,6 +114,42 @@ fn export_rejects_empty_agent_name() {
 }
 
 #[test]
+fn full_export_rejects_empty_agent_name() {
+    let bridge = mock_bridge();
+    let err = export_full_memory_snapshot(&bridge, "").unwrap_err();
+    assert!(matches!(err, SimardError::InvalidConfigValue { .. }));
+}
+
+#[test]
+fn full_export_captures_more_than_replication_cap() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+
+    // The real (in-memory) library adapter respects the `limit` argument, so it
+    // exercises the truncation the JSON-RPC mock above cannot.
+    let mem = LibraryCognitiveMemory::in_memory().unwrap();
+    let total = MAX_EXPORT_FACTS as usize + 5; // 1005 > the replication cap
+    for i in 0..total {
+        mem.store_fact(
+            &format!("concept-{i}"),
+            "content",
+            0.9,
+            &[],
+            &format!("src-{i}"),
+        )
+        .unwrap();
+    }
+
+    // The replication export truncates at the cap (correct for gossip/replay)...
+    #[allow(deprecated)]
+    let capped = export_memory_snapshot(&mem, "agent", None).unwrap();
+    assert_eq!(capped.facts.len(), MAX_EXPORT_FACTS as usize);
+
+    // ...but the backup export captures the store in full (issue #2420).
+    let full = export_full_memory_snapshot(&mem, "agent").unwrap();
+    assert_eq!(full.facts.len(), total);
+}
+
+#[test]
 fn round_trip_export_import() {
     let source = mock_bridge();
     // Store some data in the source bridge.

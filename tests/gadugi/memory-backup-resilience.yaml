@@ -1,0 +1,50 @@
+name: "Cognitive Memory Backup Resilience"
+description: >
+  Outside-in gate for issue #2420: verifies end-to-end, against the real
+  lbug 0.17.1 library backend, that the scheduled verified backup of the LIVE
+  cognitive store (1) captures a store larger than the replication cap in full
+  (no silent truncation), (2) verifies and restores with identical
+  fact/procedure counts, and (3) bounds the corrupt/shadow quarantine artifacts
+  to the newest N while never touching the live store. The finer-grained unit
+  assertions live in the crate test suite (`cargo test`); this scenario drives
+  the single comprehensive integration test so the gate compiles and runs fast.
+version: "1.0.0"
+
+config:
+  timeout: 360000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 360000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Live-store backup round-trips in full and bounds corrupt artifacts"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test memory_backup_resilience
+        live_store_backup_round_trips_and_bounds_corrupt_artifacts
+        -- --nocapture --test-threads=1
+    timeout: 360000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test live_store_backup_round_trips_and_bounds_corrupt_artifacts ... ok"

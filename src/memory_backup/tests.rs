@@ -344,3 +344,164 @@ fn backup_restore_round_trip_searchable() {
     );
     assert_eq!(procs[0].steps, vec!["build", "test", "ship"]);
 }
+
+// ---------------------------------------------------------------------------
+// issue #2420: corrupt-artifact bounding + scheduled live-store backup
+// ---------------------------------------------------------------------------
+
+fn touch_file(path: &Path, bytes: &[u8]) {
+    fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn is_corrupt_artifact_matches_quarantine_names() {
+    // Migrated lbug store quarantine names.
+    assert!(super::is_corrupt_artifact(
+        "cognitive.corrupt-1782585794318985440"
+    ));
+    assert!(super::is_corrupt_artifact(
+        "cognitive_memory.corrupt-1781915091"
+    ));
+    assert!(super::is_corrupt_artifact("cognitive.shadow"));
+    // Concatenated rename chain (issue #2420 gap #2).
+    assert!(super::is_corrupt_artifact(
+        "cognitive.wal.corrupt-1782585794318721438.cognitive.wal.corrupt-1782444638849049543.cognitive.shadow"
+    ));
+}
+
+#[test]
+fn is_corrupt_artifact_never_matches_live_store() {
+    // The live store file and its active sidecars must always be protected.
+    assert!(!super::is_corrupt_artifact("cognitive"));
+    assert!(!super::is_corrupt_artifact("cognitive.wal"));
+    assert!(!super::is_corrupt_artifact("cognitive.shm"));
+    // Unrelated files are left alone.
+    assert!(!super::is_corrupt_artifact("memory_records.json"));
+    assert!(!super::is_corrupt_artifact("config.toml"));
+    assert!(!super::is_corrupt_artifact("cognitive_memory.ladybug"));
+}
+
+#[test]
+fn prune_corrupt_artifacts_keeps_newest_n_and_protects_live_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    // The live store and an active sidecar — must survive.
+    touch_file(&root.join("cognitive"), b"LIVE-STORE");
+    touch_file(&root.join("cognitive.wal"), b"LIVE-WAL");
+    // An unrelated file — must survive.
+    touch_file(&root.join("memory_records.json"), b"[]");
+
+    // Eight corrupt artifacts created oldest-first; small sleeps give strictly
+    // increasing mtimes (same approach as `prune_old_backups_respects_min_keep`).
+    for i in 0..8 {
+        touch_file(&root.join(format!("cognitive.corrupt-{i:020}")), b"junk");
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    // One quarantined directory (historic native-store shape), newest of all.
+    let dir = root.join("cognitive.corrupt-99999999999999999999");
+    fs::create_dir_all(&dir).unwrap();
+    touch_file(&dir.join("inner"), b"x");
+
+    // 9 artifacts total, keep 5 -> prune 4.
+    let pruned = prune_corrupt_artifacts(root, 5).unwrap();
+    assert_eq!(pruned, 4);
+
+    // Live store + sidecar + unrelated file untouched.
+    assert!(root.join("cognitive").exists());
+    assert!(root.join("cognitive.wal").exists());
+    assert!(root.join("memory_records.json").exists());
+
+    // Exactly 5 corrupt artifacts remain, and they are the newest ones.
+    let remaining: Vec<String> = fs::read_dir(root)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| super::is_corrupt_artifact(n))
+        .collect();
+    assert_eq!(remaining.len(), 5);
+    // The newest (the directory) must be retained.
+    assert!(
+        remaining
+            .iter()
+            .any(|n| n == "cognitive.corrupt-99999999999999999999")
+    );
+    // The oldest (corrupt-0) must be gone.
+    assert!(
+        !remaining
+            .iter()
+            .any(|n| n.ends_with("00000000000000000000"))
+    );
+}
+
+#[test]
+fn prune_corrupt_artifacts_noop_when_under_cap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    touch_file(&root.join("cognitive.corrupt-1"), b"a");
+    touch_file(&root.join("cognitive.shadow"), b"b");
+    // 2 artifacts, keep 5 -> prune nothing.
+    assert_eq!(prune_corrupt_artifacts(root, 5).unwrap(), 0);
+    assert!(root.join("cognitive.corrupt-1").exists());
+    assert!(root.join("cognitive.shadow").exists());
+}
+
+#[test]
+fn prune_corrupt_artifacts_missing_dir_returns_zero() {
+    assert_eq!(
+        prune_corrupt_artifacts(Path::new("/no/such/state/root"), 5).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn run_scheduled_backup_round_trips_live_store_counts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_root = tmp.path();
+    let backup_root = state_root.join("backups");
+    let config = test_config(&backup_root);
+
+    // A "live" store fronted by the bridge — 2 facts + 1 procedure.
+    let bridge = mock_bridge();
+    bridge
+        .store_fact("rust", "systems lang", 0.9, &[], "ep1")
+        .unwrap();
+    bridge
+        .store_fact("ladybug", "graph store", 0.8, &[], "ep2")
+        .unwrap();
+    bridge
+        .store_procedure("backup", &["snapshot".into(), "verify".into()], &[])
+        .unwrap();
+
+    // File-backed records co-located under state_root, plus a stale corrupt
+    // artifact that the pass should bound away once 5 are exceeded.
+    let store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json")).unwrap();
+    store.put(make_record("rec1")).unwrap();
+    for i in 0..7 {
+        touch_file(
+            &state_root.join(format!("cognitive.corrupt-{i:020}")),
+            b"junk",
+        );
+    }
+
+    let outcome =
+        run_scheduled_backup_with(&bridge, &store, state_root, "test-agent", &config).unwrap();
+
+    assert!(outcome.is_valid(), "fresh backup must verify clean");
+    assert_eq!(outcome.manifest.cognitive_facts_count, 2);
+    assert_eq!(outcome.manifest.cognitive_procedures_count, 1);
+    assert_eq!(outcome.manifest.memory_records_count, 1);
+    // 7 corrupt artifacts, keep 5 -> 2 pruned.
+    assert_eq!(outcome.corrupt_artifacts_pruned, 2);
+
+    // The verified backup round-trips into a fresh target with identical counts.
+    let target_bridge = mock_bridge();
+    let target_store = FileBackedMemoryStore::try_new(state_root.join("restored.json")).unwrap();
+    let restored =
+        restore_from_backup(&target_bridge, &target_store, &outcome.manifest.backup_dir).unwrap();
+    assert_eq!(restored, 4); // 2 facts + 1 procedure + 1 record
+    assert_eq!(
+        target_bridge.recall_procedure("backup", 5).unwrap().len(),
+        1
+    );
+}

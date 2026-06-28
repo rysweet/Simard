@@ -1,7 +1,7 @@
 ---
 title: Backup pruning API
 description: Reference for retention-limited cleanup of cognitive memory backup files. The native epoch-based pruner was removed in de-fork Phase 2b; the surviving pruner is the date-based memory_backup/ module.
-last_updated: 2026-06-19
+last_updated: 2026-06-27
 owner: simard
 doc_type: reference
 related:
@@ -21,6 +21,87 @@ related:
 > `prune_old_backups()` in `src/memory_backup/mod.rs` (using `BackupConfig`),
 > which operates through the `CognitiveMemoryOps` trait on file-level snapshots.
 > The remainder of this page is archival: it documents the removed native API.
+
+---
+
+## Current implementation (issue #2420)
+
+The OODA daemon now takes a **scheduled, verified, logical backup of the LIVE
+cognitive store** every `SIMARD_BACKUP_INTERVAL_SECS` (default `3600`). The pass
+lives in [`src/memory_backup/mod.rs`](../../src/memory_backup/mod.rs) and is
+wired into the daemon loop next to the disk-health and worktree-sweep timers.
+
+### `memory_backup::run_scheduled_backup`
+
+```rust
+pub fn run_scheduled_backup(
+    bridge: &dyn CognitiveMemoryOps,
+    state_root: &Path,
+    agent_name: &str,
+) -> SimardResult<ScheduledBackupOutcome>
+```
+
+One pass:
+
+1. **Snapshot the live store** through the same `bridge` (`shared_mem`) the daemon
+   writes to — never a stale on-disk path such as the pre-migration
+   `cognitive_memory.ladybug`. This closes issue #2420 gap #1 (backups had been
+   targeting a Jun-20 stale path while the live store grew daily).
+2. **Verify** the fresh backup opens and its facts/procedures/records counts
+   match the manifest.
+3. **Only if the fresh backup verified clean**, prune old verified backups
+   (`prune_old_backups`) and bound the corrupt/shadow quarantine artifacts
+   (`prune_corrupt_artifacts`). Pruning is gated on a good fresh backup so a bad
+   write can never delete the prior good copy.
+
+`ScheduledBackupOutcome::summary()` produces the one-line daemon log entry.
+
+### `remote_transfer::export_full_memory_snapshot`
+
+```rust
+pub fn export_full_memory_snapshot(
+    bridge: &dyn CognitiveMemoryOps,
+    agent_name: &str,
+) -> SimardResult<MemorySnapshot>
+```
+
+Backups use this **uncapped** export instead of the replication
+`export_memory_snapshot` (which truncates at `MAX_EXPORT_FACTS = 1000`). On the
+live host the store held 1237 facts, so the capped path silently dropped 237 —
+a backup that quietly loses data. The full export captures the durable subset
+(semantic facts + procedures) in full; episodic/working/sensory memory remain
+out of scope (derived/transient).
+
+### `memory_backup::prune_corrupt_artifacts`
+
+```rust
+pub fn prune_corrupt_artifacts(state_root: &Path, keep: usize) -> SimardResult<usize>
+```
+
+Bounds the corrupt/shadow quarantine artifacts the library's corrupt-WAL
+recovery leaves under `state_root` — `*.corrupt-*`, `*.shadow`, and the
+concatenated rename chains
+(`cognitive.wal.corrupt-…cognitive.corrupt-…cognitive.shadow`, issue #2420 gap
+#2). It keeps the newest `keep` (default `CORRUPT_ARTIFACTS_KEEP = 5`) for
+forensics and removes the rest (files **and** directories). The live store file
+`cognitive` and its active sidecars are never eligible; any genuinely-active
+shadow file is the newest artifact and is shielded by keep-newest-N.
+
+### Engine pin (lbug 0.17.1)
+
+`amplihack-memory` is pinned to `26d49bf8` and `lbug` to `=0.17.1` to match.
+This rev carries the lbug 0.15.4 → 0.17.1 engine migration (the v40→v41 on-disk
+format the live store already uses) and the empty-read data-loss fix that
+targets the recurring main-store corruption. The previous pin (lbug 0.15.4) was
+*behind* the deployed on-disk format — the version skew was itself a corruption
+vector.
+
+---
+
+## Archival: removed native pruner
+
+> **De-fork Phase 2b.** The epoch-based pruner documented below lived in the
+> native `src/cognitive_memory/backup.rs` module, which was **deleted**.
 
 **Module (removed in Phase 2b):** `src/cognitive_memory/backup.rs`
 

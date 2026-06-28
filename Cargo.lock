@@ -58,7 +58,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "amplihack-memory"
 version = "0.4.0"
-source = "git+https://github.com/rysweet/amplihack-memory-lib.git?rev=7b81590896f3a93399d3d29f2ada2601971c6864#7b81590896f3a93399d3d29f2ada2601971c6864"
+source = "git+https://github.com/rysweet/amplihack-memory-lib.git?rev=26d49bf864ac2c03b80c4ab075c4a907c51f82a8#26d49bf864ac2c03b80c4ab075c4a907c51f82a8"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -1048,7 +1048,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1182,7 +1182,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2077,15 +2077,16 @@ dependencies = [
 
 [[package]]
 name = "lbug"
-version = "0.15.3"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c983bfdf95753e2359889e3c0534580f7689302f55271bba293e72b24ba9924b"
+checksum = "d38365ef5ebc0a55e342db7296a6ca9a2ee64916dbdbe4f87f1496b4fc68d0da"
 dependencies = [
  "cmake",
  "cxx",
  "cxx-build",
  "rust_decimal",
  "rustversion",
+ "serde_json",
  "time",
  "uuid",
 ]
@@ -2426,7 +2427,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3383,7 +3384,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3396,7 +3397,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3455,7 +3456,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3969,7 +3970,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4149,7 +4150,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5080,7 +5081,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

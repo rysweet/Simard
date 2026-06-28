@@ -165,6 +165,51 @@ pub fn export_memory_snapshot(
     Ok(snapshot)
 }
 
+/// Limit used by [`export_full_memory_snapshot`]. Unlike the replication caps
+/// ([`MAX_EXPORT_FACTS`] / [`MAX_EXPORT_PROCEDURES`]), a *backup* must be
+/// faithful, so this is effectively unbounded. The library's wildcard
+/// ("return all") path streams results rather than preallocating to the limit,
+/// so a large value is safe.
+const BACKUP_EXPORT_LIMIT: u32 = u32::MAX;
+
+/// Export a **full-fidelity** memory snapshot for backup/restore.
+///
+/// Identical in shape to [`export_memory_snapshot`] but **without** the
+/// replication truncation caps, so a store with more than [`MAX_EXPORT_FACTS`]
+/// facts (or [`MAX_EXPORT_PROCEDURES`] procedures) is captured in full.
+///
+/// Motivation (issue #2420): the live store held 1237 facts, but the capped
+/// replication export silently dropped 237 of them — a backup that quietly
+/// loses data is worse than no backup. Backups must round-trip the *current*
+/// memory count, so they take the uncapped path.
+///
+/// Like the replication export, this captures the durable subset of cognitive
+/// memory — semantic facts and procedures. Episodic, working, and sensory
+/// memory are intentionally out of scope (they are derived/transient).
+pub fn export_full_memory_snapshot(
+    bridge: &dyn CognitiveMemoryOps,
+    agent_name: &str,
+) -> SimardResult<MemorySnapshot> {
+    if agent_name.is_empty() {
+        return Err(SimardError::InvalidConfigValue {
+            key: "agent_name".to_string(),
+            value: String::new(),
+            help: "agent name cannot be empty for memory export".to_string(),
+        });
+    }
+
+    let facts = bridge.search_facts("*", BACKUP_EXPORT_LIMIT, 0.0)?;
+    let procedures = bridge.recall_procedure("*", BACKUP_EXPORT_LIMIT)?;
+    let now = current_epoch_seconds()?;
+
+    Ok(MemorySnapshot {
+        facts,
+        procedures,
+        exported_at: now,
+        source_agent: agent_name.to_string(),
+    })
+}
+
 /// Import a memory snapshot into a cognitive memory bridge.
 ///
 /// # Deprecated

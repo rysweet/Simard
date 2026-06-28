@@ -46,7 +46,12 @@ fn init_tracing() {
             .map(|t| tracing_opentelemetry::layer().with_tracer(t));
         tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().json().with_target(true))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_target(true)
+                    .with_writer(std::io::stderr),
+            )
             .with(otel)
             .with(simard::trace_collector::SpanCollectorLayer)
             .init();
@@ -57,7 +62,11 @@ fn init_tracing() {
             .map(|t| tracing_opentelemetry::layer().with_tracer(t));
         tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().with_target(true))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(true)
+                    .with_writer(std::io::stderr),
+            )
             .with(otel)
             .with(simard::trace_collector::SpanCollectorLayer)
             .init();

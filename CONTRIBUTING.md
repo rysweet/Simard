@@ -216,8 +216,9 @@ Before requesting merge:
 As of the de-fork (issue #2307, Phase 2b), Simard's cognitive memory is
 provided by the `amplihack-memory-lib` library backend
 (`LibraryCognitiveMemory`), which **owns its own durability**. The library
-persists to `~/.simard/cognitive/` (`state_root/cognitive`, a LadybugDB
-`GraphStore` directory using `lbug = "=0.15.3"`). The old native single-file
+persists to `~/.simard/cognitive` (`state_root/cognitive`, a LadybugDB
+`GraphStore` using `lbug = "=0.17.1"`; bumped from `=0.15.3` in issue #2420 to
+match the on-disk v41 format). The old native single-file
 store at `~/.simard/cognitive_memory.ladybug` is **abandoned** — never opened,
 read, or migrated. LadybugDB journals writes through its WAL and collapses the
 WAL into the store on CHECKPOINT (and inside `Database::drop`). Because

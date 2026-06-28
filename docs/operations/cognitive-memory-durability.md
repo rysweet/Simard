@@ -16,9 +16,12 @@ Durability today rests on three things:
 2. **SIGTERM-safe shutdown handler** (issue #1631) — graceful signals
    (`SIGTERM`/`SIGINT`/`SIGHUP`) run the shutdown sequence, which checkpoints the
    store before the process exits.
-3. **File-level snapshot backups** — the trait-based `memory_backup/` module
-   takes periodic file snapshots through `CognitiveMemoryOps`, providing a
-   bounded-RPO secondary recovery point.
+3. **Scheduled verified snapshot backups** (issue #2420) — the OODA daemon
+   takes a periodic, *verified, logical* snapshot of the **live** store through
+   the same `CognitiveMemoryOps` bridge it writes to (`memory_backup::run_scheduled_backup`,
+   every `SIMARD_BACKUP_INTERVAL_SECS`, default hourly). Each pass verifies the
+   fresh backup, prunes old backups, and bounds the corrupt/shadow quarantine
+   artifacts. See [Backup pruning API](../reference/backup-pruning-api.md#current-implementation-issue-2420).
 
 > **Removed in Phase 2b.** The native fork's per-write `fsync` barrier
 > (issue #1973) and its lbug-WAL "verified backup" loop
@@ -38,10 +41,11 @@ Durability today rests on three things:
 
 Simard's cognitive memory is stored by the library backend at
 `state_root/cognitive` (in production, `~/.simard/cognitive`) — a LadybugDB
-`GraphStore` directory using `lbug = "=0.15.3"`. The old native single-file
-store at `~/.simard/cognitive_memory.ladybug` is **abandoned** by Phase 2b: it is
-never opened, read, or migrated, and memory rebuilds from scratch in the new
-`cognitive/` store.
+`GraphStore` using `lbug = "=0.17.1"` (bumped from `=0.15.3` in issue #2420 to
+match the on-disk v41 format the live store already uses). The old native
+single-file store at `~/.simard/cognitive_memory.ladybug` is **abandoned** by
+Phase 2b: it is never opened, read, or migrated, and memory rebuilds from
+scratch in the new `cognitive` store.
 
 LadybugDB flushes its WAL on CHECKPOINT and inside `Database::drop`. Process
 termination via `SIGTERM` (the default signal `systemctl restart` sends) does not

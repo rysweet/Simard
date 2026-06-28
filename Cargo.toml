@@ -48,8 +48,15 @@ path = "src/bin/simard_tui/main.rs"
 # backend. `cognitive_memory::library_adapter::LibraryCognitiveMemory` drives it
 # behind Simard's `CognitiveMemoryOps` trait; the native LadybugDB fork has been
 # deleted. The `persistent` feature builds LadybugDB through the published
-# `lbug = "=0.15.3"` crate.
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "7b81590896f3a93399d3d29f2ada2601971c6864", features = ["persistent"] }
+# `lbug = "=0.17.1"` crate.
+#
+# Issue #2420: bumped 7b81590 -> 26d49bf8 (main). This rev carries the lbug
+# 0.15.4 -> 0.17.1 engine migration (#105, the v40->v41 on-disk format the live
+# store already uses) and, critically, the empty-read data-loss fix (#108) that
+# directly targets the recurring main-store corruption. The prior pin (lbug
+# 0.15.4) was BEHIND the deployed on-disk format — the version skew itself was a
+# corruption vector.
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "26d49bf864ac2c03b80c4ab075c4a907c51f82a8", features = ["persistent"] }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "43ebaa1c1b18a5630c53f0519989a2bacd42ef62" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "43ebaa1c1b18a5630c53f0519989a2bacd42ef62" }
 # De-fork phase 2b (issue #2307): the native cognitive-memory fork is gone, but
@@ -57,7 +64,11 @@ rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "4
 # (`src/bin/simard_tui/goals.rs`), which opens a LadybugDB read-only to render
 # the goal board. The cognitive-memory backend itself no longer uses lbug
 # directly — it goes through the amplihack-memory library.
-lbug = "=0.15.3"
+#
+# Issue #2420: pinned to `=0.17.1` to match the version `amplihack-memory`
+# (26d49bf8) builds. Keeping a single lbug version avoids compiling the
+# LadybugDB C++ engine twice (and the resulting duplicate-symbol link clash).
+lbug = "=0.17.1"
 rusqlite = { version = "=0.31.0", features = ["bundled"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
