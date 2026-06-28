@@ -10,8 +10,11 @@ use crate::goal_curation::archive_completed;
 use crate::goal_curation::types::{ActiveGoal, GoalBoard, GoalProgress, WipRef};
 
 use super::{
-    CompletionEvidenceGate, CompletionVerdict, EvidenceSource, MissingEvidence,
-    archive_completed_with_evidence, completion_evidence_enabled, is_self_affecting,
+    COMPLETION_VERIFICATION_METRIC, CompletionEvidenceGate, CompletionVerdict, EvidenceSource,
+    FALSE_COMPLETION_RATE_METRIC, MissingEvidence, VerificationOutcome,
+    archive_completed_with_evidence, classify_from_missing, classify_outcome,
+    completion_evidence_enabled, false_completion_rate, has_derivable_signal, is_self_affecting,
+    record_completion_verification, record_false_completion_rate,
 };
 
 /// Canned, hermetic [`EvidenceSource`]. Each field is `Result<bool, String>` so
@@ -351,6 +354,176 @@ fn ooda_decide_prompt_pins_done_gate_wording() {
         ),
         "ooda_decide.md must pin the STATUS: ACHIEVED evidence sentence"
     );
+}
+
+// --- #2456 verification outcome (extends the gate, does not duplicate it) ----
+
+/// A goal targeting another repo's surface, with no PR/issue refs — so it has
+/// NO derivable external completion signal.
+fn no_signal_goal(id: &str) -> ActiveGoal {
+    let mut g = simard_goal(id, GoalProgress::Completed);
+    g.repo = Some("amplihack-rs".to_string());
+    g.description = "improve amplihack-rs internals".to_string();
+    g.wip_refs = vec![];
+    g
+}
+
+#[test]
+fn outcome_verified_when_gate_completes() {
+    let gate = CompletionEvidenceGate::new(FakeEvidence::ok(true, true, true));
+    let goal = simard_goal("g", GoalProgress::Completed);
+    let verdict = gate.evaluate(&goal);
+    assert_eq!(
+        classify_outcome(&goal, &verdict),
+        VerificationOutcome::Verified
+    );
+}
+
+#[test]
+fn outcome_refuted_when_derivable_signal_contradicts_claim() {
+    // Self-affecting goal (routes to Simard) claimed done, but PR not merged:
+    // a derivable signal says "not done" → a false completion.
+    let goal = simard_goal("g", GoalProgress::Completed);
+    let gate = CompletionEvidenceGate::new(FakeEvidence::ok(false, true, true));
+    let verdict = gate.evaluate(&goal);
+    assert_eq!(
+        classify_outcome(&goal, &verdict),
+        VerificationOutcome::Refuted
+    );
+    assert!(VerificationOutcome::Refuted.is_false_completion());
+}
+
+#[test]
+fn outcome_unverified_when_no_external_signal_derivable() {
+    // No PR/issue ref and not self-affecting: nothing to verify against. The
+    // gate blocks, but the honest label is "unverified", NOT "refuted" — and
+    // certainly not silently verified on the self-report.
+    let goal = no_signal_goal("g");
+    assert!(!has_derivable_signal(&goal));
+    let gate = CompletionEvidenceGate::new(FakeEvidence::ok(false, true, true));
+    let verdict = gate.evaluate(&goal);
+    assert_eq!(
+        classify_outcome(&goal, &verdict),
+        VerificationOutcome::UnverifiedNoSignal
+    );
+}
+
+#[test]
+fn outcome_error_when_verification_query_failed() {
+    // A transient gh/git failure is "unknown", distinct from a refutation —
+    // even when the goal does have a derivable signal.
+    let goal = simard_goal("g", GoalProgress::Completed);
+    let gate = CompletionEvidenceGate::new(FakeEvidence {
+        pr_merged: Err("gh timed out".to_string()),
+        issue_closed: Ok(true),
+        deployed: Ok(true),
+    });
+    let verdict = gate.evaluate(&goal);
+    assert_eq!(
+        classify_outcome(&goal, &verdict),
+        VerificationOutcome::Error
+    );
+}
+
+#[test]
+fn classify_from_missing_prioritizes_could_not_verify() {
+    // CouldNotVerify dominates even alongside a real refutation signal.
+    let goal = simard_goal("g", GoalProgress::Completed);
+    let missing = vec![
+        MissingEvidence::PrNotMerged,
+        MissingEvidence::CouldNotVerify {
+            detail: "boom".to_string(),
+        },
+    ];
+    assert_eq!(
+        classify_from_missing(&goal, &missing),
+        VerificationOutcome::Error
+    );
+}
+
+#[test]
+fn has_derivable_signal_detects_pr_issue_or_self_affecting() {
+    // Self-affecting (default repo) → signal via deploy state.
+    assert!(has_derivable_signal(&simard_goal(
+        "g",
+        GoalProgress::Completed
+    )));
+
+    // Off-repo with a tracked PR → signal via the PR.
+    let mut pr_goal = no_signal_goal("g");
+    pr_goal.wip_refs = vec![WipRef {
+        kind: "pr".to_string(),
+        ref_id: "42".to_string(),
+        label: "the fix".to_string(),
+        url: None,
+    }];
+    assert!(has_derivable_signal(&pr_goal));
+
+    // Off-repo, no refs → no derivable signal.
+    assert!(!has_derivable_signal(&no_signal_goal("g")));
+}
+
+#[test]
+fn false_completion_rate_is_refuted_share_of_checkable() {
+    use VerificationOutcome::*;
+    // No checkable outcomes → None.
+    assert!(false_completion_rate(&[]).is_none());
+    assert!(false_completion_rate(&[UnverifiedNoSignal, Error]).is_none());
+    assert_eq!(false_completion_rate(&[Verified, Verified]).unwrap(), 0.0);
+    assert_eq!(false_completion_rate(&[Refuted, Refuted]).unwrap(), 1.0);
+    // Signal-less / error are excluded from the denominator: refuted 1 of
+    // (verified 1 + refuted 1) = 0.5, NOT 1/4.
+    let mixed = [Verified, Refuted, UnverifiedNoSignal, Error];
+    assert!((false_completion_rate(&mixed).unwrap() - 0.5).abs() < 1e-12);
+}
+
+#[test]
+fn outcome_metric_labels_and_codes_are_stable() {
+    // Pin the metric vocabulary from issue #2456.
+    assert_eq!(
+        COMPLETION_VERIFICATION_METRIC,
+        "goal_completion_verification"
+    );
+    assert_eq!(FALSE_COMPLETION_RATE_METRIC, "goal_false_completion_rate");
+    assert_eq!(VerificationOutcome::Verified.metric_label(), "verified");
+    assert_eq!(
+        VerificationOutcome::UnverifiedNoSignal.metric_label(),
+        "unverified_no_signal"
+    );
+    assert_eq!(VerificationOutcome::Refuted.metric_label(), "refuted");
+    assert_eq!(VerificationOutcome::Error.metric_label(), "error");
+    // Codes are distinct so a time series can aggregate by value.
+    let codes = [
+        VerificationOutcome::Verified.metric_code(),
+        VerificationOutcome::UnverifiedNoSignal.metric_code(),
+        VerificationOutcome::Refuted.metric_code(),
+        VerificationOutcome::Error.metric_code(),
+    ];
+    for (i, a) in codes.iter().enumerate() {
+        for b in &codes[i + 1..] {
+            assert!((a - b).abs() > f64::EPSILON, "codes must be distinct");
+        }
+    }
+}
+
+#[test]
+fn metric_recorders_are_test_safe_noops_across_batch_shapes() {
+    use VerificationOutcome::*;
+    // Both recorders are cfg!(test)-guarded no-ops, so they must never write the
+    // operator's real metrics.jsonl from a unit test — and must not panic on any
+    // batch shape, including empty / non-checkable batches (no rate to emit).
+    record_completion_verification(Verified);
+    record_completion_verification(Refuted);
+    record_completion_verification(UnverifiedNoSignal);
+    record_completion_verification(Error);
+
+    record_false_completion_rate(&[]);
+    record_false_completion_rate(&[UnverifiedNoSignal, Error]); // not checkable → None
+    record_false_completion_rate(&[Verified, Refuted, UnverifiedNoSignal, Error]);
+
+    // The value the batch recorder would emit is exactly false_completion_rate.
+    let mixed = [Verified, Refuted, UnverifiedNoSignal, Error];
+    assert!((false_completion_rate(&mixed).unwrap() - 0.5).abs() < 1e-12);
 }
 
 // --- helpers ----------------------------------------------------------------
