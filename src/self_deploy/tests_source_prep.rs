@@ -670,6 +670,29 @@ fn resolve_existing_repo_is_none_and_never_clones_without_a_canonical_source() {
     );
 }
 
+#[test]
+#[serial_test::serial(simard_state_root_env, simard_self_deploy_repo, cognitive_memory)]
+fn resolve_existing_repo_rejects_invalid_override_without_clone_or_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _state = EnvGuard::set(STATE_ROOT_ENV, tmp.path());
+
+    // A present-but-invalid override (path traversal) must be rejected by
+    // `validate_repo_path`. A read-only `--check` tolerates it by degrading to a
+    // cwd report (None) — loudly on stderr — rather than erroring or, worse,
+    // silently building from an unvalidated path.
+    let _override = EnvGuard::set(SELF_DEPLOY_REPO_ENV, Path::new("/tmp/../etc"));
+
+    assert!(
+        GitSourcePreparer::new().resolve_existing_repo().is_none(),
+        "an invalid override must resolve to None (cwd fallback), never bypass validation"
+    );
+    // It must not create the persistent checkout as a side effect either.
+    assert!(
+        !self_deploy_src_dir().exists(),
+        "rejecting an invalid override must remain read-only (no persistent checkout created)"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // prepare_and_build(): the orchestrator's step-1 composition. A prep failure
 // must propagate BEFORE any build (and a fortiori before daemon mutation), and

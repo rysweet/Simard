@@ -165,8 +165,10 @@ impl GitSourcePreparer {
     /// Resolve the canonical repo via the same precedence as `resolve_repo`
     /// **minus the clone step** (env override → persistent checkout → `None`).
     /// Read-only: it never clones, so it is safe for `self-deploy --check`
-    /// ("makes no changes"). `None` means no canonical source exists yet (the
-    /// caller falls back to a best-effort cwd report). Used by `report_drift`.
+    /// ("makes no changes"). `None` means no canonical source exists yet, *or*
+    /// a present override was rejected by validation — in which case the caller
+    /// falls back to a best-effort cwd report. A rejected override is **logged
+    /// loudly to stderr** (never silently degraded). Used by `report_drift`.
     pub fn resolve_existing_repo(&self) -> Option<PathBuf>;
 }
 
@@ -211,6 +213,12 @@ one.
 > yet (e.g. before the first deploy) — a state in which the deploy itself has
 > nothing canonical to build from, so there is nothing for the two to diverge
 > over.
+>
+> A *present-but-invalid* override (path traversal / symlink / non-work-tree)
+> is **not** silently swallowed: `resolve_existing_repo` warns loudly on stderr
+> (keeping stdout/`--json` clean) and then degrades to the cwd report, so an
+> operator who only ever runs `--check` still sees the misconfiguration the
+> effectful `resolve_repo` would have aborted on.
 
 ## `build_self_deploy_candidate`
 
@@ -410,6 +418,7 @@ and the fake-effects ordering) rather than replacing it.
 | fetch/checkout-then-build from an arbitrary cwd | The build is wired to the **merged SHA's checkout**, not cwd `HEAD`. |
 | resolver precedence | `SIMARD_SELF_DEPLOY_REPO` → persistent checkout → clone, in order. |
 | `--check` read-only resolution | `resolve_existing_repo()` returns the env override or persistent checkout cwd-independently, and **`None` (never a clone)** when no canonical source exists. |
+| `--check` invalid-override degradation | A present-but-invalid override resolves to `None` (cwd fallback) **without cloning or erroring**, and warns loudly on stderr — never silently swallowed. |
 | warm target dir | The build targets the persistent `self_deploy_target_dir()`, reused across runs — not a per-PID `temp_dir()`. |
 | loud failure | A failed fetch/clone/checkout aborts with the specific variant and never builds cwd `HEAD`. |
 | SHA validation | A non-40-hex or leading-`-` SHA is rejected before any git call. |

@@ -281,19 +281,24 @@ impl GitSourcePreparer {
     /// so it must never create the persistent checkout as a side effect.
     ///
     /// Returns `None` when no canonical source exists yet (e.g. before the first
-    /// deploy) — and on an invalid override (path traversal / non-work-tree),
-    /// which a read-only check degrades over rather than erroring. The caller
-    /// then falls back to a best-effort report against the current working
-    /// directory. A misconfigured override is surfaced loudly by the effectful
-    /// [`resolve_repo`](Self::resolve_repo) on the real deploy path instead.
+    /// deploy), and the caller falls back to a best-effort report against the
+    /// current working directory.
+    ///
+    /// An override that is *present but invalid* (path traversal / symlink /
+    /// non-work-tree) also yields `None` — a read-only check tolerates it by
+    /// degrading to the cwd report rather than hard-erroring like the effectful
+    /// [`resolve_repo`](Self::resolve_repo) — but the degradation is **never
+    /// silent**: it is logged loudly to stderr (mirroring the best-effort-fetch
+    /// warning in `report_drift`) so an operator who never runs the deploy path
+    /// still sees their misconfiguration.
     pub fn resolve_existing_repo(&self) -> Option<PathBuf> {
         // 1) Explicit override (tests / non-standard installs) wins outright.
         if let Some(repo) = &self.repo_override {
-            return validate_repo_path(repo).ok();
+            return validated_existing_override(repo, "repo_override");
         }
         // 2) `SIMARD_SELF_DEPLOY_REPO` env override.
         if let Some(env_repo) = env_repo_override() {
-            return validate_repo_path(&env_repo).ok();
+            return validated_existing_override(&env_repo, SELF_DEPLOY_REPO_ENV);
         }
         // 3) Persistent canonical checkout under the state root, if present.
         //    No clone fallback: `--check` must not mutate anything.
@@ -302,6 +307,29 @@ impl GitSourcePreparer {
             return Some(persistent);
         }
         None
+    }
+}
+
+/// Validate a `--check` source override, warning **loudly** (never silently
+/// degrading) when it is rejected.
+///
+/// A present-but-invalid override is an operator misconfiguration the read-only
+/// check must still surface — so it logs to stderr before returning `None`, the
+/// same "make the degraded path visible" remedy applied to the best-effort fetch
+/// in `report_drift`. It still tolerates the failure (falls back to a cwd report)
+/// rather than erroring, which the effectful deploy path
+/// ([`GitSourcePreparer::resolve_repo`]) does instead.
+fn validated_existing_override(repo: &Path, source: &str) -> Option<PathBuf> {
+    match validate_repo_path(repo) {
+        Ok(path) => Some(path),
+        Err(err) => {
+            eprintln!(
+                "self-deploy --check: warning: ignoring invalid self-deploy source \
+                 override from {source} ({err}); falling back to a current-directory \
+                 report, which may not match what an actual deploy would build"
+            );
+            None
+        }
     }
 }
 

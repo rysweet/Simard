@@ -78,7 +78,10 @@ read-only: unlike the deploy it **never clones** and tolerates an offline fetch
 canonical checkout exists yet — e.g. before your first deploy — does it fall back
 to a best-effort report from the current directory; in that pre-clone state the
 deploy itself has nothing canonical to build from either, so there is nothing for
-the two to diverge over. See the design note in
+the two to diverge over. If you set `SIMARD_SELF_DEPLOY_REPO` to an invalid path,
+`--check` does not silently ignore it: it prints a warning to stderr (stdout and
+`--json` stay clean) before degrading to the cwd report, so the misconfiguration
+is visible even if you never run the deploy. See the design note in
 [self-deploy source-prep reference](../reference/self-deploy-source-prep.md#repo-resolution-precedence).
 Use `--json` for machine-readable `DeployDrift`:
 
