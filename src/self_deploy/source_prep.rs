@@ -270,6 +270,39 @@ impl GitSourcePreparer {
             .map(|_| ())
             .map_err(|detail| SafeUpdateError::FetchFailed { detail })
     }
+
+    /// Resolve the canonical source repo **without cloning** — the read-only
+    /// resolution used by `self-deploy --check`.
+    ///
+    /// Mirrors the cwd-independent precedence of [`resolve_repo`](Self::resolve_repo)
+    /// (`repo_override` → `SIMARD_SELF_DEPLOY_REPO` → the persistent
+    /// [`self_deploy_src_dir`] checkout) but deliberately stops short of the
+    /// clone-from-origin step: `--check` documents that it "makes no changes",
+    /// so it must never create the persistent checkout as a side effect.
+    ///
+    /// Returns `None` when no canonical source exists yet (e.g. before the first
+    /// deploy) — and on an invalid override (path traversal / non-work-tree),
+    /// which a read-only check degrades over rather than erroring. The caller
+    /// then falls back to a best-effort report against the current working
+    /// directory. A misconfigured override is surfaced loudly by the effectful
+    /// [`resolve_repo`](Self::resolve_repo) on the real deploy path instead.
+    pub fn resolve_existing_repo(&self) -> Option<PathBuf> {
+        // 1) Explicit override (tests / non-standard installs) wins outright.
+        if let Some(repo) = &self.repo_override {
+            return validate_repo_path(repo).ok();
+        }
+        // 2) `SIMARD_SELF_DEPLOY_REPO` env override.
+        if let Some(env_repo) = env_repo_override() {
+            return validate_repo_path(&env_repo).ok();
+        }
+        // 3) Persistent canonical checkout under the state root, if present.
+        //    No clone fallback: `--check` must not mutate anything.
+        let persistent = self_deploy_src_dir();
+        if is_git_work_tree(&persistent) {
+            return Some(persistent);
+        }
+        None
+    }
 }
 
 impl SelfDeploySourcePreparer for GitSourcePreparer {

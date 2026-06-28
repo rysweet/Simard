@@ -67,9 +67,29 @@ pub(super) fn dispatch_self_deploy_command(
 }
 
 /// `--check`: compute and print deploy drift; never mutate anything.
+///
+/// Issue #2467 (review): resolve the source repo **cwd-independently** so
+/// `--check` reports the same drift an actual deploy would act on — even when
+/// run from an unrelated directory — and best-effort `git fetch` it so the
+/// merged head is current. Unlike [`run_self_deploy`] this stays strictly
+/// read-only: it never clones (honoring the documented "make no changes"
+/// contract) and tolerates a failed fetch (offline → report against the local
+/// tracking refs) instead of hard-erroring. When no canonical checkout exists
+/// yet (e.g. before the first deploy) it falls back to a best-effort report from
+/// the current directory.
 fn report_drift(json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let source = GitDeploySource::new();
-    let drift = ReconcileDetector::new(GitDeploySource::new()).detect();
+    let preparer = GitSourcePreparer::new();
+    let source = match preparer.resolve_existing_repo() {
+        Some(repo) => {
+            // Best-effort refresh so the merged head is current; an offline
+            // check still reports against the local tracking refs.
+            let _ = preparer.fetch_origin(&repo);
+            GitDeploySource::at(repo)
+        }
+        // No canonical source yet — best-effort report from the cwd.
+        None => GitDeploySource::new(),
+    };
+    let drift = ReconcileDetector::new(source.clone()).detect();
 
     if json {
         println!("{}", serde_json::to_string_pretty(&drift)?);

@@ -68,13 +68,17 @@ simard self-deploy --check:
   needs deploy   : YES
 ```
 
-`needs deploy: YES` means a merged change is not yet running. For the `merged
-head` shown here to be **exactly** the SHA the deploy fetches, checks out, and
-builds, `--check` must resolve the merged head against the **same canonical
-repo** the deploy uses (the `SIMARD_SELF_DEPLOY_REPO` override or the persistent
-clone) — not the cwd checkout. If `--check` is run from a stale or unrelated
-checkout while the deploy resolves a different canonical repo, the two SHAs can
-diverge; see the design note in
+`needs deploy: YES` means a merged change is not yet running. `--check` resolves
+the `merged head` against the **same canonical repo** the deploy uses (the
+`SIMARD_SELF_DEPLOY_REPO` override or the persistent clone), independent of your
+cwd, and best-effort `git fetch`es it first so the SHA shown is current and
+matches the SHA the deploy fetches, checks out, and builds. It stays strictly
+read-only: unlike the deploy it **never clones** and tolerates an offline fetch
+(reporting against the local tracking refs) rather than erroring. Only when no
+canonical checkout exists yet — e.g. before your first deploy — does it fall back
+to a best-effort report from the current directory; in that pre-clone state the
+deploy itself has nothing canonical to build from either, so there is nothing for
+the two to diverge over. See the design note in
 [self-deploy source-prep reference](../reference/self-deploy-source-prep.md#repo-resolution-precedence).
 Use `--json` for machine-readable `DeployDrift`:
 

@@ -161,6 +161,13 @@ impl GitSourcePreparer {
     /// fetches before reading the merged head to deploy). Loud on failure
     /// (`FetchFailed`).
     pub fn fetch_origin(&self, repo: &Path) -> Result<(), SafeUpdateError>;
+
+    /// Resolve the canonical repo via the same precedence as `resolve_repo`
+    /// **minus the clone step** (env override → persistent checkout → `None`).
+    /// Read-only: it never clones, so it is safe for `self-deploy --check`
+    /// ("makes no changes"). `None` means no canonical source exists yet (the
+    /// caller falls back to a best-effort cwd report). Used by `report_drift`.
+    pub fn resolve_existing_repo(&self) -> Option<PathBuf>;
 }
 
 impl Default for GitSourcePreparer { /* == new() */ }
@@ -190,17 +197,20 @@ The same resolved repo is used for **both** merged-SHA resolution and the build,
 so the SHA that is reported, fetched, checked out, and built is always the same
 one.
 
-> **`--check` resolution (as implemented).** The deploy path (`run_self_deploy`)
-> resolves the canonical repo via the precedence above, `fetch_origin`s it, and
-> reads `merged_head` from that resolved repo — so the SHA it builds is
-> cwd-independent. `simard self-deploy --check` (`report_drift`) deliberately
-> stays **cwd-rooted** (`GitDeploySource::new()`): it is read-only and performs
-> no fetch or clone, so its reported `merged head` reflects the **cwd checkout's**
-> view of `origin/main`. When run from an up-to-date checkout the two agree; from
-> a stale or unrelated cwd, `--check`'s `merged head` may lag the SHA a
-> subsequent (non-`--check`) deploy would fetch and build. Operators who need the
-> reported drift to match the deploy SHA exactly should run `--check` from an
-> up-to-date checkout (or `git fetch` first).
+> **`--check` resolution (as implemented).** Both the deploy path
+> (`run_self_deploy`) and `simard self-deploy --check` (`report_drift`) resolve
+> the canonical repo **cwd-independently**, so the SHA `--check` reports matches
+> the SHA the deploy fetches, checks out, and builds. The deploy path uses
+> `resolve_repo` (env override → persistent checkout → clone) and `fetch_origin`s
+> it, failing loudly if the source cannot be made available. `--check` uses
+> `resolve_existing_repo` (env override → persistent checkout → `None`) and a
+> **best-effort** `fetch_origin`, because it must remain read-only: it never
+> clones (honoring "makes no changes") and tolerates an offline fetch (reporting
+> against local tracking refs) rather than erroring. It falls back to a
+> cwd-rooted `GitDeploySource::new()` only when **no** canonical source exists
+> yet (e.g. before the first deploy) — a state in which the deploy itself has
+> nothing canonical to build from, so there is nothing for the two to diverge
+> over.
 
 ## `build_self_deploy_candidate`
 
@@ -399,6 +409,7 @@ and the fake-effects ordering) rather than replacing it.
 | --- | --- |
 | fetch/checkout-then-build from an arbitrary cwd | The build is wired to the **merged SHA's checkout**, not cwd `HEAD`. |
 | resolver precedence | `SIMARD_SELF_DEPLOY_REPO` → persistent checkout → clone, in order. |
+| `--check` read-only resolution | `resolve_existing_repo()` returns the env override or persistent checkout cwd-independently, and **`None` (never a clone)** when no canonical source exists. |
 | warm target dir | The build targets the persistent `self_deploy_target_dir()`, reused across runs — not a per-PID `temp_dir()`. |
 | loud failure | A failed fetch/clone/checkout aborts with the specific variant and never builds cwd `HEAD`. |
 | SHA validation | A non-40-hex or leading-`-` SHA is rejected before any git call. |

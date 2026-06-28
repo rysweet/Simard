@@ -601,6 +601,76 @@ fn resolve_repo_rejects_invalid_env_override_without_cwd_fallback() {
 }
 
 // ---------------------------------------------------------------------------
+// resolve_existing_repo(): the cwd-independent, NON-cloning resolution used by
+// `self-deploy --check` (issue #2467 review). It honors the same env-override →
+// persistent-checkout precedence as resolve_repo, but stops short of cloning (a
+// read-only `--check` must "make no changes"), returning None when no canonical
+// source exists yet so the caller can fall back to a best-effort cwd report.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial_test::serial(simard_self_deploy_repo, cognitive_memory)]
+fn resolve_existing_repo_returns_env_override_without_cloning() {
+    let root = tempfile::tempdir().unwrap();
+    let origin = root.path().join("origin");
+    let canonical = root.path().join("canonical");
+    init_origin(&origin);
+    clone_local(&origin, &canonical);
+
+    let _g = EnvGuard::set(SELF_DEPLOY_REPO_ENV, &canonical);
+    let resolved = GitSourcePreparer::new()
+        .resolve_existing_repo()
+        .expect("a valid SIMARD_SELF_DEPLOY_REPO must resolve for --check");
+    assert_eq!(
+        std::fs::canonicalize(&resolved).unwrap(),
+        std::fs::canonicalize(&canonical).unwrap(),
+        "--check must resolve the same canonical override the deploy uses, not the cwd"
+    );
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, simard_self_deploy_repo, cognitive_memory)]
+fn resolve_existing_repo_returns_persistent_checkout_when_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _state = EnvGuard::set(STATE_ROOT_ENV, tmp.path());
+    // Neutralize any ambient override (an empty value reads back as "unset").
+    let _override = EnvGuard::set(SELF_DEPLOY_REPO_ENV, Path::new(""));
+
+    // Make the persistent checkout a real git work tree under the state root.
+    let persistent = self_deploy_src_dir();
+    init_origin(&persistent);
+
+    let resolved = GitSourcePreparer::new()
+        .resolve_existing_repo()
+        .expect("an existing persistent checkout must resolve for --check");
+    assert_eq!(
+        std::fs::canonicalize(&resolved).unwrap(),
+        std::fs::canonicalize(&persistent).unwrap(),
+        "--check must resolve the persistent canonical checkout, not the cwd"
+    );
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, simard_self_deploy_repo, cognitive_memory)]
+fn resolve_existing_repo_is_none_and_never_clones_without_a_canonical_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _state = EnvGuard::set(STATE_ROOT_ENV, tmp.path());
+    let _override = EnvGuard::set(SELF_DEPLOY_REPO_ENV, Path::new(""));
+
+    // No env override and no persistent checkout under the (empty) state root.
+    assert!(
+        GitSourcePreparer::new().resolve_existing_repo().is_none(),
+        "with no canonical source, --check must NOT clone — it returns None and \
+         the caller falls back to a best-effort cwd report"
+    );
+    // ...and it must not have created the persistent checkout as a side effect.
+    assert!(
+        !self_deploy_src_dir().exists(),
+        "resolve_existing_repo must never create the persistent checkout (read-only)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // prepare_and_build(): the orchestrator's step-1 composition. A prep failure
 // must propagate BEFORE any build (and a fortiori before daemon mutation), and
 // prep must be asked for the exact target merged commit.
