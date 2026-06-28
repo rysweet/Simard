@@ -83,10 +83,13 @@ struct dependency.
 
 These functions exist once in `recipe_brain.rs`:
 
-- **`resolve_recipe_path(repo_root, recipe_filename)`** — parameterized path
-  resolution. Checks `~/.simard/prompt_assets/simard/recipes/<filename>` first
-  (hot-reload), then `<repo_root>/prompt_assets/simard/recipes/<filename>`
-  (in-tree).
+- **`resolve_recipe_path(repo_root, recipe_filename, home_override)`** —
+  parameterized path resolution. Checks
+  `<home>/.simard/prompt_assets/simard/recipes/<filename>` first (hot-reload),
+  then `<repo_root>/prompt_assets/simard/recipes/<filename>` (in-tree).
+  `home_override` is a test seam (`None` in production → `dirs::home_dir`) that
+  keeps unit tests hermetic against the ambient `~/.simard`, matching the
+  convention in `disk_health` and `brain_introspection`.
 - **`truncate(s, max)`** — char-aware truncation with `…` suffix. Used in
   error messages and rationale fields to cap unbounded LLM output.
 - **`deterministic_floor(base_urgency, failure_count)`** — fallback orient

@@ -48,8 +48,16 @@ const RECIPE_FILENAME: &str = "merge-readiness-judge.yaml";
 /// Resolve the recipe YAML path. Checks, in order:
 ///   1. `~/.simard/prompt_assets/simard/recipes/<name>` (hot-reload path)
 ///   2. `<repo_root>/prompt_assets/simard/recipes/<name>` (in-tree)
-fn resolve_recipe_path(repo_root: &std::path::Path) -> Option<PathBuf> {
-    if let Some(home) = dirs::home_dir() {
+///
+/// `home_override` lets tests supply a fake home directory without mutating the
+/// process-wide `HOME` env var (mirrors `disk_health::resolve_recipe_path`).
+/// Production passes `None`, falling back to [`dirs::home_dir`].
+fn resolve_recipe_path(
+    repo_root: &std::path::Path,
+    home_override: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    let home = home_override.map(PathBuf::from).or_else(dirs::home_dir);
+    if let Some(home) = home {
         let hot = home
             .join(".simard")
             .join("prompt_assets/simard/recipes")
@@ -76,7 +84,17 @@ pub struct RecipeMergeJudge {
 impl RecipeMergeJudge {
     /// Construct if recipe file and recipe-runner-rs binary are both available.
     pub fn new(repo_root: &std::path::Path) -> Option<Self> {
-        let recipe_path = resolve_recipe_path(repo_root)?;
+        Self::new_with_home(repo_root, None)
+    }
+
+    /// Like [`RecipeMergeJudge::new`], but accepts a `home_override` for the
+    /// hot-reload lookup so tests stay hermetic against the ambient
+    /// `~/.simard/prompt_assets` directory. Production calls `new` (`None`).
+    fn new_with_home(
+        repo_root: &std::path::Path,
+        home_override: Option<&std::path::Path>,
+    ) -> Option<Self> {
+        let recipe_path = resolve_recipe_path(repo_root, home_override)?;
         let agent_binary = crate::session_builder::LlmProvider::resolve_agent_binary()?;
         if Command::new("recipe-runner-rs")
             .arg("--version")
@@ -320,7 +338,11 @@ mod tests {
 
     #[test]
     fn new_returns_none_when_recipe_missing() {
-        let judge = RecipeMergeJudge::new(std::path::Path::new("/nonexistent"));
+        let home = tempfile::tempdir().unwrap();
+        let judge = RecipeMergeJudge::new_with_home(
+            std::path::Path::new("/nonexistent"),
+            Some(home.path()),
+        );
         assert!(judge.is_none());
     }
 

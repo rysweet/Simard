@@ -282,13 +282,23 @@ Parse-failure rate over a window:
 ### `resolve_recipe_path`
 
 ```rust
-fn resolve_recipe_path(repo_root: &Path, recipe_filename: &str) -> Option<PathBuf>
+pub fn resolve_recipe_path(
+    repo_root: &Path,
+    recipe_filename: &str,
+    home_override: Option<&Path>,
+) -> Option<PathBuf>
 ```
 
 Resolution order:
 
-1. `~/.simard/prompt_assets/simard/recipes/<recipe_filename>` (hot-reload)
+1. `<home>/.simard/prompt_assets/simard/recipes/<recipe_filename>` (hot-reload)
 2. `<repo_root>/prompt_assets/simard/recipes/<recipe_filename>` (in-tree)
+
+`home_override` selects the hot-reload base directory: `Some(path)` uses `path`
+(a test seam to stay hermetic against the ambient `~/.simard`), `None` falls
+back to [`dirs::home_dir`] — production always passes `None` (via
+`RecipeBrain::new`). Mirrors the `home_override` convention already used by
+`disk_health::resolve_recipe_path` and `brain_introspection::resolve_recipe_path`.
 
 Returns `None` if neither path contains the file.
 

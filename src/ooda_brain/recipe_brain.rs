@@ -612,8 +612,17 @@ pub fn run_brain_ladder<D>(
 /// Resolve the recipe YAML path. Checks, in order:
 ///   1. `~/.simard/prompt_assets/simard/recipes/<recipe_filename>` (hot-reload)
 ///   2. `<repo_root>/prompt_assets/simard/recipes/<recipe_filename>` (in-tree)
-pub fn resolve_recipe_path(repo_root: &Path, recipe_filename: &str) -> Option<PathBuf> {
-    if let Some(home) = dirs::home_dir() {
+///
+/// `home_override` lets tests supply a fake home directory without mutating the
+/// process-wide `HOME` env var (mirrors `disk_health::resolve_recipe_path`).
+/// Production passes `None`, falling back to [`dirs::home_dir`].
+pub fn resolve_recipe_path(
+    repo_root: &Path,
+    recipe_filename: &str,
+    home_override: Option<&Path>,
+) -> Option<PathBuf> {
+    let home = home_override.map(PathBuf::from).or_else(dirs::home_dir);
+    if let Some(home) = home {
         let hot = home
             .join(".simard")
             .join("prompt_assets/simard/recipes")
@@ -657,7 +666,19 @@ impl RecipeBrain {
     /// `recipe_filename` selects the YAML (e.g. `"ooda-decide.yaml"`).
     /// `adapter_tag` appears in error messages and logs (e.g. `"recipe-decide-brain"`).
     pub fn new(repo_root: &Path, recipe_filename: &str, adapter_tag: &'static str) -> Option<Self> {
-        let recipe_path = resolve_recipe_path(repo_root, recipe_filename)?;
+        Self::new_with_home(repo_root, recipe_filename, adapter_tag, None)
+    }
+
+    /// Like [`RecipeBrain::new`], but accepts a `home_override` for the
+    /// hot-reload lookup so tests stay hermetic against the ambient
+    /// `~/.simard/prompt_assets` directory. Production calls `new` (`None`).
+    fn new_with_home(
+        repo_root: &Path,
+        recipe_filename: &str,
+        adapter_tag: &'static str,
+        home_override: Option<&Path>,
+    ) -> Option<Self> {
+        let recipe_path = resolve_recipe_path(repo_root, recipe_filename, home_override)?;
         let agent_binary = crate::session_builder::LlmProvider::resolve_agent_binary()?;
         if Command::new("recipe-runner-rs")
             .arg("--version")
@@ -1507,7 +1528,12 @@ mod tests {
 
     #[test]
     fn resolve_recipe_path_returns_none_for_nonexistent_repo() {
-        let result = resolve_recipe_path(Path::new("/nonexistent"), "ooda-decide.yaml");
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let result = resolve_recipe_path(
+            Path::new("/nonexistent"),
+            "ooda-decide.yaml",
+            Some(home.path()),
+        );
         assert!(
             result.is_none(),
             "must return None when neither hot-reload nor in-tree path exists"
@@ -1516,7 +1542,9 @@ mod tests {
 
     #[test]
     fn resolve_recipe_path_returns_none_for_nonexistent_filename() {
-        let result = resolve_recipe_path(Path::new("/tmp"), "does-not-exist.yaml");
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let result =
+            resolve_recipe_path(Path::new("/tmp"), "does-not-exist.yaml", Some(home.path()));
         assert!(
             result.is_none(),
             "must return None when the recipe filename doesn't match any file"
@@ -1531,7 +1559,7 @@ mod tests {
         let recipe_file = recipe_dir.join("ooda-decide.yaml");
         std::fs::write(&recipe_file, "# test recipe").unwrap();
 
-        let result = resolve_recipe_path(tmp.path(), "ooda-decide.yaml");
+        let result = resolve_recipe_path(tmp.path(), "ooda-decide.yaml", Some(tmp.path()));
         assert_eq!(
             result,
             Some(recipe_file),
@@ -1550,8 +1578,8 @@ mod tests {
         std::fs::write(recipe_dir.join("ooda-decide.yaml"), "# decide").unwrap();
         std::fs::write(recipe_dir.join("ooda-orient.yaml"), "# orient").unwrap();
 
-        let decide_path = resolve_recipe_path(tmp.path(), "ooda-decide.yaml");
-        let orient_path = resolve_recipe_path(tmp.path(), "ooda-orient.yaml");
+        let decide_path = resolve_recipe_path(tmp.path(), "ooda-decide.yaml", Some(tmp.path()));
+        let orient_path = resolve_recipe_path(tmp.path(), "ooda-orient.yaml", Some(tmp.path()));
 
         assert_ne!(
             decide_path, orient_path,
@@ -1581,30 +1609,36 @@ mod tests {
 
     #[test]
     fn new_returns_none_when_decide_recipe_missing() {
-        let brain = RecipeBrain::new(
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let brain = RecipeBrain::new_with_home(
             Path::new("/nonexistent"),
             "ooda-decide.yaml",
             "recipe-decide-brain",
+            Some(home.path()),
         );
         assert!(brain.is_none());
     }
 
     #[test]
     fn new_returns_none_when_orient_recipe_missing() {
-        let brain = RecipeBrain::new(
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let brain = RecipeBrain::new_with_home(
             Path::new("/nonexistent"),
             "ooda-orient.yaml",
             "recipe-orient-brain",
+            Some(home.path()),
         );
         assert!(brain.is_none());
     }
 
     #[test]
     fn new_returns_none_when_lifecycle_recipe_missing() {
-        let brain = RecipeBrain::new(
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let brain = RecipeBrain::new_with_home(
             Path::new("/nonexistent"),
             "ooda-engineer-lifecycle.yaml",
             "recipe-engineer-lifecycle-brain",
+            Some(home.path()),
         );
         assert!(brain.is_none());
     }
@@ -1873,7 +1907,7 @@ mod tests {
         std::fs::create_dir_all(&recipe_dir).unwrap();
         std::fs::write(recipe_dir.join("ooda-decide.yaml"), "# decide").unwrap();
 
-        let path = resolve_recipe_path(tmp.path(), "ooda-decide.yaml");
+        let path = resolve_recipe_path(tmp.path(), "ooda-decide.yaml", Some(tmp.path()));
         assert!(path.is_some());
         assert!(path.unwrap().to_str().unwrap().contains("ooda-decide.yaml"));
     }
@@ -1885,7 +1919,7 @@ mod tests {
         std::fs::create_dir_all(&recipe_dir).unwrap();
         std::fs::write(recipe_dir.join("ooda-orient.yaml"), "# orient").unwrap();
 
-        let path = resolve_recipe_path(tmp.path(), "ooda-orient.yaml");
+        let path = resolve_recipe_path(tmp.path(), "ooda-orient.yaml", Some(tmp.path()));
         assert!(path.is_some());
         assert!(path.unwrap().to_str().unwrap().contains("ooda-orient.yaml"));
     }
@@ -1901,7 +1935,8 @@ mod tests {
         )
         .unwrap();
 
-        let path = resolve_recipe_path(tmp.path(), "ooda-engineer-lifecycle.yaml");
+        let path =
+            resolve_recipe_path(tmp.path(), "ooda-engineer-lifecycle.yaml", Some(tmp.path()));
         assert!(path.is_some());
         assert!(
             path.unwrap()
