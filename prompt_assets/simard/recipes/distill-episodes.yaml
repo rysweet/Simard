@@ -7,6 +7,11 @@
 # Context vars (passed via -c):
 #   episodes — JSON array of objects with
 #     { id, source_label, temporal_index, content }
+#   strict_json_instruction — format-reinforcement sentence appended to the
+#     prompt on an in-cycle retry after a transient parse miss (issue #2468).
+#     Empty on the first attempt; set to a "respond with ONLY the JSON object"
+#     reminder on retry. Interpolated via the pure `{{strict_json_instruction}}`
+#     substitution, so no conditional templating is required.
 #
 # Output: agent stdout containing a single JSON object of the form:
 #   {
@@ -34,7 +39,12 @@ version: "1.0.0"
 author: "Simard"
 tags: ["simard", "memory", "distillation"]
 
-context: {}
+context:
+  # Empty by default; the distill subprocess overrides this with a format
+  # reinforcement sentence (-c strict_json_instruction=...) on a retry after a
+  # transient parse miss (issue #2468). Declared so the `{{strict_json_instruction}}`
+  # substitution always resolves, even when the recipe is run without the override.
+  strict_json_instruction: ""
 
 steps:
   - id: "distill"
@@ -135,3 +145,5 @@ steps:
       Do not invent new concept labels. Do not invent episode ids. Do
       not include the literal string `skip` in the `concept` field —
       skipped episodes simply contribute no entry to the `facts` array.
+
+      {{strict_json_instruction}}

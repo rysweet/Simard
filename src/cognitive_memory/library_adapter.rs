@@ -34,7 +34,7 @@
 //! All persistence is rooted at a caller-supplied `state_root` (a `TempDir` in
 //! tests). The adapter opens its store at `state_root/cognitive`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -44,8 +44,12 @@ use amplihack_memory::{
     ProceduralMemory, ProspectiveMemory, RecallOptions, RecallWeights, RetentionPolicy,
     SemanticFact, StoreFactOptions, WorkingMemorySlot,
 };
+use chrono::{DateTime, Utc};
 
-use super::{CognitiveMemoryOps, MemoryKind, RecallWeightSet};
+use super::{
+    CognitiveMemoryOps, FORGET_MIN_IMPORTANCE, ForgetReport, MemoryKind, RecallWeightSet,
+    forgetting_score,
+};
 use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::{
     CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
@@ -294,6 +298,140 @@ fn map_op_err(method: &str, err: MemoryError) -> SimardError {
         bridge: STORE_NAME.to_string(),
         method: method.to_string(),
         reason: err.to_string(),
+    }
+}
+
+/// Record the controlled-forgetting (issue #2434) before/after self-metric.
+///
+/// Emits `controlled_forgetting` to `metrics.jsonl` with the live `Fact` count
+/// before/after the pass plus candidate / archived / deleted counts, so a
+/// regression (valuable-fact loss) is visible. `value` is the *net* number of
+/// live facts removed (`live_before - live_after`). Best-effort: a metrics-write
+/// failure is logged, never propagated. No-op under `cfg!(test)` so unit tests
+/// never append to the operator's real `~/.simard/metrics/metrics.jsonl`.
+fn record_forget_metric(
+    live_before: usize,
+    live_after: usize,
+    candidates: usize,
+    archived: usize,
+    deleted: usize,
+) {
+    if cfg!(test) {
+        return;
+    }
+    let value = live_before.saturating_sub(live_after) as f64;
+    let context = serde_json::json!({
+        "live_before": live_before,
+        "live_after": live_after,
+        "candidates": candidates,
+        "archived": archived,
+        "deleted": deleted,
+    })
+    .to_string();
+    if let Err(e) = crate::self_metrics::record_metric("controlled_forgetting", value, &context) {
+        tracing::warn!(
+            target: "simard::memory",
+            error = %e,
+            "failed to record controlled_forgetting metric (forgetting unaffected)",
+        );
+    }
+}
+
+/// Live low-value facts selected for controlled forgetting (issue #2434), with
+/// the per-concept targeting [`forget_low_value_facts`] drives the library
+/// retention pass with.
+struct ForgetCandidates {
+    /// Live (non-archived) fact count when the candidate set was computed.
+    live_before: usize,
+    /// Node ids of the live facts that qualify for forgetting.
+    candidate_ids: HashSet<String>,
+    /// Concepts every live member of which is a candidate (the only concepts
+    /// safe to target with a per-concept TTL — see [`forget_low_value_facts`]).
+    forgettable_concepts: HashSet<String>,
+}
+
+/// Identify the live facts safe to forget (issue #2434), keyed off the shared
+/// [`forgetting_score`] signal so there is a single source of truth for "low
+/// value" across ranked recall and the hygiene pass (design A2).
+///
+/// A live fact is *forgettable* when it carries NO provenance edge AND its
+/// `forgetting_score` exceeds the floor a never-used fact sitting exactly at the
+/// importance threshold ([`FORGET_MIN_IMPORTANCE`]) would score. Because the
+/// score blends confidence, recency, and usage, a low-confidence fact that has
+/// been recently recalled or is frequently used (reinforced via issue #2440)
+/// scores *below* the floor and is protected — completing the recall→forgetting
+/// signal loop a bare confidence threshold would miss.
+///
+/// Only *purely forgettable* concepts (every live member is a candidate) are
+/// targeted: the library's retention pass is concept-granular, so targeting a
+/// mixed concept would archive — then, lacking provenance, delete — a high-value
+/// fact that merely shares the concept. Requiring purity keeps such a fact off
+/// the delete path entirely.
+fn collect_forget_candidates(mem: &CognitiveMemory, now: DateTime<Utc>) -> ForgetCandidates {
+    // The floor a never-accessed fact at the importance threshold scores. A
+    // strict `>` comparison preserves the `confidence < FORGET_MIN_IMPORTANCE`
+    // boundary for fresh facts while letting recency/usage protect reinforced
+    // ones.
+    let floor_score = forgetting_score(FORGET_MIN_IMPORTANCE, 0, None, now);
+    let is_forgettable = |f: &SemanticFact| {
+        forgetting_score(f.confidence, f.usage_count, f.last_accessed_at, now) > floor_score
+            && mem.fact_provenance(&f.node_id).is_empty()
+    };
+
+    // `get_all_facts` includes archived facts; only live ones are forgettable.
+    let all = mem.get_all_facts(usize::MAX);
+    let live_before = all.iter().filter(|f| !f.archived).count();
+
+    let mut by_concept: HashMap<&str, Vec<&SemanticFact>> = HashMap::new();
+    for f in all.iter().filter(|f| !f.archived) {
+        by_concept.entry(f.concept.as_str()).or_default().push(f);
+    }
+
+    let mut forgettable_concepts = HashSet::new();
+    let mut candidate_ids = HashSet::new();
+    for (concept, facts) in &by_concept {
+        if facts.iter().all(|f| is_forgettable(f)) {
+            forgettable_concepts.insert((*concept).to_string());
+            candidate_ids.extend(facts.iter().map(|f| f.node_id.clone()));
+        }
+    }
+
+    ForgetCandidates {
+        live_before,
+        candidate_ids,
+        forgettable_concepts,
+    }
+}
+
+/// Net effect of a forgetting pass, measured against the live store rather than
+/// the library's coarse policy counts (issue #2434), so the self-metric reflects
+/// ground truth.
+struct ForgetOutcome {
+    archived: usize,
+    deleted: usize,
+    live_after: usize,
+}
+
+/// Measure how many of `candidate_ids` were archived vs. deleted, plus the live
+/// fact count, by re-reading the store after the retention pass.
+fn measure_forget_outcome(mem: &CognitiveMemory, candidate_ids: &HashSet<String>) -> ForgetOutcome {
+    let after = mem.get_all_facts(usize::MAX);
+    let present: HashSet<&str> = after.iter().map(|f| f.node_id.as_str()).collect();
+    let archived_present: HashSet<&str> = after
+        .iter()
+        .filter(|f| f.archived)
+        .map(|f| f.node_id.as_str())
+        .collect();
+    ForgetOutcome {
+        deleted: candidate_ids
+            .iter()
+            .filter(|id| !present.contains(id.as_str()))
+            .count(),
+        archived: candidate_ids
+            .iter()
+            .filter(|id| archived_present.contains(id.as_str()))
+            .count(),
+        live_after: after.iter().filter(|f| !f.archived).count(),
     }
 }
 
@@ -646,6 +784,64 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         Ok(scored.into_iter().map(|s| to_fact(s.item)).collect())
     }
 
+    fn recall_facts_ranked_reinforced(
+        &self,
+        query: &str,
+        limit: u32,
+        min_confidence: f64,
+        weights: RecallWeightSet,
+    ) -> SimardResult<Vec<CognitiveFact>> {
+        // Issue #2440 (perf): library-backend override of the default trait
+        // impl. The default scores via `recall_facts_ranked` (one write-lock
+        // acquisition) and then reinforces each returned fact through
+        // `reinforce_access`, which re-acquires the write lock ONCE PER fact —
+        // `1 + N` lock acquisitions and `N` separate `record_access`
+        // transactions for a `limit`-sized recall on a direct recall-intent
+        // read path. (Staged #2440 API: no production caller is wired yet — see
+        // the trait doc — so this override's win is realized once one is.) Here
+        // we score AND reinforce the top-k under a SINGLE write-lock
+        // acquisition: identical returned set and order, identical best-effort
+        // per-fact reinforcement, but one lock and one critical section. The
+        // scored items carry the raw library `node_id`, so we reinforce on that
+        // directly (no seq-prefix round-trip via `strip_seq_prefix` the default
+        // pays). Holding the lock across the batch also closes the
+        // scoring→reinforcement window the default's contract calls out, so a
+        // concurrent forgetting pass can't delete a just-recalled fact
+        // mid-batch.
+        let options = RecallOptions {
+            limit: limit as usize,
+            min_confidence,
+            include_archived: false,
+            include_superseded: false,
+            record_access: false,
+            weights: to_library_weights(weights),
+            ..RecallOptions::default()
+        };
+        let mut guard = self.lock_write("recall_facts_ranked_reinforced")?;
+        let scored = guard
+            .recall_facts_ranked(query, options)
+            .map_err(|e| map_op_err("recall_facts_ranked_reinforced", e))?;
+        let facts = scored
+            .into_iter()
+            .map(|s| {
+                let item = s.item;
+                // Best-effort per the trait contract: a failed usage/recency
+                // bump must never drop the returned set or turn a successful
+                // recall into an error.
+                if let Err(e) = guard.record_access(&item.node_id, AccessKind::Recall) {
+                    tracing::debug!(
+                        target: "simard::memory",
+                        node_id = %item.node_id,
+                        error = %e,
+                        "recall_facts_ranked_reinforced: record_access failed (non-fatal, recall unaffected)"
+                    );
+                }
+                to_fact(item)
+            })
+            .collect();
+        Ok(facts)
+    }
+
     fn store_fact_with_caller_key(
         &self,
         caller_key: &str,
@@ -714,6 +910,114 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         Ok(report.archived + report.deleted)
     }
 
+    fn forget_low_value_facts(&self, dry_run: bool) -> SimardResult<ForgetReport> {
+        // Issue #2434: controlled forgetting of *live* low-value facts. Reuses
+        // the library's `prune_semantic_memory` retention machinery (the same
+        // `prune_superseded` calls), but driven so it is BOTH bounded and safe.
+        //
+        // Candidacy ([`collect_forget_candidates`]) flows through the shared
+        // [`forgetting_score`] signal and a hard provenance gate, then targets
+        // only *purely forgettable* concepts. Why not just set
+        // `min_importance_to_keep = FORGET_MIN_IMPORTANCE`? Because the library's
+        // delete-protection is `importance >= min_importance_to_keep &&
+        // has_provenance`: a low-value candidate (importance < threshold) can
+        // never satisfy it, so a blanket importance threshold would delete
+        // provenance-bearing low-value facts too. Instead we drive deletion via a
+        // per-concept TTL (ttl = 0) over exactly the forgettable concepts with
+        // `min_importance_to_keep = 0.0`. The 0.0 keep-threshold disables the
+        // importance trigger (only our targeted concepts are candidates) AND
+        // turns delete-protection into "ANY provenance-bearing fact is protected"
+        // — belt-and-suspenders over the concept-level exclusion.
+        //
+        // Mandatory safety (issue #2434): a `dry_run` returns the candidate
+        // preview without mutating; a live run only deletes when candidates
+        // exist and records a before/after self-metric so valuable-fact loss is
+        // visible.
+        let mut guard = self.lock_write("forget_low_value_facts")?;
+
+        let ForgetCandidates {
+            live_before,
+            candidate_ids,
+            forgettable_concepts,
+        } = collect_forget_candidates(&guard, Utc::now());
+        let candidates = candidate_ids.len();
+
+        // Dry-run preview: change nothing (the mandatory preview before any live
+        // deletion).
+        if dry_run {
+            return Ok(ForgetReport {
+                dry_run: true,
+                live_before,
+                live_after: live_before,
+                candidates,
+                archived: 0,
+                deleted: 0,
+            });
+        }
+
+        // Safe no-op: nothing qualifies, so no live run (the `archived + deleted
+        // > 0` precondition from the safety contract).
+        if candidates == 0 {
+            return Ok(ForgetReport {
+                dry_run: false,
+                live_before,
+                live_after: live_before,
+                candidates: 0,
+                archived: 0,
+                deleted: 0,
+            });
+        }
+
+        // Live run. Two passes because the library archives-before-deletes: pass
+        // one archives the fresh candidates, pass two deletes the now-archived
+        // ones. Both use the same policy.
+        let ttl_seconds_by_concept: HashMap<String, i64> = forgettable_concepts
+            .into_iter()
+            .map(|c| (c, 0_i64))
+            .collect();
+        let policy = RetentionPolicy {
+            max_facts_per_concept: None,
+            ttl_seconds_by_concept,
+            min_importance_to_keep: 0.0,
+            include_superseded: false,
+            dry_run: false,
+        };
+        guard
+            .prune_semantic_memory(&policy)
+            .map_err(|e| map_op_err("forget_low_value_facts", e))?;
+        guard
+            .prune_semantic_memory(&policy)
+            .map_err(|e| map_op_err("forget_low_value_facts", e))?;
+
+        // Measure the net effect against our candidate set (never trust the
+        // coarse policy counts to attribute the change).
+        let ForgetOutcome {
+            archived,
+            deleted,
+            live_after,
+        } = measure_forget_outcome(&guard, &candidate_ids);
+
+        // Release the cognitive-memory write lock before the metric's synchronous
+        // `metrics.jsonl` append: `measure_forget_outcome` was the last reader of
+        // `guard`, and `record_forget_metric` needs only the copied counts, so
+        // holding the lock across blocking file I/O would needlessly serialize
+        // other memory ops behind a disk write.
+        drop(guard);
+
+        // Gate on a self-metric so a regression (valuable-fact loss) is visible
+        // in `metrics.jsonl`. Best-effort, no-op under `cfg!(test)`.
+        record_forget_metric(live_before, live_after, candidates, archived, deleted);
+
+        Ok(ForgetReport {
+            dry_run: false,
+            live_before,
+            live_after,
+            candidates,
+            archived,
+            deleted,
+        })
+    }
+
     fn episodes_for_fact(&self, fact_id: &str) -> SimardResult<Vec<String>> {
         // Read side of `store_fact_with_provenance`: traverse the fact's
         // outgoing `DERIVES_FROM` edges. `fact_provenance` returns an empty
@@ -758,12 +1062,19 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // Wildcard (A4): `"*"` means "return all"; the library's empty-query
         // path returns every procedure (truncated to `limit`).
         let effective_query = if query == "*" { "" } else { query };
-        Ok(self
+        let mut procedures: Vec<CognitiveProcedure> = self
             .lock()?
             .search_procedures(effective_query, limit as usize)
             .into_iter()
             .map(to_procedure)
-            .collect())
+            .collect();
+        // Issue #2440: order by `usage_count` DESC so a frequently-used procedure
+        // ranks ahead of a cold one matching the same query — `recall_procedure`
+        // is a recall path and ordering IS the ranking. `search_procedures`
+        // returns library order (CONTAINS match), which carries no usage signal;
+        // a stable sort keeps that order as the tiebreaker among equal usage.
+        procedures.sort_by_key(|p| std::cmp::Reverse(p.usage_count));
+        Ok(procedures)
     }
 
     fn store_prospective(
