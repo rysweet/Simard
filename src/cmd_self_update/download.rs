@@ -125,13 +125,45 @@ pub(crate) fn download_and_replace(
         .to_path_buf();
 
     // Download → verify checksum → extract into the private temp dir, then
-    // discover EVERY executable in the extracted tree (main + auxiliaries) with
-    // a single filesystem walk.
+    // install the full binary set from it. `install_from_extracted` takes
+    // ownership of the temp dir from here on and removes it on EVERY exit path
+    // (success or error), so a failed install — the common case being a
+    // permission error swapping the main binary — never leaks the downloaded
+    // archive plus the extracted binaries into /tmp.
     let tmp_dir = download_and_extract(url, version)?;
-    let binaries = find_all_binaries_in_dir(&tmp_dir)?;
+    install_from_extracted(&tmp_dir, &install_dir)
+}
+
+/// Discover and install the full binary set from an already-extracted tarball
+/// directory, then remove `tmp_dir` unconditionally.
+///
+/// Splitting this out from [`download_and_replace`] guarantees the temp dir is
+/// cleaned up on every error path — discovery failure, a fatal main-binary
+/// swap, or the post-install existence check — not just on success, and makes
+/// the install half of the flow unit-testable without any network I/O.
+pub(crate) fn install_from_extracted(
+    tmp_dir: &Path,
+    install_dir: &Path,
+) -> Result<InstallReport, Box<dyn std::error::Error>> {
+    let result = install_discovered(tmp_dir, install_dir);
+    // Clean up the temp directory (archive + any leftover extracted files)
+    // regardless of outcome.
+    let _ = fs::remove_dir_all(tmp_dir);
+    result
+}
+
+/// The fallible discovery + install + post-install confirmation, kept separate
+/// so [`install_from_extracted`] can run cleanup after it returns — including on
+/// the `?` early-exit paths — without a manual `remove_dir_all` at every error
+/// site.
+fn install_discovered(
+    tmp_dir: &Path,
+    install_dir: &Path,
+) -> Result<InstallReport, Box<dyn std::error::Error>> {
+    let binaries = find_all_binaries_in_dir(tmp_dir)?;
 
     println!("Replacing {} binary(ies)...", binaries.len());
-    let report = install_binaries(&binaries, &install_dir)?;
+    let report = install_binaries(&binaries, install_dir)?;
 
     // Post-install confirmation: every binary discovery installed must now be
     // present on disk. The set is dynamic, so this checks exactly what we
@@ -146,9 +178,6 @@ pub(crate) fn download_and_replace(
             return Err(format!("Auxiliary binary reported installed but missing: {name}").into());
         }
     }
-
-    // Clean up the temp directory (archive + any leftover extracted files).
-    let _ = fs::remove_dir_all(&tmp_dir);
 
     Ok(report)
 }
@@ -272,11 +301,21 @@ pub(crate) fn download_to_temp(
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let tmp_dir = download_and_extract(url, version)?;
     // Return the main `simard` candidate (discovery guarantees it sorts first).
-    let binaries = find_all_binaries_in_dir(&tmp_dir)?;
-    binaries
-        .into_iter()
-        .next()
-        .ok_or_else(|| "Binary 'simard' not found in downloaded archive".into())
+    // On a discovery failure the caller never receives the temp-dir path, so
+    // clean it up here rather than leaking the extracted tree into /tmp. On
+    // success the temp dir is intentionally retained: the returned path points
+    // inside it and the `safe-update` caller owns its lifecycle.
+    let binaries = match find_all_binaries_in_dir(&tmp_dir) {
+        Ok(binaries) => binaries,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&tmp_dir);
+            return Err(e);
+        }
+    };
+    binaries.into_iter().next().ok_or_else(|| {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        "Binary 'simard' not found in downloaded archive".into()
+    })
 }
 
 /// On Unix an "executable" is a regular file with any execute bit set. The

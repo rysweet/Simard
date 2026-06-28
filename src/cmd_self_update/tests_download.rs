@@ -19,7 +19,7 @@
 
 use super::download::{
     InstallReport, create_update_tmp_dir, find_all_binaries_in_dir, install_binaries,
-    install_binary, sha256_file, verify_sha256, verify_signature,
+    install_binary, install_from_extracted, sha256_file, verify_sha256, verify_signature,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -484,6 +484,74 @@ fn install_binaries_installs_by_basename_into_install_dir_only() {
     assert!(
         !install.path().join("deep").exists(),
         "discovery path structure must not be recreated under the install dir"
+    );
+}
+
+// ===========================================================================
+// install_from_extracted — full-set install + unconditional temp-dir cleanup
+// ===========================================================================
+
+#[test]
+fn install_from_extracted_installs_full_set_and_removes_tmp_dir() {
+    // The extracted tarball dir lives inside an outer tempdir so we can assert
+    // it is gone after the install without the outer tempdir's own Drop racing
+    // the assertion.
+    let outer = tempfile::tempdir().unwrap();
+    let extracted = outer.path().join("extracted");
+    write_exec(&extracted.join("simard"), b"main");
+    write_exec(&extracted.join("simard-tui"), b"tui");
+    let install = tempfile::tempdir().unwrap();
+
+    let report = install_from_extracted(&extracted, install.path()).unwrap();
+
+    assert!(report.main_installed);
+    assert_eq!(report.aux_installed, vec!["simard-tui".to_string()]);
+    assert!(install.path().join("simard").exists());
+    assert!(install.path().join("simard-tui").exists());
+    assert!(
+        !extracted.exists(),
+        "the extracted temp dir must be removed after a successful install"
+    );
+}
+
+#[test]
+fn install_from_extracted_missing_main_errors_and_removes_tmp_dir() {
+    // A tarball with no `simard` is a discovery error. The temp dir must STILL
+    // be cleaned up — the early `?` exit must not leak the extracted tree.
+    let outer = tempfile::tempdir().unwrap();
+    let extracted = outer.path().join("extracted");
+    write_exec(&extracted.join("simard-tui"), b"tui");
+    let install = tempfile::tempdir().unwrap();
+
+    let result = install_from_extracted(&extracted, install.path());
+
+    assert!(result.is_err(), "absence of the main binary must be fatal");
+    assert!(
+        !extracted.exists(),
+        "the extracted temp dir must be removed even when discovery fails"
+    );
+}
+
+#[test]
+fn install_from_extracted_main_swap_failure_removes_tmp_dir() {
+    // The realistic leak trigger: discovery succeeds but the main swap fails
+    // (here, an install path that is a regular file, so every join+rename
+    // underneath it fails with ENOTDIR regardless of user). The update aborts,
+    // and the temp dir must not be leaked into /tmp.
+    let outer = tempfile::tempdir().unwrap();
+    let extracted = outer.path().join("extracted");
+    write_exec(&extracted.join("simard"), b"main");
+    write_exec(&extracted.join("simard-tui"), b"tui");
+    let not_a_dir = tempfile::tempdir().unwrap();
+    let install_path = not_a_dir.path().join("install-is-a-file");
+    fs::write(&install_path, b"x").unwrap();
+
+    let result = install_from_extracted(&extracted, &install_path);
+
+    assert!(result.is_err(), "a failed main swap must be fatal");
+    assert!(
+        !extracted.exists(),
+        "the extracted temp dir must be removed even when the main swap fails"
     );
 }
 

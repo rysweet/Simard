@@ -57,7 +57,7 @@ For the build-from-source merged-but-not-running path, see the
 - [Release packaging contract](#release-packaging-contract)
 - [Backward compatibility](#backward-compatibility)
 - [Examples](#examples)
-- [Configuration & environment](#configuration--environment)
+- [Configuration & environment](#configuration-environment)
 - [Tests](#tests)
 - [See also](#see-also)
 
@@ -190,7 +190,7 @@ What changed is the breadth of the swap and the order of operations:
    existence check over exactly what discovery installed; there is no external
    "expected" manifest, since the set is dynamic — then print the
    `InstallReport`.
-8. **Self-test** the new `simard` (main binary only), then `exec()` into it via
+9. **Self-test** the new `simard` (main binary only), then `exec()` into it via
    `self_relaunch::handover` — both unchanged.
 
 ## API reference
