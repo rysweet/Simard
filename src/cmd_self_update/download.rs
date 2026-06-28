@@ -10,8 +10,6 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::platform::CURRENT_VERSION;
-
 /// Outcome of installing the full binary set from an extracted tarball.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct InstallReport {
@@ -34,7 +32,9 @@ fn update_tmp_dir() -> PathBuf {
 
 /// Download and extract the release, replacing the full set of installed
 /// Simard binaries. The main `simard` swap is fatal; auxiliary binaries are
-/// installed best-effort.
+/// installed best-effort. Returns the `InstallReport` for the caller to
+/// surface to the operator — this function only prints progress, never the
+/// final summary, so the outcome is reported exactly once.
 pub(crate) fn download_and_replace(
     url: &str,
     version: &str,
@@ -75,14 +75,6 @@ pub(crate) fn download_and_replace(
     // Clean up the temp directory (archive + any leftover extracted files).
     let _ = fs::remove_dir_all(&tmp_dir);
 
-    if report.aux_installed.is_empty() {
-        println!("Updated simard: {CURRENT_VERSION} → {version}");
-    } else {
-        println!(
-            "Updated simard + {} auxiliary binary(ies): {CURRENT_VERSION} → {version}",
-            report.aux_installed.len()
-        );
-    }
     Ok(report)
 }
 
