@@ -93,8 +93,9 @@ fn invalid_subcommand_fails_with_message() {
 
 #[test]
 fn version_string_is_semver() {
-    // The binary has no --version flag; verify the Cargo-embedded version
-    // matches the expected semver pattern so the constant stays in sync.
+    // The binary has no --version flag; verify the Cargo-embedded version is
+    // well-formed semver. We intentionally do not compare against a hard-coded
+    // literal: that only adds churn on every release without catching real bugs.
     let parts: Vec<&str> = VERSION.split('.').collect();
     assert_eq!(parts.len(), 3, "version should be semver: {VERSION}");
     for part in &parts {
