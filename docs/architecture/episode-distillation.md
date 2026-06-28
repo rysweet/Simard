@@ -424,6 +424,47 @@ When the recipe errors:
 These are low-cardinality `tracing::info!` lines suitable for
 grep-based monitoring.
 
+### `distill_success_rate` (reliability metric)
+
+> Added in issue [#2461](https://github.com/rysweet/Simard/issues/2461).
+
+A distillation failure is **non-fatal**: `dispatch_consolidate_memory`
+folds the `Err` into a human-readable string and still reports the
+`ConsolidateMemory` action successful. Before #2461 the only trace was the
+`tracing::warn!` line above, so the *frequency* of failures — and therefore
+the silent degradation of semantic recall — was invisible.
+
+Every pass that **ran the recipe** (success OR a recipe/parse failure;
+below-threshold skips are excluded) now records a `distill_success_rate`
+metric event to `metrics.jsonl` via `self_metrics::record_metric`, mirroring
+`distill_reliability_gate`. The metric scope is the **recipe + output-parse
+stage** — exactly the #2461 failure surface; downstream memory-write failures
+are a separate subsystem (they propagate as `Err` and are not folded into this
+metric). The metric `value` is `1.0` on success and `0.0`
+on failure, so the mean over passes is the success rate; the context payload
+carries `{outcome, recipe_exited_ok, parse_attempted, parse_success,
+failure_class, input_count, fact_count}`:
+
+```
+distill_success_rate       = mean(value)                          over ran passes
+distill_parse_success_rate = Σ parse_success / Σ parse_attempted  over ran passes
+```
+
+`distill_parse_success_rate` isolates the "recipe exited 0 but its output was
+unparseable" mode (`failure_class = parse-failure`, t=7517) from the "recipe
+process exited non-zero" mode (`copilot-terminal-failure`, t=7411): only runs
+that reached parsing (`parse_attempted = true`) count toward its denominator.
+Because the data lives in `metrics.jsonl` (operator runtime state, queryable
+via `self_metrics::query_metrics`), the rates are computed over a rolling
+window — no point-in-time findings doc is committed.
+
+The companion robustness fix is parser-side: `scan_for_facts_object` now
+returns the facts from the **last non-empty** balanced `{...}` object that
+parses (not the first), with string-aware brace scanning, so a leading
+banner/thinking object no longer shadows the agent's facts object and an
+accidental trailing empty object never discards earlier facts (the t=7517
+parse-failure mode; see "The recipe" above).
+
 ---
 
 ## Examples
