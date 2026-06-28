@@ -249,6 +249,19 @@ The build still sets `CARGO_BUILD_JOBS` from `cargo_jobs::cargo_jobs()` and
 fails loud (`SimardError`/`SafeUpdateError::BuildFailed`) if the binary is
 missing after a "successful" build.
 
+> **Concurrency: serialized by the host-wide build lock.** `prepare_and_build`
+> (the orchestrator's step-1 composition) acquires the shared
+> [`BuildLock`](../reference/simard-cli.md) — `<state_root>/cargo_build.lock`,
+> the same lock the operator dashboard's `/api/build-lock` surfaces and can
+> force-release — for the whole resolve→checkout→build window, releasing it on
+> drop (RAII). Two concurrent self-deploys share the persistent source checkout
+> **and** the warm target dir; without serialization, one run's
+> `git checkout --detach <shaB>` could rewrite the working tree while another's
+> `cargo build` is still reading it, so it would compile one tree yet embed the
+> other's `SIMARD_GIT_HASH` and slip the wrong source past the `version_advanced`
+> gate (which only checks the *embedded* SHA). Failing to acquire the lock within
+> the timeout aborts **loudly** with `BuildFailed` rather than racing.
+
 > **Load-bearing build environment.** `build.rs` derives `SIMARD_GIT_HASH`
 > from a bare `git rev-parse HEAD` that resolves against the build script's
 > working directory (Cargo runs it in the manifest directory). For the embedded
@@ -399,9 +412,12 @@ on `~/.simard` top-level entries matching `is_corrupt_quarantine_name`, i.e. a
 `remove_old_corrupt_dbs` reads, but they are safe because **no reaper's name
 filter matches `self-deploy-*`** (they do not start with `simard-`/`amplihack-`,
 are not `bin`/`snapshots`, and carry no `.corrupt-` infix). A dedicated test
-asserts non-overlap against **all** of these reapers so the warm dir is never
-reaped out from under an incremental build even if a future reaper broadens its
-`~/.simard` scan.
+(`warm_target_dir_name_does_not_match_any_cleanup_reaper`) asserts non-overlap
+for **both** dirs by calling the **real** `is_corrupt_quarantine_name`
+predicate (the only reaper whose scan base — the `~/.simard` top level —
+actually contains them) and the replicated `/tmp` name filters, so the warm dir
+is never reaped out from under an incremental build even if a future change
+broadens the `~/.simard` reaper.
 
 ## Tests
 

@@ -351,7 +351,7 @@ pub const CORRUPT_DB_KEEP: usize = 5;
 /// ever risking the live store. Before this generalization the cleanup only
 /// matched the native `cognitive_memory.corrupt-` prefix, so post-de-fork
 /// library quarantines accumulated unbounded (issue #2307 fallout).
-fn is_corrupt_quarantine_name(name: &str) -> bool {
+pub(crate) fn is_corrupt_quarantine_name(name: &str) -> bool {
     (name.starts_with("cognitive.") || name.starts_with("cognitive_memory."))
         && name.contains(".corrupt-")
 }

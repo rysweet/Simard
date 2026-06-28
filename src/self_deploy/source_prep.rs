@@ -34,7 +34,9 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
+use crate::build_lock::BuildLock;
 use crate::safe_update::SafeUpdateError;
 use crate::state_root::simard_state_root;
 
@@ -49,6 +51,13 @@ pub const SELF_DEPLOY_SRC_DIRNAME: &str = "self-deploy-src";
 /// Subdirectory name (under the resolved state root) for the persistent **warm**
 /// cargo target dir reused across self-deploys.
 pub const SELF_DEPLOY_TARGET_DIRNAME: &str = "self-deploy-target";
+
+/// Max wait for the host-wide build lock before a self-deploy aborts loudly
+/// (issue #2467). Long enough for a concurrent *warm* self-deploy build
+/// (~2–3 min) to finish and release the lock; a lock still held past this
+/// surfaces a loud [`SafeUpdateError::BuildFailed`] instead of racing the shared
+/// source checkout.
+const BUILD_LOCK_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Persistent self-deploy **source checkout** directory.
 ///
@@ -582,11 +591,34 @@ fn git_capture(repo: &Path, args: &[&str]) -> Result<String, String> {
 /// preparation failure propagates **before** any build is attempted — and a
 /// fortiori before any daemon mutation — so a missing/unreachable merged commit
 /// can never deploy the cwd HEAD.
+///
+/// The whole resolve→checkout→build critical section is serialized by the
+/// host-wide [`BuildLock`] (`<state_root>/cargo_build.lock` — the same lock the
+/// operator dashboard surfaces and can force-release). Two concurrent
+/// self-deploys share the persistent source checkout ([`self_deploy_src_dir`])
+/// **and** the warm `target_dir`; without this lock, run B's
+/// `git checkout --detach <shaB>` could rewrite the working tree while run A's
+/// `cargo build` is still reading it, so A would compile B's tree yet embed A's
+/// `SIMARD_GIT_HASH` — silently shipping the wrong source past the post-deploy
+/// `version_advanced` gate, which only compares the *embedded* SHA to the
+/// target. The lock is held for the whole prepare+build and released on drop;
+/// failing to acquire it within [`BUILD_LOCK_TIMEOUT`] aborts loudly (never a
+/// silent race). (Its 10-min stale-reap only weakens the rare concurrent *cold*
+/// first build; warm builds finish well inside it.)
 pub(crate) fn prepare_and_build(
     source: &dyn SelfDeploySourcePreparer,
     target_commit: &str,
     target_dir: &Path,
 ) -> Result<PathBuf, SafeUpdateError> {
+    let _build_guard = BuildLock::new(&simard_state_root())
+        .acquire(BUILD_LOCK_TIMEOUT)
+        .map_err(|e| SafeUpdateError::BuildFailed {
+            detail: format!(
+                "could not acquire the self-deploy build lock \
+                 (another self-deploy build may be running): {e}"
+            ),
+        })?;
+
     let repo = source.prepare(target_commit)?;
     crate::self_relaunch::build_self_deploy_candidate(&repo, target_dir).map_err(|e| {
         SafeUpdateError::BuildFailed {

@@ -228,9 +228,16 @@ fn warm_target_dir_is_persistent_not_pid_keyed_and_under_state_root() {
 #[test]
 #[serial_test::serial(simard_state_root_env, cognitive_memory)]
 fn warm_target_dir_name_does_not_match_any_cleanup_reaper() {
-    // cmd_cleanup/disk.rs reapers match by *name* within their scan roots
-    // (/tmp). The warm dir must not be eligible for deletion. We replicate the
-    // documented predicates and assert the warm dir name matches none.
+    // The cleanup reapers in cmd_cleanup/disk.rs match by *name*. Two scan over
+    // a /tmp base (replicated below); the only reaper whose base actually
+    // contains the warm/src dirs is `remove_old_corrupt_dbs`, which scans the
+    // `~/.simard` top level via the real `is_corrupt_quarantine_name` predicate.
+    // The other two `~/.simard` reapers (`rotate_simard_binary_backups`,
+    // `trim_simard_snapshots`) scan the `bin/` and `snapshots/` *subdirectories*,
+    // so a top-level `self-deploy-*` sibling is structurally outside their reach.
+    // Assert non-overlap against the **real** predicate (not a local copy) so
+    // this is a genuine regression guard: if a future change broadened the
+    // `~/.simard` reaper to match `self-deploy-*`, this test fails.
     fn matches_tmp_canary_reaper(name: &str) -> bool {
         name.starts_with("simard-canary")
             || name.starts_with("simard-e2e")
@@ -246,21 +253,47 @@ fn warm_target_dir_name_does_not_match_any_cleanup_reaper() {
     let tmp = tempfile::tempdir().unwrap();
     let _g = EnvGuard::set(STATE_ROOT_ENV, tmp.path());
 
-    let warm = self_deploy_target_dir();
-    let name = warm
-        .file_name()
-        .expect("warm dir has a final component")
-        .to_string_lossy()
-        .into_owned();
+    // Both new persistent dirs that live directly under the state root.
+    for dir in [self_deploy_target_dir(), self_deploy_src_dir()] {
+        let name = dir
+            .file_name()
+            .expect("dir has a final component")
+            .to_string_lossy()
+            .into_owned();
 
-    assert_eq!(name, SELF_DEPLOY_TARGET_DIRNAME);
-    assert!(
-        !matches_tmp_canary_reaper(&name),
-        "warm dir name {name:?} must not match the /tmp canary reaper"
-    );
-    assert!(
-        !matches_tmp_target_cap(&name),
-        "warm dir name {name:?} must not match the /tmp '-target' LRU cap reaper"
+        assert!(
+            !matches_tmp_canary_reaper(&name),
+            "dir name {name:?} must not match the /tmp canary reaper"
+        );
+        assert!(
+            !matches_tmp_target_cap(&name),
+            "dir name {name:?} must not match the /tmp '-target' LRU cap reaper"
+        );
+        // The real `~/.simard` top-level reaper predicate (the one whose scan
+        // base actually contains these dirs).
+        assert!(
+            !crate::cmd_cleanup::is_corrupt_quarantine_name(&name),
+            "dir name {name:?} must not match the ~/.simard corrupt-quarantine reaper \
+             (remove_old_corrupt_dbs)"
+        );
+        // Not the fixed `bin`/`snapshots` subdir names the other ~/.simard
+        // reapers scan into.
+        assert_ne!(
+            name, "bin",
+            "must not collide with the binary-backup subdir"
+        );
+        assert_ne!(
+            name, "snapshots",
+            "must not collide with the snapshots subdir"
+        );
+    }
+
+    assert_eq!(
+        self_deploy_target_dir()
+            .file_name()
+            .unwrap()
+            .to_string_lossy(),
+        SELF_DEPLOY_TARGET_DIRNAME
     );
 }
 
@@ -728,8 +761,12 @@ impl SelfDeploySourcePreparer for RecordingPreparer {
 }
 
 #[test]
+#[serial_test::serial(simard_state_root_env, cognitive_memory)]
 fn prepare_and_build_propagates_prepare_failure_before_building() {
     let warm = tempfile::tempdir().unwrap();
+    // Pin the state root (and thus the host-wide build lock at
+    // <state_root>/cargo_build.lock) into the tempdir so this stays hermetic.
+    let _state = EnvGuard::set(STATE_ROOT_ENV, warm.path());
     let fake = RecordingPreparer::failing();
     let sha = "abcdef0123456789abcdef0123456789abcdef01";
 
@@ -748,8 +785,10 @@ fn prepare_and_build_propagates_prepare_failure_before_building() {
 }
 
 #[test]
+#[serial_test::serial(simard_state_root_env, cognitive_memory)]
 fn prepare_and_build_asks_to_prepare_the_target_merged_commit() {
     let warm = tempfile::tempdir().unwrap();
+    let _state = EnvGuard::set(STATE_ROOT_ENV, warm.path());
     let fake = RecordingPreparer::failing();
     let sha = "0123456789abcdef0123456789abcdef01234567";
 
@@ -760,6 +799,58 @@ fn prepare_and_build_asks_to_prepare_the_target_merged_commit() {
         asked.as_slice(),
         &[sha.to_string()],
         "prepare_and_build must request exactly the target merged commit"
+    );
+}
+
+/// A preparer that records whether the host-wide build lock was already held at
+/// the moment `prepare` runs, then fails fast so no real build is attempted.
+struct LockObservingPreparer {
+    state_root: PathBuf,
+    lock_held_during_prepare: Mutex<Option<bool>>,
+}
+
+impl SelfDeploySourcePreparer for LockObservingPreparer {
+    fn prepare(&self, _target_commit: &str) -> Result<PathBuf, SafeUpdateError> {
+        let held = crate::build_lock::BuildLock::new(&self.state_root).is_locked();
+        *self.lock_held_during_prepare.lock().unwrap() = Some(held);
+        Err(SafeUpdateError::FetchFailed {
+            detail: "fake: stop after observing the lock".to_string(),
+        })
+    }
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, cognitive_memory)]
+fn prepare_and_build_holds_build_lock_during_prepare_and_releases_after() {
+    // Issue #2467: the resolve→checkout→build window must be serialized by the
+    // host-wide build lock so two concurrent self-deploys cannot race the shared
+    // source checkout (compile one tree, embed another's SHA). Prove the lock is
+    // (a) held while prepare runs and (b) released once prepare_and_build returns.
+    let warm = tempfile::tempdir().unwrap();
+    let _state = EnvGuard::set(STATE_ROOT_ENV, warm.path());
+
+    // No stale lock to start.
+    assert!(
+        !crate::build_lock::BuildLock::new(warm.path()).is_locked(),
+        "precondition: build lock must be free before prepare_and_build"
+    );
+
+    let fake = LockObservingPreparer {
+        state_root: warm.path().to_path_buf(),
+        lock_held_during_prepare: Mutex::new(None),
+    };
+    let sha = "abcdef0123456789abcdef0123456789abcdef01";
+
+    let _ = prepare_and_build(&fake, sha, warm.path());
+
+    assert_eq!(
+        *fake.lock_held_during_prepare.lock().unwrap(),
+        Some(true),
+        "the build lock must be held while the source checkout runs"
+    );
+    assert!(
+        !crate::build_lock::BuildLock::new(warm.path()).is_locked(),
+        "the build lock must be released (RAII) once prepare_and_build returns"
     );
 }
 
