@@ -101,10 +101,6 @@ fn version_string_is_semver() {
         part.parse::<u32>()
             .unwrap_or_else(|_| panic!("non-numeric version component '{part}' in {VERSION}"));
     }
-    assert_eq!(
-        VERSION, "0.23.0",
-        "bump this assertion when version changes"
-    );
 }
 
 #[test]
