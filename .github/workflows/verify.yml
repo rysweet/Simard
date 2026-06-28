@@ -53,7 +53,14 @@ jobs:
           # 0.16.1 → 0.17.0). Cargo's mtime-based fingerprint trusted the
           # restored .rmeta files and re-ran the dead tests against new
           # source. Bump key to force a clean rebuild.
-          shared-key: simard-ci-v2
+          #
+          # Bumped 2026-06-28 (v2 → v3, issue #2420): the engine pin moved lbug
+          # `=0.15.3` → `=0.17.1`. The prior `simard-ci-v2` cache held the
+          # cmake-built native artifacts for lbug 0.15.3; restoring it made
+          # cargo treat lbug 0.17.1 as already built and link a non-existent
+          # static lib (`could not find native static library lbug`). Bumping
+          # the key forces a cold rebuild of the LadybugDB C++ engine.
+          shared-key: simard-ci-v3
           # Single writer: only the main branch refreshes the shared cache.
           # PR runs read it but never overwrite, eliminating cache thrashing
           # across concurrent PRs.
@@ -151,7 +158,10 @@ jobs:
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: simard-ci-v2
+          # v2 → v3 (issue #2420): must match the pre-commit job's key so this
+          # job also rebuilds the lbug 0.17.1 C++ engine instead of restoring a
+          # stale lbug 0.15.3 native artifact.
+          shared-key: simard-ci-v3
           # Read-only on PRs and non-pre-commit jobs; pre-commit on main is
           # the single writer to avoid cache contention.
           save-if: false
