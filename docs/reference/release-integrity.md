@@ -111,7 +111,7 @@ cosign verify-blob \
   --certificate        simard-linux-x86_64.tar.gz.pem \
   --signature          simard-linux-x86_64.tar.gz.sig \
   --certificate-identity-regexp \
-      'https://github.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main' \
+      '^https://github\.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   simard-linux-x86_64.tar.gz
 ```
@@ -136,7 +136,7 @@ cosign verify-blob \
   --certificate        simard-0.22.0.cdx.json.pem \
   --signature          simard-0.22.0.cdx.json.sig \
   --certificate-identity-regexp \
-      'https://github.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main' \
+      '^https://github\.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   simard-0.22.0.cdx.json
 ```

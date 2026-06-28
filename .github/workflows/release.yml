@@ -24,6 +24,13 @@ jobs:
         with:
           fetch-depth: 0
           submodules: false
+          # This job holds id-token:write + contents:write while `cargo build`
+          # runs ~every dependency's build script as arbitrary code. Don't leave
+          # the GITHUB_TOKEN persisted in .git/config where that code could read
+          # it: nothing here pushes via git (the release is cut with `gh release
+          # create`, which uses GH_TOKEN; the tag-existence check is a local
+          # `git rev-parse`), so the persisted credential is pure attack surface.
+          persist-credentials: false
 
       # Resolve the version and whether its tag already exists BEFORE any
       # toolchain install or cache restore. Most pushes to main don't bump the
@@ -178,7 +185,7 @@ jobs:
           cosign verify-blob \\
             --certificate simard-linux-x86_64.tar.gz.pem \\
             --signature   simard-linux-x86_64.tar.gz.sig \\
-            --certificate-identity-regexp 'https://github.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main' \\
+            --certificate-identity-regexp '^https://github\.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main$' \\
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\
             simard-linux-x86_64.tar.gz
 
@@ -186,7 +193,7 @@ jobs:
           cosign verify-blob \\
             --certificate simard-${{ steps.version.outputs.version }}.cdx.json.pem \\
             --signature   simard-${{ steps.version.outputs.version }}.cdx.json.sig \\
-            --certificate-identity-regexp 'https://github.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main' \\
+            --certificate-identity-regexp '^https://github\.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main$' \\
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\
             simard-${{ steps.version.outputs.version }}.cdx.json
           \`\`\`" \
