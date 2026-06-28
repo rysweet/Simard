@@ -473,7 +473,7 @@ fn prepare_rejects_non_full_sha_before_touching_git() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial(simard_self_deploy_repo)]
+#[serial_test::serial(simard_self_deploy_repo, cognitive_memory)]
 fn resolve_repo_env_override_wins_when_valid() {
     let root = tempfile::tempdir().unwrap();
     let origin = root.path().join("origin");
@@ -498,7 +498,7 @@ fn resolve_repo_env_override_wins_when_valid() {
 }
 
 #[test]
-#[serial_test::serial(simard_self_deploy_repo)]
+#[serial_test::serial(simard_self_deploy_repo, cognitive_memory)]
 fn resolve_repo_rejects_invalid_env_override_without_cwd_fallback() {
     // A path-traversal value and a non-repo path must both be rejected loudly,
     // never silently resolving to the current working directory.
