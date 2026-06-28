@@ -882,6 +882,31 @@ pub fn consolidation_persistence(
         }
     }
 
+    // Issue #2434: controlled forgetting of live low-value facts. Runs alongside
+    // (not instead of) `prune_superseded` so genuinely low-value facts fade while
+    // provenance-bearing / above-threshold facts are protected. Like the
+    // superseded prune, this is housekeeping — a failure is logged and never
+    // aborts teardown.
+    match bridge.forget_low_value_facts(false) {
+        Ok(report) if report.archived + report.deleted > 0 => {
+            tracing::debug!(
+                archived = report.archived,
+                deleted = report.deleted,
+                candidates = report.candidates,
+                live_before = report.live_before,
+                live_after = report.live_after,
+                "consolidation_persistence: forgot low-value facts"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "consolidation_persistence: forget_low_value_facts failed (non-fatal)"
+            );
+        }
+    }
+
     Ok(())
 }
 

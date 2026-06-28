@@ -42,7 +42,7 @@
 
 // `distillation` module does not exist yet (PR-B introduces it).
 use crate::memory_consolidation::distillation::{
-    DISTILL_BATCH_SIZE, DISTILL_FACT_CONFIDENCE, DISTILL_MIN_EPISODES,
+    DISTILL_BATCH_SIZE, DISTILL_FACT_CONFIDENCE, DISTILL_MIN_EPISODES, DISTILL_PARSE_RETRY_MAX,
     DISTILL_RELIABILITY_THRESHOLD, DistillRecipeRunner, DistilledFact, KNOWN_DISTILL_CONCEPTS,
     assess_fact_reliability, distill_recent_episodes_with_runner,
 };
@@ -1559,4 +1559,196 @@ fn distilled_fact_confidence_is_computed_not_constant() {
         (confidence - 0.9).abs() < 1e-9,
         "confidence must be the computed score 0.9, not a constant; got {confidence}"
     );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// PR-1 (issue #2468): bounded in-cycle distill retry with format reinforcement
+// ───────────────────────────────────────────────────────────────────────────
+//
+// TDD (RED) tests written BEFORE the production change; they FAIL until #2468
+// lands. They pin the contract:
+//
+//   * A *transient* failure class (`ParseFailure`, `CopilotTerminalFailure`) is
+//     retried in-cycle up to `DISTILL_PARSE_RETRY_MAX` times; a recovered batch
+//     stores facts and marks ALL episodes within ONE pass.
+//   * A *structural* class (`SpawnFailure`, `SerializeFailure`,
+//     `RecipeReportedFailure`) escalates immediately — NO retry.
+//   * The retry-safety invariant holds across all in-cycle attempts: on final
+//     failure NO facts are stored and NO episodes are marked.
+//
+// Symbol the implementation must add: `pub const DISTILL_PARSE_RETRY_MAX: u32`
+// in `distillation.rs`, plus the retry loop in
+// `distill_recent_episodes_with_runner`.
+
+/// One scripted outcome per `run_all` attempt. Error variants use the exact
+/// stable prefixes `classify_distill_error` anchors on, so each maps to the
+/// intended `DistillFailureClass`.
+enum Attempt {
+    /// Success: emit these `(concept, content, source_episode_id)` facts.
+    Ok(Vec<(&'static str, &'static str, &'static str)>),
+    /// Transient: exited 0 but output unparseable → `ParseFailure`.
+    Parse,
+    /// Transient: recipe process exited non-zero → `CopilotTerminalFailure`.
+    Terminal,
+    /// Structural: runner could not be spawned → `SpawnFailure`.
+    Spawn,
+}
+
+/// Runner that returns a different scripted outcome on each successive call,
+/// recording the call count so the retry bound can be asserted. Once the script
+/// is exhausted it repeats the last outcome.
+struct ScriptedRunner {
+    attempts: Vec<Attempt>,
+    call_count: AtomicU32,
+}
+
+impl ScriptedRunner {
+    fn new(attempts: Vec<Attempt>) -> Self {
+        Self {
+            attempts,
+            call_count: AtomicU32::new(0),
+        }
+    }
+}
+
+impl DistillRecipeRunner for ScriptedRunner {
+    fn run(&self, _episodes: &[CognitiveEpisode]) -> SimardResult<Vec<DistilledFact>> {
+        let idx = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
+        let attempt = self
+            .attempts
+            .get(idx)
+            .or_else(|| self.attempts.last())
+            .expect("ScriptedRunner needs at least one attempt");
+        match attempt {
+            Attempt::Ok(facts) => Ok(facts
+                .iter()
+                .map(|(c, content, src)| DistilledFact {
+                    concept: (*c).to_string(),
+                    content: (*content).to_string(),
+                    source_episode_id: (*src).to_string(),
+                })
+                .collect()),
+            Attempt::Parse => Err(SimardError::BridgeError(
+                "distill: `distill` step output did not contain a parseable { \"facts\": [...] } object; output: hi"
+                    .to_string(),
+            )),
+            Attempt::Terminal => Err(SimardError::BridgeError(
+                "distill: recipe exited with exit status: 1: stderr= stdout=".to_string(),
+            )),
+            Attempt::Spawn => Err(SimardError::BridgeError(
+                "distill: recipe-runner-rs spawn failed: no such file".to_string(),
+            )),
+        }
+    }
+}
+
+/// One real, grounded, known-concept fact (passes the ISAO reliability gate) on
+/// the success attempt, tied to a real episode id from `n_episodes`.
+fn recovered_fact() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![(
+        "pr-pattern",
+        "enable auto-merge before final review",
+        "epi_00001",
+    )]
+}
+
+/// Transient `ParseFailure` on attempt 1, success on attempt 2: the batch
+/// recovers WITHIN ONE PASS — facts stored, every episode marked, runner called
+/// exactly twice.
+#[test]
+fn transient_parse_failure_then_ok_recovers_in_one_pass() {
+    let n = DISTILL_MIN_EPISODES as usize + 5;
+    let mock = EpisodeMock::with_episodes(n_episodes(n));
+    let runner = ScriptedRunner::new(vec![Attempt::Parse, Attempt::Ok(recovered_fact())]);
+
+    let report = distill_recent_episodes_with_runner(&mock, &runner)
+        .expect("transient parse miss must be recovered by an in-cycle retry");
+
+    assert!(report.fact_count >= 1, "facts stored after the retry");
+    assert_eq!(
+        report.marked_count as usize,
+        n.min(DISTILL_BATCH_SIZE as usize),
+        "every input episode marked distilled within the same pass"
+    );
+    assert_eq!(
+        runner.call_count.load(Ordering::SeqCst),
+        2,
+        "exactly one retry after the transient parse miss"
+    );
+    assert!(!mock.facts_stored().is_empty(), "a fact was persisted");
+    assert_eq!(
+        mock.marks().len() as u32,
+        report.marked_count,
+        "marks match the report"
+    );
+}
+
+/// Transient `CopilotTerminalFailure` (non-zero exit) is ALSO retried, then
+/// recovers.
+#[test]
+fn transient_terminal_failure_then_ok_recovers_in_one_pass() {
+    let n = DISTILL_MIN_EPISODES as usize + 2;
+    let mock = EpisodeMock::with_episodes(n_episodes(n));
+    let runner = ScriptedRunner::new(vec![Attempt::Terminal, Attempt::Ok(recovered_fact())]);
+
+    let report = distill_recent_episodes_with_runner(&mock, &runner)
+        .expect("a transient terminal failure must be retried and recovered");
+
+    assert!(report.fact_count >= 1, "facts stored after the retry");
+    assert_eq!(
+        runner.call_count.load(Ordering::SeqCst),
+        2,
+        "the transient terminal failure is retried once"
+    );
+}
+
+/// Both attempts fail transiently: the pass returns `Err`, NO facts are stored,
+/// NO episodes are marked (retry-safety invariant), and the runner is called a
+/// BOUNDED number of times (`DISTILL_PARSE_RETRY_MAX + 1`).
+#[test]
+fn transient_failure_exhausts_bounded_retries_then_errs_unmarked() {
+    let n = DISTILL_MIN_EPISODES as usize + 3;
+    let mock = EpisodeMock::with_episodes(n_episodes(n));
+    // Always-parse-fail; ScriptedRunner repeats the last outcome past the script.
+    let runner = ScriptedRunner::new(vec![Attempt::Parse]);
+
+    let report = distill_recent_episodes_with_runner(&mock, &runner);
+
+    assert!(report.is_err(), "exhausted retries must surface as Err");
+    assert!(
+        mock.facts_stored().is_empty(),
+        "no facts stored when every attempt fails"
+    );
+    assert!(
+        mock.marks().is_empty(),
+        "retry-safety: no episodes marked when every attempt fails"
+    );
+    assert_eq!(
+        runner.call_count.load(Ordering::SeqCst),
+        DISTILL_PARSE_RETRY_MAX + 1,
+        "retries are bounded: one initial attempt + DISTILL_PARSE_RETRY_MAX retries"
+    );
+}
+
+/// A STRUCTURAL failure (`SpawnFailure`) escalates immediately and is NOT
+/// retried, even though a later attempt would have succeeded.
+#[test]
+fn structural_spawn_failure_is_not_retried() {
+    let n = DISTILL_MIN_EPISODES as usize + 1;
+    let mock = EpisodeMock::with_episodes(n_episodes(n));
+    let runner = ScriptedRunner::new(vec![Attempt::Spawn, Attempt::Ok(recovered_fact())]);
+
+    let report = distill_recent_episodes_with_runner(&mock, &runner);
+
+    assert!(report.is_err(), "a structural failure must escalate");
+    assert_eq!(
+        runner.call_count.load(Ordering::SeqCst),
+        1,
+        "structural classes must NOT be retried"
+    );
+    assert!(
+        mock.marks().is_empty(),
+        "no episodes marked on a structural failure"
+    );
+    assert!(mock.facts_stored().is_empty());
 }

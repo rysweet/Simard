@@ -60,6 +60,23 @@ pub const DISTILL_RELIABILITY_THRESHOLD: f64 = 0.5;
 /// concept-validity component of its reliability score.
 pub const KNOWN_DISTILL_CONCEPTS: &[&str] = &["pr-pattern", "bug-pattern", "lesson-learned"];
 
+/// Maximum number of *in-cycle* retries of the distill recipe on a **transient**
+/// failure (issue #2468). The pass makes at most `DISTILL_PARSE_RETRY_MAX + 1`
+/// runner invocations: one initial attempt plus this many retries.
+///
+/// A transient miss — the recipe exited `0` but its step output carried no
+/// parseable `{ "facts": [...] }` object ([`DistillFailureClass::ParseFailure`]),
+/// or the recipe process exited non-zero
+/// ([`DistillFailureClass::CopilotTerminalFailure`]) — previously deferred the
+/// whole batch for a full consolidation cycle. A single bounded retry, with
+/// JSON-format reinforcement threaded into the recipe (see
+/// [`DistillRecipeRunner::run_all_reinforced`]), recovers most of these within
+/// the same pass, turning a dropped batch into stored facts. Structural classes
+/// (`SpawnFailure`, `SerializeFailure`, `RecipeReportedFailure`) are NOT retried
+/// — they escalate immediately. Kept at `1` so the recovery stays bounded and a
+/// genuinely broken recipe still surfaces promptly.
+pub const DISTILL_PARSE_RETRY_MAX: u32 = 1;
+
 /// A single semantic fact emitted by the recipe runner for one batch
 /// of episodes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +135,26 @@ pub trait DistillRecipeRunner {
             facts: self.run(episodes)?,
             procedures: Vec::new(),
         })
+    }
+
+    /// Retry-aware entry point used by the bounded in-cycle retry loop (issue
+    /// #2468). Identical to [`run_all`](Self::run_all), but when
+    /// `strict_json = true` the runner is asked to reinforce the response
+    /// format (e.g. by threading a `strict_json_instruction` context var into
+    /// the recipe so the agent replies with ONLY the `{ "facts": [...] }`
+    /// object). This is used on a retry after a transient parse miss.
+    ///
+    /// The default ignores `strict_json` and delegates to
+    /// [`run_all`](Self::run_all), so test stubs and fact-only runners keep
+    /// working unchanged; only [`RecipeRunnerSubprocess`] overrides it to thread
+    /// the reinforcement flag into the subprocess invocation.
+    fn run_all_reinforced(
+        &self,
+        episodes: &[CognitiveEpisode],
+        strict_json: bool,
+    ) -> SimardResult<DistillOutput> {
+        let _ = strict_json;
+        self.run_all(episodes)
     }
 }
 
@@ -222,29 +259,68 @@ pub fn distill_recent_episodes_with_runner(
         "[simard] distill: {pulled} episodes pulled (batch size {DISTILL_BATCH_SIZE}, min {DISTILL_MIN_EPISODES})"
     );
 
-    // Run the recipe. On error, return immediately WITHOUT marking
-    // any episodes — the batch is fully retry-eligible on the next
-    // pass. This is the retry-safety invariant under test in
-    // `distillation_handles_recipe_error_without_marking`.
-    let output = match runner.run_all(&episodes) {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!(
-                target: "simard::distill",
-                pulled,
-                error = %e,
-                "distill: {pulled} episodes pulled, recipe error, no markers set, retry next pass"
-            );
-            eprintln!(
-                "[simard] distill: {pulled} episodes pulled, recipe error: {e}, no markers set, retry next pass"
-            );
-            // Make the previously-silent non-fatal failure visible (#2461).
-            // Recorded BEFORE the early return; episodes stay unmarked, so the
-            // retry-safety invariant is unaffected.
-            record_distill_success_metric(false, Some(classify_distill_error(&e)), pulled, 0);
-            return Err(e);
+    // Run the recipe with a bounded in-cycle retry on TRANSIENT failures only
+    // (issue #2468). A transient miss — the recipe exited 0 but its step output
+    // had no parseable `{ "facts": [...] }` object (`ParseFailure`), or the
+    // recipe process exited non-zero (`CopilotTerminalFailure`) — previously
+    // deferred the whole batch for a full consolidation cycle. We retry up to
+    // `DISTILL_PARSE_RETRY_MAX` times within THIS pass, threading JSON-format
+    // reinforcement into the retry (`strict_json = true`). Structural classes
+    // (spawn/serialize/recipe-reported failure, and `Other`) are deterministic
+    // and escalate immediately — retrying them only wastes an LLM call.
+    //
+    // The retry-safety invariant is preserved across every attempt: no episode
+    // is marked and no fact is stored until an attempt finally parses. On final
+    // failure we return `Err` WITHOUT marking, so the batch stays fully
+    // retry-eligible on the next pass (the invariant under test in
+    // `distillation_handles_recipe_error_without_marking`).
+    let mut attempt: u32 = 0;
+    let output = loop {
+        attempt += 1;
+        // Reinforce the response format on any attempt past the first.
+        let strict_json = attempt > 1;
+        match runner.run_all_reinforced(&episodes, strict_json) {
+            Ok(o) => break o,
+            Err(e) => {
+                let class = classify_distill_error(&e);
+                let retries_left = attempt <= DISTILL_PARSE_RETRY_MAX;
+                if class.is_transient() && retries_left {
+                    tracing::warn!(
+                        target: "simard::distill",
+                        pulled,
+                        attempt,
+                        class = class.as_str(),
+                        error = %e,
+                        "distill: transient failure, retrying in-cycle with format reinforcement"
+                    );
+                    eprintln!(
+                        "[simard] distill: transient {} on attempt {attempt}, retrying in-cycle (strict json)",
+                        class.as_str()
+                    );
+                    continue;
+                }
+                tracing::warn!(
+                    target: "simard::distill",
+                    pulled,
+                    attempt,
+                    class = class.as_str(),
+                    error = %e,
+                    "distill: {pulled} episodes pulled, recipe error, no markers set, retry next pass"
+                );
+                eprintln!(
+                    "[simard] distill: {pulled} episodes pulled, recipe error: {e}, no markers set, retry next pass"
+                );
+                // Make the previously-silent non-fatal failure visible (#2461).
+                // Recorded BEFORE the early return; episodes stay unmarked, so
+                // the retry-safety invariant is unaffected. `attempt` lets the
+                // metric distinguish a first-attempt failure from an exhausted
+                // retry; a failed pass never "recovered".
+                record_distill_success_metric(false, Some(class), pulled, 0, attempt, false);
+                return Err(e);
+            }
         }
     };
+    let recovered_after_retry = attempt > 1;
     let DistillOutput { facts, procedures } = output;
 
     // ISAO-style reliability gate (issue #2433, BGML §IV). Before promoting a
@@ -387,7 +463,9 @@ pub fn distill_recent_episodes_with_runner(
     // this point is only reached after the storage writes above succeeded; a
     // downstream memory-write failure propagates as `Err` (a separate subsystem,
     // out of this recipe-stage metric's scope — see record_distill_success_metric).
-    record_distill_success_metric(true, None, pulled, stored);
+    // `attempt` / `recovered_after_retry` (#2468) let the metric distinguish a
+    // first-attempt success from one recovered by an in-cycle retry.
+    record_distill_success_metric(true, None, pulled, stored, attempt, recovered_after_retry);
 
     Ok(DistillReport {
         input_count: pulled,
@@ -589,6 +667,15 @@ impl DistillFailureClass {
     pub fn reached_parsing(self) -> bool {
         matches!(self, Self::ParseFailure)
     }
+
+    /// `true` for failure classes worth a bounded in-cycle retry (issue #2468):
+    /// a parse miss (exited 0, output unparseable) or a non-zero recipe exit.
+    /// These are observed to recover on a second attempt — often with JSON
+    /// format reinforcement. Structural classes (spawn/serialize/recipe-reported
+    /// failure, and `Other`) are deterministic and escalate immediately instead.
+    pub fn is_transient(self) -> bool {
+        matches!(self, Self::ParseFailure | Self::CopilotTerminalFailure)
+    }
 }
 
 /// Classify a distillation `SimardError` into a [`DistillFailureClass`].
@@ -631,11 +718,18 @@ pub fn classify_distill_error(err: &SimardError) -> DistillFailureClass {
 
 /// Build the `distill_success_rate` metric context for one pass that ran the
 /// recipe. `class` is `None` on success, `Some(_)` on failure.
+///
+/// `attempt` (1-based) is the number of runner invocations this pass made, and
+/// `recovered_after_retry` is `true` only when a success followed at least one
+/// transient retry (issue #2468) — together they let `distill_parse_success_rate`
+/// distinguish a first-attempt success from one recovered by an in-cycle retry.
 fn build_distill_success_context(
     success: bool,
     class: Option<DistillFailureClass>,
     input_count: u32,
     fact_count: u32,
+    attempt: u32,
+    recovered_after_retry: bool,
 ) -> String {
     let recipe_exited_ok = success || class.is_some_and(|c| c.recipe_exited_ok());
     // Parsing was attempted iff a step ran and its output was parsed — true on
@@ -650,6 +744,8 @@ fn build_distill_success_context(
         "failure_class": class.map(|c| c.as_str()),
         "input_count": input_count,
         "fact_count": fact_count,
+        "attempt": attempt,
+        "recovered_after_retry": recovered_after_retry,
     })
     .to_string()
 }
@@ -684,12 +780,21 @@ fn record_distill_success_metric(
     class: Option<DistillFailureClass>,
     input_count: u32,
     fact_count: u32,
+    attempt: u32,
+    recovered_after_retry: bool,
 ) {
     if cfg!(test) {
         return;
     }
     let value = if success { 1.0 } else { 0.0 };
-    let context = build_distill_success_context(success, class, input_count, fact_count);
+    let context = build_distill_success_context(
+        success,
+        class,
+        input_count,
+        fact_count,
+        attempt,
+        recovered_after_retry,
+    );
     if let Err(e) = crate::self_metrics::record_metric("distill_success_rate", value, &context) {
         tracing::warn!(
             target: "simard::distill",
@@ -725,6 +830,13 @@ pub fn distill_recent_episodes(
 }
 
 const RECIPE_FILENAME: &str = "distill-episodes.yaml";
+
+/// Format-reinforcement sentence threaded into the distill recipe on a retry
+/// after a transient parse miss (issue #2468). Interpolated into the recipe via
+/// the `{{strict_json_instruction}}` substitution; empty on the first attempt.
+const STRICT_JSON_INSTRUCTION: &str = "Your previous reply was not parseable. Respond with ONLY the JSON object \
+     {\"facts\":[...]} (and \"procedures\" if any) — no prose, no markdown fence, \
+     no thinking, nothing before or after the object.";
 
 fn resolve_recipe_path(repo_root: &Path) -> Option<std::path::PathBuf> {
     if let Some(home) = dirs::home_dir() {
@@ -784,12 +896,24 @@ impl RecipeRunnerSubprocess {
 
 impl DistillRecipeRunner for RecipeRunnerSubprocess {
     fn run(&self, episodes: &[CognitiveEpisode]) -> SimardResult<Vec<DistilledFact>> {
-        let raw = self.invoke_recipe(episodes)?;
+        let raw = self.invoke_recipe(episodes, false)?;
         parse_recipe_output(&raw)
     }
 
     fn run_all(&self, episodes: &[CognitiveEpisode]) -> SimardResult<DistillOutput> {
-        let raw = self.invoke_recipe(episodes)?;
+        let raw = self.invoke_recipe(episodes, false)?;
+        parse_recipe_output_full(&raw)
+    }
+
+    fn run_all_reinforced(
+        &self,
+        episodes: &[CognitiveEpisode],
+        strict_json: bool,
+    ) -> SimardResult<DistillOutput> {
+        // Issue #2468: on a retry (`strict_json = true`) thread a non-empty
+        // `strict_json_instruction` context var into the recipe so the agent
+        // reply is reinforced to be ONLY the `{ "facts": [...] }` object.
+        let raw = self.invoke_recipe(episodes, strict_json)?;
         parse_recipe_output_full(&raw)
     }
 }
@@ -798,7 +922,18 @@ impl RecipeRunnerSubprocess {
     /// Shell out to `recipe-runner-rs` with the episodes payload and return
     /// the recipe's raw stdout. Shared by [`run`](DistillRecipeRunner::run)
     /// and [`run_all`](DistillRecipeRunner::run_all).
-    fn invoke_recipe(&self, episodes: &[CognitiveEpisode]) -> SimardResult<String> {
+    ///
+    /// `strict_json` (issue #2468) threads a `strict_json_instruction` context
+    /// var into the recipe: empty on the first attempt, and a "respond with ONLY
+    /// the `{ \"facts\": [...] }` object" reinforcement sentence on a retry after
+    /// a transient parse miss. The recipe interpolates it via the pure
+    /// `{{strict_json_instruction}}` substitution, so no conditional templating
+    /// engine is needed.
+    fn invoke_recipe(
+        &self,
+        episodes: &[CognitiveEpisode],
+        strict_json: bool,
+    ) -> SimardResult<String> {
         // Serialize episodes as a compact JSON array. Each entry
         // exposes the four fields the recipe prompt references:
         // `id`, `source_label`, `temporal_index`, `content`.
@@ -826,6 +961,15 @@ impl RecipeRunnerSubprocess {
         // structured envelope whose `step_results[].output` holds the agent's
         // output, which `parse_recipe_output_full` mines. The agent binary is
         // still selected via the proven `AMPLIHACK_AGENT_BINARY` env var.
+        //
+        // `strict_json_instruction` (issue #2468) is always passed so the
+        // recipe's `{{strict_json_instruction}}` substitution resolves: empty on
+        // the first attempt, and a format-reinforcement sentence on a retry.
+        let strict_json_instruction = if strict_json {
+            STRICT_JSON_INSTRUCTION
+        } else {
+            ""
+        };
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
@@ -833,6 +977,8 @@ impl RecipeRunnerSubprocess {
             .arg("json")
             .arg("-c")
             .arg(format!("episodes={payload_json}"))
+            .arg("-c")
+            .arg(format!("strict_json_instruction={strict_json_instruction}"))
             .output()
             .map_err(|e| {
                 SimardError::BridgeError(format!("distill: recipe-runner-rs spawn failed: {e}"))
@@ -1399,6 +1545,30 @@ mod unit_tests {
         assert_eq!(classify_distill_error(&err), DistillFailureClass::Other);
     }
 
+    // ── issue #2468: retry-aware metric context ─────────────────────────────
+
+    /// PR-1 (#2468): the `distill_success_rate` context distinguishes
+    /// first-attempt success from post-retry recovery so
+    /// `distill_parse_success_rate` can tell them apart. The extended
+    /// `build_distill_success_context` therefore carries `attempt` (1-based) and
+    /// `recovered_after_retry`.
+    #[test]
+    fn distill_success_context_carries_attempt_and_recovery() {
+        // First-attempt success.
+        let first = build_distill_success_context(true, None, 20, 3, 1, false);
+        let v: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(v["attempt"], 1);
+        assert_eq!(v["recovered_after_retry"], false);
+        assert_eq!(v["parse_success"], true);
+
+        // Recovered on the second attempt after a transient miss.
+        let recovered = build_distill_success_context(true, None, 20, 3, 2, true);
+        let v2: serde_json::Value = serde_json::from_str(&recovered).unwrap();
+        assert_eq!(v2["attempt"], 2);
+        assert_eq!(v2["recovered_after_retry"], true);
+        assert_eq!(v2["parse_success"], true);
+    }
+
     #[test]
     fn parse_failure_is_the_only_class_that_reached_parsing() {
         use DistillFailureClass::*;
@@ -1418,7 +1588,7 @@ mod unit_tests {
 
     #[test]
     fn success_metric_context_marks_parse_attempted_and_parse_success() {
-        let payload = build_distill_success_context(true, None, 25, 3);
+        let payload = build_distill_success_context(true, None, 25, 3, 1, false);
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["outcome"], "success");
         assert_eq!(v["recipe_exited_ok"], true);
@@ -1431,8 +1601,14 @@ mod unit_tests {
 
     #[test]
     fn parse_failure_metric_context_attempted_parsing_but_failed() {
-        let payload =
-            build_distill_success_context(false, Some(DistillFailureClass::ParseFailure), 40, 0);
+        let payload = build_distill_success_context(
+            false,
+            Some(DistillFailureClass::ParseFailure),
+            40,
+            0,
+            1,
+            false,
+        );
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["outcome"], "failure");
         assert_eq!(v["recipe_exited_ok"], true, "parse failure means exit 0");
@@ -1448,6 +1624,8 @@ mod unit_tests {
             Some(DistillFailureClass::CopilotTerminalFailure),
             40,
             0,
+            1,
+            false,
         );
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["recipe_exited_ok"], false);
@@ -1467,6 +1645,8 @@ mod unit_tests {
             Some(DistillFailureClass::RecipeReportedFailure),
             40,
             0,
+            1,
+            false,
         );
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["recipe_exited_ok"], true, "envelope present → exit 0");
@@ -1492,8 +1672,14 @@ mod unit_tests {
             classify_distill_error(&err),
             DistillFailureClass::ParseFailure
         );
-        let payload =
-            build_distill_success_context(false, Some(classify_distill_error(&err)), 40, 0);
+        let payload = build_distill_success_context(
+            false,
+            Some(classify_distill_error(&err)),
+            40,
+            0,
+            1,
+            false,
+        );
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["parse_attempted"], true);
         assert_eq!(v["parse_success"], false);

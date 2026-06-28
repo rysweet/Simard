@@ -10,6 +10,8 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
+
 use crate::error::SimardResult;
 use crate::memory_cognitive::{
     CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
@@ -76,6 +78,100 @@ pub enum MemoryKind {
     Episode,
     /// A procedural memory (`CognitiveProcedure`).
     Procedure,
+}
+
+/// Forgetting threshold for [`CognitiveMemoryOps::forget_low_value_facts`]
+/// (issue #2434): live facts whose value falls below this fade during the
+/// controlled-forgetting hygiene pass.
+///
+/// Conservative but non-zero — a `0.0` threshold (the pre-#2434 `prune_superseded`
+/// no-op) never forgets a live fact, so semantic memory grew monotonically; a
+/// value this small only catches genuinely low-value facts while leaving the
+/// long tail of useful knowledge untouched. The actual deletion is doubly
+/// guarded (provenance-bearing and above-threshold facts are never in the delete
+/// set, dry-run preview first), so the precise value is safe within a wide band.
+pub const FORGET_MIN_IMPORTANCE: f64 = 0.1;
+
+/// Outcome of one [`CognitiveMemoryOps::forget_low_value_facts`] pass (issue
+/// #2434), used to gate the controlled-forgetting safety self-metric.
+///
+/// `archived + deleted` is the number of live facts actually forgotten this
+/// pass; `candidates` is how many qualified (it equals `archived + deleted` on a
+/// live run and is the previewed count on a `dry_run`). `live_before` /
+/// `live_after` snapshot the live `Fact` count so a regression (valuable-fact
+/// loss) is visible.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ForgetReport {
+    /// `true` when this was a preview pass that changed nothing.
+    pub dry_run: bool,
+    /// Live (non-archived) fact count before the pass.
+    pub live_before: usize,
+    /// Live (non-archived) fact count after the pass (== `live_before` for a
+    /// dry run).
+    pub live_after: usize,
+    /// Number of low-value, unprotected facts identified as forgettable.
+    pub candidates: usize,
+    /// Facts archived (soft-forgotten) this pass. `0` on a dry run.
+    pub archived: usize,
+    /// Facts deleted (hard-forgotten) this pass. `0` on a dry run.
+    pub deleted: usize,
+}
+
+/// Pure forgetting signal for a live fact (issue #2440 / #2434): a bounded
+/// `[0.0, 1.0]` score where a **higher** value means **more forgettable**.
+///
+/// A single source of truth shared by ranked recall (as a demotion tiebreaker)
+/// and the controlled-forgetting hygiene pass. It is the complement of a
+/// retention score blended from the three signals the Generative-Agents
+/// retrieval model uses, mirrored from local fact metadata (no LLM call):
+///
+/// - **importance** ≈ `confidence` (already `[0,1]`),
+/// - **recency** — exponential decay of the time since `last_accessed_at` with a
+///   7-day half-life (matching the ranked-recall recency term); a never-accessed
+///   fact (`None`) contributes no recency,
+/// - **usage** — a sub-linear boost from `usage_count` (`1 - 1/(1+n)`), bounded
+///   in `[0,1)`.
+///
+/// `forgetting = 1 - (w_imp·confidence + w_rec·recency + w_use·usage)`, with
+/// weights summing to 1 so the result stays bounded. A stale, low-confidence,
+/// never-used fact scores near `1.0` (very forgettable); a fresh, high-confidence,
+/// frequently-used fact scores near `0.0` (protect).
+pub fn forgetting_score(
+    confidence: f64,
+    usage_count: i64,
+    last_accessed_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> f64 {
+    // Importance proxy — clamp defensively in case a backend surfaces an
+    // out-of-range confidence.
+    let importance = confidence.clamp(0.0, 1.0);
+
+    // Recency: 0.5^(age_days / 7) ∈ (0, 1]. A never-accessed fact has no recency
+    // signal, so it contributes 0 (maximally forgettable on this axis).
+    const RECENCY_HALF_LIFE_DAYS: f64 = 7.0;
+    let recency = match last_accessed_at {
+        Some(ts) => {
+            let age_days = (now - ts).num_seconds().max(0) as f64 / 86_400.0;
+            0.5_f64.powf(age_days / RECENCY_HALF_LIFE_DAYS)
+        }
+        None => 0.0,
+    };
+
+    // Usage: sub-linear, saturating boost in [0, 1). 0 -> 0, 1 -> 0.5, 25 -> ~0.96.
+    let usage = {
+        let n = usage_count.max(0) as f64;
+        1.0 - 1.0 / (1.0 + n)
+    };
+
+    // Retention is a convex blend (weights sum to 1) so forgetting stays in
+    // [0, 1] without an explicit clamp; importance leads, then recency, then
+    // usage — the same precedence ranked recall and the forgetting hygiene pass
+    // rely on.
+    const W_IMPORTANCE: f64 = 0.5;
+    const W_RECENCY: f64 = 0.3;
+    const W_USAGE: f64 = 0.2;
+    let retention = W_IMPORTANCE * importance + W_RECENCY * recency + W_USAGE * usage;
+    (1.0 - retention).clamp(0.0, 1.0)
 }
 
 /// Trait abstracting cognitive memory operations.
@@ -156,6 +252,50 @@ pub trait CognitiveMemoryOps: Send + Sync {
         self.search_facts(query, limit, min_confidence)
     }
 
+    /// Reinforcing ranked recall (issue #2440, A3 / AC#2): score like
+    /// [`recall_facts_ranked`](Self::recall_facts_ranked) and, after scoring,
+    /// reinforce (`reinforce_access`) ONLY the returned top-k so recall-intent
+    /// reads feed the `usage` / `recency` signals on later cycles.
+    ///
+    /// This is the entry point recall-intent call sites (reasoning / context
+    /// retrieval) use; the pure [`recall_facts_ranked`](Self::recall_facts_ranked)
+    /// stays non-reinforcing for structural / index reads that must not inflate
+    /// usage. Reinforcement is best-effort per fact — it never changes the
+    /// returned set, only the persisted access signal.
+    ///
+    /// The default implementation works for every backend: it delegates scoring
+    /// to [`recall_facts_ranked`](Self::recall_facts_ranked) and bumps each hit
+    /// via [`reinforce_access`](Self::reinforce_access) (a no-op on backends
+    /// without access tracking), so only [`LibraryCognitiveMemory`] actually
+    /// persists the reinforcement.
+    fn recall_facts_ranked_reinforced(
+        &self,
+        query: &str,
+        limit: u32,
+        min_confidence: f64,
+        weights: RecallWeightSet,
+    ) -> SimardResult<Vec<CognitiveFact>> {
+        let facts = self.recall_facts_ranked(query, limit, min_confidence, weights)?;
+        for fact in &facts {
+            // Best-effort, per the contract above: a failed usage/recency bump
+            // must NEVER turn a successful recall into an error or drop the
+            // returned set. The bump can fail benignly — e.g. a concurrent
+            // `forget_low_value_facts` / consolidation pass deletes a
+            // just-recalled fact in the window between scoring and reinforcement,
+            // and the backend reports the now-missing node as a storage error.
+            // Log and continue; the recalled facts are still valid to return.
+            if let Err(e) = self.reinforce_access(&fact.node_id, MemoryKind::Fact) {
+                tracing::debug!(
+                    target: "simard::memory",
+                    node_id = %fact.node_id,
+                    error = %e,
+                    "recall_facts_ranked_reinforced: reinforce_access failed (non-fatal, recall unaffected)"
+                );
+            }
+        }
+        Ok(facts)
+    }
+
     /// Store a fact under a stable `caller_key` so repeated logical records
     /// deduplicate instead of accumulating (issue #2329).
     ///
@@ -194,6 +334,28 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// retention pass; only [`LibraryCognitiveMemory`] reclaims.
     fn prune_superseded(&self) -> SimardResult<usize> {
         Ok(0)
+    }
+
+    /// Controlled forgetting of *live* low-value facts (issue #2434): a bounded,
+    /// safe hygiene pass that lets genuinely low-value facts fade while
+    /// protecting valuable knowledge, complementing
+    /// [`prune_superseded`](Self::prune_superseded) (which only reclaims the
+    /// superseded tail).
+    ///
+    /// A fact is a forgetting *candidate* only when it is both **low value**
+    /// (`confidence < FORGET_MIN_IMPORTANCE`) and **unprotected** — i.e. it
+    /// carries no provenance (`DERIVES_FROM`) edge. Provenance-bearing and
+    /// above-threshold facts are NEVER in the delete set. Mandatory safety
+    /// (issue #2434): the candidate set is computed first (a `dry_run` returns it
+    /// as a pure preview that changes nothing), and a live run only deletes when
+    /// candidates exist, snapshotting the live `Fact` count before/after via a
+    /// self-metric so valuable-fact loss is visible.
+    ///
+    /// The default implementation is a safe no-op (`Ok(ForgetReport::default())`)
+    /// for backends without a retention pass (legacy bridge, IPC client, test
+    /// stubs); only [`LibraryCognitiveMemory`] forgets.
+    fn forget_low_value_facts(&self, _dry_run: bool) -> SimardResult<ForgetReport> {
+        Ok(ForgetReport::default())
     }
 
     fn store_procedure(
@@ -570,3 +732,19 @@ mod tests_graph_stats;
 // `LibraryCognitiveMemory`.
 #[cfg(test)]
 mod tests_ranked_episodic;
+
+// Issue #2440 (PR-2): ranked multi-signal recall + forgetting signal. Pins the
+// pure `forgetting_score` helper (bounded, recency/usage/confidence ordering),
+// the reinforcing `recall_facts_ranked_reinforced` entry point (bumps the
+// returned top-k), and usage-ordered `recall_procedure` against
+// `LibraryCognitiveMemory`.
+#[cfg(test)]
+mod tests_recall_forgetting;
+
+// Issue #2434 (PR-3): controlled forgetting of live facts. Pins the bounded,
+// safe `forget_low_value_facts` hygiene pass (`ForgetReport`,
+// `FORGET_MIN_IMPORTANCE`) — low-value facts fade, provenance-bearing /
+// high-value facts are protected, dry-run is a pure preview — and its wiring
+// into the consolidation cadence.
+#[cfg(test)]
+mod tests_controlled_forgetting;
