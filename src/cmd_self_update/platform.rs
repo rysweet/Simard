@@ -3,6 +3,19 @@
 pub(crate) const GITHUB_REPO: &str = "rysweet/Simard";
 pub(crate) const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// cosign keyless verification identity for release assets (issues #2261 / #2252).
+///
+/// `simard update` pins the signer of a release tarball to THIS repository's
+/// `release.yml` workflow running on `main`. The Fulcio certificate's Subject
+/// Alternative Name must match this regexp and be issued by GitHub's OIDC
+/// provider below. These two constants MUST stay in lockstep with the
+/// `cosign sign-blob` identity produced by `.github/workflows/release.yml`.
+pub(crate) const RELEASE_CERT_IDENTITY_REGEXP: &str =
+    r"^https://github\.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main$";
+
+/// OIDC issuer for GitHub Actions keyless signing certificates.
+pub(crate) const RELEASE_CERT_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
+
 /// Platform suffix for GitHub Release assets.
 pub(crate) fn platform_suffix() -> Option<&'static str> {
     if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {

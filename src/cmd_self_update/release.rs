@@ -20,12 +20,23 @@ pub(crate) fn find_latest_release() -> Result<(String, String), Box<dyn std::err
             std::process::Command::new("curl")
                 .args([
                     "-sS",
+                    // R3: https-only transport — refuse a plaintext URL and never
+                    // let a redirect downgrade the scheme to http://. The URL is a
+                    // hardcoded api.github.com constant, but this keeps the release
+                    // query consistent with the hardened download path.
+                    "--proto",
+                    "=https",
+                    "--proto-redir",
+                    "=https",
+                    "--tlsv1.2",
                     "--connect-timeout",
                     "10",
                     "--max-time",
                     "30",
                     "-H",
                     "Accept: application/vnd.github+json",
+                    // `--` terminates option parsing (arg-injection guard).
+                    "--",
                     &format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest"),
                 ])
                 .output()
