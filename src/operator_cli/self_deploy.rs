@@ -74,16 +74,25 @@ pub(super) fn dispatch_self_deploy_command(
 /// merged head is current. Unlike [`run_self_deploy`] this stays strictly
 /// read-only: it never clones (honoring the documented "make no changes"
 /// contract) and tolerates a failed fetch (offline → report against the local
-/// tracking refs) instead of hard-erroring. When no canonical checkout exists
-/// yet (e.g. before the first deploy) it falls back to a best-effort report from
-/// the current directory.
+/// tracking refs) instead of hard-erroring — but the degraded path is **never
+/// silent**: a failed best-effort fetch prints a visible warning to stderr so an
+/// operator is never misled into trusting a stale report. When no canonical
+/// checkout exists yet (e.g. before the first deploy) it falls back to a
+/// best-effort report from the current directory.
 fn report_drift(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let preparer = GitSourcePreparer::new();
     let source = match preparer.resolve_existing_repo() {
         Some(repo) => {
-            // Best-effort refresh so the merged head is current; an offline
-            // check still reports against the local tracking refs.
-            let _ = preparer.fetch_origin(&repo);
+            // Best-effort refresh so the merged head is current. A failed fetch
+            // (e.g. offline) must NOT silently degrade: warn loudly on stderr —
+            // keeping stdout (incl. `--json`) clean — then report against the
+            // local tracking refs, which may be stale.
+            if let Err(e) = preparer.fetch_origin(&repo) {
+                eprintln!(
+                    "self-deploy --check: warning: could not fetch origin ({e}); \
+                     reporting against local tracking refs, which may be stale"
+                );
+            }
             GitDeploySource::at(repo)
         }
         // No canonical source yet — best-effort report from the cwd.
