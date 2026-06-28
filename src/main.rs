@@ -20,9 +20,21 @@ fn main() -> std::process::ExitCode {
 
 /// Initialize structured tracing with optional OTEL export.
 ///
+/// Diagnostic logs are written to **stderr** so that stdout carries only a
+/// command's actual output — e.g. `simard memory stats --json` must emit
+/// nothing but the JSON document so it stays pipe-safe (`… | jq`). The
+/// dependency stack (notably `amplihack-memory`) logs at `info` on store
+/// open; routing those to stderr keeps machine-readable stdout clean.
+///
 /// - `RUST_LOG` controls verbosity (default: info)
 /// - `SIMARD_LOG_JSON=1` enables JSON log output
 /// - `OTEL_EXPORTER_OTLP_ENDPOINT` enables OTLP span export (e.g. http://localhost:4317)
+///
+/// Human/JSON log lines are always written to **stderr** so that stdout carries
+/// only program output (e.g. the `--json` payloads emitted by `simard memory
+/// stats|dump`). Routing logs to stdout would interleave dependency log lines
+/// such as `amplihack_memory::graph::lbug_store: effective LadybugDB limits ...`
+/// ahead of the JSON, breaking machine-readable parsing (issue #2340).
 fn init_tracing() {
     let use_json = std::env::var("SIMARD_LOG_JSON")
         .map(|v| matches!(v.as_str(), "1" | "true"))
@@ -37,8 +49,10 @@ fn init_tracing() {
         eprintln!("[simard] OTEL tracing enabled → {ep}");
     }
 
-    // Each branch creates the otel layer inline so Rust infers the subscriber
-    // type parameter correctly for the layered stack.
+    // Logs go to STDERR, not stdout, so they never corrupt a command's stdout
+    // result (e.g. `simard memory stats --json`, whose stdout must be parseable
+    // JSON). Without this, an INFO log emitted on a dependency's store-open path
+    // interleaves with the JSON and breaks downstream parsers.
     if use_json {
         let otel = endpoint
             .as_deref()

@@ -26,6 +26,8 @@ use crate::goals::GoalStatus;
 
 fn active(id: &str, description: &str, priority: u32) -> ActiveGoal {
     ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: id.to_string(),
         description: description.to_string(),
         priority,
@@ -91,6 +93,8 @@ fn one_active_goal_maps_basic_fields() {
 fn current_activity_is_used_as_rationale_when_present() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "improve-coverage".to_string(),
         description: "Improve test coverage on the goal curation module".to_string(),
         priority: 3,
@@ -123,6 +127,8 @@ fn missing_current_activity_yields_empty_rationale() {
 fn assigned_to_some_becomes_owner_identity() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "assigned-goal-id".to_string(),
         description: "An assigned goal".to_string(),
         priority: 1,

@@ -13,7 +13,8 @@ use crate::meeting_backend::persist::{
     extract_risks,
 };
 use crate::meeting_backend::{
-    MeetingBackend, MeetingCommand, Role, parse_command, strip_ansi_escapes,
+    HELP_GROUPS, MeetingBackend, MeetingCommand, Role, parse_command, strip_ansi_escapes,
+    unknown_command_notice,
 };
 use crate::meeting_facilitator::MeetingSession;
 
@@ -34,6 +35,50 @@ fn checkpoint_wip(backend: &MeetingBackend) {
     }
 }
 
+/// Pluralization helper: returns `"s"` for any count other than 1, so the
+/// capture tally reads naturally ("1 decision" vs "2 decisions").
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Build a compact running tally of the structured items captured so far in
+/// the session: decisions, open questions, action items, risks, and
+/// disagreements.
+///
+/// Printed after each explicit `/decision`, `/action`, `/question`, `/risk`,
+/// and `/disagree` command so the operator gets live feedback on what the
+/// meeting has accumulated without having to run `/state`. This gives the
+/// interactive REPL live capture feedback analogous to the capture-count
+/// summary the batch meeting probe emits (see `agent_program::meeting_facilitator`),
+/// though the two surfaces intentionally differ: this tally covers the full
+/// structured-capture set shown by `/state` (decisions, open questions, action
+/// items, risks, disagreements), while the batch summary reports a narrower
+/// set. The counts are sourced from the deterministic explicit-capture stores
+/// (not heuristic transcript extraction) so the tally is exact and
+/// reproducible. The category order matches the `/state` view.
+///
+/// The `[meeting] captured:` prefix is a stable, greppable marker matching
+/// the `[meeting] …` convention used by the close banners — operators can
+/// `grep '\[meeting\] captured:'` terminal scrollback reliably.
+///
+/// Issue #2376 (child of #1154 Pillar 3/5; audit #1628).
+fn capture_tally(backend: &MeetingBackend) -> String {
+    let decisions = backend.explicit_decisions().len();
+    let questions = backend.explicit_questions().len();
+    let actions = backend.explicit_action_items().len();
+    let risks = backend.explicit_risks().len();
+    let disagreements = backend.explicit_disagreements().len();
+    format!(
+        "[meeting] captured: {decisions} decision{}, {questions} open question{}, \
+         {actions} action item{}, {risks} risk{}, {disagreements} disagreement{}",
+        plural(decisions),
+        plural(questions),
+        plural(actions),
+        plural(risks),
+        plural(disagreements),
+    )
+}
+
 /// Build the live REPL prompt, optionally color-coded.
 ///
 /// The literal text is always `simard:meeting> ` so non-TTY callers and tests
@@ -41,6 +86,27 @@ fn checkpoint_wip(backend: &MeetingBackend) {
 /// `color::cyan` helper which already honors `NO_COLOR`.
 fn prompt_string() -> String {
     cyan(PROMPT_TEXT)
+}
+
+/// Render the grouped, colorized `/help` reference.
+///
+/// Sources the command groups from `meeting_backend::HELP_GROUPS` (single
+/// source of truth) and colors each group title cyan in the same `── Title ──`
+/// style used by `/state` and `/recap`. Honors `NO_COLOR` via the `cyan`
+/// helper. Reused for the `/help` command and the no-suggestion branch of the
+/// unknown-command hint. Issue #2321.
+fn write_help<W: Write>(output: &mut W) {
+    for group in HELP_GROUPS {
+        writeln!(output, "\n{}", cyan(&format!("── {} ──", group.title))).ok();
+        for entry in group.entries {
+            writeln!(output, "  {} — {}", entry.usage, entry.description).ok();
+        }
+    }
+    writeln!(
+        output,
+        "\nEverything else is natural conversation with Simard."
+    )
+    .ok();
 }
 
 /// Render a structured backend-error banner to the operator.
@@ -196,11 +262,20 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
 
         match parse_command(&line) {
             MeetingCommand::Help => {
+                write_help(output);
+            }
+            MeetingCommand::Unknown { input, suggestion } => {
+                // A mistyped command (e.g. `/colse`). Surface a did-you-mean
+                // hint instead of forwarding the typo to the LLM. Issue #2321.
                 writeln!(
                     output,
-                    "Commands:\n  /status    — show session info\n  /state     — show current decisions, open questions, action items, risks, disagreements\n  /template  — list meeting templates\n  /template <name> — apply a template (standup, 1on1, retro, planning)\n  /theme <text>    — record a theme for this meeting\n  /decision <text> [--rationale <why>] — record a decision (optional rationale)\n  /action <text>   — record an action item (assignee/deadline parsed inline)\n  /question <text> — record an open question deterministically\n  /risk <text>     — record an identified risk\n  /disagree <text> — record a disagreement or dissenting view\n  /owner <name>    — name the next agent/persona/human expected to action this handoff\n  /goal <text>     — set the meeting's overarching objective\n  /recap     — show color-coded session recap\n  /preview   — preview the handoff artifact\n  /export    — export meeting as markdown\n  /close     — end meeting and persist\n  /help      — this message\n\nEverything else is natural conversation with Simard."
+                    "{}",
+                    yellow(&unknown_command_notice(&input, suggestion.as_deref()))
                 )
                 .ok();
+                if suggestion.is_none() {
+                    write_help(output);
+                }
             }
             MeetingCommand::Status => {
                 let status = backend.status();
@@ -372,16 +447,19 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 };
                 writeln!(output, "{}", cyan(&msg)).ok();
                 checkpoint_wip(&backend);
+                writeln!(output, "{}", capture_tally(&backend)).ok();
             }
             MeetingCommand::Action(text) => {
                 backend.push_explicit_action_item(&text);
                 writeln!(output, "{}", green(&format!("Action recorded: {text}"))).ok();
                 checkpoint_wip(&backend);
+                writeln!(output, "{}", capture_tally(&backend)).ok();
             }
             MeetingCommand::Question(text) => {
                 backend.push_explicit_question(&text);
                 writeln!(output, "{}", yellow(&format!("Question recorded: {text}"))).ok();
                 checkpoint_wip(&backend);
+                writeln!(output, "{}", capture_tally(&backend)).ok();
             }
             MeetingCommand::Owner(text) => {
                 backend.push_next_owner(&text);
@@ -397,6 +475,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 backend.push_explicit_risk(&text);
                 writeln!(output, "{}", yellow(&format!("Risk recorded: {text}"))).ok();
                 checkpoint_wip(&backend);
+                writeln!(output, "{}", capture_tally(&backend)).ok();
             }
             MeetingCommand::Disagree(text) => {
                 backend.push_explicit_disagreement(&text);
@@ -407,6 +486,7 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 )
                 .ok();
                 checkpoint_wip(&backend);
+                writeln!(output, "{}", capture_tally(&backend)).ok();
             }
             MeetingCommand::Recap => {
                 let status = backend.status();

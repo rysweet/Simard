@@ -8,9 +8,26 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+/// Process-wide lock serializing read-modify-write cycles against the
+/// on-disk session registry (`load` → mutate → `save_atomic`).
+///
+/// `save_atomic` keeps the file *valid* via temp-file+rename, but it does
+/// not prevent a lost update: two callers that `load()` the same snapshot
+/// will each `save_atomic` their own copy, and the second write clobbers
+/// the first writer's appended/changed entries. Engineers are now spawned
+/// concurrently within a single OODA round (see `dispatch_advance_goal_concurrent`),
+/// so `record_spawn` can run in parallel with itself and with the daemon's
+/// `poll_and_gc`. Holding this lock across the whole load→mutate→save
+/// sequence makes those mutations atomic with respect to one another.
+fn registry_mutation_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// Sessions ended more than this many seconds ago are GC'd (default).
 /// Configurable via `SIMARD_SUBAGENT_RETENTION_SECONDS`.
@@ -158,6 +175,9 @@ pub fn save_atomic(reg: &Registry) -> io::Result<()> {
 /// sessions are pruned oldest-first until the count is within the cap.
 /// Active (non-ended) sessions are never dropped by the cap.
 pub fn record_spawn(session: SubagentSession) -> io::Result<()> {
+    let _guard = registry_mutation_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let mut reg = load();
     reg.sessions.push(session);
     enforce_cap(&mut reg);
@@ -216,6 +236,9 @@ pub fn poll_and_gc<R: SessionProbe>(probe: &R) -> io::Result<()> {
 /// Like [`poll_and_gc`] but with an explicit retention threshold. Returns
 /// the number of entries pruned.
 pub fn gc_with_retention<R: SessionProbe>(probe: &R, retention_secs: i64) -> io::Result<usize> {
+    let _guard = registry_mutation_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let mut reg = load();
     let now = now_epoch_seconds();
 

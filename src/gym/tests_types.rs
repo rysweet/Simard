@@ -1,4 +1,6 @@
 use super::types::*;
+use crate::gym_bridge::ScoreDimensions;
+use crate::gym_scoring::EvidenceQualityAssessment;
 use crate::runtime::RuntimeTopology;
 #[test]
 fn benchmark_class_display_all_variants() {
@@ -15,39 +17,6 @@ fn benchmark_class_display_all_variants() {
         BenchmarkClass::SessionQuality.to_string(),
         "session-quality"
     );
-    assert_eq!(BenchmarkClass::TestWriting.to_string(), "test-writing");
-    assert_eq!(BenchmarkClass::BugFix.to_string(), "bug-fix");
-    assert_eq!(BenchmarkClass::Refactoring.to_string(), "refactoring");
-    assert_eq!(
-        BenchmarkClass::DependencyAnalysis.to_string(),
-        "dependency-analysis"
-    );
-    assert_eq!(BenchmarkClass::ErrorHandling.to_string(), "error-handling");
-    assert_eq!(
-        BenchmarkClass::PerformanceAnalysis.to_string(),
-        "performance-analysis"
-    );
-    assert_eq!(BenchmarkClass::SecurityAudit.to_string(), "security-audit");
-    assert_eq!(BenchmarkClass::ApiDesign.to_string(), "api-design");
-    assert_eq!(BenchmarkClass::CodeReview.to_string(), "code-review");
-    assert_eq!(BenchmarkClass::Debugging.to_string(), "debugging");
-    assert_eq!(
-        BenchmarkClass::ConfigManagement.to_string(),
-        "config-management"
-    );
-    assert_eq!(
-        BenchmarkClass::ConcurrencyAnalysis.to_string(),
-        "concurrency-analysis"
-    );
-    assert_eq!(
-        BenchmarkClass::MigrationPlanning.to_string(),
-        "migration-planning"
-    );
-    assert_eq!(
-        BenchmarkClass::ObservabilityInstrumentation.to_string(),
-        "observability-instrumentation"
-    );
-    assert_eq!(BenchmarkClass::DataModeling.to_string(), "data-modeling");
 }
 
 #[test]
@@ -67,32 +36,12 @@ fn comparison_status_display_all_variants() {
 fn benchmark_class_serializes_to_kebab_case() {
     let json = serde_json::to_string(&BenchmarkClass::RepoExploration).unwrap();
     assert!(json.contains("repo-exploration"));
+    let json = serde_json::to_string(&BenchmarkClass::Documentation).unwrap();
+    assert!(json.contains("documentation"));
     let json = serde_json::to_string(&BenchmarkClass::SafeCodeChange).unwrap();
     assert!(json.contains("safe-code-change"));
-    let json = serde_json::to_string(&BenchmarkClass::TestWriting).unwrap();
-    assert!(json.contains("test-writing"));
-    let json = serde_json::to_string(&BenchmarkClass::BugFix).unwrap();
-    assert!(json.contains("bug-fix"));
-    let json = serde_json::to_string(&BenchmarkClass::Refactoring).unwrap();
-    assert!(json.contains("refactoring"));
-    let json = serde_json::to_string(&BenchmarkClass::DependencyAnalysis).unwrap();
-    assert!(json.contains("dependency-analysis"));
-    let json = serde_json::to_string(&BenchmarkClass::ErrorHandling).unwrap();
-    assert!(json.contains("error-handling"));
-    let json = serde_json::to_string(&BenchmarkClass::PerformanceAnalysis).unwrap();
-    assert!(json.contains("performance-analysis"));
-    let json = serde_json::to_string(&BenchmarkClass::SecurityAudit).unwrap();
-    assert!(json.contains("security-audit"));
-    let json = serde_json::to_string(&BenchmarkClass::ApiDesign).unwrap();
-    assert!(json.contains("api-design"));
-    let json = serde_json::to_string(&BenchmarkClass::ConcurrencyAnalysis).unwrap();
-    assert!(json.contains("concurrency-analysis"));
-    let json = serde_json::to_string(&BenchmarkClass::MigrationPlanning).unwrap();
-    assert!(json.contains("migration-planning"));
-    let json = serde_json::to_string(&BenchmarkClass::ObservabilityInstrumentation).unwrap();
-    assert!(json.contains("observability-instrumentation"));
-    let json = serde_json::to_string(&BenchmarkClass::DataModeling).unwrap();
-    assert!(json.contains("data-modeling"));
+    let json = serde_json::to_string(&BenchmarkClass::SessionQuality).unwrap();
+    assert!(json.contains("session-quality"));
 }
 
 #[test]
@@ -115,7 +64,10 @@ fn benchmark_class_equality_and_inequality() {
         BenchmarkClass::RepoExploration,
         BenchmarkClass::Documentation
     );
-    assert_ne!(BenchmarkClass::SafeCodeChange, BenchmarkClass::TestWriting);
+    assert_ne!(
+        BenchmarkClass::SafeCodeChange,
+        BenchmarkClass::SessionQuality
+    );
 }
 
 #[test]
@@ -225,6 +177,13 @@ fn benchmark_scorecard_fields() {
     let s = BenchmarkScorecard {
         task_completed: true,
         evidence_quality: "sufficient".to_string(),
+        evidence_quality_assessment: EvidenceQualityAssessment::from_dimensions(ScoreDimensions {
+            factual_accuracy: 0.8,
+            specificity: 0.6,
+            temporal_awareness: 0.4,
+            source_attribution: 1.0,
+            confidence_calibration: 0.7,
+        }),
         correctness_checks_passed: 7,
         correctness_checks_total: 10,
         unnecessary_action_count: Some(2),
@@ -238,6 +197,9 @@ fn benchmark_scorecard_fields() {
     assert_eq!(s.retry_count, None);
     assert_eq!(s.human_review_notes.len(), 1);
     assert_eq!(s.measurement_notes.len(), 2);
+    assert!((s.evidence_quality_assessment.dimensions.factual_accuracy - 0.8).abs() < 1e-9);
+    assert!((s.evidence_quality_assessment.overall - 0.7).abs() < 1e-9);
+    assert_eq!(s.evidence_quality_assessment.category, "moderate");
 }
 
 #[test]

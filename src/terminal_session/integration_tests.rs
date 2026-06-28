@@ -5,6 +5,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    use crate::terminal_session::parsing::default_shell;
     use crate::terminal_session::types::{TerminalStep, TerminalTurnSpec};
 
     // ── Parsing: simple recipes ──────────────────────────────────────
@@ -18,7 +19,7 @@ mod tests {
             spec.steps,
             vec![TerminalStep::Input("echo hello world".into())]
         );
-        assert_eq!(spec.shell, "/usr/bin/bash");
+        assert_eq!(spec.shell, default_shell());
         assert_eq!(spec.wait_timeout, Duration::from_secs(5));
         assert!(spec.working_directory.is_none());
     }
@@ -137,7 +138,7 @@ mod tests {
         // "shell:" with no value should not set shell; default used instead.
         let raw = "shell:\ncommand: echo ok";
         let spec = TerminalTurnSpec::parse(raw, "test").unwrap();
-        assert_eq!(spec.shell, "/usr/bin/bash");
+        assert_eq!(spec.shell, default_shell());
     }
 
     #[test]

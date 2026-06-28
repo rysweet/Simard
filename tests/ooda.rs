@@ -79,6 +79,7 @@ fn test_bridges() -> OodaBridges {
         knowledge: KnowledgeBridge::new(Box::new(mock_knowledge_transport())),
         gym: GymBridge::new(Box::new(mock_gym_transport())),
         session: None,
+        session_factory: None,
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
         decide_brain: None,
         orient_brain: None,
@@ -86,11 +87,14 @@ fn test_bridges() -> OodaBridges {
         progress_evidence: std::sync::Arc::new(
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
+        completion_evidence: None,
     }
 }
 
 fn sample_goal(id: &str, priority: u32, progress: GoalProgress) -> ActiveGoal {
     ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: id.to_string(),
         description: format!("Goal {id}"),
         priority,
@@ -168,7 +172,7 @@ fn act_dispatches_and_returns_outcomes() {
     let obs = observe(&mut state, &bridges).unwrap();
     let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
     let actions = decide(&priorities, &OodaConfig::default()).unwrap();
-    let outcomes = act(&actions, &mut bridges, &mut state).unwrap();
+    let outcomes = act(&actions, &mut bridges, &mut state, actions.len().max(1)).unwrap();
     assert_eq!(outcomes.len(), actions.len());
     // AdvanceGoal for blocked goals will fail (can't advance blocked goals).
     // All other outcomes should succeed.
@@ -248,6 +252,7 @@ fn feral_gym_bridge_down() {
         knowledge: KnowledgeBridge::new(Box::new(mock_knowledge_transport())),
         gym: GymBridge::new(Box::new(failing_gym)),
         session: None,
+        session_factory: None,
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
         decide_brain: None,
         orient_brain: None,
@@ -255,6 +260,7 @@ fn feral_gym_bridge_down() {
         progress_evidence: std::sync::Arc::new(
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
+        completion_evidence: None,
     };
     let mut state = OodaState::new(board_with_goals());
     let report = run_ooda_cycle(&mut state, &mut bridges, &OodaConfig::default()).unwrap();
@@ -463,6 +469,7 @@ fn successful_outcome_stores_procedural_memory() {
         knowledge: KnowledgeBridge::new(Box::new(mock_knowledge_transport())),
         gym: GymBridge::new(Box::new(mock_gym_transport())),
         session: None,
+        session_factory: None,
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
         decide_brain: Some(std::sync::Arc::new(AlwaysConsolidateBrain)),
         orient_brain: None,
@@ -470,6 +477,7 @@ fn successful_outcome_stores_procedural_memory() {
         progress_evidence: std::sync::Arc::new(
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
+        completion_evidence: None,
     };
 
     let mut state = OodaState::new(board_with_goals());

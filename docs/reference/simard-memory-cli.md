@@ -83,12 +83,49 @@ cognitive memory @ /home/azureuser/.simard/cognitive  (via daemon socket)
   ---------------------
   total            44
 
+edges / connections:
+  (edges: run with daemon stopped for graph stats)
+
 samples (best-effort):
   facts:        CARGO_TARGET_DIR points the test harness at /tmp/simard-target
   facts:        the dashboard serves on port 8080 by default
   episodes:     cycle 412 — ran cargo test; 0 failures
   procedures:   ooda:consolidate-memory | triggers: working-memory pressure
 ```
+
+The **edges / connections** section (issue
+[#2331](https://github.com/rysweet/Simard/issues/2331)) reports how the
+per-type *nodes* are wired together. It is **gated on the access tier**: the
+daemon socket exposes no graph reader, so over `via daemon socket` the section
+prints the note above and the real counts require a `direct open` (daemon
+stopped, or `stats` pointed at an idle state root):
+
+```text
+$ simard memory stats        # daemon stopped → direct on-disk open
+
+  ... per-type table ...
+
+edges / connections:
+  DERIVES_FROM                 12     (fact -> episode)
+  PROCEDURE_DERIVES_FROM        3     (procedure -> episode)
+  SIMILAR_TO                    0     (fact <-> fact)
+  SUPERSEDES                    0     (deduped snapshot)
+  facts with provenance:  4 / 5
+  snapshot dedup:         1 distinct caller keys / 6 snapshot facts
+```
+
+| Line | Meaning |
+|------|---------|
+| `DERIVES_FROM` | `DERIVES_FROM` provenance edges (fact → source episode), summed over all facts (the read side of `store_fact_with_provenance`). |
+| `PROCEDURE_DERIVES_FROM` | Provenance edges (procedure → source episode), summed over all procedures. |
+| `SIMILAR_TO` | Fact↔fact similarity edges. Always `0` on the library backend — the pinned `amplihack-memory` rev exposes no public per-type edge reader. |
+| `SUPERSEDES` | Caller-key dedup edges (new snapshot → archived prior). Always `0` for the same reason; the `snapshot dedup` line is the computed proxy. |
+| `facts with provenance: X / Y` | `X` of `Y` facts carry at least one `DERIVES_FROM` edge. |
+| `snapshot dedup: D / T` | Scoped to the `goal-board:snapshot` concept only: `T` snapshot facts (live + superseded revisions) collapsed onto `D` distinct caller keys. `T` well above `D` is the visible dedup signal. The per-goal `goal-store:record:{slug}` dedup family is **not** counted here. |
+
+The section is read-only and **never fails the report**: if the direct-open
+graph read errors, the table still prints and the section shows
+`(edges: graph stats unavailable)`.
 
 The **counts** are authoritative — they come from a single
 `get_statistics()` call (see [Type → field mapping](#type-field-mapping)).
@@ -129,14 +166,56 @@ the daemon is down or rooted at a different state root.
     "procedural": 5,
     "prospective": 5,
     "total": 44
-  }
+  },
+  "edges": {
+    "derives_from": 0,
+    "procedure_derives_from": 0,
+    "similar_to": 0,
+    "supersedes": 0
+  },
+  "provenance": {
+    "facts_with_provenance": 0,
+    "facts_total": 0
+  },
+  "snapshot_dedup": {
+    "distinct_caller_keys": 0,
+    "snapshot_facts": 0
+  },
+  "edges_note": "(edges: run with daemon stopped for graph stats)"
 }
 ```
+
+> The example is the **daemon-socket** tier (`access_tier: "daemon-socket"`),
+> so every edge object is zeroed and `edges_note` is present — the socket has
+> no graph reader. On a **direct open** the edge objects carry the real counts
+> (e.g. `edges.derives_from: 12`, `snapshot_dedup.snapshot_facts: 6`) and
+> `edges_note` is omitted.
 
 The JSON keys are the raw `CognitiveStatistics` field stems
 (`sensory`, `working`, `episodic`, `semantic`, `procedural`,
 `prospective`) plus `total`. They never carry the friendly aliases
 (`facts`/`procedures`/`triggers`) so scripts bind to a stable schema.
+
+The `edges`, `provenance`, and `snapshot_dedup` objects (issue
+[#2331](https://github.com/rysweet/Simard/issues/2331)) mirror the human
+**edges / connections** section. Their keys are **always present** (zeroed
+when the counts could not be computed) so scripts bind to a stable shape.
+When the read could not be computed for this access tier — e.g. over the
+daemon socket, which has no graph reader — a top-level **`edges_note`**
+string is added and the edge objects stay zeroed; on a successful direct
+open `edges_note` is **absent**. The keys map onto the `GraphStats` struct
+(`src/memory_cognitive.rs`):
+
+| JSON path | `GraphStats` field |
+|-----------|--------------------|
+| `edges.derives_from` | `derives_from_edges` |
+| `edges.procedure_derives_from` | `procedure_derives_from_edges` |
+| `edges.similar_to` | `similar_to_edges` (always `0` — no public reader at the pinned rev) |
+| `edges.supersedes` | `supersedes_edges` (always `0` — no public reader at the pinned rev) |
+| `provenance.facts_with_provenance` | `facts_with_provenance` |
+| `provenance.facts_total` | `facts_total` |
+| `snapshot_dedup.distinct_caller_keys` | `distinct_snapshot_caller_keys` |
+| `snapshot_dedup.snapshot_facts` | `snapshot_facts_total` |
 
 ### Type → field mapping
 
@@ -429,6 +508,8 @@ bridge-open failure exits non-zero.
 | Subcommand registration | `src/operator_cli/mod.rs` |
 | Read bridge (`open_reader_bridge`) | `src/memory_ipc/launcher.rs` |
 | `CognitiveStatistics` (`get_statistics`) | `src/memory_cognitive.rs` |
+| `GraphStats` (edges / dedup, issue #2331) | `src/memory_cognitive.rs` |
+| `graph_stats` computation (issue #2331) | `src/cognitive_memory/library_adapter.rs` |
 | State-root resolution | `src/state_root.rs` |
 | Library backend | `src/cognitive_memory/library_adapter.rs` |
 
@@ -443,6 +524,10 @@ bridge-open failure exits non-zero.
 | `stats` on a never-initialised root prints all-zeros, exit 0 | Run against a fresh `TempDir`; assert all-zeros and zero exit (tier-2 create) |
 | `stats` reports counts only and never lists trigger rows | Assert `stats` output contains the `prospective` count but no per-trigger row, and that running it does not change `prospective_count` (no `check_triggers` mutation) |
 | `--json` emits the stable count schema | Parse the JSON; assert the six field stems plus `total` |
+| human output carries the edges / connections section (issue #2331) | Assert the rendered table contains the `edges / connections`, `DERIVES_FROM`, and `facts with provenance:` labels |
+| `--json` carries the `edges` / `provenance` / `snapshot_dedup` objects (issue #2331) | Parse the JSON; assert the edge keys, `provenance.facts_total`, and `snapshot_dedup.distinct_caller_keys` are present, and that direct-open output omits `edges_note` |
+| direct open counts `DERIVES_FROM` / provenance edges (issue #2331) | Seed a fact with provenance; assert `edges.derives_from >= 1` and the human line `facts with provenance:  1 / …` |
+| daemon socket notes edges are unavailable (issue #2331) | Force the daemon-socket tier; assert the human section prints the `(edges: run with daemon stopped …)` note and the JSON carries `edges_note` with edge keys still present (zeroed) |
 | `dump` notes when neutral episode rows need direct open | Force the daemon-socket tier; assert the episode count prints with the "keyword samples only over IPC" note and no crash |
 | `dump --type=triggers` is rejected or count-only | Assert triggers cannot be row-sampled (count-only), consistent with the no-mutation guarantee |
 | Argument parsing rejects unknown flags / bad `--limit` | Assert non-zero exit and a usage message |

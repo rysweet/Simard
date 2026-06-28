@@ -15,7 +15,7 @@ pub fn seed_default_goals(store: &dyn GoalStore) -> SimardResult<Vec<GoalRecord>
         .expect("static seed session id");
 
     let mut seeded = Vec::with_capacity(crate::goal_curation::DEFAULT_SEED_GOALS.len());
-    for (priority, title, description) in crate::goal_curation::DEFAULT_SEED_GOALS {
+    for (priority, title, description, _repo) in crate::goal_curation::DEFAULT_SEED_GOALS {
         let update = GoalUpdate::new(
             title,
             description,

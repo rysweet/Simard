@@ -1,6 +1,6 @@
 [package]
 name = "simard"
-version = "0.20.0"
+version = "0.22.0"
 edition = "2024"
 default-run = "simard"
 
@@ -50,24 +50,27 @@ path = "src/bin/simard_tui/main.rs"
 # deleted. The `persistent` feature builds LadybugDB through the published
 # `lbug = "=0.17.1"` crate.
 #
-# Issue #2420: bumped 7b81590 -> 26d49bf8 (main). This rev carries the lbug
-# 0.15.4 -> 0.17.1 engine migration (#105, the v40->v41 on-disk format the live
-# store already uses) and, critically, the empty-read data-loss fix (#108) that
-# directly targets the recurring main-store corruption. The prior pin (lbug
-# 0.15.4) was BEHIND the deployed on-disk format — the version skew itself was a
-# corruption vector.
+# Pinned to the amplihack-memory-lib commit that carries the lbug 0.15.4 -> 0.17.1
+# engine migration AND the issue #107 silent-empty-read fix (the `_deleted`
+# tombstone read-path fix + the empty-read safety gate). This rev is the
+# squash-merge commit of amplihack-memory-lib PR #108 on `main`.
 amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "26d49bf864ac2c03b80c4ab075c4a907c51f82a8", features = ["persistent"] }
-rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "43ebaa1c1b18a5630c53f0519989a2bacd42ef62" }
-rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "43ebaa1c1b18a5630c53f0519989a2bacd42ef62" }
+rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "bb94cf370b32ed435c95f56918cf87c7c4334449" }
+rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "bb94cf370b32ed435c95f56918cf87c7c4334449" }
+# De-fork (issue #2323): the gym/eval RUNNER is now the upstream
+# `amplihack-agent-eval` crate (native Rust GymRunner + scenario/result types),
+# replacing the private `src/native_gym.rs` reimplementation. Only the bridge
+# wiring (`src/gym_runner_bridge.rs`) and Simard-specific scoring/history stay
+# in this crate. The crate is a light workspace member (serde/serde_json/
+# thiserror/tracing/chrono only — no heavy workspace deps are transitive).
+amplihack-agent-eval = { git = "https://github.com/rysweet/amplihack-rs.git", rev = "59548a96049ab8d558110bcaf9c82a4316f1bbf0" }
 # De-fork phase 2b (issue #2307): the native cognitive-memory fork is gone, but
 # `lbug` is still a direct dependency of the standalone `simard-tui` binary
 # (`src/bin/simard_tui/goals.rs`), which opens a LadybugDB read-only to render
 # the goal board. The cognitive-memory backend itself no longer uses lbug
-# directly — it goes through the amplihack-memory library.
-#
-# Issue #2420: pinned to `=0.17.1` to match the version `amplihack-memory`
-# (26d49bf8) builds. Keeping a single lbug version avoids compiling the
-# LadybugDB C++ engine twice (and the resulting duplicate-symbol link clash).
+# directly — it goes through the amplihack-memory library. Bumped to 0.17.1 in
+# lockstep with the amplihack-memory pin so the final binary links exactly one
+# engine and one storage format (v41).
 lbug = "=0.17.1"
 rusqlite = { version = "=0.31.0", features = ["bundled"] }
 serde = { version = "=1.0.228", features = ["derive"] }
@@ -107,6 +110,13 @@ dashboard-audit = ["dep:headless_chrome", "dep:regex", "dep:url"]
 assert_cmd = "=2.2.1"
 proptest = "=1.11.0"
 serial_test = "=3.4.0"
+# Used only by the `serial_guard` regression meta-test (issue #2360) to parse
+# the source tree and enforce the `serial(cognitive_memory)` contract. Both are
+# already in the dependency graph transitively (pinned to the locked versions);
+# this only promotes them to explicit dev-deps and enables the features the
+# AST scan needs. `span-locations` gives the scan accurate file:line offenders.
+syn = { version = "=2.0.117", features = ["full", "visit"] }
+proc-macro2 = { version = "=1.0.106", features = ["span-locations"] }
 
 [profile.release]
 lto = "thin"

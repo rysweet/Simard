@@ -63,6 +63,12 @@ pub struct OodaState {
     /// outcome is validated, or via `EngineerWorktree::Drop` if the entry is
     /// removed before explicit `cleanup()` runs.
     pub engineer_worktrees: HashMap<String, EngineerWorktree>,
+    /// Cycle number at which the automatic distillation scheduler last ran a
+    /// pass. The scheduler's interval trigger fires when
+    /// `cycle_count - last_distill_cycle >= distill_interval_cycles`. Not
+    /// persisted across restarts (resets to 0); worst case is an extra
+    /// distillation pass shortly after boot. Issue #2327, R4.
+    pub last_distill_cycle: u32,
 }
 
 impl OodaState {
@@ -79,6 +85,7 @@ impl OodaState {
             last_cycle_duration_secs: None,
             goal_failure_counts: HashMap::new(),
             engineer_worktrees: HashMap::new(),
+            last_distill_cycle: 0,
         }
     }
 
@@ -228,10 +235,28 @@ pub struct OodaConfig {
     pub daily_budget_usd: f64,
     /// Weekly budget in USD (from SIMARD_WEEKLY_BUDGET_USD env or dashboard).
     pub weekly_budget_usd: f64,
+    /// Automatic distillation scheduler: fire when the undistilled-episode
+    /// count reaches this value (`SIMARD_DISTILL_MIN_EPISODES`, default 25).
+    /// Issue #2327, R4.
+    #[serde(default = "default_distill_min_episodes")]
+    pub distill_min_episodes: u32,
+    /// Automatic distillation scheduler: fire when this many OODA cycles have
+    /// elapsed since the last pass (`SIMARD_DISTILL_INTERVAL_CYCLES`, default
+    /// 50). Issue #2327, R4.
+    #[serde(default = "default_distill_interval_cycles")]
+    pub distill_interval_cycles: u32,
     /// AIMD adaptive scaler. Populated when `SIMARD_SCALING=auto`.
     /// Skipped during (de)serialization — reconstructed from env on boot.
     #[serde(skip)]
     pub scaler: Option<std::sync::Arc<super::adaptive_scaling::AdaptiveScaler>>,
+}
+
+fn default_distill_min_episodes() -> u32 {
+    crate::memory_consolidation::scheduler::DistillSchedule::DEFAULT_MIN_EPISODES
+}
+
+fn default_distill_interval_cycles() -> u32 {
+    crate::memory_consolidation::scheduler::DistillSchedule::DEFAULT_INTERVAL_CYCLES
 }
 
 impl Default for OodaConfig {
@@ -256,6 +281,14 @@ impl Default for OodaConfig {
             gym_suite_id: "progressive".to_string(),
             daily_budget_usd: env_f64("SIMARD_DAILY_BUDGET_USD", 500.0),
             weekly_budget_usd: env_f64("SIMARD_WEEKLY_BUDGET_USD", 2500.0),
+            distill_min_episodes: env_u32(
+                "SIMARD_DISTILL_MIN_EPISODES",
+                default_distill_min_episodes(),
+            ),
+            distill_interval_cycles: env_u32(
+                "SIMARD_DISTILL_INTERVAL_CYCLES",
+                default_distill_interval_cycles(),
+            ),
             scaler,
         }
     }
@@ -341,6 +374,26 @@ impl OodaStateSnapshot {
     }
 }
 
+/// Mints fresh, independent LLM sessions for concurrent `AdvanceGoal`
+/// dispatch.
+///
+/// The slow goal-action `run_turn` call (~30-90s) used to serialize on the
+/// single shared [`OodaBridges::session`], so only ~1 engineer started per
+/// OODA round even when coverage planned many. A factory lets the Act phase
+/// mint one session per spawn-candidate goal so those `run_turn` calls run
+/// concurrently. `Send + Sync` so it can be shared across the dispatch
+/// threads spawned by `dispatch_actions`.
+pub trait OrchestratorSessionFactory: Send + Sync {
+    /// Open a fresh orchestrator session for a single goal-advance turn.
+    ///
+    /// The caller owns the returned session and is responsible for closing
+    /// it. Each call must return an independent session that can run a turn
+    /// concurrently with sessions returned by other calls.
+    fn open_session(
+        &self,
+    ) -> crate::error::SimardResult<Box<dyn crate::base_types::BaseTypeSession>>;
+}
+
 /// All bridges needed by the OODA loop.
 pub struct OodaBridges {
     pub memory: Box<dyn CognitiveMemoryOps>,
@@ -371,6 +424,27 @@ pub struct OodaBridges {
     /// [`crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker`].
     pub progress_evidence:
         std::sync::Arc<dyn crate::goal_curation::progress_evidence::ProgressEvidenceChecker>,
+    /// Deploy-aware done-gate for the curate phase (issue #2419). When `Some`,
+    /// completed goals are archived only with hard evidence (merged PR, closed
+    /// issue, and — for self-affecting changes — a verified deploy); blocked
+    /// goals stay active with a recorded blocker. Production boot wires
+    /// [`crate::goal_curation::GhCliEvidenceSource`] unless
+    /// `SIMARD_COMPLETION_EVIDENCE=off`; tests and non-daemon callers leave it
+    /// `None`, preserving the legacy unguarded
+    /// [`archive_completed`](crate::goal_curation::archive_completed).
+    pub completion_evidence:
+        Option<std::sync::Arc<dyn crate::goal_curation::completion_gate::EvidenceSource>>,
+    /// Optional factory that mints a fresh, independent LLM session per
+    /// concurrent `AdvanceGoal` dispatch.
+    ///
+    /// When `Some`, the Act phase opens one session per spawn-candidate goal
+    /// so their slow goal-action `run_turn` calls run concurrently instead of
+    /// serializing on the single shared [`Self::session`]. When `None`,
+    /// concurrent dispatch falls back to the shared [`Self::session`] under a
+    /// lock (serialized) — preserving today's behavior for tests and
+    /// non-daemon callers. Bounded by the AIMD `cap` (`scaler.current_max()`)
+    /// so concurrency stays resource-aware.
+    pub session_factory: Option<std::sync::Arc<dyn OrchestratorSessionFactory>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +457,7 @@ mod tests_ooda_config {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_creates_scaler_when_scaling_auto() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -395,6 +470,7 @@ mod tests_ooda_config {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_no_scaler_when_scaling_fixed() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -407,6 +483,7 @@ mod tests_ooda_config {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_no_scaler_when_scaling_unset() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -418,6 +495,27 @@ mod tests_ooda_config {
         );
     }
 
+    // Issue #2327 (RED): the automatic promotion scheduler is configured via
+    // two new OodaConfig fields. With the env overrides unset, they default to
+    // the canonical 25-episode threshold and 50-cycle interval.
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn ooda_config_default_distill_thresholds() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("SIMARD_DISTILL_MIN_EPISODES") };
+        unsafe { std::env::remove_var("SIMARD_DISTILL_INTERVAL_CYCLES") };
+        let config = OodaConfig::default();
+        assert_eq!(
+            config.distill_min_episodes, 25,
+            "default distill threshold must be 25 episodes"
+        );
+        assert_eq!(
+            config.distill_interval_cycles, 50,
+            "default distill interval must be 50 cycles"
+        );
+    }
+
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_auto_scaler_ceiling_is_4x_max() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -434,6 +532,7 @@ mod tests_ooda_config {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_auto_scaler_adjust_returns_within_bounds() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -452,6 +551,7 @@ mod tests_ooda_config {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_scaler_skipped_on_serde_roundtrip() {
         let _lock = ENV_LOCK.lock().unwrap();

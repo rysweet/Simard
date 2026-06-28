@@ -1,0 +1,56 @@
+name: "Engineer Lifecycle Brain Escalation Ladder (issue #2432)"
+description: "Outside-in proof that the engineer-lifecycle brain replaces the zero-retry parse→default with a bounded, confidence-gated escalation ladder (schema-repair + tier bump). Validates the recipe's {{escalation_note}} placeholder contract at the recipe-runner boundary (no LLM) — base attempt renders unchanged, escalation rungs inject the pinned schema-repair instruction — then runs the in-tree ladder/metric outcome tests."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Brain escalation ladder: recipe placeholder contract + ladder/metric outcomes"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/brain-escalation-ladder.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "ooda"
+    - "engineer-lifecycle"
+    - "recipe-brain"
+    - "escalation-ladder"
+    - "issue-2432"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

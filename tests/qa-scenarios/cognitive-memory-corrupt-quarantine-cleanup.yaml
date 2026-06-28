@@ -1,0 +1,73 @@
+name: cognitive-memory-corrupt-quarantine-cleanup
+app_type: cli
+description: |
+  Verify `simard cleanup` (remove_old_corrupt_dbs) garbage-collects the library
+  backend's corrupt store/WAL quarantines introduced by the de-fork (Phase 2b,
+  issue #2307) — files named `cognitive.corrupt-*`, `cognitive.wal.corrupt-*`,
+  and `*.cognitive.shadow`. Before the fix the matcher only knew the legacy
+  `cognitive_memory.corrupt-` prefix, so these accumulated unbounded in
+  `~/.simard`. Behavior is proven by the hermetic tempdir unit tests this
+  scenario drives (no destructive action against the live host).
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # Regression fix: aged library-backend quarantines (new filename shapes) are reclaimed,
+  # AND the critical safety invariant (live `cognitive`/`cognitive.wal` store survives).
+  # The CLI runner rejects any non-zero exit, so a failing test fails the scenario.
+  # First invocation may compile the test binary; subsequent filters reuse it.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cmd_cleanup::tests::corrupt_db_removes_aged_library_backend_quarantines"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Safety invariant in isolation: the live store is never deleted, even when aged 30+ days.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cmd_cleanup::tests::corrupt_db_never_removes_live_store_even_when_aged"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Directory-backed store quarantines are removed recursively (not just files).
+  - action: run
+    params:
+      command: "cargo test --locked --lib cmd_cleanup::tests::corrupt_db_removes_aged_directory_quarantine"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Forensics retention: young quarantines are kept within the 7-day window.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cmd_cleanup::tests::corrupt_db_keeps_young_library_quarantine"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

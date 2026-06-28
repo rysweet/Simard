@@ -88,6 +88,7 @@ pub(crate) async fn goals() -> Json<Value> {
                 "priority": g.priority,
                 "status": g.status.to_string(),
                 "assigned_to": g.assigned_to,
+                "repo": g.repo,
                 "current_activity": g.current_activity,
                 "status_chip": chip.as_str(),
                 "detail": detail,
@@ -172,6 +173,8 @@ pub(crate) async fn seed_goals() -> Json<Value> {
     let mut board = GoalBoard::new();
     let now = chrono::Utc::now().to_rfc3339();
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "self-improvement".to_string(),
         description:
             "Continuously improve own capabilities through gym scenarios and self-evaluation"
@@ -184,6 +187,8 @@ pub(crate) async fn seed_goals() -> Json<Value> {
         last_progress_update_at: None,
     });
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "knowledge-growth".to_string(),
         description:
             "Expand knowledge base through meetings, research, and cognitive memory consolidation"
@@ -196,6 +201,8 @@ pub(crate) async fn seed_goals() -> Json<Value> {
         last_progress_update_at: None,
     });
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+            repo: None,
         id: "operational-health".to_string(),
         description: "Maintain system health: budget compliance, resource usage, and error rates within thresholds".to_string(),
         priority: 3,
@@ -258,7 +265,25 @@ pub(crate) async fn add_goal(Json(body): Json<Value>) -> Json<Value> {
             )}));
         }
         let priority = body.get("priority").and_then(|v| v.as_u64()).unwrap_or(3) as u32;
+        // Issue #2359 (BUG 1): an optional target-repo slug routes the goal's
+        // engineer to ~/src/<slug>. Shape-only validation here; the
+        // existence/git-repo check happens later in `resolve_goal_repo` at
+        // spawn time, so a goal can be created for a repo cloned shortly after.
+        let repo = match body.get("repo").and_then(|v| v.as_str()) {
+            Some(slug) if !slug.trim().is_empty() => {
+                let slug = slug.trim();
+                if let Err(e) =
+                    crate::ooda_actions::advance_goal::repo_resolver::validate_repo_slug(slug)
+                {
+                    return Json(json!({"error": format!("invalid repo slug '{slug}': {e}")}));
+                }
+                Some(slug.to_string())
+            }
+            _ => None,
+        };
         board.active.push(ActiveGoal {
+            parent_goal_id: None,
+            repo,
             id: id.clone(),
             description: desc,
             priority,
@@ -361,6 +386,8 @@ pub(crate) async fn promote_backlog_item(Path(id): Path<String>) -> Json<Value> 
     };
 
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: item.id,
         description: item.description,
         priority: 3,

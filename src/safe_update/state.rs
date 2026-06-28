@@ -61,9 +61,23 @@ pub struct UpgradeStatus {
     /// Wall-clock budget (seconds) the new binary has to validate.
     #[serde(default)]
     pub validate_budget_seconds: Option<u64>,
+    /// #107 defense-in-depth: cognitive-memory item count read from the
+    /// **outgoing** binary before the swap. The validate phase compares the
+    /// **incoming** binary's count against this; a shortfall (the silent
+    /// empty-read signature, e.g. a populated store reading back empty) fails
+    /// validation and triggers rollback — clean OODA cycles alone are not
+    /// evidence of a healthy upgrade. `None` disables the parity check.
+    #[serde(default)]
+    pub pre_upgrade_item_count: Option<u64>,
 }
 
 impl UpgradeStatus {
+    /// Record the pre-upgrade cognitive item count for the #107 parity gate.
+    pub fn with_pre_upgrade_item_count(mut self, count: Option<u64>) -> Self {
+        self.pre_upgrade_item_count = count;
+        self
+    }
+
     /// Build a status row tagged `exec_handover`.
     pub fn exec_handover(
         new_version: Option<String>,
@@ -80,6 +94,7 @@ impl UpgradeStatus {
             validate_required_cycles: Some(validate_required_cycles),
             validate_cycles_seen: 0,
             validate_budget_seconds: Some(validate_budget_seconds),
+            pre_upgrade_item_count: None,
         }
     }
 
@@ -98,6 +113,7 @@ impl UpgradeStatus {
             validate_required_cycles: None,
             validate_cycles_seen: 0,
             validate_budget_seconds: None,
+            pre_upgrade_item_count: None,
         }
     }
 
@@ -112,6 +128,7 @@ impl UpgradeStatus {
             validate_required_cycles: None,
             validate_cycles_seen: 0,
             validate_budget_seconds: None,
+            pre_upgrade_item_count: None,
         }
     }
 }

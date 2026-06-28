@@ -6,6 +6,8 @@ owner: simard
 doc_type: reference
 related:
   - ../architecture/cognitive-memory.md
+  - ./cognitive-memory-ranked-episodic-recall.md
+  - ./cognitive-memory-procedural-idempotency.md
   - ./goal-prospective-memory-mirror.md
   - ./ooda-brain-api.md
   - ./ooda-engineer-lifecycle-recipe.md
@@ -24,6 +26,19 @@ related:
 > [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md).
 
 Shipped in issue [#2280](https://github.com/rysweet/Simard/issues/2280).
+
+> **Reinforcement enabled by #2395.** When #2280 shipped, a procedure's
+> `usage_count` only moved at **store** time (and, since #2298, on exact-name
+> re-store). Nothing incremented it when a procedure was **recalled and used**,
+> so the usage signal the ranker reads stayed flat. #2395 adds a single
+> reinforce-at-use seam (`reinforce_access`), driven from the goal-session path
+> (`advance.rs`) for every recalled procedure surfaced into a cycle's prompt
+> (per-action attribution — only the procedure that drove the action — is a
+> future refinement), and clarifies that preparation procedure recall is
+> **usage-ordered** (the library sorts by `usage_count` descending and matches
+> name **OR** steps — not the newest-first single-`CONTAINS`-on-name scan once
+> described here). See
+> [Ranked episodic recall & memory reinforcement](./cognitive-memory-ranked-episodic-recall.md).
 
 After the OODA Act phase dispatches actions and collects outcomes, each
 **successful** outcome is stored as a procedural memory. This enables

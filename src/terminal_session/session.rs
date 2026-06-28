@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -7,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::{SimardError, SimardResult};
 
-use super::types::{PTY_LAUNCHER, TerminalSessionCapture, TerminalWaitStatus};
+use super::types::{DEFAULT_PATH, PTY_LAUNCHER, TerminalSessionCapture, TerminalWaitStatus};
 use super::workflow_guard::{WorkflowRestoreGuard, capture_workflow_restore_guards};
 
 struct TranscriptGuard {
@@ -54,7 +55,7 @@ impl PtyTerminalSession {
         shell: &str,
         working_directory: &Path,
     ) -> SimardResult<Self> {
-        let launch_command = format!("{shell} --noprofile --norc -i");
+        let launch_command = format!("{shell} {}", interactive_shell_flags(shell));
         Self::launch_command(base_type, &launch_command, working_directory)
     }
 
@@ -88,9 +89,15 @@ impl PtyTerminalSession {
                 .arg(launch_command)
                 .arg(&transcript_path);
         }
+        command.current_dir(working_directory).env("TERM", "dumb");
+        // Ensure the child PTY has a usable PATH so ordinary commands resolve to
+        // real binaries instead of failing with exit code 127. Only override when
+        // the inherited PATH is missing or empty so operator-provided PATHs (and
+        // any PATH set by the launching service) are preserved untouched.
+        if let Some(path) = child_path_override(std::env::var_os("PATH").as_deref()) {
+            command.env("PATH", path);
+        }
         let mut child = command
-            .current_dir(working_directory)
-            .env("TERM", "dumb")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -396,6 +403,55 @@ impl PtyTerminalSession {
     }
 }
 
+/// Decide whether the child PTY needs an explicit `PATH` override.
+///
+/// Returns the fallback [`DEFAULT_PATH`] when the inherited value is missing or
+/// empty so ordinary commands resolve instead of failing with exit code 127;
+/// returns `None` when the inherited `PATH` is usable and must be preserved.
+fn child_path_override(inherited: Option<&OsStr>) -> Option<&'static str> {
+    match inherited {
+        Some(value) if !value.is_empty() => None,
+        _ => Some(DEFAULT_PATH),
+    }
+}
+
+/// Interactive launch flags appropriate for the given shell.
+///
+/// bash honours `--noprofile --norc` to skip startup files for a clean,
+/// deterministic PTY session. POSIX `sh`/dash reject those long options
+/// (`sh: Illegal option --`), so any non-bash interpreter — including the
+/// `/bin/sh`/`$SHELL` fallbacks resolved by `default_shell` — gets a bare
+/// interactive invocation instead. Without this, falling back to a non-bash
+/// shell would itself fail with the very exit code this fix is meant to
+/// eliminate.
+fn interactive_shell_flags(shell: &str) -> &'static str {
+    let name = Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if is_bash_shell(name) {
+        "--noprofile --norc -i"
+    } else {
+        "-i"
+    }
+}
+
+/// Whether `name` is the bash interpreter, tolerating versioned basenames such
+/// as `bash5` or `bash-5.2` while excluding unrelated names that merely start
+/// with "bash" (e.g. `bashful`). The `--noprofile --norc` long options are
+/// bash-only; applying them to a non-bash shell makes the interactive launch
+/// abort with the very exit code this fix is meant to eliminate.
+fn is_bash_shell(name: &str) -> bool {
+    match name.strip_prefix("bash") {
+        Some("") => true,
+        Some(rest) => rest
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit() || c == '-'),
+        None => false,
+    }
+}
+
 /// Process names that indicate active LLM work is in progress.
 #[cfg(unix)]
 const WORK_PROCESS_NAMES: &[&str] = &["copilot", "node", "amplihack"];
@@ -517,6 +573,76 @@ fn env_secs(var: &str, default: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── child_path_override ───────────────────────────────────────────────────
+
+    #[test]
+    fn child_path_override_preserves_usable_path() {
+        assert_eq!(
+            child_path_override(Some(OsStr::new("/usr/bin:/bin"))),
+            None,
+            "a non-empty inherited PATH must be preserved untouched"
+        );
+    }
+
+    #[test]
+    fn child_path_override_falls_back_when_missing() {
+        assert_eq!(child_path_override(None), Some(DEFAULT_PATH));
+    }
+
+    #[test]
+    fn child_path_override_falls_back_when_empty() {
+        assert_eq!(
+            child_path_override(Some(OsStr::new(""))),
+            Some(DEFAULT_PATH)
+        );
+    }
+
+    // ── interactive_shell_flags ───────────────────────────────────────────────
+
+    #[test]
+    fn interactive_shell_flags_uses_bash_options_for_bash() {
+        assert_eq!(
+            interactive_shell_flags("/usr/bin/bash"),
+            "--noprofile --norc -i"
+        );
+        assert_eq!(
+            interactive_shell_flags("/bin/bash"),
+            "--noprofile --norc -i"
+        );
+    }
+
+    #[test]
+    fn interactive_shell_flags_treats_versioned_bash_as_bash() {
+        // Versioned bash basenames still honour the bash-only startup-file
+        // options, so a `$SHELL`/distro fallback to e.g. `bash5` stays
+        // deterministic rather than silently running profile/rc files.
+        assert_eq!(
+            interactive_shell_flags("/usr/local/bin/bash5"),
+            "--noprofile --norc -i"
+        );
+        assert_eq!(
+            interactive_shell_flags("/opt/homebrew/bin/bash-5.2"),
+            "--noprofile --norc -i"
+        );
+        assert!(is_bash_shell("bash"));
+        assert!(is_bash_shell("bash5"));
+        assert!(is_bash_shell("bash-5.2"));
+    }
+
+    #[test]
+    fn interactive_shell_flags_uses_posix_options_for_non_bash() {
+        // `--noprofile`/`--norc` are bash-specific; POSIX sh and other shells
+        // must get a bare interactive invocation or they abort on launch.
+        assert_eq!(interactive_shell_flags("/bin/sh"), "-i");
+        assert_eq!(interactive_shell_flags("/usr/bin/dash"), "-i");
+        assert_eq!(interactive_shell_flags("/usr/bin/zsh"), "-i");
+        // Names that merely start with "bash" but are not bash must not get the
+        // bash-only options.
+        assert_eq!(interactive_shell_flags("/usr/games/bashful"), "-i");
+        assert!(!is_bash_shell("bashful"));
+        assert!(!is_bash_shell("sh"));
+    }
 
     // ── has_active_work_processes ─────────────────────────────────────────────
 
@@ -697,6 +823,7 @@ mod tests {
         assert!(!path.exists(), "default Drop must delete the transcript");
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn env_secs_returns_default_when_unset() {
         // Use a uniquely named env var so we know it's unset.
@@ -706,6 +833,7 @@ mod tests {
         assert_eq!(env_secs(&var, 42), 42);
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn env_secs_returns_parsed_value_when_set() {
         let var = format!("SIMARD_ENV_SECS_TEST_{}", uuid::Uuid::now_v7().simple());
@@ -714,11 +842,101 @@ mod tests {
         unsafe { std::env::remove_var(&var) };
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn env_secs_returns_default_when_unparseable() {
         let var = format!("SIMARD_ENV_SECS_TEST_{}", uuid::Uuid::now_v7().simple());
         unsafe { std::env::set_var(&var, "not-a-number") };
         assert_eq!(env_secs(&var, 42), 42);
         unsafe { std::env::remove_var(&var) };
+    }
+
+    // ── PtyTerminalSession end-to-end (no controlling terminal) ───────────────
+
+    /// `which`-style probe for the PTY launcher (`script`). Used to skip the
+    /// end-to-end test gracefully when the binary is absent, matching the
+    /// project convention for tests that depend on an external binary
+    /// (see `engineer_worktree::precommit` and `meeting_backend::agent_proxy`).
+    #[cfg(unix)]
+    fn pty_launcher_available() -> bool {
+        std::process::Command::new("which")
+            .arg(PTY_LAUNCHER)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    /// End-to-end smoke test of the full session lifecycle —
+    /// `launch` → `send_input` → `wait_for_output` → `finish` — proving the
+    /// terminal-shell session works even when the test process itself has **no
+    /// controlling terminal** (`tty` reports "not a tty"), exactly as in CI /
+    /// headless runners. `script` allocates its *own* PTY for the inner shell,
+    /// so an interactive (`-i`) bash still launches, executes the command it
+    /// receives, and reports output back through the transcript without any
+    /// parent TTY. This is the only test that exercises the real spawn /
+    /// transcript-capture path the production recipe runner depends on.
+    ///
+    /// Because `script` runs bash on a PTY with terminal `ECHO` enabled, the
+    /// command line we type is copied verbatim into the transcript regardless
+    /// of whether bash ever runs it. To prove the shell genuinely *executed*
+    /// the command (not merely received and echoed it), the marker embeds a
+    /// shell arithmetic expansion: the typed line contains the literal
+    /// `$((20 + 22))`, whereas only successful execution yields the evaluated
+    /// `42`. Asserting on the evaluated form therefore cannot be satisfied by
+    /// the input echo alone — it requires real command execution plus output
+    /// capture.
+    ///
+    /// Skips (rather than fails) when `script` is not on PATH.
+    #[test]
+    #[cfg(unix)]
+    fn pty_session_runs_end_to_end_without_controlling_terminal() {
+        use crate::terminal_session::types::DEFAULT_SHELL;
+
+        if !pty_launcher_available() {
+            eprintln!("skipping: PTY launcher '{PTY_LAUNCHER}' not on PATH");
+            return;
+        }
+
+        let workdir = tempfile::tempdir().expect("create temp working directory");
+        // Unique per-session token keeps the expected string specific to this
+        // run; the `$((20 + 22))` expansion guarantees the asserted form
+        // (`<token>-42-done`) can only come from executed output, never the
+        // verbatim PTY echo of the typed command (which carries `$((20 + 22))`).
+        let token = format!("notty-marker-{}", uuid::Uuid::now_v7().simple());
+        let typed_command = format!("echo {token}-$((20 + 22))-done");
+        let executed_output = format!("{token}-42-done");
+
+        let mut session = PtyTerminalSession::launch("test-bt", DEFAULT_SHELL, workdir.path())
+            .expect("launch PTY shell via script without a controlling terminal");
+
+        session
+            .send_input(&typed_command)
+            .expect("send echo command to PTY shell");
+
+        let status = session
+            .wait_for_output(&executed_output, Duration::from_secs(15))
+            .expect("poll transcript for expected output");
+        assert!(
+            matches!(status, TerminalWaitStatus::Satisfied),
+            "expected executed output '{executed_output}' to appear in the transcript, got {status:?}"
+        );
+
+        // Mirror the production recipe pattern: a trailing `exit 0` cleanly
+        // terminates the inner shell so `finish` observes a success status.
+        session
+            .send_input("exit 0")
+            .expect("send exit command to PTY shell");
+
+        let capture = session.finish().expect("finish PTY shell session");
+        assert!(
+            capture.exit_status.success(),
+            "inner shell should exit successfully, got {:?}",
+            capture.exit_status
+        );
+        assert!(
+            capture.transcript.contains(&executed_output),
+            "final transcript must contain the executed output '{executed_output}'; transcript was:\n{}",
+            capture.transcript
+        );
     }
 }

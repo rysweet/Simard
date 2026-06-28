@@ -1,0 +1,77 @@
+name: "Improvement Hypothesis Formation and Evidence Preservation"
+description: >
+  Outside-in gate for issues #2099 and #2091. Verifies that the gym/OODA
+  loop forms ImprovementHypothesis records from benchmark and session
+  failure signals (per Specs/ProductArchitecture.md lines 679-681) and
+  that promotion through GoalUpdate / GoalRecord preserves the typed
+  EvidenceRef linkage (per spec line 696). Runs the inline unit tests
+  for the new EvidenceRef enum, the hypothesis former module, and the
+  evidence round-trip tests in the promotion plan.
+version: "1.0.0"
+
+config:
+  timeout: 180000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 180000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "EvidenceRef enum — parse / serde / round-trip (#2091)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib improvements::evidence::tests
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test result: ok"
+        - "round_trip_survives_reserved_delimiters_in_every_field"
+
+  - name: "ImprovementHypothesis formers — benchmark, signal, weak-dim, review, session (#2099)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib self_improve::tests_hypothesis
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test result: ok"
+        - "benchmark_report_with_failed_scenarios_produces_hypotheses_with_evidence"
+
+  - name: "Promotion plan — evidence round-trip through GoalUpdate / GoalRecord (#2091)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib improvements::tests_promotion::evidence_round_trip
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test result: ok"
+        - "approved_goal_updates_preserve_proposal_evidence"

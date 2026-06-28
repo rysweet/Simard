@@ -1,0 +1,54 @@
+name: "Meeting REPL color single source"
+description: "Outside-in regression guard that the meeting REPL's ANSI color helpers have exactly one source of truth — the wired src/meeting_repl/color.rs module — and that the orphan duplicate src/meeting_repl/colors.rs (committed by mistake in #2294, never declared in mod.rs, never compiled) does not return. Also runs the wired color module's unit tests to prove the single source works."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Meeting REPL color helpers have a single wired source"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/meeting-repl-color-single-source.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "meeting"
+    - "repl"
+    - "color"
+    - "dead-code"
+    - "outside-in"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

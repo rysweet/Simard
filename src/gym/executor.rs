@@ -262,6 +262,15 @@ fn build_and_write_report(
     let report_txt = run_dir.join("report.txt");
     let review_json = run_dir.join("review.json");
     let derived_metrics = derive_benchmark_metrics(&metric_facts);
+    let evidence_quality_assessment =
+        crate::gym_scoring::assess_evidence_quality(&crate::gym_scoring::EvidenceQualityInputs {
+            correctness_checks_passed: checks.iter().filter(|check| check.passed).count(),
+            correctness_checks_total: checks.len(),
+            evidence_records: &arts.exported.evidence_records,
+            memory_records: &arts.exported.memory_records,
+            unnecessary_action_count: derived_metrics.unnecessary_action_count,
+            retry_count: derived_metrics.retry_count,
+        });
     let measurement_notes = vec![
         "v1 benchmark foundation derives evidence from runtime, memory, and handoff artifacts rather than a task-specific code-change judge".to_string(),
         "Attempt and action metrics derive from benchmark-controlled gym-runner facts only; they intentionally do not classify arbitrary adapter-level subcommands inside the scenario objective.".to_string(),
@@ -297,6 +306,7 @@ fn build_and_write_report(
             } else {
                 "thin".to_string()
             },
+            evidence_quality_assessment,
             correctness_checks_passed: checks.iter().filter(|check| check.passed).count(),
             correctness_checks_total: checks.len(),
             unnecessary_action_count: derived_metrics.unnecessary_action_count,

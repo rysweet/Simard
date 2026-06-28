@@ -63,6 +63,18 @@ pub struct ActiveGoal {
     pub priority: u32,
     pub status: GoalProgress,
     pub assigned_to: Option<String>,
+    /// Target repository slug for this goal (issue #2359, BUG 1).
+    ///
+    /// `None` (the default) routes the goal's engineer to the daemon's own
+    /// repo ("Simard"). A slug such as `"amplihack-rs"` routes the engineer's
+    /// worktree — and therefore its PRs — to `$HOME/src/amplihack-rs`. See
+    /// [`crate::ooda_actions::advance_goal`]'s `repo_resolver`.
+    ///
+    /// `skip_serializing_if` keeps pre-#2359 goal-board snapshots byte-
+    /// identical (the key is omitted entirely for repo-less goals), and
+    /// `serde(default)` deserializes legacy JSON that has no `repo` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     /// Current activity summary — what's happening right now toward this goal.
     #[serde(default)]
     pub current_activity: Option<String>,
@@ -77,9 +89,53 @@ pub struct ActiveGoal {
     /// `update_goal_progress_with_evidence` on every accepted update.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_progress_update_at: Option<DateTime<Utc>>,
+    /// Id of the goal this sub-goal decomposes from (issue #2405). `None` for a
+    /// top-level goal that was never produced by decomposition. This is the
+    /// cheap, always-present back-reference that lets any consumer already
+    /// holding the board group children under a parent without a graph query;
+    /// the authoritative linkage is the `decomposes_into` edge in the graph
+    /// (see `docs/reference/goal-decomposition.md`).
+    ///
+    /// `#[serde(default, skip_serializing_if)]` keeps pre-#2405 goal-board
+    /// snapshots and `goal_records.json` entries byte-identical (the key is
+    /// omitted entirely when unset) and lets legacy JSON without the key load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_goal_id: Option<String>,
 }
 
 impl ActiveGoal {
+    /// Construct a new active goal in the `NotStarted` state with no assignee,
+    /// targeting the daemon's own repo (`repo = None`).
+    pub fn new(id: impl Into<String>, description: impl Into<String>, priority: u32) -> Self {
+        Self {
+            id: id.into(),
+            description: description.into(),
+            priority,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+            repo: None,
+            current_activity: None,
+            wip_refs: Vec::new(),
+            last_progress_update_at: None,
+            parent_goal_id: None,
+        }
+    }
+
+    /// Builder: set (or clear, with `None`) the target-repo slug.
+    #[must_use]
+    pub fn with_repo(mut self, repo: Option<String>) -> Self {
+        self.repo = repo;
+        self
+    }
+
+    /// Builder: set (or clear, with `None`) the decomposition parent linkage
+    /// (issue #2405).
+    #[must_use]
+    pub fn with_parent(mut self, parent_goal_id: Option<String>) -> Self {
+        self.parent_goal_id = parent_goal_id;
+        self
+    }
+
     /// Short label for display.
     pub fn concise_label(&self) -> String {
         format!("p{} [{}] {}", self.priority, self.status, self.description)
@@ -176,6 +232,138 @@ pub struct GoalCarryoverRecord {
     pub acknowledged: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Goal graph: nodes and typed edges (issue #2405)
+// ---------------------------------------------------------------------------
+
+/// A goal projected into the cognitive-memory graph as a stable node keyed by
+/// the goal `id` (issue #2405).
+///
+/// It is the durable **anchor** that decomposition edges point at, so edges
+/// keep valid endpoints even after a goal leaves the active board (for example
+/// a parent demoted to the backlog once its children are on the board). The
+/// node carries the goal id, description, and an optional `done_criterion`.
+/// See `docs/reference/goal-decomposition.md`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalNode {
+    pub id: String,
+    pub description: String,
+    /// The explicit, independently-verifiable done-criterion for this goal.
+    /// `None` for nodes (e.g. a parent umbrella) whose completion is a roll-up
+    /// of its children rather than a single criterion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_criterion: Option<String>,
+}
+
+impl GoalNode {
+    /// Construct a goal node. `done_criterion` is `Option<impl Into<String>>`
+    /// so call sites can pass `Some("…")`, `Some(string)`, or `None`.
+    pub fn new(
+        id: impl Into<String>,
+        description: impl Into<String>,
+        done_criterion: Option<impl Into<String>>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            description: description.into(),
+            done_criterion: done_criterion.map(Into::into),
+        }
+    }
+}
+
+/// The two typed edges that connect goals in the decomposition graph
+/// (issue #2405).
+///
+/// The string form ([`as_str`](Self::as_str)) — and the serde representation —
+/// are a **durable, cross-system contract**: they appear verbatim in the
+/// `goal-edge:{type}` concept key, the `goal-edge:{type}:{from}->{to}` caller
+/// key, and the edge tags, so they must never drift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalEdgeType {
+    /// parent → child: the parent goal decomposes into this child. Its inverse
+    /// is read as `parent_of`.
+    DecomposesInto,
+    /// child → child: this sub-goal is gated on a sibling completing first
+    /// (ordering / dependency). Optional.
+    DependsOn,
+}
+
+impl GoalEdgeType {
+    /// The stable snake_case token used in concept keys, caller keys, and tags.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DecomposesInto => "decomposes_into",
+            Self::DependsOn => "depends_on",
+        }
+    }
+}
+
+/// A typed relationship edge between two goals.
+///
+/// Edges are persisted as **typed relationship facts** through
+/// [`CognitiveMemoryOps`](crate::cognitive_memory::CognitiveMemoryOps) (design
+/// choice (b) from issue #2405): one fact per edge under a stable caller key so
+/// re-writing the same edge dedups instead of accumulating, and querying back
+/// is the ordinary `search_facts` path. The graph-write/read helpers live in
+/// [`super::edges`]; this type owns the durable concept/caller-key/tag/content
+/// **format**.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalEdge {
+    pub from: String,
+    pub to: String,
+    pub edge_type: GoalEdgeType,
+}
+
+impl GoalEdge {
+    /// Construct an edge `from -> to` of `edge_type`.
+    pub fn new(from: impl Into<String>, to: impl Into<String>, edge_type: GoalEdgeType) -> Self {
+        Self {
+            from: from.into(),
+            to: to.into(),
+            edge_type,
+        }
+    }
+
+    /// Concept key the edge fact is filed under: `goal-edge:{type}`.
+    pub fn concept(&self) -> String {
+        format!("goal-edge:{}", self.edge_type.as_str())
+    }
+
+    /// Stable caller key so re-writing the same edge dedups:
+    /// `goal-edge:{type}:{from}->{to}`.
+    pub fn caller_key(&self) -> String {
+        format!(
+            "goal-edge:{}:{}->{}",
+            self.edge_type.as_str(),
+            self.from,
+            self.to
+        )
+    }
+
+    /// Discrete tags so keyword recall surfaces the edge by parent id, child
+    /// id, or edge type: `["goal-edge", type, "from:X", "to:Y"]`.
+    pub fn tags(&self) -> Vec<String> {
+        vec![
+            "goal-edge".to_string(),
+            self.edge_type.as_str().to_string(),
+            format!("from:{}", self.from),
+            format!("to:{}", self.to),
+        ]
+    }
+
+    /// Canonical compact JSON content:
+    /// `{"from":..,"to":..,"edge_type":..}` (field order = declaration order).
+    ///
+    /// Serialization is infallible — every field is a `String` or a `Copy`
+    /// enum — so a failure here is a real invariant violation that must surface
+    /// loudly rather than be papered over with a hand-built (and unescaped)
+    /// fallback string.
+    pub fn content(&self) -> String {
+        serde_json::to_string(self).expect("GoalEdge (String/enum fields) always serializes")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +437,8 @@ mod tests {
 
     fn sample_goal() -> ActiveGoal {
         ActiveGoal {
+            parent_goal_id: None,
+            repo: None,
             id: "g-1".to_string(),
             description: "Ship MVP".to_string(),
             priority: 1,
@@ -280,6 +470,8 @@ mod tests {
     #[test]
     fn active_goal_assigned_to_none() {
         let g = ActiveGoal {
+            parent_goal_id: None,
+            repo: None,
             id: "g-2".to_string(),
             description: "Unassigned".to_string(),
             priority: 3,
@@ -353,6 +545,8 @@ mod tests {
     fn goal_board_active_slots_remaining_full() {
         let goals: Vec<ActiveGoal> = (0..MAX_ACTIVE_GOALS)
             .map(|i| ActiveGoal {
+                parent_goal_id: None,
+                repo: None,
                 id: format!("g-{i}"),
                 description: format!("Goal {i}"),
                 priority: 1,
@@ -374,6 +568,8 @@ mod tests {
     fn goal_board_active_slots_remaining_overflow_saturates() {
         let goals: Vec<ActiveGoal> = (0..MAX_ACTIVE_GOALS + 2)
             .map(|i| ActiveGoal {
+                parent_goal_id: None,
+                repo: None,
                 id: format!("g-{i}"),
                 description: format!("Goal {i}"),
                 priority: 1,

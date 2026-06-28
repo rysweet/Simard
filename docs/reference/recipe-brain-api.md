@@ -91,8 +91,24 @@ fn decide_engineer_lifecycle(
 ) -> SimardResult<EngineerLifecycleDecision>
 ```
 
-Invokes `recipe-runner-rs` with the full lifecycle context as `-c` vars.
-Parses stdout via `parse_lifecycle_from_text()`.
+Invokes `recipe-runner-rs` with the full lifecycle context as `-c` vars and
+**`--output-format json`**, then extracts the agent's decision text from the
+final `step_results[].output` of the JSON envelope before running first-word
+extraction via `parse_lifecycle_outcome()`.
+
+> **Fixed in [#2419](https://github.com/rysweet/Simard/issues/2419):** This
+> call site previously read recipe-runner-rs's **default `text` output**,
+> which prints only a human summary banner (`Recipe: … SUCCESS …`) to stdout —
+> the agent's decision text is not on stdout in text mode. First-word
+> extraction therefore always saw `Recipe:`, matched no variant, and silently
+> defaulted to `ContinueSkipping` on ~99.6% of invocations, so non-default
+> decisions (`reclaim_and_redispatch`, `deprioritize`, …) never fired. The fix
+> switches to `--output-format json` + envelope extraction, mirroring the
+> already-correct `disk_health.rs` path.
+
+Every invocation emits one `brain_lifecycle_decision` metric event (see
+[Lifecycle decision metric](#lifecycle-decision-metric)) so the parse-failure
+rate is measurable from `metrics.jsonl`.
 
 ---
 
@@ -173,6 +189,51 @@ Extra fields use defaults:
 > extraction, and `LIFECYCLE_KEYWORDS` constant have been deleted. The
 > lifecycle prompt now instructs the LLM to output the variant name as its
 > first word.
+
+### `parse_lifecycle_outcome`
+
+```rust
+pub fn parse_lifecycle_outcome(
+    text: &str,
+) -> (EngineerLifecycleDecision, LifecycleParseOutcome)
+```
+
+Canonical lifecycle parser (added in
+[#2419](https://github.com/rysweet/Simard/issues/2419)). Identical first-word
+extraction to `parse_lifecycle_from_text`, but additionally returns a
+`LifecycleParseOutcome` classifying *how* the decision was produced:
+
+| Variant | Meaning |
+|---------|---------|
+| `Parsed` | First word matched a known variant — a real decision. |
+| `DefaultEmpty` | Output was empty/whitespace → defaulted to `ContinueSkipping`. |
+| `DefaultMalformed` | Output non-empty but first word matched no variant → defaulted. |
+| `Error` | recipe-runner invocation/envelope decode failed (set on the error path, not by the pure parser). |
+
+`LifecycleParseOutcome::is_parse_failure()` is `true` for everything except
+`Parsed`. This split is what makes the parse-failure rate measurable —
+previously a genuine `continue_skipping` decision and a silent fallback were
+indistinguishable. `parse_lifecycle_from_text` is the decision-only wrapper
+over this function.
+
+### Lifecycle decision metric
+
+`decide_engineer_lifecycle` records one `brain_lifecycle_decision` metric
+(value `1.0`) per invocation via `self_metrics::record_metric`. The context
+JSON carries:
+
+| Field | Description |
+|-------|-------------|
+| `goal_id` | Goal under inspection. |
+| `outcome` | `parsed` \| `default_empty` \| `default_malformed` \| `error`. |
+| `is_parse_failure` | `true` for any `outcome != "parsed"` (the numerator). |
+| `first_word` | First whitespace-delimited token of the decision text (bounded). |
+| `consecutive_skip_count` | Skip streak for this goal at decision time. |
+| `decision` | Resulting `EngineerLifecycleDecision` choice tag. |
+| `cause` | `ok` on the happy path; `spawn_failed` / `nonzero_exit` / `envelope_decode_failed` on the error path. |
+
+Parse-failure rate over a window:
+`count(is_parse_failure == true) / count(*)`.
 
 ---
 

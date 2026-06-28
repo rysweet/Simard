@@ -62,6 +62,8 @@ fn mock_bridge() -> CognitiveMemoryBridge {
                         .iter()
                         .filter_map(|v| v.as_str().map(String::from))
                         .collect(),
+                    usage_count: 0,
+                    last_accessed_at: None,
                 });
                 Ok(json!({"id": id}))
             }
@@ -186,6 +188,8 @@ fn snapshot_serializes_to_json() {
             confidence: 0.8,
             source_id: "".to_string(),
             tags: vec![],
+            usage_count: 0,
+            last_accessed_at: None,
         }],
         procedures: vec![],
         exported_at: 1000,

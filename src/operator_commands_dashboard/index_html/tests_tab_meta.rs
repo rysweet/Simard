@@ -6,7 +6,9 @@
 #![cfg(test)]
 
 use super::INDEX_HTML;
-use super::tab_meta::{BANNED_JARGON, TAB_METADATA, default_title, tab_meta_js, tab_nav_html};
+use super::tab_meta::{
+    BANNED_JARGON, TAB_METADATA, banned_jargon_js, default_title, tab_meta_js, tab_nav_html,
+};
 use std::collections::HashSet;
 
 #[test]
@@ -343,5 +345,127 @@ fn rendered_html_tab_click_handler_swaps_document_title() {
     assert!(
         INDEX_HTML.contains("__TAB_META"),
         "tab-click handler must read window.__TAB_META"
+    );
+}
+
+// ----- #2358: jargon ban extends to rendered cycle/summary text -----
+
+#[test]
+fn banned_jargon_js_is_valid_json_array() {
+    let js = banned_jargon_js();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&js).expect("banned_jargon_js must be valid JSON");
+    let arr = parsed
+        .as_array()
+        .expect("BANNED_JARGON renders as a JS array");
+    assert_eq!(arr.len(), BANNED_JARGON.len());
+    for banned in BANNED_JARGON {
+        assert!(
+            arr.iter().any(|v| v.as_str() == Some(*banned)),
+            "banned_jargon_js missing term {banned:?}"
+        );
+    }
+}
+
+#[test]
+fn rendered_html_injects_banned_jargon_for_summary_humanizer() {
+    // The `{{BANNED_JARGON_JS}}` marker must be substituted with the live
+    // BANNED_JARGON list so the client-side humanizer strips the same jargon
+    // the ledes are forbidden from containing (single source of truth).
+    assert!(
+        !INDEX_HTML.contains("{{BANNED_JARGON_JS}}"),
+        "the BANNED_JARGON marker was not substituted"
+    );
+    assert!(
+        INDEX_HTML.contains("const BANNED_JARGON="),
+        "rendered HTML must define the client-side BANNED_JARGON list"
+    );
+    for banned in BANNED_JARGON {
+        assert!(
+            INDEX_HTML.contains(banned),
+            "rendered HTML missing injected jargon term {banned:?} for the summary humanizer"
+        );
+    }
+}
+
+#[test]
+fn rendered_html_humanizes_cycle_summaries() {
+    // The humanizer must be defined and applied; raw `esc(rpt.summary)` must
+    // no longer reach the user-facing summary slots (that path leaked `OODA`,
+    // `goals=2`, `tree=clean`).
+    assert!(
+        INDEX_HTML.contains("function humanizeCycleSummary("),
+        "humanizeCycleSummary helper must be defined"
+    );
+    assert!(
+        INDEX_HTML.contains("humanizeCycleSummary(rpt.summary)"),
+        "Thinking legacy cycle summary must be humanized"
+    );
+    assert!(
+        INDEX_HTML.contains("humanizeCycleSummary(rpt.summary||'')"),
+        "Thinking inline cycle summary must be humanized"
+    );
+    assert!(
+        INDEX_HTML.contains("humanizeCycleSummary(c.summary||'')"),
+        "OODA cycle-history summary must be humanized"
+    );
+    assert!(
+        !INDEX_HTML.contains("esc(rpt.summary)"),
+        "raw esc(rpt.summary) still leaks the machine cycle summary"
+    );
+}
+
+#[test]
+fn rendered_html_drops_false_invoice_cost_claim() {
+    // #2358 P1: the Costs lede claimed "real provider invoices rather than
+    // estimates" while the metric is labeled "Estimated Cost". The lede must
+    // no longer make the invoice claim.
+    assert!(
+        !INDEX_HTML.contains("real provider invoices rather than estimates"),
+        "Costs lede must not claim invoice-derived figures while labeling them Estimated"
+    );
+}
+
+#[test]
+fn rendered_html_defines_token_humanizers() {
+    for needle in [
+        "function humanizeGoalId(",
+        "function humanizePeriod(",
+        "humanizeGoalId(top.goal_id)",
+    ] {
+        assert!(
+            INDEX_HTML.contains(needle),
+            "rendered HTML missing humanizer wiring: {needle}"
+        );
+    }
+}
+
+#[test]
+fn rendered_html_humanizes_p3_units_and_scales() {
+    // #2358 P3: durations and bare-float urgency scores must be humanized.
+    for needle in [
+        "function humanizeDuration(",
+        "function urgencyPhrase(",
+        "humanizeDuration(intervalSecs)",
+        "urgencyPhrase(top.urgency)",
+        "urgencyPhrase(p.urgency)",
+    ] {
+        assert!(
+            INDEX_HTML.contains(needle),
+            "rendered HTML missing P3 humanizer wiring: {needle}"
+        );
+    }
+    // The bare-minute interval label and bare urgency floats must be gone.
+    assert!(
+        !INDEX_HTML.contains("intervalMin"),
+        "memory growth interval still renders a bare minute count"
+    );
+    assert!(
+        !INDEX_HTML.contains("urgency ${top.urgency.toFixed(2)}"),
+        "Overview still renders a bare unexplained urgency float"
+    );
+    assert!(
+        !INDEX_HTML.contains("(urgency: ${p.urgency.toFixed(2)})"),
+        "Thinking priorities still render a bare unexplained urgency float"
     );
 }

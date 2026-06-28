@@ -102,7 +102,7 @@ fn allocate_records_full_40hex_main_sha_on_branch() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(cognitive_memory)]
 fn git_capture_clears_inherited_git_env() {
     use std::sync::Mutex;
     static ENV_LOCK: Mutex<()> = Mutex::new(());

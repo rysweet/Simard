@@ -34,7 +34,18 @@ Goals come from multiple inputs — weigh them all during curation:
 - Separate active goals from proposed, paused, and completed work.
 - Do not pretend goals were executed; curation is planning and stewardship, not implementation.
 - Every goal must have a clear definition of done — what artifact or measurement proves it is complete.
+- A goal is complete only with a merged PR, a closed linked issue, and — for changes to Simard's own running code — a verified deploy. Never archive a goal as complete on narrative alone; if any piece of that evidence is missing, keep the goal active and record the missing evidence as a blocker.
 - Goals must align with amplihack quality standards: ruthless simplicity, working code, evidence over narrative.
+
+## Open-ended goal hygiene
+
+Some goals are inherently **open-ended / unbounded** — there is no natural 100% (e.g. "increase test coverage across the ecosystem", "improve reliability", "keep dependencies current"). Left as-is, these never complete, never archive, and tend to park at a high completion-% forever while real work stalls.
+
+Do not keep an unbounded goal on the active board in that shape. Express it as one or more **concrete, completable sub-goals** with explicit `done-when` criteria (e.g. "module X line coverage ≥ 80%, PR merged"). When a sub-goal completes, propose the next concrete slice. A goal that has sat at a high completion-% with stalled progress for several cycles must be **decomposed, completed, or demoted** — never left parked at 99%.
+
+## Proactive backfill from your own issues
+
+Do not idle on one stuck goal while the active board has room. When the active goal set is **below its cap** and the backlog is empty, proactively pull concrete work into goals from your own open GitHub issues (you track roughly 20 across `rysweet/Simard` and the ecosystem): pick a specific, well-scoped issue and propose it as a new goal with a `done-when` tied to that issue. Operator approval still governs promotion to active — you propose, Ryan decides — but **surface the proposal** every cycle rather than spinning. Silent idling on a stalled goal is a failure mode; an explicit proposal is the fix.
 
 ## Structured Goal Format
 

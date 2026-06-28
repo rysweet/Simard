@@ -823,6 +823,42 @@ counter.
 If the directory is growing despite successful backups, verify
 `SIMARD_DB_BACKUP_KEEP` is non-zero — `0` disables pruning entirely.
 
+### "`~/.simard` is filling up with `cognitive.corrupt-*` files"
+
+When LadybugDB detects a corrupt store or WAL it does not delete the bad
+bytes — it **quarantines** them in place so they remain available for
+forensics. With the library backend (de-fork Phase 2b, #2307) the live store
+is `~/.simard/cognitive` (plus the `cognitive.wal` write-ahead log), so the
+quarantines are named:
+
+```text
+cognitive.corrupt-<ts>                       # quarantined main store
+cognitive.wal.corrupt-<ts>                   # quarantined WAL
+cognitive.corrupt-<ts>.cognitive.shadow      # shadow side-file
+cognitive.corrupt-<ts>.bak                   # snapshot copy
+cognitive.corrupt-<ts>.cognitive.wal.corrupt-<ts>   # recursively nested chains
+```
+
+(The pre-#2307 native backend left `cognitive_memory.corrupt-<ts>`
+single-file snapshots.) Each name carries the `.corrupt-<ts>` infix; the live
+store files never do.
+
+These quarantines are pure dead weight once an incident has been reviewed.
+`simard cleanup` garbage-collects every quarantine generation older than
+`CORRUPT_DB_MAX_AGE_DAYS` (7 days) — both the legacy `cognitive_memory.corrupt-*`
+snapshots and the library backend's `cognitive.corrupt-*` /
+`cognitive.wal.corrupt-*` / `*.cognitive.shadow` families — while never touching
+the live `cognitive` / `cognitive.wal` store. Run it manually to reclaim space
+immediately, or rely on the scheduled OODA cleanup action:
+
+```bash
+simard cleanup   # reclaims quarantines older than 7 days, among other artifacts
+```
+
+If quarantines are being *created* repeatedly (new `.corrupt-<ts>` files each
+cycle), that is a corruption signal in its own right — capture a sample and
+file a `durability` issue rather than just deleting them.
+
 ### "I see `durability barrier failed` in the journal"
 
 This is the per-write fsync barrier (#1973) reporting an I/O failure

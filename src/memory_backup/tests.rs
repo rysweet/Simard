@@ -68,6 +68,8 @@ fn mock_bridge() -> CognitiveMemoryBridge {
                         .iter()
                         .filter_map(|v| v.as_str().map(String::from))
                         .collect(),
+                    usage_count: 0,
+                    last_accessed_at: None,
                 });
                 Ok(json!({"id": id}))
             }

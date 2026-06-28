@@ -108,7 +108,7 @@ pub fn launch_knowledge_bridge_native() -> SimardResult<KnowledgeBridge> {
 /// Launch a gym bridge using the native Rust transport.
 pub fn launch_gym_bridge_native() -> SimardResult<GymBridge> {
     let mut transport = NativeBridgeTransport::new("simard-gym-eval");
-    crate::native_gym::register_gym_handlers(&mut transport);
+    crate::gym_runner_bridge::register_gym_handlers(&mut transport);
     let wrapped = wrap_native(transport);
     if !check_health("gym-native", wrapped.as_ref()) {
         return Err(crate::error::SimardError::BridgeSpawnFailed {
@@ -165,6 +165,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn resolve_packs_dir_uses_env_override() {
         let original = std::env::var("SIMARD_PACKS_DIR").ok();

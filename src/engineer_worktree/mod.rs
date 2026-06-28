@@ -412,8 +412,8 @@ impl Drop for EngineerWorktree {
 mod cleanup;
 use cleanup::{assert_under_root, cleanup_inner, create_worktrees_root, unique_suffix};
 mod sweep;
-pub use sweep::sweep_orphaned_worktrees;
-use sweep::{git_capture, is_valid_sha40, validate_goal_id};
+use sweep::{git_capture, is_valid_sha40};
+pub use sweep::{sweep_orphaned_worktrees, validate_goal_id};
 
 /// Walk up from `path`, returning the first ancestor that exists on
 /// disk. Used by the disk-pressure precheck to find a path that

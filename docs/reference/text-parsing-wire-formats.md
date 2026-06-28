@@ -149,9 +149,20 @@ If validation fails, the deterministic floor applies.
 **Enum:** `EngineerLifecycleDecision`
 
 **Parser:** `parse_lifecycle_from_text(text) -> EngineerLifecycleDecision`
+(thin wrapper over `parse_lifecycle_outcome`, which also returns a
+`LifecycleParseOutcome` for metrics).
 
 Extracts the first whitespace-delimited word, lowercases it, and matches
 against the 6 lifecycle variant names. Defaults to `ContinueSkipping`.
+
+> **Fixed in [#2419](https://github.com/rysweet/Simard/issues/2419):** The
+> `text` passed to this parser is the agent decision text extracted from the
+> `recipe-runner-rs --output-format json` envelope
+> (`step_results[].output`), **not** raw stdout. recipe-runner-rs's default
+> `text` mode prints only a summary banner to stdout, so reading raw stdout
+> made first-word extraction always see `Recipe:` and silently default
+> (~99.6% of calls). Each call now also emits a `brain_lifecycle_decision`
+> metric whose `outcome` label measures the parse-failure rate.
 
 **Keywords:**
 

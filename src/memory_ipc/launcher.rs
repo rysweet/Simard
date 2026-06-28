@@ -30,6 +30,7 @@
 //! then a direct [`LibraryCognitiveMemory::open`] (which creates the store
 //! if the underlying DB has never been opened).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, Weak};
 
@@ -190,6 +191,116 @@ fn lookup_in_process_writer(state_root: &Path) -> Option<Arc<dyn CognitiveMemory
     weak.upgrade()
 }
 
+// ---------------------------------------------------------------------------
+// Tier 2 shared store cache.
+//
+// When neither the daemon's in-process writer (tier 0) nor its IPC socket
+// (tier 1) is available, the launcher opens the library store directly. The
+// naive implementation opened a *fresh* `LibraryCognitiveMemory` on every
+// `launch_writer_bridge` / `open_reader_bridge` call, so a sequence of
+// open→write→drop→reopen→read cycles against the same `state_root` within one
+// process (e.g. the dashboard goal-CRUD handlers, or any same-process
+// read-after-write) reopened the lbug `Database` repeatedly.
+//
+// That reopen is racy: a fresh open intermittently returns fact rows whose
+// per-fact metadata (the adapter's `_simard_seq` ordering key) has not yet been
+// folded back in, which collapses the "max node_id == newest" invariant the
+// goal-board snapshot read depends on and surfaces as an empty / stale read
+// (issue #2320 — flaky `full_goal_lifecycle_crud`).
+//
+// Fix: cache one shared `Arc<LibraryCognitiveMemory>` per canonical
+// `state_root` and hand every tier-2 reader/writer a `SharedMemory` view of it.
+// Reads and writes then go through a single in-memory store, so a write is
+// immediately visible to the next read with no reopen and no metadata-loss
+// race — the same single-handle guarantee the daemon already gets from tier 0.
+//
+// Scope of the guarantee: this provides **same-process** read-after-write
+// consistency for tier-2 callers. Cross-process visibility is unchanged — it
+// flows through the daemon IPC socket (tier 1) or, for a cold open in a later
+// process, the library's WAL replay. This cache deliberately makes tier-2 a
+// process-local single-owner of each `state_root`; a caller needing a fresh
+// on-disk view from another writer must go through the daemon socket.
+//
+// Lifetime / memory: the cache holds a strong `Arc`, so the handle survives
+// across the short-lived bridges that come and go between operations (that
+// persistence is the whole point). To bound growth — the test suite allocates a
+// fresh `TempDir` state_root per hermetic test — a lookup whose directory has
+// been removed falls through to the slow path, which prunes every entry whose
+// directory no longer exists. A `TempDir` is removed when its owning test
+// drops, so its cached handle is evicted on the next mismatching access;
+// dropping the last `Arc` runs `lbug::Database::drop`, which checkpoints the
+// WAL into the main file. Live state roots (the daemon is on tier 0, so this is
+// CLI / embedded callers) stay cached for the process lifetime; the library
+// replays any un-checkpointed WAL on the next open, so a process exit without an
+// explicit checkpoint is recoverable. [`clear_tier2_store_cache`] drops every
+// handle deterministically (flushing via `Database::drop`) for shutdown/tests.
+// ---------------------------------------------------------------------------
+
+static TIER2_STORE_CACHE: RwLock<BTreeMap<PathBuf, Arc<LibraryCognitiveMemory>>> =
+    RwLock::new(BTreeMap::new());
+
+/// Drop cache entries whose canonical directory no longer exists. Called while
+/// holding the write lock. Returns nothing; eviction is best-effort and
+/// dropping the evicted `Arc`s checkpoints their stores via `Database::drop`.
+fn prune_dead_store_entries(cache: &mut BTreeMap<PathBuf, Arc<LibraryCognitiveMemory>>) {
+    cache.retain(|path, _| path.exists());
+}
+
+/// Get-or-open the shared library store for `state_root`, eliminating the
+/// per-operation reopen race (issue #2320). All tier-2 readers and writers for
+/// the same canonical `state_root` share this one handle.
+fn shared_tier2_store(state_root: &Path) -> SimardResult<Arc<LibraryCognitiveMemory>> {
+    // Materialise the directory before keying so the canonical path is stable
+    // regardless of whether the writer (which already `create_dir_all`s) or the
+    // reader reaches here first. Without this, a reader-first call on a not-yet-
+    // existing symlinked temp root would key under the raw path while a later
+    // writer keys under the resolved path — two keys, two live handles on one
+    // on-disk DB, which is exactly the double-open `SharedMemory` exists to avoid.
+    let _ = std::fs::create_dir_all(state_root);
+    let key = canonical_or_self(state_root);
+
+    // Fast path: already cached AND the backing directory still exists. The
+    // existence check guards the (test-only) case where a state_root dir is
+    // removed and a fresh dir is later created at the same path — we must not
+    // hand back the stale handle, so fall through to the pruning slow path.
+    if let Ok(cache) = TIER2_STORE_CACHE.read()
+        && let Some(arc) = cache.get(&key)
+        && key.exists()
+    {
+        return Ok(Arc::clone(arc));
+    }
+
+    // Slow path: open under the write lock so two callers racing on the same
+    // path don't both open the lbug `Database` (which would contend on the
+    // on-disk store lock). Recover from a poisoned lock rather than failing —
+    // the map itself is not left in an inconsistent state by a panicking
+    // holder.
+    let mut cache = TIER2_STORE_CACHE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    prune_dead_store_entries(&mut cache);
+    if let Some(arc) = cache.get(&key) {
+        return Ok(Arc::clone(arc));
+    }
+    let mem = Arc::new(LibraryCognitiveMemory::open(state_root)?);
+    cache.insert(key, Arc::clone(&mem));
+    Ok(mem)
+}
+
+/// Drop every cached tier-2 store handle, flushing each via `Database::drop`
+/// (which checkpoints the WAL into the main file).
+///
+/// Shutdown / test helper: production code rarely needs this because the daemon
+/// path uses tier 0 and per-`state_root` handles are pruned as their temp dirs
+/// disappear. Call it at process shutdown for a deterministic checkpoint, or in
+/// a test that must force a genuine cold reopen of a still-live `state_root`.
+pub fn clear_tier2_store_cache() {
+    let mut cache = TIER2_STORE_CACHE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.clear();
+}
+
 /// Launch a cognitive-memory writer bridge against `state_root`.
 ///
 /// Resolution ladder:
@@ -244,22 +355,27 @@ pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
         }
     }
 
-    // (2) No daemon — reap any stale lock and try direct open.
+    // (2) No daemon — reap any stale lock and open the shared tier-2 store.
+    // The store is cached per canonical `state_root` (see `shared_tier2_store`)
+    // so every same-process reader/writer for this root shares one handle,
+    // eliminating the open→write→drop→reopen→read metadata-loss race that made
+    // `full_goal_lifecycle_crud` flaky (issue #2320).
     if let Err(e) = reap_stale_open_lock(state_root) {
         eprintln!("[simard] launch_writer_bridge: stale-lock reap failed: {e}");
     }
 
-    let mem =
-        LibraryCognitiveMemory::open(state_root).map_err(|e| SimardError::RuntimeInitFailed {
-            component: "memory-ipc-launcher".into(),
-            reason: format!(
-                "cognitive memory writer unavailable at {} — IPC and direct open both failed: \
-                 {e}. Read-only fallback is disabled because writes against a read-only handle \
-                 silently no-op (issue #1590).",
-                state_root.display()
-            ),
-        })?;
-    Ok(WriterBridge::checked_new(Box::new(mem)))
+    let mem = shared_tier2_store(state_root).map_err(|e| SimardError::RuntimeInitFailed {
+        component: "memory-ipc-launcher".into(),
+        reason: format!(
+            "cognitive memory writer unavailable at {} — IPC and direct open both failed: \
+             {e}. Read-only fallback is disabled because writes against a read-only handle \
+             silently no-op (issue #1590).",
+            state_root.display()
+        ),
+    })?;
+    Ok(WriterBridge::checked_new(Box::new(SharedMemory(
+        mem as Arc<dyn CognitiveMemoryOps>,
+    ))))
 }
 
 /// Open a cognitive-memory reader bridge against `state_root`.
@@ -300,12 +416,14 @@ pub fn open_reader_bridge(state_root: &Path) -> SimardResult<ReaderBridge> {
     }
 
     // (2) De-fork Phase 2b (issue #2307): direct open of the library-backed
-    // store. The library has no read-only constructor, so this is a writer
-    // handle used for reads — acceptable because tiers 0/1 already cover the
-    // case where the daemon holds the store, and only one direct opener exists
-    // per process otherwise.
-    let mem = LibraryCognitiveMemory::open(state_root)?;
+    // store, shared per canonical `state_root` (see `shared_tier2_store`). The
+    // library has no read-only constructor, so this is a writer handle used for
+    // reads — acceptable because tiers 0/1 already cover the case where the
+    // daemon holds the store. Sharing the handle with the tier-2 writer makes a
+    // just-written goal-board snapshot immediately visible here instead of
+    // racing a fresh reopen (issue #2320).
+    let mem = shared_tier2_store(state_root)?;
     Ok(ReaderBridge {
-        inner: Box::new(mem),
+        inner: Box::new(SharedMemory(mem as Arc<dyn CognitiveMemoryOps>)),
     })
 }

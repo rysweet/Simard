@@ -691,6 +691,202 @@ fn repl_help_mentions_inline_recording_commands() {
     }
 }
 
+// ── Grouped /help + unknown-command suggestions (issue #2321) ─────────
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_help_is_grouped_into_sections() {
+    let _state = HermeticState::new();
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/help\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Grouped help test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    for title in ["Meeting control", "Capture", "Templates"] {
+        assert!(
+            output_str.contains(title),
+            "grouped help should contain section '{title}': {output_str}"
+        );
+    }
+}
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_grouped_help_colorizes_section_titles() {
+    let _state = HermeticState::new();
+    // Ensure NO_COLOR is unset so ANSI escapes are emitted.
+    // SAFETY: serial_test guards against parallel access to env vars.
+    unsafe { std::env::remove_var("NO_COLOR") };
+
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/help\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Grouped help color test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    // Section titles are wrapped in the cyan escape (\x1b[36m … \x1b[0m),
+    // matching how /state and /recap colorize their headers.
+    assert!(
+        output_str.contains("\x1b[36m── Meeting control ──\x1b[0m"),
+        "grouped help titles should be colorized cyan: {output_str:?}"
+    );
+}
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_grouped_help_honors_no_color() {
+    let _state = HermeticState::new();
+    // SAFETY: serial_test guards against parallel access to env vars.
+    unsafe { std::env::set_var("NO_COLOR", "1") };
+
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/help\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Grouped help NO_COLOR test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    unsafe { std::env::remove_var("NO_COLOR") };
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str.contains("── Meeting control ──"),
+        "section title still present without color: {output_str}"
+    );
+    assert!(
+        !output_str.contains("\x1b["),
+        "no ANSI escapes when NO_COLOR is set: {output_str:?}"
+    );
+}
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_unknown_command_suggests_closest() {
+    let _state = HermeticState::new();
+    let bridge = mock_bridge();
+    // Distinctive sentinel so we can prove the typo was NOT forwarded to the LLM.
+    let agent = MockAgentSession::new("AGENT_REPLY_SENTINEL");
+    let input = b"/colse\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Unknown command suggestion",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str.contains("Unknown command '/colse'. Did you mean '/close'?"),
+        "should suggest the closest command: {output_str}"
+    );
+    assert!(
+        !output_str.contains("AGENT_REPLY_SENTINEL"),
+        "a mistyped command must not be forwarded to the LLM: {output_str}"
+    );
+}
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_unknown_command_without_match_lists_commands() {
+    let _state = HermeticState::new();
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/zzzzzzzz\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Unknown command no match",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str.contains("Unknown command '/zzzzzzzz'."),
+        "should report the unknown command: {output_str}"
+    );
+    // No close match → fall back to listing the grouped command reference.
+    assert!(
+        output_str.contains("Meeting control") && output_str.contains("/status"),
+        "no-suggestion path should list available commands: {output_str}"
+    );
+}
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_file_path_is_not_treated_as_unknown_command() {
+    let _state = HermeticState::new();
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("noted the path");
+    // A filesystem path starts with '/' but must remain conversation.
+    let input = b"/home/user/notes.md\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "File path conversation",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        !output_str.contains("Unknown command"),
+        "a file path must not trigger the unknown-command hint: {output_str}"
+    );
+    assert!(
+        output_str.contains("noted the path"),
+        "a file path should be forwarded to the LLM as conversation: {output_str}"
+    );
+}
+
 #[test]
 #[serial(cognitive_memory)]
 fn repl_decision_command_records_and_confirms() {
@@ -781,6 +977,120 @@ fn repl_question_command_records_and_confirms() {
     assert!(
         output_str.contains("What is our SLO target?"),
         "REPL should echo the question text back: {output_str}"
+    );
+}
+
+// ── live capture-count tally (interactive parity with batch probe) ──
+// Issue #2376 (child of #1154 Pillar 3/5; audit #1628).
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_decision_emits_capture_tally() {
+    // After an explicit `/decision`, the REPL must print a running tally so
+    // the operator sees what the meeting has captured so far without running
+    // `/state`. The `[meeting] captured:` prefix is a stable greppable marker.
+    let _state = HermeticState::new();
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/decision Adopt TDD for new modules\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Tally test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        output_str.contains("[meeting] captured:"),
+        "REPL should emit a capture tally after /decision: {output_str}"
+    );
+    // Singular form for exactly one decision; zero-count categories pluralize.
+    assert!(
+        output_str.contains("1 decision,"),
+        "tally should show one decision (singular): {output_str}"
+    );
+    assert!(
+        output_str.contains("0 risks"),
+        "tally should show zero risks (plural): {output_str}"
+    );
+    assert!(
+        output_str.contains("0 disagreements"),
+        "tally should show zero disagreements (plural): {output_str}"
+    );
+}
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_capture_tally_counts_each_category_and_pluralizes() {
+    // The tally must count every structured category independently and use
+    // correct singular/plural forms. Two decisions => "2 decisions"; one of
+    // each remaining category => singular.
+    let _state = HermeticState::new();
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/decision A\n/decision B\n/question Who owns rollout?\n/action Carol ships CI\n/risk API may slip\n/disagree Prefer Python\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Tally counts test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    // The final tally (printed after /disagree) reflects all six captures.
+    assert!(
+        output_str.contains(
+            "[meeting] captured: 2 decisions, 1 open question, 1 action item, 1 risk, 1 disagreement"
+        ),
+        "final tally should count every category with correct pluralization: {output_str}"
+    );
+}
+
+#[test]
+#[serial(cognitive_memory)]
+fn repl_capture_tally_is_plain_text_for_grep() {
+    // The tally line carries no ANSI escapes even when color is enabled, so
+    // `grep '\[meeting\] captured:'` works on raw terminal scrollback.
+    let _state = HermeticState::new();
+    // Ensure color is *not* globally suppressed for this assertion.
+    unsafe { std::env::remove_var("NO_COLOR") };
+    let bridge = mock_bridge();
+    let agent = MockAgentSession::new("ok");
+    let input = b"/risk Dependency may slip\n/close\n";
+    let mut reader = &input[..];
+    let mut output = Vec::new();
+
+    run_meeting_repl(
+        "Tally plain test",
+        &bridge,
+        Some(Box::new(agent)),
+        "",
+        &mut reader,
+        &mut output,
+    )
+    .unwrap();
+
+    let output_str = String::from_utf8(output).unwrap();
+    let tally_line = output_str
+        .lines()
+        .find(|l| l.contains("[meeting] captured:"))
+        .expect("a capture tally line must be present");
+    assert!(
+        !tally_line.contains('\x1b'),
+        "tally line must be free of ANSI escapes for reliable grepping: {tally_line:?}"
     );
 }
 

@@ -201,12 +201,13 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
 
   <div class="tab-content" id="tab-logs">
     <h1 class="page-h1">Logs</h1>
-    <p class="page-lede">Raw daemon logs, the cost ledger, and per-cycle reports — the lowest-level view for debugging what the daemon did and why.</p>
+    <p class="page-lede">Detailed activity from the always-on background service that runs Simard, plus the spending log and per-cycle reports — the most granular view for understanding exactly what Simard did and why.</p>
     <div class="card" style="margin-bottom:1rem">
-      <h2>Daemon Log <button class="btn" onclick="fetchLogs()">Refresh</button> <button class="btn" onclick="copyLogContent('daemon-log')" style="margin-left:.3rem">📋 Copy</button></h2>
+      <h2>Background Service Log <button class="btn" onclick="fetchLogs()">Refresh</button> <button class="btn" onclick="copyLogContent('daemon-log')" style="margin-left:.3rem">📋 Copy</button></h2>
+      <p style="color:#8b949e;font-size:.82rem;margin:.15rem 0 .5rem">Live activity from the always-on background process that runs Simard. Use the level menu to show only problems — pick <strong>Errors</strong> to surface failures, or <strong>All levels</strong> to see everything.</p>
       <div style="margin-bottom:.5rem;display:flex;gap:.5rem;align-items:center">
-        <input id="log-filter" placeholder="Filter logs…" style="flex:1;padding:4px 8px;background:var(--bg);border:1px solid var(--border);color:var(--fg);border-radius:4px;font-size:.85rem">
-        <select id="log-level-filter" style="padding:4px;background:var(--bg);border:1px solid var(--border);color:var(--fg);border-radius:4px;font-size:.85rem">
+        <input id="log-filter" placeholder="Search the log…" style="flex:1;padding:4px 8px;background:var(--bg);border:1px solid var(--border);color:var(--fg);border-radius:4px;font-size:.85rem">
+        <select id="log-level-filter" title="Show only lines at this severity level" style="padding:4px;background:var(--bg);border:1px solid var(--border);color:var(--fg);border-radius:4px;font-size:.85rem">
           <option value="">All levels</option>
           <option value="error">Errors</option>
           <option value="warn">Warnings</option>
@@ -336,7 +337,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
 
   <div class="tab-content" id="tab-costs">
     <h1 class="page-h1">Costs</h1>
-    <p class="page-lede">Token and dollar spending by model and provider, plus your daily and weekly budget caps, computed from real provider invoices rather than estimates.</p>
+    <p class="page-lede">Token and dollar spending by model and provider, plus your daily and weekly budget caps — the dollar figures are estimates based on each model's published token prices, not a provider invoice.</p>
     <div class="grid">
       <div class="card"><h2>Daily Costs <button class="btn" onclick="fetchCosts()">Refresh</button></h2><div id="costs-daily"><span class="loading">Loading…</span></div></div>
       <div class="card"><h2>Weekly Costs</h2><div id="costs-weekly"><span class="loading">Loading…</span></div></div>

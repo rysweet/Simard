@@ -66,6 +66,28 @@ jobs:
           # across concurrent PRs.
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
+          # Persist the pre-commit clippy wrapper's stable lbug prebuilt so the
+          # version-pinned download happens once per cache lifetime instead of
+          # on every run (issue #2426). This dir lives outside registry/src on
+          # purpose, so it isn't otherwise covered by the cargo cache.
+          cache-directories: |
+            ~/.cache/simard-lbug-precommit
+
+      - name: Provision lbug native static library link path (#2426 / #2423)
+        # Pin the lbug native-static-lib path for every cargo invocation in this
+        # job. lbug 0.17.1 caches its prebuilt `liblbug.a` under registry/src,
+        # which this cache restores around but evicts — so the cached release
+        # build-script output points at a missing archive. Provision a stable
+        # copy, point lbug at it via its external-lib interface, and drop the
+        # stale cached lbug build outputs so the build script re-runs and adopts
+        # the pinned path. Runs after the cache restore on purpose.
+        shell: bash
+        run: |
+          lib_dir="$HOME/.cache/simard-lbug-precommit/lib"
+          scripts/provision-lbug-prebuilt.sh "$lib_dir" >/dev/null
+          echo "LBUG_LIBRARY_DIR=$lib_dir" >> "$GITHUB_ENV"
+          echo "LBUG_INCLUDE_DIR=$lib_dir" >> "$GITHUB_ENV"
+          rm -rf target/*/build/lbug-* target/*/.fingerprint/lbug-* 2>/dev/null || true
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -76,7 +98,47 @@ jobs:
         run: python -m pip install --upgrade pip pre-commit
 
       - name: Run pre-commit stage
-        run: python -m pre_commit run --all-files --show-diff-on-failure --hook-stage pre-commit
+        id: precommit_stage
+        # `--verbose` so the cargo-clippy-precommit hook's output (including the
+        # lbug native-lib resolution marker on stderr) is captured even on
+        # success, which the regression-guard step below asserts on. Tee'd to a
+        # log so the assertion runs without re-invoking the expensive release
+        # clippy.
+        run: |
+          set -o pipefail
+          mkdir -p target/ci-logs
+          python -m pre_commit run --all-files --show-diff-on-failure --verbose \
+            --hook-stage pre-commit 2>&1 | tee target/ci-logs/precommit-stage.log
+
+      - name: Assert pre-commit clippy compiled/linked lbug (regression guard #2426)
+        # Guards against silent reintroduction of issue #2426 (pre-commit clippy
+        # --release failing with "could not find native static library `lbug`").
+        # `if: always()` so the explicit #2426 annotation still fires when the
+        # pre-commit stage failed (a real regression fails that step first, which
+        # would otherwise skip this guard). Cheap: greps the captured log, no
+        # recompilation.
+        if: always()
+        run: |
+          outcome="${{ steps.precommit_stage.outcome }}"
+          if [ "$outcome" != "success" ] && [ "$outcome" != "failure" ]; then
+            echo "pre-commit stage did not run (outcome=$outcome); skipping #2426 guard"
+            exit 0
+          fi
+          log=target/ci-logs/precommit-stage.log
+          test -f "$log" || { echo "::error::missing pre-commit stage log"; exit 1; }
+          if grep -qiE "could not find native static library .?lbug" "$log"; then
+            echo "::error::REGRESSION (#2426): pre-commit clippy --release failed to link the lbug native static library"
+            exit 1
+          fi
+          if [ "$outcome" != "success" ]; then
+            echo "pre-commit stage failed for a non-lbug reason; see the failing hook above"
+            exit 0
+          fi
+          if ! grep -q "\[clippy-precommit-release\] SUCCESS: cargo clippy --release linked lbug" "$log"; then
+            echo "::error::pre-commit clippy --release did not report linking lbug; the lbug link-path wrapper may have regressed"
+            exit 1
+          fi
+          echo "OK: pre-commit clippy --release compiled and linked lbug (issue #2426 guard passed)"
 
       - name: Run cargo test (streamed, captured for artifact)
         id: cargo_test
@@ -166,6 +228,21 @@ jobs:
           # the single writer to avoid cache contention.
           save-if: false
           cache-on-failure: true
+          cache-directories: |
+            ~/.cache/simard-lbug-precommit
+
+      - name: Provision lbug native static library link path (#2426 / #2423)
+        # `cargo test --test install_real` (and the `cargo install` it shells
+        # out to) build lbug and hit the same evicted registry-src prebuilt as
+        # the pre-commit clippy gate. Pin the link path for the whole job so
+        # both link lbug deterministically, regardless of profile.
+        shell: bash
+        run: |
+          lib_dir="$HOME/.cache/simard-lbug-precommit/lib"
+          scripts/provision-lbug-prebuilt.sh "$lib_dir" >/dev/null
+          echo "LBUG_LIBRARY_DIR=$lib_dir" >> "$GITHUB_ENV"
+          echo "LBUG_INCLUDE_DIR=$lib_dir" >> "$GITHUB_ENV"
+          rm -rf target/*/build/lbug-* target/*/.fingerprint/lbug-* 2>/dev/null || true
 
       - name: Run install verification (cargo install + --version + ensure-deps + self-install)
         env:
@@ -220,11 +297,12 @@ jobs:
           SIMARD_BIN: ${{ github.workspace }}/target/debug/simard
           SIMARD_DASHKEY: testkey1
           CI: "true"
-        # Scope to overview.spec.ts only (the surface this CI job validates,
-        # per issue #948). Other structural specs (chat-lifecycle, multi-turn)
+        # Scope to overview.spec.ts plus the Logs level-filter regression
+        # (logs-filter.spec.ts) — both run fully mocked and need no LLM
+        # backend. Other structural specs (chat-lifecycle, multi-turn)
         # require an LLM backend that is intentionally not provisioned in CI;
         # they are validated separately when credentials are available.
-        run: npx playwright test --config=tests/e2e-dashboard/playwright.config.ts --project=structural tests/e2e-dashboard/specs/overview.spec.ts
+        run: npx playwright test --config=tests/e2e-dashboard/playwright.config.ts --project=structural tests/e2e-dashboard/specs/overview.spec.ts tests/e2e-dashboard/specs/logs-filter.spec.ts
 
       # ---- Python tab-identity smoke test (#1993 / #1994 / #1995) ----
       # Reuses the binary the TypeScript step downloaded plus the same

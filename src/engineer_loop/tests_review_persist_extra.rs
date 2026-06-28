@@ -123,6 +123,7 @@ fn persist_artifacts_with_active_goals() {
         )
         .unwrap(),
         updated_in: crate::session::SessionPhase::Preparation,
+        evidence: Vec::new(),
     }];
     let action = make_executed(EngineerActionKind::ReadOnlyScan);
     let verification = super::types::VerificationReport {

@@ -88,6 +88,8 @@ mod tests {
                 "scope:Benchmark".to_string(),
                 "session:00000000-0000-0000-0000-000000000001".to_string(),
             ],
+            usage_count: 0,
+            last_accessed_at: None,
         };
         let record = fact_to_record(&fact);
         assert_eq!(record.key, "test-concept");
@@ -104,6 +106,8 @@ mod tests {
             confidence: 0.5,
             source_id: "test".to_string(),
             tags: vec![],
+            usage_count: 0,
+            last_accessed_at: None,
         };
         let record = fact_to_record(&fact);
         assert_eq!(record.scope, MemoryScope::Untagged); // default for missing tags

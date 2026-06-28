@@ -6,10 +6,14 @@ owner: simard
 doc_type: concept
 related:
   - ./cognitive-memory.md
+  - ./episode-ingestion-policy.md
   - ../reference/cognitive-memory-preparation-filters.md
   - ../reference/cognitive-memory-episodic-recall.md
   - ../reference/ooda-procedural-memory.md
   - ../reference/cognitive-memory-procedural-idempotency.md
+  - ../reference/cognitive-memory-provenance.md
+  - ../reference/automatic-distillation-scheduler.md
+  - ../reference/distill-recipe-output-capture.md
   - ../memory.md
 ---
 
@@ -32,6 +36,17 @@ same action the `__memory__` synthetic priority dispatches to. No new
 synthetic priority is added. The existing deterministic-brain routing
 locked in by issue [#2286](https://github.com/rysweet/Simard/issues/2286)
 is preserved.
+
+> **Now also automatic (#2327).** Since
+> [#2327](https://github.com/rysweet/Simard/issues/2327), distillation no
+> longer waits for the brain to choose `ConsolidateMemory`: an
+> [automatic promotion scheduler](./episode-ingestion-policy.md) also fires
+> this pass at the end of every OODA cycle once the undistilled backlog
+> reaches a threshold or a cycle-count interval elapses. The pass was also
+> extended to emit **procedures** (not just facts), both written with
+> provenance. See the
+> [automatic distillation scheduler reference](../reference/automatic-distillation-scheduler.md).
+> The fact pipeline described below is unchanged.
 
 ---
 
@@ -80,13 +95,21 @@ Recipe output: { "facts": [ { concept, content, source_episode_id }, ... ] }
   │
   ▼
 For each fact:
-    store_fact(concept, content, confidence=0.7,
-               concepts=[concept], source=format!("distill:{source_episode_id}"))
+    store_fact_with_provenance(
+        concept, content, confidence=0.7,
+        source_id=format!("distill:{source_episode_id}"),   // textual id retained
+        tags=Some(&[concept]), metadata=None,
+        source_episode_ids=&[source_episode_id])             // DERIVES_FROM edge (#2325)
   │
   ▼
 For EVERY input episode (even those classified "skip"):
     mark_episode_distilled(node_id)
 ```
+
+Each distilled fact now also gets a `DERIVES_FROM` graph edge back to its
+source episode, in addition to the textual `distill:{id}` `source_id`
+which is retained for backward compatibility. See
+[Cognitive-memory provenance](../reference/cognitive-memory-provenance.md).
 
 The mark-everything rule prevents prompt-replay loops: an episode
 classified "skip" once will not be re-fed to the LLM on the next
@@ -146,26 +169,30 @@ recipe with a single LLM agent. It follows the same shape as
 - **Prompt**: instructs the agent to classify each episode into one
   of the three concept labels (or `skip`) and emit a JSON object
   `{ "facts": [ { "concept": "...", "content": "...",
-  "source_episode_id": "..." } ] }`.
-- **Output**: parsed by the Rust caller; non-conforming output causes
-  the caller to return `Err` (which then triggers the "no markers
-  set" retry behaviour above).
+  "source_episode_id": "..." } ], "procedures": [ ... ] }`.
+- **Output**: the runner is invoked with `--output-format json`, so the
+  agent's JSON object arrives inside `recipe-runner-rs`'s structured
+  envelope at `step_results[].output`. The Rust caller extracts it with a
+  tolerant three-tier parser; non-conforming output or a failed run
+  causes the caller to return `Err` (which then triggers the "no markers
+  set" retry behaviour above). See
+  [Distill recipe output capture](../reference/distill-recipe-output-capture.md)
+  for the full envelope contract, the parser, and failure semantics.
 
-The Rust-side invocation reuses the existing
-`Command::new("recipe-runner-rs")` shape demonstrated by
-`stewardship::recipe_merge_judge::RecipeMergeJudge`
-(`src/stewardship/recipe_merge_judge.rs`)
-and
-`goal_curation::recipe_progress_checker::RecipeProgressChecker`
-(`src/goal_curation/recipe_progress_checker.rs`):
-the binary takes the recipe path as a positional arg followed by
-zero or more `-c key=value` pairs and `AMPLIHACK_AGENT_BINARY` in
-the environment. The episodes payload is passed as a single context
-entry; whether it is inlined as `-c episodes=<json>` or written to a
-temp file and passed as `-c episodes_path=<path>` is an
-implementation detail decided at PR-B coding time by what
-`recipe-runner-rs` actually supports for array values. Both shapes
-satisfy the contract documented here.
+The Rust-side invocation shells out to `recipe-runner-rs` with an
+argv-vector (no shell): the recipe path as a positional arg,
+`--output-format json`, and the episodes batch inlined as a single
+`-c episodes=<json>` context entry, with `AMPLIHACK_AGENT_BINARY` in the
+environment. `--output-format json` is **required** — in the default
+`text` mode the runner's stdout is only a human status banner and the
+agent's facts object never reaches the caller, which is exactly the
+latent bug that
+[#2401](https://github.com/rysweet/Simard/issues/2401) fixes. The same
+`Command::new("recipe-runner-rs")` argv construction — minus
+`--output-format json` — is used by
+`stewardship::recipe_merge_judge::RecipeMergeJudge` and
+`goal_curation::recipe_progress_checker::RecipeProgressChecker`, which
+still parse the default text banner and are intentionally left unchanged.
 
 The recipe is loaded with the same resolution order Simard uses
 elsewhere:
@@ -301,19 +328,56 @@ pub struct DistillReport {
     pub input_count: u32,
     /// Number of facts emitted by the recipe.
     pub fact_count: u32,
+    /// Number of procedures emitted by the recipe.
+    pub procedure_count: u32,
     /// Number of episodes marked distilled after the pass.
     pub marked_count: u32,
-}
-
-impl DistillReport {
-    /// The pass was skipped under threshold; no work was done.
-    pub fn skipped() -> Self { Self { input_count: 0, fact_count: 0, marked_count: 0 } }
-
-    pub fn was_skipped(&self) -> bool {
-        self.input_count == 0 && self.fact_count == 0 && self.marked_count == 0
-    }
+    /// Number of candidate facts blocked by the reliability gate (issue #2433).
+    pub quarantined_count: u32,
 }
 ```
+
+`fact_count + quarantined_count` is the total number of candidate facts the
+recipe emitted for the pass; `quarantined_count` counts the candidates the
+ISAO reliability gate either quarantined (low score) or refused to promote
+because a stronger prior already existed on the concept.
+
+## Reliability gate (issue #2433)
+
+Before a distilled fact is promoted into semantic memory it is **self-assessed**
+and gated on `Fact.confidence` — turning the formerly-constant `0.7` into a
+live, computed signal (BGML's *information self-assessment ownership*, ISAO).
+
+`assess_fact_reliability(fact, episodes, batch_facts) -> f64` scores each
+candidate in `[0.0, 1.0]` from cheap local signals (no extra LLM call):
+
+| Signal | Weight | Meaning |
+|--------|--------|---------|
+| Provenance grounding | 0.5 | `source_episode_id` is one of the episodes fed to the recipe this pass (not hallucinated). **Necessary**: without it a fact tops out at 0.4 and is always quarantined. |
+| Content quality | ≤0.3 | Empty / whitespace-only content is a **hard gate** (score `0.0`); otherwise ≥3 words earns the full 0.3. |
+| Concept validity | 0.1 | Concept is one of `pr-pattern` / `bug-pattern` / `lesson-learned`. |
+| Corroboration | 0.1 | ≥2 facts agree on the same concept this pass — awarded **only to grounded facts** so hallucinated provenance can't ride on a sibling's corroboration. |
+
+A candidate scoring below `DISTILL_RELIABILITY_THRESHOLD` (0.5) is **quarantined**
+— not written. Because grounding (0.5) is necessary to reach the threshold, a
+hallucinated-provenance fact scores at most `0.4` (even with corroboration) and
+an empty fact scores `0.0`; both are quarantined. A nominal grounded,
+known-concept, ≥3-word fact scores `0.9` — at or above the legacy baseline — so
+good facts keep their prior behaviour.
+
+A surviving candidate is written with its *computed* confidence, but never
+**downgrades** a stronger existing copy of the **same fact**. The don't-clobber
+guard matches on fact *identity* (concept **and** content), not the concept
+label alone: the recipe emits only three concept labels and every good fact
+scores identically, so a concept-only guard would quarantine every distinct fact
+after the first one stored under a label and silently neuter distillation.
+Identity matching blocks only a genuine re-distillation of the same content at a
+lower-or-equal confidence, while distinct lessons that share a label accumulate
+(`search_facts(concept, _, score)` is consulted, then filtered on content).
+
+Each pass records a `distill_reliability_gate` metric whose value is the
+block-rate (`quarantined / candidate_facts`), with the counts in the context
+payload, so the gate's effect is measurable before/after from `metrics.jsonl`.
 
 ### Reduction ratio
 
@@ -400,14 +464,17 @@ distill: 8 episodes pulled, below min 20, skipped
 
 ### Example 3 — recipe error
 
-Recipe runner exits non-zero or returns malformed JSON:
+The runner exits non-zero, the envelope reports `success: false`, or the
+captured `step_results[].output` carries no parseable facts object:
 
 ```
-distill: 40 episodes pulled, recipe error: invalid JSON output, no markers set, retry next pass
+distill: 40 episodes pulled, recipe error: <message>, no markers set, retry next pass
 ```
 
 `mark_episode_distilled` is **not** called. The same 40 episodes are
-eligible on the next pass.
+eligible on the next pass. See
+[Distill recipe output capture](../reference/distill-recipe-output-capture.md#failure-semantics)
+for the exact failure matrix.
 
 ---
 

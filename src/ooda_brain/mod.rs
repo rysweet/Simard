@@ -267,6 +267,8 @@ mod inline_tests_1979 {
     fn state_with_active_goal(id: &str) -> OodaState {
         let mut board = GoalBoard::default();
         board.active.push(ActiveGoal {
+            parent_goal_id: None,
+            repo: None,
             id: id.to_string(),
             description: "test".to_string(),
             priority: 1,

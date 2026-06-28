@@ -4,6 +4,7 @@ mod auth;
 mod brain_failures;
 mod chat;
 mod current_work;
+mod cycle_source;
 mod distributed;
 mod goals;
 mod goals_status;
@@ -110,6 +111,18 @@ pub fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  Login code: {code} (saved to ~/.simard/.dashkey)");
     }
     eprintln!("  Open http://localhost:{port} and enter the code\n");
+
+    // Standalone `dashboard serve` does NOT open or register its own
+    // cognitive-memory handle. Every dashboard read/write goes through the
+    // launcher resolution ladder (`open_reader_bridge` / `launch_writer_bridge`),
+    // consulted per request: it routes to a running daemon's IPC socket (tier-1)
+    // when one is serving this `state_root`, and otherwise to the tier-2
+    // shared-store cache (#2334), which already gives this process a single
+    // handle per `state_root` with read-after-write consistency. Eagerly
+    // registering a dashboard-owned tier-0 handle here would shadow the tier-1
+    // socket for the whole process lifetime, turning the dashboard into a second
+    // concurrent cross-process writer that silently drops goals whenever a daemon
+    // runs on the same `state_root` (issue #2366).
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

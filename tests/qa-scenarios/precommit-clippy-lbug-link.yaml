@@ -1,0 +1,80 @@
+name: precommit-clippy-lbug-link
+app_type: cli
+description: |
+  Regression coverage for issue #2426 — the pre-commit `cargo clippy --release`
+  hook must compile/link the `lbug` native static library instead of failing
+  with "could not find native static library `lbug`".
+
+  Validates the fix end to end (the CLI runner rejects any non-zero exit, so
+  every `run` step below is also an assertion):
+  1. The clippy-precommit hook entry routes through the lbug link-path wrapper.
+  2. The wrapper resolves a real `liblbug.a`, runs `cargo clippy --release` to a
+     clean lint-free finish (exit 0 ⇒ lbug compiled and linked), and emits its
+     resolution + success markers.
+  3. The CI workflow wires an explicit #2426 regression guard.
+agents:
+  - name: shell
+    type: cli
+    command: bash
+steps:
+  # 1. The pre-commit config drives clippy through the wrapper, not a bare
+  #    `cargo clippy` invocation that lacks the lbug link path.
+  - action: run
+    params:
+      command: "grep -nq 'entry: scripts/clippy-precommit-release.sh' .pre-commit-config.yaml"
+    timeout: 15000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # 2. Run the wrapper (the real release clippy gate), capturing combined
+  #    output. Exit 0 only happens when lbug compiled and linked cleanly.
+  - action: run
+    params:
+      command: "scripts/clippy-precommit-release.sh > /tmp/qa-precommit-clippy-lbug.log 2>&1"
+    timeout: 1200000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # 3. The wrapper resolved a real native static lib ...
+  - action: run
+    params:
+      command: "grep -q 'lbug native static lib resolved' /tmp/qa-precommit-clippy-lbug.log"
+    timeout: 15000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # ... and reported clippy --release linked lbug (the CI guard's success marker).
+  - action: run
+    params:
+      command: "grep -q 'SUCCESS: cargo clippy --release linked lbug' /tmp/qa-precommit-clippy-lbug.log"
+    timeout: 15000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # 4. The clippy run did NOT hit the #2426 native-lib failure.
+  - action: run
+    params:
+      command: "bash -c '! grep -qiE \"could not find native static library .?lbug\" /tmp/qa-precommit-clippy-lbug.log'"
+    timeout: 15000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # 5. CI has an explicit, greppable regression guard for #2426.
+  - action: run
+    params:
+      command: "grep -nq 'regression guard #2426' .github/workflows/verify.yml"
+    timeout: 15000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

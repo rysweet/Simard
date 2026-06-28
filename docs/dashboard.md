@@ -26,8 +26,8 @@ The dashboard is a single-page app with the following tabs:
 |-----|-------|
 | **Overview** | Daemon status (OODA loop active / stopped), current cycle number, top-priority goal, last cycle's actions, recent actions stream, system status (version, OODA daemon state, active processes, disk usage), open PRs, and open issues. |
 | **Goals** | The full goal register: active top-N goals with priority, status, and current activity; the proposed backlog with promote/dismiss controls. |
-| **Traces** | Live-tailed engineer subprocess traces and OODA cycle traces (xterm.js terminal). |
-| **Logs** | Aggregated daemon and engineer logs. |
+| **Traces** | Recent agent traces collected from the cost ledger, journald, and in-process spans, plus OTEL status. Each cost row reads as plain language: **when** (relative time, absolute on hover), **what** (call type, model, estimated tokens, and dollar cost), and **who** (call context and session id) — so an operator can see which calls were most expensive without decoding raw `[cost]` lines. |
+| **Logs** | The **Background Service Log** (live activity from Simard's always-on background process), the cost ledger, and per-cycle reports. The level menu (All / Errors / Warnings / Info) filters the log to a single severity, and a free-text box searches within it. |
 | **Processes** | Live process tree under the daemon — engineer subprocesses, LLM sessions, and their resource usage. |
 | **Memory** | Cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters; full-text memory search; a **Memory Overview** with the live **Memory Store** counts; and a **Memory Files** panel showing the goals snapshot plus any non-empty legacy snapshot files. See [Memory architecture](memory.md). |
 | **Costs** | Per-provider, per-model token spend across the active session. |
@@ -35,6 +35,21 @@ The dashboard is a single-page app with the following tabs:
 | **Workboard** | Shared scratch canvas. (Renamed from "Whiteboard" — see [Tab identity contract](#tab-identity-contract).) |
 | **Thinking** | Live thinking-cycle stream (planner output before action dispatch). |
 | **Terminal** | Browser-attached PTY into the daemon host. |
+
+### Logs tab: filtering by severity (#1687)
+
+The **Background Service Log** panel classifies every line into a severity —
+**error**, **warning**, or **info** — and the **level menu** filters the view to
+just that severity. Picking **Errors** surfaces failures (parse failures, brain
+fallbacks, "did not emit a recognised action") and hides routine info lines;
+**All levels** shows everything. The text box composes with the level menu to
+search within the currently selected severity.
+
+Classification is served by `/api/logs`, which returns a `daemon_log_levels`
+array parallel to `daemon_log_lines`, with an identical client-side fallback
+classifier. This is required because the daemon emits human-readable lines with
+no level token of their own — without classification, selecting any level
+(even *Info*) matched nothing and the control appeared inert.
 
 ## Screenshots
 

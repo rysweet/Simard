@@ -98,6 +98,7 @@ pub fn bridges_from_state_root(state_root: &Path) -> SimardResult<OodaBridges> {
         knowledge,
         gym,
         session: None,
+        session_factory: None,
         brain: std::sync::Arc::new(crate::ooda_brain::DeterministicLifecycleBrain),
         decide_brain: None,
         orient_brain: None,
@@ -105,6 +106,7 @@ pub fn bridges_from_state_root(state_root: &Path) -> SimardResult<OodaBridges> {
         progress_evidence: std::sync::Arc::new(
             crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
+        completion_evidence: None,
     })
 }
 
