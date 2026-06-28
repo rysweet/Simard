@@ -518,3 +518,118 @@ fn verified_backup_round_trips_store_larger_than_export_cap() {
         "round-trip count must exceed the legacy export cap"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Security: verify/restore must read data files from `backup_dir`, never from
+// the absolute paths embedded in the (untrusted) manifest. A tampered manifest
+// must not be able to redirect reads to files outside the backup directory, and
+// a relocated backup must still verify/restore.
+// ---------------------------------------------------------------------------
+
+/// A backup directory that has been relocated (its `manifest.json` still stores
+/// the original, now-stale absolute paths) must still verify `Valid` and
+/// restore, because verify/restore read the files from `backup_dir` — not from
+/// the manifest's stored paths. Code that trusted the manifest paths would
+/// report the snapshot/records as missing here.
+#[test]
+fn verify_and_restore_use_backup_dir_not_manifest_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backup_root = tmp.path().join("backups");
+    let store_path = tmp.path().join("memory.json");
+    let config = test_config(&backup_root);
+
+    let bridge = mock_bridge();
+    bridge.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
+    let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
+    file_store.put(make_record("r1")).unwrap();
+    let manifest = backup_memory(&bridge, &file_store, "agent", &config).unwrap();
+
+    // Relocate the backup to a new directory, then destroy the original so the
+    // manifest's stored absolute paths dangle.
+    let moved = tmp.path().join("relocated_backup");
+    fs::create_dir_all(&moved).unwrap();
+    for f in [MANIFEST_FILE, SNAPSHOT_FILE, RECORDS_FILE] {
+        fs::copy(manifest.backup_dir.join(f), moved.join(f)).unwrap();
+    }
+    fs::remove_dir_all(&manifest.backup_dir).unwrap();
+
+    let v = verify_backup(&moved).unwrap();
+    assert!(
+        matches!(v.status, BackupStatus::Valid),
+        "relocated backup must verify Valid by reading files from backup_dir, got {:?}",
+        v.status
+    );
+
+    let target_bridge = mock_bridge();
+    let target_store = FileBackedMemoryStore::try_new(tmp.path().join("restored.json")).unwrap();
+    let count = restore_from_backup(&target_bridge, &target_store, &moved).unwrap();
+    assert_eq!(
+        count, 2,
+        "restore must read the relocated files (1 fact + 1 record)"
+    );
+}
+
+/// A manifest crafted to point at data files OUTSIDE the backup directory (with
+/// a self-consistent checksum/counts over those external files) must not cause
+/// restore to ingest the external data. This is the path-traversal / arbitrary
+/// file-read hardening: the attacker's injected fact must never reach the store.
+#[test]
+fn restore_does_not_read_manifest_paths_outside_backup_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backup_root = tmp.path().join("backups");
+    let store_path = tmp.path().join("memory.json");
+    let config = test_config(&backup_root);
+
+    // Legitimate backup with a single benign fact.
+    let bridge = mock_bridge();
+    bridge.store_fact("benign", "ok", 0.9, &[], "ep1").unwrap();
+    let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
+    let manifest = backup_memory(&bridge, &file_store, "agent", &config).unwrap();
+
+    // Attacker writes data files OUTSIDE the backup dir and crafts a manifest
+    // pointing at them, with a self-consistent checksum and counts.
+    let evil_dir = tmp.path().join("evil");
+    fs::create_dir_all(&evil_dir).unwrap();
+    let evil_snapshot_path = evil_dir.join("snapshot.json");
+    let evil_records_path = evil_dir.join("records.json");
+
+    let evil_bridge = mock_bridge();
+    evil_bridge
+        .store_fact("attacker-injected", "pwn", 0.9, &[], "x")
+        .unwrap();
+    let evil_snapshot =
+        crate::remote_transfer::export_full_memory_snapshot(&evil_bridge, "agent").unwrap();
+    let evil_snapshot_bytes = serde_json::to_vec_pretty(&evil_snapshot).unwrap();
+    fs::write(&evil_snapshot_path, &evil_snapshot_bytes).unwrap();
+    let evil_records: Vec<MemoryRecord> = Vec::new();
+    let evil_records_bytes = serde_json::to_vec_pretty(&evil_records).unwrap();
+    fs::write(&evil_records_path, &evil_records_bytes).unwrap();
+
+    let mut tampered = manifest.clone();
+    tampered.cognitive_snapshot_path = evil_snapshot_path;
+    tampered.memory_records_path = evil_records_path;
+    tampered.checksum = sha256_hex(&[&evil_snapshot_bytes, &evil_records_bytes]);
+    tampered.cognitive_facts_count = evil_snapshot.facts.len();
+    tampered.cognitive_procedures_count = evil_snapshot.procedures.len();
+    tampered.memory_records_count = evil_records.len();
+    fs::write(
+        manifest.backup_dir.join(MANIFEST_FILE),
+        serde_json::to_vec_pretty(&tampered).unwrap(),
+    )
+    .unwrap();
+
+    // Restore from the (legit) backup dir; the crafted external paths must be
+    // ignored. Whether the result is Ok or a verification Err, the attacker's
+    // fact must never be ingested.
+    let target_bridge = mock_bridge();
+    let target_store = FileBackedMemoryStore::try_new(tmp.path().join("restored.json")).unwrap();
+    let _ = restore_from_backup(&target_bridge, &target_store, &manifest.backup_dir);
+
+    let facts = target_bridge
+        .search_facts("attacker-injected", 10, 0.0)
+        .unwrap();
+    assert!(
+        facts.iter().all(|f| f.concept != "attacker-injected"),
+        "restore must not ingest data from manifest paths outside the backup directory"
+    );
+}
