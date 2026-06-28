@@ -359,7 +359,12 @@ pub fn run_ooda_daemon(
     // artifacts the library's corrupt-WAL recovery leaves behind.
     let backup_interval_secs: u64 = std::env::var("SIMARD_BACKUP_INTERVAL_SECS")
         .ok()
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        // Floor at 60s: a verified backup holds the lbug lock for a full export
+        // + verify + prune, so running it every loop iteration (e.g. a stray
+        // `SIMARD_BACKUP_INTERVAL_SECS=0`) would starve real memory writes and
+        // race in-flight checkpoints. 0/unset/garbage all fall back to hourly.
+        .map(|v| v.max(60))
         .unwrap_or(3600); // hourly by default
     // Take the first backup on the first loop iteration (like the disk-health
     // check) so a recovery point exists almost immediately after boot, rather
