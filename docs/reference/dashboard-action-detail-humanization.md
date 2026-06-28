@@ -33,9 +33,9 @@ Before this fix the Overview tab printed that string verbatim in two places —
 the **Last Cycle Actions** list and the **Recent actions** stream — so an
 operator saw `brain:`, `continue_skipping`, `no decision keyword found … defaulting
 to …` and other insider shorthand. The Goals tab
-([`goals_status.rs`](../../src/operator_commands_dashboard/goals_status.rs)) and the
+([`goals_status.rs`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_dashboard/goals_status.rs)) and the
 Brain Failures card
-([`brain_failures.rs`](../../src/operator_commands_dashboard/brain_failures.rs))
+([`brain_failures.rs`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_dashboard/brain_failures.rs))
 already humanized their own detail strings server-side; the Overview tab was the
 one remaining surface that leaked the raw form.
 
@@ -47,7 +47,7 @@ only what the operator *reads* on the Overview tab changes.
 > **Scope boundary.** This is a pure presentation transform. It does not touch
 > any canonical `brain` / `ooda_brain` string, any backend logic, or any HTTP
 > response shape. It lives entirely in
-> [`src/operator_commands_dashboard/index_html/part_01.rs`](../../src/operator_commands_dashboard/index_html/part_01.rs)
+> [`src/operator_commands_dashboard/index_html/part_01.rs`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_dashboard/index_html/part_01.rs)
 > as inline dashboard JavaScript.
 
 ## Overview
@@ -129,8 +129,8 @@ span — but it never contradicts the server-side meaning:
 
 | Token (canonical) | Plain phrase (Overview / JS) | Server-side semantic mirror |
 |-------------------|------------------------------|-----------------------------|
-| `continue_skipping` | `continued without acting` | Goals tab chips this as **Skipped** ([`goals_status.rs::classify`](../../src/operator_commands_dashboard/goals_status.rs)); the Brain Failures decision humanizer renders the bare token as *continue skipping* ([`brain_failures.rs::humanize_decision`](../../src/operator_commands_dashboard/brain_failures.rs)). |
-| `deterministic-brain: prefix-routed`, `fallback-brain: prefix-routed` | `chosen by built-in routing rules` | [`brain_failures.rs::humanize_rationale`](../../src/operator_commands_dashboard/brain_failures.rs) renders the full sentence *“Chosen by Simard's built-in routing rules (no language model was needed).”* |
+| `continue_skipping` | `continued without acting` | Goals tab chips this as **Skipped** ([`goals_status.rs::classify`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_dashboard/goals_status.rs)); the Brain Failures decision humanizer renders the bare token as *continue skipping* ([`brain_failures.rs::humanize_decision`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_dashboard/brain_failures.rs)). |
+| `deterministic-brain: prefix-routed`, `fallback-brain: prefix-routed` | `chosen by built-in routing rules` | [`brain_failures.rs::humanize_rationale`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_dashboard/brain_failures.rs) renders the full sentence *“Chosen by Simard's built-in routing rules (no language model was needed).”* |
 | *(generic)* `<x>-brain:` prefix | stripped (prefix removed, prose kept) | `brain_failures.rs::humanize_rationale` generic branch (`split_once("-brain:")`) |
 
 Tokens not on the allowlist are left intact (after prefix/jargon stripping) —
@@ -262,7 +262,7 @@ is the shared **`BANNED_JARGON`** blocklist, defined once in Rust and injected
 into the client script:
 
 - Source of truth:
-  [`tab_meta::BANNED_JARGON`](../../src/operator_commands_dashboard/index_html/tab_meta.rs)
+  [`tab_meta::BANNED_JARGON`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_dashboard/index_html/tab_meta.rs)
   (`OODA`, `Observe-Orient-Decide-Act`, `spawn_engineer`, `LadybugDB`,
   `cognitive memory`, `synergize`, `leverage`, `ideate`).
 - It is serialized to a JS array literal via the `{{BANNED_JARGON_JS}}` marker
@@ -276,9 +276,9 @@ Adding a term to `BANNED_JARGON` automatically extends the strip to
 
 | Test | Location | Asserts |
 |------|----------|---------|
-| `rendered_html_humanizes_overview_action_detail` | [`index_html/tests_tab_meta.rs`](../../src/operator_commands_dashboard/index_html/tests_tab_meta.rs) | `INDEX_HTML` contains `function humanizeActionDetail(`; both render sites are wired (`humanizeActionDetail(o.detail` at Site 1, and `humanizeActionDetail(` inside the recent-actions IIFE at Site 2); the raw path is gone (`!contains("esc(o.detail.substring(0,120))")`). |
+| `rendered_html_humanizes_overview_action_detail` | [`index_html/tests_tab_meta.rs`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_dashboard/index_html/tests_tab_meta.rs) | `INDEX_HTML` contains `function humanizeActionDetail(`; both render sites are wired (`humanizeActionDetail(o.detail` at Site 1, and `humanizeActionDetail(` inside the recent-actions IIFE at Site 2); the raw path is gone (`!contains("esc(o.detail.substring(0,120))")`). |
 | XSS regression assertion | `index_html/tests_tab_meta.rs` | An `<img onerror=…>` / `<script>` payload survives only as escaped entities — proving the escape-last invariant holds at both sites. |
-| Server-side humanizer mirror | [`brain_failures.rs`](../../src/operator_commands_dashboard/brain_failures.rs) tests, [`goals_status.rs`](../../src/operator_commands_dashboard/goals_status.rs) tests | The canonical decision/rationale semantics that the JS allowlist mirrors (e.g. `continue_skipping` → `Skipped`, `*-brain:` prefix stripped). |
+| Server-side humanizer mirror | [`brain_failures.rs`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_dashboard/brain_failures.rs) tests, [`goals_status.rs`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_dashboard/goals_status.rs) tests | The canonical decision/rationale semantics that the JS allowlist mirrors (e.g. `continue_skipping` → `Skipped`, `*-brain:` prefix stripped). |
 
 Run the dashboard tests:
 
@@ -312,6 +312,6 @@ INV7: a <script>/<img onerror> payload in x renders only as escaped entities.
   and the inline **Attach →** button contract that this helper composes with.
 - [OODA brain decision protocol](./ooda-brain-decision-protocol.md) — the
   canonical decision/rationale tokens that the allowlist humanizes.
-- [`brain_failures.rs`](../../src/operator_commands_dashboard/brain_failures.rs)
-  / [`goals_status.rs`](../../src/operator_commands_dashboard/goals_status.rs) —
+- [`brain_failures.rs`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_dashboard/brain_failures.rs)
+  / [`goals_status.rs`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_dashboard/goals_status.rs) —
   the server-side humanizers whose semantics this client helper mirrors.

@@ -116,6 +116,7 @@ nav:
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     - Brain Introspection API: reference/brain-introspection-api.md
+    - Dashboard Action-Detail Humanization: reference/dashboard-action-detail-humanization.md
     # Hidden from nav until issue #1590 implementation lands:
     #   - reference/cognitive-memory-bridge-helpers.md
     #   - reference/goal-board-api.md
