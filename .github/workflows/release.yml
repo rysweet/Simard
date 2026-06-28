@@ -25,18 +25,12 @@ jobs:
           fetch-depth: 0
           submodules: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Cache cargo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-
+      # Resolve the version and whether its tag already exists BEFORE any
+      # toolchain install or cache restore. Most pushes to main don't bump the
+      # version, so the tag already exists and every build step below is a
+      # no-op. Gating the Rust toolchain install and the (multi-GB `target`)
+      # cache restore on `exists == 'false'` skips that wasted setup on those
+      # runs instead of paying for it only to short-circuit immediately after.
       - name: Extract version
         id: version
         run: |
@@ -52,6 +46,20 @@ jobs:
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Install Rust toolchain
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release binary
         if: steps.tag_check.outputs.exists == 'false'
