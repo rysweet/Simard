@@ -22,15 +22,40 @@ use std::cell::RefCell;
 
 use super::{DecideJudgment, EngineerLifecycleDecision, OrientJudgment, ParseFailureRecord};
 
-/// Which OODA phase produced the judgment. Serialised as lowercase strings
-/// so the cycle-report JSON consumers (dashboard, ad-hoc inspection) read
-/// `"act"`, `"decide"`, `"orient"`.
+/// Which recipe-backed brain phase produced the judgment. Serialised as
+/// snake_case strings so the cycle-report JSON consumers (dashboard, ad-hoc
+/// inspection) read `"act"`, `"decide"`, `"orient"`, `"merge_judge"`.
+///
+/// `rename_all = "snake_case"` keeps the three single-word variants
+/// byte-identical to the previous `"lowercase"` representation (cycle reports,
+/// the parse-failure metric, and `phase_to_string` all key off these exact
+/// strings — see the byte-stability pins in this module and `mod.rs`), while
+/// the new multi-word `MergeJudge` variant serialises as `"merge_judge"`
+/// (issue #2429 — instrument verdict-parse across the merge-judge phase too).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum BrainPhase {
     Act,
     Decide,
     Orient,
+    /// Recipe-backed merge-readiness judge (`simard merge-pr`). Serialises as
+    /// `"merge_judge"`.
+    MergeJudge,
+}
+
+impl BrainPhase {
+    /// Stable snake_case label, identical to the serde representation. Shared
+    /// by the cycle-report writer, `parse_failure::phase_to_string`, and the
+    /// `brain_verdict_parsed_total` metric (issue #2429) so all three agree on
+    /// the exact phase strings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BrainPhase::Act => "act",
+            BrainPhase::Decide => "decide",
+            BrainPhase::Orient => "orient",
+            BrainPhase::MergeJudge => "merge_judge",
+        }
+    }
 }
 
 /// One record of a single `brain.judge_*()` call (or its fallback). Fields
@@ -305,6 +330,52 @@ mod tests {
             !json.contains("prompt_version"),
             "expected empty prompt_version to be skipped: {json}"
         );
+    }
+
+    /// Byte-stability pin guarding the Step 8 `BrainPhase` snake_case
+    /// migration (issue #2429 adds a `MergeJudge` variant). The serde
+    /// representation moves from `rename_all = "lowercase"` to
+    /// `rename_all = "snake_case"` so the new `MergeJudge` variant serialises
+    /// as `"merge_judge"`. That change MUST keep the three existing single-word
+    /// variants byte-identical — cycle reports, the parse-failure metric, and
+    /// the `phase_to_string` mapping all key off these exact strings.
+    #[test]
+    fn brainphase_existing_variants_serialize_byte_stable() {
+        assert_eq!(serde_json::to_string(&BrainPhase::Act).unwrap(), "\"act\"");
+        assert_eq!(
+            serde_json::to_string(&BrainPhase::Decide).unwrap(),
+            "\"decide\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BrainPhase::Orient).unwrap(),
+            "\"orient\""
+        );
+        // Round-trip must also stay stable.
+        let back: BrainPhase = serde_json::from_str("\"decide\"").unwrap();
+        assert_eq!(back, BrainPhase::Decide);
+    }
+
+    /// The new `MergeJudge` variant (issue #2429) serialises as `"merge_judge"`
+    /// and round-trips, and `as_str()` agrees with the serde representation for
+    /// every variant (the metric and `phase_to_string` rely on this).
+    #[test]
+    fn brainphase_merge_judge_serializes_snake_case_and_as_str_agrees() {
+        assert_eq!(
+            serde_json::to_string(&BrainPhase::MergeJudge).unwrap(),
+            "\"merge_judge\""
+        );
+        let back: BrainPhase = serde_json::from_str("\"merge_judge\"").unwrap();
+        assert_eq!(back, BrainPhase::MergeJudge);
+
+        for phase in [
+            BrainPhase::Act,
+            BrainPhase::Decide,
+            BrainPhase::Orient,
+            BrainPhase::MergeJudge,
+        ] {
+            let serde_repr = serde_json::to_string(&phase).unwrap();
+            assert_eq!(serde_repr, format!("\"{}\"", phase.as_str()));
+        }
     }
 
     #[test]

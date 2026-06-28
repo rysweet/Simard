@@ -245,6 +245,11 @@ pub struct OodaConfig {
     /// 50). Issue #2327, R4.
     #[serde(default = "default_distill_interval_cycles")]
     pub distill_interval_cycles: u32,
+    /// Recurrence threshold before a repeated *verified* failure becomes a
+    /// `lesson:` procedure (`SIMARD_LESSON_RECURRENCE_THRESHOLD`, default 2).
+    /// Issues #2441/#2458. `1` would distil one-off failures (not recommended).
+    #[serde(default = "default_lesson_recurrence_threshold")]
+    pub lesson_recurrence_threshold: u32,
     /// AIMD adaptive scaler. Populated when `SIMARD_SCALING=auto`.
     /// Skipped during (de)serialization — reconstructed from env on boot.
     #[serde(skip)]
@@ -257,6 +262,10 @@ fn default_distill_min_episodes() -> u32 {
 
 fn default_distill_interval_cycles() -> u32 {
     crate::memory_consolidation::scheduler::DistillSchedule::DEFAULT_INTERVAL_CYCLES
+}
+
+fn default_lesson_recurrence_threshold() -> u32 {
+    crate::memory_consolidation::reflection_lessons::LESSON_RECURRENCE_THRESHOLD
 }
 
 impl Default for OodaConfig {
@@ -288,6 +297,10 @@ impl Default for OodaConfig {
             distill_interval_cycles: env_u32(
                 "SIMARD_DISTILL_INTERVAL_CYCLES",
                 default_distill_interval_cycles(),
+            ),
+            lesson_recurrence_threshold: env_u32(
+                crate::memory_consolidation::reflection_lessons::LESSON_RECURRENCE_THRESHOLD_ENV,
+                default_lesson_recurrence_threshold(),
             ),
             scaler,
         }
@@ -512,6 +525,20 @@ mod tests_ooda_config {
         assert_eq!(
             config.distill_interval_cycles, 50,
             "default distill interval must be 50 cycles"
+        );
+    }
+
+    // Issues #2441/#2458: the lesson recurrence threshold defaults to 2 (the
+    // smallest value that excludes one-off failures) with its env override unset.
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn ooda_config_default_lesson_recurrence_threshold() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("SIMARD_LESSON_RECURRENCE_THRESHOLD") };
+        let config = OodaConfig::default();
+        assert_eq!(
+            config.lesson_recurrence_threshold, 2,
+            "default lesson recurrence threshold must be 2"
         );
     }
 

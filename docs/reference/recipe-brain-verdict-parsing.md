@@ -1,0 +1,454 @@
+---
+title: Recipe-brain verdict/decision parsing
+description: How recipe-backed brain phases turn a recipe-runner-rs subprocess run into a typed decision/verdict. All four phases — engineer-lifecycle, decide, orient, and merge-judge — share one JSON-envelope transport, one confidence-gated escalation ladder, and loud/fail-closed defaults, plus the class-level brain_verdict_parsed_total metric.
+last_updated: 2026-06-28
+review_schedule: as-needed
+owner: simard
+doc_type: reference
+related:
+  - ./recipe-brain-api.md
+  - ./text-parsing-wire-formats.md
+  - ./distill-recipe-output-capture.md
+  - ./ooda-brain-parse-failure-record.md
+  - ./pr-finalization-pipeline.md
+  - ../howto/diagnose-merge-pr-verdict-parse-failures.md
+  - ../howto/diagnose-decide-orient-parse-failures.md
+  - ../howto/diagnose-brain-decision-parse-failures.md
+---
+
+# Recipe-brain verdict/decision parsing
+
+> **Status — all four phases shipped.**
+> Every recipe-backed brain phase reads the `recipe-runner-rs --output-format
+> json` envelope, runs the shared confidence-gated escalation ladder on a
+> parse-miss, and falls back loudly (never silently). The cluster is closed:
+> [#2419](https://github.com/rysweet/Simard/issues/2419) (engineer-lifecycle
+> JSON-envelope transport) + [#2432](https://github.com/rysweet/Simard/issues/2432)
+> (escalation ladder), then the same pattern generalized to the
+> **decide**/**orient** ([#2421](https://github.com/rysweet/Simard/issues/2421))
+> and **merge-judge** ([#2428](https://github.com/rysweet/Simard/issues/2428) /
+> [#2430](https://github.com/rysweet/Simard/issues/2430) /
+> [#2435](https://github.com/rysweet/Simard/issues/2435) /
+> [#2462](https://github.com/rysweet/Simard/issues/2462) /
+> [#2463](https://github.com/rysweet/Simard/issues/2463)) phases, plus the
+> class-level `brain_verdict_parsed_total` metric
+> ([#2429](https://github.com/rysweet/Simard/issues/2429)).
+>
+> | Component | State | Location |
+> |-----------|-------|----------|
+> | engineer-lifecycle transport + ladder + metric | **shipped** ([#2419](https://github.com/rysweet/Simard/issues/2419) / [#2432](https://github.com/rysweet/Simard/issues/2432)) | `src/ooda_brain/recipe_brain.rs` |
+> | decide / orient JSON transport + ladder + loud default | **shipped** ([#2421](https://github.com/rysweet/Simard/issues/2421)) | `src/ooda_brain/recipe_brain.rs` |
+> | merge-judge JSON transport + ladder + fail-closed `Unclear` | **shipped** ([#2428](https://github.com/rysweet/Simard/issues/2428) / [#2430](https://github.com/rysweet/Simard/issues/2430) / [#2435](https://github.com/rysweet/Simard/issues/2435) / [#2462](https://github.com/rysweet/Simard/issues/2462) / [#2463](https://github.com/rysweet/Simard/issues/2463)) | `src/stewardship/recipe_merge_judge.rs` |
+> | class-level `brain_verdict_parsed_total` metric | **shipped** ([#2429](https://github.com/rysweet/Simard/issues/2429)) | `src/ooda_brain/recipe_brain.rs` |
+>
+> Everything on this page describes code that exists today. A reader six months
+> from now should treat this as the current design, not a migration note.
+
+This page explains how a `recipe-runner-rs` subprocess run becomes a typed
+decision or verdict, and how all four recipe-backed brain phases share one
+transport, one escalation ladder, and one loud-default discipline. For the
+per-parser grammar (first-word / first-float / keyword) see
+[Text-parsing wire formats](./text-parsing-wire-formats.md). For the
+`RecipeBrain` struct and its standalone parse functions see the
+[RecipeBrain API reference](./recipe-brain-api.md). For the envelope shape
+pinned against the installed `recipe-runner-rs` binary, see
+[Distill recipe output capture](./distill-recipe-output-capture.md).
+
+---
+
+## The shared failure class (why this exists)
+
+`recipe-runner-rs` has **two** stdout formats, selected by `--output-format`:
+
+| Format           | Stdout content                                                                  |
+|------------------|---------------------------------------------------------------------------------|
+| `text` (default) | A human **summary banner** only (`Recipe: <name> … SUCCESS (NN.Ns) …`). The agent step's actual output is **not** on stdout. |
+| `json`           | A structured **envelope** whose `step_results[].output` holds the agent's real output. |
+
+Every recipe-backed brain reads the **JSON envelope** (`--output-format json`
+→ `step_results[].output`), never the banner. Historically each phase read the
+default text-mode banner instead, and the consequences differed per phase even
+though the root cause was one wire-format bug. All four phases now extract the
+real agent output before parsing:
+
+| Phase | Adapter tag | Former text-mode failure (now fixed) | State |
+|-------|-------------|--------------------------------------|-------|
+| engineer-lifecycle (act) | `recipe-engineer-lifecycle-brain` | banner first word `Recipe:` → silent `continue_skipping` (~99.6% of calls) | **fixed** (#2419 / #2432) |
+| decide | `recipe-decide-brain` | banner first word `Recipe:` → silent `advance_goal` every cycle | **fixed** (#2421) |
+| orient | `recipe-orient-brain` | banner timing string `(0.0s)` scraped as `adjusted_urgency` → urgency corrupted to `0.0` | **fixed** (#2421) |
+| merge-judge | `recipe-merge-judge` | banner contains `readiness` but no `ready`/`not_ready`/`unclear` token → no verdict, every `simard merge-pr` aborted | **fixed** (#2428 / #2430 / #2435 / #2462 / #2463) |
+
+The fix is the same for all of them: **invoke `recipe-runner-rs` with
+`--output-format json`, extract the final step's `output` from the envelope,
+then run the phase parser over that real agent output** — never over the
+banner. On a parse miss, climb the confidence-gated escalation ladder before
+falling back, and **fall back loudly, never silently** (decide → `AdvanceGoal`,
+orient → deterministic urgency floor, merge-judge → fail-closed `Unclear`).
+
+> **What "STRUCTURED (JSON)" means here.** The structured layer is the
+> `recipe-runner-rs` **transport envelope** (`--output-format json` →
+> `step_results[].output`), not a change to the agent's own output grammar. The
+> decide/orient/lifecycle agents still emit a first-word/first-float token and
+> the merge-judge agent still emits its verdict — those agent output grammars
+> are unchanged (see [Text-parsing wire formats](./text-parsing-wire-formats.md)).
+> Only the **capture path** changes: from banner-scraping to envelope-extraction.
+
+---
+
+## Shared transport and ladder (the engineer-lifecycle reference)
+
+Module: `src/ooda_brain/recipe_brain.rs`. The engineer-lifecycle phase is the
+reference implementation of the shared machinery; the decide, orient, and
+merge-judge phases reuse the very same transport, ladder backbone, and
+escalation-note seam described below.
+
+### Transport: `RecipeEnvelope` + `extract_recipe_decision_output`
+
+```rust
+/// JSON envelope returned by `recipe-runner-rs --output-format json`.
+#[derive(Debug, Deserialize)]
+struct RecipeEnvelope {
+    success: bool,
+    #[serde(default)]
+    step_results: Vec<RecipeStepResult>,
+}
+
+/// A single step's result inside the envelope.
+#[derive(Debug, Deserialize)]
+struct RecipeStepResult {
+    #[serde(default)]
+    step_id: String,
+    #[serde(default)]
+    output: String,
+}
+
+/// Extract the decision text the agent actually produced from the
+/// `--output-format json` stdout envelope (the FINAL step's `output`).
+/// Shared by every recipe-backed brain phase.
+pub(crate) fn extract_recipe_decision_output(stdout: &[u8], adapter_tag: &str) -> SimardResult<String>;
+```
+
+`extract_recipe_decision_output` returns the final `step_results[].output` and
+surfaces a typed `SimardError::AdapterInvocationFailed` — rather than silently
+returning empty text — when:
+
+- the envelope cannot be deserialized (`failed to deserialize recipe JSON output`),
+- the recipe reported `success=false` (`recipe reported success=false in JSON output`),
+- no step produced output (`no step results in recipe JSON output`).
+
+These are **genuine infrastructure failures** and stay `Err`. They are distinct
+from a successful run whose agent output merely fails to parse — that is a
+parse-miss, which drives the ladder rather than an `Err`. Each phase invokes the
+runner with `--output-format json` in its `invoke_*_raw` helper, which
+distinguishes the two on the error path (returning an `Err` plus a `cause`
+label for the metric).
+
+> `RecipeEnvelope`/`RecipeStepResult` and `extract_recipe_decision_output` are
+> `pub(crate)` shared infrastructure. The merge-judge module
+> (`src/stewardship/recipe_merge_judge.rs`) reuses the identical extraction via a
+> `pub(crate) use` re-export from `ooda_brain`; the decide/orient phases call it
+> directly. Every phase uses the same envelope decoder rather than re-deriving
+> it.
+
+### Outcome classification: `LifecycleParseOutcome`
+
+Each parse is classified so the parse-failure rate (`outcome != parsed`) is
+measurable. The same `LifecycleParseOutcome` type is the shared classification
+returned by every phase's parser (`parse_action_outcome`, `parse_orient_outcome`,
+`parse_merge_outcome`, `parse_lifecycle_outcome`):
+
+| Variant | `label()` | Counts as failure? | Meaning |
+|---------|-----------|--------------------|---------|
+| `Parsed` | `parsed` | no | First word / verdict matched a known variant on the base attempt. |
+| `DefaultEmpty` | `default_empty` | **yes** | Extracted output empty/whitespace → phase's deterministic default. |
+| `DefaultMalformed` | `default_malformed` | **yes** | Output non-empty but matched no variant → phase's deterministic default. |
+| `Repaired` | `repaired` | no | Real decision recovered by a **schema-repair** ladder rung. |
+| `Escalated` | `escalated` | no | Real decision recovered by a **higher-effort** ladder rung. |
+| `Error` | `error` | **yes** | recipe-runner spawn/exit/envelope decode failed (set on the error path, not by the pure parser). |
+
+`LifecycleParseOutcome::is_parse_failure()` is `true` for `DefaultEmpty |
+DefaultMalformed | Error`. `Repaired` / `Escalated` are real recoveries — they
+do **not** count as failures, which is exactly how the ladder drops the measured
+default rate.
+
+### Confidence-gated escalation ladder (#2432)
+
+On a base parse-miss (`DefaultEmpty` / `DefaultMalformed` — a low-confidence,
+unparseable coarse judgment) the brain spends EXTRA compute only on that weak
+case before reaching the deterministic default. The shared backbone is a
+generic ladder parameterized over the phase's decision type `D`:
+
+```rust
+/// Generic escalation backbone shared by every recipe-backed brain phase.
+/// `invoke` runs one rung (with the rung's escalation note), `parse` maps raw
+/// agent output to `(D, LifecycleParseOutcome)`, and `default` supplies the
+/// loud fallback when the ladder is exhausted.
+pub fn run_brain_ladder<D>(
+    goal_id: &str,
+    base_raw: &str,
+    base_outcome: LifecycleParseOutcome,
+    cfg: &EscalationConfig,
+    invoke: impl Fn(&LadderAttempt) -> SimardResult<String>,
+    parse: impl Fn(&str) -> (D, LifecycleParseOutcome),
+    default: impl Fn() -> D,
+    decision_label: impl Fn(&D) -> String,
+) -> (D, LifecycleParseOutcome, u32, LadderTermination);
+```
+
+The decide, orient, and merge-judge phases call `run_brain_ladder` directly.
+The lifecycle-specific `run_escalation_ladder` is now a **thin wrapper** that
+delegates to `run_brain_ladder`, preserving the `LifecycleInvoker` seam so the
+lifecycle ladder stays unit-testable without a live `recipe-runner-rs`:
+
+```rust
+/// Seam over the raw lifecycle recipe invocation. Production wires `RecipeBrain`;
+/// tests wire a scripted stub.
+pub trait LifecycleInvoker {
+    fn invoke_lifecycle(&self, ctx: &EngineerLifecycleCtx, attempt: &LadderAttempt)
+        -> SimardResult<String>;
+}
+
+/// Thin wrapper over `run_brain_ladder` for the engineer-lifecycle decision.
+pub fn run_escalation_ladder(
+    invoker: &dyn LifecycleInvoker,
+    ctx: &EngineerLifecycleCtx,
+    base_raw: &str,
+    base_outcome: LifecycleParseOutcome,
+    cfg: &EscalationConfig,
+) -> (EngineerLifecycleDecision, LifecycleParseOutcome, u32, LadderTermination);
+```
+
+On a base parse-miss the ladder climbs a bounded sequence of rungs
+(`LadderRung`):
+
+1. **`Base`** — the cheap attempt, byte-identical to the pre-ladder path.
+2. **`SchemaRepair`** — re-prompt feeding the malformed output back, reminding
+   the model of the exact accepted variant tokens.
+3. **`Escalate`** — schema-repair **plus** a higher-effort, step-by-step
+   reasoning instruction.
+
+The per-rung repair note is injected through the `{{escalation_note}}` recipe
+seam. A generic `build_phase_escalation_note(rung, prior_output,
+repair_instruction, high_effort)` is the shared builder; each phase wraps it
+with its own phrasing — `build_decide_escalation_note` and
+`build_orient_escalation_note` (in `recipe_brain.rs`),
+`build_merge_escalation_note` (in `recipe_merge_judge.rs`), and the unchanged
+lifecycle `build_escalation_note`. **On the `Base` rung the note is empty**, so
+the base attempt is byte-identical to the pre-ladder behavior. The recipe YAMLs
+`ooda-decide.yaml`, `ooda-orient.yaml`, and `merge-readiness-judge.yaml` each
+carry the additive `{{escalation_note}}` placeholder near the top of the prompt
+(empty on the base attempt), mirroring `ooda-engineer-lifecycle.yaml`. The note
+builders are content-pinned (the `escalation_note_*` tests fail CI if the
+wording drifts).
+
+The deterministic default is reached **only after the ladder is exhausted** (or
+a rung's own invocation fails). Each rung logs loudly to both `tracing` and
+stderr:
+
+```
+[simard] BRAIN ESCALATION goal=<id> rung=SchemaRepair attempt=2 (parse-miss recovery)
+[simard] BRAIN ESCALATION goal=<id> RECOVERED decision=reclaim_and_redispatch via SchemaRepair (attempt 2)
+[simard] BRAIN ESCALATION goal=<id> ladder ended (exhausted) after 3 attempts — deterministic default
+```
+
+`LadderTermination` records *which* terminal path was taken, and maps to the
+metric `cause` label:
+
+| `LadderTermination` | `cause_label()` | Meaning |
+|---------------------|-----------------|---------|
+| `Recovered` | `ladder_recovered` | A rung produced a parseable decision (`Repaired`/`Escalated`). |
+| `Exhausted` | `ladder_exhausted` | Every configured rung tried; none parsed → deterministic default. |
+| `InvokeError` | `ladder_invoke_error` | A rung's own invocation failed; ladder stopped early → deterministic default. |
+| `Disabled` | `ladder_disabled` | `max_escalations == 0`; no rung tried. |
+
+### Configuration
+
+| Variable | Default | Hard cap | Effect |
+|----------|---------|----------|--------|
+| `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS` | `2` | `3` | Escalation rungs attempted after a base parse-miss (all four phases). `0` disables the ladder (default-on-first-miss). The value is clamped to `[0, HARD_CAP]` so a misconfiguration can never create an unbounded retry loop. |
+
+Parsed by `EscalationConfig::from_env()` / `parse_max_escalations`. No new
+network surface is introduced.
+
+---
+
+## Metric: `brain_lifecycle_decision` (shipped)
+
+> Closes the measurement half of [#2419](https://github.com/rysweet/Simard/issues/2419):
+> emit one event per `decide_engineer_lifecycle` invocation so the lifecycle
+> parse-failure rate is computable from `metrics.jsonl`.
+
+One event is appended to `~/.simard/metrics/metrics.jsonl` per invocation
+(`value = 1.0`). It is a **no-op under `cfg!(test)`** so unit tests never
+corrupt the operator's real measurement file. The JSON `context` payload (built
+by `build_lifecycle_metric_context`):
+
+| Field | Values / meaning |
+|-------|------------------|
+| `goal_id` | The engineer-lifecycle goal id. |
+| `outcome` | `parsed` \| `default_empty` \| `default_malformed` \| `error` \| `repaired` \| `escalated` (the `LifecycleParseOutcome::label()`). |
+| `is_parse_failure` | `true` for `default_empty` / `default_malformed` / `error`. The numerator. |
+| `first_word` | The base attempt's first token (the diagnostic record of the cheap pass — capped at 64 chars). |
+| `consecutive_skip_count` | From `EngineerLifecycleCtx`. |
+| `decision` | The final decision choice (`continue_skipping`, `reclaim_and_redispatch`, `deprioritize`, `open_tracking_issue`, `mark_goal_blocked`, `consider_self_update`). |
+| `cause` | `ok` (parsed base) \| `ladder_recovered` \| `ladder_exhausted` \| `ladder_invoke_error` \| `ladder_disabled` (or the invoke error cause on the base-error path). |
+| `attempts` | Total brain invocations spent (base + escalation rungs). |
+
+**Lifecycle parse-failure rate** over the recorded window:
+
+```bash
+jq -rc 'select(.metric_name=="brain_lifecycle_decision")
+        | .context | fromjson | "\(.outcome) is_failure=\(.is_parse_failure)"' \
+  ~/.simard/metrics/metrics.jsonl \
+  | sort | uniq -c
+```
+
+`parse_failure_rate = count(is_parse_failure == true) / count(*)`. Before #2419
+this was ~99.6% (the banner regression); a healthy daemon trends toward `0`.
+
+---
+
+## Metric: `brain_verdict_parsed_total` (shipped)
+
+> Closes [#2429](https://github.com/rysweet/Simard/issues/2429): one shared
+> counter across **all** recipe-backed brain phases with a `parsed`/`defaulted`
+> denominator, so each phase's parse-success rate is computable from one stream.
+
+A `brain_verdict_parsed_total` event (`value = 1.0`) is appended to
+`~/.simard/metrics/metrics.jsonl` **once per decide / orient / merge-judge
+invocation**, on BOTH the parsed branch and the defaulted branch. Like the
+lifecycle metric it is a **no-op under `cfg!(test)`**. The JSON `context`
+payload:
+
+| Field | Values / meaning |
+|-------|------------------|
+| `phase` | `decide` \| `orient` \| `merge_judge`. |
+| `outcome` | `parsed` (a real decision was produced) \| `defaulted` (the loud/fail-closed fallback was taken). |
+| `outcome_detail` | The `LifecycleParseOutcome::label()`: `parsed` \| `repaired` \| `escalated` \| `default_empty` \| `default_malformed` \| `error`. |
+| `is_parse_failure` | `true` for `default_empty` / `default_malformed` / `error`. |
+| `goal_id` | The phase's goal id. For merge-judge this is `pr-<N>`. |
+| `attempts` | Total brain invocations spent (base + ladder rungs). |
+
+**Per-phase parse-success rate** over the recorded window:
+
+```bash
+jq -rc 'select(.metric_name=="brain_verdict_parsed_total")
+        | .context | fromjson | "\(.phase) \(.outcome)"' \
+  ~/.simard/metrics/metrics.jsonl \
+  | sort | uniq -c
+```
+
+`parse_success_rate{phase} = parsed / (parsed + defaulted)` for that `phase`.
+
+The engineer-lifecycle phase keeps its dedicated `brain_lifecycle_decision`
+metric (above) unchanged; `brain_verdict_parsed_total` covers the decide,
+orient, and merge-judge phases. Both are in addition to the existing
+failure-only `brain_parse_failure` counter (see
+[OODA brain parse-failure record](./ooda-brain-parse-failure-record.md)) and
+the structured log lines.
+
+---
+
+## The same fix across decide, orient, and merge-judge
+
+All three phases below ride the shared transport + ladder described above:
+they invoke `recipe-runner-rs --output-format json`, extract the agent output
+from the envelope via `extract_recipe_decision_output`, parse it, run
+`run_brain_ladder` on a parse-miss, and only then fall back — loudly for
+decide/orient, fail-closed for merge-judge. The root-cause explanation for each
+phase is kept here ("previously … now …") so the contrast is unambiguous.
+
+### Decide phase (#2421)
+
+`recipe_brain.rs::judge_decision` invokes `invoke_decide_raw` (which passes
+`--output-format json` plus the rung's `escalation_note`), extracts the agent
+output from the envelope, and parses it via `parse_action_outcome(text) ->
+(DecideJudgment, LifecycleParseOutcome)`. On a parse-miss it runs
+`run_brain_ladder`, and only after the ladder is exhausted does it fall back
+**loudly** to `DecideJudgment::AdvanceGoal` (via `default_advance_goal`). The
+miss is classified `DefaultEmpty` / `DefaultMalformed`, distinct from a genuine
+LLM `advance_goal` (which is `Parsed`).
+
+Previously this call site read the default text-mode banner, whose first word is
+always `Recipe:` — so it silently returned `AdvanceGoal` every cycle, ignoring
+the LLM. Reading the envelope output instead means a real `advance_goal` and a
+banner-induced default are no longer indistinguishable. `parse_action_from_text`
+is retained as a thin decision-only wrapper over `parse_action_outcome`.
+
+### Orient phase (#2421)
+
+`recipe_brain.rs::judge_orientation` invokes `invoke_orient_raw` (json +
+`escalation_note`), extracts the envelope output, and parses it via
+`parse_orient_outcome(text, base_urgency, failure_count) -> (OrientJudgment,
+LifecycleParseOutcome)`. On a parse-miss it runs `run_brain_ladder`, then falls
+back to the deterministic urgency floor (`base_urgency −
+FAILURE_PENALTY_PER_CONSECUTIVE × failure_count`, i.e. `base_urgency − 0.2 ×
+failure_count`, clamped to `[0.0, 1.0]`).
+
+Previously this phase scanned the text-mode banner for the first decimal in
+`[0, base_urgency]`. The banner's timing string (e.g. `(0.0s)`) was scraped as
+`adjusted_urgency`, silently demoting urgency to `0.0` — worse than a benign
+default. Because urgency is now read from the JSON envelope's agent output, the
+banner `(0.0s)` timing string can no longer be scraped — **urgency `0.0` from a
+banner can no longer happen**; the deterministic floor is the only fallback.
+`parse_orient_from_text` is retained as a thin wrapper over
+`parse_orient_outcome`.
+
+### Merge-judge phase (#2462)
+
+`recipe_merge_judge.rs::RecipeMergeJudge::judge` (closing #2462 / #2463 / #2428
+/ #2430 / #2435) invokes `invoke_judge_raw` (json + `escalation_note`), extracts
+the verdict text from the envelope, and parses it via `parse_merge_outcome(text)
+-> (JudgeOutcome, LifecycleParseOutcome)`. `parse_merge_outcome` tries
+`merge_judge::parse_judge_response` (structured `{"verdict":…}` JSON, which
+populates `blockers`) FIRST, then falls back to the
+`parse_merge_verdict_from_text` keyword scanner for prose. On a parse-miss it
+runs `run_brain_ladder`, and after the ladder is exhausted it **fails CLOSED to
+`Verdict::Unclear`** (via `fail_closed_unclear`).
+
+**Fail-closed is the hard requirement.** `Unclear` is treated as a refusal by
+the merge authority (see [`merge_judge.rs`](./pr-finalization-pipeline.md)). The
+judge **never** flips fail-open to `Ready`, never emits SUCCESS-without-verdict,
+and a recipe completing `SUCCESS` is **not** a verdict. Genuine
+spawn/nonzero-exit/envelope-decode failures still propagate as `Err`
+(`SimardError::AdapterInvocationFailed`). The objective deterministic gate
+(`evaluate_objective_gates`) and the merge authority remain the sole deciders;
+the parsed verdict is advisory input.
+
+Previously this call site invoked `recipe-runner-rs` without `--output-format
+json` and ran `parse_merge_verdict_from_text` over the raw banner. The banner
+contains `readiness` but no `ready`/`not_ready`/`unclear` token, so the parser
+returned `Err("no verdict keyword …")` and every `simard merge-pr` aborted at
+the infrastructure level. Now `simard merge-pr` surfaces a real verdict (or a
+fail-closed `Unclear` → Refused, or an explicit infra `Err`) on every run.
+
+> Note: `parse_merge_verdict_from_text` (in `recipe_merge_judge.rs`, the keyword
+> scanner) is a different function from `merge_judge::parse_judge_response` (the
+> JSON-object parser). The merge judge's `parse_merge_outcome` now uses **both**:
+> `parse_judge_response` for structured JSON first, then the keyword scanner as a
+> prose fallback. See
+> [Text-parsing wire formats §2b](./text-parsing-wire-formats.md#2b-merge-judge-recipe_merge_judgers).
+
+---
+
+## Test inventory (shipped)
+
+| Module | Coverage |
+|--------|----------|
+| `src/ooda_brain/recipe_brain.rs` | `extract_recipe_decision_output` success + decode/`success=false`/empty-`step_results` error cases; `parse_lifecycle_outcome` matrix; `run_escalation_ladder` recovery / exhaustion / invoke-error / disabled paths; `LadderTermination::cause_label` distinctness; `build_escalation_note` content pins; `build_lifecycle_metric_context` shape. **`issue_2421_tests`** + **`issue_2419_family_phase_tests`**: `parse_action_outcome` / `parse_orient_outcome` classification (parsed vs `DefaultEmpty`/`DefaultMalformed`), `build_decide_escalation_note` / `build_orient_escalation_note` / `build_phase_escalation_note` content (empty on `Base`), `brain_verdict_parsed_total` context shape, and the generic `run_brain_ladder` driving an arbitrary decision type. |
+| `src/stewardship/recipe_merge_judge.rs` | `parse_merge_verdict_from_text` keyword matrix (ready / not_ready / unclear / empty / no-keyword `Err`). **`issue_2428_tests`** + **`issue_2428_production_tests`**: JSON-envelope extraction, `parse_merge_outcome` (structured `parse_judge_response` first, then keyword prose fallback), prose keyword fallback, and fail-closed `Verdict::Unclear` on an unparseable verdict. |
+| `src/stewardship/merge_judge.rs` | `parse_judge_response` JSON extraction (fenced / brace-balanced / outermost), `LlmMergeJudge`, `RefusingMergeJudge`. |
+| `tests/recipe_brain_verdict_assets.rs` | Asset/integration coverage of the recipe-brain verdict path. |
+| `tests/gadugi/decide-orient-brain-parse.sh`, `tests/gadugi/merge-judge-verdict.sh` | Outside-in gadugi scenarios exercising the decide/orient parse path and the merge-judge verdict path end-to-end. |
+
+---
+
+## See also
+
+- [How-to: Diagnose `simard merge-pr` verdict-parse failures](../howto/diagnose-merge-pr-verdict-parse-failures.md) — recognizing a real verdict, a fail-closed `unclear`, and an infra error
+- [How-to: Diagnose OODA decide/orient brain parse failures](../howto/diagnose-decide-orient-parse-failures.md)
+- [How-to: Diagnose OODA brain decision parse failures](../howto/diagnose-brain-decision-parse-failures.md) — the lifecycle escalation ladder (#2432)
+- [Reference: RecipeBrain API](./recipe-brain-api.md)
+- [Reference: Text-parsing wire formats](./text-parsing-wire-formats.md)
+- [Reference: Distill recipe output capture](./distill-recipe-output-capture.md) — the envelope shape, pinned to the binary
+- [Reference: PR-finalization review pipeline](./pr-finalization-pipeline.md) — the merge authority and objective gate

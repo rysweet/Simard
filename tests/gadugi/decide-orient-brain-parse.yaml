@@ -1,0 +1,56 @@
+name: "Decide + Orient Brain Parse (issue #2421)"
+description: "Outside-in proof that the decide and orient RecipeBrain phases recover real decisions/urgency from recipe-runner-rs JSON output instead of silently defaulting to AdvanceGoal (decide) or scraping 0.0 from the banner timing string (orient). Reproduces the text-mode banner bug and validates the json-mode fix at the recipe-runner boundary (no LLM), then runs the in-tree parser pins + JSON-envelope recovery tests."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Decide/orient brain parse: text-mode banner bug vs json-mode fix + parser pins"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/decide-orient-brain-parse.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "ooda"
+    - "recipe-brain"
+    - "decide"
+    - "orient"
+    - "issue-2421"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

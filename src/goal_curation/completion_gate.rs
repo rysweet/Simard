@@ -80,6 +80,192 @@ impl CompletionVerdict {
     }
 }
 
+// ===========================================================================
+// #2456 — external-signal verification outcome (extends, does not replace, the
+// #2450 deploy-aware done-gate above). Classifies the gate's verdict into a
+// measurable category so the false-completion rate can be tracked, and so a
+// goal with **no derivable external signal** is recorded as honestly
+// *unverified* rather than conflated with a verified completion.
+// ===========================================================================
+
+/// The outcome of verifying a claimed-complete goal against external signals.
+///
+/// Mirrors the metric vocabulary in issue #2456
+/// (`goal_completion_verification ∈ {verified, unverified_no_signal, refuted,
+/// error}`). Intrinsic self-report is never sufficient: a goal is `Verified`
+/// only when an external postcondition held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationOutcome {
+    /// At least one external postcondition was satisfied (gate said Complete).
+    Verified,
+    /// No external postcondition is derivable for this goal — held as unverified
+    /// rather than trusted on self-report alone.
+    UnverifiedNoSignal,
+    /// A derivable external signal contradicted the completion claim
+    /// (e.g. PR not merged, issue still open, self-change not deployed). This is
+    /// a false completion the subordinate self-reported as done.
+    Refuted,
+    /// Verification could not be performed this cycle (a git/gh/drift query
+    /// failed). Distinct from a refutation: the truth is simply unknown.
+    Error,
+}
+
+impl VerificationOutcome {
+    /// Stable lowercase label for the metric `context` and logs.
+    pub fn metric_label(&self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::UnverifiedNoSignal => "unverified_no_signal",
+            Self::Refuted => "refuted",
+            Self::Error => "error",
+        }
+    }
+
+    /// Numeric encoding for the `f64` metric value, so a time series can be
+    /// filtered/aggregated without re-parsing the context string.
+    pub fn metric_code(&self) -> f64 {
+        match self {
+            Self::Verified => 0.0,
+            Self::UnverifiedNoSignal => 1.0,
+            Self::Refuted => 2.0,
+            Self::Error => 3.0,
+        }
+    }
+
+    /// Whether this outcome is a false completion (claimed done, signal refuted).
+    /// This is the numerator of the `goal_false_completion_rate`.
+    pub fn is_false_completion(&self) -> bool {
+        matches!(self, Self::Refuted)
+    }
+}
+
+/// Metric name under which each completion-verification outcome is emitted.
+pub const COMPLETION_VERIFICATION_METRIC: &str = "goal_completion_verification";
+
+/// Metric name under which the per-batch false-completion rate (#2456 headline
+/// metric) is emitted: the share of *checkable* completions in one archival
+/// pass that a derivable external signal refuted. Distinct from the per-event
+/// [`COMPLETION_VERIFICATION_METRIC`] so a time series can read the rate
+/// directly without re-deriving it from the event stream.
+pub const FALSE_COMPLETION_RATE_METRIC: &str = "goal_false_completion_rate";
+
+/// Whether any *external* completion signal is derivable for this goal: a
+/// tracked PR, a tracked issue, or a self-affecting change (whose deploy state
+/// the drift detector can resolve). When none of these exist, a blocked verdict
+/// means "nothing to verify", not "verification failed".
+pub fn has_derivable_signal(goal: &ActiveGoal) -> bool {
+    let has_ref_of = |kind: &str| {
+        goal.wip_refs
+            .iter()
+            .any(|r| r.kind.eq_ignore_ascii_case(kind))
+    };
+    has_ref_of("pr") || has_ref_of("issue") || is_self_affecting(goal)
+}
+
+/// Classify a gate verdict into a [`VerificationOutcome`] for one goal.
+pub fn classify_outcome(goal: &ActiveGoal, verdict: &CompletionVerdict) -> VerificationOutcome {
+    match verdict {
+        CompletionVerdict::Complete(_) => VerificationOutcome::Verified,
+        CompletionVerdict::Blocked { missing, .. } => classify_from_missing(goal, missing),
+    }
+}
+
+/// Classify the blocked-verdict's missing-evidence list into an outcome. A
+/// [`MissingEvidence::CouldNotVerify`] dominates as `Error`; otherwise a goal
+/// with at least one derivable signal is `Refuted`, and a goal with none is
+/// `UnverifiedNoSignal`.
+pub fn classify_from_missing(
+    goal: &ActiveGoal,
+    missing: &[MissingEvidence],
+) -> VerificationOutcome {
+    if missing
+        .iter()
+        .any(|m| matches!(m, MissingEvidence::CouldNotVerify { .. }))
+    {
+        VerificationOutcome::Error
+    } else if has_derivable_signal(goal) {
+        VerificationOutcome::Refuted
+    } else {
+        VerificationOutcome::UnverifiedNoSignal
+    }
+}
+
+/// Emit one completion-verification outcome via
+/// [`crate::self_metrics::record_metric`]. Best-effort: a metric-write failure
+/// is swallowed so it never blocks or crashes the OODA cycle.
+///
+/// No-op under `cfg!(test)` so unit tests never append to the operator's real
+/// `~/.simard/metrics/metrics.jsonl` (mirroring `record_lifecycle_decision_metric`
+/// in the brain) — writing real telemetry from tests would corrupt the very
+/// before/after measurement this metric exists to capture.
+pub fn record_completion_verification(outcome: VerificationOutcome) {
+    if cfg!(test) {
+        return;
+    }
+    let _ = crate::self_metrics::record_metric(
+        COMPLETION_VERIFICATION_METRIC,
+        outcome.metric_code(),
+        outcome.metric_label(),
+    );
+}
+
+/// Emit the per-batch [`false_completion_rate`] over `outcomes` via
+/// [`crate::self_metrics::record_metric`] under [`FALSE_COMPLETION_RATE_METRIC`].
+/// A no-op when nothing in the batch was *checkable* (no verified/refuted
+/// outcome) — there is no rate to report. The metric `context` carries the
+/// `refuted`/`checkable` counts so a downstream reader can re-aggregate a
+/// pooled rate across batches rather than averaging per-batch rates. Best-effort
+/// and `cfg!(test)`-guarded for the same reason as
+/// [`record_completion_verification`].
+pub fn record_false_completion_rate(outcomes: &[VerificationOutcome]) {
+    let Some(rate) = false_completion_rate(outcomes) else {
+        return;
+    };
+    if cfg!(test) {
+        return;
+    }
+    let refuted = outcomes
+        .iter()
+        .filter(|o| matches!(o, VerificationOutcome::Refuted))
+        .count();
+    let checkable = outcomes
+        .iter()
+        .filter(|o| {
+            matches!(
+                o,
+                VerificationOutcome::Refuted | VerificationOutcome::Verified
+            )
+        })
+        .count();
+    let _ = crate::self_metrics::record_metric(
+        FALSE_COMPLETION_RATE_METRIC,
+        rate,
+        &format!("refuted={refuted} checkable={checkable}"),
+    );
+}
+
+/// The false-completion rate over a set of outcomes: `refuted / (verified +
+/// refuted)` — the share of *checkable* completions that were wrong. Signal-less
+/// (`UnverifiedNoSignal`) and `Error` outcomes are excluded from the denominator
+/// so they do not dilute the rate. `None` when nothing was checkable. This is
+/// the headline metric #2456 asks to trend down.
+pub fn false_completion_rate(outcomes: &[VerificationOutcome]) -> Option<f64> {
+    let refuted = outcomes
+        .iter()
+        .filter(|o| matches!(o, VerificationOutcome::Refuted))
+        .count();
+    let verified = outcomes
+        .iter()
+        .filter(|o| matches!(o, VerificationOutcome::Verified))
+        .count();
+    let checkable = refuted + verified;
+    if checkable == 0 {
+        return None;
+    }
+    Some(refuted as f64 / checkable as f64)
+}
+
 /// Injected evidence lookups. The production impl resolves PR/issue state via
 /// `gh` and `is_deployed` via the reconciliation detector; tests inject a
 /// canned source.
@@ -422,6 +608,12 @@ impl EvidenceSource for GhCliEvidenceSource {
 /// [`archive_completed`](super::archive_completed).
 ///
 /// Returns `(archived, blocked)`; `blocked` is always empty in legacy mode.
+///
+/// With the gate on, every candidate's [`VerificationOutcome`] is emitted via
+/// [`record_completion_verification`], and the per-batch
+/// [`false_completion_rate`] is emitted via [`record_false_completion_rate`], so
+/// the false-completion rate (#2456) is measurable both per-event and as a
+/// ready-made rate. Recording is best-effort and never affects the return value.
 pub fn archive_completed_evidence_aware(
     board: &mut GoalBoard,
     source: &dyn EvidenceSource,
@@ -431,7 +623,26 @@ pub fn archive_completed_evidence_aware(
         return (archived, Vec::new());
     }
     let gate = CompletionEvidenceGate::new(source);
-    archive_completed_with_evidence(board, &gate)
+    let (archived, blocked) = archive_completed_with_evidence(board, &gate);
+
+    // Instrument the completion-verification outcome per #2456: a goal that
+    // archived was externally verified; a blocked goal is either refuted (a
+    // derivable signal said "not done") or unverifiable for lack of any signal.
+    let mut outcomes: Vec<VerificationOutcome> = Vec::with_capacity(archived.len() + blocked.len());
+    for _ in &archived {
+        outcomes.push(VerificationOutcome::Verified);
+    }
+    for (goal, missing) in &blocked {
+        outcomes.push(classify_from_missing(goal, missing));
+    }
+    for outcome in &outcomes {
+        record_completion_verification(*outcome);
+    }
+    // The headline #2456 metric: the share of *checkable* completions this pass
+    // that an external signal refuted. No-op when nothing was checkable.
+    record_false_completion_rate(&outcomes);
+
+    (archived, blocked)
 }
 
 #[cfg(test)]

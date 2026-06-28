@@ -1,7 +1,7 @@
 ---
 title: RecipeBrain API reference
 description: Public API for the unified RecipeBrain struct and its standalone parse functions.
-last_updated: 2026-05-27
+last_updated: 2026-06-28
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -11,6 +11,7 @@ related:
   - ./ooda-brain-api.md
   - ./ooda-brain-decision-protocol.md
   - ./text-parsing-wire-formats.md
+  - ./recipe-brain-verdict-parsing.md
 ---
 
 # RecipeBrain API reference
@@ -69,8 +70,22 @@ Constructs a `RecipeBrain` if all preconditions are met. Returns `None` when:
 fn judge_decision(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment>
 ```
 
-Invokes `recipe-runner-rs` with context vars `goal_id`, `urgency`, `reason`.
-Parses stdout via `parse_action_from_text()`.
+Invokes `recipe-runner-rs` with `--output-format json` and context vars
+`goal_id`, `urgency`, `reason` (plus the ladder rung's `escalation_note`),
+extracts the agent decision text from the JSON envelope via
+`extract_recipe_decision_output`, and parses it via `parse_action_outcome` (the
+outcome-classifying variant; `parse_action_from_text` is the thin decision-only
+wrapper).
+
+> **Fixed in [#2421](https://github.com/rysweet/Simard/issues/2421).** This call
+> site reads the agent decision from the `--output-format json` envelope
+> (`step_results[].output`), never the default text-mode summary banner. On a
+> parse-miss it runs `run_brain_ladder` (the shared escalation ladder) and only
+> after the ladder is exhausted falls back **loudly** to `AdvanceGoal` (via
+> `default_advance_goal`), classified `DefaultEmpty` / `DefaultMalformed` —
+> distinct from a genuine LLM `advance_goal`. Each invocation emits a
+> `brain_verdict_parsed_total` metric (`phase=decide`). See
+> [Recipe-brain verdict/decision parsing](./recipe-brain-verdict-parsing.md).
 
 #### `OodaOrientBrain::judge_orientation`
 
@@ -78,9 +93,21 @@ Parses stdout via `parse_action_from_text()`.
 fn judge_orientation(&self, ctx: &OrientContext) -> SimardResult<OrientJudgment>
 ```
 
-Invokes `recipe-runner-rs` with context vars `goal_id`, `base_urgency`,
-`base_reason`, `failure_count`. Parses stdout via
-`parse_orient_from_text()`.
+Invokes `recipe-runner-rs` with `--output-format json` and context vars
+`goal_id`, `base_urgency`, `base_reason`, `failure_count` (plus the ladder
+rung's `escalation_note`), extracts the agent output from the JSON envelope via
+`extract_recipe_decision_output`, and parses it via `parse_orient_outcome` (the
+outcome-classifying variant; `parse_orient_from_text` is the thin wrapper).
+
+> **Fixed in [#2421](https://github.com/rysweet/Simard/issues/2421).** Because
+> urgency is parsed from the JSON envelope's agent output rather than the
+> text-mode banner, the banner's `(0.0s)` timing string can no longer be scraped
+> as `adjusted_urgency` — urgency `0.0` from a banner can no longer happen. On a
+> parse-miss it runs `run_brain_ladder` and then falls back to the deterministic
+> urgency **floor** (`base_urgency − 0.2 × failure_count`, clamped), the only
+> fallback. Each invocation emits a `brain_verdict_parsed_total` metric
+> (`phase=orient`). See
+> [Recipe-brain verdict/decision parsing](./recipe-brain-verdict-parsing.md).
 
 #### `OodaBrain::decide_engineer_lifecycle`
 
@@ -139,6 +166,13 @@ variant. Defaults to `AdvanceGoal` if no match.
 The remaining text after the first word is captured as the rationale
 (truncated to 500 chars).
 
+`parse_action_from_text` is the decision-only thin wrapper over
+`parse_action_outcome(text) -> (DecideJudgment, LifecycleParseOutcome)`, which
+additionally returns a `LifecycleParseOutcome` classifying *how* the decision
+was produced (`Parsed` vs `DefaultEmpty` / `DefaultMalformed`). `judge_decision`
+calls `parse_action_outcome` so the parse-failure rate is measurable and the
+escalation ladder fires only on a real miss.
+
 ### `parse_orient_from_text`
 
 ```rust
@@ -159,6 +193,12 @@ pub fn parse_orient_from_text(
 
 The full text is used as `rationale`. `confidence` is always `1.0`.
 `OrientJudgment::validate()` enforces bounds after extraction.
+
+`parse_orient_from_text` is the thin wrapper over `parse_orient_outcome(text,
+base_urgency, failure_count) -> (OrientJudgment, LifecycleParseOutcome)`, which
+additionally returns a `LifecycleParseOutcome`. `judge_orientation` calls
+`parse_orient_outcome` over the JSON-envelope-extracted agent output, so the
+deterministic floor is the only fallback and the ladder fires on a real miss.
 
 > **Removed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
 > The JSON extraction tier (`try_json_extraction`) has been deleted. The
@@ -242,13 +282,23 @@ Parse-failure rate over a window:
 ### `resolve_recipe_path`
 
 ```rust
-fn resolve_recipe_path(repo_root: &Path, recipe_filename: &str) -> Option<PathBuf>
+pub fn resolve_recipe_path(
+    repo_root: &Path,
+    recipe_filename: &str,
+    home_override: Option<&Path>,
+) -> Option<PathBuf>
 ```
 
 Resolution order:
 
-1. `~/.simard/prompt_assets/simard/recipes/<recipe_filename>` (hot-reload)
+1. `<home>/.simard/prompt_assets/simard/recipes/<recipe_filename>` (hot-reload)
 2. `<repo_root>/prompt_assets/simard/recipes/<recipe_filename>` (in-tree)
+
+`home_override` selects the hot-reload base directory: `Some(path)` uses `path`
+(a test seam to stay hermetic against the ambient `~/.simard`), `None` falls
+back to [`dirs::home_dir`] — production always passes `None` (via
+`RecipeBrain::new`). Mirrors the `home_override` convention already used by
+`disk_health::resolve_recipe_path` and `brain_introspection::resolve_recipe_path`.
 
 Returns `None` if neither path contains the file.
 

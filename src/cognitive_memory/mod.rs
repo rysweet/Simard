@@ -772,3 +772,13 @@ mod tests_recall_forgetting;
 // into the consolidation cadence.
 #[cfg(test)]
 mod tests_controlled_forgetting;
+
+// Issue #2441: close the episodic->procedural skill-reuse loop. End-to-end guards
+// that reuse feeds back into recall ordering through the Simard `CognitiveMemoryOps`
+// surface — a recalled+reinforced procedure ranks higher on a later recall ("close
+// the loop, don't just store") — while a freshly distilled (`usage_count == 0`)
+// procedure stays recallable for its first reuse. The distill/recall/reinforce
+// halves are already wired; these pin that they compose (existing tests only cover
+// each half in isolation).
+#[cfg(test)]
+mod tests_procedural_loop;

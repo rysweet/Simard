@@ -366,6 +366,11 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
 /// write is logged and skipped rather than failing the cycle. Backends without
 /// access tracking (legacy bridge, mocks) get the trait's no-op default, so this
 /// is a silent no-op there.
+///
+/// Applying a recalled procedure also emits the `brain_skill_reuse` metric
+/// (#2441) via [`reflection_lessons::record_skill_reuse`] — the measurable half
+/// of "recall/apply, don't just store". That emitter is itself best-effort and a
+/// `cfg!(test)` no-op.
 pub fn reinforce_prepared_context(memory: &dyn CognitiveMemoryOps, ctx: &PreparedContext) {
     let reinforce = |node_id: &str, kind: MemoryKind| {
         if let Err(e) = memory.reinforce_access(node_id, kind) {
@@ -377,6 +382,11 @@ pub fn reinforce_prepared_context(memory: &dyn CognitiveMemoryOps, ctx: &Prepare
     }
     for proc in &ctx.recalled_procedures {
         reinforce(&proc.node_id, MemoryKind::Procedure);
+        // #2441: applying a recalled procedure IS a skill reuse — emit the
+        // measurable `brain_skill_reuse` signal alongside the reinforcement that
+        // closes the recall->rerank loop. Best-effort and a `cfg!(test)` no-op
+        // inside the emitter, so the broad suite never writes metrics here.
+        reflection_lessons::record_skill_reuse(&proc.node_id, &proc.name);
     }
     for ep in &ctx.episodic_recall {
         reinforce(&ep.node_id, MemoryKind::Episode);
@@ -944,6 +954,13 @@ mod tests_pr_a;
 // recipe. See `docs/architecture/episode-distillation.md`.
 pub mod distillation;
 
+// Issues #2441/#2458: the verified-signal gate, failure→lesson distillation, and
+// loop metrics that close the episodic→procedural learning loop. Lessons are
+// name-prefixed procedures (`lesson:<goal_type>:<error_class>`); all learning
+// entry points are no-ops on `Verdict::Unverified`. See
+// `docs/reference/procedural-learning-loop.md`.
+pub mod reflection_lessons;
+
 // Issue #2327: episode-ingestion classifier — the deterministic policy that
 // runs before every `store_episode` intake site, dropping operational noise,
 // down-scoping bookkeeping, and storing meaningful episodics with
@@ -978,3 +995,10 @@ mod classifier_tests;
 // / DistillReport.procedure_count) that stores procedures with provenance.
 #[cfg(test)]
 mod promotion_scheduler_tests;
+
+// Issues #2441/#2458: memory-backed acceptance tests for the failure→lesson half
+// of the procedural-learning loop (reflection storage, recurrence-gated lesson
+// distillation, the load-bearing `Unverified` no-op). The pure gate /
+// normalization / metric contracts live in `reflection_lessons`'s inline tests.
+#[cfg(test)]
+mod tests_reflection_lessons;

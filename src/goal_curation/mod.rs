@@ -38,9 +38,12 @@ pub use decompose::{
 pub use edges::{children_of, edges_of_type, node_of, parse_goal_edge, write_edge, write_node};
 
 pub use completion_gate::{
-    CompletionEvidence, CompletionEvidenceGate, CompletionVerdict, EvidenceSource,
-    GhCliEvidenceSource, MissingEvidence, archive_completed_evidence_aware,
-    archive_completed_with_evidence, completion_evidence_enabled, is_self_affecting,
+    COMPLETION_VERIFICATION_METRIC, CompletionEvidence, CompletionEvidenceGate, CompletionVerdict,
+    EvidenceSource, FALSE_COMPLETION_RATE_METRIC, GhCliEvidenceSource, MissingEvidence,
+    VerificationOutcome, archive_completed_evidence_aware, archive_completed_with_evidence,
+    classify_from_missing, classify_outcome, completion_evidence_enabled, false_completion_rate,
+    has_derivable_signal, is_self_affecting, record_completion_verification,
+    record_false_completion_rate,
 };
 
 #[cfg(test)]

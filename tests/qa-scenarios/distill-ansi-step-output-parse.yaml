@@ -1,0 +1,66 @@
+name: distill-ansi-step-output-parse
+app_type: cli
+description: |
+  Verify episode→fact distillation recovers the agent's `{ "facts": [...] }`
+  answer when the `--output-format json` envelope's `distill` step `output`
+  carries ANSI-coded tracing-log noise instead of clean JSON (the t=7919 cycle:
+  the failing step output began with a dimmed `\x1b[2m2026-06-28T06:38:25…`
+  timestamp prefix). Raw `ESC` (0x1b) bytes are invalid inside JSON, so before
+  the fix a colourised / log-interleaved facts object failed `serde_json` and a
+  full 20-episode batch silently deferred for a cycle. `scan_for_facts_object`
+  now strips ANSI escapes before the balanced-brace scan, recovering the buried
+  payload. Proven by the hermetic in-process unit tests this scenario drives
+  (no network, no live host mutation). The CLI runner rejects any non-zero exit,
+  so a failing test fails the scenario.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # Production path: the recipe-runner-rs JSON envelope's distill-step output is
+  # ANSI-coded log noise with the facts object colourised inline; the parser
+  # mines and parses it instead of erroring "step output did not contain a
+  # parseable { facts } object". First invocation may compile the test binary.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::distillation::unit_tests::parse_recipe_output_full_recovers_facts_from_ansi_coded_step_output"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Facts-only wrapper: ANSI log lines (exact failing `\x1b[2m`+timestamp
+  # excerpt) around the facts object are stripped and the facts recovered.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::distillation::unit_tests::parse_recipe_output_recovers_facts_from_ansi_log_noise"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Stripper unit: CSI/SGR codes are removed, plain + multi-byte UTF-8 text is
+  # preserved, and a JSON-escaped `\u001b` (ASCII run, not a raw ESC) is left
+  # untouched so legitimate fact content is never mangled.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::distillation::unit_tests::strip_ansi_escapes_removes_csi_and_preserves_text_and_utf8"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

@@ -8,7 +8,11 @@
 #   2. Deterministic floor — base_urgency - 0.2 * failure_count
 #
 # Context vars (passed via -c):
-#   goal_id, base_urgency, base_reason, failure_count
+#   goal_id, base_urgency, base_reason, failure_count, escalation_note
+#
+# `escalation_note` (issue #2432 / #2421) is empty on the base attempt and
+# carries a schema-repair / higher-effort instruction on escalation-ladder
+# retries. When empty it renders to nothing, so base behaviour is unchanged.
 #
 # Output: agent stdout — bare decimal float as first token, followed by rationale
 
@@ -25,6 +29,8 @@ steps:
     type: "agent"
     agent: "default"
     prompt: |
+      {{escalation_note}}
+
       # OODA Brain — Orient Phase: Failure-Penalty Demotion
 
       ## ROLE

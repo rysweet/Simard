@@ -20,7 +20,7 @@ For the full canonical specification (schema, consolidation rules, hive event bu
 | **Working** | Task-scoped (cleared at task end) | The 20-slot active task context: goal, constraints, plan steps, current execution state. |
 | **Episodic** | Persistent, autobiographical | "What happened this session" — every cycle, every action, every observation. |
 | **Semantic** | Persistent, deduplicated | Facts and learned concepts promoted from episodic memory ("the test harness uses CARGO_TARGET_DIR"). |
-| **Procedural** | Persistent, indexed by trigger, deduplicated by name | Learned how-to: action sequences that worked for a given situation. Written by the OODA Act phase for successful outcomes. Storing an identically-named procedure is idempotent (#2298). See [OODA procedural memory](reference/ooda-procedural-memory.md) and [Procedural-memory store idempotency](reference/cognitive-memory-procedural-idempotency.md). |
+| **Procedural** | Persistent, indexed by trigger, deduplicated by name | Learned how-to: action sequences that worked for a given situation. Today holds **skills** (`ooda:…`) written by the OODA Act phase for successful outcomes. **Proposed (#2441/#2458):** gate that learning on an external verdict, add **lessons** (`lesson:<goal_type>:<error_class>`) distilled from recurring *verified* failures, recall by usage rank, and reinforce on reuse — the closed procedural-learning loop. Storing an identically-named procedure is idempotent (#2298). See [Closing the procedural-learning loop](concepts/procedural-learning-loop.md) (proposed), [OODA procedural memory](reference/ooda-procedural-memory.md), and [Procedural-memory store idempotency](reference/cognitive-memory-procedural-idempotency.md). |
 | **Prospective** | Persistent, time/event-indexed | Future intentions: Active goals as trigger-action pairs, meeting action items. See [Goal–prospective memory mirror](reference/goal-prospective-memory-mirror.md). |
 
 ## Consolidation flow
@@ -31,9 +31,21 @@ Sensory   ──(attention)──▶  Episodic
 Working   ──(task end)───▶  Episodic
 Episodic  ──(distill)────▶  Semantic    (DERIVES_FROM edge back to source episode, #2325)
 Episodic  ──(distill)────▶  Procedural  (PROCEDURE_DERIVES_FROM edge, #2327)
-OODA Act  ──(success)────▶  Procedural    (#2280)
+OODA Act  ──(success)────▶  Procedural    (skill, #2280)
+OODA Act  ──(verified success)──▶  Procedural  (skill — gated on Verdict; proposed #2441)
+OODA Act  ──(verified failure)──▶  Episodic (reflection) ──(recurring ≥2)──▶ Procedural (lesson; proposed #2458)
 Goal put  ──(Active)─────▶  Prospective   (#2207/#2280)
 ```
+
+> **Proposed (#2441/#2458) — not yet implemented.** A planned change would gate
+> all procedural learning on an **external verified signal**
+> (`Verdict::VerifiedSuccess` / `VerifiedFailure` / `Unverified`): an
+> `Unverified` outcome would learn nothing, so Simard never trains procedural
+> memory on her own self-assessment. Recalled procedures would be reinforced
+> when applied, and recurring *verified* failures would become durable lessons
+> that future similar goals consult — closing the episodic→procedural loop. See
+> [Closing the procedural-learning loop](concepts/procedural-learning-loop.md) and
+> [Procedural-learning loop API](reference/procedural-learning-loop.md).
 
 A deterministic **episode ingestion policy** runs before every
 `store_episode` write: it drops operational-noise episodes (session
