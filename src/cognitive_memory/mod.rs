@@ -120,10 +120,16 @@ pub struct ForgetReport {
 /// Pure forgetting signal for a live fact (issue #2440 / #2434): a bounded
 /// `[0.0, 1.0]` score where a **higher** value means **more forgettable**.
 ///
-/// A single source of truth shared by ranked recall (as a demotion tiebreaker)
-/// and the controlled-forgetting hygiene pass. It is the complement of a
-/// retention score blended from the three signals the Generative-Agents
-/// retrieval model uses, mirrored from local fact metadata (no LLM call):
+/// The single source of truth for "low value" in the controlled-forgetting
+/// hygiene pass ([`CognitiveMemoryOps::forget_low_value_facts`]): a fact is a
+/// forgetting candidate only when its score clears the floor a never-accessed
+/// fact at [`FORGET_MIN_IMPORTANCE`] would score. Because it blends recency and
+/// usage — not just confidence — a low-confidence fact that was recently
+/// recalled or is frequently used (reinforced via issue #2440) scores *below*
+/// the floor and is protected, closing the recall→forgetting signal loop. It is
+/// the complement of a retention score blended from the three signals the
+/// Generative-Agents retrieval model uses, mirrored from local fact metadata (no
+/// LLM call):
 ///
 /// - **importance** ≈ `confidence` (already `[0,1]`),
 /// - **recency** — exponential decay of the time since `last_accessed_at` with a
@@ -342,14 +348,17 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// [`prune_superseded`](Self::prune_superseded) (which only reclaims the
     /// superseded tail).
     ///
-    /// A fact is a forgetting *candidate* only when it is both **low value**
-    /// (`confidence < FORGET_MIN_IMPORTANCE`) and **unprotected** — i.e. it
-    /// carries no provenance (`DERIVES_FROM`) edge. Provenance-bearing and
-    /// above-threshold facts are NEVER in the delete set. Mandatory safety
-    /// (issue #2434): the candidate set is computed first (a `dry_run` returns it
-    /// as a pure preview that changes nothing), and a live run only deletes when
-    /// candidates exist, snapshotting the live `Fact` count before/after via a
-    /// self-metric so valuable-fact loss is visible.
+    /// A fact is a forgetting *candidate* only when it is both **low value** —
+    /// its [`forgetting_score`] clears the floor a never-accessed fact at
+    /// [`FORGET_MIN_IMPORTANCE`] scores, so confidence, recency, and usage all
+    /// count — and **unprotected**, carrying no provenance (`DERIVES_FROM`) edge.
+    /// Provenance-bearing facts are NEVER in the delete set, and a low-confidence
+    /// fact kept warm by recall (issue #2440 reinforcement) scores below the
+    /// floor and survives. Mandatory safety (issue #2434): the candidate set is
+    /// computed first (a `dry_run` returns it as a pure preview that changes
+    /// nothing), and a live run only deletes when candidates exist, snapshotting
+    /// the live `Fact` count before/after via a self-metric so valuable-fact loss
+    /// is visible.
     ///
     /// The default implementation is a safe no-op (`Ok(ForgetReport::default())`)
     /// for backends without a retention pass (legacy bridge, IPC client, test

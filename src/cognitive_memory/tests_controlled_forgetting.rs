@@ -23,7 +23,9 @@
 //! (`memory_consolidation::consolidation_persistence`, alongside
 //! `prune_superseded`) — pinned by `consolidation_persistence_runs_controlled_forgetting`.
 
-use super::{CognitiveMemoryOps, FORGET_MIN_IMPORTANCE, ForgetReport, LibraryCognitiveMemory};
+use super::{
+    CognitiveMemoryOps, FORGET_MIN_IMPORTANCE, ForgetReport, LibraryCognitiveMemory, MemoryKind,
+};
 use crate::memory_consolidation::consolidation_persistence;
 use crate::session::SessionId;
 
@@ -135,6 +137,60 @@ fn forget_low_value_facts_protects_provenance_bearing() {
     assert!(
         !after.contains(&"noise".to_string()),
         "unprotected low-value fact must be forgotten"
+    );
+}
+
+/// Single source of truth (design A2): candidacy flows through `forgetting_score`,
+/// which blends recency and usage — not just confidence. A low-confidence fact
+/// kept warm by recall reinforcement (issue #2440 bumps `usage_count` +
+/// `last_accessed_at`) therefore scores below the forgetting floor and survives,
+/// while an equally low-confidence fact that was never recalled is forgotten.
+/// This closes the recall→forgetting loop a bare confidence threshold would miss.
+#[test]
+fn forget_low_value_facts_protects_recall_reinforced_low_confidence() {
+    let mem = test_mem();
+    // Both facts are below the importance threshold on confidence alone.
+    let warm = mem
+        .store_fact(
+            "warm",
+            "frequently recalled low-confidence note",
+            0.05,
+            &[],
+            "src",
+        )
+        .expect("store warm");
+    mem.store_fact(
+        "cold",
+        "never recalled low-confidence note",
+        0.05,
+        &[],
+        "src",
+    )
+    .expect("store cold");
+
+    // Recall keeps `warm` alive: reinforcement stamps recency + bumps usage, so
+    // its forgetting_score drops below the floor.
+    for _ in 0..3 {
+        mem.reinforce_access(&warm, MemoryKind::Fact)
+            .expect("reinforce warm");
+    }
+
+    let report = mem
+        .forget_low_value_facts(false)
+        .expect("controlled forgetting");
+    assert!(
+        report.deleted + report.archived >= 1,
+        "the never-recalled low-confidence fact must be forgotten"
+    );
+
+    let after = live_concepts(&mem);
+    assert!(
+        after.contains(&"warm".to_string()),
+        "a low-confidence fact kept warm by recall must survive forgetting"
+    );
+    assert!(
+        !after.contains(&"cold".to_string()),
+        "an equally low-confidence but never-recalled fact must be forgotten"
     );
 }
 

@@ -34,7 +34,7 @@
 //! All persistence is rooted at a caller-supplied `state_root` (a `TempDir` in
 //! tests). The adapter opens its store at `state_root/cognitive`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -44,8 +44,12 @@ use amplihack_memory::{
     ProceduralMemory, ProspectiveMemory, RecallOptions, RecallWeights, RetentionPolicy,
     SemanticFact, StoreFactOptions, WorkingMemorySlot,
 };
+use chrono::{DateTime, Utc};
 
-use super::{CognitiveMemoryOps, FORGET_MIN_IMPORTANCE, ForgetReport, MemoryKind, RecallWeightSet};
+use super::{
+    CognitiveMemoryOps, FORGET_MIN_IMPORTANCE, ForgetReport, MemoryKind, RecallWeightSet,
+    forgetting_score,
+};
 use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::{
     CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
@@ -330,6 +334,104 @@ fn record_forget_metric(
             error = %e,
             "failed to record controlled_forgetting metric (forgetting unaffected)",
         );
+    }
+}
+
+/// Live low-value facts selected for controlled forgetting (issue #2434), with
+/// the per-concept targeting [`forget_low_value_facts`] drives the library
+/// retention pass with.
+struct ForgetCandidates {
+    /// Live (non-archived) fact count when the candidate set was computed.
+    live_before: usize,
+    /// Node ids of the live facts that qualify for forgetting.
+    candidate_ids: HashSet<String>,
+    /// Concepts every live member of which is a candidate (the only concepts
+    /// safe to target with a per-concept TTL — see [`forget_low_value_facts`]).
+    forgettable_concepts: HashSet<String>,
+}
+
+/// Identify the live facts safe to forget (issue #2434), keyed off the shared
+/// [`forgetting_score`] signal so there is a single source of truth for "low
+/// value" across ranked recall and the hygiene pass (design A2).
+///
+/// A live fact is *forgettable* when it carries NO provenance edge AND its
+/// `forgetting_score` exceeds the floor a never-used fact sitting exactly at the
+/// importance threshold ([`FORGET_MIN_IMPORTANCE`]) would score. Because the
+/// score blends confidence, recency, and usage, a low-confidence fact that has
+/// been recently recalled or is frequently used (reinforced via issue #2440)
+/// scores *below* the floor and is protected — completing the recall→forgetting
+/// signal loop a bare confidence threshold would miss.
+///
+/// Only *purely forgettable* concepts (every live member is a candidate) are
+/// targeted: the library's retention pass is concept-granular, so targeting a
+/// mixed concept would archive — then, lacking provenance, delete — a high-value
+/// fact that merely shares the concept. Requiring purity keeps such a fact off
+/// the delete path entirely.
+fn collect_forget_candidates(mem: &CognitiveMemory, now: DateTime<Utc>) -> ForgetCandidates {
+    // The floor a never-accessed fact at the importance threshold scores. A
+    // strict `>` comparison preserves the `confidence < FORGET_MIN_IMPORTANCE`
+    // boundary for fresh facts while letting recency/usage protect reinforced
+    // ones.
+    let floor_score = forgetting_score(FORGET_MIN_IMPORTANCE, 0, None, now);
+    let is_forgettable = |f: &SemanticFact| {
+        forgetting_score(f.confidence, f.usage_count, f.last_accessed_at, now) > floor_score
+            && mem.fact_provenance(&f.node_id).is_empty()
+    };
+
+    // `get_all_facts` includes archived facts; only live ones are forgettable.
+    let all = mem.get_all_facts(usize::MAX);
+    let live_before = all.iter().filter(|f| !f.archived).count();
+
+    let mut by_concept: HashMap<&str, Vec<&SemanticFact>> = HashMap::new();
+    for f in all.iter().filter(|f| !f.archived) {
+        by_concept.entry(f.concept.as_str()).or_default().push(f);
+    }
+
+    let mut forgettable_concepts = HashSet::new();
+    let mut candidate_ids = HashSet::new();
+    for (concept, facts) in &by_concept {
+        if facts.iter().all(|f| is_forgettable(f)) {
+            forgettable_concepts.insert((*concept).to_string());
+            candidate_ids.extend(facts.iter().map(|f| f.node_id.clone()));
+        }
+    }
+
+    ForgetCandidates {
+        live_before,
+        candidate_ids,
+        forgettable_concepts,
+    }
+}
+
+/// Net effect of a forgetting pass, measured against the live store rather than
+/// the library's coarse policy counts (issue #2434), so the self-metric reflects
+/// ground truth.
+struct ForgetOutcome {
+    archived: usize,
+    deleted: usize,
+    live_after: usize,
+}
+
+/// Measure how many of `candidate_ids` were archived vs. deleted, plus the live
+/// fact count, by re-reading the store after the retention pass.
+fn measure_forget_outcome(mem: &CognitiveMemory, candidate_ids: &HashSet<String>) -> ForgetOutcome {
+    let after = mem.get_all_facts(usize::MAX);
+    let present: HashSet<&str> = after.iter().map(|f| f.node_id.as_str()).collect();
+    let archived_present: HashSet<&str> = after
+        .iter()
+        .filter(|f| f.archived)
+        .map(|f| f.node_id.as_str())
+        .collect();
+    ForgetOutcome {
+        deleted: candidate_ids
+            .iter()
+            .filter(|id| !present.contains(id.as_str()))
+            .count(),
+        archived: candidate_ids
+            .iter()
+            .filter(|id| archived_present.contains(id.as_str()))
+            .count(),
+        live_after: after.iter().filter(|f| !f.archived).count(),
     }
 }
 
@@ -755,59 +857,32 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // the library's `prune_semantic_memory` retention machinery (the same
         // `prune_superseded` calls), but driven so it is BOTH bounded and safe.
         //
-        // Why not just set `min_importance_to_keep = FORGET_MIN_IMPORTANCE`?
-        // Because the library's delete-protection is
-        // `importance >= min_importance_to_keep && has_provenance`. A low-value
-        // candidate (importance < threshold) can therefore NEVER satisfy that
-        // protection, so a blanket importance threshold would delete
-        // provenance-bearing low-value facts too. Instead we:
-        //
-        //   1. Compute the candidate set ourselves: a fact is forgettable only
-        //      when it is low-value (`confidence < FORGET_MIN_IMPORTANCE`) AND
-        //      carries NO provenance edge. We further require a concept to be
-        //      *purely* forgettable (every live fact in it qualifies) before
-        //      targeting it, so a high-value or provenance-bearing fact sharing a
-        //      concept is never collateral.
-        //   2. Drive deletion via a per-concept TTL (`ttl_seconds_by_concept`,
-        //      ttl = 0) over exactly those concepts, with
-        //      `min_importance_to_keep = 0.0`. The 0.0 keep-threshold disables the
-        //      importance trigger (so only our targeted concepts are candidates)
-        //      AND turns delete-protection into "ANY provenance-bearing fact is
-        //      protected" — belt-and-suspenders over the concept-level exclusion.
+        // Candidacy ([`collect_forget_candidates`]) flows through the shared
+        // [`forgetting_score`] signal and a hard provenance gate, then targets
+        // only *purely forgettable* concepts. Why not just set
+        // `min_importance_to_keep = FORGET_MIN_IMPORTANCE`? Because the library's
+        // delete-protection is `importance >= min_importance_to_keep &&
+        // has_provenance`: a low-value candidate (importance < threshold) can
+        // never satisfy it, so a blanket importance threshold would delete
+        // provenance-bearing low-value facts too. Instead we drive deletion via a
+        // per-concept TTL (ttl = 0) over exactly the forgettable concepts with
+        // `min_importance_to_keep = 0.0`. The 0.0 keep-threshold disables the
+        // importance trigger (only our targeted concepts are candidates) AND
+        // turns delete-protection into "ANY provenance-bearing fact is protected"
+        // — belt-and-suspenders over the concept-level exclusion.
         //
         // Mandatory safety (issue #2434): a `dry_run` returns the candidate
         // preview without mutating; a live run only deletes when candidates
         // exist and records a before/after self-metric so valuable-fact loss is
         // visible.
-        use std::collections::{HashMap, HashSet};
-
         let mut guard = self.lock_write("forget_low_value_facts")?;
 
-        // `get_all_facts` includes archived facts; the live count excludes them.
-        let all = guard.get_all_facts(usize::MAX);
-        let live_before = all.iter().filter(|f| !f.archived).count();
-
-        // Group live facts by concept, then keep only the *purely forgettable*
-        // concepts (every live fact low-value and provenance-free).
-        let mut by_concept: HashMap<&str, Vec<&SemanticFact>> = HashMap::new();
-        for f in all.iter().filter(|f| !f.archived) {
-            by_concept.entry(f.concept.as_str()).or_default().push(f);
-        }
-        let mut forgettable_concepts: HashSet<String> = HashSet::new();
-        let mut candidate_ids: HashSet<String> = HashSet::new();
-        for (concept, facts) in &by_concept {
-            let all_safe = facts.iter().all(|f| {
-                f.confidence < FORGET_MIN_IMPORTANCE && guard.fact_provenance(&f.node_id).is_empty()
-            });
-            if all_safe {
-                forgettable_concepts.insert((*concept).to_string());
-                for f in facts {
-                    candidate_ids.insert(f.node_id.clone());
-                }
-            }
-        }
+        let ForgetCandidates {
+            live_before,
+            candidate_ids,
+            forgettable_concepts,
+        } = collect_forget_candidates(&guard, Utc::now());
         let candidates = candidate_ids.len();
-        drop(by_concept); // release immutable borrows of `all` before mutating
 
         // Dry-run preview: change nothing (the mandatory preview before any live
         // deletion).
@@ -839,8 +914,8 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         // one archives the fresh candidates, pass two deletes the now-archived
         // ones. Both use the same policy.
         let ttl_seconds_by_concept: HashMap<String, i64> = forgettable_concepts
-            .iter()
-            .map(|c| (c.clone(), 0_i64))
+            .into_iter()
+            .map(|c| (c, 0_i64))
             .collect();
         let policy = RetentionPolicy {
             max_facts_per_concept: None,
@@ -858,22 +933,11 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
 
         // Measure the net effect against our candidate set (never trust the
         // coarse policy counts to attribute the change).
-        let after = guard.get_all_facts(usize::MAX);
-        let present: HashSet<&str> = after.iter().map(|f| f.node_id.as_str()).collect();
-        let archived_present: HashSet<&str> = after
-            .iter()
-            .filter(|f| f.archived)
-            .map(|f| f.node_id.as_str())
-            .collect();
-        let deleted = candidate_ids
-            .iter()
-            .filter(|id| !present.contains(id.as_str()))
-            .count();
-        let archived = candidate_ids
-            .iter()
-            .filter(|id| archived_present.contains(id.as_str()))
-            .count();
-        let live_after = after.iter().filter(|f| !f.archived).count();
+        let ForgetOutcome {
+            archived,
+            deleted,
+            live_after,
+        } = measure_forget_outcome(&guard, &candidate_ids);
 
         // Gate on a self-metric so a regression (valuable-fact loss) is visible
         // in `metrics.jsonl`. Best-effort, no-op under `cfg!(test)`.
