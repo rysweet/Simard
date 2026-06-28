@@ -148,7 +148,9 @@ impl ProgressEvidenceChecker for RecipeProgressChecker {
             };
         }
 
-        parse_verdict_from_text(&raw)
+        let (decision, matched) = parse_verdict_outcome(&raw);
+        crate::recipe_output::record_parse_outcome("progress_checker", matched);
+        decision
     }
 }
 
@@ -181,23 +183,47 @@ fn render_wip_summary(goal: &ActiveGoal) -> String {
 /// - If neither keyword found, accept with diagnostic (same fallback
 ///   as the old JSON parse-error path)
 pub fn parse_verdict_from_text(text: &str) -> EvidenceDecision {
-    let lower = text.to_ascii_lowercase();
-    let rationale = truncate(text.trim(), RATIONALE_MAX_CHARS);
+    parse_verdict_outcome(text).0
+}
+
+/// Like [`parse_verdict_from_text`] but also returns whether a verdict keyword
+/// was actually found (`true`) versus the permissive accept-to-avoid-blocking
+/// default firing (`false`). The flag drives the `recipe_parse_*_total{phase}`
+/// counter at the subprocess call site (issue #2484); the pure parser stays
+/// metric-free so unit tests write no metrics.
+pub fn parse_verdict_outcome(text: &str) -> (EvidenceDecision, bool) {
+    // Strip ANSI escapes + drop whole tracing-log / runner-banner lines first
+    // (shared #2484 extractor) so a noise-obscured verdict is not silently
+    // dropped — e.g. a real "reject" must not be missed because it trailed an
+    // ANSI-coloured log prefix, and an "already"/"accepted" substring inside a
+    // dropped log line cannot fabricate a verdict.
+    let cleaned = crate::recipe_output::strip_recipe_noise(text);
+    let lower = cleaned.to_ascii_lowercase();
+    let rationale = truncate(cleaned.trim(), RATIONALE_MAX_CHARS);
 
     if lower.contains("reject") {
-        EvidenceDecision::Reject {
-            reason: format!("{ADAPTER_TAG}: reject — {rationale}"),
-        }
+        (
+            EvidenceDecision::Reject {
+                reason: format!("{ADAPTER_TAG}: reject — {rationale}"),
+            },
+            true,
+        )
     } else if lower.contains("accept") {
-        EvidenceDecision::Accept {
-            reason: format!("{ADAPTER_TAG}: accept — {rationale}"),
-        }
+        (
+            EvidenceDecision::Accept {
+                reason: format!("{ADAPTER_TAG}: accept — {rationale}"),
+            },
+            true,
+        )
     } else {
-        EvidenceDecision::Accept {
-            reason: format!(
-                "{ADAPTER_TAG}: no verdict keyword found in recipe output; accepting to avoid blocking goal"
-            ),
-        }
+        (
+            EvidenceDecision::Accept {
+                reason: format!(
+                    "{ADAPTER_TAG}: no verdict keyword found in recipe output; accepting to avoid blocking goal"
+                ),
+            },
+            false,
+        )
     }
 }
 
@@ -373,5 +399,37 @@ mod tests {
             }
             EvidenceDecision::Reject { .. } => panic!("expected accept"),
         }
+    }
+
+    #[test]
+    fn text_verdict_recovers_reject_past_ansi_log_prefix() {
+        // #2484: the verdict trails an ANSI-coloured tracing-log line. The
+        // shared extractor strips both so the real reject is recovered and the
+        // rationale carries no log/ANSI noise (a noise-obscured reject must
+        // never be silently accepted-to-avoid-blocking).
+        let esc = '\u{1b}';
+        let text = format!(
+            "{esc}[2m2026-06-28T08:08:58.151133Z{esc}[0m  INFO checker: scoring\n\
+             Verdict: reject — no measurable progress this cycle."
+        );
+        match parse_verdict_from_text(&text) {
+            EvidenceDecision::Reject { reason } => {
+                assert!(reason.contains("reject"), "got: {reason}");
+                assert!(!reason.contains("INFO checker"), "log line must be dropped");
+            }
+            EvidenceDecision::Accept { .. } => panic!("noise-obscured reject must be recovered"),
+        }
+    }
+
+    #[test]
+    fn parse_verdict_outcome_reports_match_flag_for_counter() {
+        // The `bool` drives the `recipe_parse_*_total{progress_checker}` counter:
+        // a real keyword ⇒ true (success), the permissive default ⇒ false.
+        let (decision, matched) = parse_verdict_outcome("just prose, no verdict keyword here");
+        assert!(matches!(decision, EvidenceDecision::Accept { .. }));
+        assert!(!matched, "permissive default must report matched=false");
+
+        let (_, matched_reject) = parse_verdict_outcome("Verdict: reject — insufficient evidence");
+        assert!(matched_reject, "a real verdict must report matched=true");
     }
 }

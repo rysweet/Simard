@@ -8,22 +8,10 @@ use super::gh_client::GhIssue;
 /// Strip ANSI escape sequences and collapse internal whitespace runs to a
 /// single space. Trims leading/trailing whitespace.
 pub fn normalize(msg: &str) -> String {
-    // Pass 1: strip ANSI CSI escapes (`ESC [ ... <final-byte>`). We accept the
-    // common case where the final byte is a letter (m, K, J, etc.).
-    let mut stripped = String::with_capacity(msg.len());
-    let mut chars = msg.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // Skip optional '[', then characters until a letter terminator.
-            for inner in chars.by_ref() {
-                if inner.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-            continue;
-        }
-        stripped.push(c);
-    }
+    // Pass 1: strip ANSI escapes via the single shared, hardened stripper
+    // (issue #2484) — one ANSI/CSI/OSC implementation for the whole crate
+    // instead of this formerly copy-pasted CSI-only loop.
+    let stripped = crate::recipe_output::strip_ansi(msg);
     // Pass 2: collapse whitespace.
     stripped.split_whitespace().collect::<Vec<_>>().join(" ")
 }

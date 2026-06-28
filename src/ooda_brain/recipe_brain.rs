@@ -719,6 +719,7 @@ impl OodaDecideBrain for RecipeBrain {
         let (decision, outcome) = parse_action_outcome(&base_raw);
         if !outcome.is_parse_failure() {
             record_verdict_parse_metric(BrainPhase::Decide, &ctx.goal_id, outcome, 1);
+            crate::recipe_output::record_parse_outcome("decide", true);
             return Ok(decision);
         }
 
@@ -734,6 +735,7 @@ impl OodaDecideBrain for RecipeBrain {
             |d| decide_decision_choice(d).to_string(),
         );
         record_verdict_parse_metric(BrainPhase::Decide, &ctx.goal_id, final_outcome, attempts);
+        crate::recipe_output::record_parse_outcome("decide", !final_outcome.is_parse_failure());
         Ok(final_decision)
     }
 }
@@ -758,6 +760,7 @@ impl OodaOrientBrain for RecipeBrain {
         let (judgment, outcome) = parse(&base_raw);
         if !outcome.is_parse_failure() {
             record_verdict_parse_metric(BrainPhase::Orient, &ctx.goal_id, outcome, 1);
+            crate::recipe_output::record_parse_outcome("orient", true);
             return Ok(judgment);
         }
 
@@ -773,6 +776,7 @@ impl OodaOrientBrain for RecipeBrain {
             |j| format!("urgency={:.3}", j.adjusted_urgency),
         );
         record_verdict_parse_metric(BrainPhase::Orient, &ctx.goal_id, final_outcome, attempts);
+        crate::recipe_output::record_parse_outcome("orient", !final_outcome.is_parse_failure());
         Ok(final_judgment)
     }
 }
@@ -1052,6 +1056,7 @@ impl OodaBrain for RecipeBrain {
                 "ok",
                 1,
             );
+            crate::recipe_output::record_parse_outcome("engineer_lifecycle", true);
             return Ok(decision);
         }
 
@@ -1073,6 +1078,10 @@ impl OodaBrain for RecipeBrain {
             lifecycle_decision_choice(&final_decision),
             termination.cause_label(),
             attempts,
+        );
+        crate::recipe_output::record_parse_outcome(
+            "engineer_lifecycle",
+            !final_outcome.is_parse_failure(),
         );
         Ok(final_decision)
     }
@@ -1107,7 +1116,12 @@ pub fn parse_action_from_text(text: &str) -> DecideJudgment {
 /// indistinguishable — which is exactly what let the text-mode banner masquerade
 /// as "working" (the first word `Recipe:` always defaulted to `AdvanceGoal`).
 pub fn parse_action_outcome(text: &str) -> (DecideJudgment, LifecycleParseOutcome) {
-    let trimmed = text.trim();
+    // Strip ANSI escapes + drop tracing-log / runner-banner lines first (shared
+    // #2484 extractor) so a noise-obscured first-word action keyword is not
+    // silently defaulted to `advance_goal`. Clean-path zero-copy preserves
+    // today's behaviour on clean recipe output.
+    let cleaned = crate::recipe_output::strip_recipe_noise(text);
+    let trimmed = cleaned.trim();
     if trimmed.is_empty() {
         return (default_advance_goal(), LifecycleParseOutcome::DefaultEmpty);
     }
@@ -1218,9 +1232,15 @@ pub fn parse_orient_outcome(
     base_urgency: f64,
     failure_count: u32,
 ) -> (OrientJudgment, LifecycleParseOutcome) {
+    // Strip ANSI escapes + drop tracing-log / runner-banner lines first (shared
+    // #2484 extractor): a banner timing string like `(0.0s)` or a decimal inside
+    // a tracing line must not be scraped as the urgency float and demote the
+    // goal. Clean-path zero-copy preserves today's behaviour on clean output.
+    let cleaned = crate::recipe_output::strip_recipe_noise(text);
+    let s: &str = cleaned.as_ref();
     // Hoist trim above the scanner — avoids re-trimming on each candidate.
-    let trimmed = text.trim();
-    let bytes = text.as_bytes();
+    let trimmed = s.trim();
+    let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i].is_ascii_digit() {
@@ -1235,7 +1255,7 @@ pub fn parse_orient_outcome(
                     i += 1;
                 }
                 if i > after_dot
-                    && let Ok(val) = text[start..i].parse::<f64>()
+                    && let Ok(val) = s[start..i].parse::<f64>()
                 {
                     // Inline validation before allocating rationale string.
                     if val.is_finite() && (0.0..=1.0).contains(&val) && val <= base_urgency + 1e-9 {
@@ -1307,7 +1327,12 @@ pub fn parse_lifecycle_from_text(text: &str) -> EngineerLifecycleDecision {
 /// parse-failure rate measurable per issue #2419 — before this split, a real
 /// `continue_skipping` decision and a silent fallback were indistinguishable.
 pub fn parse_lifecycle_outcome(text: &str) -> (EngineerLifecycleDecision, LifecycleParseOutcome) {
-    let trimmed = text.trim();
+    // Strip ANSI escapes + drop tracing-log / runner-banner lines first (shared
+    // #2484 extractor) so a noise-obscured first-word decision keyword is not
+    // silently defaulted to `continue_skipping` — the #2419-family non-progress
+    // loop. Clean-path zero-copy preserves today's behaviour on clean output.
+    let cleaned = crate::recipe_output::strip_recipe_noise(text);
+    let trimmed = cleaned.trim();
     if trimmed.is_empty() {
         return (
             default_continue_skipping(),
@@ -3676,12 +3701,33 @@ mod tests {
 
         #[test]
         fn decide_outcome_banner_first_word_is_default_malformed() {
-            // The text-mode banner first word `Recipe:` defaults to advance_goal
-            // — but it must be classified DefaultMalformed (a parse-miss), NOT
-            // counted as a real `advance_goal` decision.
-            let (j, oc) = parse_action_outcome("Recipe: ooda-decide SUCCESS (0.0s)");
+            // The recipe-runner text-mode SUCCESS banner must be classified as a
+            // parse-miss (DefaultMalformed), NOT counted as a real `advance_goal`
+            // decision. After #2484 noise-stripping the pure-noise lines
+            // (`Recipe:`, `Steps:`, `[completed]`) are dropped, but the runner's
+            // `Recipe '<name>': SUCCESS` summary line survives — so the banner
+            // still reaches the parser as present-but-unrecognised text and is
+            // correctly flagged DefaultMalformed (never a silent advance_goal).
+            let banner = "Recipe: ooda-decide (v1.0.0)\nSteps: 1\n\n\
+                          Recipe 'ooda-decide': SUCCESS (0.0s)\n  \
+                          [completed] decide-next-action (0.0s)\n";
+            let (j, oc) = parse_action_outcome(banner);
             assert!(matches!(j, DecideJudgment::AdvanceGoal { .. }));
             assert_eq!(oc, LifecycleParseOutcome::DefaultMalformed);
+            assert!(oc.is_parse_failure());
+        }
+
+        #[test]
+        fn decide_outcome_pure_noise_banner_is_default_empty() {
+            // A banner consisting ONLY of droppable noise lines (no surviving
+            // `Recipe '<name>': SUCCESS` summary) strips to empty and is
+            // classified DefaultEmpty — still a loud parse-failure that defaults
+            // to advance_goal and escalates, never a real decision (#2484).
+            let (j, oc) = parse_action_outcome(
+                "Recipe: ooda-decide SUCCESS (0.0s)\n  [completed] decide (0.0s)\n",
+            );
+            assert!(matches!(j, DecideJudgment::AdvanceGoal { .. }));
+            assert_eq!(oc, LifecycleParseOutcome::DefaultEmpty);
             assert!(oc.is_parse_failure());
         }
 

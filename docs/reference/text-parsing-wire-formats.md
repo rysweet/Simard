@@ -25,6 +25,65 @@ For the design rationale, see
 
 ---
 
+## Protocol 0: Shared noise pre-stripping (`recipe_output`)
+
+Used by: **every** recipe-backed parser below, before it runs.
+
+> **Added in [#2484](https://github.com/rysweet/Simard/issues/2484):**
+> `recipe-runner-rs` stdout (and the `step_results[].output` string inside its
+> `--output-format json` envelope) is routinely contaminated with three kinds
+> of non-payload noise that broke the formerly bespoke per-phase extractors:
+>
+> 1. **ANSI SGR/CSI/OSC colour codes** from `tracing`/`env_logger` (e.g. a
+>    leading `\x1b[2m` "dim" whose raw `ESC`/`0x1b` byte is invalid inside a
+>    JSON document, so `serde_json` rejects the span).
+> 2. **Timestamped tracing-log lines** interleaved with the agent answer.
+> 3. The runner's **text-mode summary banner** (`Recipe: … SUCCESS`, `Steps: …`,
+>    `[completed] …`).
+>
+> The single hardened `src/recipe_output/` module is now the **only**
+> ANSI/log/banner-stripping path. The two former duplicate strippers
+> (`meeting_backend::sanitize::strip_ansi_escapes`, `stewardship::dedup::normalize`)
+> and the distill-private ANSI stripper now delegate to it.
+
+### Functions
+
+| Function | Behaviour |
+|---|---|
+| `strip_ansi(&str) -> Cow` | Single ANSI (CSI/OSC/two-char) stripper. `Cow::Borrowed` on the clean path (no `ESC` byte). |
+| `strip_recipe_noise(&str) -> Cow` | `strip_ansi` + drop ISO-8601 tracing lines and runner-banner lines. `Cow::Borrowed` on the clean path. |
+| `balanced_objects` / `last_balanced_object` / `extract_json_payload` | String-literal-aware balanced `{…}` scan. JSON extraction is **dual-pass** (line-dropped **and** ANSI-only) so the payload survives both an interleaved log line inside a pretty body and a same-line log prefix. |
+| `extract_verdict(raw, keywords)` | Precedence keyword scan over cleaned text. |
+| `record_parse_outcome(phase, success)` | Emits `recipe_parse_{success,failure}_total{phase}` to `metrics.jsonl`. |
+
+### Clean-path guarantee
+
+`strip_ansi` and `strip_recipe_noise` return `Cow::Borrowed` — byte-identical
+text with zero allocation — when stdout carries no `ESC` byte and no droppable
+log/banner line. Adopting the shared helper therefore does **not** change any
+phase's behaviour on clean output; only previously-defaulted noisy cases now
+recover.
+
+### Observability counters
+
+On every recipe-backed phase invocation, `record_parse_outcome(phase, success)`
+is emitted at the subprocess call site (never inside a pure parse function, so
+unit tests write no metrics):
+
+```
+recipe_parse_success_total{phase}
+recipe_parse_failure_total{phase}   # incremented when the permissive default fires
+```
+
+`phase ∈ {distill, merge_judge, engineer_lifecycle, decide, orient,
+progress_checker}`. These are **complementary** to the brain phases' existing
+`brain_verdict_parsed_total{phase,outcome}` counter (issue #2429): the latter
+owns the brain-phase success-rate dashboard; these add the memory/distill and
+progress-checker phases to the same counter family and give both numerator and
+denominator per phase.
+
+---
+
 ## Protocol 1: First-word match (OODA brains)
 
 Used by: `ooda_brain::recipe_brain` (all three phases)
@@ -46,6 +105,11 @@ free-text     = <any remaining text — kept as rationale>
 - It is lowercased via `to_ascii_lowercase()` before matching.
 - If no known variant matches, a safe default is returned (not a parse error).
 - Everything after the first word is the rationale (truncated to 500 chars).
+
+> **Noise pre-stripping (#2484):** each parser first routes its input through
+> [`recipe_output::strip_recipe_noise`](#protocol-0-shared-noise-pre-stripping-recipe_output)
+> so an ANSI-coloured log prefix or runner banner cannot shadow the first-word /
+> first-float token. Clean output is passed through unchanged (`Cow::Borrowed`).
 
 ### Common parser shape
 
@@ -235,6 +299,11 @@ The parser scans the entire stdout for a verdict keyword. Everything else
 
 ### Scanning rules
 
+0. **Pre-strip noise (#2484):** route stdout through
+   [`recipe_output::strip_recipe_noise`](#protocol-0-shared-noise-pre-stripping-recipe_output)
+   first, so a dropped tracing-log line's keyword substring (e.g. `already`
+   containing `ready`) cannot fabricate a verdict and a real verdict behind an
+   ANSI/log prefix is not silently missed. Clean output is unchanged.
 1. Convert stdout to lowercase for matching.
 2. Check for the **negative** keyword first to prevent substring false positives.
 3. Check for the **positive** keyword.
@@ -449,12 +518,14 @@ Each parser has inline `#[cfg(test)]` tests in its source file:
 
 | Module | Test count | Coverage |
 |--------|-----------|----------|
+| `recipe_output/extract.rs` | 25+ | `strip_ansi` (CSI/OSC/two-char, clean-path borrow, JSON-escaped literal), `strip_recipe_noise` (drops tracing/banner lines, keeps prose), balanced-object scan (string-literal aware), `extract_json_payload` dual-pass recovery (ANSI+log, same-line prefix, interleaved log line), `extract_verdict` precedence + dropped-log-line substring safety |
 | `decide.rs` | 4+ | DeterministicFallback tests |
-| `recipe_brain.rs` | 30+ | All 10 action keywords (first-word), first-float orient, 6 lifecycle variants (first-word), case-insensitive match, unrecognized defaults |
+| `recipe_brain.rs` | 30+ | All 10 action keywords (first-word), first-float orient, 6 lifecycle variants (first-word), case-insensitive match, unrecognized defaults, #2484 banner→DefaultMalformed / pure-noise→DefaultEmpty |
 | `orient.rs` | 8+ | Float parsing, validation, extra fields, empty/invalid responses |
 | `rustyclawd.rs` | 15+ (T1–T15) | Full behavior matrix per decision protocol reference |
-| `recipe_progress_checker.rs` | 4+ | Accept, reject, no keyword (default), mixed case |
-| `recipe_merge_judge.rs` | 5+ | `parse_merge_outcome`: structured `parse_judge_response` JSON (populates blockers), prose keyword scan (ready / not_ready / unclear; substring safety), JSON-envelope extraction, and fail-closed `Verdict::Unclear` on an unparseable verdict. |
+| `recipe_progress_checker.rs` | 6+ | Accept, reject, no keyword (default), mixed case, #2484 noise-obscured reject recovery, `parse_verdict_outcome` match flag |
+| `recipe_merge_judge.rs` | 8+ | `parse_merge_outcome`: structured `parse_judge_response` JSON (populates blockers), prose keyword scan (ready / not_ready / unclear; substring safety), JSON-envelope extraction, fail-closed `Verdict::Unclear` on an unparseable verdict, and #2484 noise-stripping (dropped-log-line `ready` substring safety, verdict recovery past an ANSI log prefix). |
+| `memory_consolidation/distillation.rs` | 17+ | Plain object, prose-embedded object, last-non-empty preference, unmatched-quote tolerance, ANSI-log recovery, #2484 runner-banner recovery |
 | `disk_health.rs` | 3+ | Full output, no-cleanup output, malformed lines |
 
 ---
