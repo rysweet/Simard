@@ -5,35 +5,53 @@ use super::types::RelaunchConfig;
 use crate::error::{SimardError, SimardResult};
 use crate::self_relaunch_semaphore::{HandoffConfig, HandoffResult, LeaderSemaphore};
 
-/// Build a canary binary via `cargo build --release` in a separate target directory.
-pub fn build_canary(config: &RelaunchConfig) -> SimardResult<PathBuf> {
-    let target_dir = &config.canary_target_dir;
-
+/// Shared `cargo build --release` driver for the canary and self-deploy build
+/// paths.
+///
+/// Creates `target_dir`, builds `manifest_path` into it, and returns the
+/// resulting `target_dir/release/simard` artifact. `label` names the operation
+/// in any surfaced error (e.g. `"canary-build"`). When `neutralize_git_env` is
+/// set, the ambient git-redirection vars (`GIT_DIR`, `GIT_WORK_TREE`, …) are
+/// stripped so `build.rs` derives `SIMARD_GIT_HASH` from the package's own
+/// checkout instead of a hijacked one. Any failure is surfaced loudly.
+fn run_release_build(
+    label: &str,
+    target_dir: &Path,
+    manifest_path: &Path,
+    neutralize_git_env: bool,
+) -> SimardResult<PathBuf> {
     std::fs::create_dir_all(target_dir).map_err(|e| SimardError::PersistentStoreIo {
-        store: "canary-build".to_string(),
+        store: label.to_string(),
         action: "create target directory".to_string(),
-        path: target_dir.clone(),
+        path: target_dir.to_path_buf(),
         reason: e.to_string(),
     })?;
 
-    let output = Command::new("cargo")
-        .arg("build")
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build")
         .arg("--release")
         .arg("--target-dir")
         .arg(target_dir)
         .arg("--manifest-path")
-        .arg(config.manifest_dir.join("Cargo.toml"))
-        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs())
-        .output()
-        .map_err(|e| SimardError::BridgeSpawnFailed {
-            bridge: "canary-build".to_string(),
-            reason: format!("cargo build failed to start: {e}"),
-        })?;
+        .arg(manifest_path)
+        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs());
+    if neutralize_git_env {
+        cmd.env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_OBJECT_DIRECTORY");
+    }
+
+    let output = cmd.output().map_err(|e| SimardError::BridgeSpawnFailed {
+        bridge: label.to_string(),
+        reason: format!("cargo build failed to start: {e}"),
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(SimardError::BridgeCallFailed {
-            bridge: "canary-build".to_string(),
+            bridge: label.to_string(),
             method: "cargo build --release".to_string(),
             reason: format!("build failed (exit {}): {}", output.status, stderr),
         });
@@ -43,11 +61,21 @@ pub fn build_canary(config: &RelaunchConfig) -> SimardResult<PathBuf> {
     if !binary_path.exists() {
         return Err(SimardError::ArtifactIo {
             path: binary_path,
-            reason: "canary binary not found after successful build".to_string(),
+            reason: format!("{label} binary not found after successful build"),
         });
     }
 
     Ok(binary_path)
+}
+
+/// Build a canary binary via `cargo build --release` in a separate target directory.
+pub fn build_canary(config: &RelaunchConfig) -> SimardResult<PathBuf> {
+    run_release_build(
+        "canary-build",
+        &config.canary_target_dir,
+        &config.manifest_dir.join("Cargo.toml"),
+        false,
+    )
 }
 
 /// Build a self-deploy candidate binary from an **already-prepared** source
@@ -71,59 +99,21 @@ pub fn build_canary(config: &RelaunchConfig) -> SimardResult<PathBuf> {
 /// `target_dir/release/simard` on success. Any build failure is surfaced
 /// loudly (never a silent success).
 pub fn build_self_deploy_candidate(repo: &Path, target_dir: &Path) -> SimardResult<PathBuf> {
-    std::fs::create_dir_all(target_dir).map_err(|e| SimardError::PersistentStoreIo {
-        store: "self-deploy-build".to_string(),
-        action: "create warm target directory".to_string(),
-        path: target_dir.to_path_buf(),
-        reason: e.to_string(),
-    })?;
-
-    let output = Command::new("cargo")
-        .arg("build")
-        .arg("--release")
-        .arg("--target-dir")
-        .arg(target_dir)
-        .arg("--manifest-path")
-        .arg(repo.join("Cargo.toml"))
-        .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs())
-        // Neutralize ambient git-repo redirection (issue #2467). Cargo runs
-        // `build.rs` in the package root (`repo`), where it derives
-        // `SIMARD_GIT_HASH` from `git rev-parse HEAD`. A stray `GIT_DIR` /
-        // `GIT_WORK_TREE` in the daemon's environment would redirect that read
-        // to a different repo and embed the wrong commit — defeating the
-        // post-deploy `version_advanced` integrity gate (which compares the
-        // embedded SHA to `target_commit`). Remove only the git-redirection
-        // vars; the rest of the env (PATH/HOME/CARGO_*/RUSTUP_*) is required for
-        // the build to run.
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .output()
-        .map_err(|e| SimardError::BridgeSpawnFailed {
-            bridge: "self-deploy-build".to_string(),
-            reason: format!("cargo build failed to start: {e}"),
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(SimardError::BridgeCallFailed {
-            bridge: "self-deploy-build".to_string(),
-            method: "cargo build --release".to_string(),
-            reason: format!("build failed (exit {}): {}", output.status, stderr),
-        });
-    }
-
-    let binary_path = target_dir.join("release").join("simard");
-    if !binary_path.exists() {
-        return Err(SimardError::ArtifactIo {
-            path: binary_path,
-            reason: "self-deploy candidate binary not found after successful build".to_string(),
-        });
-    }
-
-    Ok(binary_path)
+    // Neutralize ambient git-repo redirection (issue #2467). Cargo runs
+    // `build.rs` in the package root (`repo`), where it derives
+    // `SIMARD_GIT_HASH` from `git rev-parse HEAD`. A stray `GIT_DIR` /
+    // `GIT_WORK_TREE` in the daemon's environment would redirect that read to a
+    // different repo and embed the wrong commit — defeating the post-deploy
+    // `version_advanced` integrity gate (which compares the embedded SHA to
+    // `target_commit`). The rest of the env (PATH/HOME/CARGO_*/RUSTUP_*) is
+    // required for the build to run, so only the git-redirection vars are
+    // stripped.
+    run_release_build(
+        "self-deploy-build",
+        target_dir,
+        &repo.join("Cargo.toml"),
+        true,
+    )
 }
 
 /// Validate preconditions and hand over execution to the canary binary.
