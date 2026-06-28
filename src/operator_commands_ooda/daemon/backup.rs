@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardResult;
+use crate::meeting_backend::persist::MEMORY_RECORDS_FILENAME;
 use crate::memory::FileBackedMemoryStore;
 use crate::memory_backup::{
     BackupConfig, BackupManifest, backup_memory_verified, prune_old_backups,
@@ -32,9 +33,10 @@ use crate::memory_backup::{
 /// attributed to the same agent that produced it.
 const BACKUP_AGENT: &str = "simard";
 
-/// File-backed memory records live next to the cognitive store at
-/// `state_root/memory_records.json` (the path `simard meeting read` uses).
-const MEMORY_RECORDS_FILENAME: &str = "memory_records.json";
+// File-backed memory records live next to the cognitive store at
+// `state_root/`[`MEMORY_RECORDS_FILENAME`] — the single canonical filename
+// `simard meeting read` also writes/reads (`meeting_backend::persist`). Imported
+// rather than re-declared so the backup and the writer can never disagree.
 
 /// Default backup interval: once per day. The live store changes continuously
 /// but a daily verified backup plus the library backend's own WAL durability is

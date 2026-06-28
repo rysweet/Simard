@@ -350,33 +350,11 @@ fn backup_restore_round_trip_searchable() {
 // ---------------------------------------------------------------------------
 // Issue #2420 — verified backup of the LIVE store
 //
-// 1. The backup source must equal the live store path the daemon opens
-//    (`state_root/cognitive`), so a verified backup can never silently target a
-//    stale path again (the Jun-20 regression).
-// 2. A verified backup must be re-opened and its memory count confirmed BEFORE
-//    any prune; a mismatch must fail loudly rather than be silently trusted.
+// A verified backup must be re-opened and its memory count confirmed BEFORE any
+// prune; a mismatch must fail loudly rather than be silently trusted. (The
+// "backup source == live store path the daemon opens" guarantee is pinned in
+// `cognitive_memory::tests_live_store_path_2420`.)
 // ---------------------------------------------------------------------------
-
-/// The backup module and the daemon must agree, by construction, on the source
-/// store: `backup_source_path(state_root)` is the migration-aware live-store
-/// path (`state_root/cognitive`), identical to `cognitive_memory::live_store_path`.
-#[test]
-fn backup_source_is_live_store_path() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    std::fs::create_dir_all(root.join("cognitive")).unwrap();
-
-    assert_eq!(
-        backup_source_path(root),
-        root.join("cognitive"),
-        "backup source must be the live `cognitive` store the daemon opens"
-    );
-    assert_eq!(
-        backup_source_path(root),
-        crate::cognitive_memory::live_store_path(root),
-        "backup source must delegate to the single-source-of-truth resolver"
-    );
-}
 
 /// Helper: build a backup with a known memory count (1 fact + 1 procedure + 2
 /// file-backed records = 4 total) and return its directory.

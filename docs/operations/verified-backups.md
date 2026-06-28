@@ -57,10 +57,13 @@ on-disk location of the cognitive store. It is migration-aware:
 | only the legacy `state_root/cognitive_memory.ladybug` exists | `state_root/cognitive_memory.ladybug` |
 | neither exists (fresh install) | `state_root/cognitive` (created on open) |
 
-Both the daemon's store-open path (`LibraryCognitiveMemory::open`) and the
-backup's source (`memory_backup::backup_source_path`) route through
-`live_store_path`, so "what the daemon opens" and "what the backup reads" are
-guaranteed equal. The function is exported from `cognitive_memory`.
+The daemon's store-open path (`LibraryCognitiveMemory::open`) and the
+`live_store_path` resolver are anchored to the same `LIVE_STORE_SUBDIR`
+constant, so "what the daemon opens" and "what the resolver reports" are
+guaranteed equal. The verified backup then reads that live store *through the
+bridge* (a logical snapshot), so it inherently captures exactly the store the
+daemon opened — never a stale file path. The resolver is exported from
+`cognitive_memory`.
 
 ```rust
 use simard::cognitive_memory::live_store_path;
@@ -226,16 +229,9 @@ All items live in `simard::memory_backup` unless noted.
 pub fn live_store_path(state_root: &Path) -> PathBuf
 ```
 
-Migration-aware resolver for the live cognitive store path. Used by both the
-daemon store-open and the backup source so they cannot diverge.
-
-### `backup_source_path`
-
-```rust
-pub fn backup_source_path(state_root: &Path) -> PathBuf
-```
-
-The backup's source store path — a thin delegate to `live_store_path`.
+Migration-aware resolver for the live cognitive store path. Anchored to the
+same `LIVE_STORE_SUBDIR` constant as the daemon store-open
+(`LibraryCognitiveMemory::open`) so the two cannot diverge.
 
 ### `export_full_memory_snapshot` — `simard::remote_transfer`
 
@@ -491,8 +487,8 @@ rejected as corrupt/incomplete, fall back to the next-most-recent directory.
 
 - **Path guard** — `live_store_path` resolves to `state_root/cognitive`
   post-migration, falls back to the legacy file only when `cognitive` is absent,
-  and equals the path `LibraryCognitiveMemory::open` uses;
-  `backup_source_path` delegates to it.
+  and equals the path `LibraryCognitiveMemory::open` uses (both anchored to
+  `LIVE_STORE_SUBDIR`).
 - **Whole-store export** — a store with more facts than the legacy cap exports
   fully via `export_full_memory_snapshot` while the capped export truncates; a
   verified backup of a >cap store round-trips the full count on restore.

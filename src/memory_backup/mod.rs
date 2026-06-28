@@ -317,17 +317,6 @@ pub fn restore_from_backup(
     Ok(cognitive_count + record_count)
 }
 
-/// Backup source path for the **live** cognitive store under `state_root`
-/// (issue #2420).
-///
-/// Thin re-export of [`crate::cognitive_memory::live_store_path`] so the
-/// verified-backup module and the daemon agree, by construction, on which store
-/// is backed up: the post-migration `state_root/cognitive` the daemon opens,
-/// never the stale legacy single-file path that broke backups from Jun 20.
-pub fn backup_source_path(state_root: &Path) -> PathBuf {
-    crate::cognitive_memory::live_store_path(state_root)
-}
-
 /// Verify a backup and return its manifest, **failing loudly** if it is not
 /// [`BackupStatus::Valid`] (issue #2420).
 ///

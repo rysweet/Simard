@@ -178,7 +178,10 @@ impl LibraryCognitiveMemory {
     /// Returns [`SimardError::PersistentStoreIo`] if the underlying LadybugDB
     /// store cannot be opened.
     pub fn open(state_root: &Path) -> SimardResult<Self> {
-        let db_path = state_root.join("cognitive");
+        // Use the shared `LIVE_STORE_SUBDIR` constant (not a bare literal) so the
+        // path the daemon opens and the verified-backup resolver `live_store_path`
+        // are anchored to one source of truth and cannot silently drift (#2420).
+        let db_path = state_root.join(LIVE_STORE_SUBDIR);
         let inner =
             CognitiveMemory::open_persistent(&db_path, LIBRARY_AGENT_NAME).map_err(|e| {
                 SimardError::PersistentStoreIo {
