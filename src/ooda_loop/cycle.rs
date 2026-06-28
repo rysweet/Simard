@@ -432,28 +432,38 @@ fn run_ooda_cycle_inner(
                     eprintln!("[simard] OODA consolidation: procedural recall failed: {e}");
                     false
                 });
-            if let Err(e) = bridges.memory.store_procedure(&proc_name, &steps, &[]) {
-                tracing::warn!(
-                    procedure_name = %proc_name,
-                    error = %e,
-                    "OODA consolidation: procedural memory store failed",
-                );
-                eprintln!("[simard] OODA consolidation: procedural memory failed: {e}");
-            } else if already_present {
-                eprintln!("[simard] OODA consolidation: reinforced procedure '{proc_name}'");
-            } else {
-                // ws2 #2295: structured tracing event in addition to the
-                // eprintln! line. The structured `procedure_name` field is
-                // written verbatim by every fmt layer (JSON and the
-                // default human formatter) and bypasses any line-length
-                // truncation a downstream log shipper might apply to the
-                // free-form message — making "is my trigger list
-                // truncated?" an answerable question from the journal.
-                tracing::info!(
-                    procedure_name = %proc_name,
-                    "OODA consolidation: stored procedure",
-                );
-                eprintln!("[simard] OODA consolidation: stored procedure '{proc_name}'");
+            match bridges.memory.store_procedure(&proc_name, &steps, &[]) {
+                Err(e) => {
+                    tracing::warn!(
+                        procedure_name = %proc_name,
+                        error = %e,
+                        "OODA consolidation: procedural memory store failed",
+                    );
+                    eprintln!("[simard] OODA consolidation: procedural memory failed: {e}");
+                }
+                Ok(_) if already_present => {
+                    eprintln!("[simard] OODA consolidation: reinforced procedure '{proc_name}'");
+                }
+                Ok(proc_id) => {
+                    // ws2 #2295: structured tracing event in addition to the
+                    // eprintln! line. The structured `procedure_name` field is
+                    // written verbatim by every fmt layer (JSON and the
+                    // default human formatter) and bypasses any line-length
+                    // truncation a downstream log shipper might apply to the
+                    // free-form message — making "is my trigger list
+                    // truncated?" an answerable question from the journal.
+                    tracing::info!(
+                        procedure_name = %proc_name,
+                        "OODA consolidation: stored procedure",
+                    );
+                    eprintln!("[simard] OODA consolidation: stored procedure '{proc_name}'");
+                    // #2441/#2458: a brand-new skill/lesson procedure was stored
+                    // (not a reinforcing re-store) — emit the brain_new_procedure
+                    // metric. Best-effort and a `cfg!(test)` no-op.
+                    crate::memory_consolidation::reflection_lessons::record_new_procedure(
+                        &proc_id, &proc_name,
+                    );
+                }
             }
         }
     }

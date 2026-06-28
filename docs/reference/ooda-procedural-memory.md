@@ -8,6 +8,9 @@ related:
   - ../architecture/cognitive-memory.md
   - ./cognitive-memory-ranked-episodic-recall.md
   - ./cognitive-memory-procedural-idempotency.md
+  - ./procedural-learning-loop.md
+  - ../concepts/procedural-learning-loop.md
+  - ../howto/inspect-the-procedural-learning-loop.md
   - ./goal-prospective-memory-mirror.md
   - ./ooda-brain-api.md
   - ./ooda-engineer-lifecycle-recipe.md
