@@ -346,3 +346,290 @@ fn backup_restore_round_trip_searchable() {
     );
     assert_eq!(procs[0].steps, vec!["build", "test", "ship"]);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #2420 — verified backup of the LIVE store
+//
+// A verified backup must be re-opened and its memory count confirmed BEFORE any
+// prune; a mismatch must fail loudly rather than be silently trusted. (The
+// "backup source == live store path the daemon opens" guarantee is pinned in
+// `cognitive_memory::tests_live_store_path_2420`.)
+// ---------------------------------------------------------------------------
+
+/// Helper: build a backup with a known memory count (1 fact + 1 procedure + 2
+/// file-backed records = 4 total) and return its directory.
+fn backup_with_known_counts(tmp: &Path) -> (PathBuf, usize) {
+    let backup_root = tmp.join("backups");
+    let store_path = tmp.join("memory.json");
+    let config = test_config(&backup_root);
+
+    let bridge = mock_bridge();
+    bridge.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
+    bridge
+        .store_procedure("build", &["compile".into()], &[])
+        .unwrap();
+
+    let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
+    file_store.put(make_record("rec1")).unwrap();
+    file_store.put(make_record("rec2")).unwrap();
+
+    let manifest = backup_memory(&bridge, &file_store, "agent", &config).unwrap();
+    // 1 fact + 1 procedure + 2 records.
+    (manifest.backup_dir, 4)
+}
+
+/// The count gate accepts a backup whose re-opened total matches the expected
+/// live-store count.
+#[test]
+fn verify_backup_count_passes_on_exact_total() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (backup_dir, total) = backup_with_known_counts(tmp.path());
+
+    verify_backup_memory_count(&backup_dir, total).expect("matching memory count must verify Ok");
+}
+
+/// The count gate fails loudly when the backup holds a different number of
+/// memories than expected (truncated / partial backup).
+#[test]
+fn verify_backup_count_fails_loudly_on_mismatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (backup_dir, total) = backup_with_known_counts(tmp.path());
+
+    let err = verify_backup_memory_count(&backup_dir, total + 100);
+    assert!(
+        err.is_err(),
+        "a count mismatch must be an Err, not silently trusted"
+    );
+}
+
+/// `backup_memory_verified` returns a manifest only after the backup re-opens
+/// cleanly with matching counts; `verify_backup` on the result is `Valid`.
+#[test]
+fn backup_memory_verified_returns_valid_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backup_root = tmp.path().join("backups");
+    let store_path = tmp.path().join("memory.json");
+    let config = test_config(&backup_root);
+
+    let bridge = mock_bridge();
+    bridge.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
+    let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
+    file_store.put(make_record("rec1")).unwrap();
+
+    let manifest =
+        backup_memory_verified(&bridge, &file_store, "agent", &config).expect("verified backup");
+    assert_eq!(manifest.cognitive_facts_count, 1);
+    assert_eq!(manifest.memory_records_count, 1);
+
+    let v = verify_backup(&manifest.backup_dir).unwrap();
+    assert!(
+        matches!(v.status, BackupStatus::Valid),
+        "verified backup must be Valid on disk"
+    );
+}
+
+/// A verified backup round-trips: restoring into fresh targets yields the same
+/// total memory count the backup verified.
+#[test]
+fn backup_memory_verified_round_trips_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backup_root = tmp.path().join("backups");
+    let store_path = tmp.path().join("memory.json");
+    let config = test_config(&backup_root);
+
+    let bridge = mock_bridge();
+    bridge.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
+    bridge
+        .store_procedure("build", &["compile".into()], &[])
+        .unwrap();
+    let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
+    file_store.put(make_record("rec1")).unwrap();
+    file_store.put(make_record("rec2")).unwrap();
+
+    let manifest =
+        backup_memory_verified(&bridge, &file_store, "agent", &config).expect("verified backup");
+
+    let target_bridge = mock_bridge();
+    let target_store = FileBackedMemoryStore::try_new(tmp.path().join("restored.json")).unwrap();
+    let restored =
+        restore_from_backup(&target_bridge, &target_store, &manifest.backup_dir).unwrap();
+
+    // 1 fact + 1 procedure + 2 records.
+    assert_eq!(
+        restored, 4,
+        "restore must round-trip the verified memory count"
+    );
+}
+
+/// Issue #2420 acceptance: a verified backup of a store **larger than the legacy
+/// export cap** (1000 facts) must round-trip the full memory count. This is the
+/// exact regression behind the broken backups — the live store grew past the
+/// fixed export cap, so a backup silently captured only the first 1000
+/// memories. The mock bridge ignores `limit`, so this must use the real library
+/// backend (`in_memory` for speed; durability is irrelevant to the cap fix).
+#[test]
+fn verified_backup_round_trips_store_larger_than_export_cap() {
+    use crate::cognitive_memory::LibraryCognitiveMemory;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = LibraryCognitiveMemory::in_memory().unwrap();
+
+    // > legacy MAX_EXPORT_FACTS (1000): a capped export would lose the tail.
+    let n_facts = 1025usize;
+    for i in 0..n_facts {
+        src.store_fact(
+            &format!("concept-{i}"),
+            &format!("content {i}"),
+            0.9,
+            &[],
+            &format!("ep{i}"),
+        )
+        .unwrap();
+    }
+
+    let file_store = FileBackedMemoryStore::try_new(tmp.path().join("memory.json")).unwrap();
+    file_store.put(make_record("rec1")).unwrap();
+    file_store.put(make_record("rec2")).unwrap();
+
+    let config = test_config(&tmp.path().join("backups"));
+    let manifest =
+        backup_memory_verified(&src, &file_store, "agent", &config).expect("verified backup");
+
+    assert_eq!(
+        manifest.cognitive_facts_count, n_facts,
+        "verified backup must capture every fact, not a capped subset"
+    );
+    assert_eq!(manifest.memory_records_count, 2);
+
+    // Restore into FRESH targets; the total count must round-trip exactly.
+    let dst = LibraryCognitiveMemory::in_memory().unwrap();
+    let dst_store = FileBackedMemoryStore::try_new(tmp.path().join("restored.json")).unwrap();
+    let restored = restore_from_backup(&dst, &dst_store, &manifest.backup_dir).unwrap();
+
+    let expected = manifest.cognitive_facts_count
+        + manifest.cognitive_procedures_count
+        + manifest.memory_records_count;
+    assert_eq!(
+        restored, expected,
+        "restore must round-trip the full >cap memory count"
+    );
+    assert!(
+        restored > 1000,
+        "round-trip count must exceed the legacy export cap"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Security: verify/restore must read data files from `backup_dir`, never from
+// the absolute paths embedded in the (untrusted) manifest. A tampered manifest
+// must not be able to redirect reads to files outside the backup directory, and
+// a relocated backup must still verify/restore.
+// ---------------------------------------------------------------------------
+
+/// A backup directory that has been relocated (its `manifest.json` still stores
+/// the original, now-stale absolute paths) must still verify `Valid` and
+/// restore, because verify/restore read the files from `backup_dir` — not from
+/// the manifest's stored paths. Code that trusted the manifest paths would
+/// report the snapshot/records as missing here.
+#[test]
+fn verify_and_restore_use_backup_dir_not_manifest_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backup_root = tmp.path().join("backups");
+    let store_path = tmp.path().join("memory.json");
+    let config = test_config(&backup_root);
+
+    let bridge = mock_bridge();
+    bridge.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
+    let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
+    file_store.put(make_record("r1")).unwrap();
+    let manifest = backup_memory(&bridge, &file_store, "agent", &config).unwrap();
+
+    // Relocate the backup to a new directory, then destroy the original so the
+    // manifest's stored absolute paths dangle.
+    let moved = tmp.path().join("relocated_backup");
+    fs::create_dir_all(&moved).unwrap();
+    for f in [MANIFEST_FILE, SNAPSHOT_FILE, RECORDS_FILE] {
+        fs::copy(manifest.backup_dir.join(f), moved.join(f)).unwrap();
+    }
+    fs::remove_dir_all(&manifest.backup_dir).unwrap();
+
+    let v = verify_backup(&moved).unwrap();
+    assert!(
+        matches!(v.status, BackupStatus::Valid),
+        "relocated backup must verify Valid by reading files from backup_dir, got {:?}",
+        v.status
+    );
+
+    let target_bridge = mock_bridge();
+    let target_store = FileBackedMemoryStore::try_new(tmp.path().join("restored.json")).unwrap();
+    let count = restore_from_backup(&target_bridge, &target_store, &moved).unwrap();
+    assert_eq!(
+        count, 2,
+        "restore must read the relocated files (1 fact + 1 record)"
+    );
+}
+
+/// A manifest crafted to point at data files OUTSIDE the backup directory (with
+/// a self-consistent checksum/counts over those external files) must not cause
+/// restore to ingest the external data. This is the path-traversal / arbitrary
+/// file-read hardening: the attacker's injected fact must never reach the store.
+#[test]
+fn restore_does_not_read_manifest_paths_outside_backup_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backup_root = tmp.path().join("backups");
+    let store_path = tmp.path().join("memory.json");
+    let config = test_config(&backup_root);
+
+    // Legitimate backup with a single benign fact.
+    let bridge = mock_bridge();
+    bridge.store_fact("benign", "ok", 0.9, &[], "ep1").unwrap();
+    let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
+    let manifest = backup_memory(&bridge, &file_store, "agent", &config).unwrap();
+
+    // Attacker writes data files OUTSIDE the backup dir and crafts a manifest
+    // pointing at them, with a self-consistent checksum and counts.
+    let evil_dir = tmp.path().join("evil");
+    fs::create_dir_all(&evil_dir).unwrap();
+    let evil_snapshot_path = evil_dir.join("snapshot.json");
+    let evil_records_path = evil_dir.join("records.json");
+
+    let evil_bridge = mock_bridge();
+    evil_bridge
+        .store_fact("attacker-injected", "pwn", 0.9, &[], "x")
+        .unwrap();
+    let evil_snapshot =
+        crate::remote_transfer::export_full_memory_snapshot(&evil_bridge, "agent").unwrap();
+    let evil_snapshot_bytes = serde_json::to_vec_pretty(&evil_snapshot).unwrap();
+    fs::write(&evil_snapshot_path, &evil_snapshot_bytes).unwrap();
+    let evil_records: Vec<MemoryRecord> = Vec::new();
+    let evil_records_bytes = serde_json::to_vec_pretty(&evil_records).unwrap();
+    fs::write(&evil_records_path, &evil_records_bytes).unwrap();
+
+    let mut tampered = manifest.clone();
+    tampered.cognitive_snapshot_path = evil_snapshot_path;
+    tampered.memory_records_path = evil_records_path;
+    tampered.checksum = sha256_hex(&[&evil_snapshot_bytes, &evil_records_bytes]);
+    tampered.cognitive_facts_count = evil_snapshot.facts.len();
+    tampered.cognitive_procedures_count = evil_snapshot.procedures.len();
+    tampered.memory_records_count = evil_records.len();
+    fs::write(
+        manifest.backup_dir.join(MANIFEST_FILE),
+        serde_json::to_vec_pretty(&tampered).unwrap(),
+    )
+    .unwrap();
+
+    // Restore from the (legit) backup dir; the crafted external paths must be
+    // ignored. Whether the result is Ok or a verification Err, the attacker's
+    // fact must never be ingested.
+    let target_bridge = mock_bridge();
+    let target_store = FileBackedMemoryStore::try_new(tmp.path().join("restored.json")).unwrap();
+    let _ = restore_from_backup(&target_bridge, &target_store, &manifest.backup_dir);
+
+    let facts = target_bridge
+        .search_facts("attacker-injected", 10, 0.0)
+        .unwrap();
+    assert!(
+        facts.iter().all(|f| f.concept != "attacker-injected"),
+        "restore must not ingest data from manifest paths outside the backup directory"
+    );
+}

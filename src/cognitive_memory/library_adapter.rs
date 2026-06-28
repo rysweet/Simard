@@ -35,7 +35,7 @@
 //! tests). The adapter opens its store at `state_root/cognitive`.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -92,6 +92,56 @@ const FACT_SEQ_WIDTH: usize = 20;
 /// few caller keys). Kept in sync with the literal in `goal_curation::operations`.
 const SNAPSHOT_FACT_CONCEPT: &str = "goal-board:snapshot";
 
+/// Sub-path under `state_root` where the **live** library-backed cognitive store
+/// lives post-migration (lbug 0.17.x de-fork, issue #2307). This is the exact
+/// path [`LibraryCognitiveMemory::open`] passes to `CognitiveMemory::open_persistent`,
+/// and therefore the path the daemon actually reads and writes.
+///
+/// Pinned here as a named constant (issue #2420) so the verified-backup source
+/// resolver ([`live_store_path`]) and the daemon's store open can never silently
+/// drift to different paths again — the failure that broke verified backups from
+/// Jun 20 onward (backups copied the stale legacy [`LEGACY_STORE_FILE`] while the
+/// daemon served this `cognitive` store).
+pub const LIVE_STORE_SUBDIR: &str = "cognitive";
+
+/// Legacy single-file store name used by the **native fork** before the
+/// de-fork migration (issue #2307). Retained only so [`live_store_path`] can
+/// resolve a not-yet-migrated `state_root` (and so the backup never errors on a
+/// legacy host). Never written by the current backend.
+pub const LEGACY_STORE_FILE: &str = "cognitive_memory.ladybug";
+
+/// Resolve the **live** cognitive-memory store path under `state_root`,
+/// migration-aware (issue #2420).
+///
+/// Resolution order:
+///   1. `state_root/`[`LIVE_STORE_SUBDIR`] — the post-migration library store the
+///      daemon opens. Preferred whenever it exists.
+///   2. `state_root/`[`LEGACY_STORE_FILE`] — the pre-migration native single-file
+///      store. Only chosen when the live path is absent but the legacy file is
+///      present (a host that has not migrated).
+///   3. `state_root/`[`LIVE_STORE_SUBDIR`] — default for a fresh `state_root`
+///      where neither exists yet, matching what [`LibraryCognitiveMemory::open`]
+///      will create.
+///
+/// The verified backup uses this so its source is *always* the path the daemon
+/// actually opens — asserted by a unit test so it cannot silently rot again.
+pub fn live_store_path(state_root: &Path) -> PathBuf {
+    let live = state_root.join(LIVE_STORE_SUBDIR);
+    if live.exists() {
+        return live;
+    }
+    // Only fall back to the legacy single-file store on a host that has not
+    // migrated (live path absent, legacy file present). Never prefer the legacy
+    // path over the live one — that preference is the exact bug being fixed.
+    let legacy = state_root.join(LEGACY_STORE_FILE);
+    if legacy.exists() {
+        return legacy;
+    }
+    // Fresh `state_root`: default to the live path the daemon will create on
+    // first open, never the legacy file.
+    live
+}
+
 /// Cognitive memory backed by the upstream `amplihack-memory-lib`
 /// [`CognitiveMemory`] (persistent, lbug-backed).
 ///
@@ -128,7 +178,10 @@ impl LibraryCognitiveMemory {
     /// Returns [`SimardError::PersistentStoreIo`] if the underlying LadybugDB
     /// store cannot be opened.
     pub fn open(state_root: &Path) -> SimardResult<Self> {
-        let db_path = state_root.join("cognitive");
+        // Use the shared `LIVE_STORE_SUBDIR` constant (not a bare literal) so the
+        // path the daemon opens and the verified-backup resolver `live_store_path`
+        // are anchored to one source of truth and cannot silently drift (#2420).
+        let db_path = state_root.join(LIVE_STORE_SUBDIR);
         let inner =
             CognitiveMemory::open_persistent(&db_path, LIBRARY_AGENT_NAME).map_err(|e| {
                 SimardError::PersistentStoreIo {

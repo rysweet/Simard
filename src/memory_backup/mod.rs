@@ -25,7 +25,13 @@ use crate::remote_transfer::MemorySnapshot;
 pub struct BackupManifest {
     pub backup_dir: PathBuf,
     pub created_at: DateTime<Utc>,
+    /// Absolute path the snapshot was originally written to. **Informational
+    /// only**: `verify_backup`/`restore_from_backup` derive the path they read
+    /// from `backup_dir` + a constant filename, never from this field, so a
+    /// tampered or relocated manifest cannot redirect reads to other files.
     pub cognitive_snapshot_path: PathBuf,
+    /// Absolute path the records file was originally written to. Informational
+    /// only — see [`BackupManifest::cognitive_snapshot_path`].
     pub memory_records_path: PathBuf,
     pub cognitive_facts_count: usize,
     pub cognitive_procedures_count: usize,
@@ -114,7 +120,11 @@ fn read_bytes(path: &Path) -> SimardResult<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 /// Create a timestamped backup of cognitive and file-backed memory.
-#[allow(deprecated)] // export_memory_snapshot is deprecated but needed here
+///
+/// Captures the **complete** cognitive store via
+/// [`crate::remote_transfer::export_full_memory_snapshot`] (issue #2420) — not
+/// the capped replication export — so the backup holds every live memory and a
+/// restore round-trips the current count.
 pub fn backup_memory(
     bridge: &dyn CognitiveMemoryOps,
     store: &dyn MemoryStore,
@@ -128,8 +138,9 @@ pub fn backup_memory(
     fs::create_dir_all(&backup_dir)
         .map_err(|e| store_error("create-dir", &backup_dir, e.to_string()))?;
 
-    // Export cognitive snapshot.
-    let snapshot = crate::remote_transfer::export_memory_snapshot(bridge, agent_name, None)?;
+    // Export the FULL cognitive snapshot (uncapped) so the backup is a faithful
+    // copy of the live store, not a truncated replication payload.
+    let snapshot = crate::remote_transfer::export_full_memory_snapshot(bridge, agent_name)?;
     let snapshot_path = backup_dir.join(SNAPSHOT_FILE);
     let snapshot_bytes = write_json(&snapshot_path, &snapshot)?;
 
@@ -183,12 +194,20 @@ pub fn verify_backup(backup_dir: &Path) -> SimardResult<BackupVerification> {
     let manifest: BackupManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| store_error("deserialize-manifest", &manifest_path, e.to_string()))?;
 
+    // SECURITY: derive the data-file paths from `backup_dir` plus the known
+    // constant filenames rather than trusting the absolute paths stored in the
+    // (on-disk, attacker-influenceable) manifest. A tampered manifest must not
+    // be able to redirect verification reads to arbitrary files outside the
+    // backup directory, and a backup must still verify after being relocated.
+    let snapshot_path = backup_dir.join(SNAPSHOT_FILE);
+    let records_path = backup_dir.join(RECORDS_FILE);
+
     // Check for missing files.
     let mut missing = Vec::new();
-    if !manifest.cognitive_snapshot_path.exists() {
+    if !snapshot_path.exists() {
         missing.push(SNAPSHOT_FILE.to_string());
     }
-    if !manifest.memory_records_path.exists() {
+    if !records_path.exists() {
         missing.push(RECORDS_FILE.to_string());
     }
     if !missing.is_empty() {
@@ -200,8 +219,8 @@ pub fn verify_backup(backup_dir: &Path) -> SimardResult<BackupVerification> {
     }
 
     // Verify checksum.
-    let snapshot_bytes = read_bytes(&manifest.cognitive_snapshot_path)?;
-    let records_bytes = read_bytes(&manifest.memory_records_path)?;
+    let snapshot_bytes = read_bytes(&snapshot_path)?;
+    let records_bytes = read_bytes(&records_path)?;
     let actual_checksum = sha256_hex(&[&snapshot_bytes, &records_bytes]);
 
     if actual_checksum != manifest.checksum {
@@ -217,20 +236,10 @@ pub fn verify_backup(backup_dir: &Path) -> SimardResult<BackupVerification> {
     }
 
     // Verify record counts.
-    let snapshot: MemorySnapshot = serde_json::from_slice(&snapshot_bytes).map_err(|e| {
-        store_error(
-            "deserialize-snapshot",
-            &manifest.cognitive_snapshot_path,
-            e.to_string(),
-        )
-    })?;
-    let records: Vec<MemoryRecord> = serde_json::from_slice(&records_bytes).map_err(|e| {
-        store_error(
-            "deserialize-records",
-            &manifest.memory_records_path,
-            e.to_string(),
-        )
-    })?;
+    let snapshot: MemorySnapshot = serde_json::from_slice(&snapshot_bytes)
+        .map_err(|e| store_error("deserialize-snapshot", &snapshot_path, e.to_string()))?;
+    let records: Vec<MemoryRecord> = serde_json::from_slice(&records_bytes)
+        .map_err(|e| store_error("deserialize-records", &records_path, e.to_string()))?;
 
     if snapshot.facts.len() != manifest.cognitive_facts_count
         || snapshot.procedures.len() != manifest.cognitive_procedures_count
@@ -281,28 +290,23 @@ pub fn restore_from_backup(
         }
     }
 
-    let manifest = &verification.manifest;
+    // SECURITY: like `verify_backup`, read the backup's data files from
+    // `backup_dir` plus the known constant filenames — never from the manifest's
+    // stored paths, which are untrusted on-disk data and could point at
+    // arbitrary files outside the backup directory.
+    let snapshot_path = backup_dir.join(SNAPSHOT_FILE);
+    let records_path = backup_dir.join(RECORDS_FILE);
 
     // Restore cognitive memory.
-    let snapshot_bytes = read_bytes(&manifest.cognitive_snapshot_path)?;
-    let snapshot: MemorySnapshot = serde_json::from_slice(&snapshot_bytes).map_err(|e| {
-        store_error(
-            "deserialize-snapshot",
-            &manifest.cognitive_snapshot_path,
-            e.to_string(),
-        )
-    })?;
+    let snapshot_bytes = read_bytes(&snapshot_path)?;
+    let snapshot: MemorySnapshot = serde_json::from_slice(&snapshot_bytes)
+        .map_err(|e| store_error("deserialize-snapshot", &snapshot_path, e.to_string()))?;
     let cognitive_count = crate::remote_transfer::import_memory_snapshot(bridge, &snapshot)?;
 
     // Restore file-backed memory records.
-    let records_bytes = read_bytes(&manifest.memory_records_path)?;
-    let records: Vec<MemoryRecord> = serde_json::from_slice(&records_bytes).map_err(|e| {
-        store_error(
-            "deserialize-records",
-            &manifest.memory_records_path,
-            e.to_string(),
-        )
-    })?;
+    let records_bytes = read_bytes(&records_path)?;
+    let records: Vec<MemoryRecord> = serde_json::from_slice(&records_bytes)
+        .map_err(|e| store_error("deserialize-records", &records_path, e.to_string()))?;
     let mut record_count = 0;
     for record in records {
         store.put(record)?;
@@ -310,6 +314,75 @@ pub fn restore_from_backup(
     }
 
     Ok(cognitive_count + record_count)
+}
+
+/// Verify a backup and return its manifest, **failing loudly** if it is not
+/// [`BackupStatus::Valid`] (issue #2420).
+///
+/// Unlike [`verify_backup`] — which reports status as data — this is the gate
+/// the daemon calls *before* pruning older backups: a fresh backup that does not
+/// verify must abort the prune so the last-known-good backup is never deleted in
+/// favour of a corrupt one.
+pub fn ensure_backup_valid(backup_dir: &Path) -> SimardResult<BackupManifest> {
+    let verification = verify_backup(backup_dir)?;
+    match verification.status {
+        BackupStatus::Valid => Ok(verification.manifest),
+        BackupStatus::Corrupted { reason } => Err(SimardError::MemoryIntegrityError {
+            path: backup_dir.to_path_buf(),
+            reason: format!("verified backup is corrupted: {reason}"),
+        }),
+        BackupStatus::Incomplete { missing } => Err(SimardError::MemoryIntegrityError {
+            path: backup_dir.to_path_buf(),
+            reason: format!(
+                "verified backup is incomplete, missing: {}",
+                missing.join(", ")
+            ),
+        }),
+    }
+}
+
+/// Open a backup and confirm it holds exactly `expected_total` memories
+/// (cognitive facts + procedures + file-backed records), failing loudly on a
+/// mismatch (issue #2420).
+///
+/// This is the count-verification the issue requires "after copying, before
+/// pruning": the daemon passes the live store's current memory count, so a
+/// truncated or partial backup is rejected instead of silently trusted.
+pub fn verify_backup_memory_count(backup_dir: &Path, expected_total: usize) -> SimardResult<()> {
+    let manifest = ensure_backup_valid(backup_dir)?;
+    let actual_total = manifest.cognitive_facts_count
+        + manifest.cognitive_procedures_count
+        + manifest.memory_records_count;
+    if actual_total != expected_total {
+        return Err(SimardError::MemoryIntegrityError {
+            path: backup_dir.to_path_buf(),
+            reason: format!(
+                "backup memory-count mismatch: expected {expected_total}, backup holds \
+                 {actual_total} (facts={}, procedures={}, records={})",
+                manifest.cognitive_facts_count,
+                manifest.cognitive_procedures_count,
+                manifest.memory_records_count,
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Create a backup of the live memory **and verify it** before returning
+/// (issue #2420).
+///
+/// Composes [`backup_memory`] with [`ensure_backup_valid`]: the returned
+/// manifest is guaranteed to describe a backup that re-opened cleanly with a
+/// matching memory count. Any verification failure is surfaced as an `Err` so
+/// the caller (daemon) never prunes against an unverified backup.
+pub fn backup_memory_verified(
+    bridge: &dyn CognitiveMemoryOps,
+    store: &dyn MemoryStore,
+    agent_name: &str,
+    config: &BackupConfig,
+) -> SimardResult<BackupManifest> {
+    let manifest = backup_memory(bridge, store, agent_name, config)?;
+    ensure_backup_valid(&manifest.backup_dir)
 }
 
 /// List available backups sorted newest-first, each with verification status.

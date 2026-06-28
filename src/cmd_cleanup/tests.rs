@@ -323,6 +323,93 @@ fn corrupt_db_removed_when_older_than_threshold() {
     assert!(unrelated.exists(), "non-corrupt DB must never be touched");
 }
 
+/// Retention must keep at least one forensic snapshot.
+#[test]
+fn corrupt_db_keep_is_sane() {
+    const { assert!(CORRUPT_DB_KEEP >= 1) };
+}
+
+/// Issue #2420: a burst of WAL-corruption events leaves many *young*
+/// `cognitive*.corrupt-*` quarantines that the age cap will not reclaim for a
+/// week. Keep-last-N must bound that growth: with `CORRUPT_DB_KEEP + 3` fresh
+/// quarantines present, only the newest `CORRUPT_DB_KEEP` survive, and the live
+/// store files are never touched.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_keep_bounds_quarantine_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let simard = tmp.path().join(".simard");
+    std::fs::create_dir_all(&simard).unwrap();
+
+    // Live store files — must survive untouched (no `.corrupt-` infix).
+    let live = simard.join("cognitive");
+    let live_wal = simard.join("cognitive.wal");
+    std::fs::write(&live, b"live").unwrap();
+    std::fs::write(&live_wal, b"wal").unwrap();
+
+    // CORRUPT_DB_KEEP + 3 young quarantine artifacts, each with a distinct,
+    // recent mtime so "newest N" is unambiguous. Index 0 is the newest.
+    let total = CORRUPT_DB_KEEP + 3;
+    let mut paths = Vec::with_capacity(total);
+    for i in 0..total {
+        // Alternate realistic library quarantine names; all carry `.corrupt-`.
+        let name = if i % 2 == 0 {
+            format!("cognitive.corrupt-{i:04}")
+        } else {
+            format!("cognitive.wal.corrupt-{i:04}")
+        };
+        let p = simard.join(&name);
+        std::fs::write(&p, b"quarantine").unwrap();
+        // mtime = now - (i+1) minutes: all well within the age window, strictly
+        // decreasing so larger index == older.
+        let mtime =
+            std::time::SystemTime::now() - std::time::Duration::from_secs((i as u64 + 1) * 60);
+        let times = std::fs::FileTimes::new().set_modified(mtime);
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        paths.push(p);
+    }
+
+    let old_home = std::env::var_os("HOME");
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+    let mut report = CleanupReport::default();
+    remove_old_corrupt_dbs(&mut report);
+    if let Some(h) = old_home {
+        unsafe {
+            std::env::set_var("HOME", h);
+        }
+    }
+
+    let remaining = paths.iter().filter(|p| p.exists()).count();
+    assert_eq!(
+        remaining, CORRUPT_DB_KEEP,
+        "keep-last-N must bound young quarantines to CORRUPT_DB_KEEP"
+    );
+    // The survivors must be the newest N (indices 0..CORRUPT_DB_KEEP).
+    for (i, p) in paths.iter().enumerate() {
+        if i < CORRUPT_DB_KEEP {
+            assert!(p.exists(), "newest quarantine #{i} should survive");
+        } else {
+            assert!(!p.exists(), "older quarantine #{i} should be pruned");
+        }
+    }
+    // Live store files are never quarantine candidates.
+    assert!(
+        live.exists(),
+        "live `cognitive` store must never be touched"
+    );
+    assert!(
+        live_wal.exists(),
+        "live `cognitive.wal` must never be touched"
+    );
+}
+
 // ── clean_simard_canaries ──
 
 #[test]

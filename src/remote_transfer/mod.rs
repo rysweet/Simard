@@ -106,6 +106,52 @@ impl MemorySnapshot {
     }
 }
 
+/// Export the **complete** cognitive memory (every fact + procedure) for a
+/// verified backup of the live store (issue #2420).
+///
+/// Unlike [`export_memory_snapshot`] — which caps at [`MAX_EXPORT_FACTS`] /
+/// [`MAX_EXPORT_PROCEDURES`] to keep replication/migration payloads bounded — a
+/// verified backup must capture the *entire* store so a restore can round-trip
+/// the **current** memory count. With the live store already past 10k memories
+/// and growing daily, a fixed export cap would silently drop the tail and make
+/// the count-verification gate ([`crate::memory_backup::verify_backup_memory_count`])
+/// fail forever — exactly the silent-rot failure class this issue exists to
+/// kill. It therefore requests with the maximum limit (`u32::MAX`), the same
+/// unbounded retrieval [`CognitiveMemoryOps::graph_stats`] already performs
+/// safely via `get_all_facts(usize::MAX)`, so the snapshot can never be capped
+/// below the store size.
+///
+/// Selection semantics are otherwise identical to [`export_memory_snapshot`]
+/// (wildcard query, `min_confidence = 0.0`); only the truncation is removed.
+/// This is *not* deprecated: it is the backup path, distinct from the legacy
+/// JSON replication this module otherwise superseded.
+pub fn export_full_memory_snapshot(
+    bridge: &dyn CognitiveMemoryOps,
+    agent_name: &str,
+) -> SimardResult<MemorySnapshot> {
+    if agent_name.is_empty() {
+        return Err(SimardError::InvalidConfigValue {
+            key: "agent_name".to_string(),
+            value: String::new(),
+            help: "agent name cannot be empty for memory export".to_string(),
+        });
+    }
+
+    // `u32::MAX` is the "return all" limit: the library's `get_all_facts` is
+    // already called with `usize::MAX` by `graph_stats`, so an unbounded request
+    // is safe (no per-limit pre-allocation). No real store approaches u32::MAX
+    // facts, so this can never truncate.
+    let facts = bridge.search_facts("*", u32::MAX, 0.0)?;
+    let procedures = bridge.recall_procedure("*", u32::MAX)?;
+
+    Ok(MemorySnapshot {
+        facts,
+        procedures,
+        exported_at: current_epoch_seconds()?,
+        source_agent: agent_name.to_string(),
+    })
+}
+
 /// Export a memory snapshot from a cognitive memory bridge.
 ///
 /// # Deprecated
