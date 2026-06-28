@@ -22,7 +22,7 @@ related:
 > **Status: implemented.** `simard update` replaces the **entire** Simard
 > binary set — the main `simard` daemon binary **and** every auxiliary
 > executable shipped in the release tarball (`simard-tui`, `simard-gym`,
-> `simard-ooda-step`, the `simard-audit-*` tools, and so on) — not just the
+> `simard-ooda-step`, and so on) — not just the
 > daemon binary. The dynamic discovery, the `InstallReport`
 > main-fatal/aux-best-effort contract, and the checksum/extraction/transport
 > hardening live in
@@ -67,7 +67,7 @@ Before this change, `simard update` downloaded a release tarball, found the
 single file named `simard` inside it, and swapped **only** that file over the
 running daemon binary. Every other shipped executable — most visibly
 `simard-tui`, the operator's monitoring dashboard, but also `simard-gym` and
-the `simard-*-step` / `simard-audit-*` helpers — was left at whatever version
+the `simard-*-step` helpers — was left at whatever version
 the operator last installed by hand.
 
 The result was a split-brain install: a freshly self-updated `simard` daemon
@@ -471,7 +471,7 @@ Replacing binaries...
   simard-tui           installed
   simard-gym           installed
   simard-ooda-step     installed
-  simard-audit-pass01  installed
+  simard-improve-step  installed
   …                    (remaining auxiliary binaries)
 Updated 9 binaries: v0.42.0 → v0.43.0
 Running self-test on new binary...
