@@ -28,7 +28,7 @@ related:
 
 The OODA daemon now takes a **scheduled, verified, logical backup of the LIVE
 cognitive store** every `SIMARD_BACKUP_INTERVAL_SECS` (default `3600`). The pass
-lives in [`src/memory_backup/mod.rs`](../../src/memory_backup/mod.rs) and is
+lives in `src/memory_backup/mod.rs` and is
 wired into the daemon loop next to the disk-health and worktree-sweep timers.
 
 ### `memory_backup::run_scheduled_backup`
@@ -64,7 +64,7 @@ which reports both the **captured** counts and the **total** live-memory count.
 > are short-lived. So "restore round-trips the current memory count" means the
 > durable facts + procedures, not the raw episodic event count. To keep this
 > honest, every `BackupManifest` records the full per-category
-> [`CognitiveStatistics`](cognitive-memory-durability.md) (`store_statistics`)
+> [`CognitiveStatistics`](../operations/cognitive-memory-durability.md) (`store_statistics`)
 > alongside the captured counts, so the gap is always visible in the manifest
 > and the daemon log.
 
