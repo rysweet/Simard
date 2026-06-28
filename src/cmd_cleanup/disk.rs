@@ -316,6 +316,19 @@ pub fn cap_home_cargo_targets(report: &mut CleanupReport, cap_bytes: u64) {
 /// Maximum age (in days) of corrupted memory DB files before deletion.
 pub const CORRUPT_DB_MAX_AGE_DAYS: u64 = 7;
 
+/// Maximum number of quarantined corrupt cognitive-memory artifacts to retain,
+/// regardless of age (issue #2420).
+///
+/// The age cap alone ([`CORRUPT_DB_MAX_AGE_DAYS`]) is unbounded *within* the
+/// window: a burst of WAL-corruption events (this host saw 88 MB / 112 artifacts
+/// accumulate) leaves dozens of fresh `cognitive*.corrupt-*` / `*.shadow`
+/// quarantines that the age rule will not touch for a week. Keeping only the
+/// newest N — in addition to the age cap — bounds that growth so the most recent
+/// forensic snapshots survive while older ones are reclaimed immediately. Mirrors
+/// the keep-last-N retention already used for [`BINARY_BACKUPS_KEEP`] /
+/// [`SNAPSHOTS_KEEP`].
+pub const CORRUPT_DB_KEEP: usize = 5;
+
 /// Returns `true` when `name` is a quarantined corrupt cognitive-memory
 /// artifact (safe to garbage-collect) and `false` for the live store.
 ///
@@ -343,13 +356,18 @@ fn is_corrupt_quarantine_name(name: &str) -> bool {
         && name.contains(".corrupt-")
 }
 
-/// Remove quarantined corrupt cognitive-memory snapshots in `~/.simard` older
-/// than [`CORRUPT_DB_MAX_AGE_DAYS`]. Covers both the native single-file
-/// `cognitive_memory.corrupt-*` snapshots and the library backend's
+/// Remove quarantined corrupt cognitive-memory snapshots in `~/.simard` that are
+/// either older than [`CORRUPT_DB_MAX_AGE_DAYS`] **or** beyond the newest
+/// [`CORRUPT_DB_KEEP`] quarantines (issue #2420). Covers both the native
+/// single-file `cognitive_memory.corrupt-*` snapshots and the library backend's
 /// `cognitive.corrupt-*` / `cognitive.wal.corrupt-*` / `*.cognitive.shadow`
 /// quarantines (see [`is_corrupt_quarantine_name`]). These are useful briefly
 /// for forensics then pure dead weight. The live store (`cognitive`,
 /// `cognitive.wal`) is never matched.
+///
+/// The age cap alone leaves a burst of *young* quarantines untouched for a week
+/// (this host saw 88 MB / 112 artifacts accumulate); the keep-last-N cap bounds
+/// that growth immediately while preserving the most recent forensic snapshots.
 pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
     let Some(home) = std::env::var_os("HOME") else {
         return;
@@ -360,17 +378,30 @@ pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
     };
     let max_age = std::time::Duration::from_secs(CORRUPT_DB_MAX_AGE_DAYS * 24 * 3600);
     let now = std::time::SystemTime::now();
+
+    // Collect every quarantine candidate with its mtime so we can apply both the
+    // age cap and the keep-last-N cap over the full set (read_dir order is
+    // unspecified, so we cannot rank by iteration order).
+    let mut candidates: Vec<(PathBuf, std::fs::Metadata, std::time::SystemTime)> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if !is_corrupt_quarantine_name(&name) {
             continue;
         }
-        let path = entry.path();
         let Ok(meta) = entry.metadata() else { continue };
         let Ok(modified) = meta.modified() else {
             continue;
         };
-        if now.duration_since(modified).unwrap_or_default() < max_age {
+        candidates.push((entry.path(), meta, modified));
+    }
+
+    // Newest first, so index 0..CORRUPT_DB_KEEP are the survivors of the count cap.
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.2));
+
+    for (rank, (path, meta, modified)) in candidates.iter().enumerate() {
+        let too_old = now.duration_since(*modified).unwrap_or_default() >= max_age;
+        let beyond_keep = rank >= CORRUPT_DB_KEEP;
+        if !too_old && !beyond_keep {
             continue;
         }
         // A cognitive-memory store may be backed by a single file or a
@@ -379,19 +410,20 @@ pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
         // leave the quarantine in place.
         let is_dir = meta.is_dir();
         let size = if is_dir {
-            dir_size(&path).unwrap_or(0)
+            dir_size(path).unwrap_or(0)
         } else {
             meta.len()
         };
+        let reason = if too_old { "age" } else { "keep-last-N" };
         eprintln!(
-            "  Removing old corrupt DB {} ({} MB)",
+            "  Removing corrupt DB {} ({} MB, {reason})",
             path.display(),
             size / (1024 * 1024)
         );
         let removed = if is_dir {
-            std::fs::remove_dir_all(&path)
+            std::fs::remove_dir_all(path)
         } else {
-            std::fs::remove_file(&path)
+            std::fs::remove_file(path)
         };
         if let Err(e) = removed {
             report
@@ -399,7 +431,7 @@ pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
                 .push(format!("failed to remove {}: {e}", path.display()));
         } else {
             report.bytes_freed += size;
-            report.dirs_removed.push(path);
+            report.dirs_removed.push(path.clone());
         }
     }
 }

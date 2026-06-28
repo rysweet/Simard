@@ -481,6 +481,13 @@ pub mod metrics;
 mod library_adapter;
 pub use library_adapter::LibraryCognitiveMemory;
 
+// Issue #2420: migration-aware live-store path resolution. Re-exported at the
+// module root so the verified-backup path (`memory_backup`) and the daemon both
+// reference `cognitive_memory::live_store_path` — the single source of truth for
+// "the path the daemon actually opens", so a verified backup can never again
+// silently target a stale store (the Jun-20 backup regression).
+pub use library_adapter::{LEGACY_STORE_FILE, LIVE_STORE_SUBDIR, live_store_path};
+
 // Issue #2331: re-export the graph-edge / dedup stats DTO at the module root so
 // callers reference `cognitive_memory::GraphStats` alongside the trait that
 // returns it.
@@ -498,6 +505,13 @@ pub mod bootstrap_procedures;
 // `LibraryCognitiveMemory` adapter (the sole backend).
 #[cfg(test)]
 mod tests_library_parity;
+
+// Issue #2420: migration-aware live-store path resolution. Pins that
+// `live_store_path` resolves to the post-migration `cognitive` store the daemon
+// actually opens (and falls back to the legacy single-file store only on an
+// un-migrated host), so verified backups can never silently target a stale path.
+#[cfg(test)]
+mod tests_live_store_path_2420;
 
 // PR-C (issue #2281): tests for `bootstrap_procedures::seed_bootstrap_procedures`
 // — idempotency, error propagation, and the three required procedure

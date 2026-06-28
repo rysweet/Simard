@@ -19,6 +19,8 @@ use crate::operator_commands_ooda::persistence::{persist_cycle_report, persist_c
 mod helpers;
 pub use helpers::*;
 
+mod backup;
+
 mod brains;
 
 mod config;
@@ -381,11 +383,29 @@ pub fn run_ooda_daemon(
         daemon_log(&state_root, "[simard] OODA daemon: auto-reload enabled");
     }
 
-    // De-fork Phase 2b (issue #2307): the native lbug-WAL file-copy backup
-    // (`create_verified_backup` / `prune_old_backups`) has been removed. The
-    // library backend owns its own durability (WAL flush on `checkpoint` /
-    // drop). File-level snapshot backups remain available via the trait-based
-    // `memory_backup` module.
+    // De-fork Phase 2b (issue #2307): the native lbug-WAL file-copy backup was
+    // removed. Issue #2420 reintroduces a periodic **verified** backup below —
+    // it snapshots the live store through the bridge (so it inherently targets
+    // the migrated `state_root/cognitive` path), verifies the backup re-opens
+    // before pruning, and is best-effort (a failure WARNs, never aborts the
+    // cycle). The library backend still owns its own WAL durability.
+
+    // --- periodic verified backup state (issue #2420) ---------------------
+    let backup_interval_secs: u64 = backup::backup_interval_secs_from_env(
+        std::env::var("SIMARD_BACKUP_INTERVAL_SECS").ok().as_deref(),
+    );
+    // `None` == "never backed up yet" so the FIRST cycle always runs a backup,
+    // regardless of host uptime. (A `checked_sub` back-date would silently
+    // defer the first backup a full interval on any host whose monotonic clock
+    // — boot-relative on Linux — is younger than the interval, i.e. every
+    // freshly rebooted/deployed host. That is exactly the post-restart window
+    // this fix exists to protect.)
+    let mut last_backup: Option<Instant> = None;
+    daemon_log(
+        &state_root,
+        &format!("[simard] OODA daemon: verified backup interval = {backup_interval_secs}s"),
+    );
+    // -------------------------------------------------------------------
 
     // --- periodic disk health check state ---------------------------------
     let disk_health_interval_secs: u64 = std::env::var("SIMARD_DISK_HEALTH_INTERVAL_SECS")
@@ -471,6 +491,31 @@ pub fn run_ooda_daemon(
             );
             break;
         }
+
+        // ── Periodic verified backup of the LIVE cognitive store (#2420) ──
+        // Best-effort: snapshot the live store the daemon opened, verify the
+        // backup re-opens, then prune. A failure WARNs and skips the prune so
+        // prior good backups survive; it never aborts the OODA cycle.
+        if backup::should_run_backup(last_backup, backup_interval_secs) {
+            match backup::run_verified_backup(shared_mem.as_ref(), &state_root) {
+                Ok(manifest) => daemon_log(
+                    &state_root,
+                    &format!(
+                        "[simard] verified backup OK: {} facts + {} procedures + {} records -> {}",
+                        manifest.cognitive_facts_count,
+                        manifest.cognitive_procedures_count,
+                        manifest.memory_records_count,
+                        manifest.backup_dir.display()
+                    ),
+                ),
+                Err(e) => daemon_log(
+                    &state_root,
+                    &format!("[simard] WARN: verified backup FAILED, prune skipped: {e}"),
+                ),
+            }
+            last_backup = Some(Instant::now());
+        }
+        // -------------------------------------------------------------------
 
         // ── Disk health check (before spawning engineers) ────────────────
         if last_disk_health.elapsed() >= Duration::from_secs(disk_health_interval_secs) {

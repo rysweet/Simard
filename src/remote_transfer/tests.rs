@@ -198,3 +198,43 @@ fn export_to_file_and_load() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Issue #2420: the verified-backup export must capture the **entire** store,
+/// not the capped replication subset. With more facts than the legacy
+/// `MAX_EXPORT_FACTS` cap, [`export_full_memory_snapshot`] returns all of them
+/// while the capped [`export_memory_snapshot`] truncates — proving the backup
+/// can no longer silently drop the tail as the live store grows past a fixed
+/// cap (the failure that broke verified backups from Jun 20). The mock bridge
+/// ignores `limit`, so this exercises the real library backend where the cap is
+/// actually enforced.
+#[test]
+fn full_export_captures_more_than_capped_export() {
+    use crate::cognitive_memory::LibraryCognitiveMemory;
+
+    let mem = LibraryCognitiveMemory::in_memory().unwrap();
+    let n = MAX_EXPORT_FACTS as usize + 25;
+    for i in 0..n {
+        mem.store_fact(
+            &format!("concept-{i}"),
+            &format!("content {i}"),
+            0.9,
+            &[],
+            &format!("ep{i}"),
+        )
+        .unwrap();
+    }
+
+    let full = export_full_memory_snapshot(&mem, "agent").unwrap();
+    let capped = export_memory_snapshot(&mem, "agent", None).unwrap();
+
+    assert_eq!(full.facts.len(), n, "full export must return every fact");
+    assert_eq!(
+        capped.facts.len(),
+        MAX_EXPORT_FACTS as usize,
+        "capped export truncates at the legacy cap"
+    );
+    assert!(
+        full.facts.len() > capped.facts.len(),
+        "full export must exceed the legacy cap"
+    );
+}

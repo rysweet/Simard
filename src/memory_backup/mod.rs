@@ -114,7 +114,11 @@ fn read_bytes(path: &Path) -> SimardResult<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 /// Create a timestamped backup of cognitive and file-backed memory.
-#[allow(deprecated)] // export_memory_snapshot is deprecated but needed here
+///
+/// Captures the **complete** cognitive store via
+/// [`crate::remote_transfer::export_full_memory_snapshot`] (issue #2420) — not
+/// the capped replication export — so the backup holds every live memory and a
+/// restore round-trips the current count.
 pub fn backup_memory(
     bridge: &dyn CognitiveMemoryOps,
     store: &dyn MemoryStore,
@@ -128,8 +132,9 @@ pub fn backup_memory(
     fs::create_dir_all(&backup_dir)
         .map_err(|e| store_error("create-dir", &backup_dir, e.to_string()))?;
 
-    // Export cognitive snapshot.
-    let snapshot = crate::remote_transfer::export_memory_snapshot(bridge, agent_name, None)?;
+    // Export the FULL cognitive snapshot (uncapped) so the backup is a faithful
+    // copy of the live store, not a truncated replication payload.
+    let snapshot = crate::remote_transfer::export_full_memory_snapshot(bridge, agent_name)?;
     let snapshot_path = backup_dir.join(SNAPSHOT_FILE);
     let snapshot_bytes = write_json(&snapshot_path, &snapshot)?;
 
@@ -310,6 +315,86 @@ pub fn restore_from_backup(
     }
 
     Ok(cognitive_count + record_count)
+}
+
+/// Backup source path for the **live** cognitive store under `state_root`
+/// (issue #2420).
+///
+/// Thin re-export of [`crate::cognitive_memory::live_store_path`] so the
+/// verified-backup module and the daemon agree, by construction, on which store
+/// is backed up: the post-migration `state_root/cognitive` the daemon opens,
+/// never the stale legacy single-file path that broke backups from Jun 20.
+pub fn backup_source_path(state_root: &Path) -> PathBuf {
+    crate::cognitive_memory::live_store_path(state_root)
+}
+
+/// Verify a backup and return its manifest, **failing loudly** if it is not
+/// [`BackupStatus::Valid`] (issue #2420).
+///
+/// Unlike [`verify_backup`] — which reports status as data — this is the gate
+/// the daemon calls *before* pruning older backups: a fresh backup that does not
+/// verify must abort the prune so the last-known-good backup is never deleted in
+/// favour of a corrupt one.
+pub fn ensure_backup_valid(backup_dir: &Path) -> SimardResult<BackupManifest> {
+    let verification = verify_backup(backup_dir)?;
+    match verification.status {
+        BackupStatus::Valid => Ok(verification.manifest),
+        BackupStatus::Corrupted { reason } => Err(SimardError::MemoryIntegrityError {
+            path: backup_dir.to_path_buf(),
+            reason: format!("verified backup is corrupted: {reason}"),
+        }),
+        BackupStatus::Incomplete { missing } => Err(SimardError::MemoryIntegrityError {
+            path: backup_dir.to_path_buf(),
+            reason: format!(
+                "verified backup is incomplete, missing: {}",
+                missing.join(", ")
+            ),
+        }),
+    }
+}
+
+/// Open a backup and confirm it holds exactly `expected_total` memories
+/// (cognitive facts + procedures + file-backed records), failing loudly on a
+/// mismatch (issue #2420).
+///
+/// This is the count-verification the issue requires "after copying, before
+/// pruning": the daemon passes the live store's current memory count, so a
+/// truncated or partial backup is rejected instead of silently trusted.
+pub fn verify_backup_memory_count(backup_dir: &Path, expected_total: usize) -> SimardResult<()> {
+    let manifest = ensure_backup_valid(backup_dir)?;
+    let actual_total = manifest.cognitive_facts_count
+        + manifest.cognitive_procedures_count
+        + manifest.memory_records_count;
+    if actual_total != expected_total {
+        return Err(SimardError::MemoryIntegrityError {
+            path: backup_dir.to_path_buf(),
+            reason: format!(
+                "backup memory-count mismatch: expected {expected_total}, backup holds \
+                 {actual_total} (facts={}, procedures={}, records={})",
+                manifest.cognitive_facts_count,
+                manifest.cognitive_procedures_count,
+                manifest.memory_records_count,
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Create a backup of the live memory **and verify it** before returning
+/// (issue #2420).
+///
+/// Composes [`backup_memory`] with [`ensure_backup_valid`]: the returned
+/// manifest is guaranteed to describe a backup that re-opened cleanly with a
+/// matching memory count. Any verification failure is surfaced as an `Err` so
+/// the caller (daemon) never prunes against an unverified backup.
+pub fn backup_memory_verified(
+    bridge: &dyn CognitiveMemoryOps,
+    store: &dyn MemoryStore,
+    agent_name: &str,
+    config: &BackupConfig,
+) -> SimardResult<BackupManifest> {
+    let manifest = backup_memory(bridge, store, agent_name, config)?;
+    ensure_backup_valid(&manifest.backup_dir)
 }
 
 /// List available backups sorted newest-first, each with verification status.

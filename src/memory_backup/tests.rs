@@ -346,3 +346,197 @@ fn backup_restore_round_trip_searchable() {
     );
     assert_eq!(procs[0].steps, vec!["build", "test", "ship"]);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #2420 — verified backup of the LIVE store
+//
+// 1. The backup source must equal the live store path the daemon opens
+//    (`state_root/cognitive`), so a verified backup can never silently target a
+//    stale path again (the Jun-20 regression).
+// 2. A verified backup must be re-opened and its memory count confirmed BEFORE
+//    any prune; a mismatch must fail loudly rather than be silently trusted.
+// ---------------------------------------------------------------------------
+
+/// The backup module and the daemon must agree, by construction, on the source
+/// store: `backup_source_path(state_root)` is the migration-aware live-store
+/// path (`state_root/cognitive`), identical to `cognitive_memory::live_store_path`.
+#[test]
+fn backup_source_is_live_store_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("cognitive")).unwrap();
+
+    assert_eq!(
+        backup_source_path(root),
+        root.join("cognitive"),
+        "backup source must be the live `cognitive` store the daemon opens"
+    );
+    assert_eq!(
+        backup_source_path(root),
+        crate::cognitive_memory::live_store_path(root),
+        "backup source must delegate to the single-source-of-truth resolver"
+    );
+}
+
+/// Helper: build a backup with a known memory count (1 fact + 1 procedure + 2
+/// file-backed records = 4 total) and return its directory.
+fn backup_with_known_counts(tmp: &Path) -> (PathBuf, usize) {
+    let backup_root = tmp.join("backups");
+    let store_path = tmp.join("memory.json");
+    let config = test_config(&backup_root);
+
+    let bridge = mock_bridge();
+    bridge.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
+    bridge
+        .store_procedure("build", &["compile".into()], &[])
+        .unwrap();
+
+    let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
+    file_store.put(make_record("rec1")).unwrap();
+    file_store.put(make_record("rec2")).unwrap();
+
+    let manifest = backup_memory(&bridge, &file_store, "agent", &config).unwrap();
+    // 1 fact + 1 procedure + 2 records.
+    (manifest.backup_dir, 4)
+}
+
+/// The count gate accepts a backup whose re-opened total matches the expected
+/// live-store count.
+#[test]
+fn verify_backup_count_passes_on_exact_total() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (backup_dir, total) = backup_with_known_counts(tmp.path());
+
+    verify_backup_memory_count(&backup_dir, total).expect("matching memory count must verify Ok");
+}
+
+/// The count gate fails loudly when the backup holds a different number of
+/// memories than expected (truncated / partial backup).
+#[test]
+fn verify_backup_count_fails_loudly_on_mismatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (backup_dir, total) = backup_with_known_counts(tmp.path());
+
+    let err = verify_backup_memory_count(&backup_dir, total + 100);
+    assert!(
+        err.is_err(),
+        "a count mismatch must be an Err, not silently trusted"
+    );
+}
+
+/// `backup_memory_verified` returns a manifest only after the backup re-opens
+/// cleanly with matching counts; `verify_backup` on the result is `Valid`.
+#[test]
+fn backup_memory_verified_returns_valid_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backup_root = tmp.path().join("backups");
+    let store_path = tmp.path().join("memory.json");
+    let config = test_config(&backup_root);
+
+    let bridge = mock_bridge();
+    bridge.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
+    let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
+    file_store.put(make_record("rec1")).unwrap();
+
+    let manifest =
+        backup_memory_verified(&bridge, &file_store, "agent", &config).expect("verified backup");
+    assert_eq!(manifest.cognitive_facts_count, 1);
+    assert_eq!(manifest.memory_records_count, 1);
+
+    let v = verify_backup(&manifest.backup_dir).unwrap();
+    assert!(
+        matches!(v.status, BackupStatus::Valid),
+        "verified backup must be Valid on disk"
+    );
+}
+
+/// A verified backup round-trips: restoring into fresh targets yields the same
+/// total memory count the backup verified.
+#[test]
+fn backup_memory_verified_round_trips_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backup_root = tmp.path().join("backups");
+    let store_path = tmp.path().join("memory.json");
+    let config = test_config(&backup_root);
+
+    let bridge = mock_bridge();
+    bridge.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
+    bridge
+        .store_procedure("build", &["compile".into()], &[])
+        .unwrap();
+    let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
+    file_store.put(make_record("rec1")).unwrap();
+    file_store.put(make_record("rec2")).unwrap();
+
+    let manifest =
+        backup_memory_verified(&bridge, &file_store, "agent", &config).expect("verified backup");
+
+    let target_bridge = mock_bridge();
+    let target_store = FileBackedMemoryStore::try_new(tmp.path().join("restored.json")).unwrap();
+    let restored =
+        restore_from_backup(&target_bridge, &target_store, &manifest.backup_dir).unwrap();
+
+    // 1 fact + 1 procedure + 2 records.
+    assert_eq!(
+        restored, 4,
+        "restore must round-trip the verified memory count"
+    );
+}
+
+/// Issue #2420 acceptance: a verified backup of a store **larger than the legacy
+/// export cap** (1000 facts) must round-trip the full memory count. This is the
+/// exact regression behind the broken backups — the live store grew past the
+/// fixed export cap, so a backup silently captured only the first 1000
+/// memories. The mock bridge ignores `limit`, so this must use the real library
+/// backend (`in_memory` for speed; durability is irrelevant to the cap fix).
+#[test]
+fn verified_backup_round_trips_store_larger_than_export_cap() {
+    use crate::cognitive_memory::LibraryCognitiveMemory;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = LibraryCognitiveMemory::in_memory().unwrap();
+
+    // > legacy MAX_EXPORT_FACTS (1000): a capped export would lose the tail.
+    let n_facts = 1025usize;
+    for i in 0..n_facts {
+        src.store_fact(
+            &format!("concept-{i}"),
+            &format!("content {i}"),
+            0.9,
+            &[],
+            &format!("ep{i}"),
+        )
+        .unwrap();
+    }
+
+    let file_store = FileBackedMemoryStore::try_new(tmp.path().join("memory.json")).unwrap();
+    file_store.put(make_record("rec1")).unwrap();
+    file_store.put(make_record("rec2")).unwrap();
+
+    let config = test_config(&tmp.path().join("backups"));
+    let manifest =
+        backup_memory_verified(&src, &file_store, "agent", &config).expect("verified backup");
+
+    assert_eq!(
+        manifest.cognitive_facts_count, n_facts,
+        "verified backup must capture every fact, not a capped subset"
+    );
+    assert_eq!(manifest.memory_records_count, 2);
+
+    // Restore into FRESH targets; the total count must round-trip exactly.
+    let dst = LibraryCognitiveMemory::in_memory().unwrap();
+    let dst_store = FileBackedMemoryStore::try_new(tmp.path().join("restored.json")).unwrap();
+    let restored = restore_from_backup(&dst, &dst_store, &manifest.backup_dir).unwrap();
+
+    let expected = manifest.cognitive_facts_count
+        + manifest.cognitive_procedures_count
+        + manifest.memory_records_count;
+    assert_eq!(
+        restored, expected,
+        "restore must round-trip the full >cap memory count"
+    );
+    assert!(
+        restored > 1000,
+        "round-trip count must exceed the legacy export cap"
+    );
+}
