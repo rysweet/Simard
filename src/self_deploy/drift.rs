@@ -115,6 +115,7 @@ impl<S: DeploySource> ReconcileDetector<S> {
 /// (so it never produces a *false* drift); wiring running pins from build
 /// metadata is tracked as a follow-up. The detector's fail-safe contract means a
 /// missing/!git checkout simply reports "no drift".
+#[derive(Clone)]
 pub struct GitDeploySource {
     /// Source checkout to run `git` in.
     repo_dir: PathBuf,

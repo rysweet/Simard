@@ -12,7 +12,7 @@
 //! `docs/howto/verify-and-roll-back-a-self-deploy.md`.
 
 use crate::self_deploy::{
-    DeploySource, GitDeploySource, ReconcileDetector, SelfDeployOrchestrator,
+    DeploySource, GitDeploySource, GitSourcePreparer, ReconcileDetector, SelfDeployOrchestrator,
     SystemdOrExecRestarter,
 };
 
@@ -67,9 +67,38 @@ pub(super) fn dispatch_self_deploy_command(
 }
 
 /// `--check`: compute and print deploy drift; never mutate anything.
+///
+/// Issue #2467 (review): resolve the source repo **cwd-independently** so
+/// `--check` reports the same drift an actual deploy would act on — even when
+/// run from an unrelated directory — and best-effort `git fetch` it so the
+/// merged head is current. Unlike [`run_self_deploy`] this stays strictly
+/// read-only: it never clones (honoring the documented "make no changes"
+/// contract) and tolerates a failed fetch (offline → report against the local
+/// tracking refs) instead of hard-erroring — but the degraded path is **never
+/// silent**: a failed best-effort fetch prints a visible warning to stderr so an
+/// operator is never misled into trusting a stale report. When no canonical
+/// checkout exists yet (e.g. before the first deploy) it falls back to a
+/// best-effort report from the current directory.
 fn report_drift(json: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let source = GitDeploySource::new();
-    let drift = ReconcileDetector::new(GitDeploySource::new()).detect();
+    let preparer = GitSourcePreparer::new();
+    let source = match preparer.resolve_existing_repo() {
+        Some(repo) => {
+            // Best-effort refresh so the merged head is current. A failed fetch
+            // (e.g. offline) must NOT silently degrade: warn loudly on stderr —
+            // keeping stdout (incl. `--json`) clean — then report against the
+            // local tracking refs, which may be stale.
+            if let Err(e) = preparer.fetch_origin(&repo) {
+                eprintln!(
+                    "self-deploy --check: warning: could not fetch origin ({e}); \
+                     reporting against local tracking refs, which may be stale"
+                );
+            }
+            GitDeploySource::at(repo)
+        }
+        // No canonical source yet — best-effort report from the cwd.
+        None => GitDeploySource::new(),
+    };
+    let drift = ReconcileDetector::new(source.clone()).detect();
 
     if json {
         println!("{}", serde_json::to_string_pretty(&drift)?);
@@ -103,9 +132,22 @@ fn report_drift(json: bool) -> Result<(), Box<dyn std::error::Error>> {
 /// Full operator self-deploy. Effectful: builds from source and restarts the
 /// daemon. Returns an error (loudly) on build/gate/backup/health failure; a
 /// failed health check rolls back to the previous binary.
+///
+/// Issue #2467: cwd-independent. The canonical source repo is resolved via
+/// `SIMARD_SELF_DEPLOY_REPO` → persistent `~/.simard/self-deploy-src` →
+/// clone-from-origin, then fetched so the merged head we read (and deploy) is
+/// the real one — regardless of the directory the operator runs from. The
+/// orchestrator then builds that fetched+checked-out merged commit into the
+/// warm target dir.
 fn run_self_deploy() -> Result<(), Box<dyn std::error::Error>> {
-    let source = GitDeploySource::new();
-    let drift = ReconcileDetector::new(GitDeploySource::new()).detect();
+    // Resolve the build source independent of the cwd, and fetch so
+    // `origin/main` (the merged head) is current before we read it.
+    let preparer = GitSourcePreparer::new();
+    let repo = preparer.resolve_repo()?;
+    preparer.fetch_origin(&repo)?;
+
+    let source = GitDeploySource::at(&repo);
+    let drift = ReconcileDetector::new(GitDeploySource::at(&repo)).detect();
     if !drift.needs_deploy {
         println!("simard self-deploy: running binary is already at merged head — nothing to do.");
         return Ok(());
@@ -120,11 +162,12 @@ fn run_self_deploy() -> Result<(), Box<dyn std::error::Error>> {
         drift.behind_commits
     );
 
-    let orchestrator = SelfDeployOrchestrator::new(
+    let orchestrator = SelfDeployOrchestrator::with_source(
         crate::safe_update::UpdateConfig::default(),
         Box::new(SystemdOrExecRestarter::new()),
         target_commit,
         install_path,
+        Box::new(GitSourcePreparer::new()),
     );
 
     match orchestrator.run() {

@@ -155,8 +155,8 @@ mod disk;
 pub(crate) use disk::{
     BINARY_BACKUPS_KEEP, CORRUPT_DB_KEEP, CORRUPT_DB_MAX_AGE_DAYS, SNAPSHOTS_KEEP,
     cap_home_cargo_targets, cap_simard_target_dirs, clean_simard_canaries,
-    clean_stale_cargo_targets, dir_size, remove_old_corrupt_dbs, rotate_simard_binary_backups,
-    trim_simard_snapshots,
+    clean_stale_cargo_targets, dir_size, is_corrupt_quarantine_name, remove_old_corrupt_dbs,
+    rotate_simard_binary_backups, trim_simard_snapshots,
 };
 
 #[cfg(test)]

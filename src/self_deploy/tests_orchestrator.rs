@@ -12,6 +12,7 @@ use crate::safe_update::{SafeUpdateError, UpdateConfig};
 
 use super::orchestrator::{DeploySourceKind, SelfDeployOrchestrator};
 use super::restart::FakeRestarter;
+use super::source_prep::GitSourcePreparer;
 // --- DeploySourceKind -------------------------------------------------------
 
 #[test]
@@ -91,6 +92,76 @@ fn new_safe_update_error_variants_display_loudly() {
             "Display for {err:?} should contain {needle:?}, got: {s}"
         );
     }
+}
+
+// --- Issue #2467: loud source-prep error variants ---------------------------
+
+#[test]
+fn self_deploy_source_prep_error_variants_display_loudly() {
+    // Each new variant aborts BEFORE the safety sequence and must say so
+    // loudly (and name the phase) — never a silent cwd-HEAD fallback.
+    let cases: Vec<(SafeUpdateError, &str)> = vec![
+        (
+            SafeUpdateError::SourceResolveFailed {
+                detail: "SIMARD_SELF_DEPLOY_REPO is not a work tree".to_string(),
+            },
+            "resolve",
+        ),
+        (
+            SafeUpdateError::FetchFailed {
+                detail: "could not read from remote".to_string(),
+            },
+            "fetch",
+        ),
+        (
+            SafeUpdateError::CheckoutFailed {
+                detail: "unknown revision deadbeef".to_string(),
+            },
+            "checkout",
+        ),
+    ];
+    for (err, needle) in cases {
+        let s = err.to_string().to_lowercase();
+        assert!(
+            s.contains(needle),
+            "Display for {err:?} should contain {needle:?}, got: {s}"
+        );
+        assert!(
+            s.contains("no cwd-head fallback"),
+            "Display for {err:?} must advertise the loud, no-fallback contract, got: {s}"
+        );
+    }
+}
+
+// --- Issue #2467: additive with_source constructor --------------------------
+
+#[test]
+fn with_source_injects_a_preparer_and_new_leaves_it_none() {
+    // `new` (legacy) has no source preparer; `with_source` carries one. This is
+    // the additive seam that lets the orchestrator build the fetched merged
+    // commit instead of the cwd HEAD.
+    let legacy = SelfDeployOrchestrator::new(
+        UpdateConfig::default(),
+        Box::new(FakeRestarter::new()),
+        "deadbeefcafe".to_string(),
+        PathBuf::from("/home/simard/.simard/bin/simard"),
+    );
+    assert!(
+        legacy.build_source().is_none(),
+        "new() must preserve the legacy no-source build path"
+    );
+
+    let sourced = SelfDeployOrchestrator::with_source(
+        UpdateConfig::default(),
+        Box::new(FakeRestarter::new()),
+        "deadbeefcafe".to_string(),
+        PathBuf::from("/home/simard/.simard/bin/simard"),
+        Box::new(GitSourcePreparer::new()),
+    );
+    assert!(
+        sourced.build_source().is_some(),
+        "with_source() must carry the injected source preparer"
+    );
 }
 
 // --- Orchestrator construction + end-to-end (pending) -----------------------

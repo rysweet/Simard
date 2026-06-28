@@ -27,6 +27,7 @@ pub mod health;
 pub mod orchestrator;
 pub mod orphan;
 pub mod restart;
+pub mod source_prep;
 
 pub use backup::{ProtectiveBackup, take_protective_backup};
 pub use drift::{
@@ -41,6 +42,10 @@ pub use orphan::{
     OrphanEngineer, find_engineer_orphans, match_engineer_orphan, reap_engineer_orphans,
 };
 pub use restart::{DaemonRestarter, FakeRestarter, SystemdOrExecRestarter};
+pub use source_prep::{
+    GitSourcePreparer, SelfDeploySourcePreparer, self_deploy_src_dir, self_deploy_target_dir,
+    validate_full_sha, validate_origin_transport,
+};
 
 #[cfg(test)]
 mod tests_drift;
@@ -52,3 +57,5 @@ mod tests_orchestrator;
 mod tests_orphan;
 #[cfg(test)]
 mod tests_restart;
+#[cfg(test)]
+mod tests_source_prep;
