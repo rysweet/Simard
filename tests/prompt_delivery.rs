@@ -167,6 +167,7 @@ fn stdin_mode_roundtrips_nul_bytes_unchanged() {
 // ===========================================================================
 
 #[test]
+#[serial(prompt_delivery_env)]
 fn applied_mode_reports_inline_for_small_prompt() {
     let mut cmd = Command::new("/bin/cat");
     let applied = apply_std(&mut cmd, b"tiny", PromptDelivery::Auto).unwrap();
@@ -175,6 +176,7 @@ fn applied_mode_reports_inline_for_small_prompt() {
 }
 
 #[test]
+#[serial(prompt_delivery_env)]
 fn applied_mode_reports_tempfile_for_large_prompt() {
     let mut cmd = Command::new("/bin/cat");
     let big = vec![b'x'; STDIN_PREFERRED_MAX_BYTES + 16];
