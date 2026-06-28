@@ -1,12 +1,10 @@
 ---
 title: CI-resilient test patterns
 description: >
-  Four patterns that prevent common CI-only test failures: constant-relative
-  assertions, lazy config resolution, serial env-var tests, and shape-only
-  assertions for compile-time version constants.
-last_updated: 2026-06-28
-review_schedule: when MAX_ACTIVE_GOALS, agent proxy construction, or the CLI
-  version-string test change
+  Three patterns that prevent common CI-only test failures: constant-relative
+  assertions, lazy config resolution, and serial env-var tests.
+last_updated: 2026-06-03
+review_schedule: when MAX_ACTIVE_GOALS or agent proxy construction changes
 owner: simard
 doc_type: reference
 related:
@@ -21,13 +19,11 @@ related:
 
 # CI-resilient test patterns
 
-This page documents four patterns that keep the test suite green in CI
+This page documents three patterns that keep the test suite green in CI
 where the environment differs from a developer workstation (no config
-files, no env vars, parallel test execution). Patterns 1–3 were
-introduced to fix CI-blocking failures on `main` (issue
-[#2197](https://github.com/rysweet/Simard/issues/2197)); Pattern 4 was
-added later for a recurring version-literal merge blocker (issue
-[#2483](https://github.com/rysweet/Simard/issues/2483)).
+files, no env vars, parallel test execution). All three were introduced
+to fix CI-blocking failures on `main` (issue
+[#2197](https://github.com/rysweet/Simard/issues/2197)).
 
 ---
 
@@ -265,105 +261,6 @@ Every iteration should report `test result: ok`.
 
 ---
 
-## Pattern 4: Shape-only assertions for compile-time version constants
-
-### Problem
-
-A test that pins the crate version to an exact literal is a recurring,
-systemic merge blocker. The CLI golden test
-`version_string_is_semver` in `tests/cli_golden.rs` previously asserted
-both the semver *shape* of the version **and** an exact string literal:
-
-```rust
-// ❌ brittle: must be hand-edited on every version bump
-assert_eq!(VERSION, "0.23.0", "bump this assertion when version changes");
-```
-
-Because `VERSION` is defined as the compile-time crate version:
-
-```rust
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-```
-
-…the literal `"0.23.0"` is merely a hand-maintained mirror of the value
-already owned by `Cargo.toml`. It adds no durable invariant — only the
-upkeep cost of keeping the two copies identical — yet any
-`Cargo.toml` version bump that does not also hand-edit the assertion
-fails the `pre-commit` CI job and blocks the PR. Default-workflow
-recipes and engineer goals routinely produce such bumps as a side
-effect, so the literal broke unrelated PRs repeatedly (observed on
-[#2474](https://github.com/rysweet/Simard/issues/2474) and
-[#2482](https://github.com/rysweet/Simard/issues/2482); tracked and
-fixed in [#2483](https://github.com/rysweet/Simard/issues/2483)).
-
-### Rule
-
-**Never pin a compile-time version constant to an exact string
-literal in a test.** Validate the *shape* of the version instead — that
-it is well-formed semver (three dot-separated, numeric components). The
-shape is the durable invariant; the exact value is owned by
-`Cargo.toml` and must never require a parallel manual edit.
-
-`version_string_is_semver` now asserts shape only:
-
-```rust
-#[test]
-fn version_string_is_semver() {
-    // The binary has no --version flag; verify the Cargo-embedded version
-    // matches the expected semver pattern so the constant stays in sync.
-    let parts: Vec<&str> = VERSION.split('.').collect();
-    assert_eq!(parts.len(), 3, "version should be semver: {VERSION}");
-    for part in &parts {
-        part.parse::<u32>()
-            .unwrap_or_else(|_| panic!("non-numeric version component '{part}' in {VERSION}"));
-    }
-}
-```
-
-This catches the failures that actually matter — a malformed,
-non-numeric, or wrong-segment-count version — while letting the version
-float freely. A `Cargo.toml` bump (`0.23.0 → 0.23.1`, or any future
-value) requires **zero** test edits.
-
-### Where this applies
-
-Any test that reads `env!("CARGO_PKG_VERSION")` (directly or via a
-`VERSION` constant) and asserts on it. The canonical example is
-`version_string_is_semver` in `tests/cli_golden.rs`. The other golden
-tests in that file (help-text, subcommand, and error-message
-invariants) are unaffected.
-
-> **Release control.** If an exact version *must* be gated for a
-> release, do it where the version is defined — gate the `Cargo.toml`
-> bump itself (review, tag, or a dedicated release check) rather than
-> mirroring the literal into a unit test. Shape-only validation and
-> release gating are separate concerns.
-
-### How to verify
-
-```bash
-cargo test --test cli_golden
-```
-
-The test self-adjusts to any future crate version without code changes.
-To confirm independence from the version value, bump `Cargo.toml`'s
-`version` field locally and re-run — `version_string_is_semver` stays
-green.
-
-### Related but not an instance of this pattern
-
-`tests/install_real.rs` defines
-`const EXPECTED_VERSION: &str = env!("CARGO_PKG_VERSION");` and asserts
-that the *installed* binary's `--version` output equals
-`simard {EXPECTED_VERSION}`. This is **not** the brittle anti-pattern:
-`EXPECTED_VERSION` is derived from the same compile-time constant rather
-than a hand-edited literal, so it tracks the crate version automatically
-and never needs a manual edit on a version bump. It is a legitimate
-end-to-end check (the installed binary reports the version it was built
-with) and should be left as-is.
-
----
-
 ## Summary
 
 | Pattern               | Problem                     | Fix                              | Scope                       |
@@ -371,7 +268,6 @@ with) and should be left as-is.
 | Constant-relative     | Hardcoded capacity limits   | Use `MAX_ACTIVE_GOALS + N`       | `src/ooda_loop/curate.rs`   |
 | Lazy config resolution| Constructor reads config    | Defer to `open()`                | `src/meeting_backend/agent_proxy.rs` |
 | Serial env-var tests  | Parallel env-var races      | `#[serial]` annotation           | `src/gym_runner_bridge.rs`  |
-| Shape-only version    | Exact version literal pin   | Assert semver shape, not literal | `tests/cli_golden.rs`       |
 
-All four patterns are enforced by CI: the affected tests run on every
+All three patterns are enforced by CI: the affected tests run on every
 PR and will fail if the pattern is violated.
