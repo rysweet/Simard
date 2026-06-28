@@ -997,6 +997,13 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
             live_after,
         } = measure_forget_outcome(&guard, &candidate_ids);
 
+        // Release the cognitive-memory write lock before the metric's synchronous
+        // `metrics.jsonl` append: `measure_forget_outcome` was the last reader of
+        // `guard`, and `record_forget_metric` needs only the copied counts, so
+        // holding the lock across blocking file I/O would needlessly serialize
+        // other memory ops behind a disk write.
+        drop(guard);
+
         // Gate on a self-metric so a regression (valuable-fact loss) is visible
         // in `metrics.jsonl`. Best-effort, no-op under `cfg!(test)`.
         record_forget_metric(live_before, live_after, candidates, archived, deleted);
