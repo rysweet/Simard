@@ -238,40 +238,30 @@ transitively, so the `workspace` scope surfaces them **without failing CI**.
 They are tracked (not per-ID ignored) so a fix or replacement is adopted as
 soon as one ships:
 
-| Crate | Advisory | Class | Reaches the graph via | Disposition |
+| Crate | Advisory | Class | Reaches the graph via | Cleared by |
 | --- | --- | --- | --- | --- |
-| `paste` 1.0.15 | RUSTSEC-2024-0436 | unmaintained | `ratatui 0.29.0` | transitive → surfaced, non-failing; cleared by the `ratatui` bump |
-| `proc-macro-error2` 2.0.1 | RUSTSEC-2026-0173 | unmaintained | `validator_derive → validator → rustyclawd-tools` | transitive → surfaced, non-failing; cleared by a `rustyclawd-tools` bump |
-| `lru` 0.12.5 | RUSTSEC-2026-0002 | unsound (`IterMut` Stacked Borrows; patched `>= 0.16.3`) | `ratatui 0.29.0` | transitive → surfaced, non-failing; cleared by the `ratatui` bump |
-| `git2` 0.20.4 | RUSTSEC-2026-0183, RUSTSEC-2026-0184 | unsound (potential UB in `Remote::list()` / buffer-created `BlameHunk`) | `rustyclawd-tools` | transitive → surfaced, non-failing; used only for local repo operations |
+| `paste` 1.0.15 | RUSTSEC-2024-0436 | unmaintained | `ratatui 0.29.0` | a `ratatui` bump |
+| `proc-macro-error2` 2.0.1 | RUSTSEC-2026-0173 | unmaintained | `validator_derive → validator → rustyclawd-tools` | a `rustyclawd-tools` bump |
+| `lru` 0.12.5 | RUSTSEC-2026-0002 | unsound (`IterMut` Stacked Borrows; patched `>= 0.16.3`) | `ratatui 0.29.0` | a `ratatui` bump |
+| `git2` 0.20.4 | RUSTSEC-2026-0183, RUSTSEC-2026-0184 | unsound (potential UB in `Remote::list()` / buffer-created `BlameHunk`); local repo ops only | `rustyclawd-tools` | a `rustyclawd-tools` bump |
 
-Because none of these is workspace-direct, `cargo deny check advisories` stays
-green **without** any per-ID `ignore`: the `unmaintained = "workspace"` scope
-covers `paste` / `proc-macro-error2`, and cargo-deny does not raise the
-`unsound` advisories (`lru`, `git2`) at all. `cargo audit` reports all four as
-non-failing warnings and exits `0`. If a future *unmaintained* advisory lands on
-a *direct* dependency it will fail the `unmaintained = "workspace"` check and
-force an explicit decision, which is the intended behaviour.
+Because none is workspace-direct, `cargo deny check advisories` stays green
+**without** any per-ID `ignore`: the `unmaintained = "workspace"` scope covers
+`paste` / `proc-macro-error2`, and cargo-deny does not raise the `unsound`
+advisories (`lru`, `git2`) at all. `cargo audit` reports all four as non-failing
+warnings and exits `0`.
 
-### Tracked upstream bumps (`ratatui`, `git2`)
-
-The transitive advisories above are closed by upstream bumps, not by Simard
-code changes:
-
-1. **`ratatui`** clears both `paste` (RUSTSEC-2024-0436) and `lru`
-   (RUSTSEC-2026-0002) at once — bump `ratatui` to a release that drops `paste`
-   and pulls `lru >= 0.16.3`, then update `Cargo.lock`.
-2. **`git2`** clears RUSTSEC-2026-0183 / RUSTSEC-2026-0184 when `rustyclawd-tools`
-   bumps to a patched `git2`; track it through the
-   [bump-PR pipeline](../howto/self-maintain-dependency-pins.md).
-
-None of these blocks CI today, because each is transitive and handled by the
-`workspace` scope. Should any one start failing — for example if it is later
-re-classified as a vulnerability, or pulled in as a direct dependency — it is
-carried as a *temporary* justified `ignore` (ID + "via `<upstream>`, no upgrade
-yet" + tracking link) in `deny.toml` and `.cargo/audit.toml` until the bump
-lands. The only **permanent** `ignore` in the policy remains `rsa`
-(RUSTSEC-2023-0071), the one advisory with no upstream fix.
+Each is closed by an **upstream bump**, not by Simard code: one `ratatui` bump
+clears both `paste` and `lru` (to `>= 0.16.3`) at once, and a `rustyclawd-tools`
+bump clears `git2` — both tracked through the
+[bump-PR pipeline](../howto/self-maintain-dependency-pins.md). Should any one
+start failing — a *new* unmaintained advisory landing on a *direct* dependency,
+or one of these being re-classified as a vulnerability or pulled in directly —
+the `workspace` scope forces an explicit decision: carry a *temporary* justified
+`ignore` (ID + "via `<upstream>`, no upgrade yet" + tracking link) in `deny.toml`
+and `.cargo/audit.toml` until the bump lands. The only **permanent** `ignore` in
+the policy remains `rsa` (RUSTSEC-2023-0071), the one advisory with no upstream
+fix.
 
 ## Workflow: vetting a crate or resolving an advisory
 
