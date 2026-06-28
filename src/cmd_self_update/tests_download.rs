@@ -1,7 +1,6 @@
-//! TDD contract for the multi-binary self-update path (issue #2252).
+//! Behavioural contract for the multi-binary self-update path (issue #2252).
 //!
-//! These tests specify the behaviour of the not-yet-implemented multi-binary
-//! self-update API documented in
+//! These tests pin down the multi-binary self-update API documented in
 //! `docs/reference/multi-binary-self-update.md`:
 //!
 //!   * `find_all_binaries_in_dir` — dynamic discovery of every executable in an
@@ -15,9 +14,8 @@
 //!   * shared-primitive regression guards for `download_to_temp` and the
 //!     `safe-update` download-only path.
 //!
-//! They are written FIRST and are expected to FAIL (the symbols do not exist on
-//! the default branch yet) until the implementation lands. Everything here is
-//! hermetic: no network, no live release, no reliance on a real GitHub asset.
+//! Everything here is hermetic: no network, no live release, and no reliance on
+//! a real GitHub asset.
 
 use super::download::{
     InstallReport, find_all_binaries_in_dir, install_binaries, install_binary, sha256_file,
