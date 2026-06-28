@@ -60,8 +60,23 @@ jobs:
       - name: Package binary
         if: steps.tag_check.outputs.exists == 'false'
         run: |
+          # Enumerate every [[bin]] target name from cargo metadata so the
+          # tarball ships the FULL Simard binary set (simard plus simard-tui,
+          # simard-gym, and the rest) — not just the main daemon binary.
+          # Without this, the consumer-side multi-binary self-update (#2252)
+          # would have nothing extra to install.
+          mapfile -t BIN_TARGETS < <(
+            cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name'
+          )
+          if [ "${#BIN_TARGETS[@]}" -eq 0 ]; then
+            echo "::error::No [[bin]] targets found in cargo metadata" >&2
+            exit 1
+          fi
+          echo "Packaging binaries: ${BIN_TARGETS[*]}"
           cd target/release
-          tar czf simard-linux-x86_64.tar.gz simard
+          # Tar exactly the built binaries that exist for this platform.
+          tar czf simard-linux-x86_64.tar.gz "${BIN_TARGETS[@]}"
           sha256sum simard-linux-x86_64.tar.gz > simard-linux-x86_64.tar.gz.sha256
 
       # ---- SBOM (CycloneDX) — issue #2261 -------------------------------------
