@@ -209,6 +209,31 @@ fn retry_transient_gh_inner<T>(
     }
 }
 
+/// Spawn `gh <args>` and return its stdout on success. `label` is a
+/// human-readable rendering of the command used verbatim in error messages so
+/// each call site stays a one-liner instead of repeating the
+/// spawn → status-check → `MergeAuthorityGhCommandFailed` boilerplate. Both the
+/// spawn-failure and non-zero-exit branches return the same error variant the
+/// retry classifier inspects, so transient-retry behaviour is unchanged.
+fn run_gh_checked(label: &str, args: &[&str]) -> SimardResult<Vec<u8>> {
+    let output = std::process::Command::new("gh")
+        .args(args)
+        .output()
+        .map_err(|e| SimardError::MergeAuthorityGhCommandFailed {
+            reason: format!("failed to spawn `{label}`: {e}"),
+        })?;
+    if !output.status.success() {
+        return Err(SimardError::MergeAuthorityGhCommandFailed {
+            reason: format!(
+                "`{label}` exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    Ok(output.stdout)
+}
+
 /// Production implementation that shells out to the `gh` binary.
 #[derive(Default)]
 pub struct RealPrGhClient;
@@ -223,8 +248,9 @@ impl PrGhClient for RealPrGhClient {
     fn view_pr(&self, repo: &str, pr_number: u32) -> SimardResult<PrSnapshot> {
         retry_transient_gh("gh pr view", || {
             let pr = pr_number.to_string();
-            let output = std::process::Command::new("gh")
-                .args([
+            let stdout = run_gh_checked(
+                &format!("gh pr view {pr} --repo {repo}"),
+                &[
                     "pr",
                     "view",
                     &pr,
@@ -232,21 +258,9 @@ impl PrGhClient for RealPrGhClient {
                     repo,
                     "--json",
                     "body,statusCheckRollup,mergeable,reviewDecision,baseRefName",
-                ])
-                .output()
-                .map_err(|e| SimardError::MergeAuthorityGhCommandFailed {
-                    reason: format!("failed to spawn `gh pr view`: {e}"),
-                })?;
-            if !output.status.success() {
-                return Err(SimardError::MergeAuthorityGhCommandFailed {
-                    reason: format!(
-                        "`gh pr view {pr} --repo {repo}` exited {}: {}",
-                        output.status,
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ),
-                });
-            }
-            parse_pr_view_json(&output.stdout)
+                ],
+            )?;
+            parse_pr_view_json(&stdout)
         })
     }
 
@@ -257,8 +271,9 @@ impl PrGhClient for RealPrGhClient {
     /// attempt — not a blind inner loop that could act on stale PR state.
     fn squash_merge(&self, repo: &str, pr_number: u32) -> SimardResult<()> {
         let pr = pr_number.to_string();
-        let output = std::process::Command::new("gh")
-            .args([
+        run_gh_checked(
+            &format!("gh pr merge {pr} --repo {repo} --squash --delete-branch"),
+            &[
                 "pr",
                 "merge",
                 &pr,
@@ -266,28 +281,17 @@ impl PrGhClient for RealPrGhClient {
                 repo,
                 "--squash",
                 "--delete-branch",
-            ])
-            .output()
-            .map_err(|e| SimardError::MergeAuthorityGhCommandFailed {
-                reason: format!("failed to spawn `gh pr merge`: {e}"),
-            })?;
-        if !output.status.success() {
-            return Err(SimardError::MergeAuthorityGhCommandFailed {
-                reason: format!(
-                    "`gh pr merge {pr} --repo {repo} --squash --delete-branch` exited {}: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            });
-        }
+            ],
+        )?;
         Ok(())
     }
 
     fn list_open_prs(&self, repo: &str, limit: u32) -> SimardResult<Vec<OpenPrSummary>> {
         retry_transient_gh("gh pr list", || {
             let limit_s = limit.to_string();
-            let output = std::process::Command::new("gh")
-                .args([
+            let stdout = run_gh_checked(
+                &format!("gh pr list --repo {repo} --state open"),
+                &[
                     "pr",
                     "list",
                     "--repo",
@@ -298,21 +302,9 @@ impl PrGhClient for RealPrGhClient {
                     "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url",
                     "--limit",
                     &limit_s,
-                ])
-                .output()
-                .map_err(|e| SimardError::MergeAuthorityGhCommandFailed {
-                    reason: format!("failed to spawn `gh pr list`: {e}"),
-                })?;
-            if !output.status.success() {
-                return Err(SimardError::MergeAuthorityGhCommandFailed {
-                    reason: format!(
-                        "`gh pr list --repo {repo} --state open` exited {}: {}",
-                        output.status,
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ),
-                });
-            }
-            parse_pr_list_json(&output.stdout)
+                ],
+            )?;
+            parse_pr_list_json(&stdout)
         })
     }
 }
