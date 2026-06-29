@@ -1854,4 +1854,67 @@ mod unit_tests {
         assert_eq!(out.facts[0].content, "strip ansi before the facts scan");
         assert_eq!(out.facts[0].source_episode_id, "epi_42");
     }
+
+    #[test]
+    fn parse_recipe_output_full_recovers_facts_from_copilot_launch_log_preamble() {
+        // Regression for issue #2496 (episode t=9271 live failure).
+        //
+        // The existing ANSI/banner tests above already cover dimmed
+        // `simard::distill` / `thinking` tracing prefixes and the
+        // recipe-runner text summary banner. This pins the distinct
+        // **Copilot CLI launch** noise shape the issue captured, which no
+        // other test exercises as a unit:
+        //
+        //   1. an ANSI-coloured `launching copilot binary=copilot` line,
+        //   2. an `\u{2139} NODE_OPTIONS=--max-old-space-size=…` line, and
+        //   3. a leading, ANSI-wrapped JSON *log record*
+        //      (`{"level":"info",…}`) — a complete brace-balanced object that
+        //      precedes the real facts object.
+        //
+        // Element 3 is the adversarial part: a first-object brace scan would
+        // lock onto the `{"level":…}` log record (which has no `facts` field
+        // and so fails the envelope parse) and never reach the trailing facts
+        // object. The current parser strips the ANSI/log noise and prefers the
+        // LAST non-empty facts object, so the buried payload is recovered.
+        // This is fed through the production Tier-1 `--output-format json`
+        // envelope path (`parse_recipe_output_full` -> `into_distill_output`
+        // -> `extract_step_output` -> `scan_for_facts_object`), which is where
+        // the `\`distill\` step output did not contain a parseable …` error in
+        // the issue originated.
+        let esc = '\u{1b}';
+        let step_output = format!(
+            "{esc}[2m2026-06-29T12:26:24.512Z{esc}[0m {esc}[32m INFO{esc}[0m launching copilot binary=copilot\n\
+             \u{2139} {esc}[2mNODE_OPTIONS=--max-old-space-size=8192{esc}[0m\n\
+             {esc}[36m{{\"level\":\"info\",\"msg\":\"session started\",\"cwd\":\"/repo\"}}{esc}[0m\n\
+             {{\"facts\":[{{\"concept\":\"bug-pattern\",\
+             \"content\":\"distill parser must tolerate ANSI + launch-log preamble\",\
+             \"source_episode_id\":\"epi_9271\"}}]}}\n"
+        );
+        // The raw step-output span carries ESC bytes and a leading non-facts
+        // object, so it must NOT parse as-is — the silent-drop failure mode.
+        assert!(
+            serde_json::from_str::<RecipeEnvelope>(step_output.trim()).is_err(),
+            "raw launch-log-noised step output must be unparseable as a facts envelope"
+        );
+        let envelope = serde_json::json!({
+            "recipe_name": "distill-episodes",
+            "success": true,
+            "step_results": [{
+                "step_id": "distill",
+                "status": "completed",
+                "output": step_output,
+                "error": ""
+            }]
+        })
+        .to_string();
+        let out = parse_recipe_output_full(&envelope)
+            .expect("issue #2496 launch-log-preamble payload must parse");
+        assert_eq!(out.facts.len(), 1, "exactly one fact recovered");
+        assert_eq!(out.facts[0].concept, "bug-pattern");
+        assert_eq!(
+            out.facts[0].content,
+            "distill parser must tolerate ANSI + launch-log preamble"
+        );
+        assert_eq!(out.facts[0].source_episode_id, "epi_9271");
+    }
 }
