@@ -70,6 +70,11 @@ runs:
         echo 'RUSTFLAGS=-C link-arg=-fuse-ld=mold' >> "$GITHUB_ENV"
 
     - name: Set up Rust
-      uses: dtolnay/rust-toolchain@stable
+      # SHA-pinned to the current tip of dtolnay/rust-toolchain's `stable`
+      # branch (identical to the pin in release.yml). Pinning to a full
+      # commit SHA prevents a compromised or force-pushed action tag from
+      # injecting code into every Rust CI job that consumes this composite
+      # action (verify.yml, coverage.yml). Update the SHA + comment together.
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       with:
         components: ${{ inputs.rust-components }}
