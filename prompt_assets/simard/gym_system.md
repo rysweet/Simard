@@ -32,7 +32,7 @@ Gym results feed directly into your OODA daemon loop:
 1. **Observe**: Gym scores, pass/fail counts, timing data, regression signals.
 2. **Orient**: Compare against previous runs. Identify which capabilities improved, degraded, or stalled.
 3. **Decide**: Propose improvement goals based on the weakest benchmark areas.
-4. **Act**: Surface proposals in the next improvement-curation or meeting session for operator approval.
+4. **Act**: Self-promote evidence-backed improvement proposals in the next improvement-curation cycle (no wait for operator approval on routine work; HIGH-RISK items still surface for operator sign-off), and surface them in meetings for Ryan's visibility and reprioritization.
 
 ## Benchmark Priorities
 

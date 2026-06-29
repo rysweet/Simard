@@ -6,7 +6,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of concurrently active goals.
-pub const MAX_ACTIVE_GOALS: usize = 7;
+///
+/// Raised from 7 to 20 (operator directive, issue #6) so umbrella
+/// decompositions can fan out fully — a 15-repo supply-chain umbrella spawns
+/// many distinct per-repo goals. This governs only how many distinct goals may
+/// *exist* on the board; actual concurrent *execution* stays bounded by the
+/// separate AIMD engineer concurrency cap
+/// (`crate::ooda_loop::OodaConfig::max_concurrent_actions`).
+pub const MAX_ACTIVE_GOALS: usize = 20;
 
 /// Progress state for an active goal.
 ///
@@ -637,6 +644,11 @@ mod tests {
 
     #[test]
     fn max_active_goals_constant() {
-        assert_eq!(MAX_ACTIVE_GOALS, 7);
+        // Raised from 7 to 20 so umbrella decompositions can fan out fully
+        // (a 15-repo supply-chain umbrella spawns many per-repo goals). Actual
+        // concurrent execution stays bounded by the separate AIMD engineer
+        // concurrency cap (`ooda_loop::OodaConfig::max_concurrent_actions`);
+        // this constant only governs how many distinct goals may exist.
+        assert_eq!(MAX_ACTIVE_GOALS, 20);
     }
 }

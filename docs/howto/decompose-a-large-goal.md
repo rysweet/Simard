@@ -85,7 +85,7 @@ when the daemon is running, or takes the local writer lock directly when it is
 not. A failure to acquire a writer exits non-zero — it never silently degrades
 to a read-only handle.
 
-> **Cap awareness.** `MAX_ACTIVE_GOALS` is **7**. If promoting all children
+> **Cap awareness.** `MAX_ACTIVE_GOALS` is **20**. If promoting all children
 > would exceed the cap, the overflow children land in the **backlog** (and the
 > parent stays active as the anchor instead of being demoted). They stay linked
 > to the parent through their `decomposes_into` edges and are promoted later by
@@ -177,7 +177,7 @@ percentage; it is not surfaced as a separate `goal list` column.
 | Exits non-zero with `invalid goal id '<id>': …` and nothing is written | `<goal_id>` failed `validate_goal_id` (empty, too long, leading `-`/`.`, or a disallowed character) | Re-check the id with `simard goal list`; ids are charset-validated before any work begins. |
 | Exits non-zero with `goal '<id>' not found on active board` | The id is not an active goal | Decomposition operates on an active goal; promote or re-check the id first. |
 | Exits non-zero with `decomposition failed: …` and the goal is left intact | The decomposer returned an unusable shape (fewer than 2 sub-goals after clamping, a malformed child id, or the decomposer itself errored) | This is the **deterministic-fallback** safeguard refusing to write garbage — the board and graph are untouched. Adjust the goal wording or the prompt and re-run. (A fan-out larger than 6 is **clamped** to 6, not rejected.) |
-| Children landed in the backlog instead of the board | Promoting all children would exceed `MAX_ACTIVE_GOALS = 7` | Expected. They stay linked to the parent through their `decomposes_into` edges and are promoted later by backlog scoring. |
+| Children landed in the backlog instead of the board | Promoting all children would exceed `MAX_ACTIVE_GOALS = 20` | Expected. They stay linked to the parent through their `decomposes_into` edges and are promoted later by backlog scoring. |
 | Re-running `decompose` did not create duplicate edges | The edge caller key (`goal-edge:{type}:{from}->{to}`) makes writes idempotent | Expected — a re-run supersedes the prior edge fact instead of appending. |
 
 ## Related

@@ -987,35 +987,43 @@ fn merge_boards_backlog_unions_by_id_with_in_flight_precedence() {
 /// (lowest priority number = highest importance kept).
 #[test]
 fn merge_boards_active_overflow_truncates_to_max_keeping_lowest_priority() {
-    // Persisted has 4 goals with priorities 5, 6, 7, 8.
-    // In-flight has 4 goals with priorities 1, 2, 3, 4.
-    // Union = 8 distinct ids; MAX_ACTIVE_GOALS=7 → drop priority 8.
+    // Build a union of exactly MAX_ACTIVE_GOALS + 1 distinct goals with
+    // priorities 1..=MAX_ACTIVE_GOALS+1, split across the two boards. The
+    // single highest-priority-number goal (MAX_ACTIVE_GOALS + 1) must be the
+    // one dropped; priorities 1..=MAX_ACTIVE_GOALS are all kept. Expressed
+    // relative to MAX_ACTIVE_GOALS so it stays correct when the cap changes.
+    let overflow_priority = (MAX_ACTIVE_GOALS + 1) as u32;
+    let mut persisted_goals = Vec::new();
+    let mut in_flight_goals = Vec::new();
+    for priority in 1..=overflow_priority {
+        let goal = goal_with(
+            &format!("goal-{priority:03}-overflow"),
+            priority,
+            GoalProgress::NotStarted,
+            "d",
+        );
+        if priority % 2 == 0 {
+            persisted_goals.push(goal);
+        } else {
+            in_flight_goals.push(goal);
+        }
+    }
     let persisted = GoalBoard {
-        active: vec![
-            goal_with("p-aaaaa", 5, GoalProgress::NotStarted, "p-a"),
-            goal_with("p-bbbbb", 6, GoalProgress::NotStarted, "p-b"),
-            goal_with("p-ccccc", 7, GoalProgress::NotStarted, "p-c"),
-            goal_with("p-ddddd", 8, GoalProgress::NotStarted, "p-d"),
-        ],
+        active: persisted_goals,
         backlog: vec![],
     };
     let in_flight = GoalBoard {
-        active: vec![
-            goal_with("f-aaaaa", 1, GoalProgress::NotStarted, "f-a"),
-            goal_with("f-bbbbb", 2, GoalProgress::NotStarted, "f-b"),
-            goal_with("f-ccccc", 3, GoalProgress::NotStarted, "f-c"),
-            goal_with("f-ddddd", 4, GoalProgress::NotStarted, "f-d"),
-        ],
+        active: in_flight_goals,
         backlog: vec![],
     };
     let merged = merge_boards(persisted, in_flight);
     assert_eq!(merged.active.len(), MAX_ACTIVE_GOALS);
     let priorities: Vec<u32> = merged.active.iter().map(|g| g.priority).collect();
     assert!(
-        !priorities.contains(&8),
-        "priority 8 goal must be truncated, got {priorities:?}"
+        !priorities.contains(&overflow_priority),
+        "the highest-priority-number goal ({overflow_priority}) must be truncated, got {priorities:?}"
     );
-    for p in [1u32, 2, 3, 4, 5, 6, 7] {
+    for p in 1..=(MAX_ACTIVE_GOALS as u32) {
         assert!(
             priorities.contains(&p),
             "priority {p} must be kept, got {priorities:?}"
@@ -1027,8 +1035,11 @@ fn merge_boards_active_overflow_truncates_to_max_keeping_lowest_priority() {
 /// so a persisted goal must be the one dropped, never the in-flight one.
 #[test]
 fn merge_boards_overflow_tiebreak_prefers_in_flight() {
+    // Fill the board to capacity with persisted goals, then add one in-flight
+    // goal at the same priority so the union is MAX_ACTIVE_GOALS + 1 and the
+    // tiebreak must drop a persisted goal, never the in-flight one.
     let persisted = GoalBoard {
-        active: (0..7)
+        active: (0..MAX_ACTIVE_GOALS)
             .map(|i| {
                 goal_with(
                     &format!("persisted-{i:02}-id"),
@@ -1382,9 +1393,10 @@ fn save_goal_board_read_failure_falls_back_to_persisting_in_flight() {
     assert_eq!(persisted.active[0].id, "readfail-goal-idid");
 }
 
-/// I4 — Capacity bound holds across many merge-on-write saves. Saving 9
-/// disjoint single-goal boards must result in a merged board of exactly
-/// MAX_ACTIVE_GOALS=7 goals (the ones with the lowest priority numbers).
+/// I4 — Capacity bound holds across many merge-on-write saves. Saving
+/// MAX_ACTIVE_GOALS + 2 disjoint single-goal boards must result in a merged
+/// board of exactly MAX_ACTIVE_GOALS goals (the ones with the lowest priority
+/// numbers). Expressed relative to the cap so it stays correct if it changes.
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn save_goal_board_capacity_bound_holds_after_multiple_merges() {
@@ -1392,7 +1404,8 @@ fn save_goal_board_capacity_bound_holds_after_multiple_merges() {
     let root = tmp_state_root("save-capacity");
 
     with_state_root(&root, || {
-        for i in 0u32..9 {
+        let overflow = MAX_ACTIVE_GOALS as u32 + 2;
+        for i in 0u32..overflow {
             let board = GoalBoard {
                 active: vec![goal_with(
                     &format!("capgoal-{i:04}-aaaa"),
@@ -1417,20 +1430,18 @@ fn save_goal_board_capacity_bound_holds_after_multiple_merges() {
                 .collect::<Vec<_>>()
         );
         let priorities: Vec<u32> = loaded.active.iter().map(|g| g.priority).collect();
-        for p in [1u32, 2, 3, 4, 5, 6, 7] {
+        for p in 1..=(MAX_ACTIVE_GOALS as u32) {
             assert!(
                 priorities.contains(&p),
                 "priority {p} must be kept, got {priorities:?}"
             );
         }
-        assert!(
-            !priorities.contains(&8),
-            "priority 8 must be truncated, got {priorities:?}"
-        );
-        assert!(
-            !priorities.contains(&9),
-            "priority 9 must be truncated, got {priorities:?}"
-        );
+        for p in (MAX_ACTIVE_GOALS as u32 + 1)..=overflow {
+            assert!(
+                !priorities.contains(&p),
+                "priority {p} must be truncated, got {priorities:?}"
+            );
+        }
     });
 }
 

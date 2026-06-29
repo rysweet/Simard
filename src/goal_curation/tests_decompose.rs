@@ -293,19 +293,22 @@ fn decompose_unknown_goal_errors() {
 #[test]
 fn decompose_overflows_to_backlog_but_still_writes_edges() {
     let m = mem();
-    // Parent + 5 unrelated active goals = 6 active. Removing the parent frees
-    // one slot (5 left); adding 3 children -> 8 > MAX_ACTIVE_GOALS (7), so the
-    // children cannot all be promoted and must overflow to the backlog.
+    // Fill the board to one below capacity: parent + (MAX_ACTIVE_GOALS - 2)
+    // unrelated active goals = MAX_ACTIVE_GOALS - 1 active. Removing the parent
+    // frees one slot (MAX_ACTIVE_GOALS - 2 left); promoting 3 children would
+    // need MAX_ACTIVE_GOALS + 1 slots > MAX_ACTIVE_GOALS, so the children cannot
+    // all be promoted and must overflow to the backlog. Expressed relative to
+    // the cap so it stays correct when MAX_ACTIVE_GOALS changes.
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal::new("goal-p", "Umbrella", 1));
-    for i in 0..5 {
+    for i in 0..(MAX_ACTIVE_GOALS - 2) {
         board.active.push(ActiveGoal::new(
             format!("other-{i}"),
             format!("Other {i}"),
             2,
         ));
     }
-    assert_eq!(board.active.len(), 6);
+    assert_eq!(board.active.len(), MAX_ACTIVE_GOALS - 1);
 
     let decomposer = CannedDecomposer::ok(vec![sub("a", "x"), sub("b", "y"), sub("c", "z")]);
 

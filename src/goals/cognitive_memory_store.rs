@@ -36,9 +36,9 @@ const GOAL_STORE_TAG: &str = "goal-store";
 /// distinguish them from non-goal prospective entries (e.g. meeting
 /// action items).
 const GOAL_PROSPECTIVE_PREFIX: &str = "goal:";
-/// Pull window for `list()` reads. The board enforces
-/// `MAX_ACTIVE_GOALS = 5`; even with status churn the per-process record
-/// count stays modest, so 256 covers realistic deployments without
+/// Pull window for `list()` reads. The board enforces a small
+/// `MAX_ACTIVE_GOALS` active cap; even with status churn the per-process
+/// record count stays modest, so 256 covers realistic deployments without
 /// risking truncation.
 pub(crate) const GOAL_STORE_LIST_LIMIT: u32 = 256;
 

@@ -68,6 +68,7 @@ nav:
     - OODA Loop Self-Detection: concepts/ooda-loop-self-detection.md
     - Reconcile-and-Self-Deploy: concepts/reconcile-and-self-deploy.md
     - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
+    - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Closing the Procedural-Learning Loop: concepts/procedural-learning-loop.md
     - Trustworthy Confidence + External Completion: concepts/trustworthy-confidence-and-external-completion.md
   - Tutorials:
@@ -122,6 +123,7 @@ nav:
     - Maximum Safe Parallelism: reference/maximum-safe-parallelism.md
     - Concurrent Engineer Dispatch: reference/concurrent-engineer-dispatch.md
     - PR-Finalization Review Pipeline: reference/pr-finalization-pipeline.md
+    - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md
     - Pluggable Identity API: reference/pluggable-identity-api.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md

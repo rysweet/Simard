@@ -623,6 +623,18 @@ mod tests {
         fn merge_call_count(&self) -> usize {
             self.merge_calls.lock().unwrap().len()
         }
+        /// Repos passed to `squash_merge`, in call order — lets cross-repo
+        /// tests assert the gated authority threads the target repo through to
+        /// the underlying `gh pr merge --repo <repo>` rather than a hardcoded
+        /// `rysweet/Simard`.
+        fn merged_repos(&self) -> Vec<String> {
+            self.merge_calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(repo, _pr)| repo.clone())
+                .collect()
+        }
     }
 
     impl PrGhClient for FakePrGhClient {
@@ -745,6 +757,39 @@ mod tests {
         );
         assert_eq!(gh.merge_call_count(), 1);
         assert_eq!(judge.call_count(), 1, "judge must be called exactly once");
+    }
+
+    // ─── Cross-repo: the same gated authority merges PRs in any governed repo ─
+
+    #[test]
+    fn merges_cross_repo_pr_through_the_same_gated_authority() {
+        // The gated merge authority must work for ANY repo Simard governs, not
+        // only rysweet/Simard, so supply-chain hardening PRs in amplihack-rs,
+        // RustyClawd, etc. land through the objective-gates + judge path rather
+        // than a bare `gh pr merge`. The target repo is threaded straight
+        // through to `gh pr merge --repo <repo>`.
+        let cross_repo = "rysweet/amplihack-rs";
+        let gh = FakePrGhClient::new();
+        gh.seed_view(Ok(good_snapshot()));
+        gh.seed_merge(Ok(()));
+        let judge = FakeMergeJudge::ready();
+
+        let outcome = run(820, cross_repo, &gh, &default_allowlist(), &judge).unwrap();
+
+        assert_eq!(
+            outcome,
+            MergeOutcome::Merged {
+                pr_number: 820,
+                repo: cross_repo.to_string(),
+            }
+        );
+        assert_eq!(gh.merge_call_count(), 1);
+        assert_eq!(
+            gh.merged_repos(),
+            vec![cross_repo.to_string()],
+            "the gated authority must squash-merge against the target repo, not a hardcoded rysweet/Simard"
+        );
+        assert_eq!(judge.call_count(), 1, "judge still gates cross-repo merges");
     }
 
     // ─── Judge verdicts ───────────────────────────────────────────────────
