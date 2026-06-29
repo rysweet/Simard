@@ -116,6 +116,31 @@ pub trait PrGhClient {
 `repo` slug it was called with, so the cross-repo path is verified without a
 network call.
 
+### Resilience — transient `gh` retry
+
+`gh` shells out to GitHub over the network, so its calls can fail for reasons
+that have nothing to do with the PR: secondary rate limits (HTTP 429), GitHub
+availability blips (502/503/504), DNS hiccups, connection resets, and TLS or
+request timeouts. For an autonomous self-merging agent these transient blips
+must not abort a merge-ready promotion.
+
+`RealPrGhClient` therefore wraps its **idempotent read** calls — `view_pr`
+(`gh pr view`) and `list_open_prs` (`gh pr list`) — in `retry_transient_gh`,
+a bounded loop (`GH_READ_MAX_RETRIES = 3`) with a linear backoff
+(`GH_RETRY_BACKOFF_MS = 500` × attempt). A failure is retried **only** when
+`is_transient_gh_failure` matches a transient network/availability signature in
+the error text; deterministic failures (auth, not-found, not-mergeable, bad
+flags, gate refusals) surface immediately instead of looping. The classifier
+mirrors the substring heuristic the OODA adaptive scaler already uses for 429
+detection.
+
+`squash_merge` (`gh pr merge`) is a **mutation and is deliberately
+single-attempt**. Its safe retry boundary is the gate-revalidating
+`merge_pr_if_merge_ready` cycle, which re-`view`s the PR and re-checks every
+gate before any new merge attempt — rather than a blind inner loop that could
+act on stale PR state. The read retries above already make that re-validation
+resilient to transient flakiness.
+
 ## Operator CLI — `simard merge-pr`
 
 ```text
@@ -210,6 +235,10 @@ that has none — it does **not** mean she skips these gates. See
   reserved for "could not evaluate".
 - **Back-compatible.** `simard merge-pr <PR>` with no `--repo` targets
   `rysweet/Simard` exactly as before.
+- **Resilient reads, single-attempt mutation.** Idempotent `gh` reads
+  (`view_pr`, `list_open_prs`) retry transient network/availability failures
+  with a bounded backoff; the `squash_merge` mutation is single-attempt, with
+  the gate-revalidating `merge_pr_if_merge_ready` cycle as its retry boundary.
 
 ## Related reading
 
