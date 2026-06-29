@@ -361,44 +361,157 @@ fn truncate(s: &str, max: usize) -> String {
 ///
 /// The recipe is expected to emit a JSON object of shape
 /// `{ "facts": [ { "concept": "...", "content": "...",
-/// "source_episode_id": "..." } ] }`. Because the underlying LLM may
-/// wrap the JSON in prose, we scan for the first balanced `{...}`
-/// substring containing a `"facts"` key and parse that.
+/// "source_episode_id": "..." } ] }`. Two real-world sources of noise
+/// sit in front of (or around) that object and must be tolerated:
+///
+/// 1. The underlying LLM may wrap the JSON in prose.
+/// 2. The Copilot CLI prepends ANSI-colored launch / INFO log lines
+///    (e.g. `launching copilot`, `NODE_OPTIONS=…`, and ISO-timestamp
+///    lines wrapped in `\x1b[2m…\x1b[0m` SGR escapes) ahead of the
+///    JSON — see issue #2496.
+///
+/// To recover the payload we first strip ANSI/VT escape sequences, then
+/// scan for the first balanced top-level `{...}` substring that
+/// deserializes into the `{ "facts": [...] }` envelope. The scan
+/// re-anchors at every `{` so brace-bearing log preamble (a stray log
+/// line that happens to contain its own `{...}`) does not defeat it,
+/// and it is string-literal aware so braces inside JSON string values
+/// do not throw off the depth count.
 ///
 /// Returns `Err` when no parseable object is found — the caller
 /// treats `Err` as the retry-safe "no markers set" path.
 fn parse_recipe_output(raw: &str) -> SimardResult<Vec<DistilledFact>> {
-    let trimmed = raw.trim();
-    // Fast path — recipe stdout IS the JSON object.
+    // Strip ANSI/VT escape sequences first so leading colored log noise
+    // (Copilot CLI launch banner, dim-styled timestamps) cannot wedge
+    // the brace scan.
+    let cleaned = strip_ansi_escapes(raw);
+    let trimmed = cleaned.trim();
+
+    // Fast path — the (cleaned) stdout IS the JSON object.
     if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
         return Ok(parsed.into_facts());
     }
-    // Slow path — find the first balanced `{...}` substring and try
-    // each one until something parses. Cheap because the output is
-    // small.
-    if let Some(start) = trimmed.find('{') {
-        let mut depth = 0i32;
-        let bytes = trimmed.as_bytes();
-        for i in start..bytes.len() {
-            match bytes[i] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0
-                        && let Ok(parsed) =
-                            serde_json::from_str::<RecipeEnvelope>(&trimmed[start..=i])
-                    {
-                        return Ok(parsed.into_facts());
-                    }
-                }
-                _ => {}
-            }
-        }
+
+    // Slow path — tolerate arbitrary leading/trailing log noise by
+    // scanning for the first balanced top-level object that matches the
+    // envelope contract.
+    if let Some(parsed) = scan_for_facts_object(trimmed) {
+        return Ok(parsed.into_facts());
     }
+
     Err(SimardError::BridgeError(format!(
         "distill: recipe output did not contain a parseable {{ \"facts\": [...] }} object; raw: {}",
         truncate(raw, 200)
     )))
+}
+
+/// Remove ANSI/VT100 escape sequences from `input`.
+///
+/// Handles the CSI form used for color/SGR codes (`ESC [ … final`,
+/// where `final` is a byte in `0x40..=0x7e`) — which is what the
+/// Copilot CLI emits around its launch banner and timestamps — plus
+/// any other `ESC`-introduced sequence by dropping the `ESC` and the
+/// byte that follows it. Operates byte-wise: ANSI escape bytes are all
+/// ASCII (`ESC` = `0x1b`, finals < `0x80`) so multibyte UTF-8 content
+/// (whose bytes are all `>= 0x80`) is copied through untouched.
+fn strip_ansi_escapes(input: &str) -> String {
+    const ESC: u8 = 0x1b;
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == ESC {
+            // CSI sequence: ESC [ <params/intermediates> <final 0x40..=0x7e>.
+            if i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                i += 2;
+                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1; // consume the final byte
+                }
+                continue;
+            }
+            // Any other escape (e.g. a two-byte C1 form like `ESC M`):
+            // drop the `ESC` and, when present, a single following ASCII
+            // byte. Never consume a byte `>= 0x80` — that would split a
+            // multibyte UTF-8 character (no valid escape uses one).
+            i += 1;
+            if i < bytes.len() && bytes[i] < 0x80 {
+                i += 1;
+            }
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Scan `text` for the first balanced top-level `{...}` substring that
+/// deserializes into a [`RecipeEnvelope`] (i.e. carries a `facts` key).
+///
+/// Re-anchors at every `{` so non-envelope objects in the preamble are
+/// skipped, and tracks JSON string state so braces inside string values
+/// are ignored when matching.
+fn scan_for_facts_object(text: &str) -> Option<RecipeEnvelope> {
+    let bytes = text.as_bytes();
+    let mut search_from = 0;
+    while let Some(rel) = text[search_from..].find('{') {
+        let start = search_from + rel;
+        match matching_brace_end(bytes, start) {
+            Some(end) => {
+                if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(&text[start..=end]) {
+                    return Some(parsed);
+                }
+                // Balanced but not the envelope we want (e.g. a JSON log
+                // line). Resume just past this object rather than at
+                // `start + 1` so its interior is not re-scanned — keeps
+                // the scan linear over a run of balanced log objects and
+                // matches the "first balanced top-level object" contract.
+                search_from = end + 1;
+            }
+            // Unbalanced from this `{` (e.g. a stray brace in a log
+            // line). Advance to the next `{` and try again rather than
+            // giving up — a self-contained object may still follow.
+            None => search_from = start + 1,
+        }
+    }
+    None
+}
+
+/// Return the index of the `}` that closes the `{` at `start`, or
+/// `None` if the braces never balance. String-literal aware: `{`/`}`
+/// inside a double-quoted JSON string (honoring `\` escapes) do not
+/// affect the depth count.
+fn matching_brace_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[derive(serde::Deserialize)]
@@ -504,5 +617,147 @@ mod unit_tests {
     fn parse_recipe_output_errors_when_no_object() {
         let raw = "no json here at all";
         assert!(parse_recipe_output(raw).is_err());
+    }
+
+    // ── issue #2496 regression: tolerate Copilot CLI launch/ANSI preamble ──
+
+    #[test]
+    fn parse_recipe_output_tolerates_ansi_copilot_preamble() {
+        // Captured-shape payload from the live failure (episodes
+        // t=9269/t=9271): the Copilot CLI prepends an ANSI-colored launch
+        // banner plus `NODE_OPTIONS=…` and dim-styled ISO-timestamp INFO
+        // lines ahead of the JSON. The `\x1b[…m` SGR escapes and the log
+        // preamble must be stripped/skipped so the facts object parses.
+        let raw = concat!(
+            "\u{1b}[1mlaunching copilot\u{1b}[0m\n",
+            "\u{1b}[2mNODE_OPTIONS=--max-old-space-size=4096\u{1b}[0m\n",
+            "\u{1b}[2m2026-06-29T12:26:24.123Z\u{1b}[0m \u{1b}[36mINFO\u{1b}[0m starting distill step\n",
+            "{\"facts\":[{\"concept\":\"bug-pattern\",",
+            "\"content\":\"strip ANSI before parsing distill output\",",
+            "\"source_episode_id\":\"epi_9271\"}]}\n",
+        );
+        let facts = parse_recipe_output(raw).expect("ANSI/log preamble must not defeat the parser");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "bug-pattern");
+        assert_eq!(facts[0].source_episode_id, "epi_9271");
+    }
+
+    #[test]
+    fn parse_recipe_output_skips_non_facts_json_log_line() {
+        // A structured log line (its own balanced JSON object with no
+        // `facts` key) precedes the real payload. The scan must re-anchor
+        // past it and land on the envelope rather than failing on the
+        // first `{...}` it encounters.
+        let raw = concat!(
+            "\u{1b}[2m{\"level\":\"info\",\"msg\":\"launching copilot\"}\u{1b}[0m\n",
+            "{\"facts\":[{\"concept\":\"pr-pattern\",",
+            "\"content\":\"re-anchor brace scan\",\"source_episode_id\":\"epi_9269\"}]}",
+        );
+        let facts = parse_recipe_output(raw).expect("must skip the non-facts log object");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "pr-pattern");
+        assert_eq!(facts[0].source_episode_id, "epi_9269");
+    }
+
+    #[test]
+    fn parse_recipe_output_handles_braces_inside_string_values() {
+        // `content` legitimately contains `{` and `}`; the string-literal
+        // aware brace matcher must not let those throw off depth tracking
+        // and truncate the object early.
+        let raw = concat!(
+            "\u{1b}[2mlaunching copilot\u{1b}[0m\n",
+            "{\"facts\":[{\"concept\":\"lesson-learned\",",
+            "\"content\":\"prefer HashMap<K, {V}> over a raw { Vec }\",",
+            "\"source_episode_id\":\"epi_1\"}]}",
+        );
+        let facts =
+            parse_recipe_output(raw).expect("braces inside strings must not break matching");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "lesson-learned");
+        assert!(facts[0].content.contains("{V}"));
+    }
+
+    #[test]
+    fn parse_recipe_output_clean_input_is_unchanged() {
+        // Behaviour for already-clean (no-ANSI, no-preamble) output is
+        // unchanged: a pretty-printed multi-fact envelope still parses.
+        let raw = r#"{
+            "facts": [
+                {"concept":"pr-pattern","content":"a","source_episode_id":"epi_1"},
+                {"concept":"bug-pattern","content":"b","source_episode_id":"epi_2"}
+            ]
+        }"#;
+        let facts = parse_recipe_output(raw).unwrap();
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].concept, "pr-pattern");
+        assert_eq!(facts[1].concept, "bug-pattern");
+    }
+
+    #[test]
+    fn parse_recipe_output_skips_multiple_leading_json_log_objects() {
+        // Several balanced JSON log objects precede the envelope. The
+        // scan must walk past each (resuming past its close) and land on
+        // the first top-level object that carries a `facts` key.
+        let raw = concat!(
+            "\u{1b}[2m{\"ts\":\"t1\",\"msg\":\"launching copilot\"}\u{1b}[0m\n",
+            "{\"ts\":\"t2\",\"msg\":\"NODE_OPTIONS set\"}\n",
+            "{\"ts\":\"t3\",\"level\":\"info\",\"msg\":\"distill step start\"}\n",
+            "{\"facts\":[{\"concept\":\"bug-pattern\",",
+            "\"content\":\"walk past leading log objects\",",
+            "\"source_episode_id\":\"epi_9271\"}]}",
+        );
+        let facts =
+            parse_recipe_output(raw).expect("must skip leading log objects and find the envelope");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "bug-pattern");
+        assert_eq!(facts[0].source_episode_id, "epi_9271");
+    }
+
+    #[test]
+    fn parse_recipe_output_recovers_after_unbalanced_brace_in_log_line() {
+        // A log line containing a stray, unclosed `{` precedes the JSON.
+        // The scan must re-anchor past the dangling brace and still
+        // recover the envelope on the following line.
+        let raw = concat!(
+            "INFO loading config { from disk\n",
+            "{\"facts\":[{\"concept\":\"lesson-learned\",",
+            "\"content\":\"re-anchor past dangling brace\",",
+            "\"source_episode_id\":\"epi_1\"}]}",
+        );
+        let facts =
+            parse_recipe_output(raw).expect("dangling `{` in a log line must not defeat recovery");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "lesson-learned");
+    }
+
+    #[test]
+    fn strip_ansi_escapes_removes_sgr_and_preserves_text() {
+        let s = "\u{1b}[2mdim\u{1b}[0m plain \u{1b}[36mcyan\u{1b}[0m";
+        assert_eq!(strip_ansi_escapes(s), "dim plain cyan");
+    }
+
+    #[test]
+    fn strip_ansi_escapes_preserves_utf8_payload() {
+        // Multibyte UTF-8 bytes are all >= 0x80 and must survive the
+        // byte-wise escape stripping intact.
+        let s = "\u{1b}[2mcafé — résumé\u{1b}[0m";
+        assert_eq!(strip_ansi_escapes(s), "café — résumé");
+    }
+
+    #[test]
+    fn strip_ansi_escapes_non_csi_does_not_split_utf8() {
+        // A bare ESC immediately followed by a multibyte char must drop
+        // only the ESC, never the UTF-8 lead byte (which would corrupt
+        // the character). A two-byte C1 form (ESC + ASCII final) drops
+        // both.
+        assert_eq!(strip_ansi_escapes("a\u{1b}éb"), "aéb");
+        assert_eq!(strip_ansi_escapes("a\u{1b}Mb"), "ab");
+    }
+
+    #[test]
+    fn matching_brace_end_ignores_braces_in_strings() {
+        let s = r#"{"k":"a } b { c"}trailing"#;
+        let end = matching_brace_end(s.as_bytes(), 0).expect("must balance");
+        assert_eq!(&s[0..=end], r#"{"k":"a } b { c"}"#);
     }
 }
