@@ -70,6 +70,10 @@ runs:
         echo 'RUSTFLAGS=-C link-arg=-fuse-ld=mold' >> "$GITHUB_ENV"
 
     - name: Set up Rust
-      uses: dtolnay/rust-toolchain@stable
+      # SHA-pinned for supply-chain safety. This is the HEAD of dtolnay's
+      # `stable` branch, whose action.yml hard-defaults `toolchain: stable`,
+      # so pinning preserves the stable channel exactly (same pin as
+      # release.yml). The `# stable` comment documents the tracked branch.
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       with:
         components: ${{ inputs.rust-components }}
