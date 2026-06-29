@@ -8,6 +8,7 @@ doc_type: howto
 related:
   - ../reference/simard-cli.md
   - ../reference/pr-finalization-pipeline.md
+  - ../concepts/operational-autonomy-model.md
   - ./edit-the-engineer-system-prompt.md
   - ./inspect-and-clean-engineer-worktrees.md
 ---
@@ -187,6 +188,15 @@ is infra/dependency noise *not caused by this PR*, may classify `cargo-audit` or
 [operator override](#the-deterministic-gate-what-simard-merge-pr-enforces) below.
 An unknown red is **always** real and blocking; never assume a new red is
 "probably environmental."
+
+> **Not a contradiction with operational autonomy.** Under the
+> [operational autonomy model](../concepts/operational-autonomy-model.md) Simard
+> self-merges without waiting on a human *approver* — but the **CI-green gate is
+> preserved**, and she may **not** excuse a red check herself. Relaxing an
+> environmental red is the deliberate, audited **human exception** to the CI-green
+> gate, not a weakening of it: autonomy removes the human approval *wait*, never
+> the requirement that checks be green (or a recorded human override of a
+> confirmed-noise red).
 
 ### The deterministic gate (what `simard merge-pr` enforces)
 

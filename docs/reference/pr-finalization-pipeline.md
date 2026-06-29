@@ -146,8 +146,23 @@ land the PR through the **gated merge authority** described in the
 
 - `rysweet/Simard` PR → `simard merge-pr <PR>` (re-checks the objective gates and
   the merge-readiness judge before invoking `gh pr merge --squash --delete-branch`).
-- Cross-repo PR → verify the six criteria yourself, then
-  `gh pr merge --squash --delete-branch <PR> --repo <owner/repo>`.
+- Cross-repo PR in a governed repo → `simard merge-pr <PR> --repo <owner/repo>`,
+  which routes the cross-repo merge through the **same** gated objective-gates +
+  merge-judge authority (see the
+  [cross-repo merge authority reference](./cross-repo-merge-authority.md)). A bare
+  `gh pr merge --squash --delete-branch <PR> --repo <owner/repo>` is the fallback
+  only where `simard merge-pr` is genuinely unavailable.
+
+> **Autonomy note.** For a governed repo with **no required human reviewer**,
+> Simard does not wait on an external approver — the `merge-ready` skill's
+> **required-reviews/approvals criterion** is satisfied once the objective gates
+> and the merge-judge verdict pass, because no *required* approval is
+> outstanding. This does **not** change the six evidence headings above and
+> renumbers nothing; it only resolves the skill's separate reviews/approvals
+> criterion for a repo that has no required reviewer. A *genuinely required*
+> human review (a branch-protection-mandated approval) is still a real blocker.
+> See the
+> [operational autonomy model](../concepts/operational-autonomy-model.md).
 
 Then **close the linked issue** (`Closes #<N>` auto-close for same-repo; explicit
 `gh issue close <N> --repo <owner/repo>` for cross-repo). A fix/implement goal is

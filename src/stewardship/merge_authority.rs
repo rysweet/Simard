@@ -23,8 +23,10 @@
 //!    truth for the evidence criteria — editing the skill template is enough
 //!    to evolve what the judge accepts. **No hardcoded heading lists, byte
 //!    thresholds, or bracket heuristics live in this module any more.**
-//! 4. If all gates pass: `gh pr merge <PR> --squash --delete-branch
-//!    --repo rysweet/Simard` and return [`MergeOutcome::Merged`].
+//! 4. If all gates pass: `gh pr merge <PR> --repo <repo> --squash
+//!    --delete-branch` (the target repo is a parameter — defaulting to
+//!    `rysweet/Simard` at the CLI — so the same gated path lands cross-repo
+//!    PRs) and return [`MergeOutcome::Merged`].
 //! 5. Otherwise return [`MergeOutcome::Refused`] with the first failing
 //!    objective gate, or the judge's blocker summary if every objective gate
 //!    passed.
@@ -126,6 +128,114 @@ pub trait PrGhClient {
     }
 }
 
+/// Max retry attempts for *transient* `gh` read failures (network blips,
+/// GitHub 5xx, secondary rate limits). Mutations are deliberately excluded —
+/// see [`RealPrGhClient::squash_merge`].
+const GH_READ_MAX_RETRIES: u32 = 3;
+
+/// Base backoff (milliseconds) between transient `gh` read retries. Scaled
+/// linearly by attempt number so repeated rate-limit hits back off further.
+const GH_RETRY_BACKOFF_MS: u64 = 500;
+
+/// Heuristic classifier: should a failed `gh` invocation be retried?
+///
+/// Returns `true` only for *transient* network / GitHub-availability failures
+/// (rate limits, 5xx, connection resets, DNS hiccups, TLS/timeouts) that
+/// typically clear after a short backoff. Deterministic failures — auth,
+/// not-found, not-mergeable, malformed args, gate refusals — return `false`
+/// so they surface immediately instead of looping. Mirrors the substring
+/// heuristic the OODA adaptive scaler already uses for 429 detection.
+fn is_transient_gh_failure(reason: &str) -> bool {
+    const TRANSIENT_NEEDLES: [&str; 14] = [
+        "429",
+        "rate limit",
+        "secondary rate",
+        "502",
+        "503",
+        "504",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "could not resolve host",
+        "temporary failure",
+        "try again",
+        "tls handshake",
+        "server error",
+    ];
+    let lower = reason.to_ascii_lowercase();
+    TRANSIENT_NEEDLES
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+/// Run an *idempotent* `gh` read closure, retrying transient failures with a
+/// bounded linear backoff. Read operations (`gh pr view` / `gh pr list`) carry
+/// no side effects, so a retry can never double-apply anything. Deterministic
+/// failures and the exhausted-retry case both return the underlying error.
+fn retry_transient_gh<T>(op: &str, f: impl FnMut() -> SimardResult<T>) -> SimardResult<T> {
+    retry_transient_gh_inner(op, GH_READ_MAX_RETRIES, GH_RETRY_BACKOFF_MS, f)
+}
+
+/// Backoff-parameterized core of [`retry_transient_gh`]. Split out so tests can
+/// exercise the retry/give-up logic with a zero backoff (no real sleeping).
+fn retry_transient_gh_inner<T>(
+    op: &str,
+    max_retries: u32,
+    backoff_ms: u64,
+    mut f: impl FnMut() -> SimardResult<T>,
+) -> SimardResult<T> {
+    let mut attempt = 0u32;
+    loop {
+        match f() {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                let transient = matches!(
+                    &err,
+                    SimardError::MergeAuthorityGhCommandFailed { reason }
+                        if is_transient_gh_failure(reason)
+                );
+                if !transient || attempt >= max_retries {
+                    return Err(err);
+                }
+                attempt += 1;
+                let delay = backoff_ms.saturating_mul(u64::from(attempt));
+                eprintln!(
+                    "[simard] merge-authority: `{op}` transient gh failure \
+                     (attempt {attempt}/{max_retries}), backing off {delay}ms: {err}"
+                );
+                if delay > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                }
+            }
+        }
+    }
+}
+
+/// Spawn `gh <args>` and return its stdout on success. `label` is a
+/// human-readable rendering of the command used verbatim in error messages so
+/// each call site stays a one-liner instead of repeating the
+/// spawn → status-check → `MergeAuthorityGhCommandFailed` boilerplate. Both the
+/// spawn-failure and non-zero-exit branches return the same error variant the
+/// retry classifier inspects, so transient-retry behaviour is unchanged.
+fn run_gh_checked(label: &str, args: &[&str]) -> SimardResult<Vec<u8>> {
+    let output = std::process::Command::new("gh")
+        .args(args)
+        .output()
+        .map_err(|e| SimardError::MergeAuthorityGhCommandFailed {
+            reason: format!("failed to spawn `{label}`: {e}"),
+        })?;
+    if !output.status.success() {
+        return Err(SimardError::MergeAuthorityGhCommandFailed {
+            reason: format!(
+                "`{label}` exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    Ok(output.stdout)
+}
+
 /// Production implementation that shells out to the `gh` binary.
 #[derive(Default)]
 pub struct RealPrGhClient;
@@ -138,37 +248,34 @@ impl RealPrGhClient {
 
 impl PrGhClient for RealPrGhClient {
     fn view_pr(&self, repo: &str, pr_number: u32) -> SimardResult<PrSnapshot> {
-        let pr = pr_number.to_string();
-        let output = std::process::Command::new("gh")
-            .args([
-                "pr",
-                "view",
-                &pr,
-                "--repo",
-                repo,
-                "--json",
-                "body,statusCheckRollup,mergeable,reviewDecision,baseRefName",
-            ])
-            .output()
-            .map_err(|e| SimardError::MergeAuthorityGhCommandFailed {
-                reason: format!("failed to spawn `gh pr view`: {e}"),
-            })?;
-        if !output.status.success() {
-            return Err(SimardError::MergeAuthorityGhCommandFailed {
-                reason: format!(
-                    "`gh pr view {pr} --repo {repo}` exited {}: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            });
-        }
-        parse_pr_view_json(&output.stdout)
+        retry_transient_gh("gh pr view", || {
+            let pr = pr_number.to_string();
+            let stdout = run_gh_checked(
+                &format!("gh pr view {pr} --repo {repo}"),
+                &[
+                    "pr",
+                    "view",
+                    &pr,
+                    "--repo",
+                    repo,
+                    "--json",
+                    "body,statusCheckRollup,mergeable,reviewDecision,baseRefName",
+                ],
+            )?;
+            parse_pr_view_json(&stdout)
+        })
     }
 
+    /// Squash-merge and delete the head branch. **Single attempt by design:**
+    /// unlike the idempotent read paths this is a mutation, so the safe retry
+    /// boundary is the gate-revalidating [`merge_pr_if_merge_ready`] cycle —
+    /// which re-`view`s the PR and re-checks every gate before any new merge
+    /// attempt — not a blind inner loop that could act on stale PR state.
     fn squash_merge(&self, repo: &str, pr_number: u32) -> SimardResult<()> {
         let pr = pr_number.to_string();
-        let output = std::process::Command::new("gh")
-            .args([
+        run_gh_checked(
+            &format!("gh pr merge {pr} --repo {repo} --squash --delete-branch"),
+            &[
                 "pr",
                 "merge",
                 &pr,
@@ -176,52 +283,31 @@ impl PrGhClient for RealPrGhClient {
                 repo,
                 "--squash",
                 "--delete-branch",
-            ])
-            .output()
-            .map_err(|e| SimardError::MergeAuthorityGhCommandFailed {
-                reason: format!("failed to spawn `gh pr merge`: {e}"),
-            })?;
-        if !output.status.success() {
-            return Err(SimardError::MergeAuthorityGhCommandFailed {
-                reason: format!(
-                    "`gh pr merge {pr} --repo {repo} --squash --delete-branch` exited {}: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            });
-        }
+            ],
+        )?;
         Ok(())
     }
 
     fn list_open_prs(&self, repo: &str, limit: u32) -> SimardResult<Vec<OpenPrSummary>> {
-        let limit_s = limit.to_string();
-        let output = std::process::Command::new("gh")
-            .args([
-                "pr",
-                "list",
-                "--repo",
-                repo,
-                "--state",
-                "open",
-                "--json",
-                "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url",
-                "--limit",
-                &limit_s,
-            ])
-            .output()
-            .map_err(|e| SimardError::MergeAuthorityGhCommandFailed {
-                reason: format!("failed to spawn `gh pr list`: {e}"),
-            })?;
-        if !output.status.success() {
-            return Err(SimardError::MergeAuthorityGhCommandFailed {
-                reason: format!(
-                    "`gh pr list --repo {repo} --state open` exited {}: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            });
-        }
-        parse_pr_list_json(&output.stdout)
+        retry_transient_gh("gh pr list", || {
+            let limit_s = limit.to_string();
+            let stdout = run_gh_checked(
+                &format!("gh pr list --repo {repo} --state open"),
+                &[
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--state",
+                    "open",
+                    "--json",
+                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url",
+                    "--limit",
+                    &limit_s,
+                ],
+            )?;
+            parse_pr_list_json(&stdout)
+        })
     }
 }
 
@@ -623,6 +709,18 @@ mod tests {
         fn merge_call_count(&self) -> usize {
             self.merge_calls.lock().unwrap().len()
         }
+        /// Repos passed to `squash_merge`, in call order — lets cross-repo
+        /// tests assert the gated authority threads the target repo through to
+        /// the underlying `gh pr merge --repo <repo>` rather than a hardcoded
+        /// `rysweet/Simard`.
+        fn merged_repos(&self) -> Vec<String> {
+            self.merge_calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(repo, _pr)| repo.clone())
+                .collect()
+        }
     }
 
     impl PrGhClient for FakePrGhClient {
@@ -745,6 +843,39 @@ mod tests {
         );
         assert_eq!(gh.merge_call_count(), 1);
         assert_eq!(judge.call_count(), 1, "judge must be called exactly once");
+    }
+
+    // ─── Cross-repo: the same gated authority merges PRs in any governed repo ─
+
+    #[test]
+    fn merges_cross_repo_pr_through_the_same_gated_authority() {
+        // The gated merge authority must work for ANY repo Simard governs, not
+        // only rysweet/Simard, so supply-chain hardening PRs in amplihack-rs,
+        // RustyClawd, etc. land through the objective-gates + judge path rather
+        // than a bare `gh pr merge`. The target repo is threaded straight
+        // through to `gh pr merge --repo <repo>`.
+        let cross_repo = "rysweet/amplihack-rs";
+        let gh = FakePrGhClient::new();
+        gh.seed_view(Ok(good_snapshot()));
+        gh.seed_merge(Ok(()));
+        let judge = FakeMergeJudge::ready();
+
+        let outcome = run(820, cross_repo, &gh, &default_allowlist(), &judge).unwrap();
+
+        assert_eq!(
+            outcome,
+            MergeOutcome::Merged {
+                pr_number: 820,
+                repo: cross_repo.to_string(),
+            }
+        );
+        assert_eq!(gh.merge_call_count(), 1);
+        assert_eq!(
+            gh.merged_repos(),
+            vec![cross_repo.to_string()],
+            "the gated authority must squash-merge against the target repo, not a hardcoded rysweet/Simard"
+        );
+        assert_eq!(judge.call_count(), 1, "judge still gates cross-repo merges");
     }
 
     // ─── Judge verdicts ───────────────────────────────────────────────────
@@ -1247,5 +1378,105 @@ mod tests {
     fn parse_pr_list_json_accepts_empty_array() {
         let prs = parse_pr_list_json(b"[]").unwrap();
         assert!(prs.is_empty());
+    }
+
+    // ─── Transient gh retry / resilience (Step 8b) ─────────────────────────
+
+    fn gh_failure(reason: &str) -> SimardError {
+        SimardError::MergeAuthorityGhCommandFailed {
+            reason: reason.to_string(),
+        }
+    }
+
+    #[test]
+    fn transient_classifier_matches_network_and_rate_limit_failures() {
+        for reason in [
+            "`gh pr view 5 --repo o/r` exited 1: HTTP 429: API rate limit exceeded",
+            "GraphQL: something went wrong (502 Bad Gateway)",
+            "503 Service Unavailable",
+            "error connecting: connection reset by peer",
+            "failed to spawn `gh pr view`: dial tcp: i/o timeout",
+            "could not resolve host: api.github.com",
+            "You have exceeded a secondary rate limit. Please wait a few minutes",
+            "net/http: TLS handshake timeout",
+        ] {
+            assert!(
+                is_transient_gh_failure(reason),
+                "expected transient classification for: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn transient_classifier_rejects_deterministic_failures() {
+        for reason in [
+            "`gh pr view 5` exited 1: GraphQL: Could not resolve to a PullRequest (not found)",
+            "Pull request #5 is not mergeable",
+            "gh: Not Found (HTTP 404)",
+            "authentication required: run `gh auth login`",
+            "unknown flag: --repo",
+        ] {
+            assert!(
+                !is_transient_gh_failure(reason),
+                "expected deterministic (non-retry) classification for: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_succeeds_after_transient_then_ok() {
+        let calls = Mutex::new(0u32);
+        let result: SimardResult<u8> = retry_transient_gh_inner("test", 3, 0, || {
+            let mut n = calls.lock().unwrap();
+            *n += 1;
+            if *n < 3 {
+                Err(gh_failure("HTTP 502 Bad Gateway"))
+            } else {
+                Ok(42)
+            }
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(*calls.lock().unwrap(), 3, "should retry twice then succeed");
+    }
+
+    #[test]
+    fn retry_gives_up_after_exhausting_attempts_on_transient() {
+        let calls = Mutex::new(0u32);
+        let result: SimardResult<u8> = retry_transient_gh_inner("test", 2, 0, || {
+            *calls.lock().unwrap() += 1;
+            Err(gh_failure("connection reset by peer"))
+        });
+        assert!(matches!(
+            result,
+            Err(SimardError::MergeAuthorityGhCommandFailed { .. })
+        ));
+        // 1 initial attempt + 2 retries == 3 invocations.
+        assert_eq!(*calls.lock().unwrap(), 3);
+    }
+
+    #[test]
+    fn retry_does_not_retry_deterministic_failures() {
+        let calls = Mutex::new(0u32);
+        let result: SimardResult<u8> = retry_transient_gh_inner("test", 3, 0, || {
+            *calls.lock().unwrap() += 1;
+            Err(gh_failure("Pull request is not mergeable"))
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            *calls.lock().unwrap(),
+            1,
+            "deterministic failure must not retry"
+        );
+    }
+
+    #[test]
+    fn retry_does_not_retry_on_immediate_success() {
+        let calls = Mutex::new(0u32);
+        let result: SimardResult<u8> = retry_transient_gh_inner("test", 3, 0, || {
+            *calls.lock().unwrap() += 1;
+            Ok(7u8)
+        });
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(*calls.lock().unwrap(), 1);
     }
 }

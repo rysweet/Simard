@@ -33,7 +33,7 @@ to fix CI-blocking failures on `main` (issue
 
 Tests that hardcode numeric limits (e.g. "create 7 goals, expect 5
 active and 2 in backlog") break silently whenever the underlying
-constant changes. When `MAX_ACTIVE_GOALS` was bumped from 5 → 7, the
+constant changes. When `MAX_ACTIVE_GOALS` was bumped from 5 → 7 → 20, the
 overflow test created exactly 7 decisions — all of which now fit in the
 active set, leaving the backlog empty and failing the assertion.
 
@@ -78,11 +78,11 @@ code changes.
 `MAX_ACTIVE_GOALS` is defined in `src/goal_curation/types.rs`:
 
 ```rust
-pub const MAX_ACTIVE_GOALS: usize = 7;
+pub const MAX_ACTIVE_GOALS: usize = 20;
 ```
 
 A test-time assertion in the same module (`max_active_goals_constant`
-asserts `MAX_ACTIVE_GOALS == 7`) guards against accidental changes.
+asserts `MAX_ACTIVE_GOALS == 20`) guards against accidental changes.
 If you intentionally change the constant, update that test — the
 overflow test will adapt automatically.
 

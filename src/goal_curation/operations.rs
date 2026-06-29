@@ -331,7 +331,7 @@ pub(super) fn read_latest_snapshot(bridge: &dyn CognitiveMemoryOps) -> Option<Go
 /// board, in whichever set the in-flight board placed it.
 ///
 /// **Active capacity.** If the merged active set exceeds
-/// [`MAX_ACTIVE_GOALS`] (= 5), it is truncated using a deterministic sort
+/// [`MAX_ACTIVE_GOALS`], it is truncated using a deterministic sort
 /// key:
 ///
 /// 1. `priority` ascending (lower numeric value = higher importance, kept first)

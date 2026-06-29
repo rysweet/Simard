@@ -301,7 +301,7 @@ guard.
 
 ## Active-goal cap and placement
 
-Decomposition must not blow the active cap. `MAX_ACTIVE_GOALS` is **7**
+Decomposition must not blow the active cap. `MAX_ACTIVE_GOALS` is **20**
 (`src/goal_curation/types.rs`). When `decompose_goal` writes children it
 keeps the active set within that cap by one of:
 
@@ -481,7 +481,7 @@ $ simard memory dump --type=facts --limit=200 | grep 'goal-edge:decomposes_into'
   **idempotent** — the edge dedups (changed edges supersede, they do not
   accumulate).
 - Parent progress **rolls up** from children via `rollup_parent_progress`.
-- Decomposition never pushes the active set past `MAX_ACTIVE_GOALS = 7`;
+- Decomposition never pushes the active set past `MAX_ACTIVE_GOALS = 20`;
   overflow children land in the backlog and stay linked to the parent through
   their `decomposes_into` edges (board children additionally carry the cheap
   `parent_goal_id` back-reference).

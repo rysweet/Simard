@@ -196,7 +196,7 @@ edit, the second writer's view of that one goal wins (see "Best-effort
 guarantee" below).
 
 **Active capacity truncation.** If the merged active set exceeds
-`MAX_ACTIVE_GOALS` (= 5), it is truncated using a **deterministic sort key**
+`MAX_ACTIVE_GOALS` (= 20), it is truncated using a **deterministic sort key**
 applied before the cut:
 
 1. `priority` ascending (lower numeric value = higher importance, kept first).
