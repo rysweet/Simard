@@ -1,0 +1,54 @@
+name: "Recipe-Output Extractor Hardening (#2484)"
+description: "Outside-in coverage for the shared recipe-runner-rs stdout extractor: ANSI/log/banner stripping plus last-balanced JSON and verdict-keyword recovery, exercised through the hermetic unit suite for the shared module and its distill-path adoption."
+version: "1.0.0"
+
+config:
+  timeout: 360000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 360000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Shared extractor recovers JSON facts and verdicts from noisy stdout"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/recipe-output-extractor.sh"
+    timeout: 360000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "recipe-output"
+    - "brain-reliability"
+    - "memory-distill"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

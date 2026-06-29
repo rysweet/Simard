@@ -134,6 +134,7 @@ impl MergeJudge for RecipeMergeJudge {
         let (judgment, outcome) = parse_merge_outcome(&base_raw);
         if !outcome.is_parse_failure() {
             record_verdict_parse_metric(BrainPhase::MergeJudge, &pr_label, outcome, 1);
+            crate::recipe_output::record_parse_outcome("merge_judge", true);
             return Ok(judgment);
         }
 
@@ -152,6 +153,10 @@ impl MergeJudge for RecipeMergeJudge {
             |o| verdict_label(&o.verdict).to_string(),
         );
         record_verdict_parse_metric(BrainPhase::MergeJudge, &pr_label, final_outcome, attempts);
+        crate::recipe_output::record_parse_outcome(
+            "merge_judge",
+            !final_outcome.is_parse_failure(),
+        );
         Ok(final_judgment)
     }
 
@@ -298,7 +303,12 @@ fn truncate(s: &str, max: usize) -> String {
 /// - "ready" (without "not" prefix) → Ready
 /// - None found → error
 pub fn parse_merge_verdict_from_text(text: &str) -> Result<JudgeOutcome, String> {
-    let trimmed = text.trim();
+    // Strip ANSI escapes + drop whole tracing-log / runner-banner lines first
+    // (shared #2484 extractor) so a noise-obscured verdict is not silently
+    // missed and a dropped log line's keyword substring (e.g. "already"
+    // containing "ready") cannot masquerade as a verdict.
+    let cleaned = crate::recipe_output::strip_recipe_noise(text);
+    let trimmed = cleaned.trim();
     if trimmed.is_empty() {
         return Err(format!("{ADAPTER_TAG}: recipe returned empty output"));
     }
@@ -327,7 +337,7 @@ pub fn parse_merge_verdict_from_text(text: &str) -> Result<JudgeOutcome, String>
     } else {
         Err(format!(
             "{ADAPTER_TAG}: no verdict keyword (ready/not_ready/unclear) found in recipe output; raw={:?}",
-            truncate(text, 200)
+            truncate(trimmed, 200)
         ))
     }
 }
@@ -433,6 +443,36 @@ mod tests {
             out.rationale.contains("Comprehensive"),
             "rationale should include full text: {}",
             out.rationale
+        );
+    }
+
+    #[test]
+    fn text_verdict_drops_ready_substring_in_noise_log_line() {
+        // #2484: "already" contains "ready"; on a raw scan the tracing-log line
+        // would falsely yield Verdict::Ready. After shared noise-stripping the
+        // log line is dropped and the remaining prose carries no verdict, so the
+        // judge correctly errors (→ fail-closed) instead of fabricating a Ready.
+        let text = "2026-06-28T08:08:58.151133Z  INFO judge: already scored pr\n\
+                    The assessment is complete but the prose is inconclusive.";
+        let err = parse_merge_verdict_from_text(text).unwrap_err();
+        assert!(err.contains("no verdict keyword"), "got: {err}");
+    }
+
+    #[test]
+    fn text_verdict_recovers_not_ready_past_ansi_log_prefix() {
+        // The verdict trails an ANSI-coloured tracing-log line. The shared
+        // extractor strips both so the real not_ready verdict is recovered and
+        // its rationale carries no log/ANSI noise.
+        let esc = '\u{1b}';
+        let text = format!(
+            "{esc}[2m2026-06-28T08:08:58.151133Z{esc}[0m  INFO judge: scoring\n\
+             Verdict: not_ready — missing test plan."
+        );
+        let out = parse_merge_verdict_from_text(&text).unwrap();
+        assert_eq!(out.verdict, Verdict::NotReady);
+        assert!(
+            !out.rationale.contains("INFO judge"),
+            "log line must be dropped"
         );
     }
 }

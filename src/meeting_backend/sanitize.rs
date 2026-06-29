@@ -110,26 +110,13 @@ pub fn sanitize_agent_output(raw: &str) -> String {
     result.trim().to_string()
 }
 
-/// Strip ANSI escape sequences (CSI sequences: ESC [ params final-byte).
+/// Strip ANSI escape sequences (CSI/OSC/2-char) from `s`.
+///
+/// Delegates to the single shared, hardened stripper
+/// [`crate::recipe_output::strip_ansi`] (issue #2484) so this crate has exactly
+/// one ANSI-stripping implementation rather than several copy-pasted ones.
 pub fn strip_ansi_escapes(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if let Some(next) = chars.next()
-                && next == '['
-            {
-                for ch in chars.by_ref() {
-                    if ch.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    crate::recipe_output::strip_ansi(s).into_owned()
 }
 
 /// Detect lines that are agent infrastructure noise, not conversational content.

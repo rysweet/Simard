@@ -897,12 +897,16 @@ impl RecipeRunnerSubprocess {
 impl DistillRecipeRunner for RecipeRunnerSubprocess {
     fn run(&self, episodes: &[CognitiveEpisode]) -> SimardResult<Vec<DistilledFact>> {
         let raw = self.invoke_recipe(episodes, false)?;
-        parse_recipe_output(&raw)
+        let parsed = parse_recipe_output(&raw);
+        crate::recipe_output::record_parse_outcome("distill", parsed.is_ok());
+        parsed
     }
 
     fn run_all(&self, episodes: &[CognitiveEpisode]) -> SimardResult<DistillOutput> {
         let raw = self.invoke_recipe(episodes, false)?;
-        parse_recipe_output_full(&raw)
+        let parsed = parse_recipe_output_full(&raw);
+        crate::recipe_output::record_parse_outcome("distill", parsed.is_ok());
+        parsed
     }
 
     fn run_all_reinforced(
@@ -914,7 +918,9 @@ impl DistillRecipeRunner for RecipeRunnerSubprocess {
         // `strict_json_instruction` context var into the recipe so the agent
         // reply is reinforced to be ONLY the `{ "facts": [...] }` object.
         let raw = self.invoke_recipe(episodes, strict_json)?;
-        parse_recipe_output_full(&raw)
+        let parsed = parse_recipe_output_full(&raw);
+        crate::recipe_output::record_parse_outcome("distill", parsed.is_ok());
+        parsed
     }
 }
 
@@ -1083,26 +1089,55 @@ pub(crate) fn parse_recipe_output_full(raw: &str) -> SimardResult<DistillOutput>
 /// inside JSON string literals, respecting `\"` escapes) so a brace inside a
 /// fact's `content` cannot corrupt depth accounting.
 fn scan_for_facts_object(text: &str) -> Option<DistillOutput> {
-    // Strip ANSI escape sequences first. `recipe-runner-rs` / the agent binary
-    // render their tracing logs into the captured step `output` with ANSI colour
-    // codes — the t=7919 distill parse-failure's step output began with a dimmed
-    // `\x1b[2m<RFC3339 timestamp>` prefix. A raw `ESC` (`0x1b`) byte is invalid
-    // inside a JSON document, so when those codes colourise or interleave the
-    // agent's `{ "facts": [...] }` answer `serde_json` rejects the span and the
-    // whole 20-episode batch silently defers. Removing the escapes before the
-    // balanced-brace scan recovers the buried payload (issues #2461 / #2401).
-    let cleaned = strip_ansi_escapes(text);
-    let trimmed = cleaned.trim();
+    // Try two cleaned views of the noisy step output, mirroring the shared
+    // `recipe_output::extract_json_payload` dual pass (issue #2484):
+    //
+    // 1. `strip_recipe_noise` strips ANSI escapes AND drops whole tracing/log
+    //    and runner-banner lines — this removes the `\x1b[2m<RFC3339 timestamp>`
+    //    log prefix that made `serde_json` reject the span (the t=7919 / #2461 /
+    //    #2484 distill parse-failure) and recovers a payload whose pretty body
+    //    has an interleaved tracing line.
+    // 2. `strip_ansi` is line-preserving — it recovers a payload that sits on
+    //    the SAME physical line as a leading timestamp/log prefix, which view 1
+    //    would otherwise drop wholesale.
+    //
+    // Both views are clean-path zero-copy (`Cow::Borrowed`) when stdout carries
+    // no `ESC` byte and no droppable line, so adopting the shared helper does
+    // not change behaviour on clean output. A non-empty facts object from
+    // either view wins; an empty `{"facts":[]}` "nothing to distill" answer is
+    // kept only as a fallback when neither view yields a populated object.
+    let mut empty_fallback: Option<DistillOutput> = None;
+    for cleaned in [
+        crate::recipe_output::strip_recipe_noise(text),
+        crate::recipe_output::strip_ansi(text),
+    ] {
+        if let Some(output) = scan_cleaned_for_facts(cleaned.trim()) {
+            if !output.facts.is_empty() || !output.procedures.is_empty() {
+                return Some(output);
+            }
+            if empty_fallback.is_none() {
+                empty_fallback = Some(output);
+            }
+        }
+    }
+    empty_fallback
+}
+
+/// Scan an already noise-stripped `trimmed` string for a `{ "facts": [...] }`
+/// object, preferring the LAST *non-empty* balanced top-level object (the
+/// agent's final answer trails any banner/thinking output) and falling back to
+/// the last parseable empty object. The ANSI/log/banner stripping that produces
+/// `trimmed` lives in [`scan_for_facts_object`].
+fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
     // Fast path — the text IS the JSON object.
     if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
         return Some(parsed.into_output());
     }
     // Slow path — among every balanced top-level `{...}` substring, prefer the
-    // facts from the LAST *non-empty* one that parses (the agent's final answer
-    // trails any banner/thinking output). Falling back to the last parseable
-    // object only when none carry facts/procedures preserves a legitimate
-    // `{"facts":[]}` "nothing worth distilling" answer while never letting an
-    // accidental trailing empty object shadow an earlier populated one.
+    // facts from the LAST *non-empty* one that parses. Falling back to the last
+    // parseable object only when none carry facts/procedures preserves a
+    // legitimate `{"facts":[]}` "nothing worth distilling" answer while never
+    // letting an accidental trailing empty object shadow an earlier populated one.
     let mut empty_fallback: Option<DistillOutput> = None;
     for (start, end) in balanced_object_spans(trimmed).into_iter().rev() {
         if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(&trimmed[start..end]) {
@@ -1162,75 +1197,6 @@ fn balanced_object_spans(s: &str) -> Vec<(usize, usize)> {
         }
     }
     spans
-}
-
-/// Strip ANSI escape sequences (CSI/SGR colour codes, OSC strings, and other
-/// simple `ESC x` two-byte escapes) from `s`.
-///
-/// `recipe-runner-rs` and the agent binary render their tracing logs into the
-/// captured step `output` with ANSI colour codes — the t=7919 distill
-/// parse-failure's step output began with a dimmed `\x1b[2m<RFC3339 timestamp>`
-/// prefix. A raw `ESC` (`0x1b`) byte is never valid inside a JSON document, so
-/// when those codes colourise or interleave the agent's `{ "facts": [...] }`
-/// answer, `serde_json` rejects the span and the batch silently defers (the
-/// "step output did not contain a parseable { facts } object" parse-failure).
-/// Removing the escapes before the balanced-brace scan recovers the payload.
-///
-/// Only RAW `0x1b` bytes are removed: a legitimately JSON-escaped `\u001b`
-/// inside fact content is the ASCII run `\`,`u`,`0`,`0`,`1`,`b` (no raw ESC) and
-/// is left untouched. Multi-byte UTF-8 content is preserved verbatim because
-/// every byte that is not part of an ASCII escape sequence is copied as-is.
-/// Returns the input unchanged (borrowed, no allocation) when it carries no
-/// `ESC` byte — the overwhelmingly common clean-output case.
-fn strip_ansi_escapes(s: &str) -> std::borrow::Cow<'_, str> {
-    let bytes = s.as_bytes();
-    if !bytes.contains(&0x1b) {
-        return std::borrow::Cow::Borrowed(s);
-    }
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != 0x1b {
-            out.push(bytes[i]);
-            i += 1;
-            continue;
-        }
-        // Consume the `ESC` and classify the sequence that follows.
-        i += 1;
-        match bytes.get(i) {
-            // CSI: `ESC [` params/intermediates until a final byte 0x40..=0x7e
-            // (e.g. `\x1b[2m`, `\x1b[0m`, `\x1b[38;5;245m`).
-            Some(b'[') => {
-                i += 1;
-                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    i += 1; // consume the final byte
-                }
-            }
-            // OSC: `ESC ]` … terminated by BEL (`0x07`) or ST (`ESC \`).
-            Some(b']') => {
-                i += 1;
-                while i < bytes.len() {
-                    if bytes[i] == 0x07 {
-                        i += 1;
-                        break;
-                    }
-                    if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'\\') {
-                        i += 2;
-                        break;
-                    }
-                    i += 1;
-                }
-            }
-            // Any other two-byte escape (charset select, etc.) — drop `ESC` + 1.
-            Some(_) => i += 1,
-            // Trailing lone `ESC` — nothing else to drop.
-            None => {}
-        }
-    }
-    std::borrow::Cow::Owned(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// The `recipe-runner-rs` 0.3.6 `--output-format json` envelope. Only the
@@ -1790,24 +1756,49 @@ mod unit_tests {
         assert!(facts.is_empty());
     }
 
-    // ── t=7919: ANSI-coded tracing-log noise in step output ──────────────
+    // ── t=7919 / #2484: ANSI-coded tracing-log + banner noise in step output ──
 
     #[test]
-    fn strip_ansi_escapes_removes_csi_and_preserves_text_and_utf8() {
+    fn parse_recipe_output_recovers_from_ansi_log_noise() {
+        // #2484 live-evidence shape: the distill step output begins with the
+        // dimmed `\x1b[2m<RFC3339 timestamp>` tracing prefix, then the agent's
+        // facts object on the next line. The raw span carries `ESC` bytes so it
+        // is invalid JSON; the shared `strip_recipe_noise` adoption drops the
+        // ANSI-coloured log line and recovers the buried payload.
         let esc = '\u{1b}';
-        let input = format!("{esc}[2mdim{esc}[0m plain {esc}[38;5;245mgrey{esc}[0m — café");
-        assert_eq!(strip_ansi_escapes(&input), "dim plain grey — café");
-        // No ESC byte → returned borrowed with no allocation.
-        assert!(matches!(
-            strip_ansi_escapes("no escapes here"),
-            std::borrow::Cow::Borrowed(_)
-        ));
-        // A JSON-escaped `\u001b` in content is an ASCII run (not a raw ESC) and
-        // must be left untouched so legitimate fact content is never mangled.
-        assert_eq!(
-            strip_ansi_escapes(r"literal \u001b stays"),
-            r"literal \u001b stays"
+        let raw = format!(
+            "{esc}[2m2026-06-28T08:08:58.151133Z{esc}[0m {esc}[36m INFO{esc}[0m simard::distill: run\n\
+             {{\"facts\":[{{\"concept\":\"lesson-learned\",\
+             \"content\":\"shared extractor recovered me\",\"source_episode_id\":\"epi_8451\"}}]}}"
         );
+        // The raw, un-stripped span must NOT parse (the silent-drop failure).
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&raw).is_err(),
+            "raw ANSI/log-noised span must be unparseable JSON"
+        );
+        let facts = parse_recipe_output(&raw).expect("shared extractor must recover facts");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "lesson-learned");
+        assert_eq!(facts[0].content, "shared extractor recovered me");
+    }
+
+    #[test]
+    fn parse_recipe_output_recovers_from_runner_banner() {
+        // New capability over the former distill-private ANSI-only stripper:
+        // `strip_recipe_noise` ALSO drops the recipe-runner text-mode summary
+        // banner lines that can prefix the agent's payload, which the old
+        // ANSI-only path left in place (defeating the balanced-brace scan when
+        // a banner line itself carried stray braces).
+        let raw = "Recipe: distill-episodes SUCCESS (36.0s)\n\
+                   Steps: 1/1 completed\n\
+                   [completed] distill (36.0s)\n\
+                   {\"facts\":[{\"concept\":\"bug-pattern\",\
+                   \"content\":\"runner banner must be dropped\",\
+                   \"source_episode_id\":\"epi_9\"}]}";
+        let facts = parse_recipe_output(raw).expect("banner-prefixed payload must parse");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "bug-pattern");
+        assert_eq!(facts[0].content, "runner banner must be dropped");
     }
 
     #[test]
