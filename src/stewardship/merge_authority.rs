@@ -23,8 +23,10 @@
 //!    truth for the evidence criteria — editing the skill template is enough
 //!    to evolve what the judge accepts. **No hardcoded heading lists, byte
 //!    thresholds, or bracket heuristics live in this module any more.**
-//! 4. If all gates pass: `gh pr merge <PR> --squash --delete-branch
-//!    --repo rysweet/Simard` and return [`MergeOutcome::Merged`].
+//! 4. If all gates pass: `gh pr merge <PR> --repo <repo> --squash
+//!    --delete-branch` (the target repo is a parameter — defaulting to
+//!    `rysweet/Simard` at the CLI — so the same gated path lands cross-repo
+//!    PRs) and return [`MergeOutcome::Merged`].
 //! 5. Otherwise return [`MergeOutcome::Refused`] with the first failing
 //!    objective gate, or the judge's blocker summary if every objective gate
 //!    passed.
