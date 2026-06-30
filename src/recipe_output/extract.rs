@@ -244,12 +244,16 @@ fn scan_balanced(bytes: &[u8], start: usize) -> Option<usize> {
     None
 }
 
-/// Return every balanced top-level `{…}` span in `s`, in source order.
+/// Return every balanced `{…}` span in `s`, in source order, by trying each
+/// `{` opener in turn.
 ///
-/// String-literal aware (braces inside JSON strings are ignored). Used by
-/// callers that need to try each candidate against a typed envelope — e.g.
-/// distillation parses each span as a `{ "facts": [...] }` object and keeps
-/// the first that deserialises.
+/// String-literal aware (braces inside JSON strings are ignored). A `{` that
+/// never closes — an unmatched opener in leading prose, e.g. a code fragment
+/// like `fn f() {` — is skipped so a genuinely balanced object *after* it is
+/// still found, rather than being demoted to a nested span and lost (relied on
+/// by distillation, issue #2508). Used by callers that need to try each
+/// candidate against a typed envelope — e.g. distillation parses each span as a
+/// `{ "facts": [...] }` object and keeps the first that deserialises.
 pub fn balanced_objects(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut spans = Vec::new();
@@ -462,6 +466,16 @@ mod tests {
     fn balanced_objects_handles_escaped_quote_in_string() {
         let s = r#"{"q":"he said \"}\" loudly"}"#;
         assert_eq!(balanced_objects(s), vec![s]);
+    }
+
+    #[test]
+    fn balanced_objects_skips_unmatched_leading_brace() {
+        // An unmatched, never-closing `{` in leading prose (e.g. a code fragment
+        // such as `fn f() {`) must not anchor the scan and swallow the genuinely
+        // balanced object that follows it — the candidate restart recovers it
+        // (relied on by episode distillation, issue #2508).
+        let s = r#"prefix fn f() { then {"facts":[]}"#;
+        assert_eq!(balanced_objects(s), vec![r#"{"facts":[]}"#]);
     }
 
     #[test]
