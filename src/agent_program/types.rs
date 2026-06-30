@@ -7,7 +7,7 @@ use crate::metadata::BackendDescriptor;
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
 use crate::session::SessionId;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AgentProgramContext {
     pub session_id: SessionId,
     pub identity_name: String,

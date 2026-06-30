@@ -141,7 +141,7 @@ throughout the codebase (e.g., `list_via_reader()`,
 
 ## Limit sizing
 
-`GOAL_STORE_LIST_LIMIT` is set to `256`. With `MAX_ACTIVE_GOALS = 5`
+`GOAL_STORE_LIST_LIMIT` is set to `256`. With `MAX_ACTIVE_GOALS = 20`
 and typical churn (a handful of status transitions per goal), 256 raw
 facts covers realistic deployments without risking truncation. The
 previous hardcoded value of `20` was too small: a single goal updated

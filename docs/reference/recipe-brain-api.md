@@ -1,7 +1,7 @@
 ---
 title: RecipeBrain API reference
 description: Public API for the unified RecipeBrain struct and its standalone parse functions.
-last_updated: 2026-05-27
+last_updated: 2026-06-28
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -11,6 +11,7 @@ related:
   - ./ooda-brain-api.md
   - ./ooda-brain-decision-protocol.md
   - ./text-parsing-wire-formats.md
+  - ./recipe-brain-verdict-parsing.md
 ---
 
 # RecipeBrain API reference
@@ -69,8 +70,22 @@ Constructs a `RecipeBrain` if all preconditions are met. Returns `None` when:
 fn judge_decision(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment>
 ```
 
-Invokes `recipe-runner-rs` with context vars `goal_id`, `urgency`, `reason`.
-Parses stdout via `parse_action_from_text()`.
+Invokes `recipe-runner-rs` with `--output-format json` and context vars
+`goal_id`, `urgency`, `reason` (plus the ladder rung's `escalation_note`),
+extracts the agent decision text from the JSON envelope via
+`extract_recipe_decision_output`, and parses it via `parse_action_outcome` (the
+outcome-classifying variant; `parse_action_from_text` is the thin decision-only
+wrapper).
+
+> **Fixed in [#2421](https://github.com/rysweet/Simard/issues/2421).** This call
+> site reads the agent decision from the `--output-format json` envelope
+> (`step_results[].output`), never the default text-mode summary banner. On a
+> parse-miss it runs `run_brain_ladder` (the shared escalation ladder) and only
+> after the ladder is exhausted falls back **loudly** to `AdvanceGoal` (via
+> `default_advance_goal`), classified `DefaultEmpty` / `DefaultMalformed` —
+> distinct from a genuine LLM `advance_goal`. Each invocation emits a
+> `brain_verdict_parsed_total` metric (`phase=decide`). See
+> [Recipe-brain verdict/decision parsing](./recipe-brain-verdict-parsing.md).
 
 #### `OodaOrientBrain::judge_orientation`
 
@@ -78,9 +93,21 @@ Parses stdout via `parse_action_from_text()`.
 fn judge_orientation(&self, ctx: &OrientContext) -> SimardResult<OrientJudgment>
 ```
 
-Invokes `recipe-runner-rs` with context vars `goal_id`, `base_urgency`,
-`base_reason`, `failure_count`. Parses stdout via
-`parse_orient_from_text()`.
+Invokes `recipe-runner-rs` with `--output-format json` and context vars
+`goal_id`, `base_urgency`, `base_reason`, `failure_count` (plus the ladder
+rung's `escalation_note`), extracts the agent output from the JSON envelope via
+`extract_recipe_decision_output`, and parses it via `parse_orient_outcome` (the
+outcome-classifying variant; `parse_orient_from_text` is the thin wrapper).
+
+> **Fixed in [#2421](https://github.com/rysweet/Simard/issues/2421).** Because
+> urgency is parsed from the JSON envelope's agent output rather than the
+> text-mode banner, the banner's `(0.0s)` timing string can no longer be scraped
+> as `adjusted_urgency` — urgency `0.0` from a banner can no longer happen. On a
+> parse-miss it runs `run_brain_ladder` and then falls back to the deterministic
+> urgency **floor** (`base_urgency − 0.2 × failure_count`, clamped), the only
+> fallback. Each invocation emits a `brain_verdict_parsed_total` metric
+> (`phase=orient`). See
+> [Recipe-brain verdict/decision parsing](./recipe-brain-verdict-parsing.md).
 
 #### `OodaBrain::decide_engineer_lifecycle`
 
@@ -91,8 +118,24 @@ fn decide_engineer_lifecycle(
 ) -> SimardResult<EngineerLifecycleDecision>
 ```
 
-Invokes `recipe-runner-rs` with the full lifecycle context as `-c` vars.
-Parses stdout via `parse_lifecycle_from_text()`.
+Invokes `recipe-runner-rs` with the full lifecycle context as `-c` vars and
+**`--output-format json`**, then extracts the agent's decision text from the
+final `step_results[].output` of the JSON envelope before running first-word
+extraction via `parse_lifecycle_outcome()`.
+
+> **Fixed in [#2419](https://github.com/rysweet/Simard/issues/2419):** This
+> call site previously read recipe-runner-rs's **default `text` output**,
+> which prints only a human summary banner (`Recipe: … SUCCESS …`) to stdout —
+> the agent's decision text is not on stdout in text mode. First-word
+> extraction therefore always saw `Recipe:`, matched no variant, and silently
+> defaulted to `ContinueSkipping` on ~99.6% of invocations, so non-default
+> decisions (`reclaim_and_redispatch`, `deprioritize`, …) never fired. The fix
+> switches to `--output-format json` + envelope extraction, mirroring the
+> already-correct `disk_health.rs` path.
+
+Every invocation emits one `brain_lifecycle_decision` metric event (see
+[Lifecycle decision metric](#lifecycle-decision-metric)) so the parse-failure
+rate is measurable from `metrics.jsonl`.
 
 ---
 
@@ -123,6 +166,13 @@ variant. Defaults to `AdvanceGoal` if no match.
 The remaining text after the first word is captured as the rationale
 (truncated to 500 chars).
 
+`parse_action_from_text` is the decision-only thin wrapper over
+`parse_action_outcome(text) -> (DecideJudgment, LifecycleParseOutcome)`, which
+additionally returns a `LifecycleParseOutcome` classifying *how* the decision
+was produced (`Parsed` vs `DefaultEmpty` / `DefaultMalformed`). `judge_decision`
+calls `parse_action_outcome` so the parse-failure rate is measurable and the
+escalation ladder fires only on a real miss.
+
 ### `parse_orient_from_text`
 
 ```rust
@@ -143,6 +193,12 @@ pub fn parse_orient_from_text(
 
 The full text is used as `rationale`. `confidence` is always `1.0`.
 `OrientJudgment::validate()` enforces bounds after extraction.
+
+`parse_orient_from_text` is the thin wrapper over `parse_orient_outcome(text,
+base_urgency, failure_count) -> (OrientJudgment, LifecycleParseOutcome)`, which
+additionally returns a `LifecycleParseOutcome`. `judge_orientation` calls
+`parse_orient_outcome` over the JSON-envelope-extracted agent output, so the
+deterministic floor is the only fallback and the ladder fires on a real miss.
 
 > **Removed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
 > The JSON extraction tier (`try_json_extraction`) has been deleted. The
@@ -174,6 +230,51 @@ Extra fields use defaults:
 > lifecycle prompt now instructs the LLM to output the variant name as its
 > first word.
 
+### `parse_lifecycle_outcome`
+
+```rust
+pub fn parse_lifecycle_outcome(
+    text: &str,
+) -> (EngineerLifecycleDecision, LifecycleParseOutcome)
+```
+
+Canonical lifecycle parser (added in
+[#2419](https://github.com/rysweet/Simard/issues/2419)). Identical first-word
+extraction to `parse_lifecycle_from_text`, but additionally returns a
+`LifecycleParseOutcome` classifying *how* the decision was produced:
+
+| Variant | Meaning |
+|---------|---------|
+| `Parsed` | First word matched a known variant — a real decision. |
+| `DefaultEmpty` | Output was empty/whitespace → defaulted to `ContinueSkipping`. |
+| `DefaultMalformed` | Output non-empty but first word matched no variant → defaulted. |
+| `Error` | recipe-runner invocation/envelope decode failed (set on the error path, not by the pure parser). |
+
+`LifecycleParseOutcome::is_parse_failure()` is `true` for everything except
+`Parsed`. This split is what makes the parse-failure rate measurable —
+previously a genuine `continue_skipping` decision and a silent fallback were
+indistinguishable. `parse_lifecycle_from_text` is the decision-only wrapper
+over this function.
+
+### Lifecycle decision metric
+
+`decide_engineer_lifecycle` records one `brain_lifecycle_decision` metric
+(value `1.0`) per invocation via `self_metrics::record_metric`. The context
+JSON carries:
+
+| Field | Description |
+|-------|-------------|
+| `goal_id` | Goal under inspection. |
+| `outcome` | `parsed` \| `default_empty` \| `default_malformed` \| `error`. |
+| `is_parse_failure` | `true` for any `outcome != "parsed"` (the numerator). |
+| `first_word` | First whitespace-delimited token of the decision text (bounded). |
+| `consecutive_skip_count` | Skip streak for this goal at decision time. |
+| `decision` | Resulting `EngineerLifecycleDecision` choice tag. |
+| `cause` | `ok` on the happy path; `spawn_failed` / `nonzero_exit` / `envelope_decode_failed` on the error path. |
+
+Parse-failure rate over a window:
+`count(is_parse_failure == true) / count(*)`.
+
 ---
 
 ## Shared helpers
@@ -181,13 +282,23 @@ Extra fields use defaults:
 ### `resolve_recipe_path`
 
 ```rust
-fn resolve_recipe_path(repo_root: &Path, recipe_filename: &str) -> Option<PathBuf>
+pub fn resolve_recipe_path(
+    repo_root: &Path,
+    recipe_filename: &str,
+    home_override: Option<&Path>,
+) -> Option<PathBuf>
 ```
 
 Resolution order:
 
-1. `~/.simard/prompt_assets/simard/recipes/<recipe_filename>` (hot-reload)
+1. `<home>/.simard/prompt_assets/simard/recipes/<recipe_filename>` (hot-reload)
 2. `<repo_root>/prompt_assets/simard/recipes/<recipe_filename>` (in-tree)
+
+`home_override` selects the hot-reload base directory: `Some(path)` uses `path`
+(a test seam to stay hermetic against the ambient `~/.simard`), `None` falls
+back to [`dirs::home_dir`] — production always passes `None` (via
+`RecipeBrain::new`). Mirrors the `home_override` convention already used by
+`disk_health::resolve_recipe_path` and `brain_introspection::resolve_recipe_path`.
 
 Returns `None` if neither path contains the file.
 

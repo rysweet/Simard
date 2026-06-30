@@ -19,6 +19,8 @@ use crate::operator_commands_ooda::persistence::{persist_cycle_report, persist_c
 mod helpers;
 pub use helpers::*;
 
+mod backup;
+
 mod brains;
 
 mod config;
@@ -153,6 +155,16 @@ pub fn run_ooda_daemon(
         "[simard] OODA daemon: LLM session opened for autonomous work",
     );
 
+    // Mint per-thread LLM sessions for concurrent AdvanceGoal dispatch so the
+    // slow goal-action `run_turn` calls run in parallel (one engineer per
+    // uncovered goal per round) instead of serializing on the single shared
+    // `session`. Bounded by the AIMD cap in the Act phase. Falls back to the
+    // shared `session` only if this factory is ever `None`.
+    let session_factory: std::sync::Arc<dyn crate::ooda_loop::OrchestratorSessionFactory> =
+        std::sync::Arc::new(crate::session_builder::ProviderSessionFactory::new(
+            provider, "ooda",
+        ));
+
     // Compute repo_root early — needed by both brain construction and
     // progress-evidence checker.
     let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -256,16 +268,40 @@ pub fn run_ooda_daemon(
         }
     };
 
+    // Deploy-aware done-gate (issue #2419). Honors the `SIMARD_COMPLETION_EVIDENCE=off`
+    // kill switch; otherwise a completed goal is archived only with hard
+    // evidence (merged PR + closed issue + — for self-affecting changes — a
+    // verified deploy), resolved via `gh` and the reconciliation detector.
+    let completion_evidence: Option<
+        std::sync::Arc<dyn crate::goal_curation::completion_gate::EvidenceSource>,
+    > = if crate::goal_curation::completion_evidence_enabled() {
+        daemon_log(
+            &state_root,
+            "[simard] completion-evidence: enabled (GhCliEvidenceSource -- merged+closed+deployed gate)",
+        );
+        Some(std::sync::Arc::new(
+            crate::goal_curation::GhCliEvidenceSource::new(repo_root.clone()),
+        ))
+    } else {
+        daemon_log(
+            &state_root,
+            "[simard] completion-evidence: DISABLED (legacy archive -- SIMARD_COMPLETION_EVIDENCE=off)",
+        );
+        None
+    };
+
     let mut bridges = OodaBridges {
         memory,
         knowledge,
         gym,
         session: Some(session),
+        session_factory: Some(session_factory),
         brain,
         decide_brain,
         orient_brain,
         repo_root,
         progress_evidence,
+        completion_evidence,
     };
 
     let board = load_goal_board(&*bridges.memory).unwrap_or_default();
@@ -347,11 +383,29 @@ pub fn run_ooda_daemon(
         daemon_log(&state_root, "[simard] OODA daemon: auto-reload enabled");
     }
 
-    // De-fork Phase 2b (issue #2307): the native lbug-WAL file-copy backup
-    // (`create_verified_backup` / `prune_old_backups`) has been removed. The
-    // library backend owns its own durability (WAL flush on `checkpoint` /
-    // drop). File-level snapshot backups remain available via the trait-based
-    // `memory_backup` module.
+    // De-fork Phase 2b (issue #2307): the native lbug-WAL file-copy backup was
+    // removed. Issue #2420 reintroduces a periodic **verified** backup below —
+    // it snapshots the live store through the bridge (so it inherently targets
+    // the migrated `state_root/cognitive` path), verifies the backup re-opens
+    // before pruning, and is best-effort (a failure WARNs, never aborts the
+    // cycle). The library backend still owns its own WAL durability.
+
+    // --- periodic verified backup state (issue #2420) ---------------------
+    let backup_interval_secs: u64 = backup::backup_interval_secs_from_env(
+        std::env::var("SIMARD_BACKUP_INTERVAL_SECS").ok().as_deref(),
+    );
+    // `None` == "never backed up yet" so the FIRST cycle always runs a backup,
+    // regardless of host uptime. (A `checked_sub` back-date would silently
+    // defer the first backup a full interval on any host whose monotonic clock
+    // — boot-relative on Linux — is younger than the interval, i.e. every
+    // freshly rebooted/deployed host. That is exactly the post-restart window
+    // this fix exists to protect.)
+    let mut last_backup: Option<Instant> = None;
+    daemon_log(
+        &state_root,
+        &format!("[simard] OODA daemon: verified backup interval = {backup_interval_secs}s"),
+    );
+    // -------------------------------------------------------------------
 
     // --- periodic disk health check state ---------------------------------
     let disk_health_interval_secs: u64 = std::env::var("SIMARD_DISK_HEALTH_INTERVAL_SECS")
@@ -376,6 +430,23 @@ pub fn run_ooda_daemon(
     daemon_log(
         &state_root,
         &format!("[simard] OODA daemon: worktree sweep interval = {worktree_sweep_interval_secs}s"),
+    );
+    // -------------------------------------------------------------------
+
+    // --- periodic brain introspection + memory hygiene state (issue #2419) ---
+    let brain_introspection_interval_secs: u64 = crate::brain_introspection::interval_secs_from_env(
+        std::env::var("SIMARD_BRAIN_INTROSPECTION_INTERVAL_SECS")
+            .ok()
+            .as_deref(),
+    );
+    // NOT back-dated like disk-health: the first introspection runs one full
+    // interval after start (nothing useful to say at t=0; baseline is empty).
+    let mut last_brain_introspection = Instant::now();
+    daemon_log(
+        &state_root,
+        &format!(
+            "[simard] OODA daemon: brain introspection interval = {brain_introspection_interval_secs}s"
+        ),
     );
     // -------------------------------------------------------------------
 
@@ -420,6 +491,31 @@ pub fn run_ooda_daemon(
             );
             break;
         }
+
+        // ── Periodic verified backup of the LIVE cognitive store (#2420) ──
+        // Best-effort: snapshot the live store the daemon opened, verify the
+        // backup re-opens, then prune. A failure WARNs and skips the prune so
+        // prior good backups survive; it never aborts the OODA cycle.
+        if backup::should_run_backup(last_backup, backup_interval_secs) {
+            match backup::run_verified_backup(shared_mem.as_ref(), &state_root) {
+                Ok(manifest) => daemon_log(
+                    &state_root,
+                    &format!(
+                        "[simard] verified backup OK: {} facts + {} procedures + {} records -> {}",
+                        manifest.cognitive_facts_count,
+                        manifest.cognitive_procedures_count,
+                        manifest.memory_records_count,
+                        manifest.backup_dir.display()
+                    ),
+                ),
+                Err(e) => daemon_log(
+                    &state_root,
+                    &format!("[simard] WARN: verified backup FAILED, prune skipped: {e}"),
+                ),
+            }
+            last_backup = Some(Instant::now());
+        }
+        // -------------------------------------------------------------------
 
         // ── Disk health check (before spawning engineers) ────────────────
         if last_disk_health.elapsed() >= Duration::from_secs(disk_health_interval_secs) {
@@ -519,6 +615,34 @@ pub fn run_ooda_daemon(
                 }
             }
             last_worktree_sweep = Instant::now();
+        }
+        // -------------------------------------------------------------------
+
+        // ── Periodic brain introspection + memory hygiene (issue #2419) ──
+        // Higher-level self-examination pass: safe RPC-backed memory hygiene
+        // (expired-sensory prune + additive consolidation) plus an agentic
+        // recipe that surfaces brain-health/patterns, recommends bounded prunes,
+        // and writes findings to a dedup'd GitHub issue. Best-effort: a recipe
+        // failure WARNs and the safe hygiene still ran.
+        if crate::brain_introspection::should_run_introspection(
+            last_brain_introspection.elapsed(),
+            brain_introspection_interval_secs,
+        ) {
+            match crate::brain_introspection::run_brain_introspection(
+                &*bridges.memory,
+                &bridges.repo_root,
+                &state_root,
+                None,
+            ) {
+                Ok(report) => {
+                    daemon_log(&state_root, &format!("[simard] {}", report.summary()));
+                }
+                Err(e) => daemon_log(
+                    &state_root,
+                    &format!("[simard] WARN: brain introspection failed: {e}"),
+                ),
+            }
+            last_brain_introspection = Instant::now();
         }
         // -------------------------------------------------------------------
 
@@ -778,6 +902,7 @@ mod tests {
             knowledge: mock_knowledge(),
             gym: mock_gym(),
             session: None,
+            session_factory: None,
             brain: Arc::new(crate::ooda_brain::DeterministicLifecycleBrain),
             decide_brain: None,
             orient_brain: None,
@@ -785,6 +910,7 @@ mod tests {
             progress_evidence: Arc::new(
                 crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
             ),
+            completion_evidence: None,
         }
     }
 
@@ -851,6 +977,8 @@ mod tests {
         let shared_mem = mock_shared_mem();
         let mut board = GoalBoard::new();
         board.active.push(crate::goal_curation::ActiveGoal {
+            parent_goal_id: None,
+            repo: None,
             id: "test-goal-01".to_string(),
             description: "Test goal for shutdown".to_string(),
             priority: 1,

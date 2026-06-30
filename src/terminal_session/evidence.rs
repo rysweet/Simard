@@ -47,6 +47,29 @@ pub(crate) fn terminal_checkpoint_evidence(steps: &[TerminalStep]) -> Vec<String
         .collect()
 }
 
+/// Extract a human-meaningful failure hint from a terminal transcript, such as
+/// a shell "command not found" or "Permission denied" diagnostic. Returns the
+/// most recent matching line (sanitised and compacted) so an operator sees
+/// *why* a session failed instead of only a bare exit code. Returns `None` when
+/// no recognised failure marker is present.
+pub(crate) fn terminal_failure_hint(transcript: &str) -> Option<String> {
+    const MARKERS: &[&str] = &[
+        "command not found",
+        ": not found",
+        "permission denied",
+        "no such file or directory",
+    ];
+    transcript_content_lines(transcript)
+        .into_iter()
+        .rev()
+        .map(sanitize_terminal_text)
+        .find(|line| {
+            let lowered = line.to_ascii_lowercase();
+            MARKERS.iter().any(|marker| lowered.contains(marker))
+        })
+        .map(|line| compact_terminal_evidence_value(&line, 200))
+}
+
 pub(crate) fn terminal_last_output_line(
     transcript: &str,
     steps: &[TerminalStep],
@@ -177,6 +200,50 @@ mod tests {
     fn compact_terminal_evidence_value_replaces_newlines_and_truncates() {
         let raw = "line1\nline2\tline3";
         assert_eq!(compact_terminal_evidence_value(raw, 12), "line1\\nline2...");
+    }
+
+    // -- terminal_failure_hint (regression for #2077) --
+
+    #[test]
+    fn terminal_failure_hint_extracts_bash_command_not_found() {
+        let transcript = "Script started on 2026-06-22\nbash-5.2$ say hello\nbash: say: command not found\nbash-5.2$ exit\nScript done on 2026-06-22";
+        assert_eq!(
+            terminal_failure_hint(transcript).as_deref(),
+            Some("bash: say: command not found")
+        );
+    }
+
+    #[test]
+    fn terminal_failure_hint_extracts_posix_sh_not_found() {
+        let transcript = "sh: 1: say: not found";
+        assert_eq!(
+            terminal_failure_hint(transcript).as_deref(),
+            Some("sh: 1: say: not found")
+        );
+    }
+
+    #[test]
+    fn terminal_failure_hint_extracts_permission_denied() {
+        let transcript = "bash: ./blocked.sh: Permission denied";
+        assert_eq!(
+            terminal_failure_hint(transcript).as_deref(),
+            Some("bash: ./blocked.sh: Permission denied")
+        );
+    }
+
+    #[test]
+    fn terminal_failure_hint_returns_none_for_clean_transcript() {
+        let transcript = "bash-5.2$ echo hello\nhello\nbash-5.2$ exit";
+        assert_eq!(terminal_failure_hint(transcript), None);
+    }
+
+    #[test]
+    fn terminal_failure_hint_returns_most_recent_marker_line() {
+        let transcript = "bash: first: command not found\nbash-5.2$ echo ok\nok\nbash: second: command not found";
+        assert_eq!(
+            terminal_failure_hint(transcript).as_deref(),
+            Some("bash: second: command not found")
+        );
     }
 
     // ---------------------------------------------------------------------

@@ -70,8 +70,11 @@ run_ooda_cycle:
 for an existing goal with the same id. Skip if already present. This prevents
 re-processing if the handoff was only partially processed in a previous cycle.
 
-**Cap enforcement**: `GoalBoard` enforces `MAX_ACTIVE_GOALS = 5`. If the
-board is full, excess meeting-derived goals go to the backlog instead.
+**Cap enforcement**: `GoalBoard` enforces `MAX_ACTIVE_GOALS = 20`. If the
+board is full, excess meeting-derived goals go to the backlog instead. (The
+cap was raised from 7 to 20 so umbrella decompositions can fan out fully; real
+parallelism is still bounded by the AIMD engineer concurrency cap — see the
+[operational autonomy model](../concepts/operational-autonomy-model.md).)
 
 ### 2. `seed_default_goals` — goals.rs
 

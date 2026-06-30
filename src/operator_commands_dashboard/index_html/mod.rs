@@ -19,12 +19,15 @@ use part_05::PART_05;
 /// Concatenated dashboard HTML/JS, assembled from per-segment string consts
 /// so that no single Rust source file exceeds the 400 LOC cap (#1266).
 ///
-/// Three template markers are substituted from [`tab_meta`]:
+/// Template markers are substituted from [`tab_meta`]:
 ///
 /// * `{{TAB_NAV}}` — the full `<div class="tabs">…</div>` nav bar, so the
 ///   one-label-per-route invariant flows from [`tab_meta::TAB_METADATA`].
 /// * `{{TAB_META_JS}}` — inline `<script>` exporting `window.__TAB_META`
 ///   so the client-side tab handler can swap `document.title` per tab.
+/// * `{{BANNED_JARGON_JS}}` — a JS array literal of [`tab_meta::BANNED_JARGON`]
+///   so the client-side `humanizeCycleSummary` strips the same jargon the
+///   ledes are forbidden from containing (#2358).
 /// * `{{DEFAULT_TITLE}}` — the `<title>` for the initial render, matching
 ///   the default-active tab.
 ///
@@ -37,6 +40,7 @@ pub(crate) fn index_html_string() -> String {
     let rendered = raw
         .replace("{{TAB_NAV}}", &tab_meta::tab_nav_html())
         .replace("{{TAB_META_JS}}", &tab_meta::tab_meta_js())
+        .replace("{{BANNED_JARGON_JS}}", &tab_meta::banned_jargon_js())
         .replace("{{DEFAULT_TITLE}}", tab_meta::default_title());
     debug_assert!(
         !rendered.contains("{{"),

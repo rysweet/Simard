@@ -259,6 +259,29 @@ fn fresh_benchmark_runs_stop_emitting_metric_gap_review_proposals() {
         "fresh benchmark reviews should stop proposing retry_count work once the metric is measured: {titles:#?}"
     );
 
+    let assessment = &report.scorecard.evidence_quality_assessment;
+    let dims = &assessment.dimensions;
+    for (name, value) in [
+        ("factual_accuracy", dims.factual_accuracy),
+        ("specificity", dims.specificity),
+        ("temporal_awareness", dims.temporal_awareness),
+        ("source_attribution", dims.source_attribution),
+        ("confidence_calibration", dims.confidence_calibration),
+    ] {
+        assert!(
+            (0.0..=1.0).contains(&value),
+            "structured evidence-quality dimension {name} must be in [0.0, 1.0], got {value}: {assessment:#?}"
+        );
+    }
+    assert!(
+        (assessment.overall - dims.mean()).abs() < 1e-9,
+        "structured assessment overall must equal the dimension mean: {assessment:#?}"
+    );
+    assert!(
+        !assessment.category.is_empty(),
+        "structured assessment must carry a category label: {assessment:#?}"
+    );
+
     if temp_root.exists() {
         fs::remove_dir_all(PathBuf::from(&temp_root)).expect("temp root should be removable");
     }

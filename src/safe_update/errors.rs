@@ -75,6 +75,62 @@ pub enum SafeUpdateError {
         path: PathBuf,
         reason: String,
     },
+
+    // --- Self-deploy variants (Workstream A; see
+    // docs/reference/self-deploy-api.md#error-variants) ----------------------
+    /// The candidate `cargo build --release` failed. Install path untouched.
+    BuildFailed {
+        detail: String,
+    },
+    /// A relaunch gate or the candidate `self-test` failed.
+    GateFailed {
+        gate: String,
+        detail: String,
+    },
+    /// The memory **or** binary protective backup failed. No swap performed.
+    BackupFailed {
+        which: String,
+        detail: String,
+    },
+    /// An engineer orphan survived SIGTERM + SIGKILL within the grace window.
+    OrphanReapTimeout {
+        pid: i32,
+    },
+    /// One or more post-deploy probes failed. Triggers rollback.
+    HealthCheckFailed {
+        report: String,
+    },
+    /// Health check failed and rollback restored the previous binary.
+    RolledBack {
+        reason: String,
+    },
+    /// Rollback could not reach a healthy state — critical operator alert.
+    RollbackFailed {
+        detail: String,
+    },
+
+    // --- Self-deploy source-preparation variants (issue #2467) ---------------
+    // These all abort *before* the load-bearing safety sequence starts (no
+    // backup/drain/swap has run), and are fail-loud: self-deploy must never
+    // silently fall back to building the cwd HEAD when it cannot make the
+    // merged commit available.
+    /// The canonical self-deploy source repo could not be resolved (a bad
+    /// `SIMARD_SELF_DEPLOY_REPO`, a missing persistent checkout, or a failed
+    /// clone). Aborts before the safety sequence; never builds cwd HEAD.
+    SourceResolveFailed {
+        detail: String,
+    },
+    /// `git fetch` of the canonical source repo failed. Aborts before the
+    /// safety sequence (loud; never a cwd-HEAD fallback).
+    FetchFailed {
+        detail: String,
+    },
+    /// Checking out the target merged commit failed (object missing or git
+    /// error). Aborts before the safety sequence (loud; never a cwd-HEAD
+    /// fallback).
+    CheckoutFailed {
+        detail: String,
+    },
 }
 
 impl Display for SafeUpdateError {
@@ -170,6 +226,43 @@ impl Display for SafeUpdateError {
                 f,
                 "safe-update lock: cannot acquire lock at {}: {reason}",
                 path.display()
+            ),
+            Self::BuildFailed { detail } => {
+                write!(f, "self-deploy: candidate build failed: {detail}")
+            }
+            Self::GateFailed { gate, detail } => {
+                write!(f, "self-deploy: gate '{gate}' failed: {detail}")
+            }
+            Self::BackupFailed { which, detail } => write!(
+                f,
+                "self-deploy: protective {which} backup failed (no swap performed): {detail}"
+            ),
+            Self::OrphanReapTimeout { pid } => write!(
+                f,
+                "self-deploy: engineer orphan pid {pid} survived SIGTERM+SIGKILL within the grace window"
+            ),
+            Self::HealthCheckFailed { report } => {
+                write!(f, "self-deploy: post-deploy health check failed: {report}")
+            }
+            Self::RolledBack { reason } => write!(
+                f,
+                "self-deploy: rolled back to the previous binary after a failed health check: {reason}"
+            ),
+            Self::RollbackFailed { detail } => write!(
+                f,
+                "self-deploy: ROLLBACK FAILED — critical operator alert: {detail}"
+            ),
+            Self::SourceResolveFailed { detail } => write!(
+                f,
+                "self-deploy: cannot resolve the source repo to build from (no cwd-HEAD fallback): {detail}"
+            ),
+            Self::FetchFailed { detail } => write!(
+                f,
+                "self-deploy: git fetch of the source repo failed (no cwd-HEAD fallback): {detail}"
+            ),
+            Self::CheckoutFailed { detail } => write!(
+                f,
+                "self-deploy: checkout of the target merged commit failed (no cwd-HEAD fallback): {detail}"
             ),
         }
     }

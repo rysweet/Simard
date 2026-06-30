@@ -95,6 +95,12 @@ fn no_legacy_goal_records_json_references_outside_migration_files() {
             // The flock-based store has migration code that renames the
             // legacy file to the new canonical path (#2182).
             "store.rs",
+            // The #2405 goal-decomposition feature mentions the legacy file in
+            // (a) a `parent_goal_id` doc comment explaining serde backward
+            // compatibility with pre-#2405 snapshots and (b) a test comment on
+            // the same compatibility. Both are intentional historical context.
+            "types.rs",
+            "tests_decompose.rs",
         ],
     );
 

@@ -298,7 +298,7 @@ Three important notes on the load step:
 - **Unbounded backlog growth**: `merge_boards` does not cap
   `board.backlog.len()`. Callers that accumulate stewardship items
   without periodic pruning will grow the persisted snapshot fact
-  monotonically. The active set is bounded by `MAX_ACTIVE_GOALS = 5` and
+  monotonically. The active set is bounded by `MAX_ACTIVE_GOALS = 20` and
   is truncated deterministically on merge — see
   [Active capacity truncation](../reference/goal-board-api.md#save_goal_board)
   in the API reference for the bounded/unbounded contrast and the

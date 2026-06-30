@@ -10,6 +10,7 @@ related:
   - ./recover-goal-board.md
   - ./run-ooda-daemon.md
   - ./spawn-engineers-from-ooda-daemon.md
+  - ../concepts/ooda-loop-self-detection.md
 ---
 
 # Unblock OODA goals stuck after a brain-failure lockout
@@ -47,6 +48,55 @@ immediate manual override.
 > subordinate-blocked goals continue to short-circuit dispatch — they
 > are explicitly out of scope so the system never overrides intentional
 > operator holds.
+
+## A different stuck mode: spinning at a high completion-% (no lockout)
+
+Not every stuck daemon is locked out. A second failure mode looks *healthy* from
+the brain's perspective but ships nothing:
+
+- The board shows one goal `in-progress` parked at a high percent (e.g. 99%)
+  with an empty backlog.
+- The brain confidently emits `advance_goal` every cycle.
+- Each cycle re-triages the same PRs, finds nothing to merge, re-records the same
+  percent, and repeats. `~/.simard/cycle_reports/` shows actions "succeeding"
+  but no new commits, PRs, or merges accumulate.
+
+This is the **open-ended-goal loop**: a goal like "increase test coverage across
+the ecosystem" has no reachable 100%, so it never completes, never archives, and
+parks forever while real work stalls. As of issue #2403 the prompt assets make
+Simard reason about this herself — see [OODA loop self-detection,
+reflectiveness, and proactivity](../concepts/ooda-loop-self-detection.md) for the
+full design. The goal-action brain now:
+
+1. checks, before triaging, whether the last few cycles produced **real
+   progress** (new commit SHAs, opened/merged PRs, closed issues) versus mere
+   re-triage;
+2. on detecting a loop, **changes strategy** — decomposing the open-ended goal
+   into a concrete, completable sub-goal and executing it, completing/retiring
+   the goal, or proposing fresh work from Simard's own open issues; and
+3. lets the progress-assessment gate **reject** a re-asserted high percent that
+   has only re-triage behind it, nudging decompose/complete/demote.
+
+### What an operator can do
+
+Because the prompt content hot-reloads, no rebuild is needed — syncing
+`prompt_assets/simard/` to `~/.simard/prompt_assets/simard/` is enough. If a goal
+is still parked after the next few cycles, an operator can give it a concrete,
+bounded shape directly:
+
+```bash
+# Inspect the parked goal and its recorded percent.
+simard goal list
+
+# Demote the open-ended goal off the active board (it moves to the backlog),
+# or remove it entirely if no bounded progress remains.
+simard goal demote <goal-id>
+simard goal remove <goal-id>
+
+# Add a concrete, completable replacement at a chosen priority (1-7) so the
+# board stays at its active cap rather than idling on one stalled item.
+simard goal add <priority> "module X line coverage >= 80%, PR merged"
+```
 
 ## Manual recovery via the CLI
 

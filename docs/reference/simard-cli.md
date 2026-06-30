@@ -104,6 +104,36 @@ backlog: 0 item(s)
 Exits non-zero on bridge-open / persistence errors. An empty board prints
 `(none)` and exits zero.
 
+### `simard goal add`
+
+```text
+simard goal add <priority> <description> [--repo <slug>]
+```
+
+Add a new active goal at the given `<priority>` (1–7). The goal id is derived
+from `<description>` via `goal_slug`. Fails if a goal with the derived id is
+already active or the board is at `MAX_ACTIVE_GOALS` capacity.
+
+`--repo <slug>` (optional) routes the goal at a specific ecosystem repo under
+`~/src/`. The slug is the bare directory name (e.g. `amplihack-rs`) and is
+validated with `validate_repo_slug` (charset `^[A-Za-z0-9._-]{1,64}$`; no `..`,
+no leading `-` or `.`). When omitted, the goal targets the daemon's own repo
+("Simard", `repo = None`). The slug's **existence** as a git repo is checked
+later, at engineer-spawn time — see
+[Goal target-repo routing](./goal-target-repo-routing.md) (issue
+[#2359](https://github.com/rysweet/Simard/issues/2359)).
+
+```bash
+# Target the amplihack-rs ecosystem repo:
+simard goal add 2 "Raise amplihack-rs branch coverage to 80%" --repo amplihack-rs
+
+# Target Simard itself (default):
+simard goal add 3 "Tidy the meeting REPL help text"
+```
+
+The added id and priority are logged to stderr
+(`[simard] goal add: '<id>' added at p<priority>`).
+
 ### `simard goal unblock <goal-id>`
 
 Operator escape hatch — clears the goal's `Blocked` status
@@ -271,6 +301,36 @@ Self-update the binary to the latest GitHub release. Downloads the release asset
 ### `simard install`
 
 Install the Simard binary to `~/.simard/bin`. Used by the npx wrapper (`npx github:rysweet/Simard install`) to persist the binary for direct CLI use.
+
+### `simard self-health [--json] [--pre-deploy-facts=N]`
+
+Run the post-deploy health probe against the live store and print a report. The
+five probes are `version_advanced`, `memory_intact`, `goal_board_intact`,
+`brains_llm_backed`, and `no_quarantine`; the report is healthy only when every
+probe is. `--json` emits the structured `SelfHealthReport`; `--pre-deploy-facts=N`
+supplies the memory baseline the self-deploy orchestrator captures before the
+swap. Exit code is `0` when healthy, non-zero otherwise. See the
+[self-deploy API reference](self-deploy-api.md#simard-self-health).
+
+### `simard self-deploy [--check] [--json]`
+
+Close the merged-but-not-running gap on demand (operator-only — the recipe never
+live-redeploys the daemon). With `--check` it reports deploy drift
+(running-vs-merged) and makes no changes; `--json` emits the `DeployDrift` JSON.
+Without `--check` it drives the full build-from-source self-deploy. It runs from
+**any working directory**: it first `git fetch`es and checks out the **merged
+head** (not the cwd's `HEAD`) in a cwd-independent source repo, then builds that
+commit into a persistent **warm** target dir (`~/.simard/self-deploy-target/`,
+incremental ~2–3 min) before the unchanged safety sequence — build → gate →
+dual protective backup → drain → orphan-reap → atomic swap → systemd restart →
+health check, rolling back to the previous binary on a failed health check. A
+source-resolution, fetch, or checkout failure aborts loudly *before* the daemon
+is touched (never a cwd-`HEAD` fallback). `SIMARD_SELF_DEPLOY_REPO` overrides the
+source repo. See
+[reconcile-and-self-deploy](../concepts/reconcile-and-self-deploy.md),
+[run self-deploy from any directory](../howto/run-self-deploy-from-any-directory.md),
+[self-deploy source-prep](self-deploy-source-prep.md), and
+[verify and roll back a self-deploy](../howto/verify-and-roll-back-a-self-deploy.md).
 
 ## Compatibility mapping
 
@@ -530,7 +590,9 @@ Key behavior:
 - prints explicit next-step guidance for continuing into `engineer run` with the same `state-root`
 - persists `latest_terminal_handoff.json` and compatibility `latest_handoff.json` under the shared root
 - fails visibly for unsupported topology and invalid state-root inputs
-- fails explicitly if a requested wait checkpoint never appears instead of pretending the terminal interaction succeeded
+- fails explicitly if a requested wait checkpoint never appears instead of pretending the terminal interaction succeeded; when that failure is caused by a missing or non-executable command, the shell's own diagnostic (for example `command not found`) is surfaced in the error so the offending command is named
+- when the underlying shell exits non-zero, reports an actionable error instead of a bare status code: exit `127` is explained as a command that could not be found on `PATH` (and `126` as a found-but-not-executable command), and the shell's own diagnostic line (for example `bash: say: command not found`) is surfaced so the offending command is named
+- launches the child PTY with a usable `PATH` (falling back to the standard system bin directories when the inherited environment has none) and resolves the default shell against `$SHELL`/`/bin/bash`/`/bin/sh` when the platform default is absent, so ordinary commands do not silently fail with exit `127`
 - keeps `simard_operator_probe terminal-run ...` available for compatibility
 
 Example:

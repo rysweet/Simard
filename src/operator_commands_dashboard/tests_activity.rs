@@ -234,3 +234,71 @@ async fn activity_reads_daemon_health_when_present() {
     assert_eq!(daemon["current_cycle"], 42);
     assert_eq!(daemon["status"], "running");
 }
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn activity_cycle_uses_persistent_report_after_restart() {
+    // Regression for #1680: after a daemon restart the process-local
+    // daemon_health counter resets to #1, but the persisted cycle reports keep
+    // the cumulative count. The Overview header (current_cycle) must show the
+    // persistent number so it agrees with the Thinking tab / Recent Actions.
+    let state = HermeticState::new();
+    let xdg_root = state.state_root().join("xdg_data");
+    let _xdg_guard = EnvGuard::set("XDG_DATA_HOME", &xdg_root);
+
+    let health_dir = xdg_root.join("simard");
+    std::fs::create_dir_all(&health_dir).unwrap();
+    let fake_health = serde_json::json!({
+        "status": "running",
+        "cycle_number": 1,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    });
+    std::fs::write(
+        health_dir.join("daemon_health.json"),
+        fake_health.to_string(),
+    )
+    .unwrap();
+
+    // A persisted report from before the restart.
+    let reports_dir = state.state_root().join("cycle_reports");
+    std::fs::create_dir_all(&reports_dir).unwrap();
+    std::fs::write(
+        reports_dir.join("cycle_369.json"),
+        serde_json::json!({"cycle_number": 369, "summary": "pre-restart"}).to_string(),
+    )
+    .unwrap();
+
+    let result = activity().await;
+    assert_eq!(
+        result.0["daemon"]["current_cycle"], 369,
+        "current_cycle must reflect the persisted cumulative count, not the process-local #1"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn activity_cycle_uses_persistent_report_when_daemon_absent() {
+    // Degraded state (daemon stopped, no daemon_health.json) must still report
+    // the persisted cumulative cycle number, matching workboard()/current_work()
+    // so the "Cycle #N" single-source invariant holds in every state, not just
+    // when the daemon is live.
+    let state = HermeticState::new();
+    let xdg_root = state.state_root().join("xdg_data");
+    let _xdg_guard = EnvGuard::set("XDG_DATA_HOME", &xdg_root);
+    // Deliberately do NOT write daemon_health.json.
+
+    let reports_dir = state.state_root().join("cycle_reports");
+    std::fs::create_dir_all(&reports_dir).unwrap();
+    std::fs::write(
+        reports_dir.join("cycle_500.json"),
+        serde_json::json!({"cycle_number": 500, "summary": "last before stop"}).to_string(),
+    )
+    .unwrap();
+
+    let result = activity().await;
+    assert_eq!(
+        result.0["daemon"]["current_cycle"], 500,
+        "with the daemon stopped, current_cycle must still show the persisted count"
+    );
+    assert_eq!(result.0["daemon"]["status"], "stopped");
+}

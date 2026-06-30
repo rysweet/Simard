@@ -52,7 +52,7 @@ impl TerminalTurnSpec {
         }
 
         Ok(Self {
-            shell: shell.unwrap_or_else(|| DEFAULT_SHELL.to_string()),
+            shell: shell.unwrap_or_else(default_shell),
             working_directory,
             wait_timeout,
             steps,
@@ -72,6 +72,35 @@ impl TerminalTurnSpec {
             .filter(|step| matches!(step, TerminalStep::WaitFor(_)))
             .count()
     }
+}
+
+/// Resolve the shell to launch when the agent program does not specify one.
+///
+/// Prefers the platform default ([`DEFAULT_SHELL`]); when that binary is absent
+/// (e.g. a distro that ships bash at `/bin/bash`, or a minimal image with only
+/// `/bin/sh`), falls back to `$SHELL` and then well-known POSIX shells so the
+/// terminal session does not strand on a missing interpreter and surface a bare
+/// exit code 127. Each candidate is validated with [`normalize_shell`], so the
+/// first returned value is always a safe, absolute, executable path.
+///
+/// If no candidate validates (an extremely broken host with neither bash nor
+/// sh), it returns [`DEFAULT_SHELL`] unchanged as a last resort — the launch
+/// will then fail loudly with the now-actionable "command not found" diagnostic
+/// rather than silently doing nothing.
+pub(crate) fn default_shell() -> String {
+    let mut candidates = vec![DEFAULT_SHELL.to_string()];
+    if let Ok(env_shell) = std::env::var("SHELL") {
+        candidates.push(env_shell);
+    }
+    candidates.push("/bin/bash".to_string());
+    candidates.push("/bin/sh".to_string());
+
+    for candidate in candidates {
+        if let Ok(valid) = normalize_shell(&candidate, "terminal-shell") {
+            return valid;
+        }
+    }
+    DEFAULT_SHELL.to_string()
 }
 
 pub(crate) fn parse_wait_timeout(value: &str, base_type: &str) -> SimardResult<Duration> {
@@ -327,5 +356,35 @@ mod tests {
         .expect("terminal turn should parse");
 
         assert_eq!(spec.wait_timeout, std::time::Duration::from_secs(30));
+    }
+
+    // -- default_shell (regression for #2077) --
+
+    #[test]
+    fn default_shell_returns_usable_absolute_executable() {
+        let shell = default_shell();
+        let resolved = PathBuf::from(&shell);
+        assert!(
+            resolved.is_absolute(),
+            "default shell must be absolute: {shell}"
+        );
+        assert!(
+            resolved.is_file(),
+            "default shell must resolve to an existing file: {shell}"
+        );
+        // It must round-trip through the same validation applied to
+        // operator-supplied shells, so the launch path never sees an unsafe or
+        // missing interpreter.
+        assert_eq!(
+            normalize_shell(&shell, "terminal-shell").unwrap(),
+            shell,
+            "default shell must satisfy normalize_shell"
+        );
+    }
+
+    #[test]
+    fn parse_uses_default_shell_when_unspecified() {
+        let spec = TerminalTurnSpec::parse("command: echo ok", "terminal-shell").unwrap();
+        assert_eq!(spec.shell, default_shell());
     }
 }

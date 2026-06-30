@@ -9,10 +9,12 @@ owner: simard
 doc_type: reference
 related:
   - ./hermetic-tests.md
+  - ./cognitive-memory-serial-isolation.md
   - ./COVERAGE_BASELINE.md
   - ../reference/meeting-backend-api.md
   - ../operations/meeting-handoffs.md
   - ../reference/goal-board-api.md
+  - ../architecture/gym-eval-library-adapter.md
 ---
 
 # CI-resilient test patterns
@@ -31,7 +33,7 @@ to fix CI-blocking failures on `main` (issue
 
 Tests that hardcode numeric limits (e.g. "create 7 goals, expect 5
 active and 2 in backlog") break silently whenever the underlying
-constant changes. When `MAX_ACTIVE_GOALS` was bumped from 5 → 7, the
+constant changes. When `MAX_ACTIVE_GOALS` was bumped from 5 → 7 → 20, the
 overflow test created exactly 7 decisions — all of which now fit in the
 active set, leaving the backlog empty and failing the assertion.
 
@@ -76,11 +78,11 @@ code changes.
 `MAX_ACTIVE_GOALS` is defined in `src/goal_curation/types.rs`:
 
 ```rust
-pub const MAX_ACTIVE_GOALS: usize = 7;
+pub const MAX_ACTIVE_GOALS: usize = 20;
 ```
 
 A test-time assertion in the same module (`max_active_goals_constant`
-asserts `MAX_ACTIVE_GOALS == 7`) guards against accidental changes.
+asserts `MAX_ACTIVE_GOALS == 20`) guards against accidental changes.
 If you intentionally change the constant, update that test — the
 overflow test will adapt automatically.
 
@@ -185,7 +187,7 @@ configured `llm_provider`:
 
 ### Problem
 
-Tests in `src/native_gym.rs` set and unset the `SIMARD_SKIP_GYM`
+Tests in `src/gym_runner_bridge.rs` set and unset the `SIMARD_SKIP_GYM`
 environment variable to exercise conditional code paths (skip-gym
 synthetic mode vs real execution). When `cargo test` runs these in
 parallel, two tests race on the same process-wide env var: one sets
@@ -218,14 +220,16 @@ fn run_scenario_skip_gym_returns_synthetic_success() {
 
 ### Where this applies
 
-The five env-var-mutating tests in `src/native_gym.rs`:
+The five env-var-mutating tests in `src/gym_runner_bridge.rs` (migrated from
+the deleted `src/native_gym.rs` when the gym engine moved to the
+[`amplihack-agent-eval` library](../architecture/gym-eval-library-adapter.md)):
 
 | Test function                                    | Env var mutated       |
 | ------------------------------------------------ | --------------------- |
-| `run_scenario_returns_degraded_result`            | `SIMARD_SKIP_GYM`    |
-| `run_scenario_unknown_returns_not_found`          | `SIMARD_SKIP_GYM`    |
-| `run_suite_returns_degraded_result`               | `SIMARD_SKIP_GYM`    |
+| `run_scenario_skip_gym_dimensions_present_and_zero` | `SIMARD_SKIP_GYM`  |
+| `run_scenario_skip_gym_bypasses_engine_for_any_valid_id` | `SIMARD_SKIP_GYM` |
 | `run_scenario_skip_gym_returns_synthetic_success` | `SIMARD_SKIP_GYM`    |
+| `run_suite_skip_gym_reports_zero_scenarios`       | `SIMARD_SKIP_GYM`    |
 | `run_suite_skip_gym_returns_synthetic_success`    | `SIMARD_SKIP_GYM`    |
 
 ### Relationship to `HermeticState`
@@ -243,12 +247,12 @@ any other test that calls `std::env::set_var` / `std::env::remove_var`.
 ### How to verify
 
 ```bash
-# Run the native_gym tests — they should pass deterministically now
-cargo test -p simard --lib native_gym::tests
+# Run the gym_runner_bridge tests — they should pass deterministically now
+cargo test -p simard --lib gym_runner_bridge::tests
 
 # Stress-test for flakiness (run 50 times)
 for i in $(seq 1 50); do
-    cargo test -p simard --lib native_gym::tests -- --test-threads=4 2>&1 \
+    cargo test -p simard --lib gym_runner_bridge::tests -- --test-threads=4 2>&1 \
         | tail -1
 done
 ```
@@ -263,7 +267,7 @@ Every iteration should report `test result: ok`.
 | --------------------- | --------------------------- | -------------------------------- | --------------------------- |
 | Constant-relative     | Hardcoded capacity limits   | Use `MAX_ACTIVE_GOALS + N`       | `src/ooda_loop/curate.rs`   |
 | Lazy config resolution| Constructor reads config    | Defer to `open()`                | `src/meeting_backend/agent_proxy.rs` |
-| Serial env-var tests  | Parallel env-var races      | `#[serial]` annotation           | `src/native_gym.rs`         |
+| Serial env-var tests  | Parallel env-var races      | `#[serial]` annotation           | `src/gym_runner_bridge.rs`  |
 
 All three patterns are enforced by CI: the affected tests run on every
 PR and will fail if the pattern is violated.

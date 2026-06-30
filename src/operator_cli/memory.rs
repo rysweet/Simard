@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardResult;
-use crate::memory_cognitive::CognitiveStatistics;
+use crate::memory_cognitive::{CognitiveStatistics, GraphStats};
 use crate::memory_ipc::{open_reader_bridge, socket_path_for};
 
 pub(super) const MEMORY_HELP: &str = "\
@@ -24,7 +24,8 @@ Usage:
   simard memory dump  [state-root] [--type=TYPE] [--limit=N] [--json]
 
 stats  Print per-type counts (sensory, working, episodic, semantic/facts,
-       procedural/procedures, prospective/triggers) plus a few sample rows.
+       procedural/procedures, prospective/triggers), a graph-edge / dedup
+       (\"edges / connections\") section, plus a few sample rows.
 dump   Print counts plus a larger set of sample rows per type for eyeballing
        content. --type restricts to one of: facts, episodes, procedures.
 
@@ -87,7 +88,20 @@ struct MemoryReport {
     access_tier: AccessTier,
     counts: CognitiveStatistics,
     samples: MemorySamples,
+    /// Graph-edge / dedup connection counts (issue #2331). Zeroed when they
+    /// could not be computed over the active tier — see [`Self::graph_note`].
+    graph: GraphStats,
+    /// Set when the edge counts could not be computed (e.g. over the daemon
+    /// IPC socket, which exposes no graph reader). When present, the edges
+    /// section prints this note instead of the (meaningless) zero counts.
+    graph_note: Option<String>,
 }
+
+/// Note shown when graph stats cannot be computed over the daemon IPC socket.
+/// The socket-backed `RemoteCognitiveMemory` has no graph reader (its
+/// `graph_stats` is the all-zero trait default, indistinguishable from a truly
+/// empty graph), so over IPC we surface this rather than misreport zeros.
+const DAEMON_GRAPH_NOTE: &str = "(edges: run with daemon stopped for graph stats)";
 
 /// Which type(s) a `dump` should sample. `Working` and `Sensory` are
 /// accepted but yield no sample rows — neither has a read-only enumerator, so
@@ -244,12 +258,29 @@ fn build_report(
         access_tier,
         counts.episodic_count,
     );
+    // Graph-edge / dedup stats (issue #2331). Gate on the access tier: over the
+    // daemon socket the IPC client has no graph reader (its `graph_stats` is the
+    // all-zero default), so we show a note rather than misreporting zeros. On a
+    // direct on-disk open we compute the real counts — but never fail the whole
+    // report if that read errors (the count table is the primary payload).
+    let (graph, graph_note) = match access_tier {
+        AccessTier::DaemonSocket => (GraphStats::default(), Some(DAEMON_GRAPH_NOTE.to_string())),
+        AccessTier::DirectOpen => match ops.graph_stats() {
+            Ok(g) => (g, None),
+            Err(_) => (
+                GraphStats::default(),
+                Some("(edges: graph stats unavailable)".to_string()),
+            ),
+        },
+    };
     Ok(MemoryReport {
         state_root: state_root.to_path_buf(),
         store_path: state_root.join("cognitive"),
         access_tier,
         counts,
         samples,
+        graph,
+        graph_note,
     })
 }
 
@@ -335,6 +366,44 @@ fn collect_samples(
     samples
 }
 
+/// The "edges / connections" section (issue #2331): provenance + similarity +
+/// supersedes edge counts, fact-provenance coverage, and snapshot dedup. When
+/// the counts could not be computed for the active tier the section prints the
+/// report's `graph_note` instead of zeroed counts.
+fn render_edges_section(report: &MemoryReport) -> String {
+    let mut out = String::from("\nedges / connections:\n");
+    if let Some(note) = &report.graph_note {
+        out.push_str(&format!("  {note}\n"));
+        return out;
+    }
+    let g = &report.graph;
+    out.push_str(&format!(
+        "  DERIVES_FROM            {:>7}     (fact -> episode)\n",
+        g.derives_from_edges
+    ));
+    out.push_str(&format!(
+        "  PROCEDURE_DERIVES_FROM  {:>7}     (procedure -> episode)\n",
+        g.procedure_derives_from_edges
+    ));
+    out.push_str(&format!(
+        "  SIMILAR_TO              {:>7}     (fact <-> fact)\n",
+        g.similar_to_edges
+    ));
+    out.push_str(&format!(
+        "  SUPERSEDES              {:>7}     (deduped snapshot)\n",
+        g.supersedes_edges
+    ));
+    out.push_str(&format!(
+        "  facts with provenance:  {} / {}\n",
+        g.facts_with_provenance, g.facts_total
+    ));
+    out.push_str(&format!(
+        "  snapshot dedup:         {} distinct caller keys / {} snapshot facts\n",
+        g.distinct_snapshot_caller_keys, g.snapshot_facts_total
+    ));
+    out
+}
+
 /// Human-readable counts table (+ samples when `include_samples`).
 fn render_human(report: &MemoryReport, include_samples: bool) -> String {
     let c = &report.counts;
@@ -362,6 +431,8 @@ fn render_human(report: &MemoryReport, include_samples: bool) -> String {
     ));
     out.push_str("  ---------------------\n");
     out.push_str(&format!("  total         {:>7}\n", c.total()));
+
+    out.push_str(&render_edges_section(report));
 
     if include_samples || has_any_sample(&report.samples) {
         out.push_str("\nsamples (best-effort):\n");
@@ -409,7 +480,28 @@ fn render_json(report: &MemoryReport, include_samples: bool) -> String {
             "prospective": c.prospective_count,
             "total": c.total(),
         },
+        // Issue #2331: graph-edge / dedup connection counts. Keys are always
+        // present (zeroed when not computed) for stable scripting; `edges_note`
+        // is set instead when the counts could not be computed over this tier.
+        "edges": {
+            "derives_from": report.graph.derives_from_edges,
+            "procedure_derives_from": report.graph.procedure_derives_from_edges,
+            "similar_to": report.graph.similar_to_edges,
+            "supersedes": report.graph.supersedes_edges,
+        },
+        "provenance": {
+            "facts_with_provenance": report.graph.facts_with_provenance,
+            "facts_total": report.graph.facts_total,
+        },
+        "snapshot_dedup": {
+            "distinct_caller_keys": report.graph.distinct_snapshot_caller_keys,
+            "snapshot_facts": report.graph.snapshot_facts_total,
+        },
     });
+
+    if let Some(note) = &report.graph_note {
+        value["edges_note"] = serde_json::json!(note);
+    }
 
     if include_samples {
         value["samples"] = serde_json::json!({
@@ -642,6 +734,171 @@ mod tests {
             samples.facts.iter().any(|f| f.contains("rust")),
             "fact sample should surface the seeded concept: {:?}",
             samples.facts
+        );
+    }
+
+    // ---- Issue #2331: graph-edge / dedup stats section -------------------
+
+    #[test]
+    fn render_human_includes_edges_section_labels() {
+        let (tmp, mem) = seeded_store();
+        let report = build_report(
+            &mem,
+            tmp.path(),
+            AccessTier::DirectOpen,
+            STATS_SAMPLE_LIMIT,
+            DumpType::All,
+        )
+        .expect("build_report");
+        let text = render_human(&report, false);
+
+        for label in [
+            "edges / connections",
+            "DERIVES_FROM",
+            "PROCEDURE_DERIVES_FROM",
+            "SIMILAR_TO",
+            "SUPERSEDES",
+            "facts with provenance:",
+            "snapshot dedup:",
+        ] {
+            assert!(
+                text.contains(label),
+                "human edges section missing '{label}':\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_json_includes_edges_objects() {
+        let (tmp, mem) = seeded_store();
+        let report = build_report(
+            &mem,
+            tmp.path(),
+            AccessTier::DirectOpen,
+            STATS_SAMPLE_LIMIT,
+            DumpType::All,
+        )
+        .expect("build_report");
+        let json = render_json(&report, false);
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+
+        for key in [
+            "derives_from",
+            "procedure_derives_from",
+            "similar_to",
+            "supersedes",
+        ] {
+            assert!(
+                parsed["edges"].get(key).is_some(),
+                "json edges missing '{key}': {json}"
+            );
+        }
+        assert!(
+            parsed["provenance"].get("facts_total").is_some(),
+            "json provenance.facts_total missing: {json}"
+        );
+        assert!(
+            parsed["snapshot_dedup"]
+                .get("distinct_caller_keys")
+                .is_some(),
+            "json snapshot_dedup.distinct_caller_keys missing: {json}"
+        );
+        assert!(
+            parsed.get("edges_note").is_none(),
+            "direct-open json must not carry an edges_note: {json}"
+        );
+    }
+
+    #[test]
+    fn build_report_direct_open_counts_provenance_edges() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mem = LibraryCognitiveMemory::open(tmp.path()).expect("open store");
+        let ep = mem
+            .store_episode("ran cargo test; 0 failures", "engineer-cycle", None)
+            .expect("store_episode");
+        mem.store_fact_with_provenance(
+            "lesson",
+            "tests must stay green",
+            0.9,
+            "distill:cycle",
+            None,
+            None,
+            std::slice::from_ref(&ep),
+        )
+        .expect("store_fact_with_provenance");
+
+        let report = build_report(
+            &mem,
+            tmp.path(),
+            AccessTier::DirectOpen,
+            STATS_SAMPLE_LIMIT,
+            DumpType::All,
+        )
+        .expect("build_report");
+
+        assert!(
+            report.graph.derives_from_edges >= 1,
+            "DERIVES_FROM edge must be counted after provenance link: {:?}",
+            report.graph
+        );
+        assert!(
+            report.graph.facts_with_provenance >= 1,
+            "fact with provenance must be counted: {:?}",
+            report.graph
+        );
+        assert!(
+            report.graph_note.is_none(),
+            "direct open must compute graph"
+        );
+
+        let text = render_human(&report, false);
+        assert!(
+            text.contains("facts with provenance:  1 / "),
+            "human output must reflect the provenance coverage:\n{text}"
+        );
+    }
+
+    #[test]
+    fn daemon_socket_tier_notes_edges_unavailable() {
+        // Over the daemon IPC socket the graph reader is unavailable, so the
+        // report must carry the note and zeroed counts instead of failing.
+        let (tmp, mem) = seeded_store();
+        let report = build_report(
+            &mem,
+            tmp.path(),
+            AccessTier::DaemonSocket,
+            STATS_SAMPLE_LIMIT,
+            DumpType::All,
+        )
+        .expect("build_report");
+
+        assert_eq!(
+            report.graph_note.as_deref(),
+            Some(DAEMON_GRAPH_NOTE),
+            "daemon-socket tier must note that graph stats need a direct open"
+        );
+        assert_eq!(report.graph, GraphStats::default(), "counts must be zeroed");
+
+        let text = render_human(&report, false);
+        assert!(
+            text.contains(DAEMON_GRAPH_NOTE),
+            "human edges section must print the daemon note:\n{text}"
+        );
+        assert!(
+            !text.contains("DERIVES_FROM"),
+            "note path must replace the per-edge rows:\n{text}"
+        );
+
+        let json = render_json(&report, false);
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(
+            parsed["edges_note"].as_str(),
+            Some(DAEMON_GRAPH_NOTE),
+            "json must carry edges_note over the daemon socket: {json}"
+        );
+        assert!(
+            parsed["edges"].get("derives_from").is_some(),
+            "edges keys stay present (zeroed) for stable scripting: {json}"
         );
     }
 }

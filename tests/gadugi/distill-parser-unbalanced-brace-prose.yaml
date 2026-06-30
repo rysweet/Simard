@@ -1,0 +1,118 @@
+name: "Distill Parser Recovers Answer After an Unmatched Brace in Prose"
+description: >
+  Outside-in regression gate for issue #2508 (residual of the t=9900 live
+  consolidation no-op). The episode->fact distillation parser must recover the
+  { "facts": [...] } object even when the distill agent's leading prose carries
+  an UNMATCHED `{` ahead of its JSON answer. This is realistic because the
+  distiller reasons about CODE episodes and intermittently writes a fragment
+  like `fn handler() {` in its preamble. The distillation scanner previously
+  used a hand-rolled single-shared-depth scan, so a stray unmatched `{` raised
+  depth permanently and demoted the real answer to a nested span that was never
+  recorded as top-level -> the pass found no facts object and silently no-opped
+  (zero facts). The fix reuses the shared, string-aware
+  `recipe_output::balanced_objects` helper (candidate-restart past an unmatched
+  `{`). The launch-banner / unmatched-QUOTE cases were already fixed
+  (#2461/#2496/#2504/#2506); this scenario pins the unmatched-BRACE case so it
+  cannot regress, while asserting that genuinely answer-less output still fails
+  non-fatally (Err) without panicking.
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Shared scanner skips an unmatched leading `{` and recovers the object (#2508)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib
+        recipe_output::extract::tests::balanced_objects_skips_unmatched_leading_brace
+        -- --nocapture
+    timeout: 600000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "balanced_objects_skips_unmatched_leading_brace ... ok"
+        - "test result: ok"
+
+  - name: "Distillation recovers the answer after an unmatched `{`; answer-less output stays non-fatal (#2508)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib memory_consolidation::distillation::unit_tests
+        -- --nocapture
+    timeout: 600000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "parse_recipe_output_recovers_from_unbalanced_brace_in_leading_prose ... ok"
+        - "parse_recipe_output_banner_only_fails_non_fatally_without_panic ... ok"
+        - "test result: ok"
+
+  - name: "Launch-log preamble regression (#2496) still green (no regression)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib
+        parse_recipe_output_full_recovers_facts_from_copilot_launch_log_preamble
+        -- --nocapture
+    timeout: 600000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test result: ok"
+
+  - name: "Full distillation parser contract still green (no regression)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib memory_consolidation::distillation
+        -- --nocapture
+    timeout: 600000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test result: ok"
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "test-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "memory"
+    - "distillation"
+    - "regression"
+    - "issue-2508"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

@@ -8,7 +8,11 @@
 # token and matches it case-insensitively to the 10 known action kinds.
 #
 # Context vars (passed via -c):
-#   goal_id, urgency, reason
+#   goal_id, urgency, reason, escalation_note
+#
+# `escalation_note` (issue #2432 / #2421) is empty on the base attempt and
+# carries a schema-repair / higher-effort instruction on escalation-ladder
+# retries. When empty it renders to nothing, so base behaviour is unchanged.
 #
 # Output: agent stdout — action keyword as first word, followed by rationale
 
@@ -25,6 +29,8 @@ steps:
     type: "agent"
     agent: "default"
     prompt: |
+      {{escalation_note}}
+
       # OODA Brain — Decide Phase: Action-Kind Routing
 
       ## ROLE
@@ -34,6 +40,13 @@ steps:
       daemon should dispatch.
       Be conservative: prefer `advance_goal` for ordinary goal IDs unless a clear
       signal in the goal_id or reason indicates a special routing.
+
+      If the `reason` indicates the goal has been advanced for many cycles with no
+      new progress (a suspected stuck loop — repeated triage, no new commits/PRs/
+      closed issues, a completion-% parked high), still route to `advance_goal`
+      (the action *kind* does not change), but name the suspected loop in your
+      rationale so the goal-action brain re-scopes or executes rather than
+      re-triaging the same state.
 
       ## CONTEXT
 
@@ -79,6 +92,21 @@ steps:
       - `run_gym_eval`, `build_skill`, `launch_session` — Reserved for future
         routing; do not emit unless the daemon configuration explicitly enables
         them.
+
+      ## Parallelism — how the machine gets filled
+
+      You judge **one** priority per call and name **one** action kind — that
+      contract is unchanged. Per-cycle parallelism comes from the daemon
+      dispatching MANY priorities at once: Orient surfaces one priority per
+      incomplete goal, you route each to `advance_goal`, and the coverage
+      allocator spawns one engineer per goal **up to the AIMD safety cap** (the
+      resource-aware ceiling that backs off under CPU / memory / 429 pressure).
+      Routing each distinct goal to `advance_goal` is exactly what fills the
+      machine — there is no separate "parallel" action to emit, and you must not
+      invent one. If a single goal bundles many independent work items, the
+      goal-action brain decomposes it into distinct per-issue goals; each then
+      arrives here as its own priority routed to `advance_goal`. Distinct goals
+      mean distinct engineers on distinct items — never the same one twice.
 
       ## EXAMPLES
 

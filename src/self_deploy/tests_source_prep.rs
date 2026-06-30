@@ -1,0 +1,943 @@
+//! Hermetic tests for the cwd-independent self-deploy source preparer
+//! (issue #2467 — `src/self_deploy/source_prep.rs`).
+//!
+//! These pin the two fixes the issue requires:
+//!   1. **Build the merged commit, not cwd HEAD** — the preparer `git fetch`es
+//!      the canonical repo and `checkout --detach`es the *target merged SHA*
+//!      (`prepare`), resolved independently of the current working directory.
+//!   2. **Warm target dir** — `self_deploy_target_dir()` is a persistent,
+//!      non-PID-keyed dir under the state root so builds are incremental.
+//!
+//! Everything runs offline: the git tests use a local `file`-path "origin"
+//! repo (a `git fetch` from a local path needs no network), and the wiring
+//! tests inject a fake [`SelfDeploySourcePreparer`].
+//!
+//! Written against the public contract in
+//! `docs/reference/self-deploy-source-prep.md`. They MUST fail in the red
+//! phase (the `source_prep.rs` bodies are `unimplemented!()` stubs) and MUST
+//! pass once the implementation lands — without any test edits.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Mutex;
+
+use crate::safe_update::SafeUpdateError;
+use crate::self_relaunch::build_self_deploy_candidate;
+use crate::state_root::{STATE_ROOT_ENV, simard_state_root};
+
+use super::source_prep::{
+    GitSourcePreparer, SELF_DEPLOY_SRC_DIRNAME, SELF_DEPLOY_TARGET_DIRNAME,
+    SelfDeploySourcePreparer, prepare_and_build, redact_credentials, remove_stale_checkout,
+    self_deploy_src_dir, self_deploy_target_dir, validate_full_sha, validate_origin_transport,
+};
+
+const SELF_DEPLOY_REPO_ENV: &str = "SIMARD_SELF_DEPLOY_REPO";
+
+// ---------------------------------------------------------------------------
+// Env + git fixtures (mirror engineer_worktree/state_root test discipline:
+// env_clear() then re-inject only PATH/HOME so ambient GIT_* / state-root env
+// cannot poison these fixtures).
+// ---------------------------------------------------------------------------
+
+/// Scoped env override that restores the previous value on drop. Tests that use
+/// it MUST be `#[serial]` (env is process-global).
+struct EnvGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &Path) -> Self {
+        let prev = std::env::var_os(key);
+        // SAFETY: callers are serialized via #[serial]; edition-2024 set_var is unsafe.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: callers are serialized via #[serial].
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+fn git_cmd(repo: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(repo).env_clear();
+    if let Ok(p) = std::env::var("PATH") {
+        cmd.env("PATH", p);
+    }
+    if let Ok(h) = std::env::var("HOME") {
+        cmd.env("HOME", h);
+    }
+    cmd
+}
+
+fn git_run(repo: &Path, args: &[&str]) {
+    let out = git_cmd(repo, args).output().expect("spawn git");
+    assert!(
+        out.status.success(),
+        "git {:?} failed in {}: {}",
+        args,
+        repo.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn git_out(repo: &Path, args: &[&str]) -> String {
+    let out = git_cmd(repo, args).output().expect("spawn git");
+    assert!(
+        out.status.success(),
+        "git {:?} failed in {}: {}",
+        args,
+        repo.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Initialize a bare-ish "origin" repo on `main` with one seed commit; return
+/// (repo_path, seed_sha).
+fn init_origin(dir: &Path) -> (PathBuf, String) {
+    std::fs::create_dir_all(dir).unwrap();
+    git_run(dir, &["init", "--initial-branch=main", "--quiet"]);
+    git_run(dir, &["config", "user.email", "t@e.com"]);
+    git_run(dir, &["config", "user.name", "t"]);
+    git_run(dir, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join("VERSION"), "c1\n").unwrap();
+    git_run(dir, &["add", "VERSION"]);
+    git_run(dir, &["commit", "-m", "c1", "--quiet"]);
+    let sha = git_out(dir, &["rev-parse", "HEAD"]);
+    (dir.to_path_buf(), sha)
+}
+
+/// Add a second commit on `main` in `origin` and return its sha (the "merged
+/// head" a stale clone has not yet fetched).
+fn add_merged_commit(origin: &Path) -> String {
+    std::fs::write(origin.join("VERSION"), "c2\n").unwrap();
+    git_run(origin, &["add", "VERSION"]);
+    git_run(origin, &["commit", "-m", "c2 (merged head)", "--quiet"]);
+    git_out(origin, &["rev-parse", "HEAD"])
+}
+
+/// Clone `origin` into `dest` (local path => offline). The clone's `origin`
+/// remote points at the local origin path.
+fn clone_local(origin: &Path, dest: &Path) {
+    let parent = dest.parent().unwrap();
+    std::fs::create_dir_all(parent).unwrap();
+    let out = git_cmd(parent, &["clone", "--quiet"])
+        .arg(origin)
+        .arg(dest)
+        .output()
+        .expect("spawn git clone");
+    assert!(
+        out.status.success(),
+        "git clone failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Warm target dir (fix #2): persistent, under state root, not PID/temp,
+// reaper-safe name.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial_test::serial(simard_state_root_env, cognitive_memory)]
+fn self_deploy_dirs_resolve_under_state_root_honoring_env() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _g = EnvGuard::set(STATE_ROOT_ENV, tmp.path());
+
+    assert_eq!(
+        self_deploy_target_dir(),
+        tmp.path().join(SELF_DEPLOY_TARGET_DIRNAME),
+        "warm target dir must be <SIMARD_STATE_ROOT>/{SELF_DEPLOY_TARGET_DIRNAME}"
+    );
+    assert_eq!(
+        self_deploy_src_dir(),
+        tmp.path().join(SELF_DEPLOY_SRC_DIRNAME),
+        "source checkout dir must be <SIMARD_STATE_ROOT>/{SELF_DEPLOY_SRC_DIRNAME}"
+    );
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, cognitive_memory)]
+fn warm_target_dir_is_persistent_not_pid_keyed_and_under_state_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _g = EnvGuard::set(STATE_ROOT_ENV, tmp.path());
+
+    let a = self_deploy_target_dir();
+    let b = self_deploy_target_dir();
+    assert_eq!(
+        a, b,
+        "warm target dir must be stable across calls (persistent)"
+    );
+
+    assert!(
+        a.starts_with(simard_state_root()),
+        "warm target dir {} must live under the durable state root",
+        a.display()
+    );
+
+    // The whole point of fix #2: NOT the old per-PID cold temp dir.
+    let pid = std::process::id().to_string();
+    assert!(
+        !a.to_string_lossy().contains(&pid),
+        "warm target dir must NOT be PID-keyed, got: {}",
+        a.display()
+    );
+    let legacy = crate::self_relaunch::RelaunchConfig::default().canary_target_dir;
+    assert_ne!(
+        a, legacy,
+        "warm target dir must differ from the legacy per-PID temp canary dir"
+    );
+
+    // The whole point of fix #2 is a *durable* warm dir, not the ephemeral
+    // system temp base. The hermetic setup above pins the state root to a
+    // tempdir purely for test isolation (which — per the repo's own
+    // `hermetic_state_root_lives_under_temp_dir` — necessarily lives *under*
+    // env::temp_dir()), so asserting `!a.starts_with(temp_dir())` on `a`
+    // directly would contradict the equality the production resolution
+    // guarantees. Instead assert the property that actually matters: under a
+    // durable (production-shaped, $HOME-based) state root, the warm dir escapes
+    // temp_dir() entirely. (`self_deploy_target_dir()` only computes the path —
+    // nothing is created under $HOME.)
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .expect("HOME is set in the test environment");
+    let _g2 = EnvGuard::set(STATE_ROOT_ENV, &home.join(".simard"));
+    let durable_warm = self_deploy_target_dir();
+    assert_eq!(
+        durable_warm,
+        home.join(".simard").join(SELF_DEPLOY_TARGET_DIRNAME),
+        "under a durable state root the warm dir is <state_root>/{SELF_DEPLOY_TARGET_DIRNAME}"
+    );
+    assert!(
+        !durable_warm.starts_with(std::env::temp_dir()),
+        "durable warm target dir must not live under temp_dir(), got: {}",
+        durable_warm.display()
+    );
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, cognitive_memory)]
+fn warm_target_dir_name_does_not_match_any_cleanup_reaper() {
+    // The cleanup reapers in cmd_cleanup/disk.rs match by *name*. Two scan over
+    // a /tmp base (replicated below); the only reaper whose base actually
+    // contains the warm/src dirs is `remove_old_corrupt_dbs`, which scans the
+    // `~/.simard` top level via the real `is_corrupt_quarantine_name` predicate.
+    // The other two `~/.simard` reapers (`rotate_simard_binary_backups`,
+    // `trim_simard_snapshots`) scan the `bin/` and `snapshots/` *subdirectories*,
+    // so a top-level `self-deploy-*` sibling is structurally outside their reach.
+    // Assert non-overlap against the **real** predicate (not a local copy) so
+    // this is a genuine regression guard: if a future change broadened the
+    // `~/.simard` reaper to match `self-deploy-*`, this test fails.
+    fn matches_tmp_canary_reaper(name: &str) -> bool {
+        name.starts_with("simard-canary")
+            || name.starts_with("simard-e2e")
+            || name.starts_with("simard-")
+            || name.starts_with("amplihack-")
+            || name.starts_with("amplihack_eval")
+            || name.starts_with("ia2-")
+    }
+    fn matches_tmp_target_cap(name: &str) -> bool {
+        name.starts_with("simard-") && name.ends_with("-target")
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let _g = EnvGuard::set(STATE_ROOT_ENV, tmp.path());
+
+    // Both new persistent dirs that live directly under the state root.
+    for dir in [self_deploy_target_dir(), self_deploy_src_dir()] {
+        let name = dir
+            .file_name()
+            .expect("dir has a final component")
+            .to_string_lossy()
+            .into_owned();
+
+        assert!(
+            !matches_tmp_canary_reaper(&name),
+            "dir name {name:?} must not match the /tmp canary reaper"
+        );
+        assert!(
+            !matches_tmp_target_cap(&name),
+            "dir name {name:?} must not match the /tmp '-target' LRU cap reaper"
+        );
+        // The real `~/.simard` top-level reaper predicate (the one whose scan
+        // base actually contains these dirs).
+        assert!(
+            !crate::cmd_cleanup::is_corrupt_quarantine_name(&name),
+            "dir name {name:?} must not match the ~/.simard corrupt-quarantine reaper \
+             (remove_old_corrupt_dbs)"
+        );
+        // Not the fixed `bin`/`snapshots` subdir names the other ~/.simard
+        // reapers scan into.
+        assert_ne!(
+            name, "bin",
+            "must not collide with the binary-backup subdir"
+        );
+        assert_ne!(
+            name, "snapshots",
+            "must not collide with the snapshots subdir"
+        );
+    }
+
+    assert_eq!(
+        self_deploy_target_dir()
+            .file_name()
+            .unwrap()
+            .to_string_lossy(),
+        SELF_DEPLOY_TARGET_DIRNAME
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SHA validation (SEC-I2: block leading-'-' option injection into git argv).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn validate_full_sha_accepts_exactly_40_lowercase_hex() {
+    let ok = "abcdef0123456789abcdef0123456789abcdef01";
+    assert_eq!(ok.len(), 40);
+    assert!(
+        validate_full_sha(ok).is_ok(),
+        "a full 40-hex sha must be accepted"
+    );
+}
+
+#[test]
+fn validate_full_sha_rejects_malformed_and_injection() {
+    let bad = [
+        "",                                          // empty
+        "abcdef",                                    // too short
+        "abcdef0123456789abcdef0123456789abcdef0",   // 39
+        "abcdef0123456789abcdef0123456789abcdef012", // 41
+        "ABCDEF0123456789ABCDEF0123456789ABCDEF01",  // uppercase
+        "gbcdef0123456789abcdef0123456789abcdef01",  // non-hex 'g'
+        "-bcdef0123456789abcdef0123456789abcdef01",  // leading '-' (argv option injection)
+        " bcdef0123456789abcdef0123456789abcdef01",  // leading space
+        "deadbeef",                                  // short symbolic-ish
+    ];
+    for s in bad {
+        assert!(
+            validate_full_sha(s).is_err(),
+            "validate_full_sha must reject {s:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Origin transport allow-list (SEC-I3: refuse arbitrary-command transports).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn validate_origin_transport_allows_https_and_ssh() {
+    for url in [
+        "https://github.com/rysweet/Simard.git",
+        "ssh://git@github.com/rysweet/Simard.git",
+        "git@github.com:rysweet/Simard.git",
+    ] {
+        assert!(
+            validate_origin_transport(url).is_ok(),
+            "transport must be allowed: {url}"
+        );
+    }
+}
+
+#[test]
+fn validate_origin_transport_rejects_command_transports() {
+    for url in [
+        "ext::sh -c \"touch /tmp/pwned\"",
+        "ext::git-upload-pack",
+        "fd::3",
+    ] {
+        assert!(
+            validate_origin_transport(url).is_err(),
+            "arbitrary-command transport must be rejected: {url}"
+        );
+    }
+}
+
+#[test]
+fn validate_origin_transport_rejects_leading_dash_argv_injection() {
+    // A '-'-leading origin URL would be parsed by `git clone` as an *option*
+    // (e.g. `--upload-pack=…`, `-c core.pager=…`) rather than a positional —
+    // the same argv option-injection class `validate_full_sha` blocks (SEC-I2),
+    // and exactly the "run code on clone" threat `validate_origin_transport`
+    // exists to stop (SEC-I3). All of these `is_scp_like`-shaped strings begin
+    // with '-' and MUST be refused.
+    for url in [
+        "-uevil@example.com:repo.git",
+        "--upload-pack=evil@example.com:repo.git",
+        "-ccore.pager=evil@example.com:repo.git",
+        "  -uevil@example.com:repo.git", // leading whitespace is trimmed first
+    ] {
+        assert!(
+            validate_origin_transport(url).is_err(),
+            "leading-dash origin URL must be rejected (argv option injection): {url:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Credential redaction in surfaced errors (SEC-D2: never leak a token in a
+// git error / log / PR). The project uses token-bearing remotes, so a fetch or
+// clone failure must not echo `https://<token>@host` to the operator.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn redact_credentials_strips_userinfo_from_urls() {
+    let cases = [
+        (
+            "https://x-access-token:ghp_SECRET123@github.com/rysweet/Simard.git",
+            "https://***@github.com/rysweet/Simard.git",
+        ),
+        (
+            "ssh://git:p4ssw0rd@github.com/rysweet/Simard.git",
+            "ssh://***@github.com/rysweet/Simard.git",
+        ),
+        (
+            "fatal: unable to access 'https://user:tok@github.com/o/r/': 403",
+            "fatal: unable to access 'https://***@github.com/o/r/': 403",
+        ),
+    ];
+    for (raw, want) in cases {
+        let got = redact_credentials(raw);
+        assert_eq!(got, want, "redaction mismatch for {raw:?}");
+        assert!(
+            !got.contains("ghp_SECRET123") && !got.contains("p4ssw0rd") && !got.contains(":tok@"),
+            "token must not survive redaction: {got:?}"
+        );
+    }
+}
+
+#[test]
+fn redact_credentials_leaves_tokenless_and_plain_text_unchanged() {
+    for s in [
+        "https://github.com/rysweet/Simard.git",
+        "git@github.com:rysweet/Simard.git",
+        "git [\"fetch\", \"origin\"] failed in /home/op/.simard/self-deploy-src: timeout",
+        "no urls here at all",
+    ] {
+        assert_eq!(
+            redact_credentials(s),
+            s,
+            "must pass through unchanged: {s:?}"
+        );
+    }
+}
+
+#[test]
+fn redact_credentials_handles_multiple_urls() {
+    let raw = "from https://a:b@h1/x to https://c:d@h2/y";
+    let got = redact_credentials(raw);
+    assert_eq!(got, "from https://***@h1/x to https://***@h2/y");
+    assert!(!got.contains("a:b@") && !got.contains("c:d@"));
+}
+
+// ---------------------------------------------------------------------------
+// prepare(): fetch + checkout the MERGED head, independent of cwd (fix #1).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prepare_fetches_and_checks_out_merged_head_not_cwd_head() {
+    let root = tempfile::tempdir().unwrap();
+    let origin = root.path().join("origin");
+    let canonical = root.path().join("canonical");
+
+    // origin starts at c1; a stale clone is made; THEN origin advances to c2.
+    let (_origin, _c1) = init_origin(&origin);
+    clone_local(&origin, &canonical);
+    let c2 = add_merged_commit(&origin);
+
+    // The stale clone is still on c1 and has never seen c2.
+    assert_ne!(git_out(&canonical, &["rev-parse", "HEAD"]), c2);
+
+    // Resolution is via the explicit repo (cwd-independent); the test's actual
+    // cwd is the worktree, which is NOT this canonical clone.
+    let preparer = GitSourcePreparer::at(&canonical);
+    let prepared = preparer
+        .prepare(&c2)
+        .expect("prepare must fetch + checkout the merged head");
+
+    assert_eq!(
+        std::fs::canonicalize(&prepared).unwrap(),
+        std::fs::canonicalize(&canonical).unwrap(),
+        "prepare must return the canonical repo (not the cwd checkout)"
+    );
+    assert_ne!(
+        std::fs::canonicalize(&prepared).unwrap(),
+        std::env::current_dir().unwrap(),
+        "the build source must not be the current working directory"
+    );
+    assert_eq!(
+        git_out(&canonical, &["rev-parse", "HEAD"]),
+        c2,
+        "prepared repo HEAD must be the merged head c2"
+    );
+    // Detached HEAD at the exact merged commit (so SIMARD_GIT_HASH == c2).
+    assert!(
+        !git_cmd(&canonical, &["symbolic-ref", "-q", "HEAD"])
+            .status()
+            .unwrap()
+            .success(),
+        "HEAD must be detached at the merged commit"
+    );
+}
+
+#[test]
+fn prepare_skips_fetch_when_commit_already_present_offline() {
+    // Perf/resilience (issue #2467): when the target merged commit is already
+    // in the canonical repo's object store (e.g. the `self-deploy` CLI fetched
+    // it before reading the merged head, then handed it to the orchestrator),
+    // prepare() must NOT make a second, redundant network fetch. We prove it by
+    // making `origin` unreachable AFTER cloning: a present commit must still
+    // check out — whereas an unconditional `git fetch origin` would fail loudly.
+    let root = tempfile::tempdir().unwrap();
+    let origin = root.path().join("origin");
+    let canonical = root.path().join("canonical");
+
+    let (_origin, c1) = init_origin(&origin);
+    clone_local(&origin, &canonical);
+    // c1 is already present in the clone's object store. Destroy origin so any
+    // attempted fetch would fail — the only way prepare() can succeed is by
+    // skipping the fetch for the already-present commit.
+    std::fs::remove_dir_all(&origin).unwrap();
+
+    let prepared = GitSourcePreparer::at(&canonical)
+        .prepare(&c1)
+        .expect("a locally-present commit must prepare without re-fetching");
+
+    assert_eq!(
+        std::fs::canonicalize(&prepared).unwrap(),
+        std::fs::canonicalize(&canonical).unwrap(),
+        "prepare must return the canonical repo"
+    );
+    assert_eq!(
+        git_out(&canonical, &["rev-parse", "HEAD"]),
+        c1,
+        "prepared HEAD must be the (already-present) target commit"
+    );
+    // Detached HEAD at the exact commit (so SIMARD_GIT_HASH == c1).
+    assert!(
+        !git_cmd(&canonical, &["symbolic-ref", "-q", "HEAD"])
+            .status()
+            .unwrap()
+            .success(),
+        "HEAD must be detached at the present commit"
+    );
+}
+
+#[test]
+fn prepare_is_loud_when_target_commit_is_absent_no_cwd_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    let origin = root.path().join("origin");
+    let canonical = root.path().join("canonical");
+    init_origin(&origin);
+    clone_local(&origin, &canonical);
+
+    // A syntactically valid 40-hex sha that does not exist in the repo.
+    let absent = "0".repeat(40);
+    let err = GitSourcePreparer::at(&canonical)
+        .prepare(&absent)
+        .expect_err("an unavailable merged commit must fail loudly, not fall back");
+    assert!(
+        matches!(
+            err,
+            SafeUpdateError::CheckoutFailed { .. }
+                | SafeUpdateError::FetchFailed { .. }
+                | SafeUpdateError::SourceResolveFailed { .. }
+        ),
+        "expected a loud source/fetch/checkout error, got: {err:?}"
+    );
+}
+
+#[test]
+fn prepare_rejects_non_full_sha_before_touching_git() {
+    let root = tempfile::tempdir().unwrap();
+    let origin = root.path().join("origin");
+    let canonical = root.path().join("canonical");
+    init_origin(&origin);
+    clone_local(&origin, &canonical);
+
+    // Option-injection attempt; a valid repo so the ONLY reason to fail is the
+    // bad SHA being rejected up front.
+    let err = GitSourcePreparer::at(&canonical)
+        .prepare("--upload-pack=touch /tmp/pwned")
+        .expect_err("a non-40-hex target must be rejected before any git call");
+    assert!(
+        !matches!(err, SafeUpdateError::BuildFailed { .. }),
+        "rejection must happen during source prep, never reach a build: {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// resolve_repo(): SIMARD_SELF_DEPLOY_REPO override precedence + validation,
+// never a cwd fallback.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial_test::serial(simard_self_deploy_repo, cognitive_memory)]
+fn resolve_repo_env_override_wins_when_valid() {
+    let root = tempfile::tempdir().unwrap();
+    let origin = root.path().join("origin");
+    let canonical = root.path().join("canonical");
+    init_origin(&origin);
+    clone_local(&origin, &canonical);
+
+    let _g = EnvGuard::set(SELF_DEPLOY_REPO_ENV, &canonical);
+    let resolved = GitSourcePreparer::new()
+        .resolve_repo()
+        .expect("a valid SIMARD_SELF_DEPLOY_REPO must resolve");
+    assert_eq!(
+        std::fs::canonicalize(&resolved).unwrap(),
+        std::fs::canonicalize(&canonical).unwrap(),
+        "SIMARD_SELF_DEPLOY_REPO must win the resolution precedence"
+    );
+    assert_ne!(
+        std::fs::canonicalize(&resolved).unwrap(),
+        std::env::current_dir().unwrap(),
+        "resolution must never fall back to cwd"
+    );
+}
+
+#[test]
+#[serial_test::serial(simard_self_deploy_repo, cognitive_memory)]
+fn resolve_repo_rejects_invalid_env_override_without_cwd_fallback() {
+    // A path-traversal value and a non-repo path must both be rejected loudly,
+    // never silently resolving to the current working directory.
+    let traversal = PathBuf::from("/tmp/../tmp/not-a-real-self-deploy-repo-2467");
+    let _g = EnvGuard::set(SELF_DEPLOY_REPO_ENV, &traversal);
+    let err = GitSourcePreparer::new()
+        .resolve_repo()
+        .expect_err("a '..'-bearing SIMARD_SELF_DEPLOY_REPO must be rejected");
+    assert!(
+        matches!(err, SafeUpdateError::SourceResolveFailed { .. }),
+        "invalid override must surface SourceResolveFailed, got: {err:?}"
+    );
+
+    let not_a_repo = tempfile::tempdir().unwrap();
+    let _g2 = EnvGuard::set(SELF_DEPLOY_REPO_ENV, not_a_repo.path());
+    let err2 = GitSourcePreparer::new()
+        .resolve_repo()
+        .expect_err("a non-git-work-tree SIMARD_SELF_DEPLOY_REPO must be rejected");
+    assert!(
+        matches!(err2, SafeUpdateError::SourceResolveFailed { .. }),
+        "non-repo override must surface SourceResolveFailed, got: {err2:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// resolve_existing_repo(): the cwd-independent, NON-cloning resolution used by
+// `self-deploy --check` (issue #2467 review). It honors the same env-override →
+// persistent-checkout precedence as resolve_repo, but stops short of cloning (a
+// read-only `--check` must "make no changes"), returning None when no canonical
+// source exists yet so the caller can fall back to a best-effort cwd report.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial_test::serial(simard_self_deploy_repo, cognitive_memory)]
+fn resolve_existing_repo_returns_env_override_without_cloning() {
+    let root = tempfile::tempdir().unwrap();
+    let origin = root.path().join("origin");
+    let canonical = root.path().join("canonical");
+    init_origin(&origin);
+    clone_local(&origin, &canonical);
+
+    let _g = EnvGuard::set(SELF_DEPLOY_REPO_ENV, &canonical);
+    let resolved = GitSourcePreparer::new()
+        .resolve_existing_repo()
+        .expect("a valid SIMARD_SELF_DEPLOY_REPO must resolve for --check");
+    assert_eq!(
+        std::fs::canonicalize(&resolved).unwrap(),
+        std::fs::canonicalize(&canonical).unwrap(),
+        "--check must resolve the same canonical override the deploy uses, not the cwd"
+    );
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, simard_self_deploy_repo, cognitive_memory)]
+fn resolve_existing_repo_returns_persistent_checkout_when_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _state = EnvGuard::set(STATE_ROOT_ENV, tmp.path());
+    // Neutralize any ambient override (an empty value reads back as "unset").
+    let _override = EnvGuard::set(SELF_DEPLOY_REPO_ENV, Path::new(""));
+
+    // Make the persistent checkout a real git work tree under the state root.
+    let persistent = self_deploy_src_dir();
+    init_origin(&persistent);
+
+    let resolved = GitSourcePreparer::new()
+        .resolve_existing_repo()
+        .expect("an existing persistent checkout must resolve for --check");
+    assert_eq!(
+        std::fs::canonicalize(&resolved).unwrap(),
+        std::fs::canonicalize(&persistent).unwrap(),
+        "--check must resolve the persistent canonical checkout, not the cwd"
+    );
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, simard_self_deploy_repo, cognitive_memory)]
+fn resolve_existing_repo_is_none_and_never_clones_without_a_canonical_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _state = EnvGuard::set(STATE_ROOT_ENV, tmp.path());
+    let _override = EnvGuard::set(SELF_DEPLOY_REPO_ENV, Path::new(""));
+
+    // No env override and no persistent checkout under the (empty) state root.
+    assert!(
+        GitSourcePreparer::new().resolve_existing_repo().is_none(),
+        "with no canonical source, --check must NOT clone — it returns None and \
+         the caller falls back to a best-effort cwd report"
+    );
+    // ...and it must not have created the persistent checkout as a side effect.
+    assert!(
+        !self_deploy_src_dir().exists(),
+        "resolve_existing_repo must never create the persistent checkout (read-only)"
+    );
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, simard_self_deploy_repo, cognitive_memory)]
+fn resolve_existing_repo_rejects_invalid_override_without_clone_or_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _state = EnvGuard::set(STATE_ROOT_ENV, tmp.path());
+
+    // A present-but-invalid override (path traversal) must be rejected by
+    // `validate_repo_path`. A read-only `--check` tolerates it by degrading to a
+    // cwd report (None) — loudly on stderr — rather than erroring or, worse,
+    // silently building from an unvalidated path.
+    let _override = EnvGuard::set(SELF_DEPLOY_REPO_ENV, Path::new("/tmp/../etc"));
+
+    assert!(
+        GitSourcePreparer::new().resolve_existing_repo().is_none(),
+        "an invalid override must resolve to None (cwd fallback), never bypass validation"
+    );
+    // It must not create the persistent checkout as a side effect either.
+    assert!(
+        !self_deploy_src_dir().exists(),
+        "rejecting an invalid override must remain read-only (no persistent checkout created)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// prepare_and_build(): the orchestrator's step-1 composition. A prep failure
+// must propagate BEFORE any build (and a fortiori before daemon mutation), and
+// prep must be asked for the exact target merged commit.
+// ---------------------------------------------------------------------------
+
+/// Records the target commit it was asked to prepare and returns a chosen
+/// outcome — never touches git or the filesystem.
+struct RecordingPreparer {
+    asked: Mutex<Vec<String>>,
+    outcome: Result<PathBuf, ()>,
+}
+
+impl RecordingPreparer {
+    fn failing() -> Self {
+        Self {
+            asked: Mutex::new(Vec::new()),
+            outcome: Err(()),
+        }
+    }
+}
+
+impl SelfDeploySourcePreparer for RecordingPreparer {
+    fn prepare(&self, target_commit: &str) -> Result<PathBuf, SafeUpdateError> {
+        self.asked.lock().unwrap().push(target_commit.to_string());
+        match &self.outcome {
+            Ok(p) => Ok(p.clone()),
+            Err(()) => Err(SafeUpdateError::FetchFailed {
+                detail: "fake: offline".to_string(),
+            }),
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, cognitive_memory)]
+fn prepare_and_build_propagates_prepare_failure_before_building() {
+    let warm = tempfile::tempdir().unwrap();
+    // Pin the state root (and thus the host-wide build lock at
+    // <state_root>/cargo_build.lock) into the tempdir so this stays hermetic.
+    let _state = EnvGuard::set(STATE_ROOT_ENV, warm.path());
+    let fake = RecordingPreparer::failing();
+    let sha = "abcdef0123456789abcdef0123456789abcdef01";
+
+    let err = prepare_and_build(&fake, sha, warm.path())
+        .expect_err("a failed source prep must abort the build");
+    assert!(
+        matches!(err, SafeUpdateError::FetchFailed { .. }),
+        "prep failure must propagate untransformed, got: {err:?}"
+    );
+
+    // No build was attempted: the warm target has no release artifact.
+    assert!(
+        !warm.path().join("release").join("simard").exists(),
+        "build must NOT run after a prep failure (no cwd-HEAD fallback)"
+    );
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, cognitive_memory)]
+fn prepare_and_build_asks_to_prepare_the_target_merged_commit() {
+    let warm = tempfile::tempdir().unwrap();
+    let _state = EnvGuard::set(STATE_ROOT_ENV, warm.path());
+    let fake = RecordingPreparer::failing();
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+
+    let _ = prepare_and_build(&fake, sha, warm.path());
+
+    let asked = fake.asked.lock().unwrap();
+    assert_eq!(
+        asked.as_slice(),
+        &[sha.to_string()],
+        "prepare_and_build must request exactly the target merged commit"
+    );
+}
+
+/// A preparer that records whether the host-wide build lock was already held at
+/// the moment `prepare` runs, then fails fast so no real build is attempted.
+struct LockObservingPreparer {
+    state_root: PathBuf,
+    lock_held_during_prepare: Mutex<Option<bool>>,
+}
+
+impl SelfDeploySourcePreparer for LockObservingPreparer {
+    fn prepare(&self, _target_commit: &str) -> Result<PathBuf, SafeUpdateError> {
+        let held = crate::build_lock::BuildLock::new(&self.state_root).is_locked();
+        *self.lock_held_during_prepare.lock().unwrap() = Some(held);
+        Err(SafeUpdateError::FetchFailed {
+            detail: "fake: stop after observing the lock".to_string(),
+        })
+    }
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, cognitive_memory)]
+fn prepare_and_build_holds_build_lock_during_prepare_and_releases_after() {
+    // Issue #2467: the resolve→checkout→build window must be serialized by the
+    // host-wide build lock so two concurrent self-deploys cannot race the shared
+    // source checkout (compile one tree, embed another's SHA). Prove the lock is
+    // (a) held while prepare runs and (b) released once prepare_and_build returns.
+    let warm = tempfile::tempdir().unwrap();
+    let _state = EnvGuard::set(STATE_ROOT_ENV, warm.path());
+
+    // No stale lock to start.
+    assert!(
+        !crate::build_lock::BuildLock::new(warm.path()).is_locked(),
+        "precondition: build lock must be free before prepare_and_build"
+    );
+
+    let fake = LockObservingPreparer {
+        state_root: warm.path().to_path_buf(),
+        lock_held_during_prepare: Mutex::new(None),
+    };
+    let sha = "abcdef0123456789abcdef0123456789abcdef01";
+
+    let _ = prepare_and_build(&fake, sha, warm.path());
+
+    assert_eq!(
+        *fake.lock_held_during_prepare.lock().unwrap(),
+        Some(true),
+        "the build lock must be held while the source checkout runs"
+    );
+    assert!(
+        !crate::build_lock::BuildLock::new(warm.path()).is_locked(),
+        "the build lock must be released (RAII) once prepare_and_build returns"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// build_self_deploy_candidate(): builds the prepared repo into the WARM target
+// dir; loud on failure. (Mirrors self_relaunch::build_canary's failure test —
+// no full project compile.)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn build_self_deploy_candidate_creates_warm_dir_and_fails_loudly_on_bad_repo() {
+    let warm =
+        std::env::temp_dir().join(format!("simard-sd-warm-build-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&warm);
+    let bogus_repo = PathBuf::from("/tmp/no-such-self-deploy-repo-for-2467-test");
+
+    let res = build_self_deploy_candidate(&bogus_repo, &warm);
+
+    assert!(
+        warm.exists(),
+        "build_self_deploy_candidate must create the warm target dir"
+    );
+    assert!(
+        res.is_err(),
+        "a missing source manifest must make the build fail loudly"
+    );
+    let _ = std::fs::remove_dir_all(&warm);
+}
+
+// ---------------------------------------------------------------------------
+// remove_stale_checkout(): self-heal a wedged persistent source checkout
+// (issue #2467 review). A clone is only attempted when the persistent dir is
+// NOT a valid work tree, so a leftover partial/non-git path (or dangling
+// symlink) must be removed first — otherwise `git clone <dest>` fails forever
+// ("destination path already exists and is not an empty directory") and every
+// future self-deploy is permanently wedged.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn remove_stale_checkout_clears_partial_non_git_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let dest = root.path().join("self-deploy-src");
+    // A clone killed mid-way leaves a non-empty, non-git directory.
+    std::fs::create_dir_all(dest.join(".git")).unwrap();
+    std::fs::write(dest.join("partial"), b"half-written").unwrap();
+    assert!(dest.exists());
+
+    remove_stale_checkout(&dest).expect("a partial checkout must be removed, not error");
+    assert!(
+        !dest.exists(),
+        "the wedged checkout dir must be gone so a fresh clone can recreate it"
+    );
+}
+
+#[test]
+fn remove_stale_checkout_clears_leftover_file() {
+    let root = tempfile::tempdir().unwrap();
+    let dest = root.path().join("self-deploy-src");
+    std::fs::write(&dest, b"not a directory").unwrap();
+
+    remove_stale_checkout(&dest).expect("a leftover file at the checkout path must be removed");
+    assert!(!dest.exists(), "the leftover file must be gone");
+}
+
+#[cfg(unix)]
+#[test]
+fn remove_stale_checkout_removes_symlink_without_following_it() {
+    let root = tempfile::tempdir().unwrap();
+    // The symlink target holds data that MUST survive (we delete the link only).
+    let target = root.path().join("real-contents");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("keep"), b"precious").unwrap();
+
+    let dest = root.path().join("self-deploy-src");
+    std::os::unix::fs::symlink(&target, &dest).unwrap();
+
+    remove_stale_checkout(&dest).expect("a symlink at the checkout path must be removed");
+    assert!(!dest.exists(), "the symlink itself must be removed");
+    assert!(
+        target.join("keep").exists(),
+        "removal must not follow the symlink into its target"
+    );
+}
+
+#[test]
+fn remove_stale_checkout_is_noop_when_absent() {
+    let root = tempfile::tempdir().unwrap();
+    let dest = root.path().join("does-not-exist");
+    remove_stale_checkout(&dest).expect("a missing checkout path must be a no-op, not an error");
+}

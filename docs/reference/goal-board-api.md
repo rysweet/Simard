@@ -10,6 +10,7 @@ related:
   - ../howto/recover-goal-board.md
   - ../howto/inspect-durable-goal-register.md
   - ./cognitive-memory-bridge-helpers.md
+  - ./goal-target-repo-routing.md
 ---
 
 # Goal board API reference
@@ -195,7 +196,7 @@ edit, the second writer's view of that one goal wins (see "Best-effort
 guarantee" below).
 
 **Active capacity truncation.** If the merged active set exceeds
-`MAX_ACTIVE_GOALS` (= 5), it is truncated using a **deterministic sort key**
+`MAX_ACTIVE_GOALS` (= 20), it is truncated using a **deterministic sort key**
 applied before the cut:
 
 1. `priority` ascending (lower numeric value = higher importance, kept first).
@@ -551,6 +552,16 @@ pub fn add_active_goal(board: &mut GoalBoard, goal: ActiveGoal) -> SimardResult<
 Appends an active goal. Fails if:
 - `board.active.len() >= MAX_ACTIVE_GOALS` (capacity exceeded)
 - A goal with the same `id` already exists in `board.active`
+
+> **Target repo (`repo` field).** Each `ActiveGoal` carries an optional
+> `repo: Option<String>` slug naming the ecosystem repository the goal targets
+> (e.g. `"amplihack-rs"`). `None` (the default) targets the daemon's own repo
+> ("Simard"). The field is `#[serde(default, skip_serializing_if = "Option::is_none")]`,
+> so pre-#2359 snapshots load with `repo = None` and repo-less goals serialize
+> byte-identically. The slug is resolved to a concrete worktree parent path at
+> spawn time — see
+> [Goal target-repo routing](./goal-target-repo-routing.md) (issue
+> [#2359](https://github.com/rysweet/Simard/issues/2359)).
 
 ### `add_backlog_item`
 

@@ -1,0 +1,84 @@
+name: "Distill Parser Tolerates Copilot Launch-Log Preamble"
+description: >
+  Outside-in regression gate for issue #2496 (episode t=9271 live failure).
+  The episode->fact distillation parser must recover the { "facts": [...] }
+  object from the Tier-1 recipe-runner `--output-format json` envelope even
+  when the distill step output is the noisy Copilot CLI launch preamble:
+  an ANSI-coloured `launching copilot` line, a NODE_OPTIONS line, and a
+  leading ANSI-wrapped JSON log record ({"level":"info",...}) ahead of the
+  real facts object. The current parser (issues #2401/#2461/#2484) already
+  strips ANSI/log noise and prefers the last non-empty facts object; this
+  scenario pins the captured launch-log shape end-to-end so it cannot
+  regress.
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Distill parser recovers facts from Copilot launch-log preamble (#2496)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib
+        parse_recipe_output_full_recovers_facts_from_copilot_launch_log_preamble
+        -- --nocapture
+    timeout: 600000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "parse_recipe_output_full_recovers_facts_from_copilot_launch_log_preamble ... ok"
+        - "test result: ok"
+
+  - name: "Full distillation parser contract still green (no regression)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib memory_consolidation::distillation::unit_tests
+        -- --nocapture
+    timeout: 600000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test result: ok"
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "test-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "memory"
+    - "distillation"
+    - "regression"
+    - "issue-2496"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

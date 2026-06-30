@@ -94,6 +94,7 @@ fn test_bridges() -> OodaBridges {
         knowledge: mock_knowledge(),
         gym: mock_gym(),
         session: None,
+        session_factory: None,
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
         decide_brain: None,
         orient_brain: None,
@@ -101,6 +102,7 @@ fn test_bridges() -> OodaBridges {
         progress_evidence: std::sync::Arc::new(
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
+        completion_evidence: None,
     }
 }
 
@@ -109,6 +111,8 @@ fn board_with_active_goals() -> GoalBoard {
     add_active_goal(
         &mut board,
         ActiveGoal {
+            parent_goal_id: None,
+            repo: None,
             id: "goal-improve-tests".to_string(),
             description: "Improve test coverage for session_builder module".to_string(),
             priority: 1,
@@ -123,6 +127,8 @@ fn board_with_active_goals() -> GoalBoard {
     add_active_goal(
         &mut board,
         ActiveGoal {
+            parent_goal_id: None,
+            repo: None,
             id: "goal-fix-docs".to_string(),
             description: "Update API documentation for meeting_facilitator".to_string(),
             priority: 2,
@@ -364,6 +370,8 @@ fn daemon_degrades_gracefully_when_no_provider() {
 #[test]
 fn goal_objective_contains_goal_id_and_description() {
     let goal = ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "goal-improve-tests".to_string(),
         description: "Improve test coverage for session_builder module".to_string(),
         priority: 1,

@@ -1,0 +1,141 @@
+name: "Base-Type Adapters — Memory/Knowledge Enrichment Parity"
+description: >
+  Outside-in gate for issue #1665: before the fix, only CopilotSdkAdapter
+  called `prepare_turn_context`, so the other shipped base-type adapters
+  (local-harness/terminal-shell, rusty-clawd, claude-agent-sdk,
+  ms-agent-framework) ran every turn with empty memory + knowledge context.
+  These steps drive the adapter-parameterised regression gates in
+  `tests/base_type_enrichment.rs`, which inject a mock memory bridge into each
+  shipped adapter session and assert they all render the identical
+  `## Relevant Memory Facts` block through the shared, normalized
+  `BaseTypeSession::enrich_input` entry point.
+version: "1.0.0"
+
+config:
+  timeout: 180000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 180000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Every shipped adapter exposes the shared enrichment entry point"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test base_type_enrichment
+        every_shipped_adapter_exposes_enrichment
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test every_shipped_adapter_exposes_enrichment ... ok"
+
+  - name: "Every shipped adapter renders recalled memory facts with a bridge"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test base_type_enrichment
+        every_shipped_adapter_renders_memory_facts_with_bridge
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test every_shipped_adapter_renders_memory_facts_with_bridge ... ok"
+
+  - name: "All shipped adapters render an identical enriched prompt (parity)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test base_type_enrichment
+        all_shipped_adapters_render_identical_enriched_prompt
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test all_shipped_adapters_render_identical_enriched_prompt ... ok"
+
+  - name: "Enrichment is a no-op (objective-only) when no bridge is configured"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test base_type_enrichment
+        enrichment_is_noop_without_configured_bridge
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test enrichment_is_noop_without_configured_bridge ... ok"
+
+  - name: "Production wiring launches non-empty bridges for builder adapters (Copilot + RustyClawd, #2383)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --test base_type_enrichment
+        production_wiring_launches_bridges_for_builder_adapters
+        -- --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test production_wiring_launches_bridges_for_builder_adapters ... ok"
+
+  - name: "Shared enrich_turn_input / render_enrichment_block unit coverage"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib --
+        enrich render_enrichment
+        --nocapture --test-threads=1
+    timeout: 180000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test result: ok."
+
+assertions: []
+
+cleanup:
+  - name: "Test agent cleanup"
+    agent: "test-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "base-type-adapters"
+    - "memory-enrichment"
+    - "knowledge-enrichment"
+    - "regression"
+    - "issue-1665"
+    - "issue-2383"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

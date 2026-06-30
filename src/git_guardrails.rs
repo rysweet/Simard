@@ -111,6 +111,7 @@ mod tests {
         }
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn blocks_force_push() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -123,6 +124,7 @@ mod tests {
         assert!(result.unwrap_err().contains("GUARDRAIL BLOCKED"));
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn blocks_reset_hard() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -131,6 +133,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn allows_normal_push() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -142,6 +145,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn allows_commit() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -150,6 +154,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn disabled_allows_everything() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -163,6 +168,7 @@ mod tests {
         reset_env();
     }
 
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn blocks_delete_main_branch() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

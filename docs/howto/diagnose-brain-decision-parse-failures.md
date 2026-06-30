@@ -26,6 +26,37 @@ what to do.
 For the full protocol definition see the
 [OODA Brain Decision Protocol reference](../reference/ooda-brain-decision-protocol.md).
 
+> **Fixed in [#2419](https://github.com/rysweet/Simard/issues/2419):** The
+> lifecycle brain previously parsed `recipe-runner-rs`'s **default `text`
+> output**, which prints only a summary banner (`Recipe: … SUCCESS …`) to
+> stdout — the agent's decision text is not on stdout in text mode. First-word
+> extraction always saw `Recipe:`, so ~99.6% of decisions silently defaulted
+> to `ContinueSkipping`. The brain now invokes `--output-format json` and
+> extracts the real decision from the JSON envelope, and emits one
+> `brain_lifecycle_decision` metric per call. **Before reaching for the log
+> triage below, measure the parse-failure rate directly from the metric** (see
+> [Measure the parse-failure rate](#measure-the-parse-failure-rate)).
+
+## Measure the parse-failure rate
+
+Each `decide_engineer_lifecycle` call appends a `brain_lifecycle_decision`
+event to `~/.simard/metrics/metrics.jsonl`. The `outcome` label is the signal:
+`parsed` (a real decision) vs `default_empty` / `default_malformed` / `error`
+(a parse failure). To compute the rate over the recorded window:
+
+```bash
+jq -rc 'select(.metric_name=="brain_lifecycle_decision") | .context | fromjson | .outcome' \
+  ~/.simard/metrics/metrics.jsonl \
+  | sort | uniq -c
+```
+
+A healthy lifecycle brain shows a mix of `parsed` outcomes (including genuine
+`continue_skipping`); a regression shows `default_malformed` dominating again
+(the symptom #2419 fixed). `is_parse_failure` in each context is `true` only for
+the `default_empty` / `default_malformed` / `error` outcomes; `parsed` and the
+ladder-recovered `repaired` / `escalated` outcomes (issue #2432) are `false`, so
+`count(is_parse_failure==true)/count(*)` is the rate.
+
 ## Step 1: Find the failing cycle
 
 Symptoms that justify reading parse-failure logs:
@@ -160,6 +191,56 @@ proceeding:
 * **Adding a fallback in `dispatch_spawn_engineer` for a specific raw
   response.** The single fallback path (`ContinueSkipping`) is intentional;
   a parse failure should be visible in the logs, not silently rerouted.
+
+## Escalation ladder (issue #2432)
+
+A base parse-miss (`default_empty` / `default_malformed`) is a *low-confidence*
+signal, not an immediate verdict. Instead of defaulting on the first miss, the
+lifecycle brain runs a **bounded, confidence-gated escalation ladder** (BGML's
+progress-aware module — spend extra compute only on the weak cases):
+
+1. **Base** — the cheap attempt, exactly as before.
+2. **Schema-repair** — re-prompt feeding the malformed output back, reminding
+   the model the first word must be a valid variant (`escalation_note` context
+   var, rendered by the recipe's `{{escalation_note}}` placeholder).
+3. **Escalate** — schema-repair plus a higher-effort, step-by-step reasoning
+   instruction.
+
+The deterministic `continue_skipping` default is reached **only after the
+ladder is exhausted**. Each rung is logged loudly (`BRAIN ESCALATION …`).
+
+* **Bound**: `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS` sets the number of rungs
+  attempted after a base miss (default `2`, hard-capped at `3`). `0` disables
+  the ladder. There is no unbounded retry.
+* **Metric**: `brain_lifecycle_decision` gains two non-failure outcomes,
+  `repaired` and `escalated` (a real decision recovered by the ladder), plus an
+  `attempts` field (base + rungs). A recovered decision does **not** count
+  toward the parse-failure numerator — that is how the ladder drops the
+  measured default/parse-failure rate. Compare the `repaired`/`escalated` share
+  against `default_*` to see the ladder working:
+
+  ```bash
+  jq -rc 'select(.metric_name=="brain_lifecycle_decision") | .context | fromjson | .outcome' \
+    ~/.simard/metrics/metrics.jsonl \
+    | sort | uniq -c
+  ```
+
+* A genuine recipe-runner failure (spawn/exit/envelope) still surfaces as a
+  hard `error` — only a *parse-miss on a successful run* escalates.
+
+* **Termination `cause`**: each `brain_lifecycle_decision` row also carries a
+  `cause` label recording *why* the ladder stopped, so an early stop is not
+  mistaken for genuine exhaustion:
+
+  | `cause`               | Meaning                                                            |
+  | --------------------- | ------------------------------------------------------------------ |
+  | `ladder_recovered`    | a rung produced a parseable decision (`repaired` / `escalated`)    |
+  | `ladder_exhausted`    | every configured rung was tried; none parsed → deterministic default |
+  | `ladder_invoke_error` | a rung's own invocation failed; ladder stopped early → default      |
+  | `ladder_disabled`     | `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS=0`; no rung attempted          |
+
+  A spike of `ladder_invoke_error` points at recipe-runner/adapter health, not
+  at the model's parse quality — diagnose those separately from `ladder_exhausted`.
 
 ## See Also
 

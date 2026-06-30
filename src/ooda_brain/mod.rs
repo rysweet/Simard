@@ -15,6 +15,7 @@ use crate::error::SimardResult;
 use crate::ooda_loop::OodaState;
 use std::path::PathBuf;
 
+pub mod confidence;
 mod context;
 mod decide;
 mod fallback;
@@ -35,6 +36,12 @@ mod prompt_store_tests;
 #[cfg(test)]
 mod tests;
 
+pub use confidence::{
+    CalibrationWindow, ECE_BINS, ECE_METRIC, ECE_WINDOW, HIGH_STAKES_URGENCY, JudgedDecision,
+    JudgedLifecycle, LOW_TRUST_CONFIDENCE, SELF_CONSISTENCY_K, Vote, confidence_or_low_trust,
+    effective_k, is_high_stakes, is_irreversible_lifecycle, lifecycle_conservative_rank,
+    self_consistency_vote, should_self_consistency_sample, validate_confidence,
+};
 pub use context::{count_live_engineer_claims, gather_engineer_lifecycle_ctx, redact_secrets};
 pub use decide::{
     DecideContext, DecideJudgment, DeterministicDecideBrain, OodaDecideBrain,
@@ -52,6 +59,14 @@ pub use orient::{
 };
 pub use parse_failure::ParseFailureRecord;
 pub use recipe_brain::RecipeBrain;
+/// Shared escalation-ladder backbone + verdict-parse instrumentation reused by
+/// the recipe-backed merge-judge (issue #2419 family / #2429). Exposed
+/// crate-wide so `stewardship::recipe_merge_judge` runs on the SAME ladder /
+/// transport / metric as the OODA brains rather than reinventing them.
+pub(crate) use recipe_brain::{
+    EscalationConfig, LadderRung, LifecycleParseOutcome, build_phase_escalation_note,
+    extract_recipe_decision_output, record_verdict_parse_metric, run_brain_ladder,
+};
 /// Backward-compatible type aliases (issue #2132).
 pub type RecipeDecideBrain = RecipeBrain;
 pub type RecipeEngineerLifecycleBrain = RecipeBrain;
@@ -267,6 +282,8 @@ mod inline_tests_1979 {
     fn state_with_active_goal(id: &str) -> OodaState {
         let mut board = GoalBoard::default();
         board.active.push(ActiveGoal {
+            parent_goal_id: None,
+            repo: None,
             id: id.to_string(),
             description: "test".to_string(),
             priority: 1,

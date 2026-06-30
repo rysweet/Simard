@@ -1,14 +1,16 @@
 ---
 title: Text-parsing wire formats
 description: Normative reference for every text-based wire format Simard's Rust code parses from LLM and recipe output. Replaces the former JSON-based contracts.
-last_updated: 2026-05-24
+last_updated: 2026-06-29
 review_schedule: as-needed
 owner: simard
 doc_type: reference
 related:
   - ../concepts/text-based-brain-protocol.md
+  - ../concepts/copilot-launcher-preamble-stripping.md
   - ./ooda-brain-api.md
   - ./ooda-brain-decision-protocol.md
+  - ./recipe-brain-verdict-parsing.md
   - ./progress-evidence-api.md
 ---
 
@@ -22,6 +24,121 @@ protocol families, each used at specific decision sites.
 
 For the design rationale, see
 [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md).
+
+---
+
+## Protocol 0: Shared noise pre-stripping (`recipe_output`)
+
+Used by: **every** recipe-backed parser below, before it runs.
+
+> **Added in [#2484](https://github.com/rysweet/Simard/issues/2484):**
+> `recipe-runner-rs` stdout (and the `step_results[].output` string inside its
+> `--output-format json` envelope) is routinely contaminated with **four** kinds
+> of non-payload noise that broke the formerly bespoke per-phase extractors:
+>
+> 1. **ANSI SGR/CSI/OSC colour codes** from `tracing`/`env_logger` (e.g. a
+>    leading `\x1b[2m` "dim" whose raw `ESC`/`0x1b` byte is invalid inside a
+>    JSON document, so `serde_json` rejects the span).
+> 2. **Timestamped tracing-log lines** interleaved with the agent answer.
+> 3. The runner's **text-mode summary banner** (`Recipe: … SUCCESS`, `Steps: …`,
+>    `[completed] …`).
+> 4. **Copilot CLI launch-log preamble** (added in
+>    [#2496](https://github.com/rysweet/Simard/issues/2496), generalised here
+>    from the distill path that PR [#2500](https://github.com/rysweet/Simard/pull/2500)
+>    pinned). The Copilot agent binary prepends launcher lines that carry **no**
+>    ISO-8601 timestamp — so category 2 above did not catch them: the
+>    `ℹ NODE_OPTIONS=… (saved preference)` info marker, `Run 'copilot update'…`
+>    nags, `… launching copilot binary=… version="GitHub Copilot CLI …"`
+>    lines, and leading `INFO`/`WARN` launcher lines. Left in place, the first
+>    token of the cleaned text was `ℹ`/`Run`/the version string `1.0.66-2`
+>    instead of an action keyword or urgency decimal, so **every** decide/orient
+>    parse missed and the goal deadlocked (see
+>    [Concept: Copilot launch-log preamble stripping](../concepts/copilot-launcher-preamble-stripping.md)).
+>
+> The single hardened `src/recipe_output/` module is now the **only**
+> ANSI/log/banner/launcher-stripping path. The two former duplicate strippers
+> (`meeting_backend::sanitize::strip_ansi_escapes`, `stewardship::dedup::normalize`)
+> and the distill-private ANSI/launcher stripper now delegate to it. Extending
+> the one `is_noise_line` predicate re-hardens **every** consumer — decide,
+> orient, engineer-lifecycle, merge-judge, progress checker, distill — at once.
+
+### Functions
+
+| Function | Behaviour |
+|---|---|
+| `strip_ansi(&str) -> Cow` | Single ANSI (CSI/OSC/two-char) stripper. `Cow::Borrowed` on the clean path (no `ESC` byte). |
+| `strip_recipe_noise(&str) -> Cow` | `strip_ansi` + drop ISO-8601 tracing lines, runner-banner lines, **and Copilot launch-log preamble lines** (via `is_noise_line`). `Cow::Borrowed` on the clean path. |
+| `is_noise_line(&str) -> bool` *(private)* | Per-line predicate: `true` for an ISO-timestamp tracing line, a runner summary-banner line, **or** a Copilot launcher line (`is_copilot_launcher_line`). A JSON payload (`{`-leading), action keyword, bare decimal, or verdict keyword never matches, so dropping such a line never discards the answer. |
+| `is_copilot_launcher_line(&str) -> bool` *(private)* | The launcher-only arm (#2496). Anchored `starts_with`/`contains` matches on the four launcher shapes below; matches **no** payload line. ANSI is stripped before it runs. |
+| `balanced_objects` / `last_balanced_object` / `extract_json_payload` | String-literal-aware balanced `{…}` scan. JSON extraction is **dual-pass** (line-dropped **and** ANSI-only) so the payload survives both an interleaved log line inside a pretty body and a same-line log prefix. |
+| `extract_verdict(raw, keywords)` | Precedence keyword scan over cleaned text. |
+| `record_parse_outcome(phase, success)` | Emits `recipe_parse_{success,failure}_total{phase}` to `metrics.jsonl`. |
+
+### Copilot launcher-line shapes (`is_copilot_launcher_line`)
+
+The predicate drops a line (after `trim_start`) when it matches one of these
+anchored launcher shapes and **only** these — it is deliberately conservative so
+no decision token, JSON payload, decimal, or verdict keyword is ever eaten:
+
+| Shape (anchored) | Example line |
+|---|---|
+| `ℹ`/info-marker line containing `NODE_OPTIONS=` and `(saved preference)` | `ℹ NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: …` |
+| starts with `Run 'copilot update'` | `Run 'copilot update' to check for updates.` |
+| contains `launching copilot binary=` / `version="GitHub Copilot CLI` | `… INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot version="GitHub Copilot CLI 1.0.66-2."` |
+| leading `INFO`/`WARN` launcher line with **no** ISO-8601 timestamp | `INFO using cached login`, `WARN extension not pinned` |
+
+A line that begins with `{`, a known action keyword, a bare decimal, or a
+verdict keyword is **never** classified as a launcher line. ANSI escapes are
+stripped first, so an ANSI-coloured `INFO`/`WARN` launcher line still matches and
+a coloured payload line still survives. See
+[Concept: Copilot launch-log preamble stripping § correctness as safety](../concepts/copilot-launcher-preamble-stripping.md#correctness-as-safety-never-eat-the-payload).
+
+#### Example: launcher preamble + ANSI around a decide decision
+
+Raw `step_results[].output` (ANSI shown as `\x1b[…m`, leading launcher preamble):
+
+```
+\x1b[2mℹ\x1b[0m NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: /home/azureuser/.amplihack/config
+\x1b[34mINFO\x1b[0m launching copilot binary=/home/azureuser/.npm-global/bin/copilot version="GitHub Copilot CLI 1.0.66-2."
+Run 'copilot update' to check for updates.
+advance_goal The next PR is ready to open; proceeding with the implementation.
+```
+
+After `strip_recipe_noise`, the cleaned text is just the agent answer, so the
+first-word parser reads `advance_goal` (not `ℹ`):
+
+```
+advance_goal The next PR is ready to open; proceeding with the implementation.
+```
+
+The same cleaning makes the orient parser read the model's real urgency decimal
+rather than scraping `1.0.66-2` → `1.0` from the version string.
+
+### Clean-path guarantee
+
+`strip_ansi` and `strip_recipe_noise` return `Cow::Borrowed` — byte-identical
+text with zero allocation — when stdout carries no `ESC` byte and no droppable
+log/banner line. Adopting the shared helper therefore does **not** change any
+phase's behaviour on clean output; only previously-defaulted noisy cases now
+recover.
+
+### Observability counters
+
+On every recipe-backed phase invocation, `record_parse_outcome(phase, success)`
+is emitted at the subprocess call site (never inside a pure parse function, so
+unit tests write no metrics):
+
+```
+recipe_parse_success_total{phase}
+recipe_parse_failure_total{phase}   # incremented when the permissive default fires
+```
+
+`phase ∈ {distill, merge_judge, engineer_lifecycle, decide, orient,
+progress_checker}`. These are **complementary** to the brain phases' existing
+`brain_verdict_parsed_total{phase,outcome}` counter (issue #2429): the latter
+owns the brain-phase success-rate dashboard; these add the memory/distill and
+progress-checker phases to the same counter family and give both numerator and
+denominator per phase.
 
 ---
 
@@ -46,6 +163,16 @@ free-text     = <any remaining text — kept as rationale>
 - It is lowercased via `to_ascii_lowercase()` before matching.
 - If no known variant matches, a safe default is returned (not a parse error).
 - Everything after the first word is the rationale (truncated to 500 chars).
+
+> **Noise pre-stripping (#2484, extended for the Copilot launcher preamble in
+> [#2496](https://github.com/rysweet/Simard/issues/2496)):** each parser first
+> routes its input through
+> [`recipe_output::strip_recipe_noise`](#protocol-0-shared-noise-pre-stripping-recipe_output)
+> so an ANSI-coloured log prefix, a runner banner, **or a Copilot launch-log
+> preamble line** cannot shadow the first-word / first-float token. Without the
+> launcher arm the first token was `ℹ`/`Run`/`1.0.66-2` and every decide/orient
+> parse missed → ladder exhaustion → deterministic default → a stalled goal.
+> Clean output is passed through unchanged (`Cow::Borrowed`).
 
 ### Common parser shape
 
@@ -74,6 +201,15 @@ No `serde_json`. No regex. No keyword scanning. Only `str::split_whitespace()`,
 
 Extracts the first whitespace-delimited word, lowercases it, and matches
 against the 10 action keywords. Defaults to `AdvanceGoal`.
+
+> **Transport (fixed in [#2421](https://github.com/rysweet/Simard/issues/2421)):**
+> the `text` passed to this parser is the agent output extracted from the
+> `recipe-runner-rs --output-format json` envelope (`step_results[].output`),
+> **not** the text-mode summary banner. `judge_decision` parses it via
+> `parse_action_outcome` (the outcome-classifying variant of this function) and
+> runs the escalation ladder on a parse-miss before the loud `AdvanceGoal`
+> default. See
+> [Recipe-brain verdict/decision parsing](./recipe-brain-verdict-parsing.md).
 
 **Keywords:**
 
@@ -107,6 +243,16 @@ consolidate_memory Memory hasn't been consolidated in 12 hours.
 **Struct:** `OrientJudgment`
 
 **Parser:** `parse_orient_from_text(text, base_urgency, failure_count) -> OrientJudgment`
+
+> **Transport (fixed in [#2421](https://github.com/rysweet/Simard/issues/2421)):**
+> the `text` is the agent output extracted from the `--output-format json`
+> envelope, **not** the text-mode banner. The envelope carries no banner, so the
+> first float is the model's real decimal and the deterministic floor below is
+> the only fallback — the banner's `(0.0s)` timing string can no longer be
+> scraped as `adjusted_urgency`, so urgency `0.0` from a banner can no longer
+> happen. `judge_orientation` parses via `parse_orient_outcome` (the
+> outcome-classifying variant) and runs the escalation ladder on a parse-miss.
+> See [Recipe-brain verdict/decision parsing](./recipe-brain-verdict-parsing.md).
 
 2-tier parse:
 
@@ -149,9 +295,20 @@ If validation fails, the deterministic floor applies.
 **Enum:** `EngineerLifecycleDecision`
 
 **Parser:** `parse_lifecycle_from_text(text) -> EngineerLifecycleDecision`
+(thin wrapper over `parse_lifecycle_outcome`, which also returns a
+`LifecycleParseOutcome` for metrics).
 
 Extracts the first whitespace-delimited word, lowercases it, and matches
 against the 6 lifecycle variant names. Defaults to `ContinueSkipping`.
+
+> **Fixed in [#2419](https://github.com/rysweet/Simard/issues/2419):** The
+> `text` passed to this parser is the agent decision text extracted from the
+> `recipe-runner-rs --output-format json` envelope
+> (`step_results[].output`), **not** raw stdout. recipe-runner-rs's default
+> `text` mode prints only a summary banner to stdout, so reading raw stdout
+> made first-word extraction always see `Recipe:` and silently default
+> (~99.6% of calls). Each call now also emits a `brain_lifecycle_decision`
+> metric whose `outcome` label measures the parse-failure rate.
 
 **Keywords:**
 
@@ -205,6 +362,11 @@ The parser scans the entire stdout for a verdict keyword. Everything else
 
 ### Scanning rules
 
+0. **Pre-strip noise (#2484):** route stdout through
+   [`recipe_output::strip_recipe_noise`](#protocol-0-shared-noise-pre-stripping-recipe_output)
+   first, so a dropped tracing-log line's keyword substring (e.g. `already`
+   containing `ready`) cannot fabricate a verdict and a real verdict behind an
+   ANSI/log prefix is not silently missed. Clean output is unchanged.
 1. Convert stdout to lowercase for matching.
 2. Check for the **negative** keyword first to prevent substring false positives.
 3. Check for the **positive** keyword.
@@ -259,49 +421,49 @@ Parser result: `EvidenceDecision::Accept { reason: "After reviewing the plan and
 
 ### 2b. Merge judge (`recipe_merge_judge.rs`)
 
-**Keywords:**
+> **Transport (fixed in [#2428](https://github.com/rysweet/Simard/issues/2428) /
+> [#2430](https://github.com/rysweet/Simard/issues/2430) /
+> [#2435](https://github.com/rysweet/Simard/issues/2435) /
+> [#2462](https://github.com/rysweet/Simard/issues/2462) /
+> [#2463](https://github.com/rysweet/Simard/issues/2463)):**
+> `RecipeMergeJudge::judge` invokes `recipe-runner-rs` with `--output-format
+> json` and parses the agent verdict text extracted from the envelope
+> (`step_results[].output`), **not** the text-mode summary banner. It parses via
+> `parse_merge_outcome`, runs the escalation ladder on a parse-miss, and **fails
+> closed to `Unclear`** when no verdict parses. See
+> [Recipe-brain verdict/decision parsing](./recipe-brain-verdict-parsing.md#merge-judge-phase-2462)
+> and the [operator runbook](../howto/diagnose-merge-pr-verdict-parse-failures.md).
 
-| Keyword | Maps to | Priority |
-|---------|---------|----------|
-| `not_ready` | `Verdict::NotReady` | Checked first (prevents `ready` substring match) |
-| `unclear` | `Verdict::NotReady` | Checked second (conservative — unclear is not ready) |
+**Parser:** `parse_merge_outcome(text) -> (JudgeOutcome, LifecycleParseOutcome)`,
+which composes two parsers over the envelope-extracted agent output:
+
+1. `merge_judge::parse_judge_response` — structured `{"verdict":…}` JSON
+   (fenced ` ```json ` block → first brace-balanced `{…}` that parses →
+   outermost `{…}`), which **does** populate structured `Blocker` entries.
+   Tried **first**.
+2. `parse_merge_verdict_from_text` — the case-insensitive substring keyword scan
+   below, used as a **prose fallback** when no structured JSON is present.
+
+**Keyword scan (`parse_merge_verdict_from_text`)** — the prose fallback:
+
+| Keyword (substring) | Maps to | Priority |
+|---------------------|---------|----------|
+| `not_ready` / `not ready` | `Verdict::NotReady` | Checked first (prevents `ready` substring match) |
+| `unclear` | `Verdict::Unclear` | Checked second (treated as not-ready at the call site) |
 | `ready` | `Verdict::Ready` | Checked third |
 
-**Default (no keyword):** `Verdict::NotReady` — fail-closed. A PR that
-cannot be judged is not merged.
+**On no verdict from either parser, `parse_merge_outcome` fails CLOSED to
+`Verdict::Unclear`** (classified as a parse-miss in the returned
+`LifecycleParseOutcome`). The merge authority treats `Unclear` as a refusal, so
+an unparseable verdict can never become `Ready`. Genuine infrastructure failures
+— spawn failure, nonzero exit, or an undecodable JSON envelope — still propagate
+from `RecipeMergeJudge::judge` as `SimardError::AdapterInvocationFailed`; they
+are distinct from a successful run whose verdict merely fails to parse (which
+drives the ladder, then the fail-closed `Unclear`).
 
-**Example recipe stdout:**
-
-```
-Reviewing PR #2023 against merge criteria:
-
-- CI status: all checks passing
-- Code review: approved by 1 reviewer
-- Test coverage: new tests added for all changed modules
-- No breaking API changes
-
-The PR meets all merge-readiness criteria.
-
-ready
-```
-
-Parser result: `JudgeOutcome { verdict: Verdict::Ready, rationale: "Reviewing PR #2023 against merge criteria: ...", blockers: [] }`
-
-**Note on blockers:** The keyword verdict parser does not extract structured
-`Blocker` entries. `JudgeOutcome.blockers` is always empty when parsed from
-text. The recipe agent's prose rationale contains the equivalent information
-in human-readable form. If structured blockers are needed in the future, the
-recipe prompt can be updated to emit `BLOCKER:` labeled lines.
-
-**Changes from prior implementation:**
-
-- `parse_judge_response` (which parsed JSON) is removed from `merge_judge.rs`.
-- `LlmMergeJudge` is removed from `merge_judge.rs`.
-- Helper functions `extract_fenced_blocks`, `extract_balanced_objects`, and
-  `truncate_for_log` are removed from `merge_judge.rs`.
-- `build_merge_judge()` chain is now: `RecipeMergeJudge` →
-  `RefusingMergeJudge` (was: `RecipeMergeJudge` → `LlmMergeJudge` →
-  `RefusingMergeJudge`).
+**Note on blockers:** the structured `parse_judge_response` path populates
+`JudgeOutcome.blockers`; the keyword-scan prose fallback does not (`blockers`
+empty, rationale = truncated raw text).
 
 ---
 
@@ -419,12 +581,14 @@ Each parser has inline `#[cfg(test)]` tests in its source file:
 
 | Module | Test count | Coverage |
 |--------|-----------|----------|
+| `recipe_output/extract.rs` | 25+ | `strip_ansi` (CSI/OSC/two-char, clean-path borrow, JSON-escaped literal), `strip_recipe_noise` (drops tracing/banner lines, keeps prose), balanced-object scan (string-literal aware), `extract_json_payload` dual-pass recovery (ANSI+log, same-line prefix, interleaved log line), `extract_verdict` precedence + dropped-log-line substring safety |
 | `decide.rs` | 4+ | DeterministicFallback tests |
-| `recipe_brain.rs` | 30+ | All 10 action keywords (first-word), first-float orient, 6 lifecycle variants (first-word), case-insensitive match, unrecognized defaults |
+| `recipe_brain.rs` | 30+ | All 10 action keywords (first-word), first-float orient, 6 lifecycle variants (first-word), case-insensitive match, unrecognized defaults, #2484 banner→DefaultMalformed / pure-noise→DefaultEmpty |
 | `orient.rs` | 8+ | Float parsing, validation, extra fields, empty/invalid responses |
 | `rustyclawd.rs` | 15+ (T1–T15) | Full behavior matrix per decision protocol reference |
-| `recipe_progress_checker.rs` | 4+ | Accept, reject, no keyword (default), mixed case |
-| `recipe_merge_judge.rs` | 5+ | Ready, not_ready, unclear, no keyword (default), substring safety |
+| `recipe_progress_checker.rs` | 6+ | Accept, reject, no keyword (default), mixed case, #2484 noise-obscured reject recovery, `parse_verdict_outcome` match flag |
+| `recipe_merge_judge.rs` | 8+ | `parse_merge_outcome`: structured `parse_judge_response` JSON (populates blockers), prose keyword scan (ready / not_ready / unclear; substring safety), JSON-envelope extraction, fail-closed `Verdict::Unclear` on an unparseable verdict, and #2484 noise-stripping (dropped-log-line `ready` substring safety, verdict recovery past an ANSI log prefix). |
+| `memory_consolidation/distillation.rs` | 17+ | Plain object, prose-embedded object, last-non-empty preference, unmatched-quote tolerance, ANSI-log recovery, #2484 runner-banner recovery |
 | `disk_health.rs` | 3+ | Full output, no-cleanup output, malformed lines |
 
 ---

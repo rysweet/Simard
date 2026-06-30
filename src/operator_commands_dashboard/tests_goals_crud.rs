@@ -4,37 +4,89 @@
 //! calls the async handler functions directly with constructed axum
 //! extractor wrappers.
 
+use std::sync::Arc;
+
 use axum::Json;
 use axum::extract::Path;
 use serde_json::json;
 
-use crate::cognitive_memory::LibraryCognitiveMemory;
+use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use crate::goal_curation::{GoalBoard, GoalProgress, save_goal_board};
+use crate::memory_ipc::{clear_in_process_writer, register_in_process_writer};
 use crate::operator_commands_dashboard::goals::*;
 use crate::operator_commands_dashboard::{
     dashboard_goal_board_snapshot, dashboard_save_goal_board,
 };
 use crate::test_support::HermeticState;
 
+/// Holds the single shared in-process cognitive-memory writer for the duration
+/// of a test and clears the global registration on drop (panic-safe).
+///
+/// Production wires the dashboard against ONE shared `LibraryCognitiveMemory`
+/// handle registered as the tier-0 in-process writer: the OODA daemon, bootstrap
+/// assembly, and standalone `dashboard serve` all open the store once and
+/// register it via [`register_in_process_writer`]. These handler tests mirror
+/// that tier-0 wiring so they exercise the same read/write path production uses.
+///
+/// Same-process read-after-write consistency is also guaranteed at the
+/// launcher's tier-2 store cache (`shared_tier2_store`, added in #2334 to close
+/// the #2320 goal-board read-after-write race), so the handlers persist
+/// correctly even without an explicit tier-0 registration. Registering the
+/// shared writer here keeps the tests aligned with the production tier-0 path
+/// rather than silently relying on the tier-2 fallback.
+struct SharedMemoryGuard {
+    writer: Arc<dyn CognitiveMemoryOps>,
+}
+
+impl SharedMemoryGuard {
+    fn register(state: &HermeticState) -> Self {
+        let writer: Arc<dyn CognitiveMemoryOps> = Arc::new(
+            LibraryCognitiveMemory::open(state.state_root()).expect("open shared cognitive memory"),
+        );
+        register_in_process_writer(state.state_root().to_path_buf(), Arc::clone(&writer));
+        Self { writer }
+    }
+
+    fn ops(&self) -> &dyn CognitiveMemoryOps {
+        self.writer.as_ref()
+    }
+}
+
+impl Drop for SharedMemoryGuard {
+    fn drop(&mut self) {
+        clear_in_process_writer();
+    }
+}
+
 /// Seed an empty goal board into the hermetic cognitive memory so handlers
 /// that read from it don't fail on a missing snapshot.
-fn init_empty_board(state: &HermeticState) {
-    let mem = LibraryCognitiveMemory::open(state.state_root()).expect("open native memory");
-    save_goal_board(&GoalBoard::new(), &mem).expect("seed empty board");
+///
+/// Returns the [`SharedMemoryGuard`] keeping the shared writer registered; the
+/// caller MUST bind it (`let _mem = init_empty_board(&state);`) so every handler
+/// call routes through the one shared handle.
+#[must_use]
+fn init_empty_board(state: &HermeticState) -> SharedMemoryGuard {
+    let guard = SharedMemoryGuard::register(state);
+    save_goal_board(&GoalBoard::new(), guard.ops()).expect("seed empty board");
+    guard
 }
 
 /// Seed a board with one active goal and one backlog item using the
 /// dashboard helpers (same read/write path the handlers use).
-fn init_board_with_goals(state: &HermeticState) {
-    // Step 1: initialize cognitive memory DB
-    {
-        let mem = LibraryCognitiveMemory::open(state.state_root()).expect("open native memory");
-        save_goal_board(&GoalBoard::new(), &mem).expect("init empty board");
-    }
+///
+/// Returns the [`SharedMemoryGuard`]; the caller MUST bind it so the shared
+/// writer stays registered for the life of the test.
+#[must_use]
+fn init_board_with_goals(state: &HermeticState) -> SharedMemoryGuard {
+    let guard = SharedMemoryGuard::register(state);
+    // Initialize the cognitive memory DB through the shared handle.
+    save_goal_board(&GoalBoard::new(), guard.ops()).expect("init empty board");
 
-    // Step 2: save the actual board through the dashboard helpers
+    // Save the actual board through the dashboard helpers (tier-0 shared writer).
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "existing-goal".to_string(),
         description: "An existing active goal".to_string(),
         priority: 1,
@@ -52,6 +104,7 @@ fn init_board_with_goals(state: &HermeticState) {
     });
 
     dashboard_save_goal_board(state.state_root(), &board).expect("seed board via dashboard helper");
+    guard
 }
 
 // ---------------------------------------------------------------------------
@@ -62,7 +115,7 @@ fn init_board_with_goals(state: &HermeticState) {
 #[serial_test::serial(cognitive_memory)]
 async fn seed_goals_creates_initial_goals() {
     let state = HermeticState::new();
-    init_empty_board(&state);
+    let _mem = init_empty_board(&state);
 
     let result = seed_goals().await;
     let val = &result.0;
@@ -86,7 +139,7 @@ async fn seed_goals_creates_initial_goals() {
 #[serial_test::serial(cognitive_memory)]
 async fn seed_goals_noop_when_already_seeded() {
     let state = HermeticState::new();
-    init_empty_board(&state);
+    let _mem = init_empty_board(&state);
     let _ = seed_goals().await;
 
     let result = seed_goals().await;
@@ -102,7 +155,7 @@ async fn seed_goals_noop_when_already_seeded() {
 #[serial_test::serial(cognitive_memory)]
 async fn add_goal_creates_active_goal() {
     let state = HermeticState::new();
-    init_empty_board(&state);
+    let _mem = init_empty_board(&state);
 
     let body = json!({"description": "A brand new goal", "priority": 2});
     let result = add_goal(Json(body)).await;
@@ -120,7 +173,7 @@ async fn add_goal_creates_active_goal() {
 #[serial_test::serial(cognitive_memory)]
 async fn add_goal_defaults_priority_to_3() {
     let state = HermeticState::new();
-    init_empty_board(&state);
+    let _mem = init_empty_board(&state);
 
     let body = json!({"description": "Goal without priority"});
     let _ = add_goal(Json(body)).await;
@@ -133,7 +186,7 @@ async fn add_goal_defaults_priority_to_3() {
 #[serial_test::serial(cognitive_memory)]
 async fn add_goal_rejects_empty_description() {
     let state = HermeticState::new();
-    init_empty_board(&state);
+    let _mem = init_empty_board(&state);
 
     let body = json!({"description": ""});
     let result = add_goal(Json(body)).await;
@@ -145,7 +198,7 @@ async fn add_goal_rejects_empty_description() {
 #[serial_test::serial(cognitive_memory)]
 async fn add_goal_rejects_missing_description() {
     let state = HermeticState::new();
-    init_empty_board(&state);
+    let _mem = init_empty_board(&state);
 
     let body = json!({"priority": 1});
     let result = add_goal(Json(body)).await;
@@ -161,7 +214,7 @@ async fn add_goal_rejects_missing_description() {
 #[serial_test::serial(cognitive_memory)]
 async fn add_goal_creates_backlog_item() {
     let state = HermeticState::new();
-    init_empty_board(&state);
+    let _mem = init_empty_board(&state);
 
     let body = json!({"description": "Backlog idea", "type": "backlog", "score": 0.7});
     let result = add_goal(Json(body)).await;
@@ -179,7 +232,7 @@ async fn add_goal_creates_backlog_item() {
 #[serial_test::serial(cognitive_memory)]
 async fn add_goal_backlog_defaults_score_to_half() {
     let state = HermeticState::new();
-    init_empty_board(&state);
+    let _mem = init_empty_board(&state);
 
     let body = json!({"description": "No score backlog", "type": "backlog"});
     let _ = add_goal(Json(body)).await;
@@ -196,13 +249,13 @@ async fn add_goal_backlog_defaults_score_to_half() {
 #[serial_test::serial(cognitive_memory)]
 async fn add_goal_rejects_when_at_max_active() {
     let state = HermeticState::new();
-    {
-        let mem = LibraryCognitiveMemory::open(state.state_root()).expect("open");
-        save_goal_board(&GoalBoard::new(), &mem).expect("init");
-    }
+    let mem = SharedMemoryGuard::register(&state);
+    save_goal_board(&GoalBoard::new(), mem.ops()).expect("init");
     let mut board = GoalBoard::new();
     for i in 0..crate::goal_curation::MAX_ACTIVE_GOALS {
         board.active.push(crate::goal_curation::ActiveGoal {
+            parent_goal_id: None,
+            repo: None,
             id: format!("max-goal-{i}"),
             description: format!("Max goal {i}"),
             priority: (i + 1) as u32,
@@ -232,7 +285,7 @@ async fn add_goal_rejects_when_at_max_active() {
 #[serial_test::serial(cognitive_memory)]
 async fn remove_goal_removes_active_goal() {
     let state = HermeticState::new();
-    init_board_with_goals(&state);
+    let _mem = init_board_with_goals(&state);
 
     let result = remove_goal(Path("existing-goal".to_string())).await;
     assert_eq!(
@@ -245,7 +298,7 @@ async fn remove_goal_removes_active_goal() {
 #[serial_test::serial(cognitive_memory)]
 async fn remove_goal_removes_backlog_item() {
     let state = HermeticState::new();
-    init_board_with_goals(&state);
+    let _mem = init_board_with_goals(&state);
 
     let result = remove_goal(Path("backlog-item-1".to_string())).await;
     assert_eq!(
@@ -258,7 +311,7 @@ async fn remove_goal_removes_backlog_item() {
 #[serial_test::serial(cognitive_memory)]
 async fn remove_goal_returns_error_for_unknown_id() {
     let state = HermeticState::new();
-    init_board_with_goals(&state);
+    let _mem = init_board_with_goals(&state);
 
     let result = remove_goal(Path("nonexistent".to_string())).await;
     let val = &result.0;
@@ -273,7 +326,7 @@ async fn remove_goal_returns_error_for_unknown_id() {
 #[serial_test::serial(cognitive_memory)]
 async fn update_goal_status_transitions_to_completed() {
     let state = HermeticState::new();
-    init_board_with_goals(&state);
+    let _mem = init_board_with_goals(&state);
 
     let body = json!({"status": "completed"});
     let result = update_goal_status(Path("existing-goal".to_string()), Json(body)).await;
@@ -292,7 +345,7 @@ async fn update_goal_status_transitions_to_completed() {
 #[serial_test::serial(cognitive_memory)]
 async fn update_goal_status_blocked_with_reason() {
     let state = HermeticState::new();
-    init_board_with_goals(&state);
+    let _mem = init_board_with_goals(&state);
 
     let body = json!({"status": "blocked", "reason": "waiting on PR review"});
     let result = update_goal_status(Path("existing-goal".to_string()), Json(body)).await;
@@ -317,7 +370,7 @@ async fn update_goal_status_all_valid_statuses() {
     ];
     for status in valid {
         let state = HermeticState::new();
-        init_board_with_goals(&state);
+        let _mem = init_board_with_goals(&state);
         let body = json!({"status": status});
         let result = update_goal_status(Path("existing-goal".to_string()), Json(body)).await;
         assert_eq!(
@@ -331,7 +384,7 @@ async fn update_goal_status_all_valid_statuses() {
 #[serial_test::serial(cognitive_memory)]
 async fn update_goal_status_rejects_unknown_status() {
     let state = HermeticState::new();
-    init_board_with_goals(&state);
+    let _mem = init_board_with_goals(&state);
 
     let body = json!({"status": "bogus"});
     let result = update_goal_status(Path("existing-goal".to_string()), Json(body)).await;
@@ -347,7 +400,7 @@ async fn update_goal_status_rejects_unknown_status() {
 #[serial_test::serial(cognitive_memory)]
 async fn update_goal_status_requires_status_field() {
     let state = HermeticState::new();
-    init_board_with_goals(&state);
+    let _mem = init_board_with_goals(&state);
 
     let body = json!({"reason": "no status"});
     let result = update_goal_status(Path("existing-goal".to_string()), Json(body)).await;
@@ -358,7 +411,7 @@ async fn update_goal_status_requires_status_field() {
 #[serial_test::serial(cognitive_memory)]
 async fn update_goal_status_returns_error_for_nonexistent_goal() {
     let state = HermeticState::new();
-    init_board_with_goals(&state);
+    let _mem = init_board_with_goals(&state);
 
     let body = json!({"status": "completed"});
     let result = update_goal_status(Path("ghost".to_string()), Json(body)).await;
@@ -373,7 +426,7 @@ async fn update_goal_status_returns_error_for_nonexistent_goal() {
 #[serial_test::serial(cognitive_memory)]
 async fn promote_backlog_item_moves_to_active() {
     let state = HermeticState::new();
-    init_board_with_goals(&state);
+    let _mem = init_board_with_goals(&state);
 
     let result = promote_backlog_item(Path("backlog-item-1".to_string())).await;
     let val = &result.0;
@@ -399,7 +452,7 @@ async fn promote_backlog_item_moves_to_active() {
 #[serial_test::serial(cognitive_memory)]
 async fn promote_backlog_item_returns_error_when_not_found() {
     let state = HermeticState::new();
-    init_board_with_goals(&state);
+    let _mem = init_board_with_goals(&state);
 
     let result = promote_backlog_item(Path("no-such-item".to_string())).await;
     assert!(result.0["error"].as_str().unwrap().contains("not found"));
@@ -409,13 +462,13 @@ async fn promote_backlog_item_returns_error_when_not_found() {
 #[serial_test::serial(cognitive_memory)]
 async fn promote_backlog_item_rejects_when_at_max_active() {
     let state = HermeticState::new();
-    {
-        let mem = LibraryCognitiveMemory::open(state.state_root()).expect("open");
-        save_goal_board(&GoalBoard::new(), &mem).expect("init");
-    }
+    let mem = SharedMemoryGuard::register(&state);
+    save_goal_board(&GoalBoard::new(), mem.ops()).expect("init");
     let mut board = GoalBoard::new();
     for i in 0..crate::goal_curation::MAX_ACTIVE_GOALS {
         board.active.push(crate::goal_curation::ActiveGoal {
+            parent_goal_id: None,
+            repo: None,
             id: format!("full-{i}"),
             description: format!("Full board goal {i}"),
             priority: (i + 1) as u32,
@@ -446,7 +499,7 @@ async fn promote_backlog_item_rejects_when_at_max_active() {
 #[serial_test::serial(cognitive_memory)]
 async fn demote_goal_moves_active_to_backlog() {
     let state = HermeticState::new();
-    init_board_with_goals(&state);
+    let _mem = init_board_with_goals(&state);
 
     let result = demote_goal(Path("existing-goal".to_string())).await;
     let val = &result.0;
@@ -464,7 +517,7 @@ async fn demote_goal_moves_active_to_backlog() {
 #[serial_test::serial(cognitive_memory)]
 async fn demote_goal_returns_error_when_not_found() {
     let state = HermeticState::new();
-    init_board_with_goals(&state);
+    let _mem = init_board_with_goals(&state);
 
     let result = demote_goal(Path("no-such-goal".to_string())).await;
     assert!(result.0["error"].as_str().unwrap().contains("not found"));
@@ -478,7 +531,7 @@ async fn demote_goal_returns_error_when_not_found() {
 #[serial_test::serial(cognitive_memory)]
 async fn goals_returns_active_and_backlog_lists() {
     let state = HermeticState::new();
-    init_board_with_goals(&state);
+    let _mem = init_board_with_goals(&state);
 
     let result = goals().await;
     let val = &result.0;
@@ -509,9 +562,8 @@ async fn goals_returns_active_and_backlog_lists() {
 #[serial_test::serial(cognitive_memory)]
 async fn goals_returns_empty_when_no_board() {
     let state = HermeticState::new();
-    {
-        let _mem = LibraryCognitiveMemory::open(state.state_root()).expect("open");
-    }
+    // Register the shared writer but seed no board — goals() must report empty.
+    let _mem = SharedMemoryGuard::register(&state);
 
     let result = goals().await;
     let val = &result.0;
@@ -522,12 +574,12 @@ async fn goals_returns_empty_when_no_board() {
 #[serial_test::serial(cognitive_memory)]
 async fn goals_includes_status_chip_for_active_goals() {
     let state = HermeticState::new();
-    {
-        let mem = LibraryCognitiveMemory::open(state.state_root()).expect("open");
-        save_goal_board(&GoalBoard::new(), &mem).expect("init");
-    }
+    let mem = SharedMemoryGuard::register(&state);
+    save_goal_board(&GoalBoard::new(), mem.ops()).expect("init");
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "chip-test".to_string(),
         description: "Goal with current_activity".to_string(),
         priority: 1,
@@ -558,7 +610,7 @@ async fn goals_includes_status_chip_for_active_goals() {
 #[serial_test::serial(cognitive_memory)]
 async fn full_goal_lifecycle_crud() {
     let state = HermeticState::new();
-    init_empty_board(&state);
+    let _mem = init_empty_board(&state);
 
     // 1. Seed initial goals
     let r = seed_goals().await;
@@ -610,3 +662,352 @@ async fn full_goal_lifecycle_crud() {
 }
 
 // -------------------------
+// Shared-writer wiring (regression for fresh-open goal-board data loss)
+// -------------------------
+
+/// Exercises the real handler path (each `add_goal` does load→modify→save,
+/// exactly like the production dashboard) and asserts every write persists with
+/// no silent drop. The silent goal-board data-loss class (#1590 / #2320) came
+/// from per-call fresh `LibraryCognitiveMemory` opens racing the lbug store's
+/// exclusive per-handle lock: a reopen could read an empty board and the next
+/// save would persist that empty board, dropping every goal. That race is now
+/// prevented both by the shared tier-0 in-process writer the
+/// daemon/bootstrap/`dashboard serve` register and by the launcher's tier-2
+/// store cache (#2334). With the tier-0 writer registered (as production does),
+/// every handler call short-circuits at tier-0, so this test guards the
+/// handler-level persistence contract on the tier-0 path the dashboard uses.
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn repeated_handler_writes_never_silently_drop_goals() {
+    let state = HermeticState::new();
+    let _mem = init_empty_board(&state);
+
+    for i in 0..12 {
+        let r = add_goal(Json(json!({
+            "description": format!("Ship reliability fix for module {i}"),
+            "type": "backlog",
+        })))
+        .await;
+        assert_eq!(r.0["status"], "ok", "add_goal {i} must succeed");
+    }
+
+    let board = dashboard_goal_board_snapshot(state.state_root()).unwrap();
+    assert_eq!(
+        board.backlog.len(),
+        12,
+        "every goal added through the handler must persist (no silent drop)"
+    );
+}
+
+// ===========================================================================
+// PR B — issues #2408 / #2384: env-free `_at` cores (state-root isolation)
+// ===========================================================================
+//
+// Root cause of the `full_goal_lifecycle_crud` /
+// `operator_commands_dashboard::tests_goals_crud::full_*` flake: the goal-CRUD
+// handlers resolve their state root *ambiently* via `resolve_state_root()` →
+// `std::env::var("SIMARD_STATE_ROOT")`. glibc getenv/setenv are not
+// thread-safe, so a concurrent env mutation in ANOTHER test — even in a
+// different file of the same lib-test binary — can tear a handler's read
+// mid-flight and send writes to `$HOME/.simard` instead of the hermetic temp
+// root, corrupting the board the test then reads back. `add_goal` is doubly
+// exposed: it resolves the env once directly AND again inside
+// `load_board_or_empty`.
+//
+// The fix threads an EXPLICIT `state_root: &Path` through each handler via an
+// `*_at` core; the ambient `resolve_state_root()` survives only in a thin
+// wrapper, and `add_goal`'s second resolve is killed with `load_board_or_empty_at`.
+//
+// These tests pin that contract. Each registers a shared writer + seeds a
+// board at an explicit `target` root, then constructs a SECOND `HermeticState`
+// so the ambient `SIMARD_STATE_ROOT` points at a `decoy` directory that DIFFERS
+// from `target`. A correct env-free `_at` core uses the explicit `target` it is
+// handed; an ambient one would touch the `decoy`, and the assertions below
+// fail.
+//
+// Local-binding drop order makes this sound: bindings drop in reverse
+// declaration order, so `decoy` (declared last) restores `SIMARD_STATE_ROOT`
+// to `target`'s value, then the writer guard clears, then `target` restores the
+// original env — no stale pin leaks past the test.
+//
+// This is the TDD red phase: the `*_at` functions do not exist yet, so the
+// lib-test binary will not compile until #2408/#2384's fix lands. Once the
+// cores exist and honor their explicit root, every assertion passes under
+// parallel `cargo test`.
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn seed_goals_at_writes_to_explicit_root_not_ambient_env() {
+    let target = HermeticState::new();
+    let _mem = init_empty_board(&target);
+    let decoy = HermeticState::new(); // ambient SIMARD_STATE_ROOT now != target
+
+    let r = seed_goals_at(target.state_root()).await;
+    assert_eq!(
+        r.0["status"], "ok",
+        "seed_goals_at must seed the explicit root, got: {}",
+        r.0
+    );
+
+    let board = dashboard_goal_board_snapshot(target.state_root()).unwrap();
+    assert_eq!(
+        board.active.len(),
+        3,
+        "seeded goals must land in the explicit target root"
+    );
+
+    let decoy_board = dashboard_goal_board_snapshot(decoy.state_root()).unwrap_or_default();
+    assert!(
+        decoy_board.active.is_empty() && decoy_board.backlog.is_empty(),
+        "seed_goals_at must NOT touch the ambient SIMARD_STATE_ROOT (decoy) root"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn add_goal_at_loads_and_saves_explicit_root_not_ambient_env() {
+    // Guards the #2408 double-resolution in `add_goal`: BOTH the load
+    // (`load_board_or_empty_at`) and the save must honor the explicit root.
+    let target = HermeticState::new();
+    let _mem = init_board_with_goals(&target); // 1 active "existing-goal" + 1 backlog
+    let decoy = HermeticState::new();
+
+    let r = add_goal_at(
+        target.state_root(),
+        Json(json!({"description": "Explicit root goal", "type": "backlog"})),
+    )
+    .await;
+    assert_eq!(
+        r.0["status"], "ok",
+        "add_goal_at must succeed, got: {}",
+        r.0
+    );
+
+    let board = dashboard_goal_board_snapshot(target.state_root()).unwrap();
+    // Pre-existing active goal preserved => the LOAD read the explicit root,
+    // not the empty decoy (an ambient load would drop "existing-goal").
+    assert_eq!(
+        board.active.len(),
+        1,
+        "existing active goal must survive — load must honor the explicit root"
+    );
+    // Seeded backlog item + the new one => the SAVE wrote the explicit root.
+    assert_eq!(
+        board.backlog.len(),
+        2,
+        "new backlog item must persist to the explicit root alongside the seeded one"
+    );
+
+    let decoy_board = dashboard_goal_board_snapshot(decoy.state_root()).unwrap_or_default();
+    assert!(
+        decoy_board.active.is_empty() && decoy_board.backlog.is_empty(),
+        "add_goal_at must NOT touch the ambient (decoy) root"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn remove_goal_at_uses_explicit_root() {
+    let target = HermeticState::new();
+    let _mem = init_board_with_goals(&target);
+    let _decoy = HermeticState::new();
+
+    // If remove loaded from the empty decoy it would 404; success proves the
+    // load read the explicit root.
+    let r = remove_goal_at(target.state_root(), Path("existing-goal".to_string())).await;
+    assert_eq!(
+        r.0["status"], "ok",
+        "remove_goal_at must find+remove via the explicit root, got: {}",
+        r.0
+    );
+
+    let board = dashboard_goal_board_snapshot(target.state_root()).unwrap();
+    assert!(
+        board.active.iter().all(|g| g.id != "existing-goal"),
+        "removed goal must be gone from the explicit root"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn update_goal_status_at_uses_explicit_root() {
+    let target = HermeticState::new();
+    let _mem = init_board_with_goals(&target);
+    let _decoy = HermeticState::new();
+
+    let r = update_goal_status_at(
+        target.state_root(),
+        Path("existing-goal".to_string()),
+        Json(json!({"status": "completed"})),
+    )
+    .await;
+    assert_eq!(
+        r.0["status"], "ok",
+        "update_goal_status_at must update via the explicit root, got: {}",
+        r.0
+    );
+
+    let board = dashboard_goal_board_snapshot(target.state_root()).unwrap();
+    assert!(
+        matches!(board.active[0].status, GoalProgress::Completed),
+        "status change must persist to the explicit root; got {:?}",
+        board.active[0].status
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn promote_backlog_item_at_uses_explicit_root() {
+    let target = HermeticState::new();
+    let _mem = init_board_with_goals(&target); // backlog "backlog-item-1"
+    let _decoy = HermeticState::new();
+
+    let r = promote_backlog_item_at(target.state_root(), Path("backlog-item-1".to_string())).await;
+    assert_eq!(
+        r.0["status"], "ok",
+        "promote_backlog_item_at must find the backlog item via the explicit root, got: {}",
+        r.0
+    );
+
+    let board = dashboard_goal_board_snapshot(target.state_root()).unwrap();
+    assert!(
+        board.active.iter().any(|g| g.id == "backlog-item-1"),
+        "promoted item must be active in the explicit root"
+    );
+    assert!(
+        board.backlog.iter().all(|g| g.id != "backlog-item-1"),
+        "promoted item must leave the backlog in the explicit root"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn demote_goal_at_uses_explicit_root() {
+    let target = HermeticState::new();
+    let _mem = init_board_with_goals(&target); // active "existing-goal"
+    let _decoy = HermeticState::new();
+
+    let r = demote_goal_at(target.state_root(), Path("existing-goal".to_string())).await;
+    assert_eq!(
+        r.0["status"], "ok",
+        "demote_goal_at must find the active goal via the explicit root, got: {}",
+        r.0
+    );
+
+    let board = dashboard_goal_board_snapshot(target.state_root()).unwrap();
+    assert!(
+        board.backlog.iter().any(|g| g.id == "existing-goal"),
+        "demoted goal must be in the backlog in the explicit root"
+    );
+    assert!(
+        board.active.iter().all(|g| g.id != "existing-goal"),
+        "demoted goal must leave the active list in the explicit root"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn goals_at_reads_explicit_root_not_ambient_env() {
+    let target = HermeticState::new();
+    let _mem = init_board_with_goals(&target);
+    let _decoy = HermeticState::new();
+
+    let r = goals_at(target.state_root()).await;
+    let v = &r.0;
+    assert_eq!(
+        v["active_count"], 1,
+        "goals_at must read the explicit root's active goals, got: {v}"
+    );
+    assert!(
+        v["active"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["id"] == "existing-goal"),
+        "goals_at must surface the seeded goal from the explicit root, got: {v}"
+    );
+}
+
+/// Deterministic, env-independent twin of `full_goal_lifecycle_crud` (the
+/// #2408 / #2384 flake): drive the entire CRUD lifecycle through the
+/// explicit-root `_at` cores while the ambient `SIMARD_STATE_ROOT` points at a
+/// DECOY directory. A correct fix makes every step touch only `target`.
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn full_goal_lifecycle_crud_via_at_is_env_independent() {
+    let target = HermeticState::new();
+    let _mem = init_empty_board(&target);
+    let decoy = HermeticState::new();
+    let root = target.state_root();
+
+    // 1. Seed initial goals.
+    assert_eq!(seed_goals_at(root).await.0["status"], "ok");
+
+    // 2. Add a backlog item.
+    let r = add_goal_at(
+        root,
+        Json(json!({"description": "New backlog idea", "type": "backlog"})),
+    )
+    .await;
+    assert_eq!(r.0["status"], "ok");
+    let backlog_id = r.0["id"].as_str().unwrap().to_string();
+
+    // 3. Promote backlog -> active.
+    assert_eq!(
+        promote_backlog_item_at(root, Path(backlog_id.clone()))
+            .await
+            .0["status"],
+        "ok"
+    );
+
+    // 4. In-progress.
+    assert_eq!(
+        update_goal_status_at(
+            root,
+            Path(backlog_id.clone()),
+            Json(json!({"status": "in-progress"})),
+        )
+        .await
+        .0["status"],
+        "ok"
+    );
+
+    // 5. Completed.
+    assert_eq!(
+        update_goal_status_at(
+            root,
+            Path(backlog_id.clone()),
+            Json(json!({"status": "completed"})),
+        )
+        .await
+        .0["status"],
+        "ok"
+    );
+
+    // 6. Demote back to backlog.
+    assert_eq!(
+        demote_goal_at(root, Path(backlog_id.clone())).await.0["status"],
+        "ok"
+    );
+
+    // 7. Remove.
+    assert_eq!(
+        remove_goal_at(root, Path(backlog_id)).await.0["status"],
+        "ok"
+    );
+
+    // 8. Only the 3 seeded goals remain, all in the explicit root.
+    let board = dashboard_goal_board_snapshot(root).unwrap();
+    assert_eq!(
+        board.active.len(),
+        3,
+        "only the seeded goals should remain active in the explicit root"
+    );
+
+    // The ambient/decoy root must never have been written.
+    let decoy_board = dashboard_goal_board_snapshot(decoy.state_root()).unwrap_or_default();
+    assert!(
+        decoy_board.active.is_empty() && decoy_board.backlog.is_empty(),
+        "no CRUD step may touch the ambient (decoy) SIMARD_STATE_ROOT"
+    );
+}

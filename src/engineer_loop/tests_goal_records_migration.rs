@@ -40,6 +40,8 @@ fn seed_active_only(state_root: &std::path::Path, n: usize) -> GoalBoard {
     let mut board = GoalBoard::new();
     for i in 0..n {
         board.active.push(ActiveGoal {
+            parent_goal_id: None,
+            repo: None,
             id: format!("engineer-mig-active-goal-{i:02}"),
             description: format!("Engineer migration active goal #{i:02}"),
             priority: (i + 1) as u32,
@@ -109,7 +111,8 @@ fn engineer_pipeline_returns_empty_top_5_when_no_snapshot() {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn engineer_pipeline_caps_at_five_even_when_more_goals_exist() {
-    // Goal board enforces MAX_ACTIVE_GOALS = 5, so seeding 5 + take(5)
+    // The engineer pipeline focuses on the top 5 goals (a fixed take(5),
+    // independent of the board's MAX_ACTIVE_GOALS cap), so seeding 5 + take(5)
     // must return exactly 5 records and never panic.
     // Pin SIMARD_STATE_ROOT to a TempDir so the #[cfg(test)] hermetic
     // guard in save_goal_board does not trip.

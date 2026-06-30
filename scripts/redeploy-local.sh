@@ -79,6 +79,29 @@ if [[ -d "$PROMPT_SRC" ]]; then
       echo "[redeploy]   prompt: $(basename "$f")"
     done < <(find "$PROMPT_DST/simard" -maxdepth 1 -type f -name '*.md' | sort)
   fi
+  # Explicitly verify the recipe assets reached the hot-reload path. The daemon
+  # resolves recipes from $HOME/.simard/prompt_assets/simard/recipes/ at runtime
+  # (see resolve_recipe_path in src/memory_consolidation/distillation.rs). A
+  # drifted/partial sync here silently disables distillation and its siblings
+  # (issue #2401), so list every synced recipe and FAIL loudly on zero — never
+  # let recipe drift pass unnoticed.
+  RECIPE_SRC_DIR="${PROMPT_SRC}/simard/recipes"
+  RECIPE_DST_DIR="${PROMPT_DST}/simard/recipes"
+  if [[ -d "$RECIPE_SRC_DIR" ]]; then
+    src_recipes=$(find "$RECIPE_SRC_DIR" -maxdepth 1 -type f -name '*.yaml' | wc -l | tr -d ' ')
+    dst_recipes=$(find "$RECIPE_DST_DIR" -maxdepth 1 -type f -name '*.yaml' 2>/dev/null | wc -l | tr -d ' ')
+    echo "[redeploy] synced ${dst_recipes}/${src_recipes} recipe asset(s) → ${RECIPE_DST_DIR}"
+    while IFS= read -r r; do
+      echo "[redeploy]   recipe: $(basename "$r")"
+    done < <(find "$RECIPE_DST_DIR" -maxdepth 1 -type f -name '*.yaml' 2>/dev/null | sort)
+    if [[ "$dst_recipes" -eq 0 ]]; then
+      echo "[redeploy] ERROR: 0 recipes in ${RECIPE_DST_DIR}; distillation and sibling recipe passes will silently no-op" >&2
+      exit 1
+    fi
+    if [[ "$dst_recipes" -lt "$src_recipes" ]]; then
+      echo "[redeploy] WARN: recipe count drift — ${dst_recipes} synced vs ${src_recipes} in source tree" >&2
+    fi
+  fi
 else
   echo "[redeploy] WARN: ${PROMPT_SRC} missing; daemon will use embedded prompts only"
 fi

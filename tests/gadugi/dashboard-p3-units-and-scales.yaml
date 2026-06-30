@@ -1,0 +1,52 @@
+name: "Dashboard P3 Units & Scales (#2358)"
+description: "Outside-in operator check that the dashboard's P3 usability fixes from issue #2358 hold: the Memory growth interval renders a human duration (humanizeDuration) instead of a bare minute count, the Overview and Thinking urgency scores carry a qualitative word and an explicit 0-1 scale (urgencyPhrase) instead of a bare float, and the Brain Failures view never leaks machine shorthand like 'deterministic-brain: prefix-routed'. Boots the real dashboard binary, authenticates, and asserts the served HTML and the live /api/brain-failures response."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Dashboard humanizes units, scales and brain-failure shorthand"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/dashboard-p3-units-and-scales.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "dashboard"
+    - "usability"
+    - "jargon"
+    - "issue-2358"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

@@ -629,7 +629,10 @@ ACTION: cleaned shared-target dir
     }
 
     #[test]
-    #[serial]
+    // #2360: mutates SIMARD_LLM_PROVIDER (process-global). Keyed into the
+    // cognitive_memory serial group so it never runs concurrently with a
+    // provider/state-root env reader.
+    #[serial(cognitive_memory)]
     fn run_returns_error_when_recipe_runner_unavailable_or_recipe_invalid() {
         // Create a syntactically-invalid recipe file. If recipe-runner-rs
         // is installed it will reject it (non-zero exit); if it's missing

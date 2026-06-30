@@ -1,5 +1,6 @@
 //! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent_roles::AgentRole;
@@ -54,32 +55,60 @@ pub fn is_brain_failure_marker(reason: &str) -> bool {
 #[allow(dead_code)] // Surface point for future tuning if flapping is observed.
 pub const HEALTHY_CYCLES_TO_UNBLOCK: u32 = 1;
 
+/// Lock the shared OODA state, recovering from a poisoned lock instead of
+/// panicking.
+///
+/// Concurrent `AdvanceGoal` dispatch shares `&mut OodaState` behind a
+/// `Mutex`. If one dispatch thread panics while holding the lock, the lock
+/// becomes poisoned; recovering the guard (rather than `.expect()`-ing) keeps
+/// the remaining engineer spawns — and the daemon — alive (Pillar 11: honest
+/// degradation, no cycle-wide abort from one failed action).
+pub(crate) fn lock_state<'g, 'a>(
+    state: &'g Mutex<&'a mut OodaState>,
+) -> std::sync::MutexGuard<'g, &'a mut OodaState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Spawn a subordinate engineer for a goal that the LLM picked
 /// `spawn_engineer` for, then mutate the active board to record the
 /// assignment.
+///
+/// Takes the shared state behind a `Mutex` and holds it only for short
+/// critical sections (assignment re-check, goal lookup, status writeback).
+/// The slow work — target-repo resolution, git worktree allocation, and the
+/// detached subprocess spawn — runs WITHOUT the lock held, so multiple
+/// engineers start concurrently within one OODA round (bounded by the AIMD
+/// cap upstream).
 ///
 /// Honours `SIMARD_SUBORDINATE_DEPTH` vs. `SIMARD_MAX_SUBORDINATE_DEPTH`
 /// so a recursing supervisor does not spawn forever.
 pub fn dispatch_spawn_engineer(
     action: &PlannedAction,
-    state: &mut OodaState,
+    state: &Mutex<&mut OodaState>,
     goal_id: &str,
     task: &str,
     brain: &dyn OodaBrain,
 ) -> ActionOutcome {
-    // Re-check assignment under exclusive state borrow to prevent a
-    // double-spawn race (two cycles parsing spawn_engineer back-to-back).
-    if let Some(g) = state.active_goals.active.iter().find(|g| g.id == goal_id)
-        && g.assigned_to.is_some()
+    // Re-check assignment under a short exclusive state lock to prevent a
+    // double-spawn race (two cycles/threads parsing spawn_engineer for the
+    // same goal). The per-round claim set in the dispatcher is the primary
+    // intra-round guard; this is cross-round defense-in-depth.
     {
-        return make_outcome(
-            action,
-            true,
-            format!(
-                "spawn_engineer skipped: goal '{goal_id}' already assigned to subordinate '{}'",
-                g.assigned_to.as_deref().unwrap_or("?"),
-            ),
-        );
+        let guard = lock_state(state);
+        if let Some(g) = guard.active_goals.active.iter().find(|g| g.id == goal_id)
+            && g.assigned_to.is_some()
+        {
+            let assigned = g.assigned_to.as_deref().unwrap_or("?").to_string();
+            return make_outcome(
+                action,
+                true,
+                format!(
+                    "spawn_engineer skipped: goal '{goal_id}' already assigned to subordinate '{assigned}'",
+                ),
+            );
+        }
     }
 
     // Defense-in-depth (issue #1227): check the on-disk engineer-worktrees
@@ -95,7 +124,10 @@ pub fn dispatch_spawn_engineer(
     // skipping, reclaim, deprioritize, file an issue, or block the goal.
     let state_root_inflight = engineer_worktree_state_root();
     if let Some(live) = find_live_engineer_for_goal(&state_root_inflight, goal_id) {
-        let ctx = gather_engineer_lifecycle_ctx(state, &state_root_inflight, goal_id, &live);
+        let ctx = {
+            let guard = lock_state(state);
+            gather_engineer_lifecycle_ctx(&guard, &state_root_inflight, goal_id, &live)
+        };
         // NO FALLBACK: brain.decide_engineer_lifecycle Err must surface as a
         // visible cycle failure (operator constraint, issue #1711, #1748).
         // Silent ContinueSkipping on brain Err was the bug: it cleared the
@@ -112,7 +144,11 @@ pub fn dispatch_spawn_engineer(
         let decision = match brain.decide_engineer_lifecycle(&ctx) {
             Ok(d) => d,
             Err(e) => {
-                let prior_failures = state.goal_failure_counts.get(goal_id).copied().unwrap_or(0);
+                let prior_failures = lock_state(state)
+                    .goal_failure_counts
+                    .get(goal_id)
+                    .copied()
+                    .unwrap_or(0);
                 tracing::error!(
                     target: "simard::ooda_brain",
                     goal = %goal_id,
@@ -151,15 +187,18 @@ pub fn dispatch_spawn_engineer(
                     // can identify safeguard-authored markers and
                     // distinguish them from operator-set, scope-blocked,
                     // dependency-blocked, or subordinate-blocked reasons.
-                    if let Some(g) = state
-                        .active_goals
-                        .active
-                        .iter_mut()
-                        .find(|g| g.id == goal_id)
                     {
-                        g.status = crate::goal_curation::GoalProgress::Blocked(format!(
-                            "{BRAIN_FAILURE_BLOCKED_PREFIX}{new_count}{BRAIN_FAILURE_BLOCKED_SUFFIX}"
-                        ));
+                        let mut guard = lock_state(state);
+                        if let Some(g) = guard
+                            .active_goals
+                            .active
+                            .iter_mut()
+                            .find(|g| g.id == goal_id)
+                        {
+                            g.status = crate::goal_curation::GoalProgress::Blocked(format!(
+                                "{BRAIN_FAILURE_BLOCKED_PREFIX}{new_count}{BRAIN_FAILURE_BLOCKED_SUFFIX}"
+                            ));
+                        }
                     }
                     // File tracking issue. Failure to file is logged but
                     // does NOT swallow the original brain failure.
@@ -224,8 +263,14 @@ pub fn dispatch_spawn_engineer(
         // outcome is `success`, some lifecycle decisions (e.g.
         // `OpenTrackingIssue`) intentionally return `success=false`. Reset
         // here so the safeguard threshold doesn't keep advancing.
-        state.goal_failure_counts.remove(goal_id);
-        return apply_lifecycle_decision(action, state, goal_id, &live, decision);
+        //
+        // `apply_lifecycle_decision` performs the slow reclaim/issue side
+        // effects under the lock; this is the rare cross-restart branch
+        // (a live on-disk engineer for an unassigned goal), not the common
+        // spawn path, so brief lock contention here is acceptable.
+        let mut guard = lock_state(state);
+        guard.goal_failure_counts.remove(goal_id);
+        return apply_lifecycle_decision(action, &mut guard, goal_id, &live, decision);
     }
 
     // Recursion guard. Default current depth = 0 (top-level supervisor).
@@ -248,15 +293,46 @@ pub fn dispatch_spawn_engineer(
     }
 
     let agent_name = build_engineer_name(goal_id);
-    let parent_repo = match std::env::current_dir() {
+
+    // Issue #2359 (BUG 1): route the engineer to the goal's TARGET repo, not
+    // the daemon's own working directory. Resolve the goal's `repo` slug to a
+    // local git repo path; `None`/"Simard" => the daemon's checkout. A
+    // missing or invalid target repo is a hard failure — we NEVER silently
+    // fall back to Simard (the original bug), which would open PRs in the
+    // wrong repository.
+    let goal_repo_slug = lock_state(state)
+        .active_goals
+        .active
+        .iter()
+        .find(|g| g.id == goal_id)
+        .and_then(|g| g.repo.clone());
+    let parent_repo = match super::repo_resolver::resolve_goal_repo(goal_repo_slug.as_deref()) {
         Ok(p) => p,
         Err(e) => {
+            let target = goal_repo_slug.as_deref().unwrap_or("Simard");
+            let reason = format!(
+                "target repo '{target}' could not be resolved: {e}; clone it under ~/src/ or correct the goal's repo, then `simard goal unblock {goal_id}`"
+            );
+            eprintln!("[simard] spawn_engineer FAILED for goal '{goal_id}': {reason}");
+            // Fail loud: mark the goal Blocked (a plain operator-set block — no
+            // OODA-SAFEGUARD sentinel, so `goal unblock-all` won't clear it)
+            // rather than silently editing Simard. No worktree, no assignment;
+            // the goal is parked until the operator makes the repo available.
+            {
+                let mut guard = lock_state(state);
+                if let Some(g) = guard
+                    .active_goals
+                    .active
+                    .iter_mut()
+                    .find(|g| g.id == goal_id)
+                {
+                    g.status = crate::goal_curation::GoalProgress::Blocked(reason.clone());
+                }
+            }
             return make_outcome(
                 action,
                 false,
-                format!(
-                    "spawn_engineer failed for goal '{goal_id}': cannot resolve current_dir: {e}"
-                ),
+                format!("spawn_engineer failed for goal '{goal_id}': {reason}"),
             );
         }
     };
@@ -285,9 +361,19 @@ pub fn dispatch_spawn_engineer(
     };
     let worktree_path = worktree.path().to_path_buf();
 
+    // Name the resolved target repo in the engineer's objective so the agent's
+    // plan and any explicit `gh` commands operate against the correct repo
+    // (issue #2359, BUG 1). The worktree's git remote is already authoritative
+    // for implicit `gh pr` calls; this makes the target explicit in the prompt.
+    let target_repo_label = goal_repo_slug.as_deref().unwrap_or("Simard");
+    let engineer_task = format!(
+        "{task}\n\n[target repo: {target_repo_label} — work in this worktree at {}; open any PRs against this repo, not Simard]",
+        worktree_path.display()
+    );
+
     let config = SubordinateConfig {
         agent_name: agent_name.clone(),
-        goal: task.to_string(),
+        goal: engineer_task,
         role: AgentRole::Engineer,
         worktree_path,
         current_depth,
@@ -295,23 +381,24 @@ pub fn dispatch_spawn_engineer(
 
     match spawn_subordinate(&config) {
         Ok(handle) => {
-            // Record the assignment so subsequent cycles take the
-            // heartbeat-checking path instead of re-spawning.
-            if let Some(g) = state
-                .active_goals
-                .active
-                .iter_mut()
-                .find(|g| g.id == goal_id)
+            // Record the assignment + worktree ownership under one short
+            // critical section so subsequent cycles take the heartbeat path
+            // instead of re-spawning, and the reaper can clean up the
+            // worktree after the subordinate exits (Drop is the safety net).
             {
-                g.assigned_to = Some(agent_name.clone());
+                let mut guard = lock_state(state);
+                if let Some(g) = guard
+                    .active_goals
+                    .active
+                    .iter_mut()
+                    .find(|g| g.id == goal_id)
+                {
+                    g.assigned_to = Some(agent_name.clone());
+                }
+                guard
+                    .engineer_worktrees
+                    .insert(goal_id.to_string(), worktree);
             }
-            // Take ownership of the worktree on the OODA state so the reaper
-            // path can clean it up after the subordinate exits. Drop is the
-            // safety net if the entry leaves the map without explicit cleanup.
-            state
-                .engineer_worktrees
-                .insert(goal_id.to_string(), worktree);
-
             // WS-2: persist the tmux session into the dashboard registry so
             // the Recent Actions feed can render Attach deep-links. Failures
             // are logged but never block subagent execution.
@@ -617,5 +704,141 @@ fn numeric_kill(pid: i32) -> std::io::Result<()> {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
+    }
+}
+
+// ─────────────────────────── Tests ───────────────────────────
+//
+// Unit coverage for the deterministic *private* helpers in this module that
+// previously had none: `build_engineer_name`, `truncate_for_log`, and
+// `read_sentinel_pid`. Being module-private, these can only be exercised from
+// an in-file `#[cfg(test)]` block. Every test is hermetic — pure string logic
+// or a `tempfile` sentinel — and never mutates process-global state, so they
+// are safe under cargo's default parallel runner.
+//
+// The public surface (`is_brain_failure_marker`, `dispatch_spawn_engineer`,
+// and `find_live_engineer_for_goal` including its starttime-guard branches) is
+// covered by `src/ooda_actions/tests_advance_goal.rs`.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engineer_worktree::ENGINEER_CLAIM_FILE;
+    use std::fs;
+    use std::path::Path;
+
+    // ── build_engineer_name ────────────────────────────────────────────────
+
+    #[test]
+    fn build_engineer_name_has_prefix_and_epoch_suffix() {
+        let name = build_engineer_name("improve-test-coverage");
+        let suffix = name
+            .strip_prefix("engineer-improve-test-coverage-")
+            .expect("name must start with `engineer-<goal>-`");
+        // The trailing component is a unix-epoch second count.
+        suffix
+            .parse::<u64>()
+            .expect("epoch suffix must parse as u64");
+    }
+
+    #[test]
+    fn build_engineer_name_handles_empty_goal_id() {
+        // Degenerate but must not panic: empty goal id yields the double dash.
+        let name = build_engineer_name("");
+        assert!(
+            name.starts_with("engineer--"),
+            "empty goal id should render `engineer--<epoch>`, got {name:?}"
+        );
+        name.strip_prefix("engineer--")
+            .and_then(|s| s.parse::<u64>().ok())
+            .expect("epoch suffix must parse even with empty goal id");
+    }
+
+    // ── truncate_for_log ───────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_for_log_passes_short_strings_through_unchanged() {
+        let s = "a short, safe log line";
+        assert_eq!(truncate_for_log(s), s);
+    }
+
+    #[test]
+    fn truncate_for_log_passes_exactly_max_length_unchanged() {
+        // 256 ASCII bytes is the inclusive boundary — must be returned as-is
+        // with no ellipsis appended.
+        let s = "x".repeat(256);
+        let out = truncate_for_log(&s);
+        assert_eq!(out, s);
+        assert!(!out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_for_log_truncates_and_appends_ellipsis_for_ascii() {
+        let s = "y".repeat(300);
+        let out = truncate_for_log(&s);
+        assert!(out.ends_with('…'), "truncated output must end with U+2026");
+        // 256 retained bytes + 3-byte ellipsis.
+        assert_eq!(out.len(), 256 + '…'.len_utf8());
+        assert_eq!(out.chars().count(), 257);
+    }
+
+    #[test]
+    fn truncate_for_log_respects_utf8_char_boundaries() {
+        // '€' is 3 bytes; byte index 256 falls in the middle of a char, so the
+        // cut must back off to byte 255 (85 whole chars) rather than panic.
+        let s = "€".repeat(100);
+        assert_eq!(s.len(), 300);
+        let out = truncate_for_log(&s);
+        assert!(out.ends_with('…'));
+        // 85 retained '€' chars + the ellipsis. The result is valid UTF-8 by
+        // construction (it is a `String`); the assertion guards the off-by-one
+        // boundary back-off in the loop.
+        assert_eq!(out.chars().count(), 86);
+        assert_eq!(out, format!("{}…", "€".repeat(85)));
+    }
+
+    // ── read_sentinel_pid ──────────────────────────────────────────────────
+
+    fn write_claim(dir: &Path, contents: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join(ENGINEER_CLAIM_FILE), contents).unwrap();
+    }
+
+    #[test]
+    fn read_sentinel_pid_reads_first_line_with_starttime() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_claim(tmp.path(), "12345\n9876543\n");
+        assert_eq!(read_sentinel_pid(tmp.path()), Some(12345));
+    }
+
+    #[test]
+    fn read_sentinel_pid_reads_pid_only_sentinel() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_claim(tmp.path(), "777\n");
+        assert_eq!(read_sentinel_pid(tmp.path()), Some(777));
+    }
+
+    #[test]
+    fn read_sentinel_pid_trims_whitespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_claim(tmp.path(), "  42  \n");
+        assert_eq!(read_sentinel_pid(tmp.path()), Some(42));
+    }
+
+    #[test]
+    fn read_sentinel_pid_missing_file_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(read_sentinel_pid(tmp.path()), None);
+    }
+
+    #[test]
+    fn read_sentinel_pid_empty_or_unparseable_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_claim(tmp.path(), "");
+        assert_eq!(read_sentinel_pid(tmp.path()), None);
+
+        let tmp2 = tempfile::tempdir().unwrap();
+        write_claim(tmp2.path(), "not-a-pid\n0\n");
+        assert_eq!(read_sentinel_pid(tmp2.path()), None);
     }
 }

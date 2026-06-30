@@ -13,6 +13,10 @@ use super::make_outcome;
 // cross-module tests in `crate::ooda_actions::tests_advance_goal` and
 // `crate::operator_cli::tests_goal`.
 pub(crate) mod spawn;
+// Issue #2359 (BUG 1): goal target-repo resolver. `pub(crate)` so the slug
+// validator is reusable by the operator CLI and dashboard ingress points;
+// consumed by `spawn::dispatch_spawn_engineer` and exercised by inline tests.
+pub(crate) mod repo_resolver;
 mod subordinate;
 use spawn::{dispatch_spawn_engineer, is_brain_failure_marker};
 // Dispatch-dedup helper introduced by PR #1228; intentionally re-exported so
@@ -166,13 +170,18 @@ pub(super) fn dispatch_advance_goal(
 
         // For spawn_engineer the dispatcher must perform the actual fork
         // (it owns the state mutation needed to set goal.assigned_to).
+        // `dispatch_spawn_engineer` takes the state behind a `Mutex` for its
+        // short critical sections; wrap the single-threaded `&mut state` here.
+        // (Concurrent dispatch in `ooda_actions::concurrent` shares one
+        // `Mutex` across threads instead.)
         if let Some(GoalAction::SpawnEngineer {
             task,
             files: _,
             issue: _,
         }) = result.action
         {
-            return dispatch_spawn_engineer(action, state, &goal_id, &task, brain.as_ref());
+            let state_mx = std::sync::Mutex::new(&mut *state);
+            return dispatch_spawn_engineer(action, &state_mx, &goal_id, &task, brain.as_ref());
         }
 
         return result.outcome;

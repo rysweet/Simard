@@ -127,6 +127,123 @@ pub(crate) const PART_01: &str = r#"      </div>
       if(map[kind])return map[kind];
       return kind.replace(/[_-]+/g,' ').replace(/^./,c=>c.toUpperCase());
     }
+    /* --- Plain-English humanizers (#2358) ---
+       Jargon banned from the static ledes (tab_meta::BANNED_JARGON) is injected
+       here so the same ban extends to dynamically rendered cycle/summary text. */
+    const BANNED_JARGON={{BANNED_JARGON_JS}};
+    function humanizeGoalId(id){
+      if(!id)return'';
+      const map={'__memory__':'Memory maintenance','__improvement__':'Self-improvement','__system__':'System upkeep','__meta__':'Housekeeping'};
+      if(map[id])return map[id];
+      const m=String(id).match(/^__(.+?)__$/);
+      if(m)return m[1].replace(/[_-]+/g,' ').replace(/^./,c=>c.toUpperCase());
+      return id;
+    }
+    function humanizePeriod(p){
+      if(!p)return'';
+      const mn=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      let m=String(p).match(/^daily:(\d{4})-(\d{2})-(\d{2})$/);
+      if(m){
+        const y=+m[1],mo=+m[2],day=+m[3],label=mn[mo-1]+' '+day,t=new Date();
+        if(t.getFullYear()===y&&t.getMonth()+1===mo&&t.getDate()===day)return'Today ('+label+')';
+        const ys=new Date(t.getTime()-86400000);
+        if(ys.getFullYear()===y&&ys.getMonth()+1===mo&&ys.getDate()===day)return'Yesterday ('+label+')';
+        return label+', '+y;
+      }
+      if(p==='weekly:last-7-days'||p==='weekly:last_7_days')return'Last 7 days';
+      m=String(p).match(/^weekly:(.+)$/);
+      if(m)return'Week of '+m[1].replace(/[-_]/g,' ');
+      m=String(p).match(/^daily:(.+)$/);
+      if(m)return m[1];
+      return String(p);
+    }
+    function humanizeCycleSummary(text){
+      if(!text)return'';
+      let s=String(text);
+      const m=s.match(/^OODA cycle #(\d+):\s*(\d+) priorities,\s*(\d+) actions \((\d+)\/(\d+) succeeded\),\s*goals=(\d+),\s*issues=(\d+),\s*tree=(\w+)/);
+      if(m){
+        const cyc=m[1],prio=m[2],ok=m[4],tot=m[5],goals=m[6],issues=m[7],tree=m[8];
+        const treeTxt=tree==='clean'?'working tree clean':(tree==='dirty'?'uncommitted changes':'tree '+tree);
+        const pW=prio==='1'?'priority':'priorities',aW=tot==='1'?'action':'actions',gW=goals==='1'?'goal':'goals',iW=issues==='1'?'issue':'issues';
+        return 'Cycle #'+cyc+' — '+prio+' '+pW+' considered, '+ok+' of '+tot+' '+aW+' succeeded · '+goals+' '+gW+' tracked · '+issues+' open '+iW+' · '+treeTxt;
+      }
+      // Generic fallback for non-canonical / legacy summaries: drop key=value
+      // shorthand and any leftover banned-jargon token.
+      s=s.replace(/\btree=clean\b/g,'working tree clean')
+         .replace(/\btree=dirty\b/g,'uncommitted changes')
+         .replace(/\bgoals=(\d+)\b/g,'$1 goals')
+         .replace(/\bissues=(\d+)\b/g,'$1 open issues')
+         .replace(/\b([A-Za-z_]+)=([\w.-]+)\b/g,'$1 $2')
+         .replace(/^OODA cycle/i,'Cycle');
+      for(const j of (BANNED_JARGON||[])){if(j)s=s.split(j).join('');}
+      return s.replace(/\s{2,}/g,' ').trim();
+    }
+    /* P2 (#2358): humanize a raw cycle-outcome action-detail string for the
+       Overview tab. Strips machine routing prefixes (advance-goal:, no-action:,
+       <x>-brain:, brain:), drops parenthetical brain-error noise, maps known
+       decision tokens to plain English, removes the "no decision keyword
+       found...defaulting to..." boilerplate, and applies the shared
+       BANNED_JARGON ban. The agent='engineer-...' substring the Attach button
+       keys off is preserved verbatim. Returns PLAIN TEXT only — callers must
+       escape it last (escape-last invariant). */
+    function humanizeActionDetail(detail){
+      if(detail==null)return'';
+      let s=String(detail);
+      // 1) Drop any (...) group whose body is pure machine noise, mirroring the
+      //    server-side goals_status cleanup. Single linear scan -> ReDoS-immune.
+      //    A group carrying an agent='engineer-...' reference is always kept so
+      //    the Attach-button contract survives (SR-D5).
+      const NOISE=['brain-error fallback','goal-action parse failed','ooda-brain','brain:'];
+      let out='';
+      for(let i=0;i<s.length;i++){
+        if(s.charAt(i)==='('){
+          let depth=1,j=i+1;
+          for(;j<s.length&&depth>0;j++){
+            const cj=s.charAt(j);
+            if(cj==='(')depth++;else if(cj===')')depth--;
+          }
+          const body=s.slice(i+1,depth===0?j-1:j);
+          const noisy=NOISE.some(m=>body.indexOf(m)>=0)&&body.indexOf("agent='engineer-")<0;
+          if(noisy){out+=' ';i=j-1;continue;}
+        }
+        out+=s.charAt(i);
+      }
+      s=out;
+      // 2) Drop the verbose "no decision keyword found ... defaulting to X"
+      //    boilerplate (bounded, non-backtracking).
+      s=s.replace(/no decision keyword found[^()]{0,80}?defaulting to\s*\S*/i,' ');
+      // 3) Map known machine decision tokens to plain English (allowlist).
+      const MAP={'continue_skipping':'continued without acting','spawn_engineer dispatched':'launched a sub-agent','prefix-routed':'chosen by built-in routing rules','no LLM configured':'no language model configured'};
+      for(const k in MAP){if(Object.prototype.hasOwnProperty.call(MAP,k))s=s.split(k).join(MAP[k]);}
+      // 4) Strip fixed machine routing prefixes / residual markers. The generic
+      //    <x>-brain: form is bounded ({1,20}) so it stays non-backtracking.
+      s=s.replace(/\b[a-z]{1,20}-brain:\s*/gi,' ');
+      for(const t of ['advance-goal:','no-action:','ooda-brain','brain:']){s=s.split(t).join(' ');}
+      // 5) Extend the static-lede jargon ban to this dynamic text.
+      for(const j of (BANNED_JARGON||[])){if(j)s=s.split(j).join('');}
+      // 6) Tidy orphaned punctuation and collapse whitespace.
+      return s.replace(/\(\s*\)/g,'').replace(/\s{2,}/g,' ').replace(/^[\s:;,.-]+/,'').trim();
+    }
+    // P3 (#2358): render a raw second count as a human duration, e.g.
+    // 37440s -> "10h 24m", 624m worth of seconds -> "10h 24m", 90s -> "1m".
+    function humanizeDuration(secs){
+      let s=Math.round(Number(secs)||0);
+      if(s<=0)return'0m';
+      if(s<60)return s+'s';
+      const m=Math.floor(s/60);
+      if(m<60)return m+'m';
+      const h=Math.floor(m/60),rm=m%60;
+      if(h<24)return rm?h+'h '+rm+'m':h+'h';
+      const days=Math.floor(h/24),rh=h%24;
+      return rh?days+'d '+rh+'h':days+'d';
+    }
+    // P3 (#2358): turn a bare 0-1 urgency float into a qualitative phrase with
+    // an explicit scale, e.g. 0.50 -> "medium urgency (0.50 of 1.0)".
+    function urgencyPhrase(u){
+      const n=(typeof u==='number'&&isFinite(u))?u:0;
+      const word=n>0.7?'high':n>0.4?'medium':'low';
+      return word+' urgency ('+n.toFixed(2)+' of 1.0)';
+    }
     function copyLogContent(id){
       const el=document.getElementById(id);if(!el)return;
       navigator.clipboard.writeText(el.textContent||'').then(
@@ -303,7 +420,7 @@ pub(crate) const PART_01: &str = r#"      </div>
           const rpt=c.report||{};
           if(rpt.priorities?.length){
             const top=rpt.priorities[0];
-            currentFocus=`<strong>${esc(top.goal_id)}</strong> — ${esc(top.reason)} <span style="color:${top.urgency>0.7?'var(--red)':top.urgency>0.4?'var(--yellow)':'var(--green)'}">urgency ${top.urgency.toFixed(2)}</span>`;
+            currentFocus=`<strong>${esc(humanizeGoalId(top.goal_id))}</strong> — ${esc(top.reason)} <span style="color:${top.urgency>0.7?'var(--red)':top.urgency>0.4?'var(--yellow)':'var(--green)'}">${urgencyPhrase(top.urgency)}</span>`;
             break;
           }
         }
@@ -322,7 +439,7 @@ pub(crate) const PART_01: &str = r#"      </div>
                   <span>${o.success?'✅':'❌'}</span>
                   <code style="color:var(--accent)">${esc(humanizeActionKind(o.action_kind))}</code>
                   <span>${esc(o.action_description||'')}</span>
-                  ${o.detail?'<span style="color:#8b949e;font-size:.8rem;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block">'+esc(o.detail.substring(0,120))+'</span>':''}
+                  ${o.detail?'<span style="color:#8b949e;font-size:.8rem;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block">'+esc(humanizeActionDetail(o.detail).substring(0,120))+'</span>':''}
                 </div>`).join('')}
             </div>`:'<div style="color:#8b949e">No recent actions recorded.</div>'}`;
 
@@ -357,7 +474,7 @@ pub(crate) const PART_01: &str = r#"      </div>
               <span style="color:var(--accent);min-width:2rem;font-weight:600">#${a.cycle}</span>
               <span>${a.success?'✅':'❌'}</span>
               <code>${esc(humanizeActionKind(a.action_kind))}</code>
-              <span style="flex:1">${renderActionDetail((function(){var arr=Array.from(a.detail||'');var d=arr.length>200?arr.slice(0,200).join('')+'…':arr.join('');return d||a.action_description||'';})())}</span>
+              <span style="flex:1">${renderActionDetail((function(){var arr=Array.from(humanizeActionDetail(a.detail));var d=arr.length>200?arr.slice(0,200).join('')+'…':arr.join('');return d||a.action_description||'';})())}</span>
             </div>`).join('');
         }else{
           actEl.innerHTML='<span style="color:#8b949e">No structured action history yet. The agent daemon records actions each cycle.</span>';
@@ -387,10 +504,12 @@ pub(crate) const PART_01: &str = r#"      </div>
 
     /* --- Logs --- */
     let allLogLines=[];
+    let allLogLevels=[];
     async function fetchLogs(){
       try{
         const d=await apiFetch('/api/logs');
         allLogLines=d.daemon_log_lines||[];
+        allLogLevels=d.daemon_log_levels||[];
         applyLogFilter();
         // Issue #928: guard each element access so a missing target on the
         // current tab does not abort the whole fetchLogs and leave every

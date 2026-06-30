@@ -97,12 +97,7 @@ fn benchmark_class_display_covers_all_variants() {
         BenchmarkClass::RepoExploration,
         BenchmarkClass::Documentation,
         BenchmarkClass::SafeCodeChange,
-        BenchmarkClass::TestWriting,
         BenchmarkClass::SessionQuality,
-        BenchmarkClass::BugFix,
-        BenchmarkClass::Refactoring,
-        BenchmarkClass::DependencyAnalysis,
-        BenchmarkClass::ErrorHandling,
     ];
     for class in &classes {
         let display = format!("{class}");

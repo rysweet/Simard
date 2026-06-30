@@ -11,6 +11,8 @@ mod merge;
 mod ooda;
 mod review;
 mod safe_update;
+mod self_deploy;
+mod self_health;
 mod worktree_gc;
 
 use std::path::PathBuf;
@@ -100,16 +102,23 @@ Product modes:
   dashboard serve [--port=8080]
   memory stats [state-root] [--json]
                          — read-only per-type cognitive-memory counts +
-                           sample rows (safe while the daemon holds the store)
+                           graph-edge / dedup section + sample rows
+                           (safe while the daemon holds the store)
   memory dump [state-root] [--type=TYPE] [--limit=N] [--json]
                          — counts plus a larger set of sample rows per type
   spawn <agent-name> <goal> <worktree-path> [--depth=N]
-  merge-pr <pr-number>   — squash-merge PR in rysweet/Simard if it is merge-ready
+  merge-pr <pr-number> [--repo <owner/repo>]
+                         — squash-merge a PR through Simard's gated merge
+                           authority (objective gates + merge-readiness judge)
+                           if it is merge-ready; defaults to rysweet/Simard,
+                           pass --repo to land a PR in any repo Simard governs
   worktree-gc [--apply] [--idle-days=N] [--root=PATH ...] [--parent-repo=PATH]
                          — prune merged/stale engineer worktrees (dry-run by default)
   handover [--canary-dir=PATH] [--manifest-dir=PATH]
   update
   self-test
+  self-health            — post-deploy probes (version/memory/board/brains/quarantine)
+  self-deploy [--check]  — close the merged-but-not-running gap (operator-only)
   safe-update            — drain → snapshot → pre-test → swap → exec
   rollback               — restore the latest backup over the install path
   rollback-watchdog [--once] [--interval=SECS] [--max-iterations=N]
@@ -256,6 +265,22 @@ where
             }
             reject_extra_args(args)?;
             handle_self_test()
+        }
+        "self-health" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, self_health::SELF_HEALTH_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
+            self_health::dispatch_self_health_command(args)
+        }
+        "self-deploy" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, self_deploy::SELF_DEPLOY_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
+            self_deploy::dispatch_self_deploy_command(args)
         }
         "safe-update" => {
             let mut args = args.peekable();

@@ -4,17 +4,25 @@ use serde_json::{Value, json};
 
 use super::goals_status::render_status_and_detail;
 use super::routes::resolve_state_root;
-use super::{dashboard_goal_board_snapshot, dashboard_save_goal_board};
+use super::{
+    dashboard_goal_board_snapshot, dashboard_save_goal_board,
+    dashboard_save_goal_board_with_removals,
+};
 use crate::goal_curation::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
 use crate::goals::goal_slug;
 use crate::memory_ipc::open_reader_bridge;
 
-/// Load the dashboard's view of the goal board from cognitive memory.
-/// Returns an empty `GoalBoard` when the snapshot is missing or the bridge
-/// cannot be opened — the dashboard always renders rather than 500ing.
-fn load_board_or_empty() -> GoalBoard {
-    let state_root = resolve_state_root();
-    dashboard_goal_board_snapshot(&state_root).unwrap_or_default()
+/// Load the dashboard's view of the goal board from the EXPLICIT `state_root`
+/// instead of resolving `SIMARD_STATE_ROOT` ambiently. Returns an empty
+/// `GoalBoard` when the snapshot is missing or the bridge cannot be opened —
+/// the dashboard always renders rather than 500ing.
+///
+/// `state_root` is trusted-internal: it originates only from a handler
+/// wrapper's `resolve_state_root()` or a test's `HermeticState`, NEVER from
+/// request data, so threading it through carries no path-traversal risk
+/// (#2408 / #2384).
+fn load_board_or_empty_at(state_root: &std::path::Path) -> GoalBoard {
+    dashboard_goal_board_snapshot(state_root).unwrap_or_default()
 }
 
 /// Returns `true` when `s` looks like a debug key=value dump rather than
@@ -69,8 +77,15 @@ fn human_source_label(concept: &str) -> &'static str {
 }
 
 pub(crate) async fn goals() -> Json<Value> {
-    let state_root = resolve_state_root();
-    let board = dashboard_goal_board_snapshot(&state_root).unwrap_or_default();
+    goals_at(&resolve_state_root()).await
+}
+
+/// Env-free core of [`goals`]: build the dashboard goal-board view from the
+/// EXPLICIT `state_root` rather than resolving `SIMARD_STATE_ROOT` ambiently
+/// (#2408 / #2384). See [`load_board_or_empty_at`] for the trusted-internal
+/// `state_root` invariant.
+pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
+    let board = dashboard_goal_board_snapshot(state_root).unwrap_or_default();
 
     let active: Vec<Value> = board
         .active
@@ -88,6 +103,7 @@ pub(crate) async fn goals() -> Json<Value> {
                 "priority": g.priority,
                 "status": g.status.to_string(),
                 "assigned_to": g.assigned_to,
+                "repo": g.repo,
                 "current_activity": g.current_activity,
                 "status_chip": chip.as_str(),
                 "detail": detail,
@@ -112,7 +128,7 @@ pub(crate) async fn goals() -> Json<Value> {
 
     // Pull meeting-captured actions and decisions from cognitive memory (#415)
     // (#1686: filter out raw memory IDs and debug strings, provide clean labels)
-    if let Ok(reader) = open_reader_bridge(&state_root) {
+    if let Ok(reader) = open_reader_bridge(state_root) {
         let mem = reader.ops();
         for tag in &["goal", "action", "decision"] {
             if let Ok(facts) = mem.search_facts(tag, 20, 0.0) {
@@ -163,8 +179,14 @@ pub(crate) async fn goals() -> Json<Value> {
 }
 
 pub(crate) async fn seed_goals() -> Json<Value> {
-    let state_root = resolve_state_root();
-    let existing = dashboard_goal_board_snapshot(&state_root).unwrap_or_default();
+    seed_goals_at(&resolve_state_root()).await
+}
+
+/// Env-free core of [`seed_goals`]: seed the EXPLICIT `state_root`. See
+/// [`load_board_or_empty_at`] for the trusted-internal `state_root` invariant
+/// (#2408 / #2384).
+pub(crate) async fn seed_goals_at(state_root: &std::path::Path) -> Json<Value> {
+    let existing = dashboard_goal_board_snapshot(state_root).unwrap_or_default();
     if !existing.active.is_empty() {
         return Json(json!({"status": "already_seeded", "message": "Goals already exist"}));
     }
@@ -172,6 +194,8 @@ pub(crate) async fn seed_goals() -> Json<Value> {
     let mut board = GoalBoard::new();
     let now = chrono::Utc::now().to_rfc3339();
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "self-improvement".to_string(),
         description:
             "Continuously improve own capabilities through gym scenarios and self-evaluation"
@@ -184,6 +208,8 @@ pub(crate) async fn seed_goals() -> Json<Value> {
         last_progress_update_at: None,
     });
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "knowledge-growth".to_string(),
         description:
             "Expand knowledge base through meetings, research, and cognitive memory consolidation"
@@ -196,6 +222,8 @@ pub(crate) async fn seed_goals() -> Json<Value> {
         last_progress_update_at: None,
     });
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+            repo: None,
         id: "operational-health".to_string(),
         description: "Maintain system health: budget compliance, resource usage, and error rates within thresholds".to_string(),
         priority: 3,
@@ -219,7 +247,7 @@ pub(crate) async fn seed_goals() -> Json<Value> {
         score: 0.6,
     });
 
-    match dashboard_save_goal_board(&state_root, &board) {
+    match dashboard_save_goal_board(state_root, &board) {
         Ok(()) => {
             Json(json!({"status": "ok", "message": "Seeded 3 active goals and 2 backlog items"}))
         }
@@ -228,8 +256,19 @@ pub(crate) async fn seed_goals() -> Json<Value> {
 }
 
 pub(crate) async fn add_goal(Json(body): Json<Value>) -> Json<Value> {
-    let state_root = resolve_state_root();
-    let mut board = load_board_or_empty();
+    add_goal_at(&resolve_state_root(), Json(body)).await
+}
+
+/// Env-free core of [`add_goal`]. BOTH the load (`load_board_or_empty_at`) and
+/// the save honor the EXPLICIT `state_root`, closing the #2408 double-resolution
+/// (the handler previously read `SIMARD_STATE_ROOT` once directly and again
+/// inside `load_board_or_empty`). See [`load_board_or_empty_at`] for the
+/// trusted-internal `state_root` invariant.
+pub(crate) async fn add_goal_at(
+    state_root: &std::path::Path,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    let mut board = load_board_or_empty_at(state_root);
 
     let desc = match body.get("description").and_then(|v| v.as_str()) {
         Some(d) if !d.trim().is_empty() => d.trim().to_string(),
@@ -258,7 +297,25 @@ pub(crate) async fn add_goal(Json(body): Json<Value>) -> Json<Value> {
             )}));
         }
         let priority = body.get("priority").and_then(|v| v.as_u64()).unwrap_or(3) as u32;
+        // Issue #2359 (BUG 1): an optional target-repo slug routes the goal's
+        // engineer to ~/src/<slug>. Shape-only validation here; the
+        // existence/git-repo check happens later in `resolve_goal_repo` at
+        // spawn time, so a goal can be created for a repo cloned shortly after.
+        let repo = match body.get("repo").and_then(|v| v.as_str()) {
+            Some(slug) if !slug.trim().is_empty() => {
+                let slug = slug.trim();
+                if let Err(e) =
+                    crate::ooda_actions::advance_goal::repo_resolver::validate_repo_slug(slug)
+                {
+                    return Json(json!({"error": format!("invalid repo slug '{slug}': {e}")}));
+                }
+                Some(slug.to_string())
+            }
+            _ => None,
+        };
         board.active.push(ActiveGoal {
+            parent_goal_id: None,
+            repo,
             id: id.clone(),
             description: desc,
             priority,
@@ -270,15 +327,29 @@ pub(crate) async fn add_goal(Json(body): Json<Value>) -> Json<Value> {
         });
     }
 
-    match dashboard_save_goal_board(&state_root, &board) {
+    match dashboard_save_goal_board(state_root, &board) {
         Ok(()) => Json(json!({"status": "ok", "id": id})),
         Err(e) => Json(json!({"error": format!("{e}")})),
     }
 }
 
 pub(crate) async fn remove_goal(Path(id): Path<String>) -> Json<Value> {
-    let state_root = resolve_state_root();
-    let mut board = load_board_or_empty();
+    remove_goal_at(&resolve_state_root(), Path(id)).await
+}
+
+/// Env-free core of [`remove_goal`]. See [`load_board_or_empty_at`] for the
+/// trusted-internal `state_root` invariant (#2408 / #2384).
+///
+/// Persists through [`dashboard_save_goal_board_with_removals`] rather than the
+/// plain merge-on-write save: a removed goal is absent from the in-flight
+/// board, so merge-on-write would resurrect it from the persisted snapshot.
+/// Force-removing the id defeats that resurrection, matching the CLI
+/// `simard goal remove` contract (#1923 / #1925 / #1926).
+pub(crate) async fn remove_goal_at(
+    state_root: &std::path::Path,
+    Path(id): Path<String>,
+) -> Json<Value> {
+    let mut board = load_board_or_empty_at(state_root);
 
     let before_active = board.active.len();
     let before_backlog = board.backlog.len();
@@ -289,7 +360,7 @@ pub(crate) async fn remove_goal(Path(id): Path<String>) -> Json<Value> {
         return Json(json!({"error": "goal not found"}));
     }
 
-    match dashboard_save_goal_board(&state_root, &board) {
+    match dashboard_save_goal_board_with_removals(state_root, &board, std::slice::from_ref(&id)) {
         Ok(()) => Json(json!({"status": "ok"})),
         Err(e) => Json(json!({"error": format!("{e}")})),
     }
@@ -299,8 +370,17 @@ pub(crate) async fn update_goal_status(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Json<Value> {
-    let state_root = resolve_state_root();
-    let mut board = load_board_or_empty();
+    update_goal_status_at(&resolve_state_root(), Path(id), Json(body)).await
+}
+
+/// Env-free core of [`update_goal_status`]. See [`load_board_or_empty_at`] for
+/// the trusted-internal `state_root` invariant (#2408 / #2384).
+pub(crate) async fn update_goal_status_at(
+    state_root: &std::path::Path,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    let mut board = load_board_or_empty_at(state_root);
 
     let status_str = match body.get("status").and_then(|v| v.as_str()) {
         Some(s) => s,
@@ -337,15 +417,23 @@ pub(crate) async fn update_goal_status(
         return Json(json!({"error": "goal not found in active goals"}));
     }
 
-    match dashboard_save_goal_board(&state_root, &board) {
+    match dashboard_save_goal_board(state_root, &board) {
         Ok(()) => Json(json!({"status": "ok"})),
         Err(e) => Json(json!({"error": format!("{e}")})),
     }
 }
 
 pub(crate) async fn promote_backlog_item(Path(id): Path<String>) -> Json<Value> {
-    let state_root = resolve_state_root();
-    let mut board = load_board_or_empty();
+    promote_backlog_item_at(&resolve_state_root(), Path(id)).await
+}
+
+/// Env-free core of [`promote_backlog_item`]. See [`load_board_or_empty_at`]
+/// for the trusted-internal `state_root` invariant (#2408 / #2384).
+pub(crate) async fn promote_backlog_item_at(
+    state_root: &std::path::Path,
+    Path(id): Path<String>,
+) -> Json<Value> {
+    let mut board = load_board_or_empty_at(state_root);
 
     if board.active.len() >= MAX_ACTIVE_GOALS {
         return Json(json!({"error": format!(
@@ -361,6 +449,8 @@ pub(crate) async fn promote_backlog_item(Path(id): Path<String>) -> Json<Value> 
     };
 
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: item.id,
         description: item.description,
         priority: 3,
@@ -371,15 +461,23 @@ pub(crate) async fn promote_backlog_item(Path(id): Path<String>) -> Json<Value> 
         last_progress_update_at: None,
     });
 
-    match dashboard_save_goal_board(&state_root, &board) {
+    match dashboard_save_goal_board(state_root, &board) {
         Ok(()) => Json(json!({"status": "ok"})),
         Err(e) => Json(json!({"error": format!("{e}")})),
     }
 }
 
 pub(crate) async fn demote_goal(Path(id): Path<String>) -> Json<Value> {
-    let state_root = resolve_state_root();
-    let mut board = load_board_or_empty();
+    demote_goal_at(&resolve_state_root(), Path(id)).await
+}
+
+/// Env-free core of [`demote_goal`]. See [`load_board_or_empty_at`] for the
+/// trusted-internal `state_root` invariant (#2408 / #2384).
+pub(crate) async fn demote_goal_at(
+    state_root: &std::path::Path,
+    Path(id): Path<String>,
+) -> Json<Value> {
+    let mut board = load_board_or_empty_at(state_root);
 
     let pos = board.active.iter().position(|g| g.id == id);
     let goal = match pos {
@@ -394,7 +492,7 @@ pub(crate) async fn demote_goal(Path(id): Path<String>) -> Json<Value> {
         score: 0.0,
     });
 
-    match dashboard_save_goal_board(&state_root, &board) {
+    match dashboard_save_goal_board(state_root, &board) {
         Ok(()) => Json(json!({"status": "ok"})),
         Err(e) => Json(json!({"error": format!("{e}")})),
     }

@@ -131,6 +131,7 @@ fn mixed_goal_store_bridge() -> CognitiveMemoryBridge {
         source_session_id: SessionId::parse("session-01234567-89ab-cdef-0123-456789abcdef")
             .unwrap(),
         updated_in: SessionPhase::Persistence,
+        evidence: Vec::new(),
     };
 
     let alpha = make_record("alpha", "Alpha");
@@ -425,6 +426,7 @@ fn preparation_recalls_keyword_and_goal_facts() {
         owner_identity: "simard".to_string(),
         source_session_id: test_session_id(),
         updated_in: SessionPhase::Reflection,
+        evidence: Vec::new(),
     };
     mem.store_fact(
         crate::goals::GOAL_STORE_FACT_CONCEPT,

@@ -32,6 +32,7 @@ fn write_bin(dir: &Path, name: &str, body: &[u8]) -> PathBuf {
     p
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn happy_path_drain_snapshot_pretest_swap_validate() {
     // Force handover to be skipped so we observe the swap + validate phases
@@ -107,6 +108,7 @@ fn happy_path_drain_snapshot_pretest_swap_validate() {
     }
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn negative_pretest_failure_aborts_before_swap() {
     unsafe {
@@ -153,6 +155,7 @@ fn negative_pretest_failure_aborts_before_swap() {
     }
 }
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn negative_validate_timeout_then_rollback_restores_backup() {
     unsafe {

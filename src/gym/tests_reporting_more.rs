@@ -5,6 +5,7 @@ use crate::gym::types::{
     BenchmarkComparisonStatus, BenchmarkHandoffReport, BenchmarkRunReport, BenchmarkRuntimeReport,
     BenchmarkScenario, BenchmarkScorecard,
 };
+use crate::gym_scoring::EvidenceQualityAssessment;
 use crate::runtime::RuntimeTopology;
 use std::path::PathBuf;
 fn make_summary(
@@ -125,6 +126,7 @@ fn make_test_run_report() -> BenchmarkRunReport {
         scorecard: BenchmarkScorecard {
             task_completed: true,
             evidence_quality: "sufficient".to_string(),
+            evidence_quality_assessment: EvidenceQualityAssessment::default(),
             correctness_checks_passed: 1,
             correctness_checks_total: 2,
             unnecessary_action_count: Some(3),

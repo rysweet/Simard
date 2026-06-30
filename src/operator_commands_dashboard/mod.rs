@@ -4,6 +4,7 @@ mod auth;
 mod brain_failures;
 mod chat;
 mod current_work;
+mod cycle_source;
 mod distributed;
 mod goals;
 mod goals_status;
@@ -40,7 +41,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use crate::error::SimardResult;
-use crate::goal_curation::{GoalBoard, load_goal_board, save_goal_board};
+use crate::goal_curation::{
+    GoalBoard, load_goal_board, save_goal_board, save_goal_board_with_removals,
+};
 use crate::memory_ipc::{launch_writer_bridge, open_reader_bridge};
 
 /// Read the cognitive-memory `goal-board:snapshot` for the dashboard.
@@ -63,6 +66,26 @@ pub(crate) fn dashboard_goal_board_snapshot(state_root: &Path) -> SimardResult<G
 pub(crate) fn dashboard_save_goal_board(state_root: &Path, board: &GoalBoard) -> SimardResult<()> {
     let writer = launch_writer_bridge(state_root)?;
     save_goal_board(board, writer.ops())
+}
+
+/// Persist a `GoalBoard` from a dashboard write handler while force-removing
+/// `force_remove_ids` from the merged snapshot.
+///
+/// Plain [`dashboard_save_goal_board`] uses merge-on-write semantics that
+/// re-add any goal *absent* from the in-flight board, so a concurrent writer's
+/// goals are never lost (#1915). That same merge resurrects a goal an operator
+/// explicitly removed: its id is absent from the in-flight board, so
+/// [`merge_boards`](crate::goal_curation) keeps the persisted copy. Routing an
+/// explicit removal through [`save_goal_board_with_removals`] filters those ids
+/// out of the merged result so the removal actually persists — matching the CLI
+/// `simard goal remove` path (#1923 / #1925 / #1926).
+pub(crate) fn dashboard_save_goal_board_with_removals(
+    state_root: &Path,
+    board: &GoalBoard,
+    force_remove_ids: &[String],
+) -> SimardResult<()> {
+    let writer = launch_writer_bridge(state_root)?;
+    save_goal_board_with_removals(board, force_remove_ids, writer.ops())
 }
 
 /// Initialize dashboard auth and print the login code to stderr.
@@ -110,6 +133,18 @@ pub fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  Login code: {code} (saved to ~/.simard/.dashkey)");
     }
     eprintln!("  Open http://localhost:{port} and enter the code\n");
+
+    // Standalone `dashboard serve` does NOT open or register its own
+    // cognitive-memory handle. Every dashboard read/write goes through the
+    // launcher resolution ladder (`open_reader_bridge` / `launch_writer_bridge`),
+    // consulted per request: it routes to a running daemon's IPC socket (tier-1)
+    // when one is serving this `state_root`, and otherwise to the tier-2
+    // shared-store cache (#2334), which already gives this process a single
+    // handle per `state_root` with read-after-write consistency. Eagerly
+    // registering a dashboard-owned tier-0 handle here would shadow the tier-1
+    // socket for the whole process lifetime, turning the dashboard into a second
+    // concurrent cross-process writer that silently drops goals whenever a daemon
+    // runs on the same `state_root` (issue #2366).
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

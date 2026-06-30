@@ -29,6 +29,65 @@ use super::types::{
 static SAVE_GOAL_BOARD_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 // ---------------------------------------------------------------------------
+// Parent-progress roll-up (issue #2405)
+// ---------------------------------------------------------------------------
+
+/// Roll a parent goal's progress up from its `children` (issue #2405), so the
+/// board never shows a large goal parked at a stale percent while its slices
+/// move. See `docs/reference/goal-decomposition.md`.
+///
+/// Returns:
+/// - `None` when there are no children — the parent keeps its own
+///   directly-tracked status (the signal is "keep own").
+/// - `Some(Blocked(..))` when **any** child is `Blocked` — the block surfaces on
+///   the parent so the operator and the brain see the umbrella is gated.
+/// - `Some(Completed)` only when **every** child is `Completed`.
+/// - `Some(InProgress { percent })` otherwise, where `percent` is the rounded
+///   mean of the children's percents (`Completed` → 100, `InProgress { p }` →
+///   `p`, and `NotStarted` / `Proposed` / `Paused` → 0).
+pub fn rollup_parent_progress(children: &[ActiveGoal]) -> Option<GoalProgress> {
+    if children.is_empty() {
+        return None;
+    }
+
+    let blocked: Vec<String> = children
+        .iter()
+        .filter_map(|child| match &child.status {
+            GoalProgress::Blocked(reason) => Some(reason.clone()),
+            _ => None,
+        })
+        .collect();
+    if !blocked.is_empty() {
+        return Some(GoalProgress::Blocked(format!(
+            "{} child goal(s) blocked: {}",
+            blocked.len(),
+            blocked.join("; ")
+        )));
+    }
+
+    if children
+        .iter()
+        .all(|child| child.status == GoalProgress::Completed)
+    {
+        return Some(GoalProgress::Completed);
+    }
+
+    let sum: u32 = children
+        .iter()
+        .map(|child| match &child.status {
+            GoalProgress::Completed => 100,
+            GoalProgress::InProgress { percent } => *percent,
+            GoalProgress::NotStarted | GoalProgress::Proposed | GoalProgress::Paused => 0,
+            // `Blocked` is handled above; unreachable here but mapped to 0 for
+            // totality.
+            GoalProgress::Blocked(_) => 0,
+        })
+        .sum();
+    let percent = (f64::from(sum) / children.len() as f64).round() as u32;
+    Some(GoalProgress::InProgress { percent })
+}
+
+// ---------------------------------------------------------------------------
 // Validation helpers
 // ---------------------------------------------------------------------------
 
@@ -275,7 +334,8 @@ fn migrate_legacy_disk_file_if_present(bridge: &dyn CognitiveMemoryOps) {
             return;
         }
     };
-    if let Err(e) = bridge.store_fact(
+    if let Err(e) = bridge.store_fact_with_caller_key(
+        "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
         1.0,
@@ -382,7 +442,7 @@ pub(super) fn read_latest_snapshot(bridge: &dyn CognitiveMemoryOps) -> Option<Go
 /// board, in whichever set the in-flight board placed it.
 ///
 /// **Active capacity.** If the merged active set exceeds
-/// [`MAX_ACTIVE_GOALS`] (= 5), it is truncated using a deterministic sort
+/// [`MAX_ACTIVE_GOALS`], it is truncated using a deterministic sort
 /// key:
 ///
 /// 1. `priority` ascending (lower numeric value = higher importance, kept first)
@@ -567,7 +627,11 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
         field: "board".to_string(),
         reason: format!("failed to serialize goal board: {e}"),
     })?;
-    bridge.store_fact(
+    // Issue #2329: route the board snapshot through CallerKey dedup so each save
+    // supersedes the prior board image instead of piling up a new revision every
+    // cycle. The caller key and the concept are the same stable string.
+    bridge.store_fact_with_caller_key(
+        "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
         1.0,
@@ -666,7 +730,9 @@ pub fn save_goal_board_with_removals(
         field: "board".to_string(),
         reason: format!("failed to serialize goal board: {e}"),
     })?;
-    bridge.store_fact(
+    // Issue #2329: CallerKey dedup — supersede the prior board image.
+    bridge.store_fact_with_caller_key(
+        "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
         1.0,
@@ -778,6 +844,8 @@ pub fn promote_to_active(
         })?;
     let item = board.backlog.remove(position);
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: item.id,
         description: item.description,
         priority,
@@ -1191,32 +1259,39 @@ pub fn verify_goal_carryover(
 /// The 5 default starter goals shared by both `seed_default_board` (GoalBoard)
 /// and `seed_default_goals` (GoalStore). Single source of truth.
 ///
-/// Each tuple: (priority, title, description).
-pub const DEFAULT_SEED_GOALS: [(u32, &str, &str); 5] = [
+/// Each tuple: (priority, title, description, target-repo slug). The repo slug
+/// is `None` for goals that target the daemon's own repo ("Simard") and
+/// `Some(slug)` for ecosystem-targeted goals (issue #2359, BUG 1).
+pub const DEFAULT_SEED_GOALS: [(u32, &str, &str, Option<&str>); 5] = [
     (
         1,
         "Improve amplihack test coverage",
         "Increase test coverage across the amplihack ecosystem to catch regressions early",
+        Some("amplihack-rs"),
     ),
     (
         2,
         "Enhance Simard meeting experience",
         "Improve the interactive meeting facilitator with better UX and richer handoffs",
+        None,
     ),
     (
         3,
         "Improve cognitive memory persistence",
         "Harden memory consolidation and ensure durable recall across sessions",
+        None,
     ),
     (
         4,
         "Fix broken features",
         "Analyze all Simard features against their specs and intended behavior. Identify features that are not working correctly (e.g., meeting REPL, any other broken functionality) and fix them. Prioritize by user impact. Start by auditing the Specs/ directory and comparing each spec against the actual implementation to find gaps and failures.",
+        None,
     ),
     (
         5,
         "Self-serve dashboard improvement",
         "Use your own dashboard (localhost:8080) with Playwright to understand your operations and memory. Continuously improve the dashboard until it is very useful for understanding your internal state. The dashboard must not use jargon and must remain useful to humans too. Login by reading the code from ~/.simard/.dashkey. Playwright is installed (playwright==1.59.0 with Chromium browser).",
+        None,
     ),
 ];
 
@@ -1227,14 +1302,16 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
         return 0;
     }
 
-    for (priority, id_source, description) in DEFAULT_SEED_GOALS {
+    for (priority, id_source, description, repo) in DEFAULT_SEED_GOALS {
         let id = crate::goals::goal_slug(id_source);
         board.active.push(ActiveGoal {
+            parent_goal_id: None,
             id,
             description: description.to_string(),
             priority,
             status: GoalProgress::NotStarted,
             assigned_to: None,
+            repo: repo.map(str::to_string),
             current_activity: None,
             wip_refs: vec![],
             last_progress_update_at: None,
@@ -1308,6 +1385,7 @@ pub fn active_goals_as_records(board: &GoalBoard) -> Vec<crate::goals::GoalRecor
                 owner_identity,
                 source_session_id: SENTINEL_SESSION_ID.clone(),
                 updated_in: crate::session::SessionPhase::Persistence,
+                evidence: Vec::new(),
             }
         })
         .collect()

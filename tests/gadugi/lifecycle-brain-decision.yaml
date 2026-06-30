@@ -1,0 +1,55 @@
+name: "Engineer Lifecycle Brain Decision Parse (issue #2419)"
+description: "Outside-in proof that the engineer-lifecycle brain recovers real decisions from recipe-runner-rs JSON output instead of silently defaulting to continue_skipping. Reproduces the text-mode banner bug and validates the json-mode fix at the recipe-runner boundary (no LLM), then runs the in-tree parser/metric outcome tests."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Lifecycle brain decision: text-mode bug vs json-mode fix + parser/metric outcomes"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/lifecycle-brain-decision.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "ooda"
+    - "engineer-lifecycle"
+    - "recipe-brain"
+    - "issue-2419"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

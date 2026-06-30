@@ -3,6 +3,8 @@ use super::types::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_
 
 fn make_goal(id: &str, priority: u32) -> ActiveGoal {
     ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: id.to_string(),
         description: format!("Goal {id}"),
         priority,
@@ -322,13 +324,16 @@ fn tmp_state_root(tag: &str) -> std::path::PathBuf {
 }
 
 /// Run `f` with SIMARD_STATE_ROOT set to `root`, restoring it afterwards.
-/// Uses ENV_MUTEX to prevent races between parallel tests.
+/// Uses ENV_MUTEX for intra-module ordering; callers are additionally
+/// `#[serial(cognitive_memory)]` so no test in another module reads
+/// SIMARD_STATE_ROOT while it is pinned here (issue #2316).
 fn with_state_root<F, R>(root: &std::path::Path, f: F) -> R
 where
     F: FnOnce() -> R,
 {
     let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: serialised by ENV_MUTEX; no other threads observe this var.
+    // SAFETY: serialised by ENV_MUTEX within this module and by the
+    // `cognitive_memory` serial key across modules.
     unsafe { std::env::set_var("SIMARD_STATE_ROOT", root) };
     let result = f();
     // SAFETY: same as above.
@@ -337,10 +342,13 @@ where
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn load_goal_board_reads_from_cognitive_memory() {
     let root = tmp_state_root("mem-read");
     let mut mem_board = GoalBoard::new();
     mem_board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "memory-only-goal".to_string(),
         description: "Loaded straight from cognitive memory".to_string(),
         priority: 1,
@@ -365,6 +373,7 @@ fn load_goal_board_reads_from_cognitive_memory() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn load_goal_board_returns_empty_when_memory_has_no_snapshot() {
     let root = tmp_state_root("mem-empty");
     let recording = BridgeRecording::shared();
@@ -378,6 +387,7 @@ fn load_goal_board_returns_empty_when_memory_has_no_snapshot() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn load_goal_board_returns_empty_when_search_facts_errors() {
     let root = tmp_state_root("mem-err");
     let bridge = bridge_search_fails();
@@ -389,10 +399,13 @@ fn load_goal_board_returns_empty_when_search_facts_errors() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn load_goal_board_migrates_legacy_disk_file_into_memory_then_deletes_it() {
     let root = tmp_state_root("migrate");
     let mut legacy = GoalBoard::new();
     legacy.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "legacy-goal".to_string(),
         description: "Originally on disk".to_string(),
         priority: 1,
@@ -422,6 +435,7 @@ fn load_goal_board_migrates_legacy_disk_file_into_memory_then_deletes_it() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn load_goal_board_migration_is_noop_when_no_legacy_file() {
     let root = tmp_state_root("migrate-noop");
     let recording = BridgeRecording::shared();
@@ -436,6 +450,7 @@ fn load_goal_board_migration_is_noop_when_no_legacy_file() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn load_goal_board_migration_handles_corrupt_legacy_file_without_panic() {
     let root = tmp_state_root("migrate-corrupt");
     let path = root.join("goal_records.json");
@@ -457,6 +472,7 @@ fn load_goal_board_migration_handles_corrupt_legacy_file_without_panic() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn load_goal_board_runs_migration_only_once_in_practice() {
     // After the first call, the file is gone, so the second call's migration
     // is a no-op (gated on path.exists()).  We assert:
@@ -465,6 +481,8 @@ fn load_goal_board_runs_migration_only_once_in_practice() {
     let root = tmp_state_root("migrate-once");
     let mut legacy = GoalBoard::new();
     legacy.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "once-goal".to_string(),
         description: "Migrate exactly once".to_string(),
         priority: 1,
@@ -493,10 +511,13 @@ fn load_goal_board_runs_migration_only_once_in_practice() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn save_goal_board_persists_only_to_memory_and_writes_no_disk_file() {
     let root = tmp_state_root("save-mem-only");
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "memory-saved-goal".to_string(),
         description: "Persisted only to memory".to_string(),
         priority: 1,
@@ -524,11 +545,14 @@ fn save_goal_board_persists_only_to_memory_and_writes_no_disk_file() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn save_goal_board_rejects_suspect_board_without_persisting() {
     // Suspect by short id: "g1" is < 5 chars → board_integrity_suspect fires.
     let root = tmp_state_root("save-suspect");
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "g1".to_string(),
         description: "Goal g1".to_string(),
         priority: 1,
@@ -560,10 +584,13 @@ fn save_goal_board_rejects_suspect_board_without_persisting() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn save_goal_board_accepts_a_well_formed_board() {
     let root = tmp_state_root("save-ok");
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "well-formed-goal".to_string(),
         description: "Improve test coverage on the goal curation module".to_string(),
         priority: 1,
@@ -602,6 +629,8 @@ fn is_placeholder_description_rejects_long_or_substantive_descriptions() {
 fn board_integrity_suspect_flags_short_ids_and_placeholder_descriptions() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "g1".to_string(),
         description: "Goal g1".to_string(),
         priority: 1,
@@ -618,6 +647,8 @@ fn board_integrity_suspect_flags_short_ids_and_placeholder_descriptions() {
 fn board_integrity_suspect_passes_well_formed_board() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "improve-amplihack-test-coverage".to_string(),
         description: "Increase test coverage across the amplihack ecosystem".to_string(),
         priority: 1,
@@ -636,6 +667,8 @@ fn board_integrity_suspect_passes_well_formed_board() {
 fn clear_goal_assignment_resets_status_and_clears_assigned_to() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: "assigned-goal".to_string(),
         description: "Has an engineer".to_string(),
         priority: 1,
@@ -692,6 +725,8 @@ use super::operations::{merge_boards, read_latest_snapshot};
 /// All other fields default to `None` / `vec![]`.
 fn goal_with(id: &str, priority: u32, status: GoalProgress, desc: &str) -> ActiveGoal {
     ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
         id: id.to_string(),
         description: desc.to_string(),
         priority,
@@ -783,6 +818,8 @@ fn stateful_bridge() -> (
                     confidence,
                     source_id,
                     tags,
+                    usage_count: 0,
+                    last_accessed_at: None,
                 });
                 Ok(json!({ "id": node_id }))
             }
@@ -950,35 +987,43 @@ fn merge_boards_backlog_unions_by_id_with_in_flight_precedence() {
 /// (lowest priority number = highest importance kept).
 #[test]
 fn merge_boards_active_overflow_truncates_to_max_keeping_lowest_priority() {
-    // Persisted has 4 goals with priorities 5, 6, 7, 8.
-    // In-flight has 4 goals with priorities 1, 2, 3, 4.
-    // Union = 8 distinct ids; MAX_ACTIVE_GOALS=7 → drop priority 8.
+    // Build a union of exactly MAX_ACTIVE_GOALS + 1 distinct goals with
+    // priorities 1..=MAX_ACTIVE_GOALS+1, split across the two boards. The
+    // single highest-priority-number goal (MAX_ACTIVE_GOALS + 1) must be the
+    // one dropped; priorities 1..=MAX_ACTIVE_GOALS are all kept. Expressed
+    // relative to MAX_ACTIVE_GOALS so it stays correct when the cap changes.
+    let overflow_priority = (MAX_ACTIVE_GOALS + 1) as u32;
+    let mut persisted_goals = Vec::new();
+    let mut in_flight_goals = Vec::new();
+    for priority in 1..=overflow_priority {
+        let goal = goal_with(
+            &format!("goal-{priority:03}-overflow"),
+            priority,
+            GoalProgress::NotStarted,
+            "d",
+        );
+        if priority % 2 == 0 {
+            persisted_goals.push(goal);
+        } else {
+            in_flight_goals.push(goal);
+        }
+    }
     let persisted = GoalBoard {
-        active: vec![
-            goal_with("p-aaaaa", 5, GoalProgress::NotStarted, "p-a"),
-            goal_with("p-bbbbb", 6, GoalProgress::NotStarted, "p-b"),
-            goal_with("p-ccccc", 7, GoalProgress::NotStarted, "p-c"),
-            goal_with("p-ddddd", 8, GoalProgress::NotStarted, "p-d"),
-        ],
+        active: persisted_goals,
         backlog: vec![],
     };
     let in_flight = GoalBoard {
-        active: vec![
-            goal_with("f-aaaaa", 1, GoalProgress::NotStarted, "f-a"),
-            goal_with("f-bbbbb", 2, GoalProgress::NotStarted, "f-b"),
-            goal_with("f-ccccc", 3, GoalProgress::NotStarted, "f-c"),
-            goal_with("f-ddddd", 4, GoalProgress::NotStarted, "f-d"),
-        ],
+        active: in_flight_goals,
         backlog: vec![],
     };
     let merged = merge_boards(persisted, in_flight);
     assert_eq!(merged.active.len(), MAX_ACTIVE_GOALS);
     let priorities: Vec<u32> = merged.active.iter().map(|g| g.priority).collect();
     assert!(
-        !priorities.contains(&8),
-        "priority 8 goal must be truncated, got {priorities:?}"
+        !priorities.contains(&overflow_priority),
+        "the highest-priority-number goal ({overflow_priority}) must be truncated, got {priorities:?}"
     );
-    for p in [1u32, 2, 3, 4, 5, 6, 7] {
+    for p in 1..=(MAX_ACTIVE_GOALS as u32) {
         assert!(
             priorities.contains(&p),
             "priority {p} must be kept, got {priorities:?}"
@@ -990,8 +1035,11 @@ fn merge_boards_active_overflow_truncates_to_max_keeping_lowest_priority() {
 /// so a persisted goal must be the one dropped, never the in-flight one.
 #[test]
 fn merge_boards_overflow_tiebreak_prefers_in_flight() {
+    // Fill the board to capacity with persisted goals, then add one in-flight
+    // goal at the same priority so the union is MAX_ACTIVE_GOALS + 1 and the
+    // tiebreak must drop a persisted goal, never the in-flight one.
     let persisted = GoalBoard {
-        active: (0..7)
+        active: (0..MAX_ACTIVE_GOALS)
             .map(|i| {
                 goal_with(
                     &format!("persisted-{i:02}-id"),
@@ -1164,6 +1212,7 @@ fn read_latest_snapshot_returns_none_when_empty() {
 /// With multiple snapshot facts, `read_latest_snapshot` picks the one with
 /// the largest `node_id` (most recent uuid-v7 / monotonic id).
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn read_latest_snapshot_picks_max_node_id_when_multiple_present() {
     let (bridge, _facts) = stateful_bridge();
     let root = tmp_state_root("read-latest-multi");
@@ -1220,6 +1269,7 @@ fn read_latest_snapshot_returns_none_on_bridge_search_error() {
 /// `load_goal_board` returns BOTH goals. This is the canonical #1915
 /// regression: pre-fix, the second save clobbered the first.
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn save_goal_board_sequential_two_disjoint_writers_preserves_both() {
     let (bridge, _facts) = stateful_bridge();
     let root = tmp_state_root("save-seq-merge");
@@ -1263,6 +1313,7 @@ fn save_goal_board_sequential_two_disjoint_writers_preserves_both() {
 /// I2 — Sequential writes with same goal id → second write's fields win
 /// (in-flight precedence on collision, applied at save time).
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn save_goal_board_collision_persists_in_flight_fields() {
     let (bridge, _facts) = stateful_bridge();
     let root = tmp_state_root("save-collision");
@@ -1309,6 +1360,7 @@ fn save_goal_board_collision_persists_in_flight_fields() {
 /// must NOT panic and must NOT propagate the read error — it persists the
 /// in-flight board unchanged (best-effort fail-open on read, per SR-6.1).
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn save_goal_board_read_failure_falls_back_to_persisting_in_flight() {
     let recording = BridgeRecording::shared();
     let bridge = bridge_search_fails_store_works(recording.clone());
@@ -1341,16 +1393,19 @@ fn save_goal_board_read_failure_falls_back_to_persisting_in_flight() {
     assert_eq!(persisted.active[0].id, "readfail-goal-idid");
 }
 
-/// I4 — Capacity bound holds across many merge-on-write saves. Saving 9
-/// disjoint single-goal boards must result in a merged board of exactly
-/// MAX_ACTIVE_GOALS=7 goals (the ones with the lowest priority numbers).
+/// I4 — Capacity bound holds across many merge-on-write saves. Saving
+/// MAX_ACTIVE_GOALS + 2 disjoint single-goal boards must result in a merged
+/// board of exactly MAX_ACTIVE_GOALS goals (the ones with the lowest priority
+/// numbers). Expressed relative to the cap so it stays correct if it changes.
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn save_goal_board_capacity_bound_holds_after_multiple_merges() {
     let (bridge, _facts) = stateful_bridge();
     let root = tmp_state_root("save-capacity");
 
     with_state_root(&root, || {
-        for i in 0u32..9 {
+        let overflow = MAX_ACTIVE_GOALS as u32 + 2;
+        for i in 0u32..overflow {
             let board = GoalBoard {
                 active: vec![goal_with(
                     &format!("capgoal-{i:04}-aaaa"),
@@ -1375,20 +1430,18 @@ fn save_goal_board_capacity_bound_holds_after_multiple_merges() {
                 .collect::<Vec<_>>()
         );
         let priorities: Vec<u32> = loaded.active.iter().map(|g| g.priority).collect();
-        for p in [1u32, 2, 3, 4, 5, 6, 7] {
+        for p in 1..=(MAX_ACTIVE_GOALS as u32) {
             assert!(
                 priorities.contains(&p),
                 "priority {p} must be kept, got {priorities:?}"
             );
         }
-        assert!(
-            !priorities.contains(&8),
-            "priority 8 must be truncated, got {priorities:?}"
-        );
-        assert!(
-            !priorities.contains(&9),
-            "priority 9 must be truncated, got {priorities:?}"
-        );
+        for p in (MAX_ACTIVE_GOALS as u32 + 1)..=overflow {
+            assert!(
+                !priorities.contains(&p),
+                "priority {p} must be truncated, got {priorities:?}"
+            );
+        }
     });
 }
 

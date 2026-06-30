@@ -1,0 +1,54 @@
+name: "Goal -> Target-Repo Routing CLI (#2359 BUG 1)"
+description: "Outside-in regression for issue #2359 BUG 1. Drives the real `simard goal add [--repo <slug>]` operator CLI against a throwaway state root to prove the goal->target-repo routing contract: the routing flag is documented, a valid ecosystem slug is accepted and its route confirmed, a repo-less add stays backward-compatible (defaults to the daemon's own repo), and traversal / argv-injection / out-of-charset slugs are rejected at ingress so an engineer can never be routed outside the ~/src/ ecosystem root. The same `validate_repo_slug` guard backs the dashboard HTTP and meeting/curation ingress paths."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Goal add routes to the goal's target repo and rejects unsafe slugs"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/goal-repo-routing.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "goals"
+    - "goal-routing"
+    - "target-repo"
+    - "issue-2359"
+    - "security"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

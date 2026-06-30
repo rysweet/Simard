@@ -1,0 +1,53 @@
+name: "PR Illustrated Guide Skill Contract"
+description: "Outside-in contract coverage for the pr-illustrated-guide declarative skill (amplihack-rs#810): rich frontmatter, the ten procedure steps, configurable trivial-PR filter constants, GitHub + Azure DevOps support, dual deep-link formats, conditional GUI/TUI screenshots with announced degradation, the output contract, and the default-workflow integration hook."
+version: "1.0.0"
+
+config:
+  timeout: 120000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 120000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Skill contract assertions"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/pr-illustrated-guide-skill.sh"
+    timeout: 120000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "skill"
+    - "pr-illustrated-guide"
+    - "documentation"
+    - "contract"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

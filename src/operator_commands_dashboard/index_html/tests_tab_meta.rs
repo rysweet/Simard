@@ -6,7 +6,9 @@
 #![cfg(test)]
 
 use super::INDEX_HTML;
-use super::tab_meta::{BANNED_JARGON, TAB_METADATA, default_title, tab_meta_js, tab_nav_html};
+use super::tab_meta::{
+    BANNED_JARGON, TAB_METADATA, banned_jargon_js, default_title, tab_meta_js, tab_nav_html,
+};
 use std::collections::HashSet;
 
 #[test]
@@ -343,5 +345,235 @@ fn rendered_html_tab_click_handler_swaps_document_title() {
     assert!(
         INDEX_HTML.contains("__TAB_META"),
         "tab-click handler must read window.__TAB_META"
+    );
+}
+
+// ----- #2358: jargon ban extends to rendered cycle/summary text -----
+
+#[test]
+fn banned_jargon_js_is_valid_json_array() {
+    let js = banned_jargon_js();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&js).expect("banned_jargon_js must be valid JSON");
+    let arr = parsed
+        .as_array()
+        .expect("BANNED_JARGON renders as a JS array");
+    assert_eq!(arr.len(), BANNED_JARGON.len());
+    for banned in BANNED_JARGON {
+        assert!(
+            arr.iter().any(|v| v.as_str() == Some(*banned)),
+            "banned_jargon_js missing term {banned:?}"
+        );
+    }
+}
+
+#[test]
+fn rendered_html_injects_banned_jargon_for_summary_humanizer() {
+    // The `{{BANNED_JARGON_JS}}` marker must be substituted with the live
+    // BANNED_JARGON list so the client-side humanizer strips the same jargon
+    // the ledes are forbidden from containing (single source of truth).
+    assert!(
+        !INDEX_HTML.contains("{{BANNED_JARGON_JS}}"),
+        "the BANNED_JARGON marker was not substituted"
+    );
+    assert!(
+        INDEX_HTML.contains("const BANNED_JARGON="),
+        "rendered HTML must define the client-side BANNED_JARGON list"
+    );
+    for banned in BANNED_JARGON {
+        assert!(
+            INDEX_HTML.contains(banned),
+            "rendered HTML missing injected jargon term {banned:?} for the summary humanizer"
+        );
+    }
+}
+
+#[test]
+fn rendered_html_humanizes_cycle_summaries() {
+    // The humanizer must be defined and applied; raw `esc(rpt.summary)` must
+    // no longer reach the user-facing summary slots (that path leaked `OODA`,
+    // `goals=2`, `tree=clean`).
+    assert!(
+        INDEX_HTML.contains("function humanizeCycleSummary("),
+        "humanizeCycleSummary helper must be defined"
+    );
+    assert!(
+        INDEX_HTML.contains("humanizeCycleSummary(rpt.summary)"),
+        "Thinking legacy cycle summary must be humanized"
+    );
+    assert!(
+        INDEX_HTML.contains("humanizeCycleSummary(rpt.summary||'')"),
+        "Thinking inline cycle summary must be humanized"
+    );
+    assert!(
+        INDEX_HTML.contains("humanizeCycleSummary(c.summary||'')"),
+        "OODA cycle-history summary must be humanized"
+    );
+    assert!(
+        !INDEX_HTML.contains("esc(rpt.summary)"),
+        "raw esc(rpt.summary) still leaks the machine cycle summary"
+    );
+}
+
+#[test]
+fn rendered_html_drops_false_invoice_cost_claim() {
+    // #2358 P1: the Costs lede claimed "real provider invoices rather than
+    // estimates" while the metric is labeled "Estimated Cost". The lede must
+    // no longer make the invoice claim.
+    assert!(
+        !INDEX_HTML.contains("real provider invoices rather than estimates"),
+        "Costs lede must not claim invoice-derived figures while labeling them Estimated"
+    );
+}
+
+#[test]
+fn rendered_html_defines_token_humanizers() {
+    for needle in [
+        "function humanizeGoalId(",
+        "function humanizePeriod(",
+        "humanizeGoalId(top.goal_id)",
+    ] {
+        assert!(
+            INDEX_HTML.contains(needle),
+            "rendered HTML missing humanizer wiring: {needle}"
+        );
+    }
+}
+
+#[test]
+fn rendered_html_humanizes_p3_units_and_scales() {
+    // #2358 P3: durations and bare-float urgency scores must be humanized.
+    for needle in [
+        "function humanizeDuration(",
+        "function urgencyPhrase(",
+        "humanizeDuration(intervalSecs)",
+        "urgencyPhrase(top.urgency)",
+        "urgencyPhrase(p.urgency)",
+    ] {
+        assert!(
+            INDEX_HTML.contains(needle),
+            "rendered HTML missing P3 humanizer wiring: {needle}"
+        );
+    }
+    // The bare-minute interval label and bare urgency floats must be gone.
+    assert!(
+        !INDEX_HTML.contains("intervalMin"),
+        "memory growth interval still renders a bare minute count"
+    );
+    assert!(
+        !INDEX_HTML.contains("urgency ${top.urgency.toFixed(2)}"),
+        "Overview still renders a bare unexplained urgency float"
+    );
+    assert!(
+        !INDEX_HTML.contains("(urgency: ${p.urgency.toFixed(2)})"),
+        "Thinking priorities still render a bare unexplained urgency float"
+    );
+}
+
+// ----- #2358 P2 item 3: Overview raw brain-action-detail humanization -----
+//
+// The Overview tab renders two action-detail slots that currently leak raw
+// machine strings (e.g. `brain: continue_skipping`, `no-action: no decision
+// keyword found...defaulting to...`, `<x>-brain: prefix-routed`). A new
+// client-side `humanizeActionDetail(detail)` helper must clean these for
+// display while preserving the `agent='engineer-...'` substring the Attach
+// button keys off, and the escape-last (XSS) invariant must hold at both
+// render sites. These are the Rust half of the contract; the behavioral half
+// lives in `tests/gadugi/dashboard-jargon-clarity.sh` and the Playwright
+// audit (which exercise the served page and real markup escaping at runtime).
+
+#[test]
+fn rendered_html_humanizes_overview_action_detail() {
+    // The helper must be defined alongside the other #2358 humanizers.
+    assert!(
+        INDEX_HTML.contains("function humanizeActionDetail("),
+        "humanizeActionDetail helper must be defined so the Overview \
+         action-detail slots stop leaking raw brain strings"
+    );
+
+    // Site 1 — "Last Cycle Actions" (~part_01.rs L396). The detail must be
+    // humanized *then* escaped (escape-last): esc() stays the outermost call.
+    assert!(
+        INDEX_HTML.contains("esc(humanizeActionDetail(o.detail).substring(0,120))"),
+        "Last Cycle Actions must render esc(humanizeActionDetail(o.detail)...) \
+         so the raw detail is humanized before the terminal esc()"
+    );
+
+    // Site 2 — "Recent actions" IIFE (~part_01.rs L431). The raw string is
+    // humanized inside the truncation IIFE before renderActionDetail() escapes
+    // it once.
+    assert!(
+        INDEX_HTML.contains("humanizeActionDetail(a.detail"),
+        "Recent actions must humanize a.detail inside the truncation IIFE \
+         before handing it to renderActionDetail()"
+    );
+
+    // The old raw, un-humanized path must be gone from Site 1.
+    assert!(
+        !INDEX_HTML.contains("esc(o.detail.substring(0,120))"),
+        "Last Cycle Actions still renders the raw, un-humanized detail string"
+    );
+}
+
+#[test]
+fn rendered_html_action_detail_humanizer_preserves_escape_last() {
+    // SR-D1 (escape-last invariant, CRITICAL): on every humanized value esc()
+    // must remain the *terminal* operation so an attacker-controlled detail
+    // such as `<img src=x onerror=alert(1)>` or `<script>` can only ever reach
+    // the DOM as escaped entities. We verify the source-level ordering here;
+    // runtime escaping is exercised by the Playwright audit.
+
+    // Site 1: esc() wraps the humanizer output (esc-outermost), and the
+    // truncation happens on the *raw* humanized text (truncate-before-escape)
+    // so an entity is never split.
+    assert!(
+        INDEX_HTML.contains("esc(humanizeActionDetail(o.detail).substring(0,120))"),
+        "Site 1 must keep esc() as the outermost call wrapping the humanizer"
+    );
+
+    // The escape-first anti-pattern (humanizing already-escaped text, which
+    // would leave the humanizer's own output unescaped) must never appear.
+    assert!(
+        !INDEX_HTML.contains("humanizeActionDetail(esc("),
+        "humanizeActionDetail must never run on already-escaped text \
+         (escape-first would let its output reach the DOM unescaped)"
+    );
+
+    // Site 2: renderActionDetail() performs the single, internal esc(). Feeding
+    // it the raw humanized string keeps esc() terminal there too; double-
+    // escaping (renderActionDetail(esc(...))) must not be introduced.
+    assert!(
+        INDEX_HTML.contains("const safe=esc(detail||'')"),
+        "renderActionDetail must retain its single internal esc(detail||'') \
+         as the terminal escape for Site 2"
+    );
+    assert!(
+        !INDEX_HTML.contains("renderActionDetail(esc("),
+        "Recent actions must not pre-escape before renderActionDetail() \
+         (that double-escapes and corrupts the markup)"
+    );
+}
+
+#[test]
+fn rendered_html_action_detail_humanizer_preserves_attach_button_contract() {
+    // SR-D5 (Attach-button integrity): humanizing the Recent-actions detail
+    // must not break the inline Attach button. Site 2 must still route through
+    // renderActionDetail(), which detects `agent='engineer-...'` and swaps in
+    // the Attach button when a matching tmux session is cached. The humanizer
+    // is applied to the *input* of renderActionDetail (so the agent substring
+    // it preserves verbatim still reaches the matcher), never around it.
+    assert!(
+        INDEX_HTML.contains("function renderActionDetail("),
+        "renderActionDetail must remain defined to host the Attach-button logic"
+    );
+    assert!(
+        INDEX_HTML.contains("humanizeActionDetail(a.detail"),
+        "Site 2 must humanize a.detail as the input fed into renderActionDetail"
+    );
+    // The agent matcher renderActionDetail relies on must remain intact.
+    assert!(
+        INDEX_HTML.contains(r"agent='(engineer-"),
+        "renderActionDetail must keep matching agent='engineer-...' so the \
+         Attach button contract survives the humanization change"
     );
 }
