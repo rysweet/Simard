@@ -33,16 +33,21 @@ related:
 > emission is at the OODA procedure-store seam (`src/ooda_loop/cycle.rs`); metrics
 > are written through the existing `record_metric` in `src/self_metrics/mod.rs`.
 >
-> **FU1 boundary (honest scope).** The *mechanics* of the failure→lesson half are
-> implemented and tested, but their **production trigger** requires an external
-> failure signal. Today the only engineer-loop
-> [`VerificationReport`](#verified_outcome) yields `verified`/`unverified`
-> (a git-artifact probe), never `failed`, so [`verified_outcome`] never returns
-> `VerifiedFailure` in production yet. Per both issues' stated sequencing
-> ("hard dependency on FU1"), wiring `record_failure_reflection` /
-> `maybe_distill_lesson` / `brain_repeat_failure` to a real failure verdict is a
-> one-call change deferred to FU1 — see [OODA cycle wiring](#ooda-cycle-wiring).
-> The loop is **never** gated on self-judged `ActionOutcome.success` (R10).
+> **FU1 boundary (now satisfied).** The *mechanics* of the failure→lesson half
+> were implemented and tested under #2476; their **production trigger** required
+> an external failure signal. FU1 —
+> [#2456](https://github.com/rysweet/Simard/issues/2456), the external-signal
+> completion gate — has since landed and produces a genuine, non-self-judged
+> failure signal: [`VerificationOutcome::Refuted`](#ooda-cycle-wiring), a
+> *false completion* where a derivable external postcondition (PR merged, issue
+> closed, self-change deployed) contradicted the done-claim. The OODA curate
+> phase now wires that signal end-to-end through
+> [`learn_from_verified_failures`](#ooda-cycle-wiring) →
+> `record_failure_reflection` → `maybe_distill_lesson` → `brain_repeat_failure`
+> (`src/ooda_loop/cycle.rs::learn_from_refuted_goals`). The loop is **never**
+> gated on self-judged `ActionOutcome.success` (R10): the engineer-loop
+> `VerificationReport` git-artifact probe (which only yields `verified`/
+> `unverified`) is not the trigger — the gate's *refutation* is.
 
 This page is the executable contract for the proposed procedural-learning loop.
 For the rationale and the end-to-end picture see
@@ -355,7 +360,7 @@ Example records (`metrics.jsonl`):
 
 ## OODA cycle wiring
 
-The loop has three production seams today and one FU1-gated seam.
+The loop has four production seams, all wired on honest external signals.
 
 **Wired now (honest signals):**
 
@@ -368,52 +373,41 @@ The loop has three production seams today and one FU1-gated seam.
 2. **New procedure → `brain_new_procedure`.** When the OODA consolidation seam
    (`src/ooda_loop/cycle.rs`) stores a *new* procedure (not a reinforcing
    re-store), it emits `brain_new_procedure` via [`record_new_procedure`].
-
-**Implemented + tested, FU1-gated for production trigger:**
-
-3. **Failure → reflection → lesson, and `brain_repeat_failure`.**
-   [`record_failure_reflection`], [`maybe_distill_lesson`], [`has_lesson_for`],
-   and [`record_repeat_failure`] are fully implemented and covered by
-   `tests_reflection_lessons.rs`. They are **no-ops on every non-`VerifiedFailure`
-   verdict** (R10), so they cannot fire from self-judged success. Production today
-   has no external *failure* verdict (the engineer-loop `VerificationReport` only
-   yields `verified`/`unverified`), so these do not trigger yet. Once FU1 supplies
-   a real failure signal, the wiring is the illustrative block below — calling
-   the existing, tested entry points behind a single `verified_outcome(...)`:
+3. **Refuted completion → reflection → lesson → `brain_repeat_failure`.** FU1
+   (#2456) landed the external-signal completion gate. In the OODA **curate**
+   phase, `archive_completed_evidence_aware` classifies each blocked completion;
+   a goal whose done-claim a *derivable external postcondition refuted*
+   (`VerificationOutcome::Refuted` — PR not merged, issue still open, self-change
+   not deployed) is a genuine, non-self-judged failure. `learn_from_refuted_goals`
+   (`src/ooda_loop/cycle.rs`) maps each refuted goal to a
+   [`VerifiedFailureObservation`] (`{objective, error_class}` where `error_class`
+   comes from [`error_class_from_missing`]) and hands
+   the batch to [`learn_from_verified_failures`], which records a reflection,
+   distils a recurrence-gated lesson, and emits `brain_repeat_failure` when a
+   failure recurs on a goal-type that already carries a lesson. `Unverified` /
+   `Error` outcomes (nothing to check, or a query failed) are skipped — they are
+   not failures (R10).
 
 ```rust
-// FU1 wiring (illustrative): only a *real* external verdict drives learning.
-let verdict = reflection_lessons::verified_outcome(&report); // engineer-loop report
-match &verdict {
-    Verdict::VerifiedSuccess => {
-        // distil/reinforce the successful sequence as a skill (gated on the
-        // external verdict, never on outcome.success).
-    }
-    Verdict::VerifiedFailure { error_class } => {
-        let ep = reflection_lessons::record_failure_reflection(
-            mem, &objective, &verdict, &next_time_hint,
-        )?;
-        let gt = reflection_lessons::normalize_goal_type(&objective);
-        if reflection_lessons::has_lesson_for(mem, &gt, error_class)? {
-            reflection_lessons::record_repeat_failure(&gt, error_class, &lesson_id);
-        }
-        reflection_lessons::maybe_distill_lesson(
-            mem, &verdict, &objective,
-            config.lesson_recurrence_threshold, ep.as_slice(),
-        )?;
-    }
-    Verdict::Unverified => { /* learn nothing — fail-safe */ }
-}
+// src/ooda_loop/cycle.rs — curate phase (simplified).
+let (archived, blocked) = goal_curation::archive_completed_evidence_aware(board, source);
+// Only goals an external postcondition *refuted* drive learning (never
+// self-judged ActionOutcome.success). Recurring refutations distil a lesson.
+learn_from_refuted_goals(&blocked, &*bridges.memory, config.lesson_recurrence_threshold);
+
+// learn_from_refuted_goals filters to VerificationOutcome::Refuted, derives the
+// error_class from the missing evidence, then for each observation:
+//   record_failure_reflection → maybe_distill_lesson → (repeat) record_repeat_failure
 ```
 
-> **Why the skill-distillation gate is not flipped yet.** The existing OODA
+> **Skill-distillation gate (seam 2) and self-report.** The existing OODA
 > consolidation stores procedures on a cycle's self-assessed `outcome.success`
-> (pre-existing #2281 behaviour). `ActionOutcome` carries no `VerificationReport`,
-> so there is no external verdict at that seam to gate on today. Rather than
-> regress to a *dishonest* gate, the verified-signal gate
-> ([`should_distill_skill`] / [`verified_outcome`]) ships ready for the FU1 seam
-> where a real report exists. R10 is preserved: no learning path is gated on
-> self-judged success.
+> (pre-existing #2281 behaviour). `ActionOutcome` carries no external verdict at
+> that seam, so the verified-signal skill gate
+> ([`should_distill_skill`] / [`verified_outcome`]) ships ready for an
+> engineer-loop `VerificationReport` seam where a real report exists. R10 is
+> preserved: the **failure** path (seam 3) is gated exclusively on the gate's
+> external refutation, never on self-judged success.
 
 ---
 
@@ -424,9 +418,9 @@ match &verdict {
 | `CognitiveMemoryOps` trait | unchanged | unchanged (no new methods) |
 | `CognitiveProcedure` shape | `{node_id,name,steps,prerequisites,usage_count}` | unchanged (lessons are name-prefixed) |
 | Schema / snapshots / IPC | — | unchanged; no DDL |
-| Skill distillation gate | self-judged `outcome.success` | gate **implemented** ([`verified_outcome`]/[`should_distill_skill`]); production flip deferred to FU1 (no external verdict at the OODA outcome seam yet) — R10 preserved |
-| Failure handling | none | reflection + recurrence-gated lesson (implemented + tested; production trigger FU1-gated) |
-| Metrics | — | `brain_skill_reuse` (wired), `brain_new_procedure` (wired), `brain_repeat_failure` (FU1-gated) |
+| Skill distillation gate | self-judged `outcome.success` | gate **implemented** ([`verified_outcome`]/[`should_distill_skill`]); production flip awaits an engineer-loop report seam — R10 preserved |
+| Failure handling | none | reflection + recurrence-gated lesson, **wired live** on the #2456 `Refuted` signal (`learn_from_refuted_goals`) |
+| Metrics | — | `brain_skill_reuse` (wired), `brain_new_procedure` (wired), `brain_repeat_failure` (**wired** on refuted completions) |
 
 ---
 
@@ -434,7 +428,8 @@ match &verdict {
 
 The contract is enforced by the tests below — pure gate/normalization/metric
 contracts in `reflection_lessons`'s inline `#[cfg(test)] mod tests`, memory-backed
-behaviour in `src/memory_consolidation/tests_reflection_lessons.rs`, and the
+behaviour in `src/memory_consolidation/tests_reflection_lessons.rs`, the live
+curate-phase wiring in `src/ooda_loop/cycle.rs::tests_refuted_lessons`, and the
 end-to-end reuse-loop guards in `src/cognitive_memory/tests_procedural_loop.rs`.
 
 | # | Acceptance criterion | Test | Status |
@@ -447,12 +442,13 @@ end-to-end reuse-loop guards in `src/cognitive_memory/tests_procedural_loop.rs`.
 | AC-6 (#2458) | A one-off failure (count = 1) does **not** become a lesson | `one_off_failure_is_not_a_lesson` | ✅ |
 | AC-7 (#2441/#2458) | A subsequent attempt on the failed goal-type surfaces the lesson | `recurring_failure_becomes_recallable_lesson` (recall assertion) | ✅ |
 | AC-8 (R10) | `Verdict::Unverified` distils/reflects nothing | `unverified_and_success_write_no_reflection`, `unverified_distills_no_lesson_even_with_reflections` | ✅ |
-| AC-9 (R9) | `brain_repeat_failure` records when a `VerifiedFailure` recurs on a goal-type with an existing lesson | `metric_contexts_have_expected_shapes` (metric surface); production emission **FU1-gated** | ⏳ FU1 |
+| AC-9 (R9) | `brain_repeat_failure` records when a `VerifiedFailure` recurs on a goal-type with an existing lesson | `learn_from_verified_failures_counts_repeat_after_lesson`, `learn_from_verified_failures_distill_and_repeat_in_one_pass` | ✅ |
 | AC-10 | `verified_outcome` maps pass/fail/unknown reports to the correct `Verdict` | `verified_outcome_mapping` | ✅ |
 | AC-11 | `normalize_goal_type` / `normalize_error_class` are deterministic and idempotent | `normalization_is_idempotent` | ✅ |
+| AC-12 (#2458) | The #2456 `Refuted` signal drives the live curate-phase loop (reflection + recallable lesson); `Unverified`/`Error` are skipped | `tests_refuted_lessons::*` (cycle), `error_class_from_missing_*` (gate) | ✅ |
 
-AC-1–AC-8, AC-10, AC-11 are green under `cargo test`. AC-9's metric *surface*
-(context shape + emitter) is tested; its production emission awaits FU1's
-external failure verdict (see [OODA cycle wiring](#ooda-cycle-wiring)). No
+All ACs are green under `cargo test`. The failure→lesson production trigger is
+now live on the #2456 `Refuted` signal via `learn_from_refuted_goals` in the
+OODA curate phase (see [OODA cycle wiring](#ooda-cycle-wiring)). No
 snapshot/architecture-snapshot docs are added, and no live redeploy is part of
 this change.

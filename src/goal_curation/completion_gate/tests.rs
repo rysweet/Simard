@@ -13,8 +13,9 @@ use super::{
     COMPLETION_VERIFICATION_METRIC, CompletionEvidenceGate, CompletionVerdict, EvidenceSource,
     FALSE_COMPLETION_RATE_METRIC, MissingEvidence, VerificationOutcome,
     archive_completed_with_evidence, classify_from_missing, classify_outcome,
-    completion_evidence_enabled, false_completion_rate, has_derivable_signal, is_self_affecting,
-    record_completion_verification, record_false_completion_rate,
+    completion_evidence_enabled, error_class_from_missing, false_completion_rate,
+    has_derivable_signal, is_self_affecting, record_completion_verification,
+    record_false_completion_rate,
 };
 
 /// Canned, hermetic [`EvidenceSource`]. Each field is `Result<bool, String>` so
@@ -533,4 +534,66 @@ fn blocked_missing(v: &CompletionVerdict) -> Vec<MissingEvidence> {
         CompletionVerdict::Blocked { missing, .. } => missing.clone(),
         CompletionVerdict::Complete(_) => panic!("expected Blocked, got Complete"),
     }
+}
+
+// --- error_class_from_missing (#2458 bridge to the failure→lesson loop) ------
+
+#[test]
+fn error_class_from_missing_maps_each_kind_to_a_stable_token() {
+    assert_eq!(
+        error_class_from_missing(&[MissingEvidence::PrNotMerged]),
+        "pr_not_merged"
+    );
+    assert_eq!(
+        error_class_from_missing(&[MissingEvidence::IssueOpen]),
+        "issue_open"
+    );
+    assert_eq!(
+        error_class_from_missing(&[MissingEvidence::NotDeployed]),
+        "not_deployed"
+    );
+}
+
+#[test]
+fn error_class_from_missing_joins_multiple_in_check_order() {
+    // The gate pushes PR → issue → deploy; the class preserves that order so the
+    // same refutation always yields the same key.
+    let class = error_class_from_missing(&[
+        MissingEvidence::PrNotMerged,
+        MissingEvidence::IssueOpen,
+        MissingEvidence::NotDeployed,
+    ]);
+    assert_eq!(class, "pr_not_merged__issue_open__not_deployed");
+}
+
+#[test]
+fn error_class_from_missing_is_deterministic_and_dedups() {
+    let a = error_class_from_missing(&[MissingEvidence::IssueOpen, MissingEvidence::IssueOpen]);
+    let b = error_class_from_missing(&[MissingEvidence::IssueOpen]);
+    assert_eq!(a, b, "duplicate kinds must not duplicate tokens");
+}
+
+#[test]
+fn error_class_from_missing_excludes_could_not_verify() {
+    // `CouldNotVerify` is the `Error` outcome, never a refutation — it must not
+    // leak into a concrete failure class. A PR refutation alongside it keeps
+    // only the concrete token.
+    let class = error_class_from_missing(&[
+        MissingEvidence::CouldNotVerify {
+            detail: "gh timeout".to_string(),
+        },
+        MissingEvidence::PrNotMerged,
+    ]);
+    assert_eq!(class, "pr_not_merged");
+}
+
+#[test]
+fn error_class_from_missing_defaults_when_no_concrete_kind() {
+    // Defensive: a list with only `CouldNotVerify` (which never classifies as
+    // `Refuted`) yields the sentinel rather than an empty string.
+    let class = error_class_from_missing(&[MissingEvidence::CouldNotVerify {
+        detail: "x".to_string(),
+    }]);
+    assert_eq!(class, "refuted_unknown");
+    assert_eq!(error_class_from_missing(&[]), "refuted_unknown");
 }
