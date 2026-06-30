@@ -1,0 +1,106 @@
+name: "Distill Parser Tolerates Field-Incomplete Facts"
+description: >
+  Outside-in regression gate for episode t=9664 (live OODA consolidation,
+  2026-06-30, Copilot CLI 1.0.66-2). The episode->fact distillation bridge kept
+  failing every cycle with `distill: `distill` step output did not contain a
+  parseable { "facts": [...] } object` EVEN THOUGH all ANSI/launch-log preamble
+  shapes were already stripped (#2479/#2484/#2490/#2496/#2504). The residual
+  root cause was field-level strictness: the agent intermittently omits / nulls
+  / scalar-types a single `facts[]` field (most often `source_episode_id`),
+  which made serde reject the WHOLE envelope so the entire batch was silently
+  dropped and re-deferred forever. The parser now deserializes fact fields
+  leniently (de_lenient_string): one malformed fact no longer sinks its
+  well-formed siblings, and an ungrounded recovered fact is still quarantined by
+  the reliability gate rather than promoted blindly. This scenario pins that
+  behaviour end-to-end so it cannot regress.
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Well-formed fact survives a field-incomplete sibling behind launch-log noise (t=9664)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib
+        issue_t9664_field_tolerance_tests
+        -- --nocapture
+    timeout: 600000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "distill_recovers_wellformed_fact_when_sibling_omits_source_episode_id ... ok"
+        - "parse_recipe_output_tolerates_fact_missing_source_episode_id ... ok"
+        - "parse_recipe_output_tolerates_null_and_scalar_fields ... ok"
+        - "recovered_fact_with_missing_provenance_is_still_quarantined_by_the_gate ... ok"
+        - "grounded_object_wins_over_trailing_sourceless_object ... ok"
+        - "non_scalar_field_values_collapse_to_empty ... ok"
+        - "test result: ok"
+
+  - name: "Launch-log preamble regression (#2496) still green (no regression)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib
+        parse_recipe_output_full_recovers_facts_from_copilot_launch_log_preamble
+        -- --nocapture
+    timeout: 600000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test result: ok"
+
+  - name: "Full distillation parser contract still green (no regression)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib memory_consolidation::distillation
+        -- --nocapture
+    timeout: 600000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test result: ok"
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "test-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "memory"
+    - "distillation"
+    - "regression"
+    - "issue-t9664"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

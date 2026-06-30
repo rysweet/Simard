@@ -1124,33 +1124,52 @@ fn scan_for_facts_object(text: &str) -> Option<DistillOutput> {
 }
 
 /// Scan an already noise-stripped `trimmed` string for a `{ "facts": [...] }`
-/// object, preferring the LAST *non-empty* balanced top-level object (the
-/// agent's final answer trails any banner/thinking output) and falling back to
-/// the last parseable empty object. The ANSI/log/banner stripping that produces
-/// `trimmed` lives in [`scan_for_facts_object`].
+/// object, preferring (in order) the LAST balanced top-level object that carries
+/// a **grounded-capable** fact — one with a non-empty `source_episode_id` — then
+/// the last otherwise-non-empty object, then the last parseable empty object.
+/// The ANSI/log/banner stripping that produces `trimmed` lives in
+/// [`scan_for_facts_object`].
+///
+/// The grounded-capable tier exists because field-level leniency
+/// ([`de_lenient_string`]) lets a *source-less* facts object now parse as
+/// "non-empty"; without this tier a trailing source-less object (which the
+/// reliability gate would later quarantine wholesale) could shadow an earlier
+/// fully-attributed answer and silently discard its promotable facts. Preferring
+/// the grounded-capable object keeps the agent's real, attributed answer winning
+/// while still recovering a source-less answer when that is all the output holds.
 fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
     // Fast path — the text IS the JSON object.
     if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
         return Some(parsed.into_output());
     }
-    // Slow path — among every balanced top-level `{...}` substring, prefer the
-    // facts from the LAST *non-empty* one that parses. Falling back to the last
-    // parseable object only when none carry facts/procedures preserves a
-    // legitimate `{"facts":[]}` "nothing worth distilling" answer while never
-    // letting an accidental trailing empty object shadow an earlier populated one.
+    // Slow path — among every balanced top-level `{...}` substring, scanned from
+    // the END so the agent's final answer is reached before any leading
+    // banner/thinking object. Three preference tiers (best first):
+    //   1. last object with a grounded-capable fact (non-empty source_episode_id),
+    //   2. last otherwise-non-empty object (facts/procedures present),
+    //   3. last parseable empty `{"facts":[]}` ("nothing worth distilling").
+    let mut nonempty_fallback: Option<DistillOutput> = None;
     let mut empty_fallback: Option<DistillOutput> = None;
     for (start, end) in balanced_object_spans(trimmed).into_iter().rev() {
         if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(&trimmed[start..end]) {
             let output = parsed.into_output();
-            if !output.facts.is_empty() || !output.procedures.is_empty() {
+            if output
+                .facts
+                .iter()
+                .any(|f| !f.source_episode_id.trim().is_empty())
+            {
                 return Some(output);
             }
-            if empty_fallback.is_none() {
+            if !output.facts.is_empty() || !output.procedures.is_empty() {
+                if nonempty_fallback.is_none() {
+                    nonempty_fallback = Some(output);
+                }
+            } else if empty_fallback.is_none() {
                 empty_fallback = Some(output);
             }
         }
     }
-    empty_fallback
+    nonempty_fallback.or(empty_fallback)
 }
 
 /// Return the byte spans `[start, end)` of every top-level balanced `{...}`
@@ -1305,15 +1324,61 @@ struct RecipeEnvelope {
     procedures: Vec<RecipeProcedure>,
 }
 
+/// Deserialize a fact/procedure field that the distiller agent is *supposed* to
+/// emit as a JSON string but, in practice, intermittently omits, nulls, or
+/// emits as a bare scalar (the Copilot CLI agent does this for individual
+/// `facts[]` entries — observed live in production, e.g. episode t=9664; see
+/// issue #2506).
+///
+/// Without this, a single fact missing `source_episode_id` (or carrying a
+/// `null`/numeric value) made `serde` reject the **entire** `{ "facts": [...] }`
+/// envelope, so `scan_for_facts_object` found no parseable object and the whole
+/// batch was silently dropped with the recurring
+/// `` `distill` step output did not contain a parseable { "facts": [...] } `` error —
+/// burning an LLM call every cycle while the same batch deferred forever.
+///
+/// Tolerating field-level noise lets the **well-formed** facts in a batch be
+/// recovered instead of one malformed sibling sinking all of them. Quality is
+/// not weakened: a recovered fact with an empty/unknown `source_episode_id` is
+/// ungrounded and the existing reliability gate ([`assess_fact_reliability`])
+/// quarantines it; an empty `concept` is dropped by [`RecipeEnvelope::into_facts`];
+/// empty `content` is quarantined by the reliability hard gate. Coercion is
+/// limited to **scalars** (string / number / bool); a `null` or a non-scalar
+/// (array / object) — both of which are malformed for a field the recipe
+/// promises as a plain string — collapses to the empty string so the existing
+/// gates drop/quarantine it rather than letting structured JSON text smuggle a
+/// fact past them.
+fn de_lenient_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        // Null and any non-scalar (array/object) → empty: a malformed value for
+        // a promised-string field must not become non-empty `content`/`concept`
+        // that could clear the empty-content/known-concept gates.
+        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            String::new()
+        }
+    })
+}
+
 #[derive(serde::Deserialize)]
 struct RecipeFact {
+    #[serde(default, deserialize_with = "de_lenient_string")]
     concept: String,
+    #[serde(default, deserialize_with = "de_lenient_string")]
     content: String,
+    #[serde(default, deserialize_with = "de_lenient_string")]
     source_episode_id: String,
 }
 
 #[derive(serde::Deserialize)]
 struct RecipeProcedure {
+    #[serde(default, deserialize_with = "de_lenient_string")]
     name: String,
     #[serde(default)]
     steps: Vec<String>,
@@ -1959,5 +2024,187 @@ mod issue_2496_distill_launcher_tests {
         assert_eq!(out.facts.len(), 1, "exactly one fact recovered");
         assert_eq!(out.facts[0].concept, "bug-pattern");
         assert_eq!(out.facts[0].source_episode_id, "epi_2496");
+    }
+}
+
+/// Episode t=9664 (live OODA consolidation, 2026-06-30, Copilot CLI 1.0.66-2):
+/// the distill bridge failed **recurrently** with the same
+/// `` `distill` step output did not contain a parseable { "facts": [...] } `` error
+/// (issue #2506) even though every ANSI/launch-log preamble shape was already stripped (the
+/// fix landed in #2479/#2484/#2490/#2504, and the deployed binary carried it).
+///
+/// The residual root cause was *field-level* strictness, not noise: the agent
+/// intermittently omits / nulls / scalar-types a single `facts[]` field
+/// (most often `source_episode_id`), which made `serde` reject the **whole**
+/// envelope so the entire batch was silently dropped and re-deferred every
+/// cycle. These tests pin the field-tolerant deserialization
+/// ([`de_lenient_string`]): one malformed fact no longer sinks its well-formed
+/// siblings, and an ungrounded recovered fact is still gated by
+/// [`assess_fact_reliability`] rather than promoted blindly.
+#[cfg(test)]
+mod issue_t9664_field_tolerance_tests {
+    use super::*;
+
+    /// The exact production noise prefix captured for episode t=9664: an
+    /// ANSI-coloured ISO-timestamped `launching copilot binary=…` line followed
+    /// by the bare `\u{2139} NODE_OPTIONS=…` info marker, immediately preceding
+    /// the agent's real `{ "facts": [...] }` answer.
+    fn real_t9664_noise_prefix() -> String {
+        let e = '\u{1b}';
+        format!(
+            "{e}[2m2026-06-30T04:31:59.643823Z{e}[0m {e}[32m INFO{e}[0m launching copilot \
+             {e}[3mbinary{e}[0m{e}[2m={e}[0m/home/azureuser/.npm-global/bin/copilot \
+             {e}[3mversion{e}[0m{e}[2m={e}[0m\"GitHub Copilot CLI 1.0.66-2.\"\n\
+             \u{2139} NODE_OPTIONS=--max-old-space-size=8192\n"
+        )
+    }
+
+    fn distill_envelope(step_output: &str) -> String {
+        serde_json::json!({
+            "recipe_name": "distill-episodes",
+            "success": true,
+            "step_results": [{
+                "step_id": "distill",
+                "status": "completed",
+                "output": step_output,
+                "error": ""
+            }]
+        })
+        .to_string()
+    }
+
+    /// The headline regression: leading ANSI/launch-log noise ahead of a facts
+    /// payload in which one fact is **well-formed** and a sibling **omits
+    /// `source_episode_id`**. Before the fix the missing field made the whole
+    /// `{ "facts": [...] }` object unparseable and the entire batch was dropped;
+    /// now the payload parses and the well-formed fact is recovered.
+    #[test]
+    fn distill_recovers_wellformed_fact_when_sibling_omits_source_episode_id() {
+        let step_output = format!(
+            "{}{{\"facts\":[\
+               {{\"concept\":\"bug-pattern\",\"content\":\"distill parser must tolerate a fact missing source_episode_id\",\"source_episode_id\":\"epi_9664\"}},\
+               {{\"concept\":\"lesson-learned\",\"content\":\"a sibling fact omitted its source_episode_id\"}}\
+             ]}}",
+            real_t9664_noise_prefix()
+        );
+        // The raw step-output span carries ESC bytes and a field-incomplete
+        // fact, so it must NOT parse as-is — the silent-drop failure mode.
+        assert!(
+            serde_json::from_str::<RecipeEnvelope>(step_output.trim()).is_err(),
+            "raw noised + field-incomplete step output must be unparseable as-is"
+        );
+        let out = parse_recipe_output_full(&distill_envelope(&step_output))
+            .expect("t=9664 payload (noise + one field-incomplete fact) must parse");
+        // Both facts are recovered by the parser (the reliability gate, applied
+        // later in the pass, decides promotion vs. quarantine — see
+        // `assess_fact_reliability`). The grounded one is intact.
+        assert!(
+            out.facts.iter().any(|f| f.concept == "bug-pattern"
+                && f.source_episode_id == "epi_9664"
+                && f.content == "distill parser must tolerate a fact missing source_episode_id"),
+            "the well-formed grounded fact must survive a malformed sibling: {:?}",
+            out.facts
+        );
+        // The field-incomplete sibling parses with an empty source_episode_id
+        // (ungrounded) rather than poisoning the batch.
+        assert!(
+            out.facts
+                .iter()
+                .any(|f| f.concept == "lesson-learned" && f.source_episode_id.is_empty()),
+            "the field-incomplete sibling must parse with an empty source_episode_id: {:?}",
+            out.facts
+        );
+    }
+
+    /// A bare facts object whose only fact omits `source_episode_id` must parse
+    /// (Tier-2 path) instead of erroring — the minimal reproduction of the
+    /// schema-strictness gap, independent of any noise.
+    #[test]
+    fn parse_recipe_output_tolerates_fact_missing_source_episode_id() {
+        let raw = r#"{"facts":[{"concept":"bug-pattern","content":"missing id field"}]}"#;
+        let facts = parse_recipe_output(raw).expect("a fact missing source_episode_id must parse");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "bug-pattern");
+        assert!(facts[0].source_episode_id.is_empty());
+    }
+
+    /// `null` and bare-scalar field values are coerced rather than rejected:
+    /// `source_episode_id: null` and a numeric `source_episode_id` are common
+    /// LLM deviations that previously sank the whole envelope.
+    #[test]
+    fn parse_recipe_output_tolerates_null_and_scalar_fields() {
+        let null_field = r#"{"facts":[{"concept":"lesson-learned","content":"id was null","source_episode_id":null}]}"#;
+        let facts = parse_recipe_output(null_field).expect("null source_episode_id must parse");
+        assert_eq!(facts.len(), 1);
+        assert!(facts[0].source_episode_id.is_empty());
+
+        let numeric_field = r#"{"facts":[{"concept":"pr-pattern","content":"id was numeric","source_episode_id":9664}]}"#;
+        let facts =
+            parse_recipe_output(numeric_field).expect("numeric source_episode_id must parse");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].source_episode_id, "9664");
+    }
+
+    /// Field tolerance must NOT weaken quality: a recovered fact whose
+    /// `source_episode_id` does not match any batch episode is ungrounded and
+    /// the reliability gate keeps quarantining it (score < threshold).
+    #[test]
+    fn recovered_fact_with_missing_provenance_is_still_quarantined_by_the_gate() {
+        let ungrounded = DistilledFact {
+            concept: "bug-pattern".to_string(),
+            content: "three or more words present here".to_string(),
+            source_episode_id: String::new(),
+        };
+        let score = assess_fact_reliability(&ungrounded, &[], std::slice::from_ref(&ungrounded));
+        assert!(
+            score < DISTILL_RELIABILITY_THRESHOLD,
+            "ungrounded recovered fact must stay below the promotion threshold, got {score}"
+        );
+    }
+
+    /// Field leniency must not let a trailing *source-less* facts object shadow
+    /// an earlier *grounded* one. Before the grounded-preference tier, the
+    /// source-less object — now parseable thanks to `de_lenient_string` — would
+    /// win as the "last non-empty" object and the earlier attributed fact would
+    /// be silently discarded. The grounded-capable answer must win.
+    #[test]
+    fn grounded_object_wins_over_trailing_sourceless_object() {
+        let step_output = concat!(
+            "{\"facts\":[{\"concept\":\"bug-pattern\",\"content\":\"the attributed answer\",\"source_episode_id\":\"epi_1\"}]}\n",
+            "{\"facts\":[{\"concept\":\"bug-pattern\",\"content\":\"a later source-less restatement\"}]}"
+        );
+        let facts =
+            parse_recipe_output(step_output).expect("a grounded object must be recoverable");
+        assert_eq!(
+            facts.len(),
+            1,
+            "exactly the grounded object's facts: {facts:?}"
+        );
+        assert_eq!(facts[0].source_episode_id, "epi_1");
+        assert_eq!(facts[0].content, "the attributed answer");
+    }
+
+    /// A non-scalar (array/object) value for a promised-string field collapses to
+    /// empty rather than being stringified, so it cannot smuggle structured JSON
+    /// text past the empty-content / known-concept gates. The envelope still
+    /// parses (the batch is not dropped); the malformed fact is simply gateable.
+    #[test]
+    fn non_scalar_field_values_collapse_to_empty() {
+        let raw = r#"{"facts":[{"concept":"bug-pattern","content":["a","b"],"source_episode_id":{"x":1}}]}"#;
+        let facts = parse_recipe_output(raw).expect("non-scalar fields must not sink the envelope");
+        assert_eq!(facts.len(), 1);
+        assert!(
+            facts[0].content.is_empty(),
+            "array content must collapse to empty, got {:?}",
+            facts[0].content
+        );
+        assert!(
+            facts[0].source_episode_id.is_empty(),
+            "object source_episode_id must collapse to empty, got {:?}",
+            facts[0].source_episode_id
+        );
+        // Empty content → reliability hard gate quarantines it (score 0.0).
+        let score = assess_fact_reliability(&facts[0], &[], &facts);
+        assert_eq!(score, 0.0, "empty-content fact must score 0.0");
     }
 }
