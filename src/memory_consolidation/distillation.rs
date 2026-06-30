@@ -1142,16 +1142,25 @@ fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
     if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
         return Some(parsed.into_output());
     }
-    // Slow path — among every balanced top-level `{...}` substring, scanned from
-    // the END so the agent's final answer is reached before any leading
-    // banner/thinking object. Three preference tiers (best first):
+    // Slow path — among every balanced `{...}` substring (string-aware, so a
+    // brace inside a JSON string cannot split an object), scanned from the END
+    // so the agent's final answer is reached before any leading banner/thinking
+    // object. The shared `recipe_output::balanced_objects` helper restarts at
+    // the next `{` after an unmatched/never-closing brace, so a stray `{` in the
+    // distill agent's leading prose (e.g. a code fragment like `fn f() {` while
+    // it reasons about code episodes) can no longer demote the real answer to a
+    // nested object and silently drop it (issue #2508). Three preference tiers
+    // (best first):
     //   1. last object with a grounded-capable fact (non-empty source_episode_id),
     //   2. last otherwise-non-empty object (facts/procedures present),
     //   3. last parseable empty `{"facts":[]}` ("nothing worth distilling").
     let mut nonempty_fallback: Option<DistillOutput> = None;
     let mut empty_fallback: Option<DistillOutput> = None;
-    for (start, end) in balanced_object_spans(trimmed).into_iter().rev() {
-        if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(&trimmed[start..end]) {
+    for span in crate::recipe_output::balanced_objects(trimmed)
+        .into_iter()
+        .rev()
+    {
+        if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(span) {
             let output = parsed.into_output();
             if output
                 .facts
@@ -1170,83 +1179,6 @@ fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
         }
     }
     nonempty_fallback.or(empty_fallback)
-}
-
-/// Return the byte spans `[start, end)` of every balanced `{...}` object in
-/// `s`, in source order.
-///
-/// String-aware **inside objects**: once a `{` has opened, `{`/`}` bytes inside
-/// a JSON string literal (respecting `\"` escapes) are ignored. Characters in
-/// the prose *between* objects are never allowed to swallow a later balanced
-/// object:
-///
-/// - An unmatched `"` in leading prose is skipped — the per-candidate scan only
-///   begins at a `{`, so a stray prose quote is an ordinary character (the
-///   #2461 unmatched-leading-quote fix).
-/// - An unmatched `{` in leading prose that never closes is skipped one byte at
-///   a time until a genuinely balanced object is found *after* it. The previous
-///   single-`depth` scan anchored on the first `{`; a stray `{` in the distill
-///   agent's reasoning (e.g. a code fragment such as `fn f() {` while it reasons
-///   about code episodes) raised depth permanently, demoted the real
-///   `{ "facts": [...] }` answer to a nested object, and the pass silently
-///   no-opped with zero facts (issue #2508). Restarting from the next `{`
-///   recovers the trailing answer.
-fn balanced_object_spans(s: &str) -> Vec<(usize, usize)> {
-    let bytes = s.as_bytes();
-    let mut spans = Vec::new();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'{'
-            && let Some(end) = scan_balanced_object(bytes, i)
-        {
-            spans.push((i, end + 1));
-            i = end + 1;
-            continue;
-        }
-        // A non-`{` byte, or an unmatched `{` that never closes before EOF:
-        // advance one byte and keep scanning for a balanced object that begins
-        // later (so a stray `{` in leading prose cannot swallow the answer).
-        i += 1;
-    }
-    spans
-}
-
-/// Given `bytes[start] == b'{'`, return the byte index of the `}` that closes
-/// it, honouring JSON string literals so that `{`/`}` inside `"..."`
-/// (respecting `\"` escapes) do not affect nesting depth. Returns `None` when
-/// the object is never closed before the end of input.
-///
-/// Iterative (no recursion) so pathologically deep nesting terminates without a
-/// stack overflow; serde's own recursion limit bounds the eventual per-span
-/// parse in [`scan_cleaned_for_facts`].
-fn scan_balanced_object(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// The `recipe-runner-rs` 0.3.6 `--output-format json` envelope. Only the
@@ -1601,38 +1533,12 @@ mod unit_tests {
         assert_eq!(facts[0].concept, "pr-pattern");
     }
 
-    #[test]
-    fn balanced_object_spans_finds_multiple_and_ignores_string_braces() {
-        assert_eq!(
-            balanced_object_spans(r#"{"a":1} junk {"b":{"c":2}}"#).len(),
-            2
-        );
-        assert_eq!(
-            balanced_object_spans(r#"{"k":"a } b { c"}"#).len(),
-            1,
-            "string braces must not split the object"
-        );
-    }
-
     // ── issue #2508: unmatched `{` in leading prose must not swallow the answer ──
-
-    #[test]
-    fn balanced_object_spans_skips_unmatched_leading_brace() {
-        // A stray, never-closed `{` ahead of a genuinely balanced object must
-        // be skipped, not anchored on (which would demote the real object to a
-        // nested one and yield zero top-level spans).
-        let spans = balanced_object_spans(r#"prefix fn f() { then {"facts":[]}"#);
-        assert_eq!(
-            spans.len(),
-            1,
-            "the balanced object after the stray brace must be found"
-        );
-        let (start, end) = spans[0];
-        assert_eq!(
-            &r#"prefix fn f() { then {"facts":[]}"#[start..end],
-            r#"{"facts":[]}"#
-        );
-    }
+    // The balanced-object scan reuses the shared `recipe_output::balanced_objects`
+    // helper (string-aware, restarts past an unmatched/never-closing `{`); that
+    // helper's own span-level unit tests live in `recipe_output::extract`,
+    // including `balanced_objects_skips_unmatched_leading_brace`. The end-to-end
+    // distillation recovery and the non-fatal fallback are pinned here.
 
     #[test]
     fn parse_recipe_output_recovers_from_unbalanced_brace_in_leading_prose() {

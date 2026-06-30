@@ -465,6 +465,16 @@ mod tests {
     }
 
     #[test]
+    fn balanced_objects_skips_unmatched_leading_brace() {
+        // An unmatched, never-closing `{` in leading prose (e.g. a code fragment
+        // such as `fn f() {`) must not anchor the scan and swallow the genuinely
+        // balanced object that follows it — the candidate restart recovers it
+        // (relied on by episode distillation, issue #2508).
+        let s = r#"prefix fn f() { then {"facts":[]}"#;
+        assert_eq!(balanced_objects(s), vec![r#"{"facts":[]}"#]);
+    }
+
+    #[test]
     fn last_balanced_object_returns_trailing_answer() {
         let s = "{\"thinking\":true} then {\"answer\":42}";
         assert_eq!(last_balanced_object(s), Some("{\"answer\":42}"));
