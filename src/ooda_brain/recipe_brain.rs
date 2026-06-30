@@ -4132,6 +4132,65 @@ mod issue_2496_decide_orient_launcher_tests {
         }
     }
 
+    /// End-to-end production-flow regression (#2432/#2496): the Copilot launch-log
+    /// preamble arrives INSIDE the recipe-runner-rs JSON envelope's terminal
+    /// `step_results[].output` (the captured agent stdout), exactly as the daemon
+    /// receives it. Decoding the envelope via [`extract_recipe_decision_output`]
+    /// and then parsing that output must recover the model's real decision — the
+    /// full path that deadlocked in production, not merely the inner parse helper.
+    #[test]
+    fn decide_recovers_real_action_through_full_envelope_with_preamble() {
+        let noisy = noisy_capture("run_improvement the brain-parse deadlock fix is ready");
+        let envelope = serde_json::json!({
+            "success": true,
+            "step_results": [
+                {"step_id": "decide-action", "output": noisy, "error": "", "duration": 0.0}
+            ]
+        })
+        .to_string();
+        let extracted =
+            extract_recipe_decision_output(envelope.as_bytes(), DECIDE_ADAPTER_TAG).unwrap();
+        let (decision, outcome) = parse_action_outcome(&extracted);
+        assert_eq!(
+            outcome,
+            LifecycleParseOutcome::Parsed,
+            "the preamble inside the envelope step output must not force a default_malformed miss"
+        );
+        assert!(
+            matches!(decision, DecideJudgment::RunImprovement { .. }),
+            "the model's real action must survive the full envelope→clean→parse path"
+        );
+    }
+
+    /// Orient counterpart of the full-envelope regression. With `base_urgency`
+    /// at the ceiling (1.0), the version string's `1.0` token IS in range and
+    /// `<= base_urgency`, so without launcher stripping the orient first-float
+    /// scanner scrapes `1.0` from `GitHub Copilot CLI 1.0.66-2` and silently
+    /// overrides the model's real demotion decision (0.42) with "no demotion".
+    /// Stripping the launcher line is what lets the real 0.42 be read — this is
+    /// the exact orient half of the #2496 version-string-scraping deadlock.
+    #[test]
+    fn orient_recovers_real_urgency_through_full_envelope_with_preamble() {
+        let noisy = noisy_capture("0.42 demote sharply after one transient failure");
+        let envelope = serde_json::json!({
+            "success": true,
+            "step_results": [
+                {"step_id": "orient-decision", "output": noisy, "error": "", "duration": 0.0}
+            ]
+        })
+        .to_string();
+        let extracted =
+            extract_recipe_decision_output(envelope.as_bytes(), ORIENT_ADAPTER_TAG).unwrap();
+        let (judgment, outcome) = parse_orient_outcome(&extracted, 1.0, 1);
+        assert_eq!(outcome, LifecycleParseOutcome::Parsed);
+        assert!(
+            (judgment.adjusted_urgency - 0.42).abs() < 1e-9,
+            "must read the model's 0.42 through the full envelope path, not the version \
+             string's 1.0; got {}",
+            judgment.adjusted_urgency
+        );
+    }
+
     #[test]
     fn launcher_only_capture_is_a_distinct_parse_failure() {
         // A capture that is ONLY the launcher preamble (the model produced no
