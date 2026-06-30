@@ -72,8 +72,10 @@ extractor is doing its job.
 
 A deterministic default reached because the ladder exhausted on a parse miss is
 **not** the model deciding to do nothing, and the logs now say so explicitly
-(#2496). On a parse-failure default the daemon emits a distinct warning that
-names the termination cause, e.g.:
+(#2496). Two log lines appear, with stable prefixes you can grep for.
+
+First, the escalation ladder records that it ended without a parseable decision
+and names the termination cause:
 
 ```
 WARN simard::ooda_brain: brain escalation ladder ended without a parseable decision; deterministic default
@@ -81,9 +83,30 @@ WARN simard::ooda_brain: brain escalation ladder ended without a parseable decis
 [simard] BRAIN ESCALATION goal=<id> ladder ended (ladder_exhausted) after 3 attempts — deterministic default
 ```
 
-For the engineer-lifecycle phase, the `continue_skipping` default reached this
-way is logged as a **transient parse-failure skip, re-evaluated next cycle — NOT
-a deliberate NO-ACTION**. In the metrics, the difference is unambiguous:
+Then, when that ladder exhaustion (or an `InvokeError`) leaves the phase on a
+parse-failure default, the phase emits a **second, distinct** line that the
+#2496 fix added specifically to keep a parse-failure default from reading like a
+real "no action". For **decide** and **orient**:
+
+```
+WARN simard::ooda_brain: brain phase fell to its deterministic default via a PARSE FAILURE (ladder ladder_exhausted) — NOT a model 'no action' decision; a transient parse miss, re-evaluated next cycle (issue #2496)
+    phase=decide goal=<id> outcome_detail=default_malformed cause=ladder_exhausted
+[simard] BRAIN PARSE-FAILURE DEFAULT phase=decide goal=<id> outcome=default_malformed cause=ladder_exhausted (transient miss, NOT a real no-action decision)
+```
+
+For the **engineer-lifecycle** phase, the `continue_skipping` default reached
+this way is logged as a **transient parse-failure skip, re-evaluated next cycle —
+NOT a deliberate NO-ACTION**:
+
+```
+WARN simard::ooda_brain: engineer-lifecycle fell to continue_skipping via a PARSE FAILURE (ladder ladder_exhausted) — a TRANSIENT parse-failure skip, re-evaluated next cycle, NOT a deliberate NO-ACTION (issue #2496)
+    goal=<id> outcome_detail=default_malformed cause=ladder_exhausted
+[simard] LIFECYCLE PARSE-FAILURE SKIP goal=<id> cause=ladder_exhausted (transient, re-evaluated next cycle — NOT a deliberate no-action)
+```
+
+Grep the `BRAIN PARSE-FAILURE DEFAULT` / `LIFECYCLE PARSE-FAILURE SKIP` prefixes
+to count parse-failure defaults without false-matching the model's real
+no-action decisions. In the metrics, the same difference is unambiguous:
 
 - Real decision → `brain_verdict_parsed_total{outcome=parsed}` (or lifecycle
   `brain_lifecycle_decision{is_parse_failure=false, cause=ok|ladder_recovered}`).
