@@ -41,8 +41,8 @@ pub use completion_gate::{
     COMPLETION_VERIFICATION_METRIC, CompletionEvidence, CompletionEvidenceGate, CompletionVerdict,
     EvidenceSource, FALSE_COMPLETION_RATE_METRIC, GhCliEvidenceSource, MissingEvidence,
     VerificationOutcome, archive_completed_evidence_aware, archive_completed_with_evidence,
-    classify_from_missing, classify_outcome, completion_evidence_enabled, false_completion_rate,
-    has_derivable_signal, is_self_affecting, record_completion_verification,
+    classify_from_missing, classify_outcome, completion_evidence_enabled, error_class_from_missing,
+    false_completion_rate, has_derivable_signal, is_self_affecting, record_completion_verification,
     record_false_completion_rate,
 };
 

@@ -567,6 +567,20 @@ fn run_ooda_cycle_inner(
                         .join("; "),
                 );
             }
+
+            // #2458: close the failure→lesson loop on the FU1 (#2456) external
+            // signal. A goal the completion gate *refuted* (a derivable external
+            // postcondition contradicted the done-claim) is a genuine,
+            // non-self-judged failure — the only signal allowed to drive a
+            // Reflexion-style reflection (R10). Recurring refutations on the same
+            // (goal-type, error-class) distil into a `lesson:` procedure later
+            // objectives recall. Best-effort: never blocks curation.
+            learn_from_refuted_goals(
+                &blocked,
+                &*bridges.memory,
+                config.lesson_recurrence_threshold,
+            );
+
             archived
         }
         None => crate::goal_curation::archive_completed(&mut state.active_goals),
@@ -1022,6 +1036,203 @@ pub fn compose_procedure_name(
         }
     }
     format!("{pattern}:{scope} | triggers: {}", triggers.join(","))
+}
+
+/// Drive the #2458 failure→lesson loop from the FU1 (#2456) completion gate's
+/// blocked-goal list.
+///
+/// Filters `blocked` down to the goals the gate **refuted** — a derivable
+/// external postcondition contradicted the done-claim
+/// ([`VerificationOutcome::Refuted`](crate::goal_curation::VerificationOutcome)),
+/// the only failure signal allowed to drive a Reflexion-style reflection (R10).
+/// `UnverifiedNoSignal` (nothing to check) and `Error` (could-not-verify) goals
+/// are skipped: they are not genuine failures. Each refuted goal becomes a
+/// [`VerifiedFailureObservation`](crate::memory_consolidation::reflection_lessons::VerifiedFailureObservation)
+/// keyed by `(goal description, refuting error class)` and handed to
+/// [`learn_from_verified_failures`](crate::memory_consolidation::reflection_lessons::learn_from_verified_failures).
+///
+/// Best-effort and side-effecting only on cognitive memory; it never returns an
+/// error and never blocks curation. Extracted from the cycle body so the wiring
+/// is unit-testable against an in-memory backend.
+fn learn_from_refuted_goals(
+    blocked: &[(
+        crate::goal_curation::ActiveGoal,
+        Vec<crate::goal_curation::MissingEvidence>,
+    )],
+    memory: &dyn crate::cognitive_memory::CognitiveMemoryOps,
+    threshold: u32,
+) {
+    use crate::memory_consolidation::reflection_lessons::{
+        VerifiedFailureObservation, learn_from_verified_failures,
+    };
+
+    let verified_failures: Vec<VerifiedFailureObservation> = blocked
+        .iter()
+        .filter(|(goal, missing)| {
+            matches!(
+                crate::goal_curation::classify_from_missing(goal, missing),
+                crate::goal_curation::VerificationOutcome::Refuted
+            )
+        })
+        .map(|(goal, missing)| {
+            VerifiedFailureObservation::deduped(
+                goal.description.clone(),
+                crate::goal_curation::error_class_from_missing(missing),
+                goal.id.clone(),
+            )
+        })
+        .collect();
+
+    if verified_failures.is_empty() {
+        return;
+    }
+
+    let report = learn_from_verified_failures(memory, &verified_failures, threshold);
+    eprintln!(
+        "[simard] OODA curate: failure-reflection pass over {} refuted goal(s) — \
+         {} reflection(s), {} lesson(s) distilled, {} repeat-failure(s)",
+        verified_failures.len(),
+        report.reflections_recorded,
+        report.lessons_distilled,
+        report.repeat_failures,
+    );
+}
+
+#[cfg(test)]
+mod tests_refuted_lessons {
+    use super::learn_from_refuted_goals;
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::goal_curation::{ActiveGoal, GoalProgress, MissingEvidence, WipRef};
+    use crate::memory_consolidation::reflection_lessons::{
+        LESSON_RECURRENCE_THRESHOLD, has_lesson_for, lesson_name,
+    };
+
+    /// A goal carrying a tracked PR `wip_ref` — so `has_derivable_signal` holds
+    /// and a `PrNotMerged` blocker classifies as `Refuted` (a real failure
+    /// signal), not `UnverifiedNoSignal`. `id` is the per-occurrence dedup key.
+    fn refuted_goal(id: &str, desc: &str) -> ActiveGoal {
+        ActiveGoal {
+            parent_goal_id: None,
+            repo: None,
+            id: id.to_string(),
+            description: desc.to_string(),
+            priority: 1,
+            status: GoalProgress::Completed,
+            assigned_to: None,
+            current_activity: None,
+            wip_refs: vec![WipRef {
+                kind: "pr".to_string(),
+                ref_id: "4242".to_string(),
+                label: "PR #4242".to_string(),
+                url: None,
+            }],
+            last_progress_update_at: None,
+        }
+    }
+
+    const DESC: &str = "Ship the websocket reconnect backoff for the dashboard";
+
+    /// A single refuted goal records a reflection but distils no lesson (below
+    /// the recurrence threshold). The cycle glue selected it as a real failure.
+    #[test]
+    fn one_refuted_goal_reflects_but_no_lesson_yet() {
+        let mem = LibraryCognitiveMemory::in_memory().expect("db");
+        let blocked = vec![(refuted_goal("g1", DESC), vec![MissingEvidence::PrNotMerged])];
+        learn_from_refuted_goals(&blocked, &mem, LESSON_RECURRENCE_THRESHOLD);
+        assert!(
+            !has_lesson_for(&mem, DESC, "pr_not_merged").expect("ok"),
+            "one refutation is not yet a lesson"
+        );
+    }
+
+    /// **Distinct** goals of the same type, each refuted, accumulate a recurrence
+    /// that distils a recallable lesson — the end-to-end loop the OODA curate
+    /// phase drives across attempts.
+    #[test]
+    fn recurring_refutation_distills_recallable_lesson() {
+        let mem = LibraryCognitiveMemory::in_memory().expect("db");
+        for i in 0..LESSON_RECURRENCE_THRESHOLD {
+            let id = format!("ship-attempt-{i}");
+            let blocked = vec![(refuted_goal(&id, DESC), vec![MissingEvidence::PrNotMerged])];
+            learn_from_refuted_goals(&blocked, &mem, LESSON_RECURRENCE_THRESHOLD);
+        }
+        assert!(
+            has_lesson_for(&mem, DESC, "pr_not_merged").expect("ok"),
+            "a recurring refutation across distinct goals must become a lesson"
+        );
+        let expected = lesson_name(DESC, "pr_not_merged");
+        let recalled = mem.recall_procedure("reconnect", 10).expect("recall");
+        assert!(
+            recalled.iter().any(|p| p.name == expected),
+            "lesson {expected:?} must surface for a related objective; got {:?}",
+            recalled.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// The **same** goal refuted across many cycles is one occurrence — it must
+    /// reflect exactly once and never distil a lesson on its own. This is the
+    /// bounded-growth guard: a normal in-flight PR (blocked but not yet merged)
+    /// cannot accrue an unbounded reflection trail or a per-cycle lesson.
+    #[test]
+    fn same_blocked_goal_across_cycles_reflects_once_and_no_lesson() {
+        let mem = LibraryCognitiveMemory::in_memory().expect("db");
+        for _ in 0..LESSON_RECURRENCE_THRESHOLD + 3 {
+            let blocked = vec![(
+                refuted_goal("g-stuck", DESC),
+                vec![MissingEvidence::PrNotMerged],
+            )];
+            learn_from_refuted_goals(&blocked, &mem, LESSON_RECURRENCE_THRESHOLD);
+        }
+        assert!(
+            !has_lesson_for(&mem, DESC, "pr_not_merged").expect("ok"),
+            "one goal stuck across many cycles is a single occurrence, never a lesson"
+        );
+    }
+
+    /// A goal with **no** derivable signal classifies as `UnverifiedNoSignal`,
+    /// not `Refuted`, so the glue must skip it entirely (no lesson accrues). A
+    /// non-Simard repo with no PR/issue ref is not self-affecting, so no external
+    /// postcondition is derivable.
+    #[test]
+    fn no_signal_goal_is_skipped() {
+        let mem = LibraryCognitiveMemory::in_memory().expect("db");
+        let no_signal_goal = |i: u32| {
+            let mut g = refuted_goal(&format!("ns-{i}"), DESC);
+            g.repo = Some("some-other-service".to_string()); // not Simard ⇒ not self-affecting
+            g.wip_refs.clear(); // no PR/issue ⇒ nothing external to verify
+            g
+        };
+        // Even across enough distinct goals to clear the threshold, nothing
+        // accrues because none is a genuine (refuted) failure.
+        for i in 0..LESSON_RECURRENCE_THRESHOLD + 1 {
+            let blocked = vec![(no_signal_goal(i), vec![MissingEvidence::PrNotMerged])];
+            learn_from_refuted_goals(&blocked, &mem, LESSON_RECURRENCE_THRESHOLD);
+        }
+        assert!(
+            !has_lesson_for(&mem, DESC, "pr_not_merged").expect("ok"),
+            "an unverifiable goal must never produce a lesson"
+        );
+    }
+
+    /// A `CouldNotVerify` blocker classifies as `Error`, never `Refuted` — the
+    /// glue skips it so an unverifiable cycle never fabricates a failure.
+    #[test]
+    fn could_not_verify_goal_is_skipped() {
+        let mem = LibraryCognitiveMemory::in_memory().expect("db");
+        for i in 0..LESSON_RECURRENCE_THRESHOLD + 1 {
+            let blocked = vec![(
+                refuted_goal(&format!("cnv-{i}"), DESC),
+                vec![MissingEvidence::CouldNotVerify {
+                    detail: "gh timeout".to_string(),
+                }],
+            )];
+            learn_from_refuted_goals(&blocked, &mem, LESSON_RECURRENCE_THRESHOLD);
+        }
+        assert!(
+            !has_lesson_for(&mem, DESC, "refuted_unknown").expect("ok"),
+            "an Error outcome must not drive the failure→lesson loop"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -18,7 +18,8 @@
 //! module's inline `#[cfg(test)] mod tests`.
 
 use super::reflection_lessons::{
-    LESSON_RECURRENCE_THRESHOLD, Verdict, count_recurring_failures, has_lesson_for, lesson_name,
+    LESSON_RECURRENCE_THRESHOLD, LessonLearningReport, Verdict, VerifiedFailureObservation,
+    count_recurring_failures, has_lesson_for, learn_from_verified_failures, lesson_name,
     maybe_distill_lesson, record_failure_reflection,
 };
 use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
@@ -222,5 +223,216 @@ fn recurrence_count_is_key_scoped() {
     assert_eq!(
         count_recurring_failures(&m, "fix-ci-runner-flake", "cargo_test_failed").expect("ok"),
         1
+    );
+}
+
+// ── live wiring: learn_from_verified_failures (#2458 production trigger) ──────
+//
+// These pin the end-to-end loop the OODA curate phase drives from the FU1
+// (#2456) `Refuted` signal: verified failure → reflection → recurring lesson →
+// recall. They exercise the same `LibraryCognitiveMemory` backend the daemon
+// uses.
+
+const REFUTED_OBJECTIVE: &str = "Ship the websocket reconnect backoff for the dashboard";
+const REFUTED_CLASS: &str = "pr_not_merged";
+
+fn obs() -> VerifiedFailureObservation {
+    VerifiedFailureObservation::new(REFUTED_OBJECTIVE, REFUTED_CLASS)
+}
+
+/// A single verified failure writes a reflection but — below the recurrence
+/// threshold — distils no lesson (AC-4 + AC-6 through the live entry point).
+#[test]
+fn learn_from_verified_failures_one_off_reflects_no_lesson() {
+    let m = mem();
+    let report = learn_from_verified_failures(
+        &m,
+        std::slice::from_ref(&obs()),
+        LESSON_RECURRENCE_THRESHOLD,
+    );
+    assert_eq!(
+        report,
+        LessonLearningReport {
+            reflections_recorded: 1,
+            lessons_distilled: 0,
+            repeat_failures: 0,
+        }
+    );
+    assert!(
+        !has_lesson_for(&m, REFUTED_OBJECTIVE, REFUTED_CLASS).expect("ok"),
+        "a single refuted completion must not become a lesson"
+    );
+}
+
+/// `threshold` recurring verified failures distil exactly one recallable
+/// `lesson:` procedure (AC-5 + AC-7 through the live entry point).
+#[test]
+fn learn_from_verified_failures_recurrence_distills_recallable_lesson() {
+    let m = mem();
+    let batch = vec![obs(); LESSON_RECURRENCE_THRESHOLD as usize];
+
+    let report = learn_from_verified_failures(&m, &batch, LESSON_RECURRENCE_THRESHOLD);
+    assert_eq!(report.reflections_recorded, LESSON_RECURRENCE_THRESHOLD);
+    assert_eq!(
+        report.lessons_distilled, 1,
+        "recurrence crosses the threshold once"
+    );
+    assert_eq!(
+        report.repeat_failures, 0,
+        "no pre-existing lesson to regress against"
+    );
+
+    assert!(
+        has_lesson_for(&m, REFUTED_OBJECTIVE, REFUTED_CLASS).expect("ok"),
+        "the lesson must exist after the recurrence threshold is reached"
+    );
+    // A later objective sharing a goal-type token recalls the lesson.
+    let expected = lesson_name(REFUTED_OBJECTIVE, REFUTED_CLASS);
+    let recalled = m.recall_procedure("websocket", 10).expect("recall");
+    assert!(
+        recalled.iter().any(|p| p.name == expected),
+        "lesson {expected:?} must surface for a related objective; got {:?}",
+        recalled.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+}
+
+/// A failure that recurs **after** a lesson already exists is counted as a
+/// self-regression (`repeat_failures`), not as a fresh lesson — the headline
+/// #2458 measurement that the repeat-failure rate can trend down against.
+#[test]
+fn learn_from_verified_failures_counts_repeat_after_lesson() {
+    let m = mem();
+    // First pass establishes the lesson.
+    let batch = vec![obs(); LESSON_RECURRENCE_THRESHOLD as usize];
+    let first = learn_from_verified_failures(&m, &batch, LESSON_RECURRENCE_THRESHOLD);
+    assert_eq!(first.lessons_distilled, 1);
+
+    // A subsequent failure on the same key recurs despite the lesson.
+    let second = learn_from_verified_failures(
+        &m,
+        std::slice::from_ref(&obs()),
+        LESSON_RECURRENCE_THRESHOLD,
+    );
+    assert_eq!(
+        second,
+        LessonLearningReport {
+            reflections_recorded: 1,
+            lessons_distilled: 0,
+            repeat_failures: 1,
+        },
+        "a recurrence past an existing lesson is a repeat-failure, not a new lesson"
+    );
+}
+
+/// One call carrying `threshold + 1` recurrences distils the lesson and flags
+/// the trailing recurrence as a repeat in the same pass.
+#[test]
+fn learn_from_verified_failures_distill_and_repeat_in_one_pass() {
+    let m = mem();
+    let batch = vec![obs(); LESSON_RECURRENCE_THRESHOLD as usize + 1];
+    let report = learn_from_verified_failures(&m, &batch, LESSON_RECURRENCE_THRESHOLD);
+    assert_eq!(report.reflections_recorded, LESSON_RECURRENCE_THRESHOLD + 1);
+    assert_eq!(report.lessons_distilled, 1);
+    assert_eq!(report.repeat_failures, 1);
+}
+
+/// An empty batch is a pure no-op (the common case: most cycles refute nothing).
+#[test]
+fn learn_from_verified_failures_empty_batch_is_noop() {
+    let m = mem();
+    let report = learn_from_verified_failures(&m, &[], LESSON_RECURRENCE_THRESHOLD);
+    assert!(report.is_empty());
+}
+
+/// A `threshold` of 0 falls back to the default so a misconfiguration cannot
+/// turn every one-off failure into a lesson.
+#[test]
+fn learn_from_verified_failures_threshold_zero_falls_back_to_default() {
+    let m = mem();
+    let report = learn_from_verified_failures(&m, std::slice::from_ref(&obs()), 0);
+    assert_eq!(
+        report.lessons_distilled, 0,
+        "threshold 0 must not distil a one-off"
+    );
+    assert!(!has_lesson_for(&m, REFUTED_OBJECTIVE, REFUTED_CLASS).expect("ok"));
+}
+
+/// Raw, un-normalized objective/error-class text is normalized into the same
+/// `(goal_type, error_class)` key the recall path uses.
+#[test]
+fn learn_from_verified_failures_normalizes_keys() {
+    let m = mem();
+    let raw = VerifiedFailureObservation::new("Ship The  WebSocket Reconnect!", "PR Not Merged");
+    let batch = vec![raw; LESSON_RECURRENCE_THRESHOLD as usize];
+    let report = learn_from_verified_failures(&m, &batch, LESSON_RECURRENCE_THRESHOLD);
+    assert_eq!(report.lessons_distilled, 1);
+    assert!(
+        has_lesson_for(&m, "Ship The  WebSocket Reconnect!", "PR Not Merged").expect("ok"),
+        "normalization must be consistent between store and lookup"
+    );
+}
+
+/// Per-occurrence dedup: the **same** occurrence key re-observed across cycles
+/// reflects exactly once and never distils a lesson on its own — the bounded-
+/// growth guard for a goal that stays blocked (review #2510).
+#[test]
+fn learn_from_verified_failures_dedups_same_occurrence() {
+    let m = mem();
+    let one =
+        || VerifiedFailureObservation::deduped(REFUTED_OBJECTIVE, REFUTED_CLASS, "goal-stuck");
+
+    // First observation reflects once.
+    let first = learn_from_verified_failures(
+        &m,
+        std::slice::from_ref(&one()),
+        LESSON_RECURRENCE_THRESHOLD,
+    );
+    assert_eq!(first.reflections_recorded, 1);
+
+    // Re-observing the same occurrence many more times is a no-op.
+    for _ in 0..LESSON_RECURRENCE_THRESHOLD + 3 {
+        let again = learn_from_verified_failures(
+            &m,
+            std::slice::from_ref(&one()),
+            LESSON_RECURRENCE_THRESHOLD,
+        );
+        assert!(
+            again.is_empty(),
+            "a repeat observation of one occurrence must be a no-op"
+        );
+    }
+    assert_eq!(
+        count_recurring_failures(
+            &m,
+            "ship-the-websocket-reconnect-backoff-for-the-dashboard",
+            REFUTED_CLASS
+        )
+        .expect("ok"),
+        1,
+        "exactly one reflection survives for a single stuck occurrence"
+    );
+    assert!(
+        !has_lesson_for(&m, REFUTED_OBJECTIVE, REFUTED_CLASS).expect("ok"),
+        "one stuck occurrence is never a lesson"
+    );
+}
+
+/// Distinct occurrence keys of the same `(goal_type, error_class)` accumulate a
+/// genuine recurrence that distils a lesson — dedup bounds repeats, it does not
+/// suppress real cross-attempt recurrence.
+#[test]
+fn learn_from_verified_failures_distinct_occurrences_recur() {
+    let m = mem();
+    for i in 0..LESSON_RECURRENCE_THRESHOLD {
+        let obs = VerifiedFailureObservation::deduped(
+            REFUTED_OBJECTIVE,
+            REFUTED_CLASS,
+            format!("goal-{i}"),
+        );
+        learn_from_verified_failures(&m, std::slice::from_ref(&obs), LESSON_RECURRENCE_THRESHOLD);
+    }
+    assert!(
+        has_lesson_for(&m, REFUTED_OBJECTIVE, REFUTED_CLASS).expect("ok"),
+        "distinct occurrences of the same type must still distil a lesson"
     );
 }

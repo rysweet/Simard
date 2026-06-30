@@ -1,0 +1,117 @@
+name: "Brain self-improvement — Reflexion failure→lesson loop wired live"
+description: >
+  Outside-in gate for issue #2458 (Reflexion-style failure reflections distilled
+  into procedural lessons — closing the self-improvement loop). The reflection→
+  lesson *mechanics* landed in PR #2476; this scenario pins the remaining,
+  FU1-gated piece: the **live production trigger**. FU1 (#2456, the external-
+  signal completion gate) emits `VerificationOutcome::Refuted` — a false
+  completion where a *derivable external postcondition* (PR not merged, issue
+  open, self-change not deployed) contradicted the done-claim. The OODA curate
+  phase now wires that genuine, non-self-judged signal end-to-end:
+  `learn_from_refuted_goals` (`src/ooda_loop/cycle.rs`) →
+  `learn_from_verified_failures` (`src/memory_consolidation/reflection_lessons.rs`)
+  → reflection → recurrence-gated `lesson:` procedure → `brain_repeat_failure`.
+  The loop is NEVER gated on self-judged `ActionOutcome.success` (R10): an
+  `Unverified` / `Error` outcome is skipped. Backing tests live in
+  `src/ooda_loop/cycle.rs` (tests_refuted_lessons),
+  `src/memory_consolidation/tests_reflection_lessons.rs`, and
+  `src/goal_curation/completion_gate.rs` (error_class_from_missing).
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "#2458 — live curate-phase wiring: refuted completion drives the failure→lesson loop"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib ooda_loop::cycle::tests_refuted_lessons
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test ooda_loop::cycle::tests_refuted_lessons::one_refuted_goal_reflects_but_no_lesson_yet ... ok"
+        - "test ooda_loop::cycle::tests_refuted_lessons::recurring_refutation_distills_recallable_lesson ... ok"
+        - "test ooda_loop::cycle::tests_refuted_lessons::no_signal_goal_is_skipped ... ok"
+        - "test ooda_loop::cycle::tests_refuted_lessons::could_not_verify_goal_is_skipped ... ok"
+        - "test result: ok."
+
+  - name: "#2458 — verified-failure batch: reflection, recurrence-gated lesson, repeat-failure metric"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib memory_consolidation::tests_reflection_lessons::learn_from_verified_failures
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test memory_consolidation::tests_reflection_lessons::learn_from_verified_failures_one_off_reflects_no_lesson ... ok"
+        - "test memory_consolidation::tests_reflection_lessons::learn_from_verified_failures_recurrence_distills_recallable_lesson ... ok"
+        - "test memory_consolidation::tests_reflection_lessons::learn_from_verified_failures_counts_repeat_after_lesson ... ok"
+        - "test memory_consolidation::tests_reflection_lessons::learn_from_verified_failures_distill_and_repeat_in_one_pass ... ok"
+        - "test memory_consolidation::tests_reflection_lessons::learn_from_verified_failures_empty_batch_is_noop ... ok"
+        - "test memory_consolidation::tests_reflection_lessons::learn_from_verified_failures_threshold_zero_falls_back_to_default ... ok"
+        - "test result: ok."
+
+  - name: "#2458 — error-class derivation from the gate's refuting evidence (FU1 bridge)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib goal_curation::completion_gate::tests::error_class_from_missing
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test goal_curation::completion_gate::tests::error_class_from_missing_maps_each_kind_to_a_stable_token ... ok"
+        - "test goal_curation::completion_gate::tests::error_class_from_missing_excludes_could_not_verify ... ok"
+        - "test goal_curation::completion_gate::tests::error_class_from_missing_defaults_when_no_concrete_kind ... ok"
+        - "test result: ok."
+
+assertions: []
+
+cleanup:
+  - name: "Test agent cleanup"
+    agent: "test-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "cognitive-memory"
+    - "self-improvement"
+    - "reflexion"
+    - "procedural-lessons"
+    - "ooda"
+    - "regression"
+    - "issue-2458"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

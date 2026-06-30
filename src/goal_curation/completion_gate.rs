@@ -191,6 +191,41 @@ pub fn classify_from_missing(
     }
 }
 
+/// Derive a normalized *error-class* key from the refuting evidence of a
+/// `Refuted` completion (#2458). Each missing-evidence kind maps to a stable
+/// token, joined in the gate's fixed check order (PR → issue → deploy) so the
+/// same refutation always yields the same class. [`MissingEvidence::CouldNotVerify`]
+/// is excluded — it routes to [`VerificationOutcome::Error`], never `Refuted`.
+///
+/// This is the bridge from FU1's external failure signal to #2458's failure→
+/// lesson loop: the returned class is the `error_class` half of the
+/// `(goal_type, error_class)` recurrence key
+/// ([`crate::memory_consolidation::reflection_lessons`]).
+///
+/// Returns `"refuted_unknown"` when no concrete refuting kind is present
+/// (defensive; the classifier never routes such a list to `Refuted`).
+pub fn error_class_from_missing(missing: &[MissingEvidence]) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for m in missing {
+        let token = match m {
+            MissingEvidence::PrNotMerged => "pr_not_merged",
+            MissingEvidence::IssueOpen => "issue_open",
+            MissingEvidence::NotDeployed => "not_deployed",
+            // `CouldNotVerify` is the `Error` outcome, not a refutation — never
+            // let an unverifiable cycle masquerade as a concrete failure class.
+            MissingEvidence::CouldNotVerify { .. } => continue,
+        };
+        if !parts.contains(&token) {
+            parts.push(token);
+        }
+    }
+    if parts.is_empty() {
+        "refuted_unknown".to_string()
+    } else {
+        parts.join("__")
+    }
+}
+
 /// Emit one completion-verification outcome via
 /// [`crate::self_metrics::record_metric`]. Best-effort: a metric-write failure
 /// is swallowed so it never blocks or crashes the OODA cycle.

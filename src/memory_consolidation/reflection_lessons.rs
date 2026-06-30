@@ -211,20 +211,59 @@ pub fn record_failure_reflection(
     verdict: &Verdict,
     hint: &str,
 ) -> SimardResult<Option<String>> {
+    record_failure_reflection_marked(memory, objective, verdict, hint, None)
+}
+
+/// As [`record_failure_reflection`], but optionally embeds a per-occurrence
+/// dedup marker so [`occurrence_already_reflected`] can recognise a repeat
+/// observation of the *same* blocked completion across cycles.
+fn record_failure_reflection_marked(
+    memory: &dyn CognitiveMemoryOps,
+    objective: &str,
+    verdict: &Verdict,
+    hint: &str,
+    occurrence_key: Option<&str>,
+) -> SimardResult<Option<String>> {
     let Verdict::VerifiedFailure { error_class } = verdict else {
         return Ok(None);
     };
     let goal_type = normalize_goal_type(objective);
     let marker = reflection_marker(&goal_type, error_class);
-    let content = format!("{} {marker}", reflection_text(objective, error_class, hint));
+    let mut content = format!("{} {marker}", reflection_text(objective, error_class, hint));
+    if let Some(key) = occurrence_key {
+        content.push(' ');
+        content.push_str(&occurrence_marker(key));
+    }
     let metadata = serde_json::json!({
         "kind": "reflection",
         "failure": true,
         "goal_type": goal_type,
         "error_class": error_class,
+        "occurrence_key": occurrence_key,
     });
     let id = memory.store_episode(&content, "reflection:failure", Some(&metadata))?;
     Ok(Some(id))
+}
+
+/// A fully-delimited content marker keyed by a per-occurrence identity (e.g. the
+/// goal id). Embedded alongside the `(goal_type, error_class)` marker so the
+/// same blocked completion, re-observed every OODA cycle, can be deduped to a
+/// single reflection. The brackets make the match collision-safe across keys
+/// that share a prefix.
+fn occurrence_marker(occurrence_key: &str) -> String {
+    format!("[reflect-occ={}]", normalize_error_class(occurrence_key))
+}
+
+/// `true` if a `reflection:failure` episode has already been recorded for this
+/// exact occurrence key. Used to bound the failure-reflection trail for a goal
+/// that stays blocked across many cycles (so one unresolved in-flight PR cannot
+/// accrue an unbounded reflection stream or a per-cycle `brain_repeat_failure`).
+fn occurrence_already_reflected(memory: &dyn CognitiveMemoryOps, occurrence_key: &str) -> bool {
+    let marker = occurrence_marker(occurrence_key);
+    memory
+        .search_episodes_by_keywords(std::slice::from_ref(&marker), 1)
+        .map(|hits| hits.iter().any(|e| e.content.contains(&marker)))
+        .unwrap_or(false)
 }
 
 /// Count stored `reflection:failure` episodes recorded for this
@@ -291,6 +330,217 @@ pub fn maybe_distill_lesson(
         record_new_procedure(&id, &name);
     }
     Ok(Some(id))
+}
+
+// ── live wiring: verified failures → reflections → lessons (#2458) ───────────
+
+/// One externally-verified failure observation sourced from the FU1 (#2456)
+/// completion gate — a [`VerificationOutcome::Refuted`](crate::goal_curation::VerificationOutcome)
+/// false completion where a derivable external postcondition contradicted the
+/// done-claim.
+///
+/// `objective` is the failed goal's description (the goal-type source);
+/// `error_class` is the normalized refuting signal (e.g. `pr_not_merged`). Both
+/// are re-normalized downstream, so callers may pass raw text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedFailureObservation {
+    /// The failed goal's objective/description — normalized into the goal-type.
+    pub objective: String,
+    /// The normalized refuting signal (the `error_class` half of the key).
+    pub error_class: String,
+    /// Stable per-occurrence identity (e.g. the goal id). When `Some`, the same
+    /// blocked completion re-observed across cycles is deduped to **one**
+    /// reflection — bounding the failure-reflection trail and keeping recurrence
+    /// honest (distinct occurrences, not cycle count). `None` disables dedup, so
+    /// every call is treated as a fresh occurrence.
+    ///
+    /// Intentionally the goal id **alone**, not `(id, error_class)`: a single
+    /// stuck attempt should reflect exactly once even if its refuting class
+    /// progresses across cycles (e.g. `pr_not_merged` → `not_deployed` after the
+    /// PR merges). Lesson distillation is unaffected by this choice — a lesson
+    /// requires recurrence across *distinct* goals, which always carry distinct
+    /// keys regardless of class.
+    pub occurrence_key: Option<String>,
+}
+
+impl VerifiedFailureObservation {
+    /// Construct an observation with **no** per-occurrence dedup — every call is
+    /// a distinct occurrence. Use [`deduped`](Self::deduped) for the live cycle
+    /// path where the same blocked goal recurs across cycles.
+    pub fn new(objective: impl Into<String>, error_class: impl Into<String>) -> Self {
+        Self {
+            objective: objective.into(),
+            error_class: error_class.into(),
+            occurrence_key: None,
+        }
+    }
+
+    /// Construct an observation deduped across cycles by `occurrence_key` (the
+    /// goal id at the live OODA seam). A goal that stays blocked over many cycles
+    /// then contributes exactly one reflection, and `brain_repeat_failure` fires
+    /// only on a genuinely *new* occurrence — never once per cycle.
+    pub fn deduped(
+        objective: impl Into<String>,
+        error_class: impl Into<String>,
+        occurrence_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            objective: objective.into(),
+            error_class: error_class.into(),
+            occurrence_key: Some(occurrence_key.into()),
+        }
+    }
+}
+
+/// Aggregate result of one [`learn_from_verified_failures`] pass. All counters
+/// are observable so the OODA cycle can log what the failure-reflection pass did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LessonLearningReport {
+    /// Reflections written this pass (one per verified failure observation).
+    pub reflections_recorded: u32,
+    /// **New** `lesson:` procedures distilled this pass (recurrence first
+    /// reached the threshold — not a reinforcing re-store).
+    pub lessons_distilled: u32,
+    /// Verified failures that recurred on a goal-type that *already* carried a
+    /// lesson — the loop's self-regression signal (`brain_repeat_failure`).
+    pub repeat_failures: u32,
+}
+
+impl LessonLearningReport {
+    /// `true` when the pass did nothing (empty/all-skipped batch).
+    pub fn is_empty(&self) -> bool {
+        self.reflections_recorded == 0 && self.lessons_distilled == 0 && self.repeat_failures == 0
+    }
+}
+
+/// Deterministic default reflection hint, grounded in the **external** signal
+/// (the refuting `error_class`) rather than any self-judgement — the same
+/// fail-safe invariant the rest of this module enforces (R10).
+fn default_failure_hint(error_class: &str) -> String {
+    format!(
+        "Recall the lesson for this goal-type and resolve the refuting signal \
+         ({error_class}) before re-claiming completion.",
+    )
+}
+
+/// Live production trigger (#2458): turn a batch of **externally-verified**
+/// failures into reflections and, on recurrence, procedural lessons.
+///
+/// This is the wiring the issue gated on FU1 (#2456) for: every observation
+/// here is sourced from a real external signal
+/// ([`VerificationOutcome::Refuted`](crate::goal_curation::VerificationOutcome)),
+/// never the brain's self-reported `ActionOutcome.success` (R10). The OODA
+/// curate phase calls it with the goals the completion gate refuted.
+///
+/// For each observation:
+/// 0. **dedup** — if the observation carries an `occurrence_key` already
+///    reflected (the same blocked goal seen on a prior cycle), skip it entirely.
+///    This bounds the reflection trail and keeps recurrence honest (distinct
+///    occurrences, not cycle count);
+/// 1. record a `reflection:failure` episode ([`record_failure_reflection`]);
+/// 2. capture whether a lesson *already* existed for this
+///    `(goal_type, error_class)` **before** distilling — a failure that recurs
+///    despite an existing lesson is the self-regression signal, emitted as
+///    `brain_repeat_failure` ([`record_repeat_failure`]);
+/// 3. distil a `lesson:` procedure once recurrence reaches `threshold`
+///    ([`maybe_distill_lesson`]); idempotent by name (#2298).
+///
+/// Best-effort per observation: an error on one failure is logged and skipped so
+/// one bad record never drops the rest of the batch. Never returns `Err` and
+/// never blocks the cycle. A `threshold` of `0` is treated as
+/// [`LESSON_RECURRENCE_THRESHOLD`] so a misconfiguration cannot turn every
+/// one-off failure into a lesson.
+pub fn learn_from_verified_failures(
+    memory: &dyn CognitiveMemoryOps,
+    failures: &[VerifiedFailureObservation],
+    threshold: u32,
+) -> LessonLearningReport {
+    let threshold = if threshold == 0 {
+        LESSON_RECURRENCE_THRESHOLD
+    } else {
+        threshold
+    };
+    let mut report = LessonLearningReport::default();
+
+    for obs in failures {
+        let error_class = normalize_error_class(&obs.error_class);
+
+        // Per-occurrence dedup (review #2510): a goal that stays blocked across
+        // cycles (e.g. a normal in-flight PR not yet merged) must not re-reflect
+        // every cycle — that would grow episodic memory without bound, distil a
+        // lesson from a single premature claim, and emit `brain_repeat_failure`
+        // every cycle. Skip an observation whose occurrence was already
+        // reflected; recurrence is measured across *distinct* occurrences.
+        if let Some(key) = &obs.occurrence_key
+            && occurrence_already_reflected(memory, key)
+        {
+            continue;
+        }
+
+        let verdict = Verdict::VerifiedFailure {
+            error_class: error_class.clone(),
+        };
+
+        // The self-regression check must read state BEFORE this failure's
+        // reflection/lesson is (re)stored — otherwise a freshly-distilled lesson
+        // would mask the very recurrence we want to flag.
+        let had_lesson = has_lesson_for(memory, &obs.objective, &error_class).unwrap_or(false);
+
+        let reflection_id = match record_failure_reflection_marked(
+            memory,
+            &obs.objective,
+            &verdict,
+            &default_failure_hint(&error_class),
+            obs.occurrence_key.as_deref(),
+        ) {
+            Ok(Some(id)) => {
+                report.reflections_recorded += 1;
+                Some(id)
+            }
+            // Unreachable for a `VerifiedFailure`, but harmless: distillation
+            // still gates on the persisted recurrence count.
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(
+                    target: "simard::reflection_lessons",
+                    objective = %obs.objective,
+                    error = %e,
+                    "record_failure_reflection failed; skipping observation",
+                );
+                continue;
+            }
+        };
+        let sources: Vec<String> = reflection_id.into_iter().collect();
+
+        match maybe_distill_lesson(memory, &verdict, &obs.objective, threshold, &sources) {
+            Ok(Some(lesson_id)) => {
+                if had_lesson {
+                    // Recurred despite an existing lesson — self-regression.
+                    report.repeat_failures += 1;
+                    record_repeat_failure(
+                        &normalize_goal_type(&obs.objective),
+                        &error_class,
+                        &lesson_id,
+                    );
+                } else {
+                    // First crossing of the recurrence threshold — a new lesson.
+                    report.lessons_distilled += 1;
+                }
+            }
+            // Below threshold — a one-off failure, no lesson yet (AC-6).
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    target: "simard::reflection_lessons",
+                    objective = %obs.objective,
+                    error = %e,
+                    "maybe_distill_lesson failed; reflection retained for next pass",
+                );
+            }
+        }
+    }
+
+    report
 }
 
 // ── metrics ─────────────────────────────────────────────────────────────────
