@@ -235,14 +235,34 @@ are ever logged.
 
 **Best-effort guarantee (RR-1, RR-4).** The merge guarantees that no goal
 *added* on a disjoint subset *disappears* in the common race (two writers
-each operating on its own snapshot, mutating disjoint goal ids). It does
-**not** provide linearizability: in a tight read-read-write-write
-interleaving where writer B's merge read completes before writer A's
-`store_fact`, A's goal can still be missing from B's merged snapshot when
-B writes — A's fact remains in the append-only log but is no longer
-`max_by(node_id)`. Field-level last-writer-wins also applies on same-id
-concurrent edits. Callers that need strict serializability must serialize
-through the daemon IPC socket (see
+each operating on its own snapshot, mutating disjoint goal ids). On its own
+the merge does **not** provide linearizability: in a tight
+read-read-write-write interleaving where writer B's merge read completes
+before writer A's `store_fact`, A's goal can still be missing from B's
+merged snapshot when B writes — A's fact remains in the append-only log but
+is no longer `max_by(node_id)`. Field-level last-writer-wins also applies on
+same-id concurrent edits.
+
+**Cross-process serialization (issue [#2511](https://github.com/rysweet/Simard/issues/2511)).**
+The in-process `SAVE_GOAL_BOARD_MUTEX` only serializes threads within a
+single process. The OODA daemon and the `simard goal add/remove` CLI run in
+*separate processes*, so before #2511 the daemon's snapshot flush could land
+between the CLI's merge read and its `store_fact`, silently clobbering a
+just-added goal even though the CLI exited `0`. On Unix, `save_goal_board`
+and `save_goal_board_with_removals` now additionally hold an advisory
+`flock(2)` over `<state_root>/state/goal-board.lock` for the entire
+read-merge-write window. Because both the daemon and the CLI resolve the same
+`SIMARD_STATE_ROOT`, they rendezvous on the same lock file, so their
+read-merge-write sequences can no longer interleave — closing the cross-process
+window above. The lock is **best-effort**: if it cannot be acquired (unwritable
+state dir, etc.) the save proceeds unlocked and logs at `debug`, never failing
+persistence; it is released automatically by the kernel on process death, so a
+crashed holder never wedges the board. The lock is a Unix-only optimization and
+is not compiled into `cfg(test)` unit-test builds (which are single-process and
+already serialized by the in-process mutex).
+
+Callers on non-Unix platforms, or that need strict serializability beyond this
+advisory lock, should still funnel writes through the daemon IPC socket (see
 [Cognitive memory bridge helpers](./cognitive-memory-bridge-helpers.md)).
 
 #### Deletion semantics (RR-5)
@@ -362,12 +382,18 @@ should never see that id survive a degraded save.
 **Best-effort guarantee under concurrent writes.** The
 removal-then-merge ordering means a goal-id added by a *concurrent*
 writer with the same id will not be removed by this call (the
-concurrent writer's `store_fact` lands after the merge read). The
-documented operator workflow — list, identify, remove — already
-tolerates this: the operator's next `simard goal list` will surface any
-resurrection, and a second `simard goal remove` call is safe to issue.
-Callers that need strict serial removal must funnel through the daemon
-IPC writer (which is what the CLI subcommands do — see
+concurrent writer's `store_fact` lands after the merge read). On Unix
+this is constrained by the same cross-process advisory `flock` that
+`save_goal_board` holds (issue #2511): a concurrent daemon or CLI write
+cannot interleave with this call's read-merge-filter-write window, so the
+collateral loss of an *unrelated* goal added concurrently during a
+`simard goal remove` no longer occurs. The documented operator workflow —
+list, identify, remove — already tolerates same-id resurrection: the
+operator's next `simard goal list` will surface any resurrection, and a
+second `simard goal remove` call is safe to issue. Callers that need
+strict serial removal beyond the advisory lock (or on non-Unix platforms)
+must funnel through the daemon IPC writer (which is what the CLI
+subcommands do — see
 [bridge helpers](./cognitive-memory-bridge-helpers.md)).
 
 #### `merge_boards` (private helper, testable in isolation)

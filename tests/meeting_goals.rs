@@ -178,7 +178,14 @@ fn goal_board_progress_lifecycle() {
 }
 
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn goal_board_load_persist_and_duplicates() {
+    // `persist_board` flows through `save_goal_board`, which acquires a
+    // cross-process advisory lock under `<state_root>/state/` (issue #2511).
+    // Pin a hermetic state root so that lock lands in a tempdir instead of the
+    // operator's ~/.simard. `HermeticState` mutates process-global env vars,
+    // so its contract requires `#[serial(cognitive_memory)]`.
+    let _hermetic = simard::test_support::HermeticState::new();
     let bridge = mock_bridge();
     let board = load_goal_board(&bridge).unwrap();
     assert!(board.active.is_empty());
