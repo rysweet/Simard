@@ -1124,33 +1124,52 @@ fn scan_for_facts_object(text: &str) -> Option<DistillOutput> {
 }
 
 /// Scan an already noise-stripped `trimmed` string for a `{ "facts": [...] }`
-/// object, preferring the LAST *non-empty* balanced top-level object (the
-/// agent's final answer trails any banner/thinking output) and falling back to
-/// the last parseable empty object. The ANSI/log/banner stripping that produces
-/// `trimmed` lives in [`scan_for_facts_object`].
+/// object, preferring (in order) the LAST balanced top-level object that carries
+/// a **grounded-capable** fact — one with a non-empty `source_episode_id` — then
+/// the last otherwise-non-empty object, then the last parseable empty object.
+/// The ANSI/log/banner stripping that produces `trimmed` lives in
+/// [`scan_for_facts_object`].
+///
+/// The grounded-capable tier exists because field-level leniency
+/// ([`de_lenient_string`]) lets a *source-less* facts object now parse as
+/// "non-empty"; without this tier a trailing source-less object (which the
+/// reliability gate would later quarantine wholesale) could shadow an earlier
+/// fully-attributed answer and silently discard its promotable facts. Preferring
+/// the grounded-capable object keeps the agent's real, attributed answer winning
+/// while still recovering a source-less answer when that is all the output holds.
 fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
     // Fast path — the text IS the JSON object.
     if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
         return Some(parsed.into_output());
     }
-    // Slow path — among every balanced top-level `{...}` substring, prefer the
-    // facts from the LAST *non-empty* one that parses. Falling back to the last
-    // parseable object only when none carry facts/procedures preserves a
-    // legitimate `{"facts":[]}` "nothing worth distilling" answer while never
-    // letting an accidental trailing empty object shadow an earlier populated one.
+    // Slow path — among every balanced top-level `{...}` substring, scanned from
+    // the END so the agent's final answer is reached before any leading
+    // banner/thinking object. Three preference tiers (best first):
+    //   1. last object with a grounded-capable fact (non-empty source_episode_id),
+    //   2. last otherwise-non-empty object (facts/procedures present),
+    //   3. last parseable empty `{"facts":[]}` ("nothing worth distilling").
+    let mut nonempty_fallback: Option<DistillOutput> = None;
     let mut empty_fallback: Option<DistillOutput> = None;
     for (start, end) in balanced_object_spans(trimmed).into_iter().rev() {
         if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(&trimmed[start..end]) {
             let output = parsed.into_output();
-            if !output.facts.is_empty() || !output.procedures.is_empty() {
+            if output
+                .facts
+                .iter()
+                .any(|f| !f.source_episode_id.trim().is_empty())
+            {
                 return Some(output);
             }
-            if empty_fallback.is_none() {
+            if !output.facts.is_empty() || !output.procedures.is_empty() {
+                if nonempty_fallback.is_none() {
+                    nonempty_fallback = Some(output);
+                }
+            } else if empty_fallback.is_none() {
                 empty_fallback = Some(output);
             }
         }
     }
-    empty_fallback
+    nonempty_fallback.or(empty_fallback)
 }
 
 /// Return the byte spans `[start, end)` of every top-level balanced `{...}`
@@ -1324,8 +1343,11 @@ struct RecipeEnvelope {
 /// ungrounded and the existing reliability gate ([`assess_fact_reliability`])
 /// quarantines it; an empty `concept` is dropped by [`RecipeEnvelope::into_facts`];
 /// empty `content` is quarantined by the reliability hard gate. Coercion is
-/// limited to scalars; a non-scalar (array/object) is stringified, which the
-/// same gates then reject.
+/// limited to **scalars** (string / number / bool); a `null` or a non-scalar
+/// (array / object) — both of which are malformed for a field the recipe
+/// promises as a plain string — collapses to the empty string so the existing
+/// gates drop/quarantine it rather than letting structured JSON text smuggle a
+/// fact past them.
 fn de_lenient_string<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1333,10 +1355,14 @@ where
     use serde::Deserialize;
     Ok(match serde_json::Value::deserialize(deserializer)? {
         serde_json::Value::String(s) => s,
-        serde_json::Value::Null => String::new(),
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
-        other => other.to_string(),
+        // Null and any non-scalar (array/object) → empty: a malformed value for
+        // a promised-string field must not become non-empty `content`/`concept`
+        // that could clear the empty-content/known-concept gates.
+        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            String::new()
+        }
     })
 }
 
@@ -2134,5 +2160,51 @@ mod issue_t9664_field_tolerance_tests {
             score < DISTILL_RELIABILITY_THRESHOLD,
             "ungrounded recovered fact must stay below the promotion threshold, got {score}"
         );
+    }
+
+    /// Field leniency must not let a trailing *source-less* facts object shadow
+    /// an earlier *grounded* one. Before the grounded-preference tier, the
+    /// source-less object — now parseable thanks to `de_lenient_string` — would
+    /// win as the "last non-empty" object and the earlier attributed fact would
+    /// be silently discarded. The grounded-capable answer must win.
+    #[test]
+    fn grounded_object_wins_over_trailing_sourceless_object() {
+        let step_output = concat!(
+            "{\"facts\":[{\"concept\":\"bug-pattern\",\"content\":\"the attributed answer\",\"source_episode_id\":\"epi_1\"}]}\n",
+            "{\"facts\":[{\"concept\":\"bug-pattern\",\"content\":\"a later source-less restatement\"}]}"
+        );
+        let facts =
+            parse_recipe_output(step_output).expect("a grounded object must be recoverable");
+        assert_eq!(
+            facts.len(),
+            1,
+            "exactly the grounded object's facts: {facts:?}"
+        );
+        assert_eq!(facts[0].source_episode_id, "epi_1");
+        assert_eq!(facts[0].content, "the attributed answer");
+    }
+
+    /// A non-scalar (array/object) value for a promised-string field collapses to
+    /// empty rather than being stringified, so it cannot smuggle structured JSON
+    /// text past the empty-content / known-concept gates. The envelope still
+    /// parses (the batch is not dropped); the malformed fact is simply gateable.
+    #[test]
+    fn non_scalar_field_values_collapse_to_empty() {
+        let raw = r#"{"facts":[{"concept":"bug-pattern","content":["a","b"],"source_episode_id":{"x":1}}]}"#;
+        let facts = parse_recipe_output(raw).expect("non-scalar fields must not sink the envelope");
+        assert_eq!(facts.len(), 1);
+        assert!(
+            facts[0].content.is_empty(),
+            "array content must collapse to empty, got {:?}",
+            facts[0].content
+        );
+        assert!(
+            facts[0].source_episode_id.is_empty(),
+            "object source_episode_id must collapse to empty, got {:?}",
+            facts[0].source_episode_id
+        );
+        // Empty content → reliability hard gate quarantines it (score 0.0).
+        let score = assess_fact_reliability(&facts[0], &[], &facts);
+        assert_eq!(score, 0.0, "empty-content fact must score 0.0");
     }
 }
