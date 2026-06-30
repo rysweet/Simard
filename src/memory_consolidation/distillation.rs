@@ -1124,11 +1124,13 @@ fn scan_for_facts_object(text: &str) -> Option<DistillOutput> {
 }
 
 /// Scan an already noise-stripped `trimmed` string for a `{ "facts": [...] }`
-/// object, preferring (in order) the LAST balanced top-level object that carries
+/// object, preferring (in order) the LAST balanced object candidate that carries
 /// a **grounded-capable** fact — one with a non-empty `source_episode_id` — then
 /// the last otherwise-non-empty object, then the last parseable empty object.
-/// The ANSI/log/banner stripping that produces `trimmed` lives in
-/// [`scan_for_facts_object`].
+/// Candidates are the balanced `{...}` substrings returned by
+/// [`crate::recipe_output::balanced_objects`] (string-aware, and resilient to an
+/// unmatched `{` in leading prose). The ANSI/log/banner stripping that produces
+/// `trimmed` lives in [`scan_for_facts_object`].
 ///
 /// The grounded-capable tier exists because field-level leniency
 /// ([`de_lenient_string`]) lets a *source-less* facts object now parse as

@@ -244,12 +244,16 @@ fn scan_balanced(bytes: &[u8], start: usize) -> Option<usize> {
     None
 }
 
-/// Return every balanced top-level `{…}` span in `s`, in source order.
+/// Return every balanced `{…}` span in `s`, in source order, by trying each
+/// `{` opener in turn.
 ///
-/// String-literal aware (braces inside JSON strings are ignored). Used by
-/// callers that need to try each candidate against a typed envelope — e.g.
-/// distillation parses each span as a `{ "facts": [...] }` object and keeps
-/// the first that deserialises.
+/// String-literal aware (braces inside JSON strings are ignored). A `{` that
+/// never closes — an unmatched opener in leading prose, e.g. a code fragment
+/// like `fn f() {` — is skipped so a genuinely balanced object *after* it is
+/// still found, rather than being demoted to a nested span and lost (relied on
+/// by distillation, issue #2508). Used by callers that need to try each
+/// candidate against a typed envelope — e.g. distillation parses each span as a
+/// `{ "facts": [...] }` object and keeps the first that deserialises.
 pub fn balanced_objects(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut spans = Vec::new();
