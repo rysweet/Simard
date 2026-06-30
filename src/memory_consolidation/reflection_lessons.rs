@@ -211,20 +211,59 @@ pub fn record_failure_reflection(
     verdict: &Verdict,
     hint: &str,
 ) -> SimardResult<Option<String>> {
+    record_failure_reflection_marked(memory, objective, verdict, hint, None)
+}
+
+/// As [`record_failure_reflection`], but optionally embeds a per-occurrence
+/// dedup marker so [`occurrence_already_reflected`] can recognise a repeat
+/// observation of the *same* blocked completion across cycles.
+fn record_failure_reflection_marked(
+    memory: &dyn CognitiveMemoryOps,
+    objective: &str,
+    verdict: &Verdict,
+    hint: &str,
+    occurrence_key: Option<&str>,
+) -> SimardResult<Option<String>> {
     let Verdict::VerifiedFailure { error_class } = verdict else {
         return Ok(None);
     };
     let goal_type = normalize_goal_type(objective);
     let marker = reflection_marker(&goal_type, error_class);
-    let content = format!("{} {marker}", reflection_text(objective, error_class, hint));
+    let mut content = format!("{} {marker}", reflection_text(objective, error_class, hint));
+    if let Some(key) = occurrence_key {
+        content.push(' ');
+        content.push_str(&occurrence_marker(key));
+    }
     let metadata = serde_json::json!({
         "kind": "reflection",
         "failure": true,
         "goal_type": goal_type,
         "error_class": error_class,
+        "occurrence_key": occurrence_key,
     });
     let id = memory.store_episode(&content, "reflection:failure", Some(&metadata))?;
     Ok(Some(id))
+}
+
+/// A fully-delimited content marker keyed by a per-occurrence identity (e.g. the
+/// goal id). Embedded alongside the `(goal_type, error_class)` marker so the
+/// same blocked completion, re-observed every OODA cycle, can be deduped to a
+/// single reflection. The brackets make the match collision-safe across keys
+/// that share a prefix.
+fn occurrence_marker(occurrence_key: &str) -> String {
+    format!("[reflect-occ={}]", normalize_error_class(occurrence_key))
+}
+
+/// `true` if a `reflection:failure` episode has already been recorded for this
+/// exact occurrence key. Used to bound the failure-reflection trail for a goal
+/// that stays blocked across many cycles (so one unresolved in-flight PR cannot
+/// accrue an unbounded reflection stream or a per-cycle `brain_repeat_failure`).
+fn occurrence_already_reflected(memory: &dyn CognitiveMemoryOps, occurrence_key: &str) -> bool {
+    let marker = occurrence_marker(occurrence_key);
+    memory
+        .search_episodes_by_keywords(std::slice::from_ref(&marker), 1)
+        .map(|hits| hits.iter().any(|e| e.content.contains(&marker)))
+        .unwrap_or(false)
 }
 
 /// Count stored `reflection:failure` episodes recorded for this
@@ -309,14 +348,39 @@ pub struct VerifiedFailureObservation {
     pub objective: String,
     /// The normalized refuting signal (the `error_class` half of the key).
     pub error_class: String,
+    /// Stable per-occurrence identity (e.g. the goal id). When `Some`, the same
+    /// blocked completion re-observed across cycles is deduped to **one**
+    /// reflection — bounding the failure-reflection trail and keeping recurrence
+    /// honest (distinct occurrences, not cycle count). `None` disables dedup, so
+    /// every call is treated as a fresh occurrence.
+    pub occurrence_key: Option<String>,
 }
 
 impl VerifiedFailureObservation {
-    /// Construct an observation from any string-like objective and error class.
+    /// Construct an observation with **no** per-occurrence dedup — every call is
+    /// a distinct occurrence. Use [`deduped`](Self::deduped) for the live cycle
+    /// path where the same blocked goal recurs across cycles.
     pub fn new(objective: impl Into<String>, error_class: impl Into<String>) -> Self {
         Self {
             objective: objective.into(),
             error_class: error_class.into(),
+            occurrence_key: None,
+        }
+    }
+
+    /// Construct an observation deduped across cycles by `occurrence_key` (the
+    /// goal id at the live OODA seam). A goal that stays blocked over many cycles
+    /// then contributes exactly one reflection, and `brain_repeat_failure` fires
+    /// only on a genuinely *new* occurrence — never once per cycle.
+    pub fn deduped(
+        objective: impl Into<String>,
+        error_class: impl Into<String>,
+        occurrence_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            objective: objective.into(),
+            error_class: error_class.into(),
+            occurrence_key: Some(occurrence_key.into()),
         }
     }
 }
@@ -362,6 +426,10 @@ fn default_failure_hint(error_class: &str) -> String {
 /// curate phase calls it with the goals the completion gate refuted.
 ///
 /// For each observation:
+/// 0. **dedup** — if the observation carries an `occurrence_key` already
+///    reflected (the same blocked goal seen on a prior cycle), skip it entirely.
+///    This bounds the reflection trail and keeps recurrence honest (distinct
+///    occurrences, not cycle count);
 /// 1. record a `reflection:failure` episode ([`record_failure_reflection`]);
 /// 2. capture whether a lesson *already* existed for this
 ///    `(goal_type, error_class)` **before** distilling — a failure that recurs
@@ -389,6 +457,19 @@ pub fn learn_from_verified_failures(
 
     for obs in failures {
         let error_class = normalize_error_class(&obs.error_class);
+
+        // Per-occurrence dedup (review #2510): a goal that stays blocked across
+        // cycles (e.g. a normal in-flight PR not yet merged) must not re-reflect
+        // every cycle — that would grow episodic memory without bound, distil a
+        // lesson from a single premature claim, and emit `brain_repeat_failure`
+        // every cycle. Skip an observation whose occurrence was already
+        // reflected; recurrence is measured across *distinct* occurrences.
+        if let Some(key) = &obs.occurrence_key
+            && occurrence_already_reflected(memory, key)
+        {
+            continue;
+        }
+
         let verdict = Verdict::VerifiedFailure {
             error_class: error_class.clone(),
         };
@@ -398,11 +479,12 @@ pub fn learn_from_verified_failures(
         // would mask the very recurrence we want to flag.
         let had_lesson = has_lesson_for(memory, &obs.objective, &error_class).unwrap_or(false);
 
-        let reflection_id = match record_failure_reflection(
+        let reflection_id = match record_failure_reflection_marked(
             memory,
             &obs.objective,
             &verdict,
             &default_failure_hint(&error_class),
+            obs.occurrence_key.as_deref(),
         ) {
             Ok(Some(id)) => {
                 report.reflections_recorded += 1;

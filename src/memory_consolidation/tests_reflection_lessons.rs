@@ -371,3 +371,68 @@ fn learn_from_verified_failures_normalizes_keys() {
         "normalization must be consistent between store and lookup"
     );
 }
+
+/// Per-occurrence dedup: the **same** occurrence key re-observed across cycles
+/// reflects exactly once and never distils a lesson on its own — the bounded-
+/// growth guard for a goal that stays blocked (review #2510).
+#[test]
+fn learn_from_verified_failures_dedups_same_occurrence() {
+    let m = mem();
+    let one =
+        || VerifiedFailureObservation::deduped(REFUTED_OBJECTIVE, REFUTED_CLASS, "goal-stuck");
+
+    // First observation reflects once.
+    let first = learn_from_verified_failures(
+        &m,
+        std::slice::from_ref(&one()),
+        LESSON_RECURRENCE_THRESHOLD,
+    );
+    assert_eq!(first.reflections_recorded, 1);
+
+    // Re-observing the same occurrence many more times is a no-op.
+    for _ in 0..LESSON_RECURRENCE_THRESHOLD + 3 {
+        let again = learn_from_verified_failures(
+            &m,
+            std::slice::from_ref(&one()),
+            LESSON_RECURRENCE_THRESHOLD,
+        );
+        assert!(
+            again.is_empty(),
+            "a repeat observation of one occurrence must be a no-op"
+        );
+    }
+    assert_eq!(
+        count_recurring_failures(
+            &m,
+            "ship-the-websocket-reconnect-backoff-for-the-dashboard",
+            REFUTED_CLASS
+        )
+        .expect("ok"),
+        1,
+        "exactly one reflection survives for a single stuck occurrence"
+    );
+    assert!(
+        !has_lesson_for(&m, REFUTED_OBJECTIVE, REFUTED_CLASS).expect("ok"),
+        "one stuck occurrence is never a lesson"
+    );
+}
+
+/// Distinct occurrence keys of the same `(goal_type, error_class)` accumulate a
+/// genuine recurrence that distils a lesson — dedup bounds repeats, it does not
+/// suppress real cross-attempt recurrence.
+#[test]
+fn learn_from_verified_failures_distinct_occurrences_recur() {
+    let m = mem();
+    for i in 0..LESSON_RECURRENCE_THRESHOLD {
+        let obs = VerifiedFailureObservation::deduped(
+            REFUTED_OBJECTIVE,
+            REFUTED_CLASS,
+            format!("goal-{i}"),
+        );
+        learn_from_verified_failures(&m, std::slice::from_ref(&obs), LESSON_RECURRENCE_THRESHOLD);
+    }
+    assert!(
+        has_lesson_for(&m, REFUTED_OBJECTIVE, REFUTED_CLASS).expect("ok"),
+        "distinct occurrences of the same type must still distil a lesson"
+    );
+}

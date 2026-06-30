@@ -386,7 +386,12 @@ The loop has four production seams, all wired on honest external signals.
    distils a recurrence-gated lesson, and emits `brain_repeat_failure` when a
    failure recurs on a goal-type that already carries a lesson. `Unverified` /
    `Error` outcomes (nothing to check, or a query failed) are skipped — they are
-   not failures (R10).
+   not failures (R10). **Per-occurrence dedup:** each observation carries the
+   goal id as an `occurrence_key`, so a goal that stays blocked across many
+   cycles (e.g. a normal in-flight PR not yet merged) reflects exactly **once** —
+   bounding episodic growth and keeping recurrence honest (distinct
+   false-completions, not cycle count). Recurrence therefore accrues across
+   *distinct* goals/attempts of the same type, never from one stuck goal.
 
 ```rust
 // src/ooda_loop/cycle.rs — curate phase (simplified).
