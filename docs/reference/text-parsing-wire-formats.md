@@ -1,14 +1,16 @@
 ---
 title: Text-parsing wire formats
 description: Normative reference for every text-based wire format Simard's Rust code parses from LLM and recipe output. Replaces the former JSON-based contracts.
-last_updated: 2026-06-28
+last_updated: 2026-06-29
 review_schedule: as-needed
 owner: simard
 doc_type: reference
 related:
   - ../concepts/text-based-brain-protocol.md
+  - ../concepts/copilot-launcher-preamble-stripping.md
   - ./ooda-brain-api.md
   - ./ooda-brain-decision-protocol.md
+  - ./recipe-brain-verdict-parsing.md
   - ./progress-evidence-api.md
 ---
 
@@ -31,7 +33,7 @@ Used by: **every** recipe-backed parser below, before it runs.
 
 > **Added in [#2484](https://github.com/rysweet/Simard/issues/2484):**
 > `recipe-runner-rs` stdout (and the `step_results[].output` string inside its
-> `--output-format json` envelope) is routinely contaminated with three kinds
+> `--output-format json` envelope) is routinely contaminated with **four** kinds
 > of non-payload noise that broke the formerly bespoke per-phase extractors:
 >
 > 1. **ANSI SGR/CSI/OSC colour codes** from `tracing`/`env_logger` (e.g. a
@@ -40,21 +42,77 @@ Used by: **every** recipe-backed parser below, before it runs.
 > 2. **Timestamped tracing-log lines** interleaved with the agent answer.
 > 3. The runner's **text-mode summary banner** (`Recipe: … SUCCESS`, `Steps: …`,
 >    `[completed] …`).
+> 4. **Copilot CLI launch-log preamble** (added in
+>    [#2496](https://github.com/rysweet/Simard/issues/2496), generalised here
+>    from the distill path that PR [#2500](https://github.com/rysweet/Simard/pull/2500)
+>    pinned). The Copilot agent binary prepends launcher lines that carry **no**
+>    ISO-8601 timestamp — so category 2 above did not catch them: the
+>    `ℹ NODE_OPTIONS=… (saved preference)` info marker, `Run 'copilot update'…`
+>    nags, `… launching copilot binary=… version="GitHub Copilot CLI …"`
+>    lines, and leading `INFO`/`WARN` launcher lines. Left in place, the first
+>    token of the cleaned text was `ℹ`/`Run`/the version string `1.0.66-2`
+>    instead of an action keyword or urgency decimal, so **every** decide/orient
+>    parse missed and the goal deadlocked (see
+>    [Concept: Copilot launch-log preamble stripping](../concepts/copilot-launcher-preamble-stripping.md)).
 >
 > The single hardened `src/recipe_output/` module is now the **only**
-> ANSI/log/banner-stripping path. The two former duplicate strippers
+> ANSI/log/banner/launcher-stripping path. The two former duplicate strippers
 > (`meeting_backend::sanitize::strip_ansi_escapes`, `stewardship::dedup::normalize`)
-> and the distill-private ANSI stripper now delegate to it.
+> and the distill-private ANSI/launcher stripper now delegate to it. Extending
+> the one `is_noise_line` predicate re-hardens **every** consumer — decide,
+> orient, engineer-lifecycle, merge-judge, progress checker, distill — at once.
 
 ### Functions
 
 | Function | Behaviour |
 |---|---|
 | `strip_ansi(&str) -> Cow` | Single ANSI (CSI/OSC/two-char) stripper. `Cow::Borrowed` on the clean path (no `ESC` byte). |
-| `strip_recipe_noise(&str) -> Cow` | `strip_ansi` + drop ISO-8601 tracing lines and runner-banner lines. `Cow::Borrowed` on the clean path. |
+| `strip_recipe_noise(&str) -> Cow` | `strip_ansi` + drop ISO-8601 tracing lines, runner-banner lines, **and Copilot launch-log preamble lines** (via `is_noise_line`). `Cow::Borrowed` on the clean path. |
+| `is_noise_line(&str) -> bool` *(private)* | Per-line predicate: `true` for an ISO-timestamp tracing line, a runner summary-banner line, **or** a Copilot launcher line (`is_copilot_launcher_line`). A JSON payload (`{`-leading), action keyword, bare decimal, or verdict keyword never matches, so dropping such a line never discards the answer. |
+| `is_copilot_launcher_line(&str) -> bool` *(private)* | The launcher-only arm (#2496). Anchored `starts_with`/`contains` matches on the four launcher shapes below; matches **no** payload line. ANSI is stripped before it runs. |
 | `balanced_objects` / `last_balanced_object` / `extract_json_payload` | String-literal-aware balanced `{…}` scan. JSON extraction is **dual-pass** (line-dropped **and** ANSI-only) so the payload survives both an interleaved log line inside a pretty body and a same-line log prefix. |
 | `extract_verdict(raw, keywords)` | Precedence keyword scan over cleaned text. |
 | `record_parse_outcome(phase, success)` | Emits `recipe_parse_{success,failure}_total{phase}` to `metrics.jsonl`. |
+
+### Copilot launcher-line shapes (`is_copilot_launcher_line`)
+
+The predicate drops a line (after `trim_start`) when it matches one of these
+anchored launcher shapes and **only** these — it is deliberately conservative so
+no decision token, JSON payload, decimal, or verdict keyword is ever eaten:
+
+| Shape (anchored) | Example line |
+|---|---|
+| `ℹ`/info-marker line containing `NODE_OPTIONS=` and `(saved preference)` | `ℹ NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: …` |
+| starts with `Run 'copilot update'` | `Run 'copilot update' to check for updates.` |
+| contains `launching copilot binary=` / `version="GitHub Copilot CLI` | `… INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot version="GitHub Copilot CLI 1.0.66-2."` |
+| leading `INFO`/`WARN` launcher line with **no** ISO-8601 timestamp | `INFO using cached login`, `WARN extension not pinned` |
+
+A line that begins with `{`, a known action keyword, a bare decimal, or a
+verdict keyword is **never** classified as a launcher line. ANSI escapes are
+stripped first, so an ANSI-coloured `INFO`/`WARN` launcher line still matches and
+a coloured payload line still survives. See
+[Concept: Copilot launch-log preamble stripping § correctness as safety](../concepts/copilot-launcher-preamble-stripping.md#correctness-as-safety-never-eat-the-payload).
+
+#### Example: launcher preamble + ANSI around a decide decision
+
+Raw `step_results[].output` (ANSI shown as `\x1b[…m`, leading launcher preamble):
+
+```
+\x1b[2mℹ\x1b[0m NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: /home/azureuser/.amplihack/config
+\x1b[34mINFO\x1b[0m launching copilot binary=/home/azureuser/.npm-global/bin/copilot version="GitHub Copilot CLI 1.0.66-2."
+Run 'copilot update' to check for updates.
+advance_goal The next PR is ready to open; proceeding with the implementation.
+```
+
+After `strip_recipe_noise`, the cleaned text is just the agent answer, so the
+first-word parser reads `advance_goal` (not `ℹ`):
+
+```
+advance_goal The next PR is ready to open; proceeding with the implementation.
+```
+
+The same cleaning makes the orient parser read the model's real urgency decimal
+rather than scraping `1.0.66-2` → `1.0` from the version string.
 
 ### Clean-path guarantee
 
@@ -106,10 +164,15 @@ free-text     = <any remaining text — kept as rationale>
 - If no known variant matches, a safe default is returned (not a parse error).
 - Everything after the first word is the rationale (truncated to 500 chars).
 
-> **Noise pre-stripping (#2484):** each parser first routes its input through
+> **Noise pre-stripping (#2484, extended for the Copilot launcher preamble in
+> [#2496](https://github.com/rysweet/Simard/issues/2496)):** each parser first
+> routes its input through
 > [`recipe_output::strip_recipe_noise`](#protocol-0-shared-noise-pre-stripping-recipe_output)
-> so an ANSI-coloured log prefix or runner banner cannot shadow the first-word /
-> first-float token. Clean output is passed through unchanged (`Cow::Borrowed`).
+> so an ANSI-coloured log prefix, a runner banner, **or a Copilot launch-log
+> preamble line** cannot shadow the first-word / first-float token. Without the
+> launcher arm the first token was `ℹ`/`Run`/`1.0.66-2` and every decide/orient
+> parse missed → ladder exhaustion → deterministic default → a stalled goal.
+> Clean output is passed through unchanged (`Cow::Borrowed`).
 
 ### Common parser shape
 

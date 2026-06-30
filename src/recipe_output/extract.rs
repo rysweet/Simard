@@ -1,6 +1,6 @@
 //! Hardened extraction primitives for `recipe-runner-rs` stdout (issue #2484).
 //!
-//! `recipe-runner-rs` stdout is routinely contaminated with three kinds of
+//! `recipe-runner-rs` stdout is routinely contaminated with four kinds of
 //! non-payload noise that break the per-phase extractors that read it:
 //!
 //! 1. **ANSI SGR/CSI/OSC colour codes** emitted by `tracing`/`env_logger`
@@ -12,6 +12,16 @@
 //!    numbers, and verdict-substring false positives (e.g. "al*ready*").
 //! 3. The runner's **human summary banner** (`Recipe: … SUCCESS (36.0s)`,
 //!    `Steps: …`, `  [completed] …`).
+//! 4. The GitHub Copilot CLI **launch-log preamble** (issue #2496): launcher
+//!    lines the agent binary prints to stdout *before* its real answer — the
+//!    `ℹ … NODE_OPTIONS=… (saved preference)` info marker, a
+//!    `Run 'copilot update' …` nag, a `… launching copilot binary=…
+//!    version="GitHub Copilot CLI …"` line, and bare `INFO`/`WARN` launcher
+//!    lines. These carry **no** ISO-8601 timestamp, so category 2 above does
+//!    not catch them; left in place, the first token of the cleaned text
+//!    became `ℹ`/`Run`/the version string `1.0.66-2` instead of a decide
+//!    action keyword or an orient urgency decimal, so *every* decide/orient
+//!    parse missed and the goal deadlocked.
 //!
 //! Before this module each phase scanned that raw text with a bespoke,
 //! fragile extractor and fell back to a permissive default on a miss
@@ -98,13 +108,78 @@ fn starts_with_iso_timestamp(s: &str) -> bool {
         && b[10] == b'T'
 }
 
+/// `true` when (after trimming leading whitespace) `line` is a GitHub Copilot
+/// CLI **launch-log preamble** line — the non-payload banner the agent binary
+/// prints to stdout *before* its real answer (observed with Copilot CLI
+/// `1.0.66-2`, issue #2496). These lines carry **no** ISO-8601 timestamp, so
+/// [`starts_with_iso_timestamp`] does not catch them, yet they would otherwise
+/// become the first token a decide/orient first-word/first-float parser reads
+/// (`ℹ` / `Run` / the version string `1.0.66-2`), defaulting every parse and
+/// deadlocking the goal.
+///
+/// Deliberately conservative — it matches **only** these anchored launcher
+/// shapes and never a line that could be the answer:
+///
+/// - the `ℹ … NODE_OPTIONS=… (saved preference)` info-marker line,
+/// - a `Run 'copilot update' …` update nag,
+/// - a `… launching copilot binary=… version="GitHub Copilot CLI …"` line,
+/// - a leading `INFO`/`WARN` launcher line that carries no ISO-8601 timestamp.
+///
+/// A line beginning with `{` (JSON payload), an action keyword, a bare decimal,
+/// or a verdict keyword is **never** classified as launcher noise, so dropping a
+/// launcher line can never discard a decision token or a JSON answer. ANSI
+/// escapes are stripped before this runs (see [`strip_recipe_noise`]), so a
+/// colour-coded launcher line still matches and a coloured payload line still
+/// survives. This is correctness-as-safety: the predicate consumes untrusted
+/// agent stdout, so it errs toward keeping a line rather than eating a payload.
+fn is_copilot_launcher_line(line: &str) -> bool {
+    let t = line.trim_start();
+
+    // An ISO-timestamped line is a tracing line owned by the timestamp arm of
+    // `is_noise_line`; never treat it as a launcher line here (keeps this
+    // predicate safe to call standalone and from the timestamp-first chokepoint).
+    if starts_with_iso_timestamp(t) {
+        return false;
+    }
+
+    // `Run 'copilot update' …` update nag.
+    if t.starts_with("Run 'copilot update'") {
+        return true;
+    }
+
+    // `… launching copilot binary=… version="GitHub Copilot CLI …"` — anchored
+    // on launcher-only substrings that no decision/verdict/JSON line contains.
+    if t.contains("launching copilot binary=") || t.contains("version=\"GitHub Copilot CLI") {
+        return true;
+    }
+
+    // `ℹ … NODE_OPTIONS=… (saved preference)` info marker. Require BOTH the
+    // env-var token AND the saved-preference marker so an agent answer that
+    // merely mentions NODE_OPTIONS in prose is never eaten.
+    if t.starts_with('\u{2139}') && t.contains("NODE_OPTIONS=") && t.contains("(saved preference)")
+    {
+        return true;
+    }
+
+    // Bare `INFO`/`WARN` launcher line with no ISO-8601 timestamp. A decide
+    // action keyword, an orient decimal, a verdict keyword, and a `{`-leading
+    // JSON payload never begin with these level tokens, so this is safe.
+    t.starts_with("INFO ") || t.starts_with("WARN ")
+}
+
 /// `true` when (after trimming) `line` is non-payload recipe-runner noise:
-/// a tracing/env_logger timestamped log line, or a runner summary-banner
-/// line. JSON payloads start with `{` and agent prose does not match these
-/// prefixes, so dropping such lines never discards the answer.
+/// a tracing/env_logger timestamped log line, a runner summary-banner line, or
+/// a Copilot CLI launch-log preamble line ([`is_copilot_launcher_line`]). JSON
+/// payloads start with `{` and agent prose does not match these prefixes, so
+/// dropping such lines never discards the answer. This is the single shared
+/// chokepoint: extending it re-hardens every consumer — decide, orient,
+/// engineer-lifecycle, merge-judge, progress checker, distill — at once.
 fn is_noise_line(line: &str) -> bool {
     let t = line.trim_start();
     if starts_with_iso_timestamp(t) {
+        return true;
+    }
+    if is_copilot_launcher_line(t) {
         return true;
     }
     // recipe-runner-rs text-mode summary banner.
@@ -116,8 +191,9 @@ fn is_noise_line(line: &str) -> bool {
         || t.starts_with("[running]")
 }
 
-/// Strip ANSI escapes **and** drop whole tracing/env_logger log lines and
-/// recipe-runner summary-banner lines.
+/// Strip ANSI escapes **and** drop whole tracing/env_logger log lines,
+/// recipe-runner summary-banner lines, and Copilot CLI launch-log preamble
+/// lines (all via [`is_noise_line`]).
 ///
 /// Returns [`Cow::Borrowed`] unchanged on the clean path (no `ESC` byte and
 /// no droppable line), preserving today's behaviour and allocations.
@@ -497,5 +573,146 @@ mod tests {
         let m = extract_verdict(raw, &["reject", "accept"]).unwrap();
         assert_eq!(m.keyword, "accept");
         assert_eq!(m.rationale, "After review I accept the claim.");
+    }
+}
+
+/// Issue #2496: the Copilot CLI launch-log preamble must be dropped at this
+/// shared chokepoint so the decide/orient first-word/first-float parsers read
+/// the agent's real answer, never the launcher banner. The cardinal safety
+/// property is that no decision token, JSON payload, decimal, or verdict
+/// keyword is ever eaten.
+#[cfg(test)]
+mod issue_2496_launcher_tests {
+    use super::*;
+
+    // The exact live preamble (Copilot CLI 1.0.66-2), ANSI stripped.
+    const INFO_MARKER: &str = "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). \
+         To change: /home/azureuser/.amplihack/config";
+    const LAUNCHING: &str = "INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot \
+         version=\"GitHub Copilot CLI 1.0.66-2.\"";
+    const UPDATE_NAG: &str = "Run 'copilot update' to check for updates.";
+
+    // ---- each launcher shape is dropped ----------------------------------
+
+    #[test]
+    fn drops_node_options_info_marker_line() {
+        assert!(is_copilot_launcher_line(INFO_MARKER));
+        assert!(is_noise_line(INFO_MARKER));
+    }
+
+    #[test]
+    fn drops_copilot_update_nag_line() {
+        assert!(is_copilot_launcher_line(UPDATE_NAG));
+        assert!(is_noise_line(UPDATE_NAG));
+    }
+
+    #[test]
+    fn drops_launching_binary_version_line() {
+        assert!(is_copilot_launcher_line(LAUNCHING));
+        assert!(is_noise_line(LAUNCHING));
+    }
+
+    #[test]
+    fn drops_bare_info_and_warn_launcher_lines() {
+        assert!(is_copilot_launcher_line("INFO using cached login"));
+        assert!(is_copilot_launcher_line("WARN extension not pinned"));
+        assert!(is_noise_line("INFO using cached login"));
+        assert!(is_noise_line("WARN extension not pinned"));
+    }
+
+    // ---- payload recovery: the preamble must NOT shadow the answer -------
+
+    #[test]
+    fn recovers_decide_action_keyword_behind_launcher_preamble() {
+        let raw = format!(
+            "\x1b[2m{INFO_MARKER}\x1b[0m\n\
+             \x1b[34m{LAUNCHING}\x1b[0m\n\
+             {UPDATE_NAG}\n\
+             advance_goal The next PR is ready to open."
+        );
+        let cleaned = strip_recipe_noise(&raw);
+        assert_eq!(
+            cleaned.split_whitespace().next(),
+            Some("advance_goal"),
+            "first word must be the action keyword, not launcher noise"
+        );
+    }
+
+    #[test]
+    fn recovers_orient_urgency_decimal_behind_launcher_preamble() {
+        // The version string 1.0.66-2 must be gone so it cannot be mined as the
+        // urgency decimal ahead of the model's real first float.
+        let raw = format!("{INFO_MARKER}\n{LAUNCHING}\n{UPDATE_NAG}\n0.42");
+        let cleaned = strip_recipe_noise(&raw);
+        assert_eq!(cleaned.trim(), "0.42");
+        assert!(
+            !cleaned.contains("1.0.66"),
+            "version string must not survive to be scraped as urgency"
+        );
+    }
+
+    #[test]
+    fn recovers_json_payload_behind_launcher_preamble() {
+        let raw = format!("{INFO_MARKER}\n{LAUNCHING}\n{{\"facts\":[]}}");
+        assert_eq!(
+            extract_json_payload(&raw),
+            Some("{\"facts\":[]}".to_string())
+        );
+    }
+
+    // ---- negative / safety: a payload line is NEVER classified as noise --
+
+    #[test]
+    fn never_drops_json_object_line() {
+        assert!(!is_copilot_launcher_line("{\"facts\":[]}"));
+        assert!(!is_noise_line("{\"facts\":[]}"));
+    }
+
+    #[test]
+    fn never_drops_action_keyword_line() {
+        assert!(!is_copilot_launcher_line("advance_goal proceeding now"));
+        assert!(!is_noise_line("advance_goal proceeding now"));
+    }
+
+    #[test]
+    fn never_drops_bare_decimal_line() {
+        assert!(!is_copilot_launcher_line("0.42"));
+        assert!(!is_noise_line("0.42"));
+    }
+
+    #[test]
+    fn never_drops_verdict_keyword_line() {
+        assert!(!is_copilot_launcher_line("ready to merge"));
+        assert!(!is_copilot_launcher_line("not_ready missing tests"));
+        assert!(!is_noise_line("ready to merge"));
+    }
+
+    #[test]
+    fn never_drops_prose_that_merely_mentions_node_options() {
+        // Mentions NODE_OPTIONS but is not the saved-preference info marker.
+        let line = "We should raise NODE_OPTIONS for the next run.";
+        assert!(!is_copilot_launcher_line(line));
+        assert!(!is_noise_line(line));
+    }
+
+    #[test]
+    fn iso_timestamped_info_line_is_not_a_launcher_line() {
+        // A real tracing line is owned by the timestamp arm, not the launcher
+        // arm — keeps the two causes distinct.
+        let line = "2026-06-29T12:26:24.512Z  INFO launching copilot binary=x";
+        assert!(!is_copilot_launcher_line(line));
+        assert!(is_noise_line(line), "still dropped, but as a tracing line");
+    }
+
+    #[test]
+    fn clean_output_is_borrowed_zero_copy() {
+        // Adopting the stricter predicate changes nothing for noise-free output.
+        let s = "advance_goal proceed with the implementation";
+        let out = strip_recipe_noise(s);
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "clean path must not allocate"
+        );
+        assert_eq!(out, s);
     }
 }

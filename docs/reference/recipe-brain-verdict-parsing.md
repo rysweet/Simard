@@ -1,7 +1,7 @@
 ---
 title: Recipe-brain verdict/decision parsing
 description: How recipe-backed brain phases turn a recipe-runner-rs subprocess run into a typed decision/verdict. All four phases — engineer-lifecycle, decide, orient, and merge-judge — share one JSON-envelope transport, one confidence-gated escalation ladder, and loud/fail-closed defaults, plus the class-level brain_verdict_parsed_total metric.
-last_updated: 2026-06-28
+last_updated: 2026-06-29
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -11,6 +11,7 @@ related:
   - ./distill-recipe-output-capture.md
   - ./ooda-brain-parse-failure-record.md
   - ./pr-finalization-pipeline.md
+  - ../concepts/copilot-launcher-preamble-stripping.md
   - ../howto/diagnose-merge-pr-verdict-parse-failures.md
   - ../howto/diagnose-decide-orient-parse-failures.md
   - ../howto/diagnose-brain-decision-parse-failures.md
@@ -40,6 +41,7 @@ related:
 > | decide / orient JSON transport + ladder + loud default | **shipped** ([#2421](https://github.com/rysweet/Simard/issues/2421)) | `src/ooda_brain/recipe_brain.rs` |
 > | merge-judge JSON transport + ladder + fail-closed `Unclear` | **shipped** ([#2428](https://github.com/rysweet/Simard/issues/2428) / [#2430](https://github.com/rysweet/Simard/issues/2430) / [#2435](https://github.com/rysweet/Simard/issues/2435) / [#2462](https://github.com/rysweet/Simard/issues/2462) / [#2463](https://github.com/rysweet/Simard/issues/2463)) | `src/stewardship/recipe_merge_judge.rs` |
 > | class-level `brain_verdict_parsed_total` metric | **shipped** ([#2429](https://github.com/rysweet/Simard/issues/2429)) | `src/ooda_brain/recipe_brain.rs` |
+> | Copilot launch-log preamble stripped at the shared chokepoint + decide/orient termination-cause wiring | **shipped** ([#2496](https://github.com/rysweet/Simard/issues/2496), generalising the distill regression PR [#2500](https://github.com/rysweet/Simard/pull/2500)) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
 >
 > Everything on this page describes code that exists today. A reader six months
 > from now should treat this as the current design, not a migration note.
@@ -326,8 +328,15 @@ payload:
 | `outcome` | `parsed` (a real decision was produced) \| `defaulted` (the loud/fail-closed fallback was taken). |
 | `outcome_detail` | The `LifecycleParseOutcome::label()`: `parsed` \| `repaired` \| `escalated` \| `default_empty` \| `default_malformed` \| `error`. |
 | `is_parse_failure` | `true` for `default_empty` / `default_malformed` / `error`. |
+| `cause` | The `LadderTermination::cause_label()` of the run: `ladder_recovered` \| `ladder_exhausted` \| `ladder_invoke_error` \| `ladder_disabled`, or `ok` when the base attempt parsed without entering the ladder. Decide and orient now **wire the ladder's termination through to this field** (it was previously discarded as `_termination`), so a `defaulted` row attributes the default to its precise terminal path — exactly as the lifecycle metric already did. |
 | `goal_id` | The phase's goal id. For merge-judge this is `pr-<N>`. |
 | `attempts` | Total brain invocations spent (base + ladder rungs). |
+
+A `defaulted` row therefore reads unambiguously: `is_parse_failure=true` with
+`cause=ladder_exhausted` is a transient parse miss that survived the ladder — NOT
+a model that chose to do nothing. The
+[parse-failure-is-not-a-decision section](#parse-failure-is-not-a-deliberate-decision-2496)
+explains why the two must stay distinct.
 
 **Per-phase parse-success rate** over the recorded window:
 
@@ -375,6 +384,21 @@ the LLM. Reading the envelope output instead means a real `advance_goal` and a
 banner-induced default are no longer indistinguishable. `parse_action_from_text`
 is retained as a thin decision-only wrapper over `parse_action_outcome`.
 
+> **Launcher-preamble hardening ([#2496](https://github.com/rysweet/Simard/issues/2496)).**
+> `parse_action_outcome` runs the agent output through
+> [`recipe_output::strip_recipe_noise`](./text-parsing-wire-formats.md#protocol-0-shared-noise-pre-stripping-recipe_output)
+> before reading the first word, so the Copilot CLI launch-log preamble
+> (`ℹ NODE_OPTIONS=…`, `launching copilot binary=… version="GitHub Copilot CLI
+> 1.0.66-2."`, `Run 'copilot update'…`) and its ANSI colour codes can no longer
+> make the first token `ℹ`/`Run`/`1.0.66-2`. This is the fix for the production
+> deadlock: with the preamble surviving, **every** active goal misparsed to
+> `default_malformed`, the ladder exhausted, decide returned its NO-new-action
+> default, and zero engineers spawned. `judge_decision` now also wires the
+> ladder's `LadderTermination` through to the `brain_verdict_parsed_total`
+> `cause` field instead of discarding it, so a parse-failure default is logged
+> distinctly from a real decision (see
+> [Parse failure is not a deliberate decision](#parse-failure-is-not-a-deliberate-decision-2496)).
+
 ### Orient phase (#2421)
 
 `recipe_brain.rs::judge_orientation` invokes `invoke_orient_raw` (json +
@@ -393,6 +417,17 @@ banner `(0.0s)` timing string can no longer be scraped — **urgency `0.0` from 
 banner can no longer happen**; the deterministic floor is the only fallback.
 `parse_orient_from_text` is retained as a thin wrapper over
 `parse_orient_outcome`.
+
+> **Launcher-preamble hardening ([#2496](https://github.com/rysweet/Simard/issues/2496)).**
+> `parse_orient_outcome` runs the envelope output through
+> [`recipe_output::strip_recipe_noise`](./text-parsing-wire-formats.md#protocol-0-shared-noise-pre-stripping-recipe_output)
+> first, so the Copilot launch-log preamble's version string
+> `version="GitHub Copilot CLI 1.0.66-2."` cannot be mined as the urgency decimal
+> (`1.0` / `0.66`) ahead of the model's real first float. Like decide,
+> `judge_orientation` now wires the ladder's `LadderTermination` through to the
+> `brain_verdict_parsed_total` `cause` field (previously discarded), so a
+> deterministic-floor default reached via `ladder_exhausted` on a parse miss is
+> attributable and distinct from a genuinely low urgency the model emitted.
 
 ### Merge-judge phase (#2462)
 
@@ -431,11 +466,49 @@ fail-closed `Unclear` → Refused, or an explicit infra `Err`) on every run.
 
 ---
 
+## Parse failure is not a deliberate decision (#2496)
+
+The deterministic default is a safety net, not a decision. A default reached
+because a transient parse miss exhausted the escalation ladder is a **different
+event** from the model deliberately choosing to do nothing, and the two must
+never be conflated — conflating them is what let the launch-log-preamble stall
+masquerade as healthy "the brain decided to take no action" behaviour while
+goals with real work sat idle.
+
+Every recipe-backed brain phase therefore keeps the distinction explicit, using
+the `LifecycleParseOutcome::is_parse_failure()` classification and the
+`LadderTermination` cause already produced by `run_brain_ladder`:
+
+| Phase | Deterministic default | Parse-failure default is logged / recorded as… |
+|-------|-----------------------|-----------------------------------------------|
+| decide | `AdvanceGoal` (loud `default_advance_goal`) | `brain_verdict_parsed_total{phase=decide, outcome=defaulted, is_parse_failure=true, cause=ladder_exhausted\|ladder_invoke_error}` + a distinct `tracing::warn!` tagging the default as a parse-failure default (NOT a model decision). |
+| orient | deterministic urgency floor | `brain_verdict_parsed_total{phase=orient, …, cause=…}` + distinct warn; the floor is attributable to the parse miss, not read as a real low urgency. |
+| engineer-lifecycle | `ContinueSkipping` | `brain_lifecycle_decision{outcome=default_*, cause=ladder_exhausted\|ladder_invoke_error}` + a loud, distinct log stating the skip is a **transient parse-failure skip, re-evaluated next cycle — NOT a deliberate NO-ACTION**. |
+| merge-judge | fail-closed `Unclear` (Refused) | already distinct: `Unclear` is never `Ready`; recorded with its `cause`. |
+
+The defaults and the ladder are unchanged — they remain the rarely-needed safety
+net. What changes is **visibility and attribution**: a parse-failure default is
+loud, carries its `LadderTermination` cause, and is self-clearing on the next
+cycle once the input is clean. With the launcher preamble now stripped at the
+[shared chokepoint](./text-parsing-wire-formats.md#protocol-0-shared-noise-pre-stripping-recipe_output),
+that next cycle's input *is* clean, so a goal with actionable work is no longer
+parked under a NO-ACTION that was really a parse miss. The conservative
+retry/skip semantics make a single transient miss harmless: the lifecycle skip is
+re-evaluated, and decide re-runs the goal next cycle rather than treating one
+poisoned capture as a durable decision.
+
+For the design rationale, see
+[Concept: Copilot launch-log preamble stripping § keeping a parse failure distinct from a real "no action"](../concepts/copilot-launcher-preamble-stripping.md#keeping-a-parse-failure-distinct-from-a-real-no-action).
+
+---
+
 ## Test inventory (shipped)
 
 | Module | Coverage |
 |--------|----------|
-| `src/ooda_brain/recipe_brain.rs` | `extract_recipe_decision_output` success + decode/`success=false`/empty-`step_results` error cases; `parse_lifecycle_outcome` matrix; `run_escalation_ladder` recovery / exhaustion / invoke-error / disabled paths; `LadderTermination::cause_label` distinctness; `build_escalation_note` content pins; `build_lifecycle_metric_context` shape. **`issue_2421_tests`** + **`issue_2419_family_phase_tests`**: `parse_action_outcome` / `parse_orient_outcome` classification (parsed vs `DefaultEmpty`/`DefaultMalformed`), `build_decide_escalation_note` / `build_orient_escalation_note` / `build_phase_escalation_note` content (empty on `Base`), `brain_verdict_parsed_total` context shape, and the generic `run_brain_ladder` driving an arbitrary decision type. |
+| `src/recipe_output/extract.rs` | **`issue_2496_launcher_tests`**: each Copilot launcher shape dropped by `is_copilot_launcher_line` / `is_noise_line` (the `ℹ NODE_OPTIONS=… (saved preference)` info marker, `Run 'copilot update'…`, `launching copilot binary=… version="GitHub Copilot CLI 1.0.66-2."`, leading `INFO`/`WARN` launcher lines); payload-recovery cases (a launcher+ANSI preamble wrapped around a valid action keyword, a bare urgency decimal, and a `{…}` JSON body, each surviving the clean); negative/safety cases (a `{`-leading line, an action keyword, a bare decimal, and a verdict keyword are **never** dropped); and the `Cow::Borrowed` zero-copy clean-path assertion on noise-free input. |
+| `src/ooda_brain/recipe_brain.rs` | `extract_recipe_decision_output` success + decode/`success=false`/empty-`step_results` error cases; `parse_lifecycle_outcome` matrix; `run_escalation_ladder` recovery / exhaustion / invoke-error / disabled paths; `LadderTermination::cause_label` distinctness; `build_escalation_note` content pins; `build_lifecycle_metric_context` shape. **`issue_2421_tests`** + **`issue_2419_family_phase_tests`**: `parse_action_outcome` / `parse_orient_outcome` classification (parsed vs `DefaultEmpty`/`DefaultMalformed`), `build_decide_escalation_note` / `build_orient_escalation_note` / `build_phase_escalation_note` content (empty on `Base`), `brain_verdict_parsed_total` context shape, and the generic `run_brain_ladder` driving an arbitrary decision type. **`issue_2496_decide_orient_launcher_tests`**: `parse_action_outcome` and `parse_orient_outcome` fed a real Copilot 1.0.66-2 banner + ANSI-coloured `INFO`/`WARN` launcher lines wrapped around a valid decision / urgency decimal, asserting the decision parses (`Parsed`, not `DefaultMalformed`) and the version string `1.0.66-2` is not mined as the urgency; the **all-goals-`DefaultMalformed` stall regression** asserting that the same noisy capture across a batch of active goals now yields parsed decisions (the deadlock no longer reproduces); and the decide/orient `cause` wiring (a parse-failure default carries `ladder_exhausted` / `ladder_invoke_error`, distinct from a genuine decision). |
+| `src/memory_consolidation/distillation.rs` | **`issue_2496_distill_launcher_tests`** (built on the merged PR [#2500](https://github.com/rysweet/Simard/pull/2500) regression): the distill fact parser still recovers `{ "facts": […] }` from a launcher-preamble-wrapped capture, now via the shared `is_noise_line` chokepoint rather than a private cleaner. |
 | `src/stewardship/recipe_merge_judge.rs` | `parse_merge_verdict_from_text` keyword matrix (ready / not_ready / unclear / empty / no-keyword `Err`). **`issue_2428_tests`** + **`issue_2428_production_tests`**: JSON-envelope extraction, `parse_merge_outcome` (structured `parse_judge_response` first, then keyword prose fallback), prose keyword fallback, and fail-closed `Verdict::Unclear` on an unparseable verdict. |
 | `src/stewardship/merge_judge.rs` | `parse_judge_response` JSON extraction (fenced / brace-balanced / outermost), `LlmMergeJudge`, `RefusingMergeJudge`. |
 | `tests/recipe_brain_verdict_assets.rs` | Asset/integration coverage of the recipe-brain verdict path. |

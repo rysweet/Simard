@@ -133,7 +133,7 @@ impl MergeJudge for RecipeMergeJudge {
         let base_raw = invoke(LadderRung::Base, "")?;
         let (judgment, outcome) = parse_merge_outcome(&base_raw);
         if !outcome.is_parse_failure() {
-            record_verdict_parse_metric(BrainPhase::MergeJudge, &pr_label, outcome, 1);
+            record_verdict_parse_metric(BrainPhase::MergeJudge, &pr_label, outcome, "ok", 1);
             crate::recipe_output::record_parse_outcome("merge_judge", true);
             return Ok(judgment);
         }
@@ -142,7 +142,7 @@ impl MergeJudge for RecipeMergeJudge {
         // `Verdict::Unclear` (acceptance: never SUCCESS-without-verdict). The
         // merge authority refuses on `Unclear`, so the merge does not proceed.
         let cfg = EscalationConfig::from_env();
-        let (final_judgment, final_outcome, attempts, _termination) = run_brain_ladder(
+        let (final_judgment, final_outcome, attempts, termination) = run_brain_ladder(
             &pr_label,
             &base_raw,
             outcome,
@@ -152,7 +152,16 @@ impl MergeJudge for RecipeMergeJudge {
             || fail_closed_unclear(&base_raw),
             |o| verdict_label(&o.verdict).to_string(),
         );
-        record_verdict_parse_metric(BrainPhase::MergeJudge, &pr_label, final_outcome, attempts);
+        // issue #2496: record the precise `LadderTermination` cause (previously
+        // discarded as `_termination`) so a fail-closed `Unclear` row attributes
+        // the default to its terminal path, consistent with decide/orient.
+        record_verdict_parse_metric(
+            BrainPhase::MergeJudge,
+            &pr_label,
+            final_outcome,
+            termination.cause_label(),
+            attempts,
+        );
         crate::recipe_output::record_parse_outcome(
             "merge_judge",
             !final_outcome.is_parse_failure(),

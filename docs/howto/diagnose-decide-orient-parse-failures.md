@@ -1,7 +1,7 @@
 ---
 title: Diagnose OODA decide/orient brain parse failures
 description: Operator runbook for text-based OODA brain parse failures. Find, classify, and remediate parse failures from the decide and orient phases.
-last_updated: 2026-06-28
+last_updated: 2026-06-29
 review_schedule: as-needed
 owner: simard
 ---
@@ -15,6 +15,94 @@ owner: simard
 > **Prerequisites:** read access to `~/.simard/logs/`,
 > `~/.simard/cycle_reports/`, and `~/.simard/metrics/` on the daemon
 > host; familiarity with the `simard` CLI and `jq`.
+
+## First, rule out the Copilot launch-log preamble (#2496)
+
+> **Start here when *every* active goal defaults on the same cycle and no
+> engineers are spawning.** That all-goals-at-once pattern is the signature of a
+> capture-noise stall, not a per-goal model problem.
+
+The Copilot CLI agent binary prepends a **launch-log preamble** and ANSI colour
+codes to its stdout before the agent's answer — lines such as:
+
+```
+ℹ NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: /home/azureuser/.amplihack/config
+… INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot version="GitHub Copilot CLI 1.0.66-2."
+Run 'copilot update' to check for updates.
+```
+
+These lines carry no ISO-8601 timestamp, so they were not caught by the original
+log-line filter. Left in place, the decide parser's first token became
+`ℹ`/`Run`/`1.0.66-2` instead of an action keyword, **every** goal classified as
+`default_malformed`, the escalation ladder exhausted, decide returned its
+no-new-action default, and Simard spawned zero engineers — a deadlock, since the
+parse failure is exactly what blocks spawning the engineer that would fix it.
+
+**This is handled automatically.** The shared extractor
+(`recipe_output::strip_recipe_noise`, [#2484](https://github.com/rysweet/Simard/issues/2484)
+/ [#2496](https://github.com/rysweet/Simard/issues/2496)) now strips the launcher
+preamble — via the `is_copilot_launcher_line` arm of `is_noise_line` — before any
+decide/orient/lifecycle/merge-judge/distill parse. See
+[Reference: text-parsing wire formats § Protocol 0](../reference/text-parsing-wire-formats.md#protocol-0-shared-noise-pre-stripping-recipe_output)
+and [Concept: Copilot launch-log preamble stripping](../concepts/copilot-launcher-preamble-stripping.md).
+
+### Confirm the launcher preamble is being stripped
+
+The `default_malformed` / `ladder_exhausted` rate should be near zero. Read the
+shared parse-success counter:
+
+```bash
+jq -rc 'select(.metric_name=="brain_verdict_parsed_total")
+        | .context | fromjson | "\(.phase) \(.outcome) cause=\(.cause)"' \
+  ~/.simard/metrics/metrics.jsonl \
+  | sort | uniq -c
+```
+
+A healthy daemon shows `decide parsed` and `orient parsed` dominating. A surge of
+`decide defaulted cause=ladder_exhausted` across many goals on the **same** cycle
+is the launcher-preamble stall signature.
+
+To confirm what the agent actually emitted, read the captured raw output for one
+defaulted decision — the preamble (if present) is visible in
+`raw_response_truncated` in the cycle report (see Step 2 below). If the cleaned
+first token is now an action keyword but the raw still shows the preamble, the
+extractor is doing its job.
+
+### Telling a parse-failure default from a real "no action"
+
+A deterministic default reached because the ladder exhausted on a parse miss is
+**not** the model deciding to do nothing, and the logs now say so explicitly
+(#2496). On a parse-failure default the daemon emits a distinct warning that
+names the termination cause, e.g.:
+
+```
+WARN simard::ooda_brain: brain escalation ladder ended without a parseable decision; deterministic default
+    goal="<id>" attempts=3 base_outcome="default_malformed" termination=Exhausted
+[simard] BRAIN ESCALATION goal=<id> ladder ended (ladder_exhausted) after 3 attempts — deterministic default
+```
+
+For the engineer-lifecycle phase, the `continue_skipping` default reached this
+way is logged as a **transient parse-failure skip, re-evaluated next cycle — NOT
+a deliberate NO-ACTION**. In the metrics, the difference is unambiguous:
+
+- Real decision → `brain_verdict_parsed_total{outcome=parsed}` (or lifecycle
+  `brain_lifecycle_decision{is_parse_failure=false, cause=ok|ladder_recovered}`).
+- Parse-failure default → `outcome=defaulted`, `is_parse_failure=true`,
+  `cause=ladder_exhausted` (or `ladder_invoke_error`).
+
+If you see the parse-failure cause, treat the goal as **not yet decided** — it
+will be re-evaluated on the next clean cycle — rather than as a goal the brain
+chose to leave idle.
+
+### If the stall recurs (the launcher reshaped its banner)
+
+If a future Copilot CLI release changes the preamble so a **new** shape slips
+through, the symptom returns as an all-goals `default_malformed` surge with the
+preamble visible in `raw_response_truncated`. The fix is a one-line extension of
+`is_copilot_launcher_line` in `src/recipe_output/extract.rs` (the single
+chokepoint) plus a regression test pinning the new sample — never a per-parser
+patch. File against the launcher-preamble surface and reference
+[#2496](https://github.com/rysweet/Simard/issues/2496).
 
 ## Decide brain: first-word extraction
 
@@ -156,6 +244,7 @@ Open the `raw_response_truncated` value and match against this triage table.
 
 | `raw_response_truncated` looks like… | Likely cause | Action |
 |----|----|----|
+| Leading `ℹ NODE_OPTIONS=…`, `… launching copilot binary=… version="GitHub Copilot CLI …"`, or `Run 'copilot update'…` before the real answer | Copilot launch-log preamble (#2496) leaked into the capture | None for a known shape — the shared extractor strips it. If the preamble is a **new** shape and the parse still missed, extend `is_copilot_launcher_line` (see [§ launch-log preamble](#first-rule-out-the-copilot-launch-log-preamble-2496)). |
 | `"OK"`, `"continue"`, `"yes"` | Model ignored the output instruction; emitted a chat ack | [Step 3 — replay the prompt](#step-3-replay-the-prompt-locally); strengthen the prompt's output instructions |
 | `""` (empty string) | Adapter returned `Err` with no body (5xx, timeout) | Check adapter logs for 5xx / rate-limit / timeout |
 | Long prose without any number | Model is in chat mode, not following the output format | Strengthen the prompt's OUTPUT_FORMAT section to require a bare decimal as the first token |
@@ -256,6 +345,8 @@ You should see:
 
 * [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md) — normative grammar for all text protocols.
 * [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md) — design rationale.
+* [Concept: Copilot launch-log preamble stripping](../concepts/copilot-launcher-preamble-stripping.md) — why the launcher noise is stripped at one chokepoint, and why a parse-failure default stays distinct from a real "no action".
+* [Reference: recipe-brain verdict/decision parsing](../reference/recipe-brain-verdict-parsing.md) — shared transport, escalation ladder, and termination-cause telemetry.
 * [Reference: OODA Brain Decision Protocol](../reference/ooda-brain-decision-protocol.md) — engineer-lifecycle wire format.
 * [How-to: diagnose OODA brain decision parse failures](./diagnose-brain-decision-parse-failures.md) — engineer-lifecycle equivalent.
 * [How-to: edit the OODA brain prompt](./edit-the-ooda-brain-prompt.md) — prompt editing guide.

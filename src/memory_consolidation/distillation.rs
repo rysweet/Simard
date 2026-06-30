@@ -1918,3 +1918,46 @@ mod unit_tests {
         assert_eq!(out.facts[0].source_episode_id, "epi_9271");
     }
 }
+
+/// Issue #2496: distill delegates launcher stripping to the **shared**
+/// `recipe_output` chokepoint (the same `is_noise_line` predicate the OODA
+/// brains use) and carries no parallel launcher cleaner. Complements the
+/// `parse_recipe_output_full_recovers_facts_from_copilot_launch_log_preamble`
+/// regression above (which uses an ISO-timestamped launcher line) by pinning the
+/// **bare**, non-timestamped launcher shapes that only the new
+/// `is_copilot_launcher_line` arm recognises.
+#[cfg(test)]
+mod issue_2496_distill_launcher_tests {
+    use super::*;
+
+    #[test]
+    fn distill_recovers_facts_behind_bare_launcher_preamble_via_shared_chokepoint() {
+        // A launcher preamble with NO ISO-8601 timestamp — the shape only the
+        // shared `is_copilot_launcher_line` arm drops. Distill recovers the
+        // trailing facts object through the same chokepoint the brains use.
+        let step_output = "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). \
+             To change: /home/azureuser/.amplihack/config\n\
+             INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot \
+             version=\"GitHub Copilot CLI 1.0.66-2.\"\n\
+             Run 'copilot update' to check for updates.\n\
+             {\"facts\":[{\"concept\":\"bug-pattern\",\
+             \"content\":\"shared chokepoint strips the launch preamble for distill too\",\
+             \"source_episode_id\":\"epi_2496\"}]}";
+        let envelope = serde_json::json!({
+            "recipe_name": "distill-episodes",
+            "success": true,
+            "step_results": [{
+                "step_id": "distill",
+                "status": "completed",
+                "output": step_output,
+                "error": ""
+            }]
+        })
+        .to_string();
+        let out = parse_recipe_output_full(&envelope)
+            .expect("issue #2496 bare-launcher-preamble payload must parse");
+        assert_eq!(out.facts.len(), 1, "exactly one fact recovered");
+        assert_eq!(out.facts[0].concept, "bug-pattern");
+        assert_eq!(out.facts[0].source_episode_id, "epi_2496");
+    }
+}
