@@ -282,10 +282,32 @@ first that yields a facts object:
 **Tier 1 — runner envelope (the production path).**
 
 1. Deserialize stdout as `RecipeRunnerEnvelope`.
+   - **Tier 1a (fast path):** parse the trimmed stdout directly. Clean
+     production output (the envelope is the first byte) parses here with zero
+     extra work.
+   - **Tier 1b (noise-tolerant recovery, [#2512](https://github.com/rysweet/Simard/issues/2512)):**
+     if the direct parse fails, recover the envelope through the **shared**
+     `recipe_output` chokepoint (`recover_runner_envelope`). The copilot
+     subprocess prints its launch banner (`ℹ NODE_OPTIONS=…`,
+     `launching copilot binary=… version="GitHub Copilot CLI …"`,
+     `Run 'copilot update'…`) and intermittent ANSI tracing lines to the
+     **inherited stdout *before*** recipe-runner-rs emits its JSON envelope, so
+     the captured stdout **begins with the banner instead of the `{`** and the
+     Tier-1a parse rejects it — losing the envelope and its escaped facts
+     payload. Tier 1b strips that preamble (the same `strip_recipe_noise` +
+     `strip_ansi` dual view + string-aware `balanced_objects` end-first scan the
+     inner step-output path uses) and recovers the envelope. This is the
+     *outer-envelope* analog of the inner step-output banner stripping below,
+     and of the #2504 decide/orient launch-banner fix. A leading non-envelope
+     log record (e.g. `{"level":"info",…}`) lacks `success`/`step_results`, so
+     it is never mistaken for the envelope.
 2. If `success == false`, return `Err` immediately — never extract facts
    from a failed run. (Defense-in-depth: a failed run already exits non-zero,
    so `invoke_recipe`'s exit-code guard normally returns `Err` before this
-   point — see [Failure semantics](#failure-semantics).)
+   point — see [Failure semantics](#failure-semantics).) A banner-prefixed
+   `success == false` envelope recovered by Tier 1b still routes here (it is
+   *committed to* once recovered), so it surfaces a `RecipeReportedFailure`,
+   never a silent drop.
 3. Select the step: the entry with `step_id == "distill"`; if absent,
    the **last** entry with `status == "completed"`. (The `step_id` rule
    pins to the recipe's named step; the last-completed fallback tolerates
@@ -379,6 +401,7 @@ cycle.
 | Envelope `success == false` *with* exit `0`            | parser Tier 1 guard → `Err` (defense-in-depth)         | non-fatal; no markers set; retry next pass     |
 | No completed `distill` step                            | parser Tier 1 → `Err`                                  | non-fatal; no markers set; retry next pass     |
 | `output` present but no parseable facts object         | parser Tier 3 → `Err`                                  | non-fatal; no markers set; retry next pass     |
+| Launch-banner / ANSI noise **before** the envelope `{` | parser Tier 1b recovery → `Ok(DistillOutput { … })`    | facts stored ([#2512](https://github.com/rysweet/Simard/issues/2512)) |
 | Valid envelope, facts extracted                        | parser Tier 1 → `Ok(DistillOutput { … })`              | facts stored; **every** input episode marked   |
 
 Every `Err` is mapped to a non-fatal log line at

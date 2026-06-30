@@ -447,16 +447,25 @@ failure_class, input_count, fact_count}`:
 
 ```
 distill_success_rate       = mean(value)                          over ran passes
-distill_parse_success_rate = Σ parse_success / Σ parse_attempted  over ran passes
+distill_parse_success_rate = mean(value)                          over passes that reached parsing
 ```
 
-`distill_parse_success_rate` isolates the "recipe exited 0 but its output was
-unparseable" mode (`failure_class = parse-failure`, t=7517) from the "recipe
-process exited non-zero" mode (`copilot-terminal-failure`, t=7411): only runs
-that reached parsing (`parse_attempted = true`) count toward its denominator.
-Because the data lives in `metrics.jsonl` (operator runtime state, queryable
-via `self_metrics::query_metrics`), the rates are computed over a rolling
-window — no point-in-time findings doc is committed.
+`distill_parse_success_rate` is emitted as a **first-class metric**
+(issue [#2512](https://github.com/rysweet/Simard/issues/2512)) for the subset
+of passes that actually reached output parsing (`parse_attempted == true`), so
+its plain mean is exactly successes-vs-attempts — no post-hoc filtering of
+`distill_success_rate` events is needed (the older `parse_attempted` /
+`parse_success` context flags remain for back-compatible derivation). It
+isolates the "recipe exited 0 but its output was unparseable" mode
+(`failure_class = parse-failure`, t=7517 — including the #2512
+launch-banner-prefixed *envelope*) from the "recipe process exited non-zero"
+mode (`copilot-terminal-failure`, t=7411) and the "exited 0 but no step output"
+mode (`recipe-reported-failure`), which never reached parsing and emit **no**
+parse-rate event. This is the rate the launch-banner parse fixes (#2496/#2504/
+#2512) drive toward `1.0`, mirroring how #2504 was validated for the
+decide/orient brain. Because the data lives in `metrics.jsonl` (operator
+runtime state, queryable via `self_metrics::query_metrics`), the rates are
+computed over a rolling window — no point-in-time findings doc is committed.
 
 The companion robustness fix is parser-side: `scan_for_facts_object` now
 returns the facts from the **last non-empty** balanced `{...}` object that
