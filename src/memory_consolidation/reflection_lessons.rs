@@ -353,6 +353,13 @@ pub struct VerifiedFailureObservation {
     /// reflection — bounding the failure-reflection trail and keeping recurrence
     /// honest (distinct occurrences, not cycle count). `None` disables dedup, so
     /// every call is treated as a fresh occurrence.
+    ///
+    /// Intentionally the goal id **alone**, not `(id, error_class)`: a single
+    /// stuck attempt should reflect exactly once even if its refuting class
+    /// progresses across cycles (e.g. `pr_not_merged` → `not_deployed` after the
+    /// PR merges). Lesson distillation is unaffected by this choice — a lesson
+    /// requires recurrence across *distinct* goals, which always carry distinct
+    /// keys regardless of class.
     pub occurrence_key: Option<String>,
 }
 
