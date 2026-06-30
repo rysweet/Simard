@@ -56,6 +56,8 @@ steps:
         - "parse_recipe_output_tolerates_fact_missing_source_episode_id ... ok"
         - "parse_recipe_output_tolerates_null_and_scalar_fields ... ok"
         - "recovered_fact_with_missing_provenance_is_still_quarantined_by_the_gate ... ok"
+        - "grounded_object_wins_over_trailing_sourceless_object ... ok"
+        - "non_scalar_field_values_collapse_to_empty ... ok"
         - "test result: ok"
 
   - name: "Launch-log preamble regression (#2496) still green (no regression)"
