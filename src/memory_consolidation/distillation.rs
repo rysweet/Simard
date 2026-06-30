@@ -1172,22 +1172,58 @@ fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
     nonempty_fallback.or(empty_fallback)
 }
 
-/// Return the byte spans `[start, end)` of every top-level balanced `{...}`
-/// object in `s`, in source order.
+/// Return the byte spans `[start, end)` of every balanced `{...}` object in
+/// `s`, in source order.
 ///
-/// String-aware **inside objects**: once a `{` has opened (depth > 0), `{`/`}`
-/// bytes inside a JSON string literal (respecting `\"` escapes) are ignored.
-/// Quotes encountered at depth 0 (e.g. an unmatched quote in leading prose)
-/// are treated as ordinary characters so they cannot swallow the object's `{`
-/// opener. Unbalanced trailing `{` are silently dropped.
+/// String-aware **inside objects**: once a `{` has opened, `{`/`}` bytes inside
+/// a JSON string literal (respecting `\"` escapes) are ignored. Characters in
+/// the prose *between* objects are never allowed to swallow a later balanced
+/// object:
+///
+/// - An unmatched `"` in leading prose is skipped — the per-candidate scan only
+///   begins at a `{`, so a stray prose quote is an ordinary character (the
+///   #2461 unmatched-leading-quote fix).
+/// - An unmatched `{` in leading prose that never closes is skipped one byte at
+///   a time until a genuinely balanced object is found *after* it. The previous
+///   single-`depth` scan anchored on the first `{`; a stray `{` in the distill
+///   agent's reasoning (e.g. a code fragment such as `fn f() {` while it reasons
+///   about code episodes) raised depth permanently, demoted the real
+///   `{ "facts": [...] }` answer to a nested object, and the pass silently
+///   no-opped with zero facts (issue #2508). Restarting from the next `{`
+///   recovers the trailing answer.
 fn balanced_object_spans(s: &str) -> Vec<(usize, usize)> {
     let bytes = s.as_bytes();
     let mut spans = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'{'
+            && let Some(end) = scan_balanced_object(bytes, i)
+        {
+            spans.push((i, end + 1));
+            i = end + 1;
+            continue;
+        }
+        // A non-`{` byte, or an unmatched `{` that never closes before EOF:
+        // advance one byte and keep scanning for a balanced object that begins
+        // later (so a stray `{` in leading prose cannot swallow the answer).
+        i += 1;
+    }
+    spans
+}
+
+/// Given `bytes[start] == b'{'`, return the byte index of the `}` that closes
+/// it, honouring JSON string literals so that `{`/`}` inside `"..."`
+/// (respecting `\"` escapes) do not affect nesting depth. Returns `None` when
+/// the object is never closed before the end of input.
+///
+/// Iterative (no recursion) so pathologically deep nesting terminates without a
+/// stack overflow; serde's own recursion limit bounds the eventual per-span
+/// parse in [`scan_cleaned_for_facts`].
+fn scan_balanced_object(bytes: &[u8], start: usize) -> Option<usize> {
     let mut depth = 0i32;
-    let mut start = 0usize;
     let mut in_string = false;
     let mut escaped = false;
-    for (i, &b) in bytes.iter().enumerate() {
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
         if in_string {
             if escaped {
                 escaped = false;
@@ -1199,23 +1235,18 @@ fn balanced_object_spans(s: &str) -> Vec<(usize, usize)> {
             continue;
         }
         match b {
-            b'"' if depth > 0 => in_string = true,
-            b'{' => {
-                if depth == 0 {
-                    start = i;
-                }
-                depth += 1;
-            }
-            b'}' if depth > 0 => {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
                 depth -= 1;
                 if depth == 0 {
-                    spans.push((start, i + 1));
+                    return Some(i);
                 }
             }
             _ => {}
         }
     }
-    spans
+    None
 }
 
 /// The `recipe-runner-rs` 0.3.6 `--output-format json` envelope. Only the
@@ -1581,6 +1612,64 @@ mod unit_tests {
             1,
             "string braces must not split the object"
         );
+    }
+
+    // ── issue #2508: unmatched `{` in leading prose must not swallow the answer ──
+
+    #[test]
+    fn balanced_object_spans_skips_unmatched_leading_brace() {
+        // A stray, never-closed `{` ahead of a genuinely balanced object must
+        // be skipped, not anchored on (which would demote the real object to a
+        // nested one and yield zero top-level spans).
+        let spans = balanced_object_spans(r#"prefix fn f() { then {"facts":[]}"#);
+        assert_eq!(
+            spans.len(),
+            1,
+            "the balanced object after the stray brace must be found"
+        );
+        let (start, end) = spans[0];
+        assert_eq!(
+            &r#"prefix fn f() { then {"facts":[]}"#[start..end],
+            r#"{"facts":[]}"#
+        );
+    }
+
+    #[test]
+    fn parse_recipe_output_recovers_from_unbalanced_brace_in_leading_prose() {
+        // The distill agent reasons about CODE episodes, so its preamble can
+        // carry a code fragment with an unmatched `{` (e.g. `fn handler() {`)
+        // before it emits the JSON answer. The old single-`depth` scan anchored
+        // on that stray brace and silently dropped the real facts object,
+        // no-opping distillation. The scanner must recover the trailing answer.
+        let raw = concat!(
+            "Looking at the episodes, the leak is in `fn handler() {` where the guard is missing.\n",
+            "Here is the distilled output:\n",
+            r#"{"facts":[{"concept":"bug-pattern","content":"missing guard in handler","#,
+            r#""source_episode_id":"epi_9900"}]}"#,
+        );
+        let facts = parse_recipe_output(raw).expect("answer after an unmatched `{` must parse");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "bug-pattern");
+        assert_eq!(facts[0].content, "missing guard in handler");
+        assert_eq!(facts[0].source_episode_id, "epi_9900");
+    }
+
+    #[test]
+    fn parse_recipe_output_banner_only_fails_non_fatally_without_panic() {
+        // Genuinely answer-less output — only the Copilot CLI launch banner,
+        // no `{ "facts": [...] }` object anywhere — must return Err (the
+        // retry-safe "no markers set" path) without panicking. This is the
+        // t=9900 shape when the agent emits its launch preamble and no answer.
+        let raw = concat!(
+            "2026-06-30T09:00:00.000000Z  INFO launching copilot binary=copilot ",
+            "version=\"GitHub Copilot CLI 1.0.66-2\"\n",
+            "\u{2139} NODE_OPTIONS=--max-old-space-size=8192 (saved preference)\n",
+            "Run 'copilot update' to update\n",
+        );
+        assert!(parse_recipe_output(raw).is_err());
+        // And the empty / whitespace-only shapes likewise fail without panic.
+        assert!(parse_recipe_output("").is_err());
+        assert!(parse_recipe_output("   \n \t ").is_err());
     }
 
     // ── issue #2461: failure classification ─────────────────────────────
