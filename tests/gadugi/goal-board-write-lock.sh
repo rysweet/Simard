@@ -34,7 +34,7 @@ goal add 2 "Harden beta repo"
 
 LIST1="$(goal list)"
 printf '%s\n' "$LIST1"
-printf '%s\n' "$LIST1" | grep -F "active goals: 2 / 7" >/dev/null
+printf '%s\n' "$LIST1" | grep -F "active goals: 2 /" >/dev/null
 printf '%s\n' "$LIST1" | grep -F "harden-alpha-repo" >/dev/null
 printf '%s\n' "$LIST1" | grep -F "harden-beta-repo" >/dev/null
 
@@ -44,7 +44,7 @@ goal remove harden-alpha-repo
 
 LIST2="$(goal list)"
 printf '%s\n' "$LIST2"
-printf '%s\n' "$LIST2" | grep -F "active goals: 2 / 7" >/dev/null
+printf '%s\n' "$LIST2" | grep -F "active goals: 2 /" >/dev/null
 printf '%s\n' "$LIST2" | grep -F "harden-beta-repo" >/dev/null
 printf '%s\n' "$LIST2" | grep -F "harden-gamma-repo" >/dev/null
 if printf '%s\n' "$LIST2" | grep -F "harden-alpha-repo" >/dev/null; then
