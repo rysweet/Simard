@@ -1,13 +1,15 @@
 ---
 title: Distill recipe output capture
 description: How Simard's distillation pass reliably captures the distill agent's { "facts": [...], "procedures": [...] } JSON from recipe-runner-rs — the --output-format json invocation, the RecipeRunnerEnvelope / RecipeRunnerStepResult deserialization types, the three-tier parser in parse_recipe_output_full, the agent-step selection rule, failure semantics, and the redeploy-local.sh recipe-asset sync that keeps the hot-reload path current.
-last_updated: 2026-06-24
+last_updated: 2026-06-29
 owner: simard
 doc_type: reference
 related:
   - ../architecture/episode-distillation.md
   - ./automatic-distillation-scheduler.md
   - ./cognitive-memory-provenance.md
+  - ./text-parsing-wire-formats.md
+  - ../concepts/copilot-launcher-preamble-stripping.md
   - ../memory.md
 ---
 
@@ -346,6 +348,21 @@ scan (braces inside JSON string literals are ignored, so a brace in a fact's
 only when no object carries facts/procedures). The scan is linear in the input
 length; pathologically nested braces parse to an `Err` (via serde's recursion
 limit) rather than panicking — see `parser_tolerates_deeply_nested_input_without_panic`.
+
+> **Shared noise stripping ([#2496](https://github.com/rysweet/Simard/issues/2496)).**
+> Before scanning, the distill parser strips ANSI codes and non-payload lines
+> through the **shared** `recipe_output::strip_recipe_noise` chokepoint — the
+> same `is_noise_line` predicate the OODA brains use — rather than a distill-private
+> cleaner. This is what lets the parser survive the Copilot CLI launch-log
+> preamble (`ℹ NODE_OPTIONS=…`, `launching copilot binary=… version="GitHub
+> Copilot CLI …"`, `Run 'copilot update'…`) that PR
+> [#2500](https://github.com/rysweet/Simard/pull/2500) first pinned as a distill
+> regression. Because the launcher-shape detection now lives at the single
+> chokepoint, hardening it once re-hardens distill **and** decide/orient/
+> lifecycle/merge-judge together; distill carries **no** parallel launcher
+> cleaner. See
+> [Text-parsing wire formats § Protocol 0](./text-parsing-wire-formats.md#protocol-0-shared-noise-pre-stripping-recipe_output)
+> and [Concept: Copilot launch-log preamble stripping](../concepts/copilot-launcher-preamble-stripping.md).
 
 ---
 

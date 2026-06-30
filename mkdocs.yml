@@ -71,6 +71,7 @@ nav:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Closing the Procedural-Learning Loop: concepts/procedural-learning-loop.md
     - Trustworthy Confidence + External Completion: concepts/trustworthy-confidence-and-external-completion.md
+    - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md

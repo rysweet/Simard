@@ -718,13 +718,13 @@ impl OodaDecideBrain for RecipeBrain {
         let base_raw = invoke(LadderRung::Base, "")?;
         let (decision, outcome) = parse_action_outcome(&base_raw);
         if !outcome.is_parse_failure() {
-            record_verdict_parse_metric(BrainPhase::Decide, &ctx.goal_id, outcome, 1);
+            record_verdict_parse_metric(BrainPhase::Decide, &ctx.goal_id, outcome, "ok", 1);
             crate::recipe_output::record_parse_outcome("decide", true);
             return Ok(decision);
         }
 
         let cfg = EscalationConfig::from_env();
-        let (final_decision, final_outcome, attempts, _termination) = run_brain_ladder(
+        let (final_decision, final_outcome, attempts, termination) = run_brain_ladder(
             &ctx.goal_id,
             &base_raw,
             outcome,
@@ -734,7 +734,25 @@ impl OodaDecideBrain for RecipeBrain {
             default_advance_goal,
             |d| decide_decision_choice(d).to_string(),
         );
-        record_verdict_parse_metric(BrainPhase::Decide, &ctx.goal_id, final_outcome, attempts);
+        // issue #2496: a parse-failure default here is the production-deadlock
+        // surface — log it distinctly so it is never read as a real LLM
+        // `advance_goal`/no-new-action decision, and attribute it to its precise
+        // `LadderTermination` cause (previously discarded as `_termination`).
+        if final_outcome.is_parse_failure() {
+            warn_parse_failure_default(
+                BrainPhase::Decide,
+                &ctx.goal_id,
+                final_outcome,
+                termination,
+            );
+        }
+        record_verdict_parse_metric(
+            BrainPhase::Decide,
+            &ctx.goal_id,
+            final_outcome,
+            termination.cause_label(),
+            attempts,
+        );
         crate::recipe_output::record_parse_outcome("decide", !final_outcome.is_parse_failure());
         Ok(final_decision)
     }
@@ -759,13 +777,13 @@ impl OodaOrientBrain for RecipeBrain {
         let base_raw = invoke(LadderRung::Base, "")?;
         let (judgment, outcome) = parse(&base_raw);
         if !outcome.is_parse_failure() {
-            record_verdict_parse_metric(BrainPhase::Orient, &ctx.goal_id, outcome, 1);
+            record_verdict_parse_metric(BrainPhase::Orient, &ctx.goal_id, outcome, "ok", 1);
             crate::recipe_output::record_parse_outcome("orient", true);
             return Ok(judgment);
         }
 
         let cfg = EscalationConfig::from_env();
-        let (final_judgment, final_outcome, attempts, _termination) = run_brain_ladder(
+        let (final_judgment, final_outcome, attempts, termination) = run_brain_ladder(
             &ctx.goal_id,
             &base_raw,
             outcome,
@@ -775,7 +793,25 @@ impl OodaOrientBrain for RecipeBrain {
             default,
             |j| format!("urgency={:.3}", j.adjusted_urgency),
         );
-        record_verdict_parse_metric(BrainPhase::Orient, &ctx.goal_id, final_outcome, attempts);
+        // issue #2496: distinguish a deterministic-floor default reached via a
+        // parse miss (e.g. the launcher version string mis-scraped as urgency)
+        // from a genuinely low urgency the model emitted — log it distinctly and
+        // attribute it to its `LadderTermination` cause (previously discarded).
+        if final_outcome.is_parse_failure() {
+            warn_parse_failure_default(
+                BrainPhase::Orient,
+                &ctx.goal_id,
+                final_outcome,
+                termination,
+            );
+        }
+        record_verdict_parse_metric(
+            BrainPhase::Orient,
+            &ctx.goal_id,
+            final_outcome,
+            termination.cause_label(),
+            attempts,
+        );
         crate::recipe_output::record_parse_outcome("orient", !final_outcome.is_parse_failure());
         Ok(final_judgment)
     }
@@ -1065,6 +1101,35 @@ impl OodaBrain for RecipeBrain {
         let cfg = EscalationConfig::from_env();
         let (final_decision, final_outcome, attempts, termination) =
             run_escalation_ladder(self, ctx, &base_raw, outcome, &cfg);
+        // issue #2496: when the deterministic `continue_skipping` default is
+        // reached because a transient parse miss EXHAUSTED the ladder (or a rung
+        // failed to invoke), say so loudly and distinctly — it is NOT a
+        // deliberate NO-ACTION decision; it is a transient parse-failure skip
+        // that is re-evaluated next cycle. The conservative default itself is
+        // unchanged; only its visibility improves.
+        if final_outcome.is_parse_failure()
+            && matches!(
+                termination,
+                LadderTermination::Exhausted | LadderTermination::InvokeError
+            )
+        {
+            tracing::warn!(
+                target: "simard::ooda_brain",
+                goal = %ctx.goal_id,
+                outcome_detail = final_outcome.label(),
+                cause = termination.cause_label(),
+                "engineer-lifecycle fell to continue_skipping via a PARSE FAILURE \
+                 (ladder {}) — a TRANSIENT parse-failure skip, re-evaluated next \
+                 cycle, NOT a deliberate NO-ACTION (issue #2496)",
+                termination.cause_label()
+            );
+            eprintln!(
+                "[simard] LIFECYCLE PARSE-FAILURE SKIP goal={} cause={} \
+                 (transient, re-evaluated next cycle — NOT a deliberate no-action)",
+                ctx.goal_id,
+                termination.cause_label()
+            );
+        }
         // NOTE: `first_word` intentionally always reflects the *base* attempt's
         // token — it is the diagnostic record of what the cheap first pass
         // produced (e.g. the banner regression or a malformed reply), even on a
@@ -1487,6 +1552,7 @@ fn build_verdict_parse_context(
     phase: BrainPhase,
     goal_id: &str,
     outcome: LifecycleParseOutcome,
+    cause: &str,
     attempts: u32,
 ) -> String {
     serde_json::json!({
@@ -1498,6 +1564,16 @@ fn build_verdict_parse_context(
         // default_empty / default_malformed / error) for drill-down.
         "outcome_detail": outcome.label(),
         "is_parse_failure": outcome.is_parse_failure(),
+        // issue #2496: the `LadderTermination::cause_label()` of the run
+        // (`ladder_recovered` / `ladder_exhausted` / `ladder_invoke_error` /
+        // `ladder_disabled`), or `ok` when the base attempt parsed without
+        // entering the ladder. Decide and orient now wire the ladder's
+        // termination through to this field (it was previously discarded as
+        // `_termination`), so a `defaulted` row attributes the default to its
+        // precise terminal path: `is_parse_failure=true` with
+        // `cause=ladder_exhausted` is a transient parse miss, NOT a model that
+        // chose to do nothing.
+        "cause": cause,
         "goal_id": goal_id,
         // Total brain invocations spent (base + escalation rungs).
         "attempts": attempts,
@@ -1518,9 +1594,10 @@ pub(crate) fn record_verdict_parse_metric(
     phase: BrainPhase,
     goal_id: &str,
     outcome: LifecycleParseOutcome,
+    cause: &str,
     attempts: u32,
 ) {
-    let context = build_verdict_parse_context(phase, goal_id, outcome, attempts);
+    let context = build_verdict_parse_context(phase, goal_id, outcome, cause, attempts);
     if cfg!(test) {
         return;
     }
@@ -1533,6 +1610,46 @@ pub(crate) fn record_verdict_parse_metric(
             "failed to record brain_verdict_parsed_total metric (decision unaffected)",
         );
     }
+}
+
+/// Emit a loud, distinct log when a recipe-backed brain phase reaches its
+/// deterministic default **because a transient parse miss exhausted the
+/// escalation ladder** — NOT because the model deliberately chose to do nothing
+/// (issue #2496). Keeping the two events distinct is what stops a
+/// poisoned-input stall (every active goal misparsing the Copilot launch-log
+/// preamble) from masquerading as healthy "the brain decided to take no action"
+/// behaviour while goals with real work sit idle.
+///
+/// The deterministic default itself is unchanged — it remains the rarely-needed
+/// safety net; only its visibility and attribution improve. Logs a bounded
+/// classification + the `LadderTermination` cause, never the raw agent preamble
+/// (which embeds env-derived `NODE_OPTIONS`/binary paths), so dropped launcher
+/// noise does not leak environment detail into logs.
+fn warn_parse_failure_default(
+    phase: BrainPhase,
+    goal_id: &str,
+    outcome: LifecycleParseOutcome,
+    termination: LadderTermination,
+) {
+    tracing::warn!(
+        target: "simard::ooda_brain",
+        phase = phase.as_str(),
+        goal = %goal_id,
+        outcome_detail = outcome.label(),
+        cause = termination.cause_label(),
+        "brain phase fell to its deterministic default via a PARSE FAILURE \
+         (ladder {}) — NOT a model 'no action' decision; a transient parse miss, \
+         re-evaluated next cycle (issue #2496)",
+        termination.cause_label()
+    );
+    eprintln!(
+        "[simard] BRAIN PARSE-FAILURE DEFAULT phase={} goal={} outcome={} cause={} \
+         (transient miss, NOT a real no-action decision)",
+        phase.as_str(),
+        goal_id,
+        outcome.label(),
+        termination.cause_label()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3846,18 +3963,21 @@ mod tests {
                 BrainPhase::Decide,
                 "g1",
                 LifecycleParseOutcome::Parsed,
+                "ok",
                 1,
             );
             let v: serde_json::Value = serde_json::from_str(&parsed).unwrap();
             assert_eq!(v["phase"], "decide");
             assert_eq!(v["outcome"], "parsed");
             assert_eq!(v["is_parse_failure"], false);
+            assert_eq!(v["cause"], "ok");
             assert_eq!(v["attempts"], 1);
 
             let defaulted = build_verdict_parse_context(
                 BrainPhase::MergeJudge,
                 "pr-9",
                 LifecycleParseOutcome::DefaultMalformed,
+                LadderTermination::Exhausted.cause_label(),
                 3,
             );
             let v2: serde_json::Value = serde_json::from_str(&defaulted).unwrap();
@@ -3865,6 +3985,8 @@ mod tests {
             assert_eq!(v2["outcome"], "defaulted");
             assert_eq!(v2["is_parse_failure"], true);
             assert_eq!(v2["outcome_detail"], "default_malformed");
+            // issue #2496: a defaulted row attributes the default to its cause.
+            assert_eq!(v2["cause"], "ladder_exhausted");
 
             // A ladder recovery counts as parsed — that is how the ladder drops
             // the measured default rate.
@@ -3872,11 +3994,13 @@ mod tests {
                 BrainPhase::Orient,
                 "g",
                 LifecycleParseOutcome::Repaired,
+                LadderTermination::Recovered.cause_label(),
                 2,
             );
             let v3: serde_json::Value = serde_json::from_str(&repaired).unwrap();
             assert_eq!(v3["outcome"], "parsed");
             assert_eq!(v3["outcome_detail"], "repaired");
+            assert_eq!(v3["cause"], "ladder_recovered");
         }
 
         // --- generic ladder backbone for an ARBITRARY decision type -------
@@ -3926,5 +4050,195 @@ mod tests {
             assert_eq!(attempts, 3, "base + 2 exhausted rungs");
             assert_eq!(term, LadderTermination::Exhausted);
         }
+    }
+}
+
+/// Issue #2496: the production-deadlock regression cluster. The Copilot CLI
+/// `1.0.66-2` launch-log preamble (now stripped at the shared `recipe_output`
+/// chokepoint) must not shadow the decide/orient first-word/first-float token,
+/// and a parse-failure default must attribute to its `LadderTermination` cause
+/// — distinct from a genuine decision.
+#[cfg(test)]
+mod issue_2496_decide_orient_launcher_tests {
+    use super::*;
+
+    const ESC: char = '\u{1b}';
+
+    /// A real Copilot CLI `1.0.66-2` launch-log preamble (ANSI-coloured) wrapped
+    /// around `answer`, exactly as captured in the recipe envelope's
+    /// `step_results[].output`.
+    fn noisy_capture(answer: &str) -> String {
+        format!(
+            "{ESC}[2m\u{2139}{ESC}[0m NODE_OPTIONS=--max-old-space-size=32768 \
+             (saved preference). To change: /home/azureuser/.amplihack/config\n\
+             {ESC}[34mINFO{ESC}[0m launching copilot \
+             binary=/home/azureuser/.npm-global/bin/copilot \
+             version=\"GitHub Copilot CLI 1.0.66-2.\"\n\
+             Run 'copilot update' to check for updates.\n\
+             {answer}"
+        )
+    }
+
+    #[test]
+    fn decide_parses_real_action_behind_launcher_preamble() {
+        let raw = noisy_capture("run_improvement The brain-parse deadlock fix is ready.");
+        let (decision, outcome) = parse_action_outcome(&raw);
+        assert_eq!(
+            outcome,
+            LifecycleParseOutcome::Parsed,
+            "launcher preamble must not force the default_malformed miss"
+        );
+        assert!(
+            matches!(decision, DecideJudgment::RunImprovement { .. }),
+            "the model's real action must be read, not launcher noise"
+        );
+    }
+
+    #[test]
+    fn orient_reads_real_urgency_not_the_version_string() {
+        // base_urgency 0.80; the model's real urgency is 0.42. The version
+        // string `1.0.66-2` is on a dropped launcher line, so it can never be
+        // mined as the urgency float ahead of the model's judgment.
+        let raw = noisy_capture("0.42 demoting slightly after one failure.");
+        let (judgment, outcome) = parse_orient_outcome(&raw, 0.80, 1);
+        assert_eq!(outcome, LifecycleParseOutcome::Parsed);
+        assert!(
+            (judgment.adjusted_urgency - 0.42).abs() < 1e-9,
+            "must read the model's 0.42, got {}",
+            judgment.adjusted_urgency
+        );
+    }
+
+    #[test]
+    fn all_goals_default_malformed_stall_no_longer_reproduces() {
+        // The production deadlock: the SAME noisy capture across a batch of
+        // active goals previously misparsed to `default_malformed` for EVERY
+        // goal, exhausting the ladder and spawning zero engineers. With launcher
+        // stripping, each goal's real decision now parses.
+        let goals = [
+            ("g-1", "run_improvement fix the flaky test"),
+            ("g-2", "advance_goal open the next PR"),
+            ("g-3", "consolidate_memory distil the last episode"),
+            ("g-4", "launch_session start the engineer"),
+        ];
+        for (goal, answer) in goals {
+            let raw = noisy_capture(answer);
+            let (_decision, outcome) = parse_action_outcome(&raw);
+            assert_eq!(
+                outcome,
+                LifecycleParseOutcome::Parsed,
+                "goal {goal} must parse its real decision, not stall on default_malformed"
+            );
+        }
+    }
+
+    /// End-to-end production-flow regression (#2432/#2496): the Copilot launch-log
+    /// preamble arrives INSIDE the recipe-runner-rs JSON envelope's terminal
+    /// `step_results[].output` (the captured agent stdout), exactly as the daemon
+    /// receives it. Decoding the envelope via [`extract_recipe_decision_output`]
+    /// and then parsing that output must recover the model's real decision — the
+    /// full path that deadlocked in production, not merely the inner parse helper.
+    #[test]
+    fn decide_recovers_real_action_through_full_envelope_with_preamble() {
+        let noisy = noisy_capture("run_improvement the brain-parse deadlock fix is ready");
+        let envelope = serde_json::json!({
+            "success": true,
+            "step_results": [
+                {"step_id": "decide-action", "output": noisy, "error": "", "duration": 0.0}
+            ]
+        })
+        .to_string();
+        let extracted =
+            extract_recipe_decision_output(envelope.as_bytes(), DECIDE_ADAPTER_TAG).unwrap();
+        let (decision, outcome) = parse_action_outcome(&extracted);
+        assert_eq!(
+            outcome,
+            LifecycleParseOutcome::Parsed,
+            "the preamble inside the envelope step output must not force a default_malformed miss"
+        );
+        assert!(
+            matches!(decision, DecideJudgment::RunImprovement { .. }),
+            "the model's real action must survive the full envelope→clean→parse path"
+        );
+    }
+
+    /// Orient counterpart of the full-envelope regression. With `base_urgency`
+    /// at the ceiling (1.0), the version string's `1.0` token IS in range and
+    /// `<= base_urgency`, so without launcher stripping the orient first-float
+    /// scanner scrapes `1.0` from `GitHub Copilot CLI 1.0.66-2` and silently
+    /// overrides the model's real demotion decision (0.42) with "no demotion".
+    /// Stripping the launcher line is what lets the real 0.42 be read — this is
+    /// the exact orient half of the #2496 version-string-scraping deadlock.
+    #[test]
+    fn orient_recovers_real_urgency_through_full_envelope_with_preamble() {
+        let noisy = noisy_capture("0.42 demote sharply after one transient failure");
+        let envelope = serde_json::json!({
+            "success": true,
+            "step_results": [
+                {"step_id": "orient-decision", "output": noisy, "error": "", "duration": 0.0}
+            ]
+        })
+        .to_string();
+        let extracted =
+            extract_recipe_decision_output(envelope.as_bytes(), ORIENT_ADAPTER_TAG).unwrap();
+        let (judgment, outcome) = parse_orient_outcome(&extracted, 1.0, 1);
+        assert_eq!(outcome, LifecycleParseOutcome::Parsed);
+        assert!(
+            (judgment.adjusted_urgency - 0.42).abs() < 1e-9,
+            "must read the model's 0.42 through the full envelope path, not the version \
+             string's 1.0; got {}",
+            judgment.adjusted_urgency
+        );
+    }
+
+    #[test]
+    fn launcher_only_capture_is_a_distinct_parse_failure() {
+        // A capture that is ONLY the launcher preamble (the model produced no
+        // answer) must still classify as a parse failure — the loud, attributable
+        // default, never a silent success masquerading as a real "no action".
+        let raw = noisy_capture("");
+        let (_decision, outcome) = parse_action_outcome(&raw);
+        assert!(
+            outcome.is_parse_failure(),
+            "an answer-less launcher capture is a parse failure, not a real decision"
+        );
+    }
+
+    #[test]
+    fn parse_failure_default_carries_its_termination_cause() {
+        // The decide/orient `cause` wiring: a parse-failure default attributes to
+        // its `LadderTermination`, distinct from a genuine decision (`ok`).
+        let exhausted = build_verdict_parse_context(
+            BrainPhase::Decide,
+            "g",
+            LifecycleParseOutcome::DefaultMalformed,
+            LadderTermination::Exhausted.cause_label(),
+            3,
+        );
+        let v: serde_json::Value = serde_json::from_str(&exhausted).unwrap();
+        assert_eq!(v["is_parse_failure"], true);
+        assert_eq!(v["cause"], "ladder_exhausted");
+
+        let invoke_err = build_verdict_parse_context(
+            BrainPhase::Orient,
+            "g",
+            LifecycleParseOutcome::DefaultMalformed,
+            LadderTermination::InvokeError.cause_label(),
+            2,
+        );
+        let v2: serde_json::Value = serde_json::from_str(&invoke_err).unwrap();
+        assert_eq!(v2["cause"], "ladder_invoke_error");
+
+        // A genuine parsed decision is tagged `ok`, never a ladder cause.
+        let parsed = build_verdict_parse_context(
+            BrainPhase::Decide,
+            "g",
+            LifecycleParseOutcome::Parsed,
+            "ok",
+            1,
+        );
+        let v3: serde_json::Value = serde_json::from_str(&parsed).unwrap();
+        assert_eq!(v3["is_parse_failure"], false);
+        assert_eq!(v3["cause"], "ok");
     }
 }
