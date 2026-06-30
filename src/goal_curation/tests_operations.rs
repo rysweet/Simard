@@ -1662,6 +1662,7 @@ fn archive_completed_also_archives_in_progress_100() {
 
 #[cfg(unix)]
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn board_lock_path_resolves_under_state_root_state_dir() {
     let _env = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let root = tmp_state_root("board-lock-path");
@@ -1675,6 +1676,7 @@ fn board_lock_path_resolves_under_state_root_state_dir() {
 
 #[cfg(unix)]
 #[test]
+#[serial_test::serial(cognitive_memory)]
 fn board_write_lock_serializes_independent_acquirers() {
     use std::sync::mpsc;
     use std::time::Duration;
