@@ -110,6 +110,12 @@ pub mod self_deploy;
 pub mod self_improve;
 pub mod self_improve_executor;
 pub mod self_metrics;
+// Goal (#2419): recurring monthly self-quality-audit periodic task — a pure
+// recipe invoker (mirrors `disk_health`) with disk-backed last-run persistence
+// so the ~30-day cadence survives daemon restarts.
+pub mod self_quality_audit;
+#[cfg(test)]
+mod self_quality_audit_tests;
 pub mod self_relaunch;
 pub mod self_relaunch_semaphore;
 pub mod session;

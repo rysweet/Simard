@@ -1,0 +1,152 @@
+# monthly-self-quality-audit.yaml — Agent-based recurring monthly
+# self-quality-audit of Simard's OWN code (issue #2419).
+#
+# Invoked by src/self_quality_audit.rs via recipe-runner-rs on its own daemon
+# interval (SIMARD_SELF_AUDIT_INTERVAL, default 2592000s ≈ 30 days). The Rust
+# hook owns the interval gate, disk-backed last-run persistence, subprocess
+# spawn, marker parsing, and logging. This recipe owns all LLM judgment: the
+# five SEEK→VALIDATE→FIX quality-audit waves, the bounded crusty-old-engineer
+# proxy-review loop, and the self-merge decisions.
+#
+# Context vars (passed via -c):
+#   state_root — path to ~/.simard (logs, metrics, memory live here)
+#   repo_path  — repository root of the local rysweet/Simard checkout
+#
+# Output: text markers to stdout (one per line), parsed by
+# `parse_self_quality_audit_text` in src/self_quality_audit.rs:
+#   AUDIT_STARTED                 (advisory)
+#   WAVE_START=<n>                (advisory; one per wave started, n = 1..5)
+#   WAVE_COMPLETE=<n>             (one per wave that finished; counted)
+#   PR_OPENED=<url>               (0..n; one per PR opened by a wave)
+#   CRUSTY_APPROVED=<url>         (0..n; one per PR crusty approved)
+#   CRUSTY_UNRESOLVED=<url>       (0..n; PR still unsatisfied after 3 rounds)
+#   PR_MERGED=<url>               (0..n; one per PR self-merged)
+#   AUDIT_COMPLETE=<summary>      (REQUIRED terminal marker, non-empty)
+#
+# Design: a single orchestrating agent step (mirrors disk-health-check.yaml and
+# brain-introspection.yaml). The agent invokes the amplihack `quality-audit` and
+# `crusty-old-engineer` skills and uses bash + gh tools to review and merge.
+# Per the no-point-in-time-docs rule, this audit NEVER writes a committed
+# snapshot markdown file — all findings live in the PRs it opens.
+
+name: "monthly-self-quality-audit"
+description: "Recurring monthly 5-wave, crusty-gated self-quality-audit of Simard's own code"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "quality-audit", "self-improvement", "crusty", "maintenance"]
+
+context:
+  state_root: "~/.simard"
+  repo_path: "/home/azureuser/src/Simard/worktrees/main"
+
+steps:
+  - id: "self-quality-audit"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are Simard's **monthly self-quality-audit** orchestrator. On a ~30-day
+      cadence you run a five-wave quality audit of Simard's OWN codebase
+      (`rysweet/Simard`), then get every resulting pull request reviewed by the
+      `crusty-old-engineer` skill acting as operator **Ryan's proxy reviewer**,
+      and self-merge the PRs that are both crusty-approved and CI-green.
+
+      You have the Skill tool (to invoke `quality-audit` and
+      `crusty-old-engineer`) plus bash + `gh` tools. Work autonomously — do not
+      ask for confirmation between steps.
+
+      ## Context
+
+      - repo_path: `{{repo_path}}` — local checkout of `rysweet/Simard`. Run all
+        git/gh/build/test commands from here.
+      - state_root: `{{state_root}}` — logs and metrics.
+      - target repository (for `gh`): `rysweet/Simard`.
+
+      ## Procedure
+
+      Print `AUDIT_STARTED` as the very first marker line.
+
+      ### Five SEEK→VALIDATE→FIX waves
+
+      Run **five** sequential quality-audit waves. Before each wave print
+      `WAVE_START=<n>` (n = 1..5). For each wave:
+
+      1. Invoke the amplihack **`quality-audit`** skill against `rysweet/Simard`
+         to perform one SEEK → VALIDATE → FIX pass:
+         - **SEEK**: scan Simard's own code for the highest-value quality issue
+           not already covered by an open PR (correctness bugs, silent error
+           degradation, missing tests, clippy/lint debt, dead code, unsafe
+           patterns, doc drift). Skip issues an earlier wave this run already
+           addressed.
+         - **VALIDATE**: confirm the issue is real and worth fixing (reproduce
+           it, or point to the exact code path).
+         - **FIX**: implement the fix on a NEW branch, keep `cargo fmt` +
+           `cargo clippy` clean and `cargo build` + `cargo test` green, then open
+           a pull request against `rysweet/Simard`.
+      2. If the wave opens a PR, print `PR_OPENED=<full PR url>` (one line per PR
+         opened). A wave that legitimately finds nothing to fix opens no PR —
+         that is fine.
+      3. After the wave finishes (whether or not it opened a PR) print
+         `WAVE_COMPLETE=<n>`.
+
+      Each wave targets a DIFFERENT issue — never re-open a fix for something an
+      earlier wave (or an already-open PR) handled.
+
+      ### Crusty proxy review + self-merge (per PR)
+
+      For **each** PR opened above (`PR_OPENED` list), run a bounded proxy-review
+      loop. Crusty is Ryan's stand-in reviewer: nothing merges until crusty is
+      satisfied.
+
+      Loop up to **3 rounds** per PR:
+
+      1. Invoke the **`crusty-old-engineer`** skill on the PR's diff as operator
+         Ryan's proxy reviewer. Ask for a clear verdict: satisfied, or a concrete
+         list of required changes.
+      2. If crusty is **satisfied**: print `CRUSTY_APPROVED=<pr url>` and exit the
+         loop for this PR.
+      3. If crusty is **not satisfied**: address every required change on the PR
+         branch (keep fmt/clippy/build/tests green, push), then start the next
+         round.
+      4. If still unsatisfied after 3 rounds: print `CRUSTY_UNRESOLVED=<pr url>`,
+         leave the PR **open** for human follow-up, and move on. Do NOT merge it.
+
+      After a PR earns `CRUSTY_APPROVED`, self-merge it **only if** CI is green:
+
+      - Check CI: `gh pr checks <pr url> --repo rysweet/Simard`. Wait briefly and
+        re-check if runs are still pending; if checks remain failing, treat the
+        PR like an unresolved one (leave it open, do not merge).
+      - Merge (respecting branch protection):
+        `gh pr merge <pr url> --repo rysweet/Simard --squash --delete-branch`.
+      - On a successful merge print `PR_MERGED=<pr url>`.
+
+      Never merge a PR that is not crusty-approved, and never merge a PR whose CI
+      is not green. Respect branch protection — if a required check or approval is
+      missing, leave the PR open rather than forcing the merge.
+
+      ### No snapshot docs
+
+      Do NOT create any point-in-time / snapshot markdown file summarizing this
+      run. All findings and fixes live in the PRs. (Durable reference/how-to docs
+      that a fix legitimately needs may be updated inside that fix's PR.)
+
+      ## Required output markers
+
+      Your FINAL output must contain these plain-text markers, each on its own
+      line (printed as plain text, NOT inside code fences). Any other line is
+      ignored by the Rust shim (`parse_self_quality_audit_text`).
+
+      ```
+      AUDIT_STARTED
+      WAVE_START=<n>                # one per wave started (n = 1..5)
+      WAVE_COMPLETE=<n>             # one per wave finished (counted into waves)
+      PR_OPENED=<url>               # one per PR opened
+      CRUSTY_APPROVED=<url>         # one per PR crusty approved
+      CRUSTY_UNRESOLVED=<url>       # one per PR still unsatisfied after 3 rounds
+      PR_MERGED=<url>               # one per PR self-merged
+      AUDIT_COMPLETE=<one-line summary>   # REQUIRED, non-empty terminal marker
+      ```
+
+      `AUDIT_COMPLETE=` is REQUIRED and must carry a non-empty one-line summary
+      (e.g. `AUDIT_COMPLETE=5 waves run; 3 PRs opened, 2 merged, 1 crusty-unresolved`).
+      Without it the daemon rejects the run. Emit it exactly once, last.
+    output: "self_quality_audit_report"
