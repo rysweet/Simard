@@ -29,6 +29,7 @@ use std::process::Command;
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::CognitiveEpisode;
+use crate::memory_consolidation::raw_capture;
 
 /// Maximum number of episodes pulled per distillation pass.
 pub const DISTILL_BATCH_SIZE: u32 = 50;
@@ -116,6 +117,23 @@ pub struct DistillOutput {
     pub procedures: Vec<DistilledProcedure>,
 }
 
+/// Outcome of a single **capturing** runner invocation
+/// ([`DistillRecipeRunner::run_all_reinforced_capturing`]): the parse result
+/// plus, on a failure that produced recipe stdout, the raw pre-extraction bytes
+/// so the caller can harvest a real currently-failing sample (Wave 1
+/// raw-capture, 2026-07-02 operator-review priority 1).
+pub struct DistillAttemptOutcome {
+    /// The parse result — identical to what [`run_all_reinforced`] returns.
+    ///
+    /// [`run_all_reinforced`]: DistillRecipeRunner::run_all_reinforced
+    pub result: SimardResult<DistillOutput>,
+    /// The raw recipe stdout **exactly as the extractor received it**, present
+    /// only when the runner actually produced stdout AND parsing failed. `None`
+    /// for stub runners with no stdout and for spawn/terminal failures (which
+    /// never yielded a parseable step output to harvest).
+    pub raw_on_failure: Option<String>,
+}
+
 /// Pluggable LLM-side runner for the distillation recipe.
 ///
 /// The trait exists so tests can substitute a deterministic stub.
@@ -155,6 +173,32 @@ pub trait DistillRecipeRunner {
     ) -> SimardResult<DistillOutput> {
         let _ = strict_json;
         self.run_all(episodes)
+    }
+
+    /// Like [`run_all_reinforced`](Self::run_all_reinforced), but on failure ALSO
+    /// surfaces the raw pre-extraction recipe stdout so the caller can harvest a
+    /// real currently-failing sample (Wave 1 raw-capture).
+    ///
+    /// The default delegates to [`run_all_reinforced`](Self::run_all_reinforced)
+    /// and supplies no raw (`raw_on_failure = None`), so stub/fact-only runners
+    /// keep working unchanged. Only [`RecipeRunnerSubprocess`] overrides it to
+    /// thread the full stdout through — it is the only runner that HAS the bytes
+    /// the diagnostic exists to capture.
+    ///
+    /// NOTE for future runners: `run_all_reinforced` and this method must not be
+    /// left to delegate to *each other*. `RecipeRunnerSubprocess` overrides BOTH
+    /// (its `run_all_reinforced` calls this method, which does the real work). A
+    /// runner that overrides ONLY `run_all_reinforced` to call back into this
+    /// default would recurse infinitely — override both, or neither.
+    fn run_all_reinforced_capturing(
+        &self,
+        episodes: &[CognitiveEpisode],
+        strict_json: bool,
+    ) -> DistillAttemptOutcome {
+        DistillAttemptOutcome {
+            result: self.run_all_reinforced(episodes, strict_json),
+            raw_on_failure: None,
+        }
     }
 }
 
@@ -279,7 +323,11 @@ pub fn distill_recent_episodes_with_runner(
         attempt += 1;
         // Reinforce the response format on any attempt past the first.
         let strict_json = attempt > 1;
-        match runner.run_all_reinforced(&episodes, strict_json) {
+        let DistillAttemptOutcome {
+            result,
+            raw_on_failure,
+        } = runner.run_all_reinforced_capturing(&episodes, strict_json);
+        match result {
             Ok(o) => break o,
             Err(e) => {
                 let class = classify_distill_error(&e);
@@ -316,6 +364,27 @@ pub fn distill_recent_episodes_with_runner(
                 // metric distinguish a first-attempt failure from an exhausted
                 // retry; a failed pass never "recovered".
                 record_distill_success_metric(false, Some(class), pulled, 0, attempt, false);
+                // Wave 1 (2026-07-02 operator-review priority 1): env-gated,
+                // default-off raw-capture of a SURVIVING parse failure so a real
+                // currently-failing sample can be harvested into a regression
+                // test. `capture_parse_failure` self-gates to the toggle AND to
+                // `failure_class == "parse-failure"`, so calling it on every
+                // escalation is safe — a spawn/terminal/serialize failure writes
+                // nothing. When the runner surfaced the raw stdout we capture it
+                // verbatim ("exactly as the extractor received it"); otherwise
+                // (stub runners with no stdout) we fall back to the classified
+                // error string. Best-effort: a capture error never escalates.
+                let cfg = raw_capture::RawCaptureConfig::from_env();
+                let raw_for_capture = raw_on_failure.unwrap_or_else(|| e.to_string());
+                let meta = raw_capture::CaptureMeta {
+                    failure_class: class.as_str(),
+                    recipe_exited_ok: class.recipe_exited_ok(),
+                    attempt,
+                    recovered_after_retry: false,
+                    input_count: pulled,
+                    fact_count: 0,
+                };
+                let _ = raw_capture::capture_parse_failure(&cfg, &meta, &raw_for_capture);
                 return Err(e);
             }
         }
@@ -944,10 +1013,38 @@ impl DistillRecipeRunner for RecipeRunnerSubprocess {
         // Issue #2468: on a retry (`strict_json = true`) thread a non-empty
         // `strict_json_instruction` context var into the recipe so the agent
         // reply is reinforced to be ONLY the `{ "facts": [...] }` object.
-        let raw = self.invoke_recipe(episodes, strict_json)?;
+        //
+        // Delegates to the capturing variant so the parse + metric logic lives in
+        // exactly one place; the harvested raw is simply dropped here.
+        self.run_all_reinforced_capturing(episodes, strict_json)
+            .result
+    }
+
+    fn run_all_reinforced_capturing(
+        &self,
+        episodes: &[CognitiveEpisode],
+        strict_json: bool,
+    ) -> DistillAttemptOutcome {
+        // A spawn/terminal failure never produced parseable stdout, so there is
+        // nothing to harvest — surface the error with no raw.
+        let raw = match self.invoke_recipe(episodes, strict_json) {
+            Ok(raw) => raw,
+            Err(e) => {
+                return DistillAttemptOutcome {
+                    result: Err(e),
+                    raw_on_failure: None,
+                };
+            }
+        };
         let parsed = parse_recipe_output_full(&raw);
         crate::recipe_output::record_parse_outcome("distill", parsed.is_ok());
-        parsed
+        // On a parse failure keep the exact bytes the extractor saw so Wave 1
+        // raw-capture can persist a real currently-failing sample.
+        let raw_on_failure = if parsed.is_err() { Some(raw) } else { None };
+        DistillAttemptOutcome {
+            result: parsed,
+            raw_on_failure,
+        }
     }
 }
 
