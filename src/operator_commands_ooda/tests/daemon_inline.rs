@@ -43,10 +43,14 @@ fn test_exe_mtime_returns_some() {
 }
 
 #[test]
-fn test_binary_changed_true_for_epoch() {
-    // If start_time is UNIX_EPOCH, the binary is certainly newer.
+fn test_binary_changed_false_for_epoch_identical_content() {
+    // Content-identity gate (2026-07-02 operator-review #2): even though an
+    // epoch start_time trips the mtime pre-filter, the on-disk binary is the
+    // running test binary (identical content), so no relaunch. The prior
+    // mtime-only check asserted `true` here — that was the self-restart churn
+    // bug this gate fixes.
     let epoch = SystemTime::UNIX_EPOCH;
-    assert!(binary_changed(epoch));
+    assert!(!binary_changed(epoch));
 }
 
 #[test]

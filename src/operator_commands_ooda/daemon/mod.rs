@@ -379,6 +379,17 @@ pub fn run_ooda_daemon(
     // Capture the binary mtime at startup so we can detect in-place upgrades.
     let start_time = exe_mtime().unwrap_or_else(SystemTime::now);
 
+    // Pin the running image's CONTENT hash at startup too. The reload gate
+    // (`binary_changed`) now relaunches only when the on-disk image is a
+    // genuinely different binary — not on a byte-identical rebuild that merely
+    // bumped the mtime, which was the ~40–45 min self-restart churn trigger
+    // (2026-07-02 operator-review #2; see
+    // docs/reference/ooda-binary-identity-reload-gate.md). Pinning it here
+    // (rather than lazily on the first check) closes the window where an
+    // in-place replace between exec and the first cycle could be mistaken for
+    // the running image.
+    capture_running_image_hash();
+
     if auto_reload {
         daemon_log(&state_root, "[simard] OODA daemon: auto-reload enabled");
     }
@@ -473,9 +484,14 @@ pub fn run_ooda_daemon(
             break;
         }
 
-        // Auto-reload: if the on-disk binary is newer, exec into it.
+        // Auto-reload: if the on-disk binary is a genuinely different image
+        // (content hash differs from the running one), exec into it.
         #[cfg(unix)]
         if auto_reload && binary_changed(start_time) {
+            daemon_log(
+                &state_root,
+                "[simard] OODA daemon: on-disk binary is a genuinely different image (content hash changed) — reloading via exec()",
+            );
             // Close the LLM session before exec so we don't leak resources.
             if let Some(ref mut session) = bridges.session {
                 let _ = session.close();

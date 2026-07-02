@@ -134,6 +134,7 @@ nav:
     - Dependency Trust Policy: reference/dependency-trust-policy.md
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
     - Recipe-brain Verdict/Decision Parsing: reference/recipe-brain-verdict-parsing.md
+    - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
     # Hidden from nav until issue #1590 implementation lands:
     #   - reference/cognitive-memory-bridge-helpers.md
     #   - reference/goal-board-api.md
