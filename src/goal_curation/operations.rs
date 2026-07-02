@@ -147,6 +147,117 @@ pub fn simard_state_root() -> std::path::PathBuf {
     crate::state_root::simard_state_root()
 }
 
+/// Filename of the cross-process advisory lock that serializes the goal-board
+/// read-merge-write window across independent OS processes (issue
+/// [#2511](https://github.com/rysweet/Simard/issues/2511)).
+#[cfg(unix)]
+const BOARD_WRITE_LOCK_FILE: &str = "goal-board.lock";
+
+/// Resolve the path of the cross-process goal-board write lock.
+///
+/// Co-located with the canonical goal store under `<state_root>/state/` (see
+/// [`crate::state_root::goal_store_path`]) so every process that resolves the
+/// same `SIMARD_STATE_ROOT` rendezvouses on the same lock file. Both the OODA
+/// daemon and the `simard goal` CLI resolve their state root through
+/// [`simard_state_root`], so they agree on this path.
+#[cfg(unix)]
+pub(super) fn board_lock_path() -> std::path::PathBuf {
+    crate::state_root::simard_state_root()
+        .join("state")
+        .join(BOARD_WRITE_LOCK_FILE)
+}
+
+/// RAII guard holding an exclusive `flock` over [`board_lock_path`] for the
+/// duration of a goal-board read-merge-write sequence.
+///
+/// [`save_goal_board`] already serializes *in-process* writers via
+/// [`SAVE_GOAL_BOARD_MUTEX`] and merge-on-write (issue #1915), but that mutex
+/// is process-local. The `simard goal add/remove` CLI runs in a *separate
+/// process* from the OODA daemon, so the daemon's snapshot flush could land
+/// between the CLI's snapshot read and its `store_fact`, silently clobbering
+/// the just-added goal even though the CLI exited 0 (issue #2511). An advisory
+/// `flock` on a shared file closes that cross-process window: the daemon's and
+/// the CLI's read-merge-write sequences can no longer interleave.
+///
+/// Acquisition is **best-effort**: any filesystem error (unwritable state dir,
+/// open/lock failure) is logged at `debug` and the caller proceeds *unlocked*
+/// rather than failing the save. This preserves the existing fail-open
+/// availability contract — the lock can only *prevent* the race, never
+/// introduce a new way for goal persistence to error out. `flock` locks are
+/// released automatically by the kernel on FD close or process death, so a
+/// crashed holder never wedges the board.
+#[cfg(unix)]
+pub(super) struct BoardWriteLock {
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl BoardWriteLock {
+    /// Best-effort acquire an exclusive (blocking) lock. Returns `None` (after
+    /// logging at `debug`) when the lock file cannot be opened or locked.
+    pub(super) fn acquire() -> Option<Self> {
+        use std::os::unix::io::AsRawFd;
+
+        let path = board_lock_path();
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            debug!(
+                lock = "goal-board",
+                error = %e,
+                "BoardWriteLock: create lock dir failed; proceeding unlocked"
+            );
+            return None;
+        }
+
+        let file = match std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                debug!(
+                    lock = "goal-board",
+                    error = %e,
+                    "BoardWriteLock: open lock file failed; proceeding unlocked"
+                );
+                return None;
+            }
+        };
+
+        // Blocking exclusive lock. The guarded critical section (one snapshot
+        // read + one merge + one store_fact) is short, so contention resolves
+        // in milliseconds. flock treats independent open descriptions as
+        // mutually exclusive even within one process, so this serializes the
+        // daemon and CLI processes alike.
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if ret != 0 {
+            debug!(
+                lock = "goal-board",
+                error = %std::io::Error::last_os_error(),
+                "BoardWriteLock: flock(LOCK_EX) failed; proceeding unlocked"
+            );
+            return None;
+        }
+
+        Some(Self { file })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for BoardWriteLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // Best-effort unlock; the kernel also releases the lock when `file`
+        // drops (FD close) immediately after, so a failure here is benign.
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
 /// Returns `Some(reason)` if the board contains obviously corrupt or
 /// placeholder goals that should not be accepted as valid loaded state.
 ///
@@ -474,6 +585,18 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
+    // Cross-process serialization for the read-merge-write window (#2511).
+    // Held for the remainder of the function so the daemon's snapshot flush
+    // and a concurrent `simard goal` CLI mutation cannot interleave (the
+    // in-process mutex above only covers threads of this process). Skipped
+    // under `cfg(test)`: unit tests run single-process (already serialized by
+    // the mutex) and resolve `simard_state_root()` from a parallel-mutated env
+    // var, which would be non-deterministic at this call site (the reason the
+    // hermetic guard was removed here, PR #2017). Production and integration
+    // builds acquire the real lock.
+    #[cfg(all(unix, not(test)))]
+    let _board_lock = BoardWriteLock::acquire();
+
     // Step 2: read latest persisted snapshot (None on any failure).
     let persisted = read_latest_snapshot(bridge);
 
@@ -566,6 +689,12 @@ pub fn save_goal_board_with_removals(
     let _critical = SAVE_GOAL_BOARD_MUTEX
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    // Cross-process serialization for the read-merge-filter-write window
+    // (#2511) — see the note in `save_goal_board`. Held for the remainder of
+    // the function. Gated out of unit-test builds for the same reason.
+    #[cfg(all(unix, not(test)))]
+    let _board_lock = BoardWriteLock::acquire();
 
     let persisted = read_latest_snapshot(bridge);
     let mut merged = match persisted {

@@ -1648,3 +1648,82 @@ fn archive_completed_also_archives_in_progress_100() {
     assert_eq!(archived[0].id, "done-goal");
     assert_eq!(board.active.len(), 1, "only wip-goal should remain");
 }
+
+// ── BoardWriteLock: cross-process write-lock primitive (issue #2511) ─────
+//
+// `save_goal_board` / `save_goal_board_with_removals` hold an in-process
+// `SAVE_GOAL_BOARD_MUTEX` plus this advisory `flock` so the OODA daemon and a
+// separate `simard goal` CLI process cannot interleave their read-merge-write
+// windows. We test the lock primitive directly: `flock(2)` treats two
+// independent open descriptions as mutually exclusive *even within one
+// process*, so two threads each calling `acquire()` (each opening its own FD)
+// faithfully model the cross-process daemon/CLI race the integrated lock
+// guards against.
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn board_lock_path_resolves_under_state_root_state_dir() {
+    let _env = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let root = tmp_state_root("board-lock-path");
+    // SAFETY: serialised by ENV_MUTEX.
+    unsafe { std::env::set_var("SIMARD_STATE_ROOT", &root) };
+    let path = super::operations::board_lock_path();
+    // SAFETY: serialised by ENV_MUTEX.
+    unsafe { std::env::remove_var("SIMARD_STATE_ROOT") };
+    assert_eq!(path, root.join("state").join("goal-board.lock"));
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn board_write_lock_serializes_independent_acquirers() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    // Pin a hermetic state root for the whole test so `board_lock_path()`
+    // resolves under a tempdir, not the operator's ~/.simard. Hold ENV_MUTEX
+    // for the duration (mirrors the #1915 concurrency test).
+    let _env = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let root = tmp_state_root("board-write-lock");
+    // SAFETY: serialised by ENV_MUTEX.
+    unsafe { std::env::set_var("SIMARD_STATE_ROOT", &root) };
+    struct EnvRestore;
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            // SAFETY: serialised by ENV_MUTEX.
+            unsafe { std::env::remove_var("SIMARD_STATE_ROOT") };
+        }
+    }
+    let _restore = EnvRestore;
+
+    // Acquire the first lock in this thread and hold it.
+    let first = super::operations::BoardWriteLock::acquire()
+        .expect("first lock acquisition should succeed");
+
+    // A second, independent acquisition (its own FD, simulating a separate
+    // process) must BLOCK until `first` is dropped.
+    let (tx, rx) = mpsc::channel::<()>();
+    let handle = std::thread::spawn(move || {
+        let _second = super::operations::BoardWriteLock::acquire()
+            .expect("second lock acquisition should eventually succeed");
+        // Signal acquisition, then hold the lock until the receiver has
+        // observed the signal (the guard drops at end of scope).
+        tx.send(()).ok();
+    });
+
+    // While we still hold `first`, the second acquirer must not make progress.
+    assert!(
+        rx.recv_timeout(Duration::from_millis(250)).is_err(),
+        "second acquirer must block while the first lock is held (#2511)"
+    );
+
+    // Release the first lock; the second acquirer can now proceed.
+    drop(first);
+    assert!(
+        rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "second acquirer must obtain the lock once the first is released"
+    );
+
+    handle.join().expect("lock thread should join cleanly");
+}
