@@ -110,8 +110,36 @@ impl RecursionGuard {
         }
     }
 
-    /// Convenience: refuse acting on own work with a typed error.
+    /// True only when every identity field is populated. A guard missing any
+    /// field cannot reliably recognise its own artifacts, so `admit` must fail
+    /// CLOSED (see below) rather than silently wave work through.
+    pub fn is_configured(&self) -> bool {
+        !self.author_login.is_empty()
+            && !self.branch_prefix.is_empty()
+            && !self.goal_source_tag.is_empty()
+    }
+
+    /// Gate acting on a subject. Fails **CLOSED** (crusty risk #3): when the
+    /// identity needed to classify `subject` is unconfigured, REFUSE rather than
+    /// allow — an anti-recursion guard that disables itself when misconfigured is
+    /// worse than none. PR/commit subjects require `author_login`; branch
+    /// subjects require `branch_prefix`; goal subjects require `goal_source_tag`.
+    /// When configured, refuse only the Overseer's OWN work (`is_own`).
+    ///
+    /// The Overseer must run under a DISTINCT identity (never the human
+    /// operator's login), so a correctly-configured guard admits the operator's
+    /// PRs while still refusing its own.
     pub fn admit(&self, subject: &Subject) -> Result<(), OverseerError> {
+        let unconfigured = match subject {
+            Subject::Pr { .. } | Subject::Commit { .. } => self.author_login.is_empty(),
+            Subject::Branch { .. } => self.branch_prefix.is_empty(),
+            Subject::Goal { .. } => self.goal_source_tag.is_empty(),
+        };
+        if unconfigured {
+            return Err(OverseerError::Recursion {
+                subject: format!("unconfigured-identity: {subject:?}"),
+            });
+        }
         if self.is_own(subject) {
             Err(OverseerError::Recursion {
                 subject: format!("{subject:?}"),
@@ -134,14 +162,27 @@ pub struct BudgetGate {
 
 impl Default for BudgetGate {
     fn default() -> Self {
-        // Mirrors the OODA loop's default daily budget.
-        Self {
-            daily_budget_usd: 500.0,
-        }
+        // Single-sourced from `SIMARD_DAILY_BUDGET_USD` (crusty risk #6): the
+        // Overseer's ceiling can never drift from the OODA loop's. The 500.0
+        // fallback lives in one place — `config::resolve_daily_budget_usd`.
+        Self::from_env()
     }
 }
 
 impl BudgetGate {
+    /// Construct from the single-sourced `SIMARD_DAILY_BUDGET_USD` env knob.
+    pub fn from_env() -> Self {
+        Self {
+            daily_budget_usd: crate::overseer::config::daily_budget_usd(),
+        }
+    }
+
+    /// Construct with an explicit ceiling (used by callers that already resolved
+    /// the budget, and by tests).
+    pub fn with_budget(daily_budget_usd: f64) -> Self {
+        Self { daily_budget_usd }
+    }
+
     pub fn admit(&self, spent_today_usd: f64) -> Result<(), OverseerError> {
         if self.daily_budget_usd > 0.0 && spent_today_usd >= self.daily_budget_usd {
             Err(OverseerError::Budget {
@@ -185,5 +226,121 @@ impl ConflictSequencer {
     /// Release a sequence group when its sweep completes.
     pub fn release(&mut self, group: &str) {
         self.active_groups.retain(|a| a != group);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn configured_guard() -> RecursionGuard {
+        RecursionGuard {
+            author_login: "simard-overseer[bot]".to_string(),
+            branch_prefix: "overseer/".to_string(),
+            goal_source_tag: "overseer:".to_string(),
+        }
+    }
+
+    // ── item 4: RecursionGuard must fail CLOSED ──────────────────────────────
+
+    #[test]
+    fn admit_fails_closed_when_identity_unconfigured() {
+        // A default guard has empty identity — it cannot recognise its own work,
+        // so `admit` must REFUSE, not allow (a guard that silently disables
+        // itself when misconfigured is worse than none).
+        let guard = RecursionGuard::default();
+        assert!(!guard.is_configured());
+
+        let pr = Subject::Pr {
+            repo: "rysweet/Simard".to_string(),
+            pr: 1,
+            author: "anyone".to_string(),
+        };
+        let commit = Subject::Commit {
+            sha: "abc123".to_string(),
+            author: "anyone".to_string(),
+        };
+        let branch = Subject::Branch {
+            name: "feature/x".to_string(),
+        };
+        let goal = Subject::Goal {
+            id: "g1".to_string(),
+            source: "ooda".to_string(),
+        };
+
+        assert!(
+            guard.admit(&pr).is_err(),
+            "unconfigured guard must refuse a PR subject (fail closed)"
+        );
+        assert!(
+            guard.admit(&commit).is_err(),
+            "unconfigured guard must refuse a commit subject (fail closed)"
+        );
+        assert!(
+            guard.admit(&branch).is_err(),
+            "unconfigured guard must refuse a branch subject (fail closed)"
+        );
+        assert!(
+            guard.admit(&goal).is_err(),
+            "unconfigured guard must refuse a goal subject (fail closed)"
+        );
+    }
+
+    #[test]
+    fn admit_refuses_own_work_when_configured() {
+        let guard = configured_guard();
+        assert!(guard.is_configured());
+
+        let own_pr = Subject::Pr {
+            repo: "rysweet/Simard".to_string(),
+            pr: 1,
+            author: "simard-overseer[bot]".to_string(),
+        };
+        let own_branch = Subject::Branch {
+            name: "overseer/fix-distill".to_string(),
+        };
+        let own_goal = Subject::Goal {
+            id: "g1".to_string(),
+            source: "overseer:distill".to_string(),
+        };
+        assert!(guard.admit(&own_pr).is_err());
+        assert!(guard.admit(&own_branch).is_err());
+        assert!(guard.admit(&own_goal).is_err());
+    }
+
+    #[test]
+    fn admit_allows_operator_work_under_distinct_identity() {
+        // The Overseer runs under a DISTINCT login, so a correctly-configured
+        // guard admits the human operator's PRs (they are not the Overseer's own).
+        let guard = configured_guard();
+        let operator_pr = Subject::Pr {
+            repo: "rysweet/Simard".to_string(),
+            pr: 2,
+            author: "rysweet".to_string(),
+        };
+        let foreign_branch = Subject::Branch {
+            name: "feature/human-work".to_string(),
+        };
+        assert!(guard.admit(&operator_pr).is_ok());
+        assert!(guard.admit(&foreign_branch).is_ok());
+    }
+
+    // ── item 7: BudgetGate is single-sourced from the env knob ───────────────
+
+    #[test]
+    fn budget_gate_holds_at_or_over_ceiling() {
+        let gate = BudgetGate::with_budget(500.0);
+        assert!(gate.admit(499.99).is_ok());
+        assert!(gate.admit(500.0).is_err(), "spend at ceiling must hold");
+        assert!(gate.admit(600.0).is_err(), "spend over ceiling must hold");
+    }
+
+    #[test]
+    fn budget_gate_from_env_has_positive_ceiling() {
+        // Correctness of env parsing is covered by `config` unit tests; here we
+        // only assert the default/from_env path yields a usable positive ceiling
+        // (never the removed hardcoded duplicate).
+        assert!(BudgetGate::from_env().daily_budget_usd > 0.0);
+        assert!(BudgetGate::default().daily_budget_usd > 0.0);
     }
 }
