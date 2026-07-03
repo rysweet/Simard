@@ -59,6 +59,7 @@ nav:
     - Agent Composition: architecture/agent-composition.md
     - Implementation Plan: architecture/implementation-plan.md
     - Brain Introspection + Memory Hygiene: architecture/brain-introspection.md
+    - Monthly Self-Quality-Audit: architecture/monthly-self-quality-audit.md
   - Concepts:
     - Truthful Runtime Metadata: concepts/truthful-runtime-metadata.md
     - Prompt-driven Brain Iteration: concepts/prompt-driven-brain-iteration.md
@@ -96,6 +97,7 @@ nav:
     - Diagnose a Rejected Goal Completion: howto/diagnose-a-rejected-goal-completion.md
     - Interpret Brain Confidence and Verify Completion: howto/interpret-brain-confidence-and-verify-completion.md
     - Configure Brain Introspection: howto/configure-brain-introspection.md
+    - Configure the Monthly Self-Quality-Audit: howto/configure-self-quality-audit.md
     - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
     - Diagnose merge-pr Verdict-Parse Failures: howto/diagnose-merge-pr-verdict-parse-failures.md
     - Inspect the Procedural-Learning Loop: howto/inspect-the-procedural-learning-loop.md
@@ -130,12 +132,14 @@ nav:
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     - Brain Introspection API: reference/brain-introspection-api.md
+    - Self-Quality-Audit API: reference/self-quality-audit-api.md
     - Dashboard Action-Detail Humanization: reference/dashboard-action-detail-humanization.md
     - Supply-Chain Audit & Guardrails: reference/supply-chain-audit.md
     - Dependency Trust Policy: reference/dependency-trust-policy.md
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
     - Recipe-brain Verdict/Decision Parsing: reference/recipe-brain-verdict-parsing.md
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md
+    - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
     # Hidden from nav until issue #1590 implementation lands:
     #   - reference/cognitive-memory-bridge-helpers.md
     #   - reference/goal-board-api.md

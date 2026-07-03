@@ -379,9 +379,33 @@ pub fn run_ooda_daemon(
     // Capture the binary mtime at startup so we can detect in-place upgrades.
     let start_time = exe_mtime().unwrap_or_else(SystemTime::now);
 
+    // Pin the running image's CONTENT hash at startup too. The reload gate
+    // (`binary_changed`) now relaunches only when the on-disk image is a
+    // genuinely different binary — not on a byte-identical rebuild that merely
+    // bumped the mtime, which was the ~40–45 min self-restart churn trigger
+    // (2026-07-02 operator-review #2; see
+    // docs/reference/ooda-binary-identity-reload-gate.md). Pinning it here
+    // (rather than lazily on the first check) closes the window where an
+    // in-place replace between exec and the first cycle could be mistaken for
+    // the running image.
+    capture_running_image_hash();
+
     if auto_reload {
         daemon_log(&state_root, "[simard] OODA daemon: auto-reload enabled");
     }
+    let self_relaunch_interval = crate::self_deploy::restart::self_relaunch_min_interval_from_env(
+        std::env::var(crate::self_deploy::restart::SELF_RELAUNCH_MIN_INTERVAL_ENV)
+            .ok()
+            .as_deref(),
+    );
+    daemon_log(
+        &state_root,
+        &format!(
+            "[simard] self-relaunch: min interval = {} ({}; 0/off disables interval-only relaunches; real binary hash changes bypass the interval)",
+            self_relaunch_interval.label(),
+            crate::self_deploy::restart::SELF_RELAUNCH_MIN_INTERVAL_ENV,
+        ),
+    );
 
     // De-fork Phase 2b (issue #2307): the native lbug-WAL file-copy backup was
     // removed. Issue #2420 reintroduces a periodic **verified** backup below —
@@ -450,6 +474,32 @@ pub fn run_ooda_daemon(
     );
     // -------------------------------------------------------------------
 
+    // --- periodic monthly self-quality-audit state (issue #2419) ---------
+    // Reuses the sibling periodic-task infra, but persists last-run to DISK
+    // (every sibling gates on an in-process `Instant`, which resets on reboot —
+    // fine at 24h, wrong at 30d). On startup: load the persisted epoch; if the
+    // marker is absent or unparseable, initialize it to NOW and persist, so the
+    // heavy five-wave audit fires ~one interval later rather than on every fresh
+    // deploy/restart. Env `SIMARD_SELF_AUDIT_INTERVAL` (seconds; 0 disables).
+    let self_audit_interval_secs: u64 = crate::self_quality_audit::interval_secs_from_env(
+        std::env::var("SIMARD_SELF_AUDIT_INTERVAL").ok().as_deref(),
+    );
+    let self_audit_last_run_path = state_root.join(crate::self_quality_audit::LAST_RUN_FILENAME);
+    let mut self_audit_last_run: u64 =
+        match crate::self_quality_audit::read_last_run(&self_audit_last_run_path) {
+            Some(epoch) => epoch,
+            None => {
+                let now = crate::self_quality_audit::now_epoch_secs();
+                let _ = crate::self_quality_audit::write_last_run(&self_audit_last_run_path, now);
+                now
+            }
+        };
+    daemon_log(
+        &state_root,
+        &format!("[simard] OODA daemon: self quality-audit interval = {self_audit_interval_secs}s"),
+    );
+    // -------------------------------------------------------------------
+
     let mut cycles_run = 0u32;
 
     loop {
@@ -473,9 +523,14 @@ pub fn run_ooda_daemon(
             break;
         }
 
-        // Auto-reload: if the on-disk binary is newer, exec into it.
+        // Auto-reload: if the on-disk binary is a genuinely different image
+        // (content hash differs from the running one), exec into it.
         #[cfg(unix)]
         if auto_reload && binary_changed(start_time) {
+            daemon_log(
+                &state_root,
+                "[simard] OODA daemon: on-disk binary is a genuinely different image (content hash changed) — reloading via exec()",
+            );
             // Close the LLM session before exec so we don't leak resources.
             if let Some(ref mut session) = bridges.session {
                 let _ = session.close();
@@ -643,6 +698,47 @@ pub fn run_ooda_daemon(
                 ),
             }
             last_brain_introspection = Instant::now();
+        }
+        // -------------------------------------------------------------------
+
+        // ── Periodic monthly self-quality-audit (issue #2419) ────────────
+        // Fires ~monthly on a DISK-persisted gate (survives restarts). Drives
+        // five SEEK→VALIDATE→FIX quality-audit waves over Simard's OWN repo,
+        // each resulting PR gated by a bounded crusty-old-engineer proxy review,
+        // then self-merges crusty-approved + CI-green PRs. No-fallback: a recipe
+        // failure WARNs; last-run is persisted regardless of outcome so a
+        // failing recipe cannot hot-loop for a full interval.
+        let self_audit_elapsed = Duration::from_secs(
+            crate::self_quality_audit::now_epoch_secs().saturating_sub(self_audit_last_run),
+        );
+        if crate::self_quality_audit::should_run_self_audit(
+            self_audit_elapsed,
+            self_audit_interval_secs,
+        ) {
+            daemon_log(
+                &state_root,
+                "[simard] self quality-audit: firing 5-wave crusty-gated self-audit of rysweet/Simard",
+            );
+            match crate::self_quality_audit::run_self_quality_audit(
+                &bridges.repo_root,
+                &state_root,
+                None,
+            ) {
+                Ok(report) => {
+                    daemon_log(&state_root, &format!("[simard] {}", report.summary()));
+                }
+                Err(e) => daemon_log(
+                    &state_root,
+                    &format!("[simard] WARN: self quality-audit failed: {e}"),
+                ),
+            }
+            // Persist last-run on BOTH Ok and Err to prevent hot-looping a
+            // failing recipe every cycle for a full interval.
+            self_audit_last_run = crate::self_quality_audit::now_epoch_secs();
+            let _ = crate::self_quality_audit::write_last_run(
+                &self_audit_last_run_path,
+                self_audit_last_run,
+            );
         }
         // -------------------------------------------------------------------
 
