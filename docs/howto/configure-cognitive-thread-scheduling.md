@@ -15,6 +15,17 @@ related:
 
 # Configure and monitor cognitive-thread scheduling
 
+!!! note "Status — planned (design for #2419, not yet shipped)"
+    This guide documents the cognitive-thread scheduler (the **Mind**) as
+    designed in issue #2419. The `src/cognitive_threads/` module, the
+    `SIMARD_MIND_*` budget/cadence knobs, and the `simard.thread.*`
+    metrics/spans described below **do not exist yet** — they become active
+    when the scheduler and its three threads (`OodaThread`, `MaintenanceThread`,
+    `EngineerLogAnalysisThread`) land. Until then the daemon runs OODA plus its
+    six periodic tasks through the existing hand-rolled loop. See
+    [Cognitive-thread scheduling](../reference/cognitive-thread-scheduling.md)
+    for the design and rollout scope.
+
 Simard's daemon does more than run the OODA loop. Every background mental
 process — housekeeping, backups, brain introspection, the monthly self-audit,
 maintenance, engineer-log analysis — is a **cognitive thread** owned by a single
