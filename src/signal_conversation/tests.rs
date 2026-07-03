@@ -85,6 +85,44 @@ fn parse_inbound_treats_other_text_as_conversation() {
 }
 
 #[test]
+fn parse_inbound_is_case_insensitive_and_trims() {
+    // The command vocabulary is matched case-insensitively (ASCII) after
+    // trimming — the optimized parser must preserve exactly this behavior.
+    assert_eq!(gating::parse_inbound("  STATUS  "), InboundCommand::Status);
+    assert_eq!(gating::parse_inbound("Pause"), InboundCommand::Pause);
+    assert_eq!(gating::parse_inbound("ApProVe"), InboundCommand::Approve);
+    assert_eq!(gating::parse_inbound("DEPLOY"), InboundCommand::Deploy);
+    assert_eq!(
+        gating::parse_inbound("Merge #42"),
+        InboundCommand::Merge(42)
+    );
+    assert_eq!(gating::parse_inbound("MERGE 7"), InboundCommand::Merge(7));
+}
+
+#[test]
+fn parse_inbound_bare_and_malformed_merge_is_conversation() {
+    // Bare `merge`, a non-numeric remainder, or text that merely starts with
+    // "merge" must fall through to a conversation turn (carried verbatim).
+    for text in ["merge", "merge please", "merge #", "merges"] {
+        match gating::parse_inbound(text) {
+            InboundCommand::Conversation(t) => assert_eq!(t, text),
+            other => panic!("expected Conversation for {text:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn parse_inbound_carries_a_long_turn_verbatim_without_casefolding() {
+    // A long conversation turn must be recognized as free text and carried with
+    // its original case/whitespace — the parser must not lowercase the body.
+    let turn = "Here Is A Long Update About The Release: ".repeat(64);
+    match gating::parse_inbound(&turn) {
+        InboundCommand::Conversation(t) => assert_eq!(t, turn.trim()),
+        other => panic!("expected a Conversation turn, got {other:?}"),
+    }
+}
+
+#[test]
 fn low_risk_commands_classify_low() {
     for cmd in [
         InboundCommand::Status,

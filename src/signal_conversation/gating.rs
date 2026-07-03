@@ -52,27 +52,44 @@ pub enum GateDecision {
 /// `merge #NNNN`) is matched case-insensitively; anything else is an ordinary
 /// meeting turn, carried verbatim (original case/whitespace) as
 /// [`InboundCommand::Conversation`].
+///
+/// The vocabulary is short and ASCII, so recognition uses case-insensitive ASCII
+/// comparisons rather than allocating a fully lowercased copy of the message.
+/// This matters on the per-message inbound path: an ordinary conversation turn —
+/// which can be a long paste — is recognized as free text without ever being
+/// case-folded (the `eq_ignore_ascii_case` checks short-circuit on length).
 pub fn parse_inbound(text: &str) -> InboundCommand {
     let trimmed = text.trim();
-    let lower = trimmed.to_lowercase();
-    match lower.as_str() {
-        "status" => InboundCommand::Status,
-        "pause" => InboundCommand::Pause,
-        "approve" => InboundCommand::Approve,
-        "deploy" => InboundCommand::Deploy,
-        _ => {
-            if let Some(rest) = lower.strip_prefix("merge") {
-                let rest = rest.trim();
-                let digits = rest.strip_prefix('#').unwrap_or(rest).trim();
-                // An empty or non-numeric remainder parses to `Err`, so this
-                // naturally falls through to `Conversation` for bare `merge`.
-                if let Ok(n) = digits.parse::<u64>() {
-                    return InboundCommand::Merge(n);
-                }
-            }
-            InboundCommand::Conversation(trimmed.to_string())
-        }
+    if trimmed.eq_ignore_ascii_case("status") {
+        InboundCommand::Status
+    } else if trimmed.eq_ignore_ascii_case("pause") {
+        InboundCommand::Pause
+    } else if trimmed.eq_ignore_ascii_case("approve") {
+        InboundCommand::Approve
+    } else if trimmed.eq_ignore_ascii_case("deploy") {
+        InboundCommand::Deploy
+    } else if let Some(n) = parse_merge(trimmed) {
+        InboundCommand::Merge(n)
+    } else {
+        InboundCommand::Conversation(trimmed.to_string())
     }
+}
+
+/// Parse a `merge #NNNN` command (case-insensitive `merge` prefix, optional `#`),
+/// returning the PR number. A bare `merge`, a non-numeric remainder, or any text
+/// that merely starts with "merge" yields `None`, so it falls through to
+/// [`InboundCommand::Conversation`] — matching the original lowercase behavior.
+fn parse_merge(trimmed: &str) -> Option<u64> {
+    // ASCII-case-insensitively strip the 5-byte "merge" prefix. `get(..5)` is
+    // `None` if `trimmed` is shorter than the prefix or byte 5 is not a char
+    // boundary; either way this is not a `merge` command.
+    let rest = trimmed.get(..5)?;
+    if !rest.eq_ignore_ascii_case("merge") {
+        return None;
+    }
+    let rest = trimmed[5..].trim();
+    let digits = rest.strip_prefix('#').unwrap_or(rest).trim();
+    digits.parse::<u64>().ok()
 }
 
 /// Classify an inbound command's risk. `status`/`pause`/`approve` and ordinary
