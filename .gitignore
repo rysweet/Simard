@@ -33,3 +33,7 @@ tests/e2e-dashboard/.audit-output/
 
 # Generated dashboard-audit screenshots/reports (regenerated locally; not source)
 scripts/dashboard-audit/out/
+
+# Guard: never commit stray PR/engineer worktree dirs as gitlinks (breaks release checkout submodule step)
+pr*-worktree/
+*-worktree/
