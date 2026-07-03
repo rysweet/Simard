@@ -452,11 +452,7 @@ fn assemble_memory(
         decide_ladder_exhausted: m.counter(names::BRAIN_LADDER_EXHAUSTED, &[]),
     };
 
-    let (avail, fresh) = snapshot_freshness(&m.captured_at);
-    let mut env = SectionEnvelope::live(memory, Some(m.captured_at.clone()));
-    env.availability = avail;
-    env.freshness = fresh;
-    env
+    snapshot_section(memory, &m.captured_at)
 }
 
 /// Clamp a gauge's `i64` back into a non-negative `u64` for a count field.
@@ -543,24 +539,32 @@ fn assemble_telemetry(
         anomalies,
     };
 
-    let (avail, fresh) = snapshot_freshness(&m.captured_at);
-    let mut env = SectionEnvelope::live(signals, Some(m.captured_at.clone()));
-    env.availability = avail;
-    env.freshness = fresh;
-    env
+    snapshot_section(signals, &m.captured_at)
 }
 
-fn snapshot_freshness(captured_at: &str) -> (super::Availability, super::Freshness) {
+/// Wrap a snapshot-derived section, choosing `live` vs `stale` from
+/// `captured_at`. A readable snapshot is always `Ok`; only its freshness varies,
+/// so the two constructors capture every reachable state without a
+/// mutate-after-construct step.
+fn snapshot_section<T>(data: T, captured_at: &str) -> SectionEnvelope<T> {
+    let as_of = Some(captured_at.to_string());
+    if snapshot_is_stale(captured_at) {
+        SectionEnvelope::stale(data, as_of)
+    } else {
+        SectionEnvelope::live(data, as_of)
+    }
+}
+
+/// Whether the snapshot's `captured_at` is older than the freshness window. An
+/// unparseable timestamp is treated as fresh (not stale), matching the prior
+/// tolerant behavior.
+fn snapshot_is_stale(captured_at: &str) -> bool {
     match chrono::DateTime::parse_from_rfc3339(captured_at) {
         Ok(ts) => {
             let age = chrono::Utc::now().signed_duration_since(ts.with_timezone(&chrono::Utc));
-            if age.num_seconds() <= SNAPSHOT_FRESHNESS_SECS {
-                (super::Availability::Ok, super::Freshness::Live)
-            } else {
-                (super::Availability::Ok, super::Freshness::Stale)
-            }
+            age.num_seconds() > SNAPSHOT_FRESHNESS_SECS
         }
-        Err(_) => (super::Availability::Ok, super::Freshness::Live),
+        Err(_) => false,
     }
 }
 
