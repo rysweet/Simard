@@ -149,7 +149,7 @@ fn kill_orphaned_cargo_processes(report: &mut CleanupReport) {
 }
 
 /// Recursively compute directory size in bytes.
-mod disk;
+pub(crate) mod disk;
 // re-exported for cfg(test) consumers in cmd_cleanup/tests.rs (false-positive of clippy unused_imports on lib pass — see #1405)
 #[allow(unused_imports)]
 pub(crate) use disk::{

@@ -99,6 +99,7 @@ nav:
     - Reconcile-and-Self-Deploy: concepts/reconcile-and-self-deploy.md
     - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
+    - Unified Telemetry and Status: concepts/unified-telemetry-and-status.md
     - Goal-Board Persistence: concepts/goal-board-persistence.md
     - Goal-Board Corruption Guards: concepts/goal-board-corruption-guards.md
     - File-Backed Goal-Store Simplification: concepts/file-backed-goal-store-simplification.md
@@ -166,8 +167,13 @@ nav:
     - View Agent Terminal Logs: howto/view-agent-terminal-logs.md
     - Run Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
     - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
+    - Read Simard Status: howto/simard-status.md
+    - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
+    - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
+    - Telemetry Metrics: reference/telemetry-metrics.md
+    - StatusSnapshot API: reference/status-snapshot-api.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
     - npx / npm Install: reference/npx-npm-install.md
@@ -258,6 +264,7 @@ nav:
     - Dependency Trust Policy: reference/dependency-trust-policy.md
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md
+    - Cognitive-Thread Scheduling: reference/cognitive-thread-scheduling.md
   - Operations:
     - Overview: operations/index.md
     - Verified Backups of the Live Store: operations/verified-backups.md

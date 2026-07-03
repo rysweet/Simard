@@ -94,6 +94,28 @@ pub fn record_cost(
     };
 
     write_entry(&entry)?;
+
+    // Issue #2528: bridge token throughput into the unified telemetry facade
+    // alongside the authoritative JSONL ledger (which `simard status` reads for
+    // the honest $/token/credit reconciliation). Tokens are naturally integral;
+    // dollar cost stays ledger-sourced to avoid a lossy integer counter.
+    crate::telemetry::counter_add(
+        crate::telemetry::names::LLM_TOKENS,
+        prompt_tokens_est,
+        &[
+            (crate::telemetry::names::ATTR_DIR, "in"),
+            (crate::telemetry::names::ATTR_CACHED, "false"),
+        ],
+    );
+    crate::telemetry::counter_add(
+        crate::telemetry::names::LLM_TOKENS,
+        completion_tokens_est,
+        &[
+            (crate::telemetry::names::ATTR_DIR, "out"),
+            (crate::telemetry::names::ATTR_CACHED, "false"),
+        ],
+    );
+
     Ok(entry)
 }
 

@@ -513,6 +513,54 @@ pub fn run_ooda_daemon(
     );
     // -------------------------------------------------------------------
 
+    // ── Cognitive-thread scheduler (issue #2419) ───────────────────────
+    // ADDITIVE and OFF by default. When SIMARD_COGNITIVE_THREADS_ENABLED is
+    // truthy, a `Mind` hosts NEW background cognitive threads (safe
+    // maintenance/cleanup + engineer-log analysis) on their own cadence,
+    // subsuming the ad-hoc periodic-task pattern for these threads. OODA
+    // itself stays driven by this loop's authoritative inline cycle below so
+    // its external cadence and side-effects are byte-for-byte preserved; the
+    // scheduler is invoked only AFTER the inline cycle and never gates it.
+    let cognitive_threads_enabled = std::env::var("SIMARD_COGNITIVE_THREADS_ENABLED")
+        .ok()
+        .map(|s| matches!(s.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false);
+    let cognitive_repo_root = bridges.repo_root.clone();
+    let cognitive_runtime = if cognitive_threads_enabled {
+        match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => Some(rt),
+            Err(e) => {
+                daemon_log(
+                    &state_root,
+                    &format!("[simard] WARN: cognitive-thread runtime build failed: {e}"),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut mind = crate::cognitive_threads::Mind::new();
+    if cognitive_runtime.is_some() {
+        mind.register(Box::new(
+            crate::cognitive_threads::MaintenanceThread::from_env(),
+        ));
+        mind.register(Box::new(
+            crate::cognitive_threads::EngineerLogAnalysisThread::from_env(),
+        ));
+        daemon_log(
+            &state_root,
+            &format!(
+                "[simard] OODA daemon: cognitive-thread scheduler ENABLED ({} background thread(s))",
+                mind.len()
+            ),
+        );
+    }
+
     let mut cycles_run = 0u32;
 
     loop {
@@ -825,6 +873,78 @@ pub fn run_ooda_daemon(
                 if let Err(e) = crate::self_metrics::collect_and_record_all(cycle_elapsed) {
                     eprintln!("[simard] OODA metrics: failed to record: {e}");
                 }
+
+                // Issue #2528: emit unified cycle telemetry (OTel + in-process
+                // registry) and push per-cycle gauges, then flush the metrics
+                // snapshot so `simard status` and the TUI — separate processes —
+                // read live daemon metrics with no external OTLP collector. All
+                // best-effort: a telemetry hiccup never disrupts the cycle.
+                {
+                    use crate::telemetry::{self, names};
+                    telemetry::counter_add(names::DAEMON_CYCLE, 1, &[]);
+                    telemetry::histogram_record(
+                        names::DAEMON_CYCLE_DURATION_SECONDS,
+                        cycle_elapsed.as_secs_f64(),
+                        &[],
+                    );
+                    telemetry::gauge_set(
+                        names::GOAL_ACTIVE,
+                        state.active_goals.active.len() as i64,
+                        &[],
+                    );
+                    if let Ok(stats) = bridges.memory.get_statistics() {
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.episodic_count as i64,
+                            &[(names::ATTR_TYPE, "episodic")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.semantic_count as i64,
+                            &[(names::ATTR_TYPE, "semantic")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.prospective_count as i64,
+                            &[(names::ATTR_TYPE, "prospective")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.working_count as i64,
+                            &[(names::ATTR_TYPE, "working")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.procedural_count as i64,
+                            &[(names::ATTR_TYPE, "procedural")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.sensory_count as i64,
+                            &[(names::ATTR_TYPE, "sensory")],
+                        );
+                    }
+                    if let Ok(g) = bridges.memory.graph_stats() {
+                        telemetry::gauge_set(
+                            names::MEMORY_EDGES,
+                            g.derives_from_edges as i64,
+                            &[(names::ATTR_TYPE, "DERIVES_FROM")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_EDGES,
+                            g.similar_to_edges as i64,
+                            &[(names::ATTR_TYPE, "SIMILAR_TO")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_EDGES,
+                            g.supersedes_edges as i64,
+                            &[(names::ATTR_TYPE, "SUPERSEDES")],
+                        );
+                    }
+                    if let Err(e) = telemetry::flush_snapshot(&state_root) {
+                        eprintln!("[simard] telemetry: failed to flush metrics snapshot: {e}");
+                    }
+                }
             }
             Err(e) => {
                 daemon_log(&state_root, &format!("[simard] OODA cycle error: {e}"));
@@ -832,6 +952,36 @@ pub fn run_ooda_daemon(
         }
 
         cycles_run += 1;
+
+        // ── Cognitive-thread scheduler tick (issue #2419) ───────────────
+        // Runs AFTER the authoritative OODA cycle so OODA is never starved.
+        // Background threads (maintenance, engineer-log analysis) run on their
+        // own cadence under the `Mind`'s priority/failure-isolation budget; a
+        // thread erroring or panicking is caught and backed off, never taking
+        // down the daemon or the OODA loop. No-op unless explicitly enabled.
+        if let Some(ref rt) = cognitive_runtime {
+            let now_epoch = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let mut ctx = crate::cognitive_threads::ThreadContext {
+                state_root: &state_root,
+                repo_root: &cognitive_repo_root,
+                memory: shared_mem.as_ref(),
+                runtime: rt.handle().clone(),
+                shutdown: &shutdown,
+                now_epoch,
+                dry_run: false,
+            };
+            for outcome in mind.run_due(&mut ctx) {
+                if outcome.ran {
+                    daemon_log(
+                        &state_root,
+                        &format!("[simard] cognitive-thread: {}", outcome.summary),
+                    );
+                }
+            }
+        }
 
         // Skip the inter-cycle sleep if this was the last requested cycle.
         if max_cycles > 0 && cycles_run >= max_cycles {

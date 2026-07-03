@@ -67,6 +67,7 @@ simard
 |- memory
 |  |- stats [state-root] [--json]
 |  `- dump [state-root] [--type=TYPE] [--limit=N] [--json]
+|- status [--json]
 |- act-on-decisions
 |- spawn <agent-name> <goal> <worktree-path>
 |- handover [--canary-dir=PATH]
@@ -291,6 +292,36 @@ prospective enumerator, so `dump` never row-samples triggers (see
 unavailable over the daemon socket (e.g. the library's `get_episodes`),
 `dump` prints the count with `(samples unavailable over IPC)` and
 continues — run with the daemon stopped for full rows.
+
+## Status subcommand
+
+`simard status [--json]` prints one consolidated operational report — the
+**unified telemetry status snapshot**. It assembles a single
+[`StatusSnapshot`](./status-snapshot-api.md) from **durable, process-agnostic
+sources** (the daemon's `~/.simard/telemetry/metrics_snapshot.json`, the cost
+ledger, `self_metrics`, memory IPC, `systemctl show simard.service` + `/proc`,
+and `gh`) — never by grepping journald — so it returns the same numbers whether
+or not it runs in the daemon process. The dashboard **Status** tab and the TUI
+**Status** tab render the same snapshot.
+
+- **Default** — the canonical terminal layout: `DAEMON / UPTIME`,
+  `RESOURCE SNAPSHOT`, `LLM USAGE`, `MEMORY / BRAIN`, `GYM`, `GOAL BOARD`,
+  `ACTIVE WORKSTREAMS`, `COMPLETED WORK`, `SELF-IMPROVEMENT`, and
+  `TELEMETRY / UNEXPECTED SIGNALS`.
+- `--json` — the serialized `StatusSnapshot`; each section is wrapped in an
+  envelope with `availability` (`ok`/`unavailable`/`error`) and `freshness`
+  (`live`/`stale`/`absent`) so scripts can tell a real `0` from "unknown".
+
+The command never panics and always exits zero on a successful assembly, even
+when individual sources are degraded — those sections render `stale`/`absent`
+rather than failing the report. The state root resolves via `$SIMARD_STATE_ROOT`
+then `$HOME/.simard`, matching the daemon.
+
+See the [operator how-to](../howto/simard-status.md) for a full rendered example
+and per-section interpretation, the
+[StatusSnapshot API](./status-snapshot-api.md) for the types and `--json`
+schema, and the [telemetry metrics reference](./telemetry-metrics.md) for the
+metric catalog behind it.
 
 ## Self-management commands
 

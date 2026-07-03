@@ -27,6 +27,7 @@ use super::registry::{
     agent_graph, build_lock_force_release, build_lock_status, registry_deregister, registry_list,
     registry_reap, registry_register,
 };
+use super::status::status_snapshot;
 use super::subagent::{disk_usage_pct, subagent_sessions};
 use super::tmux::{azlin_tmux_sessions, ws_tmux_attach_handler};
 use super::workboard::workboard;
@@ -77,6 +78,7 @@ pub fn build_router() -> Router {
         .route("/api/ooda-cycles", get(ooda_cycles))
         .route("/api/brain-failures", get(brain_failures))
         .route("/api/prs", get(pr_readiness))
+        .route("/api/status/snapshot", get(status_snapshot))
         .route("/api/subagent-sessions", get(subagent_sessions))
         .route("/ws/chat", get(ws_chat_handler))
         .route(WS_AGENT_LOG_ROUTE, get(ws_agent_log_handler))
