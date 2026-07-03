@@ -27,6 +27,25 @@ use super::{
     truncate_for_outcome,
 };
 
+/// Detail prefix marking a no-action cycle that made **no shippable progress**
+/// — the signal the Fix-3 breaker counts (see [`outcome_made_no_progress`]).
+///
+/// It is emitted at a FIXED position, ahead of any free-form reason/reviewer
+/// text, so the classifier keys on the prefix alone and never scans (and so can
+/// never be fooled by) orchestrator prose that merely mentions a literal such
+/// as `(progress=…)`.
+pub(crate) const NO_PROGRESS_DETAIL_PREFIX: &str = "no-action:";
+
+/// Detail prefix marking a no-action cycle that recorded reviewer-**accepted**
+/// progress. It deliberately does *not* begin with [`NO_PROGRESS_DETAIL_PREFIX`]
+/// (a space, not a colon, follows `no-action`), so accepted progress is never
+/// miscounted as a livelock. The mutual exclusivity is pinned by the
+/// `accepted_prefix_is_not_a_no_progress_prefix` test.
+///
+/// The operator dashboard strips this token as internal vocabulary — keep it in
+/// sync with `NOISE_PHRASES` in `operator_commands_dashboard::goals_status`.
+pub(crate) const PROGRESS_ACCEPTED_DETAIL_PREFIX: &str = "no-action progress-accepted:";
+
 /// Apply a `PROGRESS: NN` marker (or no marker) to the goal board and
 /// return a successful [`ActionOutcome`] describing the no-op cycle.
 ///
@@ -78,7 +97,7 @@ pub(crate) fn assess_only_outcome(
                 goal_id, reason_short, pct,
             );
             let detail = format!(
-                "no-action: {} (progress={}%, goal '{}')",
+                "{PROGRESS_ACCEPTED_DETAIL_PREFIX} {} (progress={}%, goal '{}')",
                 reason_short, pct, goal_id,
             );
             make_outcome(action, true, detail)
@@ -419,21 +438,25 @@ pub(crate) fn apply_goal_advance_result(
 /// in lockstep (pinned by the tests below). The three success-`true` no-action
 /// details are:
 ///
-/// - pure no-action: `"no-action: {reason} (goal '{id}')"`               → no progress
-/// - accepted bump:  `"no-action: {reason} (progress={pct}%, goal '{id}')"` → progress
+/// - pure no-action: `"no-action: {reason} (goal '{id}')"`                                             → no progress
 /// - rejected bump:  `"no-action: progress claim rejected (reviewer): … (goal '{id}', proposed={pct}%)"` → no progress
+/// - accepted bump:  `"no-action progress-accepted: {reason} (progress={pct}%, goal '{id}')"`           → progress
 ///
-/// The accepted-bump branch is the only one that emits the deterministic
-/// `"(progress="` token, so the predicate keys on that token rather than the
-/// free-form reviewer/orchestrator prose. A `success=false` outcome (empty
-/// response, run error, or a failed progress update) is *not* a no-progress
-/// no-op — it is already counted by the brain-failure safeguard's
+/// The discriminator is a **fixed-position prefix**, never a substring scan:
+/// the two no-progress details begin with [`NO_PROGRESS_DETAIL_PREFIX`] while
+/// the accepted-progress detail begins with the distinct
+/// [`PROGRESS_ACCEPTED_DETAIL_PREFIX`]. Because every free-form reason/reviewer
+/// string is interpolated *after* its prefix, no LLM prose can forge or break
+/// the classification — in particular a reason that literally contains
+/// `(progress=` no longer produces a false negative (the previous
+/// `!detail.contains("(progress=")` predicate did). A `success=false` outcome
+/// (empty response, run error, or a failed progress update) is *not* a
+/// no-progress no-op — it is already counted by the brain-failure safeguard's
 /// `goal_failure_counts`, so this predicate excludes it to avoid double-counting.
 pub(crate) fn outcome_made_no_progress(outcome: &ActionOutcome) -> bool {
     outcome.success
         && outcome.action.goal_id.is_some()
-        && outcome.detail.starts_with("no-action:")
-        && !outcome.detail.contains("(progress=")
+        && outcome.detail.starts_with(NO_PROGRESS_DETAIL_PREFIX)
 }
 
 #[cfg(test)]
@@ -581,5 +604,95 @@ mod tests_no_progress_classifier {
         };
         let outcome = make_outcome(&action, true, "no-action: whatever".to_string());
         assert!(!outcome_made_no_progress(&outcome));
+    }
+
+    #[test]
+    fn accepted_prefix_is_not_a_no_progress_prefix() {
+        // The whole design rests on these two prefixes being mutually exclusive
+        // under `starts_with`. If someone edits either constant so the accepted
+        // prefix begins with the no-progress prefix, reviewer-accepted progress
+        // would be miscounted as a livelock — fail loudly here rather than in
+        // production.
+        assert!(
+            !PROGRESS_ACCEPTED_DETAIL_PREFIX.starts_with(NO_PROGRESS_DETAIL_PREFIX),
+            "accepted prefix {PROGRESS_ACCEPTED_DETAIL_PREFIX:?} must not start with \
+             the no-progress prefix {NO_PROGRESS_DETAIL_PREFIX:?}",
+        );
+    }
+
+    #[test]
+    fn no_action_reason_mentioning_progress_token_still_counts() {
+        // Regression: a pure no-action whose free-form reason happens to mention
+        // "(progress=" must STILL count as no progress. The previous
+        // `!detail.contains("(progress=")` predicate produced a false negative
+        // here, silently exempting a genuinely stuck goal from the breaker.
+        let action = advance_goal_action("g");
+        let mut board = board_with("g");
+        let outcome = assess_only_outcome(
+            &action,
+            &*mem(),
+            &NoopProgressEvidenceChecker,
+            &mut board,
+            "g",
+            "blocked awaiting CI (progress=50% claimed upstream)",
+            None,
+        );
+        assert!(outcome.success);
+        assert!(
+            outcome.detail.contains("(progress="),
+            "test must exercise the fragile substring: {}",
+            outcome.detail,
+        );
+        assert!(
+            outcome_made_no_progress(&outcome),
+            "a pure no-action must count as no progress even when its reason \
+             mentions a progress token: {}",
+            outcome.detail,
+        );
+    }
+
+    #[test]
+    fn rejected_reason_mentioning_progress_token_still_counts() {
+        // Same regression on the rejected-bump branch: the reviewer's free-form
+        // rejection reason is interpolated into the detail, so a reason that
+        // mentions "(progress=" must not be able to flip the classification.
+        struct RejectWithProgressToken;
+        impl ProgressEvidenceChecker for RejectWithProgressToken {
+            fn check(
+                &self,
+                _goal: &ActiveGoal,
+                _current: u32,
+                _proposed: u32,
+                _now: chrono::DateTime<Utc>,
+            ) -> EvidenceDecision {
+                EvidenceDecision::Reject {
+                    reason: "claim of (progress=70%) is unsupported by commits".to_string(),
+                }
+            }
+        }
+
+        let action = advance_goal_action("g");
+        let mut board = board_with("g");
+        let outcome = assess_only_outcome(
+            &action,
+            &*mem(),
+            &RejectWithProgressToken,
+            &mut board,
+            "g",
+            "claiming 70% with no evidence",
+            Some(70),
+        );
+        assert!(outcome.success);
+        assert!(
+            outcome.detail.contains("(progress="),
+            "test must exercise the fragile substring: {}",
+            outcome.detail,
+        );
+        assert!(
+            outcome_made_no_progress(&outcome),
+            "a rejected progress claim must count as no progress even when the \
+             reviewer's reason mentions a progress token: {}",
+            outcome.detail,
+        );
     }
 }
