@@ -264,94 +264,20 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                             ))
                             .await;
                     }
-                    MeetingCommand::Theme(theme) => {
-                        let rec = apply_record(&mut backend, &MeetingCommand::Theme(theme.clone()))
-                            .expect("theme is a record command");
-                        let _ = socket
-                            .send(Message::Text(
-                                json!({"role":"system","content": rec.text})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await;
-                    }
-                    MeetingCommand::Decision { text, rationale } => {
-                        let rec = apply_record(
-                            &mut backend,
-                            &MeetingCommand::Decision {
-                                text: text.clone(),
-                                rationale: rationale.clone(),
-                            },
-                        )
-                        .expect("decision is a record command");
-                        let _ = socket
-                            .send(Message::Text(
-                                json!({"role":"system","content": rec.text})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await;
-                    }
-                    MeetingCommand::Action(text) => {
-                        let rec = apply_record(&mut backend, &MeetingCommand::Action(text.clone()))
-                            .expect("action is a record command");
-                        let _ = socket
-                            .send(Message::Text(
-                                json!({"role":"system","content": rec.text})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await;
-                    }
-                    MeetingCommand::Question(text) => {
-                        let rec =
-                            apply_record(&mut backend, &MeetingCommand::Question(text.clone()))
-                                .expect("question is a record command");
-                        let _ = socket
-                            .send(Message::Text(
-                                json!({"role":"system","content": rec.text})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await;
-                    }
-                    MeetingCommand::Owner(text) => {
-                        let rec = apply_record(&mut backend, &MeetingCommand::Owner(text.clone()))
-                            .expect("owner is a record command");
-                        let _ = socket
-                            .send(Message::Text(
-                                json!({"role":"system","content": rec.text})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await;
-                    }
-                    MeetingCommand::Goal(text) => {
-                        let rec = apply_record(&mut backend, &MeetingCommand::Goal(text.clone()))
-                            .expect("goal is a record command");
-                        let _ = socket
-                            .send(Message::Text(
-                                json!({"role":"system","content": rec.text})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await;
-                    }
-                    MeetingCommand::Risk(text) => {
-                        let rec = apply_record(&mut backend, &MeetingCommand::Risk(text.clone()))
-                            .expect("risk is a record command");
-                        let _ = socket
-                            .send(Message::Text(
-                                json!({"role":"system","content": rec.text})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await;
-                    }
-                    MeetingCommand::Disagree(text) => {
-                        let rec =
-                            apply_record(&mut backend, &MeetingCommand::Disagree(text.clone()))
-                                .expect("disagree is a record command");
+                    // Every structured-capture command renders identically on the
+                    // dashboard: apply the backend mutation via the shared
+                    // `apply_record` and echo its canonical acknowledgement as a
+                    // `system` chat line. Binding the whole command (`cmd @ …`)
+                    // passes it straight through with no clone-and-reconstruct.
+                    cmd @ (MeetingCommand::Theme(_)
+                    | MeetingCommand::Decision { .. }
+                    | MeetingCommand::Action(_)
+                    | MeetingCommand::Question(_)
+                    | MeetingCommand::Owner(_)
+                    | MeetingCommand::Goal(_)
+                    | MeetingCommand::Risk(_)
+                    | MeetingCommand::Disagree(_)) => {
+                        let rec = apply_record(&mut backend, &cmd).expect("record command");
                         let _ = socket
                             .send(Message::Text(
                                 json!({"role":"system","content": rec.text})

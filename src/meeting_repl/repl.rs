@@ -434,64 +434,40 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 }
                 writeln!(output).ok();
             }
-            MeetingCommand::Theme(text) => {
-                let rec = apply_record(&mut backend, &MeetingCommand::Theme(text.clone()))
-                    .expect("theme is a record command");
-                writeln!(output, "{}", green(&rec.text)).ok();
+            // All eight structured-capture commands share one shape: apply the
+            // backend mutation via the shared `apply_record`, echo the canonical
+            // acknowledgement (color-coded by capture kind), checkpoint WIP, and —
+            // for the list-growing captures — print the live capture tally.
+            // Binding the whole command (`cmd @ …`) passes it straight to
+            // `apply_record` with no clone-and-reconstruct.
+            cmd @ (MeetingCommand::Theme(_)
+            | MeetingCommand::Decision { .. }
+            | MeetingCommand::Action(_)
+            | MeetingCommand::Question(_)
+            | MeetingCommand::Owner(_)
+            | MeetingCommand::Goal(_)
+            | MeetingCommand::Risk(_)
+            | MeetingCommand::Disagree(_)) => {
+                let rec = apply_record(&mut backend, &cmd).expect("record command");
+                let ack = match &cmd {
+                    MeetingCommand::Theme(_) | MeetingCommand::Action(_) => green(&rec.text),
+                    MeetingCommand::Decision { .. }
+                    | MeetingCommand::Owner(_)
+                    | MeetingCommand::Goal(_) => cyan(&rec.text),
+                    _ => yellow(&rec.text),
+                };
+                writeln!(output, "{ack}").ok();
                 checkpoint_wip(&backend);
-            }
-            MeetingCommand::Decision { text, rationale } => {
-                let rec = apply_record(
-                    &mut backend,
-                    &MeetingCommand::Decision {
-                        text: text.clone(),
-                        rationale: rationale.clone(),
-                    },
-                )
-                .expect("decision is a record command");
-                writeln!(output, "{}", cyan(&rec.text)).ok();
-                checkpoint_wip(&backend);
-                writeln!(output, "{}", capture_tally(&backend)).ok();
-            }
-            MeetingCommand::Action(text) => {
-                let rec = apply_record(&mut backend, &MeetingCommand::Action(text.clone()))
-                    .expect("action is a record command");
-                writeln!(output, "{}", green(&rec.text)).ok();
-                checkpoint_wip(&backend);
-                writeln!(output, "{}", capture_tally(&backend)).ok();
-            }
-            MeetingCommand::Question(text) => {
-                let rec = apply_record(&mut backend, &MeetingCommand::Question(text.clone()))
-                    .expect("question is a record command");
-                writeln!(output, "{}", yellow(&rec.text)).ok();
-                checkpoint_wip(&backend);
-                writeln!(output, "{}", capture_tally(&backend)).ok();
-            }
-            MeetingCommand::Owner(text) => {
-                let rec = apply_record(&mut backend, &MeetingCommand::Owner(text.clone()))
-                    .expect("owner is a record command");
-                writeln!(output, "{}", cyan(&rec.text)).ok();
-                checkpoint_wip(&backend);
-            }
-            MeetingCommand::Goal(text) => {
-                let rec = apply_record(&mut backend, &MeetingCommand::Goal(text.clone()))
-                    .expect("goal is a record command");
-                writeln!(output, "{}", cyan(&rec.text)).ok();
-                checkpoint_wip(&backend);
-            }
-            MeetingCommand::Risk(text) => {
-                let rec = apply_record(&mut backend, &MeetingCommand::Risk(text.clone()))
-                    .expect("risk is a record command");
-                writeln!(output, "{}", yellow(&rec.text)).ok();
-                checkpoint_wip(&backend);
-                writeln!(output, "{}", capture_tally(&backend)).ok();
-            }
-            MeetingCommand::Disagree(text) => {
-                let rec = apply_record(&mut backend, &MeetingCommand::Disagree(text.clone()))
-                    .expect("disagree is a record command");
-                writeln!(output, "{}", yellow(&rec.text)).ok();
-                checkpoint_wip(&backend);
-                writeln!(output, "{}", capture_tally(&backend)).ok();
+                if matches!(
+                    cmd,
+                    MeetingCommand::Decision { .. }
+                        | MeetingCommand::Action(_)
+                        | MeetingCommand::Question(_)
+                        | MeetingCommand::Risk(_)
+                        | MeetingCommand::Disagree(_)
+                ) {
+                    writeln!(output, "{}", capture_tally(&backend)).ok();
+                }
             }
             MeetingCommand::Recap => {
                 let status = backend.status();
