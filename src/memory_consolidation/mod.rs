@@ -954,6 +954,12 @@ mod tests_pr_a;
 // recipe. See `docs/architecture/episode-distillation.md`.
 pub mod distillation;
 
+// 2026-07-02 operator-review priority 1 (Wave 1): env-gated, default-off
+// raw-capture of a distillation *parse failure*'s raw recipe-runner stdout, so a
+// real currently-failing sample can be harvested into a regression test. See
+// `docs/reference/distill-raw-capture-on-parse-failure.md`.
+pub mod raw_capture;
+
 // Issues #2441/#2458: the verified-signal gate, failure→lesson distillation, and
 // loop metrics that close the episodic→procedural learning loop. Lessons are
 // name-prefixed procedures (`lesson:<goal_type>:<error_class>`); all learning
