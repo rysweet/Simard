@@ -102,6 +102,8 @@ nav:
     - Diagnose merge-pr Verdict-Parse Failures: howto/diagnose-merge-pr-verdict-parse-failures.md
     - Inspect the Procedural-Learning Loop: howto/inspect-the-procedural-learning-loop.md
     - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
+    - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
+    - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Self-Deploy API: reference/self-deploy-api.md

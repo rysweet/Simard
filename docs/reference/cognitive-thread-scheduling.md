@@ -520,6 +520,17 @@ daemon integration) → tests (above) → how-to doc + this reference doc + mkdo
 nav entry → single merge-ready PR against `rysweet/Simard` off `origin/main`,
 green CI, no redeploy.
 
+### Companion how-to guides
+
+- [Configure and monitor cognitive-thread scheduling](../howto/configure-cognitive-thread-scheduling.md)
+  — operator guide: cadence knobs, the non-critical per-tick budget, OODA-parity
+  checks, per-thread telemetry/health, driving the two exemplars safely, and
+  diagnosing a backed-off thread.
+- [Add a new cognitive thread](../howto/add-a-new-cognitive-thread.md)
+  — developer guide: implementing the trait, choosing a policy/priority,
+  env-config, registering with the `Mind`, emitting telemetry through the single
+  seam, the safety rules, and the fixture-only test plan.
+
 ---
 
 ## Appendix A — API Contracts (the "studs")
