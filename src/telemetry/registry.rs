@@ -75,17 +75,12 @@ pub fn counter_add(name: &str, value: u64, attrs: &[(&str, &str)]) {
     super::otel::record_counter(name, value, attrs);
     let mut reg = lock();
     let key = intern_key(&mut reg, name, attrs);
-    let total_series = reg.counters.len() + reg.gauges.len() + reg.histograms.len();
-    match reg.counters.get_mut(&key) {
-        Some(slot) => *slot = slot.saturating_add(value),
-        None => {
-            if total_series >= MAX_SERIES {
-                reg.overflow_series = reg.overflow_series.saturating_add(1);
-                return;
-            }
-            reg.counters.insert(key, value);
-        }
+    let exists = reg.counters.contains_key(&key);
+    if !admit_series(&mut reg, exists) {
+        return;
     }
+    let slot = reg.counters.entry(key).or_insert(0);
+    *slot = slot.saturating_add(value);
 }
 
 /// Set gauge `name` to `value` for the given attribute set (last write wins).
@@ -95,9 +90,8 @@ pub fn gauge_set(name: &str, value: i64, attrs: &[(&str, &str)]) {
     super::otel::record_gauge(name, value, attrs);
     let mut reg = lock();
     let key = intern_key(&mut reg, name, attrs);
-    let total_series = reg.counters.len() + reg.gauges.len() + reg.histograms.len();
-    if !reg.gauges.contains_key(&key) && total_series >= MAX_SERIES {
-        reg.overflow_series = reg.overflow_series.saturating_add(1);
+    let exists = reg.gauges.contains_key(&key);
+    if !admit_series(&mut reg, exists) {
         return;
     }
     reg.gauges.insert(key, value);
@@ -111,9 +105,8 @@ pub fn histogram_record(name: &str, value: f64, attrs: &[(&str, &str)]) {
     super::otel::record_histogram(name, value, attrs);
     let mut reg = lock();
     let key = intern_key(&mut reg, name, attrs);
-    let total_series = reg.counters.len() + reg.gauges.len() + reg.histograms.len();
-    if !reg.histograms.contains_key(&key) && total_series >= MAX_SERIES {
-        reg.overflow_series = reg.overflow_series.saturating_add(1);
+    let exists = reg.histograms.contains_key(&key);
+    if !admit_series(&mut reg, exists) {
         return;
     }
     let accum = reg.histograms.entry(key).or_insert_with(|| HistogramAccum {
@@ -205,6 +198,23 @@ impl HistogramAccum {
             buckets,
         }
     }
+}
+
+/// Admission control for the global series cap. `key_exists` says whether the
+/// series is already tracked. Updates to an existing series are always admitted;
+/// a *new* series that would exceed [`MAX_SERIES`] is rejected — this records an
+/// overflow and returns `false`, so callers drop the write. Centralizing the cap
+/// here keeps the "a bug must never grow the registry without limit" invariant in
+/// one place across counters, gauges, and histograms.
+fn admit_series(reg: &mut Registry, key_exists: bool) -> bool {
+    if key_exists {
+        return true;
+    }
+    if reg.counters.len() + reg.gauges.len() + reg.histograms.len() >= MAX_SERIES {
+        reg.overflow_series = reg.overflow_series.saturating_add(1);
+        return false;
+    }
+    true
 }
 
 /// Normalize + cardinality-bound the attribute set and return the interned
