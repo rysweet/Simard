@@ -130,6 +130,12 @@ pub mod skill_builder;
 pub mod state_root;
 pub mod stewardship;
 pub mod subagent_sessions;
+// Issue #2528: unified telemetry facade + one `simard status` snapshot. The
+// `telemetry` module is the OpenTelemetry-backed metric facade + in-process
+// registry; `status` is the single typed StatusSnapshot the CLI, dashboard, and
+// TUI all render.
+pub mod status;
+pub mod telemetry;
 pub mod terminal_engineer_bridge;
 mod terminal_session;
 #[doc(hidden)]

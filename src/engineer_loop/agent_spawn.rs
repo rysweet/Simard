@@ -394,9 +394,30 @@ pub fn spawn_agent_for_goal(
     let state_dir = crate::safe_update::default_state_dir();
     refuse_if_draining(&state_dir)?;
     let prompt = build_agent_prompt(objective, inspection);
+
+    // Issue #2528: structured engineer lifecycle telemetry. `spawn_agent_for_goal`
+    // blocks for the whole in-process session, so a spawn/exit pair brackets the
+    // synchronous wait and the live-count gauge is exact for in-process spawns.
+    use crate::telemetry::{self, names};
+    use std::sync::atomic::Ordering;
+    telemetry::counter_add(names::ENGINEER_SPAWNED, 1, &[]);
+    let active = ACTIVE_ENGINEERS.fetch_add(1, Ordering::Relaxed) + 1;
+    telemetry::gauge_set(names::ENGINEER_ACTIVE, active, &[]);
+
     let rx = start_agent_session(prompt, workspace_path.to_path_buf());
-    await_agent_session(rx)
+    let result = await_agent_session(rx);
+
+    let active = ACTIVE_ENGINEERS.fetch_sub(1, Ordering::Relaxed) - 1;
+    telemetry::gauge_set(names::ENGINEER_ACTIVE, active.max(0), &[]);
+    let outcome = if result.is_ok() { "success" } else { "failure" };
+    telemetry::counter_add(names::ENGINEER_EXITED, 1, &[(names::ATTR_OUTCOME, outcome)]);
+
+    result
 }
+
+/// Live count of in-process engineer sessions, published as the
+/// `simard.engineer.active` gauge (issue #2528).
+static ACTIVE_ENGINEERS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 /// Refuse a dispatch if the safe-update orchestrator has marked the
 /// dispatch gate closed. Logs to stderr so operator-facing tools can see

@@ -295,6 +295,26 @@ pub(crate) const PART_05: &str = r#"      try {
       }
     }
 
+    /* --- Status (unified telemetry snapshot, #2528) --- */
+    async function fetchStatusSnapshot(){
+      const el=document.getElementById('status-snapshot-panel');
+      if(!el) return;
+      try {
+        const d = await apiFetch('/api/status/snapshot');
+        if(d.error){
+          el.innerHTML='<span class="err">Failed to load status: '+esc(d.error)+'</span>';
+          return;
+        }
+        const rendered = typeof d.rendered==='string' ? d.rendered : '';
+        el.innerHTML='<pre class="status-report" data-testid="status-report" '
+          +'style="white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;'
+          +'font-size:.82rem;line-height:1.45;color:#c9d1d9;margin:0">'
+          +esc(rendered)+'</pre>';
+      } catch(e) {
+        el.innerHTML='<span class="err">Failed to load status: '+esc(e.message||e)+'</span>';
+      }
+    }
+
     /* --- Merge Readiness (#1880) --- */
     async function fetchMergeReadiness(){
       const el=document.getElementById('merge-readiness-panel');

@@ -20,6 +20,7 @@ mod ooda_cycles;
 mod pr_readiness;
 mod registry;
 pub(crate) mod routes;
+mod status;
 mod subagent;
 mod tmux;
 mod workboard;

@@ -298,8 +298,9 @@ mod tests {
             "brain-failures",
             "merge-decisions",
             "terminal",
+            "status",
         ];
-        assert_eq!(tabs.len(), 13, "expected exactly 13 top-level tabs");
+        assert_eq!(tabs.len(), 14, "expected exactly 14 top-level tabs");
 
         for tab in &tabs {
             let needle = format!(r#"data-tab="{tab}" title=""#);
@@ -730,22 +731,22 @@ mod tests {
         );
     }
 
-    /// Sanity-check on the page-lede count: there must be exactly 13
+    /// Sanity-check on the page-lede count: there must be exactly 15
     /// (one per tab) — a stricter bound than the existing `>= 13`
-    /// assertion. If a refactor accidentally adds a 14th, we want to
+    /// assertion. If a refactor accidentally adds a 16th, we want to
     /// know immediately so we can decide whether the new container is
     /// actually a new tab or a misuse of the class.
     #[test]
     fn index_html_has_exactly_eleven_page_intros() {
         let count = INDEX_HTML.matches(r#"class="page-lede""#).count();
         assert_eq!(
-            count, 14,
-            "expected exactly 14 page-lede paragraphs (one per top-level tab), got {count}"
+            count, 15,
+            "expected exactly 15 page-lede paragraphs (one per top-level tab), got {count}"
         );
         let h1_count = INDEX_HTML.matches(r#"class="page-h1""#).count();
         assert_eq!(
-            h1_count, 14,
-            "expected exactly 14 page-h1 headings (one per top-level tab), got {h1_count}"
+            h1_count, 15,
+            "expected exactly 15 page-h1 headings (one per top-level tab), got {h1_count}"
         );
     }
 

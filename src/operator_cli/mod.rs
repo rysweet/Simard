@@ -13,6 +13,7 @@ mod review;
 mod safe_update;
 mod self_deploy;
 mod self_health;
+mod status;
 mod worktree_gc;
 
 use std::path::PathBuf;
@@ -106,6 +107,10 @@ Product modes:
                            (safe while the daemon holds the store)
   memory dump [state-root] [--type=TYPE] [--limit=N] [--json]
                          — counts plus a larger set of sample rows per type
+  status [--json]        — one consolidated operational report (daemon,
+                           resources, LLM usage, memory/brain, gym, goals,
+                           workstreams, merged PRs, self-improvement, telemetry
+                           anomalies); the unified telemetry status snapshot
   spawn <agent-name> <goal> <worktree-path> [--depth=N]
   merge-pr <pr-number> [--repo <owner/repo>]
                          — squash-merge a PR through Simard's gated merge
@@ -234,6 +239,7 @@ where
         "ooda" => ooda::dispatch_ooda_command(args),
         "dashboard" => dashboard::dispatch_dashboard_command(args),
         "memory" => memory::dispatch_memory_command(args),
+        "status" => status::dispatch_status_command(args),
         "spawn" => dispatch_spawn_command(args),
         "merge-pr" => merge::dispatch_merge_pr_command(args),
         "worktree-gc" => worktree_gc::dispatch_worktree_gc_command(args),
@@ -340,7 +346,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|memory|spawn|merge-pr|worktree-gc|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap> ..."
+    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {

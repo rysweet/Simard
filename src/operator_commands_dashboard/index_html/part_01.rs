@@ -37,6 +37,15 @@ pub(crate) const PART_01: &str = r#"      </div>
     </div>
   </div>
 
+  <div class="tab-content" id="tab-status">
+    <h1 class="page-h1">Status</h1>
+    <p class="page-lede">One consolidated operational report — the daemon, system resources, model spending, memory and brain health, gym, goals, active work, merged pull requests, and unexpected telemetry signals, all on a single page.</p>
+    <div class="card" style="max-width:1100px">
+      <h2>Operational Status <button class="btn" onclick="fetchStatusSnapshot()" style="font-size:.75rem">Refresh</button></h2>
+      <div id="status-snapshot-panel"><span class="loading">Loading…</span></div>
+    </div>
+  </div>
+
   <div class="tab-content" id="tab-terminal">
     <h1 class="page-h1">Terminal</h1>
     <p class="page-lede">Attach to the live terminal of a running Simard sub-agent and watch its standard output and standard error stream in real time.</p>
@@ -357,6 +366,7 @@ pub(crate) const PART_01: &str = r#"      </div>
         if(tab.dataset.tab==='brain-failures') {fetchBrainFailures();tabRefreshTimers.brainFailures=setInterval(fetchBrainFailures,30000);}
         if(tab.dataset.tab==='merge-decisions') {fetchMergeJudge();tabRefreshTimers.mergeJudge=setInterval(fetchMergeJudge,30000);}
         if(tab.dataset.tab==='pr-readiness') {fetchPrReadiness();tabRefreshTimers.prReadiness=setInterval(fetchPrReadiness,30000);}
+        if(tab.dataset.tab==='status') {fetchStatusSnapshot();tabRefreshTimers.status=setInterval(fetchStatusSnapshot,30000);}
         if(tab.dataset.tab==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
       });
     });
