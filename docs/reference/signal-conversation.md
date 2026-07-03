@@ -59,6 +59,22 @@ cargo test  --features signal
 The transport uses tokio `net` (already a dependency), so enabling `signal` pulls in
 no new crate — there is no HTTP client and no `async-trait`.
 
+## Launching
+
+Start the channel with the operator subcommand from a `--features signal` build:
+
+```bash
+simard signal run
+```
+
+`simard signal run` (`src/operator_cli/signal.rs`) loads the `[signal]` config,
+builds a tokio runtime, and calls `signal_conversation::run`
+(`src/signal_conversation/channel.rs`), which connects to the signal-cli endpoint
+and drives the operator conversation to completion. It exits when the signal-cli
+socket closes; supervise it (systemd/tmux) to reconnect. A default build (no
+`signal` feature) still recognizes `simard signal run` but returns a clear error
+telling the operator to rebuild with `--features signal`.
+
 ## Transport
 
 The operator runs signal-cli in JSON-RPC daemon mode over TCP:

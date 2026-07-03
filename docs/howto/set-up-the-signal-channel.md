@@ -127,9 +127,19 @@ The Signal channel compiles only with the `signal` feature:
 cargo build --features signal
 ```
 
-Then run the daemon (or your normal Simard entrypoint) from that build. On startup
-Simard reads `[signal]`, connects to the signal-cli endpoint, and begins receiving
-inbound messages from allowlisted senders and sending notifications out.
+Then launch the Signal channel with the `signal run` subcommand from that build:
+
+```bash
+simard signal run
+```
+
+On startup Simard reads the `[signal]` table, connects to the signal-cli endpoint,
+and begins receiving inbound messages from allowlisted senders and sending
+notifications out. Leave it running (systemd unit, tmux, or a supervisor) alongside
+the signal-cli daemon from step 3. `simard signal run` exits when the signal-cli
+socket closes; supervise it if you want it to reconnect. A build **without**
+`--features signal` still recognizes `simard signal run` but tells you to rebuild
+with the feature — no Signal code is compiled into a default build.
 
 ## 6. Verify the round trip
 
