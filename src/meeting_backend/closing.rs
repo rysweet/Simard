@@ -518,12 +518,12 @@ impl MeetingBackend {
             }
         }
 
-        // ── Memory consolidation ── (no-op in current production; bridge
+        // ── Memory consolidation ── (no-op in current production; adapter
         // is always `None`. Kept for forward compatibility; bounded with
-        // the agent-close budget if a future caller wires a bridge in.)
-        if let Some(ref bridge) = self.bridge {
+        // the agent-close budget if a future caller wires an adapter in.)
+        if let Some(ref adapter) = self.adapter {
             persist::store_enriched_cognitive_memory(
-                &**bridge,
+                &**adapter,
                 &self.topic,
                 &summary_text,
                 &self.history,
@@ -551,11 +551,11 @@ impl MeetingBackend {
         // engineer loop can verify it received the goal state the meeting
         // produced. Without this, the handoff is implicit and goals can
         // silently vanish if the state root diverges.
-        if let Some(ref bridge) = self.bridge {
-            match crate::goal_curation::load_goal_board(&**bridge) {
+        if let Some(ref adapter) = self.adapter {
+            match crate::goal_curation::load_goal_board(&**adapter) {
                 Ok(board) => {
                     if let Err(e) =
-                        crate::goal_curation::write_goal_carryover(&board, &meeting_id, &**bridge)
+                        crate::goal_curation::write_goal_carryover(&board, &meeting_id, &**adapter)
                     {
                         warn!(
                             target: "simard::meeting_backend::closing",
@@ -577,27 +577,27 @@ impl MeetingBackend {
                 }
             }
         } else {
-            // When no bridge is available (most current deployments), try
+            // When no adapter is available (most current deployments), try
             // to launch one from the default state root for this write.
             // Compiled out of test builds: `default_state_root()` returns
             // `$HOME/.simard` which trips the hermetic guard (#2092).
             #[cfg(not(test))]
             {
                 let state_root = crate::memory_ipc::default_state_root();
-                match crate::memory_ipc::launch_writer_bridge(&state_root) {
-                    Ok(bridge) => match crate::goal_curation::load_goal_board(bridge.ops()) {
+                match crate::memory_ipc::launch_writer_adapter(&state_root) {
+                    Ok(adapter) => match crate::goal_curation::load_goal_board(adapter.ops()) {
                         Ok(board) => {
                             if let Err(e) = crate::goal_curation::write_goal_carryover(
                                 &board,
                                 &meeting_id,
-                                bridge.ops(),
+                                adapter.ops(),
                             ) {
                                 warn!(
                                     target: "simard::meeting_backend::closing",
                                     phase = "goal_carryover",
                                     outcome = "error",
                                     error = %e,
-                                    "Failed to write goal carryover record (fallback bridge)"
+                                    "Failed to write goal carryover record (fallback adapter)"
                                 );
                             }
                         }
@@ -607,7 +607,7 @@ impl MeetingBackend {
                                 phase = "goal_carryover",
                                 outcome = "error",
                                 error = %e,
-                                "Failed to load goal board for carryover (fallback bridge)"
+                                "Failed to load goal board for carryover (fallback adapter)"
                             );
                         }
                     },
@@ -615,7 +615,7 @@ impl MeetingBackend {
                         tracing::debug!(
                             target: "simard::meeting_backend::closing",
                             error = %e,
-                            "Could not launch bridge for goal carryover write"
+                            "Could not launch adapter for goal carryover write"
                         );
                     }
                 }
@@ -1139,7 +1139,7 @@ fn write_goals_from_decisions(decisions: &[crate::meeting_facilitator::MeetingDe
     if decisions.is_empty() {
         return;
     }
-    // `CognitiveMemoryGoalStore::put` calls `launch_writer_bridge` with
+    // `CognitiveMemoryGoalStore::put` calls `launch_writer_adapter` with
     // `simard_state_root()` (`$HOME/.simard`), which trips the hermetic
     // guard in test builds. Skip the real write in tests — goal persistence
     // is validated via dedicated integration tests with HermeticState.

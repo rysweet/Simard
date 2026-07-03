@@ -136,7 +136,7 @@ flowchart TD
    [self-deploy source-prep reference](../reference/self-deploy-source-prep.md)
    and [how to run self-deploy from any directory](../howto/run-self-deploy-from-any-directory.md).
 2. **Gate the candidate.** The existing relaunch gates run in order — Smoke →
-   UnitTest → GymBaseline → BridgeHealth — followed by the candidate's own
+   UnitTest → GymBaseline → ServerHealth — followed by the candidate's own
    `simard self-test`. Any failure aborts.
 3. **Dual protective backup** (taken only *after* build + gates pass, immediately
    before any daemon mutation):
@@ -186,7 +186,7 @@ of the following hold:
 | **Version advanced** | running build commit/version ≥ the target commit/version |
 | **Memory intact** | cognitive-memory fact count ≥ the pre-deploy count (within tolerance), via the `CognitiveMemoryOps` count API |
 | **Goal board intact** | the goal board loads and the active-goal count is preserved |
-| **Brains LLM-backed** | zero `BrainJudgmentRecord.fallback == true` records over a probe cycle (see [parse-failure record](../reference/ooda-brain-parse-failure-record.md)) |
+| **Brains LLM-backed** | zero `ReasonerJudgmentRecord.fallback == true` records over a probe cycle (see [parse-failure record](../reference/ooda-brain-parse-failure-record.md)) |
 | **No quarantine** | the cognitive-memory store quarantine flag is clear |
 
 Any single failing probe fails the health check and triggers rollback. The probe

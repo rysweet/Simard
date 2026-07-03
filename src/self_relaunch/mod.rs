@@ -1,6 +1,6 @@
 //! Canary deployment and handover for self-relaunch.
 //!
-//! Gate sequence: Smoke -> UnitTest -> GymBaseline -> BridgeHealth.
+//! Gate sequence: Smoke -> UnitTest -> GymBaseline -> ServerHealth.
 //! All gates must pass before handover. Failures reject the canary (Pillar 11).
 //!
 //! For coordinated multi-process handoff with leader election, see
@@ -27,7 +27,7 @@ mod tests {
         assert_eq!(gates[0], RelaunchGate::Smoke);
         assert_eq!(gates[1], RelaunchGate::UnitTest);
         assert_eq!(gates[2], RelaunchGate::GymBaseline);
-        assert_eq!(gates[3], RelaunchGate::BridgeHealth);
+        assert_eq!(gates[3], RelaunchGate::ServerHealth);
     }
 
     #[test]

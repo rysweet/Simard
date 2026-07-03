@@ -187,7 +187,7 @@ configured `llm_provider`:
 
 ### Problem
 
-Tests in `src/gym_runner_bridge.rs` set and unset the `SIMARD_SKIP_GYM`
+Tests in `src/gym_runner_client.rs` set and unset the `SIMARD_SKIP_GYM`
 environment variable to exercise conditional code paths (skip-gym
 synthetic mode vs real execution). When `cargo test` runs these in
 parallel, two tests race on the same process-wide env var: one sets
@@ -220,7 +220,7 @@ fn run_scenario_skip_gym_returns_synthetic_success() {
 
 ### Where this applies
 
-The five env-var-mutating tests in `src/gym_runner_bridge.rs` (migrated from
+The five env-var-mutating tests in `src/gym_runner_client.rs` (migrated from
 the deleted `src/native_gym.rs` when the gym engine moved to the
 [`amplihack-agent-eval` library](../architecture/gym-eval-library-adapter.md)):
 
@@ -247,12 +247,12 @@ any other test that calls `std::env::set_var` / `std::env::remove_var`.
 ### How to verify
 
 ```bash
-# Run the gym_runner_bridge tests — they should pass deterministically now
-cargo test -p simard --lib gym_runner_bridge::tests
+# Run the gym_runner_client tests — they should pass deterministically now
+cargo test -p simard --lib gym_runner_client::tests
 
 # Stress-test for flakiness (run 50 times)
 for i in $(seq 1 50); do
-    cargo test -p simard --lib gym_runner_bridge::tests -- --test-threads=4 2>&1 \
+    cargo test -p simard --lib gym_runner_client::tests -- --test-threads=4 2>&1 \
         | tail -1
 done
 ```
@@ -267,7 +267,7 @@ Every iteration should report `test result: ok`.
 | --------------------- | --------------------------- | -------------------------------- | --------------------------- |
 | Constant-relative     | Hardcoded capacity limits   | Use `MAX_ACTIVE_GOALS + N`       | `src/ooda_loop/curate.rs`   |
 | Lazy config resolution| Constructor reads config    | Defer to `open()`                | `src/meeting_backend/agent_proxy.rs` |
-| Serial env-var tests  | Parallel env-var races      | `#[serial]` annotation           | `src/gym_runner_bridge.rs`  |
+| Serial env-var tests  | Parallel env-var races      | `#[serial]` annotation           | `src/gym_runner_client.rs`  |
 
 All three patterns are enforced by CI: the affected tests run on every
 PR and will fail if the pattern is violated.

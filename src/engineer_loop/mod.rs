@@ -39,7 +39,7 @@ use crate::base_types::BaseTypeId;
 use crate::error::{SimardError, SimardResult};
 use crate::runtime::RuntimeTopology;
 use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
-use crate::terminal_engineer_bridge::{SHARED_EXPLICIT_STATE_ROOT_SOURCE, TerminalBridgeContext};
+use crate::terminal_engineer::{SHARED_EXPLICIT_STATE_ROOT_SOURCE, TerminalEngineerContext};
 
 use execution::{
     parse_status_paths, run_command, run_command_allow_failure, trimmed_stdout,
@@ -191,7 +191,7 @@ pub fn run_local_engineer_loop(
         objective: objective.to_string(),
         completed_phase: SessionPhase::Intake,
         inspection: Some(inspection.clone()),
-        terminal_bridge_context: None,
+        terminal_engineer_context: None,
         execution_plan: None,
         action: None,
         verification: None,
@@ -208,25 +208,27 @@ pub fn run_local_engineer_loop(
     session.advance(SessionPhase::Preparation)?;
 
     let phase_start = Instant::now();
-    let terminal_bridge_context =
-        TerminalBridgeContext::load_from_state_root(&state_root, SHARED_EXPLICIT_STATE_ROOT_SOURCE);
-    match &terminal_bridge_context {
+    let terminal_engineer_context = TerminalEngineerContext::load_from_state_root(
+        &state_root,
+        SHARED_EXPLICIT_STATE_ROOT_SOURCE,
+    );
+    match &terminal_engineer_context {
         Ok(_) => {
             phase_traces.push(PhaseTrace {
-                name: "load-bridge-context".to_string(),
+                name: "load-adapter-context".to_string(),
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Success,
             });
         }
         Err(e) => {
             phase_traces.push(PhaseTrace {
-                name: "load-bridge-context".to_string(),
+                name: "load-adapter-context".to_string(),
                 duration: phase_start.elapsed(),
                 outcome: PhaseOutcome::Failed(e.to_string()),
             });
         }
     }
-    let terminal_bridge_context = match terminal_bridge_context {
+    let terminal_engineer_context = match terminal_engineer_context {
         Ok(ctx) => ctx,
         Err(e) => {
             let _ = session.advance(SessionPhase::Failed);
@@ -234,7 +236,7 @@ pub fn run_local_engineer_loop(
                 &state_root,
                 &SessionErrorReflection {
                     objective: objective.to_string(),
-                    failed_phase: "load-bridge-context".to_string(),
+                    failed_phase: "load-adapter-context".to_string(),
                     error_message: e.to_string(),
                     phase_traces: phase_traces.clone(),
                     session_id: Some(session_id_str.clone()),
@@ -250,9 +252,9 @@ pub fn run_local_engineer_loop(
     // that the engineer session's goal board matches. A drift means
     // goals curated in the meeting may have silently vanished.
     let phase_start = Instant::now();
-    match crate::memory_ipc::launch_writer_bridge(&state_root) {
-        Ok(bridge) => match crate::goal_curation::load_goal_board(bridge.ops()) {
-            Ok(board) => match crate::goal_curation::verify_goal_carryover(&board, bridge.ops()) {
+    match crate::memory_ipc::launch_writer_adapter(&state_root) {
+        Ok(adapter) => match crate::goal_curation::load_goal_board(adapter.ops()) {
+            Ok(board) => match crate::goal_curation::verify_goal_carryover(&board, adapter.ops()) {
                 Ok(crate::goal_curation::CarryoverVerification::Drifted {
                     meeting_id,
                     missing_goal_ids,
@@ -326,7 +328,7 @@ pub fn run_local_engineer_loop(
         Err(e) => {
             tracing::debug!(
                 error = %e,
-                "engineer loop: could not launch bridge for carryover check"
+                "engineer loop: could not launch adapter for carryover check"
             );
             phase_traces.push(PhaseTrace {
                 name: "goal-carryover-verify".to_string(),
@@ -342,7 +344,7 @@ pub fn run_local_engineer_loop(
         objective: objective.to_string(),
         completed_phase: SessionPhase::Preparation,
         inspection: Some(inspection.clone()),
-        terminal_bridge_context: terminal_bridge_context.clone(),
+        terminal_engineer_context: terminal_engineer_context.clone(),
         execution_plan: None,
         action: None,
         verification: None,
@@ -381,7 +383,7 @@ pub fn run_local_engineer_loop(
         objective: objective.to_string(),
         completed_phase: SessionPhase::Planning,
         inspection: Some(inspection.clone()),
-        terminal_bridge_context: terminal_bridge_context.clone(),
+        terminal_engineer_context: terminal_engineer_context.clone(),
         execution_plan: Some(execution_plan.clone()),
         action: None,
         verification: None,
@@ -466,7 +468,7 @@ pub fn run_local_engineer_loop(
         objective: objective.to_string(),
         completed_phase: SessionPhase::Execution,
         inspection: Some(inspection.clone()),
-        terminal_bridge_context: terminal_bridge_context.clone(),
+        terminal_engineer_context: terminal_engineer_context.clone(),
         execution_plan: Some(execution_plan.clone()),
         action: Some(action.clone()),
         verification: Some(verification.clone()),
@@ -541,7 +543,7 @@ pub fn run_local_engineer_loop(
         &inspection,
         &action,
         &verification,
-        terminal_bridge_context.as_ref(),
+        terminal_engineer_context.as_ref(),
     );
     match &persist_result {
         Ok(()) => {
@@ -587,7 +589,7 @@ pub fn run_local_engineer_loop(
         action,
         verification,
         summary: Some(session_summary),
-        terminal_bridge_context,
+        terminal_engineer_context,
         elapsed_duration: loop_start.elapsed(),
         phase_traces,
         session_record: Some(session),

@@ -82,13 +82,13 @@ pub(super) fn query_pane_pid(session_name: &str) -> Option<u32> {
 /// no progress has ever been reported.
 pub fn check_heartbeat(
     handle: &SubordinateHandle,
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
 ) -> SimardResult<HeartbeatStatus> {
     if handle.killed {
         return Ok(HeartbeatStatus::Dead);
     }
 
-    let progress = poll_progress(&handle.agent_name, bridge)?;
+    let progress = poll_progress(&handle.agent_name, adapter)?;
 
     match progress {
         None => Ok(HeartbeatStatus::Dead),

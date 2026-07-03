@@ -27,27 +27,27 @@ pub use watches::{DEFAULT_DEVELOPER_WATCHES, default_developer_watches, seed_dev
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
-    use crate::memory_bridge::CognitiveMemoryBridge;
+    use crate::memory_adapter::CognitiveMemoryAdapter;
+    use crate::server_subprocess::InMemoryServerTransport;
     use serde_json::json;
 
-    fn mock_bridge() -> CognitiveMemoryBridge {
+    fn mock_adapter() -> CognitiveMemoryAdapter {
         let transport =
-            InMemoryBridgeTransport::new("test-research", |method, _params| match method {
+            InMemoryServerTransport::new("test-research", |method, _params| match method {
                 "memory.store_fact" => Ok(json!({"id": "sem_r1"})),
                 "memory.store_episode" => Ok(json!({"id": "epi_r1"})),
                 "memory.search_facts" => Ok(json!({"facts": []})),
-                _ => Err(crate::bridge::BridgeErrorPayload {
+                _ => Err(crate::server_transport::ServerErrorPayload {
                     code: -32601,
                     message: format!("unknown method: {method}"),
                 }),
             });
-        CognitiveMemoryBridge::new(Box::new(transport))
+        CognitiveMemoryAdapter::new(Box::new(transport))
     }
 
     #[test]
     fn add_and_track_research_topic() {
-        let bridge = mock_bridge();
+        let adapter = mock_adapter();
         add_research_topic(
             ResearchTopic {
                 id: "rt-1".to_string(),
@@ -56,28 +56,28 @@ mod tests {
                 priority: 2,
                 status: ResearchStatus::Proposed,
             },
-            &bridge,
+            &adapter,
         )
         .unwrap();
     }
 
     #[test]
     fn track_developer_watch() {
-        let bridge = mock_bridge();
+        let adapter = mock_adapter();
         track_developer(
             DeveloperWatch {
                 github_id: "octocat".to_string(),
                 focus_areas: vec!["agent-frameworks".to_string()],
                 last_checked: None,
             },
-            &bridge,
+            &adapter,
         )
         .unwrap();
     }
 
     #[test]
     fn rejects_empty_topic_id() {
-        let bridge = mock_bridge();
+        let adapter = mock_adapter();
         let err = add_research_topic(
             ResearchTopic {
                 id: "".to_string(),
@@ -86,7 +86,7 @@ mod tests {
                 priority: 1,
                 status: ResearchStatus::Proposed,
             },
-            &bridge,
+            &adapter,
         )
         .unwrap_err();
         assert!(err.to_string().contains("empty"));
@@ -94,14 +94,14 @@ mod tests {
 
     #[test]
     fn rejects_watch_without_focus_areas() {
-        let bridge = mock_bridge();
+        let adapter = mock_adapter();
         let err = track_developer(
             DeveloperWatch {
                 github_id: "someone".to_string(),
                 focus_areas: vec![],
                 last_checked: None,
             },
-            &bridge,
+            &adapter,
         )
         .unwrap_err();
         assert!(err.to_string().contains("focus area"));
@@ -153,8 +153,8 @@ mod tests {
 
     #[test]
     fn seed_developer_watches_stores_all_five() {
-        let bridge = mock_bridge();
-        let seeded = seed_developer_watches(&bridge);
+        let adapter = mock_adapter();
+        let seeded = seed_developer_watches(&adapter);
         assert_eq!(seeded, 5);
     }
 

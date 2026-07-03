@@ -117,8 +117,8 @@ impl LeaderSemaphore {
                 return Ok(refreshed);
             }
             if is_pid_alive(existing.pid) && !self.is_stale(&existing) {
-                return Err(SimardError::BridgeCallFailed {
-                    bridge: "leader-semaphore".to_string(),
+                return Err(SimardError::ServerCallFailed {
+                    adapter: "leader-semaphore".to_string(),
                     method: "try_acquire".to_string(),
                     reason: format!(
                         "leadership held by pid {} (gen {})",
@@ -171,15 +171,15 @@ impl LeaderSemaphore {
     pub fn transfer(&self, from_pid: u32, to_pid: u32) -> SimardResult<LeaderState> {
         let current = self
             .read_state()?
-            .ok_or_else(|| SimardError::BridgeCallFailed {
-                bridge: "leader-semaphore".to_string(),
+            .ok_or_else(|| SimardError::ServerCallFailed {
+                adapter: "leader-semaphore".to_string(),
                 method: "transfer".to_string(),
                 reason: "no leader state to transfer from".to_string(),
             })?;
 
         if current.pid != from_pid {
-            return Err(SimardError::BridgeCallFailed {
-                bridge: "leader-semaphore".to_string(),
+            return Err(SimardError::ServerCallFailed {
+                adapter: "leader-semaphore".to_string(),
                 method: "transfer".to_string(),
                 reason: format!(
                     "caller pid {} does not own semaphore (owner: {})",

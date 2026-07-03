@@ -5,8 +5,8 @@ Validates the complete migration path:
   2. flock serialization prevents concurrent write corruption
   3. read_only mode allows multiple concurrent readers
   4. Memory facade initializes with distributed topology
-  5. Simard memory bridge creates backend via facade when available
-  6. Bridge JSON-RPC protocol works end-to-end through ladybug
+  5. Simard memory adapter creates backend via facade when available
+  6. Adapter JSON-RPC protocol works end-to-end through ladybug
   7. kuzu/ladybug import conflict is absent in production code path
   8. remote_transfer.rs deprecation markers are present
 
@@ -276,75 +276,75 @@ class TestAmplihackLadybugStore:
 
 
 # ===================================================================
-# Scenario 5: Simard memory bridge uses Memory facade
+# Scenario 5: Simard memory adapter uses Memory facade
 # ===================================================================
 
 
-class TestSimardBridgeFacade:
-    """Verify Simard memory bridge creates backend via Memory facade."""
+class TestSimardAdapterFacade:
+    """Verify Simard memory adapter creates backend via Memory facade."""
 
-    def test_bridge_module_imports_facade(self):
-        bridge_path = (
+    def test_adapter_module_imports_facade(self):
+        adapter_path = (
             Path.home() / "src" / "Simard" / "worktrees" / "main"
             / "python" / "simard_memory_server.py"
         )
-        content = bridge_path.read_text()
+        content = adapter_path.read_text()
         assert "from amplihack.memory.facade import Memory" in content
         assert "topology=\"distributed\"" in content or "topology='distributed'" in content
 
-    def test_bridge_creates_direct_cognitive_fallback(self, tmp_path):
-        """When topology=single, bridge falls back to direct CognitiveMemory."""
-        bridge_dir = (
+    def test_adapter_creates_direct_cognitive_fallback(self, tmp_path):
+        """When topology=single, adapter falls back to direct CognitiveMemory."""
+        adapter_dir = (
             Path.home() / "src" / "Simard" / "worktrees" / "main" / "python"
         )
-        if str(bridge_dir) not in sys.path:
-            sys.path.insert(0, str(bridge_dir))
+        if str(adapter_dir) not in sys.path:
+            sys.path.insert(0, str(adapter_dir))
 
         from simard_memory_server import _create_memory_backend
 
-        db_path = str(tmp_path / "bridge_test_db")
+        db_path = str(tmp_path / "adapter_test_db")
         mem = _create_memory_backend("test-agent", db_path, topology="single")
         assert mem is not None
 
         # Basic operation check
-        nid = mem.store_fact(concept="bridge-test", content="hello", confidence=1.0)
+        nid = mem.store_fact(concept="adapter-test", content="hello", confidence=1.0)
         assert nid.startswith("sem_") or nid.startswith("fact_") or len(nid) > 0
         mem.close()
 
-    def test_bridge_default_topology_is_distributed(self):
+    def test_adapter_default_topology_is_distributed(self):
         """CLI default topology should be 'distributed'."""
-        bridge_path = (
+        adapter_path = (
             Path.home() / "src" / "Simard" / "worktrees" / "main"
             / "python" / "simard_memory_server.py"
         )
-        content = bridge_path.read_text()
+        content = adapter_path.read_text()
         assert 'default="distributed"' in content
 
 
 # ===================================================================
-# Scenario 6: Bridge JSON-RPC protocol end-to-end
+# Scenario 6: Adapter JSON-RPC protocol end-to-end
 # ===================================================================
 
 
-class TestBridgeProtocol:
-    """End-to-end test: send JSON-RPC to the bridge subprocess via stdin/stdout."""
+class TestAdapterProtocol:
+    """End-to-end test: send JSON-RPC to the adapter subprocess via stdin/stdout."""
 
     @pytest.fixture
-    def bridge_proc(self, tmp_path):
-        """Start the bridge subprocess."""
-        bridge_script = (
+    def adapter_proc(self, tmp_path):
+        """Start the adapter subprocess."""
+        adapter_script = (
             Path.home() / "src" / "Simard" / "worktrees" / "main"
             / "python" / "simard_memory_server.py"
         )
-        db_path = tmp_path / "e2e_bridge_db"
+        db_path = tmp_path / "e2e_adapter_db"
         env = os.environ.copy()
         env["PYTHONPATH"] = ":".join([
             str(_MEMORY_LIB_SRC),
             str(_AMPLIHACK_SRC),
-            str(bridge_script.parent),
+            str(adapter_script.parent),
         ])
         proc = subprocess.Popen(
-            [sys.executable, str(bridge_script),
+            [sys.executable, str(adapter_script),
              "--agent-name", "e2e-test",
              "--db-path", str(db_path),
              "--topology", "single"],
@@ -366,8 +366,8 @@ class TestBridgeProtocol:
         assert line, f"No response for {method}"
         return json.loads(line)
 
-    def test_store_and_search_fact(self, bridge_proc):
-        resp = self._send(bridge_proc, "memory.store_fact", {
+    def test_store_and_search_fact(self, adapter_proc):
+        resp = self._send(adapter_proc, "memory.store_fact", {
             "concept": "ladybug-migration",
             "content": "kuzu replaced by ladybug",
             "confidence": 0.95,
@@ -376,7 +376,7 @@ class TestBridgeProtocol:
         fact_id = resp.get("result", {}).get("id")
         assert fact_id, f"Expected fact id, got {resp}"
 
-        resp2 = self._send(bridge_proc, "memory.search_facts", {
+        resp2 = self._send(adapter_proc, "memory.search_facts", {
             "query": "ladybug",
             "limit": 5,
         })
@@ -385,23 +385,23 @@ class TestBridgeProtocol:
         assert len(facts) >= 1
         assert any("ladybug" in f["content"] for f in facts)
 
-    def test_store_and_recall_procedure(self, bridge_proc):
-        resp = self._send(bridge_proc, "memory.store_procedure", {
+    def test_store_and_recall_procedure(self, adapter_proc):
+        resp = self._send(adapter_proc, "memory.store_procedure", {
             "name": "upgrade-db",
             "steps": ["backup", "migrate", "verify"],
             "prerequisites": ["backup-tool"],
         })
         assert "error" not in resp, f"Error: {resp}"
 
-        resp2 = self._send(bridge_proc, "memory.recall_procedure", {
+        resp2 = self._send(adapter_proc, "memory.recall_procedure", {
             "query": "upgrade",
         })
         procs = resp2.get("result", {}).get("procedures", [])
         assert len(procs) >= 1
         assert procs[0]["name"] == "upgrade-db"
 
-    def test_statistics_returns_all_six_types(self, bridge_proc):
-        resp = self._send(bridge_proc, "memory.get_statistics", {})
+    def test_statistics_returns_all_six_types(self, adapter_proc):
+        resp = self._send(adapter_proc, "memory.get_statistics", {})
         assert "error" not in resp
         stats = resp.get("result", {})
         for key in [

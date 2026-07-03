@@ -80,7 +80,7 @@ callers (OODA, goals, consolidation, dashboards, bootstrap)
         │
         └─ RemoteCognitiveMemory    (the daemon's IPC client — unchanged)
 
-   selected in ooda_loop::bridge_factory::connect_memory()
+   selected in ooda_loop::context_factory::connect_memory()
 ```
 
 `RemoteCognitiveMemory` is the daemon's IPC client; `connect_memory()` still
@@ -170,7 +170,7 @@ CLI all run on the library backend.
 
 ### Runtime backend selection
 
-`connect_memory(state_root)` (in `ooda_loop::bridge_factory`) collapses to a
+`connect_memory(state_root)` (in `ooda_loop::context_factory`) collapses to a
 **two-tier** precedence:
 
 1. a live daemon socket exists → `RemoteCognitiveMemory` (IPC client; unchanged),

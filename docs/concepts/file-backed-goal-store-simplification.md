@@ -23,7 +23,7 @@ the production `GoalStore` implementation in `bootstrap::assembly`.
 `FileBackedGoalStore` (which persisted to `goal_records.json`) and the
 cognitive-memory graph (the `goal-board:snapshot` fact). The adapter would
 route every `GoalStore` trait call through the cognitive-memory bridge
-helpers, opening per-call reader or writer bridges.
+helpers, opening per-call reader or writer adapters.
 
 In practice, this introduced three problems:
 
@@ -32,7 +32,7 @@ In practice, this introduced three problems:
    backend, engineer loop, bootstrap-assembled sessions. These consumers
    do not need the full cognitive-memory graph, the bridge resolution
    ladder, or the daemon IPC socket. Routing a `list()` call through
-   `open_reader_bridge → search_facts → filter → parse` is
+   `open_reader_adapter → search_facts → filter → parse` is
    disproportionate to reading a JSON file.
 
 2. **Failure modes inherited from the bridge stack.** When the daemon is

@@ -1,4 +1,4 @@
-//! IPC bridge between clients (meeting, engineer, etc.) and the
+//! IPC adapter between clients (meeting, engineer, etc.) and the
 //! OODA daemon's cognitive memory.
 //!
 //! The daemon holds an exclusive lock on the cognitive-memory store. To let
@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(test)]
-mod tests_bridge_isolation;
+mod tests_adapter_isolation;
 #[cfg(test)]
 mod tests_default_state_root_1967;
 #[cfg(test)]
@@ -73,7 +73,7 @@ pub fn default_socket_path() -> PathBuf {
 /// See issues [#1923](https://github.com/rysweet/Simard/issues/1923) /
 /// [#1925](https://github.com/rysweet/Simard/issues/1925) for the
 /// fixture-leak failure mode this resolution prevents, and
-/// `docs/reference/cognitive-memory-bridge-helpers.md` for the bridge-
+/// `docs/reference/cognitive-memory-adapter-helpers.md` for the adapter-
 /// helper integration.
 ///
 /// Implementation: env-var override (when non-empty) → `state_root.join("memory.sock")`.
@@ -100,7 +100,7 @@ pub const MEMORY_SOCKET_ENV: &str = "SIMARD_MEMORY_SOCKET";
 /// Environment variable that opts a test out of the hermetic-state-root
 /// guard. Read by the cfg(test)-only assertion sites
 /// (`save_goal_board` / `save_goal_board_with_removals`, the cognitive-memory
-/// writer, `launch_writer_bridge`). The
+/// writer, `launch_writer_adapter`). The
 /// only legitimate consumer is the npm install-real / install-fake
 /// harness; new uses require code-review acknowledgement.
 pub const TEST_ALLOW_LIVE_STATE_ENV: &str = "SIMARD_TEST_ALLOW_LIVE_STATE";
@@ -220,15 +220,15 @@ pub enum MemoryResponse {
 }
 
 pub(crate) fn ipc_err(ctx: &str, e: impl std::fmt::Display) -> SimardError {
-    SimardError::BridgeTransportError {
-        bridge: "memory-ipc".to_string(),
+    SimardError::ServerTransportError {
+        adapter: "memory-ipc".to_string(),
         reason: format!("{ctx}: {e}"),
     }
 }
 
 pub(crate) fn write_frame<W: Write>(w: &mut W, payload: &[u8]) -> SimardResult<()> {
-    let len = u32::try_from(payload.len()).map_err(|_| SimardError::BridgeTransportError {
-        bridge: "memory-ipc".into(),
+    let len = u32::try_from(payload.len()).map_err(|_| SimardError::ServerTransportError {
+        adapter: "memory-ipc".into(),
         reason: format!("message too large: {} bytes", payload.len()),
     })?;
     w.write_all(&len.to_be_bytes())
@@ -255,7 +255,7 @@ pub use client::RemoteCognitiveMemory;
 pub use launcher::clear_in_process_writer;
 pub use launcher::clear_tier2_store_cache;
 pub use launcher::{
-    ReaderBridge, WriterBridge, launch_writer_bridge, open_reader_bridge,
+    ReaderAdapter, WriterAdapter, launch_writer_adapter, open_reader_adapter,
     register_in_process_writer,
 };
 pub use server::{ServerHandle, spawn_server};
@@ -441,7 +441,7 @@ impl CognitiveMemoryOps for SharedMemory {
     }
     fn graph_stats(&self) -> SimardResult<GraphStats> {
         // Issue #2331: forward to the wrapped in-process store so a tier-0
-        // `open_reader_bridge` reader (same-process daemon writer) reports the
+        // `open_reader_adapter` reader (same-process daemon writer) reports the
         // real edge / dedup counts instead of the all-zero trait default.
         self.0.graph_stats()
     }

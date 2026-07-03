@@ -5,7 +5,7 @@
 //! knowledge context. It is intended for local testing and for running
 //! arbitrary commands through the same session lifecycle as real adapters.
 
-use crate::base_type_turn::EnrichmentBridges;
+use crate::base_type_turn::EnrichmentAdapters;
 use crate::base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
     BaseTypeSession, BaseTypeSessionRequest, BaseTypeTurnInput, capability_set,
@@ -95,7 +95,7 @@ impl BaseTypeFactory for RealLocalHarnessAdapter {
             descriptor: self.descriptor.clone(),
             config: self.config.clone(),
             request,
-            enrichment: EnrichmentBridges::new(),
+            enrichment: EnrichmentAdapters::new(),
             is_open: false,
             is_closed: false,
             turn_count: 0,
@@ -108,12 +108,12 @@ struct RealLocalHarnessSession {
     descriptor: BaseTypeDescriptor,
     config: HarnessConfig,
     request: BaseTypeSessionRequest,
-    /// Memory + knowledge bridges exposed through the shared enrichment entry
+    /// Memory + knowledge adapters exposed through the shared enrichment entry
     /// point (issue #1665). The harness executes literal shell commands rather
     /// than natural-language LLM prompts, so it does not fold enrichment into
-    /// its command stream; the bridges are surfaced via
+    /// its command stream; the adapters are surfaced via
     /// [`BaseTypeSession::enrich_input`] for contract uniformity and testing.
-    enrichment: EnrichmentBridges,
+    enrichment: EnrichmentAdapters,
     is_open: bool,
     is_closed: bool,
     turn_count: u32,
@@ -157,11 +157,11 @@ impl BaseTypeSession for RealLocalHarnessSession {
         &self.descriptor
     }
 
-    fn enrichment(&self) -> Option<&EnrichmentBridges> {
+    fn enrichment(&self) -> Option<&EnrichmentAdapters> {
         Some(&self.enrichment)
     }
 
-    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentBridges> {
+    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentAdapters> {
         Some(&mut self.enrichment)
     }
 
@@ -286,7 +286,7 @@ mod tests {
                 .clone(),
             config: HarnessConfig::default(),
             request: test_request(),
-            enrichment: EnrichmentBridges::default(),
+            enrichment: EnrichmentAdapters::default(),
             is_open: true,
             is_closed: false,
             turn_count: 0,
@@ -310,7 +310,7 @@ mod tests {
                 working_directory: Some("/tmp".to_string()),
             },
             request: test_request(),
-            enrichment: EnrichmentBridges::default(),
+            enrichment: EnrichmentAdapters::default(),
             is_open: true,
             is_closed: false,
             turn_count: 0,

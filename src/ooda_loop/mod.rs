@@ -2,11 +2,11 @@
 //!
 //! The outer OODA cycle gathers observations from all subsystems, orients by
 //! ranking priorities, decides on actions within concurrency limits, and
-//! dispatches them. If any bridge is unavailable, the cycle degrades honestly
+//! dispatches them. If any adapter is unavailable, the cycle degrades honestly
 //! (Pillar 11): the observation records `None` for that subsystem.
 
 pub mod adaptive_scaling;
-mod bridge_factory;
+mod context_factory;
 mod curate;
 // Issue #2359 (BUG 2): per-cycle goal coverage allocator.
 pub mod coverage;
@@ -50,7 +50,7 @@ mod tests_phase_recall_episodes;
 mod tests_pr_c_procedures;
 
 // Re-export all public items so `crate::ooda_loop::X` still works.
-pub use bridge_factory::{bridges_from_state_root, connect_memory};
+pub use context_factory::{connect_memory, context_from_state_root};
 pub use curate::{
     check_meeting_handoffs, promote_from_backlog, reap_old_handoffs, tombstone_goals,
 };
@@ -63,7 +63,7 @@ pub use review::review_outcomes;
 pub use summary::summarize_cycle_report;
 pub use types::{
     ActionKind, ActionOutcome, CycleReport, EnvironmentSnapshot, GoalSnapshot, Observation,
-    OodaBridges, OodaConfig, OodaPhase, OodaState, OodaStateSnapshot, OrchestratorSessionFactory,
+    OodaConfig, OodaContext, OodaPhase, OodaState, OodaStateSnapshot, OrchestratorSessionFactory,
     PlannedAction, Priority,
 };
 
@@ -72,18 +72,18 @@ use crate::error::SimardResult;
 /// Act: dispatch actions. Failures are per-action, not cycle-wide (Pillar 11).
 ///
 /// Delegates to [`crate::ooda_actions::dispatch_actions_bounded`] which calls
-/// the real subsystems (gym bridge, supervisor, skill builder, etc.).
-/// Takes `&mut OodaBridges` so that the optional session can be used for
+/// the real subsystems (gym adapter, supervisor, skill builder, etc.).
+/// Takes `&mut OodaContext` so that the optional session can be used for
 /// `run_turn` calls during `AdvanceGoal` actions. `max_concurrency` is the
 /// AIMD `scaler.current_max()` cap — the hard ceiling on concurrent engineer
 /// starts this round.
 pub fn act(
     actions: &[PlannedAction],
-    bridges: &mut OodaBridges,
+    adapters: &mut OodaContext,
     state: &mut OodaState,
     max_concurrency: usize,
 ) -> SimardResult<Vec<ActionOutcome>> {
-    crate::ooda_actions::dispatch_actions_bounded(actions, bridges, state, max_concurrency)
+    crate::ooda_actions::dispatch_actions_bounded(actions, adapters, state, max_concurrency)
 }
 
 pub use cycle::run_ooda_cycle;

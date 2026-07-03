@@ -166,7 +166,7 @@ invocation so a single command can sweep a known fixture vector
 Behaviour contract:
 
 - Routes through the daemon's IPC writer (tier 1 of
-  `launch_writer_bridge`) when a daemon socket is reachable, otherwise
+  `launch_writer_adapter`) when a daemon socket is reachable, otherwise
   takes the writer lock directly. The operator never needs to pause the
   daemon.
 - Persists via [`save_goal_board_with_removals`](./goal-board-api.md#save_goal_board_with_removals)
@@ -441,7 +441,7 @@ positional and the env fallback.
 
 The cognitive-memory IPC socket (the Unix-domain socket that fronts the
 daemon's writer lock — see
-[bridge helpers](./cognitive-memory-bridge-helpers.md)) lives **next to
+[bridge helpers](./cognitive-memory-adapter-helpers.md)) lives **next to
 the cognitive-memory database it fronts**, not at a fixed
 `$HOME/.simard/memory.sock`. This is what makes
 `SIMARD_STATE_ROOT=$TMPDIR/...` actually hermetic: a test that overrides
@@ -1159,7 +1159,7 @@ Runs the continuous OODA (Observe-Orient-Decide-Act) daemon loop for autonomous 
 
 Key behavior:
 
-- launches memory, knowledge, and gym bridges
+- launches memory, knowledge, and gym adapters
 - loads the goal board from cognitive memory
 - runs OODA cycles in a loop with 60-second sleep between cycles
 - `--cycles=N` limits the daemon to N cycles; `--cycles=0` or omitting the flag runs indefinitely

@@ -172,7 +172,7 @@ tests assert node-count stability and never assert a frozen `usage_count`.
 The `CognitiveMemoryOps::store_procedure` signature
 (`-> SimardResult<String>`) is **unchanged**. The fix is internal to
 `LibraryCognitiveMemory`, so none of the other implementations
-(`CognitiveMemoryBridge`, `RemoteCognitiveMemory`, `SharedMemory`, and the
+(`CognitiveMemoryAdapter`, `RemoteCognitiveMemory`, `SharedMemory`, and the
 test/meeting stubs) change shape, and no IPC/wire-protocol change is needed
 to convey a "created vs. existing" flag across process boundaries.
 

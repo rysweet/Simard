@@ -1,6 +1,6 @@
-//! Native Rust implementation of the knowledge bridge.
+//! Native Rust implementation of the knowledge adapter.
 //!
-//! Replaces `python/simard_knowledge_bridge.py` with in-process Rust logic.
+//! Replaces `python/simard_knowledge_client.py` with in-process Rust logic.
 //! Reads knowledge pack manifests from disk and queries pack databases via
 //! rusqlite, eliminating the Python subprocess dependency.
 
@@ -12,8 +12,8 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::bridge::BridgeErrorPayload;
-use crate::bridge_subprocess::native::NativeBridgeTransport;
+use crate::server_subprocess::native::NativeServerTransport;
+use crate::server_transport::ServerErrorPayload;
 
 const ERROR_INTERNAL: i32 = -32603;
 
@@ -258,8 +258,8 @@ fn estimate_confidence(answer: &str, sources: &[SourceInfo]) -> f64 {
     (raw * 100.0).round() / 100.0
 }
 
-/// Register all knowledge bridge method handlers on a NativeBridgeTransport.
-pub fn register_knowledge_handlers(transport: &mut NativeBridgeTransport, packs_dir: PathBuf) {
+/// Register all knowledge adapter method handlers on a NativeServerTransport.
+pub fn register_knowledge_handlers(transport: &mut NativeServerTransport, packs_dir: PathBuf) {
     let packs_dir_list = packs_dir.clone();
     let packs_dir_info = packs_dir.clone();
     let packs_dir_query = packs_dir;
@@ -296,7 +296,7 @@ pub fn register_knowledge_handlers(transport: &mut NativeBridgeTransport, packs_
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if pack_name.is_empty() {
-                return Err(BridgeErrorPayload {
+                return Err(ServerErrorPayload {
                     code: ERROR_INTERNAL,
                     message: "pack_name is required".to_string(),
                 });
@@ -311,7 +311,7 @@ pub fn register_knowledge_handlers(transport: &mut NativeBridgeTransport, packs_
                     "article_count": p.article_count,
                     "section_count": p.section_count,
                 })),
-                None => Err(BridgeErrorPayload {
+                None => Err(ServerErrorPayload {
                     code: ERROR_INTERNAL,
                     message: format!("pack '{pack_name}' not found"),
                 }),
@@ -334,7 +334,7 @@ pub fn register_knowledge_handlers(transport: &mut NativeBridgeTransport, packs_
             let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
             if pack_name.is_empty() {
-                return Err(BridgeErrorPayload {
+                return Err(ServerErrorPayload {
                     code: ERROR_INTERNAL,
                     message: "pack_name is required".to_string(),
                 });
@@ -367,7 +367,7 @@ pub fn register_knowledge_handlers(transport: &mut NativeBridgeTransport, packs_
                             path
                         }
                         None => {
-                            return Err(BridgeErrorPayload {
+                            return Err(ServerErrorPayload {
                                 code: ERROR_INTERNAL,
                                 message: format!("pack '{pack_name}' not found"),
                             });
@@ -377,7 +377,7 @@ pub fn register_knowledge_handlers(transport: &mut NativeBridgeTransport, packs_
             };
 
             if !db_path.exists() {
-                return Err(BridgeErrorPayload {
+                return Err(ServerErrorPayload {
                     code: ERROR_INTERNAL,
                     message: format!(
                         "pack '{pack_name}' has no database at {}",
@@ -409,7 +409,7 @@ pub fn register_knowledge_handlers(transport: &mut NativeBridgeTransport, packs_
                         "confidence": confidence,
                     }))
                 }
-                Err(e) => Err(BridgeErrorPayload {
+                Err(e) => Err(ServerErrorPayload {
                     code: ERROR_INTERNAL,
                     message: e,
                 }),
@@ -552,15 +552,15 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         create_test_pack(tmp.path(), "test-pack");
 
-        let mut transport = NativeBridgeTransport::new("simard-knowledge");
+        let mut transport = NativeServerTransport::new("simard-knowledge");
         register_knowledge_handlers(&mut transport, tmp.path().to_path_buf());
 
-        let request = crate::bridge::BridgeRequest {
-            id: crate::bridge::new_request_id(),
+        let request = crate::server_transport::ServerRequest {
+            id: crate::server_transport::new_request_id(),
             method: "knowledge.list_packs".to_string(),
             params: serde_json::json!({}),
         };
-        let response = crate::bridge::BridgeTransport::call(&transport, request).unwrap();
+        let response = crate::server_transport::ServerTransport::call(&transport, request).unwrap();
         assert!(response.result.is_some());
         let result = response.result.unwrap();
         let packs = result["packs"].as_array().unwrap();
@@ -573,11 +573,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         create_test_pack(tmp.path(), "test-pack");
 
-        let mut transport = NativeBridgeTransport::new("simard-knowledge");
+        let mut transport = NativeServerTransport::new("simard-knowledge");
         register_knowledge_handlers(&mut transport, tmp.path().to_path_buf());
 
-        let request = crate::bridge::BridgeRequest {
-            id: crate::bridge::new_request_id(),
+        let request = crate::server_transport::ServerRequest {
+            id: crate::server_transport::new_request_id(),
             method: "knowledge.query".to_string(),
             params: serde_json::json!({
                 "pack_name": "test-pack",
@@ -585,7 +585,7 @@ mod tests {
                 "limit": 5,
             }),
         };
-        let response = crate::bridge::BridgeTransport::call(&transport, request).unwrap();
+        let response = crate::server_transport::ServerTransport::call(&transport, request).unwrap();
         assert!(response.result.is_some());
         let result = response.result.unwrap();
         assert!(!result["answer"].as_str().unwrap().is_empty());
@@ -597,15 +597,15 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         create_test_pack(tmp.path(), "test-pack");
 
-        let mut transport = NativeBridgeTransport::new("simard-knowledge");
+        let mut transport = NativeServerTransport::new("simard-knowledge");
         register_knowledge_handlers(&mut transport, tmp.path().to_path_buf());
 
-        let request = crate::bridge::BridgeRequest {
-            id: crate::bridge::new_request_id(),
+        let request = crate::server_transport::ServerRequest {
+            id: crate::server_transport::new_request_id(),
             method: "knowledge.pack_info".to_string(),
             params: serde_json::json!({"pack_name": "test-pack"}),
         };
-        let response = crate::bridge::BridgeTransport::call(&transport, request).unwrap();
+        let response = crate::server_transport::ServerTransport::call(&transport, request).unwrap();
         assert!(response.result.is_some());
         let result = response.result.unwrap();
         assert_eq!(result["name"], "test-pack");
@@ -616,15 +616,15 @@ mod tests {
     fn native_knowledge_transport_pack_not_found() {
         let tmp = TempDir::new().unwrap();
 
-        let mut transport = NativeBridgeTransport::new("simard-knowledge");
+        let mut transport = NativeServerTransport::new("simard-knowledge");
         register_knowledge_handlers(&mut transport, tmp.path().to_path_buf());
 
-        let request = crate::bridge::BridgeRequest {
-            id: crate::bridge::new_request_id(),
+        let request = crate::server_transport::ServerRequest {
+            id: crate::server_transport::new_request_id(),
             method: "knowledge.pack_info".to_string(),
             params: serde_json::json!({"pack_name": "nonexistent"}),
         };
-        let response = crate::bridge::BridgeTransport::call(&transport, request).unwrap();
+        let response = crate::server_transport::ServerTransport::call(&transport, request).unwrap();
         assert!(response.error.is_some());
         assert!(response.error.unwrap().message.contains("not found"));
     }
@@ -634,11 +634,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         create_test_pack(tmp.path(), "test-pack");
 
-        let mut transport = NativeBridgeTransport::new("simard-knowledge");
+        let mut transport = NativeServerTransport::new("simard-knowledge");
         register_knowledge_handlers(&mut transport, tmp.path().to_path_buf());
 
-        let request = crate::bridge::BridgeRequest {
-            id: crate::bridge::new_request_id(),
+        let request = crate::server_transport::ServerRequest {
+            id: crate::server_transport::new_request_id(),
             method: "knowledge.query".to_string(),
             params: serde_json::json!({
                 "pack_name": "test-pack",
@@ -646,7 +646,7 @@ mod tests {
                 "limit": 5,
             }),
         };
-        let response = crate::bridge::BridgeTransport::call(&transport, request).unwrap();
+        let response = crate::server_transport::ServerTransport::call(&transport, request).unwrap();
         assert!(response.result.is_some());
         let result = response.result.unwrap();
         assert_eq!(result["confidence"], 0.0);

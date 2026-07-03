@@ -6,8 +6,8 @@
 //! shelling to the helper bin via JSON IPC. This proves the recipe path
 //! and the in-process path are interchangeable.
 //!
-//! Bridge-dependent phases (observe, act, budget-check, memory-intake,
-//! prepare-context) are NOT covered here — they require live bridges
+//! Adapter-dependent phases (observe, act, budget-check, memory-intake,
+//! prepare-context) are NOT covered here — they require live adapters
 //! and are exercised via integration tests against `run_ooda_cycle`.
 
 use std::path::Path;
@@ -343,7 +343,7 @@ fn act_rejects_missing_actions_json() {
     );
 }
 
-// --- observe subcommand surface (live execution requires bridges and is
+// --- observe subcommand surface (live execution requires adapters and is
 //      exercised by the daemon path; here we only verify the helper bin
 //      surface accepts the right flags and rejects malformed invocations) -
 

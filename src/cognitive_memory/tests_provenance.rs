@@ -18,7 +18,7 @@
 //!
 //! These tests target `LibraryCognitiveMemory::in_memory()` directly —
 //! the in-memory `GraphStore` implements `query_neighbors`, so the edge
-//! round-trip is exercised without going through the bridge/IPC layer.
+//! round-trip is exercised without going through the adapter/IPC layer.
 //!
 //! ## Param-order footgun (intentional)
 //!
@@ -27,7 +27,7 @@
 //! `Option`s — which is the *opposite* of the legacy
 //! `store_fact(concept, content, confidence, tags, source_id)`. The tests
 //! call the new method in library order on purpose; the trait default
-//! impl bridges the swap for non-library backends.
+//! impl adapters the swap for non-library backends.
 //!
 //! ## Expected red signal
 //!

@@ -118,7 +118,7 @@ simard-engineer-step persist \
 | `--inspection-json`      | yes      | JSON-encoded `RepoInspection`                        |
 | `--action-json`          | yes      | JSON-encoded `ExecutedEngineerAction`                |
 | `--verification-json`    | yes      | JSON-encoded `VerificationReport`                    |
-| `--terminal-bridge-json` | no       | JSON-encoded `TerminalBridgeContext` (if applicable) |
+| `--terminal-bridge-json` | no       | JSON-encoded `TerminalEngineerContext` (if applicable) |
 
 **Output**: Confirmation JSON with the path to the written report.
 

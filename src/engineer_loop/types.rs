@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::goals::GoalRecord;
 use crate::session::{SessionPhase, SessionRecord};
-use crate::terminal_engineer_bridge::TerminalBridgeContext;
+use crate::terminal_engineer::TerminalEngineerContext;
 
 use std::path::PathBuf;
 
@@ -171,7 +171,7 @@ impl PhaseTrace {
     pub fn session_phase(&self) -> SessionPhase {
         match self.name.as_str() {
             "inspect" | "pre-mutation-guard" => SessionPhase::Intake,
-            "load-bridge-context" => SessionPhase::Preparation,
+            "load-adapter-context" => SessionPhase::Preparation,
             "agent-prompt-build" | "plan" => SessionPhase::Planning,
             "agent-spawn" | "agent-wait" => SessionPhase::Execution,
             "review" => SessionPhase::Reflection,
@@ -197,7 +197,7 @@ pub struct EngineerLoopRun {
     /// `None` for runs deserialized from older formats that predate summary tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<SessionSummary>,
-    pub terminal_bridge_context: Option<TerminalBridgeContext>,
+    pub terminal_engineer_context: Option<TerminalEngineerContext>,
     #[serde(with = "duration_millis")]
     pub elapsed_duration: Duration,
     pub phase_traces: Vec<PhaseTrace>,
@@ -310,9 +310,9 @@ pub struct SessionCheckpoint {
     /// Workspace inspection captured during Intake.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspection: Option<RepoInspection>,
-    /// Terminal bridge context loaded during Preparation.
+    /// Terminal adapter context loaded during Preparation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_bridge_context: Option<TerminalBridgeContext>,
+    pub terminal_engineer_context: Option<TerminalEngineerContext>,
     /// Execution plan formed during Planning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_plan: Option<ExecutionPlan>,

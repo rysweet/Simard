@@ -146,7 +146,7 @@ rather than firing `simard rollback` directly.
 `spawn_agent_for_goal` (the engineer-dispatch entry point in
 `src/engineer_loop/agent_spawn.rs`) calls `refuse_if_draining` first.
 If `draining.flag` is present, the dispatch is refused with a
-`BridgeCallFailed { bridge: "engineer", method: "spawn_agent_for_goal" }`
+`ServerCallFailed { bridge: "engineer", method: "spawn_agent_for_goal" }`
 error. The brain treats this as an expected refusal, not a real
 failure, while a safe-update is in progress.
 

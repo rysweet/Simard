@@ -13,7 +13,7 @@ use crate::cognitive_memory::{CognitiveMemoryOps, RecallWeightSet};
 use crate::goal_curation::{
     ActiveGoal, GoalBoard, GoalProgress, add_active_goal, load_goal_board, save_goal_board,
 };
-use crate::memory_ipc::launch_writer_bridge;
+use crate::memory_ipc::launch_writer_adapter;
 use crate::state_root::STATE_ROOT_ENV;
 
 fn isolated_state_root() -> (TempDir, std::path::PathBuf) {
@@ -42,8 +42,8 @@ fn active_goal(id: &str, priority: u32) -> ActiveGoal {
 
 /// Count the LIVE `goal-board:snapshot` facts via ranked recall (which excludes
 /// superseded/archived revisions).
-fn live_snapshot_count(bridge: &dyn CognitiveMemoryOps) -> usize {
-    bridge
+fn live_snapshot_count(adapter: &dyn CognitiveMemoryOps) -> usize {
+    adapter
         .recall_facts_ranked("goal-board:snapshot", 256, 0.0, RecallWeightSet::default())
         .expect("ranked recall")
         .into_iter()
@@ -55,34 +55,34 @@ fn live_snapshot_count(bridge: &dyn CognitiveMemoryOps) -> usize {
 #[serial(cognitive_memory)]
 fn repeated_snapshot_saves_supersede_not_duplicate() {
     let (_tmp, root) = isolated_state_root();
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let adapter = launch_writer_adapter(&root).expect("writer adapter");
 
     // Save #1: one live snapshot.
     let mut board = GoalBoard::new();
     add_active_goal(&mut board, active_goal("goal-alpha", 1)).unwrap();
-    save_goal_board(&board, bridge.ops()).expect("save v1");
+    save_goal_board(&board, adapter.ops()).expect("save v1");
     assert_eq!(
-        live_snapshot_count(bridge.ops()),
+        live_snapshot_count(adapter.ops()),
         1,
         "one live snapshot after first save"
     );
 
     // Save #2 (changed): supersedes v1 — still one live snapshot.
     add_active_goal(&mut board, active_goal("goal-beta", 2)).unwrap();
-    save_goal_board(&board, bridge.ops()).expect("save v2");
-    assert_eq!(live_snapshot_count(bridge.ops()), 1, "v2 supersedes v1");
+    save_goal_board(&board, adapter.ops()).expect("save v2");
+    assert_eq!(live_snapshot_count(adapter.ops()), 1, "v2 supersedes v1");
 
     // Save #3 (changed): supersedes v2 — still one live snapshot.
     add_active_goal(&mut board, active_goal("goal-gamma", 3)).unwrap();
-    save_goal_board(&board, bridge.ops()).expect("save v3");
+    save_goal_board(&board, adapter.ops()).expect("save v3");
     assert_eq!(
-        live_snapshot_count(bridge.ops()),
+        live_snapshot_count(adapter.ops()),
         1,
         "repeated snapshots must supersede, never accumulate live duplicates"
     );
 
     // The latest snapshot content is readable and reflects all three goals.
-    let loaded = load_goal_board(bridge.ops()).expect("load board");
+    let loaded = load_goal_board(adapter.ops()).expect("load board");
     let ids: std::collections::HashSet<&str> =
         loaded.active.iter().map(|g| g.id.as_str()).collect();
     assert!(ids.contains("goal-alpha"));

@@ -55,17 +55,17 @@ fn spawn_rejects_empty_goal() {
 #[test]
 fn spawn_accepts_any_depth() {
     // Depth limits are now warnings only — external tools have their own guardrails.
-    // spawn_subordinate will fail with BridgeSpawnFailed (can't exec) but NOT
+    // spawn_subordinate will fail with ServerSpawnFailed (can't exec) but NOT
     // InvalidIdentityComposition, proving depth validation no longer blocks.
     let mut config = test_config();
     config.current_depth = 100;
     let result = spawn_subordinate(&config);
     // It should fail because current_exe() won't work as a subordinate launcher
-    // in test mode, but the error should be BridgeSpawnFailed, NOT depth-related.
+    // in test mode, but the error should be ServerSpawnFailed, NOT depth-related.
     match result {
         Ok(_) => {}                                      // spawned successfully — fine
-        Err(SimardError::BridgeSpawnFailed { .. }) => {} // expected in test
-        Err(other) => panic!("expected BridgeSpawnFailed, got: {other}"),
+        Err(SimardError::ServerSpawnFailed { .. }) => {} // expected in test
+        Err(other) => panic!("expected ServerSpawnFailed, got: {other}"),
     }
 }
 

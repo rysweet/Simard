@@ -2,7 +2,7 @@
 
 Recipe: `prompt_assets/simard/recipes/ooda-decide.yaml`
 Prompt source: `prompt_assets/simard/ooda_decide.md` (content embedded in recipe YAML)
-Shim: `src/ooda_brain/recipe_decide.rs`
+Shim: `src/ooda_reasoners/recipe_decide.rs`
 
 This is the single source of truth for the decide-phase action-kind routing
 decision. The decide brain runs as a **recipe step** via `recipe-runner-rs`.
@@ -15,7 +15,7 @@ against the 10 action keywords.
 > case-insensitively. The recipe prompt now instructs the LLM to output the
 > action keyword as the very first word.
 >
-> **History:** Before #2111, the decide brain was `RustyClawdDecideBrain`,
+> **History:** Before #2111, the decide brain was `RustyClawdDecideReasoner`,
 > which used a `DECISION:` marker parser. #2111 replaced it with keyword
 > scanning. #2144 further simplified to first-word extraction.
 
@@ -57,7 +57,7 @@ steps:
 
 The recipe is a single `agent` step. The recipe-runner-rs subprocess handles
 prompt rendering, agent invocation, and stdout capture. The Rust shim
-(`RecipeBrain`) parses the stdout.
+(`RecipeReasoner`) parses the stdout.
 
 ### What changed from `ooda_decide.md`
 
@@ -76,7 +76,7 @@ awareness sections are preserved verbatim.
 ## Placeholders (Context Variables)
 
 The recipe-runner-rs performs Handlebars `{{name}}` substitution from the
-context variables passed by `RecipeBrain`.
+context variables passed by `RecipeReasoner`.
 
 | Variable | Type | Source |
 |---|---|---|
@@ -87,8 +87,8 @@ context variables passed by `RecipeBrain`.
 ## Action Keywords
 
 The `OPTIONS` section enumerates the valid action keywords. Each maps 1:1
-to a `DecideJudgment` enum variant in `src/ooda_brain/decide.rs`. The
-first-word parser in `recipe_brain.rs` matches these keywords.
+to a `DecideJudgment` enum variant in `src/ooda_reasoners/decide.rs`. The
+first-word parser in `recipe_reasoner.rs` matches these keywords.
 
 | Keyword | Enum variant | When to use |
 |---|---|---|
@@ -105,8 +105,8 @@ first-word parser in `recipe_brain.rs` matches these keywords.
 
 ## First-Word Parser
 
-`RecipeBrain` uses `parse_action_from_text()` in
-`src/ooda_brain/recipe_brain.rs` to extract the action kind from the
+`RecipeReasoner` uses `parse_action_from_text()` in
+`src/ooda_reasoners/recipe_reasoner.rs` to extract the action kind from the
 agent's stdout.
 
 ### How it works
@@ -129,10 +129,10 @@ false-positive risk from keyword substrings.
 
 ## Error Handling
 
-`RecipeBrain` returns `Err(SimardError::AdapterInvocationFailed)` when:
+`RecipeReasoner` returns `Err(SimardError::AdapterInvocationFailed)` when:
 
 - The `recipe-runner-rs` binary is not found (construction fails;
-  `RecipeBrain::new()` returns `None`).
+  `RecipeReasoner::new()` returns `None`).
 - The subprocess exits with a non-zero status.
 - The subprocess cannot be spawned (permission error, missing binary at
   runtime, etc.).
@@ -185,7 +185,7 @@ optional rollback). The section gates the action on:
 
 Unlike `ooda_brain.md` (which is embedded via `include_str!`), the decide
 recipe is loaded at runtime by the recipe-runner-rs subprocess.
-`RecipeBrain` resolves the recipe path relative to `repo_root`:
+`RecipeReasoner` resolves the recipe path relative to `repo_root`:
 
 ```
 {repo_root}/prompt_assets/simard/recipes/ooda-decide.yaml
@@ -205,15 +205,15 @@ significant improvement over the old `include_str!` approach, which required
 
 Semantic changes (adding a new action keyword) require a coordinated change:
 
-1. Add the variant to `DecideJudgment` in `src/ooda_brain/decide.rs`.
+1. Add the variant to `DecideJudgment` in `src/ooda_reasoners/decide.rs`.
 2. Add the mapping from `DecideJudgment` → `ActionKind`.
 3. Add the keyword to `parse_action_from_text()` in
-   `src/ooda_brain/recipe_brain.rs`.
+   `src/ooda_reasoners/recipe_reasoner.rs`.
 4. Add the keyword to the `OPTIONS` section in the recipe prompt.
 5. Add an example to the `EXAMPLES` section.
-6. Add a test to `recipe_brain.rs` covering the new keyword.
+6. Add a test to `recipe_reasoner.rs` covering the new keyword.
 7. Update the variant table in
-   [text-parsing wire formats § decide](text-parsing-wire-formats.md#1a-decide-phase-recipe_brainrs).
+   [text-parsing wire formats § decide](text-parsing-wire-formats.md#1a-decide-phase-recipe_reasonerrs).
 
 Cosmetic edits (rationale guidance, examples, ROLE phrasing) are safe to
 ship alone — and take effect without a rebuild.
@@ -221,7 +221,7 @@ ship alone — and take effect without a rebuild.
 ## Construction Pattern
 
 ```rust
-let brain: Box<dyn OodaDecideBrain> = match RecipeBrain::new(
+let brain: Box<dyn DecideReasoner> = match RecipeReasoner::new(
     repo_root,
     "ooda-decide.yaml",
     "recipe-decide-brain",
@@ -229,17 +229,17 @@ let brain: Box<dyn OodaDecideBrain> = match RecipeBrain::new(
     Some(b) => Box::new(b),
     None => {
         eprintln!("[ooda] recipe-runner-rs not found; using deterministic fallback");
-        Box::new(DeterministicFallbackDecideBrain)
+        Box::new(DeterministicFallbackDecideReasoner)
     }
 };
 ```
 
-`RecipeBrain::new(repo_root, recipe_filename, adapter_tag)` returns `None` when:
+`RecipeReasoner::new(repo_root, recipe_filename, adapter_tag)` returns `None` when:
 - The `recipe-runner-rs` binary is not on `$PATH`.
 - The recipe YAML file does not exist at the expected path.
 
 The daemon wiring in `operator_commands_ooda/daemon/brains.rs` calls
-`build_decide_brain(state_root, repo_root)`, which performs this
+`build_decide_reasoner(state_root, repo_root)`, which performs this
 construction.
 
 ## See Also
@@ -247,7 +247,7 @@ construction.
 * [Reference: `ooda_brain.md` prompt schema](ooda-brain-prompt.md) — engineer-lifecycle prompt
 * [Reference: `ooda_orient.md` prompt schema](ooda-orient-prompt.md) — orient-phase prompt
 * [Reference: text-parsing wire formats](text-parsing-wire-formats.md) — normative grammar
-* [Reference: `OodaBrain` API](ooda-brain-api.md) — trait and type definitions
+* [Reference: `ActReasoner` API](ooda-brain-api.md) — trait and type definitions
 * [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md) — design rationale
 * [Concept: OODA loop self-detection](../concepts/ooda-loop-self-detection.md) — why the decide rationale names a suspected loop while keeping `advance_goal`
 * [How-to: edit the OODA brain prompt](../howto/edit-the-ooda-brain-prompt.md) — editing guide

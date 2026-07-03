@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use super::dashboard_goal_board_snapshot;
 use super::routes::resolve_state_root;
 use super::subagent::{count_json_records, file_metrics};
-use crate::memory_ipc::open_reader_bridge;
+use crate::memory_ipc::open_reader_adapter;
 
 // ---------------------------------------------------------------------------
 // Memory metrics panel
@@ -34,11 +34,11 @@ pub(crate) async fn memory_metrics() -> Json<Value> {
         .unwrap_or(0);
 
     // Query the library-backed cognitive memory for live statistics (#419),
-    // routed through `open_reader_bridge` so the daemon's IPC writer serves the
+    // routed through `open_reader_adapter` so the daemon's IPC writer serves the
     // read when running embedded. Capture the error so the dashboard can show
     // *why* data is missing instead of silently returning zeros.
     let native_result =
-        open_reader_bridge(&state_root).and_then(|reader| reader.ops().get_statistics());
+        open_reader_adapter(&state_root).and_then(|reader| reader.ops().get_statistics());
     let native_error = native_result.as_ref().err().map(|e| e.to_string());
     let native_stats = native_result.ok();
 

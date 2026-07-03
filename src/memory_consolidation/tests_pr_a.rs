@@ -18,7 +18,7 @@
 //! ## How these compile against pre-PR-A code
 //!
 //! The tests must compile against the current 3-argument
-//! `preparation_memory_operations(objective, session_id, bridge)`
+//! `preparation_memory_operations(objective, session_id, adapter)`
 //! signature. They route through a thin shim
 //! [`prep_with_active_slugs`] that today simply calls the 3-arg
 //! function and ignores the extra argument. When PR-A switches the
@@ -31,8 +31,8 @@
 //! tests themselves do not change.
 
 use super::*;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_adapter::CognitiveMemoryAdapter;
+use crate::server_subprocess::InMemoryServerTransport;
 use crate::session::SessionId;
 use serde_json::json;
 use std::collections::HashSet;
@@ -49,27 +49,27 @@ fn test_session_id() -> SessionId {
 fn prep_with_active_slugs(
     objective: &str,
     session_id: &SessionId,
-    bridge: &dyn crate::cognitive_memory::CognitiveMemoryOps,
+    adapter: &dyn crate::cognitive_memory::CognitiveMemoryOps,
     active_slugs: &HashSet<&str>,
 ) -> crate::error::SimardResult<PreparedContext> {
     preparation_memory_operations_with_active_slugs(
         objective,
         session_id,
-        bridge,
+        adapter,
         Some(active_slugs),
     )
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Bridge fixtures
+// Adapter fixtures
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Bridge that returns five `goal-board:snapshot` revisions plus one
+/// Adapter that returns five `goal-board:snapshot` revisions plus one
 /// unrelated `bug-pattern` fact when queried by the objective text or
 /// by the goal-store concept. PR-A filter 1 should drop all five
 /// snapshots.
-fn snapshot_revisions_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("snapshot-revs", |method, params| match method {
+fn snapshot_revisions_adapter() -> CognitiveMemoryAdapter {
+    let transport = InMemoryServerTransport::new("snapshot-revs", |method, params| match method {
         "memory.search_facts" => {
             let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
             // Both the per-fragment objective search AND the
@@ -106,18 +106,18 @@ fn snapshot_revisions_bridge() -> CognitiveMemoryBridge {
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
         "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
         "memory.push_working" => Ok(json!({"id": "wrk_1"})),
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::server_transport::ServerErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
-/// Bridge that returns three `goal-store:record` facts: two with slugs
+/// Adapter that returns three `goal-store:record` facts: two with slugs
 /// the caller will pass in `active_slugs` ("alpha", "beta") and one
 /// with a stale slug ("ghost-of-tdd") that should be filtered out.
-fn mixed_goal_store_bridge() -> CognitiveMemoryBridge {
+fn mixed_goal_store_adapter() -> CognitiveMemoryAdapter {
     use crate::goals::{GoalRecord, GoalStatus};
     use crate::session::SessionPhase;
 
@@ -139,7 +139,7 @@ fn mixed_goal_store_bridge() -> CognitiveMemoryBridge {
     let stale = make_record("ghost-of-tdd", "Ghost-of-TDD (stale)");
 
     let transport =
-        InMemoryBridgeTransport::new("mixed-goal-store", move |method, params| match method {
+        InMemoryServerTransport::new("mixed-goal-store", move |method, params| match method {
             "memory.search_facts" => {
                 let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
                 if query == "goal-store:record" {
@@ -179,19 +179,19 @@ fn mixed_goal_store_bridge() -> CognitiveMemoryBridge {
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::server_transport::ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
-/// Bridge that returns a `lesson-learned` and a `pr-pattern` fact —
+/// Adapter that returns a `lesson-learned` and a `pr-pattern` fact —
 /// neither of which is a `goal-store:record` or `goal-board:snapshot`.
 /// Both filters should leave these untouched.
-fn diverse_concepts_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("diverse", |method, _params| match method {
+fn diverse_concepts_adapter() -> CognitiveMemoryAdapter {
+    let transport = InMemoryServerTransport::new("diverse", |method, _params| match method {
         "memory.search_facts" => Ok(json!({
             "facts": [
                 {
@@ -216,12 +216,12 @@ fn diverse_concepts_bridge() -> CognitiveMemoryBridge {
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
         "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
         "memory.push_working" => Ok(json!({"id": "wrk_1"})),
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::server_transport::ServerErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -235,9 +235,9 @@ fn diverse_concepts_bridge() -> CognitiveMemoryBridge {
 /// returns all 5 snapshot revisions in the prepared context.
 #[test]
 fn preparation_drops_goal_board_snapshot_revisions() {
-    let bridge = snapshot_revisions_bridge();
+    let adapter = snapshot_revisions_adapter();
     let active: HashSet<&str> = HashSet::new();
-    let ctx = prep_with_active_slugs("unrelated objective", &test_session_id(), &bridge, &active)
+    let ctx = prep_with_active_slugs("unrelated objective", &test_session_id(), &adapter, &active)
         .unwrap();
 
     let snapshots: Vec<_> = ctx
@@ -280,12 +280,12 @@ fn preparation_drops_goal_board_snapshot_revisions() {
 /// `ghost-of-tdd` because it is the only revision of its slug.
 #[test]
 fn preparation_drops_stale_goal_store_records() {
-    let bridge = mixed_goal_store_bridge();
+    let adapter = mixed_goal_store_adapter();
     let mut active: HashSet<&str> = HashSet::new();
     active.insert("alpha");
     active.insert("beta");
 
-    let ctx = prep_with_active_slugs("unrelated objective", &test_session_id(), &bridge, &active)
+    let ctx = prep_with_active_slugs("unrelated objective", &test_session_id(), &adapter, &active)
         .unwrap();
 
     let slugs: Vec<String> = ctx
@@ -314,12 +314,12 @@ fn preparation_drops_stale_goal_store_records() {
 /// asserts the absence of the stale slug, which is not yet enforced.
 #[test]
 fn preparation_keeps_active_goal_store_records() {
-    let bridge = mixed_goal_store_bridge();
+    let adapter = mixed_goal_store_adapter();
     let mut active: HashSet<&str> = HashSet::new();
     active.insert("alpha");
     active.insert("beta");
 
-    let ctx = prep_with_active_slugs("unrelated objective", &test_session_id(), &bridge, &active)
+    let ctx = prep_with_active_slugs("unrelated objective", &test_session_id(), &adapter, &active)
         .unwrap();
 
     let slugs: std::collections::HashSet<String> = ctx
@@ -357,10 +357,15 @@ fn preparation_keeps_active_goal_store_records() {
 /// PR-A author cannot accidentally widen the filter.
 #[test]
 fn preparation_does_not_filter_other_concepts() {
-    let bridge = diverse_concepts_bridge();
+    let adapter = diverse_concepts_adapter();
     let active: HashSet<&str> = HashSet::new();
-    let ctx = prep_with_active_slugs("any objective at all", &test_session_id(), &bridge, &active)
-        .unwrap();
+    let ctx = prep_with_active_slugs(
+        "any objective at all",
+        &test_session_id(),
+        &adapter,
+        &active,
+    )
+    .unwrap();
 
     let concepts: std::collections::HashSet<String> = ctx
         .relevant_facts
@@ -381,7 +386,7 @@ fn preparation_does_not_filter_other_concepts() {
 /// **TDD red → green (issue #2302): the "facts always zero" defect.**
 ///
 /// End-to-end through the real `LibraryCognitiveMemory` (not a mock
-/// bridge) so the actual `search_facts` body is exercised. Stores a
+/// adapter) so the actual `search_facts` body is exercised. Stores a
 /// keyword-bearing learned fact and a valid `goal-store:record` fact,
 /// then prepares with a realistic multi-word objective and the live
 /// active slug set. Both facts must surface in `PreparedContext`.

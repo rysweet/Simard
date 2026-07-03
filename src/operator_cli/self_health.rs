@@ -1,15 +1,15 @@
 //! `simard self-health` — run the post-deploy health probe and print a report.
 //!
 //! A sibling of `self-test`. Reports the five self-deploy health probes
-//! (version, memory, goal board, brains LLM-backed, no quarantine) against the
-//! live store, opened through the canonical reader bridge (daemon socket when
+//! (version, memory, goal board, reasoners LLM-backed, no quarantine) against the
+//! live store, opened through the canonical reader adapter (daemon socket when
 //! up, else a direct on-disk open). Exit code 0 when every probe is healthy,
 //! non-zero otherwise. The self-deploy orchestrator runs the same probe
 //! internally; this is the operator-facing entry point.
 //!
 //! See `docs/reference/self-deploy-api.md#simard-self-health`.
 
-use crate::memory_ipc::open_reader_bridge;
+use crate::memory_ipc::open_reader_adapter;
 
 pub(super) const SELF_HEALTH_HELP: &str = "\
 Simard self-health subcommand
@@ -55,7 +55,7 @@ pub(super) fn dispatch_self_health_command(
     let (json, pre_deploy_facts) = parse_flags(args)?;
 
     let state_root = crate::state_root::simard_state_root();
-    let reader = open_reader_bridge(&state_root)?;
+    let reader = open_reader_adapter(&state_root)?;
 
     // A manual self-health checks THIS running binary against itself, so the
     // target commit is the running build commit; the version probe confirms the

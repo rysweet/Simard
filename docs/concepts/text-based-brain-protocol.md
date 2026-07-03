@@ -131,7 +131,7 @@ struct retains `Deserialize` for internal use, but the parser never calls
 
 ### 1. First-word match protocol (OODA brains)
 
-Used by: `recipe_brain.rs` (all three phases)
+Used by: `recipe_reasoner.rs` (all three phases)
 
 > **Changed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
 > All three OODA brain parsers now use the same first-word extraction pattern.
@@ -217,10 +217,10 @@ Several modules were deleted or cleaned up as part of the text-migration changes
 - **`merge_judge.rs` (partial)** — `LlmMergeJudge`, `parse_judge_response`,
   `extract_fenced_blocks`, `extract_balanced_objects`, `truncate_for_log`.
 
-- **`decide.rs` (partial, #2111)** — `RustyClawdDecideBrain`,
-  `parse_judgment_from_response`, `build_rustyclawd_decide_brain`.
+- **`decide.rs` (partial, #2111)** — `RustyClawdDecideReasoner`,
+  `parse_judgment_from_response`, `build_rustyclawd_decide_reasoner`.
 
-- **`recipe_brain.rs` (partial, #2144)** — `ascii_contains_ignore_case()`,
+- **`recipe_reasoner.rs` (partial, #2144)** — `ascii_contains_ignore_case()`,
   `try_json_extraction()`, `try_bare_float()`, `parse_with_marker()`,
   `extract_decision_marker()`, `try_keyword_scan()`, `build_keyword_decision()`,
   `LIFECYCLE_KEYWORDS`. All three parse functions (`parse_action_from_text`,
@@ -257,7 +257,7 @@ reliably.
 > **Completed in [#2111](https://github.com/rysweet/Simard/issues/2111) and
 > [#2144](https://github.com/rysweet/Simard/issues/2144):**
 > The decide brain now uses first-word extraction. The `DECISION:` marker
-> parser, keyword scanner, JSON extractor, and `RustyClawdDecideBrain` have
+> parser, keyword scanner, JSON extractor, and `RustyClawdDecideReasoner` have
 > all been deleted. Parse failures from the OODA brains are eliminated.
 
 ## Security improvements

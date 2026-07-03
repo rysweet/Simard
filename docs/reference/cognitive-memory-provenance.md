@@ -81,10 +81,10 @@ edits. Only the live on-disk backend,
 [`LibraryCognitiveMemory`](../architecture/cognitive-memory-library-adapter.md),
 overrides them; the other six inherit the no-provenance defaults:
 
-- `CognitiveMemoryBridge` (`src/memory_bridge/mod.rs`) — in-process bridge,
+- `CognitiveMemoryAdapter` (`src/memory_adapter/mod.rs`) — in-process bridge,
 - `RemoteCognitiveMemory` (`src/memory_ipc/client.rs`) — IPC client,
 - `SharedMemory` (`src/memory_ipc/mod.rs`) — IPC server-side shared memory,
-- and the three test stubs `ProcMock`, `MockBridge`, `EpisodeMock`.
+- and the three test stubs `ProcMock`, `MockAdapter`, `EpisodeMock`.
 
 These are all native Rust implementors — the de-fork removed the Python
 bridge, so there is no out-of-process bridge client to update.
@@ -129,7 +129,7 @@ Returns the new fact's `node_id`.
 
 **Default (non-library) impl.** Delegates to `store_fact`, dropping the
 provenance edges and the extra metadata. Because `store_fact` takes
-`tags: &[String]` (not an `Option`), the default bridges the optional
+`tags: &[String]` (not an `Option`), the default adapters the optional
 tags slot with `tags.unwrap_or(&[])`. This keeps the six non-graph
 backends (bridge / IPC / stubs) compiling and functionally correct — they
 store the fact, just without edges.

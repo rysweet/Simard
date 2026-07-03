@@ -1,6 +1,6 @@
 # Reference: OODA Brain Decision Protocol (first-word match)
 
-Crate: `simard` · Module: `simard::ooda_brain::rustyclawd`
+Crate: `simard` · Module: `simard::ooda_reasoners::rustyclawd`
 Closes the design gap that Issue [#1711](https://github.com/rysweet/Simard/issues/1711) opened.
 
 This page is the normative definition of the **wire format** the OODA brain
@@ -48,7 +48,7 @@ match first_word.as_str() {
     "open_tracking_issue" => ...,
     "mark_goal_blocked" => ...,
     "consider_self_update" => ...,
-    _ => Err(SimardError::BrainResponseUnparseable { .. }),
+    _ => Err(SimardError::ReasonerResponseUnparseable { .. }),
 }
 ```
 
@@ -92,11 +92,11 @@ The following table is the canonical specification.
 | T2 | `continue_skipping rest of text` | `Ok(ContinueSkipping { rationale: "continue_skipping rest of text" })` |
 | T3 | `CONTINUE_SKIPPING` | `Ok(ContinueSkipping { ... })` — case-insensitive first-word match |
 | T5 | `open_tracking_issue rest` | `Ok(OpenTrackingIssue { title: "", body: "", rationale: "open_tracking_issue rest" })` |
-| T10 | `OK` | `Err(BrainResponseUnparseable)` |
-| T11 | `` (empty) | `Err(BrainResponseUnparseable)` |
-| T12 | `bogus_variant` | `Err(BrainResponseUnparseable)` |
+| T10 | `OK` | `Err(ReasonerResponseUnparseable)` |
+| T11 | `` (empty) | `Err(ReasonerResponseUnparseable)` |
+| T12 | `bogus_variant` | `Err(ReasonerResponseUnparseable)` |
 | T14 | `reclaim_and_redispatch rest` | `Ok(ReclaimAndRedispatch { redispatch_context: "", rationale: "reclaim_and_redispatch rest" })` |
-| T15 | `🚀continue_skipping` | `Err(BrainResponseUnparseable)` — first word does not match a whitelisted variant |
+| T15 | `🚀continue_skipping` | `Err(ReasonerResponseUnparseable)` — first word does not match a whitelisted variant |
 
 > **Removed in #2144:**
 > - T4 (`DECISION: CONTINUE_SKIPPING` exact-snake-case marker parsing)
@@ -105,13 +105,13 @@ The following table is the canonical specification.
 
 ## Error format
 
-`SimardError::BrainResponseUnparseable` still carries the full raw response so
+`SimardError::ReasonerResponseUnparseable` still carries the full raw response so
 operators can diagnose bad model output.
 
 ```rust
-SimardError::BrainResponseUnparseable {
+SimardError::ReasonerResponseUnparseable {
     raw: String,
-    source: BrainParseSource,
+    source: ReasonerParseSource,
 }
 ```
 
@@ -136,7 +136,7 @@ The `raw` field remains **untruncated** in the error struct. Truncation to
 A representative parse-failure log now looks like:
 
 ```
-WARN simard::ooda_brain: brain.decide_engineer_lifecycle parse failed
+WARN simard::ooda_reasoners: brain.decide_engineer_lifecycle parse failed
     goal=improve-amplihack-test-coverage
     raw="OK"
     error=unrecognized lifecycle variant in first token
@@ -144,9 +144,9 @@ WARN simard::ooda_brain: brain.decide_engineer_lifecycle parse failed
 
 ## What did **not** change
 
-* The `OodaBrain` trait, `EngineerLifecycleCtx`, and
+* The `ActReasoner` trait, `EngineerLifecycleCtx`, and
   `EngineerLifecycleDecision` types are still the public contract.
-* `DeterministicFallbackBrain` still returns `ContinueSkipping` when the brain
+* `DeterministicFallbackActReasoner` still returns `ContinueSkipping` when the brain
   cannot be constructed.
 * The fallback path on parse error is still `ContinueSkipping`.
 * `truncate()` still protects rationale and other text fields from unbounded
@@ -228,8 +228,8 @@ rate-limit responses — those concerns still live one layer up.
 
 | Caller | Affected? |
 |--------|-----------|
-| `RustyClawdBrain::decide_engineer_lifecycle` | Yes — now uses first-word matching instead of marker parsing. |
-| `DeterministicFallbackBrain` | No — bypasses the parser entirely. |
+| `RustyClawdActReasoner::decide_engineer_lifecycle` | Yes — now uses first-word matching instead of marker parsing. |
+| `DeterministicFallbackActReasoner` | No — bypasses the parser entirely. |
 | Prompt examples in `ooda_brain.md` | Yes — must start with the lifecycle variant name. |
 
 A model that still emits `DECISION:` lines or labeled fields may fail parsing
@@ -239,7 +239,7 @@ if the first token is not itself a valid lifecycle variant.
 
 * [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md)
 * [Reference: text-parsing wire formats](text-parsing-wire-formats.md)
-* [Reference: `OodaBrain` API](ooda-brain-api.md)
+* [Reference: `ActReasoner` API](ooda-brain-api.md)
 * [Reference: `ooda_brain.md` Prompt Schema](ooda-brain-prompt.md)
 * [How-to: diagnose brain decision parse failures](../howto/diagnose-brain-decision-parse-failures.md)
 * [How-to: edit the OODA brain prompt](../howto/edit-the-ooda-brain-prompt.md)

@@ -236,7 +236,7 @@ fn prune_superseded(&self) -> SimardResult<usize>;
 Notes:
 
 - The trait stays `&self`. The library's `recall_facts_ranked` is
-  `&mut self` (it *can* record access); the adapter bridges that through its
+  `&mut self` (it *can* record access); the adapter adapters that through its
   existing `Mutex` write-lock pattern.
 - The trait takes the Simard-owned `RecallWeightSet`, **not** the library's
   `RecallWeights`, so the trait — and every mock/implementor — stays

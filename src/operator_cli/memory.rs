@@ -2,7 +2,7 @@
 //! of the six-type cognitive-memory store on the library backend (issue #2308
 //! follow-up).
 //!
-//! Both commands open the store through [`open_reader_bridge`], the canonical
+//! Both commands open the store through [`open_reader_adapter`], the canonical
 //! read-only consumer entry point: when the OODA daemon is up they route
 //! through its memory socket (no lock contention); when it is down they fall
 //! back to a direct open of the on-disk store. Neither command mutates memory.
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardResult;
 use crate::memory_cognitive::{CognitiveStatistics, GraphStats};
-use crate::memory_ipc::{open_reader_bridge, socket_path_for};
+use crate::memory_ipc::{open_reader_adapter, socket_path_for};
 
 pub(super) const MEMORY_HELP: &str = "\
 Simard memory subcommand — cognitive-memory introspection (read-only)
@@ -186,7 +186,7 @@ fn run_stats(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::erro
     let state_root = resolve_state_root(state_root_opt);
     let tier = access_tier_for(&state_root);
 
-    let reader = open_reader_bridge(&state_root)?;
+    let reader = open_reader_adapter(&state_root)?;
     let report = build_report(
         reader.ops(),
         &state_root,
@@ -230,7 +230,7 @@ fn run_dump(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error
     let state_root = resolve_state_root(state_root_opt);
     let tier = access_tier_for(&state_root);
 
-    let reader = open_reader_bridge(&state_root)?;
+    let reader = open_reader_adapter(&state_root)?;
     let report = build_report(reader.ops(), &state_root, tier, limit, dump_type)?;
 
     if json {

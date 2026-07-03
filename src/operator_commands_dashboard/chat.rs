@@ -8,7 +8,7 @@ use serde_json::json;
 use crate::error::{SimardError, SimardResult};
 
 // ---------------------------------------------------------------------------
-// WebSocket chat — bridges to Simard's meeting facilitator conversation model
+// WebSocket chat — adapters to Simard's meeting facilitator conversation model
 // ---------------------------------------------------------------------------
 
 /// Load the meeting system prompt from disk.

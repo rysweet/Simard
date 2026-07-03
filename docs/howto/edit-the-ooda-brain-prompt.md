@@ -109,7 +109,7 @@ The fastest validation loop is the brain's unit tests, which exercise the
 parser against the shipped prompt and a stub LLM submitter:
 
 ```bash
-cargo test -p simard ooda_brain
+cargo test -p simard ooda_reasoners
 ```
 
 For end-to-end behavior, restart the daemon (TL;DR above) and watch
@@ -206,7 +206,7 @@ for the full grammar of each format.
 * [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md)
 * [Concept: prompt-driven OODA brain](../concepts/prompt-driven-ooda-brain.md)
 * [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md)
-* [Reference: `OodaBrain` API](../reference/ooda-brain-api.md)
+* [Reference: `ActReasoner` API](../reference/ooda-brain-api.md)
 * [Reference: `ooda_brain.md` prompt schema](../reference/ooda-brain-prompt.md)
 * [Reference: `ooda_decide.md` prompt schema](../reference/ooda-decide-prompt.md) — decide recipe and first-word parser
 * [Reference: `ooda_orient.md` prompt schema](../reference/ooda-orient-prompt.md)

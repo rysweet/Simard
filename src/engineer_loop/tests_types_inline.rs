@@ -201,10 +201,10 @@ fn phase_trace_maps_pre_mutation_guard_to_intake() {
 }
 
 #[test]
-fn phase_trace_maps_load_bridge_context_to_preparation() {
+fn phase_trace_maps_load_adapter_context_to_preparation() {
     use crate::session::SessionPhase;
     let trace = PhaseTrace {
-        name: "load-bridge-context".to_string(),
+        name: "load-adapter-context".to_string(),
         duration: std::time::Duration::from_millis(5),
         outcome: PhaseOutcome::Success,
     };
@@ -382,7 +382,7 @@ fn engineer_loop_run_session_record_backward_compat() {
             checks: vec![],
         },
         summary: None,
-        terminal_bridge_context: None,
+        terminal_engineer_context: None,
         elapsed_duration: std::time::Duration::from_millis(100),
         phase_traces: vec![],
         session_record: None,

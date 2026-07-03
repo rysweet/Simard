@@ -8,12 +8,12 @@ owner: simard
 
 # Reference: OODA Brain Parse-Failure Record
 
-Crate: `simard` · Module: `simard::ooda_brain::parse_failure`
+Crate: `simard` · Module: `simard::ooda_reasoners::parse_failure`
 Closes the visibility gap that Issue [#1890](https://github.com/rysweet/Simard/issues/1890) opened. Sibling of [#1711](https://github.com/rysweet/Simard/issues/1711) (engineer-lifecycle decision protocol) and [#1748](https://github.com/rysweet/Simard/issues/1748) (silent deterministic fallback audit).
 
-This page is the normative definition of how `decide_with_brain` and `orient_with_brain` in `simard::ooda_loop` surface a brain-invocation failure (the dominant case is a JSON-parse failure; other adapter `Err` variants are covered identically — see [Scope of the record](#scope-of-the-record)). Before this contract, a brain failure produced a single `WARN` line of the form `no JSON object found in LLM response (got N bytes)` and was then silently substituted by `DeterministicFallbackDecideBrain` / `DeterministicFallbackOrientBrain`. The cycle still ran, the cycle report still claimed a decision, and the operator had no way to tell a healthy cycle from a degraded one.
+This page is the normative definition of how `decide_with_brain` and `orient_with_brain` in `simard::ooda_loop` surface a brain-invocation failure (the dominant case is a JSON-parse failure; other adapter `Err` variants are covered identically — see [Scope of the record](#scope-of-the-record)). Before this contract, a brain failure produced a single `WARN` line of the form `no JSON object found in LLM response (got N bytes)` and was then silently substituted by `DeterministicFallbackDecideReasoner` / `DeterministicFallbackOrientReasoner`. The cycle still ran, the cycle report still claimed a decision, and the operator had no way to tell a healthy cycle from a degraded one.
 
-> **TL;DR** — Decide and orient brain failures fire four visibility channels in a fixed sequence: (1) a single `ERROR`-level structured `tracing` event, (2) a `brain_parse_failure` metric increment, (3) a new `parse_failure` block on the corresponding `BrainJudgmentRecord` (which lands in `cycle_reports/cycle_*.json`), and (4) a throttled `gh issue create` escalation at ≥3 consecutive failures per `(phase, goal_id)`. The cycle does **not** abort — it continues with a deterministic substitution whose record now carries a `parse_failure` block, so the cycle report makes the degraded state machine-readable.
+> **TL;DR** — Decide and orient brain failures fire four visibility channels in a fixed sequence: (1) a single `ERROR`-level structured `tracing` event, (2) a `brain_parse_failure` metric increment, (3) a new `parse_failure` block on the corresponding `ReasonerJudgmentRecord` (which lands in `cycle_reports/cycle_*.json`), and (4) a throttled `gh issue create` escalation at ≥3 consecutive failures per `(phase, goal_id)`. The cycle does **not** abort — it continues with a deterministic substitution whose record now carries a `parse_failure` block, so the cycle report makes the degraded state machine-readable.
 
 ## Scope of the record
 
@@ -31,7 +31,7 @@ and orient has:
 ```rust
 match brain.judge_orientation(&ctx) {
     Ok(j) if j.validate(ctx.base_urgency).is_ok() => (j, false),
-    _ => (DeterministicFallbackOrientBrain::compute(&ctx), true),
+    _ => (DeterministicFallbackOrientReasoner::compute(&ctx), true),
 }
 ```
 
@@ -52,7 +52,7 @@ The new record makes the difference **machine-detectable** and **operator-visibl
 
 ## The `ParseFailureRecord` schema
 
-`ParseFailureRecord` is a serde-serializable struct exported from `simard::ooda_brain::parse_failure`. It is embedded on `BrainJudgmentRecord` via a new optional field (see below).
+`ParseFailureRecord` is a serde-serializable struct exported from `simard::ooda_reasoners::parse_failure`. It is embedded on `ReasonerJudgmentRecord` via a new optional field (see below).
 
 ```rust
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -116,13 +116,13 @@ pub struct ParseFailureRecord {
 
 | Field | Source | Stability |
 |---|---|---|
-| `phase` | `BrainPhase::Decide` / `Orient` lowercased | Enum-equivalent; treated as opaque bytes when used in `gh` `Command::args`. |
+| `phase` | `ReasonerPhase::Decide` / `Orient` lowercased | Enum-equivalent; treated as opaque bytes when used in `gh` `Command::args`. |
 | `goal_id` | Internal goal id from `OodaState` | Originates from meeting decisions and `goal-curation` commands (so is user-influenced at origin); treated as opaque bytes — only used as a `HashMap` key and as an argument to `Command::args` (never shell-interpolated, never path-joined). |
 | `error_message` | `SimardError::Display` (`err.to_string()`) | Stable across the existing `AdapterInvocationFailed { base_type, reason }` shape. `Display`, never `Debug`, so future variants that grow private fields cannot leak. |
 | `raw_response_truncated` | `let mut s = raw.to_string(); truncate_to_char_boundary(&mut s, RAW_RESPONSE_TRUNCATE_BYTES);` | UTF-8-boundary safe; in-place mutation on a `String` (the existing helper signature). |
 | `prompt_name` | `&'static str` constant the call site already passes to `prompt_store::current_version` (e.g. `DECIDE_PROMPT_NAME`) | No new prompt-store API needed. |
-| `prompt_version` | `prompt_store::current_version(prompt_name)` (12-char sha256 prefix) | Same helper the `BrainJudgmentRecord.prompt_version` field already uses; empty string means embedded fallback was served. |
-| `consecutive_count` | `Mutex<HashMap<(BrainPhase, String), u32>>` in `parse_failure` module (a `OnceLock` global) | Process-local; resets on success per `(phase, goal_id)`; cross-restart loss is acceptable and documented. |
+| `prompt_version` | `prompt_store::current_version(prompt_name)` (12-char sha256 prefix) | Same helper the `ReasonerJudgmentRecord.prompt_version` field already uses; empty string means embedded fallback was served. |
+| `consecutive_count` | `Mutex<HashMap<(ReasonerPhase, String), u32>>` in `parse_failure` module (a `OnceLock` global) | Process-local; resets on success per `(phase, goal_id)`; cross-restart loss is acceptable and documented. |
 | `retry_attempted` | Always `false` in this release | Reserved; schema-stable for future retry-with-feedback. |
 | `timestamp` | `chrono::Utc::now().to_rfc3339()` at moment of failure | One source of truth across all four channels. |
 
@@ -133,17 +133,17 @@ pub struct ParseFailureRecord {
 * **No `cycle_id`** — `cycle_N.json` already carries it on the enclosing record; embedding here would duplicate state.
 * **No `model_name` / `adapter` / `provider`** — the brain log line for the same cycle already names them; this record describes the *failure*, not the brain.
 * **No `secrets_scrubbed: bool`** — truncation is the only sanitization (see [Known limits](#known-limits)). A boolean would imply guarantees the implementation does not make.
-* **No `prompt_summary`** — earlier drafts proposed a one-line prose summary, but the existing `prompt_name` + `prompt_version` pair (both already sourced from `prompt_store`) is already sufficient to identify the exact prompt bytes, and avoids introducing a new prompt-store API (`prompt_summary(name) -> String`) just for this record. Operators who need the full prompt can `cat $SIMARD_PROMPT_ASSETS_DIR/$prompt_name` (or read the embedded fallback in `src/ooda_brain/prompt_store.rs`).
-* **No back-references to `BrainJudgmentRecord.rationale`** — the rationale field continues to hold the existing fallback rationale (`"deterministic fallback"`) so `BrainJudgmentRecord` remains self-describing for callers that don't load `parse_failure`. The `parse_failure.error_message` carries the human-readable failure detail.
+* **No `prompt_summary`** — earlier drafts proposed a one-line prose summary, but the existing `prompt_name` + `prompt_version` pair (both already sourced from `prompt_store`) is already sufficient to identify the exact prompt bytes, and avoids introducing a new prompt-store API (`prompt_summary(name) -> String`) just for this record. Operators who need the full prompt can `cat $SIMARD_PROMPT_ASSETS_DIR/$prompt_name` (or read the embedded fallback in `src/ooda_reasoners/prompt_store.rs`).
+* **No back-references to `ReasonerJudgmentRecord.rationale`** — the rationale field continues to hold the existing fallback rationale (`"deterministic fallback"`) so `ReasonerJudgmentRecord` remains self-describing for callers that don't load `parse_failure`. The `parse_failure.error_message` carries the human-readable failure detail.
 
-## `BrainJudgmentRecord` extension
+## `ReasonerJudgmentRecord` extension
 
 The existing record gains exactly one additive field:
 
 ```rust
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct BrainJudgmentRecord {
-    pub phase: BrainPhase,
+pub struct ReasonerJudgmentRecord {
+    pub phase: ReasonerPhase,
     pub context_summary: String,
     pub decision: String,
     pub rationale: String,
@@ -181,16 +181,16 @@ jq '.brain_judgments[]
 
 ## The four visibility channels
 
-Every call to `record_parse_failure(phase, goal_id, &err, &raw, prompt_name)` fires the four channels in a **fixed sequence**: tracing → metric → counter-increment → in-memory record returned for embedding into `BrainJudgmentRecord` → conditional `gh issue create`. The sequence is not atomic (channel 4 spawns a subprocess; channel 3 only lands on disk when `persist_cycle_report` runs at end-of-cycle), but an observer that sees channel N is guaranteed to have a record of channels `1..N−1` as well: the helper runs synchronously and only returns once channels 1, 2, and 4 (the externally observable ones) have been invoked.
+Every call to `record_parse_failure(phase, goal_id, &err, &raw, prompt_name)` fires the four channels in a **fixed sequence**: tracing → metric → counter-increment → in-memory record returned for embedding into `ReasonerJudgmentRecord` → conditional `gh issue create`. The sequence is not atomic (channel 4 spawns a subprocess; channel 3 only lands on disk when `persist_cycle_report` runs at end-of-cycle), but an observer that sees channel N is guaranteed to have a record of channels `1..N−1` as well: the helper runs synchronously and only returns once channels 1, 2, and 4 (the externally observable ones) have been invoked.
 
-**Sequencing relative to the fallback brain.** The four channels fire *before* the deterministic fallback brain is invoked, so even if the fallback itself errors (the `?` propagation on `fallback.judge_decision(&ctx)?` in `decide.rs`) the parse failure has already been recorded on channels 1, 2, and 4. Only channel 3 (the on-disk `BrainJudgmentRecord`) is lost in that pathological case — the cycle never gets to call `push_brain_judgment` — but the tracing event, the metric increment, and the auto-filed issue all survive. This sequencing is asserted by a regression test that injects a failing fallback brain and verifies channels 1, 2, and 4 still fire.
+**Sequencing relative to the fallback brain.** The four channels fire *before* the deterministic fallback brain is invoked, so even if the fallback itself errors (the `?` propagation on `fallback.judge_decision(&ctx)?` in `decide.rs`) the parse failure has already been recorded on channels 1, 2, and 4. Only channel 3 (the on-disk `ReasonerJudgmentRecord`) is lost in that pathological case — the cycle never gets to call `push_brain_judgment` — but the tracing event, the metric increment, and the auto-filed issue all survive. This sequencing is asserted by a regression test that injects a failing fallback brain and verifies channels 1, 2, and 4 still fire.
 
 ### 1. Structured `tracing::error!`
 
-Target: `simard::ooda_brain`. Level: `ERROR`. Shape:
+Target: `simard::ooda_reasoners`. Level: `ERROR`. Shape:
 
 ```
-ERROR simard::ooda_brain: brain.{phase} parse failed
+ERROR simard::ooda_reasoners: brain.{phase} parse failed
     phase="decide"
     goal_id="improve-amplihack-test-coverage"
     error="base type \"ooda-brain\" failed during invocation: …"
@@ -201,7 +201,7 @@ ERROR simard::ooda_brain: brain.{phase} parse failed
     retry_attempted=false
 ```
 
-The fields are emitted via `tracing`'s structured-field syntax, not interpolated into the message, so log subscribers (jsonl writer, dashboard tail) get a real key/value map. The message string itself is constant (`brain.decide parse failed` / `brain.orient parse failed`) so subscribers can `MATCH` on it without regex. Per the `target=simard::ooda_brain` namespace, operators who need to tame a pathological per-cycle failure loop on the console (without losing on-disk evidence) can subscriber-side filter on a different `MAX_LEVEL` for that target rather than touching the helper.
+The fields are emitted via `tracing`'s structured-field syntax, not interpolated into the message, so log subscribers (jsonl writer, dashboard tail) get a real key/value map. The message string itself is constant (`brain.decide parse failed` / `brain.orient parse failed`) so subscribers can `MATCH` on it without regex. Per the `target=simard::ooda_reasoners` namespace, operators who need to tame a pathological per-cycle failure loop on the console (without losing on-disk evidence) can subscriber-side filter on a different `MAX_LEVEL` for that target rather than touching the helper.
 
 ### 2. `brain_parse_failure` metric
 
@@ -218,9 +218,9 @@ let _ = record_metric("brain_parse_failure", 1.0, &ctx_json);
 
 The existing `record_metric(name: &str, value: f64, context: &str)` API (in `simard::self_metrics`) takes `context` as an opaque string; the helper above renders the structured dimensions as a JSON object inside that string, matching the convention the dashboard already uses to parse `context` back out. The return value is ignored — a metric-write failure must not abort a cycle, and channels 1 and 3 still record the event. The metric lands in `~/.simard/metrics/metrics.jsonl` (single append-only file; see `metrics_file_path()`). One counter name with dimensions (per A7 in the spec); aggregation by phase is `select(.metric_name == "brain_parse_failure") | (.context | fromjson).phase`.
 
-### 3. `BrainJudgmentRecord.parse_failure` on disk
+### 3. `ReasonerJudgmentRecord.parse_failure` on disk
 
-The record produced by `record_parse_failure` is wrapped into the existing `push_brain_judgment(BrainJudgmentRecord { …, parse_failure: Some(record), … })` call. `persist_cycle_report` in `operator_commands_ooda::persistence` serializes it via `serde_json::to_value` with no manual schema work — the field is on the struct, so it lands in the JSON.
+The record produced by `record_parse_failure` is wrapped into the existing `push_brain_judgment(ReasonerJudgmentRecord { …, parse_failure: Some(record), … })` call. `persist_cycle_report` in `operator_commands_ooda::persistence` serializes it via `serde_json::to_value` with no manual schema work — the field is on the struct, so it lands in the JSON.
 
 ### 4. Throttled `gh issue create`
 
@@ -256,14 +256,14 @@ The title pattern is `OODA decide brain parse failure: goal=<id> (N consecutive)
    parse_failure = None              │
                                      ├─► tracing::error!  (ch.1)
                                      ├─► record_metric   (ch.2)
-                                     ├─► BrainJudgmentRecord.parse_failure = Some(_)  (ch.3)
+                                     ├─► ReasonerJudgmentRecord.parse_failure = Some(_)  (ch.3)
                                      ├─► counter[ (phase, goal_id) ] += 1
                                      │       │
                                      │       └─► if ≥3:  gh issue create  (ch.4)
                                      │
                                      ▼
                           DeterministicFallback*Brain
-                          (cycle continues; BrainJudgmentRecord keeps its
+                          (cycle continues; ReasonerJudgmentRecord keeps its
                            existing fallback shape — fallback: true,
                            rationale: "deterministic fallback",
                            prompt_version: "" — but the new
@@ -312,7 +312,7 @@ A `cycle_N.json` produced by a cycle that hit a decide-brain parse failure now c
 }
 ```
 
-The `decision`, `rationale`, `confidence`, `fallback`, and `prompt_version` fields keep the values that `BrainJudgmentRecord::from_decide(..., fallback=true, prompt_version="")` (the existing fallback path) already produces — this PR does **not** introduce a synthetic `"deterministic-fallback (forced)"` label or rewrite the rationale. The `parse_failure.is_some()` discriminator is the single signal operators and dashboards use to distinguish "operator deliberately ran without an LLM brain" (no `parse_failure` key) from "LLM brain failed and the deterministic floor caught it" (`parse_failure` present). Note that `prompt_version` on the outer record is empty here because the fallback brain doesn't read a prompt asset; the `parse_failure.prompt_version` field carries the version of the LLM brain's prompt that produced the unparseable response.
+The `decision`, `rationale`, `confidence`, `fallback`, and `prompt_version` fields keep the values that `ReasonerJudgmentRecord::from_decide(..., fallback=true, prompt_version="")` (the existing fallback path) already produces — this PR does **not** introduce a synthetic `"deterministic-fallback (forced)"` label or rewrite the rationale. The `parse_failure.is_some()` discriminator is the single signal operators and dashboards use to distinguish "operator deliberately ran without an LLM brain" (no `parse_failure` key) from "LLM brain failed and the deterministic floor caught it" (`parse_failure` present). Note that `prompt_version` on the outer record is empty here because the fallback brain doesn't read a prompt asset; the `parse_failure.prompt_version` field carries the version of the LLM brain's prompt that produced the unparseable response.
 
 Healthy cycles serialize **byte-for-byte identically** to the pre-PR shape: the `parse_failure` key is omitted via `skip_serializing_if`. The TR4 regression test fixture pins this property.
 
@@ -331,11 +331,11 @@ Healthy cycles serialize **byte-for-byte identically** to the pre-PR shape: the 
 * **No secret scrubbing of LLM output.** Per A9 in the requirements, `raw_response_truncated` contains whatever the model returned, truncated only. The model is reading our prompt; secret exposure in its *response* is low-probability in practice. If a leak class emerges, it will be addressed separately — there is no module-level toggle to add scrubbing.
 * **No retry-with-feedback in this release.** The `retry_attempted` field is reserved and always `false`. A future PR can wire a single-attempt retry through the brain trait without changing this record's JSON shape.
 * **Counter is process-local.** Daemon restart resets all `(phase, goal_id)` counters to zero. A pathological restart loop could file one issue per (3 × restart). Operators who see this should investigate the restart loop, not the threshold.
-* **Counter map is unbounded.** The `(BrainPhase, String) → u32` map is keyed by `goal_id` and pruned only by successful-parse reset, not by absolute time or size. For daemons with unbounded goal cardinality the map grows monotonically (bounded only by distinct `goal_id` count per process lifetime). In practice goal cardinality is small (top-5 active + backlog) and daemon process lifetimes are bounded by `safe-update`, so no eviction logic is gated. If a future deployment shape changes this, an LRU cap is the obvious next step and does not change the JSON shape.
+* **Counter map is unbounded.** The `(ReasonerPhase, String) → u32` map is keyed by `goal_id` and pruned only by successful-parse reset, not by absolute time or size. For daemons with unbounded goal cardinality the map grows monotonically (bounded only by distinct `goal_id` count per process lifetime). In practice goal cardinality is small (top-5 active + backlog) and daemon process lifetimes are bounded by `safe-update`, so no eviction logic is gated. If a future deployment shape changes this, an LRU cap is the obvious next step and does not change the JSON shape.
 * **`gh` is best-effort.** If `gh` is missing, unauthenticated, or rate-limited, the spawn failure is logged at `WARN` and the other three channels still fire. The cycle does not block on the network.
-* **Tracing-flood self-limiting.** A pathological per-cycle failure produces one `ERROR` line per cycle (one per phase). At default cycle cadence this is bounded by the cycle pacing, not by an in-helper rate limit; operators who need a louder cap can subscriber-side filter `target=simard::ooda_brain` to a lower level. The `gh` channel's per-`(phase, goal_id)` throttle (A6) is the protection against issue-tracker flooding; the tracing channel intentionally remains uncapped so the on-disk evidence is complete.
+* **Tracing-flood self-limiting.** A pathological per-cycle failure produces one `ERROR` line per cycle (one per phase). At default cycle cadence this is bounded by the cycle pacing, not by an in-helper rate limit; operators who need a louder cap can subscriber-side filter `target=simard::ooda_reasoners` to a lower level. The `gh` channel's per-`(phase, goal_id)` throttle (A6) is the protection against issue-tracker flooding; the tracing channel intentionally remains uncapped so the on-disk evidence is complete.
 * **Validation-failure case not covered.** The orient call site collapses `Ok(j) if j.validate(...).is_err()` into the same `_ =>` deterministic-substitution arm. This PR fires the record for `Err(_)` only, not for `Ok-but-invalid`. The latter is a structurally separate failure mode tracked in a follow-up issue; when addressed it should reuse `ParseFailureRecord` with an `error_message` prefix of `"orient validation failed: …"` to keep operator tooling unchanged.
-* **Deterministic-fallback brains are unchanged.** This PR does **not** remove `DeterministicFallbackDecideBrain` / `DeterministicFallbackOrientBrain`. They are still the legitimate substitute for the no-LLM bootstrap path (operator deliberately ran the daemon without an LLM brain configured). Removing them is the scope of [#1748](https://github.com/rysweet/Simard/issues/1748), explicitly out of scope here.
+* **Deterministic-fallback brains are unchanged.** This PR does **not** remove `DeterministicFallbackDecideReasoner` / `DeterministicFallbackOrientReasoner`. They are still the legitimate substitute for the no-LLM bootstrap path (operator deliberately ran the daemon without an LLM brain configured). Removing them is the scope of [#1748](https://github.com/rysweet/Simard/issues/1748), explicitly out of scope here.
 
 ## Operator replay surface
 
@@ -348,7 +348,7 @@ pub fn try_parse_orient_response(raw: &str)
     -> Result<OrientJudgment, SimardError>;
 ```
 
-Both helpers wrap the same parse path that `RustyClawdDecideBrain::run` / `RustyClawdOrientBrain::run` use internally. They take a `&str` matching the `raw_response_truncated` field shape and return either a typed judgment or the same `SimardError::AdapterInvocationFailed` variant the call site sees in production. Operator-replay use is documented in the [how-to guide](../howto/diagnose-decide-orient-parse-failures.md#step-3-replay-the-prompt-locally). These helpers are the only new public surface this PR introduces beyond `ParseFailureRecord` and the `parse_failure` field on `BrainJudgmentRecord`.
+Both helpers wrap the same parse path that `RustyClawdDecideReasoner::run` / `RustyClawdOrientReasoner::run` use internally. They take a `&str` matching the `raw_response_truncated` field shape and return either a typed judgment or the same `SimardError::AdapterInvocationFailed` variant the call site sees in production. Operator-replay use is documented in the [how-to guide](../howto/diagnose-decide-orient-parse-failures.md#step-3-replay-the-prompt-locally). These helpers are the only new public surface this PR introduces beyond `ParseFailureRecord` and the `parse_failure` field on `ReasonerJudgmentRecord`.
 
 ## See also
 
@@ -356,5 +356,5 @@ Both helpers wrap the same parse path that `RustyClawdDecideBrain::run` / `Rusty
 * [Reference: OODA Brain Decision Protocol](./ooda-brain-decision-protocol.md) — sibling visibility contract for the engineer-lifecycle brain (#1711).
 * [How-to: diagnose OODA brain decision parse failures](../howto/diagnose-brain-decision-parse-failures.md) — engineer-lifecycle equivalent of this PR's runbook.
 * [Fail-Open Audit (P5 / #1245)](../fail-open-audit.md) — broader audit that this PR partially discharges.
-* [Reference: `OodaBrain` API](./ooda-brain-api.md) — public surface of the brain trait, unchanged by this PR.
+* [Reference: `ActReasoner` API](./ooda-brain-api.md) — public surface of the brain trait, unchanged by this PR.
 * [Reference: string truncation helpers](./string-truncation-helpers.md) — `truncate_to_char_boundary` UTF-8 contract.

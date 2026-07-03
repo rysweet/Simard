@@ -78,7 +78,7 @@ First, the escalation ladder records that it ended without a parseable decision
 and names the termination cause:
 
 ```
-WARN simard::ooda_brain: brain escalation ladder ended without a parseable decision; deterministic default
+WARN simard::ooda_reasoners: brain escalation ladder ended without a parseable decision; deterministic default
     goal="<id>" attempts=3 base_outcome="default_malformed" termination=Exhausted
 [simard] BRAIN ESCALATION goal=<id> ladder ended (ladder_exhausted) after 3 attempts — deterministic default
 ```
@@ -89,7 +89,7 @@ parse-failure default, the phase emits a **second, distinct** line that the
 real "no action". For **decide** and **orient**:
 
 ```
-WARN simard::ooda_brain: brain phase fell to its deterministic default via a PARSE FAILURE (ladder ladder_exhausted) — NOT a model 'no action' decision; a transient parse miss, re-evaluated next cycle (issue #2496)
+WARN simard::ooda_reasoners: brain phase fell to its deterministic default via a PARSE FAILURE (ladder ladder_exhausted) — NOT a model 'no action' decision; a transient parse miss, re-evaluated next cycle (issue #2496)
     phase=decide goal=<id> outcome_detail=default_malformed cause=ladder_exhausted
 [simard] BRAIN PARSE-FAILURE DEFAULT phase=decide goal=<id> outcome=default_malformed cause=ladder_exhausted (transient miss, NOT a real no-action decision)
 ```
@@ -99,7 +99,7 @@ this way is logged as a **transient parse-failure skip, re-evaluated next cycle 
 NOT a deliberate NO-ACTION**:
 
 ```
-WARN simard::ooda_brain: engineer-lifecycle fell to continue_skipping via a PARSE FAILURE (ladder ladder_exhausted) — a TRANSIENT parse-failure skip, re-evaluated next cycle, NOT a deliberate NO-ACTION (issue #2496)
+WARN simard::ooda_reasoners: engineer-lifecycle fell to continue_skipping via a PARSE FAILURE (ladder ladder_exhausted) — a TRANSIENT parse-failure skip, re-evaluated next cycle, NOT a deliberate NO-ACTION (issue #2496)
     goal=<id> outcome_detail=default_malformed cause=ladder_exhausted
 [simard] LIFECYCLE PARSE-FAILURE SKIP goal=<id> cause=ladder_exhausted (transient, re-evaluated next cycle — NOT a deliberate no-action)
 ```
@@ -153,11 +153,11 @@ The decide brain can still fail at the **infrastructure** level:
 | Failure | Log signature | Action |
 |---------|--------------|--------|
 | `recipe-runner-rs` not found | `[ooda] recipe-runner-rs not found; using deterministic decide fallback` | Install `recipe-runner-rs` or verify `$PATH`. |
-| Recipe subprocess exits non-zero | `ERROR simard::ooda_brain: recipe_decide invocation failed` + stderr | Check the recipe YAML syntax and the agent's error output. |
-| Recipe YAML not found | `RecipeBrain::new() returned None` | Verify `prompt_assets/simard/recipes/ooda-decide.yaml` exists. |
+| Recipe subprocess exits non-zero | `ERROR simard::ooda_reasoners: recipe_decide invocation failed` + stderr | Check the recipe YAML syntax and the agent's error output. |
+| Recipe YAML not found | `RecipeReasoner::new() returned None` | Verify `prompt_assets/simard/recipes/ooda-decide.yaml` exists. |
 
-When `RecipeBrain` fails to construct or the subprocess fails, the
-daemon falls back to `DeterministicFallbackDecideBrain`, which maps goal
+When `RecipeReasoner` fails to construct or the subprocess fails, the
+daemon falls back to `DeterministicFallbackDecideReasoner`, which maps goal
 prefixes to action kinds (`__memory__` → `consolidate_memory`, etc.; real
 goals → `advance_goal`). This fallback is correct for most cases but does
 not preserve the agent's judgment for edge cases.
@@ -166,7 +166,7 @@ not preserve the agent's judgment for edge cases.
 
 ```bash
 tail -F ~/.simard/logs/rustyclawd.log \
-  | grep -E 'recipe_decide|build_decide_brain'
+  | grep -E 'recipe_decide|build_decide_reasoner'
 ```
 
 On successful construction, no log line is emitted. On fallback:
@@ -223,7 +223,7 @@ tail -F ~/.simard/logs/rustyclawd.log \
 A matching line looks like:
 
 ```
-ERROR simard::ooda_brain: brain.orient parse failed
+ERROR simard::ooda_reasoners: brain.orient parse failed
     phase="orient"
     goal_id="improve-amplihack-test-coverage"
     error="no float found in LLM response (got 3 bytes)"
@@ -294,7 +294,7 @@ Add a one-off test:
 #[test]
 fn repro_parse_failure() {
     let raw = "OK"; // <-- paste unescaped payload here
-    let result = crate::ooda_brain::try_parse_orient_response(raw);
+    let result = crate::ooda_reasoners::try_parse_orient_response(raw);
     eprintln!("{result:?}");
 }
 ```

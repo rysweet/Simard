@@ -49,15 +49,15 @@ impl RustyClawdAdapter {
     /// Enable per-turn memory + knowledge enrichment for sessions opened by
     /// this adapter, reading cognitive memory from `state_root`.
     ///
-    /// Without this, sessions are created with both bridges set to `None` and
+    /// Without this, sessions are created with both adapters set to `None` and
     /// every turn runs through `enrich_input` with an empty
-    /// [`crate::base_type_turn::EnrichmentBridges`] — the no-op of issue #2383
+    /// [`crate::base_type_turn::EnrichmentAdapters`] — the no-op of issue #2383
     /// that left RustyClawd recalling no memory facts/procedures or domain
     /// knowledge in production even though the #1665 `enrich_input` entry point
     /// was already wired through `run_turn`.
     ///
     /// Mirrors [`crate::base_type_copilot::CopilotSdkAdapter::with_enrichment`]:
-    /// bridges are launched lazily in [`BaseTypeFactory::open_session`] via the
+    /// adapters are launched lazily in [`BaseTypeFactory::open_session`] via the
     /// shared [`EnrichmentSource::resolve`]; a launch failure logs and degrades
     /// to `None` so a missing knowledge pack or an unavailable memory store
     /// never breaks turn dispatch.
@@ -84,11 +84,11 @@ impl BaseTypeFactory for RustyClawdAdapter {
             });
         }
 
-        // Issue #2383: populate the session's enrichment bridges from the
+        // Issue #2383: populate the session's enrichment adapters from the
         // configured source (graceful degradation inside `resolve`) so the
         // shared `enrich_input` entry point actually injects memory facts,
         // procedures, and domain knowledge into every production turn — instead
-        // of the empty `EnrichmentBridges::new()` that made enrichment inert.
+        // of the empty `EnrichmentAdapters::new()` that made enrichment inert.
         Ok(Box::new(RustyClawdSession {
             descriptor: self.descriptor.clone(),
             request,
@@ -363,17 +363,17 @@ mod tests {
         }
     }
 
-    /// Mock memory bridge mirroring `tests/base_type_enrichment.rs`: returns a
+    /// Mock memory adapter mirroring `tests/base_type_enrichment.rs`: returns a
     /// single fact and procedure for any query so the rendered prompt is
     /// deterministic.
-    fn mock_memory_bridge() -> Box<dyn crate::cognitive_memory::CognitiveMemoryOps> {
-        use crate::bridge::BridgeErrorPayload;
-        use crate::bridge_subprocess::InMemoryBridgeTransport;
-        use crate::memory_bridge::CognitiveMemoryBridge;
+    fn mock_memory_adapter() -> Box<dyn crate::cognitive_memory::CognitiveMemoryOps> {
+        use crate::memory_adapter::CognitiveMemoryAdapter;
+        use crate::server_subprocess::InMemoryServerTransport;
+        use crate::server_transport::ServerErrorPayload;
         use serde_json::json;
 
         let transport =
-            InMemoryBridgeTransport::new("rc-test-memory", |method, params| match method {
+            InMemoryServerTransport::new("rc-test-memory", |method, params| match method {
                 "memory.search_facts" => {
                     let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
                     Ok(
@@ -386,21 +386,21 @@ mod tests {
                     "name": "build-and-test", "steps": ["cargo build", "cargo test"],
                     "prerequisites": ["rust toolchain"], "usage_count": 5}]})),
                 "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(ServerErrorPayload {
                     code: -32601,
                     message: format!("unknown method: {method}"),
                 }),
             });
-        Box::new(CognitiveMemoryBridge::new(Box::new(transport)))
+        Box::new(CognitiveMemoryAdapter::new(Box::new(transport)))
     }
 
     /// The production-wiring regression guard for issue #2383: a RustyClawd
     /// session built through `with_enrichment` (the same seam `SessionBuilder`
-    /// uses) must have non-empty bridges, instead of the empty
-    /// `EnrichmentBridges::new()` that made enrichment a permanent no-op.
+    /// uses) must have non-empty adapters, instead of the empty
+    /// `EnrichmentAdapters::new()` that made enrichment a permanent no-op.
     #[test]
     #[serial_test::serial(cognitive_memory)]
-    fn production_session_with_enrichment_has_nonempty_bridges() {
+    fn production_session_with_enrichment_has_nonempty_adapters() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
         let state_root = tmp.path().join("state");
@@ -412,49 +412,49 @@ mod tests {
             .open_session(enrichment_test_request())
             .expect("session must open with enrichment");
 
-        let bridges = session
+        let adapters = session
             .enrichment()
-            .expect("RustyClawd session must expose enrichment bridges");
+            .expect("RustyClawd session must expose enrichment adapters");
         assert!(
-            bridges.is_configured(),
-            "with_enrichment must populate the session's bridges (issue #2383)"
+            adapters.is_configured(),
+            "with_enrichment must populate the session's adapters (issue #2383)"
         );
         assert!(
-            bridges.memory.is_some(),
-            "open_session must wire the memory bridge when enrichment is Native"
+            adapters.memory.is_some(),
+            "open_session must wire the memory adapter when enrichment is Native"
         );
         assert!(
-            bridges.knowledge.is_some(),
-            "open_session must wire the knowledge bridge when enrichment is Native"
+            adapters.knowledge.is_some(),
+            "open_session must wire the knowledge adapter when enrichment is Native"
         );
     }
 
-    /// The default adapter (no `with_enrichment`) must leave both bridges `None`
+    /// The default adapter (no `with_enrichment`) must leave both adapters `None`
     /// so unit tests and lightweight callers incur no filesystem side effects.
     #[test]
-    fn production_session_without_enrichment_has_empty_bridges() {
+    fn production_session_without_enrichment_has_empty_adapters() {
         let session = RustyClawdAdapter::registered("rc-no-enrich")
             .unwrap()
             .open_session(enrichment_test_request())
             .expect("session must open without enrichment");
 
-        let bridges = session
+        let adapters = session
             .enrichment()
-            .expect("RustyClawd session must expose enrichment bridges");
+            .expect("RustyClawd session must expose enrichment adapters");
         assert!(
-            !bridges.is_configured(),
-            "default adapter must not wire any enrichment bridge"
+            !adapters.is_configured(),
+            "default adapter must not wire any enrichment adapter"
         );
-        assert!(bridges.memory.is_none());
-        assert!(bridges.knowledge.is_none());
+        assert!(adapters.memory.is_none());
+        assert!(adapters.knowledge.is_none());
     }
 
-    /// With a memory bridge injected, `enrich_input` must inject the rendered
+    /// With a memory adapter injected, `enrich_input` must inject the rendered
     /// `## Relevant Memory Facts` block into `prompt_preamble` while keeping the
-    /// objective bare — proving the wired bridges flow through the shared
+    /// objective bare — proving the wired adapters flow through the shared
     /// `enrich_input` entry point for RustyClawd.
     #[test]
-    fn enrich_input_injects_memory_facts_block_with_bridge() {
+    fn enrich_input_injects_memory_facts_block_with_adapter() {
         use crate::base_types::BaseTypeTurnInput;
 
         let mut session = RustyClawdAdapter::registered("rc-enrich-input")
@@ -465,7 +465,7 @@ mod tests {
         session
             .enrichment_mut()
             .expect("RustyClawd must support enrichment injection")
-            .memory = Some(mock_memory_bridge());
+            .memory = Some(mock_memory_adapter());
 
         let input = BaseTypeTurnInput::objective_only("implement error handling");
         let enriched = session.enrich_input(&input).expect("enrich_input");
@@ -495,10 +495,10 @@ mod tests {
         assert_eq!(enriched.objective, "implement error handling");
     }
 
-    /// Without a configured bridge, `enrich_input` is a no-op: the objective is
+    /// Without a configured adapter, `enrich_input` is a no-op: the objective is
     /// preserved and no memory block is fabricated.
     #[test]
-    fn enrich_input_is_noop_without_bridge() {
+    fn enrich_input_is_noop_without_adapter() {
         use crate::base_types::BaseTypeTurnInput;
 
         let session = RustyClawdAdapter::registered("rc-noop")
@@ -514,7 +514,7 @@ mod tests {
             !enriched
                 .prompt_preamble
                 .contains("## Relevant Memory Facts"),
-            "no bridge configured must not fabricate memory facts"
+            "no adapter configured must not fabricate memory facts"
         );
     }
 }

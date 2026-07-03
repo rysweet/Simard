@@ -1,6 +1,6 @@
 ---
-title: RecipeBrain API reference
-description: Public API for the unified RecipeBrain struct and its standalone parse functions.
+title: RecipeReasoner API reference
+description: Public API for the unified RecipeReasoner struct and its standalone parse functions.
 last_updated: 2026-06-28
 review_schedule: as-needed
 owner: simard
@@ -14,21 +14,21 @@ related:
   - ./recipe-brain-verdict-parsing.md
 ---
 
-# RecipeBrain API reference
+# RecipeReasoner API reference
 
-Module: `src/ooda_brain/recipe_brain.rs`
+Module: `src/ooda_reasoners/recipe_reasoner.rs`
 
-## RecipeBrain
+## RecipeReasoner
 
 ```rust
-pub struct RecipeBrain {
+pub struct RecipeReasoner {
     recipe_path: PathBuf,
     agent_binary: &'static str,
     adapter_tag: &'static str,
 }
 ```
 
-### `RecipeBrain::new`
+### `RecipeReasoner::new`
 
 ```rust
 pub fn new(
@@ -38,7 +38,7 @@ pub fn new(
 ) -> Option<Self>
 ```
 
-Constructs a `RecipeBrain` if all preconditions are met. Returns `None` when:
+Constructs a `RecipeReasoner` if all preconditions are met. Returns `None` when:
 
 - The recipe YAML file is not found at either resolution path.
 - `LlmProvider::resolve_agent_binary()` returns `None` (config unavailable).
@@ -62,9 +62,9 @@ Constructs a `RecipeBrain` if all preconditions are met. Returns `None` when:
 
 ### Trait implementations
 
-`RecipeBrain` implements three traits simultaneously:
+`RecipeReasoner` implements three traits simultaneously:
 
-#### `OodaDecideBrain::judge_decision`
+#### `DecideReasoner::judge_decision`
 
 ```rust
 fn judge_decision(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment>
@@ -87,7 +87,7 @@ wrapper).
 > `brain_verdict_parsed_total` metric (`phase=decide`). See
 > [Recipe-brain verdict/decision parsing](./recipe-brain-verdict-parsing.md).
 
-#### `OodaOrientBrain::judge_orientation`
+#### `OrientReasoner::judge_orientation`
 
 ```rust
 fn judge_orientation(&self, ctx: &OrientContext) -> SimardResult<OrientJudgment>
@@ -109,7 +109,7 @@ outcome-classifying variant; `parse_orient_from_text` is the thin wrapper).
 > (`phase=orient`). See
 > [Recipe-brain verdict/decision parsing](./recipe-brain-verdict-parsing.md).
 
-#### `OodaBrain::decide_engineer_lifecycle`
+#### `ActReasoner::decide_engineer_lifecycle`
 
 ```rust
 fn decide_engineer_lifecycle(
@@ -297,7 +297,7 @@ Resolution order:
 `home_override` selects the hot-reload base directory: `Some(path)` uses `path`
 (a test seam to stay hermetic against the ambient `~/.simard`), `None` falls
 back to [`dirs::home_dir`] — production always passes `None` (via
-`RecipeBrain::new`). Mirrors the `home_override` convention already used by
+`RecipeReasoner::new`). Mirrors the `home_override` convention already used by
 `disk_health::resolve_recipe_path` and `brain_introspection::resolve_recipe_path`.
 
 Returns `None` if neither path contains the file.

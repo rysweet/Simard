@@ -70,7 +70,7 @@ mod tests {
                 success: true,
                 detail: "done".to_string(),
             }],
-            brain_judgments: Vec::new(),
+            reasoner_judgments: Vec::new(),
         };
         let summary = summarize_cycle_report(&report);
         assert!(summary.contains("cycle #1"));
@@ -99,7 +99,7 @@ mod tests {
             priorities: Vec::new(),
             planned_actions: Vec::new(),
             outcomes: Vec::new(),
-            brain_judgments: Vec::new(),
+            reasoner_judgments: Vec::new(),
         };
         let summary = summarize_cycle_report(&report);
         assert!(summary.contains("tree=dirty"));
@@ -140,7 +140,7 @@ mod tests {
                     detail: "fail".to_string(),
                 },
             ],
-            brain_judgments: Vec::new(),
+            reasoner_judgments: Vec::new(),
         };
         let summary = summarize_cycle_report(&report);
         assert!(summary.contains("1/2 succeeded"));

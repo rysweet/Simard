@@ -38,7 +38,7 @@ pub enum EvidenceDecision {
 /// by sufficient evidence (LLM-reviewed or heuristic).
 ///
 /// `Send + Sync` so a single `Arc<dyn ProgressEvidenceChecker>` can be
-/// installed on `OodaBridges` and shared across OODA actions.
+/// installed on `OodaContext` and shared across OODA actions.
 pub trait ProgressEvidenceChecker: Send + Sync {
     fn check(
         &self,
@@ -56,7 +56,7 @@ pub trait ProgressEvidenceChecker: Send + Sync {
 /// Always returns `Accept { reason: "noop checker (no evidence enforced)" }`.
 ///
 /// Used:
-/// 1. By tests' default bridges constructors so existing tests don't
+/// 1. By tests' default adapters constructors so existing tests don't
 ///    need to provide an `LlmSubmitter` implementation.
 /// 2. As the operator escape hatch via `SIMARD_PROGRESS_EVIDENCE=off` at
 ///    daemon boot.

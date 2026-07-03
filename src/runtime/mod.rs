@@ -34,7 +34,7 @@ pub struct RuntimeKernel {
     start_time: Instant,
     subordinates: Vec<crate::runtime_ipc::IpcSubprocessHandle>,
     /// Optional cognitive memory for consolidation lifecycle hooks.
-    cognitive_bridge: Option<Box<dyn CognitiveMemoryOps>>,
+    cognitive_adapter: Option<Box<dyn CognitiveMemoryOps>>,
 }
 
 pub type LocalRuntime = RuntimeKernel;
@@ -98,7 +98,7 @@ impl RuntimeKernel {
             mailbox_address,
             start_time: Instant::now(),
             subordinates: Vec::new(),
-            cognitive_bridge: None,
+            cognitive_adapter: None,
         })
     }
 
@@ -251,11 +251,11 @@ impl RuntimeKernel {
     }
 
     /// Attach a cognitive memory backend for session lifecycle consolidation.
-    pub fn set_cognitive_bridge(&mut self, bridge: Box<dyn CognitiveMemoryOps>) {
-        self.cognitive_bridge = Some(bridge);
+    pub fn set_cognitive_adapter(&mut self, adapter: Box<dyn CognitiveMemoryOps>) {
+        self.cognitive_adapter = Some(adapter);
     }
 
-    /// Flush any pending memory bridge writes (retries failed writes).
+    /// Flush any pending memory adapter writes (retries failed writes).
     pub fn flush_pending_memory(&self) {
         let synced = self.ports.memory_store.flush_pending();
         if synced > 0 {

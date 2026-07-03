@@ -1,19 +1,19 @@
 use super::*;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_adapter::CognitiveMemoryAdapter;
+use crate::server_subprocess::InMemoryServerTransport;
 use serde_json::json;
 
-fn mock_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("test-goals", |method, _params| match method {
+fn mock_adapter() -> CognitiveMemoryAdapter {
+    let transport = InMemoryServerTransport::new("test-goals", |method, _params| match method {
         "memory.search_facts" => Ok(json!({"facts": []})),
         "memory.store_fact" => Ok(json!({"id": "sem_g1"})),
         "memory.store_episode" => Ok(json!({"id": "epi_g1"})),
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::server_transport::ServerErrorPayload {
             code: -32601,
             message: format!("unknown method: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
 fn sample_goal(id: &str, priority: u32) -> ActiveGoal {
@@ -72,7 +72,7 @@ fn update_progress_and_archive() {
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn load_empty_board_from_bridge() {
+fn load_empty_board_from_adapter() {
     // Point SIMARD_STATE_ROOT at a temp dir with no goal_records.json so the
     // disk-first tier misses and falls through to cognitive memory (also empty).
     let tmp = std::env::temp_dir().join(format!(
@@ -88,8 +88,8 @@ fn load_empty_board_from_bridge() {
     unsafe {
         std::env::set_var("SIMARD_STATE_ROOT", &tmp);
     }
-    let bridge = mock_bridge();
-    let board = load_goal_board(&bridge).unwrap();
+    let adapter = mock_adapter();
+    let board = load_goal_board(&adapter).unwrap();
     unsafe {
         std::env::remove_var("SIMARD_STATE_ROOT");
     }

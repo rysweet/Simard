@@ -20,7 +20,7 @@ use crate::error::SimardResult;
 use crate::stewardship::dedup;
 use crate::stewardship::gh_client::{GhClient, GhIssue};
 
-use super::mind::Mind;
+use super::brain::Brain;
 use super::schedule::{self, MIN_INTERVAL_SECS};
 use super::telemetry;
 use super::thread::{
@@ -323,14 +323,14 @@ fn clamp_interval_secs_enforces_floor() {
 }
 
 // ---------------------------------------------------------------------------
-// §12 — Mind: registry (green today), due-computation, failure isolation,
+// §12 — Brain: registry (green today), due-computation, failure isolation,
 // priority budget, OODA parity, graceful shutdown.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn mind_registry_len_and_is_empty() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut mind = Mind::with_budget(2);
+    let mut mind = Brain::with_budget(2);
     assert!(mind.is_empty());
     let (t, _runs) = fake(
         "a",
@@ -348,7 +348,7 @@ fn mind_registry_len_and_is_empty() {
 #[test]
 fn due_threads_excludes_on_demand_and_disabled() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut mind = Mind::with_budget(4);
+    let mut mind = Brain::with_budget(4);
     // index 0: due interval thread
     let (t0, _r0) = fake(
         "due",
@@ -379,7 +379,7 @@ fn run_due_runs_critical_every_tick_and_bounds_noncritical_fanout() {
     let env = TestEnv::new();
     let log = Arc::new(Mutex::new(Vec::new()));
     let budget = 2;
-    let mut mind = Mind::with_budget(budget);
+    let mut mind = Brain::with_budget(budget);
 
     let (crit, crit_runs) = fake(
         "ooda",
@@ -445,7 +445,7 @@ fn run_due_isolates_panicking_thread_without_killing_siblings() {
     // backed off; OODA and other threads still run.
     let env = TestEnv::new();
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut mind = Mind::with_budget(8);
+    let mut mind = Brain::with_budget(8);
 
     let (crit, crit_runs) = fake(
         "ooda",
@@ -508,7 +508,7 @@ fn run_due_isolates_panicking_thread_without_killing_siblings() {
 fn run_due_backs_off_erroring_thread_but_never_ooda() {
     let env = TestEnv::new();
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut mind = Mind::with_budget(8);
+    let mut mind = Brain::with_budget(8);
 
     let (crit, _crit_runs) = fake(
         "ooda",
@@ -555,7 +555,7 @@ fn run_due_returns_early_on_shutdown() {
     let env = TestEnv::new();
     env.request_shutdown();
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut mind = Mind::with_budget(8);
+    let mut mind = Brain::with_budget(8);
 
     let (low, low_runs) = fake(
         "low",

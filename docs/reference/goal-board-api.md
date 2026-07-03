@@ -9,7 +9,7 @@ related:
   - ../concepts/goal-board-persistence.md
   - ../howto/recover-goal-board.md
   - ../howto/inspect-durable-goal-register.md
-  - ./cognitive-memory-bridge-helpers.md
+  - ./cognitive-memory-adapter-helpers.md
   - ./goal-target-repo-routing.md
 ---
 
@@ -30,9 +30,9 @@ related:
 > obtain `Vec<GoalRecord>` from a `GoalBoard`.
 >
 > The bridge-acquisition helpers used in the examples
-> (`launch_writer_bridge`, `open_reader_bridge`) are also part of the
+> (`launch_writer_adapter`, `open_reader_adapter`) are also part of the
 > migration spec — see
-> [Cognitive memory bridge helpers](./cognitive-memory-bridge-helpers.md).
+> [Cognitive memory bridge helpers](./cognitive-memory-adapter-helpers.md).
 
 This document covers the public functions in
 `src/goal_curation/operations.rs` that load, save, mutate, and adapt the goal
@@ -84,7 +84,7 @@ fresh snapshot.
 
 | Name | Type | Description |
 |------|------|-------------|
-| `bridge` | `&dyn CognitiveMemoryOps` | Cognitive memory adapter — typically obtained via `open_reader_bridge` for read-only consumers (see [bridge helpers](./cognitive-memory-bridge-helpers.md)) or via the daemon's own in-process bridge for the OODA cycle |
+| `bridge` | `&dyn CognitiveMemoryOps` | Cognitive memory adapter — typically obtained via `open_reader_adapter` for read-only consumers (see [bridge helpers](./cognitive-memory-adapter-helpers.md)) or via the daemon's own in-process bridge for the OODA cycle |
 
 **Return contract**
 
@@ -111,9 +111,9 @@ returned board themselves.
 
 ```rust
 use simard::goal_curation::load_goal_board;
-use simard::memory_ipc::open_reader_bridge;
+use simard::memory_ipc::open_reader_adapter;
 
-let bridge = open_reader_bridge(&state_root)?;       // ReaderBridge
+let bridge = open_reader_adapter(&state_root)?;       // ReaderAdapter
 let board = load_goal_board(bridge.ops())?;          // .ops() → &dyn CognitiveMemoryOps
 eprintln!("Loaded {} active goal(s)", board.active.len());
 ```
@@ -264,7 +264,7 @@ already serialized by the in-process mutex).
 
 Callers on non-Unix platforms, or that need strict serializability beyond this
 advisory lock, should still funnel writes through the daemon IPC socket (see
-[Cognitive memory bridge helpers](./cognitive-memory-bridge-helpers.md)).
+[Cognitive memory bridge helpers](./cognitive-memory-adapter-helpers.md)).
 
 #### Deletion semantics (RR-5)
 
@@ -395,7 +395,7 @@ second `simard goal remove` call is safe to issue. Callers that need
 strict serial removal beyond the advisory lock (or on non-Unix platforms)
 must funnel through the daemon IPC writer (which is what the CLI
 subcommands do — see
-[bridge helpers](./cognitive-memory-bridge-helpers.md)).
+[bridge helpers](./cognitive-memory-adapter-helpers.md)).
 
 #### `merge_boards` (private helper, testable in isolation)
 
@@ -481,9 +481,9 @@ anywhere else.
 ```rust
 use simard::goal_curation::{load_goal_board, save_goal_board, update_goal_progress};
 use simard::goals::GoalProgress;
-use simard::memory_ipc::launch_writer_bridge;
+use simard::memory_ipc::launch_writer_adapter;
 
-let bridge = launch_writer_bridge(&state_root)?;     // WriterBridge or Err
+let bridge = launch_writer_adapter(&state_root)?;     // WriterAdapter or Err
 let mut board = load_goal_board(bridge.ops())?;
 update_goal_progress(&mut board, &goal_id, GoalProgress::InProgress { percent: 75 })?;
 // save_goal_board now re-reads the latest snapshot and merges before storing,
@@ -709,9 +709,9 @@ callers that need backlog data must read `board.backlog` directly.
 
 ```rust
 use simard::goal_curation::{active_goals_as_records, load_goal_board};
-use simard::memory_ipc::open_reader_bridge;
+use simard::memory_ipc::open_reader_adapter;
 
-let bridge = open_reader_bridge(&state_root)?;
+let bridge = open_reader_adapter(&state_root)?;
 let board = load_goal_board(bridge.ops())?;
 let next_five: Vec<GoalRecord> =
     active_goals_as_records(&board).into_iter().take(5).collect();
@@ -724,7 +724,7 @@ at `src/engineer_loop/mod.rs:276`.
 **Example — meeting REPL goal curation (target call site)**
 
 ```rust
-let bridge = open_reader_bridge(&state_root)?;
+let bridge = open_reader_adapter(&state_root)?;
 let board = load_goal_board(bridge.ops())?;
 let records = active_goals_as_records(&board);
 present_records_to_curator(&records);
@@ -753,7 +753,7 @@ at `src/operator_commands_meeting/improvement_curation.rs:123`.
 | `SimardError` variant | When raised |
 |-----------------------|-------------|
 | `InvalidGoalRecord { field, reason }` | Validation failure (empty field, priority 0, percent > 100, capacity exceeded, duplicate id, item not found), serialization failure, or integrity-guard rejection of a suspect board in `save_goal_board` |
-| `BridgeTransportError { bridge, reason }` | A `bridge.store_fact` or `bridge.store_episode` call failed (propagated via `?` from `save_goal_board`/`persist_board`). `load_goal_board` does **not** raise this — it logs and degrades to an empty board instead |
+| `ServerTransportError { bridge, reason }` | A `bridge.store_fact` or `bridge.store_episode` call failed (propagated via `?` from `save_goal_board`/`persist_board`). `load_goal_board` does **not** raise this — it logs and degrades to an empty board instead |
 
 There is no silent disk fallback for writes — when cognitive memory is
 unavailable, `save_goal_board` fails and the in-memory mutation is lost.

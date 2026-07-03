@@ -147,7 +147,7 @@ fn no_file_backed_goal_store_references_in_meeting_or_engineer_paths() {
 #[test]
 fn dashboard_handlers_do_not_reference_goal_records_json() {
     // Spec acceptance criterion #6 — every dashboard handler must flow
-    // through the cognitive-memory writer/reader bridge. The dashboard
+    // through the cognitive-memory writer/reader adapter. The dashboard
     // module must contain no references to the legacy file in production
     // code (test scaffolding excluded).
     let src = repo_src_dir();

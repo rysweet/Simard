@@ -211,14 +211,14 @@ impl SessionBuilder {
     }
 
     /// Build the per-turn adapter session and populate its memory + knowledge
-    /// enrichment bridges, returning the **unopened** session plus the adapter
+    /// enrichment adapters, returning the **unopened** session plus the adapter
     /// name (for diagnostics).
     ///
     /// `session.open()` is intentionally left to the caller because it requires
-    /// a live backend / credentials. The enrichment bridges, by contrast, are
+    /// a live backend / credentials. The enrichment adapters, by contrast, are
     /// wired here in `open_session` and need no auth — so this is the exact
     /// production seam that regressed in #2383 (the `RustyClawd` arm built
-    /// sessions with empty bridges). The `*_provider_wires_enrichment_*` tests
+    /// sessions with empty adapters). The `*_provider_wires_enrichment_*` tests
     /// assert against this method, so dropping a `with_enrichment` call is
     /// caught without standing up a live backend.
     ///
@@ -245,7 +245,7 @@ impl SessionBuilder {
                 // session); meeting-mode sessions returned early above via
                 // PersistentAgentProxy and are out of scope here. Reads from the
                 // default state root (shared with the OODA daemon when running);
-                // a bridge launch failure degrades gracefully to no enrichment.
+                // an adapter launch failure degrades gracefully to no enrichment.
                 let factory = CopilotSdkAdapter::registered(&tag)
                     .map_err(|e| format!("CopilotSdkAdapter::registered({}): {}", tag, e))?
                     .with_enrichment(crate::memory_ipc::default_state_root());
@@ -260,11 +260,11 @@ impl SessionBuilder {
                 // RustyClawd production adapter, mirroring the Copilot path
                 // above (#1664). #1665 routed `RustyClawd::run_turn` through the
                 // shared `enrich_input` entry point, but production sessions
-                // were built with empty bridges, so enrichment was a permanent
-                // no-op. Wiring `with_enrichment` here populates the bridges so
+                // were built with empty adapters, so enrichment was a permanent
+                // no-op. Wiring `with_enrichment` here populates the adapters so
                 // each turn recalls relevant memory facts, procedures, and
                 // domain knowledge. Reads from the default state root (shared
-                // with the OODA daemon when running); a bridge launch failure
+                // with the OODA daemon when running); an adapter launch failure
                 // degrades gracefully to no enrichment.
                 let factory = RustyClawdAdapter::registered(&tag)
                     .map_err(|e| format!("RustyClawdAdapter::registered({}): {}", tag, e))?
@@ -309,8 +309,8 @@ impl crate::ooda_loop::OrchestratorSessionFactory for ProviderSessionFactory {
             .address("ooda-daemon-engineer://local")
             .adapter_tag(&self.adapter_tag)
             .open()
-            .map_err(|e| crate::error::SimardError::BridgeTransportError {
-                bridge: "ooda-session-factory".to_string(),
+            .map_err(|e| crate::error::SimardError::ServerTransportError {
+                adapter: "ooda-session-factory".to_string(),
                 reason: e,
             })
     }
@@ -401,7 +401,7 @@ mod tests {
     //
     // These assert against the exact production seam that regressed: the
     // `with_enrichment(...)` call inside `SessionBuilder`'s provider arms.
-    // Deleting that call (the #2383 defect) drops both bridges to None, so
+    // Deleting that call (the #2383 defect) drops both adapters to None, so
     // `is_configured()` flips to false and these tests fail — unlike the
     // adapter-level tests, which exercise the builder method directly and
     // would stay green. `build_enriched_session` stops before the
@@ -426,13 +426,13 @@ mod tests {
                 .expect("build_enriched_session must succeed for RustyClawd");
 
         assert_eq!(adapter, "RustyClawdAdapter");
-        let bridges = session
+        let adapters = session
             .enrichment()
-            .expect("RustyClawd session must expose enrichment bridges");
+            .expect("RustyClawd session must expose enrichment adapters");
         assert!(
-            bridges.is_configured(),
+            adapters.is_configured(),
             "SessionBuilder must wire memory + knowledge enrichment for the \
-             RustyClawd provider (issue #2383); empty bridges means the \
+             RustyClawd provider (issue #2383); empty adapters means the \
              with_enrichment(...) call was dropped"
         );
     }
@@ -451,11 +451,11 @@ mod tests {
             .expect("build_enriched_session must succeed for Copilot");
 
         assert_eq!(adapter, "CopilotSdkAdapter");
-        let bridges = session
+        let adapters = session
             .enrichment()
-            .expect("Copilot session must expose enrichment bridges");
+            .expect("Copilot session must expose enrichment adapters");
         assert!(
-            bridges.is_configured(),
+            adapters.is_configured(),
             "SessionBuilder must wire memory + knowledge enrichment for the \
              Copilot provider (issue #1664)"
         );

@@ -67,7 +67,7 @@ Symptoms that justify reading parse-failure logs:
   goal whose consecutive-skip count climbs every minute.
 * The most recent decision rationale for the goal is the literal string
   `"deterministic fallback"` — the sentinel emitted by
-  `DeterministicFallbackBrain` when the real brain failed to construct.
+  `DeterministicFallbackActReasoner` when the real brain failed to construct.
 
 Tail the daemon log directly. There is no `simard logs` subcommand; the
 daemon writes to `~/.simard/logs/` on the host:
@@ -85,7 +85,7 @@ tail -F ~/.simard/logs/rustyclawd.log \
 You are looking for a line shaped like:
 
 ```
-WARN simard::ooda_brain: brain.decide_engineer_lifecycle parse failed
+WARN simard::ooda_reasoners: brain.decide_engineer_lifecycle parse failed
     goal=improve-amplihack-test-coverage
     raw="OK"
     error=unrecognized first word in LLM response (got 3 bytes)
@@ -118,16 +118,16 @@ hermetic unit test against the captured `raw=` text:
 
 1. Copy the `raw=` payload from the log line (it is rendered with `{:?}`,
    so you may need to unescape `\n` → newline and `\"` → `"`).
-2. Add a one-off test to `src/ooda_brain/tests.rs`:
+2. Add a one-off test to `src/ooda_reasoners/tests.rs`:
 
    ```rust
    #[test]
    fn repro_1711_OK_payload() {
        let raw = "OK"; // <-- paste the unescaped payload here
-       let result = crate::ooda_brain::recipe_brain::parse_lifecycle_from_text(raw);
+       let result = crate::ooda_reasoners::recipe_reasoner::parse_lifecycle_from_text(raw);
        eprintln!("{result:?}");
        // Either Ok(EngineerLifecycleDecision::...) or
-       // Err(BrainResponseUnparseable { ... }) — matches the daemon's behavior.
+       // Err(ReasonerResponseUnparseable { ... }) — matches the daemon's behavior.
    }
    ```
 
@@ -248,5 +248,5 @@ ladder is exhausted**. Each rung is logged loudly (`BRAIN ESCALATION …`).
 * [Reference: text-parsing wire formats](../reference/text-parsing-wire-formats.md)
 * [Reference: OODA Brain Decision Protocol](../reference/ooda-brain-decision-protocol.md)
 * [How-to: edit the OODA brain prompt](edit-the-ooda-brain-prompt.md)
-* [Reference: `OodaBrain` API](../reference/ooda-brain-api.md)
+* [Reference: `ActReasoner` API](../reference/ooda-brain-api.md)
 * [safe-self-update](../safe-self-update.md)

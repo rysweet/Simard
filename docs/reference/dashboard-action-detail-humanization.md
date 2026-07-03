@@ -40,12 +40,12 @@ already humanized their own detail strings server-side; the Overview tab was the
 one remaining surface that leaked the raw form.
 
 `humanizeActionDetail` closes that gap **at the render layer only**. The
-canonical strings produced by `brain` / `ooda_brain` are unchanged, so logs,
+canonical strings produced by `brain` / `ooda_reasoners` are unchanged, so logs,
 the cost ledger, and the backend protocol tests stay byte-for-byte identical —
 only what the operator *reads* on the Overview tab changes.
 
 > **Scope boundary.** This is a pure presentation transform. It does not touch
-> any canonical `brain` / `ooda_brain` string, any backend logic, or any HTTP
+> any canonical `brain` / `ooda_reasoners` string, any backend logic, or any HTTP
 > response shape. It lives entirely in
 > [`src/operator_commands_dashboard/index_html/part_01.rs`](https://github.com/rysweet/Simard/blob/main/src/operator_commands_dashboard/index_html/part_01.rs)
 > as inline dashboard JavaScript.
@@ -100,7 +100,7 @@ dashboard script in `part_01.rs`.
 ```js
 /**
  * Humanize a raw cycle action `detail` string for operator display.
- * Render-layer only — the canonical brain/ooda_brain strings are unchanged.
+ * Render-layer only — the canonical brain/ooda_reasoners strings are unchanged.
  *
  * @param {string|null|undefined} detail  Raw outcome.detail from the daemon.
  * @returns {string}  Plain text (never HTML). Caller escapes with esc().
@@ -300,7 +300,7 @@ INV2: esc() is the terminal op on every humanized value at both Overview render 
 INV3: any agent='engineer-<id>' substring in x is preserved verbatim in the output.
 INV4: truncation is applied to raw (pre-esc) text only — entities are never split.
 INV5: humanizeActionDetail is idempotent.
-INV6: no canonical brain / ooda_brain string is modified — presentation layer only.
+INV6: no canonical brain / ooda_reasoners string is modified — presentation layer only.
 INV7: a <script>/<img onerror> payload in x renders only as escaped entities.
 ```
 

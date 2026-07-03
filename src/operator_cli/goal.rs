@@ -22,7 +22,7 @@
 //!     removes every active or backlog goal whose description is exactly
 //!     `Goal <id>` (the placeholder pattern emitted by test fixtures).
 //!
-//! Persistence is cognitive memory via `launch_writer_bridge` against
+//! Persistence is cognitive memory via `launch_writer_adapter` against
 //! `simard_state_root()` (honours `SIMARD_STATE_ROOT`). Audit traces are
 //! emitted to stderr so operators can grep `journalctl --user -u
 //! simard-ooda` after the runbook step.
@@ -33,7 +33,7 @@ use crate::goal_curation::{
     GoalDecomposer, GoalProgress, load_goal_board, save_goal_board, save_goal_board_with_removals,
     simard_state_root,
 };
-use crate::memory_ipc::launch_writer_bridge;
+use crate::memory_ipc::launch_writer_adapter;
 use crate::ooda_actions::advance_goal::spawn::is_brain_failure_marker;
 
 use super::args::{next_required, reject_extra_args};
@@ -134,9 +134,9 @@ pub(super) fn dispatch_goal_command(
 /// non-zero; callers should not silently degrade.
 fn load_board() -> Result<crate::goal_curation::GoalBoard, Box<dyn Error>> {
     let state_root = simard_state_root();
-    let bridge = launch_writer_bridge(&state_root)
-        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    let board = load_goal_board(bridge.ops())
+    let adapter = launch_writer_adapter(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer adapter: {e}"))?;
+    let board = load_goal_board(adapter.ops())
         .map_err(|e| format!("failed to read goal board from cognitive memory: {e}"))?;
     Ok(board)
 }
@@ -144,9 +144,9 @@ fn load_board() -> Result<crate::goal_curation::GoalBoard, Box<dyn Error>> {
 /// Persist the mutated board back to cognitive memory.
 fn save_board(board: &crate::goal_curation::GoalBoard) -> Result<(), Box<dyn Error>> {
     let state_root = simard_state_root();
-    let bridge = launch_writer_bridge(&state_root)
-        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    save_goal_board(board, bridge.ops())
+    let adapter = launch_writer_adapter(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer adapter: {e}"))?;
+    save_goal_board(board, adapter.ops())
         .map_err(|e| format!("failed to persist goal board: {e}"))?;
     Ok(())
 }
@@ -159,9 +159,9 @@ fn save_board_with_removals(
     ids: &[String],
 ) -> Result<(), Box<dyn Error>> {
     let state_root = simard_state_root();
-    let bridge = launch_writer_bridge(&state_root)
-        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    save_goal_board_with_removals(board, ids, bridge.ops())
+    let adapter = launch_writer_adapter(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer adapter: {e}"))?;
+    save_goal_board_with_removals(board, ids, adapter.ops())
         .map_err(|e| format!("failed to persist goal board with removals: {e}"))?;
     Ok(())
 }
@@ -377,7 +377,7 @@ fn handle_remove(ids: &[String]) -> Result<(), Box<dyn Error>> {
 
 /// `simard goal decompose <goal-id> [--max-children <N>] [--dry-run]` — break a
 /// large active goal into 2-6 bounded sub-goals (issue #2405). Routes through
-/// the same cognitive-memory **writer bridge** as `goal add` / `goal remove`,
+/// the same cognitive-memory **writer adapter** as `goal add` / `goal remove`,
 /// so the write is serialized by the daemon when one is running and takes the
 /// local writer lock otherwise. The parent->child `decomposes_into` edges are
 /// written into the graph (and are queryable back), then the mutated board is
@@ -412,9 +412,9 @@ fn handle_decompose(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn Error
     }
 
     let state_root = simard_state_root();
-    let bridge = launch_writer_bridge(&state_root)
-        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    let ops = bridge.ops();
+    let adapter = launch_writer_adapter(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer adapter: {e}"))?;
+    let ops = adapter.ops();
 
     let mut board = load_goal_board(ops)
         .map_err(|e| format!("failed to read goal board from cognitive memory: {e}"))?;
@@ -700,7 +700,7 @@ mod tests {
         // `decompose` must be a recognized verb that requires a goal id —
         // NOT fall through to the `unsupported command` arm. Reaching the
         // missing-id error proves the verb is wired without touching the
-        // cognitive-memory writer bridge.
+        // cognitive-memory writer adapter.
         let args = vec!["decompose".to_string()];
         let result = dispatch_goal_command(args.into_iter());
         assert!(result.is_err());

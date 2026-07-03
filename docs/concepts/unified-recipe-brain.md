@@ -1,6 +1,6 @@
 ---
-title: Unified RecipeBrain
-description: One struct, three OODA phases — how RecipeBrain replaced RecipeDecideBrain, RecipeOrientBrain, and RecipeEngineerLifecycleBrain with a single parameterized type.
+title: Unified RecipeReasoner
+description: One struct, three OODA phases — how RecipeReasoner replaced RecipeDecideReasoner, RecipeOrientReasoner, and RecipeEngineerLifecycleReasoner with a single parameterized type.
 last_updated: 2026-05-27
 review_schedule: as-needed
 owner: simard
@@ -13,18 +13,18 @@ related:
   - ../howto/edit-the-ooda-brain-prompt.md
 ---
 
-# Unified RecipeBrain
+# Unified RecipeReasoner
 
 Simard's three OODA phases — **decide**, **orient**, and **act**
 (engineer-lifecycle) — each delegate their LLM call to `recipe-runner-rs`
 executing a phase-specific recipe YAML. Before this consolidation, each phase
-had its own struct (`RecipeDecideBrain`, `RecipeOrientBrain`,
-`RecipeEngineerLifecycleBrain`). They were copy-pasted from each other: same
+had its own struct (`RecipeDecideReasoner`, `RecipeOrientReasoner`,
+`RecipeEngineerLifecycleReasoner`). They were copy-pasted from each other: same
 constructor, same `resolve_recipe_path`, same `truncate()` helper, same parser
 wiring. The only differences were the recipe filename, the adapter tag for
 error messages, and the trait impl body.
 
-`RecipeBrain` is a single struct that takes the recipe filename and adapter tag
+`RecipeReasoner` is a single struct that takes the recipe filename and adapter tag
 as constructor parameters. It implements all three brain traits.
 
 ## Principle
@@ -39,7 +39,7 @@ function for each argument value would.
 ## Structure
 
 ```rust
-pub struct RecipeBrain {
+pub struct RecipeReasoner {
     recipe_path: PathBuf,
     agent_binary: &'static str,
     adapter_tag: &'static str,
@@ -49,12 +49,12 @@ pub struct RecipeBrain {
 Construction:
 
 ```rust
-RecipeBrain::new(repo_root, "ooda-decide.yaml", "recipe-decide-brain")
-RecipeBrain::new(repo_root, "ooda-orient.yaml", "recipe-orient-brain")
-RecipeBrain::new(repo_root, "ooda-engineer-lifecycle.yaml", "recipe-engineer-lifecycle-brain")
+RecipeReasoner::new(repo_root, "ooda-decide.yaml", "recipe-decide-brain")
+RecipeReasoner::new(repo_root, "ooda-orient.yaml", "recipe-orient-brain")
+RecipeReasoner::new(repo_root, "ooda-engineer-lifecycle.yaml", "recipe-engineer-lifecycle-brain")
 ```
 
-All three calls return `Option<RecipeBrain>`. The constructor:
+All three calls return `Option<RecipeReasoner>`. The constructor:
 
 1. Resolves the recipe YAML path (hot-reload `~/.simard/...` first, in-tree
    fallback second) using `resolve_recipe_path(repo_root, recipe_filename)`.
@@ -65,23 +65,23 @@ All three calls return `Option<RecipeBrain>`. The constructor:
 
 ## Trait implementations
 
-`RecipeBrain` implements three traits on one type:
+`RecipeReasoner` implements three traits on one type:
 
 | Trait | Method | Recipe YAML | Output parser |
 |-------|--------|-------------|---------------|
-| `OodaDecideBrain` | `judge_decision()` | `ooda-decide.yaml` | `parse_action_from_text()` — first-word case-insensitive match for 10 action keywords |
-| `OodaOrientBrain` | `judge_orientation()` | `ooda-orient.yaml` | `parse_orient_from_text()` — first decimal-float extraction with deterministic floor fallback |
-| `OodaBrain` | `decide_engineer_lifecycle()` | `ooda-engineer-lifecycle.yaml` | `parse_lifecycle_from_text()` — first-word case-insensitive match → variant with default fields |
+| `DecideReasoner` | `judge_decision()` | `ooda-decide.yaml` | `parse_action_from_text()` — first-word case-insensitive match for 10 action keywords |
+| `OrientReasoner` | `judge_orientation()` | `ooda-orient.yaml` | `parse_orient_from_text()` — first decimal-float extraction with deterministic floor fallback |
+| `ActReasoner` | `decide_engineer_lifecycle()` | `ooda-engineer-lifecycle.yaml` | `parse_lifecycle_from_text()` — first-word case-insensitive match → variant with default fields |
 
 Each trait impl invokes `recipe-runner-rs` with the stored `recipe_path` and
 phase-specific `-c` context vars, then delegates to the corresponding parse
 function. The parse functions are standalone public functions in
-`recipe_brain.rs` — they are pure `&str -> Judgment` transforms with no
+`recipe_reasoner.rs` — they are pure `&str -> Judgment` transforms with no
 struct dependency.
 
 ## Shared helpers
 
-These functions exist once in `recipe_brain.rs`:
+These functions exist once in `recipe_reasoner.rs`:
 
 - **`resolve_recipe_path(repo_root, recipe_filename, home_override)`** —
   parameterized path resolution. Checks
@@ -105,14 +105,14 @@ These functions exist once in `recipe_brain.rs`:
 `brains.rs` constructs three instances of the same type:
 
 ```rust
-// build_act_brain
-RecipeBrain::new(repo_root, "ooda-engineer-lifecycle.yaml", "recipe-engineer-lifecycle-brain")
+// build_act_reasoner
+RecipeReasoner::new(repo_root, "ooda-engineer-lifecycle.yaml", "recipe-engineer-lifecycle-brain")
 
-// build_decide_brain
-RecipeBrain::new(repo_root, "ooda-decide.yaml", "recipe-decide-brain")
+// build_decide_reasoner
+RecipeReasoner::new(repo_root, "ooda-decide.yaml", "recipe-decide-brain")
 
-// build_orient_brain
-RecipeBrain::new(repo_root, "ooda-orient.yaml", "recipe-orient-brain")
+// build_orient_reasoner
+RecipeReasoner::new(repo_root, "ooda-orient.yaml", "recipe-orient-brain")
 ```
 
 Each is wrapped in `Arc<dyn Trait>` and passed to the OODA cycle. The fallback
@@ -120,17 +120,17 @@ chain varies per phase.
 
 ## What was deleted
 
-- `src/ooda_brain/recipe_decide.rs` — struct, constructor, and duplicated
+- `src/ooda_reasoners/recipe_decide.rs` — struct, constructor, and duplicated
   helpers removed. Parse function (`parse_action_from_text`) and its tests
   remain in this file.
-- `src/ooda_brain/recipe_orient.rs` — struct, constructor, and duplicated
+- `src/ooda_reasoners/recipe_orient.rs` — struct, constructor, and duplicated
   helpers removed. Parse function (`parse_orient_from_text`) and its tests
   remain in this file.
-- `src/ooda_brain/recipe_engineer_lifecycle.rs` — struct, constructor, and
+- `src/ooda_reasoners/recipe_engineer_lifecycle.rs` — struct, constructor, and
   duplicated helpers removed. Parse function (`parse_lifecycle_from_text`) and
   its tests remain in this file.
 - **Removed in #2144:** the remaining parser-specific helper stack in
-  `recipe_brain.rs` that supported full-text scans, JSON extraction, and
+  `recipe_reasoner.rs` that supported full-text scans, JSON extraction, and
   marker/labeled-line parsing.
 
 ## Security invariants preserved

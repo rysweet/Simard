@@ -289,10 +289,10 @@ fn distilled_procedure_surfaces_through_prepare_turn_context() {
     mem.store_procedure(&stored_name, &["inspect the payload".to_string()], &[])
         .expect("store distilled procedure");
 
-    // Drive the real base-type adapter preparation path. Knowledge bridge
+    // Drive the real base-type adapter preparation path. Knowledge adapter
     // is None (not configured) — exactly the engineer/base-type turn shape.
     let context = prepare_turn_context("inspect the payload before shipping", Some(&mem), None)
-        .expect("prepare_turn_context must not error with a live memory bridge");
+        .expect("prepare_turn_context must not error with a live memory adapter");
 
     let names: Vec<&str> = context.procedures.iter().map(|p| p.name.as_str()).collect();
     assert!(

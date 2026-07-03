@@ -143,12 +143,12 @@ fn display_clock_before_unix_epoch() {
     assert!(err.to_string().contains("UNIX epoch"));
 }
 
-// --- Display: Bridge errors ---
+// --- Display: Adapter errors ---
 
 #[test]
-fn display_bridge_spawn_failed() {
-    let err = SimardError::BridgeSpawnFailed {
-        bridge: "memory".to_string(),
+fn display_adapter_spawn_failed() {
+    let err = SimardError::ServerSpawnFailed {
+        adapter: "memory".to_string(),
         reason: "python not found".to_string(),
     };
     let msg = err.to_string();
@@ -157,9 +157,9 @@ fn display_bridge_spawn_failed() {
 }
 
 #[test]
-fn display_bridge_transport_error() {
-    let err = SimardError::BridgeTransportError {
-        bridge: "knowledge".to_string(),
+fn display_adapter_transport_error() {
+    let err = SimardError::ServerTransportError {
+        adapter: "knowledge".to_string(),
         reason: "connection refused".to_string(),
     };
     let msg = err.to_string();
@@ -168,9 +168,9 @@ fn display_bridge_transport_error() {
 }
 
 #[test]
-fn display_bridge_protocol_error() {
-    let err = SimardError::BridgeProtocolError {
-        bridge: "gym".to_string(),
+fn display_adapter_protocol_error() {
+    let err = SimardError::ServerProtocolError {
+        adapter: "gym".to_string(),
         reason: "invalid json".to_string(),
     };
     let msg = err.to_string();
@@ -179,9 +179,9 @@ fn display_bridge_protocol_error() {
 }
 
 #[test]
-fn display_bridge_call_failed() {
-    let err = SimardError::BridgeCallFailed {
-        bridge: "memory".to_string(),
+fn display_adapter_call_failed() {
+    let err = SimardError::ServerCallFailed {
+        adapter: "memory".to_string(),
         method: "store_episode".to_string(),
         reason: "timeout".to_string(),
     };
@@ -192,9 +192,9 @@ fn display_bridge_call_failed() {
 }
 
 #[test]
-fn display_bridge_circuit_open() {
-    let err = SimardError::BridgeCircuitOpen {
-        bridge: "memory".to_string(),
+fn display_server_circuit_open() {
+    let err = SimardError::ServerCircuitOpen {
+        adapter: "memory".to_string(),
     };
     let msg = err.to_string();
     assert!(msg.contains("memory"), "{msg}");
@@ -353,11 +353,11 @@ fn fmt_field_reason_improvement_record() {
 }
 
 #[test]
-fn display_bridge_error() {
-    let err = SimardError::BridgeError("general bridge failure".to_string());
+fn display_adapter_error() {
+    let err = SimardError::ServerError("general adapter failure".to_string());
     let msg = err.to_string();
-    assert!(msg.contains("general bridge failure"), "{msg}");
-    assert!(msg.contains("bridge error"), "{msg}");
+    assert!(msg.contains("general adapter failure"), "{msg}");
+    assert!(msg.contains("adapter error"), "{msg}");
 }
 
 #[test]
@@ -374,11 +374,11 @@ fn display_gym_history_db() {
 #[test]
 fn display_runtime_init_failed() {
     let err = SimardError::RuntimeInitFailed {
-        component: "memory-bridge".to_string(),
+        component: "memory-adapter".to_string(),
         reason: "port in use".to_string(),
     };
     let msg = err.to_string();
-    assert!(msg.contains("memory-bridge"), "{msg}");
+    assert!(msg.contains("memory-adapter"), "{msg}");
     assert!(msg.contains("port in use"), "{msg}");
 }
 

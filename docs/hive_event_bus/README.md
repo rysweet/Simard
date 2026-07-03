@@ -10,7 +10,7 @@ sync) without yet committing to a network transport.
 
 > **Scope:** The bus is **in-process only**. It does not cross process or
 > machine boundaries. A future workstream may add a network adapter that
-> bridges this bus to a remote transport; nothing in this module assumes one.
+> connects this bus to a remote transport; nothing in this module assumes one.
 
 [`tokio::sync::broadcast`]: https://docs.rs/tokio/latest/tokio/sync/broadcast/index.html
 [#949]: https://github.com/rysweet/Simard/issues/949

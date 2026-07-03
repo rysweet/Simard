@@ -1,24 +1,24 @@
 use super::*;
-use crate::bridge::BridgeErrorPayload;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_adapter::CognitiveMemoryAdapter;
+use crate::server_subprocess::InMemoryServerTransport;
+use crate::server_transport::ServerErrorPayload;
 
-// ── helper: mock bridges ────────────────────────────────────────────
+// ── helper: mock adapters ────────────────────────────────────────────
 
-fn empty_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("test-empty", |method, _params| match method {
+fn empty_adapter() -> CognitiveMemoryAdapter {
+    let transport = InMemoryServerTransport::new("test-empty", |method, _params| match method {
         "memory.store_fact" => Ok(serde_json::json!({"id": "fact_1"})),
         "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(ServerErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
-fn bridge_with_goal_fact() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("test-goals", |method, _params| match method {
+fn adapter_with_goal_fact() -> CognitiveMemoryAdapter {
+    let transport = InMemoryServerTransport::new("test-goals", |method, _params| match method {
         "memory.store_fact" => Ok(serde_json::json!({"id": "fact_1"})),
         "memory.search_facts" => Ok(serde_json::json!({
             "facts": [{
@@ -30,15 +30,15 @@ fn bridge_with_goal_fact() -> CognitiveMemoryBridge {
                 "tags": ["sub:agent-1"]
             }]
         })),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(ServerErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
-fn bridge_with_progress_fact() -> CognitiveMemoryBridge {
+fn adapter_with_progress_fact() -> CognitiveMemoryAdapter {
     let progress = SubordinateProgress {
         sub_id: "agent-1".to_string(),
         phase: "execution".to_string(),
@@ -53,7 +53,7 @@ fn bridge_with_progress_fact() -> CognitiveMemoryBridge {
     };
     let content = serde_json::to_string(&progress).unwrap();
     let transport =
-        InMemoryBridgeTransport::new("test-progress", move |method, _params| match method {
+        InMemoryServerTransport::new("test-progress", move |method, _params| match method {
             "memory.search_facts" => Ok(serde_json::json!({
                 "facts": [{
                     "node_id": "p1",
@@ -64,16 +64,16 @@ fn bridge_with_progress_fact() -> CognitiveMemoryBridge {
                     "tags": ["sub:agent-1"]
                 }]
             })),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
-fn bridge_with_bad_progress() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("test-bad", |method, _params| match method {
+fn adapter_with_bad_progress() -> CognitiveMemoryAdapter {
+    let transport = InMemoryServerTransport::new("test-bad", |method, _params| match method {
         "memory.search_facts" => Ok(serde_json::json!({
             "facts": [{
                 "node_id": "p1",
@@ -84,12 +84,12 @@ fn bridge_with_bad_progress() -> CognitiveMemoryBridge {
                 "tags": ["sub:agent-1"]
             }]
         })),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(ServerErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
 // ── sub_tag / source_id helpers ─────────────────────────────────────
@@ -276,9 +276,9 @@ fn progress_with_outcome_overwrites_existing_outcome() {
 // ── assign_goal ─────────────────────────────────────────────────────
 
 #[test]
-fn assign_goal_succeeds_with_mock_bridge() {
-    let bridge = empty_bridge();
-    let result = assign_goal("agent-1", "build feature X", &bridge);
+fn assign_goal_succeeds_with_mock_adapter() {
+    let adapter = empty_adapter();
+    let result = assign_goal("agent-1", "build feature X", &adapter);
     assert!(result.is_ok());
 }
 
@@ -286,23 +286,23 @@ fn assign_goal_succeeds_with_mock_bridge() {
 
 #[test]
 fn read_assigned_goal_returns_none_when_empty() {
-    let bridge = empty_bridge();
-    let result = read_assigned_goal("agent-1", &bridge).unwrap();
+    let adapter = empty_adapter();
+    let result = read_assigned_goal("agent-1", &adapter).unwrap();
     assert!(result.is_none());
 }
 
 #[test]
 fn read_assigned_goal_returns_content_when_present() {
-    let bridge = bridge_with_goal_fact();
-    let result = read_assigned_goal("agent-1", &bridge).unwrap();
+    let adapter = adapter_with_goal_fact();
+    let result = read_assigned_goal("agent-1", &adapter).unwrap();
     assert_eq!(result, Some("build feature X".to_string()));
 }
 
 // ── report_progress ─────────────────────────────────────────────────
 
 #[test]
-fn report_progress_succeeds_with_mock_bridge() {
-    let bridge = empty_bridge();
+fn report_progress_succeeds_with_mock_adapter() {
+    let adapter = empty_adapter();
     let progress = SubordinateProgress {
         sub_id: "agent-1".to_string(),
         phase: "execution".to_string(),
@@ -315,7 +315,7 @@ fn report_progress_succeeds_with_mock_bridge() {
         prs_produced: 0,
         exit_status: None,
     };
-    let result = report_progress("agent-1", &progress, &bridge);
+    let result = report_progress("agent-1", &progress, &adapter);
     assert!(result.is_ok());
 }
 
@@ -323,15 +323,15 @@ fn report_progress_succeeds_with_mock_bridge() {
 
 #[test]
 fn poll_progress_returns_none_when_empty() {
-    let bridge = empty_bridge();
-    let result = poll_progress("agent-1", &bridge).unwrap();
+    let adapter = empty_adapter();
+    let result = poll_progress("agent-1", &adapter).unwrap();
     assert!(result.is_none());
 }
 
 #[test]
 fn poll_progress_returns_deserialized_progress() {
-    let bridge = bridge_with_progress_fact();
-    let result = poll_progress("agent-1", &bridge).unwrap();
+    let adapter = adapter_with_progress_fact();
+    let result = poll_progress("agent-1", &adapter).unwrap();
     assert!(result.is_some());
     let p = result.unwrap();
     assert_eq!(p.sub_id, "agent-1");
@@ -341,8 +341,8 @@ fn poll_progress_returns_deserialized_progress() {
 
 #[test]
 fn poll_progress_returns_error_on_bad_json() {
-    let bridge = bridge_with_bad_progress();
-    let result = poll_progress("agent-1", &bridge);
+    let adapter = adapter_with_bad_progress();
+    let result = poll_progress("agent-1", &adapter);
     assert!(result.is_err());
 }
 

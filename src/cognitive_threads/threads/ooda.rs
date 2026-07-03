@@ -5,12 +5,12 @@
 //! Its `tick()` performs the exact current per-cycle work in the same order
 //! (heartbeat → `run_ooda_cycle` → persist report/episode/health/metrics), so
 //! the daemon's external cadence and side-effects are byte-for-byte preserved.
-//! The `tick()` body is a `todo!()` stub during TDD; the OODA state/bridges/
+//! The `tick()` body is a `todo!()` stub during TDD; the OODA state/adapters/
 //! config it owns are moved in at construction, matching Appendix A.7/A.9.
 
 use std::time::Instant;
 
-use crate::ooda_loop::{OodaBridges, OodaConfig, OodaPhase, OodaState};
+use crate::ooda_loop::{OodaConfig, OodaContext, OodaPhase, OodaState};
 use crate::operator_commands_ooda::persistence::{persist_cycle_report, persist_cycle_to_memory};
 
 use super::super::thread::{
@@ -25,7 +25,7 @@ const OODA_ID: &str = "ooda";
 /// `run_ooda_cycle` per tick.
 pub struct OodaThread {
     state: OodaState,
-    bridges: OodaBridges,
+    adapters: OodaContext,
     config: OodaConfig,
     interval_secs: u64,
     cycles: u64,
@@ -39,13 +39,13 @@ impl OodaThread {
     /// and the configured cadence (`SIMARD_OODA_INTERVAL_SECS`).
     pub fn new(
         state: OodaState,
-        bridges: OodaBridges,
+        adapters: OodaContext,
         config: OodaConfig,
         interval_secs: u64,
     ) -> Self {
         Self {
             state,
-            bridges,
+            adapters,
             config,
             interval_secs,
             cycles: 0,
@@ -58,8 +58,8 @@ impl OodaThread {
     /// Reclaim the owned OODA resources (for the daemon's post-loop graceful
     /// shutdown, which flushes the board and closes the session). Supports the
     /// full cutover where the daemon drives OODA solely through this thread.
-    pub fn into_parts(self) -> (OodaState, OodaBridges) {
-        (self.state, self.bridges)
+    pub fn into_parts(self) -> (OodaState, OodaContext) {
+        (self.state, self.adapters)
     }
 }
 
@@ -91,7 +91,7 @@ impl CognitiveThread for OodaThread {
         // truth for the cycle's durable output.
         let outcome = match crate::ooda_loop::run_ooda_cycle(
             &mut self.state,
-            &mut self.bridges,
+            &mut self.adapters,
             &self.config,
         ) {
             Ok(report) => {
@@ -102,7 +102,7 @@ impl CognitiveThread for OodaThread {
                 self.state.current_phase = OodaPhase::Sleep;
 
                 persist_cycle_report(ctx.state_root, &report);
-                persist_cycle_to_memory(&self.bridges, &report);
+                persist_cycle_to_memory(&self.adapters, &report);
                 let _ = crate::self_metrics::collect_and_record_all(elapsed);
 
                 self.last_success = Some(true);

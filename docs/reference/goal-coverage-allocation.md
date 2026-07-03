@@ -146,7 +146,7 @@ reorder and bound it:
 
 ```rust
 // --- Decide --- (existing branch; now bound with `let mut`)
-let mut planned_actions = match bridges.decide_brain.as_ref() {
+let mut planned_actions = match adapters.decide_reasoner.as_ref() {
     Some(brain) => decide_with_brain(&priorities, config, brain.as_ref())?,
     None => decide(&priorities, config)?,
 };
@@ -163,7 +163,7 @@ eprintln!("[simard] OODA cycle: coverage — {}", report.log_line());
 // --- Act (now dispatches the planned spawn-path `AdvanceGoal` actions
 //     concurrently, bounded by this same `cap` — see
 //     reference/concurrent-engineer-dispatch.md) ---
-let outcomes = act(&planned_actions, bridges, state, cap)?;
+let outcomes = act(&planned_actions, adapters, state, cap)?;
 ```
 
 **Cap source.** Coverage reads `scaler.current_max()` — the value the Decide

@@ -5,7 +5,7 @@
 //! behaviour that Step 8 must implement:
 //!
 //!   1. When the LLM brain returns `Err`, the per-cycle
-//!      `BrainJudgmentRecord` for that goal MUST carry a
+//!      `ReasonerJudgmentRecord` for that goal MUST carry a
 //!      `parse_failure: Some(ParseFailureRecord)` — not the historical
 //!      silent `parse_failure: None` deterministic-fallback record.
 //!   2. The `ParseFailureRecord` MUST be populated with the LLM error
@@ -21,7 +21,7 @@
 //!      reset the consecutive_count for that pair to 0.
 //!
 //! Anti-regression: pre-fix, `decide_with_brain` swallowed the brain
-//! `Err(_)` into the deterministic fallback with `BrainJudgmentRecord
+//! `Err(_)` into the deterministic fallback with `ReasonerJudgmentRecord
 //! { fallback: true, rationale: "fallback-brain: prefix-routed", … }`
 //! and no parse-failure breadcrumb. `improve-simard-dashboard` and
 //! `fix-broken-features` ran 89 cycles at 0.00% before any operator
@@ -32,20 +32,20 @@ use std::collections::HashMap;
 use crate::error::{SimardError, SimardResult};
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
 use crate::memory_cognitive::CognitiveStatistics;
-use crate::ooda_brain::{
-    BrainJudgmentRecord, BrainPhase, DecideContext, DecideJudgment, OodaDecideBrain,
-    OodaOrientBrain, OrientContext, OrientJudgment,
-    parse_failure::{peek_consecutive_count, reset_consecutive_count_for_tests, test_serial_guard},
-};
 use crate::ooda_loop::{
     EnvironmentSnapshot, Observation, OodaConfig, Priority, decide_with_brain, orient_with_brain,
+};
+use crate::ooda_reasoners::{
+    DecideContext, DecideJudgment, DecideReasoner, OrientContext, OrientJudgment, OrientReasoner,
+    ReasonerJudgmentRecord, ReasonerPhase,
+    parse_failure::{peek_consecutive_count, reset_consecutive_count_for_tests, test_serial_guard},
 };
 
 // ---------------------------------------------------------------------------
 // Test doubles (resolution A11: AlwaysErrBrain — smallest stub possible)
 // ---------------------------------------------------------------------------
 
-/// A `OodaDecideBrain` that always returns `SimardError::AdapterInvocationFailed`
+/// A `DecideReasoner` that always returns `SimardError::AdapterInvocationFailed`
 /// with an embedded raw-response snippet — mirrors the production failure mode
 /// from issue #1890 where the LLM returned `"OK"` and the parser produced
 /// `"no JSON object; raw_response=\"OK\""`.
@@ -61,7 +61,7 @@ impl AlwaysErrDecideBrain {
     }
 }
 
-impl OodaDecideBrain for AlwaysErrDecideBrain {
+impl DecideReasoner for AlwaysErrDecideBrain {
     fn judge_decision(&self, _ctx: &DecideContext) -> SimardResult<DecideJudgment> {
         Err(SimardError::AdapterInvocationFailed {
             base_type: "ooda-decide-brain".to_string(),
@@ -85,7 +85,7 @@ impl AlwaysErrOrientBrain {
     }
 }
 
-impl OodaOrientBrain for AlwaysErrOrientBrain {
+impl OrientReasoner for AlwaysErrOrientBrain {
     fn judge_orientation(&self, _ctx: &OrientContext) -> SimardResult<OrientJudgment> {
         Err(SimardError::AdapterInvocationFailed {
             base_type: "ooda-orient-brain".to_string(),
@@ -111,7 +111,7 @@ impl ToggleDecideBrain {
     }
 }
 
-impl OodaDecideBrain for ToggleDecideBrain {
+impl DecideReasoner for ToggleDecideBrain {
     fn judge_decision(&self, _ctx: &DecideContext) -> SimardResult<DecideJudgment> {
         let mut g = self.failures_remaining.lock().unwrap();
         if *g > 0 {
@@ -174,8 +174,8 @@ fn board_with_one_goal(id: &str) -> GoalBoard {
 /// `test_serial_guard()` mutex if they assert on counter values, so
 /// `cargo test`'s parallel execution can't contaminate the assertion.
 fn run_isolated<R>(f: impl FnOnce() -> R) -> R {
-    crate::ooda_brain::with_brain_judgment_scope(|| {
-        crate::ooda_brain::clear_brain_judgments();
+    crate::ooda_reasoners::with_brain_judgment_scope(|| {
+        crate::ooda_reasoners::clear_reasoner_judgments();
         f()
     })
 }
@@ -187,7 +187,7 @@ fn run_isolated<R>(f: impl FnOnce() -> R) -> R {
 #[test]
 fn decide_with_brain_errored_pushes_parse_failure_record() {
     // ANTI-REGRESSION (issue #1890): before this PR, decide_with_brain on
-    // brain Err pushed a BrainJudgmentRecord with `parse_failure: None`
+    // brain Err pushed a ReasonerJudgmentRecord with `parse_failure: None`
     // and the deterministic-fallback rationale — indistinguishable on
     // disk from "operator deliberately ran without an LLM brain".
     let priorities = one_priority("improve-simard-dashboard");
@@ -196,15 +196,15 @@ fn decide_with_brain_errored_pushes_parse_failure_record() {
 
     let records = run_isolated(|| {
         decide_with_brain(&priorities, &config, &brain).unwrap();
-        crate::ooda_brain::take_brain_judgments()
+        crate::ooda_reasoners::take_reasoner_judgments()
     });
 
     assert_eq!(records.len(), 1, "exactly one judgment record per priority");
     let rec = &records[0];
-    assert_eq!(rec.phase, BrainPhase::Decide);
+    assert_eq!(rec.phase, ReasonerPhase::Decide);
     assert!(
         rec.parse_failure.is_some(),
-        "BrainJudgmentRecord.parse_failure MUST be Some(_) on brain Err (issue #1890); \
+        "ReasonerJudgmentRecord.parse_failure MUST be Some(_) on brain Err (issue #1890); \
          got None — silent fallback regressed: {:?}",
         rec,
     );
@@ -218,7 +218,7 @@ fn decide_with_brain_errored_parse_failure_carries_error_and_raw_response() {
 
     let records = run_isolated(|| {
         decide_with_brain(&priorities, &config, &brain).unwrap();
-        crate::ooda_brain::take_brain_judgments()
+        crate::ooda_reasoners::take_reasoner_judgments()
     });
 
     let pf = records[0]
@@ -282,7 +282,7 @@ fn decide_with_brain_errored_record_marks_brain_error() {
 
     let records = run_isolated(|| {
         decide_with_brain(&priorities, &config, &brain).unwrap();
-        crate::ooda_brain::take_brain_judgments()
+        crate::ooda_reasoners::take_reasoner_judgments()
     });
 
     assert_eq!(records[0].decision, "brain_error");
@@ -297,7 +297,7 @@ fn decide_with_brain_errored_record_marks_brain_error() {
 fn decide_with_brain_ok_path_leaves_parse_failure_none() {
     // Healthy LLM brain returns Ok — no parse failure, no schema churn.
     struct OkBrain;
-    impl OodaDecideBrain for OkBrain {
+    impl DecideReasoner for OkBrain {
         fn judge_decision(&self, _ctx: &DecideContext) -> SimardResult<DecideJudgment> {
             Ok(DecideJudgment::AdvanceGoal {
                 rationale: "healthy".to_string(),
@@ -309,7 +309,7 @@ fn decide_with_brain_ok_path_leaves_parse_failure_none() {
 
     let records = run_isolated(|| {
         decide_with_brain(&priorities, &config, &OkBrain).unwrap();
-        crate::ooda_brain::take_brain_judgments()
+        crate::ooda_reasoners::take_reasoner_judgments()
     });
 
     assert!(
@@ -320,7 +320,7 @@ fn decide_with_brain_ok_path_leaves_parse_failure_none() {
 
 #[test]
 fn decide_with_brain_errored_record_serializes_parse_failure_to_json() {
-    // End-to-end: the BrainJudgmentRecord MUST serialize the parse_failure
+    // End-to-end: the ReasonerJudgmentRecord MUST serialize the parse_failure
     // field so it lands in `~/.simard/cycle_reports/cycle_N.json`. This is
     // visibility channel 3 from the four-channel contract.
     let priorities = one_priority("g1");
@@ -329,10 +329,10 @@ fn decide_with_brain_errored_record_serializes_parse_failure_to_json() {
 
     let records = run_isolated(|| {
         decide_with_brain(&priorities, &config, &brain).unwrap();
-        crate::ooda_brain::take_brain_judgments()
+        crate::ooda_reasoners::take_reasoner_judgments()
     });
 
-    let json = serde_json::to_string(&records[0]).expect("BrainJudgmentRecord must serialize");
+    let json = serde_json::to_string(&records[0]).expect("ReasonerJudgmentRecord must serialize");
     assert!(
         json.contains("\"parse_failure\""),
         "parse_failure MUST be present in serialized cycle_report JSON: {json}",
@@ -347,7 +347,7 @@ fn decide_with_brain_errored_record_serializes_parse_failure_to_json() {
     );
     // Round-trip — back-compat regression: older readers parsing a richer
     // record must not break.
-    let back: BrainJudgmentRecord = serde_json::from_str(&json).expect("round-trip");
+    let back: ReasonerJudgmentRecord = serde_json::from_str(&json).expect("round-trip");
     assert!(back.parse_failure.is_some());
 }
 
@@ -357,7 +357,7 @@ fn decide_with_brain_errored_consecutive_count_increments_per_call() {
     // the gh-issue-create channel can throttle at >= 3.
     let _serial = test_serial_guard();
     let goal_id = "decide_with_brain_errored_consecutive_count-goal";
-    reset_consecutive_count_for_tests(BrainPhase::Decide, goal_id);
+    reset_consecutive_count_for_tests(ReasonerPhase::Decide, goal_id);
     let priorities = vec![Priority {
         goal_id: goal_id.to_string(),
         urgency: 0.9,
@@ -370,7 +370,7 @@ fn decide_with_brain_errored_consecutive_count_increments_per_call() {
         for _ in 0..3 {
             decide_with_brain(&priorities, &config, &brain).unwrap();
         }
-        peek_consecutive_count(BrainPhase::Decide, goal_id)
+        peek_consecutive_count(ReasonerPhase::Decide, goal_id)
     });
     assert_eq!(
         count_after_three, 3,
@@ -383,7 +383,7 @@ fn decide_with_brain_consecutive_count_resets_on_next_successful_parse() {
     // Three failures, then one Ok — counter MUST reset.
     let _serial = test_serial_guard();
     let goal_id = "decide_with_brain_consecutive_count_resets-goal";
-    reset_consecutive_count_for_tests(BrainPhase::Decide, goal_id);
+    reset_consecutive_count_for_tests(ReasonerPhase::Decide, goal_id);
     let priorities = vec![Priority {
         goal_id: goal_id.to_string(),
         urgency: 0.9,
@@ -396,7 +396,7 @@ fn decide_with_brain_consecutive_count_resets_on_next_successful_parse() {
         for _ in 0..4 {
             decide_with_brain(&priorities, &config, &brain).unwrap();
         }
-        peek_consecutive_count(BrainPhase::Decide, goal_id)
+        peek_consecutive_count(ReasonerPhase::Decide, goal_id)
     });
     assert_eq!(
         after, 0,
@@ -412,7 +412,7 @@ fn decide_with_brain_errored_continues_to_next_priority() {
     struct FirstFailsThenOkBrain {
         call: std::sync::Mutex<u32>,
     }
-    impl OodaDecideBrain for FirstFailsThenOkBrain {
+    impl DecideReasoner for FirstFailsThenOkBrain {
         fn judge_decision(&self, _ctx: &DecideContext) -> SimardResult<DecideJudgment> {
             let mut c = self.call.lock().unwrap();
             *c += 1;
@@ -447,7 +447,7 @@ fn decide_with_brain_errored_continues_to_next_priority() {
 
     let (actions, records) = run_isolated(|| {
         let actions = decide_with_brain(&priorities, &config, &brain).unwrap();
-        (actions, crate::ooda_brain::take_brain_judgments())
+        (actions, crate::ooda_reasoners::take_reasoner_judgments())
     });
 
     assert_eq!(
@@ -485,7 +485,7 @@ fn orient_with_brain_errored_pushes_parse_failure_record() {
 
     let records = run_isolated(|| {
         orient_with_brain(&obs, &board, &failures, &brain).unwrap();
-        crate::ooda_brain::take_brain_judgments()
+        crate::ooda_reasoners::take_reasoner_judgments()
     });
 
     assert_eq!(
@@ -494,10 +494,10 @@ fn orient_with_brain_errored_pushes_parse_failure_record() {
         "exactly one orient record per failing goal"
     );
     let rec = &records[0];
-    assert_eq!(rec.phase, BrainPhase::Orient);
+    assert_eq!(rec.phase, ReasonerPhase::Orient);
     assert!(
         rec.parse_failure.is_some(),
-        "orient BrainJudgmentRecord.parse_failure MUST be Some(_) on brain Err (issue #1890)",
+        "orient ReasonerJudgmentRecord.parse_failure MUST be Some(_) on brain Err (issue #1890)",
     );
 }
 
@@ -511,7 +511,7 @@ fn orient_with_brain_errored_parse_failure_carries_error_and_raw_response() {
 
     let records = run_isolated(|| {
         orient_with_brain(&obs, &board, &failures, &brain).unwrap();
-        crate::ooda_brain::take_brain_judgments()
+        crate::ooda_reasoners::take_reasoner_judgments()
     });
 
     let pf = records[0]
@@ -563,7 +563,7 @@ fn orient_with_brain_errored_still_produces_priority() {
 #[test]
 fn orient_with_brain_ok_path_leaves_parse_failure_none() {
     struct OkOrientBrain;
-    impl OodaOrientBrain for OkOrientBrain {
+    impl OrientReasoner for OkOrientBrain {
         fn judge_orientation(&self, ctx: &OrientContext) -> SimardResult<OrientJudgment> {
             Ok(OrientJudgment {
                 adjusted_urgency: (ctx.base_urgency - 0.05).max(0.0),
@@ -580,7 +580,7 @@ fn orient_with_brain_ok_path_leaves_parse_failure_none() {
 
     let records = run_isolated(|| {
         orient_with_brain(&obs, &board, &failures, &OkOrientBrain).unwrap();
-        crate::ooda_brain::take_brain_judgments()
+        crate::ooda_reasoners::take_reasoner_judgments()
     });
 
     assert_eq!(records.len(), 1);
@@ -594,7 +594,7 @@ fn orient_with_brain_ok_path_leaves_parse_failure_none() {
 fn orient_with_brain_errored_consecutive_count_increments_per_call() {
     let _serial = test_serial_guard();
     let goal_id = "orient_with_brain_errored_consecutive_count-goal";
-    reset_consecutive_count_for_tests(BrainPhase::Orient, goal_id);
+    reset_consecutive_count_for_tests(ReasonerPhase::Orient, goal_id);
     let board = board_with_one_goal(goal_id);
     let obs = observation_with_no_signals();
     let mut failures = HashMap::new();
@@ -605,7 +605,7 @@ fn orient_with_brain_errored_consecutive_count_increments_per_call() {
         for _ in 0..3 {
             orient_with_brain(&obs, &board, &failures, &brain).unwrap();
         }
-        peek_consecutive_count(BrainPhase::Orient, goal_id)
+        peek_consecutive_count(ReasonerPhase::Orient, goal_id)
     });
     assert_eq!(
         count_after_three, 3,
@@ -620,8 +620,8 @@ fn orient_and_decide_counters_are_independent_for_same_goal() {
     // the gh-issue-create throttle would mis-fire.
     let _serial = test_serial_guard();
     let goal_id = "orient_and_decide_counters_are_independent-goal";
-    reset_consecutive_count_for_tests(BrainPhase::Decide, goal_id);
-    reset_consecutive_count_for_tests(BrainPhase::Orient, goal_id);
+    reset_consecutive_count_for_tests(ReasonerPhase::Decide, goal_id);
+    reset_consecutive_count_for_tests(ReasonerPhase::Orient, goal_id);
     let priorities = vec![Priority {
         goal_id: goal_id.to_string(),
         urgency: 0.9,
@@ -632,16 +632,16 @@ fn orient_and_decide_counters_are_independent_for_same_goal() {
     let mut failures = HashMap::new();
     failures.insert(goal_id.to_string(), 1);
     let config = OodaConfig::default();
-    let decide_brain = AlwaysErrDecideBrain::new("OK");
-    let orient_brain = AlwaysErrOrientBrain::new("OK");
+    let decide_reasoner = AlwaysErrDecideBrain::new("OK");
+    let orient_reasoner = AlwaysErrOrientBrain::new("OK");
 
     let (decide_count, orient_count) = run_isolated(|| {
-        decide_with_brain(&priorities, &config, &decide_brain).unwrap();
-        decide_with_brain(&priorities, &config, &decide_brain).unwrap();
-        orient_with_brain(&obs, &board, &failures, &orient_brain).unwrap();
+        decide_with_brain(&priorities, &config, &decide_reasoner).unwrap();
+        decide_with_brain(&priorities, &config, &decide_reasoner).unwrap();
+        orient_with_brain(&obs, &board, &failures, &orient_reasoner).unwrap();
         (
-            peek_consecutive_count(BrainPhase::Decide, goal_id),
-            peek_consecutive_count(BrainPhase::Orient, goal_id),
+            peek_consecutive_count(ReasonerPhase::Decide, goal_id),
+            peek_consecutive_count(ReasonerPhase::Orient, goal_id),
         )
     });
 

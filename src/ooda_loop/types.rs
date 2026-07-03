@@ -6,9 +6,9 @@ use std::fmt::{self, Display, Formatter};
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::engineer_worktree::EngineerWorktree;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
-use crate::gym_bridge::GymBridge;
+use crate::gym_client::GymClient;
 use crate::gym_scoring::GymSuiteScore;
-use crate::knowledge_bridge::KnowledgeBridge;
+use crate::knowledge_client::KnowledgeClient;
 use crate::memory_cognitive::CognitiveStatistics;
 use crate::memory_consolidation::PreparedContext;
 use crate::self_improve::ImprovementCycle;
@@ -218,11 +218,16 @@ pub struct CycleReport {
     pub priorities: Vec<Priority>,
     pub planned_actions: Vec<PlannedAction>,
     pub outcomes: Vec<ActionOutcome>,
-    /// Per-cycle forensic trace of prompt-driven OODA brain judgments
-    /// (act / decide / orient). Empty when no brain calls fired this cycle
+    /// Per-cycle forensic trace of prompt-driven OODA reasoner judgments
+    /// (act / decide / orient). Empty when no reasoner calls fired this cycle
     /// or when reading older reports written before this field existed.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub brain_judgments: Vec<crate::ooda_brain::BrainJudgmentRecord>,
+    // FROZEN WIRE VALUE: persisted CycleReport JSON key "brain_judgments".
+    #[serde(
+        rename = "brain_judgments",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub reasoner_judgments: Vec<crate::ooda_reasoners::ReasonerJudgmentRecord>,
 }
 
 /// Configuration for the OODA loop.
@@ -325,7 +330,7 @@ fn env_u32(key: &str, default: u32) -> u32 {
 /// recipe steps via JSON. Excludes:
 /// - `engineer_worktrees` — OS handles owning git worktrees; recipe steps
 ///   re-key these by `goal_id` from the parent process state.
-/// - The `OodaBridges` (memory store, gym, knowledge) — instantiated per
+/// - The `OodaContext` (memory store, gym, knowledge) — instantiated per
 ///   helper-bin invocation from the configured `state_root`.
 ///
 /// Use `OodaStateSnapshot::from(&state)` to capture, and
@@ -391,7 +396,7 @@ impl OodaStateSnapshot {
 /// dispatch.
 ///
 /// The slow goal-action `run_turn` call (~30-90s) used to serialize on the
-/// single shared [`OodaBridges::session`], so only ~1 engineer started per
+/// single shared [`OodaContext::session`], so only ~1 engineer started per
 /// OODA round even when coverage planned many. A factory lets the Act phase
 /// mint one session per spawn-candidate goal so those `run_turn` calls run
 /// concurrently. `Send + Sync` so it can be shared across the dispatch
@@ -407,11 +412,11 @@ pub trait OrchestratorSessionFactory: Send + Sync {
     ) -> crate::error::SimardResult<Box<dyn crate::base_types::BaseTypeSession>>;
 }
 
-/// All bridges needed by the OODA loop.
-pub struct OodaBridges {
+/// All adapters needed by the OODA loop.
+pub struct OodaContext {
     pub memory: Box<dyn CognitiveMemoryOps>,
-    pub knowledge: KnowledgeBridge,
-    pub gym: GymBridge,
+    pub knowledge: KnowledgeClient,
+    pub gym: GymClient,
     /// Optional base-type session for real autonomous work (e.g. RustyClawd).
     /// When present, `AdvanceGoal` actions use `run_turn` to delegate work
     /// to an LLM agent instead of just bumping a progress percentage.
@@ -419,15 +424,15 @@ pub struct OodaBridges {
     /// Prompt-driven decision brain (issue #1266). Today only the
     /// engineer-lifecycle skip branch consults it; future PRs migrate
     /// observe/orient/decide/curate/review.
-    pub brain: std::sync::Arc<dyn crate::ooda_brain::OodaBrain>,
+    pub act_reasoner: std::sync::Arc<dyn crate::ooda_reasoners::ActReasoner>,
     /// Optional LLM-backed Decide brain (PR #1469). When `Some`, the
     /// cycle's Decide phase routes through it; otherwise it uses the
-    /// `DeterministicDecideBrain` floor.
-    pub decide_brain: Option<std::sync::Arc<dyn crate::ooda_brain::OodaDecideBrain>>,
+    /// `DeterministicFallbackDecideReasoner` floor.
+    pub decide_reasoner: Option<std::sync::Arc<dyn crate::ooda_reasoners::DecideReasoner>>,
     /// Optional LLM-backed Orient brain (PR #1471). When `Some`, the
     /// cycle's Orient phase routes through it; otherwise it uses the
-    /// `DeterministicOrientBrain` floor.
-    pub orient_brain: Option<std::sync::Arc<dyn crate::ooda_brain::OodaOrientBrain>>,
+    /// `DeterministicFallbackOrientReasoner` floor.
+    pub orient_reasoner: Option<std::sync::Arc<dyn crate::ooda_reasoners::OrientReasoner>>,
     /// Repository root used by engineer loops and review persistence.
     /// Defaults to `std::env::current_dir()` at daemon boot.
     pub repo_root: std::path::PathBuf,

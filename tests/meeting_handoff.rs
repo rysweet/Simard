@@ -63,7 +63,7 @@ fn sample_session_with_questions() -> MeetingSession {
         ],
         notes: vec![
             "What about error handling?".to_string(),
-            "Memory bridge is stable.".to_string(),
+            "Memory adapter is stable.".to_string(),
             "Should we add metrics?".to_string(),
         ],
         status: MeetingSessionStatus::Closed,

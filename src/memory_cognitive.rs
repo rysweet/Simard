@@ -2,7 +2,7 @@
 //!
 //! Each struct maps one-to-one to the corresponding Python type in
 //! `amplihack-memory-lib`. Fields use the same names and semantics so that
-//! JSON round-trips between the Rust bridge client and the Python bridge
+//! JSON round-trips between the Rust adapter client and the Python adapter
 //! server are lossless.
 
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Maps to Python `SensoryItem`. The `expires_at` field is a Unix timestamp
 /// (seconds) after which the item may be pruned.
 ///
-/// Used by future `get_recent_sensory` bridge method (Phase 3+).
+/// Used by future `get_recent_sensory` adapter method (Phase 3+).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct CognitiveSensoryItem {
@@ -41,7 +41,7 @@ pub struct CognitiveWorkingSlot {
 /// Maps to Python `EpisodicMemory`. Episodes can be consolidated into
 /// summaries via `consolidate_episodes`.
 ///
-/// Used by future `get_episodes` bridge method (Phase 3+).
+/// Used by future `get_episodes` adapter method (Phase 3+).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct CognitiveEpisode {
@@ -139,7 +139,7 @@ impl CognitiveStatistics {
 /// `SUPERSEDES` chain left behind by caller-key snapshot dedup.
 ///
 /// Returned by [`CognitiveMemoryOps::graph_stats`](crate::cognitive_memory::CognitiveMemoryOps::graph_stats).
-/// Backends without a provenance graph (IPC client, bridge, stubs) return an
+/// Backends without a provenance graph (IPC client, adapter, stubs) return an
 /// all-zero value via the trait default, so callers stay backend-agnostic.
 ///
 /// `similar_to_edges` and `supersedes_edges` are present for completeness but

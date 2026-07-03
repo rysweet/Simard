@@ -4,7 +4,7 @@ use rustyclawd_core::client::{
     Client as RcClient, ClientError, Config as RcConfig, Message as RcMessage,
 };
 
-use crate::base_type_turn::EnrichmentBridges;
+use crate::base_type_turn::EnrichmentAdapters;
 use crate::base_types::{
     BaseTypeDescriptor, BaseTypeOutcome, BaseTypeSession, BaseTypeSessionRequest,
     BaseTypeTurnInput, ensure_session_not_already_open, ensure_session_not_closed,
@@ -43,15 +43,15 @@ pub(super) struct RustyClawdSession {
     pub(super) is_closed: bool,
     /// RustyClawd API client, initialized on open() from environment config.
     pub(super) client: Option<RcClient>,
-    /// Tokio runtime for bridging async rustyclawd client calls into sync
+    /// Tokio runtime for connecting async rustyclawd client calls into sync
     /// BaseTypeSession methods.
     pub(super) rt: Option<tokio::runtime::Runtime>,
     /// Accumulated conversation history for multi-turn sessions (meetings, etc.).
     pub(super) conversation_history: Vec<RcMessage>,
-    /// Memory + knowledge bridges applied to every turn through the shared
+    /// Memory + knowledge adapters applied to every turn through the shared
     /// enrichment entry point (issue #1665). `None`/empty until the runtime
-    /// injects configured bridges via [`BaseTypeSession::enrichment_mut`].
-    pub(super) enrichment: EnrichmentBridges,
+    /// injects configured adapters via [`BaseTypeSession::enrichment_mut`].
+    pub(super) enrichment: EnrichmentAdapters,
 }
 
 impl fmt::Debug for RustyClawdSession {
@@ -70,11 +70,11 @@ impl BaseTypeSession for RustyClawdSession {
         &self.descriptor
     }
 
-    fn enrichment(&self) -> Option<&EnrichmentBridges> {
+    fn enrichment(&self) -> Option<&EnrichmentAdapters> {
         Some(&self.enrichment)
     }
 
-    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentBridges> {
+    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentAdapters> {
         Some(&mut self.enrichment)
     }
 
@@ -265,7 +265,7 @@ mod tests {
             client: None,
             rt: None,
             conversation_history: Vec::new(),
-            enrichment: EnrichmentBridges::default(),
+            enrichment: EnrichmentAdapters::default(),
         };
         let debug_str = format!("{session:?}");
         assert!(debug_str.contains("RustyClawdSession"));
@@ -295,7 +295,7 @@ mod tests {
             client: None,
             rt: None,
             conversation_history: Vec::new(),
-            enrichment: EnrichmentBridges::default(),
+            enrichment: EnrichmentAdapters::default(),
         };
         let debug_str = format!("{session:?}");
         assert!(debug_str.contains("false")); // is_open and is_closed

@@ -5,7 +5,7 @@ use crate::ooda_actions::dispatch_actions;
 use crate::ooda_loop::{ActionKind, OodaState, PlannedAction};
 
 use super::make_outcome;
-use super::test_helpers::{board_with_goal, test_bridges};
+use super::test_helpers::{board_with_goal, test_adapters};
 use crate::goal_curation::GoalProgress;
 
 // ── make_outcome ────────────────────────────────────────────────
@@ -51,16 +51,16 @@ fn make_outcome_clones_action_independently() {
 
 #[test]
 fn dispatch_empty_actions_returns_empty_vec() {
-    let mut bridges = test_bridges();
+    let mut adapters = test_adapters();
     let board = board_with_goal("g1", GoalProgress::NotStarted, None);
     let mut state = OodaState::new(board);
-    let outcomes = dispatch_actions(&[], &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&[], &mut adapters, &mut state).unwrap();
     assert!(outcomes.is_empty());
 }
 
 #[test]
 fn dispatch_consolidate_memory_returns_one_outcome() {
-    let mut bridges = test_bridges();
+    let mut adapters = test_adapters();
     let board = board_with_goal("g1", GoalProgress::NotStarted, None);
     let mut state = OodaState::new(board);
     let actions = vec![PlannedAction {
@@ -68,14 +68,14 @@ fn dispatch_consolidate_memory_returns_one_outcome() {
         goal_id: None,
         description: "consolidate".to_string(),
     }];
-    let outcomes = dispatch_actions(&actions, &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&actions, &mut adapters, &mut state).unwrap();
     assert_eq!(outcomes.len(), 1);
     assert!(outcomes[0].success);
 }
 
 #[test]
 fn dispatch_research_query_returns_one_outcome() {
-    let mut bridges = test_bridges();
+    let mut adapters = test_adapters();
     let board = board_with_goal("g1", GoalProgress::NotStarted, None);
     let mut state = OodaState::new(board);
     let actions = vec![PlannedAction {
@@ -83,14 +83,14 @@ fn dispatch_research_query_returns_one_outcome() {
         goal_id: None,
         description: "look up patterns".to_string(),
     }];
-    let outcomes = dispatch_actions(&actions, &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&actions, &mut adapters, &mut state).unwrap();
     assert_eq!(outcomes.len(), 1);
     assert!(outcomes[0].success);
 }
 
 #[test]
 fn dispatch_multiple_independent_actions_preserves_order() {
-    let mut bridges = test_bridges();
+    let mut adapters = test_adapters();
     let board = board_with_goal("g1", GoalProgress::NotStarted, None);
     let mut state = OodaState::new(board);
     let actions = vec![
@@ -105,7 +105,7 @@ fn dispatch_multiple_independent_actions_preserves_order() {
             description: "gym eval".to_string(),
         },
     ];
-    let outcomes = dispatch_actions(&actions, &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&actions, &mut adapters, &mut state).unwrap();
     assert_eq!(outcomes.len(), 2);
     assert_eq!(outcomes[0].action.description, "consolidate");
     assert_eq!(outcomes[1].action.description, "gym eval");
@@ -113,7 +113,7 @@ fn dispatch_multiple_independent_actions_preserves_order() {
 
 #[test]
 fn dispatch_advance_goal_without_session_fails_gracefully() {
-    let mut bridges = test_bridges(); // no session
+    let mut adapters = test_adapters(); // no session
     let board = board_with_goal("g1", GoalProgress::InProgress { percent: 30 }, None);
     let mut state = OodaState::new(board);
     let actions = vec![PlannedAction {
@@ -121,7 +121,7 @@ fn dispatch_advance_goal_without_session_fails_gracefully() {
         goal_id: Some("g1".to_string()),
         description: "advance goal".to_string(),
     }];
-    let outcomes = dispatch_actions(&actions, &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&actions, &mut adapters, &mut state).unwrap();
     assert_eq!(outcomes.len(), 1);
     assert!(!outcomes[0].success);
 }

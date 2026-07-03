@@ -17,7 +17,7 @@
 
 | Feature | Description | Key Files |
 |---------|-------------|-----------|
-| Cognitive Memory Bridge | 6-type memory (episodic, semantic, procedural, metacognitive, sensory, working) | `src/cognitive_memory_bridge/` |
+| Cognitive Memory Bridge | 6-type memory (episodic, semantic, procedural, metacognitive, sensory, working) | `src/cognitive_memory_adapter/` |
 | Base Types & PTY | ooda-copilot, pty-spawn, tool-call; composable agent primitives | `src/base_types/` |
 | Engineer Session Loop | Multi-turn engineer sessions with handoff and review | `src/engineer_session/` |
 | Gym & Evaluation | 40+ scenario suite across 8 categories with scoring | `src/gym/` |

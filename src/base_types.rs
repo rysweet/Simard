@@ -17,7 +17,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::base_type_turn::EnrichmentBridges;
+use crate::base_type_turn::EnrichmentAdapters;
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
 use crate::metadata::BackendDescriptor;
@@ -148,7 +148,7 @@ pub struct BaseTypeTurnInput {
     /// System-level identity context loaded from the manifest's prompt assets.
     /// Used by LLM-calling adapters to construct system prompts.
     pub identity_context: String,
-    /// Additional prompt preamble for the turn (e.g., from enrichment bridges).
+    /// Additional prompt preamble for the turn (e.g., from enrichment adapters).
     pub prompt_preamble: String,
 }
 
@@ -180,20 +180,20 @@ pub trait BaseTypeSession: Send {
 
     fn close(&mut self) -> SimardResult<()>;
 
-    /// Optional memory + knowledge bridges used to enrich each turn.
+    /// Optional memory + knowledge adapters used to enrich each turn.
     ///
     /// Defaults to `None` (enrichment not supported / not configured). Adapters
     /// that support memory + knowledge enrichment override this to expose their
-    /// stored [`EnrichmentBridges`]. See [`BaseTypeSession::enrich_input`].
-    fn enrichment(&self) -> Option<&EnrichmentBridges> {
+    /// stored [`EnrichmentAdapters`]. See [`BaseTypeSession::enrich_input`].
+    fn enrichment(&self) -> Option<&EnrichmentAdapters> {
         None
     }
 
-    /// Mutable access to this session's [`EnrichmentBridges`] so the runtime
-    /// (or tests) can inject configured bridges after the session is created.
+    /// Mutable access to this session's [`EnrichmentAdapters`] so the runtime
+    /// (or tests) can inject configured adapters after the session is created.
     ///
     /// Defaults to `None` for adapters that do not support enrichment.
-    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentBridges> {
+    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentAdapters> {
         None
     }
 
@@ -201,12 +201,12 @@ pub trait BaseTypeSession: Send {
     /// adapter (issue #1665).
     ///
     /// Recalls memory facts/procedures and domain knowledge for the turn's
-    /// objective using the session's configured bridges, and returns a new
+    /// objective using the session's configured adapters, and returns a new
     /// [`BaseTypeTurnInput`] with the rendered enrichment injected into
     /// `prompt_preamble` (the per-turn system/preamble context). The
     /// `objective` and `identity_context` are preserved, so stateful adapters
     /// keep clean conversation history and prompt-folding adapters pick the
-    /// enrichment up automatically. When no bridges are configured the input is
+    /// enrichment up automatically. When no adapters are configured the input is
     /// returned unchanged.
     ///
     /// Before #1665 only `CopilotSdkAdapter` enriched its turns; this provided
@@ -214,7 +214,7 @@ pub trait BaseTypeSession: Send {
     /// shared call site, so the behavior cannot silently diverge again.
     fn enrich_input(&self, input: &BaseTypeTurnInput) -> SimardResult<BaseTypeTurnInput> {
         match self.enrichment() {
-            Some(bridges) => bridges.enrich(input),
+            Some(adapters) => adapters.enrich(input),
             None => crate::base_type_turn::enrich_turn_input(input, None, None),
         }
     }

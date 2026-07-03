@@ -137,9 +137,9 @@ pub(crate) fn validated_terminal_read_artifacts(
     state_root: &Path,
 ) -> crate::SimardResult<EngineerReadArtifacts> {
     validate_existing_read_state_root_root("terminal read", state_root)?;
-    let selected_handoff = crate::terminal_engineer_bridge::select_handoff_artifact_for_read(
+    let selected_handoff = crate::terminal_engineer::select_handoff_artifact_for_read(
         state_root,
-        crate::terminal_engineer_bridge::ScopedHandoffMode::Terminal,
+        crate::terminal_engineer::ScopedHandoffMode::Terminal,
         "terminal read",
     )?;
     Ok(EngineerReadArtifacts {
@@ -162,9 +162,9 @@ pub(crate) fn validated_engineer_read_artifacts(
     state_root: &Path,
 ) -> crate::SimardResult<EngineerReadArtifacts> {
     validate_existing_read_state_root_root("engineer read", state_root)?;
-    let selected_handoff = crate::terminal_engineer_bridge::select_handoff_artifact_for_read(
+    let selected_handoff = crate::terminal_engineer::select_handoff_artifact_for_read(
         state_root,
-        crate::terminal_engineer_bridge::ScopedHandoffMode::Engineer,
+        crate::terminal_engineer::ScopedHandoffMode::Engineer,
         "engineer read",
     )?;
     Ok(EngineerReadArtifacts {

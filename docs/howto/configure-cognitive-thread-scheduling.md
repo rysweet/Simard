@@ -1,6 +1,6 @@
 ---
 title: Configure and monitor cognitive-thread scheduling
-description: Operator guide for Simard's cognitive-thread scheduler (the Mind) (#2419) — how the daemon runs the OODA loop and its background threads on their own cadences, tuning the per-thread interval knobs and the non-critical per-tick budget, guaranteeing the OODA loop is never starved, observing per-thread metrics/spans/health, driving the MaintenanceThread safely (dry-run + protected paths), reading the EngineerLogAnalysisThread's deduplicated GitHub issues, and diagnosing a backed-off or misconfigured thread.
+description: Operator guide for Simard's cognitive-thread scheduler (the Brain) (#2419) — how the daemon runs the OODA loop and its background threads on their own cadences, tuning the per-thread interval knobs and the non-critical per-tick budget, guaranteeing the OODA loop is never starved, observing per-thread metrics/spans/health, driving the MaintenanceThread safely (dry-run + protected paths), reading the EngineerLogAnalysisThread's deduplicated GitHub issues, and diagnosing a backed-off or misconfigured thread.
 last_updated: 2026-07-03
 review_schedule: as-needed
 owner: simard
@@ -16,24 +16,24 @@ related:
 # Configure and monitor cognitive-thread scheduling
 
 !!! note "Status — shipped, additive, OFF by default (#2419)"
-    The cognitive-thread scheduler (the **Mind**), the `src/cognitive_threads/`
+    The cognitive-thread scheduler (the **Brain**), the `src/cognitive_threads/`
     module, its `simard.thread.*` metrics/spans, and the two exemplar threads
     (`MaintenanceThread`, `EngineerLogAnalysisThread`) **have shipped**. In the
     live daemon they are **inactive until you opt in** with
     `SIMARD_COGNITIVE_THREADS_ENABLED` (see [Enable the scheduler](#enable-the-scheduler)).
     Two design goals are intentionally **deferred to follow-ups** and are *not*
-    active yet: (1) driving the OODA cycle itself **through** the Mind (today the
+    active yet: (1) driving the OODA cycle itself **through** the Brain (today the
     daemon keeps its existing inline OODA cycle for byte-for-byte parity, and the
-    Mind runs only the two background threads *after* it), and (2) migrating the
-    six pre-existing periodic tasks onto the Mind (they remain hand-rolled). See
+    Brain runs only the two background threads *after* it), and (2) migrating the
+    six pre-existing periodic tasks onto the Brain (they remain hand-rolled). See
     [Cognitive-thread scheduling](../reference/cognitive-thread-scheduling.md)
     for the design and rollout scope.
 
 Simard's daemon does more than run the OODA loop. Every background mental
 process — housekeeping, backups, brain introspection, the monthly self-audit,
 maintenance, engineer-log analysis — is a **cognitive thread** owned by a single
-scheduler, the **Mind**. Each thread declares its own cadence (or trigger), the
-Mind computes which threads are due each tick, and runs them under a
+scheduler, the **Brain**. Each thread declares its own cadence (or trigger), the
+Brain computes which threads are due each tick, and runs them under a
 priority/resource budget that **always runs the OODA loop first and never lets
 it be starved**.
 
@@ -59,9 +59,9 @@ Use this guide when:
 - A thread has gone quiet and you suspect it has been backed off after repeated
   failures
 
-## The model: one Mind, many threads
+## The model: one Brain, many threads
 
-The Mind holds a **registry** of threads. Once per outer daemon iteration it:
+The Brain holds a **registry** of threads. Once per outer daemon iteration it:
 
 1. computes the **due** set (enabled, not backed-off, and past its next-run),
 2. runs the **OODA thread first, unconditionally, every tick** (it is
@@ -77,12 +77,12 @@ delay a sibling. The OODA thread is the one exception to backoff: its errors are
 logged and the cycle continues, exactly as before the scheduler existed.
 
 !!! info "How OODA-first works in the live daemon today"
-    The `Mind`'s contract runs `Priority::Critical` (OODA) first and exempt from
+    The `Brain`'s contract runs `Priority::Critical` (OODA) first and exempt from
     the budget. **As shipped**, the daemon achieves the same guarantee a simpler
-    way: it runs its existing **inline OODA cycle first**, then calls the `Mind`
+    way: it runs its existing **inline OODA cycle first**, then calls the `Brain`
     (which currently holds only the two background threads) *afterward*. Either
     way OODA runs first every iteration and no number of background threads can
-    delay it. Registering `OodaThread` in the live `Mind` is a follow-up.
+    delay it. Registering `OodaThread` in the live `Brain` is a follow-up.
 
 Threads that ship in this build:
 
@@ -94,7 +94,7 @@ Threads that ship in this build:
 
 The pre-existing periodic tasks — verified backup, disk-health check,
 RSS/memory shedding, engineer-worktree sweep, brain introspection, and the
-monthly self-quality-audit — are **designed to be subsumed by the same Mind**,
+monthly self-quality-audit — are **designed to be subsumed by the same Brain**,
 but that migration is a **follow-up**: in this build they still run through the
 daemon's existing hand-rolled loop with their current env-var knobs (below). The
 scheduler runs *alongside* them.
@@ -111,7 +111,7 @@ export SIMARD_COGNITIVE_THREADS_ENABLED=1
 
 | Knob | Env var | Default | What it controls |
 | --- | --- | --: | --- |
-| Master switch | `SIMARD_COGNITIVE_THREADS_ENABLED` | `false` | When truthy, the daemon builds the `Mind` and runs the background threads after each OODA cycle. Unset ⇒ zero behaviour change. |
+| Master switch | `SIMARD_COGNITIVE_THREADS_ENABLED` | `false` | When truthy, the daemon builds the `Brain` and runs the background threads after each OODA cycle. Unset ⇒ zero behaviour change. |
 
 When it is enabled, the daemon logs at startup:
 
@@ -161,7 +161,7 @@ after OODA; a third due thread waits for the next tick.
 ### The pre-existing periodic tasks (unchanged knobs)
 
 These tasks still run through the daemon's existing hand-rolled loop (their
-migration onto the `Mind` is a follow-up); their knobs are unchanged:
+migration onto the `Brain` is a follow-up); their knobs are unchanged:
 
 | Task | Env var | Default |
 | --- | --- | --: |
@@ -242,7 +242,7 @@ grep "simard.thread." ~/.simard/ooda.log | tail -20
 grep "simard.thread.maintenance" ~/.simard/ooda.log | tail -10
 ```
 
-The Mind also exposes a **health snapshot** per thread (last-run, next-run,
+The Brain also exposes a **health snapshot** per thread (last-run, next-run,
 consecutive errors, backoff-until) that feeds the operator dashboard heartbeat.
 See [the dashboard](../dashboard.md) for the live per-thread view.
 
@@ -362,14 +362,14 @@ never affected.
 
 ### 4. Is the daemon shutting down between threads?
 
-The Mind checks for a shutdown request between threads and returns early to keep
+The Brain checks for a shutdown request between threads and returns early to keep
 graceful drain fast, so a thread late in a tick may be skipped during shutdown.
 This is expected and coexists with the existing `interruptible_sleep` +
 drain/checkpoint path.
 
 ## Related
 
-- [Cognitive-thread scheduling (reference)](../reference/cognitive-thread-scheduling.md) — trait, `Mind` API, `SchedulePolicy`, telemetry contract, security requirements
+- [Cognitive-thread scheduling (reference)](../reference/cognitive-thread-scheduling.md) — trait, `Brain` API, `SchedulePolicy`, telemetry contract, security requirements
 - [Add a new cognitive thread (howto)](./add-a-new-cognitive-thread.md) — implement and register your own thread
 - [Configure and monitor brain introspection](./configure-brain-introspection.md) — a subsumed periodic task
 - [Configure and monitor the monthly self-quality-audit](./configure-self-quality-audit.md) — the disk-persisted-gate example

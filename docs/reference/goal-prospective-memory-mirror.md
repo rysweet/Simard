@@ -41,7 +41,7 @@ The goal store uses a dual-write strategy:
    objective summary mentions related terms.
 
 Both writes occur inside a single `put()` call using the same
-`WriterBridge`. If either the primary fact write or the mirror write
+`WriterAdapter`. If either the primary fact write or the mirror write
 fails, `put()` returns `Err` — callers see the error and can retry or
 surface it.
 
@@ -87,7 +87,7 @@ impl CognitiveMemoryGoalStore {
     /// - Non-Active goals (Completed, Paused, Proposed): resolve any
     ///   stale prospective entries.
     ///
-    /// Opens its own bridges internally. Returns the first error
+    /// Opens its own adapters internally. Returns the first error
     /// encountered — callers can retry or log as appropriate.
     pub fn reconcile_prospectives(&self) -> SimardResult<()>;
 }
@@ -97,7 +97,7 @@ impl CognitiveMemoryGoalStore {
 
 1. Calls `list_via_reader()` to load all current (latest-per-slug) goal
    records.
-2. Opens a `WriterBridge` for prospective operations.
+2. Opens a `WriterAdapter` for prospective operations.
 3. For each record:
    - **Active**: calls `check_triggers` with the slug-derived trigger
      phrase. If no matching prospective entry exists, calls

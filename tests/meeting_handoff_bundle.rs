@@ -1,7 +1,7 @@
 //! Integration test for the structured meeting handoff bundle.
 //!
 //! Drives a small scripted meeting (constructing a `MeetingSession` directly
-//! to avoid pulling in the cognitive-memory bridge) and asserts the on-disk
+//! to avoid pulling in the cognitive-memory adapter) and asserts the on-disk
 //! shape of the per-meeting bundle that downstream goals/engineers consume.
 //!
 //! Test isolation: `SIMARD_MEETINGS_ROOT` is set to a per-test temp directory

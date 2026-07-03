@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::evidence::{EvidenceRecord, EvidenceSource};
 use crate::gym::BenchmarkRunReport;
-use crate::gym_bridge::{GymScenarioResult, GymSuiteResult, ScoreDimensions};
+use crate::gym_client::{GymScenarioResult, GymSuiteResult, ScoreDimensions};
 use crate::memory::MemoryRecord;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

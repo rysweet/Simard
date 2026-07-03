@@ -79,7 +79,7 @@ Valid wire strings (see `src/meeting_backend/close_guard.rs`):
 - `agent_close_timeout`
 - `summary_timeout`
 - `summary_empty`
-- `bridge_timeout`
+- `adapter_timeout`
 - `persistence_error`
 
 ## Backward compatibility

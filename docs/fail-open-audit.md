@@ -24,23 +24,23 @@ Each site is classified as:
 
 | Class | Count (est.) | Notes |
 |-------|--------------|-------|
-| PROPAGATE | 0 confirmed | None found; gym/knowledge bridges are LOG-AND-CONTINUE by design |
-| LOG-AND-CONTINUE | ~5 known | bridge_launcher.rs (FIXED in this PR), cost_tracking.rs:280, dashboard goal_board parse, etc. |
+| PROPAGATE | 0 confirmed | None found; gym/knowledge adapters are LOG-AND-CONTINUE by design |
+| LOG-AND-CONTINUE | ~5 known | server_launcher.rs (FIXED in this PR), cost_tracking.rs:280, dashboard goal_board parse, etc. |
 | DOCUMENT-FAIL-OPEN | ~93 | meeting_repl writeln/flush (52), env-var lookups, file existence checks |
 
 ## Highest-leverage sites
 
-### `src/bridge_launcher.rs` — FIXED (originally in fail-open audit PR, updated in #2181)
+### `src/server_launcher.rs` — FIXED (originally in fail-open audit PR, updated in #2181)
 
 **Before** (original fail-open):
 ```rust
-let knowledge = launch_knowledge_bridge(&python_dir).ok();
-let gym = launch_gym_bridge(&python_dir).ok();
+let knowledge = launch_knowledge_client(&python_dir).ok();
+let gym = launch_gym_client(&python_dir).ok();
 ```
 
 **After** (native Rust transport, #2181):
 ```rust
-let knowledge = match launch_knowledge_bridge_native() {
+let knowledge = match launch_knowledge_client_native() {
     Ok(b) => Some(b),
     Err(e) => { eprintln!("... FAILED: {e}"); None }
 };
@@ -76,7 +76,7 @@ These are correct as-is and documented inline where useful:
 
 ## Round 5 outcome
 
-- 1 PROPAGATE→LOG conversion shipped (bridge_launcher)
+- 1 PROPAGATE→LOG conversion shipped (server_launcher)
 - 2 follow-ups identified (cost_tracking, dashboard goal_board)
 - 0 PROPAGATE bugs found that warrant immediate emergency fix
 
@@ -106,6 +106,6 @@ This audit closes the "is the codebase riddled with silent error swallows?" ques
 - [Google SRE Book — Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/)
 - PR #4477 (amplihack) — the 13-day silent failure that motivated this audit
 - PR #1240 (Simard) — eval-watchdog, the structural fix for the *symptom*
-- PR #1259 (Simard) — bridge_launcher fail-open conversion (Round 5)
+- PR #1259 (Simard) — server_launcher fail-open conversion (Round 5)
 - PR #1274 (Simard) — advance_goal.rs error propagation (4 sites, #1264)
 - PR #1275 (Simard) — vacate handler error propagation (#1263)

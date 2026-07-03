@@ -367,7 +367,7 @@ fn reinforce_access(&self, node_id: &str, kind: MemoryKind) -> SimardResult<()> 
 Notes:
 
 - The trait stays `&self`. The library's `recall_episodes_ranked` and
-  `record_access` are `&mut self` (they *can* mutate); the adapter bridges that
+  `record_access` are `&mut self` (they *can* mutate); the adapter adapters that
   through its existing `Mutex` write-lock — durability and recovery are
   unchanged because every touched method already write-locks.
 - The trait takes the Simard-owned `RecallWeightSet`, **not** the library's

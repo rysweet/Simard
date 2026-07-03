@@ -39,8 +39,8 @@ pub fn spawn_server(
     // without an IPC server while meetings kept falling back to direct open.
     let _ = std::fs::remove_file(&socket_path);
     let listener =
-        UnixListener::bind(&socket_path).map_err(|e| SimardError::BridgeSpawnFailed {
-            bridge: "memory-ipc".into(),
+        UnixListener::bind(&socket_path).map_err(|e| SimardError::ServerSpawnFailed {
+            adapter: "memory-ipc".into(),
             reason: format!("bind {}: {e}", socket_path.display()),
         })?;
 
@@ -76,8 +76,8 @@ pub fn spawn_server(
                 }
             }
         })
-        .map_err(|e| SimardError::BridgeSpawnFailed {
-            bridge: "memory-ipc".into(),
+        .map_err(|e| SimardError::ServerSpawnFailed {
+            adapter: "memory-ipc".into(),
             reason: format!("spawn server thread: {e}"),
         })?;
 

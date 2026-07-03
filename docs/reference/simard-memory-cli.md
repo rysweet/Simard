@@ -321,13 +321,13 @@ treats every sample row as advisory.
 
 ## Lock-safe read path
 
-Both commands open the store through `open_reader_bridge(state_root)`
+Both commands open the store through `open_reader_adapter(state_root)`
 (`src/memory_ipc/launcher.rs`), the canonical read-only consumer entry
 point. Its resolution ladder is what makes the commands safe to run while
 the daemon owns the store:
 
 ```
-open_reader_bridge(state_root)
+open_reader_adapter(state_root)
   0. in-process writer Arc      → same-process callers (not the CLI)
   1. daemon socket present?     → RemoteCognitiveMemory::connect(
                                     <state_root>/memory.sock)         ← no lock contention
@@ -506,7 +506,7 @@ bridge-open failure exits non-zero.
 |------|------|
 | `memory` subcommand dispatch | `src/operator_cli/memory.rs` |
 | Subcommand registration | `src/operator_cli/mod.rs` |
-| Read bridge (`open_reader_bridge`) | `src/memory_ipc/launcher.rs` |
+| Read bridge (`open_reader_adapter`) | `src/memory_ipc/launcher.rs` |
 | `CognitiveStatistics` (`get_statistics`) | `src/memory_cognitive.rs` |
 | `GraphStats` (edges / dedup, issue #2331) | `src/memory_cognitive.rs` |
 | `graph_stats` computation (issue #2331) | `src/cognitive_memory/library_adapter.rs` |

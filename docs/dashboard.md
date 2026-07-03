@@ -62,7 +62,7 @@ Both lists now route those strings through the client-side
 (`continue_skipping` → *continued without acting*), drops brain-fallback
 boilerplate, and applies the shared `BANNED_JARGON` strip — while preserving any
 `agent='engineer-…'` reference verbatim so the inline **Attach →** button still
-works. The transform is render-layer only: the canonical `brain` / `ooda_brain`
+works. The transform is render-layer only: the canonical `brain` / `ooda_reasoners`
 strings, logs, and API responses are unchanged. See
 [Overview action-detail humanization](reference/dashboard-action-detail-humanization.md).
 

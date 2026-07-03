@@ -112,7 +112,7 @@ depend on is preserved:
   single-line `{"verdict": …}` JSON contract is unchanged; stalled goals simply
   resolve to `reject`.
 
-Prompt-content tests in `src/ooda_brain/prompt_store_tests.rs` pin this wording
+Prompt-content tests in `src/ooda_reasoners/prompt_store_tests.rs` pin this wording
 so a future edit that drops the loop-detection guidance fails CI.
 
 ## Known follow-ups (would need Rust)

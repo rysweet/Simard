@@ -198,7 +198,7 @@ brain hallucination detected: rejected progress 35%->75% on enhance-simard-meeti
 These episodes flow through the existing cognitive-memory pipeline:
 
 - Greppable on the daemon's stderr (memory writes log there).
-- Searchable via `bridges.memory.search("brain hallucination detected")`.
+- Searchable via `adapters.memory.search("brain hallucination detected")`.
 - Surfaced on the operator dashboard via `POST /api/memory/search` with
   `{"query":"brain hallucination detected"}` (the dashboard's memory
   search box uses this endpoint).

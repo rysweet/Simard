@@ -85,7 +85,7 @@ fact from a more authoritative place:
 |---|---|---|
 | `simard.distill.*` | ✅ `distillation.rs` | ok + parse_fail + facts/procedures/episodes_marked |
 | `simard.brain.decision` / `.escalations` | ✅ `judgment_record::push` | every decision, phase + parse outcome |
-| `simard.brain.ladder_exhausted` | ✅ `recipe_brain::run_brain_ladder` | decide/orient ladder fully exhausted |
+| `simard.brain.ladder_exhausted` | ✅ `recipe_reasoner::run_brain_ladder` | decide/orient ladder fully exhausted |
 | `simard.engineer.spawned` / `.exited` / `.active` | ✅ `agent_spawn.rs` | brackets the in-process session |
 | `simard.daemon.cycle` / `.cycle_duration_seconds` | ✅ `daemon/mod.rs` | per OODA cycle |
 | `simard.daemon.restart` | ⏳ reserved | status reads the authoritative `NRestarts` from `systemctl show`; the in-process counter would reset on each restart |
@@ -161,7 +161,7 @@ gauges the section renders `absent`, never a fabricated zero.
 
 ### LLM usage — `simard.llm.*`
 
-Bridged from `cost_tracking` (the ledger format is unchanged; these are
+Adapterd from `cost_tracking` (the ledger format is unchanged; these are
 additive emissions).
 
 | Metric | Type | Attributes | Meaning |

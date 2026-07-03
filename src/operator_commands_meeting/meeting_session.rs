@@ -17,15 +17,16 @@ fn load_meeting_system_prompt() -> String {
 
 /// Launch a cognitive memory backend suitable for meeting mode.
 ///
-/// Delegates to [`memory_ipc::launch_writer_bridge`] so the daemon-IPC →
+/// Delegates to [`memory_ipc::launch_writer_adapter`] so the daemon-IPC →
 /// native-write → read-only ladder lives in one place (issue #1590,
 /// spec recommendation C / A2).
-fn launch_real_meeting_bridge() -> Result<Box<dyn CognitiveMemoryOps>, Box<dyn std::error::Error>> {
+fn launch_real_meeting_adapter() -> Result<Box<dyn CognitiveMemoryOps>, Box<dyn std::error::Error>>
+{
     let state_root = memory_ipc::default_state_root();
-    let bridge = memory_ipc::launch_writer_bridge(&state_root)?;
-    // Move the boxed ops out of the WriterBridge wrapper so existing call
+    let adapter = memory_ipc::launch_writer_adapter(&state_root)?;
+    // Move the boxed ops out of the WriterAdapter wrapper so existing call
     // sites that hold `Box<dyn CognitiveMemoryOps>` keep working unchanged.
-    Ok(bridge.into_box())
+    Ok(adapter.into_box())
 }
 
 /// Open an agent session for the meeting REPL using `SessionBuilder`.
@@ -58,14 +59,14 @@ fn open_meeting_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSes
 
 /// Entry point for the `simard meeting` CLI command.
 pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let bridge = launch_real_meeting_bridge()?;
-    tracing::info!("Cognitive memory bridge active");
+    let adapter = launch_real_meeting_adapter()?;
+    tracing::info!("Cognitive memory adapter active");
 
-    print_greeting_banner(Some(&*bridge));
+    print_greeting_banner(Some(&*adapter));
 
     let agent_session = open_meeting_agent_session();
     let base_prompt = load_meeting_system_prompt();
-    let live_context = build_live_meeting_context(&*bridge)?;
+    let live_context = build_live_meeting_context(&*adapter)?;
     let meeting_system_prompt = format!("{base_prompt}\n\n{live_context}");
 
     if agent_session.is_some() {
@@ -81,7 +82,7 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
 
     let _session = run_meeting_repl(
         topic,
-        &*bridge,
+        &*adapter,
         agent_session,
         &meeting_system_prompt,
         &mut reader,

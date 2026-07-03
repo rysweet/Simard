@@ -374,7 +374,7 @@ driver function `goal_curation::decompose_goal` parses that block, clamps the
 list to `[2, 6]`, mints a child goal id per entry, then writes each child
 goal + its `decomposes_into` edge (and any `depends_on` edges) through the
 bridge. The prompt wording is pinned by a content-pin test
-(`src/ooda_brain/prompt_store_tests.rs`) so the parser contract cannot drift
+(`src/ooda_reasoners/prompt_store_tests.rs`) so the parser contract cannot drift
 silently.
 
 ## Operator CLI
@@ -395,7 +395,7 @@ work begins; an unknown or malformed id exits non-zero with a clear message
 and writes nothing.
 
 It routes through the same cognitive-memory **writer bridge** path as
-`goal add` / `goal remove` (`launch_writer_bridge(&state_root)` →
+`goal add` / `goal remove` (`launch_writer_adapter(&state_root)` →
 `bridge.ops()`, in `src/operator_cli/goal.rs`), so:
 
 - when the OODA daemon is running, the write is serialized through the

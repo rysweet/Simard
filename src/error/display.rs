@@ -205,30 +205,30 @@ impl Display for SimardError {
             Self::ClockBeforeUnixEpoch { reason } => {
                 write!(f, "system clock is before UNIX epoch: {reason}")
             }
-            Self::BridgeSpawnFailed { bridge, reason } => {
-                write!(f, "bridge '{bridge}' failed to spawn: {reason}")
+            Self::ServerSpawnFailed { adapter, reason } => {
+                write!(f, "adapter '{adapter}' failed to spawn: {reason}")
             }
-            Self::BridgeTransportError { bridge, reason } => {
-                write!(f, "bridge '{bridge}' transport error: {reason}")
+            Self::ServerTransportError { adapter, reason } => {
+                write!(f, "adapter '{adapter}' transport error: {reason}")
             }
-            Self::BridgeProtocolError { bridge, reason } => {
-                write!(f, "bridge '{bridge}' protocol error: {reason}")
+            Self::ServerProtocolError { adapter, reason } => {
+                write!(f, "adapter '{adapter}' protocol error: {reason}")
             }
-            Self::BridgeCallFailed {
-                bridge,
+            Self::ServerCallFailed {
+                adapter,
                 method,
                 reason,
             } => {
-                write!(f, "bridge '{bridge}' call to '{method}' failed: {reason}")
+                write!(f, "adapter '{adapter}' call to '{method}' failed: {reason}")
             }
-            Self::BridgeCircuitOpen { bridge } => {
+            Self::ServerCircuitOpen { adapter } => {
                 write!(
                     f,
-                    "bridge '{bridge}' circuit is open — calls are rejected until the bridge recovers"
+                    "adapter '{adapter}' circuit is open — calls are rejected until the adapter recovers"
                 )
             }
-            Self::BridgeError(msg) => {
-                write!(f, "bridge error: {msg}")
+            Self::ServerError(msg) => {
+                write!(f, "adapter error: {msg}")
             }
             Self::BudgetExceeded {
                 period,
@@ -409,9 +409,9 @@ mod tests {
     }
 
     #[test]
-    fn bridge_transport_error_display() {
-        let err = SimardError::BridgeTransportError {
-            bridge: "subprocess".into(),
+    fn adapter_transport_error_display() {
+        let err = SimardError::ServerTransportError {
+            adapter: "subprocess".into(),
             reason: "child missing".into(),
         };
         assert!(err.to_string().contains("subprocess"));

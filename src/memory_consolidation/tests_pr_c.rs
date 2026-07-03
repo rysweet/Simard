@@ -26,9 +26,9 @@
 //! then compile but fail at assertions until the recall logic lands.
 
 use super::*;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_adapter::CognitiveMemoryAdapter;
 use crate::memory_cognitive::CognitiveEpisode;
+use crate::server_subprocess::InMemoryServerTransport;
 use crate::session::SessionId;
 use serde_json::json;
 
@@ -43,9 +43,9 @@ fn test_session_id() -> SessionId {
 fn prep_returning_recall(
     objective: &str,
     session_id: &SessionId,
-    bridge: &dyn crate::cognitive_memory::CognitiveMemoryOps,
+    adapter: &dyn crate::cognitive_memory::CognitiveMemoryOps,
 ) -> crate::error::SimardResult<(PreparedContext, Vec<CognitiveEpisode>)> {
-    let ctx = preparation_memory_operations(objective, session_id, bridge)?;
+    let ctx = preparation_memory_operations(objective, session_id, adapter)?;
     // Pre-PR-C: PreparedContext has no `episodic_recall` field, so
     // this clone-and-return surfaces an empty vec. Post-PR-C: edit
     // the next line to `ctx.episodic_recall.clone()` and the
@@ -55,17 +55,17 @@ fn prep_returning_recall(
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Bridge fixtures
+// Adapter fixtures
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Bridge that returns three episodes via the (future)
+/// Adapter that returns three episodes via the (future)
 /// `memory.search_episodes_by_keywords` method:
 ///
 /// * `epi_a` (label `goal-curator`, contains "merge")
 /// * `epi_b` (label `distill:epi_xx`, contains "merge")
 /// * `epi_c` (label `session-12345`, contains "merge")  ← must be filtered
-fn keyword_recall_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("kw-recall", |method, _params| match method {
+fn keyword_recall_adapter() -> CognitiveMemoryAdapter {
+    let transport = InMemoryServerTransport::new("kw-recall", |method, _params| match method {
         "memory.search_facts" => Ok(json!({"facts": []})),
         "memory.check_triggers" => Ok(json!({"prospectives": []})),
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
@@ -95,19 +95,19 @@ fn keyword_recall_bridge() -> CognitiveMemoryBridge {
                 },
             ]
         })),
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::server_transport::ServerErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
-/// Bridge whose `search_episodes_by_keywords` MUST NOT be called.
+/// Adapter whose `search_episodes_by_keywords` MUST NOT be called.
 /// Used by the "no tokens" edge case: a short or stopword-only
 /// objective must short-circuit before issuing the trait call.
-fn no_recall_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("no-recall", |method, _params| match method {
+fn no_recall_adapter() -> CognitiveMemoryAdapter {
+    let transport = InMemoryServerTransport::new("no-recall", |method, _params| match method {
         "memory.search_facts" => Ok(json!({"facts": []})),
         "memory.check_triggers" => Ok(json!({"prospectives": []})),
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
@@ -115,24 +115,24 @@ fn no_recall_bridge() -> CognitiveMemoryBridge {
         "memory.search_episodes_by_keywords" => {
             panic!("search_episodes_by_keywords must not be called when no tokens are derived")
         }
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::server_transport::ServerErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
-/// Bridge that captures the keyword list it receives via
+/// Adapter that captures the keyword list it receives via
 /// `search_episodes_by_keywords` for tokenizer assertions.
-fn capturing_recall_bridge() -> (
-    CognitiveMemoryBridge,
+fn capturing_recall_adapter() -> (
+    CognitiveMemoryAdapter,
     std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 ) {
     let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let cap = captured.clone();
     let transport =
-        InMemoryBridgeTransport::new("capture-recall", move |method, params| match method {
+        InMemoryServerTransport::new("capture-recall", move |method, params| match method {
             "memory.search_facts" => Ok(json!({"facts": []})),
             "memory.check_triggers" => Ok(json!({"prospectives": []})),
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
@@ -148,12 +148,12 @@ fn capturing_recall_bridge() -> (
                 }
                 Ok(json!({"episodes": []}))
             }
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::server_transport::ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         });
-    (CognitiveMemoryBridge::new(Box::new(transport)), captured)
+    (CognitiveMemoryAdapter::new(Box::new(transport)), captured)
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -164,8 +164,9 @@ fn capturing_recall_bridge() -> (
 /// `PreparedContext.episodic_recall` is non-empty.
 #[test]
 fn preparation_injects_episodic_recall() {
-    let bridge = keyword_recall_bridge();
-    let (_, recall) = prep_returning_recall("merge PR #2281", &test_session_id(), &bridge).unwrap();
+    let adapter = keyword_recall_adapter();
+    let (_, recall) =
+        prep_returning_recall("merge PR #2281", &test_session_id(), &adapter).unwrap();
 
     assert!(
         !recall.is_empty(),
@@ -189,8 +190,9 @@ fn preparation_injects_episodic_recall() {
 /// them creates a self-reinforcing loop.
 #[test]
 fn preparation_excludes_self_session_noise() {
-    let bridge = keyword_recall_bridge();
-    let (_, recall) = prep_returning_recall("merge PR #2281", &test_session_id(), &bridge).unwrap();
+    let adapter = keyword_recall_adapter();
+    let (_, recall) =
+        prep_returning_recall("merge PR #2281", &test_session_id(), &adapter).unwrap();
 
     for ep in &recall {
         assert!(
@@ -218,11 +220,11 @@ fn preparation_excludes_self_session_noise() {
 ///     alphanumeric and length >= 3)
 #[test]
 fn preparation_tokenizes_and_strips_stopwords() {
-    let (bridge, captured) = capturing_recall_bridge();
+    let (adapter, captured) = capturing_recall_adapter();
     let _ = prep_returning_recall(
         "the merge PR #2281 and PR review with cargo CI",
         &test_session_id(),
-        &bridge,
+        &adapter,
     )
     .unwrap();
 
@@ -283,12 +285,12 @@ fn preparation_tokenizes_and_strips_stopwords() {
 }
 
 /// Short / stopword-only objective produces NO tokens → trait method
-/// is NOT called and `episodic_recall` stays empty. The `no_recall_bridge`
+/// is NOT called and `episodic_recall` stays empty. The `no_recall_adapter`
 /// panics if the trait method fires, proving the short-circuit.
 #[test]
 fn preparation_emits_no_recall_when_objective_yields_no_tokens() {
-    let bridge = no_recall_bridge();
-    let (_, recall) = prep_returning_recall("the and or", &test_session_id(), &bridge).unwrap();
+    let adapter = no_recall_adapter();
+    let (_, recall) = prep_returning_recall("the and or", &test_session_id(), &adapter).unwrap();
 
     assert!(
         recall.is_empty(),
@@ -299,7 +301,7 @@ fn preparation_emits_no_recall_when_objective_yields_no_tokens() {
 
 // ───────────────────────────────────────────────────────────────────────────
 // Issue #2308 follow-up: end-to-end episode store + recall on the *library*
-// backend (the sole backend), not a mock bridge. Confirms that an episode
+// backend (the sole backend), not a mock adapter. Confirms that an episode
 // whose content shares a keyword with the objective is actually persisted and
 // recalled through the real preparation path, and that it is counted by
 // `get_statistics().episodic_count` (the number `simard memory stats` reports).

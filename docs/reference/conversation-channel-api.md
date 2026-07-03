@@ -23,7 +23,7 @@ frontend uses. It is `pub`-exported from `src/lib.rs` as
 
 Nothing in this module is named `bridge`/`Bridge`. `ConversationChannel` is a
 first-class chat abstraction and is unrelated to the pre-existing cognitive-memory
-`BridgeTransport`.
+`ServerTransport`.
 
 ## Message types
 

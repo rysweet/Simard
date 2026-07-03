@@ -180,7 +180,7 @@ defer: Promote this pattern into a repeatable benchmark | rationale=wait for the
     // Issue #1590 follow-up: with bootstrap migrated to
     // `CognitiveMemoryGoalStore`, the goal register is durable inside
     // cognitive memory, NOT in `goal_records.json`. We pin the
-    // read-only contract of the read probe by snapshotting the bridge-
+    // read-only contract of the read probe by snapshotting the adapter-
     // backed `memory_records.json` (which hosts non-goal review
     // artefacts that the read probe must leave alone) before and after
     // the read.

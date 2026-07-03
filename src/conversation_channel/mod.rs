@@ -18,9 +18,9 @@
 //!
 //! # Naming
 //!
-//! Nothing here is named `bridge`/`Bridge`. This is a first-class chat
+//! Nothing here is named `adapter`/`Adapter`. This is a first-class chat
 //! abstraction and is unrelated to the pre-existing cognitive-memory
-//! `BridgeTransport`. The Signal implementation ([`crate::signal_conversation`])
+//! `ServerTransport`. The Signal implementation ([`crate::signal_conversation`])
 //! does **not** route through that trait.
 
 use std::future::Future;

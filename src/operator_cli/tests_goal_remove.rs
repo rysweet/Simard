@@ -17,7 +17,7 @@
 //! - Persists via `save_goal_board_with_removals` so the PR #1926
 //!   resurrection failure mode is defeated.
 //! - Idempotent — unknown ids are silent no-ops, no error.
-//! - Exits non-zero on bridge-open / persistence failure (not tested
+//! - Exits non-zero on adapter-open / persistence failure (not tested
 //!   here; covered by load_board failure-mode unit tests).
 //! - No goal ids or descriptions are echoed to stdout — surface is
 //!   scriptable.
@@ -42,7 +42,7 @@ use crate::goal_curation::{
     ActiveGoal, BacklogItem, GoalBoard, GoalProgress, add_active_goal, add_backlog_item,
     load_goal_board, save_goal_board,
 };
-use crate::memory_ipc::launch_writer_bridge;
+use crate::memory_ipc::launch_writer_adapter;
 use crate::operator_cli::dispatch_operator_cli;
 use crate::state_root::STATE_ROOT_ENV;
 
@@ -89,13 +89,13 @@ fn seed(root: &Path, active: Vec<ActiveGoal>, backlog: Vec<BacklogItem>) {
     for b in backlog {
         add_backlog_item(&mut board, b).expect("add backlog");
     }
-    let bridge = launch_writer_bridge(root).expect("writer bridge");
-    save_goal_board(&board, bridge.ops()).expect("save");
+    let adapter = launch_writer_adapter(root).expect("writer adapter");
+    save_goal_board(&board, adapter.ops()).expect("save");
 }
 
 fn reload(root: &Path) -> GoalBoard {
-    let bridge = launch_writer_bridge(root).expect("reader bridge");
-    load_goal_board(bridge.ops()).expect("load_goal_board")
+    let adapter = launch_writer_adapter(root).expect("reader adapter");
+    load_goal_board(adapter.ops()).expect("load_goal_board")
 }
 
 fn cli(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {

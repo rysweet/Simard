@@ -224,7 +224,7 @@ mod fake_sequence {
     use crate::safe_update::SafeUpdateError;
     use crate::self_deploy::backup::ProtectiveBackup;
     use crate::self_deploy::health::{
-        BrainsLlmBackedProbe, GoalBoardIntactProbe, MemoryIntactProbe, NoQuarantineProbe,
+        GoalBoardIntactProbe, MemoryIntactProbe, NoQuarantineProbe, ReasonersLlmBackedProbe,
         SelfHealthProbes, SelfHealthReport, VersionAdvancedProbe,
     };
     use crate::self_deploy::orchestrator::{DeployEffects, run_sequence};
@@ -277,7 +277,7 @@ mod fake_sequence {
                 healthy: true,
                 active_goals: 5,
             },
-            brains_llm_backed: BrainsLlmBackedProbe {
+            brains_llm_backed: ReasonersLlmBackedProbe {
                 healthy: true,
                 fallback_records: 0,
             },

@@ -1,7 +1,7 @@
 # Reference: `ooda_brain.md` Prompt Schema
 
 File: `prompt_assets/simard/ooda_brain.md`
-Loaded at compile time via `include_str!` from `src/ooda_brain/rustyclawd.rs`.
+Loaded at compile time via `include_str!` from `src/ooda_reasoners/rustyclawd.rs`.
 
 This is the single source of truth for the engineer-lifecycle decision. Edit
 this file to change Simard's behavior; no Rust changes required (rebuild +
@@ -48,7 +48,7 @@ RATIONALE: engineer touched worktree 8s ago; let it cook
 …
 ```
 
-Section headers are part of the contract: `RustyClawdBrain` does not parse
+Section headers are part of the contract: `RustyClawdActReasoner` does not parse
 the markdown structurally, but the shipped prompt and tests assume these
 headers exist.
 
@@ -62,7 +62,7 @@ headers exist.
 
 ## Placeholders
 
-`RustyClawdBrain` performs literal `{{name}}` → value substitution in
+`RustyClawdActReasoner` performs literal `{{name}}` → value substitution in
 **CONTEXT** before submission. Unknown placeholders are left untouched.
 
 | Placeholder | Type | Source |
@@ -173,7 +173,7 @@ than firing on every cycle.
 
 ## Parser Rules
 
-`parse_decision_from_response` (in `src/ooda_brain/rustyclawd.rs`) uses the
+`parse_decision_from_response` (in `src/ooda_reasoners/rustyclawd.rs`) uses the
 DECISION marker as its **sole** parser:
 
 1. **Find the DECISION marker.** The first non-blank line matching
@@ -193,11 +193,11 @@ DECISION marker as its **sole** parser:
    this call.
 
 If no `DECISION:` marker is found, the parser returns
-`SimardError::BrainResponseUnparseable { raw, source }`. The JSON
+`SimardError::ReasonerResponseUnparseable { raw, source }`. The JSON
 fallback path (legacy `find('{')..rfind('}')` extraction) and the
 hybrid prose-plus-JSON form have been removed as of #1980.
 
-Failures produce `SimardError::BrainResponseUnparseable { raw, source }`,
+Failures produce `SimardError::ReasonerResponseUnparseable { raw, source }`,
 logged at warn level with the **full raw response text** embedded
 (truncated to `MAX_RAW_LOG_BYTES = 8192` and rendered with `{:?}` so
 control characters are escaped). The caller falls back to the
@@ -218,7 +218,7 @@ The prompt is embedded with `include_str!`, so:
 
 The five top-level headers (`# ROLE`, `# CONTEXT`, `# OPTIONS`,
 `# OUTPUT_FORMAT`, `# EXAMPLES`) are conventions, not enforced by the
-compiler. The shipped prompt and the unit tests in `src/ooda_brain/tests.rs`
+compiler. The shipped prompt and the unit tests in `src/ooda_reasoners/tests.rs`
 assume they are present; removing them will break the prompt's effectiveness
 even though it will still compile.
 
@@ -253,11 +253,11 @@ When adding a new variant:
    [Behavior matrix](ooda-brain-decision-protocol.md#behavior-matrix) in
    the protocol reference covering the new variant's marker-only,
    marker-with-labeled-lines, and missing-required-fields cases.
-5. Add the matching `#[test]` function(s) to `src/ooda_brain/tests.rs`,
+5. Add the matching `#[test]` function(s) to `src/ooda_reasoners/tests.rs`,
    numbered as the next available `Tn`. Behavior-matrix rows and tests
    must stay 1:1.
 6. Update the variant count and table in
-   [Reference: `OodaBrain` API → Decision](ooda-brain-api.md#decision).
+   [Reference: `ActReasoner` API → Decision](ooda-brain-api.md#decision).
 
 ## See Also
 
@@ -266,7 +266,7 @@ When adding a new variant:
 * [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md)
 * [Concept: prompt-driven OODA brain](../concepts/prompt-driven-ooda-brain.md)
 * [Reference: text-parsing wire formats](text-parsing-wire-formats.md)
-* [Reference: `OodaBrain` API](ooda-brain-api.md)
+* [Reference: `ActReasoner` API](ooda-brain-api.md)
 * [Reference: OODA Brain Decision Protocol](ooda-brain-decision-protocol.md)
 * [How-to: edit the OODA brain prompt](../howto/edit-the-ooda-brain-prompt.md)
 * [How-to: diagnose brain decision parse failures](../howto/diagnose-brain-decision-parse-failures.md)

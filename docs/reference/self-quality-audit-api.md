@@ -382,7 +382,7 @@ if crate::self_quality_audit::should_run_self_audit(elapsed, self_audit_interval
     daemon_log(&state_root,
         "[simard] self quality-audit: starting 5-wave crusty-gated self-audit");
     match crate::self_quality_audit::run_self_quality_audit(
-        &bridges.repo_root, &state_root, None,
+        &adapters.repo_root, &state_root, None,
     ) {
         Ok(report) => daemon_log(&state_root, &format!("[simard] {}", report.summary())),
         Err(e) => daemon_log(&state_root,

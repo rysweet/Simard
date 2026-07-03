@@ -21,7 +21,7 @@ use crate::identity::OperatingMode;
 use crate::memory::{FileBackedMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeState, RuntimeTopology};
 use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
-use crate::terminal_engineer_bridge::{ScopedHandoffMode, persist_handoff_artifacts};
+use crate::terminal_engineer::{ScopedHandoffMode, persist_handoff_artifacts};
 use crate::terminal_session::{
     PtyTerminalSession, TerminalSessionCapture, compact_terminal_evidence_value,
 };

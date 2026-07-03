@@ -9,8 +9,8 @@ the primary `OodaThread`, plus two exemplars — `MaintenanceThread` and
     The scheduler landed **additively and disabled by default** to honour the
     byte-for-byte OODA-parity hard constraint:
 
-    - The `Mind` and all three threads exist and are fully unit-tested.
-    - In the **live daemon** the `Mind` is created only when
+    - The `Brain` and all three threads exist and are fully unit-tested.
+    - In the **live daemon** the `Brain` is created only when
       `SIMARD_COGNITIVE_THREADS_ENABLED` is truthy, and it hosts **only the two
       background exemplars** (`MaintenanceThread`, `EngineerLogAnalysisThread`).
       It runs **after** the daemon's existing inline OODA cycle each iteration,
@@ -19,7 +19,7 @@ the primary `OodaThread`, plus two exemplars — `MaintenanceThread` and
       (wrap-don't-replace). `OodaThread` is the faithful primary-thread
       realization used by the scheduler tests and ready for the full cutover;
       routing the live loop through it, and migrating the six periodic tasks
-      onto the `Mind`, are tracked as **follow-ups** (see §6, A.9).
+      onto the `Brain`, are tracked as **follow-ups** (see §6, A.9).
 
 ## 1. Motivation
 
@@ -60,7 +60,7 @@ housekeeping gates, then one synchronous `run_ooda_cycle(...)`, then
 is built *inside* the daemon and used *within* the cycle (engineer I/O, LLM
 sessions) via `block_on` — the top-level scheduling loop itself is not async.
 
-**Decision:** the `Mind`/`Scheduler` and `CognitiveThread::tick()` are
+**Decision:** the `Brain`/`Scheduler` and `CognitiveThread::tick()` are
 **synchronous**. Threads that need async I/O receive a `tokio::runtime::Handle`
 in their `ThreadContext` and `block_on` it, exactly as the OODA cycle already
 does.
@@ -72,7 +72,7 @@ synchronous scheduler is a **structural refactor with zero behavioural delta**:
 the outer loop still sleeps `interval_secs`, OODA still fires once per outer
 iteration, and every periodic gate keeps its current firing semantics.
 
-The trait is designed so a *future* fully-async `Mind` is additive: a later
+The trait is designed so a *future* fully-async `Brain` is additive: a later
 `async fn tick_async` default can wrap the sync `tick`, and the runtime handle
 is already threaded through. "Async `tick()`" from the issue is honoured in
 **spirit** (async work runs inside a tick) without paying the correctness risk
@@ -86,7 +86,7 @@ src/cognitive_threads/
   thread.rs        // CognitiveThread trait, ThreadKind, SchedulePolicy,
                    // Priority, ThreadOutcome, ThreadHealth, ThreadContext
   schedule.rs      // SchedulePolicy::next_run / is_due pure functions
-  mind.rs          // Mind (Scheduler): registry, due-computation, budget,
+  brain.rs          // Brain (Scheduler): registry, due-computation, budget,
                    // failure isolation, graceful shutdown, run_due()
   telemetry.rs     // small metric/span helper (rebase target for telemetry facade)
   threads/
@@ -98,13 +98,13 @@ src/cognitive_threads/
 
 Declared in `src/lib.rs` as `pub mod cognitive_threads;` (sibling of
 `ooda_scheduler`). No `Bridge` in any new type/module name (operator rule);
-naming stays within Scheduler / Mind / CognitiveThread / Faculty / Context /
+naming stays within Scheduler / Brain / CognitiveThread / Faculty / Context /
 Client.
 
 ## 4. The `CognitiveThread` trait
 
 ```rust
-/// A single scheduled mental process owned by the `Mind`.
+/// A single scheduled mental process owned by the `Brain`.
 pub trait CognitiveThread: Send {
     /// Stable, unique, snake_case id used in telemetry metric/span names.
     fn id(&self) -> &str;
@@ -125,7 +125,7 @@ pub trait CognitiveThread: Send {
     fn enabled(&self) -> bool { true }
 
     /// Execute exactly one step. MUST be best-effort and self-contained:
-    /// return `Err` rather than panic where possible; the `Mind` also
+    /// return `Err` rather than panic where possible; the `Brain` also
     /// catches panics as a backstop. May `block_on` `ctx.runtime`.
     fn tick(&mut self, ctx: &mut ThreadContext<'_>) -> ThreadOutcome;
 
@@ -141,7 +141,7 @@ pub enum ThreadKind {
     Ooda,                 // implemented (primary)
     Maintenance,          // implemented (exemplar 1)
     EngineerLogAnalysis,  // implemented (exemplar 2)
-    // Reserved for the vision — hosted by the same Mind, not implemented here:
+    // Reserved for the vision — hosted by the same Brain, not implemented here:
     BackgroundThought,
     MemoryConsolidation,
     SensoryProcessing,
@@ -199,10 +199,10 @@ pub struct ThreadContext<'a> {
 Injecting `now_epoch` and a `Clock` makes due-computation and backoff **purely
 unit-testable** with no sleeps.
 
-## 5. The `Mind` (Scheduler)
+## 5. The `Brain` (Scheduler)
 
 ```rust
-pub struct Mind { threads: Vec<ThreadEntry>, budget: RunBudget }
+pub struct Brain { threads: Vec<ThreadEntry>, budget: RunBudget }
 ```
 
 Responsibilities:
@@ -235,7 +235,7 @@ Responsibilities:
 6. **Telemetry** — every run opens span `simard.thread.<id>` and records the
    per-thread metrics (§7). Health snapshots feed the dashboard heartbeat.
 
-The daemon integration is **minimal and additive**: build a `Mind`, register
+The daemon integration is **minimal and additive**: build a `Brain`, register
 the threads, and replace the six inlined gate-blocks + the `run_ooda_cycle`
 call with a single `mind.run_due(&mut ctx)` at the same point in the loop. The
 outer `interruptible_sleep(interval_secs)` and `shutdown_daemon` stay exactly
@@ -248,7 +248,7 @@ as they are.
 current per-cycle work, in the same order:
 
 1. cycle-start heartbeat file write,
-2. `run_ooda_cycle(&mut state, &mut bridges, &config)`,
+2. `run_ooda_cycle(&mut state, &mut adapters, &config)`,
 3. on `Ok`: summarize, persist cycle report, persist episode to memory, write
    health file, `self_metrics::collect_and_record_all(elapsed)`,
 4. on `Err`: `daemon_log` the error, continue (identical to today).
@@ -256,11 +256,11 @@ current per-cycle work, in the same order:
 Because the outer loop already sleeps `interval_secs` and OODA runs once per
 outer iteration, modelling OODA as `Interval(interval_secs)` and running it
 **every** `run_due` yields **byte-for-byte identical cadence and side-effects**.
-Parity is asserted by tests that drive N iterations through the `Mind` and
+Parity is asserted by tests that drive N iterations through the `Brain` and
 compare cycle count, ordering, and emitted side-effects against the legacy
 path.
 
-State that the OODA cycle mutates (`OodaState`, `OodaBridges`, `config`) is
+State that the OODA cycle mutates (`OodaState`, `OodaContext`, `config`) is
 owned by `OodaThread` (moved into it at daemon start), not the generic
 `ThreadContext` — only OODA needs it, and this keeps the trait clean.
 
@@ -273,14 +273,14 @@ owned by `OodaThread` (moved into it at daemon start), not the generic
     loop's `cycles_run` counter — they are not part of `tick()`.) To guarantee
     byte-for-byte parity **without** an untestable live-loop rewrite, the daemon
     keeps its inline OODA cycle authoritative for now and does **not** register
-    `OodaThread` in the live `Mind`. Cutting the live loop over to
-    `OodaThread` (using `OodaThread::into_parts()` to hand `state`/`bridges`
+    `OodaThread` in the live `Brain`. Cutting the live loop over to
+    `OodaThread` (using `OodaThread::into_parts()` to hand `state`/`adapters`
     back to the graceful-shutdown drain) is a **follow-up**, gated on adding a
     daemon-loop parity harness.
 
 ### Migrating the existing periodic tasks
 
-The six other hooks are **low-risk** to migrate onto the `Mind` because each
+The six other hooks are **low-risk** to migrate onto the `Brain` because each
 already matches the trait shape. Plan:
 
 - Backup, disk-health, worktree-sweep → thin `CognitiveThread` wrappers of the
@@ -298,8 +298,8 @@ tracked as an explicit follow-up — the abstraction still lands with OODA +
 the two new exemplars. **Subsume, never duplicate.**
 
 !!! note "As shipped: periodic-task migration is deferred"
-    None of the six periodic tasks were migrated onto the `Mind` in this PR;
-    they remain hand-rolled in the daemon loop exactly as before. The `Mind`
+    None of the six periodic tasks were migrated onto the `Brain` in this PR;
+    they remain hand-rolled in the daemon loop exactly as before. The `Brain`
     hosts only the two **new** exemplar threads. Migrating the existing tasks
     (behaviour-preserving wrappers, including the disk-persisted self-audit
     gate in A.10) is the explicit follow-up this section anticipates.
@@ -441,11 +441,11 @@ issue create/update per run.
 
 | Question | Resolution |
 | --- | --- |
-| `async tick()` vs sync? | **Sync** trait + sync `Mind`; async work via `ctx.runtime.block_on`. The daemon's top-level loop is synchronous and correctness-critical; an async top-level loop is out of scope. Async-`Mind` reserved as additive future. |
-| Module name? | `src/cognitive_threads/` (not `mind/`). No `Bridge` anywhere. Scheduler type is `Mind`. |
+| `async tick()` vs sync? | **Sync** trait + sync `Brain`; async work via `ctx.runtime.block_on`. The daemon's top-level loop is synchronous and correctness-critical; an async top-level loop is out of scope. Async-`Brain` reserved as additive future. |
+| Module name? | `src/cognitive_threads/` (not `mind/`). No `Bridge` anywhere. Scheduler type is `Brain`. |
 | Reuse or fork `ooda_scheduler`? | **Neither** — it is the engineer action-slot scheduler; leave untouched. New module is independent. |
 | Migrate the 6 existing periodic hooks now? | **Yes, if low-risk** as behaviour-preserving wrappers (incl. disk-persisted self-audit gate). Any risky one stays inlined + explicit follow-up. Subsume, don't duplicate. |
-| Migrate `memory_consolidation` / rewrite it? | **No.** Reserved `ThreadKind::MemoryConsolidation`; the `Mind` can host it later. Not rewritten here. |
+| Migrate `memory_consolidation` / rewrite it? | **No.** Reserved `ThreadKind::MemoryConsolidation`; the `Brain` can host it later. Not rewritten here. |
 | How does OODA keep exact cadence? | `Interval(SIMARD_OODA_INTERVAL_SECS)`, `Priority::Critical`, run every `run_due`, outer loop still sleeps `interval_secs`. Parity tests assert identical cadence/side-effects. |
 | Concurrency model? | Cooperative, single-threaded scheduler tick (matches today). "Concurrency budget" = per-tick cap on **non-critical** threads; OODA is exempt and never starved. Engineer concurrency (AIMD / `SIMARD_MAX_CONCURRENT_ACTIONS`) is untouched. |
 | Telemetry facade dependency? | Not present on base → centralize emission behind one helper, emit via `tracing` + OTel-if-present, use the `simard.thread.<id>.*` names so rebase is one file. |
@@ -487,7 +487,7 @@ paths safe by construction and reuse the crate's existing hardening.**
 | **SR-5** | **Destructive-op path safety (MaintenanceThread).** Before any `remove_dir_all`/`remove_file`, the target MUST be (a) matched against an **allow-list of canonicalized absolute roots** (not filename-prefix only); (b) rejected if it **is a symlink** or falls outside the allowed root after `fs::canonicalize` (defeats `..`/symlink traversal and the TOCTOU where a symlink is swapped in before delete); (c) checked against the deny-list (`worktrees/main`, `~/.simard/repo`, live store, engineer worktrees). | Canonical allow/deny gate **in the thread**, wrapping the reused helpers. | ⚠ `cmd_cleanup::disk` gates by **filename prefix** with **no** `symlink_metadata`/`canonicalize`/`is_symlink` guard (verified: zero occurrences in `disk.rs`). The thread MUST add this gate itself and MUST refuse to `remove_dir_all` a path whose `symlink_metadata` is a symlink. |
 | **SR-6** | **Never delete the live store.** The candidate path MUST be asserted `!=` the active cognitive-store path (and its shadow/WAL) reachable via `ThreadContext.memory`. | Runtime equality assert (belt-and-suspenders with the SR-5 deny-list). | New check in the thread. |
 | **SR-7** | **Conservative default posture.** Global `dry_run` honored (`SIMARD_MAINTENANCE_DRY_RUN`); retention **floors** (always keep ≥ N newest) enforced *before* any prune; destructive maintenance ships **dry-run-first / opt-in** until validated in production. Availability > reclaimed bytes. | `ThreadContext.dry_run` + env retention floors. | Design §8. |
-| **SR-8** | **Resource-exhaustion / DoS bounds.** (a) `Mind` caps non-critical fan-out per tick and keeps OODA `Critical`/exempt so no thread flood starves the control loop; (b) `catch_unwind` + **capped** exponential backoff stops a hot-failing thread pinning a core; (c) interval env vars are clamped to a **minimum floor** (reject/normalize `0`/negative) so a hostile/misconfigured env can't make a thread due every tick; (d) `EngineerLogAnalysis` enforces record/window/finding caps **before** reading and ≤ 1 `create_issue` per run. | §5 budget + backoff; interval clamp; scan caps. | Budget/backoff in §5; add interval-floor clamp + pre-read caps. |
+| **SR-8** | **Resource-exhaustion / DoS bounds.** (a) `Brain` caps non-critical fan-out per tick and keeps OODA `Critical`/exempt so no thread flood starves the control loop; (b) `catch_unwind` + **capped** exponential backoff stops a hot-failing thread pinning a core; (c) interval env vars are clamped to a **minimum floor** (reject/normalize `0`/negative) so a hostile/misconfigured env can't make a thread due every tick; (d) `EngineerLogAnalysis` enforces record/window/finding caps **before** reading and ≤ 1 `create_issue` per run. | §5 budget + backoff; interval clamp; scan caps. | Budget/backoff in §5; add interval-floor clamp + pre-read caps. |
 | **SR-9** | **Least authority.** Threads receive only borrowed, scoped resources via `ThreadContext` and MUST NOT reach globals. The two new threads MUST have **no** code path to `self_deploy`/`self_relaunch`/redeploy. `GhClient` is injected as `Box<dyn GhClient + Send>` (fake in tests → no network, no credentials). | `ThreadContext` seam (§4); trait-object `GhClient`. | ✅ Verified: none of `cmd_cleanup`, `memory_backup`, `stewardship`, `disk_pressure` reference `self_deploy`/`self_relaunch`/`redeploy`. |
 | **SR-10** | **Credential confidentiality.** New code MUST NOT read, log, embed in an issue body, or emit to telemetry any token/`GH_TOKEN`. Error strings may include `gh` stderr (gh prints no tokens) but MUST NOT be augmented with env dumps. | No secret in fields/bodies/errors. | `gh` auth stays ambient in the CLI. |
 | **SR-11** | **Telemetry integrity (no metric-cardinality injection).** Metric/span **names** use the fixed `simard.thread.<id>` scheme where `<id>` is a per-thread compile-time constant — never derived from untrusted input. Untrusted content appears only as **length-bounded structured field values**, never as a format-string arg (no log forging) and never as a name. | Constant ids; bounded structured fields. | Design §7. |
@@ -522,11 +522,11 @@ paths safe by construction and reuse the crate's existing hardening.**
 
 - `schedule.rs` — `is_due` / `next_run` for `Interval`, `OnDemand`,
   `EventDriven`, `Adaptive` against injected clocks.
-- `mind.rs` — **failure isolation**: a panicking/erroring fake thread is
+- `brain.rs` — **failure isolation**: a panicking/erroring fake thread is
   caught, backed off, and does **not** stop OODA or siblings; **priority
   budget**: OODA runs every tick and is never starved by a flood of due
   non-critical threads.
-- **OODA-as-thread parity**: N iterations through the `Mind` produce the same
+- **OODA-as-thread parity**: N iterations through the `Brain` produce the same
   cycle count/order/side-effects as the legacy inline path (fake OODA cycle).
 - `MaintenanceThread` — fixture `~/.simard` tree: prunes only allow-listed
   stale artifacts, **never** protected paths, honours `dry_run`, respects
@@ -565,7 +565,7 @@ green CI, no redeploy.
   diagnosing a backed-off thread.
 - [Add a new cognitive thread](../howto/add-a-new-cognitive-thread.md)
   — developer guide: implementing the trait, choosing a policy/priority,
-  env-config, registering with the `Mind`, emitting telemetry through the single
+  env-config, registering with the `Brain`, emitting telemetry through the single
   seam, the safety rules, and the fixture-only test plan.
 
 ---
@@ -580,18 +580,18 @@ Anything not listed here is a private implementation detail.
 ### A.1 Public module surface — `src/cognitive_threads/mod.rs`
 
 ```rust
-//! Cognitive-thread scheduling: a `Mind` runs many `CognitiveThread`s on
+//! Cognitive-thread scheduling: a `Brain` runs many `CognitiveThread`s on
 //! their own cadence/trigger. See docs/reference/cognitive-thread-scheduling.md.
 
 mod schedule;
 mod thread;
-mod mind;
+mod brain;
 mod telemetry;
 pub mod threads;
 #[cfg(test)]
 mod tests;
 
-pub use mind::Mind;
+pub use brain::Brain;
 pub use thread::{
     CognitiveThread, Priority, SchedulePolicy, ThreadContext, ThreadHealth,
     ThreadKind, ThreadOutcome,
@@ -604,9 +604,9 @@ Registered in `src/lib.rs` as `pub mod cognitive_threads;` (sibling of
 
 ### A.2 `CognitiveThread` trait (object-safe)
 
-Object-safe: the `Mind` stores `Box<dyn CognitiveThread>`. `Send` (not `Sync`)
+Object-safe: the `Brain` stores `Box<dyn CognitiveThread>`. `Send` (not `Sync`)
 — the scheduler ticks threads sequentially on one thread; `Send` only supports
-moving a thread into the `Mind` at registration.
+moving a thread into the `Brain` at registration.
 
 ```rust
 pub trait CognitiveThread: Send {
@@ -704,12 +704,12 @@ pub fn backoff_until_epoch(
 ) -> u64;
 ```
 
-### A.5 `Mind` (the Scheduler) — public API
+### A.5 `Brain` (the Scheduler) — public API
 
 ```rust
-pub struct Mind { /* threads: Vec<ThreadEntry>, budget: RunBudget (both private) */ }
+pub struct Brain { /* threads: Vec<ThreadEntry>, budget: RunBudget (both private) */ }
 
-impl Mind {
+impl Brain {
     pub fn new() -> Self;                                  // budget from env, default 2
     pub fn with_budget(max_noncritical_per_tick: usize) -> Self;
     pub fn register(&mut self, thread: Box<dyn CognitiveThread>) -> &mut Self; // chainable
@@ -728,7 +728,7 @@ impl Mind {
     pub fn len(&self) -> usize;
     pub fn is_empty(&self) -> bool;
 }
-impl Default for Mind { fn default() -> Self { Self::new() } }
+impl Default for Brain { fn default() -> Self { Self::new() } }
 ```
 
 Budget env: `SIMARD_MIND_MAX_NONCRITICAL_PER_TICK` (default 2). `ThreadEntry`,
@@ -760,11 +760,11 @@ duration_seconds, next_run_epoch, active}`.
 
 ```rust
 // ooda.rs — owns the mutable OODA state (moved in at daemon start).
-pub struct OodaThread { /* state, bridges, config, interval_secs, health (private) */ }
+pub struct OodaThread { /* state, adapters, config, interval_secs, health (private) */ }
 impl OodaThread {
     pub fn new(
         state: crate::ooda_loop::OodaState,
-        bridges: crate::ooda_loop::OodaBridges,
+        adapters: crate::ooda_loop::OodaContext,
         config: crate::ooda_loop::OodaConfig,
         interval_secs: u64,
     ) -> Self;
@@ -856,8 +856,8 @@ gate-blocks + the `run_ooda_cycle(...)` call collapse to one `mind.run_due`.
 *Before start of loop (setup):*
 
 ```rust
-let mut mind = Mind::new();
-mind.register(Box::new(OodaThread::new(state, bridges, config, interval_secs)))
+let mut mind = Brain::new();
+mind.register(Box::new(OodaThread::new(state, adapters, config, interval_secs)))
     .register(Box::new(MaintenanceThread::from_env()))
     .register(Box::new(EngineerLogAnalysisThread::from_env()));
 // (behaviour-preserving wrappers for backup / disk-health / RSS / worktree-sweep
@@ -881,22 +881,22 @@ let _outcomes = mind.run_due(&mut ctx);
 ```
 
 The trailing `interruptible_sleep(interval_secs, &shutdown)` and
-`shutdown_daemon(...)` drain are **unchanged**. `OodaState`/`OodaBridges`/
+`shutdown_daemon(...)` drain are **unchanged**. `OodaState`/`OodaContext`/
 `OodaConfig` move **into** `OodaThread` (only OODA needs them), keeping
 `ThreadContext` generic. Parity tests (§6, §12) assert identical cycle
 count/order/side-effects vs. the legacy path.
 
 !!! note "As shipped in this PR"
     The seam is **additive** and does not collapse the inline OODA cycle. The
-    daemon builds the `Mind` only when `SIMARD_COGNITIVE_THREADS_ENABLED` is
+    daemon builds the `Brain` only when `SIMARD_COGNITIVE_THREADS_ENABLED` is
     truthy, registers **only** `MaintenanceThread::from_env()` and
     `EngineerLogAnalysisThread::from_env()`, and calls `mind.run_due(&mut ctx)`
     **after** the existing `run_ooda_cycle(...)` match — not in place of it. The
     context is built with `memory: shared_mem.as_ref()`, a dedicated
-    single-worker runtime handle, `repo_root` cloned from `bridges.repo_root`,
+    single-worker runtime handle, `repo_root` cloned from `adapters.repo_root`,
     and `dry_run: false` (each exemplar carries its own dry-run default). This
     keeps edits to the OODA emission sites nil (parity) while the two new
-    threads run under the `Mind`'s budget + failure isolation. Registering
+    threads run under the `Brain`'s budget + failure isolation. Registering
     `OodaThread` here and deleting the inline match is the documented follow-up.
 
 ### A.10 Persistent-gate contract (optional migrated self-audit thread)

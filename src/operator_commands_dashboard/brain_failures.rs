@@ -253,10 +253,10 @@ fn fallback_description(phase: &str, decision: &str, confidence: Option<f64>) ->
 }
 
 /// Humanize a raw brain `rationale` marker for operator display. P3 of #2358 —
-/// the canonical rationale strings (set in `ooda_brain`) are insider shorthand
+/// the canonical rationale strings (set in `ooda_reasoners`) are insider shorthand
 /// like `deterministic-brain: prefix-routed`; this maps them to plain English
 /// at the display layer only. The persisted/canonical rationale is unchanged so
-/// logs and `ooda_brain` tests stay green. Unknown rationales are passed
+/// logs and `ooda_reasoners` tests stay green. Unknown rationales are passed
 /// through with the machine `<x>-brain:` prefix stripped and common shorthand
 /// expanded, so no raw token reaches the operator.
 fn humanize_rationale(raw: &str) -> String {

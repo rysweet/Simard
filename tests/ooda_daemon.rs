@@ -12,14 +12,14 @@
 
 use serde_json::json;
 use simard::base_types::{BaseTypeOutcome, BaseTypeTurnInput};
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
 use simard::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, add_active_goal};
-use simard::gym_bridge::GymBridge;
+use simard::gym_client::GymClient;
 use simard::identity::OperatingMode;
-use simard::knowledge_bridge::KnowledgeBridge;
-use simard::memory_bridge::CognitiveMemoryBridge;
-use simard::ooda_loop::{ActionKind, OodaBridges, OodaConfig, OodaState, run_ooda_cycle};
+use simard::knowledge_client::KnowledgeClient;
+use simard::memory_adapter::CognitiveMemoryAdapter;
+use simard::ooda_loop::{ActionKind, OodaConfig, OodaContext, OodaState, run_ooda_cycle};
+use simard::server_subprocess::InMemoryServerTransport;
+use simard::server_transport::ServerErrorPayload;
 use simard::session_builder::{LlmProvider, SessionBuilder};
 use simard::test_support::TestAdapter;
 
@@ -27,8 +27,8 @@ use simard::test_support::TestAdapter;
 // Test helpers (reused mock transports)
 // ---------------------------------------------------------------------------
 
-fn mock_memory() -> CognitiveMemoryBridge {
-    CognitiveMemoryBridge::new(Box::new(InMemoryBridgeTransport::new(
+fn mock_memory() -> CognitiveMemoryAdapter {
+    CognitiveMemoryAdapter::new(Box::new(InMemoryServerTransport::new(
         "daemon-mem",
         |method, _params| match method {
             "memory.search_facts" => Ok(json!({"facts": []})),
@@ -51,7 +51,7 @@ fn mock_memory() -> CognitiveMemoryBridge {
             "memory.clear_working" => Ok(json!({"count": 0})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
             "memory.store_procedure" => Ok(json!({"id": "proc_new"})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
@@ -59,8 +59,8 @@ fn mock_memory() -> CognitiveMemoryBridge {
     )))
 }
 
-fn mock_gym() -> GymBridge {
-    GymBridge::new(Box::new(InMemoryBridgeTransport::new(
+fn mock_gym() -> GymClient {
+    GymClient::new(Box::new(InMemoryServerTransport::new(
         "daemon-gym",
         |_method, _params| {
             Ok(json!({
@@ -75,12 +75,12 @@ fn mock_gym() -> GymBridge {
     )))
 }
 
-fn mock_knowledge() -> KnowledgeBridge {
-    KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
+fn mock_knowledge() -> KnowledgeClient {
+    KnowledgeClient::new(Box::new(InMemoryServerTransport::new(
         "daemon-knowledge",
         |method, _params| match method {
             "knowledge.list_packs" => Ok(json!({"packs": []})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
@@ -88,16 +88,16 @@ fn mock_knowledge() -> KnowledgeBridge {
     )))
 }
 
-fn test_bridges() -> OodaBridges {
-    OodaBridges {
+fn test_adapters() -> OodaContext {
+    OodaContext {
         memory: Box::new(mock_memory()),
         knowledge: mock_knowledge(),
         gym: mock_gym(),
         session: None,
         session_factory: None,
-        brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
-        decide_brain: None,
-        orient_brain: None,
+        act_reasoner: std::sync::Arc::new(simard::ooda_reasoners::DeterministicFallbackActReasoner),
+        decide_reasoner: None,
+        orient_reasoner: None,
         repo_root: std::path::PathBuf::from("."),
         progress_evidence: std::sync::Arc::new(
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
@@ -254,12 +254,12 @@ fn daemon_session_handles_multiple_goals_sequentially() {
 /// it should use the session's run_turn output to determine real progress.
 #[test]
 fn ooda_cycle_advance_goal_produces_outcome_for_each_active_goal() {
-    let mut bridges = test_bridges();
+    let mut adapters = test_adapters();
     let board = board_with_active_goals();
     let mut state = OodaState::new(board);
     let config = OodaConfig::default();
 
-    let report = run_ooda_cycle(&mut state, &mut bridges, &config).unwrap();
+    let report = run_ooda_cycle(&mut state, &mut adapters, &config).unwrap();
 
     // Should have actions dispatched for the active goals
     assert!(!report.planned_actions.is_empty());
@@ -290,7 +290,7 @@ fn ooda_cycle_advance_goal_produces_outcome_for_each_active_goal() {
 
 #[test]
 fn daemon_runs_multiple_cycles_and_persists_state_across_them() {
-    let mut bridges = test_bridges();
+    let mut adapters = test_adapters();
     let board = board_with_active_goals();
     let mut state = OodaState::new(board);
     let config = OodaConfig::default();
@@ -298,7 +298,7 @@ fn daemon_runs_multiple_cycles_and_persists_state_across_them() {
     // Run 3 cycles (simulating daemon loop without sleep)
     let mut reports = Vec::new();
     for _ in 0..3 {
-        let report = run_ooda_cycle(&mut state, &mut bridges, &config).unwrap();
+        let report = run_ooda_cycle(&mut state, &mut adapters, &config).unwrap();
         reports.push(report);
     }
 
@@ -339,7 +339,7 @@ fn daemon_runs_multiple_cycles_and_persists_state_across_them() {
 #[test]
 fn daemon_degrades_gracefully_when_no_provider() {
     // Force RustyClawd without ANTHROPIC_API_KEY → session may open but
-    // won't produce useful results. The daemon still runs OODA via bridges.
+    // won't produce useful results. The daemon still runs OODA vian adapters.
     unsafe {
         std::env::remove_var("ANTHROPIC_API_KEY");
         std::env::set_var("SIMARD_LLM_PROVIDER", "rustyclawd");
@@ -354,10 +354,10 @@ fn daemon_degrades_gracefully_when_no_provider() {
     // Session may or may not open depending on adapter internals — both are valid.
     drop(session);
 
-    // Daemon should still be able to run OODA cycles via bridges regardless.
-    let mut bridges = test_bridges();
+    // Daemon should still be able to run OODA cycles vian adapters regardless.
+    let mut adapters = test_adapters();
     let mut state = OodaState::new(board_with_active_goals());
-    let report = run_ooda_cycle(&mut state, &mut bridges, &OodaConfig::default()).unwrap();
+    let report = run_ooda_cycle(&mut state, &mut adapters, &OodaConfig::default()).unwrap();
     assert_eq!(report.cycle_number, 1);
 }
 
@@ -404,18 +404,18 @@ fn goal_objective_contains_goal_id_and_description() {
 // ===========================================================================
 
 /// Test that run_ooda_daemon_with_session (the new entry point) can accept
-/// a pre-built session for testing, avoiding the need for live bridges.
+/// a pre-built session for testing, avoiding the need for live adapters.
 ///
 /// This test defines the expected new API. The function should:
 /// - Accept an optional Box<dyn BaseTypeSession>
 /// - Use it for run_turn calls during AdvanceGoal actions
-/// - Use bridge-only dispatch if session is None
+/// - Use adapter-only dispatch if session is None
 #[test]
 fn run_ooda_daemon_with_session_uses_session_for_advance_goal() {
     // This tests the new function signature that we need to implement.
     // For now it uses the existing run_ooda_cycle which doesn't have session support yet.
     // After implementation, this should call the new daemon entry point.
-    let mut bridges = test_bridges();
+    let mut adapters = test_adapters();
     let board = board_with_active_goals();
     let mut state = OodaState::new(board);
     let config = OodaConfig {
@@ -424,7 +424,7 @@ fn run_ooda_daemon_with_session_uses_session_for_advance_goal() {
     };
 
     // Run a cycle — after implementation, advance_goal actions should use the session
-    let report = run_ooda_cycle(&mut state, &mut bridges, &config).unwrap();
+    let report = run_ooda_cycle(&mut state, &mut adapters, &config).unwrap();
 
     // Verify advance goal actions exist and produce outcomes
     let advance_outcomes: Vec<_> = report
@@ -456,11 +456,11 @@ fn run_ooda_daemon_with_session_uses_session_for_advance_goal() {
 
 #[test]
 fn cycle_report_summarizes_all_action_outcomes() {
-    let mut bridges = test_bridges();
+    let mut adapters = test_adapters();
     let mut state = OodaState::new(board_with_active_goals());
     let config = OodaConfig::default();
 
-    let report = run_ooda_cycle(&mut state, &mut bridges, &config).unwrap();
+    let report = run_ooda_cycle(&mut state, &mut adapters, &config).unwrap();
     let summary = simard::ooda_loop::summarize_cycle_report(&report);
 
     assert!(summary.contains("OODA cycle #1"));

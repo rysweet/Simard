@@ -144,7 +144,7 @@ denominator per phase.
 
 ## Protocol 1: First-word match (OODA brains)
 
-Used by: `ooda_brain::recipe_brain` (all three phases)
+Used by: `ooda_reasoners::recipe_reasoner` (all three phases)
 
 > **Changed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
 > All three OODA brain parsers now use the same first-word extraction pattern.
@@ -193,7 +193,7 @@ No `serde_json`. No regex. No keyword scanning. Only `str::split_whitespace()`,
 
 ---
 
-### 1a. Decide phase (`recipe_brain.rs`)
+### 1a. Decide phase (`recipe_reasoner.rs`)
 
 **Enum:** `DecideJudgment`
 
@@ -238,7 +238,7 @@ consolidate_memory Memory hasn't been consolidated in 12 hours.
 
 ---
 
-### 1b. Orient phase (`recipe_brain.rs`)
+### 1b. Orient phase (`recipe_reasoner.rs`)
 
 **Struct:** `OrientJudgment`
 
@@ -290,7 +290,7 @@ If validation fails, the deterministic floor applies.
 
 ---
 
-### 1c. Engineer lifecycle (`recipe_brain.rs`)
+### 1c. Engineer lifecycle (`recipe_reasoner.rs`)
 
 **Enum:** `EngineerLifecycleDecision`
 
@@ -548,11 +548,11 @@ characters in action descriptions are safe — they're just text after `ACTION:`
 
 ## Error handling
 
-All text parsers return `SimardError::BrainResponseUnparseable` (or the
+All text parsers return `SimardError::ReasonerResponseUnparseable` (or the
 site-specific error variant) when parsing fails. The error carries:
 
 - `raw: String` — the **complete, untruncated** text that was received.
-- `source: BrainParseSource` — the specific parse failure context.
+- `source: ReasonerParseSource` — the specific parse failure context.
 
 For the first-word match parsers (decide, lifecycle), an unrecognized first
 word returns a safe default rather than an error. Only truly unparseable
@@ -567,8 +567,8 @@ Parse failures are logged at `ERROR` level with the full raw response
 function as documented in
 [diagnose-decide-orient-parse-failures](../howto/diagnose-decide-orient-parse-failures.md).
 
-The deterministic fallback brains (`DeterministicFallbackDecideBrain`,
-`DeterministicFallbackOrientBrain`, `DeterministicFallbackBrain`) continue
+The deterministic fallback brains (`DeterministicFallbackDecideReasoner`,
+`DeterministicFallbackOrientReasoner`, `DeterministicFallbackActReasoner`) continue
 to serve as the no-LLM bootstrap path. They are **not** silent error
 handlers — the parse failure is surfaced through all four visibility channels
 before the fallback is applied.
@@ -583,7 +583,7 @@ Each parser has inline `#[cfg(test)]` tests in its source file:
 |--------|-----------|----------|
 | `recipe_output/extract.rs` | 25+ | `strip_ansi` (CSI/OSC/two-char, clean-path borrow, JSON-escaped literal), `strip_recipe_noise` (drops tracing/banner lines, keeps prose), balanced-object scan (string-literal aware), `extract_json_payload` dual-pass recovery (ANSI+log, same-line prefix, interleaved log line), `extract_verdict` precedence + dropped-log-line substring safety |
 | `decide.rs` | 4+ | DeterministicFallback tests |
-| `recipe_brain.rs` | 30+ | All 10 action keywords (first-word), first-float orient, 6 lifecycle variants (first-word), case-insensitive match, unrecognized defaults, #2484 banner→DefaultMalformed / pure-noise→DefaultEmpty |
+| `recipe_reasoner.rs` | 30+ | All 10 action keywords (first-word), first-float orient, 6 lifecycle variants (first-word), case-insensitive match, unrecognized defaults, #2484 banner→DefaultMalformed / pure-noise→DefaultEmpty |
 | `orient.rs` | 8+ | Float parsing, validation, extra fields, empty/invalid responses |
 | `rustyclawd.rs` | 15+ (T1–T15) | Full behavior matrix per decision protocol reference |
 | `recipe_progress_checker.rs` | 6+ | Accept, reject, no keyword (default), mixed case, #2484 noise-obscured reject recovery, `parse_verdict_outcome` match flag |

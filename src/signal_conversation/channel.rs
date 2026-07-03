@@ -24,9 +24,9 @@
 //!
 //! # Naming
 //!
-//! Nothing here is named `bridge`/`Bridge`. `SignalConversation` is a first-class
+//! Nothing here is named `adapter`/`Adapter`. `SignalConversation` is a first-class
 //! conversation channel and does not implement the cognitive-memory
-//! `BridgeTransport`.
+//! `ServerTransport`.
 
 use crate::conversation_channel::{ConversationChannel, Inbound, OperatorRef, OutKind, Outbound};
 use crate::error::SimardResult;

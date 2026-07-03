@@ -87,7 +87,7 @@ nav:
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
     - OODA Loop Self-Detection: concepts/ooda-loop-self-detection.md
-    - Unified RecipeBrain: concepts/unified-recipe-brain.md
+    - Unified RecipeReasoner: concepts/unified-recipe-brain.md
     - Prompt-Driven OODA Brain: concepts/prompt-driven-ooda-brain.md
     - Prompt-Driven Brain Iteration: concepts/prompt-driven-brain-iteration.md
     - Text-Based Brain Protocol: concepts/text-based-brain-protocol.md
@@ -186,12 +186,12 @@ nav:
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Runtime Contracts: reference/runtime-contracts.md
     - Subprocess Prompt Delivery: prompt-delivery.md
-    - Bridge Wire Protocol: reference/bridge-wire-protocol.md
+    - Server Wire Protocol: reference/server-wire-protocol.md
     - Text-Parsing Wire Formats: reference/text-parsing-wire-formats.md
     - Recipe Context-Var Sanitization: reference/recipe-context-var-sanitization.md
     - Engineer-Loop argv Sanitization: reference/engineer-loop-argv-sanitization.md
     - String-Truncation Helpers: reference/string-truncation-helpers.md
-    - RecipeBrain API: reference/recipe-brain-api.md
+    - RecipeReasoner API: reference/recipe-brain-api.md
     - OODA Reasoners API: reference/ooda-brain-api.md
     - Brain Executive API: reference/brain-executive-api.md
     - Terminology Migration (Brain model): reference/brain-terminology-migration.md
@@ -210,7 +210,7 @@ nav:
     - Memory Introspection CLI: reference/simard-memory-cli.md
     - Cognitive-Memory Provenance (DERIVES_FROM): reference/cognitive-memory-provenance.md
     - Cognitive-Memory Bootstrap Procedures: reference/cognitive-memory-bootstrap-procedures.md
-    - Cognitive-Memory Bridge Helpers: reference/cognitive-memory-bridge-helpers.md
+    - Cognitive-Memory Bridge Helpers: reference/cognitive-memory-adapter-helpers.md
     - Cognitive-Memory Preparation Filters: reference/cognitive-memory-preparation-filters.md
     - Cognitive-Memory Fact Recall: reference/cognitive-memory-fact-recall.md
     - Cognitive-Memory Ranked Recall: reference/cognitive-memory-ranked-recall.md

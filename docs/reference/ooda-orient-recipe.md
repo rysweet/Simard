@@ -2,7 +2,7 @@
 
 Recipe: `prompt_assets/simard/recipes/ooda-orient.yaml`
 Prompt source: `prompt_assets/simard/ooda_orient.md` (content embedded in recipe YAML)
-Shim: `src/ooda_brain/recipe_orient.rs`
+Shim: `src/ooda_reasoners/recipe_orient.rs`
 
 This is the single source of truth for the orient-phase failure-penalty
 demotion judgment. The orient brain runs as a **recipe step** via
@@ -11,7 +11,7 @@ demotion judgment. The orient brain runs as a **recipe step** via
 
 > **History:** Before issue
 > [#2115](https://github.com/rysweet/Simard/issues/2115), the orient brain
-> was `RustyClawdOrientBrain`, which compiled the prompt via `include_str!`,
+> was `RustyClawdOrientReasoner`, which compiled the prompt via `include_str!`,
 > submitted it to an `LlmSubmitter`, and parsed the response as JSON. The
 > recipe-based approach moves the prompt to a YAML file that can be edited
 > without a rebuild, and adds a 3-tier parsing strategy (JSON → bare
@@ -52,7 +52,7 @@ steps:
 
 The recipe is a single `agent` step. The recipe-runner-rs subprocess handles
 prompt rendering, agent invocation, and stdout capture. The Rust shim
-(`RecipeOrientBrain`) parses the stdout using a 3-tier strategy.
+(`RecipeOrientReasoner`) parses the stdout using a 3-tier strategy.
 
 ### What changed from `ooda_orient.md`
 
@@ -73,7 +73,7 @@ The ROLE, CONTEXT, DECISION, and EXAMPLES sections are preserved verbatim.
 ## Placeholders (Context Variables)
 
 The recipe-runner-rs performs Handlebars `{{name}}` substitution from the
-context variables passed by `RecipeOrientBrain`.
+context variables passed by `RecipeOrientReasoner`.
 
 | Variable | Type | Source |
 |---|---|---|
@@ -87,7 +87,7 @@ this brain — they are not subject to failure-penalty demotion.
 
 ## 3-Tier Parsing Strategy
 
-`RecipeOrientBrain` uses a 3-tier parsing chain to extract the urgency
+`RecipeOrientReasoner` uses a 3-tier parsing chain to extract the urgency
 from the agent's stdout. Each tier is tried in order; the first success
 wins. All tiers validate the result through `OrientJudgment::validate()`.
 
@@ -130,7 +130,7 @@ formula:
 adjusted_urgency = max(0.0, base_urgency - 0.2 × failure_count)
 ```
 
-This is the same formula used by `DeterministicFallbackOrientBrain` and
+This is the same formula used by `DeterministicFallbackOrientReasoner` and
 matches the pre-prompt-driven behavior exactly. The rationale is set to
 `"recipe output unparseable; deterministic floor applied"`.
 
@@ -149,10 +149,10 @@ priorities — this is the primary security invariant.
 
 ## Error Handling
 
-`RecipeOrientBrain` returns `Err(SimardError::AdapterInvocationFailed)` when:
+`RecipeOrientReasoner` returns `Err(SimardError::AdapterInvocationFailed)` when:
 
 - The `recipe-runner-rs` binary is not found (construction fails;
-  `RecipeOrientBrain::new()` returns `None`).
+  `RecipeOrientReasoner::new()` returns `None`).
 - The subprocess exits with a non-zero status.
 - The subprocess cannot be spawned.
 
@@ -161,14 +161,14 @@ produces a valid `OrientJudgment`. Tier 3 (deterministic floor) is the
 unconditional safety net.
 
 On `AdapterInvocationFailed`, the caller falls back per-priority to
-`DeterministicFallbackOrientBrain` and logs the error with truncated
+`DeterministicFallbackOrientReasoner` and logs the error with truncated
 stderr (500 chars).
 
 ## Runtime Loading (not compile-time)
 
 Unlike the old `ooda_orient.md` (which was embedded via `include_str!`),
 the orient recipe is loaded at runtime by the recipe-runner-rs subprocess.
-`RecipeOrientBrain` resolves the recipe path in this order:
+`RecipeOrientReasoner` resolves the recipe path in this order:
 
 1. `~/.simard/prompt_assets/simard/recipes/ooda-orient.yaml` (hot-reload)
 2. `{repo_root}/prompt_assets/simard/recipes/ooda-orient.yaml` (in-tree)
@@ -178,22 +178,22 @@ Prompt edits take effect on the next daemon cycle **without a rebuild**.
 ## Construction Pattern
 
 ```rust
-let brain: Option<Arc<dyn OodaOrientBrain>> = RecipeOrientBrain::new(repo_root)
-    .map(|b| Arc::new(b) as Arc<dyn OodaOrientBrain>);
+let brain: Option<Arc<dyn OrientReasoner>> = RecipeOrientReasoner::new(repo_root)
+    .map(|b| Arc::new(b) as Arc<dyn OrientReasoner>);
 ```
 
-`RecipeOrientBrain::new(repo_root)` returns `None` when:
+`RecipeOrientReasoner::new(repo_root)` returns `None` when:
 - The `recipe-runner-rs` binary is not on `$PATH`.
 - The recipe YAML file does not exist at either resolution path.
 
 The daemon wiring in `operator_commands_ooda/daemon/brains.rs` calls
-`build_orient_brain(state_root, repo_root)`, which tries
-`RecipeOrientBrain` first and falls back to
-`DeterministicFallbackOrientBrain`.
+`build_orient_reasoner(state_root, repo_root)`, which tries
+`RecipeOrientReasoner` first and falls back to
+`DeterministicFallbackOrientReasoner`.
 
 ## Test Inventory
 
-`src/ooda_brain/recipe_orient.rs` contains inline `#[cfg(test)]` tests
+`src/ooda_reasoners/recipe_orient.rs` contains inline `#[cfg(test)]` tests
 covering all three parse tiers and edge cases:
 
 | Test | Tier | Coverage |
@@ -225,7 +225,7 @@ change to the struct in `orient.rs` and the Tier 1 parser in
 * [Reference: OODA decide recipe and prompt schema](ooda-decide-prompt.md) — decide-phase recipe
 * [Reference: OODA engineer lifecycle recipe](ooda-engineer-lifecycle-recipe.md) — engineer lifecycle recipe
 * [Reference: text-parsing wire formats](text-parsing-wire-formats.md) — normative grammar
-* [Reference: `OodaBrain` API](ooda-brain-api.md) — trait and type definitions
+* [Reference: `ActReasoner` API](ooda-brain-api.md) — trait and type definitions
 * [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md) — design rationale
 * [How-to: edit the OODA brain prompt](../howto/edit-the-ooda-brain-prompt.md) — editing guide
 * [How-to: diagnose decide/orient parse failures](../howto/diagnose-decide-orient-parse-failures.md) — operator runbook

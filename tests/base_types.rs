@@ -8,7 +8,7 @@
 //! - TestAdapter serves as lightweight test harness
 //! - All base types register in bootstrap and identity manifests
 //! - Session lifecycle state machine is correct for all adapters
-//! - CognitiveMemoryBridge integration works end-to-end
+//! - CognitiveMemoryAdapter integration works end-to-end
 
 use simard::{
     BaseTypeCapability, BaseTypeFactory, BaseTypeId, BaseTypeSessionRequest, BaseTypeTurnInput,
@@ -597,17 +597,17 @@ fn in_memory_store_works_as_memory_backend() {
 }
 
 // ---------------------------------------------------------------------------
-// 11. CognitiveBridgeMemoryStore can be constructed
+// 11. CognitiveMemoryStoreAdapter can be constructed
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cognitive_bridge_memory_store_descriptor_identifies_cognitive_backend() {
-    use simard::CognitiveBridgeMemoryStore;
-    // CognitiveBridgeMemoryStore wraps a BridgeTransport. We can verify it
-    // exists and is exported — full integration requires a running bridge.
+fn cognitive_adapter_memory_store_descriptor_identifies_cognitive_backend() {
+    use simard::CognitiveMemoryStoreAdapter;
+    // CognitiveMemoryStoreAdapter wraps a ServerTransport. We can verify it
+    // exists and is exported — full integration requires a running adapter.
     // This is a structural/compilation test.
     let _type_exists: fn() -> bool = || {
-        let _check: Option<CognitiveBridgeMemoryStore> = None;
+        let _check: Option<CognitiveMemoryStoreAdapter> = None;
         true
     };
 }

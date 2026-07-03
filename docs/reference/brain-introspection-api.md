@@ -20,7 +20,7 @@ related:
 > `src/operator_commands_ooda/daemon/mod.rs`; recipe:
 > `prompt_assets/simard/recipes/brain-introspection.yaml`; standing prompt:
 > `prompt_assets/simard/brain_introspection.md`; prompt pin:
-> `src/ooda_brain/prompt_store.rs`.
+> `src/ooda_reasoners/prompt_store.rs`.
 
 **Module:** `src/brain_introspection.rs`
 
@@ -65,7 +65,7 @@ bridge-reachability finding, the increment split) see
 daemon loop (interval gate, mod.rs)
        │   SIMARD_BRAIN_INTROSPECTION_INTERVAL_SECS elapsed
        ▼
-run_brain_introspection(&*bridges.memory, &repo_root, &state_root, None)
+run_brain_introspection(&*adapters.memory, &repo_root, &state_root, None)
        │
        ├─ 1. mem.get_statistics()            → stats_before (RPC-backed)
        │       live_memories = non-sensory modality sum (working + episodic +
@@ -132,7 +132,7 @@ pub fn run_brain_introspection(
 
 | Parameter       | Type                       | Description                                                                 |
 | --------------- | -------------------------- | --------------------------------------------------------------------------- |
-| `mem`           | `&dyn CognitiveMemoryOps`  | The daemon's memory bridge; the daemon passes `&*bridges.memory`            |
+| `mem`           | `&dyn CognitiveMemoryOps`  | The daemon's memory bridge; the daemon passes `&*adapters.memory`            |
 | `repo_root`     | `&Path`                    | Repository root — used to locate the recipe YAML                            |
 | `state_root`    | `&Path`                    | Simard state directory (`~/.simard`) — passed as a recipe context var       |
 | `home_override` | `Option<&Path>`            | Test seam for `resolve_recipe_path` hot-reload resolution; `None` in prod   |
@@ -141,8 +141,8 @@ pub fn run_brain_introspection(
 > `run_disk_health_check` (a pure scheduler that holds no memory handle), this
 > hook takes `mem: &dyn CognitiveMemoryOps` because the real memory operations
 > (`get_statistics`, `prune_expired_sensory`, `consolidate_episodes`) run
-> in-process over the bridge. The daemon already has `bridges.memory` in scope,
-> so the call site is `run_brain_introspection(&*bridges.memory, …)`.
+> in-process over the bridge. The daemon already has `adapters.memory` in scope,
+> so the call site is `run_brain_introspection(&*adapters.memory, …)`.
 
 **Returns:** `SimardResult<BrainIntrospectionReport>`
 
@@ -399,8 +399,8 @@ if crate::brain_introspection::should_run_introspection(
     brain_introspection_interval_secs,
 ) {
     match crate::brain_introspection::run_brain_introspection(
-        &*bridges.memory,
-        &bridges.repo_root,
+        &*adapters.memory,
+        &adapters.repo_root,
         &state_root,
         None,
     ) {
@@ -467,7 +467,7 @@ The first increment performs **no destructive superseded/semantic deletes
 daemon-side**. This is a deliberate consequence of a bridge-reachability fact,
 not a missing feature:
 
-The daemon's `bridges.memory` is a `CognitiveMemoryBridge` (a JSON-RPC IPC
+The daemon's `adapters.memory` is a `CognitiveMemoryAdapter` (a JSON-RPC IPC
 client), **not** the in-process `LibraryCognitiveMemory`. Over that bridge:
 
 - `prune_superseded()` uses the **default trait impl `Ok(0)` — a no-op**
@@ -510,7 +510,7 @@ explicitly guards against. The safe resolution:
 | Category                          | Description                                                                         |
 | --------------------------------- | ----------------------------------------------------------------------------------- |
 | `enforce_prune_cap`               | `req < cap`, `== cap`, `> cap`, `cap = 0` → never exceeds; `cap = 0` ⇒ 0; asserts the cap bounds the recipe's `-c max_prune` recommendation count |
-| `run_brain_introspection`         | Stub `CognitiveMemoryOps` (InMemory transport, mirrors `memory_bridge/tests.rs`): asserts stats read, **unbounded** `prune_expired_sensory` call (no cap applied), `consolidated_facts` measured as the post−pre semantic+procedural delta, recipe spawn path; recipe-runner-missing → graceful WARN |
+| `run_brain_introspection`         | Stub `CognitiveMemoryOps` (InMemory transport, mirrors `memory_adapter/tests.rs`): asserts stats read, **unbounded** `prune_expired_sensory` call (no cap applied), `consolidated_facts` measured as the post−pre semantic+procedural delta, recipe spawn path; recipe-runner-missing → graceful WARN |
 | `no_destructive_value_prune`      | Asserts no hook path calls `prune_superseded` or a destructive semantic/procedural delete (the only deletion is expired-sensory cleanup) |
 | `resolve_recipe_path`             | Hot-reload (via `home_override`) vs. in-tree resolution; neither present → `None`    |
 | `parse_brain_introspection_text`  | Happy path; missing-required (`BRAIN_HEALTH`) → error; noisy LLM output tolerated    |

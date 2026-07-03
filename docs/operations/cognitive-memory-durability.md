@@ -108,11 +108,11 @@ current graceful shutdown sequence:
 
 | Step | Operation | Failure mode when signal-driven |
 |---|---|---|
-| 1 | `persist_board(&state.active_goals, &*bridges.memory)` | Logged, next step still runs. |
+| 1 | `persist_board(&state.active_goals, &*adapters.memory)` | Logged, next step still runs. |
 | 2 | `shared_mem.checkpoint()` | Logged, next step still runs. |
-| 3 | `bridges.session.close()` | Logged, next step still runs. |
+| 3 | `adapters.session.close()` | Logged, next step still runs. |
 | 4 | `memory_ipc::clear_in_process_writer()` | Cannot fail. |
-| 5 | Bridges and the daemon-owned `Arc<dyn CognitiveMemoryOps>` drop on return. | Drop-time failures are logged by the backend. |
+| 5 | Adapters and the daemon-owned `Arc<dyn CognitiveMemoryOps>` drop on return. | Drop-time failures are logged by the backend. |
 
 Normal-exit callers receive errors. Signal-driven shutdown logs errors and keeps
 progressing because the process is already exiting.

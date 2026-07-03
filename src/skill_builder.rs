@@ -37,17 +37,17 @@ pub struct SkillTemplate {
 
 /// Extract skill candidates from procedural memory.
 ///
-/// Queries the cognitive memory bridge for procedures that have been used
+/// Queries the cognitive memory adapter for procedures that have been used
 /// at least `min_usage` times. Procedures with fewer uses are considered
 /// too infrequent to warrant a dedicated skill.
 ///
 /// Returns templates sorted by usage count (highest first).
 pub fn extract_skill_candidates(
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
     min_usage: u32,
 ) -> SimardResult<Vec<SkillTemplate>> {
     // Recall all procedures with a broad query.
-    let procedures = bridge.recall_procedure("*", 100)?;
+    let procedures = adapter.recall_procedure("*", 100)?;
 
     let mut candidates: Vec<SkillTemplate> = procedures
         .iter()

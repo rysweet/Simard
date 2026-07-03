@@ -339,7 +339,7 @@ to prevent LLM/subprocess output from leaking into log lines.
 |---|---|
 | `close_timeout` | The master 60s budget expired |
 | `agent_close_timeout` | The inner `agent.close()` exceeded 45s |
-| `bridge_timeout` | The cognitive-memory bridge `store_enriched_*` exceeded its inner budget |
+| `adapter_timeout` | The cognitive-memory bridge `store_enriched_*` exceeded its inner budget |
 | `summary_empty` | The summarizer returned but produced no decisions/actions/questions |
 | `persistence_error` | An IO error occurred while persisting (e.g. `EACCES`, `ENOSPC`, parent `state_root` unwritable). The full-fidelity handoff is unavailable; the partial-handoff branch retried with the legacy `meeting_handoffs/handoff-<ts>.json` writer when possible |
 

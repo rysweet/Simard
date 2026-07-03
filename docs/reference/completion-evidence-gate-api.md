@@ -26,7 +26,7 @@ related:
 > They sit alongside the legacy
 > [`archive_completed`](https://github.com/rysweet/Simard/blob/main/src/goal_curation/operations.rs)
 > and the [`progress_evidence`](../reference/progress-evidence-api.md) checker;
-> the production daemon installs the gate on `OodaBridges.completion_evidence`
+> the production daemon installs the gate on `OodaContext.completion_evidence`
 > unless the kill-switch is `off`.
 
 This reference specifies the API for the deploy-aware done-gate. For the

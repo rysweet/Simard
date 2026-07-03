@@ -1,15 +1,15 @@
 use super::*;
-use crate::bridge::BridgeErrorPayload;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_adapter::CognitiveMemoryAdapter;
+use crate::server_subprocess::InMemoryServerTransport;
+use crate::server_transport::ServerErrorPayload;
 
 fn mock_memory() -> Box<dyn CognitiveMemoryOps> {
-    Box::new(CognitiveMemoryBridge::new(Box::new(
-        InMemoryBridgeTransport::new("test-activity", |method, _params| match method {
+    Box::new(CognitiveMemoryAdapter::new(Box::new(
+        InMemoryServerTransport::new("test-activity", |method, _params| match method {
             "memory.store_fact" => Ok(serde_json::json!({"id": "sem_act_1"})),
             "memory.store_episode" => Ok(serde_json::json!({"id": "epi_act_1"})),
             "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),

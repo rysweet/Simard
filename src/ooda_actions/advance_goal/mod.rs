@@ -1,7 +1,7 @@
 //! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
 use crate::goal_curation::GoalProgress;
-use crate::ooda_loop::{ActionOutcome, OodaBridges, OodaState, PlannedAction};
+use crate::ooda_loop::{ActionOutcome, OodaContext, OodaState, PlannedAction};
 
 use super::goal_session::GoalAction;
 use super::make_outcome;
@@ -38,7 +38,7 @@ pub use subordinate::validate_subordinate_completion;
 /// progress percentage.
 pub(super) fn dispatch_advance_goal(
     action: &PlannedAction,
-    bridges: &mut OodaBridges,
+    adapters: &mut OodaContext,
     state: &mut OodaState,
 ) -> ActionOutcome {
     let goal_id = match &action.goal_id {
@@ -62,7 +62,7 @@ pub(super) fn dispatch_advance_goal(
 
     // If the goal has a subordinate, check heartbeat.
     if let Some(ref sub_name) = goal.assigned_to {
-        return advance_goal_with_subordinate(action, bridges, state, &goal_id, sub_name);
+        return advance_goal_with_subordinate(action, adapters, state, &goal_id, sub_name);
     }
 
     // Blocked and completed goals short-circuit before session dispatch.
@@ -86,7 +86,7 @@ pub(super) fn dispatch_advance_goal(
     match &goal.status {
         GoalProgress::Blocked(reason) if is_brain_failure_marker(reason) => {
             tracing::info!(
-                target: "simard::ooda_brain",
+                target: "simard::ooda_reasoners",
                 goal = %goal_id,
                 prior_failures = state.goal_failure_counts.get(&goal_id).copied().unwrap_or(0),
                 "issue #1911 auto-recovery: brain-failure marker cleared; restoring goal to NotStarted",
@@ -140,22 +140,22 @@ pub(super) fn dispatch_advance_goal(
     }
 
     // Clone the brain Arc up-front so we don't fight the borrow checker
-    // when we mutably borrow `bridges.session` below (issue #1266).
-    let brain = std::sync::Arc::clone(&bridges.brain);
+    // when we mutably borrow `adapters.session` below (issue #1266).
+    let brain = std::sync::Arc::clone(&adapters.act_reasoner);
 
     // Same pattern for the progress-evidence checker (issue #1967): clone
     // the Arc up-front so it lives across the inner mutable session
-    // borrow without colliding with the bridges field-borrow check.
-    let checker = std::sync::Arc::clone(&bridges.progress_evidence);
+    // borrow without colliding with the adapters field-borrow check.
+    let checker = std::sync::Arc::clone(&adapters.progress_evidence);
 
-    // Split-borrow disjoint fields of `bridges` so we can hold `&mut
-    // session` and `&dyn memory` simultaneously. `&mut *bridges` flattens
+    // Split-borrow disjoint fields of `adapters` so we can hold `&mut
+    // session` and `&dyn memory` simultaneously. `&mut *adapters` flattens
     // the deref so Rust tracks the per-field borrows.
-    let OodaBridges {
+    let OodaContext {
         ref mut session,
         ref memory,
         ..
-    } = *bridges;
+    } = *adapters;
 
     // If a base-type session is available, use run_turn for real agent work.
     if let Some(sess) = session {

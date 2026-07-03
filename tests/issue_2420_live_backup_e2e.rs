@@ -3,7 +3,7 @@
 //! Drives the SAME flow the OODA daemon runs in production — open the live
 //! cognitive store at `state_root/cognitive`, take a *verified* backup, verify
 //! its memory count, then restore into a fresh store — but against a REAL
-//! persistent lbug store (not an in-memory bridge). Proves the issue's
+//! persistent lbug store (not an in-memory adapter). Proves the issue's
 //! acceptance: "a fresh verified backup of the LIVE store can be produced and a
 //! restore round-trips the current memory count."
 

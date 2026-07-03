@@ -234,7 +234,7 @@ pub(crate) async fn azlin_tmux_sessions() -> Json<Value> {
     }))
 }
 
-/// GET `/ws/tmux_attach/{host}/{session}` — WebSocket bridging xterm.js to
+/// GET `/ws/tmux_attach/{host}/{session}` — WebSocket connecting xterm.js to
 /// `azlin connect <host> --no-tmux -- tmux attach -t <session>`. The same
 /// azlin exec channel as the snapshot route — no new SSH path.
 pub(crate) async fn ws_tmux_attach_handler(

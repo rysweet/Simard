@@ -147,7 +147,7 @@ them into one number. See the [concept doc](../concepts/unified-telemetry-and-st
 ## `--json` schema
 
 `simard status --json` and the dashboard endpoint emit the **same** serialized
-`StatusSnapshot`. Shape (abridged; every section follows the envelope pattern):
+`StatusSnapshot`. Shape (aconnected; every section follows the envelope pattern):
 
 ```json
 {

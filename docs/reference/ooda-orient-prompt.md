@@ -1,7 +1,7 @@
 # Reference: `ooda_orient.md` Prompt Schema
 
 File: `prompt_assets/simard/ooda_orient.md`
-Loaded at compile time via `include_str!` from `src/ooda_brain/orient.rs`.
+Loaded at compile time via `include_str!` from `src/ooda_reasoners/orient.rs`.
 
 This is the single source of truth for the orient-phase failure-penalty
 demotion judgment. Edit this file to change how Simard demotes chronically
@@ -52,7 +52,7 @@ this brain — they are not subject to failure-penalty demotion.
 
 The orient brain uses the **first-float protocol**. The wire format is
 documented normatively in
-[text-parsing wire formats § orient phase](text-parsing-wire-formats.md#1b-orient-phase-recipe_brainrs).
+[text-parsing wire formats § orient phase](text-parsing-wire-formats.md#1b-orient-phase-recipe_reasonerrs).
 
 ### Response format
 
@@ -122,7 +122,7 @@ must exist at build time and be valid UTF-8, and should stay under ~32 KB.
 
 ## Parser Rules
 
-`parse_judgment_from_response` in `src/ooda_brain/orient.rs` now uses the
+`parse_judgment_from_response` in `src/ooda_reasoners/orient.rs` now uses the
 renamed helper `try_first_float()`:
 
 1. Split the response on whitespace.
@@ -138,7 +138,7 @@ The helper rename is purely descriptive: `try_bare_float()` →
 
 ## Deterministic Fallback
 
-`DeterministicFallbackOrientBrain` preserves the pre-#1469 formula bit-for-bit:
+`DeterministicFallbackOrientReasoner` preserves the pre-#1469 formula bit-for-bit:
 
 ```
 adjusted_urgency = max(0.0, base_urgency - 0.2 * failure_count)

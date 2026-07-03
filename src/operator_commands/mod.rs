@@ -42,7 +42,7 @@ pub(crate) use evidence::{
 };
 pub(crate) use format::{
     print_display, print_goal_section, print_meeting_goal_section, print_string_section,
-    print_terminal_bridge_section, print_text,
+    print_terminal_engineer_section, print_text,
 };
 pub(crate) use goals::GoalRegisterView;
 pub(crate) use recipes::{

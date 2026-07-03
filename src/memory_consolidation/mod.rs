@@ -27,7 +27,7 @@ pub struct PreparedContext {
     /// PR-C (issue #2281, problem 4): episodes with at least one
     /// keyword overlap with the objective, filtered to drop
     /// self-session noise. Defaults to empty (no recall) when the
-    /// objective has no usable tokens or the bridge returns nothing.
+    /// objective has no usable tokens or the adapter returns nothing.
     #[serde(default)]
     pub episodic_recall: Vec<CognitiveEpisode>,
 }
@@ -57,20 +57,20 @@ pub struct FactExtraction {
 pub fn intake_memory_operations(
     objective: &str,
     session_id: &SessionId,
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     // Record the raw objective as a sensory observation (5 min TTL).
-    bridge.record_sensory("objective", objective, 300)?;
+    adapter.record_sensory("objective", objective, 300)?;
 
     // Push the objective into working memory for this session.
-    bridge.push_working("objective", objective, session_id.as_str(), 1.0)?;
+    adapter.push_working("objective", objective, session_id.as_str(), 1.0)?;
 
     // Store as an episodic event so we have a record of what was asked —
     // routed through the ingestion classifier (issue #2327). The session-start
     // marker is operational noise and is dropped unless it carries a failure
     // summary.
     classifier::store_episode_classified(
-        bridge,
+        adapter,
         &format!("Session {session_id} started with objective: {objective}"),
         "session-intake",
         &classifier::IntakeContext::default(),
@@ -98,10 +98,10 @@ pub fn intake_memory_operations(
 pub fn preparation_memory_operations(
     objective: &str,
     session_id: &SessionId,
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
 ) -> SimardResult<PreparedContext> {
     preparation_memory_operations_with_active_slugs(
-        objective, session_id, bridge,
+        objective, session_id, adapter,
         // `None` opts out of the stale-slug filter so existing test
         // fixtures (`tests.rs`) that exercise the goal-fact dedup
         // path keep passing unchanged.
@@ -129,7 +129,7 @@ pub fn preparation_memory_operations(
 pub fn preparation_memory_operations_with_active_slugs(
     objective: &str,
     session_id: &SessionId,
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
     active_slugs: Option<&std::collections::HashSet<&str>>,
 ) -> SimardResult<PreparedContext> {
     // Back-compat entry point: balanced (Orient/library-default) ranked-recall
@@ -139,7 +139,7 @@ pub fn preparation_memory_operations_with_active_slugs(
     preparation_memory_operations_with_active_slugs_phased(
         objective,
         session_id,
-        bridge,
+        adapter,
         active_slugs,
         RecallWeightSet::default(),
     )
@@ -166,7 +166,7 @@ pub fn preparation_memory_operations_with_active_slugs(
 pub fn preparation_memory_operations_with_active_slugs_phased(
     objective: &str,
     session_id: &SessionId,
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
     active_slugs: Option<&std::collections::HashSet<&str>>,
     weights: RecallWeightSet,
 ) -> SimardResult<PreparedContext> {
@@ -188,7 +188,7 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
         // recency + confidence + …, phase-weighted) instead of a plain
         // confidence-sorted keyword `search_facts`. Facts come back in
         // descending score order; superseded snapshot revisions are excluded.
-        let per_fragment = bridge.recall_facts_ranked(fragment, 10, 0.0, weights)?;
+        let per_fragment = adapter.recall_facts_ranked(fragment, 10, 0.0, weights)?;
         for fact in per_fragment {
             // PR-A filter 1: drop goal-board:snapshot revisions even
             // when they surface from a per-fragment match. The live
@@ -208,7 +208,7 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
     // the objective text doesn't substring-match "goal-store:record".
     // Uses the same limit as CognitiveMemoryGoalStore::list_via_reader()
     // so status churn doesn't cause current goals to fall off (#2207).
-    let goal_facts = bridge.search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)?;
+    let goal_facts = adapter.search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)?;
 
     // Dedup goal facts by slug, keeping only the latest revision per slug
     // (highest node_id, which is UUID-v7 time-ordered). This mirrors the
@@ -266,7 +266,7 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
     }
 
     // Check if any prospective memories are triggered by the objective.
-    let triggered_prospectives = bridge.check_triggers(objective)?;
+    let triggered_prospectives = adapter.check_triggers(objective)?;
 
     // PR-C (issue #2281, problem 3 + 4): both procedural and episodic
     // recall benefit from breaking the objective into trigger
@@ -281,14 +281,14 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
     // Both bootstrap procedures (`*-bootstrap`) seeded by
     // `seed_bootstrap_procedures` and distilled procedures emitted each
     // cycle by `ooda_loop::cycle::compose_procedure_name` go through the
-    // exact same `bridge.recall_procedure(token, …)` Cypher CONTAINS path
+    // exact same `adapter.recall_procedure(token, …)` Cypher CONTAINS path
     // so neither class can win or lose recall relative to the other.
     let recalled_procedures =
-        recall_procedures_for_objective_with_tokens(bridge, objective, &tokens, 5)?;
+        recall_procedures_for_objective_with_tokens(adapter, objective, &tokens, 5)?;
 
     // PR-C (issue #2281, problem 4) + issue #2395: episodic recall.
     //
-    // Tokenize the objective into trigger keywords, then ask the bridge for up
+    // Tokenize the objective into trigger keywords, then ask the adapter for up
     // to 5 matching episodes via **ranked recall** (`recall_episodes_ranked`)
     // rather than the flat newest-first keyword scan: episodes are scored across
     // relevance + recency + usage + graph proximity (phase-weighted) and gated
@@ -297,7 +297,7 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
     // (`source_label.starts_with("session-")`) which is just the current session
     // loop's own breath echoing back into the prompt.
     //
-    // When the tokenizer produces no usable keywords we skip the bridge call
+    // When the tokenizer produces no usable keywords we skip the adapter call
     // entirely — there is no cheap "match anything" fallback and a no-token
     // query would surface arbitrary episodes that bear no relation to the
     // objective. The query handed to ranked recall is the space-joined tokens,
@@ -307,7 +307,7 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
         (0usize, 0usize, Vec::<CognitiveEpisode>::new())
     } else {
         let query = tokens.join(" ");
-        let raw = bridge.recall_episodes_ranked(&query, 5, weights)?;
+        let raw = adapter.recall_episodes_ranked(&query, 5, weights)?;
         let raw_len = raw.len();
         let kept: Vec<CognitiveEpisode> = raw
             .into_iter()
@@ -325,7 +325,7 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
         recalled_procedures.len(),
         episodic_recall.len(),
     );
-    bridge.push_working(
+    adapter.push_working(
         "context-summary",
         &context_summary,
         session_id.as_str(),
@@ -364,7 +364,7 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
 ///
 /// Best-effort and non-fatal: reinforcement is additive, so a failed access
 /// write is logged and skipped rather than failing the cycle. Backends without
-/// access tracking (legacy bridge, mocks) get the trait's no-op default, so this
+/// access tracking (legacy adapter, mocks) get the trait's no-op default, so this
 /// is a silent no-op there.
 ///
 /// Applying a recalled procedure also emits the `brain_skill_reuse` metric
@@ -420,7 +420,7 @@ const TOKEN_STOPWORDS: &[&str] = &[
 /// 5. Deduplicate while preserving first-seen order.
 ///
 /// Returns an empty vec when the objective produces no usable
-/// tokens; callers should skip the bridge call in that case
+/// tokens; callers should skip the adapter call in that case
 /// (per the episodic-recall spec — no "match anything" fallback).
 ///
 /// Pub-crate so [`crate::base_type_turn`] can share the same tokenizer
@@ -461,7 +461,7 @@ pub(crate) fn tokenize_objective(objective: &str) -> Vec<String> {
 ///   procedures written by the OODA cycle's
 ///   [`crate::ooda_loop::cycle::compose_procedure_name`].
 /// * Base-type adapters passed the **entire raw objective** to a single
-///   `bridge.recall_procedure(objective, 5)` call. The Cypher
+///   `adapter.recall_procedure(objective, 5)` call. The Cypher
 ///   `name CONTAINS '<full objective>'` clause never matched any
 ///   stored procedure because no procedure name embeds a natural
 ///   sentence. Effect: zero distilled procedures ever reached the
@@ -484,12 +484,12 @@ pub(crate) fn tokenize_objective(objective: &str) -> Vec<String> {
 /// issue a single `recall_procedure(objective, max)` call so callers
 /// that pass a pre-tokenized or exact-name query keep working.
 pub fn recall_procedures_for_objective(
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
     objective: &str,
     max: u32,
 ) -> SimardResult<Vec<CognitiveProcedure>> {
     let tokens = tokenize_objective(objective);
-    recall_procedures_for_objective_with_tokens(bridge, objective, &tokens, max)
+    recall_procedures_for_objective_with_tokens(adapter, objective, &tokens, max)
 }
 
 /// Token-aware inner form of [`recall_procedures_for_objective`].
@@ -498,7 +498,7 @@ pub fn recall_procedures_for_objective(
 /// already computed for episodic recall instead of paying for a second
 /// pass over the objective string.
 pub(crate) fn recall_procedures_for_objective_with_tokens(
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
     objective: &str,
     tokens: &[String],
     max: u32,
@@ -506,7 +506,7 @@ pub(crate) fn recall_procedures_for_objective_with_tokens(
     if tokens.is_empty() {
         // Empty-token fallback (see doc on
         // `recall_procedures_for_objective`).
-        let mut hits = bridge.recall_procedure(objective, max)?;
+        let mut hits = adapter.recall_procedure(objective, max)?;
         hits.truncate(max as usize);
         return Ok(hits);
     }
@@ -515,7 +515,7 @@ pub(crate) fn recall_procedures_for_objective_with_tokens(
     let mut by_id: std::collections::HashMap<String, CognitiveProcedure> =
         std::collections::HashMap::new();
     for tok in tokens {
-        let hits = bridge.recall_procedure(tok, per_token_cap)?;
+        let hits = adapter.recall_procedure(tok, per_token_cap)?;
         for p in hits {
             by_id.entry(p.node_id.clone()).or_insert(p);
         }
@@ -571,11 +571,11 @@ pub(crate) fn recall_procedures_for_objective_with_tokens(
 pub fn execution_memory_operations(
     pty_output: &str,
     session_id: &SessionId,
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     // Record the output as a sensory observation (short TTL since it is
     // transient terminal output).
-    bridge.record_sensory("pty-output", pty_output, 120)?;
+    adapter.record_sensory("pty-output", pty_output, 120)?;
 
     // Push a truncated version into working memory for immediate context.
     // Use char-boundary-safe truncation to avoid panic on multi-byte UTF-8.
@@ -589,7 +589,7 @@ pub fn execution_memory_operations(
     } else {
         pty_output.to_string()
     };
-    bridge.push_working("execution-output", &truncated, session_id.as_str(), 0.6)?;
+    adapter.push_working("execution-output", &truncated, session_id.as_str(), 0.6)?;
 
     Ok(())
 }
@@ -604,7 +604,7 @@ pub fn reflection_memory_operations(
     transcript: &str,
     facts: &[FactExtraction],
     session_id: &SessionId,
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     // Store the session transcript as an episodic memory, capturing its id so
     // each fact derived from this transcript can link back to it (issue #2325).
@@ -629,13 +629,13 @@ pub fn reflection_memory_operations(
             if has_facts {
                 // Provenance anchor required — store even if down-scoped.
                 Some(classifier::store_episode_for_provenance(
-                    bridge,
+                    adapter,
                     &content,
                     "session-reflection",
                     &ctx,
                 )?)
             } else {
-                classifier::store_episode_classified(bridge, &content, "session-reflection", &ctx)?
+                classifier::store_episode_classified(adapter, &content, "session-reflection", &ctx)?
             }
         }
     };
@@ -652,7 +652,7 @@ pub fn reflection_memory_operations(
             continue;
         }
         // Cross-session dedup: skip if an existing fact has >= confidence.
-        let existing = bridge
+        let existing = adapter
             .search_facts(&fact.concept, 5, fact.confidence)
             .unwrap_or_default();
         if existing.iter().any(|f| f.confidence >= fact.confidence) {
@@ -661,7 +661,7 @@ pub fn reflection_memory_operations(
         // Provenance write (#2325): thread the transcript episode id so a
         // `DERIVES_FROM` edge links this fact back to the transcript it was
         // reflected from, instead of the legacy no-provenance `store_fact`.
-        bridge.store_fact_with_provenance(
+        adapter.store_fact_with_provenance(
             &fact.concept,
             &fact.content,
             fact.confidence,
@@ -689,9 +689,9 @@ pub fn reflection_memory_operations(
 #[tracing::instrument(skip_all)]
 pub fn persistence_memory_operations(
     session_id: &SessionId,
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
-    persistence_memory_operations_with_snapshot_dir(session_id, bridge, None)
+    persistence_memory_operations_with_snapshot_dir(session_id, adapter, None)
 }
 
 /// Same as [`persistence_memory_operations`] but allows callers (typically
@@ -702,25 +702,25 @@ pub fn persistence_memory_operations(
 #[tracing::instrument(skip_all)]
 pub fn persistence_memory_operations_with_snapshot_dir(
     session_id: &SessionId,
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
     snapshot_dir_override: Option<&std::path::Path>,
 ) -> SimardResult<()> {
     // Consolidate episodes (batch of 10) BEFORE clearing working memory, so a
     // consolidation failure aborts teardown rather than silently dropping the
     // session's working-memory contents. Errors are propagated.
-    bridge.consolidate_episodes(10)?;
+    adapter.consolidate_episodes(10)?;
 
     // Clear working memory for this session.
-    bridge.clear_working(session_id.as_str())?;
+    adapter.clear_working(session_id.as_str())?;
 
     // Prune expired sensory items.
-    bridge.prune_expired_sensory()?;
+    adapter.prune_expired_sensory()?;
 
     // Store a final episodic memory marking session end — routed through the
     // ingestion classifier (issue #2327). The "completed and persisted" marker
     // is operational noise and is dropped unless it carries a failure summary.
     classifier::store_episode_classified(
-        bridge,
+        adapter,
         &format!("Session {session_id} completed and persisted"),
         "session-persistence",
         &classifier::IntakeContext::default(),
@@ -733,7 +733,7 @@ pub fn persistence_memory_operations_with_snapshot_dir(
     // that #1427 was filed against.
     if let Some(dir) = crate::memory_snapshot::snapshot_dir(snapshot_dir_override) {
         let path =
-            crate::memory_snapshot::save_session_snapshot(bridge, session_id.as_str(), &dir)?;
+            crate::memory_snapshot::save_session_snapshot(adapter, session_id.as_str(), &dir)?;
         tracing::info!(path = %path.display(), "memory_snapshot: saved");
         // Prune: keep only the 10 most recent snapshots.
         prune_snapshots(&dir, 10);
@@ -811,23 +811,23 @@ fn prune_snapshots(dir: &std::path::Path, keep: usize) {
 ///
 /// Call this early in the session lifecycle (e.g. after `intake_memory_operations`)
 /// to pull any cross-session facts into the current working context.  The
-/// bridge is queried for recent facts and any matching records are pushed
+/// adapter is queried for recent facts and any matching records are pushed
 /// into working memory so the agent can reason over prior session knowledge.
 pub fn consolidation_intake(
     session_id: &SessionId,
     objective: &str,
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
 ) -> SimardResult<usize> {
-    let prior_facts = bridge.search_facts(objective, 50, 0.0)?;
+    let prior_facts = adapter.search_facts(objective, 50, 0.0)?;
     let count = prior_facts.len();
     if count > 0 {
         let summary = format!("Hydrated {count} prior-session facts for cross-session recall");
-        bridge.push_working("consolidation-intake", &summary, session_id.as_str(), 0.7)?;
+        adapter.push_working("consolidation-intake", &summary, session_id.as_str(), 0.7)?;
         // Cross-session hydration bookkeeping is operational: the classifier
         // down-scopes it (low importance, is_operational = true) rather than
         // storing it at full importance (issue #2327).
         classifier::store_episode_classified(
-            bridge,
+            adapter,
             &summary,
             "consolidation-intake",
             &classifier::IntakeContext::default(),
@@ -844,7 +844,7 @@ pub fn consolidation_intake(
 /// round-trip and prevents data loss on unexpected shutdown.
 pub fn consolidation_persistence(
     session_id: &SessionId,
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     // Drain all working-memory slots into episodic store so they survive
     // session teardown.  Each slot is written as an episode using its
@@ -852,16 +852,16 @@ pub fn consolidation_persistence(
     // through the ingestion classifier so per-slot noise is dropped/down-scoped
     // by content (issue #2327).
     let ctx = classifier::IntakeContext::default();
-    let slots = bridge.get_working(session_id.as_str())?;
+    let slots = adapter.get_working(session_id.as_str())?;
     for slot in &slots {
-        classifier::store_episode_classified(bridge, &slot.content, &slot.slot_type, &ctx)?;
+        classifier::store_episode_classified(adapter, &slot.content, &slot.slot_type, &ctx)?;
     }
 
     // Store an episodic record capturing the consolidation event. The
     // "flushing working memory" marker is operational noise and is dropped
     // unless it carries a failure summary (issue #2327).
     classifier::store_episode_classified(
-        bridge,
+        adapter,
         &format!("Session {session_id} flushing working memory to episodes"),
         "consolidation-persistence",
         &ctx,
@@ -870,13 +870,13 @@ pub fn consolidation_persistence(
     // Consolidate any remaining episodes into long-term storage. Errors are
     // propagated so a failed consolidation aborts the persistence phase
     // rather than silently dropping data.
-    bridge.consolidate_episodes(20)?;
+    adapter.consolidate_episodes(20)?;
 
     // Issue #2329: reclaim the superseded tail left behind by caller-key snapshot
     // dedup (goal-board snapshots, per-goal records). Pruning is housekeeping, so
     // a failure is logged and never aborts teardown — it must not turn a
     // successful consolidation into a failure.
-    match bridge.prune_superseded() {
+    match adapter.prune_superseded() {
         Ok(reclaimed) if reclaimed > 0 => {
             tracing::debug!(
                 reclaimed,
@@ -897,7 +897,7 @@ pub fn consolidation_persistence(
     // provenance-bearing / above-threshold facts are protected. Like the
     // superseded prune, this is housekeeping — a failure is logged and never
     // aborts teardown.
-    match bridge.forget_low_value_facts(false) {
+    match adapter.forget_low_value_facts(false) {
         Ok(report) if report.archived + report.deleted > 0 => {
             tracing::debug!(
                 archived = report.archived,

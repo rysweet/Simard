@@ -4,7 +4,7 @@
 //! module handles three responsibilities:
 //!
 //! 1. **Prepare** — gather memory facts, knowledge results, and procedures
-//!    from the bridges and bundle them into a [`TurnContext`].
+//!    from the adapters and bundle them into a [`TurnContext`].
 //! 2. **Format** — serialize the context into a single string prompt that an
 //!    LLM adapter can submit.
 //! 3. **Parse** — extract structured [`TurnOutput`] from raw LLM text output.
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use crate::base_types::BaseTypeTurnInput;
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
-use crate::knowledge_bridge::{KnowledgeBridge, KnowledgeQueryResult};
+use crate::knowledge_client::{KnowledgeClient, KnowledgeQueryResult};
 use crate::knowledge_context::enrich_planning_context;
 use crate::memory_cognitive::{CognitiveFact, CognitiveProcedure};
 
@@ -53,22 +53,22 @@ pub struct TurnOutput {
     pub confidence: Option<f64>,
 }
 
-/// Prepare a [`TurnContext`] by querying memory and knowledge bridges.
+/// Prepare a [`TurnContext`] by querying memory and knowledge adapters.
 ///
-/// Both bridges are optional (None = not configured, which is fine).
-/// If a bridge IS provided but its call fails, the error propagates — no
+/// Both adapters are optional (None = not configured, which is fine).
+/// If an adapter IS provided but its call fails, the error propagates — no
 /// silent degradation per PHILOSOPHY.md.
 pub fn prepare_turn_context(
     objective: &str,
-    memory_bridge: Option<&dyn CognitiveMemoryOps>,
-    knowledge_bridge: Option<&KnowledgeBridge>,
+    memory_adapter: Option<&dyn CognitiveMemoryOps>,
+    knowledge_client: Option<&KnowledgeClient>,
 ) -> SimardResult<TurnContext> {
-    let memory_facts = match memory_bridge {
-        Some(bridge) => bridge.search_facts(objective, MAX_MEMORY_FACTS, MIN_FACT_CONFIDENCE)?,
+    let memory_facts = match memory_adapter {
+        Some(adapter) => adapter.search_facts(objective, MAX_MEMORY_FACTS, MIN_FACT_CONFIDENCE)?,
         None => Vec::new(),
     };
 
-    let procedures = match memory_bridge {
+    let procedures = match memory_adapter {
         // ws2 #2295: route base-type adapter recall through the same
         // tokenized helper the OODA preparation phase uses. The
         // previous direct `recall_procedure(objective, MAX_PROCEDURES)`
@@ -78,16 +78,16 @@ pub fn prepare_turn_context(
         // procedures regardless of how many cycles had run. See
         // `crate::memory_consolidation::recall_procedures_for_objective`
         // for the unification contract and case-folding invariant.
-        Some(bridge) => crate::memory_consolidation::recall_procedures_for_objective(
-            bridge,
+        Some(adapter) => crate::memory_consolidation::recall_procedures_for_objective(
+            adapter,
             objective,
             MAX_PROCEDURES,
         )?,
         None => Vec::new(),
     };
 
-    let knowledge = match knowledge_bridge {
-        Some(bridge) => enrich_planning_context(objective, bridge)?.relevant_knowledge,
+    let knowledge = match knowledge_client {
+        Some(adapter) => enrich_planning_context(objective, adapter)?.relevant_knowledge,
         None => Vec::new(),
     };
 
@@ -187,60 +187,60 @@ pub fn render_enrichment_block(context: &TurnContext) -> String {
     prompt
 }
 
-/// A bundle of optional memory + knowledge bridges used to enrich a turn.
+/// A bundle of optional memory + knowledge adapters used to enrich a turn.
 ///
-/// This is the single, normalized home for the enrichment bridges. Every
+/// This is the single, normalized home for the enrichment adapters. Every
 /// base-type adapter routes its turn through the same call site
-/// ([`EnrichmentBridges::enrich`] / [`enrich_turn_input`]), eliminating the
+/// ([`EnrichmentAdapters::enrich`] / [`enrich_turn_input`]), eliminating the
 /// divergence flagged in issue #1665 where only the Copilot adapter queried
 /// memory and knowledge.
 ///
-/// Both bridges are optional: `None` means "not configured", which is fine and
-/// yields an unenriched (objective-only) prompt. When a bridge IS configured
+/// Both adapters are optional: `None` means "not configured", which is fine and
+/// yields an unenriched (objective-only) prompt. When an adapter IS configured
 /// but its call fails, the error propagates — no silent degradation, per
 /// PHILOSOPHY.md.
 #[derive(Default)]
-pub struct EnrichmentBridges {
+pub struct EnrichmentAdapters {
     pub memory: Option<Box<dyn CognitiveMemoryOps>>,
-    pub knowledge: Option<KnowledgeBridge>,
+    pub knowledge: Option<KnowledgeClient>,
 }
 
-impl EnrichmentBridges {
-    /// Create an empty bundle (no bridges configured).
+impl EnrichmentAdapters {
+    /// Create an empty bundle (no adapters configured).
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Whether any enrichment bridge is configured.
+    /// Whether any enrichment adapter is configured.
     pub fn is_configured(&self) -> bool {
         self.memory.is_some() || self.knowledge.is_some()
     }
 
     /// Enrich `input` with recalled memory + knowledge using the configured
-    /// bridges, returning a new [`BaseTypeTurnInput`].
+    /// adapters, returning a new [`BaseTypeTurnInput`].
     pub fn enrich(&self, input: &BaseTypeTurnInput) -> SimardResult<BaseTypeTurnInput> {
         enrich_turn_input(input, self.memory.as_deref(), self.knowledge.as_ref())
     }
 }
 
-impl std::fmt::Debug for EnrichmentBridges {
+impl std::fmt::Debug for EnrichmentAdapters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The bridges are not `Debug`; surface only whether each is configured.
-        f.debug_struct("EnrichmentBridges")
+        // The adapters are not `Debug`; surface only whether each is configured.
+        f.debug_struct("EnrichmentAdapters")
             .field("memory", &self.memory.is_some())
             .field("knowledge", &self.knowledge.is_some())
             .finish()
     }
 }
 
-/// Where a base-type session sources its memory + knowledge enrichment bridges.
+/// Where a base-type session sources its memory + knowledge enrichment adapters.
 ///
 /// The default is [`EnrichmentSource::Disabled`] so that lightweight callers and
 /// unit tests incur no filesystem side effects (opening a cognitive-memory
-/// store, launching native bridges). The live production path
+/// store, launching native adapters). The live production path
 /// ([`crate::session_builder::SessionBuilder`]) opts in via each adapter's
 /// `with_enrichment` builder, wiring the same cognitive-memory store and native
-/// knowledge bridge the rest of the runtime uses so each turn is enriched with
+/// knowledge adapter the rest of the runtime uses so each turn is enriched with
 /// relevant memory facts, procedures, and domain knowledge.
 ///
 /// This is the single, shared home for the enrichment-source policy used by
@@ -249,70 +249,70 @@ impl std::fmt::Debug for EnrichmentBridges {
 /// behavior identical across adapters instead of being duplicated per adapter.
 #[derive(Clone, Debug, Default)]
 pub enum EnrichmentSource {
-    /// No enrichment bridges. [`EnrichmentSource::resolve`] yields an empty
-    /// [`EnrichmentBridges`], so `enrich_input` returns the input unchanged and
+    /// No enrichment adapters. [`EnrichmentSource::resolve`] yields an empty
+    /// [`EnrichmentAdapters`], so `enrich_input` returns the input unchanged and
     /// only the `## Objective` section is emitted.
     #[default]
     Disabled,
-    /// Launch the native cognitive-memory + knowledge bridges lazily (on
+    /// Launch the native cognitive-memory + knowledge adapters lazily (on
     /// `open_session`), reading memory from `state_root`. A launch failure logs
-    /// and degrades that bridge to `None` (never panics).
+    /// and degrades that adapter to `None` (never panics).
     Native { state_root: PathBuf },
 }
 
 impl EnrichmentSource {
-    /// Resolve this source into concrete [`EnrichmentBridges`].
+    /// Resolve this source into concrete [`EnrichmentAdapters`].
     ///
     /// [`EnrichmentSource::Disabled`] yields an empty bundle (no side effects).
     /// [`EnrichmentSource::Native`] launches the native cognitive-memory +
-    /// knowledge bridges via [`launch_enrichment_bridges`], degrading any
-    /// unavailable bridge to `None` without panicking.
-    pub fn resolve(&self) -> EnrichmentBridges {
+    /// knowledge adapters via [`launch_enrichment_adapters`], degrading any
+    /// unavailable adapter to `None` without panicking.
+    pub fn resolve(&self) -> EnrichmentAdapters {
         match self {
-            EnrichmentSource::Disabled => EnrichmentBridges::new(),
+            EnrichmentSource::Disabled => EnrichmentAdapters::new(),
             EnrichmentSource::Native { state_root } => {
-                let (memory, knowledge) = launch_enrichment_bridges(state_root);
-                EnrichmentBridges { memory, knowledge }
+                let (memory, knowledge) = launch_enrichment_adapters(state_root);
+                EnrichmentAdapters { memory, knowledge }
             }
         }
     }
 }
 
-/// Launch the cognitive-memory and knowledge bridges that enrich each turn,
+/// Launch the cognitive-memory and knowledge adapters that enrich each turn,
 /// degrading gracefully when either is unavailable.
 ///
 /// Memory is obtained via [`crate::ooda_loop::connect_memory`] (the same
 /// IPC-aware connector recipe steps use, sharing the daemon's live store when
 /// one is running and otherwise opening the library-backed store directly).
 /// Knowledge uses the in-process native transport from
-/// [`crate::bridge_launcher::launch_knowledge_bridge_native`].
+/// [`crate::server_launcher::launch_knowledge_client_native`].
 ///
 /// Mirrors the honest-degradation contract of
-/// [`crate::bridge_launcher::launch_all_bridges`]: a launch failure is logged
-/// and yields `None` for that bridge so turn dispatch proceeds without that
+/// [`crate::server_launcher::launch_all_adapters`]: a launch failure is logged
+/// and yields `None` for that adapter so turn dispatch proceeds without that
 /// enrichment rather than aborting. Neither failure path panics.
 ///
 /// Shared by every adapter that supports production enrichment (Copilot —
 /// issue #1664; RustyClawd — issue #2383) so the launcher exists exactly once.
-pub fn launch_enrichment_bridges(
+pub fn launch_enrichment_adapters(
     state_root: &Path,
-) -> (Option<Box<dyn CognitiveMemoryOps>>, Option<KnowledgeBridge>) {
+) -> (Option<Box<dyn CognitiveMemoryOps>>, Option<KnowledgeClient>) {
     let memory = match crate::ooda_loop::connect_memory(state_root) {
         Ok(memory) => Some(memory),
         Err(error) => {
             eprintln!(
-                "[simard] base-type adapter: cognitive-memory bridge unavailable — memory \
+                "[simard] base-type adapter: cognitive-memory adapter unavailable — memory \
                  enrichment disabled for this session: {error}"
             );
             None
         }
     };
 
-    let knowledge = match crate::bridge_launcher::launch_knowledge_bridge_native() {
+    let knowledge = match crate::server_launcher::launch_knowledge_client_native() {
         Ok(knowledge) => Some(knowledge),
         Err(error) => {
             eprintln!(
-                "[simard] base-type adapter: knowledge bridge unavailable — knowledge \
+                "[simard] base-type adapter: knowledge adapter unavailable — knowledge \
                  enrichment disabled for this session: {error}"
             );
             None
@@ -340,15 +340,15 @@ pub fn launch_enrichment_bridges(
 ///   automatically because they already fold `prompt_preamble` into the
 ///   submitted prompt.
 ///
-/// When no bridges are configured (or they return nothing) the input is
+/// When no adapters are configured (or they return nothing) the input is
 /// returned unchanged — identical to the previous unenriched behavior, just
 /// reachable from every adapter.
 pub fn enrich_turn_input(
     input: &BaseTypeTurnInput,
-    memory_bridge: Option<&dyn CognitiveMemoryOps>,
-    knowledge_bridge: Option<&KnowledgeBridge>,
+    memory_adapter: Option<&dyn CognitiveMemoryOps>,
+    knowledge_client: Option<&KnowledgeClient>,
 ) -> SimardResult<BaseTypeTurnInput> {
-    let context = prepare_turn_context(&input.objective, memory_bridge, knowledge_bridge)?;
+    let context = prepare_turn_context(&input.objective, memory_adapter, knowledge_client)?;
     let block = render_enrichment_block(&context);
 
     let prompt_preamble = if block.is_empty() {
@@ -539,13 +539,13 @@ CONFIDENCE: 0.85";
         assert!((output.confidence.unwrap() - 1.0).abs() < f64::EPSILON);
     }
 
-    // ── enrich_turn_input / EnrichmentBridges ───────────────────────
+    // ── enrich_turn_input / EnrichmentAdapters ───────────────────────
 
     #[test]
-    fn enrich_turn_input_without_bridges_returns_input_unchanged() {
+    fn enrich_turn_input_without_adapters_returns_input_unchanged() {
         let input = BaseTypeTurnInput::objective_only("implement the widget");
         let enriched = enrich_turn_input(&input, None, None).unwrap();
-        // No bridges => objective + preamble unchanged, no memory block.
+        // No adapters => objective + preamble unchanged, no memory block.
         assert_eq!(enriched.objective, "implement the widget");
         assert!(enriched.prompt_preamble.is_empty());
         assert!(
@@ -563,7 +563,7 @@ CONFIDENCE: 0.85";
             prompt_preamble: "conversation so far".to_string(),
         };
         let enriched = enrich_turn_input(&input, None, None).unwrap();
-        // Without bridges the input is returned verbatim.
+        // Without adapters the input is returned verbatim.
         assert_eq!(enriched.objective, "do the task");
         assert_eq!(enriched.identity_context, "you are an engineer");
         assert_eq!(enriched.prompt_preamble, "conversation so far");
@@ -607,12 +607,12 @@ CONFIDENCE: 0.85";
     }
 
     #[test]
-    fn enrichment_bridges_default_is_unconfigured() {
-        let bridges = EnrichmentBridges::new();
-        assert!(!bridges.is_configured());
-        // enrich() with no bridges returns the input unchanged.
+    fn enrichment_adapters_default_is_unconfigured() {
+        let adapters = EnrichmentAdapters::new();
+        assert!(!adapters.is_configured());
+        // enrich() with no adapters returns the input unchanged.
         let input = BaseTypeTurnInput::objective_only("hello");
-        let enriched = bridges.enrich(&input).unwrap();
+        let enriched = adapters.enrich(&input).unwrap();
         assert_eq!(enriched.objective, "hello");
         assert!(
             !enriched
@@ -622,44 +622,44 @@ CONFIDENCE: 0.85";
     }
 
     #[test]
-    fn enrichment_bridges_debug_hides_bridge_internals() {
-        let bridges = EnrichmentBridges::new();
-        let debug = format!("{bridges:?}");
-        assert!(debug.contains("EnrichmentBridges"));
+    fn enrichment_adapters_debug_hides_adapter_internals() {
+        let adapters = EnrichmentAdapters::new();
+        let debug = format!("{adapters:?}");
+        assert!(debug.contains("EnrichmentAdapters"));
         assert!(debug.contains("memory: false"));
         assert!(debug.contains("knowledge: false"));
     }
 
-    // ── EnrichmentSource / launch_enrichment_bridges ────────────────
+    // ── EnrichmentSource / launch_enrichment_adapters ────────────────
 
     #[test]
     fn enrichment_source_default_is_disabled() {
         let source = EnrichmentSource::default();
         assert!(matches!(source, EnrichmentSource::Disabled));
         // Disabled resolves to an empty, unconfigured bundle (no side effects).
-        let bridges = source.resolve();
-        assert!(!bridges.is_configured());
+        let adapters = source.resolve();
+        assert!(!adapters.is_configured());
     }
 
-    /// The production launch helper wires both real bridges when the state root
+    /// The production launch helper wires both real adapters when the state root
     /// can back a cognitive-memory store. Shared by Copilot (#1664) and
     /// RustyClawd (#2383); lives with the launcher it exercises.
     #[test]
     #[serial_test::serial(cognitive_memory)]
-    fn launch_enrichment_bridges_wires_real_bridges_for_valid_state_root() {
+    fn launch_enrichment_adapters_wires_real_adapters_for_valid_state_root() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
         let state_root = tmp.path().join("state");
         std::fs::create_dir_all(&state_root).unwrap();
 
-        let (memory, knowledge) = launch_enrichment_bridges(&state_root);
+        let (memory, knowledge) = launch_enrichment_adapters(&state_root);
         assert!(
             memory.is_some(),
-            "cognitive-memory bridge must launch for a writable state_root"
+            "cognitive-memory adapter must launch for a writable state_root"
         );
         assert!(
             knowledge.is_some(),
-            "native knowledge bridge must launch in-process"
+            "native knowledge adapter must launch in-process"
         );
     }
 
@@ -667,40 +667,40 @@ CONFIDENCE: 0.85";
     /// writable state root — the policy seam shared by every production adapter.
     #[test]
     #[serial_test::serial(cognitive_memory)]
-    fn enrichment_source_native_resolves_configured_bridges() {
+    fn enrichment_source_native_resolves_configured_adapters() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
         let state_root = tmp.path().join("state");
         std::fs::create_dir_all(&state_root).unwrap();
 
-        let bridges = EnrichmentSource::Native { state_root }.resolve();
+        let adapters = EnrichmentSource::Native { state_root }.resolve();
         assert!(
-            bridges.memory.is_some(),
-            "Native source must wire the memory bridge for a writable state_root"
+            adapters.memory.is_some(),
+            "Native source must wire the memory adapter for a writable state_root"
         );
         assert!(
-            bridges.knowledge.is_some(),
-            "Native source must wire the knowledge bridge in-process"
+            adapters.knowledge.is_some(),
+            "Native source must wire the knowledge adapter in-process"
         );
     }
 
     /// A state root that cannot back a store (a regular file) makes the memory
     /// launch fail; it must degrade to `None` without panicking, while the
-    /// in-process knowledge bridge still launches.
+    /// in-process knowledge adapter still launches.
     #[test]
-    fn launch_enrichment_bridges_degrades_when_memory_unavailable() {
+    fn launch_enrichment_adapters_degrades_when_memory_unavailable() {
         use tempfile::NamedTempFile;
         // A regular file as `state_root` makes `<state_root>/cognitive` uncreatable.
         let file = NamedTempFile::new().unwrap();
 
-        let (memory, knowledge) = launch_enrichment_bridges(file.path());
+        let (memory, knowledge) = launch_enrichment_adapters(file.path());
         assert!(
             memory.is_none(),
-            "memory bridge must degrade to None when the state_root cannot back a store"
+            "memory adapter must degrade to None when the state_root cannot back a store"
         );
         assert!(
             knowledge.is_some(),
-            "knowledge bridge must still launch when only memory is unavailable"
+            "knowledge adapter must still launch when only memory is unavailable"
         );
     }
 }

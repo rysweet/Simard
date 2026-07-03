@@ -176,27 +176,27 @@ pub enum SimardError {
     ClockBeforeUnixEpoch {
         reason: String,
     },
-    BridgeSpawnFailed {
-        bridge: String,
+    ServerSpawnFailed {
+        adapter: String,
         reason: String,
     },
-    BridgeTransportError {
-        bridge: String,
+    ServerTransportError {
+        adapter: String,
         reason: String,
     },
-    BridgeProtocolError {
-        bridge: String,
+    ServerProtocolError {
+        adapter: String,
         reason: String,
     },
-    BridgeCallFailed {
-        bridge: String,
+    ServerCallFailed {
+        adapter: String,
         method: String,
         reason: String,
     },
-    BridgeCircuitOpen {
-        bridge: String,
+    ServerCircuitOpen {
+        adapter: String,
     },
-    BridgeError(String),
+    ServerError(String),
     PlanningUnavailable {
         reason: String,
     },

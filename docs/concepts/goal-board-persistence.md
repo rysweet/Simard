@@ -6,7 +6,7 @@ owner: simard
 doc_type: concept
 related:
   - ../reference/goal-board-api.md
-  - ../reference/cognitive-memory-bridge-helpers.md
+  - ../reference/cognitive-memory-adapter-helpers.md
   - ../reference/cognitive-memory-goal-store.md
   - ../howto/recover-goal-board.md
   - ../architecture/overview.md
@@ -92,32 +92,32 @@ into cognitive memory.
 ### Single store, two access patterns
 
 All consumers obtain a typed bridge — see
-[Cognitive memory bridge helpers](../reference/cognitive-memory-bridge-helpers.md) —
+[Cognitive memory bridge helpers](../reference/cognitive-memory-adapter-helpers.md) —
 and route through two functions in
 [`src/goal_curation/operations.rs`](../reference/goal-board-api.md):
 
 | Operation | Function | Bridge type |
 |-----------|----------|-------------|
-| Read | `load_goal_board(bridge.ops())` | `ReaderBridge` (cheap, never contends with daemon writer lock) |
-| Write | `save_goal_board(&board, bridge.ops())` | `WriterBridge` (prefers daemon IPC when available, else takes the local writer lock; fails synchronously if no writer is obtainable) |
+| Read | `load_goal_board(bridge.ops())` | `ReaderAdapter` (cheap, never contends with daemon writer lock) |
+| Write | `save_goal_board(&board, bridge.ops())` | `WriterAdapter` (prefers daemon IPC when available, else takes the local writer lock; fails synchronously if no writer is obtainable) |
 
 When the OODA daemon is running, **all** writes flow through the daemon's
 IPC socket. Dashboard mutation handlers, meeting REPL flows, and any other
 out-of-process writer connect to the same socket via
-`launch_writer_bridge`'s tier 1, so writes are serialized by the daemon.
+`launch_writer_adapter`'s tier 1, so writes are serialized by the daemon.
 When no daemon is running, the writer bridge takes the local LadybugDB
 writer lock directly.
 
 ### Bridge ladders
 
-`launch_writer_bridge` today resolves two writer-bearing tiers in order,
+`launch_writer_adapter` today resolves two writer-bearing tiers in order,
 followed by a read-only fallback:
 
 1. **Daemon IPC** — connect to `~/.simard/memory.sock` if it exists.
 2. **Local writer** — open the LadybugDB store directly with the writer
    lock, after running the stale-lock reaper.
 3. **Read-only fallback (current)** — wrap a read-only handle as a
-   `WriterBridge`. **The issue-#1590 follow-up removes this tier**; once
+   `WriterAdapter`. **The issue-#1590 follow-up removes this tier**; once
    that lands, callers learn synchronously whether they got a writer
    instead of receiving a silently-degraded handle.
 
@@ -126,13 +126,13 @@ own `Arc<dyn CognitiveMemoryOps>` directly to in-process callers (the
 dashboard, the OODA reflection paths) without going through the Unix
 socket.
 
-`open_reader_bridge` resolves two tiers:
+`open_reader_adapter` resolves two tiers:
 
 1. **Daemon IPC** — same socket as above.
 2. **Local read-only opener** — never contends with the writer lock, so
    safe to call concurrently with a running daemon.
 
-See the [helper reference](../reference/cognitive-memory-bridge-helpers.md)
+See the [helper reference](../reference/cognitive-memory-adapter-helpers.md)
 for the full algorithm and stale-lock reaper details.
 
 ### Legacy migration on first startup
@@ -181,13 +181,13 @@ without operator intervention.
 | Consumer | File | Bridge helper | Read fn | Write fn | Notes |
 |----------|------|---------------|---------|----------|-------|
 | OODA cycle | `src/ooda_loop/cycle.rs` | (uses daemon's own bridge) | `load_goal_board` | `persist_board` | Records an episode in addition to saving the snapshot |
-| Dashboard goals API | `src/operator_commands_dashboard/goals.rs` | `launch_writer_bridge` (writes), `open_reader_bridge` (reads) | `load_goal_board` | `save_goal_board` (×6 mutation handlers) | The in-process Arc shortcut keeps mutation handlers from going through Unix-socket IPC against the same process |
-| Dashboard workboard | `src/operator_commands_dashboard/workboard.rs` | `open_reader_bridge` | `load_goal_board` | — | Read-only |
-| Dashboard current work | `src/operator_commands_dashboard/current_work.rs` | `open_reader_bridge` | `load_goal_board` | — | Read-only |
-| Dashboard metrics panel | `src/operator_commands_dashboard/metrics.rs` | `open_reader_bridge` | `load_goal_board` | — | Reports `{ source: "cognitive-memory:goal-board:snapshot", count: N }` |
-| Meeting goal curation | `src/operator_commands_meeting/goal_curation.rs` | `open_reader_bridge` (reads), `launch_writer_bridge` (mutations) | `load_goal_board` + `active_goals_as_records` | `save_goal_board` | Replaces `FileBackedGoalStore` |
-| Meeting improvement curation | `src/operator_commands_meeting/improvement_curation.rs` | `launch_writer_bridge` | `load_goal_board` + `active_goals_as_records` | `save_goal_board` | Replaces `FileBackedGoalStore` |
-| Engineer loop | `src/engineer_loop/mod.rs` | `launch_writer_bridge` (used because the load step also performs the legacy `goal_records.json` migration write-back) | `load_goal_board` + `active_goals_as_records` | — | Reads top 5 active goals as `GoalRecord`s |
+| Dashboard goals API | `src/operator_commands_dashboard/goals.rs` | `launch_writer_adapter` (writes), `open_reader_adapter` (reads) | `load_goal_board` | `save_goal_board` (×6 mutation handlers) | The in-process Arc shortcut keeps mutation handlers from going through Unix-socket IPC against the same process |
+| Dashboard workboard | `src/operator_commands_dashboard/workboard.rs` | `open_reader_adapter` | `load_goal_board` | — | Read-only |
+| Dashboard current work | `src/operator_commands_dashboard/current_work.rs` | `open_reader_adapter` | `load_goal_board` | — | Read-only |
+| Dashboard metrics panel | `src/operator_commands_dashboard/metrics.rs` | `open_reader_adapter` | `load_goal_board` | — | Reports `{ source: "cognitive-memory:goal-board:snapshot", count: N }` |
+| Meeting goal curation | `src/operator_commands_meeting/goal_curation.rs` | `open_reader_adapter` (reads), `launch_writer_adapter` (mutations) | `load_goal_board` + `active_goals_as_records` | `save_goal_board` | Replaces `FileBackedGoalStore` |
+| Meeting improvement curation | `src/operator_commands_meeting/improvement_curation.rs` | `launch_writer_adapter` | `load_goal_board` + `active_goals_as_records` | `save_goal_board` | Replaces `FileBackedGoalStore` |
+| Engineer loop | `src/engineer_loop/mod.rs` | `launch_writer_adapter` (used because the load step also performs the legacy `goal_records.json` migration write-back) | `load_goal_board` + `active_goals_as_records` | — | Reads top 5 active goals as `GoalRecord`s |
 | Bootstrap-assembled `RuntimePorts.goal_store` | `src/bootstrap/assembly.rs` | **planned** `CognitiveMemoryGoalStore` (uses both helpers internally) | adapter `list` / `active_top_goals` | adapter `upsert` / `remove` | Currently still `FileBackedGoalStore::try_new(config.goal_store_path())` — see [goal-store adapter](../reference/cognitive-memory-goal-store.md) |
 
 After the bootstrap-adapter migration lands, `FileBackedGoalStore` is no
@@ -306,7 +306,7 @@ Three important notes on the load step:
 - **Concurrent daemons**: if two Simard daemons share the same
   `SIMARD_STATE_ROOT`, the second one will fail to take the writer lock
   and exit. This is enforced by LadybugDB.
-- **Bridge writes when no writer can be acquired**: `launch_writer_bridge`
+- **Bridge writes when no writer can be acquired**: `launch_writer_adapter`
   returns `Err` synchronously rather than returning a degraded bridge.
   Callers must handle the error — they cannot silently fall through to a
   read-only path. This is rare and indicates a stale lock the reaper

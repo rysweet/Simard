@@ -45,27 +45,27 @@ use crate::error::SimardResult;
 use crate::goal_curation::{
     GoalBoard, load_goal_board, save_goal_board, save_goal_board_with_removals,
 };
-use crate::memory_ipc::{launch_writer_bridge, open_reader_bridge};
+use crate::memory_ipc::{launch_writer_adapter, open_reader_adapter};
 
 /// Read the cognitive-memory `goal-board:snapshot` for the dashboard.
 ///
 /// Used by every dashboard handler that previously read the legacy
 /// on-disk goal-records file from `<state_root>` (issue #1590). Routes
-/// through [`open_reader_bridge`] so the daemon's IPC writer can serve
+/// through [`open_reader_adapter`] so the daemon's IPC writer can serve
 /// the read when running embedded; otherwise opens the on-disk DB
 /// read-only.
 pub(crate) fn dashboard_goal_board_snapshot(state_root: &Path) -> SimardResult<GoalBoard> {
-    let reader = open_reader_bridge(state_root)?;
+    let reader = open_reader_adapter(state_root)?;
     load_goal_board(reader.ops())
 }
 
 /// Persist a `GoalBoard` from a dashboard write handler.
 ///
-/// Routes through [`launch_writer_bridge`] which prefers the daemon's IPC
+/// Routes through [`launch_writer_adapter`] which prefers the daemon's IPC
 /// socket (avoiding lock contention when the daemon is running) and falls
 /// back to a direct on-disk open otherwise (issue #1590).
 pub(crate) fn dashboard_save_goal_board(state_root: &Path, board: &GoalBoard) -> SimardResult<()> {
-    let writer = launch_writer_bridge(state_root)?;
+    let writer = launch_writer_adapter(state_root)?;
     save_goal_board(board, writer.ops())
 }
 
@@ -85,7 +85,7 @@ pub(crate) fn dashboard_save_goal_board_with_removals(
     board: &GoalBoard,
     force_remove_ids: &[String],
 ) -> SimardResult<()> {
-    let writer = launch_writer_bridge(state_root)?;
+    let writer = launch_writer_adapter(state_root)?;
     save_goal_board_with_removals(board, force_remove_ids, writer.ops())
 }
 
@@ -137,7 +137,7 @@ pub fn serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 
     // Standalone `dashboard serve` does NOT open or register its own
     // cognitive-memory handle. Every dashboard read/write goes through the
-    // launcher resolution ladder (`open_reader_bridge` / `launch_writer_bridge`),
+    // launcher resolution ladder (`open_reader_adapter` / `launch_writer_adapter`),
     // consulted per request: it routes to a running daemon's IPC socket (tier-1)
     // when one is serving this `state_root`, and otherwise to the tier-2
     // shared-store cache (#2334), which already gives this process a single

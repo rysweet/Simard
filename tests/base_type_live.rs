@@ -10,13 +10,13 @@ use simard::base_type_turn::{
 use simard::base_types::{
     BaseTypeCapability, BaseTypeFactory, BaseTypeSessionRequest, BaseTypeTurnInput,
 };
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
 use simard::identity::OperatingMode;
-use simard::knowledge_bridge::{KnowledgeBridge, KnowledgeQueryResult, KnowledgeSource};
-use simard::memory_bridge::CognitiveMemoryBridge;
+use simard::knowledge_client::{KnowledgeClient, KnowledgeQueryResult, KnowledgeSource};
+use simard::memory_adapter::CognitiveMemoryAdapter;
 use simard::memory_cognitive::{CognitiveFact, CognitiveProcedure};
 use simard::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
+use simard::server_subprocess::InMemoryServerTransport;
+use simard::server_transport::ServerErrorPayload;
 use simard::session::SessionId;
 
 fn test_request() -> BaseTypeSessionRequest {
@@ -30,8 +30,8 @@ fn test_request() -> BaseTypeSessionRequest {
     }
 }
 
-fn mock_memory_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("test-memory", |method, params| match method {
+fn mock_memory_adapter() -> CognitiveMemoryAdapter {
+    let transport = InMemoryServerTransport::new("test-memory", |method, params| match method {
         "memory.search_facts" => {
             let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
             Ok(
@@ -44,16 +44,16 @@ fn mock_memory_bridge() -> CognitiveMemoryBridge {
             "name": "build-and-test", "steps": ["cargo build", "cargo test"],
             "prerequisites": ["rust toolchain"], "usage_count": 5}]})),
         "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(ServerErrorPayload {
             code: -32601,
             message: format!("unknown method: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
-fn mock_knowledge_bridge() -> KnowledgeBridge {
-    let transport = InMemoryBridgeTransport::new("test-knowledge", |method, params| match method {
+fn mock_knowledge_client() -> KnowledgeClient {
+    let transport = InMemoryServerTransport::new("test-knowledge", |method, params| match method {
         "knowledge.list_packs" => Ok(json!({"packs": [{"name": "rust-expert",
             "description": "Rust programming knowledge",
             "article_count": 120, "section_count": 450}]})),
@@ -66,21 +66,21 @@ fn mock_knowledge_bridge() -> KnowledgeBridge {
                 "sources": [{"title": "Rust Guide", "section": "Overview",
                     "url": "https://example.com/rust"}], "confidence": 0.9}))
         }
-        _ => Err(BridgeErrorPayload {
+        _ => Err(ServerErrorPayload {
             code: -32601,
             message: format!("unknown method: {method}"),
         }),
     });
-    KnowledgeBridge::new(Box::new(transport))
+    KnowledgeClient::new(Box::new(transport))
 }
 
 // -- Turn context preparation --
 
 #[test]
-fn prepare_context_with_both_bridges() {
-    let memory = mock_memory_bridge();
-    // Knowledge bridge mock returns incompatible format; test memory bridge only.
-    // Knowledge bridge integration tested separately in knowledge_context tests.
+fn prepare_context_with_both_adapters() {
+    let memory = mock_memory_adapter();
+    // Knowledge adapter mock returns incompatible format; test memory adapter only.
+    // Knowledge adapter integration tested separately in knowledge_context tests.
     let context = prepare_turn_context("implement error handling", Some(&memory), None).unwrap();
     assert_eq!(context.objective, "implement error handling");
     assert!(!context.memory_facts.is_empty());
@@ -90,24 +90,24 @@ fn prepare_context_with_both_bridges() {
 }
 
 #[test]
-fn prepare_context_with_broken_knowledge_bridge_returns_error() {
-    let memory = mock_memory_bridge();
-    let transport = InMemoryBridgeTransport::new("broken-knowledge", |_method, _params| {
-        Err(BridgeErrorPayload {
+fn prepare_context_with_broken_knowledge_client_returns_error() {
+    let memory = mock_memory_adapter();
+    let transport = InMemoryServerTransport::new("broken-knowledge", |_method, _params| {
+        Err(ServerErrorPayload {
             code: -32000,
-            message: "bridge unavailable".to_string(),
+            message: "adapter unavailable".to_string(),
         })
     });
-    let knowledge = KnowledgeBridge::new(Box::new(transport));
+    let knowledge = KnowledgeClient::new(Box::new(transport));
     let result = prepare_turn_context("implement error handling", Some(&memory), Some(&knowledge));
     assert!(
         result.is_err(),
-        "broken knowledge bridge should propagate error, not silently degrade"
+        "broken knowledge adapter should propagate error, not silently degrade"
     );
 }
 
 #[test]
-fn prepare_context_without_bridges() {
+fn prepare_context_without_adapters() {
     let context = prepare_turn_context("do something", None, None).unwrap();
     assert!(context.memory_facts.is_empty());
     assert!(context.procedures.is_empty());
@@ -116,7 +116,7 @@ fn prepare_context_without_bridges() {
 
 #[test]
 fn prepare_context_with_only_memory() {
-    let memory = mock_memory_bridge();
+    let memory = mock_memory_adapter();
     let context = prepare_turn_context("test objective", Some(&memory), None).unwrap();
     assert!(!context.memory_facts.is_empty());
     assert!(context.knowledge.is_empty());
@@ -359,8 +359,8 @@ fn harness_adapter_rejects_multi_process_topology() {
 
 #[test]
 fn full_turn_round_trip() {
-    let memory = mock_memory_bridge();
-    let knowledge = mock_knowledge_bridge();
+    let memory = mock_memory_adapter();
+    let knowledge = mock_knowledge_client();
     let context = prepare_turn_context(
         "implement error handling in Rust",
         Some(&memory),

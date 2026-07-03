@@ -34,9 +34,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::error::{SimardError, SimardResult};
-use crate::ooda_brain::{
-    BrainPhase, EscalationConfig, LadderRung, LifecycleParseOutcome, build_phase_escalation_note,
-    extract_recipe_decision_output, record_verdict_parse_metric, run_brain_ladder,
+use crate::ooda_reasoners::{
+    EscalationConfig, LadderRung, LifecycleParseOutcome, ReasonerPhase,
+    build_phase_escalation_note, extract_recipe_decision_output, record_verdict_parse_metric,
+    run_brain_ladder,
 };
 
 use super::merge_authority::PrSnapshot;
@@ -133,7 +134,7 @@ impl MergeJudge for RecipeMergeJudge {
         let base_raw = invoke(LadderRung::Base, "")?;
         let (judgment, outcome) = parse_merge_outcome(&base_raw);
         if !outcome.is_parse_failure() {
-            record_verdict_parse_metric(BrainPhase::MergeJudge, &pr_label, outcome, "ok", 1);
+            record_verdict_parse_metric(ReasonerPhase::MergeJudge, &pr_label, outcome, "ok", 1);
             crate::recipe_output::record_parse_outcome("merge_judge", true);
             return Ok(judgment);
         }
@@ -156,7 +157,7 @@ impl MergeJudge for RecipeMergeJudge {
         // discarded as `_termination`) so a fail-closed `Unclear` row attributes
         // the default to its terminal path, consistent with decide/orient.
         record_verdict_parse_metric(
-            BrainPhase::MergeJudge,
+            ReasonerPhase::MergeJudge,
             &pr_label,
             final_outcome,
             termination.cause_label(),
@@ -508,7 +509,7 @@ mod tests {
 //     (fail closed) — never a SUCCESS-without-verdict.
 //
 // The envelope-extraction contract is mirrored inline (the production helper
-// `extract_recipe_decision_output` lives in `ooda_brain` and is being lifted
+// `extract_recipe_decision_output` lives in `ooda_reasoners` and is being lifted
 // into a shared `brain_ladder` module by the implementation step). The unit
 // under test here is the parse composition the judge must wire in; the live
 // `recipe-runner-rs --output-format json` boundary is covered by the
@@ -717,7 +718,7 @@ mod issue_2428_tests {
 #[cfg(test)]
 mod issue_2428_production_tests {
     use super::*;
-    use crate::ooda_brain::LifecycleParseOutcome;
+    use crate::ooda_reasoners::LifecycleParseOutcome;
 
     #[test]
     fn json_verdict_parses_as_parsed() {

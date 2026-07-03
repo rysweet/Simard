@@ -2,7 +2,7 @@
 //! and the durable `simard self-health --json` shape.
 
 use super::health::{
-    BrainsLlmBackedProbe, GoalBoardIntactProbe, MemoryIntactProbe, NoQuarantineProbe,
+    GoalBoardIntactProbe, MemoryIntactProbe, NoQuarantineProbe, ReasonersLlmBackedProbe,
     SelfHealthProbes, SelfHealthReport, VersionAdvancedProbe,
 };
 
@@ -22,7 +22,7 @@ fn all_healthy_probes() -> SelfHealthProbes {
             healthy: true,
             active_goals: 5,
         },
-        brains_llm_backed: BrainsLlmBackedProbe {
+        brains_llm_backed: ReasonersLlmBackedProbe {
             healthy: true,
             fallback_records: 0,
         },

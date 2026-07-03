@@ -1,17 +1,17 @@
-//! Integration tests for gym evaluation bridge and scoring.
+//! Integration tests for gym evaluation adapter and scoring.
 //!
-//! These tests use an in-memory bridge transport to validate the full
-//! pipeline: bridge call -> deserialization -> scoring -> regression
+//! These tests use an in-memory adapter transport to validate the full
+//! pipeline: adapter call -> deserialization -> scoring -> regression
 //! detection -> improvement tracking, without requiring a running Python
-//! bridge server.
+//! adapter server.
 
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
-use simard::gym_bridge::{GymBridge, GymScenarioResult, GymSuiteResult, ScoreDimensions};
+use simard::gym_client::{GymClient, GymScenarioResult, GymSuiteResult, ScoreDimensions};
 use simard::gym_scoring::{
     GymSuiteScore, RegressionSeverity, TrendDirection, aggregate_suite_scores, detect_regression,
     suite_score_from_result, track_improvement,
 };
+use simard::server_subprocess::InMemoryServerTransport;
+use simard::server_transport::ServerErrorPayload;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -58,8 +58,8 @@ fn suite_score(overall: f64, accuracy: f64) -> GymSuiteScore {
     }
 }
 
-fn mock_bridge_with_scenarios() -> GymBridge {
-    let transport = InMemoryBridgeTransport::new("gym-eval", |method, params| match method {
+fn mock_adapter_with_scenarios() -> GymClient {
+    let transport = InMemoryServerTransport::new("gym-eval", |method, params| match method {
         "gym.list_scenarios" => Ok(serde_json::json!([
             {
                 "id": "L1",
@@ -146,22 +146,22 @@ fn mock_bridge_with_scenarios() -> GymBridge {
             "scenarios_total": 2,
             "degraded_sources": []
         })),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(ServerErrorPayload {
             code: -32601,
             message: format!("unknown method: {method}"),
         }),
     });
-    GymBridge::new(Box::new(transport))
+    GymClient::new(Box::new(transport))
 }
 
 // ---------------------------------------------------------------------------
-// Bridge integration tests
+// Adapter integration tests
 // ---------------------------------------------------------------------------
 
 #[test]
-fn bridge_list_scenarios_returns_typed_results() {
-    let bridge = mock_bridge_with_scenarios();
-    let scenarios = bridge.list_scenarios().unwrap();
+fn adapter_list_scenarios_returns_typed_results() {
+    let adapter = mock_adapter_with_scenarios();
+    let scenarios = adapter.list_scenarios().unwrap();
     assert_eq!(scenarios.len(), 2);
     assert_eq!(scenarios[0].id, "L1");
     assert_eq!(scenarios[0].question_count, 5);
@@ -170,9 +170,9 @@ fn bridge_list_scenarios_returns_typed_results() {
 }
 
 #[test]
-fn bridge_run_scenario_returns_scored_result() {
-    let bridge = mock_bridge_with_scenarios();
-    let result = bridge.run_scenario("L1").unwrap();
+fn adapter_run_scenario_returns_scored_result() {
+    let adapter = mock_adapter_with_scenarios();
+    let result = adapter.run_scenario("L1").unwrap();
     assert!(result.success);
     assert_eq!(result.scenario_id, "L1");
     assert!((result.score - 0.85).abs() < 1e-9);
@@ -180,9 +180,9 @@ fn bridge_run_scenario_returns_scored_result() {
 }
 
 #[test]
-fn bridge_run_suite_returns_aggregate_result() {
-    let bridge = mock_bridge_with_scenarios();
-    let result = bridge.run_suite("progressive").unwrap();
+fn adapter_run_suite_returns_aggregate_result() {
+    let adapter = mock_adapter_with_scenarios();
+    let result = adapter.run_suite("progressive").unwrap();
     assert!(result.success);
     assert_eq!(result.scenarios_passed, 2);
     assert_eq!(result.scenarios_total, 2);
@@ -191,15 +191,15 @@ fn bridge_run_suite_returns_aggregate_result() {
 }
 
 #[test]
-fn bridge_error_propagates_as_simard_error() {
-    let transport = InMemoryBridgeTransport::new("gym-eval", |_method, _params| {
-        Err(BridgeErrorPayload {
+fn adapter_error_propagates_as_simard_error() {
+    let transport = InMemoryServerTransport::new("gym-eval", |_method, _params| {
+        Err(ServerErrorPayload {
             code: -32603,
             message: "eval backend crashed".to_string(),
         })
     });
-    let bridge = GymBridge::new(Box::new(transport));
-    let err = bridge.list_scenarios().unwrap_err();
+    let adapter = GymClient::new(Box::new(transport));
+    let err = adapter.list_scenarios().unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("eval backend crashed"));
 }
@@ -331,12 +331,12 @@ fn track_improvement_directions() {
     );
 }
 
-// End-to-end pipeline: bridge -> scoring -> regression -> trend
+// End-to-end pipeline: adapter -> scoring -> regression -> trend
 
 #[test]
-fn full_pipeline_bridge_to_trend() {
-    let bridge = mock_bridge_with_scenarios();
-    let current_score = suite_score_from_result(&bridge.run_suite("progressive").unwrap());
+fn full_pipeline_adapter_to_trend() {
+    let adapter = mock_adapter_with_scenarios();
+    let current_score = suite_score_from_result(&adapter.run_suite("progressive").unwrap());
     let baseline = suite_score(0.90, 0.95);
     let regressions = detect_regression(&current_score, &baseline);
     assert!(!regressions.is_empty(), "0.78 should regress vs 0.90");

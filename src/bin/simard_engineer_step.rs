@@ -8,7 +8,7 @@
 //!   persist       --state-root <path> --topology <kebab> --objective <text>
 //!                 --inspection-json <json> --action-json <json>
 //!                 --verification-json <json>
-//!                 [--terminal-bridge-json <json>]
+//!                 [--terminal-adapter-json <json>]
 //!
 //! On success: prints the phase output as JSON to stdout, exit 0.
 //! On error: writes the error to stderr, exits 2.
@@ -24,7 +24,7 @@ use simard::engineer_loop::{
     persist_engineer_loop_artifacts, run_optional_review, spawn_agent_for_goal,
 };
 use simard::runtime::RuntimeTopology;
-use simard::terminal_engineer_bridge::TerminalBridgeContext;
+use simard::terminal_engineer::TerminalEngineerContext;
 
 fn die(msg: impl AsRef<str>) -> ExitCode {
     eprintln!("simard-engineer-step: {}", msg.as_ref());
@@ -125,12 +125,14 @@ fn cmd_persist(args: &[String]) -> Result<(), String> {
         serde_json::from_str(&action_json).map_err(|e| format!("parse action-json: {e}"))?;
     let verification: VerificationReport = serde_json::from_str(&verification_json)
         .map_err(|e| format!("parse verification-json: {e}"))?;
-    let bridge_context: Option<TerminalBridgeContext> = match arg(args, "--terminal-bridge-json") {
-        Some(s) if !s.is_empty() && s != "null" => {
-            Some(serde_json::from_str(&s).map_err(|e| format!("parse terminal-bridge-json: {e}"))?)
-        }
-        _ => None,
-    };
+    let adapter_context: Option<TerminalEngineerContext> =
+        match arg(args, "--terminal-adapter-json") {
+            Some(s) if !s.is_empty() && s != "null" => Some(
+                serde_json::from_str(&s)
+                    .map_err(|e| format!("parse terminal-adapter-json: {e}"))?,
+            ),
+            _ => None,
+        };
 
     persist_engineer_loop_artifacts(
         &state_root,
@@ -139,7 +141,7 @@ fn cmd_persist(args: &[String]) -> Result<(), String> {
         &inspection,
         &action,
         &verification,
-        bridge_context.as_ref(),
+        adapter_context.as_ref(),
     )
     .map_err(|e| format!("persist_engineer_loop_artifacts failed: {e}"))?;
     println!("{{\"status\":\"persisted\"}}");

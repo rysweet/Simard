@@ -6,7 +6,7 @@ owner: simard
 doc_type: concept
 related:
   - ./goal-fact-dedup-in-preparation.md
-  - ../reference/cognitive-memory-bridge-helpers.md
+  - ../reference/cognitive-memory-adapter-helpers.md
   - ../architecture/cognitive-memory.md
   - ../memory.md
   - ../howto/diagnose-search-facts-issues.md
@@ -194,7 +194,7 @@ entry.
 
 - [Goal fact dedup in preparation](./goal-fact-dedup-in-preparation.md)
   — the per-slug dedup that runs after the objective search.
-- [Cognitive memory bridge helpers](../reference/cognitive-memory-bridge-helpers.md)
+- [Cognitive memory bridge helpers](../reference/cognitive-memory-adapter-helpers.md)
   — how `search_facts` reaches the graph store.
 - [Memory architecture](../memory.md) — overview of the six memory
   types.

@@ -3,15 +3,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::bridge_launcher::{launch_gym_bridge_native, launch_knowledge_bridge_native};
 use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use crate::goal_curation::{load_goal_board, persist_board};
 use crate::identity::OperatingMode;
 use crate::memory_ipc;
 use crate::ooda_loop::{
-    OodaBridges, OodaConfig, OodaPhase, OodaState, run_ooda_cycle, summarize_cycle_report,
+    OodaConfig, OodaContext, OodaPhase, OodaState, run_ooda_cycle, summarize_cycle_report,
 };
 use crate::runtime_config::RuntimeConfig;
+use crate::server_launcher::{launch_gym_client_native, launch_knowledge_client_native};
 use crate::session_builder::{LlmProvider, SessionBuilder};
 
 use crate::operator_commands_ooda::persistence::{persist_cycle_report, persist_cycle_to_memory};
@@ -21,14 +21,14 @@ pub use helpers::*;
 
 mod backup;
 
-mod brains;
+mod reasoners;
 
 mod config;
 pub use config::DaemonDashboardConfig;
 
 /// Run one or more OODA cycles as a daemon-style loop.
 ///
-/// Launches all bridges, opens a RustyClawd session via [`SessionBuilder`]
+/// Launches all adapters, opens a RustyClawd session via [`SessionBuilder`]
 /// for real autonomous work, loads the goal board from cognitive memory,
 /// and runs OODA cycles until `max_cycles` is reached (0 = infinite).
 ///
@@ -40,7 +40,7 @@ pub use config::DaemonDashboardConfig;
 /// cleanly, and the daemon exits without orphaning PTY subprocesses.
 ///
 /// If no LLM adapter is available (e.g. no API key, no Copilot SDK),
-/// the daemon exits with an error — no silent degradation to bridge-only mode.
+/// the daemon exits with an error — no silent degradation to adapter-only mode.
 pub fn run_ooda_daemon(
     max_cycles: u32,
     state_root_override: Option<PathBuf>,
@@ -63,7 +63,7 @@ pub fn run_ooda_daemon(
     }
     // --------------------------------------------------------------------
 
-    // Auto-ensure runtime dependencies before launching bridges
+    // Auto-ensure runtime dependencies before launching adapters
     if let Err(e) = crate::cmd_ensure_deps::handle_ensure_deps() {
         eprintln!("Warning: some dependencies could not be verified: {e}");
     }
@@ -83,7 +83,7 @@ pub fn run_ooda_daemon(
     // Register the live writer for in-process callers (dashboard, OODA
     // loop, reflection, etc.) so they bypass IPC and disk re-open and
     // share this exact handle. This eliminates the dashboard's
-    // hollow-success failure mode where launch_writer_bridge previously
+    // hollow-success failure mode where launch_writer_adapter previously
     // fell through to a read-only handle when both IPC and direct open
     // failed (issue #1590 follow-up).
     memory_ipc::register_in_process_writer(state_root.clone(), Arc::clone(&shared_mem));
@@ -122,8 +122,8 @@ pub fn run_ooda_daemon(
 
     let memory: Box<dyn CognitiveMemoryOps> =
         Box::new(memory_ipc::SharedMemory(Arc::clone(&shared_mem)));
-    let knowledge = launch_knowledge_bridge_native()?;
-    let gym = launch_gym_bridge_native()?;
+    let knowledge = launch_knowledge_client_native()?;
+    let gym = launch_gym_client_native()?;
 
     // One-time bootstrap: snapshot SIMARD_LLM_PROVIDER (if set in env)
     // to <state_root>/config.toml so child processes (engineer subprocesses
@@ -169,33 +169,33 @@ pub fn run_ooda_daemon(
     // progress-evidence checker.
     let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-    let brain = brains::build_act_brain(&state_root, &repo_root);
-    let decide_brain = brains::build_decide_brain(&state_root, &repo_root);
-    let orient_brain = brains::build_orient_brain(&state_root, &repo_root);
+    let act_reasoner = reasoners::build_act_reasoner(&state_root, &repo_root);
+    let decide_reasoner = reasoners::build_decide_reasoner(&state_root, &repo_root);
+    let orient_reasoner = reasoners::build_orient_reasoner(&state_root, &repo_root);
 
     // After all three brains are constructed, surface the cumulative
     // fallback count in the dashboard. Nonzero == daemon is running in
     // degraded mode (see issues #1711, #1748). Future health endpoints
     // should refuse "healthy" when this is nonzero.
-    let degraded = brains::fallback_brain_count();
+    let degraded = reasoners::fallback_reasoner_count();
     if degraded > 0 {
         daemon_log(
             &state_root,
             &format!(
-                "[simard] OODA daemon: DEGRADED MODE — {degraded}/3 brains fell back to deterministic (see issues #1711, #1748)"
+                "[simard] OODA daemon: DEGRADED MODE — {degraded}/3 reasoners fell back to deterministic (see issues #1711, #1748)"
             ),
         );
     } else {
         daemon_log(
             &state_root,
-            "[simard] OODA daemon: all 3 brains LLM-backed (no fallback in use)",
+            "[simard] OODA daemon: brain online — orient/decide/act reasoners LLM-backed (no fallback)",
         );
     }
 
     // Surface where the daemon will look for hot-reloadable prompt assets so
     // operators know where to edit (see `docs/concepts/prompt-driven-brain-iteration.md`).
     {
-        let store = crate::ooda_brain::prompt_store::global();
+        let store = crate::ooda_reasoners::prompt_store::global();
         let dir_str = store
             .resolved_dir()
             .map(|p| p.display().to_string())
@@ -247,7 +247,7 @@ pub fn run_ooda_daemon(
                     "[simard] progress-evidence: enabled (LlmReviewerProgressChecker -- direct LLM fallback)",
                 );
                 let reviewer_submitter =
-                    crate::ooda_brain::SessionLlmSubmitter::new(reviewer_provider);
+                    crate::ooda_reasoners::SessionLlmSubmitter::new(reviewer_provider);
                 std::sync::Arc::new(
                     crate::goal_curation::progress_reviewer::LlmReviewerProgressChecker::new(
                         reviewer_submitter,
@@ -290,21 +290,21 @@ pub fn run_ooda_daemon(
         None
     };
 
-    let mut bridges = OodaBridges {
+    let mut adapters = OodaContext {
         memory,
         knowledge,
         gym,
         session: Some(session),
         session_factory: Some(session_factory),
-        brain,
-        decide_brain,
-        orient_brain,
+        act_reasoner,
+        decide_reasoner,
+        orient_reasoner,
         repo_root,
         progress_evidence,
         completion_evidence,
     };
 
-    let board = load_goal_board(&*bridges.memory).unwrap_or_default();
+    let board = load_goal_board(&*adapters.memory).unwrap_or_default();
     let mut state = OodaState::new(board);
     let config = OodaConfig::default();
 
@@ -422,7 +422,7 @@ pub fn run_ooda_daemon(
 
     // De-fork Phase 2b (issue #2307): the native lbug-WAL file-copy backup was
     // removed. Issue #2420 reintroduces a periodic **verified** backup below —
-    // it snapshots the live store through the bridge (so it inherently targets
+    // it snapshots the live store through the adapter (so it inherently targets
     // the migrated `state_root/cognitive` path), verifies the backup re-opens
     // before pruning, and is best-effort (a failure WARNs, never aborts the
     // cycle). The library backend still owns its own WAL durability.
@@ -515,7 +515,7 @@ pub fn run_ooda_daemon(
 
     // ── Cognitive-thread scheduler (issue #2419) ───────────────────────
     // ADDITIVE and OFF by default. When SIMARD_COGNITIVE_THREADS_ENABLED is
-    // truthy, a `Mind` hosts NEW background cognitive threads (safe
+    // truthy, a `Brain` hosts NEW background cognitive threads (safe
     // maintenance/cleanup + engineer-log analysis) on their own cadence,
     // subsuming the ad-hoc periodic-task pattern for these threads. OODA
     // itself stays driven by this loop's authoritative inline cycle below so
@@ -525,7 +525,7 @@ pub fn run_ooda_daemon(
         .ok()
         .map(|s| matches!(s.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
         .unwrap_or(false);
-    let cognitive_repo_root = bridges.repo_root.clone();
+    let cognitive_repo_root = adapters.repo_root.clone();
     let cognitive_runtime = if cognitive_threads_enabled {
         match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -544,7 +544,7 @@ pub fn run_ooda_daemon(
     } else {
         None
     };
-    let mut mind = crate::cognitive_threads::Mind::new();
+    let mut mind = crate::cognitive_threads::Brain::new();
     if cognitive_runtime.is_some() {
         mind.register(Box::new(
             crate::cognitive_threads::MaintenanceThread::from_env(),
@@ -593,7 +593,7 @@ pub fn run_ooda_daemon(
                 "[simard] OODA daemon: on-disk binary is a genuinely different image (content hash changed) — reloading via exec()",
             );
             // Close the LLM session before exec so we don't leak resources.
-            if let Some(ref mut session) = bridges.session {
+            if let Some(ref mut session) = adapters.session {
                 let _ = session.close();
             }
             exec_self_reload()?;
@@ -637,7 +637,7 @@ pub fn run_ooda_daemon(
         if last_disk_health.elapsed() >= Duration::from_secs(disk_health_interval_secs) {
             // Tier 1: deterministic emergency cleanup (no LLM, no recipe)
             if let Some(emergency_report) =
-                crate::disk_health::emergency_cleanup(&bridges.repo_root, &state_root)
+                crate::disk_health::emergency_cleanup(&adapters.repo_root, &state_root)
             {
                 daemon_log(
                     &state_root,
@@ -655,7 +655,8 @@ pub fn run_ooda_daemon(
                 );
             }
             // Tier 2: recipe-based LLM cleanup (moderate pressure, nuanced decisions)
-            match crate::disk_health::run_disk_health_check(&bridges.repo_root, &state_root, None) {
+            match crate::disk_health::run_disk_health_check(&adapters.repo_root, &state_root, None)
+            {
                 Ok(report) => {
                     daemon_log(&state_root, &format!("[simard] {}", report.summary()));
                     if report.cleanup_performed() {
@@ -745,8 +746,8 @@ pub fn run_ooda_daemon(
             brain_introspection_interval_secs,
         ) {
             match crate::brain_introspection::run_brain_introspection(
-                &*bridges.memory,
-                &bridges.repo_root,
+                &*adapters.memory,
+                &adapters.repo_root,
                 &state_root,
                 None,
             ) {
@@ -781,7 +782,7 @@ pub fn run_ooda_daemon(
                 "[simard] self quality-audit: firing 5-wave crusty-gated self-audit of rysweet/Simard",
             );
             match crate::self_quality_audit::run_self_quality_audit(
-                &bridges.repo_root,
+                &adapters.repo_root,
                 &state_root,
                 None,
             ) {
@@ -832,7 +833,7 @@ pub fn run_ooda_daemon(
             );
         }
 
-        match run_ooda_cycle(&mut state, &mut bridges, &config) {
+        match run_ooda_cycle(&mut state, &mut adapters, &config) {
             Ok(report) => {
                 let cycle_elapsed = cycle_start.elapsed();
                 let summary = summarize_cycle_report(&report);
@@ -843,7 +844,7 @@ pub fn run_ooda_daemon(
                 // Persist the cycle report to filesystem for auditability.
                 persist_cycle_report(&state_root, &report);
                 // Persist the cycle summary to cognitive memory as an episode.
-                persist_cycle_to_memory(&bridges, &report);
+                persist_cycle_to_memory(&adapters, &report);
                 // Write daemon health file for dashboard
                 {
                     let health_dir = dirs::data_local_dir()
@@ -892,7 +893,7 @@ pub fn run_ooda_daemon(
                         state.active_goals.active.len() as i64,
                         &[],
                     );
-                    if let Ok(stats) = bridges.memory.get_statistics() {
+                    if let Ok(stats) = adapters.memory.get_statistics() {
                         telemetry::gauge_set(
                             names::MEMORY_NODES,
                             stats.episodic_count as i64,
@@ -924,7 +925,7 @@ pub fn run_ooda_daemon(
                             &[(names::ATTR_TYPE, "sensory")],
                         );
                     }
-                    if let Ok(g) = bridges.memory.graph_stats() {
+                    if let Ok(g) = adapters.memory.graph_stats() {
                         telemetry::gauge_set(
                             names::MEMORY_EDGES,
                             g.derives_from_edges as i64,
@@ -956,7 +957,7 @@ pub fn run_ooda_daemon(
         // ── Cognitive-thread scheduler tick (issue #2419) ───────────────
         // Runs AFTER the authoritative OODA cycle so OODA is never starved.
         // Background threads (maintenance, engineer-log analysis) run on their
-        // own cadence under the `Mind`'s priority/failure-isolation budget; a
+        // own cadence under the `Brain`'s priority/failure-isolation budget; a
         // thread erroring or panicking is caught and backed off, never taking
         // down the daemon or the OODA loop. No-op unless explicitly enabled.
         if let Some(ref rt) = cognitive_runtime {
@@ -994,14 +995,14 @@ pub fn run_ooda_daemon(
     }
 
     // Final shutdown: flush board, drop in-process writer registration,
-    // close session, then drop bridges (triggers Database::drop ->
+    // close session, then drop adapters (triggers Database::drop ->
     // force_checkpoint_on_close). Errors at this point only get warned —
     // we are exiting anyway and cannot recover.
     if let Err(e) = shutdown_daemon(
         &state_root,
         &shared_mem,
         &mut state,
-        &mut bridges,
+        &mut adapters,
         /* signal_driven */ true,
     ) {
         daemon_log(
@@ -1027,7 +1028,7 @@ pub fn run_ooda_daemon(
 /// 4. Clear the in-process writer registration so the global `Weak` no
 ///    longer holds a path that would prevent the writer Arc from being
 ///    dropped by name elsewhere.
-/// 5. Drop the caller-owned bridges (the daemon's `bridges.memory` Box,
+/// 5. Drop the caller-owned adapters (the daemon's `adapters.memory` Box,
 ///    other Arc<dyn> references). Once the last strong Arc to the
 ///    `lbug::Database` drops, `Database::drop` runs
 ///    `force_checkpoint_on_close` as a defense-in-depth backstop.
@@ -1039,13 +1040,13 @@ fn shutdown_daemon(
     state_root: &std::path::Path,
     shared_mem: &Arc<dyn CognitiveMemoryOps>,
     state: &mut OodaState,
-    bridges: &mut OodaBridges,
+    adapters: &mut OodaContext,
     signal_driven: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     daemon_log(state_root, "[simard] OODA daemon: shutdown sequence start");
 
     // 1. Persist the goal board through the live writer.
-    if let Err(e) = persist_board(&state.active_goals, &*bridges.memory) {
+    if let Err(e) = persist_board(&state.active_goals, &*adapters.memory) {
         let msg = format!("[simard] shutdown: persist_board failed: {e}");
         daemon_log(state_root, &msg);
         if !signal_driven {
@@ -1063,7 +1064,7 @@ fn shutdown_daemon(
     }
 
     // 3. Close the LLM session.
-    if let Some(ref mut session) = bridges.session
+    if let Some(ref mut session) = adapters.session
         && let Err(e) = session.close()
     {
         let msg = format!("[simard] shutdown: session.close failed: {e}");
@@ -1076,7 +1077,7 @@ fn shutdown_daemon(
     // 4. Clear in-process writer registration so the Weak ref drops.
     memory_ipc::clear_in_process_writer();
 
-    // 5. Bridges (and the daemon-owned strong Arc to LibraryCognitiveMemory)
+    // 5. Adapters (and the daemon-owned strong Arc to LibraryCognitiveMemory)
     //    drop on function return — the inherent Database::drop runs
     //    force_checkpoint_on_close as a backstop.
     daemon_log(
@@ -1089,19 +1090,19 @@ fn shutdown_daemon(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::BridgeErrorPayload;
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
     use crate::cognitive_memory::CognitiveMemoryOps;
     use crate::goal_curation::GoalBoard;
-    use crate::gym_bridge::GymBridge;
-    use crate::knowledge_bridge::KnowledgeBridge;
-    use crate::memory_bridge::CognitiveMemoryBridge;
-    use crate::ooda_loop::{OodaBridges, OodaState};
+    use crate::gym_client::GymClient;
+    use crate::knowledge_client::KnowledgeClient;
+    use crate::memory_adapter::CognitiveMemoryAdapter;
+    use crate::ooda_loop::{OodaContext, OodaState};
+    use crate::server_subprocess::InMemoryServerTransport;
+    use crate::server_transport::ServerErrorPayload;
     use serde_json::json;
 
     fn mock_memory() -> Box<dyn CognitiveMemoryOps> {
-        Box::new(CognitiveMemoryBridge::new(Box::new(
-            InMemoryBridgeTransport::new("test-daemon-shutdown", |method, _params| match method {
+        Box::new(CognitiveMemoryAdapter::new(Box::new(
+            InMemoryServerTransport::new("test-daemon-shutdown", |method, _params| match method {
                 "memory.search_facts" => Ok(json!({"facts": []})),
                 "memory.store_fact" => Ok(json!({"id": "sem_1"})),
                 "memory.store_episode" => Ok(json!({"id": "epi_1"})),
@@ -1109,7 +1110,7 @@ mod tests {
                     "sensory_count": 0, "working_count": 0, "episodic_count": 0,
                     "semantic_count": 0, "procedural_count": 0, "prospective_count": 0
                 })),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(ServerErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
@@ -1118,8 +1119,8 @@ mod tests {
     }
 
     fn mock_shared_mem() -> Arc<dyn CognitiveMemoryOps> {
-        Arc::new(CognitiveMemoryBridge::new(Box::new(
-            InMemoryBridgeTransport::new("test-daemon-shared", |method, _params| match method {
+        Arc::new(CognitiveMemoryAdapter::new(Box::new(
+            InMemoryServerTransport::new("test-daemon-shared", |method, _params| match method {
                 "memory.search_facts" => Ok(json!({"facts": []})),
                 "memory.store_fact" => Ok(json!({"id": "sem_1"})),
                 "memory.store_episode" => Ok(json!({"id": "epi_1"})),
@@ -1127,7 +1128,7 @@ mod tests {
                     "sensory_count": 0, "working_count": 0, "episodic_count": 0,
                     "semantic_count": 0, "procedural_count": 0, "prospective_count": 0
                 })),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(ServerErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
@@ -1135,12 +1136,12 @@ mod tests {
         )))
     }
 
-    fn mock_knowledge() -> KnowledgeBridge {
-        KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
+    fn mock_knowledge() -> KnowledgeClient {
+        KnowledgeClient::new(Box::new(InMemoryServerTransport::new(
             "test-knowledge",
             |method, _params| match method {
                 "knowledge.list_packs" => Ok(json!({"packs": []})),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(ServerErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
@@ -1148,23 +1149,23 @@ mod tests {
         )))
     }
 
-    fn mock_gym() -> GymBridge {
-        GymBridge::new(Box::new(InMemoryBridgeTransport::new(
+    fn mock_gym() -> GymClient {
+        GymClient::new(Box::new(InMemoryServerTransport::new(
             "test-gym",
             |_method, _params| Ok(json!({"suite_id": "test", "success": true})),
         )))
     }
 
-    fn test_bridges() -> OodaBridges {
-        OodaBridges {
+    fn test_adapters() -> OodaContext {
+        OodaContext {
             memory: mock_memory(),
             knowledge: mock_knowledge(),
             gym: mock_gym(),
             session: None,
             session_factory: None,
-            brain: Arc::new(crate::ooda_brain::DeterministicLifecycleBrain),
-            decide_brain: None,
-            orient_brain: None,
+            act_reasoner: Arc::new(crate::ooda_reasoners::DeterministicFallbackActReasoner),
+            decide_reasoner: None,
+            orient_reasoner: None,
             repo_root: std::path::PathBuf::from("."),
             progress_evidence: Arc::new(
                 crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
@@ -1182,9 +1183,9 @@ mod tests {
         let dir = hermetic.state_root();
         let shared_mem = mock_shared_mem();
         let mut state = OodaState::new(GoalBoard::new());
-        let mut bridges = test_bridges();
+        let mut adapters = test_adapters();
 
-        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut bridges, false);
+        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut adapters, false);
         assert!(
             result.is_ok(),
             "shutdown with empty state must succeed: {result:?}"
@@ -1198,9 +1199,9 @@ mod tests {
         let dir = hermetic.state_root();
         let shared_mem = mock_shared_mem();
         let mut state = OodaState::new(GoalBoard::new());
-        let mut bridges = test_bridges();
+        let mut adapters = test_adapters();
 
-        let _ = shutdown_daemon(dir, &shared_mem, &mut state, &mut bridges, true);
+        let _ = shutdown_daemon(dir, &shared_mem, &mut state, &mut adapters, true);
 
         let log = std::fs::read_to_string(dir.join("ooda.log")).unwrap_or_default();
         assert!(
@@ -1220,8 +1221,8 @@ mod tests {
         let dir = hermetic.state_root();
         let shared_mem = mock_shared_mem();
         let mut state = OodaState::new(GoalBoard::new());
-        let mut bridges = test_bridges();
-        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut bridges, true);
+        let mut adapters = test_adapters();
+        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut adapters, true);
         assert!(
             result.is_ok(),
             "signal-driven shutdown must not propagate errors: {result:?}"
@@ -1248,9 +1249,9 @@ mod tests {
             last_progress_update_at: None,
         });
         let mut state = OodaState::new(board);
-        let mut bridges = test_bridges();
+        let mut adapters = test_adapters();
 
-        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut bridges, false);
+        let result = shutdown_daemon(dir, &shared_mem, &mut state, &mut adapters, false);
         assert!(
             result.is_ok(),
             "shutdown with active goals must succeed: {result:?}"

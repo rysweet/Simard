@@ -5,7 +5,7 @@ use crate::operator_commands::{
     render_redacted_objective_metadata, required_terminal_evidence_value, terminal_evidence_values,
     validated_terminal_read_artifacts,
 };
-use crate::terminal_engineer_bridge::{
+use crate::terminal_engineer::{
     TERMINAL_HANDOFF_FILE_NAME, TERMINAL_MODE_BOUNDARY, load_runtime_handoff_snapshot,
 };
 use crate::{
@@ -41,11 +41,11 @@ impl TerminalReadView {
     pub(super) fn load(state_root: PathBuf) -> crate::SimardResult<Self> {
         let artifacts = validated_terminal_read_artifacts(&state_root)?;
         let handoff = load_runtime_handoff_snapshot(
-            &crate::terminal_engineer_bridge::SelectedHandoffArtifact {
+            &crate::terminal_engineer::SelectedHandoffArtifact {
                 path: artifacts.handoff_path.clone(),
                 file_name: match artifacts.handoff_file_name.as_str() {
                     TERMINAL_HANDOFF_FILE_NAME => TERMINAL_HANDOFF_FILE_NAME,
-                    _ => crate::terminal_engineer_bridge::COMPATIBILITY_HANDOFF_FILE_NAME,
+                    _ => crate::terminal_engineer::COMPATIBILITY_HANDOFF_FILE_NAME,
                 },
             },
             "terminal read",

@@ -42,7 +42,7 @@
 //!
 //! These tests target `LibraryCognitiveMemory::in_memory()` directly so
 //! the native override — where the bug lives — is exercised without the
-//! bridge/IPC/mock layers (whose stub `store_procedure` impls would hide
+//! adapter/IPC/mock layers (whose stub `store_procedure` impls would hide
 //! the defect).
 
 use super::{CognitiveMemoryOps, LibraryCognitiveMemory};

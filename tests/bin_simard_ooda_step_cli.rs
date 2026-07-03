@@ -6,7 +6,7 @@
 //! deterministic — these tests exercise their happy paths plus the
 //! error-envelope path used by every subcommand on parse / IO failure.
 //!
-//! observe / act are bridge-dependent (require live state-root with
+//! observe / act are adapter-dependent (require live state-root with
 //! cognitive-memory, runtime, etc.) — we only exercise their argument-
 //! parsing surface, not their happy path.
 //!

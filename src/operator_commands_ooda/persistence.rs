@@ -74,7 +74,7 @@ pub(crate) fn persist_cycle_report(
                 }
             entry
         }).collect::<Vec<_>>(),
-        // BrainJudgmentRecord is a flat data carrier whose external JSON
+        // ReasonerJudgmentRecord is a flat data carrier whose external JSON
         // shape is governed entirely by its `Serialize` derive (including
         // `#[serde(skip_serializing_if = "String::is_empty")]` on
         // `prompt_version`). Defer to `serde_json::to_value` so the auto-
@@ -88,10 +88,10 @@ pub(crate) fn persist_cycle_report(
         // labels, the `spawn_engineer` enrichment block) and so stay
         // hand-rolled by design.
         //
-        // `BrainJudgmentRecord` only carries primitives + a small enum
+        // `ReasonerJudgmentRecord` only carries primitives + a small enum
         // and so cannot fail to serialise; the `unwrap_or` keeps the
         // best-effort write contract of this function.
-        "brain_judgments": report.brain_judgments.iter().map(|j| {
+        "brain_judgments": report.reasoner_judgments.iter().map(|j| {
             serde_json::to_value(j).unwrap_or(serde_json::Value::Null)
         }).collect::<Vec<_>>(),
     });
@@ -172,7 +172,7 @@ fn extract_quoted_after(text: &str, prefix: &str) -> Option<String> {
 /// and goal curation sessions can recall what happened. Best-effort: failures
 /// are logged but do not abort the daemon.
 pub(crate) fn persist_cycle_to_memory(
-    bridges: &crate::ooda_loop::OodaBridges,
+    adapters: &crate::ooda_loop::OodaContext,
     report: &crate::ooda_loop::CycleReport,
 ) {
     use serde_json::json;
@@ -189,7 +189,7 @@ pub(crate) fn persist_cycle_to_memory(
         "open_issues": report.observation.environment.open_issues.len(),
     });
 
-    if let Err(e) = bridges
+    if let Err(e) = adapters
         .memory
         .store_episode(&summary, "ooda-daemon", Some(&metadata))
     {
@@ -248,7 +248,7 @@ mod tests {
                 success: true,
                 detail: "done".to_string(),
             }],
-            brain_judgments: Vec::new(),
+            reasoner_judgments: Vec::new(),
         }
     }
 
@@ -391,12 +391,12 @@ mod tests {
 
     #[test]
     fn persist_cycle_report_serialises_brain_judgments_when_present() {
-        use crate::ooda_brain::{BrainJudgmentRecord, BrainPhase};
+        use crate::ooda_reasoners::{ReasonerJudgmentRecord, ReasonerPhase};
 
         let dir = tempfile::tempdir().unwrap();
         let mut report = minimal_report(11);
-        report.brain_judgments.push(BrainJudgmentRecord {
-            phase: BrainPhase::Decide,
+        report.reasoner_judgments.push(ReasonerJudgmentRecord {
+            phase: ReasonerPhase::Decide,
             context_summary: "goal_id=ship-v1 urgency=0.900".to_string(),
             decision: "advance_goal".to_string(),
             rationale: "high priority".to_string(),
@@ -405,8 +405,8 @@ mod tests {
             prompt_version: "abc123def456".to_string(),
             parse_failure: None,
         });
-        report.brain_judgments.push(BrainJudgmentRecord {
-            phase: BrainPhase::Orient,
+        report.reasoner_judgments.push(ReasonerJudgmentRecord {
+            phase: ReasonerPhase::Orient,
             context_summary: "goal_id=g1 base_urgency=0.600 failures=2".to_string(),
             decision: "demote".to_string(),
             rationale: "two failures".to_string(),
@@ -424,7 +424,7 @@ mod tests {
         assert_eq!(arr[0]["phase"], "decide");
         assert_eq!(arr[0]["decision"], "advance_goal");
         assert_eq!(arr[0]["fallback"], false);
-        // Regression: PR #1476 added `prompt_version` to BrainJudgmentRecord
+        // Regression: PR #1476 added `prompt_version` to ReasonerJudgmentRecord
         // but the manual json! mapping in persist_cycle_report omitted it,
         // silently dropping the field on every persisted cycle report.
         assert_eq!(
@@ -457,7 +457,7 @@ mod tests {
         assert_eq!(parsed["brain_judgments"], serde_json::json!([]));
     }
 
-    /// Issue #1890 regression: a BrainJudgmentRecord whose `parse_failure`
+    /// Issue #1890 regression: a ReasonerJudgmentRecord whose `parse_failure`
     /// field is `Some(_)` MUST round-trip through `persist_cycle_report`'s
     /// auto-derive serialisation onto the cycle JSON file. This is
     /// visibility channel #3 from the four-channel contract (see
@@ -466,12 +466,12 @@ mod tests {
     /// that PR #1480 had to repair for `prompt_version`.
     #[test]
     fn persist_cycle_report_round_trips_parse_failure_field() {
-        use crate::ooda_brain::{BrainJudgmentRecord, BrainPhase, ParseFailureRecord};
+        use crate::ooda_reasoners::{ParseFailureRecord, ReasonerJudgmentRecord, ReasonerPhase};
 
         let dir = tempfile::tempdir().unwrap();
         let mut report = minimal_report(1890);
-        report.brain_judgments.push(BrainJudgmentRecord {
-            phase: BrainPhase::Decide,
+        report.reasoner_judgments.push(ReasonerJudgmentRecord {
+            phase: ReasonerPhase::Decide,
             context_summary: "goal_id=fix-broken-features urgency=0.900".to_string(),
             decision: "advance_goal".to_string(),
             rationale: "deterministic fallback (brain Err)".to_string(),
@@ -520,17 +520,17 @@ mod tests {
     }
 
     /// Anti-regression for byte-for-byte cycle-JSON back-compat: a
-    /// `BrainJudgmentRecord` whose `parse_failure` is `None` (every healthy
+    /// `ReasonerJudgmentRecord` whose `parse_failure` is `None` (every healthy
     /// cycle) MUST NOT emit the field at all — pre-PR consumers must see
     /// the exact same shape they did before.
     #[test]
     fn persist_cycle_report_omits_parse_failure_when_none() {
-        use crate::ooda_brain::{BrainJudgmentRecord, BrainPhase};
+        use crate::ooda_reasoners::{ReasonerJudgmentRecord, ReasonerPhase};
 
         let dir = tempfile::tempdir().unwrap();
         let mut report = minimal_report(13);
-        report.brain_judgments.push(BrainJudgmentRecord {
-            phase: BrainPhase::Decide,
+        report.reasoner_judgments.push(ReasonerJudgmentRecord {
+            phase: ReasonerPhase::Decide,
             context_summary: "goal_id=ship-v1 urgency=0.900".to_string(),
             decision: "advance_goal".to_string(),
             rationale: "healthy LLM brain".to_string(),

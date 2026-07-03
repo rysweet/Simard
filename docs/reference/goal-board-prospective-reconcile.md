@@ -84,7 +84,7 @@ bridge:
 for goal in goal_board.active:
     trigger_condition = goal_slug(goal.id).replace('-', ' ')   // slug-phrase
     if no pending prospective with this trigger_condition:
-        bridges.memory.store_prospective(
+        adapters.memory.store_prospective(
             description       = "goal:{goal.description}",
             trigger_condition = trigger_condition,
             action_on_trigger = "Pursue goal: …",

@@ -716,7 +716,7 @@ fn record_reliability_gate_metric(candidate_facts: u32, quarantined: u32, promot
 // `metrics.jsonl`, mirroring `record_reliability_gate_metric` (#2433).
 
 /// Machine-readable class of a distillation failure, derived from the stable
-/// leading prefix of the `SimardError::BridgeError` message emitted at each
+/// leading prefix of the `SimardError::ServerError` message emitted at each
 /// runner/parse site in this module. Covers every `Err` `run_all` can surface,
 /// including the **production** `--output-format json` envelope path (where a
 /// parse failure manifests as a *step-output* parse error, not the legacy
@@ -783,20 +783,20 @@ impl DistillFailureClass {
 /// Classify a distillation `SimardError` into a [`DistillFailureClass`].
 ///
 /// Discrimination anchors on the **stable leading prefix** this module emits
-/// for each class (`SimardError::BridgeError(msg)` → `msg.starts_with(...)`),
+/// for each class (`SimardError::ServerError(msg)` → `msg.starts_with(...)`),
 /// NOT on `contains`. Several messages embed foreign text (terminal failures
 /// carry up to 200 chars each of recipe stderr/stdout; parse failures carry the
 /// agent output excerpt), and that variable tail always trails the fixed prefix
 /// — so anchoring keeps a non-zero exit from being misread as a parse-failure
 /// and corrupting `distill_parse_success_rate`.
 ///
-/// The prefixes mirror the seven `BridgeError` sites in this file; the
+/// The prefixes mirror the seven `ServerError` sites in this file; the
 /// production `--output-format json` path's step-output parse error
 /// (`distill: \`distill\` step output did not contain a parseable …`) is the
 /// t=7517 manifestation and MUST map to `ParseFailure`, since production never
 /// reaches the legacy bare-stdout `did not yield a parseable` path.
 pub fn classify_distill_error(err: &SimardError) -> DistillFailureClass {
-    let SimardError::BridgeError(msg) = err else {
+    let SimardError::ServerError(msg) = err else {
         return DistillFailureClass::Other;
     };
     if msg.starts_with("distill: recipe-runner-rs spawn failed") {
@@ -1112,7 +1112,7 @@ impl RecipeRunnerSubprocess {
             })
             .collect();
         let payload_json = serde_json::to_string(&payload).map_err(|e| {
-            SimardError::BridgeError(format!(
+            SimardError::ServerError(format!(
                 "distill: failed to serialize episodes payload: {e}"
             ))
         })?;
@@ -1144,7 +1144,7 @@ impl RecipeRunnerSubprocess {
             .arg(format!("strict_json_instruction={strict_json_instruction}"))
             .output()
             .map_err(|e| {
-                SimardError::BridgeError(format!("distill: recipe-runner-rs spawn failed: {e}"))
+                SimardError::ServerError(format!("distill: recipe-runner-rs spawn failed: {e}"))
             })?;
 
         if !output.status.success() {
@@ -1153,7 +1153,7 @@ impl RecipeRunnerSubprocess {
             // surface both — never a silent or context-free failure.
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            return Err(SimardError::BridgeError(format!(
+            return Err(SimardError::ServerError(format!(
                 "distill: recipe exited with {}: stderr={} stdout={}",
                 output.status,
                 truncate(stderr.trim(), 200),
@@ -1242,7 +1242,7 @@ pub(crate) fn parse_recipe_output_full(raw: &str) -> SimardResult<DistillOutput>
     }
 
     // Tier 3 — explicit, bounded failure.
-    Err(SimardError::BridgeError(format!(
+    Err(SimardError::ServerError(format!(
         "distill: recipe run did not yield a parseable {{ \"facts\": [...] }} object: {}",
         truncate(raw, 200)
     )))
@@ -1455,18 +1455,18 @@ impl RecipeRunnerEnvelope {
     /// well-formed payload.
     fn into_distill_output(self) -> SimardResult<DistillOutput> {
         if !self.success {
-            return Err(SimardError::BridgeError(format!(
+            return Err(SimardError::ServerError(format!(
                 "distill: recipe-runner reported failure (success=false): {}",
                 truncate(self.first_error().trim(), 200)
             )));
         }
         let step = self.select_distill_step().ok_or_else(|| {
-            SimardError::BridgeError(
+            SimardError::ServerError(
                 "distill: recipe envelope had no completed `distill` step".to_string(),
             )
         })?;
         extract_step_output(&step.output).ok_or_else(|| {
-            SimardError::BridgeError(format!(
+            SimardError::ServerError(format!(
                 "distill: `distill` step output did not contain a parseable \
                  {{ \"facts\": [...] }} object; output: {}",
                 truncate(step_output_excerpt(&step.output).trim(), 200)
@@ -1860,7 +1860,7 @@ mod unit_tests {
             ("something unexpected", Other),
         ];
         for (msg, expected) in cases {
-            let err = SimardError::BridgeError(msg.to_string());
+            let err = SimardError::ServerError(msg.to_string());
             assert_eq!(classify_distill_error(&err), expected, "msg: {msg}");
         }
     }
@@ -1870,7 +1870,7 @@ mod unit_tests {
         // A terminal failure embeds the recipe's stdout, which may itself
         // contain the parse-failure phrase; prefix anchoring must keep it a
         // terminal failure so recipe_exited_ok stays false.
-        let terminal = SimardError::BridgeError(
+        let terminal = SimardError::ServerError(
             "distill: recipe exited with exit status: 1: stderr= stdout=recipe run did not \
              yield a parseable object"
                 .to_string(),
@@ -1883,7 +1883,7 @@ mod unit_tests {
     }
 
     #[test]
-    fn classify_non_bridge_error_is_other() {
+    fn classify_non_adapter_error_is_other() {
         let err = SimardError::PlanningUnavailable {
             reason: "backend down".to_string(),
         };
@@ -2008,7 +2008,7 @@ mod unit_tests {
         // Regression for the production t=7517 path: the `--output-format json`
         // step-output parse error MUST classify as parse-failure so it lands in
         // the distill_parse_success_rate denominator (parse_attempted = true).
-        let err = SimardError::BridgeError(
+        let err = SimardError::ServerError(
             "distill: `distill` step output did not contain a parseable \
              { \"facts\": [...] } object; output: NODE_OPTIONS banner..."
                 .to_string(),
@@ -2450,7 +2450,7 @@ mod issue_2512_outer_envelope_banner_tests {
 }
 
 /// Episode t=9664 (live OODA consolidation, 2026-06-30, Copilot CLI 1.0.66-2):
-/// the distill bridge failed **recurrently** with the same
+/// the distill adapter failed **recurrently** with the same
 /// `` `distill` step output did not contain a parseable { "facts": [...] } `` error
 /// (issue #2506) even though every ANSI/launch-log preamble shape was already stripped (the
 /// fix landed in #2479/#2484/#2490/#2504, and the deployed binary carried it).

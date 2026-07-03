@@ -59,10 +59,10 @@ updated board.
 run_ooda_cycle:
     load_goal_board(memory)          // existing
     check_meeting_handoffs(state)    // NEW — converts handoffs to goals
-    observe(state, bridges)          // existing
+    observe(state, adapters)          // existing
     orient(observation, goals)       // existing
     decide(priorities, config)       // existing
-    act(actions, bridges, state)     // existing
+    act(actions, adapters, state)     // existing
     curate(state)                    // existing
 ```
 

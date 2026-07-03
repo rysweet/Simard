@@ -197,7 +197,7 @@ pub fn classify_from_missing(
 /// same refutation always yields the same class. [`MissingEvidence::CouldNotVerify`]
 /// is excluded — it routes to [`VerificationOutcome::Error`], never `Refuted`.
 ///
-/// This is the bridge from FU1's external failure signal to #2458's failure→
+/// This is the adapter from FU1's external failure signal to #2458's failure→
 /// lesson loop: the returned class is the `error_class` half of the
 /// `(goal_type, error_class)` recurrence key
 /// ([`crate::memory_consolidation::reflection_lessons`]).
@@ -317,7 +317,7 @@ pub trait EvidenceSource: Send + Sync {
 
 /// Blanket impl so an `&dyn EvidenceSource` (e.g. `Arc::as_ref()`) satisfies the
 /// `E: EvidenceSource` bound on [`CompletionEvidenceGate`] without cloning the
-/// source. Lets the daemon store one `Arc<dyn EvidenceSource>` on `OodaBridges`
+/// source. Lets the daemon store one `Arc<dyn EvidenceSource>` on `OodaContext`
 /// and pass it by reference into the gate each cycle.
 impl<T: EvidenceSource + ?Sized> EvidenceSource for &T {
     fn any_pr_merged(&self, goal: &ActiveGoal) -> SimardResult<bool> {

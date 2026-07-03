@@ -25,10 +25,10 @@
 //! the recipe emits capped `PRUNE_CANDIDATE` lines for human review.
 //!
 //! The hook deliberately never calls [`CognitiveMemoryOps::prune_superseded`]
-//! daemon-side: over the daemon's IPC bridge that call is an `Ok(0)` no-op (only
+//! daemon-side: over the daemon's IPC adapter that call is an `Ok(0)` no-op (only
 //! the in-process `LibraryCognitiveMemory` reclaims), so invoking it would be a
 //! silent-degradation hazard. Backed-up, bounded destructive prune is a
-//! documented follow-up that adds the RPC on the bridge **server**.
+//! documented follow-up that adds the RPC on the adapter **server**.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -102,7 +102,7 @@ pub struct UpdateConfig {
     pub memory_backup_required: bool,
     /// SIGTERM→SIGKILL window for the engineer-orphan reaper.
     pub orphan_kill_grace_seconds: u64,
-    /// OODA cycles observed for the "brains LLM-backed" health probe.
+    /// OODA cycles observed for the "reasoners LLM-backed" health probe.
     pub health_probe_cycles: u32,
     /// Allowed shortfall of `live_facts` below `baseline_facts` before the
     /// "memory intact" health probe fails.

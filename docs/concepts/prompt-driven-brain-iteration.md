@@ -1,8 +1,8 @@
 # Prompt-driven brain iteration (hot-reload)
 
-The three prompt-driven OODA brains — **act** (`RustyClawdBrain`, PR #1458),
-**decide** (`RustyClawdDecideBrain`, PR #1469), and **orient**
-(`RustyClawdOrientBrain`, PR #1471), all wired in [#1474] — load their
+The three prompt-driven OODA brains — **act** (`RustyClawdActReasoner`, PR #1458),
+**decide** (`RustyClawdDecideReasoner`, PR #1469), and **orient**
+(`RustyClawdOrientReasoner`, PR #1471), all wired in [#1474] — load their
 prompt text from disk on every OODA cycle. Editing a prompt takes effect on
 the **next cycle**; no rebuild, no daemon restart.
 
@@ -29,9 +29,9 @@ The resolved path is logged at daemon startup, e.g.
 
 | File              | Brain                        | Decision site                                                      |
 | ----------------- | ---------------------------- | ------------------------------------------------------------------ |
-| `ooda_brain.md`   | `RustyClawdBrain` (act)      | Engineer-lifecycle skip branch — keep skipping, reclaim, deprioritise, open issue, or block. |
-| `ooda_decide.md`  | `RustyClawdDecideBrain`      | Map a prioritised goal to an `ActionKind` (advance, improve, consolidate, ...). |
-| `ooda_orient.md`  | `RustyClawdOrientBrain`      | Demote per-goal urgency in proportion to consecutive failures.     |
+| `ooda_brain.md`   | `RustyClawdActReasoner` (act)      | Engineer-lifecycle skip branch — keep skipping, reclaim, deprioritise, open issue, or block. |
+| `ooda_decide.md`  | `RustyClawdDecideReasoner`      | Map a prioritised goal to an `ActionKind` (advance, improve, consolidate, ...). |
+| `ooda_orient.md`  | `RustyClawdOrientReasoner`      | Demote per-goal urgency in proportion to consecutive failures.     |
 
 ## How hot-reload works
 

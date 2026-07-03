@@ -15,7 +15,7 @@
 //! ```
 //!
 //! every OODA cycle. `preparation_memory_operations` passes the **raw objective**
-//! to `bridge.check_triggers(objective)`; the library backend lowercases and
+//! to `adapter.check_triggers(objective)`; the library backend lowercases and
 //! tokenises both sides and fires each matching prospective once. These tests
 //! store a goal prospective exactly as `goals::cognitive_memory_store` does
 //! (slug with dashes→spaces, `goal:` description prefix) and assert it surfaces

@@ -1,5 +1,5 @@
 use crate::meetings::PersistedMeetingRecord;
-use crate::terminal_engineer_bridge::ENGINEER_HANDOFF_FILE_NAME;
+use crate::terminal_engineer::ENGINEER_HANDOFF_FILE_NAME;
 
 // Re-export so siblings can import all parsing helpers from one place.
 pub(super) use super::evidence_helpers::required_engineer_evidence_value;
@@ -31,7 +31,7 @@ pub(super) fn parse_carried_meeting_decisions(raw: &str) -> crate::SimardResult<
             field: "carried-meeting-decisions".to_string(),
             reason: format!(
                 "engineer read requires {ENGINEER_HANDOFF_FILE_NAME} or {} to carry at least one persisted meeting record or '<none>' for carried-meeting-decisions",
-                crate::terminal_engineer_bridge::COMPATIBILITY_HANDOFF_FILE_NAME
+                crate::terminal_engineer::COMPATIBILITY_HANDOFF_FILE_NAME
             ),
         });
     }

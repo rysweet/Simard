@@ -68,8 +68,8 @@ fn rendered_output(output: &Output) -> String {
 #[cfg(test)]
 mod llm_provider_guard_tests {
     use crate::common::{
-        llm_provider_unavailable, memory_bridge_unavailable, require_llm_provider,
-        require_memory_bridge,
+        llm_provider_unavailable, memory_adapter_unavailable, require_llm_provider,
+        require_memory_adapter,
     };
 
     #[test]
@@ -136,39 +136,39 @@ mod llm_provider_guard_tests {
     }
 
     #[test]
-    fn detects_missing_memory_bridge() {
-        // The OODA daemon surfaces these when the amplihack memory bridge is
+    fn detects_missing_memory_adapter() {
+        // The OODA daemon surfaces these when the amplihack memory adapter is
         // unavailable; an `#[ignore]`d test that needs it must not pass by
         // skipping when force-run (issue #2047).
-        assert!(memory_bridge_unavailable(
+        assert!(memory_adapter_unavailable(
             "Error: Cannot find amplihack-memory-lib"
         ));
-        assert!(memory_bridge_unavailable(
-            "memory bridge unhealthy: connection refused"
+        assert!(memory_adapter_unavailable(
+            "memory adapter unhealthy: connection refused"
         ));
     }
 
     #[test]
-    fn does_not_flag_memory_bridge_on_unrelated_output() {
+    fn does_not_flag_memory_adapter_on_unrelated_output() {
         assert!(
-            !memory_bridge_unavailable("ooda daemon: seeded 5 default goals"),
+            !memory_adapter_unavailable("ooda daemon: seeded 5 default goals"),
             "must not false-positive on benign output"
         );
     }
 
     #[test]
-    #[should_panic(expected = "requires the amplihack memory bridge")]
-    fn require_memory_bridge_panics_when_unavailable() {
-        // Force-running an ignored bridge-dependent test without the bridge must
+    #[should_panic(expected = "requires the amplihack memory adapter")]
+    fn require_memory_adapter_panics_when_unavailable() {
+        // Force-running an ignored adapter-dependent test without the adapter must
         // fail loudly (issue #2047), never silently pass by an early `return`.
-        require_memory_bridge("example_test", "Error: Cannot find amplihack-memory-lib");
+        require_memory_adapter("example_test", "Error: Cannot find amplihack-memory-lib");
     }
 
     #[test]
-    fn require_memory_bridge_is_noop_when_available() {
-        // When the bridge is available the guard returns without panicking,
+    fn require_memory_adapter_is_noop_when_available() {
+        // When the adapter is available the guard returns without panicking,
         // letting the real assertions run.
-        require_memory_bridge("example_test", "ooda daemon: seeded 5 default goals");
+        require_memory_adapter("example_test", "ooda daemon: seeded 5 default goals");
     }
 }
 
@@ -506,7 +506,7 @@ fn engineer_loop_run_includes_non_zero_elapsed_duration() {
     );
     // The agent-spawn pipeline replaced the old monolithic
     // select/execute/verify phases with a finer-grained agent lifecycle:
-    // load-bridge-context, agent-prompt-build, agent-spawn, agent-wait,
+    // load-adapter-context, agent-prompt-build, agent-spawn, agent-wait,
     // review. Assert on the agent-wait phase as the canonical "this is the
     // long-running engineering work" anchor; surrounding phases are
     // implementation details that may evolve again.

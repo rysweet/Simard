@@ -75,7 +75,7 @@ use simard::stewardship::{
 
 ### Entry points
 
-| Function | Signature (abridged) | Use |
+| Function | Signature (aconnected) | Use |
 |----------|----------------------|-----|
 | `merge_pr_if_merge_ready` | `(pr_number: u32, repo: &str, gh: &dyn PrGhClient) -> SimardResult<MergeOutcome>` | Production entry point. Reads the base-branch allowlist from `SIMARD_MERGE_BASE_ALLOWLIST`. |
 | `merge_pr_if_merge_ready_with_allowlist` | `(pr_number, repo, gh, base_allowlist: &[String]) -> SimardResult<MergeOutcome>` | Explicit allowlist (tests / callers that bypass the env). |

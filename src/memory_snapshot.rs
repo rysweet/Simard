@@ -51,7 +51,7 @@ pub fn snapshot_dir(override_dir: Option<&Path>) -> Option<PathBuf> {
 /// Errors are returned but callers should treat them as non-fatal.
 #[allow(deprecated)] // we intentionally use the legacy snapshot API
 pub fn save_session_snapshot(
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
     agent_name: &str,
     dir: &Path,
 ) -> SimardResult<PathBuf> {
@@ -65,7 +65,7 @@ pub fn save_session_snapshot(
     let filename = format!("{agent_name}-{epoch}.{SNAPSHOT_EXT}");
     let path = dir.join(&filename);
 
-    crate::remote_transfer::export_memory_snapshot(bridge, agent_name, Some(&path))?;
+    crate::remote_transfer::export_memory_snapshot(adapter, agent_name, Some(&path))?;
 
     Ok(path)
 }
@@ -152,15 +152,15 @@ pub fn prune_snapshots(dir: &Path, keep: usize) {
     }
 }
 
-/// Import a previously saved snapshot into the cognitive bridge.
+/// Import a previously saved snapshot into the cognitive adapter.
 ///
 /// Returns the number of items imported.
 #[allow(deprecated)] // we intentionally use the legacy snapshot API
 pub fn restore_snapshot(
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
     snapshot: &MemorySnapshot,
 ) -> SimardResult<usize> {
-    crate::remote_transfer::import_memory_snapshot(bridge, snapshot)
+    crate::remote_transfer::import_memory_snapshot(adapter, snapshot)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -197,12 +197,12 @@ mod tests {
 
     #[test]
     fn round_trip_save_and_load() {
-        use crate::bridge_subprocess::InMemoryBridgeTransport;
-        use crate::memory_bridge::CognitiveMemoryBridge;
+        use crate::memory_adapter::CognitiveMemoryAdapter;
+        use crate::server_subprocess::InMemoryServerTransport;
         use serde_json::json;
 
         let transport =
-            InMemoryBridgeTransport::new("test-snapshot", move |method, _params| match method {
+            InMemoryServerTransport::new("test-snapshot", move |method, _params| match method {
                 "memory.search_facts" => Ok(json!({
                     "facts": [{
                         "node_id": "f1",
@@ -217,19 +217,19 @@ mod tests {
                 "memory.store_fact" => Ok(json!({"id": "imported-1"})),
                 "memory.store_procedure" => Ok(json!({"id": "imported-p1"})),
                 "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-                _ => Err(crate::bridge::BridgeErrorPayload {
+                _ => Err(crate::server_transport::ServerErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
             });
-        let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+        let adapter = CognitiveMemoryAdapter::new(Box::new(transport));
 
         let dir = std::env::temp_dir().join("simard-test-roundtrip-snapshots");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create test dir");
 
         // Save
-        let path = save_session_snapshot(&bridge, "test-agent", &dir).expect("save snapshot");
+        let path = save_session_snapshot(&adapter, "test-agent", &dir).expect("save snapshot");
         assert!(path.exists());
 
         // Load
@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(loaded.source_agent, "test-agent");
 
         // Restore
-        let count = restore_snapshot(&bridge, &loaded).expect("restore snapshot");
+        let count = restore_snapshot(&adapter, &loaded).expect("restore snapshot");
         assert_eq!(count, 1);
 
         let _ = std::fs::remove_dir_all(&dir);

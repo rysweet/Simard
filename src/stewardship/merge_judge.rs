@@ -35,8 +35,8 @@
 //! objective preconditions.
 
 use crate::error::{SimardError, SimardResult};
-use crate::ooda_brain::prompt_store;
-use crate::ooda_brain::{LlmSubmitter, SessionLlmSubmitter};
+use crate::ooda_reasoners::prompt_store;
+use crate::ooda_reasoners::{LlmSubmitter, SessionLlmSubmitter};
 use crate::session_builder::LlmProvider;
 
 use super::merge_authority::PrSnapshot;
@@ -45,7 +45,7 @@ const ADAPTER_TAG: &str = "merge-readiness-judge";
 pub const PROMPT_NAME: &str = "merge_readiness_judge.md";
 
 /// Truncate `s` to 2 KiB for inclusion in error messages / logs. Same shape
-/// as `ooda_brain::rustyclawd::truncate_for_log`, duplicated here so this
+/// as `ooda_reasoners::rustyclawd::truncate_for_log`, duplicated here so this
 /// module does not depend on a private helper across module boundaries.
 fn truncate_for_log(s: &str) -> String {
     const MAX_LEN: usize = 2048;
@@ -148,7 +148,7 @@ impl MergeJudgeKind {
 }
 
 /// Trait every merge judge implements. Synchronous on purpose to match the
-/// OODA brain pattern — the LLM-backed impl bridges to async internally.
+/// OODA brain pattern — the LLM-backed impl adapters to async internally.
 pub trait MergeJudge: Send + Sync {
     fn judge(
         &self,

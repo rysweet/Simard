@@ -8,7 +8,7 @@ status: design — partially implemented
 related:
   - ../concepts/goal-board-persistence.md
   - ../reference/goal-board-api.md
-  - ../reference/cognitive-memory-bridge-helpers.md
+  - ../reference/cognitive-memory-adapter-helpers.md
   - ../howto/inspect-durable-goal-register.md
   - ../reference/simard-cli.md
   - ../reference/goal-target-repo-routing.md
@@ -122,7 +122,7 @@ SIMARD_STATE_ROOT="$STATE_ROOT" simard goals restore --from /backups/goal-board-
 ```
 
 `simard goals restore` parses the file as a `GoalBoard`, calls
-`launch_writer_bridge`, and invokes `save_goal_board`. The integrity guard
+`launch_writer_adapter`, and invokes `save_goal_board`. The integrity guard
 runs on the restored board — if your backup contains placeholder goals
 the restore is rejected without modifying the snapshot. The restore must
 be performed against a state root the daemon is **not** currently writing
@@ -212,7 +212,7 @@ match what you edited.
 
 ### Dashboard write returns a "no writer available" error
 
-This means `launch_writer_bridge` returned `Err` because neither the
+This means `launch_writer_adapter` returned `Err` because neither the
 daemon IPC socket nor the local writer lock could be obtained. Either:
 
 - The daemon's IPC socket exists but the daemon is not responding —
@@ -221,7 +221,7 @@ daemon IPC socket nor the local writer lock could be obtained. Either:
   writing, remove the LadybugDB lock file under the cognitive-memory store
   directory (`$STATE_ROOT/cognitive/`), and try again.
 
-See [Cognitive memory bridge helpers](../reference/cognitive-memory-bridge-helpers.md)
+See [Cognitive memory bridge helpers](../reference/cognitive-memory-adapter-helpers.md)
 for the full ladder.
 
 ### The `.reseed_goals` marker was created but goals were not reset
@@ -253,5 +253,5 @@ restore from it directly, you can either:
 
 - [Goal board persistence — concept](../concepts/goal-board-persistence.md)
 - [Goal board API reference](../reference/goal-board-api.md)
-- [Cognitive memory bridge helpers](../reference/cognitive-memory-bridge-helpers.md)
+- [Cognitive memory bridge helpers](../reference/cognitive-memory-adapter-helpers.md)
 - [How to inspect the durable goal register](./inspect-durable-goal-register.md)

@@ -1,6 +1,6 @@
 ---
 title: Add a new recipe brain phase
-description: How to add a new OODA phase backed by recipe-runner-rs using the existing RecipeBrain struct.
+description: How to add a new OODA phase backed by recipe-runner-rs using the existing RecipeReasoner struct.
 last_updated: 2026-05-27
 review_schedule: as-needed
 owner: simard
@@ -13,7 +13,7 @@ related:
 
 # Add a new recipe brain phase
 
-`RecipeBrain` is a single struct that handles all recipe-runner-backed OODA
+`RecipeReasoner` is a single struct that handles all recipe-runner-backed OODA
 phases. To add a new phase, you write a recipe YAML, a parse function, and a
 trait impl — you do **not** create a new struct.
 
@@ -28,7 +28,7 @@ context as `-c key=value` args and writes its decision to stdout. The
 
 ### 2. Define the trait (if new)
 
-If the phase needs a new trait, add it to `src/ooda_brain/mod.rs`:
+If the phase needs a new trait, add it to `src/ooda_reasoners/mod.rs`:
 
 ```rust
 pub trait OodaNewPhaseBrain: Send + Sync {
@@ -38,7 +38,7 @@ pub trait OodaNewPhaseBrain: Send + Sync {
 
 ### 3. Write a parse function
 
-Create `src/ooda_brain/recipe_<phase>.rs` with a public
+Create `src/ooda_reasoners/recipe_<phase>.rs` with a public
 `parse_<phase>_from_text(text: &str) -> NewPhaseJudgment` function. This
 follows the existing pattern — each phase keeps its parse function and tests
 in its own file. Use the first-word extraction pattern:
@@ -53,11 +53,11 @@ match first_word.as_str() {
 }
 ```
 
-Use `truncate()` for rationale capping (imported from `recipe_brain.rs`).
+Use `truncate()` for rationale capping (imported from `recipe_reasoner.rs`).
 
-### 4. Implement the trait on RecipeBrain
+### 4. Implement the trait on RecipeReasoner
 
-Add an `impl OodaNewPhaseBrain for RecipeBrain` block in `recipe_brain.rs`.
+Add an `impl OodaNewPhaseBrain for RecipeReasoner` block in `recipe_reasoner.rs`.
 The body:
 
 1. Builds the `Command` with `self.recipe_path`, `self.agent_binary`, and
@@ -75,9 +75,9 @@ pub(super) fn build_new_phase_brain(
     state_root: &Path,
     repo_root: &Path,
 ) -> Option<Arc<dyn OodaNewPhaseBrain>> {
-    match RecipeBrain::new(repo_root, "ooda-new-phase.yaml", "recipe-new-phase-brain") {
+    match RecipeReasoner::new(repo_root, "ooda-new-phase.yaml", "recipe-new-phase-brain") {
         Some(b) => {
-            daemon_log(state_root, "[simard] OODA daemon: new_phase_brain = RecipeBrain");
+            daemon_log(state_root, "[simard] OODA daemon: new_phase_brain = RecipeReasoner");
             Some(Arc::new(b))
         }
         None => {
@@ -100,9 +100,9 @@ block in `recipe_<phase>.rs` (the same file as the parse function). Test:
 
 ## What you do NOT do
 
-- Do **not** create a new struct. `RecipeBrain` handles all phases.
+- Do **not** create a new struct. `RecipeReasoner` handles all phases.
 - Do **not** duplicate `resolve_recipe_path` or `truncate`. They are shared.
 - Do **not** use `ascii_contains_ignore_case` or keyword scanning — those
   patterns have been removed (#2144). Use first-word extraction only.
 - Do **not** add the recipe filename as a module-level `const`. Pass it to
-  `RecipeBrain::new()` from `brains.rs`.
+  `RecipeReasoner::new()` from `brains.rs`.

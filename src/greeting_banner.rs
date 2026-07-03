@@ -13,7 +13,7 @@ use crate::goal_curation::load_goal_board;
 const MAX_PROJECTS_SHOWN: usize = 5;
 
 /// Build the greeting banner text. Returns lines to print to stderr.
-pub fn build_greeting_banner(bridge: Option<&dyn CognitiveMemoryOps>) -> Vec<String> {
+pub fn build_greeting_banner(adapter: Option<&dyn CognitiveMemoryOps>) -> Vec<String> {
     let mut lines = Vec::new();
 
     // Section 1: Name and version
@@ -29,8 +29,8 @@ pub fn build_greeting_banner(bridge: Option<&dyn CognitiveMemoryOps>) -> Vec<Str
     lines.push(format!("  GitHub: {issues} open issues, {prs} open PRs"));
 
     // Section 4: Known projects from cognitive memory
-    if let Some(bridge) = bridge {
-        let projects = known_projects(bridge);
+    if let Some(adapter) = adapter {
+        let projects = known_projects(adapter);
         if projects.is_empty() {
             lines.push("  Known projects: (none yet)".to_string());
         } else {
@@ -47,7 +47,7 @@ pub fn build_greeting_banner(bridge: Option<&dyn CognitiveMemoryOps>) -> Vec<Str
         }
 
         // Section 5: Active goals
-        match load_goal_board(bridge) {
+        match load_goal_board(adapter) {
             Ok(board) if !board.active.is_empty() => {
                 lines.push(format!("  Active goals ({}):", board.active.len()));
                 for goal in &board.active {
@@ -56,15 +56,15 @@ pub fn build_greeting_banner(bridge: Option<&dyn CognitiveMemoryOps>) -> Vec<Str
             }
             Ok(_) => {
                 // No active goals — show memory stats instead
-                append_memory_stats(bridge, &mut lines);
+                append_memory_stats(adapter, &mut lines);
             }
             Err(_) => {
-                append_memory_stats(bridge, &mut lines);
+                append_memory_stats(adapter, &mut lines);
             }
         }
     } else {
-        lines.push("  Known projects: (no memory bridge)".to_string());
-        lines.push("  Goals: (no memory bridge)".to_string());
+        lines.push("  Known projects: (no memory adapter)".to_string());
+        lines.push("  Goals: (no memory adapter)".to_string());
     }
 
     lines.push("─".repeat(40));
@@ -72,8 +72,8 @@ pub fn build_greeting_banner(bridge: Option<&dyn CognitiveMemoryOps>) -> Vec<Str
 }
 
 /// Print the greeting banner to stderr.
-pub fn print_greeting_banner(bridge: Option<&dyn CognitiveMemoryOps>) {
-    let lines = build_greeting_banner(bridge);
+pub fn print_greeting_banner(adapter: Option<&dyn CognitiveMemoryOps>) {
+    let lines = build_greeting_banner(adapter);
     let mut stderr = std::io::stderr().lock();
     for line in &lines {
         let _ = writeln!(stderr, "{line}");
@@ -159,8 +159,8 @@ fn fetch_gh_count(args: &[&str]) -> String {
 }
 
 /// Extract known project names from semantic facts.
-fn known_projects(bridge: &dyn CognitiveMemoryOps) -> Vec<(String, f64)> {
-    match bridge.search_facts("project", 20, 0.0) {
+fn known_projects(adapter: &dyn CognitiveMemoryOps) -> Vec<(String, f64)> {
+    match adapter.search_facts("project", 20, 0.0) {
         Ok(facts) => {
             let mut projects: Vec<(String, f64)> = facts
                 .iter()
@@ -189,8 +189,8 @@ fn known_projects(bridge: &dyn CognitiveMemoryOps) -> Vec<(String, f64)> {
 }
 
 /// Show memory statistics when no active goals exist.
-fn append_memory_stats(bridge: &dyn CognitiveMemoryOps, lines: &mut Vec<String>) {
-    match bridge.get_statistics() {
+fn append_memory_stats(adapter: &dyn CognitiveMemoryOps, lines: &mut Vec<String>) {
+    match adapter.get_statistics() {
         Ok(stats) => {
             lines.push(format!(
                 "  Memory: {} total ({} semantic, {} episodic, {} procedural)",
@@ -231,9 +231,9 @@ mod tests {
     }
 
     #[test]
-    fn banner_without_bridge_shows_no_bridge() {
+    fn banner_without_adapter_shows_no_adapter() {
         let lines = build_greeting_banner(None);
-        assert!(lines.iter().any(|l| l.contains("no memory bridge")));
+        assert!(lines.iter().any(|l| l.contains("no memory adapter")));
     }
 
     #[test]
@@ -261,10 +261,10 @@ mod tests {
     }
 
     #[test]
-    fn known_projects_returns_vec_with_no_bridge() {
-        // Direct test of the empty case — no bridge available
+    fn known_projects_returns_vec_with_no_adapter() {
+        // Direct test of the empty case — no adapter available
         let lines = build_greeting_banner(None);
-        assert!(lines.iter().any(|l| l.contains("no memory bridge")));
+        assert!(lines.iter().any(|l| l.contains("no memory adapter")));
     }
 
     #[test]
@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn banner_no_bridge_mentions_projects_and_goals() {
+    fn banner_no_adapter_mentions_projects_and_goals() {
         let lines = build_greeting_banner(None);
         let has_projects = lines.iter().any(|l| l.contains("Known projects"));
         let has_goals = lines.iter().any(|l| l.contains("Goals"));
@@ -385,7 +385,7 @@ mod tests {
     // --- banner idempotent ---
 
     #[test]
-    fn banner_is_deterministic_for_no_bridge() {
+    fn banner_is_deterministic_for_no_adapter() {
         let lines1 = build_greeting_banner(None);
         let lines2 = build_greeting_banner(None);
         // Source file count and GitHub counts might differ due to timing,

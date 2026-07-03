@@ -18,7 +18,7 @@ The OODA daemon lets Simard operate autonomously: she observes her goal board, r
 ## Prerequisites
 
 - Simard binary built (`cargo build --quiet`)
-- Python ecosystem bridges available (cognitive memory, knowledge packs, gym) — the daemon launches these automatically
+- Python ecosystem adapters available (cognitive memory, knowledge packs, gym) — the daemon launches these automatically
 - `ANTHROPIC_API_KEY` set if RustyClawd-backed actions are enabled
 - Goal board populated (via `simard goal-curation run` or meeting sessions)
 

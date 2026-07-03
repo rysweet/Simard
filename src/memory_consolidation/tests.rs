@@ -1,17 +1,17 @@
 use super::*;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_adapter::CognitiveMemoryAdapter;
 use crate::memory_cognitive::{CognitiveStatistics, CognitiveWorkingSlot};
+use crate::server_subprocess::InMemoryServerTransport;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
+fn counting_adapter() -> (CognitiveMemoryAdapter, Arc<AtomicU32>) {
     let call_count = Arc::new(AtomicU32::new(0));
     let counter = call_count.clone();
-    let transport = InMemoryBridgeTransport::new("test", move |method, _params| {
+    let transport = InMemoryServerTransport::new("test", move |method, _params| {
         counter.fetch_add(1, Ordering::SeqCst);
         match method {
             "memory.record_sensory" => Ok(json!({"id": "sen_1"})),
@@ -30,13 +30,13 @@ fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
             // so legacy fixtures keep working without any test-side
             // changes.
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::server_transport::ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         }
     });
-    (CognitiveMemoryBridge::new(Box::new(transport)), call_count)
+    (CognitiveMemoryAdapter::new(Box::new(transport)), call_count)
 }
 
 fn test_session_id() -> SessionId {
@@ -45,8 +45,8 @@ fn test_session_id() -> SessionId {
 
 #[test]
 fn intake_records_sensory_working_and_episode() {
-    let (bridge, count) = counting_bridge();
-    intake_memory_operations("build feature X", &test_session_id(), &bridge).unwrap();
+    let (adapter, count) = counting_adapter();
+    intake_memory_operations("build feature X", &test_session_id(), &adapter).unwrap();
     // Issue #2327: the session-start lifecycle marker is operational noise and
     // is now DROPPED by the ingestion classifier, so only 2 calls remain:
     // record_sensory + push_working (store_episode is skipped).
@@ -55,9 +55,9 @@ fn intake_records_sensory_working_and_episode() {
 
 #[test]
 fn preparation_returns_empty_context_when_memory_empty() {
-    let (bridge, _) = counting_bridge();
+    let (adapter, _) = counting_adapter();
     let ctx =
-        preparation_memory_operations("build feature X", &test_session_id(), &bridge).unwrap();
+        preparation_memory_operations("build feature X", &test_session_id(), &adapter).unwrap();
     assert!(ctx.relevant_facts.is_empty());
     assert!(ctx.triggered_prospectives.is_empty());
     assert!(ctx.recalled_procedures.is_empty());
@@ -65,7 +65,7 @@ fn preparation_returns_empty_context_when_memory_empty() {
 
 #[test]
 fn reflection_stores_transcript_and_facts() {
-    let (bridge, count) = counting_bridge();
+    let (adapter, count) = counting_adapter();
     let facts = vec![
         FactExtraction {
             concept: "rust".to_string(),
@@ -78,14 +78,14 @@ fn reflection_stores_transcript_and_facts() {
             confidence: 0.8,
         },
     ];
-    reflection_memory_operations("transcript...", &facts, &test_session_id(), &bridge).unwrap();
+    reflection_memory_operations("transcript...", &facts, &test_session_id(), &adapter).unwrap();
     // 1 store_episode + 2*(search_facts + store_fact) = 5
     assert_eq!(count.load(Ordering::SeqCst), 5);
 }
 
 #[test]
 fn reflection_deduplicates_facts_by_concept() {
-    let (bridge, count) = counting_bridge();
+    let (adapter, count) = counting_adapter();
     let facts = vec![
         FactExtraction {
             concept: "rust".to_string(),
@@ -98,7 +98,7 @@ fn reflection_deduplicates_facts_by_concept() {
             confidence: 0.8,
         },
     ];
-    reflection_memory_operations("transcript...", &facts, &test_session_id(), &bridge).unwrap();
+    reflection_memory_operations("transcript...", &facts, &test_session_id(), &adapter).unwrap();
     // 1 store_episode + 1*(search_facts + store_fact) (second duplicate skipped) = 3
     assert_eq!(count.load(Ordering::SeqCst), 3);
 }
@@ -250,25 +250,25 @@ fn reflection_threads_episode_id_as_fact_provenance() {
 
 #[test]
 fn execution_truncates_multibyte_utf8_safely() {
-    let (bridge, _) = counting_bridge();
+    let (adapter, _) = counting_adapter();
     // Build a string with multi-byte chars that would panic with naive byte slicing.
     // Each CJK char is 3 bytes; 200 chars = 600 bytes, exceeding the 500-byte threshold.
     let cjk_output: String = std::iter::repeat_n('漢', 200).collect();
     assert!(cjk_output.len() > 500);
     // Must not panic.
-    execution_memory_operations(&cjk_output, &test_session_id(), &bridge).unwrap();
+    execution_memory_operations(&cjk_output, &test_session_id(), &adapter).unwrap();
 }
 
 #[test]
 fn execution_does_not_truncate_short_output() {
-    let (bridge, _) = counting_bridge();
-    execution_memory_operations("short", &test_session_id(), &bridge).unwrap();
+    let (adapter, _) = counting_adapter();
+    execution_memory_operations("short", &test_session_id(), &adapter).unwrap();
 }
 
 #[test]
 fn persistence_clears_working_and_prunes() {
-    let (bridge, count) = counting_bridge();
-    persistence_memory_operations(&test_session_id(), &bridge).unwrap();
+    let (adapter, count) = counting_adapter();
+    persistence_memory_operations(&test_session_id(), &adapter).unwrap();
     // clear_working + prune_expired_sensory + consolidate_episodes = 3
     // Issue #2327: the "completed and persisted" lifecycle marker is now
     // dropped (operational noise), so store_episode is no longer called.
@@ -278,8 +278,8 @@ fn persistence_clears_working_and_prunes() {
 
 #[test]
 fn consolidation_intake_returns_zero_when_no_prior_facts() {
-    let (bridge, count) = counting_bridge();
-    let hydrated = consolidation_intake(&test_session_id(), "test-objective", &bridge).unwrap();
+    let (adapter, count) = counting_adapter();
+    let hydrated = consolidation_intake(&test_session_id(), "test-objective", &adapter).unwrap();
     assert_eq!(hydrated, 0);
     // Only 1 call: search_facts
     assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -289,7 +289,7 @@ fn consolidation_intake_returns_zero_when_no_prior_facts() {
 fn consolidation_intake_with_facts_pushes_to_working_memory() {
     let call_count = Arc::new(AtomicU32::new(0));
     let counter = call_count.clone();
-    let transport = InMemoryBridgeTransport::new("test-intake", move |method, _params| {
+    let transport = InMemoryServerTransport::new("test-intake", move |method, _params| {
         counter.fetch_add(1, Ordering::SeqCst);
         match method {
             "memory.search_facts" => Ok(json!({
@@ -304,14 +304,14 @@ fn consolidation_intake_with_facts_pushes_to_working_memory() {
             })),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
             "memory.store_episode" => Ok(json!({"id": "epi_1"})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::server_transport::ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         }
     });
-    let bridge = CognitiveMemoryBridge::new(Box::new(transport));
-    let hydrated = consolidation_intake(&test_session_id(), "test-objective", &bridge).unwrap();
+    let adapter = CognitiveMemoryAdapter::new(Box::new(transport));
+    let hydrated = consolidation_intake(&test_session_id(), "test-objective", &adapter).unwrap();
     assert_eq!(hydrated, 1);
     // search_facts + push_working + store_episode = 3
     assert_eq!(call_count.load(Ordering::SeqCst), 3);
@@ -319,8 +319,8 @@ fn consolidation_intake_with_facts_pushes_to_working_memory() {
 
 #[test]
 fn consolidation_persistence_flushes_and_consolidates() {
-    let (bridge, count) = counting_bridge();
-    consolidation_persistence(&test_session_id(), &bridge).unwrap();
+    let (adapter, count) = counting_adapter();
+    consolidation_persistence(&test_session_id(), &adapter).unwrap();
     // get_working + consolidate_episodes = 2
     // Issue #2327: the "flushing working memory" lifecycle marker is now
     // dropped (operational noise), so store_episode is no longer called.
@@ -334,12 +334,12 @@ fn consolidation_persistence_flushes_and_consolidates() {
 // status churn doesn't cause current goals to fall off the result set.
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Build a bridge whose `search_facts("goal-store:record", ...)` returns
+/// Build an adapter whose `search_facts("goal-store:record", ...)` returns
 /// multiple revisions for the same goal slug. This simulates the append-only
 /// fact store returning historical rows alongside the current version.
-fn goal_dedup_bridge() -> CognitiveMemoryBridge {
+fn goal_dedup_adapter() -> CognitiveMemoryAdapter {
     use crate::goals::GoalRecord;
-    let transport = InMemoryBridgeTransport::new("goal-dedup", move |method, params| {
+    let transport = InMemoryServerTransport::new("goal-dedup", move |method, params| {
         match method {
             "memory.search_facts" => {
                 // Inspect the query parameter to route goal vs objective searches.
@@ -426,23 +426,23 @@ fn goal_dedup_bridge() -> CognitiveMemoryBridge {
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::server_transport::ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         }
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
 #[test]
 fn preparation_deduplicates_goal_facts_by_slug_keeping_latest() {
-    // The bridge returns 3 goal facts: 2 revisions of "alpha" and 1 "beta".
+    // The adapter returns 3 goal facts: 2 revisions of "alpha" and 1 "beta".
     // After dedup, only the latest "alpha" (node_id n_0002) and "beta" should
     // appear in relevant_facts.
-    let bridge = goal_dedup_bridge();
+    let adapter = goal_dedup_adapter();
     let ctx =
-        preparation_memory_operations("unrelated objective", &test_session_id(), &bridge).unwrap();
+        preparation_memory_operations("unrelated objective", &test_session_id(), &adapter).unwrap();
 
     // Collect goal-record facts by parsing their content.
     let goal_facts: Vec<crate::goals::GoalRecord> = ctx
@@ -479,8 +479,8 @@ fn preparation_deduplicates_goal_facts_by_slug_keeping_latest() {
 
 #[test]
 fn preparation_does_not_include_unparseable_goal_facts() {
-    // A bridge that returns one valid goal fact and one with malformed JSON.
-    let transport = InMemoryBridgeTransport::new("bad-json", move |method, params| match method {
+    // An adapter that returns one valid goal fact and one with malformed JSON.
+    let transport = InMemoryServerTransport::new("bad-json", move |method, params| match method {
         "memory.search_facts" => {
             let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
             if query == "goal-store:record" {
@@ -512,14 +512,14 @@ fn preparation_does_not_include_unparseable_goal_facts() {
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
         "memory.push_working" => Ok(json!({"id": "wrk_1"})),
         "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::server_transport::ServerErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+    let adapter = CognitiveMemoryAdapter::new(Box::new(transport));
     let ctx =
-        preparation_memory_operations("unrelated objective", &test_session_id(), &bridge).unwrap();
+        preparation_memory_operations("unrelated objective", &test_session_id(), &adapter).unwrap();
 
     // The unparseable fact should be silently skipped (match+continue).
     // Only the valid "good" goal fact should survive dedup.
@@ -547,7 +547,7 @@ fn preparation_uses_goal_store_list_limit_not_hardcoded_20() {
     let captured_limit = Arc::new(Mutex::new(0u32));
     let limit_capture = captured_limit.clone();
 
-    let transport = InMemoryBridgeTransport::new("limit-check", move |method, params| {
+    let transport = InMemoryServerTransport::new("limit-check", move |method, params| {
         match method {
             "memory.search_facts" => {
                 let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
@@ -563,14 +563,14 @@ fn preparation_uses_goal_store_list_limit_not_hardcoded_20() {
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::server_transport::ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         }
     });
-    let bridge = CognitiveMemoryBridge::new(Box::new(transport));
-    preparation_memory_operations("check limit", &test_session_id(), &bridge).unwrap();
+    let adapter = CognitiveMemoryAdapter::new(Box::new(transport));
+    preparation_memory_operations("check limit", &test_session_id(), &adapter).unwrap();
 
     let limit = *captured_limit.lock().unwrap();
     assert!(
@@ -584,22 +584,22 @@ fn preparation_uses_goal_store_list_limit_not_hardcoded_20() {
 // save failures rather than silently swallowing them via `eprintln!`.
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Build a counting bridge that satisfies every call needed by the
+/// Build a counting adapter that satisfies every call needed by the
 /// persistence phase *and* the snapshot save (search_facts + recall_procedure).
-fn persistence_capable_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("snapshot-fail", |method, _params| match method {
+fn persistence_capable_adapter() -> CognitiveMemoryAdapter {
+    let transport = InMemoryServerTransport::new("snapshot-fail", |method, _params| match method {
         "memory.consolidate_episodes" => Ok(json!({"id": null})),
         "memory.clear_working" => Ok(json!({"count": 0})),
         "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
         "memory.store_episode" => Ok(json!({"id": "epi_1"})),
         "memory.search_facts" => Ok(json!({"facts": []})),
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::server_transport::ServerErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
 #[test]
@@ -608,13 +608,13 @@ fn persistence_propagates_snapshot_save_error_when_dir_is_a_file() {
     // If `dir` is actually a regular file, `std::fs::write` returns
     // `ENOTDIR`.  The fix for G10 (issue #1604) propagates that error
     // instead of swallowing it via `eprintln!`.
-    let bridge = persistence_capable_bridge();
+    let adapter = persistence_capable_adapter();
     let tmp_file = tempfile::NamedTempFile::new().expect("create tmp file");
     let dir_that_is_a_file = tmp_file.path().to_path_buf();
 
     let err = persistence_memory_operations_with_snapshot_dir(
         &test_session_id(),
-        &bridge,
+        &adapter,
         Some(&dir_that_is_a_file),
     )
     .expect_err("snapshot save into a non-directory must propagate as Err");
@@ -634,12 +634,12 @@ fn persistence_with_valid_override_dir_writes_snapshot_and_returns_ok() {
     // Sanity check: the override mechanism still writes a snapshot when
     // pointed at a real directory, so the G10 propagation path does not
     // regress the happy case.
-    let bridge = persistence_capable_bridge();
+    let adapter = persistence_capable_adapter();
     let tmp_dir = tempfile::tempdir().expect("create tmp dir");
 
     persistence_memory_operations_with_snapshot_dir(
         &test_session_id(),
-        &bridge,
+        &adapter,
         Some(tmp_dir.path()),
     )
     .expect("happy-path snapshot save must succeed");
@@ -703,7 +703,7 @@ fn prune_snapshots_does_not_panic_when_dir_missing() {
 /// Round-trip verification: intake → execution → persistence → recall.
 ///
 /// Uses `LibraryCognitiveMemory` (in-memory LadybugDB) so that stored
-/// data is actually queryable, unlike the counting bridge which only
+/// data is actually queryable, unlike the counting adapter which only
 /// counts calls.
 #[test]
 fn round_trip_execution_memory_recall() {
@@ -753,14 +753,14 @@ fn round_trip_execution_memory_recall() {
 // results by node_id and cap total at 10.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Build a bridge that captures search_facts query strings and returns
+/// Build an adapter that captures search_facts query strings and returns
 /// per-fragment results with controllable node_ids for dedup testing.
-fn compound_objective_bridge(
+fn compound_objective_adapter(
     captured_queries: Arc<std::sync::Mutex<Vec<String>>>,
     facts_per_query: std::collections::HashMap<String, Vec<serde_json::Value>>,
-) -> CognitiveMemoryBridge {
+) -> CognitiveMemoryAdapter {
     let transport =
-        InMemoryBridgeTransport::new("compound-obj", move |method, params| match method {
+        InMemoryServerTransport::new("compound-obj", move |method, params| match method {
             "memory.search_facts" => {
                 let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
                 captured_queries.lock().unwrap().push(query.to_string());
@@ -771,23 +771,23 @@ fn compound_objective_bridge(
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::server_transport::ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
 #[test]
 fn preparation_splits_compound_objective_into_separate_searches() {
     let queries = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let bridge = compound_objective_bridge(queries.clone(), std::collections::HashMap::new());
+    let adapter = compound_objective_adapter(queries.clone(), std::collections::HashMap::new());
 
     let _ctx = preparation_memory_operations(
         "fix auth bug; deploy to staging; update docs",
         &test_session_id(),
-        &bridge,
+        &adapter,
     )
     .unwrap();
 
@@ -823,9 +823,9 @@ fn preparation_splits_compound_objective_into_separate_searches() {
 #[test]
 fn preparation_single_fragment_objective_produces_one_search() {
     let queries = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let bridge = compound_objective_bridge(queries.clone(), std::collections::HashMap::new());
+    let adapter = compound_objective_adapter(queries.clone(), std::collections::HashMap::new());
 
-    let _ctx = preparation_memory_operations("fix auth bug", &test_session_id(), &bridge).unwrap();
+    let _ctx = preparation_memory_operations("fix auth bug", &test_session_id(), &adapter).unwrap();
 
     let captured = queries.lock().unwrap();
     let objective_queries: Vec<&String> = captured
@@ -864,8 +864,9 @@ fn preparation_deduplicates_split_results_by_node_id() {
         ],
     );
 
-    let bridge = compound_objective_bridge(queries, facts_map);
-    let ctx = preparation_memory_operations("goal A; goal B", &test_session_id(), &bridge).unwrap();
+    let adapter = compound_objective_adapter(queries, facts_map);
+    let ctx =
+        preparation_memory_operations("goal A; goal B", &test_session_id(), &adapter).unwrap();
 
     // n1, n2, n3 — n2 appears in both fragments but should only appear once.
     let node_ids: Vec<&str> = ctx
@@ -916,8 +917,9 @@ fn preparation_caps_split_results_at_ten() {
     }
     facts_map.insert("goal B".to_string(), goal_b_facts);
 
-    let bridge = compound_objective_bridge(queries, facts_map);
-    let ctx = preparation_memory_operations("goal A; goal B", &test_session_id(), &bridge).unwrap();
+    let adapter = compound_objective_adapter(queries, facts_map);
+    let ctx =
+        preparation_memory_operations("goal A; goal B", &test_session_id(), &adapter).unwrap();
 
     // 8 + 6 = 14 unique facts, but total must be capped at 10.
     assert!(
@@ -930,11 +932,11 @@ fn preparation_caps_split_results_at_ten() {
 #[test]
 fn preparation_skips_empty_fragments_from_splitting() {
     let queries = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let bridge = compound_objective_bridge(queries.clone(), std::collections::HashMap::new());
+    let adapter = compound_objective_adapter(queries.clone(), std::collections::HashMap::new());
 
     // Trailing "; " produces an empty fragment that must be skipped.
     let _ctx =
-        preparation_memory_operations("goal A; ; goal B", &test_session_id(), &bridge).unwrap();
+        preparation_memory_operations("goal A; ; goal B", &test_session_id(), &adapter).unwrap();
 
     let captured = queries.lock().unwrap();
     let objective_queries: Vec<&String> = captured

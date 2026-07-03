@@ -26,8 +26,8 @@ use serde::Deserialize;
 
 use super::progress_evidence::{EvidenceDecision, ProgressEvidenceChecker};
 use super::types::ActiveGoal;
-use crate::ooda_brain::LlmSubmitter;
-use crate::ooda_brain::prompt_store;
+use crate::ooda_reasoners::LlmSubmitter;
+use crate::ooda_reasoners::prompt_store;
 
 pub const PROMPT_NAME: &str = "progress_assessment_reviewer.md";
 const ADAPTER_TAG: &str = "progress-assessment-reviewer";

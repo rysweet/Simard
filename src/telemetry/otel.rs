@@ -1,4 +1,4 @@
-//! OpenTelemetry metrics bridge for the unified telemetry facade.
+//! OpenTelemetry metrics adapter for the unified telemetry facade.
 //!
 //! The facade ([`super::counter_add`] / [`super::gauge_set`] /
 //! [`super::histogram_record`]) dual-writes: always into the in-process

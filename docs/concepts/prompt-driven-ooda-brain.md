@@ -35,7 +35,7 @@ side-effect on `OodaState` and a distinctive `ActionOutcome.detail` prefix
 
 ```
                 ┌─────────────────────┐
-cycle.rs ─────► │ build brain (1×)    │  RustyClawdBrain ──or── DeterministicFallbackBrain
+cycle.rs ─────► │ build brain (1×)    │  RustyClawdActReasoner ──or── DeterministicFallbackActReasoner
                 └─────────┬───────────┘
                           ▼
         dispatch_spawn_engineer(action, state, goal_id, task, &brain)
@@ -65,9 +65,9 @@ useful as an audit trail and can be processed manually.
 
 ## Backward Compatibility
 
-* If `RustyClawdBrain` cannot be constructed (no API key, no rustyclawd
+* If `RustyClawdActReasoner` cannot be constructed (no API key, no rustyclawd
   subprocess, no network), the daemon falls back to
-  `DeterministicFallbackBrain`, which always returns `continue_skipping`. This
+  `DeterministicFallbackActReasoner`, which always returns `continue_skipping`. This
   is **byte-identical** to the pre-feature behavior. No panics, no startup
   failure.
 * `ActionOutcome` and the on-disk `cycle_reports/*.json` schema are unchanged.
@@ -79,7 +79,7 @@ useful as an audit trail and can be processed manually.
 ## Future Migrations
 
 This PR establishes the **pattern** at one decision site. The same
-`OodaBrain`-style trait and `prompt_assets/simard/ooda_*.md` file convention
+`ActReasoner`-style trait and `prompt_assets/simard/ooda_*.md` file convention
 has incrementally absorbed the other OODA phases. All use text-based wire
 formats (DECISION markers and labeled lines) — no JSON parsing of LLM output.
 
@@ -104,5 +104,5 @@ for the normative grammar of each format.
 * [Concept: OODA loop self-detection, reflectiveness, and proactivity](./ooda-loop-self-detection.md) — how the engineer-lifecycle brain treats churn with no new artifact as a stuck loop
 * [How-to: spawn engineers from the OODA daemon](../howto/spawn-engineers-from-ooda-daemon.md)
 * [How-to: edit the OODA brain prompt](../howto/edit-the-ooda-brain-prompt.md)
-* [Reference: `OodaBrain` API](../reference/ooda-brain-api.md)
+* [Reference: `ActReasoner` API](../reference/ooda-brain-api.md)
 * [Reference: `ooda_brain.md` prompt schema](../reference/ooda-brain-prompt.md)

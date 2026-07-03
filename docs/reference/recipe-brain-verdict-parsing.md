@@ -37,11 +37,11 @@ related:
 >
 > | Component | State | Location |
 > |-----------|-------|----------|
-> | engineer-lifecycle transport + ladder + metric | **shipped** ([#2419](https://github.com/rysweet/Simard/issues/2419) / [#2432](https://github.com/rysweet/Simard/issues/2432)) | `src/ooda_brain/recipe_brain.rs` |
-> | decide / orient JSON transport + ladder + loud default | **shipped** ([#2421](https://github.com/rysweet/Simard/issues/2421)) | `src/ooda_brain/recipe_brain.rs` |
+> | engineer-lifecycle transport + ladder + metric | **shipped** ([#2419](https://github.com/rysweet/Simard/issues/2419) / [#2432](https://github.com/rysweet/Simard/issues/2432)) | `src/ooda_reasoners/recipe_reasoner.rs` |
+> | decide / orient JSON transport + ladder + loud default | **shipped** ([#2421](https://github.com/rysweet/Simard/issues/2421)) | `src/ooda_reasoners/recipe_reasoner.rs` |
 > | merge-judge JSON transport + ladder + fail-closed `Unclear` | **shipped** ([#2428](https://github.com/rysweet/Simard/issues/2428) / [#2430](https://github.com/rysweet/Simard/issues/2430) / [#2435](https://github.com/rysweet/Simard/issues/2435) / [#2462](https://github.com/rysweet/Simard/issues/2462) / [#2463](https://github.com/rysweet/Simard/issues/2463)) | `src/stewardship/recipe_merge_judge.rs` |
-> | class-level `brain_verdict_parsed_total` metric | **shipped** ([#2429](https://github.com/rysweet/Simard/issues/2429)) | `src/ooda_brain/recipe_brain.rs` |
-> | Copilot launch-log preamble stripped at the shared chokepoint + decide/orient termination-cause wiring | **shipped** ([#2496](https://github.com/rysweet/Simard/issues/2496), generalising the distill regression PR [#2500](https://github.com/rysweet/Simard/pull/2500)) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
+> | class-level `brain_verdict_parsed_total` metric | **shipped** ([#2429](https://github.com/rysweet/Simard/issues/2429)) | `src/ooda_reasoners/recipe_reasoner.rs` |
+> | Copilot launch-log preamble stripped at the shared chokepoint + decide/orient termination-cause wiring | **shipped** ([#2496](https://github.com/rysweet/Simard/issues/2496), generalising the distill regression PR [#2500](https://github.com/rysweet/Simard/pull/2500)) | `src/recipe_output/extract.rs`, `src/ooda_reasoners/recipe_reasoner.rs` |
 >
 > Everything on this page describes code that exists today. A reader six months
 > from now should treat this as the current design, not a migration note.
@@ -51,8 +51,8 @@ decision or verdict, and how all four recipe-backed brain phases share one
 transport, one escalation ladder, and one loud-default discipline. For the
 per-parser grammar (first-word / first-float / keyword) see
 [Text-parsing wire formats](./text-parsing-wire-formats.md). For the
-`RecipeBrain` struct and its standalone parse functions see the
-[RecipeBrain API reference](./recipe-brain-api.md). For the envelope shape
+`RecipeReasoner` struct and its standalone parse functions see the
+[RecipeReasoner API reference](./recipe-brain-api.md). For the envelope shape
 pinned against the installed `recipe-runner-rs` binary, see
 [Distill recipe output capture](./distill-recipe-output-capture.md).
 
@@ -99,7 +99,7 @@ orient → deterministic urgency floor, merge-judge → fail-closed `Unclear`).
 
 ## Shared transport and ladder (the engineer-lifecycle reference)
 
-Module: `src/ooda_brain/recipe_brain.rs`. The engineer-lifecycle phase is the
+Module: `src/ooda_reasoners/recipe_reasoner.rs`. The engineer-lifecycle phase is the
 reference implementation of the shared machinery; the decide, orient, and
 merge-judge phases reuse the very same transport, ladder backbone, and
 escalation-note seam described below.
@@ -148,7 +148,7 @@ label for the metric).
 > `RecipeEnvelope`/`RecipeStepResult` and `extract_recipe_decision_output` are
 > `pub(crate)` shared infrastructure. The merge-judge module
 > (`src/stewardship/recipe_merge_judge.rs`) reuses the identical extraction via a
-> `pub(crate) use` re-export from `ooda_brain`; the decide/orient phases call it
+> `pub(crate) use` re-export from `ooda_reasoners`; the decide/orient phases call it
 > directly. Every phase uses the same envelope decoder rather than re-deriving
 > it.
 
@@ -203,7 +203,7 @@ delegates to `run_brain_ladder`, preserving the `LifecycleInvoker` seam so the
 lifecycle ladder stays unit-testable without a live `recipe-runner-rs`:
 
 ```rust
-/// Seam over the raw lifecycle recipe invocation. Production wires `RecipeBrain`;
+/// Seam over the raw lifecycle recipe invocation. Production wires `RecipeReasoner`;
 /// tests wire a scripted stub.
 pub trait LifecycleInvoker {
     fn invoke_lifecycle(&self, ctx: &EngineerLifecycleCtx, attempt: &LadderAttempt)
@@ -233,7 +233,7 @@ The per-rung repair note is injected through the `{{escalation_note}}` recipe
 seam. A generic `build_phase_escalation_note(rung, prior_output,
 repair_instruction, high_effort)` is the shared builder; each phase wraps it
 with its own phrasing — `build_decide_escalation_note` and
-`build_orient_escalation_note` (in `recipe_brain.rs`),
+`build_orient_escalation_note` (in `recipe_reasoner.rs`),
 `build_merge_escalation_note` (in `recipe_merge_judge.rs`), and the unchanged
 lifecycle `build_escalation_note`. **On the `Base` rung the note is empty**, so
 the base attempt is byte-identical to the pre-ladder behavior. The recipe YAMLs
@@ -369,7 +369,7 @@ phase is kept here ("previously … now …") so the contrast is unambiguous.
 
 ### Decide phase (#2421)
 
-`recipe_brain.rs::judge_decision` invokes `invoke_decide_raw` (which passes
+`recipe_reasoner.rs::judge_decision` invokes `invoke_decide_raw` (which passes
 `--output-format json` plus the rung's `escalation_note`), extracts the agent
 output from the envelope, and parses it via `parse_action_outcome(text) ->
 (DecideJudgment, LifecycleParseOutcome)`. On a parse-miss it runs
@@ -401,7 +401,7 @@ is retained as a thin decision-only wrapper over `parse_action_outcome`.
 
 ### Orient phase (#2421)
 
-`recipe_brain.rs::judge_orientation` invokes `invoke_orient_raw` (json +
+`recipe_reasoner.rs::judge_orientation` invokes `invoke_orient_raw` (json +
 `escalation_note`), extracts the envelope output, and parses it via
 `parse_orient_outcome(text, base_urgency, failure_count) -> (OrientJudgment,
 LifecycleParseOutcome)`. On a parse-miss it runs `run_brain_ladder`, then falls
@@ -507,11 +507,11 @@ For the design rationale, see
 | Module | Coverage |
 |--------|----------|
 | `src/recipe_output/extract.rs` | **`issue_2496_launcher_tests`**: each Copilot launcher shape dropped by `is_copilot_launcher_line` / `is_noise_line` (the `ℹ NODE_OPTIONS=… (saved preference)` info marker, `Run 'copilot update'…`, `launching copilot binary=… version="GitHub Copilot CLI 1.0.66-2."`, leading `INFO`/`WARN` launcher lines); payload-recovery cases (a launcher+ANSI preamble wrapped around a valid action keyword, a bare urgency decimal, and a `{…}` JSON body, each surviving the clean); negative/safety cases (a `{`-leading line, an action keyword, a bare decimal, and a verdict keyword are **never** dropped); and the `Cow::Borrowed` zero-copy clean-path assertion on noise-free input. |
-| `src/ooda_brain/recipe_brain.rs` | `extract_recipe_decision_output` success + decode/`success=false`/empty-`step_results` error cases; `parse_lifecycle_outcome` matrix; `run_escalation_ladder` recovery / exhaustion / invoke-error / disabled paths; `LadderTermination::cause_label` distinctness; `build_escalation_note` content pins; `build_lifecycle_metric_context` shape. **`issue_2421_tests`** + **`issue_2419_family_phase_tests`**: `parse_action_outcome` / `parse_orient_outcome` classification (parsed vs `DefaultEmpty`/`DefaultMalformed`), `build_decide_escalation_note` / `build_orient_escalation_note` / `build_phase_escalation_note` content (empty on `Base`), `brain_verdict_parsed_total` context shape, and the generic `run_brain_ladder` driving an arbitrary decision type. **`issue_2496_decide_orient_launcher_tests`**: `parse_action_outcome` and `parse_orient_outcome` fed a real Copilot 1.0.66-2 banner + ANSI-coloured `INFO`/`WARN` launcher lines wrapped around a valid decision / urgency decimal, asserting the decision parses (`Parsed`, not `DefaultMalformed`) and the version string `1.0.66-2` is not mined as the urgency; the **all-goals-`DefaultMalformed` stall regression** asserting that the same noisy capture across a batch of active goals now yields parsed decisions (the deadlock no longer reproduces); and the decide/orient `cause` wiring (a parse-failure default carries `ladder_exhausted` / `ladder_invoke_error`, distinct from a genuine decision). |
+| `src/ooda_reasoners/recipe_reasoner.rs` | `extract_recipe_decision_output` success + decode/`success=false`/empty-`step_results` error cases; `parse_lifecycle_outcome` matrix; `run_escalation_ladder` recovery / exhaustion / invoke-error / disabled paths; `LadderTermination::cause_label` distinctness; `build_escalation_note` content pins; `build_lifecycle_metric_context` shape. **`issue_2421_tests`** + **`issue_2419_family_phase_tests`**: `parse_action_outcome` / `parse_orient_outcome` classification (parsed vs `DefaultEmpty`/`DefaultMalformed`), `build_decide_escalation_note` / `build_orient_escalation_note` / `build_phase_escalation_note` content (empty on `Base`), `brain_verdict_parsed_total` context shape, and the generic `run_brain_ladder` driving an arbitrary decision type. **`issue_2496_decide_orient_launcher_tests`**: `parse_action_outcome` and `parse_orient_outcome` fed a real Copilot 1.0.66-2 banner + ANSI-coloured `INFO`/`WARN` launcher lines wrapped around a valid decision / urgency decimal, asserting the decision parses (`Parsed`, not `DefaultMalformed`) and the version string `1.0.66-2` is not mined as the urgency; the **all-goals-`DefaultMalformed` stall regression** asserting that the same noisy capture across a batch of active goals now yields parsed decisions (the deadlock no longer reproduces); and the decide/orient `cause` wiring (a parse-failure default carries `ladder_exhausted` / `ladder_invoke_error`, distinct from a genuine decision). |
 | `src/memory_consolidation/distillation.rs` | **`issue_2496_distill_launcher_tests`** (built on the merged PR [#2500](https://github.com/rysweet/Simard/pull/2500) regression): the distill fact parser still recovers `{ "facts": […] }` from a launcher-preamble-wrapped capture, now via the shared `is_noise_line` chokepoint rather than a private cleaner. |
 | `src/stewardship/recipe_merge_judge.rs` | `parse_merge_verdict_from_text` keyword matrix (ready / not_ready / unclear / empty / no-keyword `Err`). **`issue_2428_tests`** + **`issue_2428_production_tests`**: JSON-envelope extraction, `parse_merge_outcome` (structured `parse_judge_response` first, then keyword prose fallback), prose keyword fallback, and fail-closed `Verdict::Unclear` on an unparseable verdict. |
 | `src/stewardship/merge_judge.rs` | `parse_judge_response` JSON extraction (fenced / brace-balanced / outermost), `LlmMergeJudge`, `RefusingMergeJudge`. |
-| `tests/recipe_brain_verdict_assets.rs` | Asset/integration coverage of the recipe-brain verdict path. |
+| `tests/recipe_reasoner_verdict_assets.rs` | Asset/integration coverage of the recipe-brain verdict path. |
 | `tests/gadugi/decide-orient-brain-parse.sh`, `tests/gadugi/merge-judge-verdict.sh` | Outside-in gadugi scenarios exercising the decide/orient parse path and the merge-judge verdict path end-to-end. |
 
 ---
@@ -521,7 +521,7 @@ For the design rationale, see
 - [How-to: Diagnose `simard merge-pr` verdict-parse failures](../howto/diagnose-merge-pr-verdict-parse-failures.md) — recognizing a real verdict, a fail-closed `unclear`, and an infra error
 - [How-to: Diagnose OODA decide/orient brain parse failures](../howto/diagnose-decide-orient-parse-failures.md)
 - [How-to: Diagnose OODA brain decision parse failures](../howto/diagnose-brain-decision-parse-failures.md) — the lifecycle escalation ladder (#2432)
-- [Reference: RecipeBrain API](./recipe-brain-api.md)
+- [Reference: RecipeReasoner API](./recipe-brain-api.md)
 - [Reference: Text-parsing wire formats](./text-parsing-wire-formats.md)
 - [Reference: Distill recipe output capture](./distill-recipe-output-capture.md) — the envelope shape, pinned to the binary
 - [Reference: PR-finalization review pipeline](./pr-finalization-pipeline.md) — the merge authority and objective gate

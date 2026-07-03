@@ -242,7 +242,7 @@ Rust parsers depend on:
 | `ooda_decide` | `DECISION:` keyword | Untouched. |
 | Progress-assessment reviewer | JSON | Untouched. |
 
-Prompt-content tests in `src/ooda_brain/prompt_store_tests.rs` assert the new
+Prompt-content tests in `src/ooda_reasoners/prompt_store_tests.rs` assert the new
 pipeline anchors are baked into the embedded prompts (content assertions only —
 no parser or logic changes).
 
@@ -282,7 +282,7 @@ repo-scoped token; the prompt-level guardrails are defense-in-depth.
 This is a **prompt-only change** to `prompt_assets/simard/*.md`, so it
 **hot-reloads** from `~/.simard/prompt_assets/simard/` — **no binary rebuild or
 daemon redeploy** is required for the runtime behavior. (The accompanying
-prompt-content assertions in `src/ooda_brain/prompt_store_tests.rs` are compiled
+prompt-content assertions in `src/ooda_reasoners/prompt_store_tests.rs` are compiled
 into the test binary via `include_str!`, so they re-bake on `cargo test`; that is
 a test-only build, not a runtime redeploy.)
 

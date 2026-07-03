@@ -136,7 +136,7 @@ const COPILOT_OPERATIONS: &[&str] = &[
     "copilot-chat",
     "copilot-completions",
     "copilot-submit",
-    "bridge-call",
+    "adapter-call",
 ];
 
 /// Operations that require commit authentication.

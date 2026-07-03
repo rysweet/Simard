@@ -3,13 +3,13 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use simard::bridge_subprocess::InMemoryBridgeTransport;
-use simard::gym_bridge::GymBridge;
+use simard::gym_client::GymClient;
 use simard::self_improve::{
     ImprovementConfig, ImprovementDecision, ImprovementPhase, ProposedChange,
     run_improvement_cycle, summarize_cycle,
 };
 use simard::self_relaunch::{GateResult, RelaunchGate, all_gates_passed, default_gates, handover};
+use simard::server_subprocess::InMemoryServerTransport;
 
 fn suite_json(suite_id: &str, overall: f64) -> serde_json::Value {
     let d = |v: f64| {
@@ -31,17 +31,17 @@ fn suite_json(suite_id: &str, overall: f64) -> serde_json::Value {
     })
 }
 
-fn fixed_score_bridge(score: f64) -> GymBridge {
-    let t = InMemoryBridgeTransport::new("gym", move |method, _| match method {
+fn fixed_score_adapter(score: f64) -> GymClient {
+    let t = InMemoryServerTransport::new("gym", move |method, _| match method {
         "gym.run_suite" => Ok(suite_json("progressive", score)),
         _ => Ok(serde_json::json!([])),
     });
-    GymBridge::new(Box::new(t))
+    GymClient::new(Box::new(t))
 }
 
-fn improving_bridge(base: f64, post: f64) -> GymBridge {
+fn improving_adapter(base: f64, post: f64) -> GymClient {
     let n = AtomicUsize::new(0);
-    let t = InMemoryBridgeTransport::new("gym", move |method, _| match method {
+    let t = InMemoryServerTransport::new("gym", move |method, _| match method {
         "gym.run_suite" => {
             let s = if n.fetch_add(1, Ordering::SeqCst) == 0 {
                 base
@@ -52,12 +52,12 @@ fn improving_bridge(base: f64, post: f64) -> GymBridge {
         }
         _ => Ok(serde_json::json!([])),
     });
-    GymBridge::new(Box::new(t))
+    GymClient::new(Box::new(t))
 }
 
-fn regressing_bridge(base: f64, post_overall: f64, post_spec: f64) -> GymBridge {
+fn regressing_adapter(base: f64, post_overall: f64, post_spec: f64) -> GymClient {
     let n = AtomicUsize::new(0);
-    let t = InMemoryBridgeTransport::new("gym", move |method, _| match method {
+    let t = InMemoryServerTransport::new("gym", move |method, _| match method {
         "gym.run_suite" => {
             if n.fetch_add(1, Ordering::SeqCst) == 0 {
                 Ok(suite_json("progressive", base))
@@ -78,7 +78,7 @@ fn regressing_bridge(base: f64, post_overall: f64, post_spec: f64) -> GymBridge 
         }
         _ => Ok(serde_json::json!([])),
     });
-    GymBridge::new(Box::new(t))
+    GymClient::new(Box::new(t))
 }
 
 fn sample_changes() -> Vec<ProposedChange> {
@@ -103,7 +103,7 @@ fn cfg(changes: Vec<ProposedChange>) -> ImprovementConfig {
 
 #[test]
 fn cycle_with_no_changes_stops_at_analyze() {
-    let gym = fixed_score_bridge(0.70);
+    let gym = fixed_score_adapter(0.70);
     let config = cfg(vec![]);
 
     let cycle = run_improvement_cycle(&gym, &config).expect("cycle should succeed");
@@ -118,7 +118,7 @@ fn cycle_with_no_changes_stops_at_analyze() {
 
 #[test]
 fn cycle_commits_on_sufficient_improvement() {
-    let gym = improving_bridge(0.70, 0.75);
+    let gym = improving_adapter(0.70, 0.75);
     let config = cfg(sample_changes());
 
     let cycle = run_improvement_cycle(&gym, &config).expect("cycle should succeed");
@@ -138,7 +138,7 @@ fn cycle_commits_on_sufficient_improvement() {
 
 #[test]
 fn cycle_reverts_when_improvement_too_small() {
-    let gym = improving_bridge(0.70, 0.71);
+    let gym = improving_adapter(0.70, 0.71);
     let config = cfg(sample_changes());
 
     let cycle = run_improvement_cycle(&gym, &config).expect("cycle should succeed");
@@ -153,7 +153,7 @@ fn cycle_reverts_when_improvement_too_small() {
 #[test]
 fn cycle_reverts_on_dimension_regression() {
     // Overall improves from 0.70 to 0.80, but specificity drops from 0.63 to 0.40
-    let gym = regressing_bridge(0.70, 0.80, 0.40);
+    let gym = regressing_adapter(0.70, 0.80, 0.40);
     let config = cfg(sample_changes());
 
     let cycle = run_improvement_cycle(&gym, &config).expect("cycle should succeed");
@@ -168,7 +168,7 @@ fn cycle_reverts_on_dimension_regression() {
 
 #[test]
 fn cycle_records_baseline_accurately() {
-    let gym = fixed_score_bridge(0.82);
+    let gym = fixed_score_adapter(0.82);
     let config = ImprovementConfig {
         suite_id: "progressive".to_string(),
         min_net_improvement: 0.02,
@@ -189,7 +189,7 @@ fn cycle_records_baseline_accurately() {
 
 #[test]
 fn summarize_cycle_includes_key_info() {
-    let gym = improving_bridge(0.70, 0.75);
+    let gym = improving_adapter(0.70, 0.75);
     let config = cfg(sample_changes());
 
     let cycle = run_improvement_cycle(&gym, &config).expect("cycle should succeed");
@@ -213,17 +213,17 @@ fn summarize_cycle_includes_key_info() {
 }
 
 #[test]
-fn bridge_error_propagates_from_cycle() {
-    let transport = InMemoryBridgeTransport::new("gym-fail", |_method, _params| {
-        Err(simard::bridge::BridgeErrorPayload {
+fn adapter_error_propagates_from_cycle() {
+    let transport = InMemoryServerTransport::new("gym-fail", |_method, _params| {
+        Err(simard::server_transport::ServerErrorPayload {
             code: -32603,
             message: "gym server crashed".to_string(),
         })
     });
-    let gym = GymBridge::new(Box::new(transport));
+    let gym = GymClient::new(Box::new(transport));
     let config = cfg(sample_changes());
 
-    let err = run_improvement_cycle(&gym, &config).expect_err("should propagate bridge error");
+    let err = run_improvement_cycle(&gym, &config).expect_err("should propagate adapter error");
     let msg = err.to_string();
     assert!(
         msg.contains("gym server crashed"),
@@ -241,7 +241,7 @@ fn default_gates_is_ordered() {
     assert_eq!(gates[0], RelaunchGate::Smoke);
     assert_eq!(gates[1], RelaunchGate::UnitTest);
     assert_eq!(gates[2], RelaunchGate::GymBaseline);
-    assert_eq!(gates[3], RelaunchGate::BridgeHealth);
+    assert_eq!(gates[3], RelaunchGate::ServerHealth);
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn handover_accepts_valid_file() {
 #[test]
 fn cycle_with_exact_threshold_improvement_commits() {
     // Net improvement of exactly 0.02 (the default threshold) should commit
-    let gym = improving_bridge(0.70, 0.72);
+    let gym = improving_adapter(0.70, 0.72);
     let config = cfg(sample_changes());
 
     let cycle = run_improvement_cycle(&gym, &config).expect("cycle should succeed");
@@ -308,7 +308,7 @@ fn cycle_with_exact_threshold_improvement_commits() {
 
 #[test]
 fn cycle_with_zero_net_change_reverts() {
-    let gym = improving_bridge(0.70, 0.70);
+    let gym = improving_adapter(0.70, 0.70);
     let config = cfg(sample_changes());
 
     let cycle = run_improvement_cycle(&gym, &config).expect("cycle should succeed");
@@ -320,7 +320,7 @@ fn cycle_with_zero_net_change_reverts() {
 
 #[test]
 fn cycle_with_negative_improvement_reverts() {
-    let gym = improving_bridge(0.70, 0.65);
+    let gym = improving_adapter(0.70, 0.65);
     let config = cfg(sample_changes());
 
     let cycle = run_improvement_cycle(&gym, &config).expect("cycle should succeed");

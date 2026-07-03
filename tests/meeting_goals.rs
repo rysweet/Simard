@@ -3,8 +3,6 @@
 
 use serde_json::json;
 
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
 use simard::goal_curation::{
     ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS, add_active_goal,
     add_backlog_item, archive_completed, load_goal_board, persist_board, promote_to_active,
@@ -18,26 +16,28 @@ use simard::meeting_facilitator::{
     ActionItem, MeetingDecision, MeetingSessionStatus, add_note, close_meeting, record_action_item,
     record_decision, start_meeting,
 };
-use simard::memory_bridge::CognitiveMemoryBridge;
+use simard::memory_adapter::CognitiveMemoryAdapter;
 use simard::research_tracker::{
     DeveloperWatch, ResearchStatus, ResearchTopic, add_research_topic, track_developer,
     update_topic_status,
 };
+use simard::server_subprocess::InMemoryServerTransport;
+use simard::server_transport::ServerErrorPayload;
 
-fn mock_bridge() -> CognitiveMemoryBridge {
+fn mock_adapter() -> CognitiveMemoryAdapter {
     let transport =
-        InMemoryBridgeTransport::new("test-integration", |method, _params| match method {
+        InMemoryServerTransport::new("test-integration", |method, _params| match method {
             "memory.record_sensory" => Ok(json!({"id": "sen_int"})),
             "memory.store_episode" => Ok(json!({"id": "epi_int"})),
             "memory.store_fact" => Ok(json!({"id": "sem_int"})),
             "memory.store_prospective" => Ok(json!({"id": "pro_int"})),
             "memory.search_facts" => Ok(json!({"facts": []})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown method: {method}"),
             }),
         });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
 fn sample_active(id: &str, priority: u32) -> ActiveGoal {
@@ -57,8 +57,8 @@ fn sample_active(id: &str, priority: u32) -> ActiveGoal {
 
 #[test]
 fn meeting_full_lifecycle() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Phase 8 planning", &bridge).expect("meeting should start");
+    let adapter = mock_adapter();
+    let mut session = start_meeting("Phase 8 planning", &adapter).expect("meeting should start");
     assert_eq!(session.status, MeetingSessionStatus::Open);
 
     record_decision(
@@ -83,7 +83,7 @@ fn meeting_full_lifecycle() {
     .unwrap();
     add_note(&mut session, "Research tracker also needed").unwrap();
 
-    let closed = close_meeting(session, &bridge).expect("meeting should close");
+    let closed = close_meeting(session, &adapter).expect("meeting should close");
     assert_eq!(closed.status, MeetingSessionStatus::Closed);
     assert_eq!(closed.decisions.len(), 1);
     assert_eq!(closed.action_items.len(), 1);
@@ -93,9 +93,9 @@ fn meeting_full_lifecycle() {
 
 #[test]
 fn meeting_rejects_operations_on_closed_session_and_double_close() {
-    let bridge = mock_bridge();
-    let session = start_meeting("Retro", &bridge).unwrap();
-    let mut closed = close_meeting(session, &bridge).unwrap();
+    let adapter = mock_adapter();
+    let session = start_meeting("Retro", &adapter).unwrap();
+    let mut closed = close_meeting(session, &adapter).unwrap();
 
     assert!(
         record_decision(
@@ -122,7 +122,7 @@ fn meeting_rejects_operations_on_closed_session_and_double_close() {
         .is_err()
     );
     assert!(add_note(&mut closed, "late").is_err());
-    assert!(close_meeting(closed, &bridge).is_err());
+    assert!(close_meeting(closed, &adapter).is_err());
 }
 
 #[test]
@@ -188,10 +188,10 @@ fn goal_board_load_persist_and_duplicates() {
     // operator's ~/.simard. `HermeticState` mutates process-global env vars,
     // so its contract requires `#[serial(cognitive_memory)]`.
     let _hermetic = simard::test_support::HermeticState::new();
-    let bridge = mock_bridge();
-    let board = load_goal_board(&bridge).unwrap();
+    let adapter = mock_adapter();
+    let board = load_goal_board(&adapter).unwrap();
     assert!(board.active.is_empty());
-    persist_board(&board, &bridge).unwrap();
+    persist_board(&board, &adapter).unwrap();
 
     let mut board2 = GoalBoard::new();
     add_active_goal(&mut board2, sample_active("g1", 1)).unwrap();
@@ -205,7 +205,7 @@ fn goal_board_load_persist_and_duplicates() {
 
 #[test]
 fn research_topic_and_developer_watch() {
-    let bridge = mock_bridge();
+    let adapter = mock_adapter();
 
     add_research_topic(
         ResearchTopic {
@@ -215,10 +215,10 @@ fn research_topic_and_developer_watch() {
             priority: 1,
             status: ResearchStatus::Proposed,
         },
-        &bridge,
+        &adapter,
     )
     .unwrap();
-    update_topic_status("rt-1", ResearchStatus::Completed, &bridge).unwrap();
+    update_topic_status("rt-1", ResearchStatus::Completed, &adapter).unwrap();
 
     track_developer(
         DeveloperWatch {
@@ -226,7 +226,7 @@ fn research_topic_and_developer_watch() {
             focus_areas: vec!["agent-sdk".to_string()],
             last_checked: None,
         },
-        &bridge,
+        &adapter,
     )
     .unwrap();
 
@@ -240,7 +240,7 @@ fn research_topic_and_developer_watch() {
                 priority: 1,
                 status: ResearchStatus::Proposed,
             },
-            &bridge,
+            &adapter,
         )
         .is_err()
     );
@@ -251,7 +251,7 @@ fn research_topic_and_developer_watch() {
                 focus_areas: vec!["a".to_string()],
                 last_checked: None,
             },
-            &bridge,
+            &adapter,
         )
         .is_err()
     );
@@ -294,8 +294,8 @@ fn identity_operation_validation() {
 
 #[test]
 fn meeting_decisions_feed_goal_board() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Goal alignment", &bridge).unwrap();
+    let adapter = mock_adapter();
+    let mut session = start_meeting("Goal alignment", &adapter).unwrap();
     record_decision(
         &mut session,
         MeetingDecision {
@@ -305,7 +305,7 @@ fn meeting_decisions_feed_goal_board() {
         },
     )
     .unwrap();
-    let closed = close_meeting(session, &bridge).unwrap();
+    let closed = close_meeting(session, &adapter).unwrap();
 
     let mut board = GoalBoard::new();
     for (i, decision) in closed.decisions.iter().enumerate() {
@@ -332,8 +332,8 @@ fn meeting_decisions_feed_goal_board() {
 
 #[test]
 fn meeting_action_items_become_research_topics() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Research planning", &bridge).unwrap();
+    let adapter = mock_adapter();
+    let mut session = start_meeting("Research planning", &adapter).unwrap();
     record_action_item(
         &mut session,
         ActionItem {
@@ -345,7 +345,7 @@ fn meeting_action_items_become_research_topics() {
         },
     )
     .unwrap();
-    let closed = close_meeting(session, &bridge).unwrap();
+    let closed = close_meeting(session, &adapter).unwrap();
 
     for (i, item) in closed.action_items.iter().enumerate() {
         add_research_topic(
@@ -356,7 +356,7 @@ fn meeting_action_items_become_research_topics() {
                 priority: item.priority,
                 status: ResearchStatus::Proposed,
             },
-            &bridge,
+            &adapter,
         )
         .unwrap();
     }

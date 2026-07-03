@@ -136,16 +136,16 @@ fn persist_cycle_report_multiple_cycles_coexist() {
 fn persist_cycle_report_uses_serde_derive_for_all_fields() {
     // Regression for the divergence-class bug fixed in PR #1480: the
     // hand-rolled brain_judgments mapping in `persist_cycle_report`
-    // silently dropped any field added to `BrainJudgmentRecord` (e.g.
+    // silently dropped any field added to `ReasonerJudgmentRecord` (e.g.
     // PR #1476's `prompt_version`). Persisting via
     // `serde_json::to_value(&record)` makes the struct's `Serialize`
     // derive the single source of truth — assert that here so any future
     // field addition is caught by `cargo test` instead of going missing
     // from cycle reports for days.
-    use crate::ooda_brain::{BrainJudgmentRecord, BrainPhase};
+    use crate::ooda_reasoners::{ReasonerJudgmentRecord, ReasonerPhase};
 
-    let record = BrainJudgmentRecord {
-        phase: BrainPhase::Decide,
+    let record = ReasonerJudgmentRecord {
+        phase: ReasonerPhase::Decide,
         context_summary: "goal_id=ship-v1 urgency=0.900".to_string(),
         decision: "advance_goal".to_string(),
         rationale: "high priority".to_string(),
@@ -162,7 +162,7 @@ fn persist_cycle_report_uses_serde_derive_for_all_fields() {
     let _ = std::fs::remove_dir_all(&scratch);
 
     let mut report = make_test_report(77);
-    report.brain_judgments.push(record.clone());
+    report.reasoner_judgments.push(record.clone());
     persist_cycle_report(&scratch, &report);
 
     let content =
@@ -185,7 +185,7 @@ fn persist_cycle_report_uses_serde_derive_for_all_fields() {
     assert_eq!(persisted["prompt_version"], record.prompt_version);
 
     // (b) Key-set equality with the struct's own Serialize derive: if
-    //     anyone adds a new field to BrainJudgmentRecord, this assertion
+    //     anyone adds a new field to ReasonerJudgmentRecord, this assertion
     //     fires immediately instead of letting the field be silently
     //     dropped from cycle reports (cf. PR #1480).
     let expected: std::collections::BTreeSet<String> = serde_json::to_value(&record)

@@ -1,26 +1,26 @@
 //! Integration tests for the OODA loop, scheduler, and skill builder.
 
 use serde_json::json;
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
 use simard::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, add_active_goal};
-use simard::gym_bridge::GymBridge;
-use simard::knowledge_bridge::KnowledgeBridge;
-use simard::memory_bridge::CognitiveMemoryBridge;
+use simard::gym_client::GymClient;
+use simard::knowledge_client::KnowledgeClient;
+use simard::memory_adapter::CognitiveMemoryAdapter;
 use simard::ooda_loop::{
-    ActionKind, OodaBridges, OodaConfig, OodaState, act, decide, observe, orient, run_ooda_cycle,
+    ActionKind, OodaConfig, OodaContext, OodaState, act, decide, observe, orient, run_ooda_cycle,
     summarize_cycle_report,
 };
 use simard::ooda_scheduler::{
     Scheduler, SlotStatus, complete_slot, drain_finished, fail_slot, poll_slots, schedule_actions,
     scheduler_summary, start_slot,
 };
+use simard::server_subprocess::InMemoryServerTransport;
+use simard::server_transport::ServerErrorPayload;
 use simard::skill_builder::{
     SkillTemplate, extract_skill_candidates, generate_skill_definition, install_skill,
 };
 
-fn mock_memory_transport() -> InMemoryBridgeTransport {
-    InMemoryBridgeTransport::new("test-memory", |method, _params| match method {
+fn mock_memory_transport() -> InMemoryServerTransport {
+    InMemoryServerTransport::new("test-memory", |method, _params| match method {
         "memory.search_facts" => Ok(json!({"facts": []})),
         "memory.store_fact" => Ok(json!({"id": "sem_1"})),
         "memory.store_episode" => Ok(json!({"id": "epi_1"})),
@@ -40,15 +40,15 @@ fn mock_memory_transport() -> InMemoryBridgeTransport {
         "memory.clear_working" => Ok(json!({"count": 0})),
         "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
         "memory.store_procedure" => Ok(json!({"id": "proc_new"})),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(ServerErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     })
 }
 
-fn mock_gym_transport() -> InMemoryBridgeTransport {
-    InMemoryBridgeTransport::new("test-gym", |_method, _params| {
+fn mock_gym_transport() -> InMemoryServerTransport {
+    InMemoryServerTransport::new("test-gym", |_method, _params| {
         Ok(json!({
             "suite_id": "progressive", "success": true, "overall_score": 0.75,
             "dimensions": {"factual_accuracy": 0.8, "specificity": 0.7,
@@ -60,29 +60,29 @@ fn mock_gym_transport() -> InMemoryBridgeTransport {
     })
 }
 
-fn mock_knowledge_transport() -> InMemoryBridgeTransport {
-    InMemoryBridgeTransport::new("test-knowledge", |method, _params| match method {
+fn mock_knowledge_transport() -> InMemoryServerTransport {
+    InMemoryServerTransport::new("test-knowledge", |method, _params| match method {
         "knowledge.list_packs" => Ok(json!({"packs": [{"name": "rust-expert",
             "description": "Rust knowledge", "article_count": 100, "section_count": 400}]})),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(ServerErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     })
 }
 
-fn test_bridges() -> OodaBridges {
-    OodaBridges {
-        memory: Box::new(CognitiveMemoryBridge::new(
-            Box::new(mock_memory_transport()),
-        )),
-        knowledge: KnowledgeBridge::new(Box::new(mock_knowledge_transport())),
-        gym: GymBridge::new(Box::new(mock_gym_transport())),
+fn test_adapters() -> OodaContext {
+    OodaContext {
+        memory: Box::new(CognitiveMemoryAdapter::new(Box::new(
+            mock_memory_transport(),
+        ))),
+        knowledge: KnowledgeClient::new(Box::new(mock_knowledge_transport())),
+        gym: GymClient::new(Box::new(mock_gym_transport())),
         session: None,
         session_factory: None,
-        brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
-        decide_brain: None,
-        orient_brain: None,
+        act_reasoner: std::sync::Arc::new(simard::ooda_reasoners::DeterministicFallbackActReasoner),
+        decide_reasoner: None,
+        orient_reasoner: None,
         repo_root: std::path::PathBuf::from("."),
         progress_evidence: std::sync::Arc::new(
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
@@ -128,9 +128,9 @@ fn board_with_goals() -> GoalBoard {
 
 #[test]
 fn observe_gathers_goal_statuses_and_gym_health() {
-    let bridges = test_bridges();
+    let adapters = test_adapters();
     let mut state = OodaState::new(board_with_goals());
-    let obs = observe(&mut state, &bridges).unwrap();
+    let obs = observe(&mut state, &adapters).unwrap();
     assert_eq!(obs.goal_statuses.len(), 3);
     assert!(obs.gym_health.is_some());
     assert!(obs.memory_stats.total() > 0);
@@ -138,10 +138,10 @@ fn observe_gathers_goal_statuses_and_gym_health() {
 
 #[test]
 fn orient_produces_ranked_priorities() {
-    let bridges = test_bridges();
+    let adapters = test_adapters();
     let board = board_with_goals();
     let mut state = OodaState::new(board.clone());
-    let obs = observe(&mut state, &bridges).unwrap();
+    let obs = observe(&mut state, &adapters).unwrap();
     let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
     assert!(!priorities.is_empty());
     assert_eq!(priorities[0].goal_id, "g3"); // blocked = highest urgency
@@ -150,10 +150,10 @@ fn orient_produces_ranked_priorities() {
 
 #[test]
 fn decide_selects_actions_within_concurrent_limit() {
-    let bridges = test_bridges();
+    let adapters = test_adapters();
     let board = board_with_goals();
     let mut state = OodaState::new(board.clone());
-    let obs = observe(&mut state, &bridges).unwrap();
+    let obs = observe(&mut state, &adapters).unwrap();
     let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
     let config = OodaConfig {
         max_concurrent_actions: 2,
@@ -166,13 +166,13 @@ fn decide_selects_actions_within_concurrent_limit() {
 
 #[test]
 fn act_dispatches_and_returns_outcomes() {
-    let mut bridges = test_bridges();
+    let mut adapters = test_adapters();
     let board = board_with_goals();
     let mut state = OodaState::new(board.clone());
-    let obs = observe(&mut state, &bridges).unwrap();
+    let obs = observe(&mut state, &adapters).unwrap();
     let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
     let actions = decide(&priorities, &OodaConfig::default()).unwrap();
-    let outcomes = act(&actions, &mut bridges, &mut state, actions.len().max(1)).unwrap();
+    let outcomes = act(&actions, &mut adapters, &mut state, actions.len().max(1)).unwrap();
     assert_eq!(outcomes.len(), actions.len());
     // AdvanceGoal for blocked goals will fail (can't advance blocked goals).
     // All other outcomes should succeed.
@@ -192,24 +192,24 @@ fn act_dispatches_and_returns_outcomes() {
 
 #[test]
 fn run_full_ooda_cycle_and_increments() {
-    let mut bridges = test_bridges();
+    let mut adapters = test_adapters();
     let mut state = OodaState::new(board_with_goals());
     let config = OodaConfig::default();
-    let r1 = run_ooda_cycle(&mut state, &mut bridges, &config).unwrap();
+    let r1 = run_ooda_cycle(&mut state, &mut adapters, &config).unwrap();
     assert_eq!(r1.cycle_number, 1);
     assert!(!r1.priorities.is_empty());
     assert!(!r1.outcomes.is_empty());
     assert!(summarize_cycle_report(&r1).contains("OODA cycle #1"));
-    let r2 = run_ooda_cycle(&mut state, &mut bridges, &config).unwrap();
+    let r2 = run_ooda_cycle(&mut state, &mut adapters, &config).unwrap();
     assert_eq!(r2.cycle_number, 2);
     assert_eq!(state.cycle_count, 2);
 }
 
 #[test]
 fn feral_empty_goals_seeds_defaults() {
-    let mut bridges = test_bridges();
+    let mut adapters = test_adapters();
     let mut state = OodaState::new(GoalBoard::new());
-    let report = run_ooda_cycle(&mut state, &mut bridges, &OodaConfig::default()).unwrap();
+    let report = run_ooda_cycle(&mut state, &mut adapters, &OodaConfig::default()).unwrap();
     // Empty boards now get seeded with 5 default goals before observation.
     assert_eq!(report.observation.goal_statuses.len(), 5);
     assert_eq!(report.cycle_number, 1);
@@ -217,7 +217,7 @@ fn feral_empty_goals_seeds_defaults() {
 
 #[test]
 fn feral_all_goals_blocked() {
-    let bridges = test_bridges();
+    let adapters = test_adapters();
     let mut board = GoalBoard::new();
     add_active_goal(
         &mut board,
@@ -230,7 +230,7 @@ fn feral_all_goals_blocked() {
     )
     .unwrap();
     let mut state = OodaState::new(board.clone());
-    let obs = observe(&mut state, &bridges).unwrap();
+    let obs = observe(&mut state, &adapters).unwrap();
     let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
     for p in priorities.iter().filter(|p| !p.goal_id.starts_with("__")) {
         assert!((p.urgency - 1.0).abs() < f64::EPSILON);
@@ -238,24 +238,24 @@ fn feral_all_goals_blocked() {
 }
 
 #[test]
-fn feral_gym_bridge_down() {
-    let failing_gym = InMemoryBridgeTransport::new("gym-fail", |_, _| {
-        Err(BridgeErrorPayload {
+fn feral_gym_client_down() {
+    let failing_gym = InMemoryServerTransport::new("gym-fail", |_, _| {
+        Err(ServerErrorPayload {
             code: -32603,
             message: "crashed".into(),
         })
     });
-    let mut bridges = OodaBridges {
-        memory: Box::new(CognitiveMemoryBridge::new(
-            Box::new(mock_memory_transport()),
-        )),
-        knowledge: KnowledgeBridge::new(Box::new(mock_knowledge_transport())),
-        gym: GymBridge::new(Box::new(failing_gym)),
+    let mut adapters = OodaContext {
+        memory: Box::new(CognitiveMemoryAdapter::new(Box::new(
+            mock_memory_transport(),
+        ))),
+        knowledge: KnowledgeClient::new(Box::new(mock_knowledge_transport())),
+        gym: GymClient::new(Box::new(failing_gym)),
         session: None,
         session_factory: None,
-        brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
-        decide_brain: None,
-        orient_brain: None,
+        act_reasoner: std::sync::Arc::new(simard::ooda_reasoners::DeterministicFallbackActReasoner),
+        decide_reasoner: None,
+        orient_reasoner: None,
         repo_root: std::path::PathBuf::from("."),
         progress_evidence: std::sync::Arc::new(
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
@@ -263,7 +263,7 @@ fn feral_gym_bridge_down() {
         completion_evidence: None,
     };
     let mut state = OodaState::new(board_with_goals());
-    let report = run_ooda_cycle(&mut state, &mut bridges, &OodaConfig::default()).unwrap();
+    let report = run_ooda_cycle(&mut state, &mut adapters, &OodaConfig::default()).unwrap();
     assert!(report.observation.gym_health.is_none());
     assert_eq!(report.cycle_number, 1);
 }
@@ -300,7 +300,7 @@ fn scheduler_slot_lifecycle() {
     )
     .unwrap();
     start_slot(&mut sched, 1).unwrap();
-    fail_slot(&mut sched, 1, "bridge down".into()).unwrap();
+    fail_slot(&mut sched, 1, "adapter down".into()).unwrap();
     let completed = poll_slots(&mut sched);
     assert_eq!(completed.len(), 2);
     assert!(completed[0].outcome.is_ok());
@@ -367,11 +367,11 @@ fn start_non_pending_slot_fails() {
 
 #[test]
 fn extract_skill_candidates_filters_by_usage() {
-    let bridge = CognitiveMemoryBridge::new(Box::new(mock_memory_transport()));
-    let candidates = extract_skill_candidates(&bridge, 3).unwrap();
+    let adapter = CognitiveMemoryAdapter::new(Box::new(mock_memory_transport()));
+    let candidates = extract_skill_candidates(&adapter, 3).unwrap();
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].name, "cargo-build");
-    assert!(extract_skill_candidates(&bridge, 10).unwrap().is_empty());
+    assert!(extract_skill_candidates(&adapter, 10).unwrap().is_empty());
 }
 
 #[test]
@@ -423,7 +423,7 @@ fn successful_outcome_stores_procedural_memory() {
     let counter = procedure_calls.clone();
 
     let counting_memory =
-        InMemoryBridgeTransport::new("proc-counter-mem", move |method, _params| match method {
+        InMemoryServerTransport::new("proc-counter-mem", move |method, _params| match method {
             "memory.store_procedure" => {
                 counter.fetch_add(1, Ordering::SeqCst);
                 Ok(json!({"id": "proc_new"}))
@@ -444,7 +444,7 @@ fn successful_outcome_stores_procedural_memory() {
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             "memory.clear_working" => Ok(json!({"count": 0})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
@@ -453,26 +453,26 @@ fn successful_outcome_stores_procedural_memory() {
     // Custom decide brain that routes all priorities to ConsolidateMemory,
     // which succeeds with the mock transport (no session required).
     struct AlwaysConsolidateBrain;
-    impl simard::ooda_brain::OodaDecideBrain for AlwaysConsolidateBrain {
+    impl simard::ooda_reasoners::DecideReasoner for AlwaysConsolidateBrain {
         fn judge_decision(
             &self,
-            _ctx: &simard::ooda_brain::DecideContext,
-        ) -> simard::error::SimardResult<simard::ooda_brain::DecideJudgment> {
-            Ok(simard::ooda_brain::DecideJudgment::ConsolidateMemory {
+            _ctx: &simard::ooda_reasoners::DecideContext,
+        ) -> simard::error::SimardResult<simard::ooda_reasoners::DecideJudgment> {
+            Ok(simard::ooda_reasoners::DecideJudgment::ConsolidateMemory {
                 rationale: "test: force consolidate for success".into(),
             })
         }
     }
 
-    let mut bridges = OodaBridges {
-        memory: Box::new(CognitiveMemoryBridge::new(Box::new(counting_memory))),
-        knowledge: KnowledgeBridge::new(Box::new(mock_knowledge_transport())),
-        gym: GymBridge::new(Box::new(mock_gym_transport())),
+    let mut adapters = OodaContext {
+        memory: Box::new(CognitiveMemoryAdapter::new(Box::new(counting_memory))),
+        knowledge: KnowledgeClient::new(Box::new(mock_knowledge_transport())),
+        gym: GymClient::new(Box::new(mock_gym_transport())),
         session: None,
         session_factory: None,
-        brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
-        decide_brain: Some(std::sync::Arc::new(AlwaysConsolidateBrain)),
-        orient_brain: None,
+        act_reasoner: std::sync::Arc::new(simard::ooda_reasoners::DeterministicFallbackActReasoner),
+        decide_reasoner: Some(std::sync::Arc::new(AlwaysConsolidateBrain)),
+        orient_reasoner: None,
         repo_root: std::path::PathBuf::from("."),
         progress_evidence: std::sync::Arc::new(
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
@@ -481,7 +481,7 @@ fn successful_outcome_stores_procedural_memory() {
     };
 
     let mut state = OodaState::new(board_with_goals());
-    let report = run_ooda_cycle(&mut state, &mut bridges, &OodaConfig::default()).unwrap();
+    let report = run_ooda_cycle(&mut state, &mut adapters, &OodaConfig::default()).unwrap();
 
     // The cycle must have produced at least one successful outcome.
     let successes = report.outcomes.iter().filter(|o| o.success).count();

@@ -3,7 +3,7 @@
 //! These exercise the public gym command API (`run_gym_compare`,
 //! `run_gym_list`) and the legacy CLI dispatcher (`dispatch_legacy_gym_cli`)
 //! end-to-end against seeded on-disk fixtures — no network, no sleeps, no
-//! live runtime/bridge state, and no cognitive-memory writes. The success
+//! live runtime/adapter state, and no cognitive-memory writes. The success
 //! branch of `run_gym_compare` is the largest uncovered region in
 //! `src/operator_commands_gym/commands.rs`; driving it through both the
 //! library entry point and the CLI dispatcher mirrors the deterministic

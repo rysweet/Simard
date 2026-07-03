@@ -210,7 +210,7 @@ fn looks_like_implementation(text: &str) -> bool {
 /// for backward compatibility with callers that inspect the closed session.
 pub fn run_meeting_repl<R: BufRead, W: Write>(
     topic: &str,
-    _bridge: &dyn CognitiveMemoryOps,
+    _adapter: &dyn CognitiveMemoryOps,
     agent: Option<Box<dyn BaseTypeSession>>,
     meeting_system_prompt: &str,
     input: &mut R,

@@ -9,7 +9,7 @@ related:
   - ./cognitive-memory-serial-isolation.md
   - ../reference/simard-cli.md
   - ../reference/goal-board-api.md
-  - ../reference/cognitive-memory-bridge-helpers.md
+  - ../reference/cognitive-memory-adapter-helpers.md
   - ../howto/clean-fixture-leaks.md
   - ./COVERAGE_BASELINE.md
 ---
@@ -142,7 +142,7 @@ Additional enforcement points outside cognitive memory:
 - `goals::persistence::save_goal_board` and
   `goals::persistence::save_goal_board_with_removals` (immediately
   before the first `store_fact` call).
-- `memory_ipc::launcher::launch_writer_bridge` (immediately before
+- `memory_ipc::launcher::launch_writer_adapter` (immediately before
   returning a writer bridge, regardless of which tier was selected).
 
 Current enforcement remains multi-site: `HermeticState`/serial isolation cover
@@ -171,7 +171,7 @@ fn my_persistence_test() {
     // SIMARD_MEMORY_SOCKET is unset for the duration of `state`
     // (so socket_path_for follows the state root automatically)
 
-    let bridge = launch_writer_bridge(state.state_root()).expect("bridge");
+    let bridge = launch_writer_adapter(state.state_root()).expect("bridge");
     save_goal_board(&board, bridge.ops()).expect("save");
     // bridge dropped, then state dropped — TempDir reaped last
 }
@@ -260,7 +260,7 @@ The cheapest correct migration:
 A grep that finds candidate tests:
 
 ```bash
-rg --type rust -l 'save_goal_board|store_fact|launch_writer_bridge' \
+rg --type rust -l 'save_goal_board|store_fact|launch_writer_adapter' \
    src/ tests/ | xargs rg -L 'HermeticState'
 ```
 
@@ -284,6 +284,6 @@ list.
 - [Goal board API — save_goal_board_with_removals](../reference/goal-board-api.md#save_goal_board_with_removals)
   — the removal API exercised by the cleanup commands; tests of it
   must use `HermeticState`.
-- [Cognitive memory bridge helpers](../reference/cognitive-memory-bridge-helpers.md)
-  — the `launch_writer_bridge` tier table now reflects the
+- [Cognitive memory bridge helpers](../reference/cognitive-memory-adapter-helpers.md)
+  — the `launch_writer_adapter` tier table now reflects the
   per-state-root socket path.

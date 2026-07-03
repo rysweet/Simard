@@ -203,7 +203,7 @@ run_ooda_cycle:
    … observe → orient → decide → act …
    state.cycle_count += 1
    └─▶ scheduler::run_scheduled_distillation(   ◀── NEW end-of-cycle hook
-          &*bridges.memory, &bridges.repo_root, &schedule, cycles_since_last)
+          &*adapters.memory, &adapters.repo_root, &schedule, cycles_since_last)
 ```
 
 ### Trigger predicate

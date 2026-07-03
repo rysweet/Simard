@@ -6,7 +6,7 @@ owner: simard
 doc_type: reference
 related:
   - ./adapter-pattern.md
-  - ../reference/bridge-wire-protocol.md
+  - ../reference/server-wire-protocol.md
   - ./cognitive-memory-library-adapter.md
   - ../testing/ci-resilient-test-patterns.md
 ---
@@ -363,7 +363,7 @@ SIMARD_SKIP_GYM=1 cargo run --quiet -- gym run L1-recall
 
 The three `gym.*` methods, their parameters, and their exact JSON result shapes
 are specified in the
-[Bridge Wire Protocol Reference](../reference/bridge-wire-protocol.md#gym-bridge-methods).
+[Server Wire Protocol Reference](../reference/server-wire-protocol.md#gym-bridge-methods).
 The de-fork keeps that contract byte-stable.
 
 ---
@@ -428,7 +428,7 @@ cargo build --release
 
 - [Adapter Pattern](adapter-pattern.md) — the transport abstraction the gym client
   uses.
-- [Bridge Wire Protocol Reference](../reference/bridge-wire-protocol.md) — the
+- [Server Wire Protocol Reference](../reference/server-wire-protocol.md) — the
   exact `gym.*` method contracts.
 - [Library-backed Cognitive Memory](cognitive-memory-library-adapter.md) — the
   earlier de-fork that established this adapter pattern.

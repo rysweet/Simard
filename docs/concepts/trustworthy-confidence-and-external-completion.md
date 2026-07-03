@@ -14,9 +14,9 @@ related:
   - ../reference/external-signal-completion-gate.md
   - ../reference/completion-evidence-gate-api.md
   - ../howto/interpret-brain-confidence-and-verify-completion.md
-  - ../../src/ooda_brain/orient.rs
-  - ../../src/ooda_brain/decide.rs
-  - ../../src/ooda_brain/judgment_record.rs
+  - ../../src/ooda_reasoners/orient.rs
+  - ../../src/ooda_reasoners/decide.rs
+  - ../../src/ooda_reasoners/judgment_record.rs
   - ../../src/goal_curation/completion_gate.rs
 ---
 
@@ -28,15 +28,15 @@ related:
 >
 > This document describes the **intended** design and the *why* behind it.
 > Nothing here ships yet: the verbalized-confidence fields on
-> [`DecideJudgment`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/decide.rs)
+> [`DecideJudgment`](https://github.com/rysweet/Simard/blob/main/src/ooda_reasoners/decide.rs)
 > and
-> [`EngineerLifecycleDecision`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/mod.rs),
+> [`EngineerLifecycleDecision`](https://github.com/rysweet/Simard/blob/main/src/ooda_reasoners/mod.rs),
 > the `self_consistency` sampler, the `self_metrics::calibration` ECE spine, and
 > the external-signal completion ladder in `completion_gate.rs` are all
 > **planned, not live**. The precedent it builds on —
-> [`OrientJudgment.confidence`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/orient.rs)
+> [`OrientJudgment.confidence`](https://github.com/rysweet/Simard/blob/main/src/ooda_reasoners/orient.rs)
 > and
-> [`BrainJudgmentRecord.confidence`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/judgment_record.rs)
+> [`ReasonerJudgmentRecord.confidence`](https://github.com/rysweet/Simard/blob/main/src/ooda_reasoners/judgment_record.rs)
 > — does exist today. See the
 > [trustworthy-confidence API](../reference/trustworthy-confidence-api.md) and the
 > [external-signal completion gate](../reference/external-signal-completion-gate.md)
@@ -55,7 +55,7 @@ deserves*.
 ### 1. Decisions had no usable confidence (#2457)
 
 The Orient phase already carries a self-reported `confidence` (see
-[`OrientJudgment`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/orient.rs)),
+[`OrientJudgment`](https://github.com/rysweet/Simard/blob/main/src/ooda_reasoners/orient.rs)),
 but the two **commitment** phases do not:
 
 - **Decide** (`DecideJudgment`) — which action kind to run this cycle.
@@ -102,7 +102,7 @@ when it matters.
    3/3 sweep is trusted, a 1/3/1 split is not.
 
 The result would be recorded on the judgment, surfaced on
-[`BrainJudgmentRecord.confidence`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/judgment_record.rs)
+[`ReasonerJudgmentRecord.confidence`](https://github.com/rysweet/Simard/blob/main/src/ooda_reasoners/judgment_record.rs)
 in cycle reports, fed to the #2432 ladder and the #2433 gate, and scored for
 **calibration** (Expected Calibration Error) against the only objective
 outcome available: the #2456 verification result.

@@ -374,7 +374,7 @@ use simard::memory_backup::{backup_memory_verified, BackupConfig};
 
 let config = BackupConfig { backup_dir: state_root.join("backups"), ..BackupConfig::default() };
 let manifest = backup_memory_verified(
-    &*bridges.memory,          // live cognitive bridge
+    &*adapters.memory,          // live cognitive bridge
     &file_backed_store,        // <state_root>/memory_records.json
     "simard",
     &config,
@@ -388,11 +388,11 @@ println!("verified backup: {} facts -> {}", manifest.cognitive_facts_count, mani
 use simard::memory_backup::{backup_memory_verified, restore_from_backup};
 
 // 1. Back up the live store (full + verified).
-let manifest = backup_memory_verified(&*bridges.memory, &file_backed_store, "simard", &config)?;
+let manifest = backup_memory_verified(&*adapters.memory, &file_backed_store, "simard", &config)?;
 
 // 2. Restore into a fresh (empty) store and confirm the count round-trips.
 //    A fresh target is required for exact equality: restore is additive.
-let restored = restore_from_backup(&*fresh_bridge, &fresh_store, &manifest.backup_dir)?;
+let restored = restore_from_backup(&*fresh_adapter, &fresh_store, &manifest.backup_dir)?;
 let expected = manifest.cognitive_facts_count
     + manifest.cognitive_procedures_count
     + manifest.memory_records_count;

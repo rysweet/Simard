@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, add_active_goal, save_goal_board};
-use crate::memory_ipc::launch_writer_bridge;
+use crate::memory_ipc::launch_writer_adapter;
 use crate::ooda_actions::advance_goal::spawn::{
     BRAIN_FAILURE_BLOCKED_PREFIX, BRAIN_FAILURE_BLOCKED_SUFFIX,
 };
@@ -31,7 +31,7 @@ use crate::operator_cli::dispatch_operator_cli;
 fn isolated_state_root() -> (TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("create tempdir");
     let root = tmp.path().to_path_buf();
-    // Set BEFORE launching any bridge so the writer + reader land in the
+    // Set BEFORE launching any adapter so the writer + reader land in the
     // same isolated directory.
     // SAFETY: tests are serialised via `#[serial_test::serial(cognitive_memory)]`,
     // so concurrent env mutation is excluded by the harness.
@@ -48,7 +48,7 @@ fn seed_board(root: &Path, goals: Vec<ActiveGoal>) {
     for goal in goals {
         add_active_goal(&mut board, goal).expect("add goal under MAX_ACTIVE_GOALS");
     }
-    let writer = launch_writer_bridge(root).expect("writer bridge");
+    let writer = launch_writer_adapter(root).expect("writer adapter");
     save_goal_board(&board, writer.ops()).expect("save board");
 }
 
@@ -73,7 +73,7 @@ fn active_goal(id: &str, status: GoalProgress) -> ActiveGoal {
 
 /// Re-read the persisted goal board from cognitive memory at `root`.
 fn load_board(root: &Path) -> GoalBoard {
-    let writer = launch_writer_bridge(root).expect("writer bridge");
+    let writer = launch_writer_adapter(root).expect("writer adapter");
     crate::goal_curation::load_goal_board(writer.ops()).expect("load board")
 }
 

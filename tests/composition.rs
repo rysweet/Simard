@@ -6,11 +6,11 @@ use std::sync::Mutex;
 use serde_json::{Value, json};
 
 use simard::{
-    AgentRole, BridgeErrorPayload, CognitiveMemoryBridge, HeartbeatStatus, InMemoryBridgeTransport,
-    SubordinateConfig, SubordinateHandle, SubordinateIdentity, SubordinateProgress, assign_goal,
-    check_heartbeat, compose_identity, identity_for_role, kill_subordinate, max_retries_per_goal,
-    max_subordinate_depth, poll_progress, read_assigned_goal, report_progress, role_for_objective,
-    spawn_subordinate,
+    AgentRole, CognitiveMemoryAdapter, HeartbeatStatus, InMemoryServerTransport,
+    ServerErrorPayload, SubordinateConfig, SubordinateHandle, SubordinateIdentity,
+    SubordinateProgress, assign_goal, check_heartbeat, compose_identity, identity_for_role,
+    kill_subordinate, max_retries_per_goal, max_subordinate_depth, poll_progress,
+    read_assigned_goal, report_progress, role_for_objective, spawn_subordinate,
 };
 
 struct StoredFact {
@@ -22,9 +22,9 @@ struct StoredFact {
     tags: Vec<String>,
 }
 
-fn mock_hive_bridge() -> CognitiveMemoryBridge {
+fn mock_hive_adapter() -> CognitiveMemoryAdapter {
     let store: &'static Mutex<Vec<StoredFact>> = Box::leak(Box::new(Mutex::new(Vec::new())));
-    let transport = InMemoryBridgeTransport::new("test-hive", move |method, params| match method {
+    let transport = InMemoryServerTransport::new("test-hive", move |method, params| match method {
         "memory.store_fact" => {
             let mut facts = store.lock().unwrap();
             let id = format!("fact-{}", facts.len() + 1);
@@ -65,12 +65,12 @@ fn mock_hive_bridge() -> CognitiveMemoryBridge {
                 .collect();
             Ok(json!({"facts": matching}))
         }
-        _ => Err(BridgeErrorPayload {
+        _ => Err(ServerErrorPayload {
             code: -32601,
             message: format!("method not found: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
 #[allow(dead_code)]
@@ -133,21 +133,21 @@ fn spawn_mock_subordinate_and_verify_handle() {
 #[test]
 fn heartbeat_dead_when_no_progress_reported() {
     let handle = test_handle("sub-hb-1", "goal");
-    let status = check_heartbeat(&handle, &mock_hive_bridge()).expect("check");
+    let status = check_heartbeat(&handle, &mock_hive_adapter()).expect("check");
     assert_eq!(status, HeartbeatStatus::Dead);
 }
 
 #[test]
 fn heartbeat_alive_after_progress_reported() {
     let handle = test_handle("sub-hb-2", "goal");
-    let bridge = mock_hive_bridge();
+    let adapter = mock_hive_adapter();
     report_progress(
         "sub-hb-2",
         &progress("sub-hb-2", now_epoch(), None),
-        &bridge,
+        &adapter,
     )
     .expect("rpt");
-    match check_heartbeat(&handle, &bridge).expect("check") {
+    match check_heartbeat(&handle, &adapter).expect("check") {
         HeartbeatStatus::Alive { phase, .. } => assert_eq!(phase, "execution"),
         other => panic!("expected Alive, got {other}"),
     }
@@ -156,9 +156,9 @@ fn heartbeat_alive_after_progress_reported() {
 #[test]
 fn heartbeat_stale_with_old_epoch() {
     let handle = test_handle("sub-hb-3", "goal");
-    let bridge = mock_hive_bridge();
-    report_progress("sub-hb-3", &progress("sub-hb-3", 1000, None), &bridge).expect("rpt");
-    match check_heartbeat(&handle, &bridge).expect("check") {
+    let adapter = mock_hive_adapter();
+    report_progress("sub-hb-3", &progress("sub-hb-3", 1000, None), &adapter).expect("rpt");
+    match check_heartbeat(&handle, &adapter).expect("check") {
         HeartbeatStatus::Stale { seconds_since } => assert!(seconds_since > 100),
         other => panic!("expected Stale, got {other}"),
     }
@@ -167,16 +167,16 @@ fn heartbeat_stale_with_old_epoch() {
 #[test]
 fn heartbeat_dead_after_kill() {
     let mut handle = test_handle("sub-hb-4", "goal");
-    let bridge = mock_hive_bridge();
+    let adapter = mock_hive_adapter();
     report_progress(
         "sub-hb-4",
         &progress("sub-hb-4", now_epoch(), None),
-        &bridge,
+        &adapter,
     )
     .expect("rpt");
     kill_subordinate(&mut handle).expect("kill");
     assert_eq!(
-        check_heartbeat(&handle, &bridge).expect("check"),
+        check_heartbeat(&handle, &adapter).expect("check"),
         HeartbeatStatus::Dead
     );
 }
@@ -185,9 +185,9 @@ fn heartbeat_dead_after_kill() {
 
 #[test]
 fn assign_goal_and_read_it_back() {
-    let bridge = mock_hive_bridge();
-    assign_goal("sub-g1", "implement parser", &bridge).expect("assign");
-    let goal = read_assigned_goal("sub-g1", &bridge)
+    let adapter = mock_hive_adapter();
+    assign_goal("sub-g1", "implement parser", &adapter).expect("assign");
+    let goal = read_assigned_goal("sub-g1", &adapter)
         .expect("read")
         .expect("present");
     assert_eq!(goal, "implement parser");
@@ -196,7 +196,7 @@ fn assign_goal_and_read_it_back() {
 #[test]
 fn read_goal_returns_none_when_unassigned() {
     assert!(
-        read_assigned_goal("nonexistent", &mock_hive_bridge())
+        read_assigned_goal("nonexistent", &mock_hive_adapter())
             .expect("read")
             .is_none()
     );
@@ -204,10 +204,10 @@ fn read_goal_returns_none_when_unassigned() {
 
 #[test]
 fn assign_goal_overwrites_with_latest() {
-    let bridge = mock_hive_bridge();
-    assign_goal("sub-g2", "first", &bridge).expect("a1");
-    assign_goal("sub-g2", "second", &bridge).expect("a2");
-    let goal = read_assigned_goal("sub-g2", &bridge)
+    let adapter = mock_hive_adapter();
+    assign_goal("sub-g2", "first", &adapter).expect("a1");
+    assign_goal("sub-g2", "second", &adapter).expect("a2");
+    let goal = read_assigned_goal("sub-g2", &adapter)
         .expect("read")
         .expect("present");
     assert_eq!(goal, "second");
@@ -217,10 +217,10 @@ fn assign_goal_overwrites_with_latest() {
 
 #[test]
 fn report_and_poll_progress() {
-    let bridge = mock_hive_bridge();
+    let adapter = mock_hive_adapter();
     let p = progress("sub-p1", 99999, None);
-    report_progress("sub-p1", &p, &bridge).expect("report");
-    let polled = poll_progress("sub-p1", &bridge)
+    report_progress("sub-p1", &p, &adapter).expect("report");
+    let polled = poll_progress("sub-p1", &adapter)
         .expect("poll")
         .expect("present");
     assert_eq!(polled.sub_id, "sub-p1");
@@ -230,7 +230,7 @@ fn report_and_poll_progress() {
 #[test]
 fn poll_progress_returns_none_when_unreported() {
     assert!(
-        poll_progress("nonexistent", &mock_hive_bridge())
+        poll_progress("nonexistent", &mock_hive_adapter())
             .expect("poll")
             .is_none()
     );
@@ -238,10 +238,10 @@ fn poll_progress_returns_none_when_unreported() {
 
 #[test]
 fn progress_with_outcome_round_trips() {
-    let bridge = mock_hive_bridge();
+    let adapter = mock_hive_adapter();
     let p = progress("sub-p2", 88888, Some("all tests passed"));
-    report_progress("sub-p2", &p, &bridge).expect("report");
-    let polled = poll_progress("sub-p2", &bridge)
+    report_progress("sub-p2", &p, &adapter).expect("report");
+    let polled = poll_progress("sub-p2", &adapter)
         .expect("poll")
         .expect("present");
     assert_eq!(polled.outcome, Some("all tests passed".to_string()));
@@ -374,26 +374,26 @@ fn kill_idempotency_check() {
 
 #[test]
 fn goal_isolation_between_subordinates() {
-    let bridge = mock_hive_bridge();
-    assign_goal("sub-a", "goal A", &bridge).expect("a");
-    assign_goal("sub-b", "goal B", &bridge).expect("b");
+    let adapter = mock_hive_adapter();
+    assign_goal("sub-a", "goal A", &adapter).expect("a");
+    assign_goal("sub-b", "goal B", &adapter).expect("b");
     assert_eq!(
-        read_assigned_goal("sub-a", &bridge).unwrap().unwrap(),
+        read_assigned_goal("sub-a", &adapter).unwrap().unwrap(),
         "goal A"
     );
     assert_eq!(
-        read_assigned_goal("sub-b", &bridge).unwrap().unwrap(),
+        read_assigned_goal("sub-b", &adapter).unwrap().unwrap(),
         "goal B"
     );
 }
 
 #[test]
 fn progress_isolation_between_subordinates() {
-    let bridge = mock_hive_bridge();
-    report_progress("sub-iso-a", &progress("sub-iso-a", 11111, None), &bridge).expect("a");
-    report_progress("sub-iso-b", &progress("sub-iso-b", 22222, None), &bridge).expect("b");
-    let a = poll_progress("sub-iso-a", &bridge).unwrap().unwrap();
-    let b = poll_progress("sub-iso-b", &bridge).unwrap().unwrap();
+    let adapter = mock_hive_adapter();
+    report_progress("sub-iso-a", &progress("sub-iso-a", 11111, None), &adapter).expect("a");
+    report_progress("sub-iso-b", &progress("sub-iso-b", 22222, None), &adapter).expect("b");
+    let a = poll_progress("sub-iso-a", &adapter).unwrap().unwrap();
+    let b = poll_progress("sub-iso-b", &adapter).unwrap().unwrap();
     assert_eq!(a.sub_id, "sub-iso-a");
     assert_eq!(b.sub_id, "sub-iso-b");
 }

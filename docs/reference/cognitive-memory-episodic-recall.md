@@ -64,7 +64,7 @@ surfaces *specific* past situations. Both arrive in the
 
 PR-C adds one method to `CognitiveMemoryOps`
 (`src/cognitive_memory/mod.rs`) with a default no-op so legacy
-bridges keep compiling:
+adapters keep compiling:
 
 ```rust
 pub trait CognitiveMemoryOps {
@@ -245,7 +245,7 @@ pub struct PreparedContext {
 ```
 
 All other `PreparedContext` constructors in the codebase (test stubs,
-snapshot importers, mock bridges) are updated to add
+snapshot importers, mock adapters) are updated to add
 `episodic_recall: vec![]` so compilation stays green.
 
 ---

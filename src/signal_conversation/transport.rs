@@ -13,8 +13,8 @@
 //!
 //! # Naming
 //!
-//! Nothing here is named `bridge`/`Bridge`. This is the Signal conversation
-//! channel's transport; it is unrelated to the cognitive-memory `BridgeTransport`.
+//! Nothing here is named `adapter`/`Adapter`. This is the Signal conversation
+//! channel's transport; it is unrelated to the cognitive-memory `ServerTransport`.
 
 use std::future::Future;
 

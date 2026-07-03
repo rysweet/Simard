@@ -286,7 +286,7 @@ budget, the close still writes a deserialize-valid bundle to disk
 and emits:
 
 ```
-WARN handoff_partial=true reason=<close_timeout|agent_close_timeout|summary_empty|bridge_timeout|persistence_error> meeting_id=<id>
+WARN handoff_partial=true reason=<close_timeout|agent_close_timeout|summary_empty|adapter_timeout|persistence_error> meeting_id=<id>
 ```
 
 The on-disk JSON schema is unchanged on a partial close — existing

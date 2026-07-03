@@ -22,8 +22,8 @@ related:
 >
 > This runbook documents the operator interface for the
 > trustworthy-confidence primitive
-> ([`src/ooda_brain/confidence.rs`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/confidence.rs) —
-> **shipped**, exported from `crate::ooda_brain`; the self-consistency vote lives
+> ([`src/ooda_reasoners/confidence.rs`](https://github.com/rysweet/Simard/blob/main/src/ooda_reasoners/confidence.rs) —
+> **shipped**, exported from `crate::ooda_reasoners`; the self-consistency vote lives
 > in that same file, not a separate `self_consistency.rs`) and the external-signal
 > completion gate in
 > [`src/goal_curation/completion_gate.rs`](https://github.com/rysweet/Simard/blob/main/src/goal_curation/completion_gate.rs).

@@ -25,7 +25,7 @@ The dashboard's **Processes** tab makes this concurrency visible: the live proce
 
 **The hive event bus is in-process only.** From `src/hive_event_bus.rs`:
 
-> The bus is **in-process only**. It does not cross process or machine boundaries. A future workstream may add a network adapter that bridges this bus to a remote transport; nothing in this module assumes one.
+> The bus is **in-process only**. It does not cross process or machine boundaries. A future workstream may add a network adapter that connects this bus to a remote transport; nothing in this module assumes one.
 
 There is no built-in multi-host transport. Two daemons running on two different hosts do not share an event bus, do not share working/sensory memory, and do not coordinate goal dispatch through any network protocol that ships in the binary today.
 

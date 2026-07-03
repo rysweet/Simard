@@ -34,7 +34,7 @@ pub fn run_meeting_probe(
         ..BootstrapInputs::default()
     })?;
 
-    // Display greeting banner before starting the meeting session (no bridge available here)
+    // Display greeting banner before starting the meeting session (no adapter available here)
     print_greeting_banner(None);
 
     let execution = run_local_session(&config)?;

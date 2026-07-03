@@ -81,8 +81,8 @@ it never deletes.
 
 ## The bridge-reachability finding (drives the increment split)
 
-The single most important design fact: the daemon's `bridges.memory` is a
-`CognitiveMemoryBridge` — a **JSON-RPC IPC client** — not the in-process
+The single most important design fact: the daemon's `adapters.memory` is a
+`CognitiveMemoryAdapter` — a **JSON-RPC IPC client** — not the in-process
 `LibraryCognitiveMemory`. Over that bridge:
 
 - `prune_superseded()` falls through to the **default trait impl `Ok(0)` — a

@@ -152,7 +152,7 @@ pub struct MeetingBackend {
     /// `send_message` and any subsequent `agent.close()` call fall through
     /// to safe no-ops.
     agent: Option<Box<dyn BaseTypeSession>>,
-    bridge: Option<Box<dyn CognitiveMemoryOps>>,
+    adapter: Option<Box<dyn CognitiveMemoryOps>>,
     started_at: String,
     is_open: bool,
     /// Explicit themes recorded via the `/theme` command.
@@ -205,12 +205,12 @@ impl MeetingBackend {
     ///
     /// - `topic`: the meeting subject (used in prompts and persistence).
     /// - `agent`: an opened `BaseTypeSession` for LLM calls.
-    /// - `bridge`: optional cognitive memory bridge for enrichment and storage.
+    /// - `adapter`: optional cognitive memory adapter for enrichment and storage.
     /// - `system_prompt`: pre-built system prompt (identity + live context).
     pub fn new_session(
         topic: &str,
         agent: Box<dyn BaseTypeSession>,
-        bridge: Option<Box<dyn CognitiveMemoryOps>>,
+        adapter: Option<Box<dyn CognitiveMemoryOps>>,
         system_prompt: String,
     ) -> Self {
         let started_at = Utc::now().to_rfc3339();
@@ -228,7 +228,7 @@ impl MeetingBackend {
             history: Vec::new(),
             system_prompt,
             agent: Some(agent),
-            bridge,
+            adapter,
             started_at,
             is_open: true,
             themes: Vec::new(),

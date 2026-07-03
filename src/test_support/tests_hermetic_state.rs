@@ -10,7 +10,7 @@
 //!   `$HOME/.simard`.
 //! - (H3) `socket_path()` is `<state_root>/memory.sock` when
 //!   `SIMARD_MEMORY_SOCKET` is unset.
-//! - (H4) `TempDir` outlives every bridge handle the test opens
+//! - (H4) `TempDir` outlives every adapter handle the test opens
 //!   (covered by RAII drop order — the helper's destructor must reap
 //!   the temp dir AFTER releasing the env vars, not before).
 //! - Drop must restore the previous values of `SIMARD_STATE_ROOT` and
@@ -220,7 +220,7 @@ fn sequential_hermetic_states_do_not_cross_contaminate() {
 #[serial(cognitive_memory)]
 fn hermetic_state_root_is_a_writable_directory() {
     // Sanity: the helper must actually create the directory before
-    // returning, so downstream `launch_writer_bridge(state_root)` calls
+    // returning, so downstream `launch_writer_adapter(state_root)` calls
     // do not fail with ENOENT.
     let state = HermeticState::new();
     let root = state.state_root();

@@ -37,29 +37,29 @@ pub use types::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
-    use crate::memory_bridge::CognitiveMemoryBridge;
+    use crate::memory_adapter::CognitiveMemoryAdapter;
+    use crate::server_subprocess::InMemoryServerTransport;
     use serde_json::json;
 
-    fn mock_bridge() -> CognitiveMemoryBridge {
+    fn mock_adapter() -> CognitiveMemoryAdapter {
         let transport =
-            InMemoryBridgeTransport::new("test-meeting-mod", |method, _params| match method {
+            InMemoryServerTransport::new("test-meeting-mod", |method, _params| match method {
                 "memory.record_sensory" => Ok(json!({"id": "sen_m1"})),
                 "memory.store_episode" => Ok(json!({"id": "epi_m1"})),
                 "memory.store_fact" => Ok(json!({"id": "sem_m1"})),
                 "memory.store_prospective" => Ok(json!({"id": "pro_m1"})),
-                _ => Err(crate::bridge::BridgeErrorPayload {
+                _ => Err(crate::server_transport::ServerErrorPayload {
                     code: -32601,
                     message: format!("unknown method: {method}"),
                 }),
             });
-        CognitiveMemoryBridge::new(Box::new(transport))
+        CognitiveMemoryAdapter::new(Box::new(transport))
     }
 
     #[test]
     fn start_meeting_creates_open_session() {
-        let bridge = mock_bridge();
-        let session = start_meeting("Architecture review", &bridge).unwrap();
+        let adapter = mock_adapter();
+        let session = start_meeting("Architecture review", &adapter).unwrap();
         assert_eq!(session.topic, "Architecture review");
         assert_eq!(session.status, MeetingSessionStatus::Open);
         assert!(session.decisions.is_empty());
@@ -68,15 +68,15 @@ mod tests {
 
     #[test]
     fn start_meeting_rejects_empty_topic() {
-        let bridge = mock_bridge();
-        assert!(start_meeting("", &bridge).is_err());
-        assert!(start_meeting("   ", &bridge).is_err());
+        let adapter = mock_adapter();
+        assert!(start_meeting("", &adapter).is_err());
+        assert!(start_meeting("   ", &adapter).is_err());
     }
 
     #[test]
     fn record_decision_adds_to_session() {
-        let bridge = mock_bridge();
-        let mut session = start_meeting("Test", &bridge).unwrap();
+        let adapter = mock_adapter();
+        let mut session = start_meeting("Test", &adapter).unwrap();
         record_decision(
             &mut session,
             MeetingDecision {
@@ -92,8 +92,8 @@ mod tests {
 
     #[test]
     fn record_action_item_validates_priority() {
-        let bridge = mock_bridge();
-        let mut session = start_meeting("Test", &bridge).unwrap();
+        let adapter = mock_adapter();
+        let mut session = start_meeting("Test", &adapter).unwrap();
         let result = record_action_item(
             &mut session,
             ActionItem {
@@ -109,16 +109,16 @@ mod tests {
 
     #[test]
     fn add_note_to_open_session() {
-        let bridge = mock_bridge();
-        let mut session = start_meeting("Test", &bridge).unwrap();
+        let adapter = mock_adapter();
+        let mut session = start_meeting("Test", &adapter).unwrap();
         add_note(&mut session, "Important observation").unwrap();
         assert_eq!(session.notes.len(), 1);
     }
 
     #[test]
     fn add_question_to_open_session() {
-        let bridge = mock_bridge();
-        let mut session = start_meeting("Test", &bridge).unwrap();
+        let adapter = mock_adapter();
+        let mut session = start_meeting("Test", &adapter).unwrap();
         add_question(&mut session, "What about scaling?").unwrap();
         assert_eq!(session.explicit_questions.len(), 1);
         assert_eq!(session.explicit_questions[0], "What about scaling?");

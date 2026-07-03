@@ -21,8 +21,8 @@ use simard::remote_transfer::{
     MemorySnapshot, export_memory_snapshot, import_memory_snapshot, load_snapshot_from_file,
 };
 use simard::{
-    BridgeErrorPayload, CognitiveFact, CognitiveMemoryBridge, CognitiveProcedure,
-    InMemoryBridgeTransport, SimardError,
+    CognitiveFact, CognitiveMemoryAdapter, CognitiveProcedure, InMemoryServerTransport,
+    ServerErrorPayload, SimardError,
 };
 
 // ---------------------------------------------------------------------------
@@ -45,8 +45,8 @@ fn mock_executor() -> MockAzlinExecutor {
 fn failing_executor(fail_on: &'static str) -> MockAzlinExecutor {
     MockAzlinExecutor::new(move |args| {
         if args.first().copied() == Some(fail_on) {
-            Err(SimardError::BridgeTransportError {
-                bridge: "azlin".to_string(),
+            Err(SimardError::ServerTransportError {
+                adapter: "azlin".to_string(),
                 reason: format!("simulated failure on {fail_on}"),
             })
         } else {
@@ -60,14 +60,14 @@ struct MockStore {
     procedures: Vec<CognitiveProcedure>,
 }
 
-fn mock_bridge() -> CognitiveMemoryBridge {
+fn mock_adapter() -> CognitiveMemoryAdapter {
     let store: &'static Mutex<MockStore> = Box::leak(Box::new(Mutex::new(MockStore {
         facts: vec![],
         procedures: vec![],
     })));
 
     let transport =
-        InMemoryBridgeTransport::new("test-memory", move |method, params| match method {
+        InMemoryServerTransport::new("test-memory", move |method, params| match method {
             "memory.search_facts" => {
                 let s = store.lock().unwrap();
                 let facts: Vec<serde_json::Value> = s
@@ -141,12 +141,12 @@ fn mock_bridge() -> CognitiveMemoryBridge {
                 Ok(json!({"id": id}))
             }
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(ServerErrorPayload {
                 code: -32601,
                 message: format!("method not found: {method}"),
             }),
         });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
 // ---------------------------------------------------------------------------
@@ -174,14 +174,14 @@ fn azlin_ssh_requires_running_status() {
         status: "stopped".to_string(),
     };
     let err = azlin_ssh(&vm, &executor).unwrap_err();
-    assert!(matches!(err, SimardError::BridgeTransportError { .. }));
+    assert!(matches!(err, SimardError::ServerTransportError { .. }));
 }
 
 #[test]
 fn azlin_create_failure_propagates() {
     let executor = failing_executor("create");
     let err = azlin_create("fail-vm", &AzlinConfig::default(), &executor).unwrap_err();
-    assert!(matches!(err, SimardError::BridgeTransportError { .. }));
+    assert!(matches!(err, SimardError::ServerTransportError { .. }));
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +249,7 @@ fn session_establish_pty_rejects_non_running() {
     let mut session = create_remote_session(&config, &executor).unwrap();
     destroy_session(&mut session, &executor).unwrap();
     let err = establish_pty(&session, &executor).unwrap_err();
-    assert!(matches!(err, SimardError::BridgeTransportError { .. }));
+    assert!(matches!(err, SimardError::ServerTransportError { .. }));
 }
 
 #[test]
@@ -272,9 +272,9 @@ fn session_destroy_failure_marks_failed() {
 
 #[test]
 fn memory_snapshot_export_and_import() {
-    let source = mock_bridge();
+    let source = mock_adapter();
     source
-        .store_fact("architecture", "uses bridge pattern", 0.95, &[], "ep-1")
+        .store_fact("architecture", "uses adapter pattern", 0.95, &[], "ep-1")
         .unwrap();
     source
         .store_fact("testing", "mock executors for CLI tools", 0.8, &[], "ep-2")
@@ -292,7 +292,7 @@ fn memory_snapshot_export_and_import() {
     assert_eq!(snapshot.procedures.len(), 1);
     assert_eq!(snapshot.source_agent, "source-agent");
 
-    let target = mock_bridge();
+    let target = mock_adapter();
     let count = import_memory_snapshot(&target, &snapshot).unwrap();
     assert_eq!(count, 3);
 
@@ -304,8 +304,8 @@ fn memory_snapshot_export_and_import() {
 
 #[test]
 fn memory_snapshot_file_round_trip() {
-    let bridge = mock_bridge();
-    bridge
+    let adapter = mock_adapter();
+    adapter
         .store_fact("serialization", "JSON round-trip works", 0.99, &[], "")
         .unwrap();
 
@@ -313,7 +313,7 @@ fn memory_snapshot_file_round_trip() {
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("test-snapshot.json");
 
-    let original = export_memory_snapshot(&bridge, "file-agent", Some(&path)).unwrap();
+    let original = export_memory_snapshot(&adapter, "file-agent", Some(&path)).unwrap();
     let loaded = load_snapshot_from_file(&path).unwrap();
 
     assert_eq!(original.facts.len(), loaded.facts.len());
@@ -324,7 +324,7 @@ fn memory_snapshot_file_round_trip() {
 
 #[test]
 fn empty_snapshot_import_returns_zero() {
-    let target = mock_bridge();
+    let target = mock_adapter();
     let empty = MemorySnapshot {
         facts: vec![],
         procedures: vec![],
@@ -352,18 +352,18 @@ fn session_with_memory_migration() {
     let mut session = create_remote_session(&config, &executor).unwrap();
 
     // Export local memory.
-    let local_bridge = mock_bridge();
-    local_bridge
+    let local_adapter = mock_adapter();
+    local_adapter
         .store_fact("project", "Simard is a self-building agent", 0.99, &[], "")
         .unwrap();
 
     begin_transfer(&mut session).unwrap();
-    let snapshot = export_memory_snapshot(&local_bridge, "migrator", None).unwrap();
+    let snapshot = export_memory_snapshot(&local_adapter, "migrator", None).unwrap();
     assert_eq!(snapshot.facts.len(), 1);
 
-    // Import into a "remote" bridge.
-    let remote_bridge = mock_bridge();
-    let count = import_memory_snapshot(&remote_bridge, &snapshot).unwrap();
+    // Import into a "remote" adapter.
+    let remote_adapter = mock_adapter();
+    let count = import_memory_snapshot(&remote_adapter, &snapshot).unwrap();
     assert_eq!(count, 1);
     end_transfer(&mut session).unwrap();
 

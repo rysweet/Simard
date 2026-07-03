@@ -48,7 +48,7 @@ if str(SCRIPT_DIR) not in sys.path:
 # ---------------------------------------------------------------------------
 # Stub `playwright.sync_api` so `audit_dashboard.py` can be imported in a
 # test environment that has no Playwright installed (matches the existing
-# test_knowledge_bridge.py pattern that stubs `wikigr`).
+# test_knowledge_client.py pattern that stubs `wikigr`).
 # ---------------------------------------------------------------------------
 
 

@@ -10,11 +10,11 @@ use super::{
 };
 use crate::goal_curation::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
 use crate::goals::goal_slug;
-use crate::memory_ipc::open_reader_bridge;
+use crate::memory_ipc::open_reader_adapter;
 
 /// Load the dashboard's view of the goal board from the EXPLICIT `state_root`
 /// instead of resolving `SIMARD_STATE_ROOT` ambiently. Returns an empty
-/// `GoalBoard` when the snapshot is missing or the bridge cannot be opened —
+/// `GoalBoard` when the snapshot is missing or the adapter cannot be opened —
 /// the dashboard always renders rather than 500ing.
 ///
 /// `state_root` is trusted-internal: it originates only from a handler
@@ -132,7 +132,7 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
 
     // Pull meeting-captured actions and decisions from cognitive memory (#415)
     // (#1686: filter out raw memory IDs and debug strings, provide clean labels)
-    if let Ok(reader) = open_reader_bridge(state_root) {
+    if let Ok(reader) = open_reader_adapter(state_root) {
         let mem = reader.ops();
         for tag in &["goal", "action", "decision"] {
             if let Ok(facts) = mem.search_facts(tag, 20, 0.0) {

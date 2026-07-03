@@ -400,8 +400,8 @@ done
 # them so the loop reports only the de-flake signal:
 for i in $(seq 1 20); do
   ./target/debug/deps/simard-<hash> \
-    --skip ooda_brain::recipe_brain::tests::resolve_recipe_path \
-    --skip ooda_brain::recipe_brain::tests::new_returns_none_when \
+    --skip ooda_reasoners::recipe_reasoner::tests::resolve_recipe_path \
+    --skip ooda_reasoners::recipe_reasoner::tests::new_returns_none_when \
     --skip base_type_copilot::tests \
     || { echo "FLAKE on run $i"; break; }
 done
@@ -461,7 +461,7 @@ page.
 
 **Out of scope (confirmed):** snapshot/redeploy docs; refactoring `select_mode`
 or the goal-board logic beyond the isolation needs and that coupled removal fix;
-unrelated flaky tests (e.g. the `ooda_brain::recipe_brain` recipe-resolution and
+unrelated flaky tests (e.g. the `ooda_reasoners::recipe_reasoner` recipe-resolution and
 `base_type_copilot` copilot-spawning tests, which only fail on a developer box
 that has a live `~/.simard` install / `copilot` on `PATH` and pass/skip in clean
 CI); any change to CI workflow definitions.

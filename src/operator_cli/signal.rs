@@ -16,9 +16,9 @@
 //!
 //! # Naming
 //!
-//! Nothing here is named `bridge`/`Bridge`. This dispatches the first-class
+//! Nothing here is named `adapter`/`Adapter`. This dispatches the first-class
 //! Signal conversation channel and is unrelated to the cognitive-memory
-//! `BridgeTransport`.
+//! `ServerTransport`.
 
 use super::args::{next_required, reject_extra_args};
 

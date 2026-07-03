@@ -17,8 +17,8 @@ the API is documented in
 
 | Value | Behavior |
 |---|---|
-| Unset, or any value other than `off` (case-insensitive) | `OodaBridges.progress_evidence` is wired to `RecipeProgressChecker`, which invokes a recipe-based LLM agent to verify that proposed progress claims are coherent with the goal's plan and WIP artifacts. |
-| `off` (case-insensitive) | `OodaBridges.progress_evidence` is wired to `NoopProgressEvidenceChecker`. Every progress claim is accepted. **No `"goal progress accepted:"` or `"brain hallucination detected:"` audit episodes are emitted.** |
+| Unset, or any value other than `off` (case-insensitive) | `OodaContext.progress_evidence` is wired to `RecipeProgressChecker`, which invokes a recipe-based LLM agent to verify that proposed progress claims are coherent with the goal's plan and WIP artifacts. |
+| `off` (case-insensitive) | `OodaContext.progress_evidence` is wired to `NoopProgressEvidenceChecker`. Every progress claim is accepted. **No `"goal progress accepted:"` or `"brain hallucination detected:"` audit episodes are emitted.** |
 
 The variable is read once, at daemon startup, in the bridge-construction
 path. Changing it during a daemon run has no effect — restart the daemon

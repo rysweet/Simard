@@ -6,9 +6,9 @@ use crate::cognitive_memory::CognitiveMemoryOps;
 
 use super::super::types::{ConversationMessage, HandoffActionItem};
 
-/// Store the meeting as an episodic memory via the cognitive bridge.
+/// Store the meeting as an episodic memory via the cognitive adapter.
 pub fn store_cognitive_memory(
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
     topic: &str,
     summary: &str,
     messages: &[ConversationMessage],
@@ -31,7 +31,7 @@ pub fn store_cognitive_memory(
         let episode_content = format!(
             "Meeting transcript — topic: {topic}\n\n{transcript_text}\n\nSummary: {summary}"
         );
-        if let Err(e) = bridge.store_episode(
+        if let Err(e) = adapter.store_episode(
             &episode_content,
             "meeting-backend-transcript",
             Some(&serde_json::json!({
@@ -53,7 +53,7 @@ pub fn store_cognitive_memory(
             "summary".to_string(),
             topic.to_string(),
         ];
-        if let Err(e) = bridge.store_fact(
+        if let Err(e) = adapter.store_fact(
             &format!("meeting:{topic}"),
             summary,
             0.85,
@@ -74,14 +74,14 @@ pub fn store_cognitive_memory(
 //
 /// Store enriched meeting data (with action items) into episodic memory.
 pub fn store_enriched_cognitive_memory(
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
     topic: &str,
     summary: &str,
     messages: &[ConversationMessage],
     action_items: &[HandoffActionItem],
     decisions: &[String],
 ) {
-    store_cognitive_memory(bridge, topic, summary, messages);
+    store_cognitive_memory(adapter, topic, summary, messages);
 
     if !action_items.is_empty() {
         let action_text: String = action_items
@@ -104,7 +104,7 @@ pub fn store_enriched_cognitive_memory(
             .join("\n");
 
         let episode = format!("Action items from meeting \"{topic}\":\n{action_text}");
-        if let Err(e) = bridge.store_episode(
+        if let Err(e) = adapter.store_episode(
             &episode,
             "meeting-action-items",
             Some(&serde_json::json!({
@@ -128,7 +128,7 @@ pub fn store_enriched_cognitive_memory(
             .join("\n");
 
         let episode = format!("Decisions from meeting \"{topic}\":\n{decision_text}");
-        if let Err(e) = bridge.store_episode(
+        if let Err(e) = adapter.store_episode(
             &episode,
             "meeting-decisions",
             Some(&serde_json::json!({
@@ -156,13 +156,13 @@ mod tests {
     };
     use std::sync::Mutex;
 
-    struct MockBridge {
+    struct MockAdapter {
         episodes: Mutex<Vec<String>>,
         facts: Mutex<Vec<String>>,
         should_fail: bool,
     }
 
-    impl MockBridge {
+    impl MockAdapter {
         fn new() -> Self {
             Self {
                 episodes: Mutex::new(Vec::new()),
@@ -180,7 +180,7 @@ mod tests {
         }
     }
 
-    impl CognitiveMemoryOps for MockBridge {
+    impl CognitiveMemoryOps for MockAdapter {
         fn record_sensory(&self, _: &str, _: &str, _: u64) -> SimardResult<String> {
             Ok("ok".into())
         }
@@ -278,39 +278,39 @@ mod tests {
 
     #[test]
     fn store_cognitive_memory_stores_episode_and_fact() {
-        let bridge = MockBridge::new();
-        store_cognitive_memory(&bridge, "Sprint", "We decided on TDD", &sample_messages());
-        let episodes = bridge.episodes.lock().unwrap();
+        let adapter = MockAdapter::new();
+        store_cognitive_memory(&adapter, "Sprint", "We decided on TDD", &sample_messages());
+        let episodes = adapter.episodes.lock().unwrap();
         assert_eq!(episodes.len(), 1);
         assert!(episodes[0].contains("Sprint"));
-        let facts = bridge.facts.lock().unwrap();
+        let facts = adapter.facts.lock().unwrap();
         assert_eq!(facts.len(), 1);
         assert!(facts[0].contains("TDD"));
     }
 
     #[test]
     fn store_cognitive_memory_empty_messages_skips_episode() {
-        let bridge = MockBridge::new();
-        store_cognitive_memory(&bridge, "empty", "Summary only", &[]);
-        assert!(bridge.episodes.lock().unwrap().is_empty());
+        let adapter = MockAdapter::new();
+        store_cognitive_memory(&adapter, "empty", "Summary only", &[]);
+        assert!(adapter.episodes.lock().unwrap().is_empty());
     }
 
     #[test]
     fn store_cognitive_memory_empty_summary_skips_fact() {
-        let bridge = MockBridge::new();
-        store_cognitive_memory(&bridge, "topic", "", &sample_messages());
-        assert!(bridge.facts.lock().unwrap().is_empty());
+        let adapter = MockAdapter::new();
+        store_cognitive_memory(&adapter, "topic", "", &sample_messages());
+        assert!(adapter.facts.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn store_cognitive_memory_bridge_error_does_not_panic() {
-        let bridge = MockBridge::failing();
-        store_cognitive_memory(&bridge, "topic", "summary", &sample_messages());
+    fn store_cognitive_memory_adapter_error_does_not_panic() {
+        let adapter = MockAdapter::failing();
+        store_cognitive_memory(&adapter, "topic", "summary", &sample_messages());
     }
 
     #[test]
     fn store_enriched_stores_action_items_episode() {
-        let bridge = MockBridge::new();
+        let adapter = MockAdapter::new();
         let items = vec![HandoffActionItem {
             description: "Deploy to staging".into(),
             assignee: Some("Bob".into()),
@@ -319,14 +319,14 @@ mod tests {
             priority: None,
         }];
         store_enriched_cognitive_memory(
-            &bridge,
+            &adapter,
             "Sprint",
             "Summary",
             &sample_messages(),
             &items,
             &[],
         );
-        let episodes = bridge.episodes.lock().unwrap();
+        let episodes = adapter.episodes.lock().unwrap();
         assert_eq!(episodes.len(), 2);
         assert!(episodes[1].contains("Deploy to staging"));
         assert!(episodes[1].contains("[assignee: Bob]"));
@@ -334,31 +334,31 @@ mod tests {
 
     #[test]
     fn store_enriched_stores_decisions_episode() {
-        let bridge = MockBridge::new();
+        let adapter = MockAdapter::new();
         let decisions = vec!["Adopt TDD".to_string(), "Use Rust".to_string()];
         store_enriched_cognitive_memory(
-            &bridge,
+            &adapter,
             "retro",
             "Good session",
             &sample_messages(),
             &[],
             &decisions,
         );
-        let episodes = bridge.episodes.lock().unwrap();
+        let episodes = adapter.episodes.lock().unwrap();
         assert_eq!(episodes.len(), 2);
         assert!(episodes[1].contains("Adopt TDD"));
     }
 
     #[test]
     fn store_enriched_empty_extras_only_stores_base() {
-        let bridge = MockBridge::new();
-        store_enriched_cognitive_memory(&bridge, "topic", "summary", &sample_messages(), &[], &[]);
-        assert_eq!(bridge.episodes.lock().unwrap().len(), 1);
+        let adapter = MockAdapter::new();
+        store_enriched_cognitive_memory(&adapter, "topic", "summary", &sample_messages(), &[], &[]);
+        assert_eq!(adapter.episodes.lock().unwrap().len(), 1);
     }
 
     #[test]
     fn store_enriched_action_fields_all_present() {
-        let bridge = MockBridge::new();
+        let adapter = MockAdapter::new();
         let items = vec![HandoffActionItem {
             description: "Write docs".into(),
             assignee: Some("Charlie".into()),
@@ -366,8 +366,8 @@ mod tests {
             linked_goal: Some("docs-goal".into()),
             priority: Some(2),
         }];
-        store_enriched_cognitive_memory(&bridge, "T", "S", &sample_messages(), &items, &[]);
-        let episodes = bridge.episodes.lock().unwrap();
+        store_enriched_cognitive_memory(&adapter, "T", "S", &sample_messages(), &items, &[]);
+        let episodes = adapter.episodes.lock().unwrap();
         let ep = &episodes[1];
         assert!(ep.contains("[assignee: Charlie]"));
         assert!(ep.contains("[deadline: next sprint]"));
@@ -375,10 +375,10 @@ mod tests {
     }
 
     #[test]
-    fn store_enriched_bridge_error_does_not_panic() {
-        let bridge = MockBridge::failing();
+    fn store_enriched_adapter_error_does_not_panic() {
+        let adapter = MockAdapter::failing();
         store_enriched_cognitive_memory(
-            &bridge,
+            &adapter,
             "t",
             "s",
             &sample_messages(),

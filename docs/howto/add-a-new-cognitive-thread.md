@@ -1,6 +1,6 @@
 ---
 title: Add a new cognitive thread
-description: Developer guide for adding a new scheduled mental process to Simard's daemon (#2419) — implementing the CognitiveThread trait, choosing a SchedulePolicy and Priority, reading config from the environment, registering with the Mind, emitting telemetry through the single facade seam, obeying the safety rules (no println, least-authority ThreadContext, dry-run, protected-path allow-list, injected GhClient), and unit-testing due-computation, failure isolation, and side-effects with no sleeps or network.
+description: Developer guide for adding a new scheduled mental process to Simard's daemon (#2419) — implementing the CognitiveThread trait, choosing a SchedulePolicy and Priority, reading config from the environment, registering with the Brain, emitting telemetry through the single facade seam, obeying the safety rules (no println, least-authority ThreadContext, dry-run, protected-path allow-list, injected GhClient), and unit-testing due-computation, failure isolation, and side-effects with no sleeps or network.
 last_updated: 2026-07-03
 review_schedule: as-needed
 owner: simard
@@ -14,7 +14,7 @@ related:
 # Add a new cognitive thread
 
 !!! note "Status — shipped (#2419)"
-    The `CognitiveThread` trait, the `Mind`, and the `src/cognitive_threads/`
+    The `CognitiveThread` trait, the `Brain`, and the `src/cognitive_threads/`
     module **have shipped**, so this guide is directly actionable. The scheduler
     is additive and off by default in the live daemon (enable it with
     `SIMARD_COGNITIVE_THREADS_ENABLED`); see
@@ -23,7 +23,7 @@ related:
     [design reference](../reference/cognitive-thread-scheduling.md).
 
 Simard runs many background mental processes through one scheduler, the
-**Mind**. Adding a new one — a background-thought pass, a memory-consolidation
+**Brain**. Adding a new one — a background-thought pass, a memory-consolidation
 step, a new maintenance chore — means implementing the `CognitiveThread` trait
 and registering it. You do **not** touch the daemon loop, the OODA path, or the
 engineer action-slot scheduler (`src/ooda_scheduler/`, which is unrelated).
@@ -50,7 +50,7 @@ thread — leave `src/ooda_scheduler/` alone.
 src/cognitive_threads/
   thread.rs        # the trait + supporting types (do not change the trait)
   schedule.rs      # pure is_due / next_run / backoff (reuse; do not fork)
-  mind.rs          # the scheduler (register with it; do not modify to add a thread)
+  brain.rs          # the scheduler (register with it; do not modify to add a thread)
   telemetry.rs     # the single metric/span helper (emit through this only)
   threads/
     ooda.rs                    # primary thread (reference example)
@@ -61,16 +61,16 @@ src/cognitive_threads/
 
 Add `mod your_thread;` and a `pub use` in `src/cognitive_threads/threads/mod.rs`,
 and register the thread in the daemon setup block (see
-[Register with the Mind](#step-4-register-with-the-mind)). Nothing else in the module
+[Register with the Brain](#step-4-register-with-the-brain)). Nothing else in the module
 needs to change to host a new thread.
 
 !!! warning "Naming rule"
     No type or module may contain the word **`Bridge`** (operator preference).
-    Stay within Scheduler / Mind / CognitiveThread / Faculty / Context / Client.
+    Stay within Scheduler / Brain / CognitiveThread / Faculty / Context / Client.
 
 ## Step 1 — Implement the trait
 
-The trait is small and **object-safe** (the Mind stores `Box<dyn
+The trait is small and **object-safe** (the Brain stores `Box<dyn
 CognitiveThread>`). Threads tick **synchronously**; async work runs inside the
 tick via `ctx.runtime.block_on(...)`, exactly as the OODA cycle already does.
 
@@ -83,7 +83,7 @@ use std::time::{Duration, Instant};
 
 pub struct BackgroundThoughtThread {
     interval_secs: u64,
-    // in-memory bookkeeping the Mind reads back via health():
+    // in-memory bookkeeping the Brain reads back via health():
     last_run_epoch: Option<u64>,
     consecutive_errors: u32,
 }
@@ -101,7 +101,7 @@ impl CognitiveThread for BackgroundThoughtThread {
         let started = Instant::now();
 
         // Do the work. Best-effort: prefer returning ThreadOutcome::failed(..)
-        // over panicking (the Mind catches panics as a backstop, but a clean
+        // over panicking (the Brain catches panics as a backstop, but a clean
         // Err keeps telemetry meaningful).
         // Async I/O? run it on the shared runtime:
         //   let result = ctx.runtime.block_on(async { /* ... */ });
@@ -112,17 +112,17 @@ impl CognitiveThread for BackgroundThoughtThread {
     }
 
     fn health(&self) -> ThreadHealth {
-        // Report what the thread itself knows. The Mind overlays the
+        // Report what the thread itself knows. The Brain overlays the
         // authoritative scheduling bookkeeping it owns (next_run, backoff)
         // from its private RunBudget when it builds the dashboard snapshot.
         ThreadHealth {
             id: self.id().to_string(),
             enabled: self.enabled(),
             last_run_epoch: self.last_run_epoch,
-            next_run_epoch: None,       // filled by the Mind
+            next_run_epoch: None,       // filled by the Brain
             last_success: Some(true),
             consecutive_errors: self.consecutive_errors,
-            backoff_until_epoch: None,  // filled by the Mind
+            backoff_until_epoch: None,  // filled by the Brain
         }
     }
 }
@@ -136,7 +136,7 @@ Key points:
 - **`priority()` is never `Critical`.** `Critical` is reserved for OODA, which is
   budget-exempt and never backed off. Background work is `Low` (or `Normal`).
 - **`tick()` is best-effort and self-contained.** Return `ThreadOutcome::failed`
-  on a handled error; the Mind wraps every tick in `catch_unwind` and applies
+  on a handled error; the Brain wraps every tick in `catch_unwind` and applies
   capped exponential backoff, so a bad tick can never crash the daemon or a
   sibling.
 
@@ -195,23 +195,23 @@ now_epoch_secs}` and write the marker on **both** `Ok` and `Err`. See the
 persistent-gate contract. **Do not add a schema, migration, or table** — the
 scheduler is deliberately DB-free.
 
-## Step 4 — Register with the Mind
+## Step 4 — Register with the Brain
 
 Registration is one chained call in the daemon setup block. You do **not** edit
-the daemon loop body or `mind.rs`.
+the daemon loop body or `brain.rs`.
 
 ```rust
 mind.register(Box::new(BackgroundThoughtThread::from_env()));
 ```
 
-The Mind then computes due-ness, runs it in priority order under the per-tick
+The Brain then computes due-ness, runs it in priority order under the per-tick
 non-critical budget (`SIMARD_MIND_MAX_NONCRITICAL_PER_TICK`), isolates its
 failures, and records its telemetry — automatically.
 
 ## Step 5 — Emit telemetry (the only observability path)
 
 !!! danger "No `println!` / `eprintln!` / `print!` in new code"
-    Use structured `tracing` events + spans and OTel metrics **only**. The Mind
+    Use structured `tracing` events + spans and OTel metrics **only**. The Brain
     already opens the per-run span and records `runs` / `duration_seconds` /
     `next_run_epoch` / `active` for you. For any *extra* thread-specific metric,
     emit it **through `cognitive_threads::telemetry`** — that one helper is the
@@ -220,7 +220,7 @@ failures, and records its telemetry — automatically.
     from your thread.
 
 Return rich `detail` on the `ThreadOutcome` (bounded, no secrets) and let the
-Mind's span carry it:
+Brain's span carry it:
 
 ```rust
 ThreadOutcome::ok("done", elapsed)
@@ -256,7 +256,7 @@ These apply to every new thread and are non-negotiable:
   use a fake — no network, no ambient credentials.
 - **Bound your work.** Cap records scanned, findings, and side-effects per run;
   clamp intervals to a floor. A hot-failing thread is already capped by the
-  Mind's backoff, but don't rely on it as your only bound.
+  Brain's backoff, but don't rely on it as your only bound.
 - **Durable artifacts are GitHub issues or code, never repo snapshot docs.** If
   your thread produces findings, file a **deduplicated** issue via the
   stewardship path or emit structured telemetry — do not commit a point-in-time
@@ -273,7 +273,7 @@ The abstraction is built to be unit-testable with an **injected clock**
   `OnDemand`/`EventDriven`).
 - **Failure isolation** — a `tick()` that panics or returns `Err` is caught,
   bumps `consecutive_errors`, sets backoff, and does **not** stop OODA or a
-  sibling thread. Drive it through `Mind::run_due` with a fake OODA thread and a
+  sibling thread. Drive it through `Brain::run_due` with a fake OODA thread and a
   fake panicking thread and assert both survive.
 - **Side-effects** — run `tick()` against a fixture `~/.simard` (via `tempfile`)
   and assert exactly the intended effect; assert **no** protected path is
@@ -305,6 +305,6 @@ Place tests in `src/cognitive_threads/tests.rs` (shared harness) or a
 
 ## Related
 
-- [Cognitive-thread scheduling (reference)](../reference/cognitive-thread-scheduling.md) — the authoritative trait/`Mind`/telemetry/security contract
+- [Cognitive-thread scheduling (reference)](../reference/cognitive-thread-scheduling.md) — the authoritative trait/`Brain`/telemetry/security contract
 - [Configure and monitor cognitive-thread scheduling (howto)](./configure-cognitive-thread-scheduling.md) — operate and observe threads
 - [Configure and monitor the monthly self-quality-audit](./configure-self-quality-audit.md) — the disk-persisted-gate reuse pattern

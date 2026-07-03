@@ -2,9 +2,7 @@ use serde_json::json;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
-use simard::memory_bridge::CognitiveMemoryBridge;
+use simard::memory_adapter::CognitiveMemoryAdapter;
 use simard::memory_cognitive::{
     CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveWorkingSlot,
 };
@@ -13,13 +11,15 @@ use simard::memory_consolidation::{
     persistence_memory_operations, preparation_memory_operations, reflection_memory_operations,
 };
 use simard::memory_hive::{DEFAULT_CONFIDENCE_GATE, DEFAULT_QUALITY_THRESHOLD, HiveConfig};
+use simard::server_subprocess::InMemoryServerTransport;
+use simard::server_transport::ServerErrorPayload;
 use simard::session::SessionId;
 
 // ---------------------------------------------------------------------------
 // Stateful in-memory mock that supports store-then-search-back patterns
 // ---------------------------------------------------------------------------
 
-fn stateful_bridge() -> CognitiveMemoryBridge {
+fn stateful_adapter() -> CognitiveMemoryAdapter {
     let facts: Arc<Mutex<Vec<CognitiveFact>>> = Arc::new(Mutex::new(Vec::new()));
     let slots: Arc<Mutex<Vec<CognitiveWorkingSlot>>> = Arc::new(Mutex::new(Vec::new()));
     let procs: Arc<Mutex<Vec<CognitiveProcedure>>> = Arc::new(Mutex::new(Vec::new()));
@@ -36,7 +36,7 @@ fn stateful_bridge() -> CognitiveMemoryBridge {
     );
 
     let transport =
-        InMemoryBridgeTransport::new("stateful-memory", move |method, params| match method {
+        InMemoryServerTransport::new("stateful-memory", move |method, params| match method {
             "memory.store_fact" => {
                 let mut g = f.lock().unwrap();
                 let id = format!("sem_{:04}", g.len());
@@ -222,24 +222,24 @@ fn stateful_bridge() -> CognitiveMemoryBridge {
                 "prospective_count": pr.lock().unwrap().len() as u64,
             })),
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryAdapter::new(Box::new(transport))
 }
 
 fn test_session_id() -> SessionId {
     SessionId::parse("session-01234567-89ab-cdef-0123-456789abcdef").unwrap()
 }
 
-// --- Store fact via bridge, search it back ---
+// --- Store fact vian adapter, search it back ---
 
 #[test]
 fn store_fact_and_search_back() {
-    let bridge = stateful_bridge();
-    let id = bridge
+    let adapter = stateful_adapter();
+    let id = adapter
         .store_fact(
             "rust",
             "Rust is a systems language",
@@ -249,7 +249,7 @@ fn store_fact_and_search_back() {
         )
         .unwrap();
     assert!(id.starts_with("sem_"));
-    let facts = bridge.search_facts("rust", 10, 0.0).unwrap();
+    let facts = adapter.search_facts("rust", 10, 0.0).unwrap();
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].concept, "rust");
     assert!((facts[0].confidence - 0.95).abs() < f64::EPSILON);
@@ -257,12 +257,12 @@ fn store_fact_and_search_back() {
 
 #[test]
 fn search_facts_respects_min_confidence() {
-    let bridge = stateful_bridge();
-    bridge.store_fact("low", "not sure", 0.2, &[], "").unwrap();
-    bridge
+    let adapter = stateful_adapter();
+    adapter.store_fact("low", "not sure", 0.2, &[], "").unwrap();
+    adapter
         .store_fact("high", "very sure", 0.9, &[], "")
         .unwrap();
-    let facts = bridge.search_facts("sure", 10, 0.5).unwrap();
+    let facts = adapter.search_facts("sure", 10, 0.5).unwrap();
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].concept, "high");
 }
@@ -271,66 +271,66 @@ fn search_facts_respects_min_confidence() {
 
 #[test]
 fn store_episodes_and_consolidate() {
-    let bridge = stateful_bridge();
+    let adapter = stateful_adapter();
     for i in 0..3 {
-        bridge
+        adapter
             .store_episode(&format!("episode {i}"), "test", None)
             .unwrap();
     }
-    let consolidated = bridge.consolidate_episodes(3).unwrap();
+    let consolidated = adapter.consolidate_episodes(3).unwrap();
     assert!(consolidated.is_some());
     assert!(consolidated.unwrap().starts_with("con_"));
 }
 
 #[test]
 fn consolidate_returns_none_when_insufficient() {
-    let bridge = stateful_bridge();
-    bridge.store_episode("only one", "test", None).unwrap();
-    assert!(bridge.consolidate_episodes(10).unwrap().is_none());
+    let adapter = stateful_adapter();
+    adapter.store_episode("only one", "test", None).unwrap();
+    assert!(adapter.consolidate_episodes(10).unwrap().is_none());
 }
 
 // --- Push/get/clear working memory slots ---
 
 #[test]
 fn push_get_clear_working_memory() {
-    let bridge = stateful_bridge();
-    let id1 = bridge
+    let adapter = stateful_adapter();
+    let id1 = adapter
         .push_working("goal", "build feature", "t1", 1.0)
         .unwrap();
-    let id2 = bridge
+    let id2 = adapter
         .push_working("constraint", "must be fast", "t1", 0.8)
         .unwrap();
     assert_ne!(id1, id2);
-    assert_eq!(bridge.get_working("t1").unwrap().len(), 2);
-    assert_eq!(bridge.clear_working("t1").unwrap(), 2);
-    assert!(bridge.get_working("t1").unwrap().is_empty());
+    assert_eq!(adapter.get_working("t1").unwrap().len(), 2);
+    assert_eq!(adapter.clear_working("t1").unwrap(), 2);
+    assert!(adapter.get_working("t1").unwrap().is_empty());
 }
 
 #[test]
 fn working_memory_isolates_by_task_id() {
-    let bridge = stateful_bridge();
-    bridge.push_working("goal", "task A", "a", 1.0).unwrap();
-    bridge.push_working("goal", "task B", "b", 1.0).unwrap();
-    assert_eq!(bridge.get_working("a").unwrap().len(), 1);
-    assert_eq!(bridge.get_working("b").unwrap().len(), 1);
+    let adapter = stateful_adapter();
+    adapter.push_working("goal", "task A", "a", 1.0).unwrap();
+    adapter.push_working("goal", "task B", "b", 1.0).unwrap();
+    assert_eq!(adapter.get_working("a").unwrap().len(), 1);
+    assert_eq!(adapter.get_working("b").unwrap().len(), 1);
 }
 
 // --- Record and prune sensory items ---
 
 #[test]
 fn record_and_prune_sensory() {
-    let bridge = stateful_bridge();
-    let id = bridge.record_sensory("text", "hello", 300).unwrap();
+    let adapter = stateful_adapter();
+    let id = adapter.record_sensory("text", "hello", 300).unwrap();
     assert!(id.starts_with("sen_"));
-    assert_eq!(bridge.prune_expired_sensory().unwrap(), 0);
+    assert_eq!(adapter.prune_expired_sensory().unwrap(), 0);
 }
 
 // --- Store and recall procedures ---
 
 #[test]
 fn store_and_recall_procedure() {
-    let bridge = stateful_bridge();
-    let id = bridge
+    let adapter = stateful_adapter();
+    let id = adapter
         .store_procedure(
             "deploy",
             &["build".into(), "test".into(), "push".into()],
@@ -338,7 +338,7 @@ fn store_and_recall_procedure() {
         )
         .unwrap();
     assert!(id.starts_with("proc_"));
-    let procs = bridge.recall_procedure("deploy", 5).unwrap();
+    let procs = adapter.recall_procedure("deploy", 5).unwrap();
     assert_eq!(procs.len(), 1);
     assert_eq!(procs[0].steps.len(), 3);
     assert_eq!(procs[0].prerequisites, vec!["clean"]);
@@ -346,32 +346,32 @@ fn store_and_recall_procedure() {
 
 #[test]
 fn recall_procedure_filters_by_query() {
-    let bridge = stateful_bridge();
-    bridge
+    let adapter = stateful_adapter();
+    adapter
         .store_procedure("deploy", &["push".into()], &[])
         .unwrap();
-    bridge
+    adapter
         .store_procedure("build", &["compile".into()], &[])
         .unwrap();
-    assert_eq!(bridge.recall_procedure("deploy", 5).unwrap().len(), 1);
+    assert_eq!(adapter.recall_procedure("deploy", 5).unwrap().len(), 1);
 }
 
 // --- Store prospective, check triggers ---
 
 #[test]
 fn store_prospective_and_check_triggers() {
-    let bridge = stateful_bridge();
-    let id = bridge
+    let adapter = stateful_adapter();
+    let id = adapter
         .store_prospective("watch errors", "error compile", "cargo fix", 5)
         .unwrap();
     assert!(id.starts_with("pro_"));
     assert!(
-        bridge
+        adapter
             .check_triggers("all tests passed")
             .unwrap()
             .is_empty()
     );
-    let triggered = bridge.check_triggers("found a compilation error").unwrap();
+    let triggered = adapter.check_triggers("found a compilation error").unwrap();
     assert_eq!(triggered.len(), 1);
     assert_eq!(triggered[0].status, "triggered");
     assert_eq!(triggered[0].action_on_trigger, "cargo fix");
@@ -381,38 +381,38 @@ fn store_prospective_and_check_triggers() {
 
 #[test]
 fn full_session_lifecycle() {
-    let bridge = stateful_bridge();
+    let adapter = stateful_adapter();
     let session = test_session_id();
 
-    intake_memory_operations("build the widget", &session, &bridge).unwrap();
-    assert!(!bridge.get_working(session.as_str()).unwrap().is_empty());
+    intake_memory_operations("build the widget", &session, &adapter).unwrap();
+    assert!(!adapter.get_working(session.as_str()).unwrap().is_empty());
 
-    let ctx = preparation_memory_operations("build the widget", &session, &bridge).unwrap();
+    let ctx = preparation_memory_operations("build the widget", &session, &adapter).unwrap();
     assert!(ctx.relevant_facts.is_empty());
 
-    execution_memory_operations("$ cargo build\n   Compiling...", &session, &bridge).unwrap();
+    execution_memory_operations("$ cargo build\n   Compiling...", &session, &adapter).unwrap();
 
     let facts = vec![FactExtraction {
         concept: "widget".into(),
         content: "Widget builds with cargo".into(),
         confidence: 0.85,
     }];
-    reflection_memory_operations("transcript...", &facts, &session, &bridge).unwrap();
-    assert_eq!(bridge.search_facts("widget", 10, 0.0).unwrap().len(), 1);
+    reflection_memory_operations("transcript...", &facts, &session, &adapter).unwrap();
+    assert_eq!(adapter.search_facts("widget", 10, 0.0).unwrap().len(), 1);
 
-    persistence_memory_operations(&session, &bridge).unwrap();
-    assert!(bridge.get_working(session.as_str()).unwrap().is_empty());
+    persistence_memory_operations(&session, &adapter).unwrap();
+    assert!(adapter.get_working(session.as_str()).unwrap().is_empty());
 }
 
 // --- Statistics ---
 
 #[test]
 fn statistics_reflect_stored_items() {
-    let bridge = stateful_bridge();
-    bridge.store_fact("test", "content", 0.9, &[], "").unwrap();
-    bridge.record_sensory("text", "data", 300).unwrap();
-    bridge.push_working("goal", "work", "t1", 1.0).unwrap();
-    let stats = bridge.get_statistics().unwrap();
+    let adapter = stateful_adapter();
+    adapter.store_fact("test", "content", 0.9, &[], "").unwrap();
+    adapter.record_sensory("text", "data", 300).unwrap();
+    adapter.push_working("goal", "work", "t1", 1.0).unwrap();
+    let stats = adapter.get_statistics().unwrap();
     assert_eq!(stats.semantic_count, 1);
     assert_eq!(stats.sensory_count, 1);
     assert_eq!(stats.working_count, 1);
@@ -423,9 +423,9 @@ fn statistics_reflect_stored_items() {
 
 #[test]
 fn feral_empty_concept_still_stores() {
-    let bridge = stateful_bridge();
+    let adapter = stateful_adapter();
     assert!(
-        bridge
+        adapter
             .store_fact("", "content", 0.5, &[], "")
             .unwrap()
             .starts_with("sem_")
@@ -434,23 +434,25 @@ fn feral_empty_concept_still_stores() {
 
 #[test]
 fn feral_confidence_boundary_values() {
-    let bridge = stateful_bridge();
-    bridge
+    let adapter = stateful_adapter();
+    adapter
         .store_fact("zero", "zero conf", 0.0, &[], "")
         .unwrap();
-    bridge.store_fact("one", "full conf", 1.0, &[], "").unwrap();
-    let facts = bridge.search_facts("conf", 10, 1.0).unwrap();
+    adapter
+        .store_fact("one", "full conf", 1.0, &[], "")
+        .unwrap();
+    let facts = adapter.search_facts("conf", 10, 1.0).unwrap();
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].concept, "one");
 }
 
 #[test]
 fn feral_large_payload() {
-    let bridge = stateful_bridge();
+    let adapter = stateful_adapter();
     let big = "x".repeat(100_000);
-    bridge.store_fact("big", &big, 0.5, &[], "").unwrap();
+    adapter.store_fact("big", &big, 0.5, &[], "").unwrap();
     assert_eq!(
-        bridge.search_facts("big", 10, 0.0).unwrap()[0]
+        adapter.search_facts("big", 10, 0.0).unwrap()[0]
             .content
             .len(),
         100_000
@@ -459,14 +461,14 @@ fn feral_large_payload() {
 
 #[test]
 fn feral_unknown_method_returns_error() {
-    let transport = InMemoryBridgeTransport::new("test", |method, _| {
-        Err(BridgeErrorPayload {
+    let transport = InMemoryServerTransport::new("test", |method, _| {
+        Err(ServerErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         })
     });
     assert!(
-        CognitiveMemoryBridge::new(Box::new(transport))
+        CognitiveMemoryAdapter::new(Box::new(transport))
             .get_statistics()
             .is_err()
     );

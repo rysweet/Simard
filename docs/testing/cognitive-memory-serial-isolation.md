@@ -18,7 +18,7 @@ related:
   - ./deflaking-known-flaky-tests.md
   - ./COVERAGE_BASELINE.md
   - ../reference/goal-board-api.md
-  - ../reference/cognitive-memory-bridge-helpers.md
+  - ../reference/cognitive-memory-adapter-helpers.md
 ---
 
 # serial(cognitive_memory) test isolation — the watched env surface
@@ -175,8 +175,8 @@ if**, at run time, it does any of:
   env, directly or via `resolve_state_root()` / `memory_ipc::socket_path_for`
   default resolution.
 - **(D)** Opens cognitive memory at the **env-derived default path**
-  (`LibraryCognitiveMemory::open`, `CognitiveMemoryBridge`, `open_native`,
-  `launch_writer_bridge` against a path obtained from the global env) **or**
+  (`LibraryCognitiveMemory::open`, `CognitiveMemoryAdapter`, `open_native`,
+  `launch_writer_adapter` against a path obtained from the global env) **or**
   invokes one of the **async dashboard route handlers** that resolve the state
   root internally via `resolve_state_root()` — `seed_goals`, `add_goal`,
   `remove_goal`, `update_goal_status`, `promote_backlog_item`, `demote_goal`,
@@ -239,7 +239,7 @@ class the #2360 work left open by:
 2. Multi-keying every remaining env mutator into `cognitive_memory` (adding —
    never removing — the key alongside any existing semantic group). This folded
    in the previously-uncaught variables, including `SIMARD_SKIP_GYM`
-   (`gym_runner_bridge`), `NO_COLOR` (`meeting_repl`), `ENV_OVERRIDE`
+   (`gym_runner_client`), `NO_COLOR` (`meeting_repl`), `ENV_OVERRIDE`
    (`prompt_delivery_env`), `SIMARD_NO_UPDATE_CHECK` (`update_check_env`),
    `ENV_LLM_PROVIDER` (`runtime_config`), `ANTHROPIC_API_KEY` (`review_pipeline`,
    `self_improve_executor`), `SIMARD_DASHBOARD_PORT`, `SIMARD_OPERATOR_NAME`,
@@ -476,7 +476,7 @@ exemptions cannot be added silently.
 |----------|---------|-----------------|-------|
 | `SIMARD_STATE_ROOT` | `resolve_state_root()`, `memory_ipc::default_state_root()` | `HermeticState` sets it to a `TempDir` | The variable at the center of the race. Mutating **or** reading it requires the `cognitive_memory` key. |
 | `SIMARD_MEMORY_SOCKET` | `memory_ipc::socket_path_for` | `HermeticState` **unsets** it | When unset, the socket path follows the state root. |
-| `HOME` | `resolve_state_root()` fallback, `cmd_cleanup`, `ooda_brain` | Per-test `TempDir` in the affected tests | A `HOME` mutation can tear a concurrent `SIMARD_STATE_ROOT` read, so `HOME` mutators are in scope. |
+| `HOME` | `resolve_state_root()` fallback, `cmd_cleanup`, `ooda_reasoners` | Per-test `TempDir` in the affected tests | A `HOME` mutation can tear a concurrent `SIMARD_STATE_ROOT` read, so `HOME` mutators are in scope. |
 | `SIMARD_TEST_ALLOW_LIVE_STATE` | hermetic guard (see [hermetic-tests.md](./hermetic-tests.md)) | install/fake harnesses only | Opt-out of the hermetic state-root guard; unrelated to the serial key, but a test that sets it still mutates env and so needs the key (or an allowlist entry). |
 
 ### Serial keys
@@ -540,7 +540,7 @@ use simard::test_support::HermeticState;
 #[serial_test::serial(cognitive_memory)]   // required by the Annotation Decision Rule (A)
 fn promotes_backlog_item_into_active() {
     let state = HermeticState::new();
-    let bridge = launch_writer_bridge(state.state_root()).expect("bridge");
+    let bridge = launch_writer_adapter(state.state_root()).expect("bridge");
 
     save_goal_board(&seed_board(), bridge.ops()).expect("seed");
     promote_backlog_item(&id, bridge.ops()).expect("promote");
@@ -598,7 +598,7 @@ let board = dashboard_goal_board_snapshot(state.state_root())?;
 
 `dashboard_goal_board_snapshot(state_root)` / `dashboard_save_goal_board(state_root, board)`
 are **already** the explicit-`state_root` form (they call
-`open_reader_bridge`/`launch_writer_bridge` on the passed path); there is no
+`open_reader_adapter`/`launch_writer_adapter` on the passed path); there is no
 zero-arg env-default form and no separate `_at` overload to add.
 `full_goal_lifecycle_crud` already reads its final assertion via the explicit,
 synchronous `dashboard_goal_board_snapshot(state.state_root())`
@@ -631,7 +631,7 @@ the #2360 fix
 |------|---------|---------------------|-----|
 | `cmd_cleanup/tests.rs` | `cap_home_cargo_targets_{missing_root_is_noop, records_error_on_unremovable_target, rotates_lru_over_cap, under_cap_is_noop}`, `corrupt_db_removed_when_older_than_threshold`, `rotate_keeps_newest_n_backups`, `rotate_noop_when_under_threshold`, `trim_snapshots_keeps_newest_n` (write `HOME`) | bare `#[serial_test::serial]` | `#[serial_test::serial(cognitive_memory)]` |
 | `self_metrics/tests.rs` | `record_and_query_metric`, `query_metrics_with_since_filter`, `query_metrics_empty_file`, `daily_report_empty`, `daily_report_with_data`, `recent_metrics_limit`, `collect_and_record_all_records_four_metrics`, `malformed_lines_skipped` (write `HOME` via the `with_temp_home` helper) | bare `#[serial]` | `#[serial(cognitive_memory)]` |
-| `ooda_brain/prompt_store_tests.rs` | `env_var_takes_precedence_over_home`, `home_used_when_env_var_unset` (write `HOME`) | none | `#[serial_test::serial(cognitive_memory)]` |
+| `ooda_reasoners/prompt_store_tests.rs` | `env_var_takes_precedence_over_home`, `home_used_when_env_var_unset` (write `HOME`) | none | `#[serial_test::serial(cognitive_memory)]` |
 | `operator_commands_dashboard/tests_routes_b.rs` | `host_enumeration_reads_load_hosts` (writes `HOME`) | none | `#[serial_test::serial(cognitive_memory)]` |
 
 The `self_metrics` writers are reached only through the same-file
@@ -791,7 +791,7 @@ cargo test --release
 # 3. Stress the closed race directly: run the dashboard tests together with the
 #    formerly-disjoint env mutators under the multi-threaded runner.
 cargo test --release --lib \
-  operator_commands_dashboard cmd_cleanup ooda_brain bootstrap goal_curation
+  operator_commands_dashboard cmd_cleanup ooda_reasoners bootstrap goal_curation
 
 # 4. The regression guard.
 cargo test --lib serial_guard
@@ -819,5 +819,5 @@ Acceptance gate:
 - [Goal board API](../reference/goal-board-api.md) — the handler surface
   (`save_goal_board`, `load_goal_board`, …) whose env-default reads are
   serialized here.
-- [Cognitive memory bridge helpers](../reference/cognitive-memory-bridge-helpers.md)
-  — `launch_writer_bridge` and the per-state-root socket path.
+- [Cognitive memory bridge helpers](../reference/cognitive-memory-adapter-helpers.md)
+  — `launch_writer_adapter` and the per-state-root socket path.

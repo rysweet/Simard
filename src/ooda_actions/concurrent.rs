@@ -3,7 +3,7 @@
 //! The Act phase plans up to `cap = scaler.current_max()` `AdvanceGoal`
 //! actions per OODA round (one per uncovered incomplete goal). Before this
 //! module, every `AdvanceGoal` dispatch serialized on a single global
-//! `bridges`+`state` `Mutex` held across the slow goal-action LLM `run_turn`
+//! `adapters`+`state` `Mutex` held across the slow goal-action LLM `run_turn`
 //! (~30-90s) — so only ~1 engineer started per round even when the plan was
 //! parallel.
 //!
@@ -32,10 +32,10 @@ use crate::base_types::BaseTypeSession;
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::goal_curation::GoalProgress;
 use crate::goal_curation::progress_evidence::ProgressEvidenceChecker;
-use crate::ooda_brain::OodaBrain;
 use crate::ooda_loop::{
-    ActionOutcome, OodaBridges, OodaState, OrchestratorSessionFactory, PlannedAction,
+    ActionOutcome, OodaContext, OodaState, OrchestratorSessionFactory, PlannedAction,
 };
+use crate::ooda_reasoners::ActReasoner;
 
 use super::advance_goal::spawn::{dispatch_spawn_engineer, is_brain_failure_marker, lock_state};
 use super::goal_session::{GoalAction, apply_goal_advance_result, build_goal_advance_input};
@@ -97,7 +97,7 @@ pub(super) fn try_claim(claims: &Mutex<HashSet<String>>, goal_id: &str) -> bool 
 struct AdvanceCtx<'a> {
     memory: &'a dyn CognitiveMemoryOps,
     checker: &'a dyn ProgressEvidenceChecker,
-    brain: &'a dyn OodaBrain,
+    brain: &'a dyn ActReasoner,
     /// Mints a fresh per-goal session so `run_turn` calls run concurrently.
     session_factory: Option<&'a dyn OrchestratorSessionFactory>,
     /// Fallback single session used (under lock, serialized) only when no
@@ -119,24 +119,24 @@ struct AdvanceCtx<'a> {
 pub(super) fn dispatch_advance_concurrent(
     actions: &[PlannedAction],
     indices: &[usize],
-    bridges: &mut OodaBridges,
+    adapters: &mut OodaContext,
     state: &mut OodaState,
     max_concurrency: usize,
     results: &mut [Option<ActionOutcome>],
 ) {
-    // Decompose the `Send + Sync` bridge pieces (everything AdvanceGoal needs
+    // Decompose the `Send + Sync` adapter pieces (everything AdvanceGoal needs
     // except the single non-`Sync` session). Disjoint field borrows.
-    let memory: &dyn CognitiveMemoryOps = &*bridges.memory;
-    let checker: &dyn ProgressEvidenceChecker = &*bridges.progress_evidence;
-    let brain: &dyn OodaBrain = &*bridges.brain;
+    let memory: &dyn CognitiveMemoryOps = &*adapters.memory;
+    let checker: &dyn ProgressEvidenceChecker = &*adapters.progress_evidence;
+    let brain: &dyn ActReasoner = &*adapters.act_reasoner;
     let session_factory: Option<&dyn OrchestratorSessionFactory> =
-        bridges.session_factory.as_deref();
+        adapters.session_factory.as_deref();
 
     // Take ownership of the shared fallback session for the duration of the
     // round so the per-thread context can lend it out by `Box` (avoids tying a
     // `&mut` into the ctx struct). Restored afterwards so daemon shutdown can
     // still close it.
-    let shared_session = Mutex::new(bridges.session.take());
+    let shared_session = Mutex::new(adapters.session.take());
 
     let state_mx = Mutex::new(&mut *state);
     let claims = Mutex::new(HashSet::new());
@@ -181,7 +181,7 @@ pub(super) fn dispatch_advance_concurrent(
     });
 
     // Restore the shared session so the daemon can close it on shutdown.
-    bridges.session = shared_session
+    adapters.session = shared_session
         .into_inner()
         .unwrap_or_else(|p| p.into_inner());
 }
@@ -232,7 +232,7 @@ fn dispatch_advance_goal_concurrent(action: &PlannedAction, ctx: &AdvanceCtx) ->
         match &goal.status {
             GoalProgress::Blocked(reason) if is_brain_failure_marker(reason) => {
                 tracing::info!(
-                    target: "simard::ooda_brain",
+                    target: "simard::ooda_reasoners",
                     goal = %goal_id,
                     "issue #1911 auto-recovery (concurrent dispatch): clearing brain-failure marker",
                 );

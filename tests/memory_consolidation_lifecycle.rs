@@ -5,24 +5,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::json;
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
 use simard::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
-use simard::gym_bridge::GymBridge;
-use simard::knowledge_bridge::KnowledgeBridge;
-use simard::memory_bridge::CognitiveMemoryBridge;
+use simard::gym_client::GymClient;
+use simard::knowledge_client::KnowledgeClient;
+use simard::memory_adapter::CognitiveMemoryAdapter;
 use simard::memory_consolidation::{
     FactExtraction, consolidation_intake, consolidation_persistence, intake_memory_operations,
     persistence_memory_operations, preparation_memory_operations, reflection_memory_operations,
 };
-use simard::ooda_loop::{OodaBridges, OodaConfig, OodaState, run_ooda_cycle};
+use simard::ooda_loop::{OodaConfig, OodaContext, OodaState, run_ooda_cycle};
+use simard::server_subprocess::InMemoryServerTransport;
+use simard::server_transport::ServerErrorPayload;
 use simard::session::SessionId;
 
-/// Build a bridge whose transport counts calls per method category.
-fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
+/// Build an adapter whose transport counts calls per method category.
+fn counting_adapter() -> (CognitiveMemoryAdapter, Arc<AtomicU32>) {
     let call_count = Arc::new(AtomicU32::new(0));
     let counter = call_count.clone();
-    let transport = InMemoryBridgeTransport::new("lifecycle-test", move |method, _params| {
+    let transport = InMemoryServerTransport::new("lifecycle-test", move |method, _params| {
         counter.fetch_add(1, Ordering::SeqCst);
         match method {
             "memory.record_sensory" => Ok(json!({"id": "sen_1"})),
@@ -37,13 +37,13 @@ fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
             "memory.clear_working" => Ok(json!({"count": 2})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
             "memory.consolidate_episodes" => Ok(json!({"id": null})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         }
     });
-    (CognitiveMemoryBridge::new(Box::new(transport)), call_count)
+    (CognitiveMemoryAdapter::new(Box::new(transport)), call_count)
 }
 
 fn test_session_id() -> SessionId {
@@ -56,37 +56,37 @@ fn test_session_id() -> SessionId {
 
 #[test]
 fn full_session_lifecycle_triggers_all_consolidation_phases() {
-    let (bridge, call_count) = counting_bridge();
+    let (adapter, call_count) = counting_adapter();
     let sid = test_session_id();
     let objective = "implement feature X";
 
     // Phase 1: Intake
-    intake_memory_operations(objective, &sid, &bridge).unwrap();
+    intake_memory_operations(objective, &sid, &adapter).unwrap();
     let after_intake = call_count.load(Ordering::SeqCst);
-    // Intake makes two bridge calls: record_sensory + push_working. The
+    // Intake makes two adapter calls: record_sensory + push_working. The
     // session-start episode ("started with objective: ...") is now classified
     // as operational noise and dropped by the #2327 ingestion classifier, so
     // it no longer issues a store_episode call.
     assert!(
         after_intake >= 2,
-        "intake should make at least 2 bridge calls (sensory + working; \
+        "intake should make at least 2 adapter calls (sensory + working; \
          session-start episode is dropped by the #2327 ingestion classifier)"
     );
 
     // Phase 1b: Cross-session recall
-    consolidation_intake(&sid, "", &bridge).unwrap();
+    consolidation_intake(&sid, "", &adapter).unwrap();
     let after_consolidation_intake = call_count.load(Ordering::SeqCst);
     assert!(
         after_consolidation_intake > after_intake,
-        "consolidation_intake should make at least 1 bridge call"
+        "consolidation_intake should make at least 1 adapter call"
     );
 
     // Phase 2: Preparation
-    let ctx = preparation_memory_operations(objective, &sid, &bridge).unwrap();
+    let ctx = preparation_memory_operations(objective, &sid, &adapter).unwrap();
     let after_prep = call_count.load(Ordering::SeqCst);
     assert!(
         after_prep > after_consolidation_intake,
-        "preparation should make bridge calls"
+        "preparation should make adapter calls"
     );
     // With empty memory, all results should be empty.
     assert!(ctx.relevant_facts.is_empty());
@@ -99,20 +99,20 @@ fn full_session_lifecycle_triggers_all_consolidation_phases() {
         content: "Rust uses ownership for memory safety".to_string(),
         confidence: 0.95,
     }];
-    reflection_memory_operations("session transcript here", &facts, &sid, &bridge).unwrap();
+    reflection_memory_operations("session transcript here", &facts, &sid, &adapter).unwrap();
     let after_reflection = call_count.load(Ordering::SeqCst);
     assert!(
         after_reflection > after_prep,
-        "reflection should make bridge calls"
+        "reflection should make adapter calls"
     );
 
     // Phase 4: Persistence
-    consolidation_persistence(&sid, &bridge).unwrap();
-    persistence_memory_operations(&sid, &bridge).unwrap();
+    consolidation_persistence(&sid, &adapter).unwrap();
+    persistence_memory_operations(&sid, &adapter).unwrap();
     let after_persistence = call_count.load(Ordering::SeqCst);
     assert!(
         after_persistence > after_reflection,
-        "persistence should make bridge calls"
+        "persistence should make adapter calls"
     );
 }
 
@@ -120,8 +120,8 @@ fn full_session_lifecycle_triggers_all_consolidation_phases() {
 // Test 2: OODA cycle triggers consolidation phases end-to-end
 // ============================================================================
 
-fn full_mock_memory_transport() -> InMemoryBridgeTransport {
-    InMemoryBridgeTransport::new("ooda-lifecycle-test", |method, _params| match method {
+fn full_mock_memory_transport() -> InMemoryServerTransport {
+    InMemoryServerTransport::new("ooda-lifecycle-test", |method, _params| match method {
         "memory.search_facts" => Ok(json!({"facts": []})),
         "memory.store_fact" => Ok(json!({"id": "sem_1"})),
         "memory.store_episode" => Ok(json!({"id": "epi_1"})),
@@ -141,7 +141,7 @@ fn full_mock_memory_transport() -> InMemoryBridgeTransport {
         "memory.clear_working" => Ok(json!({"count": 0})),
         "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
         "memory.store_procedure" => Ok(json!({"id": "proc_new"})),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(ServerErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
@@ -150,21 +150,21 @@ fn full_mock_memory_transport() -> InMemoryBridgeTransport {
 
 #[test]
 fn ooda_cycle_runs_with_consolidation_wired_in() {
-    let bridges = OodaBridges {
-        memory: Box::new(CognitiveMemoryBridge::new(Box::new(
+    let adapters = OodaContext {
+        memory: Box::new(CognitiveMemoryAdapter::new(Box::new(
             full_mock_memory_transport(),
         ))),
-        knowledge: KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
+        knowledge: KnowledgeClient::new(Box::new(InMemoryServerTransport::new(
             "test-knowledge",
             |method, _params| match method {
                 "knowledge.list_packs" => Ok(json!({"packs": []})),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(ServerErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
             },
         ))),
-        gym: GymBridge::new(Box::new(InMemoryBridgeTransport::new(
+        gym: GymClient::new(Box::new(InMemoryServerTransport::new(
             "test-gym",
             |_method, _params| {
                 Ok(json!({
@@ -179,9 +179,9 @@ fn ooda_cycle_runs_with_consolidation_wired_in() {
         ))),
         session: None,
         session_factory: None,
-        brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
-        decide_brain: None,
-        orient_brain: None,
+        act_reasoner: std::sync::Arc::new(simard::ooda_reasoners::DeterministicFallbackActReasoner),
+        decide_reasoner: None,
+        orient_reasoner: None,
         repo_root: std::path::PathBuf::from("."),
         progress_evidence: std::sync::Arc::new(
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
@@ -204,12 +204,12 @@ fn ooda_cycle_runs_with_consolidation_wired_in() {
     });
 
     let mut state = OodaState::new(board);
-    let mut bridges = bridges;
+    let mut adapters = adapters;
     let config = OodaConfig::default();
 
     // The cycle should complete without errors, proving consolidation
     // phases are wired in and the mock handles all required methods.
-    let report = run_ooda_cycle(&mut state, &mut bridges, &config).unwrap();
+    let report = run_ooda_cycle(&mut state, &mut adapters, &config).unwrap();
     assert!(report.cycle_number > 0);
 }
 
@@ -221,7 +221,7 @@ fn ooda_cycle_runs_with_consolidation_wired_in() {
 fn cross_session_recall_hydrates_prior_facts() {
     let call_count = Arc::new(AtomicU32::new(0));
     let counter = call_count.clone();
-    let transport = InMemoryBridgeTransport::new("recall-test", move |method, _params| {
+    let transport = InMemoryServerTransport::new("recall-test", move |method, _params| {
         counter.fetch_add(1, Ordering::SeqCst);
         match method {
             "memory.search_facts" => Ok(json!({
@@ -248,24 +248,24 @@ fn cross_session_recall_hydrates_prior_facts() {
             "memory.get_working" => Ok(json!({"slots": []})),
             "memory.store_episode" => Ok(json!({"id": "epi_1"})),
             "memory.record_sensory" => Ok(json!({"id": "sen_1"})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         }
     });
-    let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+    let adapter = CognitiveMemoryAdapter::new(Box::new(transport));
 
     // Start a new session: intake records the objective.
     let sid = SessionId::parse("session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
-    intake_memory_operations("continue prior work", &sid, &bridge).unwrap();
+    intake_memory_operations("continue prior work", &sid, &adapter).unwrap();
 
     // Cross-session recall should find 2 prior facts and push summary to
     // working memory.
-    let hydrated = consolidation_intake(&sid, "continue prior work", &bridge).unwrap();
+    let hydrated = consolidation_intake(&sid, "continue prior work", &adapter).unwrap();
     assert_eq!(hydrated, 2, "should hydrate 2 prior-session facts");
 
-    // Verify bridge calls: intake (2: sensory + working; the session-start
+    // Verify adapter calls: intake (2: sensory + working; the session-start
     // episode is dropped by the #2327 ingestion classifier) +
     // consolidation_intake with facts (3) = 5.
     let total = call_count.load(Ordering::SeqCst);
@@ -283,7 +283,7 @@ fn cross_session_recall_hydrates_prior_facts() {
 fn multiple_ooda_cycles_accumulate_consolidation() {
     let call_count = Arc::new(AtomicU32::new(0));
     let counter = call_count.clone();
-    let transport = InMemoryBridgeTransport::new("multi-cycle-test", move |method, _params| {
+    let transport = InMemoryServerTransport::new("multi-cycle-test", move |method, _params| {
         counter.fetch_add(1, Ordering::SeqCst);
         match method {
             "memory.search_facts" => Ok(json!({"facts": []})),
@@ -302,26 +302,26 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             "memory.clear_working" => Ok(json!({"count": 0})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         }
     });
 
-    let mut bridges = OodaBridges {
-        memory: Box::new(CognitiveMemoryBridge::new(Box::new(transport))),
-        knowledge: KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
+    let mut adapters = OodaContext {
+        memory: Box::new(CognitiveMemoryAdapter::new(Box::new(transport))),
+        knowledge: KnowledgeClient::new(Box::new(InMemoryServerTransport::new(
             "k",
             |method, _params| match method {
                 "knowledge.list_packs" => Ok(json!({"packs": []})),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(ServerErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
             },
         ))),
-        gym: GymBridge::new(Box::new(InMemoryBridgeTransport::new(
+        gym: GymClient::new(Box::new(InMemoryServerTransport::new(
             "g",
             |_method, _params| {
                 Ok(json!({
@@ -336,9 +336,9 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
         ))),
         session: None,
         session_factory: None,
-        brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
-        decide_brain: None,
-        orient_brain: None,
+        act_reasoner: std::sync::Arc::new(simard::ooda_reasoners::DeterministicFallbackActReasoner),
+        decide_reasoner: None,
+        orient_reasoner: None,
         repo_root: std::path::PathBuf::from("."),
         progress_evidence: std::sync::Arc::new(
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
@@ -364,22 +364,22 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
     let config = OodaConfig::default();
 
     // Run two cycles — both should succeed.
-    let r1 = run_ooda_cycle(&mut state, &mut bridges, &config).unwrap();
+    let r1 = run_ooda_cycle(&mut state, &mut adapters, &config).unwrap();
     let calls_after_first = call_count.load(Ordering::SeqCst);
 
-    let r2 = run_ooda_cycle(&mut state, &mut bridges, &config).unwrap();
+    let r2 = run_ooda_cycle(&mut state, &mut adapters, &config).unwrap();
     let calls_after_second = call_count.load(Ordering::SeqCst);
 
     assert_eq!(r1.cycle_number, 1);
     assert_eq!(r2.cycle_number, 2);
 
-    // Second cycle should make roughly the same number of bridge calls,
+    // Second cycle should make roughly the same number of adapter calls,
     // proving consolidation runs each cycle.
     let first_cycle_calls = calls_after_first;
     let second_cycle_calls = calls_after_second - calls_after_first;
     assert!(
         second_cycle_calls > 0,
-        "second cycle should make bridge calls for consolidation"
+        "second cycle should make adapter calls for consolidation"
     );
     assert!(
         (second_cycle_calls as f64) >= (first_cycle_calls as f64 * 0.5),

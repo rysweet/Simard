@@ -15,7 +15,7 @@ use crate::base_types::{BaseTypeDescriptor, BaseTypeOutcome, BaseTypeSession, Ba
 use crate::error::{SimardError, SimardResult};
 use crate::goal_curation::{GoalBoard, GoalProgress, add_active_goal};
 use crate::ooda_actions::dispatch_actions_bounded;
-use crate::ooda_actions::test_helpers::{active_goal, test_bridges};
+use crate::ooda_actions::test_helpers::{active_goal, test_adapters};
 use crate::ooda_loop::{ActionKind, OodaState, OrchestratorSessionFactory, PlannedAction};
 
 /// Shared instrumentation across every session a factory mints, so tests can
@@ -58,8 +58,8 @@ impl BaseTypeSession for FakeSession {
         if let Some(sub) = &self.fail_substring
             && input.objective.contains(sub.as_str())
         {
-            return Err(SimardError::BridgeTransportError {
-                bridge: "fake-session".to_string(),
+            return Err(SimardError::ServerTransportError {
+                adapter: "fake-session".to_string(),
                 reason: format!("injected failure for objective containing '{sub}'"),
             });
         }
@@ -122,8 +122,8 @@ fn concurrent_dispatch_parallelizes_and_respects_cap() {
     let sleep = Duration::from_millis(200);
 
     let instr = Arc::new(Instrumentation::default());
-    let mut bridges = test_bridges();
-    bridges.session_factory = Some(Arc::new(FakeFactory {
+    let mut adapters = test_adapters();
+    adapters.session_factory = Some(Arc::new(FakeFactory {
         instr: Arc::clone(&instr),
         sleep,
         response: "NO ACTION".to_string(),
@@ -133,7 +133,8 @@ fn concurrent_dispatch_parallelizes_and_respects_cap() {
 
     // Run 1: cap = N → all dispatch concurrently.
     let t0 = Instant::now();
-    let outcomes = dispatch_actions_bounded(&actions, &mut bridges, &mut state, ids.len()).unwrap();
+    let outcomes =
+        dispatch_actions_bounded(&actions, &mut adapters, &mut state, ids.len()).unwrap();
     let parallel_elapsed = t0.elapsed();
 
     assert_eq!(outcomes.len(), ids.len());
@@ -159,7 +160,7 @@ fn concurrent_dispatch_parallelizes_and_respects_cap() {
 
     // Run 2: cap = 1 → dispatch serialized (peak must never exceed 1).
     let t1 = Instant::now();
-    let _ = dispatch_actions_bounded(&actions, &mut bridges, &mut state, 1).unwrap();
+    let _ = dispatch_actions_bounded(&actions, &mut adapters, &mut state, 1).unwrap();
     let serial_elapsed = t1.elapsed();
 
     let peak_serial = instr.peak.load(Ordering::SeqCst);
@@ -185,8 +186,8 @@ fn same_goal_claimed_once_no_double_spawn() {
     let actions = vec![advance_action("dup-goal"), advance_action("dup-goal")];
 
     let instr = Arc::new(Instrumentation::default());
-    let mut bridges = test_bridges();
-    bridges.session_factory = Some(Arc::new(FakeFactory {
+    let mut adapters = test_adapters();
+    adapters.session_factory = Some(Arc::new(FakeFactory {
         instr: Arc::clone(&instr),
         sleep: Duration::from_millis(150),
         response: "NO ACTION".to_string(),
@@ -195,7 +196,7 @@ fn same_goal_claimed_once_no_double_spawn() {
     let mut state = OodaState::new(board_with_unassigned_goals(&["dup-goal"]));
 
     let outcomes =
-        dispatch_actions_bounded(&actions, &mut bridges, &mut state, actions.len()).unwrap();
+        dispatch_actions_bounded(&actions, &mut adapters, &mut state, actions.len()).unwrap();
 
     assert_eq!(outcomes.len(), 2);
     // Exactly one thread won the claim and ran the turn; the other skipped
@@ -228,8 +229,8 @@ fn one_failing_advance_does_not_abort_others() {
     let actions: Vec<PlannedAction> = ids.iter().map(|id| advance_action(id)).collect();
 
     let instr = Arc::new(Instrumentation::default());
-    let mut bridges = test_bridges();
-    bridges.session_factory = Some(Arc::new(FakeFactory {
+    let mut adapters = test_adapters();
+    adapters.session_factory = Some(Arc::new(FakeFactory {
         instr: Arc::clone(&instr),
         sleep: Duration::from_millis(50),
         response: "NO ACTION".to_string(),
@@ -238,7 +239,8 @@ fn one_failing_advance_does_not_abort_others() {
     }));
     let mut state = OodaState::new(board_with_unassigned_goals(&ids));
 
-    let outcomes = dispatch_actions_bounded(&actions, &mut bridges, &mut state, ids.len()).unwrap();
+    let outcomes =
+        dispatch_actions_bounded(&actions, &mut adapters, &mut state, ids.len()).unwrap();
 
     assert_eq!(outcomes.len(), 3, "one outcome per input action, in order");
     assert!(

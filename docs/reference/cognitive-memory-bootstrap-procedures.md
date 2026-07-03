@@ -189,12 +189,12 @@ daemon never produces duplicate procedures.
 
 ### Wiring
 
-`seed_bootstrap_procedures` is called once during `OodaBridges`
+`seed_bootstrap_procedures` is called once during `OodaContext`
 construction, immediately after `LibraryCognitiveMemory::open`
 succeeds and before the OODA loop starts. The exact call site lands
 at implementation time in whichever of `bin/simard/main.rs` or
 `src/operator_commands_ooda/daemon/mod.rs` constructs the
-`OodaBridges` (current daemon boot wiring threads both candidates);
+`OodaContext` (current daemon boot wiring threads both candidates);
 the requirement is **once per daemon start, post-`open`,
 pre-loop**, regardless of file.
 
@@ -470,7 +470,7 @@ procedure count:
 |-----------------------------------------------|-------------------------------------------------------|
 | `seed_bootstrap_procedures`                   | `src/cognitive_memory/bootstrap_procedures.rs`         |
 | `BOOTSTRAP_PROCEDURES` constant               | `src/cognitive_memory/bootstrap_procedures.rs`         |
-| Daemon boot wiring                            | Once-per-start call from the `OodaBridges` constructor, post-`LibraryCognitiveMemory::open`, pre-loop. Current daemon construction is in `src/operator_commands_ooda/daemon/mod.rs`. |
+| Daemon boot wiring                            | Once-per-start call from the `OodaContext` constructor, post-`LibraryCognitiveMemory::open`, pre-loop. Current daemon construction is in `src/operator_commands_ooda/daemon/mod.rs`. |
 | OODA cycle procedure storage                  | `src/ooda_loop/cycle.rs` (currently at `cycle.rs:343`, the `format!("ooda:{}", outcome.action.kind)` site) |
 | Runtime pattern + trigger mapping             | `src/ooda_loop/cycle.rs` (next to the storage site)   |
 | `derive_triggers_from_objective` helper       | `src/ooda_loop/cycle.rs`                              |

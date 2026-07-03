@@ -105,9 +105,9 @@ fn meeting_repl_shows_greeting() {
 }
 
 /// Verify OODA daemon starts and seeds default goals.
-/// Requires the amplihack memory bridge and a real LLM session.
+/// Requires the amplihack memory adapter and a real LLM session.
 #[test]
-#[ignore = "requires a real LLM provider/session (and amplihack memory bridge); reported as `ignored` by default rather than passing by skipping (issue #2047)"]
+#[ignore = "requires a real LLM provider/session (and amplihack memory adapter); reported as `ignored` by default rather than passing by skipping (issue #2047)"]
 fn ooda_daemon_seeds_five_goals() {
     let state_root = tempfile::tempdir().expect("temp dir for ooda test");
     let output = Command::new("timeout")
@@ -124,11 +124,11 @@ fn ooda_daemon_seeds_five_goals() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // The OODA daemon requires both the amplihack memory bridge and a real LLM
+    // The OODA daemon requires both the amplihack memory adapter and a real LLM
     // session. This test is `#[ignore]`d by default (issue #2047); when
     // force-run without either dependency, fail loudly instead of silently
     // passing by an early `return`.
-    common::require_memory_bridge("ooda_daemon_seeds_five_goals", &stderr);
+    common::require_memory_adapter("ooda_daemon_seeds_five_goals", &stderr);
     common::require_llm_provider("ooda_daemon_seeds_five_goals", &stderr);
 
     assert!(

@@ -1,6 +1,6 @@
 # Reference: Recipe Context Variable Sanitization
 
-Module: `src/ooda_brain/sanitize.rs`
+Module: `src/ooda_reasoners/sanitize.rs`
 Consumers: `recipe_engineer_lifecycle.rs`, `recipe_decide.rs`, `recipe_orient.rs`
 
 All three recipe-based OODA brains pass user-derived and log-derived strings
@@ -42,8 +42,8 @@ engineer-lifecycle brain, `goal_id` and `reason` in the decide brain, and
 
 ### `sanitize_context_var(s: &str, max_len: usize) -> String`
 
-`pub(super)` function in `src/ooda_brain/sanitize.rs`. Available to all
-modules within `ooda_brain` via `use super::sanitize::sanitize_context_var`.
+`pub(super)` function in `src/ooda_reasoners/sanitize.rs`. Available to all
+modules within `ooda_reasoners` via `use super::sanitize::sanitize_context_var`.
 
 **Steps (in order):**
 
@@ -132,13 +132,13 @@ clean).
 | Sanitizer | Location | Purpose | This feature |
 |-----------|----------|---------|--------------|
 | `truncate_to_char_boundary` | `src/util/string_truncate.rs` | Byte-budget truncation for evidence buffers (in-place `&mut String`, byte-based) | Different API; `sanitize_context_var` operates on char count and returns a new `String` |
-| `truncate_for_log` | `src/ooda_brain/rustyclawd.rs` (also duplicated in `spawn.rs`, `merge_judge.rs`) | Display-length truncation for log lines | Truncation only — no newline replacement or whitespace normalization |
+| `truncate_for_log` | `src/ooda_reasoners/rustyclawd.rs` (also duplicated in `spawn.rs`, `merge_judge.rs`) | Display-length truncation for log lines | Truncation only — no newline replacement or whitespace normalization |
 | `truncate()` (local) | `recipe_engineer_lifecycle.rs`, `recipe_decide.rs` | Truncate stderr in error messages | Retained — serves a different purpose (error display, not CLI arg safety) |
-| `redact_secrets` | `src/ooda_brain/context.rs` | Strip API keys from log tails | Runs before sanitization — `gather_engineer_lifecycle_ctx` redacts first, then the recipe shim sanitizes at arg-construction time |
+| `redact_secrets` | `src/ooda_reasoners/context.rs` | Strip API keys from log tails | Runs before sanitization — `gather_engineer_lifecycle_ctx` redacts first, then the recipe shim sanitizes at arg-construction time |
 
 `sanitize_context_var` is intentionally **not** a replacement for any of these
 helpers. It is scoped narrowly to the recipe `-c key=value` construction
-pattern and lives in `ooda_brain/sanitize.rs` alongside its three consumers.
+pattern and lives in `ooda_reasoners/sanitize.rs` alongside its three consumers.
 
 ## Security Considerations
 
@@ -161,7 +161,7 @@ pattern and lives in `ooda_brain/sanitize.rs` alongside its three consumers.
 
 ## Testing
 
-`src/ooda_brain/sanitize.rs` contains an inline `#[cfg(test)]` module with
+`src/ooda_reasoners/sanitize.rs` contains an inline `#[cfg(test)]` module with
 unit tests covering:
 
 | Test | What it verifies |
@@ -180,13 +180,13 @@ unit tests covering:
 Run the sanitizer tests:
 
 ```bash
-cargo test --package simard --lib ooda_brain::sanitize
+cargo test --package simard --lib ooda_reasoners::sanitize
 ```
 
 Run all affected module tests:
 
 ```bash
-cargo test --package simard --lib ooda_brain
+cargo test --package simard --lib ooda_reasoners
 ```
 
 ## Configuration
@@ -208,7 +208,7 @@ call at each site in `recipe_engineer_lifecycle.rs`, `recipe_decide.rs`, or
 ## Module Layout (after this change)
 
 ```
-src/ooda_brain/
+src/ooda_reasoners/
 ├── mod.rs                       # mod sanitize; declaration
 ├── sanitize.rs                  # sanitize_context_var + unit tests   (NEW)
 ├── recipe_engineer_lifecycle.rs # wraps 4 fields with sanitize_context_var

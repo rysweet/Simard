@@ -4,7 +4,7 @@ use crate::operator_commands::{
     load_terminal_objective_file, print_text, prompt_root, resolved_state_root,
     resolved_terminal_read_state_root,
 };
-use crate::terminal_engineer_bridge::{
+use crate::terminal_engineer::{
     SHARED_DEFAULT_STATE_ROOT_SOURCE, SHARED_EXPLICIT_STATE_ROOT_SOURCE, ScopedHandoffMode,
     persist_handoff_artifacts, scoped_handoff_path,
 };

@@ -6,11 +6,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::agent_roles::AgentRole;
 use crate::agent_supervisor::{SubordinateConfig, spawn_subordinate};
 use crate::identity_composition::max_subordinate_depth;
-use crate::ooda_brain::{
-    BrainJudgmentRecord, EngineerLifecycleDecision, OodaBrain, apply_decision_to_state,
+use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
+use crate::ooda_reasoners::{
+    ActReasoner, EngineerLifecycleDecision, ReasonerJudgmentRecord, apply_decision_to_state,
     gather_engineer_lifecycle_ctx, push_brain_judgment,
 };
-use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
 
 use crate::ooda_actions::make_outcome;
 
@@ -89,7 +89,7 @@ pub fn dispatch_spawn_engineer(
     state: &Mutex<&mut OodaState>,
     goal_id: &str,
     task: &str,
-    brain: &dyn OodaBrain,
+    brain: &dyn ActReasoner,
 ) -> ActionOutcome {
     // Re-check assignment under a short exclusive state lock to prevent a
     // double-spawn race (two cycles/threads parsing spawn_engineer for the
@@ -150,7 +150,7 @@ pub fn dispatch_spawn_engineer(
                     .copied()
                     .unwrap_or(0);
                 tracing::error!(
-                    target: "simard::ooda_brain",
+                    target: "simard::ooda_reasoners",
                     goal = %goal_id,
                     error = %e,
                     prior_consecutive_failures = prior_failures,
@@ -223,7 +223,7 @@ pub fn dispatch_spawn_engineer(
                         }
                         Ok(out) => {
                             tracing::error!(
-                                target: "simard::ooda_brain",
+                                target: "simard::ooda_reasoners",
                                 goal = %goal_id,
                                 stderr = %String::from_utf8_lossy(&out.stderr),
                                 "deterministic safeguard: gh issue create FAILED (goal still marked Blocked)",
@@ -231,7 +231,7 @@ pub fn dispatch_spawn_engineer(
                         }
                         Err(io_err) => {
                             tracing::error!(
-                                target: "simard::ooda_brain",
+                                target: "simard::ooda_reasoners",
                                 goal = %goal_id,
                                 error = %io_err,
                                 "deterministic safeguard: gh process spawn FAILED (goal still marked Blocked)",
@@ -250,11 +250,13 @@ pub fn dispatch_spawn_engineer(
                 );
             }
         };
-        push_brain_judgment(BrainJudgmentRecord::from_engineer_lifecycle(
+        push_brain_judgment(ReasonerJudgmentRecord::from_engineer_lifecycle(
             goal_id,
             &decision,
             false,
-            crate::ooda_brain::prompt_store::current_version(crate::ooda_brain::ACT_PROMPT_NAME),
+            crate::ooda_reasoners::prompt_store::current_version(
+                crate::ooda_reasoners::ACT_PROMPT_NAME,
+            ),
         ));
         // Issue #1911 — Site 2 reset.
         // A non-fallback `Ok(decision)` from `decide_engineer_lifecycle`
@@ -584,7 +586,7 @@ fn apply_lifecycle_decision(
             && let Err(e) = numeric_kill(pid)
         {
             tracing::warn!(
-                target: "simard::ooda_brain",
+                target: "simard::ooda_reasoners",
                 goal = %goal_id,
                 pid,
                 error = %e,
@@ -597,7 +599,7 @@ fn apply_lifecycle_decision(
             .status()
         {
             tracing::warn!(
-                target: "simard::ooda_brain",
+                target: "simard::ooda_reasoners",
                 goal = %goal_id,
                 worktree = %live_worktree.display(),
                 error = %e,
@@ -621,7 +623,7 @@ fn apply_lifecycle_decision(
             .status();
         if let Err(e) = result {
             tracing::warn!(
-                target: "simard::ooda_brain",
+                target: "simard::ooda_reasoners",
                 goal = %goal_id,
                 error = %e,
                 "open_tracking_issue: gh issue create failed",
@@ -640,10 +642,10 @@ fn apply_lifecycle_decision(
         // dispatch path when `count_live_engineer_claims == 0`, at which
         // point the act-phase will spawn the orchestrator.
         let state_root = engineer_worktree_state_root();
-        let live = crate::ooda_brain::count_live_engineer_claims(&state_root);
+        let live = crate::ooda_reasoners::count_live_engineer_claims(&state_root);
         if live > 0 {
             tracing::info!(
-                target: "simard::ooda_brain",
+                target: "simard::ooda_reasoners",
                 goal = %goal_id,
                 live_engineer_count = live,
                 rationale = %rationale,
@@ -667,14 +669,14 @@ fn apply_lifecycle_decision(
                 .spawn();
             match result {
                 Ok(child) => tracing::info!(
-                    target: "simard::ooda_brain",
+                    target: "simard::ooda_reasoners",
                     goal = %goal_id,
                     pid = child.id(),
                     rationale = %rationale,
                     "consider_self_update: spawned `simard safe-update` (detached)",
                 ),
                 Err(e) => tracing::warn!(
-                    target: "simard::ooda_brain",
+                    target: "simard::ooda_reasoners",
                     goal = %goal_id,
                     error = %e,
                     "consider_self_update: failed to spawn `simard safe-update`",

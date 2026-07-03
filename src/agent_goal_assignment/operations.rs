@@ -1,4 +1,4 @@
-//! Bridge operations for assigning goals and reporting progress.
+//! Adapter operations for assigning goals and reporting progress.
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
@@ -7,13 +7,13 @@ use super::types::SubordinateProgress;
 use super::{DIRECTIVE_CONFIDENCE, GOAL_CONCEPT, PROGRESS_CONCEPT};
 use super::{goal_source_id, progress_source_id, sub_tag};
 
-/// Assign a goal to a subordinate by writing a semantic fact via the bridge.
+/// Assign a goal to a subordinate by writing a semantic fact via the adapter.
 ///
 /// The supervisor calls this to tell a subordinate what to work on. The fact
 /// is stored with concept `goal-assignment` and tagged with the subordinate's
 /// ID for retrieval.
-pub fn assign_goal(sub_id: &str, goal: &str, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
-    bridge.store_fact(
+pub fn assign_goal(sub_id: &str, goal: &str, adapter: &dyn CognitiveMemoryOps) -> SimardResult<()> {
+    adapter.store_fact(
         GOAL_CONCEPT,
         goal,
         DIRECTIVE_CONFIDENCE,
@@ -30,9 +30,9 @@ pub fn assign_goal(sub_id: &str, goal: &str, bridge: &dyn CognitiveMemoryOps) ->
 /// (e.g. re-assignment), returns the most recently stored one.
 pub fn read_assigned_goal(
     my_id: &str,
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
 ) -> SimardResult<Option<String>> {
-    let facts = bridge.search_facts(&sub_tag(my_id), 10, 0.0)?;
+    let facts = adapter.search_facts(&sub_tag(my_id), 10, 0.0)?;
 
     let goal = facts
         .into_iter()
@@ -49,17 +49,17 @@ pub fn read_assigned_goal(
 pub fn report_progress(
     sub_id: &str,
     progress: &SubordinateProgress,
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     let content = serde_json::to_string(progress).map_err(|e| {
-        crate::error::SimardError::BridgeCallFailed {
-            bridge: "cognitive-memory".to_string(),
+        crate::error::SimardError::ServerCallFailed {
+            adapter: "cognitive-memory".to_string(),
             method: "store_fact".to_string(),
             reason: format!("failed to serialize progress: {e}"),
         }
     })?;
 
-    bridge.store_fact(
+    adapter.store_fact(
         PROGRESS_CONCEPT,
         &content,
         DIRECTIVE_CONFIDENCE,
@@ -75,9 +75,9 @@ pub fn report_progress(
 /// `None` if no progress has been reported yet.
 pub fn poll_progress(
     sub_id: &str,
-    bridge: &dyn CognitiveMemoryOps,
+    adapter: &dyn CognitiveMemoryOps,
 ) -> SimardResult<Option<SubordinateProgress>> {
-    let facts = bridge.search_facts(&sub_tag(sub_id), 10, 0.0)?;
+    let facts = adapter.search_facts(&sub_tag(sub_id), 10, 0.0)?;
 
     let fact = facts
         .into_iter()
@@ -101,52 +101,52 @@ pub fn poll_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::BridgeErrorPayload;
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
-    use crate::memory_bridge::CognitiveMemoryBridge;
+    use crate::memory_adapter::CognitiveMemoryAdapter;
+    use crate::server_subprocess::InMemoryServerTransport;
+    use crate::server_transport::ServerErrorPayload;
 
-    fn mock_bridge_store_ok() -> CognitiveMemoryBridge {
-        let transport = InMemoryBridgeTransport::new("test-ops", |method, _params| match method {
+    fn mock_adapter_store_ok() -> CognitiveMemoryAdapter {
+        let transport = InMemoryServerTransport::new("test-ops", |method, _params| match method {
             "memory.store_fact" => Ok(serde_json::json!({"id": "fact_1"})),
             "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(ServerErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         });
-        CognitiveMemoryBridge::new(Box::new(transport))
+        CognitiveMemoryAdapter::new(Box::new(transport))
     }
 
-    fn mock_bridge_store_fail() -> CognitiveMemoryBridge {
-        let transport = InMemoryBridgeTransport::new("test-fail", |_method, _params| {
-            Err(BridgeErrorPayload {
+    fn mock_adapter_store_fail() -> CognitiveMemoryAdapter {
+        let transport = InMemoryServerTransport::new("test-fail", |_method, _params| {
+            Err(ServerErrorPayload {
                 code: -1,
                 message: "store failed".to_string(),
             })
         });
-        CognitiveMemoryBridge::new(Box::new(transport))
+        CognitiveMemoryAdapter::new(Box::new(transport))
     }
 
     // ── assign_goal ─────────────────────────────────────────────────
 
     #[test]
     fn assign_goal_empty_goal_string() {
-        let bridge = mock_bridge_store_ok();
-        let result = assign_goal("agent-x", "", &bridge);
+        let adapter = mock_adapter_store_ok();
+        let result = assign_goal("agent-x", "", &adapter);
         assert!(result.is_ok());
     }
 
     #[test]
     fn assign_goal_empty_sub_id() {
-        let bridge = mock_bridge_store_ok();
-        let result = assign_goal("", "some goal", &bridge);
+        let adapter = mock_adapter_store_ok();
+        let result = assign_goal("", "some goal", &adapter);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn assign_goal_bridge_failure_propagates() {
-        let bridge = mock_bridge_store_fail();
-        let result = assign_goal("agent-1", "goal", &bridge);
+    fn assign_goal_adapter_failure_propagates() {
+        let adapter = mock_adapter_store_fail();
+        let result = assign_goal("agent-1", "goal", &adapter);
         assert!(result.is_err());
     }
 
@@ -154,15 +154,15 @@ mod tests {
 
     #[test]
     fn read_assigned_goal_empty_id() {
-        let bridge = mock_bridge_store_ok();
-        let result = read_assigned_goal("", &bridge).unwrap();
+        let adapter = mock_adapter_store_ok();
+        let result = read_assigned_goal("", &adapter).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
-    fn read_assigned_goal_bridge_failure_propagates() {
-        let bridge = mock_bridge_store_fail();
-        let result = read_assigned_goal("agent-1", &bridge);
+    fn read_assigned_goal_adapter_failure_propagates() {
+        let adapter = mock_adapter_store_fail();
+        let result = read_assigned_goal("agent-1", &adapter);
         assert!(result.is_err());
     }
 
@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn report_progress_serializes_correctly() {
-        let bridge = mock_bridge_store_ok();
+        let adapter = mock_adapter_store_ok();
         let progress = SubordinateProgress {
             sub_id: "a".to_string(),
             phase: "planning".to_string(),
@@ -183,13 +183,13 @@ mod tests {
             prs_produced: 0,
             exit_status: None,
         };
-        let result = report_progress("a", &progress, &bridge);
+        let result = report_progress("a", &progress, &adapter);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn report_progress_bridge_failure_propagates() {
-        let bridge = mock_bridge_store_fail();
+    fn report_progress_adapter_failure_propagates() {
+        let adapter = mock_adapter_store_fail();
         let progress = SubordinateProgress {
             sub_id: "a".to_string(),
             phase: "p".to_string(),
@@ -202,7 +202,7 @@ mod tests {
             prs_produced: 0,
             exit_status: None,
         };
-        let result = report_progress("a", &progress, &bridge);
+        let result = report_progress("a", &progress, &adapter);
         assert!(result.is_err());
     }
 
@@ -210,15 +210,15 @@ mod tests {
 
     #[test]
     fn poll_progress_empty_id() {
-        let bridge = mock_bridge_store_ok();
-        let result = poll_progress("", &bridge).unwrap();
+        let adapter = mock_adapter_store_ok();
+        let result = poll_progress("", &adapter).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
-    fn poll_progress_bridge_failure_propagates() {
-        let bridge = mock_bridge_store_fail();
-        let result = poll_progress("agent-1", &bridge);
+    fn poll_progress_adapter_failure_propagates() {
+        let adapter = mock_adapter_store_fail();
+        let result = poll_progress("agent-1", &adapter);
         assert!(result.is_err());
     }
 }

@@ -35,9 +35,9 @@ pub struct GoalBoardIntactProbe {
     pub active_goals: usize,
 }
 
-/// Probe: zero `BrainJudgmentRecord.fallback == true` records over a probe cycle.
+/// Probe: zero `ReasonerJudgmentRecord.fallback == true` records over a probe cycle.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrainsLlmBackedProbe {
+pub struct ReasonersLlmBackedProbe {
     pub healthy: bool,
     pub fallback_records: u64,
 }
@@ -55,7 +55,7 @@ pub struct SelfHealthProbes {
     pub version_advanced: VersionAdvancedProbe,
     pub memory_intact: MemoryIntactProbe,
     pub goal_board_intact: GoalBoardIntactProbe,
-    pub brains_llm_backed: BrainsLlmBackedProbe,
+    pub brains_llm_backed: ReasonersLlmBackedProbe,
     pub no_quarantine: NoQuarantineProbe,
 }
 
@@ -143,7 +143,7 @@ fn count_quarantine_files(state_root: &std::path::Path) -> u64 {
 /// * `memory_count_tolerance` — allowed shortfall of `live_facts` below
 ///   `baseline_facts` before the memory probe fails.
 /// * `fallback_window_start` — only `brain_parse_failure` metrics at/after this
-///   instant count toward the "brains LLM-backed" probe, so historical failures
+///   instant count toward the "reasoners LLM-backed" probe, so historical failures
 ///   from the *previous* binary never fail a fresh deploy.
 pub fn run_self_health_probe(
     mem: &dyn CognitiveMemoryOps,
@@ -200,7 +200,7 @@ pub fn run_self_health_probe(
         crate::self_metrics::query_metrics("brain_parse_failure", Some(fallback_window_start))
             .map(|v| v.len() as u64)
             .unwrap_or(0);
-    let brains_llm_backed = BrainsLlmBackedProbe {
+    let brains_llm_backed = ReasonersLlmBackedProbe {
         healthy: fallback_records == 0,
         fallback_records,
     };

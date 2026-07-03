@@ -75,7 +75,7 @@ The exact format is part of the
 The `WARNING:` line is only emitted on a partial close. The literal
 prefix `[meeting] WARNING: partial close (reason=` is stable and
 parsable. `<reason>` is one of the snake_case `PartialReason` wire
-values (`close_timeout`, `agent_close_timeout`, `bridge_timeout`,
+values (`close_timeout`, `agent_close_timeout`, `adapter_timeout`,
 `summary_empty`, `persistence_error`).
 
 ### From the journal
@@ -265,7 +265,7 @@ line and address the underlying cause:
 |---|---|---|
 | `agent_close_timeout` | A child subprocess (Copilot SDK, local-harness PTY) is slow to shut down | Check `journalctl --since "1h ago" -p warning` for subprocess-shutdown patterns; the default is now 45s (raised from 15s in #1999) — consider bumping `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS` to 90 if your environment routinely shows >45s shutdowns |
 | `summary_empty` | The summarizer LLM call did not return in time, or returned without structured fields | Raise `SIMARD_MEETING_CLOSE_TIMEOUT_SECS` to 120 if the provider is consistently slow; or switch base-type via `--base-type` (see [base-type adapters](../reference/base-type-adapters.md)) |
-| `bridge_timeout` | The cognitive-memory bridge subprocess is stalled or dead | Check `journalctl -u simard-ooda --since "1h ago" \| grep bridge`; restart the daemon if the bridge process is hung |
+| `adapter_timeout` | The cognitive-memory bridge subprocess is stalled or dead | Check `journalctl -u simard-ooda --since "1h ago" \| grep bridge`; restart the daemon if the bridge process is hung |
 | `close_timeout` | A phase outside the named inner budgets exceeded the master | File a bug — the master should rarely fire if every inner budget is healthy |
 | `persistence_error` | IO error writing the bundle (disk full, permission denied) | Resolve the underlying disk/permission issue; rerun the meeting |
 

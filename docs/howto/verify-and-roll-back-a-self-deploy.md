@@ -63,7 +63,7 @@ The human-readable table prints one line per probe:
 | version advanced | the running binary is behind merged `main` |
 | memory intact | the live fact count dropped below the pre-deploy baseline |
 | goal board intact | the goal board did not load or lost active goals |
-| brains LLM-backed | a brain fell back to deterministic output (parse failure) |
+| reasoners LLM-backed | a brain fell back to deterministic output (parse failure) |
 | no quarantine | the cognitive-memory store is quarantined |
 
 Exit code `0` means every probe passed. Any non-zero exit means at least one

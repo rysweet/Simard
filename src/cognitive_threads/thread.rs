@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 
-/// A single scheduled mental process owned by the [`super::Mind`].
+/// A single scheduled mental process owned by the [`super::Brain`].
 ///
-/// Object-safe (`Mind` stores `Box<dyn CognitiveThread>`) and `Send` (threads
-/// are moved into the `Mind` at registration; the scheduler ticks them
+/// Object-safe (`Brain` stores `Box<dyn CognitiveThread>`) and `Send` (threads
+/// are moved into the `Brain` at registration; the scheduler ticks them
 /// sequentially on one thread, so `Sync` is not required).
 pub trait CognitiveThread: Send {
     /// Stable, unique, `snake_case` id used in telemetry metric/span names.
@@ -41,7 +41,7 @@ pub trait CognitiveThread: Send {
     }
 
     /// Execute exactly one step. MUST be best-effort and self-contained: return
-    /// [`ThreadOutcome::failed`] rather than panic where possible; the `Mind`
+    /// [`ThreadOutcome::failed`] rather than panic where possible; the `Brain`
     /// also catches panics as a backstop. May `block_on` `ctx.runtime`.
     fn tick(&mut self, ctx: &mut ThreadContext<'_>) -> ThreadOutcome;
 
@@ -52,7 +52,7 @@ pub trait CognitiveThread: Send {
 /// Coarse class of a cognitive process.
 ///
 /// The first three variants are implemented in this PR; the rest are reserved
-/// for the "mind of many processes" vision — the same [`super::Mind`] can host
+/// for the "mind of many processes" vision — the same [`super::Brain`] can host
 /// them later without a trait change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum ThreadKind {

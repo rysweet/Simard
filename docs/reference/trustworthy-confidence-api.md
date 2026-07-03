@@ -12,10 +12,10 @@ related:
   - ./external-signal-completion-gate.md
   - ./ooda-brain-decision-protocol.md
   - ./ooda-decide-prompt.md
-  - ../../src/ooda_brain/decide.rs
-  - ../../src/ooda_brain/mod.rs
-  - ../../src/ooda_brain/orient.rs
-  - ../../src/ooda_brain/judgment_record.rs
+  - ../../src/ooda_reasoners/decide.rs
+  - ../../src/ooda_reasoners/mod.rs
+  - ../../src/ooda_reasoners/orient.rs
+  - ../../src/ooda_reasoners/judgment_record.rs
   - ../../src/self_metrics/mod.rs
 ---
 
@@ -24,8 +24,8 @@ related:
 > **Status: partially implemented (issue [#2457](https://github.com/rysweet/Simard/issues/2457), open).**
 >
 > **Shipped now** — the trustworthy-confidence *primitive* in
-> [`src/ooda_brain/confidence.rs`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/confidence.rs)
-> (re-exported from `crate::ooda_brain`): the fail-closed default policy
+> [`src/ooda_reasoners/confidence.rs`](https://github.com/rysweet/Simard/blob/main/src/ooda_reasoners/confidence.rs)
+> (re-exported from `crate::ooda_reasoners`): the fail-closed default policy
 > (`default_confidence` / `LOW_TRUST_CONFIDENCE` / `confidence_or_low_trust`),
 > `validate_confidence` / `clamp_confidence`; the high-stakes + irreversibility gates
 > (`HIGH_STAKES_URGENCY`, `is_high_stakes`, `is_irreversible_lifecycle`,
@@ -38,18 +38,18 @@ related:
 > [the confidence carrier](#the-confidence-carrier)). All are unit-tested.
 >
 > **Exists already** (the precedents this builds on):
-> [`OrientJudgment::confidence`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/orient.rs)
+> [`OrientJudgment::confidence`](https://github.com/rysweet/Simard/blob/main/src/ooda_reasoners/orient.rs)
 > with its private `default_confidence() -> f64` and `validate` pattern;
-> [`DecideJudgment`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/decide.rs)
+> [`DecideJudgment`](https://github.com/rysweet/Simard/blob/main/src/ooda_reasoners/decide.rs)
 > and
-> [`EngineerLifecycleDecision`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/mod.rs);
-> [`BrainJudgmentRecord.confidence: f32`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/judgment_record.rs);
+> [`EngineerLifecycleDecision`](https://github.com/rysweet/Simard/blob/main/src/ooda_reasoners/mod.rs);
+> [`ReasonerJudgmentRecord.confidence: f32`](https://github.com/rysweet/Simard/blob/main/src/ooda_reasoners/judgment_record.rs);
 > and
 > [`self_metrics::record_metric`](https://github.com/rysweet/Simard/blob/main/src/self_metrics/mod.rs).
 >
 > **Follow-up (not in this slice):** threading the verbalized/vote confidence
 > all the way through the brain trait return types into the live
-> `BrainJudgmentRecord` and the #2432 escalation ladder, and soliciting a
+> `ReasonerJudgmentRecord` and the #2432 escalation ladder, and soliciting a
 > `CONFIDENCE:` line in `ooda_decide.md` / `ooda_brain.md`. The carriers and the
 > primitive exist so that wiring is a small, additive follow-up; today the
 > production parse path still records the deterministic `1.0` / fallback `0.5`
@@ -69,7 +69,7 @@ primitive (#2457). For the rationale, see
 - [High-stakes trigger](#high-stakes-trigger)
 - [Budget gating](#budget-gating)
 - [Calibration: Expected Calibration Error](#calibration-expected-calibration-error)
-- [`BrainJudgmentRecord` integration](#brainjudgmentrecord-integration)
+- [`ReasonerJudgmentRecord` integration](#reasonerjudgmentrecord-integration)
 - [Downstream consumers (#2432, #2433)](#downstream-consumers)
 - [Environment knobs](#environment-knobs)
 - [Compatibility & wire stability](#compatibility-and-wire-stability)
@@ -85,7 +85,7 @@ the shipped primitive attaches confidence with a thin **carrier** that wraps the
 existing judgment with `#[serde(flatten)]`:
 
 ```rust
-// src/ooda_brain/confidence.rs — SHIPPED
+// src/ooda_reasoners/confidence.rs — SHIPPED
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct JudgedDecision {
     #[serde(flatten)]
@@ -128,11 +128,11 @@ here.
 
 ## Default policy
 
-[`src/ooda_brain/confidence.rs`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/confidence.rs)
+[`src/ooda_reasoners/confidence.rs`](https://github.com/rysweet/Simard/blob/main/src/ooda_reasoners/confidence.rs)
 defines the policy that makes confidence safe to consume:
 
 ```rust
-// src/ooda_brain/confidence.rs — SHIPPED
+// src/ooda_reasoners/confidence.rs — SHIPPED
 /// The cheerful default. Returned ONLY for paths where high confidence is
 /// genuinely warranted and carries no privilege risk:
 ///   * the deterministic floor brains (always-confident by construction), and
@@ -219,12 +219,12 @@ pub fn validate(&self) -> Result<(), String> {
 
 ## Self-consistency sampling
 
-The shipped `self_consistency_vote` in `src/ooda_brain/confidence.rs` takes K
+The shipped `self_consistency_vote` in `src/ooda_reasoners/confidence.rs` takes K
 already-sampled judgments and returns the modal choice with
 `confidence = modal_count / k`.
 
 ```rust
-// src/ooda_brain/confidence.rs — SHIPPED
+// src/ooda_reasoners/confidence.rs — SHIPPED
 pub struct Vote<K> {
     /// The winning choice (modal sample; ties broken by `rank`).
     pub choice: K,
@@ -287,12 +287,12 @@ decision is always produced.
 
 ## Calibration: Expected Calibration Error
 
-The shipped `CalibrationWindow` (in `src/ooda_brain/confidence.rs`) scores how
+The shipped `CalibrationWindow` (in `src/ooda_reasoners/confidence.rs`) scores how
 *meaningful* the stated confidence is, using the #2456 completion verdict as
 ground truth.
 
 ```rust
-// src/ooda_brain/confidence.rs — SHIPPED
+// src/ooda_reasoners/confidence.rs — SHIPPED
 pub const ECE_WINDOW: usize = 50; // most-recent samples
 pub const ECE_BINS: usize = 10;   // equal-width [0,1] bins
 pub const ECE_METRIC: &str = "brain_confidence_ece";
@@ -321,9 +321,9 @@ impl CalibrationWindow {
 A lower ECE is better; `0.0` means the brain's stated confidence exactly tracks
 its hit-rate per bin.
 
-## `BrainJudgmentRecord` integration
+## `ReasonerJudgmentRecord` integration
 
-[`BrainJudgmentRecord.confidence: f32`](https://github.com/rysweet/Simard/blob/main/src/ooda_brain/judgment_record.rs)
+[`ReasonerJudgmentRecord.confidence: f32`](https://github.com/rysweet/Simard/blob/main/src/ooda_reasoners/judgment_record.rs)
 already exists today, but is currently populated with **fixed placeholders**
 (`1.0` non-fallback / `0.5` fallback, and `0.0` for phases with no native
 confidence field). This spec would source it from the judgment's `confidence()`

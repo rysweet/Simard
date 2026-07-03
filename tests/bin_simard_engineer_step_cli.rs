@@ -5,7 +5,7 @@
 //! - unknown subcommand error
 //! - missing-required-flag errors for every subcommand
 //! - JSON-parse error paths for inspection-json / action-json /
-//!   verification-json / topology / terminal-bridge-json
+//!   verification-json / topology / terminal-adapter-json
 //! - the `inspect` subcommand happy path against a freshly-initialised
 //!   git repo in a tempdir (deterministic; no network)
 //! - the `review` subcommand happy path with a non-mutating action (the

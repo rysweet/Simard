@@ -163,7 +163,7 @@ All methods are **synchronous**. Dashboard callers wrap them in `tokio::task::sp
 pub fn new_session(
     topic: &str,
     agent: Box<dyn BaseTypeSession>,
-    bridge: Option<Arc<dyn BridgeTransport>>,
+    bridge: Option<Arc<dyn ServerTransport>>,
     system_prompt: String,
 ) -> Self
 ```
@@ -244,7 +244,7 @@ Ends the meeting, persists all artifacts, and returns a summary.
    runtime.
 4. Stores cognitive memories via the bridge (if available) within the
    bridge inner budget. Bridge failures / timeouts emit
-   `WARN reason=bridge_timeout` and flow into the partial envelope
+   `WARN reason=adapter_timeout` and flow into the partial envelope
    without blocking the close.
 5. Marks the session as closed. Further `send_message()` calls return
    an error.

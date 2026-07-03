@@ -1,20 +1,20 @@
-//! Failing TDD tests (issue #1590, Step 7) for the cognitive-memory bridge
+//! Failing TDD tests (issue #1590, Step 7) for the cognitive-memory adapter
 //! launcher helpers required by spec section A2 / Recommendation C.
 //!
 //! Public API under test (not yet implemented):
 //!
 //! ```ignore
-//! pub struct WriterBridge { /* opaque */ }
-//! pub struct ReaderBridge { /* opaque */ }
+//! pub struct WriterAdapter { /* opaque */ }
+//! pub struct ReaderAdapter { /* opaque */ }
 //!
-//! impl WriterBridge { pub fn ops(&self) -> &dyn CognitiveMemoryOps; }
-//! impl ReaderBridge { pub fn ops(&self) -> &dyn CognitiveMemoryOps; }
+//! impl WriterAdapter { pub fn ops(&self) -> &dyn CognitiveMemoryOps; }
+//! impl ReaderAdapter { pub fn ops(&self) -> &dyn CognitiveMemoryOps; }
 //!
-//! pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge>;
-//! pub fn open_reader_bridge(state_root: &Path) -> SimardResult<ReaderBridge>;
+//! pub fn launch_writer_adapter(state_root: &Path) -> SimardResult<WriterAdapter>;
+//! pub fn open_reader_adapter(state_root: &Path) -> SimardResult<ReaderAdapter>;
 //! ```
 //!
-//! Behavioural ladder for the writer (matches `launch_real_meeting_bridge`):
+//! Behavioural ladder for the writer (matches `launch_real_meeting_adapter`):
 //!   1. Connect to the daemon's UDS at `default_socket_path()` if present.
 //!   2. Otherwise reap any stale open-lock and `LibraryCognitiveMemory::open`.
 //!
@@ -23,7 +23,7 @@
 //! the reader creates the store if it does not yet exist).
 
 use super::{
-    clear_in_process_writer, launch_writer_bridge, open_reader_bridge, register_in_process_writer,
+    clear_in_process_writer, launch_writer_adapter, open_reader_adapter, register_in_process_writer,
 };
 use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use crate::goal_curation::{GoalBoard, load_goal_board, save_goal_board};
@@ -44,23 +44,23 @@ fn fresh_state_root(tag: &str) -> std::path::PathBuf {
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn launch_writer_bridge_succeeds_on_fresh_state_root_without_daemon() {
+fn launch_writer_adapter_succeeds_on_fresh_state_root_without_daemon() {
     // No daemon socket → must fall through to LibraryCognitiveMemory::open.
     let root = fresh_state_root("writer-fresh");
-    let writer = launch_writer_bridge(&root)
-        .expect("launch_writer_bridge must succeed without a daemon when state root is writable");
+    let writer = launch_writer_adapter(&root)
+        .expect("launch_writer_adapter must succeed without a daemon when state root is writable");
     // ops() must hand back a usable trait object.
     let ops: &dyn CognitiveMemoryOps = writer.ops();
     let _ = ops
         .get_statistics()
-        .expect("get_statistics must work on a fresh writer bridge");
+        .expect("get_statistics must work on a fresh writer adapter");
 }
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn writer_bridge_supports_store_fact_round_trip() {
+fn writer_adapter_supports_store_fact_round_trip() {
     let root = fresh_state_root("writer-roundtrip");
-    let writer = launch_writer_bridge(&root).expect("writer bridge");
+    let writer = launch_writer_adapter(&root).expect("writer adapter");
 
     writer
         .ops()
@@ -71,12 +71,12 @@ fn writer_bridge_supports_store_fact_round_trip() {
             &["tdd-1590".to_string()],
             "tdd-test",
         )
-        .expect("store_fact through WriterBridge must succeed");
+        .expect("store_fact through WriterAdapter must succeed");
 
     let facts = writer
         .ops()
         .search_facts("test-tdd-1590:roundtrip", 5, 0.0)
-        .expect("search_facts through WriterBridge must succeed");
+        .expect("search_facts through WriterAdapter must succeed");
     assert!(
         facts.iter().any(|f| f.content == "hello from TDD"),
         "round-tripped fact must be retrievable; got {} facts",
@@ -86,14 +86,15 @@ fn writer_bridge_supports_store_fact_round_trip() {
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn open_reader_bridge_creates_empty_store_when_missing() {
+fn open_reader_adapter_creates_empty_store_when_missing() {
     // De-fork Phase 2b (issue #2307): the library backend has no read-only
     // constructor, so the reader's tier-2 direct open CREATES the store when it
     // does not yet exist (rather than the native `open_read_only`, which failed
-    // on a missing DB). The contract is now: `open_reader_bridge` succeeds and
+    // on a missing DB). The contract is now: `open_reader_adapter` succeeds and
     // returns an empty, queryable store.
     let root = fresh_state_root("reader-missing");
-    let reader = open_reader_bridge(&root).expect("open_reader_bridge must create an empty store");
+    let reader =
+        open_reader_adapter(&root).expect("open_reader_adapter must create an empty store");
     let stats = reader
         .ops()
         .get_statistics()
@@ -106,11 +107,11 @@ fn open_reader_bridge_creates_empty_store_when_missing() {
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn open_reader_bridge_succeeds_after_writer_initialises_db() {
+fn open_reader_adapter_succeeds_after_writer_initialises_db() {
     let root = fresh_state_root("reader-after-writer");
     {
         // Drop the writer to release the open-lock before the reader opens.
-        let writer = launch_writer_bridge(&root).expect("writer bridge");
+        let writer = launch_writer_adapter(&root).expect("writer adapter");
         writer
             .ops()
             .store_fact(
@@ -123,21 +124,21 @@ fn open_reader_bridge_succeeds_after_writer_initialises_db() {
             .expect("store_fact");
     }
 
-    let reader = open_reader_bridge(&root)
-        .expect("open_reader_bridge must succeed after writer has created the DB");
+    let reader = open_reader_adapter(&root)
+        .expect("open_reader_adapter must succeed after writer has created the DB");
     let facts = reader
         .ops()
         .search_facts("test-tdd-1590:reader-handoff", 5, 0.0)
         .expect("reader search_facts");
     assert!(
         facts.iter().any(|f| f.content == "seeded by writer"),
-        "reader bridge must surface facts written by the prior writer"
+        "reader adapter must surface facts written by the prior writer"
     );
 }
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
+fn writer_adapter_is_compatible_with_save_and_load_goal_board() {
     // The whole point of these helpers is to let dashboard / meeting /
     // engineer call sites flow through `save_goal_board(&board, writer.ops())`
     // and `load_goal_board(reader.ops())` without any ceremony.
@@ -145,14 +146,14 @@ fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
     // #[cfg(test)] hermetic guard in save_goal_board does not trip.
     let hermetic = crate::test_support::HermeticState::new();
     let root = hermetic.state_root().to_path_buf();
-    let writer = launch_writer_bridge(&root).expect("writer bridge");
+    let writer = launch_writer_adapter(&root).expect("writer adapter");
 
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
         parent_goal_id: None,
         repo: None,
         id: "tdd-roundtrip-active-goal".to_string(),
-        description: "Goal saved via WriterBridge then loaded again".to_string(),
+        description: "Goal saved via WriterAdapter then loaded again".to_string(),
         priority: 1,
         status: crate::goal_curation::GoalProgress::NotStarted,
         assigned_to: None,
@@ -161,23 +162,23 @@ fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
         last_progress_update_at: None,
     });
 
-    save_goal_board(&board, writer.ops()).expect("save_goal_board via WriterBridge must succeed");
+    save_goal_board(&board, writer.ops()).expect("save_goal_board via WriterAdapter must succeed");
     let loaded =
-        load_goal_board(writer.ops()).expect("load_goal_board via WriterBridge must succeed");
+        load_goal_board(writer.ops()).expect("load_goal_board via WriterAdapter must succeed");
     assert_eq!(loaded.active.len(), 1);
     assert_eq!(loaded.active[0].id, "tdd-roundtrip-active-goal");
 }
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
+fn writer_adapter_does_not_create_legacy_goal_records_json_on_save() {
     // Acceptance criterion #6: every save must flow through cognitive memory.
     // No writer call site is allowed to create the legacy JSON file.
     // HermeticState pins SIMARD_STATE_ROOT to a TempDir so the
     // #[cfg(test)] hermetic guard in save_goal_board does not trip.
     let hermetic = crate::test_support::HermeticState::new();
     let root = hermetic.state_root().to_path_buf();
-    let writer = launch_writer_bridge(&root).expect("writer bridge");
+    let writer = launch_writer_adapter(&root).expect("writer adapter");
 
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
@@ -197,7 +198,7 @@ fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
     let legacy = root.join("goal_records.json");
     assert!(
         !legacy.exists(),
-        "save_goal_board through WriterBridge must NOT create {}",
+        "save_goal_board through WriterAdapter must NOT create {}",
         legacy.display()
     );
 }
@@ -215,21 +216,21 @@ fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
 //   2. LibraryCognitiveMemory::open — fails because the daemon owns the
 //      writer lock.
 //   3. (removed) open_read_only — used to succeed, returning a read-only
-//      handle wrapped as a `WriterBridge`. Subsequent writes silently no-op
+//      handle wrapped as a `WriterAdapter`. Subsequent writes silently no-op
 //      at the IPC transport. This silent-degradation tier was deleted.
 //
 // The fix:
 //   - Tier 0: in-process Arc shortcut, registered by the daemon at
 //     startup. Same-process callers skip IPC entirely.
 //   - Remove tier 3 (silent read-only fallback).
-//   - Defensive `is_read_only()` invariant on `WriterBridge`.
+//   - Defensive `is_read_only()` invariant on `WriterAdapter`.
 // ---------------------------------------------------------------------------
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn register_in_process_writer_returns_registered_arc_via_launch_writer_bridge() {
+fn register_in_process_writer_returns_registered_arc_via_launch_writer_adapter() {
     // Use an in-memory LibraryCognitiveMemory so we don't depend on disk
-    // state. The state_root passed to launch_writer_bridge must match
+    // state. The state_root passed to launch_writer_adapter must match
     // the registered state_root for the shortcut to fire (path-aware
     // registration so unrelated tests with different state_roots are
     // unaffected).
@@ -243,19 +244,19 @@ fn register_in_process_writer_returns_registered_arc_via_launch_writer_bridge() 
     let root = fresh_state_root("in-process-writer-shortcut");
     register_in_process_writer(root.clone(), Arc::clone(&inner));
 
-    // Call launch_writer_bridge with the registered state_root — without
+    // Call launch_writer_adapter with the registered state_root — without
     // the in-process shortcut, tier 2 would create a fresh DB on disk at
     // this path. With the shortcut, the launcher returns the registered
     // Arc and never touches disk.
-    let writer = launch_writer_bridge(&root)
-        .expect("launch_writer_bridge must succeed via the registered in-process writer");
+    let writer = launch_writer_adapter(&root)
+        .expect("launch_writer_adapter must succeed via the registered in-process writer");
 
-    // Write through the bridge.
+    // Write through the adapter.
     writer
         .ops()
         .store_fact(
             "tdd-1590:in-process-writer",
-            "written via launch_writer_bridge after register",
+            "written via launch_writer_adapter after register",
             1.0,
             &["tdd-1590".to_string()],
             "tdd-test",
@@ -263,20 +264,20 @@ fn register_in_process_writer_returns_registered_arc_via_launch_writer_bridge() 
         .expect("store_fact through in-process writer must succeed");
 
     // The fact must be visible on the registered Arc directly,
-    // proving the bridge and the registered handle are the SAME backend.
+    // proving the adapter and the registered handle are the SAME backend.
     let facts = inner
         .search_facts("tdd-1590:in-process-writer", 5, 0.0)
         .expect("search_facts on the registered Arc must succeed");
     assert!(
         facts
             .iter()
-            .any(|f| f.content == "written via launch_writer_bridge after register"),
+            .any(|f| f.content == "written via launch_writer_adapter after register"),
         "the in-process shortcut must route writes to the registered Arc; got {} facts",
         facts.len()
     );
 
     // The registered shortcut must also avoid creating a DB on disk
-    // at the (irrelevant) state_root passed to launch_writer_bridge.
+    // at the (irrelevant) state_root passed to launch_writer_adapter.
     let db_path = root.join("cognitive");
     assert!(
         !db_path.exists(),
@@ -290,7 +291,7 @@ fn register_in_process_writer_returns_registered_arc_via_launch_writer_bridge() 
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn launch_writer_bridge_returns_err_when_state_root_is_unwritable_file() {
+fn launch_writer_adapter_returns_err_when_state_root_is_unwritable_file() {
     // Force tiers 1 and 2 to fail by passing a path that is a regular
     // file rather than a directory. The launcher's tier 2
     // (LibraryCognitiveMemory::open) fails because the path is not a
@@ -298,16 +299,16 @@ fn launch_writer_bridge_returns_err_when_state_root_is_unwritable_file() {
     // read-only fallback tier; the failure surfaces from tier 2.
     //
     // Either way, the contract this test pins is: the launcher must
-    // never silently return a `WriterBridge` whose underlying handle
+    // never silently return a `WriterAdapter` whose underlying handle
     // cannot perform writes against the requested state_root.
     let parent = fresh_state_root("writer-unwritable-parent");
     let unwritable = parent.join("not-a-dir.txt");
     std::fs::write(&unwritable, b"this is a regular file, not a directory").expect("seed file");
 
-    let result = launch_writer_bridge(&unwritable);
+    let result = launch_writer_adapter(&unwritable);
     assert!(
         result.is_err(),
-        "launch_writer_bridge must return Err for an unusable state_root, \
+        "launch_writer_adapter must return Err for an unusable state_root, \
          got Ok writer (regression: silent read-only fallback or hollow success)"
     );
 }

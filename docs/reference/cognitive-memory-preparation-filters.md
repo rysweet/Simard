@@ -56,7 +56,7 @@ brain nothing and frees the fact budget for genuinely diverse facts.
 |----------------|---------------------|------------------------------------------------------------------------|
 | `objective`    | `&str`              | Current cycle objective (from `state.last_objective`)                  |
 | `session_id`   | `&str`              | Current session id                                                     |
-| `bridge`       | `&dyn CognitiveMemoryOps` | Cognitive memory handle from `OodaBridges`                       |
+| `bridge`       | `&dyn CognitiveMemoryOps` | Cognitive memory handle from `OodaContext`                       |
 | `active_slugs` | `&HashSet<&str>`    | **New in PR-A** — union of `state.active_goals.active` and `.backlog` ids |
 
 The single caller (`src/ooda_loop/cycle.rs`, in `prepare_phase`)
@@ -75,7 +75,7 @@ let active_slugs: HashSet<&str> = state
 let prepared = preparation_memory_operations(
     &state.last_objective,
     &session_id,
-    &*bridges.memory,
+    &*adapters.memory,
     &active_slugs,
 )?;
 ```

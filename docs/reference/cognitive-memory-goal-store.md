@@ -6,7 +6,7 @@ owner: simard
 doc_type: reference
 related:
   - ./file-backed-goal-store.md
-  - ./cognitive-memory-bridge-helpers.md
+  - ./cognitive-memory-adapter-helpers.md
   - ./goal-board-api.md
   - ../concepts/goal-board-persistence.md
   - ../concepts/file-backed-goal-store-simplification.md
@@ -99,22 +99,22 @@ Each method would have opened a fresh bridge for the duration of one
 call and let it drop afterwards. There would have been no long-lived
 bridge held inside the adapter because:
 
-- The planned in-process Arc shortcut (tier 0 of `launch_writer_bridge`)
+- The planned in-process Arc shortcut (tier 0 of `launch_writer_adapter`)
   would have made per-call acquisition cheap inside the daemon process.
-- Holding a `WriterBridge` across awaits would have either serialized all
+- Holding a `WriterAdapter` across awaits would have either serialized all
   callers behind a `Mutex` or risked lock contention with the daemon.
 
 ### Read methods
 
 ```rust
 fn list(&self) -> SimardResult<Vec<GoalRecord>> {
-    let bridge = open_reader_bridge(&self.state_root)?;
+    let bridge = open_reader_adapter(&self.state_root)?;
     let board = load_goal_board(bridge.ops())?;
     Ok(active_goals_as_records(&board))
 }
 ```
 
-Read methods would have used `open_reader_bridge` because they do not
+Read methods would have used `open_reader_adapter` because they do not
 need the writer lock and should not contend with the daemon. The
 `active_goals_as_records` adapter (defined in
 `goal_curation::operations`) would have projected the goal board's
@@ -126,7 +126,7 @@ behavioural change.
 
 ```rust
 fn upsert(&self, record: GoalRecord) -> SimardResult<()> {
-    let bridge = launch_writer_bridge(&self.state_root)?;
+    let bridge = launch_writer_adapter(&self.state_root)?;
     let mut board = load_goal_board(bridge.ops())?;
     apply_upsert(&mut board, record);
     save_goal_board(&board, bridge.ops())?;
@@ -134,12 +134,12 @@ fn upsert(&self, record: GoalRecord) -> SimardResult<()> {
 }
 ```
 
-Write methods would have used `launch_writer_bridge`. With the planned
+Write methods would have used `launch_writer_adapter`. With the planned
 in-process Arc shortcut this would have been a single `OnceLock::get`
 plus an `Arc::clone` when the daemon was registered — no IPC round-trip
 and no lock acquisition. Outside the daemon process the helper would
 have fallen back to IPC or direct open as documented in [Cognitive
-memory bridge helpers](./cognitive-memory-bridge-helpers.md).
+memory bridge helpers](./cognitive-memory-adapter-helpers.md).
 
 The launcher's planned strict no-silent-degradation contract would have
 meant writer-method errors (database lock contention, IPC connect
@@ -220,7 +220,7 @@ the full API and locking protocol.
 
 ## Related reading
 
-- [Cognitive memory bridge helpers](./cognitive-memory-bridge-helpers.md)
+- [Cognitive memory bridge helpers](./cognitive-memory-adapter-helpers.md)
   — the lower-level helpers that this adapter wraps.
 - [Goal board API reference](./goal-board-api.md) — `load_goal_board`,
   `save_goal_board`, and `active_goals_as_records`.

@@ -17,7 +17,7 @@
 //!   [`SimardError::StoragePoisoned`].
 //! * **Error mapping.** `open` failures map to
 //!   [`SimardError::PersistentStoreIo`]; per-operation failures map to
-//!   [`SimardError::BridgeCallFailed`] with `bridge = "cognitive-memory-library"`,
+//!   [`SimardError::ServerCallFailed`] with `adapter = "cognitive-memory-library"`,
 //!   preserving the upstream `MemoryError` message. No new `SimardError` variant
 //!   is introduced — this keeps the change additive.
 //! * **Documented divergences (A3/A6/A7).** `check_triggers`,
@@ -245,7 +245,7 @@ impl LibraryCognitiveMemory {
     /// hermetic-state-root guard so a cargo-test write can never land in the
     /// operator's live `$HOME/.simard` store. This is the adapter's
     /// reimplementation of the per-write guard the deleted native backend ran;
-    /// it keeps the documented multi-site contract intact (`launch_writer_bridge`
+    /// it keeps the documented multi-site contract intact (`launch_writer_adapter`
     /// remains the other site). No-op for the in-memory constructor (no
     /// `state_root`) and compiled out of release builds. See
     /// `docs/testing/hermetic-tests.md`.
@@ -294,8 +294,8 @@ impl LibraryCognitiveMemory {
 /// Map an upstream [`MemoryError`] from a delegated call onto a Simard error,
 /// preserving the upstream message.
 fn map_op_err(method: &str, err: MemoryError) -> SimardError {
-    SimardError::BridgeCallFailed {
-        bridge: STORE_NAME.to_string(),
+    SimardError::ServerCallFailed {
+        adapter: STORE_NAME.to_string(),
         method: method.to_string(),
         reason: err.to_string(),
     }

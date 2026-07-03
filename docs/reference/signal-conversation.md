@@ -32,7 +32,7 @@ installation and linking.
 
 > **Naming.** `SignalConversation` is a first-class conversation channel. It does
 > **not** implement, extend, or route through the pre-existing cognitive-memory
-> `BridgeTransport`. No symbol added by this feature contains `bridge`/`Bridge`.
+> `ServerTransport`. No symbol added by this feature contains `bridge`/`Bridge`.
 
 ## Feature gate
 

@@ -6,18 +6,18 @@
 //! context. These tests assert that *every* shipped adapter now renders the
 //! same `## Relevant Memory Facts` block through the shared, normalized
 //! `BaseTypeSession::enrich_input` entry point when fed an identical
-//! mock-bridged objective.
+//! mock-connected objective.
 
 use serde_json::json;
 
 use simard::base_types::{
     BaseTypeFactory, BaseTypeSession, BaseTypeSessionRequest, BaseTypeTurnInput,
 };
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
 use simard::identity::OperatingMode;
-use simard::memory_bridge::CognitiveMemoryBridge;
+use simard::memory_adapter::CognitiveMemoryAdapter;
 use simard::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
+use simard::server_subprocess::InMemoryServerTransport;
+use simard::server_transport::ServerErrorPayload;
 use simard::session::SessionId;
 use simard::{
     CognitiveMemoryOps, CopilotSdkAdapter, RealLocalHarnessAdapter, RustyClawdAdapter,
@@ -37,11 +37,11 @@ fn test_request() -> BaseTypeSessionRequest {
     }
 }
 
-/// Mock memory bridge mirroring `tests/base_type_live.rs`: returns a single
+/// Mock memory adapter mirroring `tests/base_type_live.rs`: returns a single
 /// fact and a single procedure for any query so the rendered prompt is
 /// deterministic across adapters.
-fn mock_memory_bridge() -> Box<dyn CognitiveMemoryOps> {
-    let transport = InMemoryBridgeTransport::new("test-memory", |method, params| match method {
+fn mock_memory_adapter() -> Box<dyn CognitiveMemoryOps> {
+    let transport = InMemoryServerTransport::new("test-memory", |method, params| match method {
         "memory.search_facts" => {
             let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
             Ok(
@@ -54,12 +54,12 @@ fn mock_memory_bridge() -> Box<dyn CognitiveMemoryOps> {
             "name": "build-and-test", "steps": ["cargo build", "cargo test"],
             "prerequisites": ["rust toolchain"], "usage_count": 5}]})),
         "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(ServerErrorPayload {
             code: -32601,
             message: format!("unknown method: {method}"),
         }),
     });
-    Box::new(CognitiveMemoryBridge::new(Box::new(transport)))
+    Box::new(CognitiveMemoryAdapter::new(Box::new(transport)))
 }
 
 /// Construct every shipped base-type adapter session, named for diagnostics.
@@ -99,20 +99,20 @@ fn every_shipped_adapter_exposes_enrichment() {
     for (name, session) in all_shipped_sessions() {
         assert!(
             session.enrichment().is_some(),
-            "adapter '{name}' must expose enrichment bridges"
+            "adapter '{name}' must expose enrichment adapters"
         );
     }
 }
 
 #[test]
-fn every_shipped_adapter_renders_memory_facts_with_bridge() {
+fn every_shipped_adapter_renders_memory_facts_with_adapter() {
     let input = BaseTypeTurnInput::objective_only(OBJECTIVE);
 
     for (name, mut session) in all_shipped_sessions() {
         session
             .enrichment_mut()
             .unwrap_or_else(|| panic!("adapter '{name}' must support enrichment injection"))
-            .memory = Some(mock_memory_bridge());
+            .memory = Some(mock_memory_adapter());
 
         let enriched = session
             .enrich_input(&input)
@@ -151,7 +151,7 @@ fn all_shipped_adapters_render_identical_enriched_prompt() {
 
     let mut rendered: Vec<(String, String)> = Vec::new();
     for (name, mut session) in all_shipped_sessions() {
-        session.enrichment_mut().unwrap().memory = Some(mock_memory_bridge());
+        session.enrichment_mut().unwrap().memory = Some(mock_memory_adapter());
         let enriched = session.enrich_input(&input).unwrap();
         rendered.push((name.to_string(), enriched.prompt_preamble));
     }
@@ -167,43 +167,43 @@ fn all_shipped_adapters_render_identical_enriched_prompt() {
 }
 
 #[test]
-fn enrichment_is_noop_without_configured_bridge() {
+fn enrichment_is_noop_without_configured_adapter() {
     let input = BaseTypeTurnInput::objective_only(OBJECTIVE);
 
     for (name, session) in all_shipped_sessions() {
-        // No bridge injected => input returned unchanged, no memory section.
+        // No adapter injected => input returned unchanged, no memory section.
         let enriched = session.enrich_input(&input).unwrap();
         assert_eq!(
             enriched.objective, OBJECTIVE,
-            "adapter '{name}' must still preserve the objective without bridges"
+            "adapter '{name}' must still preserve the objective without adapters"
         );
         assert!(
             !enriched
                 .prompt_preamble
                 .contains("## Relevant Memory Facts"),
-            "adapter '{name}' must not fabricate memory facts when no bridge is configured"
+            "adapter '{name}' must not fabricate memory facts when no adapter is configured"
         );
     }
 }
 
 /// Production-wiring parity gate (issue #2383).
 ///
-/// The cross-adapter tests above inject a *mock* bridge through
-/// `enrichment_mut`, which proves `enrich_input` consumes bridges but not that
+/// The cross-adapter tests above inject a *mock* adapter through
+/// `enrichment_mut`, which proves `enrich_input` consumes adapters but not that
 /// the production factory seam (`with_enrichment` + `open_session`) actually
 /// launches them. Before #2383 only `CopilotSdkAdapter` exposed
 /// `with_enrichment`; RustyClawd's `SessionBuilder` arm built sessions with
-/// empty bridges, so enrichment was inert in production.
+/// empty adapters, so enrichment was inert in production.
 ///
 /// This drives both production-wired adapters through their `with_enrichment`
 /// builders against a real, writable state root and asserts they launch
-/// identical, non-empty memory + knowledge bridges — the parity that must hold
+/// identical, non-empty memory + knowledge adapters — the parity that must hold
 /// so RustyClawd cannot silently regress to no-enrichment again. The
 /// `SessionBuilder`-level seam itself (the line that actually regressed) is
 /// covered by `session_builder`'s `*_provider_wires_enrichment_*` tests.
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn production_wiring_launches_bridges_for_builder_adapters() {
+fn production_wiring_launches_adapters_for_builder_adapters() {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -212,16 +212,16 @@ fn production_wiring_launches_bridges_for_builder_adapters() {
     std::fs::create_dir_all(&state_root).unwrap();
 
     fn assert_wired(name: &str, session: &dyn BaseTypeSession) {
-        let bridges = session
+        let adapters = session
             .enrichment()
-            .unwrap_or_else(|| panic!("adapter '{name}' must expose enrichment bridges"));
+            .unwrap_or_else(|| panic!("adapter '{name}' must expose enrichment adapters"));
         assert!(
-            bridges.memory.is_some(),
-            "adapter '{name}' production wiring must launch the memory bridge"
+            adapters.memory.is_some(),
+            "adapter '{name}' production wiring must launch the memory adapter"
         );
         assert!(
-            bridges.knowledge.is_some(),
-            "adapter '{name}' production wiring must launch the knowledge bridge"
+            adapters.knowledge.is_some(),
+            "adapter '{name}' production wiring must launch the knowledge adapter"
         );
     }
 

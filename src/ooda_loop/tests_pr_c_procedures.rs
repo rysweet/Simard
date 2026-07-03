@@ -9,7 +9,7 @@
 //!
 //! ```ignore
 //! let proc_name = format!("ooda:{}", outcome.action.kind);
-//! bridges.memory.store_procedure(&proc_name, &steps, &[])?;
+//! adapters.memory.store_procedure(&proc_name, &steps, &[])?;
 //! ```
 //!
 //! After PR-C the writer must construct a goal-scoped, trigger-bearing

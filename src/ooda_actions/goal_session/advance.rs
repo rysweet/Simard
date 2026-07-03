@@ -162,7 +162,7 @@ pub(crate) fn build_goal_advance_input(
     // Load the objective instructions from the prompt store (runtime-overridable,
     // falls back to the compiled-in embed when no disk file exists).
     let goal_session_objective =
-        crate::ooda_brain::prompt_store::global().load("goal_session_objective.md");
+        crate::ooda_reasoners::prompt_store::global().load("goal_session_objective.md");
 
     // Build the objective in a single pre-sized buffer to avoid intermediate allocations.
     let mut objective = String::with_capacity(1024);

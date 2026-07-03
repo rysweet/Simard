@@ -2211,14 +2211,14 @@ input: printf \"terminal-mode-scope-ok\\n\"";
 
 #[test]
 #[ignore] // Spawns simard binary — hangs in pre-commit
-fn simard_engineer_run_and_read_surface_honest_terminal_bridge_context_from_shared_state_root() {
-    let state_root = TempDirGuard::new("simard-cli-terminal-engineer-bridge");
+fn simard_engineer_run_and_read_surface_honest_terminal_engineer_context_from_shared_state_root() {
+    let state_root = TempDirGuard::new("simard-cli-terminal-engineer-adapter");
     let repo_root = repo_root();
     let terminal_objective = "\
 working-directory: .\n\
-command: printf \"bridge-session-ready\\n\"\n\
-wait-for: bridge-session-ready\n\
-input: printf \"bridge-session-ok\\n\"";
+command: printf \"adapter-session-ready\\n\"\n\
+wait-for: adapter-session-ready\n\
+input: printf \"adapter-session-ok\\n\"";
     let terminal_output = Command::new(env!("CARGO_BIN_EXE_simard"))
         .arg("engineer")
         .arg("terminal")
@@ -2231,7 +2231,7 @@ input: printf \"bridge-session-ok\\n\"";
 
     assert!(
         terminal_output.status.success(),
-        "terminal run should succeed before the bridge flow is exercised:\n{terminal_rendered}"
+        "terminal run should succeed before the adapter flow is exercised:\n{terminal_rendered}"
     );
 
     let engineer_run_output = Command::new(env!("CARGO_BIN_EXE_simard"))
@@ -2247,7 +2247,7 @@ input: printf \"bridge-session-ok\\n\"";
 
     assert!(
         engineer_run_output.status.success(),
-        "engineer run should succeed before bridge assertions:\n{engineer_run_rendered}"
+        "engineer run should succeed before adapter assertions:\n{engineer_run_rendered}"
     );
 
     let engineer_read_output = Command::new(env!("CARGO_BIN_EXE_simard"))
@@ -2261,13 +2261,13 @@ input: printf \"bridge-session-ok\\n\"";
 
     assert!(
         engineer_read_output.status.success(),
-        "engineer read should succeed before bridge assertions:\n{engineer_read_rendered}"
+        "engineer read should succeed before adapter assertions:\n{engineer_read_rendered}"
     );
     for expected in [
         "Mode boundary: terminal is a bounded local terminal session surface",
         "Mode boundary: engineer is a separate repo-grounded bounded loop",
         "Terminal continuity source: shared explicit state-root",
-        "Terminal continuity last output line: bridge-session-ok",
+        "Terminal continuity last output line: adapter-session-ok",
     ] {
         assert!(
             engineer_run_rendered.contains(expected),

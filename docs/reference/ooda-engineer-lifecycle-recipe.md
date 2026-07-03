@@ -2,7 +2,7 @@
 
 Recipe: `prompt_assets/simard/recipes/ooda-engineer-lifecycle.yaml`
 Prompt source: `prompt_assets/simard/ooda_brain.md` (content embedded in recipe YAML)
-Shim: `src/ooda_brain/recipe_engineer_lifecycle.rs`
+Shim: `src/ooda_reasoners/recipe_engineer_lifecycle.rs`
 
 This is the single source of truth for the engineer-lifecycle decision at the
 Act phase's skip branch. The engineer-lifecycle brain runs as a **recipe step**
@@ -12,7 +12,7 @@ via `recipe-runner-rs`, following the same pattern as `ooda-decide.yaml`,
 
 > **History:** Before issue
 > [#2115](https://github.com/rysweet/Simard/issues/2115), the engineer
-> lifecycle brain was `RustyClawdBrain`, which compiled the prompt via
+> lifecycle brain was `RustyClawdActReasoner`, which compiled the prompt via
 > `include_str!`, submitted it to an `LlmSubmitter`, and parsed the response
 > using `DECISION:` markers on the first non-blank line. The recipe-based
 > approach moves the prompt to a YAML file that can be edited without a
@@ -61,7 +61,7 @@ steps:
 
 The recipe is a single `agent` step. The recipe-runner-rs subprocess handles
 prompt rendering, agent invocation, and stdout capture. The Rust shim
-(`RecipeEngineerLifecycleBrain`) parses the stdout using keyword scanning.
+(`RecipeEngineerLifecycleReasoner`) parses the stdout using keyword scanning.
 
 ### What changed from `ooda_brain.md`
 
@@ -83,7 +83,7 @@ are adapted to show prose-form output instead of `DECISION:` marker format.
 ## Placeholders (Context Variables)
 
 The recipe-runner-rs performs Handlebars `{{name}}` substitution from the
-context variables passed by `RecipeEngineerLifecycleBrain`.
+context variables passed by `RecipeEngineerLifecycleReasoner`.
 
 | Variable | Type | Source |
 |---|---|---|
@@ -102,8 +102,8 @@ context variables passed by `RecipeEngineerLifecycleBrain`.
 
 ## Keyword Scanning
 
-`RecipeEngineerLifecycleBrain` uses keyword scanning (the same **keyword
-verdict protocol** as `RecipeDecideBrain`) to extract the lifecycle variant
+`RecipeEngineerLifecycleReasoner` uses keyword scanning (the same **keyword
+verdict protocol** as `RecipeDecideReasoner`) to extract the lifecycle variant
 from the agent's stdout. The agent's prose is scanned case-insensitively
 for one of the 6 lifecycle variant keywords.
 
@@ -145,7 +145,7 @@ missing, defaults are applied:
 
 If no lifecycle keyword is found in the output, the parser returns
 `ContinueSkipping` — the safe default. This matches the
-`DeterministicFallbackBrain` behavior.
+`DeterministicFallbackActReasoner` behavior.
 
 ### Keyword safety
 
@@ -155,11 +155,11 @@ the lifecycle keywords require no substring disambiguation — none of the
 
 ## Error Handling
 
-`RecipeEngineerLifecycleBrain` returns
+`RecipeEngineerLifecycleReasoner` returns
 `Err(SimardError::AdapterInvocationFailed)` when:
 
 - The `recipe-runner-rs` binary is not found (construction fails;
-  `RecipeEngineerLifecycleBrain::new()` returns `None`).
+  `RecipeEngineerLifecycleReasoner::new()` returns `None`).
 - The subprocess exits with a non-zero status.
 - The subprocess cannot be spawned.
 
@@ -168,13 +168,13 @@ produces a valid `EngineerLifecycleDecision`. The `ContinueSkipping`
 default is the unconditional safety net.
 
 On `AdapterInvocationFailed`, the caller in `dispatch_spawn_engineer`
-falls back to `DeterministicFallbackBrain` and logs the error.
+falls back to `DeterministicFallbackActReasoner` and logs the error.
 
 ## Runtime Loading (not compile-time)
 
 Unlike the old `ooda_brain.md` (which was embedded via `include_str!`),
 the engineer lifecycle recipe is loaded at runtime by recipe-runner-rs.
-`RecipeEngineerLifecycleBrain` resolves the recipe path in this order:
+`RecipeEngineerLifecycleReasoner` resolves the recipe path in this order:
 
 1. `~/.simard/prompt_assets/simard/recipes/ooda-engineer-lifecycle.yaml`
    (hot-reload)
@@ -186,26 +186,26 @@ Prompt edits take effect on the next daemon cycle **without a rebuild**.
 ## Construction Pattern
 
 ```rust
-let brain: Arc<dyn OodaBrain> = match RecipeEngineerLifecycleBrain::new(repo_root) {
+let brain: Arc<dyn ActReasoner> = match RecipeEngineerLifecycleReasoner::new(repo_root) {
     Some(b) => {
-        daemon_log(state_root, "[simard] OODA daemon: brain = RecipeEngineerLifecycleBrain");
+        daemon_log(state_root, "[simard] OODA daemon: brain = RecipeEngineerLifecycleReasoner");
         Arc::new(b)
     }
     None => {
         record_fallback(state_root, "act", "recipe-runner-rs or recipe YAML not available");
-        Arc::new(DeterministicFallbackBrain)
+        Arc::new(DeterministicFallbackActReasoner)
     }
 };
 ```
 
-`RecipeEngineerLifecycleBrain::new(repo_root)` returns `None` when:
+`RecipeEngineerLifecycleReasoner::new(repo_root)` returns `None` when:
 - The `recipe-runner-rs` binary is not on `$PATH`.
 - The recipe YAML file does not exist at either resolution path.
 
 The daemon wiring in `operator_commands_ooda/daemon/brains.rs` calls
-`build_act_brain(state_root, repo_root)`, which tries
-`RecipeEngineerLifecycleBrain` first and falls back to
-`DeterministicFallbackBrain`.
+`build_act_reasoner(state_root, repo_root)`, which tries
+`RecipeEngineerLifecycleReasoner` first and falls back to
+`DeterministicFallbackActReasoner`.
 
 ## Examples
 
@@ -288,18 +288,18 @@ EngineerLifecycleDecision::MarkGoalBlocked {
 
 ## Comparison with the old `DECISION:` marker protocol
 
-| Aspect | Old (`RustyClawdBrain`) | New (`RecipeEngineerLifecycleBrain`) |
+| Aspect | Old (`RustyClawdActReasoner`) | New (`RecipeEngineerLifecycleReasoner`) |
 |--------|------------------------|-------------------------------------|
 | Prompt location | `include_str!` (compiled in) | Recipe YAML (runtime) |
 | Prompt edit cycle | Edit → `cargo build` → `safe-update` | Edit YAML → next cycle |
 | Output format | `DECISION:` on first non-blank line | Keyword anywhere in prose |
 | Extra fields | `TITLE:`, `BODY:` labeled lines | Same labeled lines (extracted after keyword match) |
-| Parse failure mode | `BrainResponseUnparseable` error | Always succeeds (defaults to `ContinueSkipping`) |
+| Parse failure mode | `ReasonerResponseUnparseable` error | Always succeeds (defaults to `ContinueSkipping`) |
 | Structured variants | Marker-wins precedence | Keyword + labeled lines |
 
 ## Test Inventory
 
-`src/ooda_brain/recipe_engineer_lifecycle.rs` contains inline
+`src/ooda_reasoners/recipe_engineer_lifecycle.rs` contains inline
 `#[cfg(test)]` tests covering all variants and parsing edge cases:
 
 | Test | Coverage |
@@ -319,12 +319,12 @@ EngineerLifecycleDecision::MarkGoalBlocked {
 Adding a new lifecycle variant (a new `EngineerLifecycleDecision` enum
 value) requires a coordinated change:
 
-1. Add the variant to `EngineerLifecycleDecision` in `src/ooda_brain/mod.rs`.
+1. Add the variant to `EngineerLifecycleDecision` in `src/ooda_reasoners/mod.rs`.
 2. Add the keyword to the scanner in
-   `src/ooda_brain/recipe_engineer_lifecycle.rs`.
+   `src/ooda_reasoners/recipe_engineer_lifecycle.rs`.
 3. Add the variant to the `OPTIONS` section in the recipe YAML.
 4. Add an example to the `EXAMPLES` section.
-5. Add `apply_decision_to_state` handling in `src/ooda_brain/mod.rs`.
+5. Add `apply_decision_to_state` handling in `src/ooda_reasoners/mod.rs`.
 6. Add a test covering the new keyword.
 7. Update the variant table in
    [text-parsing wire formats](text-parsing-wire-formats.md).
@@ -339,7 +339,7 @@ ship alone — and take effect without a rebuild.
 * [Reference: OODA decide recipe and prompt schema](ooda-decide-prompt.md) — decide-phase recipe
 * [Reference: OODA orient recipe and prompt schema](ooda-orient-recipe.md) — orient-phase recipe
 * [Reference: text-parsing wire formats](text-parsing-wire-formats.md) — normative grammar
-* [Reference: `OodaBrain` API](ooda-brain-api.md) — trait and type definitions
+* [Reference: `ActReasoner` API](ooda-brain-api.md) — trait and type definitions
 * [Concept: prompt-driven OODA brain](../concepts/prompt-driven-ooda-brain.md) — concept overview
 * [How-to: edit the OODA brain prompt](../howto/edit-the-ooda-brain-prompt.md) — editing guide
 * [Reference: recipe context variable sanitization](recipe-context-var-sanitization.md) — `sanitize_context_var` helper that strips newlines from context values before passing to recipe-runner-rs

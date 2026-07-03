@@ -109,7 +109,7 @@ The enum has **6 variants** and its serde tag/values are frozen.
 `simard safe-update` path; it is the only variant that can mutate the running
 daemon binary. `Deserialize` is not derived — the enum is constructed from
 text-parsed fields via the DECISION marker protocol (see
-[text-parsing wire formats § engineer lifecycle](./text-parsing-wire-formats.md#1c-engineer-lifecycle-recipe_brainrs)).
+[text-parsing wire formats § engineer lifecycle](./text-parsing-wire-formats.md#1c-engineer-lifecycle-recipe_reasonerrs)).
 
 ## Implementations
 
@@ -130,8 +130,8 @@ impl<S: LlmSubmitter> RustyClawdActReasoner<S> {
 }
 ```
 
-The free function `build_act_reasoner()` (was `build_rustyclawd_brain`)
-constructs the production reasoner backed by `RustyClawdAdapter`:
+The free function `build_act_reasoner()`
+constructs the production reasoner backed by `RustyClawdActReasoner`:
 
 ```rust
 pub fn build_act_reasoner() -> SimardResult<RustyClawdActReasoner<RustyClawdSubmitter>>;

@@ -3,7 +3,7 @@
 //! The action-kind selection (which kind of [`ActionKind`] each priority maps
 //! to) is delegated to a prompt-driven brain — see
 //! `prompt_assets/simard/ooda_decide.md`. The default entrypoint
-//! ([`decide`]) wires in [`DeterministicDecideBrain`], the deterministic
+//! ([`decide`]) wires in [`DeterministicFallbackDecideReasoner`], the deterministic
 //! prefix-based routing used when no LLM brain is configured. Callers that
 //! have an LLM-backed brain invoke [`decide_with_brain`] directly.
 //!
@@ -12,10 +12,10 @@
 //! brain.
 
 use crate::error::SimardResult;
-use crate::ooda_brain::parse_failure::{record_parse_failure, reset_consecutive_count};
-use crate::ooda_brain::{
-    BrainJudgmentRecord, BrainPhase, DECIDE_PROMPT_NAME, DecideContext, DeterministicDecideBrain,
-    OodaDecideBrain, push_brain_judgment,
+use crate::ooda_reasoners::parse_failure::{record_parse_failure, reset_consecutive_count};
+use crate::ooda_reasoners::{
+    DECIDE_PROMPT_NAME, DecideContext, DecideReasoner, DeterministicFallbackDecideReasoner,
+    ReasonerJudgmentRecord, ReasonerPhase, push_brain_judgment,
 };
 
 use super::{ActionKind, OodaConfig, PlannedAction, Priority, is_synthetic_id};
@@ -24,7 +24,7 @@ use super::{ActionKind, OodaConfig, PlannedAction, Priority, is_synthetic_id};
 /// entrypoint used when no LLM brain is configured.
 #[tracing::instrument(skip_all)]
 pub fn decide(priorities: &[Priority], config: &OodaConfig) -> SimardResult<Vec<PlannedAction>> {
-    let brain = DeterministicDecideBrain;
+    let brain = DeterministicFallbackDecideReasoner;
     decide_with_brain(priorities, config, &brain)
 }
 
@@ -36,7 +36,7 @@ pub fn decide(priorities: &[Priority], config: &OodaConfig) -> SimardResult<Vec<
 pub fn decide_with_brain(
     priorities: &[Priority],
     config: &OodaConfig,
-    brain: &dyn OodaDecideBrain,
+    brain: &dyn DecideReasoner,
 ) -> SimardResult<Vec<PlannedAction>> {
     let base_limit = config.max_concurrent_actions as usize;
     let limit = if let Some(ref scaler) = config.scaler {
@@ -44,7 +44,7 @@ pub fn decide_with_brain(
     } else {
         base_limit
     };
-    let deterministic = DeterministicDecideBrain;
+    let deterministic = DeterministicFallbackDecideReasoner;
     let mut actions = Vec::with_capacity(limit);
     for priority in priorities {
         if actions.len() >= limit {
@@ -63,7 +63,7 @@ pub fn decide_with_brain(
         // (returning AdvanceGoal, which is unroutable without a goal_id).
         // Always use the deterministic brain for these — the LLM adds no
         // value for synthetic priorities.
-        let effective_brain: &dyn OodaDecideBrain = if is_synthetic_id(&priority.goal_id) {
+        let effective_brain: &dyn DecideReasoner = if is_synthetic_id(&priority.goal_id) {
             &deterministic
         } else {
             brain
@@ -72,13 +72,13 @@ pub fn decide_with_brain(
             Ok(j) => {
                 // Healthy parse — reset the (Decide, goal_id) counter so a
                 // recovery cancels any pending gh-issue escalation.
-                reset_consecutive_count(BrainPhase::Decide, &priority.goal_id);
-                push_brain_judgment(BrainJudgmentRecord::from_decide(
+                reset_consecutive_count(ReasonerPhase::Decide, &priority.goal_id);
+                push_brain_judgment(ReasonerJudgmentRecord::from_decide(
                     &priority.goal_id,
                     priority.urgency,
                     &j,
                     is_synthetic_id(&priority.goal_id),
-                    crate::ooda_brain::prompt_store::current_version(DECIDE_PROMPT_NAME),
+                    crate::ooda_reasoners::prompt_store::current_version(DECIDE_PROMPT_NAME),
                 ));
                 j
             }
@@ -87,12 +87,12 @@ pub fn decide_with_brain(
                 // priority. No fallback to a different brain.
                 let raw_response = extract_raw_response(&e);
                 let pf = record_parse_failure(
-                    BrainPhase::Decide,
+                    ReasonerPhase::Decide,
                     &priority.goal_id,
                     &e,
                     &raw_response,
                     DECIDE_PROMPT_NAME,
-                    crate::ooda_brain::prompt_store::current_version(DECIDE_PROMPT_NAME),
+                    crate::ooda_reasoners::prompt_store::current_version(DECIDE_PROMPT_NAME),
                 );
                 tracing::error!(
                     priority_goal_id = %priority.goal_id,
@@ -100,7 +100,7 @@ pub fn decide_with_brain(
                     "decide brain failed for priority — skipping (no fallback)"
                 );
                 let mut rec =
-                    BrainJudgmentRecord::from_decide_error(&priority.goal_id, priority.urgency);
+                    ReasonerJudgmentRecord::from_decide_error(&priority.goal_id, priority.urgency);
                 rec.parse_failure = Some(pf);
                 push_brain_judgment(rec);
                 continue;
@@ -158,8 +158,8 @@ fn extract_raw_response(err: &crate::error::SimardError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ooda_brain::{DecideContext, DecideJudgment, OodaDecideBrain};
     use crate::ooda_loop::{ActionKind, OodaConfig, Priority};
+    use crate::ooda_reasoners::{DecideContext, DecideJudgment, DecideReasoner};
 
     #[test]
     fn decide_respects_max_concurrent_actions() {
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn decide_with_brain_uses_brain_judgment_for_action_kind() {
         struct AlwaysGymBrain;
-        impl OodaDecideBrain for AlwaysGymBrain {
+        impl DecideReasoner for AlwaysGymBrain {
             fn judge_decision(
                 &self,
                 _ctx: &DecideContext,
@@ -332,12 +332,12 @@ mod tests {
     #[test]
     fn decide_with_brain_records_brain_rationale_not_fallback_marker() {
         // Wiring test: when an LLM-backed brain is provided, the rationale
-        // recorded on the per-cycle BrainJudgmentRecord must be the brain's
+        // recorded on the per-cycle ReasonerJudgmentRecord must be the brain's
         // own rationale, NOT the deterministic-fallback's
         // `"fallback-brain: prefix-routed"` marker. This proves the
         // daemon's #1469 wire-up actually fires the LLM brain.
         struct LlmStubBrain;
-        impl OodaDecideBrain for LlmStubBrain {
+        impl DecideReasoner for LlmStubBrain {
             fn judge_decision(
                 &self,
                 _ctx: &DecideContext,
@@ -353,10 +353,10 @@ mod tests {
             reason: "test".to_string(),
         }];
         let config = OodaConfig::default();
-        let records = crate::ooda_brain::with_brain_judgment_scope(|| {
-            crate::ooda_brain::clear_brain_judgments();
+        let records = crate::ooda_reasoners::with_brain_judgment_scope(|| {
+            crate::ooda_reasoners::clear_reasoner_judgments();
             decide_with_brain(&priorities, &config, &LlmStubBrain).unwrap();
-            crate::ooda_brain::take_brain_judgments()
+            crate::ooda_reasoners::take_reasoner_judgments()
         });
         assert_eq!(records.len(), 1);
         assert!(
@@ -372,19 +372,19 @@ mod tests {
     // Issue #1979 / #1933 / no-fallback: when the LLM-backed brain returns
     // Err for a priority, decide_with_brain must
     //   (1) record the parse failure in parse_failure::counters(),
-    //   (2) embed a ParseFailureRecord on the per-cycle BrainJudgmentRecord,
+    //   (2) embed a ParseFailureRecord on the per-cycle ReasonerJudgmentRecord,
     //   (3) SKIP the priority (no action produced — no fallback).
     // -----------------------------------------------------------------------
     #[test]
     fn decide_with_brain_skips_priority_on_brain_error() {
         use crate::error::SimardError;
-        use crate::ooda_brain::BrainPhase;
-        use crate::ooda_brain::parse_failure::{
+        use crate::ooda_reasoners::ReasonerPhase;
+        use crate::ooda_reasoners::parse_failure::{
             peek_consecutive_count, reset_consecutive_count_for_tests, test_serial_guard,
         };
 
         struct AlwaysErrBrain;
-        impl OodaDecideBrain for AlwaysErrBrain {
+        impl DecideReasoner for AlwaysErrBrain {
             fn judge_decision(
                 &self,
                 _ctx: &DecideContext,
@@ -400,7 +400,7 @@ mod tests {
         // Serialise on the global counters guard; the map is process-wide.
         let _g = test_serial_guard();
         let goal_id = "decide-parse-fail-1979";
-        reset_consecutive_count_for_tests(BrainPhase::Decide, goal_id);
+        reset_consecutive_count_for_tests(ReasonerPhase::Decide, goal_id);
 
         let priorities = vec![Priority {
             goal_id: goal_id.to_string(),
@@ -409,10 +409,10 @@ mod tests {
         }];
         let config = OodaConfig::default();
 
-        let (actions, records) = crate::ooda_brain::with_brain_judgment_scope(|| {
-            crate::ooda_brain::clear_brain_judgments();
+        let (actions, records) = crate::ooda_reasoners::with_brain_judgment_scope(|| {
+            crate::ooda_reasoners::clear_reasoner_judgments();
             let acts = decide_with_brain(&priorities, &config, &AlwaysErrBrain).unwrap();
-            (acts, crate::ooda_brain::take_brain_judgments())
+            (acts, crate::ooda_reasoners::take_reasoner_judgments())
         });
 
         // (3) Priority is SKIPPED — no fallback action produced.
@@ -423,10 +423,10 @@ mod tests {
         );
 
         // (1) parse_failure::counters() observed the (Decide, goal_id) bump.
-        let count = peek_consecutive_count(BrainPhase::Decide, goal_id);
+        let count = peek_consecutive_count(ReasonerPhase::Decide, goal_id);
         assert_eq!(count, 1, "expected consecutive_count == 1, got {count}");
 
-        // (2) The per-cycle BrainJudgmentRecord embeds the ParseFailureRecord.
+        // (2) The per-cycle ReasonerJudgmentRecord embeds the ParseFailureRecord.
         assert_eq!(records.len(), 1);
         let rec = &records[0];
         assert_eq!(rec.decision, "brain_error");
@@ -443,18 +443,18 @@ mod tests {
             pf.raw_response_truncated,
         );
 
-        reset_consecutive_count_for_tests(BrainPhase::Decide, goal_id);
+        reset_consecutive_count_for_tests(ReasonerPhase::Decide, goal_id);
     }
 
     #[test]
     fn decide_with_brain_successful_parse_resets_consecutive_counter() {
-        use crate::ooda_brain::BrainPhase;
-        use crate::ooda_brain::parse_failure::{
+        use crate::ooda_reasoners::ReasonerPhase;
+        use crate::ooda_reasoners::parse_failure::{
             peek_consecutive_count, reset_consecutive_count_for_tests, test_serial_guard,
         };
 
         struct AlwaysOkBrain;
-        impl OodaDecideBrain for AlwaysOkBrain {
+        impl DecideReasoner for AlwaysOkBrain {
             fn judge_decision(
                 &self,
                 _ctx: &DecideContext,
@@ -467,20 +467,20 @@ mod tests {
 
         let _g = test_serial_guard();
         let goal_id = "decide-reset-1979";
-        reset_consecutive_count_for_tests(BrainPhase::Decide, goal_id);
+        reset_consecutive_count_for_tests(ReasonerPhase::Decide, goal_id);
         // Seed a non-zero counter to prove the reset-on-success path fires.
-        crate::ooda_brain::parse_failure::record_parse_failure(
-            BrainPhase::Decide,
+        crate::ooda_reasoners::parse_failure::record_parse_failure(
+            ReasonerPhase::Decide,
             goal_id,
             &crate::error::SimardError::AdapterInvocationFailed {
                 base_type: "decide".into(),
                 reason: "seed".into(),
             },
             "raw",
-            crate::ooda_brain::DECIDE_PROMPT_NAME,
+            crate::ooda_reasoners::DECIDE_PROMPT_NAME,
             String::new(),
         );
-        assert_eq!(peek_consecutive_count(BrainPhase::Decide, goal_id), 1);
+        assert_eq!(peek_consecutive_count(ReasonerPhase::Decide, goal_id), 1);
 
         let priorities = vec![Priority {
             goal_id: goal_id.to_string(),
@@ -491,12 +491,12 @@ mod tests {
         let _ = decide_with_brain(&priorities, &config, &AlwaysOkBrain).unwrap();
 
         assert_eq!(
-            peek_consecutive_count(BrainPhase::Decide, goal_id),
+            peek_consecutive_count(ReasonerPhase::Decide, goal_id),
             0,
             "successful parse must reset (Decide, goal_id) counter"
         );
 
-        reset_consecutive_count_for_tests(BrainPhase::Decide, goal_id);
+        reset_consecutive_count_for_tests(ReasonerPhase::Decide, goal_id);
     }
 
     // -----------------------------------------------------------------------
@@ -595,7 +595,7 @@ mod tests {
         // priorities, decide_with_brain must bypass it and use deterministic
         // routing so __memory__ becomes ConsolidateMemory (not skipped).
         struct AlwaysAdvanceBrain;
-        impl OodaDecideBrain for AlwaysAdvanceBrain {
+        impl DecideReasoner for AlwaysAdvanceBrain {
             fn judge_decision(
                 &self,
                 _ctx: &DecideContext,
@@ -640,7 +640,7 @@ mod tests {
         // an unrecognized __foo__ slips through (not currently possible via
         // SyntheticPriorityKind, but guards against future regressions).
         struct AlwaysAdvanceBrain;
-        impl OodaDecideBrain for AlwaysAdvanceBrain {
+        impl DecideReasoner for AlwaysAdvanceBrain {
             fn judge_decision(
                 &self,
                 _ctx: &DecideContext,

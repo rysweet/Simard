@@ -30,14 +30,14 @@ impl RemoteCognitiveMemory {
     /// doesn't exist, the daemon isn't listening, or the handshake fails.
     pub fn connect(socket_path: &Path) -> SimardResult<Self> {
         if !socket_path.exists() {
-            return Err(SimardError::BridgeSpawnFailed {
-                bridge: "memory-ipc-client".into(),
+            return Err(SimardError::ServerSpawnFailed {
+                adapter: "memory-ipc-client".into(),
                 reason: format!("socket {} not present", socket_path.display()),
             });
         }
         let stream =
-            UnixStream::connect(socket_path).map_err(|e| SimardError::BridgeSpawnFailed {
-                bridge: "memory-ipc-client".into(),
+            UnixStream::connect(socket_path).map_err(|e| SimardError::ServerSpawnFailed {
+                adapter: "memory-ipc-client".into(),
                 reason: format!("connect {}: {e}", socket_path.display()),
             })?;
         // Short timeouts so a wedged daemon doesn't hang meeting forever.
@@ -50,8 +50,8 @@ impl RemoteCognitiveMemory {
         // Handshake
         match client.call(MemoryRequest::Ping)? {
             MemoryResponse::Pong => Ok(client),
-            other => Err(SimardError::BridgeSpawnFailed {
-                bridge: "memory-ipc-client".into(),
+            other => Err(SimardError::ServerSpawnFailed {
+                adapter: "memory-ipc-client".into(),
                 reason: format!("handshake: expected Pong, got {other:?}"),
             }),
         }
@@ -77,13 +77,13 @@ impl RemoteCognitiveMemory {
 
     fn unexpected(name: &str, got: MemoryResponse) -> SimardError {
         match got {
-            MemoryResponse::Error(msg) => SimardError::BridgeCallFailed {
-                bridge: "memory-ipc".into(),
+            MemoryResponse::Error(msg) => SimardError::ServerCallFailed {
+                adapter: "memory-ipc".into(),
                 method: name.into(),
                 reason: msg,
             },
-            other => SimardError::BridgeCallFailed {
-                bridge: "memory-ipc".into(),
+            other => SimardError::ServerCallFailed {
+                adapter: "memory-ipc".into(),
                 method: name.into(),
                 reason: format!("unexpected response variant: {other:?}"),
             },

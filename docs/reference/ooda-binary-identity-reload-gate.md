@@ -196,7 +196,7 @@ The loop call site is unchanged in shape — only the gate's semantics tighten:
 // src/operator_commands_ooda/daemon/mod.rs
 #[cfg(unix)]
 if auto_reload && binary_changed(start_time) {
-    if let Some(ref mut session) = bridges.session {
+    if let Some(ref mut session) = adapters.session {
         let _ = session.close();
     }
     exec_self_reload()?;

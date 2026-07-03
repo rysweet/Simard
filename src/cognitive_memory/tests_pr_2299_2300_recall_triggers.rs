@@ -22,7 +22,7 @@
 //!   the trigger fires (the symptom logged "0 triggers").
 //!
 //! These target `LibraryCognitiveMemory::in_memory()` directly so the live
-//! backend is exercised hermetically, without the bridge/IPC/mock layers (whose
+//! backend is exercised hermetically, without the adapter/IPC/mock layers (whose
 //! stub trait methods would mask the defect).
 
 use super::{CognitiveMemoryOps, LibraryCognitiveMemory};

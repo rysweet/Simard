@@ -300,7 +300,7 @@ their defaults and meaning.
 | `deploy_source` | `BuildFromSource` | `BuildFromSource` for merged-but-unreleased `main`; `ReleaseDownload` for tagged releases. |
 | `memory_backup_required` | `true` | When `true`, a failed cognitive-memory backup aborts the deploy. |
 | `orphan_kill_grace_seconds` | `10` | SIGTERM→SIGKILL window for the engineer-orphan reaper. |
-| `health_probe_cycles` | `1` | OODA cycles observed for the "brains LLM-backed" probe. |
+| `health_probe_cycles` | `1` | OODA cycles observed for the "reasoners LLM-backed" probe. |
 | `memory_count_tolerance` | `0` | Allowed shortfall of `live_facts` below `baseline_facts` before the probe fails. |
 
 ### Source & warm-dir environment
