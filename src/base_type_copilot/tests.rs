@@ -504,21 +504,50 @@ fn copilot_on_path() -> bool {
         .is_ok()
 }
 
+/// Case-insensitive markers that identify an *ambient* auth or rate-limit
+/// failure of the real `copilot` subprocess — the only class of
+/// `AdapterInvocationFailed` the behavioral meeting tests are allowed to skip
+/// on. Anything else (a genuine regression in turn execution) must surface.
+const AMBIENT_AUTH_FAILURE_MARKERS: &[&str] = &[
+    "auth", // authentication / authorization / unauthorized
+    "credential",
+    "login",
+    "rate limit",
+    "rate-limit",
+    "429", // HTTP Too Many Requests
+];
+
+/// Returns `true` when `reason` looks like an ambient GitHub auth or rate-limit
+/// failure (missing, expired, or rate-limited credentials) rather than a real
+/// defect in meeting-mode turn execution.
+fn reason_is_ambient_auth_failure(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    AMBIENT_AUTH_FAILURE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
 /// Unwrap a meeting-mode turn outcome, or signal a graceful skip when the real
-/// `copilot` subprocess could not complete a turn in this environment (e.g.
-/// missing, expired, or rate-limited GitHub auth).
+/// `copilot` subprocess could not complete a turn because of an *ambient* auth
+/// or rate-limit failure in this environment (e.g. missing, expired, or
+/// rate-limited GitHub credentials).
 ///
 /// The behavioral meeting tests below can only assert on a *successful* turn, so
 /// having `copilot` on PATH is necessary but not sufficient — the subprocess
-/// also needs valid auth, which is ambient and can fail intermittently. When the
-/// adapter cannot invoke a turn, return `None` so the caller skips, consistent
-/// with the `copilot_on_path()` gate. Any other error is a real bug and panics.
+/// also needs valid auth, which is ambient and can fail intermittently. Only an
+/// `AdapterInvocationFailed` whose `reason` matches a known auth/rate-limit
+/// marker signals a skip (`None`), consistent with the `copilot_on_path()` gate.
+/// Every other error — including an `AdapterInvocationFailed` with a non-auth
+/// `reason` — is a real bug and panics, so a genuine regression cannot be
+/// silently skipped in auth-less CI.
 fn meeting_outcome_or_skip(
     result: Result<BaseTypeOutcome, SimardError>,
 ) -> Option<BaseTypeOutcome> {
     match result {
         Ok(outcome) => Some(outcome),
-        Err(SimardError::AdapterInvocationFailed { reason, .. }) => {
+        Err(SimardError::AdapterInvocationFailed { reason, .. })
+            if reason_is_ambient_auth_failure(&reason) =>
+        {
             eprintln!("SKIP: copilot meeting turn unavailable in this environment: {reason}");
             None
         }
@@ -555,6 +584,38 @@ fn meeting_outcome_or_skip_returns_outcome_on_success() {
     let outcome = meeting_outcome_or_skip(ok).expect("Ok(outcome) should pass through as Some");
     assert_eq!(outcome.plan, "meeting plan");
     assert_eq!(outcome.evidence, vec!["copilot-meeting-session-id=abc"]);
+}
+
+#[test]
+fn meeting_outcome_or_skip_skips_on_rate_limit_failure() {
+    // A rate-limited subprocess is the other ambient auth failure the
+    // behavioral meeting tests must skip on rather than fail.
+    let err = Err(SimardError::AdapterInvocationFailed {
+        base_type: "copilot-meeting-test".to_string(),
+        reason: "copilot meeting subprocess exited with exit status: 1: \
+                 Error: API rate limit exceeded (429)."
+            .to_string(),
+    });
+    assert!(
+        meeting_outcome_or_skip(err).is_none(),
+        "rate-limit failure should signal a skip (None), not panic"
+    );
+}
+
+#[test]
+#[should_panic(expected = "unexpected error from meeting-mode run_turn")]
+fn meeting_outcome_or_skip_panics_on_non_auth_adapter_failure() {
+    // A non-auth AdapterInvocationFailed is a genuine regression in turn
+    // execution, not an ambient-auth skip. It MUST panic so it cannot be
+    // silently swallowed in auth-less CI where the meeting tests would
+    // otherwise skip on any adapter invocation failure.
+    let err: Result<BaseTypeOutcome, SimardError> = Err(SimardError::AdapterInvocationFailed {
+        base_type: "copilot-meeting-test".to_string(),
+        reason: "copilot meeting subprocess exited with exit status: 1: \
+                 Error: failed to parse structured decision from model output."
+            .to_string(),
+    });
+    let _ = meeting_outcome_or_skip(err);
 }
 
 #[test]
