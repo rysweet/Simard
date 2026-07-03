@@ -13,7 +13,9 @@
 //!   [`recv`](SignalConversation::recv); an unknown sender never reaches a command
 //!   handler or the meeting engine (fail-closed).
 //! - **(b) identity binding** — the authorized sender's E.164 is carried on
-//!   [`OperatorRef`], and command replies + sign-off are bound to that sender.
+//!   [`OperatorRef`] and every reply is addressed back to that sender; a gated
+//!   high-risk command runs only after an explicit `approve` from an allowlisted
+//!   operator, never from the original text.
 //! - **(c) high-risk gate** — [`gate`] routes every mutating command
 //!   (`deploy`, `merge`) to [`GateDecision::PendingSignOff`]: it is **never**
 //!   auto-executed from a text; Simard records it and asks for explicit `approve`,
@@ -157,6 +159,9 @@ impl<T: SignalTransport, H: SignalCommandHandler> SignalConversation<T, H> {
             InboundCommand::Status => self.handler.status(),
             InboundCommand::Pause => self.handler.pause(),
             InboundCommand::Approve => match self.pending.take() {
+                // Any allowlisted operator may sign off the pending high-risk
+                // command (all senders here have already cleared the allowlist),
+                // so the original requester (`_from`) is intentionally not compared.
                 Some((_from, pending_cmd)) => match self.handler.execute_approved(&pending_cmd) {
                     Ok(msg) => msg,
                     Err(e) => format!("Approved, but the action failed: {e}"),
