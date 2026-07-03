@@ -1,7 +1,7 @@
 ---
 title: Simard documentation
 description: Start here for the shipped `simard` operator CLI, the shared-state-root bridge from bounded terminal sessions into the repo-grounded engineer loop, the `engineer read` audit companion, compatibility binaries, runtime contracts, and benchmark flow.
-last_updated: 2026-04-03
+last_updated: 2026-07-03
 review_schedule: as-needed
 owner: simard
 ---
@@ -15,6 +15,12 @@ Simard is a terminal-native engineering identity, written in Rust, that drives a
 The shipped command tree covers `engineer`, `meeting`, `goal-curation`, `improvement-curation`, `gym`, `review`, and `bootstrap` from one binary, including the read-only `engineer read` audit companion and the bounded `engineer terminal*` session surfaces. The legacy `simard_operator_probe` and `simard-gym` binaries remain available as compatibility surfaces while operators migrate, but the primary product surface is now `simard ...`.
 
 Terminal sessions and repo-grounded engineer runs now bridge through one explicit local `state-root`. That bridge is file-backed and operator-visible. It does not imply hidden resume logic, external orchestration, or automatic continuation.
+
+!!! note "Recently reconciled"
+    The docs were audited against the current source: the cognitive-memory
+    pages were de-forked to the library backend (issue #2307), and every page
+    is now reachable from the navigation. See
+    [What's Changed](./whats-changed.md) for the full change index.
 
 ## Start here
 

@@ -188,7 +188,7 @@ pub fn update_goal_progress_with_evidence(
     | `Blocked(_)` | the goal's *current* percent (no change) |
     | `Completed` | `100` |
 
-2. Determine `since` via the [three-step fallback chain](../concepts/progress-evidence-gating.md#sourcing-since--the-last-update-timestamp).
+2. Determine `since` via the [three-step fallback chain](../concepts/progress-evidence-gating.md#sourcing-since-the-last-update-timestamp).
 
 3. **Bypass set.** If any of the following hold, call the underlying
    `update_goal_progress` directly and return

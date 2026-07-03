@@ -91,7 +91,7 @@ variant that can mutate the running daemon binary.
 
 `Deserialize` is no longer derived — the enum is never deserialized from
 JSON. It is constructed from text-parsed fields via the DECISION marker
-protocol (see [text-parsing wire formats § engineer lifecycle](../reference/text-parsing-wire-formats.md#1c-engineer-lifecycle-rustyclawdrs)).
+protocol (see [text-parsing wire formats § engineer lifecycle](../reference/text-parsing-wire-formats.md#1c-engineer-lifecycle-recipe_brainrs)).
 `Serialize` is retained for logging and state persistence.
 
 ## Implementations
@@ -106,7 +106,7 @@ parses the text response using the DECISION marker protocol.
 The parser finds the first `DECISION: <variant>` line, extracts labeled
 fields for structured variants, and collects remaining lines as rationale.
 There is no JSON fallback — the DECISION marker is the sole parser. See
-[text-parsing wire formats § engineer lifecycle](../reference/text-parsing-wire-formats.md#1c-engineer-lifecycle-rustyclawdrs)
+[text-parsing wire formats § engineer lifecycle](../reference/text-parsing-wire-formats.md#1c-engineer-lifecycle-recipe_brainrs)
 for the full grammar.
 
 ```rust

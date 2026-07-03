@@ -573,7 +573,7 @@ issue tracker by hand.
 
 For a **reviewable** alternative that does *not* file anything
 automatically, see the per-meeting
-[issue stubs](#ready-to-file-issue-stubs-issues--2309) written into the
+[issue stubs](#ready-to-file-issue-stubs-issues-2309) written into the
 bundle's `issues/` directory on `/close`.
 
 ---

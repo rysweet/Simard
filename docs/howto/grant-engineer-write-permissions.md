@@ -60,7 +60,7 @@ amplihack-hygiene-plan-20260512T231555Z.md  ← thoughtful plan
 Cure: ensure your dispatch path is using `run_engineer_subprocess` and
 that the live `amplihack` binary on the daemon's PATH was built from a
 revision containing the contract. Walk the checklist in
-[Engineer Copilot Subprocess Permissions §Example 4](../reference/engineer-copilot-permissions.md#example-4--debugging-a-engineer-produced-no-pr-report).
+[Engineer Copilot Subprocess Permissions §Example 4](../reference/engineer-copilot-permissions.md#example-4-debugging-a-engineer-produced-no-pr-report).
 
 ## Step-by-step: add a new engineer call site
 

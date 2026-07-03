@@ -1,8 +1,8 @@
 ---
 title: Procedural-memory store idempotency
 description: How store_procedure deduplicates on exact procedure name so repeated OODA consolidation cycles stop re-storing identical procedures, ending the 0% compression / frozen procedural-store defect.
-last_updated: 2026-06-19
-owner: simard
+last_updated: 2026-07-03
+owner: cognitive-memory
 doc_type: reference
 related:
   - ./ooda-procedural-memory.md
@@ -14,15 +14,15 @@ related:
 
 # Procedural-memory store idempotency
 
-> **De-fork Phase 2b.** The idempotent-upsert *behavior* described here is
-> preserved: it is reached through the `CognitiveMemoryOps` trait, now backed
-> solely by `LibraryCognitiveMemory` over `amplihack-memory-lib`. The native
+> **De-fork Phase 2b (#2307).** The idempotent-upsert *behavior* described
+> here is preserved through the `CognitiveMemoryOps` trait, now backed solely by
+> `LibraryCognitiveMemory` over the external `amplihack-memory` library. Native
 > implementation details this page cites — `store_procedure` /
 > `mark_episode_distilled` / `list_undistilled_episodes` in
-> `src/cognitive_memory/ops.rs` and the `NativeCognitiveMemory::in_memory()`
-> test helper — were **deleted** with the fork; treat those code citations as
-> historical. The library performs the equivalent name-keyed upsert internally
-> (see [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md)).
+> `src/cognitive_memory/ops.rs` and the `NativeCognitiveMemory::in_memory()` test
+> helper — were deleted with the fork; treat those citations as historical. The
+> current adapter implements the equivalent name-keyed upsert/reinforcement
+> contract in `src/cognitive_memory/library_adapter.rs`.
 
 > Shipped in issue [#2298](https://github.com/rysweet/Simard/issues/2298).
 > Supersedes the "one procedure node per successful cycle / intentional
@@ -87,8 +87,8 @@ ruled out — they are correct and are left untouched:
 
 | Candidate | Verdict |
 |-----------|---------|
-| `mark_episode_distilled` not persisting | **Not the cause.** `SET e.distilled = 1` + `post_write_barrier` persist correctly and idempotently (`ops.rs`). |
-| `list_undistilled_episodes` re-returning the same episodes | **Not the cause.** The `WHERE e.distilled = 0` gate excludes marked rows (`ops.rs`). |
+| `mark_episode_distilled` not persisting | **Not the cause in the historical native-fork investigation.** The deleted `ops.rs` path used `SET e.distilled = 1` plus its native `post_write_barrier`; current distillation goes through `LibraryCognitiveMemory`. |
+| `list_undistilled_episodes` re-returning the same episodes | **Not the cause.** The current library-backed path preserves the distilled flag contract. |
 | Procedural-store upsert creating new nodes instead of updating | **Confirmed root cause.** `store_procedure` had no name dedup. |
 
 Note that **episode distillation** (which writes *facts*, not procedures —
@@ -135,21 +135,21 @@ fn store_procedure(
 
 Contract:
 
-1. **Existing name** → no `CREATE`. The existing node's id is returned, that
-   node's `usage_count` is incremented (`SET p.usage_count = p.usage_count + 1`),
-   and the standard `post_write_barrier` still runs. Calling again with the
-   same name returns the **same id**. This path is therefore *not* a pure
+1. **Existing name** → no `CREATE`. The existing node's id is returned, and
+   the adapter reinforces the existing procedure through the library path so its
+   `usage_count` advances.
+   Calling again with the same name returns the **same id**. This path is therefore *not* a pure
    no-op: it is idempotent on the **node count** while deliberately recording
    the recurrence (see *Reinforcement signal: `usage_count`* below).
 2. **New name** → a `Procedure` node is created exactly as before
-   (`CREATE … usage_count: 0`, followed by `post_write_barrier`), and the
-   new id is returned.
+   through the library-backed store, and the new id is returned.
 3. The method remains **total and idempotent on node count**: any number of
    calls with the same `name` leave the `Procedure` node count unchanged
    after the first (only `usage_count` advances).
 
-The existence check is a single indexed lookup using the same
-`escape_cypher` escaping as the create path:
+The current adapter detects an existing procedure by exact name through the
+library-backed procedure search before storing. In the deleted native fork, the
+existence check was a single escaped Cypher lookup:
 
 ```cypher
 MATCH (p:Procedure) WHERE p.name = '<escaped-name>' RETURN p.id LIMIT 1
@@ -161,19 +161,17 @@ each caller needing its own recall-then-store guard.
 
 ### Reinforcement signal: `usage_count`
 
-On the existing-name path, `store_procedure` bumps the stored procedure's
-`usage_count` (`SET p.usage_count = p.usage_count + 1`) so that a recurring
-procedure still records its reinforcement/recurrence for future ranking by
-`recall_procedure`. This is a counter update on a single existing row, **not**
-a new node. Idempotency is defined over the *node count*, not over
-`usage_count`; regression tests assert node-count stability and never assert
-a frozen `usage_count`.
+On the existing-name path, `store_procedure` reinforces the stored procedure so
+that a recurring procedure still records its recurrence for future ranking by
+`recall_procedure`. This updates an existing procedure, **not** a new node.
+Idempotency is defined over the *node count*, not over `usage_count`; regression
+tests assert node-count stability and never assert a frozen `usage_count`.
 
 ### Trait surface is unchanged
 
 The `CognitiveMemoryOps::store_procedure` signature
 (`-> SimardResult<String>`) is **unchanged**. The fix is internal to
-`NativeCognitiveMemory`, so none of the other implementations
+`LibraryCognitiveMemory`, so none of the other implementations
 (`CognitiveMemoryBridge`, `RemoteCognitiveMemory`, `SharedMemory`, and the
 test/meeting stubs) change shape, and no IPC/wire-protocol change is needed
 to convey a "created vs. existing" flag across process boundaries.
@@ -286,12 +284,12 @@ restarting the daemon never duplicates the 5 bootstrap procedures.
 
 | Item | File |
 |------|------|
-| `store_procedure` (idempotent upsert) | `src/cognitive_memory/ops.rs` (`NativeCognitiveMemory`) |
+| `store_procedure` (idempotent upsert) | `src/cognitive_memory/library_adapter.rs` (`LibraryCognitiveMemory`) |
 | `store_procedure` trait method (signature unchanged) | `src/cognitive_memory/mod.rs` (`CognitiveMemoryOps`) |
 | OODA call site + log guard | `src/ooda_loop/cycle.rs` (procedural-learning loop) |
 | `compose_procedure_name` (name derivation, unchanged) | `src/ooda_loop/cycle.rs` |
 | Bootstrap seeder (exact-name precedent) | `src/cognitive_memory/bootstrap_procedures.rs` |
-| `mark_episode_distilled` / `list_undistilled_episodes` (unchanged) | `src/cognitive_memory/ops.rs` |
+| `mark_episode_distilled` / `list_undistilled_episodes` (current library-backed implementations) | `src/cognitive_memory/library_adapter.rs` |
 
 ---
 
@@ -303,7 +301,7 @@ the dedup lands.
 
 ### Regression test (store layer)
 
-Against `NativeCognitiveMemory::in_memory()` (the `test_mem()` helper in
+Against `LibraryCognitiveMemory::in_memory()` (the `test_mem()` helper in
 `src/cognitive_memory/tests_pr_2298_idempotency.rs`) — **not** the
 `EpisodeMock`/`ProcMock` stubs, whose `store_procedure` is a no-op that would
 hide the bug:
@@ -339,11 +337,11 @@ distillation/consolidation pass over a fixed episode set,
 
 - `src/cognitive_memory/bootstrap_procedures_tests.rs` — seeding stays
   idempotent (`seed_is_idempotent`, `seed_skips_existing_procedures_by_name`).
-- `src/cognitive_memory/ops.rs` round-trip tests
+- `src/cognitive_memory` library-adapter round-trip tests
   (`store_procedure_returns_prefixed_id`,
   `recall_procedure_returns_steps_and_prerequisites`).
-- Hermetic-guard tests (`tests_hermetic_parity.rs`, the
-  `assert_hermetic_for` guard at the top of `store_procedure`).
+- Hermetic-guard tests (`tests_hermetic_parity.rs` and the current
+  `LibraryCognitiveMemory` `cfg(test)` lock-write guard).
 - `cargo test` for the `cognitive_memory`, `memory_consolidation`, and
   `ooda_loop` modules.
 

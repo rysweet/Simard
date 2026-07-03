@@ -93,7 +93,7 @@ A few notes on the mode semantics that surprise first-time readers:
   `Auto` heuristic is therefore conservative — small prompts that *might*
   contain secrets should be sent in `Stdin` mode via an explicit override.
 * **There is a 16 MiB hard cap.** Prompts larger than 16 MiB return
-  [`PromptDeliveryError::TooLarge`](#errors) before any file or pipe is
+  [`PromptDeliveryError::TooLarge`](#enum-promptdeliveryerror) before any file or pipe is
   touched. This bound prevents a runaway agent from filling `/tmp`.
 
 ### Auto-selection heuristic
@@ -176,10 +176,10 @@ pub fn apply_std(
   modes, appends a `--` flag terminator before any positional prompt arg in
   `Inline` mode (so a prompt starting with `--` is never mistaken for a
   flag), and pushes the prompt as the final argv element when applicable.
-* Returns an [`AppliedPromptStd`](#struct-appliedprompt) RAII guard. The
+* Returns an [`AppliedPromptStd`](#struct-appliedpromptstdtokio) RAII guard. The
   guard owns the temp file (if any) and the in-memory prompt bytes (for
   stdin modes). It MUST outlive the child.
-* Never panics. Returns [`PromptDeliveryError`](#errors) for size violations
+* Never panics. Returns [`PromptDeliveryError`](#enum-promptdeliveryerror) for size violations
   and I/O failures.
 
 ### `fn apply_tokio`
