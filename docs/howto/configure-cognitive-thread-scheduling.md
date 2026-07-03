@@ -15,14 +15,17 @@ related:
 
 # Configure and monitor cognitive-thread scheduling
 
-!!! note "Status — planned (design for #2419, not yet shipped)"
-    This guide documents the cognitive-thread scheduler (the **Mind**) as
-    designed in issue #2419. The `src/cognitive_threads/` module, the
-    `SIMARD_MIND_*` budget/cadence knobs, and the `simard.thread.*`
-    metrics/spans described below **do not exist yet** — they become active
-    when the scheduler and its three threads (`OodaThread`, `MaintenanceThread`,
-    `EngineerLogAnalysisThread`) land. Until then the daemon runs OODA plus its
-    six periodic tasks through the existing hand-rolled loop. See
+!!! note "Status — shipped, additive, OFF by default (#2419)"
+    The cognitive-thread scheduler (the **Mind**), the `src/cognitive_threads/`
+    module, its `simard.thread.*` metrics/spans, and the two exemplar threads
+    (`MaintenanceThread`, `EngineerLogAnalysisThread`) **have shipped**. In the
+    live daemon they are **inactive until you opt in** with
+    `SIMARD_COGNITIVE_THREADS_ENABLED` (see [Enable the scheduler](#enable-the-scheduler)).
+    Two design goals are intentionally **deferred to follow-ups** and are *not*
+    active yet: (1) driving the OODA cycle itself **through** the Mind (today the
+    daemon keeps its existing inline OODA cycle for byte-for-byte parity, and the
+    Mind runs only the two background threads *after* it), and (2) migrating the
+    six pre-existing periodic tasks onto the Mind (they remain hand-rolled). See
     [Cognitive-thread scheduling](../reference/cognitive-thread-scheduling.md)
     for the design and rollout scope.
 
@@ -47,8 +50,8 @@ add your own thread see
 Use this guide when:
 
 - You want to change how often a background thread runs (or turn it off)
-- You need to confirm the OODA loop still runs on its exact cadence after the
-  scheduler took over the daemon loop
+- You need to confirm the OODA loop still runs on its exact cadence after
+  enabling the scheduler
 - You want to read a thread's runs/errors/duration metrics or its next-run time
 - The `MaintenanceThread` is (or isn't) pruning artifacts and you want to verify
   it is behaving conservatively
@@ -73,6 +76,14 @@ error is **caught, recorded, and backed off** — it can never crash the daemon 
 delay a sibling. The OODA thread is the one exception to backoff: its errors are
 logged and the cycle continues, exactly as before the scheduler existed.
 
+!!! info "How OODA-first works in the live daemon today"
+    The `Mind`'s contract runs `Priority::Critical` (OODA) first and exempt from
+    the budget. **As shipped**, the daemon achieves the same guarantee a simpler
+    way: it runs its existing **inline OODA cycle first**, then calls the `Mind`
+    (which currently holds only the two background threads) *afterward*. Either
+    way OODA runs first every iteration and no number of background threads can
+    delay it. Registering `OodaThread` in the live `Mind` is a follow-up.
+
 Threads that ship in this build:
 
 | Thread id (telemetry key) | Kind | Priority | Cadence source |
@@ -83,9 +94,34 @@ Threads that ship in this build:
 
 The pre-existing periodic tasks — verified backup, disk-health check,
 RSS/memory shedding, engineer-worktree sweep, brain introspection, and the
-monthly self-quality-audit — are **subsumed by the same Mind** rather than
-duplicated. They keep their existing env-var knobs (below); the scheduler only
-changes *how* they are dispatched, not *when* or *what* they do.
+monthly self-quality-audit — are **designed to be subsumed by the same Mind**,
+but that migration is a **follow-up**: in this build they still run through the
+daemon's existing hand-rolled loop with their current env-var knobs (below). The
+scheduler runs *alongside* them.
+
+## Enable the scheduler
+
+The scheduler is **off by default**. Turn it on with a single truthy env var
+(`1`, `true`, `yes`, or `on`), then launch the daemon:
+
+```bash
+# Enable the cognitive-thread scheduler (maintenance + engineer-log analysis)
+export SIMARD_COGNITIVE_THREADS_ENABLED=1
+```
+
+| Knob | Env var | Default | What it controls |
+| --- | --- | --: | --- |
+| Master switch | `SIMARD_COGNITIVE_THREADS_ENABLED` | `false` | When truthy, the daemon builds the `Mind` and runs the background threads after each OODA cycle. Unset ⇒ zero behaviour change. |
+
+When it is enabled, the daemon logs at startup:
+
+```
+[simard] OODA daemon: cognitive-thread scheduler ENABLED (2 background thread(s))
+```
+
+Recommended first rollout: enable it with **maintenance in dry-run** and
+**analysis in dry-run** (below), read the telemetry for a few cycles, then relax
+the dry-run switches once you trust the behaviour.
 
 ## Tune the cadences
 
@@ -96,9 +132,20 @@ launching the daemon.
 
 | Knob | Env var | Default | What it controls |
 | --- | --- | --: | --- |
-| Maintenance cadence | `SIMARD_MAINTENANCE_INTERVAL_SECS` | `86400` (daily) | Seconds between housekeeping passes |
-| Maintenance dry-run | `SIMARD_MAINTENANCE_DRY_RUN` | `false` | When set, logs the actions it *would* take and deletes nothing |
-| Analysis cadence | `SIMARD_ENGINEER_LOG_ANALYSIS_INTERVAL_SECS` | slow (e.g. hourly+) | Seconds between engineer-log analysis passes |
+| Maintenance cadence | `SIMARD_MAINTENANCE_INTERVAL_SECS` | `86400` (daily) | Seconds between housekeeping passes (clamped to a 60 s floor) |
+| Maintenance dry-run | `SIMARD_MAINTENANCE_DRY_RUN` | `true` | Ships dry-run-first: logs the actions it *would* take and deletes nothing. Set to `0`/`false` to enable real pruning. |
+| Keep corrupt dirs | `SIMARD_MAINTENANCE_KEEP_CORRUPT` | `3` | Retention floor for `cognitive.corrupt-*` quarantine dirs (min 1) |
+| Keep snapshots | `SIMARD_MAINTENANCE_KEEP_SNAPSHOTS` | `5` | Retention floor for store snapshots / shadow-WAL copies (min 1) |
+| Keep backups | `SIMARD_MAINTENANCE_KEEP_BACKUPS` | `7` | Retention floor for verified backups (min 1) |
+| Analysis cadence | `SIMARD_ENGINEER_LOG_ANALYSIS_INTERVAL_SECS` | `21600` (6 h) | Seconds between engineer-log analysis passes (clamped to a 60 s floor) |
+| Analysis dry-run | `SIMARD_ENGINEER_LOG_ANALYSIS_DRY_RUN` | `false` | When truthy, emits findings as structured telemetry and files **no** GitHub issue |
+
+!!! tip "Maintenance ships dry-run-first"
+    `SIMARD_MAINTENANCE_DRY_RUN` defaults to **`true`** (SR-7): even with the
+    scheduler enabled, maintenance deletes nothing until you explicitly set
+    `SIMARD_MAINTENANCE_DRY_RUN=0`. The analysis thread defaults to filing real
+    (deduplicated) issues — set `SIMARD_ENGINEER_LOG_ANALYSIS_DRY_RUN=1` to keep
+    it observe-only during initial rollout.
 
 ### The scheduler budget
 
@@ -111,7 +158,10 @@ burst of simultaneously-due threads can never crowd out the OODA cycle. If two
 background threads come due in the same tick and the budget is `2`, both run
 after OODA; a third due thread waits for the next tick.
 
-### The subsumed periodic tasks (unchanged knobs)
+### The pre-existing periodic tasks (unchanged knobs)
+
+These tasks still run through the daemon's existing hand-rolled loop (their
+migration onto the `Mind` is a follow-up); their knobs are unchanged:
 
 | Task | Env var | Default |
 | --- | --- | --: |
@@ -145,9 +195,11 @@ export SIMARD_MIND_MAX_NONCRITICAL_PER_TICK=3
 ## Confirm OODA parity (the critical guarantee)
 
 The single most important property: the daemon behaves **identically** from the
-outside after the scheduler took over. OODA still fires once per outer iteration
-on `SIMARD_OODA_INTERVAL_SECS`, spawns engineers the same way, and writes the
-same cycle reports, episodes, and health files.
+outside whether or not the scheduler is enabled. OODA still fires once per outer
+iteration on `SIMARD_OODA_INTERVAL_SECS`, spawns engineers the same way, and
+writes the same cycle reports, episodes, and health files — its cycle is run by
+the daemon's unchanged inline path, with the background threads scheduled
+strictly *after* it.
 
 Confirm the OODA cadence at startup and that cycles are still advancing:
 
@@ -219,17 +271,18 @@ nothing):
 - Every action is emitted as **structured telemetry** (path, bytes freed,
   kept/pruned counts) — never a snapshot doc committed to the repo.
 
-Recommended first rollout: run it in dry-run for a few cycles and read the
-telemetry before enabling deletion.
+Recommended first rollout: it already ships in dry-run (`SIMARD_MAINTENANCE_DRY_RUN`
+defaults to `true`), so just read the telemetry for a few cycles before enabling
+deletion.
 
 ```bash
-# 1. Observe-only: see what it would prune
-export SIMARD_MAINTENANCE_DRY_RUN=1
+# 1. Observe-only (this is the default): see what it would prune
+export SIMARD_COGNITIVE_THREADS_ENABLED=1   # maintenance is dry-run by default
 # ... start the daemon, then:
 grep "simard.thread.maintenance" ~/.simard/ooda.log | tail -20
 
 # 2. When satisfied, enable real pruning
-unset SIMARD_MAINTENANCE_DRY_RUN
+export SIMARD_MAINTENANCE_DRY_RUN=0
 ```
 
 ## Read the EngineerLogAnalysisThread's findings

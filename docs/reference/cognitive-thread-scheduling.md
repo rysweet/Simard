@@ -5,6 +5,22 @@ processes" vision; **this PR implements the scheduler + three threads**:
 the primary `OodaThread`, plus two exemplars — `MaintenanceThread` and
 `EngineerLogAnalysisThread`.
 
+!!! note "As shipped in this PR (additive & OFF by default)"
+    The scheduler landed **additively and disabled by default** to honour the
+    byte-for-byte OODA-parity hard constraint:
+
+    - The `Mind` and all three threads exist and are fully unit-tested.
+    - In the **live daemon** the `Mind` is created only when
+      `SIMARD_COGNITIVE_THREADS_ENABLED` is truthy, and it hosts **only the two
+      background exemplars** (`MaintenanceThread`, `EngineerLogAnalysisThread`).
+      It runs **after** the daemon's existing inline OODA cycle each iteration,
+      so it can never delay or starve OODA.
+    - The daemon's authoritative OODA cycle stays **inline and unchanged**
+      (wrap-don't-replace). `OodaThread` is the faithful primary-thread
+      realization used by the scheduler tests and ready for the full cutover;
+      routing the live loop through it, and migrating the six periodic tasks
+      onto the `Mind`, are tracked as **follow-ups** (see §6, A.9).
+
 ## 1. Motivation
 
 Simard should eventually run **many concurrent cognitive processes**, each on
@@ -248,6 +264,20 @@ State that the OODA cycle mutates (`OodaState`, `OodaBridges`, `config`) is
 owned by `OodaThread` (moved into it at daemon start), not the generic
 `ThreadContext` — only OODA needs it, and this keeps the trait clean.
 
+!!! note "As shipped: `OodaThread` is faithful; the live loop keeps OODA inline"
+    `OodaThread::tick()` performs the core per-cycle work and the **same
+    canonical persistence** as the daemon — it calls `run_ooda_cycle`, then the
+    shared `persist_cycle_report` / `persist_cycle_to_memory` helpers and
+    `self_metrics::collect_and_record_all`, and sets the `Sleep` phase. (The
+    dashboard **heartbeat file** writes remain a daemon-loop concern tied to the
+    loop's `cycles_run` counter — they are not part of `tick()`.) To guarantee
+    byte-for-byte parity **without** an untestable live-loop rewrite, the daemon
+    keeps its inline OODA cycle authoritative for now and does **not** register
+    `OodaThread` in the live `Mind`. Cutting the live loop over to
+    `OodaThread` (using `OodaThread::into_parts()` to hand `state`/`bridges`
+    back to the graceful-shutdown drain) is a **follow-up**, gated on adding a
+    daemon-loop parity harness.
+
 ### Migrating the existing periodic tasks
 
 The six other hooks are **low-risk** to migrate onto the `Mind` because each
@@ -266,6 +296,13 @@ already matches the trait shape. Plan:
 If any wrapper proves risky under review, it stays inlined for this PR and is
 tracked as an explicit follow-up — the abstraction still lands with OODA +
 the two new exemplars. **Subsume, never duplicate.**
+
+!!! note "As shipped: periodic-task migration is deferred"
+    None of the six periodic tasks were migrated onto the `Mind` in this PR;
+    they remain hand-rolled in the daemon loop exactly as before. The `Mind`
+    hosts only the two **new** exemplar threads. Migrating the existing tasks
+    (behaviour-preserving wrappers, including the disk-persisted self-audit
+    gate in A.10) is the explicit follow-up this section anticipates.
 
 ## Persistence & data model (Step 5c determination — no relational database)
 
@@ -848,6 +885,19 @@ The trailing `interruptible_sleep(interval_secs, &shutdown)` and
 `OodaConfig` move **into** `OodaThread` (only OODA needs them), keeping
 `ThreadContext` generic. Parity tests (§6, §12) assert identical cycle
 count/order/side-effects vs. the legacy path.
+
+!!! note "As shipped in this PR"
+    The seam is **additive** and does not collapse the inline OODA cycle. The
+    daemon builds the `Mind` only when `SIMARD_COGNITIVE_THREADS_ENABLED` is
+    truthy, registers **only** `MaintenanceThread::from_env()` and
+    `EngineerLogAnalysisThread::from_env()`, and calls `mind.run_due(&mut ctx)`
+    **after** the existing `run_ooda_cycle(...)` match — not in place of it. The
+    context is built with `memory: shared_mem.as_ref()`, a dedicated
+    single-worker runtime handle, `repo_root` cloned from `bridges.repo_root`,
+    and `dry_run: false` (each exemplar carries its own dry-run default). This
+    keeps edits to the OODA emission sites nil (parity) while the two new
+    threads run under the `Mind`'s budget + failure isolation. Registering
+    `OodaThread` here and deleting the inline match is the documented follow-up.
 
 ### A.10 Persistent-gate contract (optional migrated self-audit thread)
 

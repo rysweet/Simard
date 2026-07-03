@@ -2,7 +2,7 @@
 ///
 /// Writes a structured JSON report so the dashboard can display
 /// the full OODA internal reasoning for each cycle.
-pub(super) fn persist_cycle_report(
+pub(crate) fn persist_cycle_report(
     state_root: &std::path::Path,
     report: &crate::ooda_loop::CycleReport,
 ) {
@@ -171,7 +171,7 @@ fn extract_quoted_after(text: &str, prefix: &str) -> Option<String> {
 /// Records the cycle summary and outcome counts so that future OODA cycles
 /// and goal curation sessions can recall what happened. Best-effort: failures
 /// are logged but do not abort the daemon.
-pub(super) fn persist_cycle_to_memory(
+pub(crate) fn persist_cycle_to_memory(
     bridges: &crate::ooda_loop::OodaBridges,
     report: &crate::ooda_loop::CycleReport,
 ) {

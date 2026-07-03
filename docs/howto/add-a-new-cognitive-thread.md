@@ -13,14 +13,14 @@ related:
 
 # Add a new cognitive thread
 
-!!! note "Status — planned (design for #2419, not yet shipped)"
-    This guide describes how to add a thread to the cognitive-thread scheduler
-    (the **Mind**) as designed in issue #2419. The `CognitiveThread` trait, the
-    `Mind`, and the `src/cognitive_threads/` module **do not exist yet** — they
-    land with the scheduler. The signatures, derives, and reuse contracts below
-    come from the
-    [design reference](../reference/cognitive-thread-scheduling.md); follow this
-    guide once that module is in the tree.
+!!! note "Status — shipped (#2419)"
+    The `CognitiveThread` trait, the `Mind`, and the `src/cognitive_threads/`
+    module **have shipped**, so this guide is directly actionable. The scheduler
+    is additive and off by default in the live daemon (enable it with
+    `SIMARD_COGNITIVE_THREADS_ENABLED`); see
+    [Configure and monitor cognitive-thread scheduling](./configure-cognitive-thread-scheduling.md).
+    The signatures, derives, and reuse contracts below match the
+    [design reference](../reference/cognitive-thread-scheduling.md).
 
 Simard runs many background mental processes through one scheduler, the
 **Mind**. Adding a new one — a background-thought pass, a memory-consolidation
