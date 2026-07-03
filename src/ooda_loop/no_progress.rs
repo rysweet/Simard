@@ -233,12 +233,14 @@ pub(crate) fn apply_no_progress_breaker_with_threshold(
         }
     }
 
-    // Prune counters for goals no longer on the active board.
-    let live: HashSet<String> = state
+    // Prune counters for goals no longer on the active board. Borrow the ids
+    // (rather than cloning each into an owned String) — the tracker only needs
+    // to test membership.
+    let live: HashSet<&str> = state
         .active_goals
         .active
         .iter()
-        .map(|g| g.id.clone())
+        .map(|g| g.id.as_str())
         .collect();
     tracker.retain_goals(&live);
 

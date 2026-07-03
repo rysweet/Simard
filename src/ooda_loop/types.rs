@@ -113,9 +113,10 @@ impl OodaState {
             .collect();
         self.goal_failure_counts
             .retain(|id, _| active_ids.contains(id.as_str()));
-        // Keep the Fix-3 no-progress counters bounded to live goals too.
-        self.no_progress_tracker
-            .retain_goals(&active_ids.iter().map(|s| s.to_string()).collect());
+        // Keep the Fix-3 no-progress counters bounded to live goals too, reusing
+        // the borrowed id set rather than cloning every id into a fresh
+        // `HashSet<String>`.
+        self.no_progress_tracker.retain_goals(&active_ids);
     }
 }
 
