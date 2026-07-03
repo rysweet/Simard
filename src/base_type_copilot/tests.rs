@@ -475,7 +475,9 @@ fn assert_metachar_rejected(command: &str, expected_char: char) {
 // struct directly (not the trait object) since the struct is crate-private
 // but accessible within the same crate's test module.
 
-use crate::base_types::{BaseTypeFactory, BaseTypeSessionRequest, BaseTypeTurnInput};
+use crate::base_types::{
+    BaseTypeFactory, BaseTypeOutcome, BaseTypeSessionRequest, BaseTypeTurnInput,
+};
 use crate::identity::OperatingMode;
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
 use crate::session::SessionId;
@@ -500,6 +502,28 @@ fn copilot_on_path() -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok()
+}
+
+/// Unwrap a meeting-mode turn outcome, or signal a graceful skip when the real
+/// `copilot` subprocess could not complete a turn in this environment (e.g.
+/// missing, expired, or rate-limited GitHub auth).
+///
+/// The behavioral meeting tests below can only assert on a *successful* turn, so
+/// having `copilot` on PATH is necessary but not sufficient — the subprocess
+/// also needs valid auth, which is ambient and can fail intermittently. When the
+/// adapter cannot invoke a turn, return `None` so the caller skips, consistent
+/// with the `copilot_on_path()` gate. Any other error is a real bug and panics.
+fn meeting_outcome_or_skip(
+    result: Result<BaseTypeOutcome, SimardError>,
+) -> Option<BaseTypeOutcome> {
+    match result {
+        Ok(outcome) => Some(outcome),
+        Err(SimardError::AdapterInvocationFailed { reason, .. }) => {
+            eprintln!("SKIP: copilot meeting turn unavailable in this environment: {reason}");
+            None
+        }
+        Err(other) => panic!("unexpected error from meeting-mode run_turn: {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -722,7 +746,9 @@ fn meeting_turn_plan_mentions_meeting_mode() {
         .unwrap();
     session.open().unwrap();
     let input = BaseTypeTurnInput::objective_only("Hello from meeting test");
-    let outcome = session.run_turn(input).unwrap();
+    let Some(outcome) = meeting_outcome_or_skip(session.run_turn(input)) else {
+        return;
+    };
     assert!(
         outcome.plan.to_lowercase().contains("meeting"),
         "meeting-mode plan should mention 'meeting', got: {}",
@@ -743,7 +769,9 @@ fn meeting_turn_evidence_includes_session_id() {
         .unwrap();
     session.open().unwrap();
     let input = BaseTypeTurnInput::objective_only("Evidence test");
-    let outcome = session.run_turn(input).unwrap();
+    let Some(outcome) = meeting_outcome_or_skip(session.run_turn(input)) else {
+        return;
+    };
     let has_session_id = outcome
         .evidence
         .iter()
@@ -768,7 +796,9 @@ fn meeting_turn_evidence_has_no_pty_artifacts() {
         .unwrap();
     session.open().unwrap();
     let input = BaseTypeTurnInput::objective_only("No PTY test");
-    let outcome = session.run_turn(input).unwrap();
+    let Some(outcome) = meeting_outcome_or_skip(session.run_turn(input)) else {
+        return;
+    };
     let has_transcript = outcome
         .evidence
         .iter()
@@ -800,7 +830,9 @@ fn meeting_turn_evidence_shows_direct_copilot_command() {
         .unwrap();
     session.open().unwrap();
     let input = BaseTypeTurnInput::objective_only("Command check");
-    let outcome = session.run_turn(input).unwrap();
+    let Some(outcome) = meeting_outcome_or_skip(session.run_turn(input)) else {
+        return;
+    };
     let cmd_evidence = outcome
         .evidence
         .iter()
