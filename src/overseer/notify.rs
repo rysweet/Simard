@@ -48,22 +48,84 @@ impl MergeNotification {
 
     /// A short, plain-language body suitable for email or a Signal message.
     pub fn plain_text(&self) -> String {
+        self.to_operator().plain_text()
+    }
+
+    /// Render this merge as a general [`OperatorNotification`].
+    pub fn to_operator(&self) -> OperatorNotification {
+        OperatorNotification {
+            kind: "merge",
+            headline: self.pr_title.clone(),
+            problem: self.problem.clone(),
+            link: Some(self.pr_url.clone()),
+            repo: self.repo.clone(),
+            autonomous: self.autonomous,
+        }
+    }
+}
+
+/// A general operator notification the channels deliver. Both a merge (M2) and a
+/// deploy (M3) render into this, so the channels stay event-agnostic while the
+/// mandatory "notify on both channels, never drop" guarantee covers every kind
+/// of operator event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperatorNotification {
+    /// Event kind for the subject/logs: `"merge"` | `"deploy"`.
+    pub kind: &'static str,
+    /// One-line headline (email subject core / Signal first line).
+    pub headline: String,
+    /// Plain-language explanation of the problem/why.
+    pub problem: String,
+    /// Optional canonical link (PR url / commit url).
+    pub link: Option<String>,
+    pub repo: String,
+    pub autonomous: bool,
+}
+
+impl OperatorNotification {
+    /// The email subject line.
+    pub fn subject(&self) -> String {
+        format!("[Overseer] {}: {}", self.kind, self.headline)
+    }
+
+    /// A short, plain-language body suitable for email or a Signal message.
+    pub fn plain_text(&self) -> String {
         let who = if self.autonomous {
-            "The Overseer autonomously merged"
+            "The Overseer autonomously"
         } else {
-            "A PR was merged"
+            "The operator"
         };
+        let link = self
+            .link
+            .as_deref()
+            .map(|l| format!("\n\nLink:\n  {l}"))
+            .unwrap_or_default();
         format!(
-            "{who} a pull request in {repo}.\n\n\
-             Problem solved:\n  {problem}\n\n\
-             PR:\n  {title}\n  {url}\n",
+            "{who} performed a {kind} in {repo}.\n\nProblem solved:\n  {problem}{link}\n",
             who = who,
+            kind = self.kind,
             repo = self.repo,
             problem = self.problem,
-            title = self.pr_title,
-            url = self.pr_url,
+            link = link,
         )
     }
+
+    /// Build a deploy notification (M3). `previous`/`commit` are the deployed
+    /// git hashes; `gate_summary` describes the canary/deploy-gate result.
+    pub fn deploy(commit: &str, previous: &str, repo: &str, gate_summary: &str) -> Self {
+        Self {
+            kind: "deploy",
+            headline: format!("deployed {}", short_commit(commit)),
+            problem: format!("Deployed {commit} (previous {previous}); {gate_summary}"),
+            link: None,
+            repo: repo.to_string(),
+            autonomous: true,
+        }
+    }
+}
+
+fn short_commit(commit: &str) -> &str {
+    &commit[..commit.len().min(12)]
 }
 
 /// The outcome of delivering to one channel. There is no "silently dropped"
@@ -116,7 +178,7 @@ impl NotifyReport {
 /// (Signal) are driven behind the adapter.
 pub trait NotifyChannel: Send + Sync {
     fn name(&self) -> &str;
-    fn deliver(&self, notification: &MergeNotification) -> ChannelDelivery;
+    fn deliver(&self, notification: &OperatorNotification) -> ChannelDelivery;
 }
 
 /// The mandatory operator notifier: fires EVERY channel on EVERY notification.
@@ -143,9 +205,9 @@ impl DualChannelNotifier {
     }
 
     /// Fire every channel, recording each outcome. This is the single call the
-    /// merge path makes after a successful merge; its `NotifyReport` proves the
-    /// notification fired on both channels.
-    pub fn notify(&self, notification: &MergeNotification) -> NotifyReport {
+    /// merge/deploy paths make; its `NotifyReport` proves the notification fired
+    /// on both channels.
+    pub fn notify(&self, notification: &OperatorNotification) -> NotifyReport {
         let per_channel = self
             .channels
             .iter()
@@ -162,11 +224,12 @@ impl DualChannelNotifier {
     }
 }
 
-fn log_degraded(channel: &str, outcome: &ChannelDelivery, n: &MergeNotification) {
+fn log_degraded(channel: &str, outcome: &ChannelDelivery, n: &OperatorNotification) {
     tracing::warn!(
         target: "overseer::notify",
         channel,
-        pr = %n.pr_url,
+        kind = n.kind,
+        link = n.link.as_deref().unwrap_or(""),
         ?outcome,
         "operator notification not delivered live — queued/failed (never dropped)"
     );
@@ -258,7 +321,7 @@ impl NotifyChannel for EmailNotifyChannel {
         "email"
     }
 
-    fn deliver(&self, n: &MergeNotification) -> ChannelDelivery {
+    fn deliver(&self, n: &OperatorNotification) -> ChannelDelivery {
         if !self.config.is_configured() {
             return ChannelDelivery::Queued {
                 reason: "SMTP not configured (set SMTP_HOST / SIMARD_OVERSEER_EMAIL_{FROM,TO})"
@@ -422,7 +485,7 @@ impl NotifyChannel for SignalNotifyChannel {
         "signal"
     }
 
-    fn deliver(&self, n: &MergeNotification) -> ChannelDelivery {
+    fn deliver(&self, n: &OperatorNotification) -> ChannelDelivery {
         match &self.sender {
             None => ChannelDelivery::Queued {
                 reason: "Signal channel not wired (configure the ConversationChannel transport)"
@@ -441,7 +504,7 @@ mod tests {
     use super::*;
     use crate::conversation_channel::MockConversationChannel;
 
-    fn sample() -> MergeNotification {
+    fn sample_merge() -> MergeNotification {
         MergeNotification {
             problem: "distillation parse-failure rate exceeded threshold".to_string(),
             pr_title: "fix(distill): strip launch-banner noise".to_string(),
@@ -451,15 +514,40 @@ mod tests {
         }
     }
 
+    fn sample() -> OperatorNotification {
+        sample_merge().to_operator()
+    }
+
     // ── content ──────────────────────────────────────────────────────────────
 
     #[test]
     fn plain_text_carries_problem_pr_and_repo() {
-        let t = sample().plain_text();
-        assert!(t.contains("distillation parse-failure"));
-        assert!(t.contains("fix(distill): strip launch-banner noise"));
-        assert!(t.contains("https://github.com/rysweet/Simard/pull/123"));
-        assert!(t.contains("rysweet/Simard"));
+        let n = sample_merge().to_operator();
+        // The PR title heads the subject; the body carries problem + link + repo.
+        assert!(
+            n.subject()
+                .contains("fix(distill): strip launch-banner noise")
+        );
+        let body = n.plain_text();
+        assert!(body.contains("distillation parse-failure"));
+        assert!(body.contains("https://github.com/rysweet/Simard/pull/123"));
+        assert!(body.contains("rysweet/Simard"));
+    }
+
+    #[test]
+    fn deploy_notification_carries_commits_and_repo() {
+        let n = OperatorNotification::deploy(
+            "abcdef1234567890",
+            "0011223344556677",
+            "rysweet/Simard",
+            "canary green (4/4 gates)",
+        );
+        assert_eq!(n.kind, "deploy");
+        assert!(n.subject().contains("deployed abcdef123456"));
+        let body = n.plain_text();
+        assert!(body.contains("abcdef1234567890"));
+        assert!(body.contains("0011223344556677"));
+        assert!(body.contains("canary green"));
     }
 
     // ── fakes ────────────────────────────────────────────────────────────────
@@ -468,13 +556,13 @@ mod tests {
     struct RecordingChannel {
         name: String,
         outcome: Option<ChannelDelivery>,
-        seen: Mutex<Vec<MergeNotification>>,
+        seen: Mutex<Vec<OperatorNotification>>,
     }
     impl NotifyChannel for RecordingChannel {
         fn name(&self) -> &str {
             &self.name
         }
-        fn deliver(&self, n: &MergeNotification) -> ChannelDelivery {
+        fn deliver(&self, n: &OperatorNotification) -> ChannelDelivery {
             self.seen.lock().unwrap().push(n.clone());
             self.outcome.clone().unwrap_or(ChannelDelivery::Sent)
         }

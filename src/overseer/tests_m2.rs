@@ -14,7 +14,7 @@ use crate::overseer::intervention::Intervention;
 use crate::overseer::launch::{RecipeRunner, SmartOrchestratorLauncher};
 use crate::overseer::merge_ops::{DiffReviewer, MergePrOps, PollClock, PollConfig, PrSource};
 use crate::overseer::notify::{
-    ChannelDelivery, DualChannelNotifier, MergeNotification, NotifyChannel,
+    ChannelDelivery, DualChannelNotifier, NotifyChannel, OperatorNotification,
 };
 use crate::overseer::signal::signals_from;
 use crate::overseer::{decide, orient};
@@ -122,13 +122,13 @@ impl PollClock for NoSleep {
 
 struct Capture {
     name: String,
-    seen: Arc<Mutex<Vec<MergeNotification>>>,
+    seen: Arc<Mutex<Vec<OperatorNotification>>>,
 }
 impl NotifyChannel for Capture {
     fn name(&self) -> &str {
         &self.name
     }
-    fn deliver(&self, n: &MergeNotification) -> ChannelDelivery {
+    fn deliver(&self, n: &OperatorNotification) -> ChannelDelivery {
         self.seen.lock().unwrap().push(n.clone());
         ChannelDelivery::Sent
     }
@@ -139,8 +139,8 @@ fn green_merge_ops(
     gh: Arc<GreenGh>,
 ) -> (
     MergePrOps,
-    Arc<Mutex<Vec<MergeNotification>>>,
-    Arc<Mutex<Vec<MergeNotification>>>,
+    Arc<Mutex<Vec<OperatorNotification>>>,
+    Arc<Mutex<Vec<OperatorNotification>>>,
 ) {
     let email = Arc::new(Mutex::new(vec![]));
     let signal = Arc::new(Mutex::new(vec![]));
@@ -215,7 +215,7 @@ fn seeded_problem_launches_fix_merges_green_pr_and_notifies_operator() {
         "operator Signalled on merge"
     );
     let n = &email.lock().unwrap()[0];
-    assert!(n.pr_url.ends_with("/pull/2601"));
+    assert!(n.link.as_deref().unwrap().ends_with("/pull/2601"));
     assert!(n.problem.contains("merge-ready"));
     assert!(n.autonomous);
 }

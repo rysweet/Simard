@@ -47,9 +47,12 @@
 
 pub mod capabilities;
 pub mod config;
+pub mod conflict;
+pub mod deploy;
 pub mod guardrails;
 pub mod intervention;
 pub mod launch;
+pub mod meeting_ops;
 pub mod merge_ops;
 pub mod notify;
 pub mod observer;
