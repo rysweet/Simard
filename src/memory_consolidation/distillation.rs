@@ -364,6 +364,15 @@ pub fn distill_recent_episodes_with_runner(
                 // metric distinguish a first-attempt failure from an exhausted
                 // retry; a failed pass never "recovered".
                 record_distill_success_metric(false, Some(class), pulled, 0, attempt, false);
+                // Issue #2528: mirror the distill failure into the unified
+                // telemetry facade alongside the human log lines above, so the
+                // status snapshot's distill-fail rate is a structured signal
+                // rather than a journald grep.
+                crate::telemetry::counter_add(
+                    crate::telemetry::names::DISTILL_RUNS,
+                    1,
+                    &[(crate::telemetry::names::ATTR_RESULT, "parse_fail")],
+                );
                 // Wave 1 (2026-07-02 operator-review priority 1): env-gated,
                 // default-off raw-capture of a SURVIVING parse failure so a real
                 // currently-failing sample can be harvested into a regression
@@ -525,6 +534,30 @@ pub fn distill_recent_episodes_with_runner(
     );
     eprintln!(
         "[simard] distill: {pulled} episodes → {stored} facts, {stored_procs} procedures, {marked} marked"
+    );
+
+    // Issue #2528: mirror the distill outcome into the unified telemetry facade
+    // (OTel counters + in-process registry) ALONGSIDE the human log line above,
+    // so `simard status` reads structured signals instead of grepping journald.
+    crate::telemetry::counter_add(
+        crate::telemetry::names::DISTILL_RUNS,
+        1,
+        &[(crate::telemetry::names::ATTR_RESULT, "ok")],
+    );
+    crate::telemetry::counter_add(
+        crate::telemetry::names::DISTILL_FACTS,
+        u64::from(stored),
+        &[],
+    );
+    crate::telemetry::counter_add(
+        crate::telemetry::names::DISTILL_PROCEDURES,
+        u64::from(stored_procs),
+        &[],
+    );
+    crate::telemetry::counter_add(
+        crate::telemetry::names::DISTILL_EPISODES_MARKED,
+        u64::from(marked),
+        &[],
     );
 
     // The recipe ran and its output parsed (#2461): record a success event so

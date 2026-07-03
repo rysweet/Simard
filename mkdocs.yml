@@ -73,6 +73,7 @@ nav:
     - Closing the Procedural-Learning Loop: concepts/procedural-learning-loop.md
     - Trustworthy Confidence + External Completion: concepts/trustworthy-confidence-and-external-completion.md
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
+    - Unified Telemetry and Status: concepts/unified-telemetry-and-status.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
@@ -102,8 +103,11 @@ nav:
     - Diagnose merge-pr Verdict-Parse Failures: howto/diagnose-merge-pr-verdict-parse-failures.md
     - Inspect the Procedural-Learning Loop: howto/inspect-the-procedural-learning-loop.md
     - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
+    - Read Simard Status: howto/simard-status.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
+    - Telemetry Metrics: reference/telemetry-metrics.md
+    - StatusSnapshot API: reference/status-snapshot-api.md
     - Self-Deploy API: reference/self-deploy-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
     - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md

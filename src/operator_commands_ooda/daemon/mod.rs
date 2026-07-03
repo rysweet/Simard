@@ -825,6 +825,78 @@ pub fn run_ooda_daemon(
                 if let Err(e) = crate::self_metrics::collect_and_record_all(cycle_elapsed) {
                     eprintln!("[simard] OODA metrics: failed to record: {e}");
                 }
+
+                // Issue #2528: emit unified cycle telemetry (OTel + in-process
+                // registry) and push per-cycle gauges, then flush the metrics
+                // snapshot so `simard status` and the TUI — separate processes —
+                // read live daemon metrics with no external OTLP collector. All
+                // best-effort: a telemetry hiccup never disrupts the cycle.
+                {
+                    use crate::telemetry::{self, names};
+                    telemetry::counter_add(names::DAEMON_CYCLE, 1, &[]);
+                    telemetry::histogram_record(
+                        names::DAEMON_CYCLE_DURATION_SECONDS,
+                        cycle_elapsed.as_secs_f64(),
+                        &[],
+                    );
+                    telemetry::gauge_set(
+                        names::GOAL_ACTIVE,
+                        state.active_goals.active.len() as i64,
+                        &[],
+                    );
+                    if let Ok(stats) = bridges.memory.get_statistics() {
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.episodic_count as i64,
+                            &[(names::ATTR_TYPE, "episodic")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.semantic_count as i64,
+                            &[(names::ATTR_TYPE, "semantic")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.prospective_count as i64,
+                            &[(names::ATTR_TYPE, "prospective")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.working_count as i64,
+                            &[(names::ATTR_TYPE, "working")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.procedural_count as i64,
+                            &[(names::ATTR_TYPE, "procedural")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.sensory_count as i64,
+                            &[(names::ATTR_TYPE, "sensory")],
+                        );
+                    }
+                    if let Ok(g) = bridges.memory.graph_stats() {
+                        telemetry::gauge_set(
+                            names::MEMORY_EDGES,
+                            g.derives_from_edges as i64,
+                            &[(names::ATTR_TYPE, "DERIVES_FROM")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_EDGES,
+                            g.similar_to_edges as i64,
+                            &[(names::ATTR_TYPE, "SIMILAR_TO")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_EDGES,
+                            g.supersedes_edges as i64,
+                            &[(names::ATTR_TYPE, "SUPERSEDES")],
+                        );
+                    }
+                    if let Err(e) = telemetry::flush_snapshot(&state_root) {
+                        eprintln!("[simard] telemetry: failed to flush metrics snapshot: {e}");
+                    }
+                }
             }
             Err(e) => {
                 daemon_log(&state_root, &format!("[simard] OODA cycle error: {e}"));

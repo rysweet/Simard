@@ -1,7 +1,7 @@
 //! simard-tui: CLI TUI monitoring client for Simard.
 //!
 //! Displays daemon status, goals, and activity in a terminal UI.
-//! Tabs switch with Alt+1–6 / ←→ arrow keys, auto-refreshes every 2s, quit with q.
+//! Tabs switch with Alt+1–7 / ←→ arrow keys, auto-refreshes every 2s, quit with q.
 
 mod app;
 mod goals;

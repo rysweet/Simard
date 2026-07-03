@@ -13,7 +13,7 @@ use crate::goals;
 use crate::system::{self, CpuSample, DaemonInfo};
 use crate::types::GoalBoard;
 
-/// The six tabs in the TUI.
+/// The seven tabs in the TUI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Overview,
@@ -22,16 +22,18 @@ pub enum Tab {
     Activity,
     Meeting,
     Stats,
+    Status,
 }
 
 /// All tabs in display order.
-pub const ALL_TABS: [Tab; 6] = [
+pub const ALL_TABS: [Tab; 7] = [
     Tab::Overview,
     Tab::Goals,
     Tab::Engineers,
     Tab::Activity,
     Tab::Meeting,
     Tab::Stats,
+    Tab::Status,
 ];
 
 impl Tab {
@@ -44,6 +46,7 @@ impl Tab {
             Self::Activity => "Activity",
             Self::Meeting => "Meeting",
             Self::Stats => "Stats",
+            Self::Status => "Status",
         }
     }
 
@@ -63,6 +66,7 @@ impl Tab {
             KeyCode::Char('4') => Some(Tab::Activity),
             KeyCode::Char('5') => Some(Tab::Meeting),
             KeyCode::Char('6') => Some(Tab::Stats),
+            KeyCode::Char('7') => Some(Tab::Status),
             _ => None,
         }
     }
@@ -76,6 +80,7 @@ impl Tab {
             Self::Activity => 4,
             Self::Meeting => 5,
             Self::Stats => 6,
+            Self::Status => 7,
         }
     }
 }
@@ -186,7 +191,7 @@ impl App {
 
     /// Handle a key press event.
     ///
-    /// - `Alt+1`–`Alt+6` / `Ctrl+1`–`Ctrl+6`: switch tabs (always)
+    /// - `Alt+1`–`Alt+7` / `Ctrl+1`–`Ctrl+7`: switch tabs (always)
     /// - `Tab`/`Shift+Tab`: cycle tabs forward/backward (always)
     /// - On Meeting tab with Running: chars → input, Enter → send,
     ///   Backspace → delete, Left/Right → cursor, Esc → stop meeting
@@ -922,7 +927,7 @@ mod tests {
 
     #[test]
     fn all_tabs_count() {
-        assert_eq!(ALL_TABS.len(), 6);
+        assert_eq!(ALL_TABS.len(), 7);
     }
 
     #[test]
@@ -940,6 +945,7 @@ mod tests {
         assert_eq!(Tab::Activity.label(), "Activity");
         assert_eq!(Tab::Meeting.label(), "Meeting");
         assert_eq!(Tab::Stats.label(), "Stats");
+        assert_eq!(Tab::Status.label(), "Status");
     }
 
     #[test]
@@ -951,6 +957,7 @@ mod tests {
         assert_eq!(Tab::from_key(&alt_key('4')), Some(Tab::Activity));
         assert_eq!(Tab::from_key(&alt_key('5')), Some(Tab::Meeting));
         assert_eq!(Tab::from_key(&alt_key('6')), Some(Tab::Stats));
+        assert_eq!(Tab::from_key(&alt_key('7')), Some(Tab::Status));
     }
 
     #[test]
@@ -1615,7 +1622,7 @@ mod tests {
     #[test]
     fn handle_key_right_arrow_wraps_at_end() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Stats; // index 5 (last)
+        app.active_tab = Tab::Status; // index 6 (last)
 
         app.handle_key(key_code(KeyCode::Right));
         assert_eq!(app.active_tab, Tab::Overview); // wraps to index 0
@@ -1627,7 +1634,7 @@ mod tests {
         assert_eq!(app.active_tab, Tab::Overview); // index 0
 
         app.handle_key(key_code(KeyCode::Left));
-        assert_eq!(app.active_tab, Tab::Stats); // wraps to index 5
+        assert_eq!(app.active_tab, Tab::Status); // wraps to index 6
     }
 
     #[test]
@@ -2391,6 +2398,11 @@ mod tests {
             Tab::from_key(&ctrl_key('5')),
             Some(Tab::Meeting),
             "Ctrl+5 should switch to Meeting"
+        );
+        assert_eq!(
+            Tab::from_key(&ctrl_key('7')),
+            Some(Tab::Status),
+            "Ctrl+7 should switch to Status"
         );
     }
 }
