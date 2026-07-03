@@ -198,8 +198,11 @@ makes zero shippable progress. The two need different breakers.
    [OODA loop self-detection](./ooda-loop-self-detection.md).
 
 2. **No-action classification.** When a decision resolves to a `NO ACTION` /
-   `NO_ACTION` marker on its own line, the advance-goal parser routes it to
-   `GoalAction::NoAction { reason }` (rather than spawning an engineer). This
+   `NO_ACTION` marker on its own line, the goal-session parser
+   (`parse_orchestrator_response` → `has_no_action_marker` in
+   `src/ooda_actions/goal_session/mod.rs`, reached through the advance-goal
+   dispatch) routes it to `GoalAction::NoAction { reason }` and records a no-op
+   cycle via `assess_only_outcome` (rather than spawning an engineer). This
    gives the progress path a **countable, structured** no-progress signal
    instead of having to pattern-match free prose.
 
@@ -242,7 +245,8 @@ Layer 1 (prompt self-detection) and the brain-*failure* escalation of layer 3
 are shipped and documented
 ([OODA loop self-detection](./ooda-loop-self-detection.md),
 [Unblock OODA goals stuck after a brain-failure lockout](../howto/unblock-stuck-ooda-goals.md)).
-Layer 2's `NO ACTION` classification is shipped in the advance-goal dispatch.
+Layer 2's `NO ACTION` classification is shipped in the goal-session parser
+(`src/ooda_actions/goal_session/`), reached through the advance-goal dispatch.
 The **no-action** counterpart of the layer-3 escalation — a per-goal
 consecutive-no-progress counter that forces the resolution ladder above — is
 the concept this page defines; it reuses the existing sentinel-`Blocked` +
@@ -298,8 +302,11 @@ Each fix removes one leg of the same stool:
   and are visible on the next read.
 - **Fix 2** lets objectively-finished goals **leave** the active board on
   evidence, instead of being re-litigated at 0%.
-- **Fix 3** guarantees a goal that repeatedly produces no progress reaches a
-  **definitive** resolution instead of an endless "I'll verify" loop.
+- **Fix 3** drives a goal that repeatedly produces no progress toward a
+  **definitive** resolution instead of an endless "I'll verify" loop — shipped
+  today for brain *failures*, and by design (see
+  [Status and boundaries](#status-and-boundaries)) for the *no-action* livelock
+  counterpart.
 - **Fix 4** restores **learning**, so distillation turns episodes back into the
   facts and procedures that let the daemon notice it is repeating itself.
 
@@ -319,8 +326,13 @@ state this incident captured.
 - **No evidence-free completion** and **no evidence-free perpetual re-litigation**:
   a goal with a derivable signal is auto-resolved by the done-gate rather than
   returned to the active set at 0% (Fix 2).
-- **Bounded no-progress**: a goal cannot emit unbounded consecutive no-action
-  cycles; it terminates in DONE / DROP / ESCALATE (Fix 3).
+- **Bounded no-progress** *(design defined here; the no-action breaker is not
+  yet shipped — see [Status and boundaries](#status-and-boundaries))*: a goal
+  must not emit unbounded consecutive no-action cycles; it terminates in DONE /
+  DROP / ESCALATE (Fix 3). Layer 1 (prompt self-detection) and the
+  brain-*failure* escalation are shipped today; the per-goal
+  consecutive-no-action counter that closes this guarantee is the concept this
+  page defines.
 - **Banner-immune distillation**: a launch-banner-prefixed transcript still
   yields facts, verified by regression fixture (Fix 4).
 
