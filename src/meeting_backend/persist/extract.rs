@@ -86,11 +86,30 @@ pub fn extract_action_items(messages: &[ConversationMessage]) -> Vec<HandoffActi
     items
 }
 
+/// ASCII-case-insensitive substring search returning the byte index **into
+/// `haystack`** (not a case-folded copy).
+///
+/// `sentence.to_lowercase().find(needle)` returns an index into the *lowercased*
+/// string, whose byte length can differ from the original (e.g. `İ` U+0130 is
+/// 2 bytes and lowercases to 3), so using that index to slice the ORIGINAL
+/// `sentence` both mis-extracts the text and can land off a UTF-8 char boundary
+/// and panic. Because `needle` here is pure ASCII, a match window can only
+/// consist of ASCII bytes, so the returned index (and `index + needle.len()`)
+/// are always valid char boundaries in `haystack` — the slice is panic-free.
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || n.len() > h.len() {
+        return None;
+    }
+    (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
+}
+
 /// Try to extract an assignee from a sentence.
 pub(crate) fn extract_assignee(sentence: &str) -> Option<String> {
     let verbs = [" will ", " should ", " needs to ", " need to ", " must "];
     for verb in &verbs {
-        if let Some(idx) = sentence.to_lowercase().find(verb) {
+        if let Some(idx) = find_ascii_ci(sentence, verb) {
             let prefix = sentence[..idx].trim();
             if let Some(name) = prefix.split_whitespace().last() {
                 let clean = name.trim_matches(|c: char| !c.is_alphanumeric());
@@ -103,7 +122,7 @@ pub(crate) fn extract_assignee(sentence: &str) -> Option<String> {
             }
         }
     }
-    if let Some(idx) = sentence.to_lowercase().find("assigned to ") {
+    if let Some(idx) = find_ascii_ci(sentence, "assigned to ") {
         let after = &sentence[idx + "assigned to ".len()..];
         if let Some(name) = after.split_whitespace().next() {
             let clean = name.trim_matches(|c: char| !c.is_alphanumeric());
@@ -339,9 +358,13 @@ fn extract_decision_rationale(decision: &str, messages: &[ConversationMessage]) 
             // Check the preceding message for rationale context.
             if i > 0 {
                 let prev = &messages[i - 1].content;
-                // Truncate long rationale to keep handoff concise.
+                // Truncate long rationale to keep handoff concise. Char-boundary
+                // safe: `&prev[..297]` panics when byte 297 splits a multi-byte
+                // char, and message content is arbitrary user/agent text.
                 if prev.len() > 300 {
-                    return format!("{}…", &prev[..297]);
+                    let mut t = prev.clone();
+                    crate::util::string_truncate::truncate_to_char_boundary(&mut t, 297);
+                    return format!("{t}…");
                 }
                 return prev.clone();
             }
@@ -581,6 +604,35 @@ mod tests {
         assert_eq!(
             extract_assignee("task assigned to Charlie"),
             Some("Charlie".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_assignee_does_not_panic_on_case_folding_length_change() {
+        // The crash branch: a multibyte name AFTER "assigned to ". Under the old
+        // `sentence.to_lowercase().find(...)` code, 'İ' (U+0130, 2 bytes) folds to
+        // 3 bytes, so the index is shifted and `&sentence[idx + 12..]` slices mid-
+        // 'İ' in the ORIGINAL and PANICS. The ASCII-CI search indexes the original
+        // directly, so it is boundary-safe and extracts the right name.
+        assert_eq!(
+            extract_assignee("İ assigned to İbrahim"),
+            Some("İbrahim".to_string())
+        );
+        // Mis-extraction guard: with a multibyte char before the phrase the old
+        // code returned "ob" (index off by the fold-growth); the fix returns "Bob".
+        assert_eq!(
+            extract_assignee("İşi assigned to Bob"),
+            Some("Bob".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_assignee_matches_verb_case_insensitively() {
+        // The old code lowercased the whole sentence before matching; the ASCII-CI
+        // search must preserve that case-insensitive verb matching.
+        assert_eq!(
+            extract_assignee("Dana WILL ship it"),
+            Some("Dana".to_string())
         );
     }
 
