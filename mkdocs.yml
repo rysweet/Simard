@@ -163,6 +163,7 @@ nav:
     - Monitor Simard with the TUI: howto/monitor-simard-with-tui.md
     - View Agent Terminal Logs: howto/view-agent-terminal-logs.md
     - Run Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
+    - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
@@ -252,6 +253,7 @@ nav:
     - Supply-Chain Audit & Guardrails: reference/supply-chain-audit.md
     - Dependency Trust Policy: reference/dependency-trust-policy.md
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
+    - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md
   - Operations:
     - Overview: operations/index.md
     - Verified Backups of the Live Store: operations/verified-backups.md

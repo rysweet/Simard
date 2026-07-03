@@ -1705,7 +1705,16 @@ fn transient_terminal_failure_then_ok_recovers_in_one_pass() {
 /// Both attempts fail transiently: the pass returns `Err`, NO facts are stored,
 /// NO episodes are marked (retry-safety invariant), and the runner is called a
 /// BOUNDED number of times (`DISTILL_PARSE_RETRY_MAX + 1`).
+///
+/// `#[serial]` on the raw-capture env group: this is the one OTHER test that
+/// drives a distill pass to a SURVIVING `ParseFailure`, so it would hit the
+/// Wave 1 capture path and — if it ran concurrently with
+/// `surviving_parse_failure_writes_a_raw_capture_sample_when_enabled` (which
+/// sets the process-global `SIMARD_DISTILL_RAW_CAPTURE*` env) — write a stray
+/// sample into that test's capture dir. Serializing it on the same key keeps the
+/// enabled-capture assertion (`exactly one sample`) deterministic.
 #[test]
+#[serial_test::serial(simard_distill_raw_capture_env, cognitive_memory)]
 fn transient_failure_exhausts_bounded_retries_then_errs_unmarked() {
     let n = DISTILL_MIN_EPISODES as usize + 3;
     let mock = EpisodeMock::with_episodes(n_episodes(n));
@@ -1751,4 +1760,124 @@ fn structural_spawn_failure_is_not_retried() {
         "no episodes marked on a structural failure"
     );
     assert!(mock.facts_stored().is_empty());
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Wave 1 (RED): env-gated raw-capture fires on a SURVIVING parse failure
+// ───────────────────────────────────────────────────────────────────────────
+//
+// Contract (`docs/reference/distill-raw-capture-on-parse-failure.md`): when
+// `SIMARD_DISTILL_RAW_CAPTURE` is truthy and a `ParseFailure` survives the
+// bounded in-cycle retry, the distill failure path in
+// `distill_recent_episodes_with_runner` writes exactly one
+// `distill-parsefail-*.txt` sample under the configured capture dir, carrying a
+// `# failure_class: parse-failure` header.
+//
+// This is a RUNNABLE RED: it references no not-yet-existing symbol (only env +
+// filesystem + the existing runner path), so it COMPILES against today's code
+// and FAILS at runtime because no capture is wired yet. It also pins the
+// requirement that capture is gated by the ENV toggle ONLY — never by
+// `cfg!(test)` — so it is observable under `cargo test`. Wave 1 turns it green.
+
+/// Scoped env override that restores the previous value on drop.
+struct RawCaptureEnvGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+impl RawCaptureEnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var_os(key);
+        // SAFETY: this test is `#[serial]` on the raw-capture env group.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, prev }
+    }
+}
+impl Drop for RawCaptureEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: this test is `#[serial]` on the raw-capture env group.
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial(simard_distill_raw_capture_env, cognitive_memory)]
+fn surviving_parse_failure_writes_a_raw_capture_sample_when_enabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let capture_dir = tmp.path().join("distill-captures");
+    let _enable = RawCaptureEnvGuard::set("SIMARD_DISTILL_RAW_CAPTURE", "1");
+    let _dir = RawCaptureEnvGuard::set(
+        "SIMARD_DISTILL_RAW_CAPTURE_DIR",
+        capture_dir.to_str().unwrap(),
+    );
+
+    let n = DISTILL_MIN_EPISODES as usize + 3;
+    let mock = EpisodeMock::with_episodes(n_episodes(n));
+    // Every attempt is a ParseFailure ⇒ the retry is exhausted and the pass
+    // escalates with `Err(ParseFailure)` — the exact "surviving parse failure"
+    // the harvester exists to capture.
+    let runner = ScriptedRunner::new(vec![Attempt::Parse]);
+
+    let report = distill_recent_episodes_with_runner(&mock, &runner);
+    assert!(report.is_err(), "a surviving parse failure must return Err");
+
+    let samples: Vec<std::path::PathBuf> = std::fs::read_dir(&capture_dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|n| n.starts_with("distill-parsefail-") && n.ends_with(".txt"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    assert_eq!(
+        samples.len(),
+        1,
+        "an enabled, surviving parse failure must write exactly one capture sample; found {samples:?}"
+    );
+    let body = std::fs::read_to_string(&samples[0]).unwrap();
+    assert!(
+        body.contains("# failure_class: parse-failure"),
+        "captured sample must carry the parse-failure header; body:\n{body}"
+    );
+}
+
+/// Negative control: with capture DISABLED (the default), the same surviving
+/// parse failure writes NO sample. Guards against the diagnostic ever becoming
+/// default-on. Runnable RED until capture exists (the dir is simply never
+/// created); stays green thereafter because the toggle is off.
+#[test]
+#[serial_test::serial(simard_distill_raw_capture_env, cognitive_memory)]
+fn surviving_parse_failure_writes_nothing_when_capture_disabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let capture_dir = tmp.path().join("distill-captures");
+    // Explicitly OFF, and point the dir override at the tempdir so that IF a
+    // future regression made capture default-on we would still detect the file.
+    let _disable = RawCaptureEnvGuard::set("SIMARD_DISTILL_RAW_CAPTURE", "0");
+    let _dir = RawCaptureEnvGuard::set(
+        "SIMARD_DISTILL_RAW_CAPTURE_DIR",
+        capture_dir.to_str().unwrap(),
+    );
+
+    let n = DISTILL_MIN_EPISODES as usize + 3;
+    let mock = EpisodeMock::with_episodes(n_episodes(n));
+    let runner = ScriptedRunner::new(vec![Attempt::Parse]);
+
+    let report = distill_recent_episodes_with_runner(&mock, &runner);
+    assert!(report.is_err(), "a surviving parse failure must return Err");
+
+    let created_any = std::fs::read_dir(&capture_dir)
+        .map(|mut rd| rd.next().is_some())
+        .unwrap_or(false);
+    assert!(
+        !created_any,
+        "capture is default-off: no sample may be written when the toggle is falsy"
+    );
 }
