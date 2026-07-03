@@ -330,10 +330,8 @@ pub fn run_ooda_daemon(
         }
     }
 
-    let interval_secs: u64 = std::env::var("SIMARD_OODA_INTERVAL_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(300);
+    let interval_secs: u64 =
+        ooda_interval_secs_from_env(std::env::var("SIMARD_OODA_INTERVAL_SECS").ok().as_deref());
 
     daemon_log(
         &state_root,
@@ -385,13 +383,28 @@ pub fn run_ooda_daemon(
     // bumped the mtime, which was the ~40–45 min self-restart churn trigger
     // (2026-07-02 operator-review #2; see
     // docs/reference/ooda-binary-identity-reload-gate.md). Pinning it here
-    // (rather than lazily on the first check) closes the window where an
-    // in-place replace between exec and the first cycle could be mistaken for
-    // the running image.
+    // (rather than lazily on the first check) narrows the window where an
+    // in-place replace between exec and this call could be mistaken for the
+    // running image (the hash is read from the on-disk path, so a replace that
+    // lands before this line still poisons the pinned identity — but the effect
+    // is bounded: the next genuinely-different rebuild bumps mtime+hash and
+    // reloads).
     capture_running_image_hash();
 
     if auto_reload {
-        daemon_log(&state_root, "[simard] OODA daemon: auto-reload enabled");
+        // Make the LOGGED state match reality: if we could not hash our own
+        // image at startup, the content-identity gate fails closed and
+        // self-reload is disabled for this whole process. Say so, rather than
+        // logging "enabled" while silently never relaunching.
+        if running_image_hash().is_some() {
+            daemon_log(&state_root, "[simard] OODA daemon: auto-reload enabled");
+        } else {
+            daemon_log(
+                &state_root,
+                "[simard] OODA daemon: WARNING auto-reload requested but the running-image hash \
+                 is unavailable — self-reload is DISABLED for this process (fail-closed)",
+            );
+        }
     }
     let self_relaunch_interval = crate::self_deploy::restart::self_relaunch_min_interval_from_env(
         std::env::var(crate::self_deploy::restart::SELF_RELAUNCH_MIN_INTERVAL_ENV)
@@ -1098,12 +1111,30 @@ mod tests {
 
     #[test]
     fn ooda_interval_env_var_parsing() {
-        // Test the same parsing pattern used in run_ooda_daemon.
-        let parse = |val: &str| -> u64 { val.parse().ok().unwrap_or(300) };
-        assert_eq!(parse("60"), 60);
-        assert_eq!(parse("0"), 0);
-        assert_eq!(parse("not-a-number"), 300);
-        assert_eq!(parse(""), 300);
+        // Exercises the REAL helper (not a copy of the inline logic).
+        assert_eq!(ooda_interval_secs_from_env(Some("60")), 60);
+        // A `0` interval must clamp to the default — a zero-delay loop busy-spins
+        // the daemon (interruptible_sleep no-ops on Duration::ZERO). This is the
+        // Wave 4 fix; the prior test asserted `0 -> 0`, codifying the bug.
+        assert_eq!(
+            ooda_interval_secs_from_env(Some("0")),
+            DEFAULT_OODA_INTERVAL_SECS
+        );
+        assert_eq!(
+            ooda_interval_secs_from_env(Some("not-a-number")),
+            DEFAULT_OODA_INTERVAL_SECS
+        );
+        assert_eq!(
+            ooda_interval_secs_from_env(Some("")),
+            DEFAULT_OODA_INTERVAL_SECS
+        );
+        assert_eq!(
+            ooda_interval_secs_from_env(None),
+            DEFAULT_OODA_INTERVAL_SECS
+        );
+        // Whitespace is trimmed; a large value is honoured (a long sleep is harmless).
+        assert_eq!(ooda_interval_secs_from_env(Some("  120  ")), 120);
+        assert_eq!(ooda_interval_secs_from_env(Some("86400")), 86_400);
     }
 
     // ── DaemonDashboardConfig coverage from mod.rs perspective ───────

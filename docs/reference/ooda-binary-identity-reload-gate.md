@@ -118,9 +118,13 @@ in-place replace, `std::env::current_exe()` resolves to the NEW bytes, so
 re-hashing it at check time would compare the new file against itself and never
 detect a change. The startup-pinned hash still identifies the OLD image the
 process is actually running, so a later on-disk hash that differs from it is a
-genuine new image. Pinning at startup (rather than lazily on the first check)
-also closes the window in which a replace between `exec` and the first cycle
-could be mistaken for the running image.
+genuine new image. Pinning at startup (rather than lazily on the first cycle
+check) also **narrows** the window in which a replace between `exec` and the
+capture call could be mistaken for the running image. It does not fully close
+it — the hash is read from the on-disk path, so a replace that lands before the
+startup capture still poisons the pinned identity — but the effect is bounded:
+the next genuinely-different rebuild bumps both mtime and content hash and the
+daemon reloads.
 
 Comparing the on-disk (untrusted) bytes against the startup-pinned (trusted)
 running hash also means the gate detects a tampered swap that an mtime
@@ -156,7 +160,7 @@ pub fn file_content_hash(path: &Path) -> Option<String>;
 pub fn running_image_hash() -> Option<&'static str>;
 
 /// Pin the running-image hash at a known-early point (daemon startup),
-/// closing the exec→first-check window. Idempotent.
+/// narrowing (not fully closing) the exec→first-check window. Idempotent.
 pub fn capture_running_image_hash();
 
 /// Pure reload decision (unit-tested in isolation): `true` only when the on-disk
@@ -205,17 +209,17 @@ if auto_reload && binary_changed(start_time) {
 | Variable / flag | Default | Purpose |
 | --- | --- | --- |
 | `--no-auto-reload` | (auto-reload **on**) | CLI flag to `simard ooda run` that disables auto-reload entirely — the daemon never relaunches itself regardless of on-disk changes. |
-| `SIMARD_OODA_INTERVAL_SECS` | `300` | Cycle interval. Also the cadence at which the reload gate is evaluated. An unparseable/empty value falls back to `300`; **range-clamping of `0` and oversized values is the Wave 4 daemon-safety hardening target and is not yet in place** (see below). |
+| `SIMARD_OODA_INTERVAL_SECS` | `300` | Cycle interval. Also the cadence at which the reload gate is evaluated. An unparseable/empty value **or `0`** falls back to `300` (Wave 4): a `0` interval would busy-loop the daemon, so it is clamped. An oversized value is honoured verbatim (a long sleep is harmless). |
 
-`SIMARD_OODA_INTERVAL_SECS` is read as
-`std::env::var(...).ok().and_then(|v| v.parse().ok()).unwrap_or(300)` on `main`
-today: a non-numeric or empty value falls back to the `300` default, but `0` and
-absurdly large values currently parse successfully and are accepted verbatim. A
-value of `0` would busy-spin the loop — evaluating the reload gate and every
-other per-cycle check with no sleep. Clamping this knob to a safe range is the
-**Wave 4** daemon-correctness/safety hardening item (`daemon-correctness-safety`,
-R3); it is specified here for context but is not part of the Wave 2 reload-gate
-change.
+`SIMARD_OODA_INTERVAL_SECS` is parsed by
+`ooda_interval_secs_from_env` (daemon/helpers.rs): a value that parses as `u64`
+and is **> 0** is honoured (whitespace-trimmed); unset, empty, non-numeric, or
+`0` all fall back to `DEFAULT_OODA_INTERVAL_SECS` (300). Clamping `0` (Wave 4)
+prevents the zero-delay busy loop — `interruptible_sleep(Duration::ZERO, …)`
+returns immediately, so a `0` interval would evaluate the reload gate and every
+other per-cycle check back-to-back with no pause. This mirrors the sibling
+`backup_interval_secs_from_env` guard. An absurdly large value is not clamped: it
+merely sleeps a long time, which is harmless.
 
 Auto-reload continuing to be *enabled* is correct; the fix is to stop it firing
 on identical content, not to turn it off. Operators who want a fully static
