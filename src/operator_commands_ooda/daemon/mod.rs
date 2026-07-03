@@ -474,6 +474,32 @@ pub fn run_ooda_daemon(
     );
     // -------------------------------------------------------------------
 
+    // --- periodic monthly self-quality-audit state (issue #2419) ---------
+    // Reuses the sibling periodic-task infra, but persists last-run to DISK
+    // (every sibling gates on an in-process `Instant`, which resets on reboot —
+    // fine at 24h, wrong at 30d). On startup: load the persisted epoch; if the
+    // marker is absent or unparseable, initialize it to NOW and persist, so the
+    // heavy five-wave audit fires ~one interval later rather than on every fresh
+    // deploy/restart. Env `SIMARD_SELF_AUDIT_INTERVAL` (seconds; 0 disables).
+    let self_audit_interval_secs: u64 = crate::self_quality_audit::interval_secs_from_env(
+        std::env::var("SIMARD_SELF_AUDIT_INTERVAL").ok().as_deref(),
+    );
+    let self_audit_last_run_path = state_root.join(crate::self_quality_audit::LAST_RUN_FILENAME);
+    let mut self_audit_last_run: u64 =
+        match crate::self_quality_audit::read_last_run(&self_audit_last_run_path) {
+            Some(epoch) => epoch,
+            None => {
+                let now = crate::self_quality_audit::now_epoch_secs();
+                let _ = crate::self_quality_audit::write_last_run(&self_audit_last_run_path, now);
+                now
+            }
+        };
+    daemon_log(
+        &state_root,
+        &format!("[simard] OODA daemon: self quality-audit interval = {self_audit_interval_secs}s"),
+    );
+    // -------------------------------------------------------------------
+
     let mut cycles_run = 0u32;
 
     loop {
@@ -672,6 +698,47 @@ pub fn run_ooda_daemon(
                 ),
             }
             last_brain_introspection = Instant::now();
+        }
+        // -------------------------------------------------------------------
+
+        // ── Periodic monthly self-quality-audit (issue #2419) ────────────
+        // Fires ~monthly on a DISK-persisted gate (survives restarts). Drives
+        // five SEEK→VALIDATE→FIX quality-audit waves over Simard's OWN repo,
+        // each resulting PR gated by a bounded crusty-old-engineer proxy review,
+        // then self-merges crusty-approved + CI-green PRs. No-fallback: a recipe
+        // failure WARNs; last-run is persisted regardless of outcome so a
+        // failing recipe cannot hot-loop for a full interval.
+        let self_audit_elapsed = Duration::from_secs(
+            crate::self_quality_audit::now_epoch_secs().saturating_sub(self_audit_last_run),
+        );
+        if crate::self_quality_audit::should_run_self_audit(
+            self_audit_elapsed,
+            self_audit_interval_secs,
+        ) {
+            daemon_log(
+                &state_root,
+                "[simard] self quality-audit: firing 5-wave crusty-gated self-audit of rysweet/Simard",
+            );
+            match crate::self_quality_audit::run_self_quality_audit(
+                &bridges.repo_root,
+                &state_root,
+                None,
+            ) {
+                Ok(report) => {
+                    daemon_log(&state_root, &format!("[simard] {}", report.summary()));
+                }
+                Err(e) => daemon_log(
+                    &state_root,
+                    &format!("[simard] WARN: self quality-audit failed: {e}"),
+                ),
+            }
+            // Persist last-run on BOTH Ok and Err to prevent hot-looping a
+            // failing recipe every cycle for a full interval.
+            self_audit_last_run = crate::self_quality_audit::now_epoch_secs();
+            let _ = crate::self_quality_audit::write_last_run(
+                &self_audit_last_run_path,
+                self_audit_last_run,
+            );
         }
         // -------------------------------------------------------------------
 
