@@ -98,6 +98,10 @@ mod operator_commands_meeting;
 mod operator_commands_ooda;
 mod operator_commands_review;
 mod operator_commands_terminal;
+// Design spike (#2419): additive type/trait sketch for the Overseer
+// operator/observer co-process. NOT wired into `main` or the daemon loop —
+// nothing here is constructed at runtime. See docs/design/overseer.md.
+pub mod overseer;
 mod persistence;
 pub mod prompt_assets;
 pub mod prompt_delivery;
