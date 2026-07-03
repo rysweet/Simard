@@ -373,6 +373,58 @@ Each phase is independently shippable, additive, and gated behind an env flag
   cycle (Observe failure aborts the cycle cleanly; board-read failure degrades to
   "no dedup", never a crash).
 
+## Risks and sharp edges (crusty review)
+
+This spike is intentionally incomplete. Before ANY acting milestone (M2+) is
+built, these must be resolved — they are hard gates, not advice.
+
+1. **Closed self-modification loop.** `VerifyAndMergePr` is currently classed
+   Routine/autonomous while `Deploy` is HIGH-RISK. Autonomous-merge plus eventual
+   auto-deploy is a closed loop gated only by "CI green" — which is the absence of
+   one signal, not judgment. The failure mode is slow degradation across many
+   green-but-wrong merges (the Knight Capital shape). **Do NOT classify
+   `VerifyAndMergePr` as Routine on day one** — keep it human-in-loop / `Escalate`
+   until M1 signal quality is proven. Autonomy is earned, not defaulted.
+
+2. **The safety checks are the unbuilt part.** The pr-verify diff-scans (items
+   3–6: no-`Bridge`, no-`print!`, additive, PRD-preserved) are specified, not
+   implemented. **M2 (merge authority) is HARD-GATED on those existing and being
+   unit-tested.** No merge capability ships before the merge-safety scans do.
+
+3. **`RecursionGuard` must fail CLOSED.** `is_own()` returns `false` when the
+   identity fields (`author_login`/`branch_prefix`/`goal_source_tag`) are empty, so
+   a misconfiguration silently disables anti-recursion. A guardrail that turns
+   itself off when unconfigured is worse than none. When identity is unconfigured,
+   `admit()` on a PR/commit subject must REFUSE (error), not allow. The Overseer
+   must also run under a DISTINCT identity — never the human operator's login, or
+   `is_own` will (correctly) refuse the human's PRs too.
+
+4. **Two controllers, one mutable store.** Observe is read-only, but Act writes
+   heavily (goal board, issues, launched engineers) into the same state Simard's
+   OODA concurrently mutates. "The loops can't drive each other" is about
+   scheduling, not shared state. Dedup (drop problems an in-flight engineer owns)
+   is racy: read→decide→act has a window. Treat this as a coordination problem
+   (two-autoscalers-on-one-cluster / split-brain), document the race window, and
+   keep the per-cycle launch cap conservative.
+
+5. **Operator expedients are not autonomous policy.** `--no-verify` pushes and
+   admin-merges past pending CI are deliberate human shortcuts under supervision.
+   Baked into an unattended loop they keep the shortcut and lose the judgment.
+   `ResolveConflict` is correctly HIGH-RISK; do not let routine merge paths inherit
+   the expedients.
+
+6. **Single-source the budget.** `BudgetGate` hardcodes `500.0`; read
+   `SIMARD_DAILY_BUDGET_USD` so it cannot drift from the OODA loop's ceiling.
+
+7. **Prefer M1. Earn the rest.** M1 (observe → report → file deduped issues)
+   delivers most of the value (visibility) at a fraction of the risk. M2–M4 should
+   be justified by M1's signals proving boring, not assumed.
+
+### References
+- Knight Capital, SEC order (2013): https://www.sec.gov/litigation/admin/2013/34-70694.pdf
+- Bainbridge, *Ironies of Automation* (1983): https://www.ise.ncsu.edu/wp-content/uploads/2017/02/Bainbridge_1983_Automatica.pdf
+- Google SRE Book, *Automation at Google*: https://sre.google/sre-book/automation-at-google/
+
 ## Non-goals (this spike)
 
 - No daemon runtime behavior change; nothing wired into `main` or the daemon loop.
