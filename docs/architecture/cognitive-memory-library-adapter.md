@@ -1,7 +1,7 @@
 ---
 title: Library-backed Cognitive Memory (the sole backend)
 description: How Simard's CognitiveMemoryOps trait is backed by amplihack-memory-lib's persistent CognitiveMemory through the LibraryCognitiveMemory adapter. As of de-fork Phase 2b this is the ONLY on-disk cognitive-memory backend; the native LadybugDB fork has been deleted.
-last_updated: 2026-06-19
+last_updated: 2026-07-03
 owner: simard
 doc_type: reference
 related:
@@ -134,18 +134,18 @@ conformance tests) and enables the library's `persistent` feature:
 ```toml
 # Cargo.toml
 [dependencies]
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "ece725b1ac7e1c34cc254529879b291df1ed9ec7", features = ["persistent"] }
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "26d49bf864ac2c03b80c4ab075c4a907c51f82a8", features = ["persistent"] }
 
 # Retained for ONE remaining direct reader: src/bin/simard_tui/goals.rs.
 # Not used by the cognitive-memory backend, which goes through amplihack-memory.
-lbug = "=0.15.3"
+lbug = "=0.17.1"
 ```
 
 - The library's `persistent` feature compiles **LadybugDB from source**, which
   requires a working **CMake + C++ toolchain** and noticeably longer build
   times. Because the library backend is now the only backend, every build pays
   this cost — budget extra time for `cargo build --release --bin simard`.
-- Both Simard and the library pin `lbug = "=0.15.3"`, so they share one
+- Both Simard and the library pin `lbug = "=0.17.1"`, so they share one
   LadybugDB build.
 
 ### No cargo feature, no env switch
