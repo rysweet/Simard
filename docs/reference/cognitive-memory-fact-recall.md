@@ -1,8 +1,8 @@
 ---
 title: Tokenized fact recall in preparation
 description: How search_facts tokenizes a multi-word objective into keywords and ORs one CONTAINS clause per token so semantic facts (including goal-store:record facts) actually surface into the OODA prepared context instead of always returning zero.
-last_updated: 2026-06-19
-owner: simard
+last_updated: 2026-07-03
+owner: cognitive-memory
 related:
   - ../architecture/cognitive-memory.md
   - ./cognitive-memory-preparation-filters.md
@@ -16,14 +16,13 @@ doc_type: reference
 
 # Tokenized fact recall in preparation
 
-> **De-fork Phase 2b.** The *behavior* described here (tokenized, multi-keyword
-> fact recall) is preserved: it is reached through the `CognitiveMemoryOps` trait,
-> now backed solely by `LibraryCognitiveMemory` over `amplihack-memory-lib`. The
-> native implementation details this page cites — the raw Cypher in
-> `src/cognitive_memory/ops.rs`, the `escape_cypher` helper, and
-> `NativeCognitiveMemory` — were **deleted** with the fork; treat those code
-> citations as historical. The library performs the equivalent tokenized search
-> internally (see [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md)).
+> **De-fork Phase 2b (#2307).** The *behavior* described here (tokenized,
+> multi-keyword fact recall) is preserved through the `CognitiveMemoryOps` trait,
+> now backed solely by `LibraryCognitiveMemory` over the external
+> `amplihack-memory` library. Native implementation details this page cites — raw
+> Cypher in `src/cognitive_memory/ops.rs`, the `escape_cypher` helper, and
+> `NativeCognitiveMemory` — were deleted with the fork; treat those citations as
+> historical. The library-backed adapter delegates fact search to the library.
 
 > Shipped in issue [#2302](https://github.com/rysweet/Simard/issues/2302)
 > (the "facts always zero" defect). Companion to the issue #2281
@@ -31,9 +30,11 @@ doc_type: reference
 > [Preparation-phase memory filters](./cognitive-memory-preparation-filters.md)
 > and [Episodic recall in preparation](./cognitive-memory-episodic-recall.md).
 
-`search_facts` now tokenizes its query into keywords and ORs one
-`CONTAINS` clause per token before hitting the graph. This is the fix
-for the symptom every OODA cycle logged:
+`search_facts` now has the tokenized-recall behavior fixed by #2302: a
+multi-word objective can recall facts that share useful keywords instead of
+requiring the whole objective to appear verbatim. Current source reaches this
+through `LibraryCognitiveMemory`, which delegates fact search to the external
+library. This is the fix for the symptom every OODA cycle logged:
 
 ```
 [simard] OODA cycle: prepared context (0 facts, 0 triggers, 5 procedures, 0 episodes)
@@ -60,8 +61,8 @@ prepared-context fact count climbs above zero:
 ## Scope
 
 This reference covers **only** semantic fact recall — the
-`search_facts` method on `NativeCognitiveMemory` and the
-preparation-phase caller that feeds it.
+`CognitiveMemoryOps::search_facts` method (currently implemented by
+`LibraryCognitiveMemory`) and the preparation-phase caller that feeds it.
 
 It does **not** change:
 
@@ -72,8 +73,10 @@ It does **not** change:
   [Episodic recall in preparation](./cognitive-memory-episodic-recall.md)),
 - trigger matching / `check_triggers`.
 
-Those surfaces share `src/cognitive_memory/ops.rs` but are untouched
-here. The only behavioural change is inside the fact-search function.
+In the pre-#2307 native fork, those surfaces shared
+`src/cognitive_memory/ops.rs` but were untouched by this fix. In current source,
+`LibraryCognitiveMemory` delegates fact search to the library backend; the only
+behavioral contract preserved here is semantic fact recall.
 
 ---
 
@@ -108,17 +111,18 @@ is treated as one literal substring. No stored fact's `content`
 contains that exact 45-character run, so the query returns nothing —
 on **every** cycle, for **every** fragment.
 
-The library equivalent (the amplihack-memory-lib semantic store)
-already tokenizes the query into keywords and ORs a `CONTAINS` per
-token. Simard's `NativeCognitiveMemory` did not. This change closes
-that gap.
+Before the #2307 de-fork, the external library's semantic store already
+tokenized the query while Simard's native `NativeCognitiveMemory` implementation
+did not. The original fix closed that gap; after #2307 the library-backed adapter
+is the only implementation.
 
 ### After
 
-`search_facts` splits the query into keywords and ORs one
-`(concept CONTAINS … OR content CONTAINS …)` group per keyword. A
-single shared keyword between the objective and a stored fact is now
-enough to recall that fact.
+The observable post-fix contract is that a single shared useful keyword between
+the objective and a stored fact is enough to recall that fact. In the deleted
+native fork this was implemented by splitting the query and OR-ing one
+`(concept CONTAINS … OR content CONTAINS …)` group per keyword; current source
+delegates the search to the library backend.
 
 ---
 
@@ -137,31 +141,36 @@ fn search_facts(
 
 | Parameter        | Meaning                                                            |
 |------------------|-------------------------------------------------------------------|
-| `query`          | Free text. Tokenized into keywords (see below). `"*"` is a wildcard. |
-| `limit`          | Max rows returned (`ORDER BY f.id DESC LIMIT {limit}`). Unchanged. |
-| `min_confidence` | `AND f.confidence >= {min_confidence}` floor. Unchanged.          |
+| `query`          | Free text. `"*"` is a wildcard. Tokenized-recall behavior is preserved, but the active backend owns query construction. |
+| `limit`          | Maximum number of facts returned. |
+| `min_confidence` | Minimum confidence floor passed through to the backend. |
 
-Return order (`f.id DESC`, newest-first because ids are UUID-v7
-time-prefixed), the confidence floor, and the `LIMIT` semantics are
-all **identical** to the previous implementation. Only the `WHERE`
-match expression changes.
+The trait signature is unchanged. Historical sections below describe the deleted
+native fork's `ORDER BY f.id DESC LIMIT ...` query shape; current ordering and
+query construction are delegated to the library backend through
+`LibraryCognitiveMemory`.
 
 ---
 
-## Tokenization
+## Historical native tokenization contract
 
-`search_facts` tokenizes `query` with deliberately minimal rules. The
-goal is to break a natural-language objective into useful keywords
-**without** disturbing the structured concept literals that internal
-callers pass (most importantly `goal-store:record`).
+This section documents the deleted native `ops.rs` tokenizer that implemented
+#2302. Current source delegates fact search to the external library backend, so
+these rules are migration history for the observable recall contract rather than
+current Simard-owned tokenizer internals.
+
+The native `search_facts` tokenized `query` with deliberately minimal rules. The
+goal was to break a natural-language objective into useful keywords **without**
+disturbing the structured concept literals that internal callers pass (most
+importantly `goal-store:record`).
 
 1. **Split on ASCII whitespace only.** Internal characters such as
    `-`, `:`, `/`, `.`, `#`, and digits are preserved inside a token.
 2. **Trim leading/trailing punctuation** from each token (e.g.
    `"(auth,"` → `"auth"`), preserving interior punctuation.
 3. **Drop empty tokens** produced by trimming.
-4. **Do not lowercase the emitted keyword.** The token that reaches
-   Cypher keeps its original case so matching stays consistent with the
+4. **Do not lowercase the emitted keyword.** In the native fork, the token that
+   reached Cypher kept its original case so matching stayed consistent with the
    prior whole-string `CONTAINS` behaviour. The stopword test in rule 5
    is the *one* exception: it lowercases a throwaway copy of the token
    for the membership check only, so a sentence-initial `"The"` is still
@@ -173,9 +182,10 @@ callers pass (most importantly `goal-store:record`).
    newest `LIMIT` facts" and wastes the token budget. **Short tokens are
    kept** (`CI`, `PR`, `#2302` are all discriminating in this domain),
    so there is no minimum-length filter; the keyword-vs-function-word
-   distinction is what gates a token, not its length. The stopword set
-   lives in a **fact-recall-local** constant, `FACT_QUERY_STOPWORDS` in
-   `src/cognitive_memory/ops.rs`, deliberately **separate** from the
+   distinction is what gates a token, not its length. In the deleted native
+   fork, the stopword set lived in a **fact-recall-local** constant,
+   `FACT_QUERY_STOPWORDS` in `src/cognitive_memory/ops.rs`, deliberately
+   **separate** from the
    `TOKEN_STOPWORDS` list that the episodic/procedural `tokenize_objective`
    helper uses. Keeping it local means this fix is confined to fact search
    and provably cannot alter episodic or procedural recall (issue #2302
@@ -269,9 +279,14 @@ tokens = []                       // whitespace only — whole-string path prese
 
 ---
 
-## Query construction
+## Historical native query construction
 
-`search_facts` chooses one of four shapes based on the query and its
+The details below describe the pre-#2307 native `ops.rs` implementation that
+originally fixed issue #2302. The current `LibraryCognitiveMemory` implementation
+delegates to the external library; keep this section as migration history for the
+observable tokenized-recall contract, not as current Simard query-building code.
+
+The native `search_facts` chose one of four shapes based on the query and its
 token count.
 
 ### 1. Wildcard (`query == "*"`)
@@ -338,10 +353,9 @@ ORDER BY f.id DESC LIMIT {limit}
 
 ### 4. Two or more tokens
 
-The fix path. One `(concept CONTAINS … OR content CONTAINS …)` group
-per token, OR-joined, each token escaped with the **same**
-`escape_cypher` helper that `search_episodes_by_keywords` uses
-(`src/cognitive_memory/ops.rs`):
+The historical native fix path used one `(concept CONTAINS … OR content CONTAINS …)` group
+per token, OR-joined, each token escaped with the same native `escape_cypher`
+helper that `search_episodes_by_keywords` used in the deleted `ops.rs` file:
 
 ```rust
 // for tokens ["investigate", "failing", "auth"]
@@ -362,13 +376,11 @@ the OR group — they are not per-token.
 
 ### Escaping
 
-Every token (and the whole-string query in case 2) is passed through
-`escape_cypher` (`src/cognitive_memory/ops.rs`) before interpolation.
-This escapes `\`, `'`, newline, carriage-return, tab, and null —
-preventing both query breakage and Cypher injection from fact content
-or objective text. Reusing the existing helper means fact search,
-episodic search, and goal-store reads all share one escaping
-contract.
+In the deleted native fork, every token (and the whole-string query in case 2)
+was passed through `escape_cypher` before interpolation. That escaped `\`, `'`,
+newline, carriage-return, tab, and null, preventing query breakage and Cypher
+injection in the native query builder. Current escaping/query construction is
+owned by the external library backend.
 
 ---
 
@@ -502,22 +514,25 @@ known to exist is the signature of the original defect.
 
 ---
 
-## Preserved invariants (regression guards)
+## Historical native preserved invariants (regression guards)
 
-This change is intentionally narrow. The following behaviours are
-unchanged and are protected by existing tests:
+For the pre-#2307 native fix, this change was intentionally narrow. The
+following behaviours were unchanged and protected by tests; current source
+preserves the high-level recall contract through the library backend:
 
 - **`*` wildcard export** still returns all facts above the floor
   (issue #1710 — `export_memory_snapshot`).
-- **`min_confidence` floor** and **`ORDER BY f.id DESC LIMIT {limit}`**
-  semantics are identical.
-- **Single-keyword and empty/whitespace queries** take the preserved
-  whole-string path — results unchanged.
+- **`min_confidence` floor** and the native `ORDER BY f.id DESC LIMIT {limit}`
+  tail stayed identical in the deleted native query builder.
+- **Single-keyword and empty/whitespace queries** took the preserved
+  whole-string path in the native query builder — results unchanged there.
 - **`goal-store:record` load** (limit 256, dedup-by-slug,
   `goal-board:snapshot` filter, stale-slug filter) is byte-for-byte
   unchanged because the concept tokenizes to one token.
-- **Cypher escaping** for fact content and objective text is handled by
-  the shared `escape_cypher` helper.
+- **Query safety** for fact content and objective text remains owned by the
+  active backend. In the deleted native fork this was the shared
+  `escape_cypher` helper; current code delegates query construction to the
+  library backend.
 
 ---
 
@@ -525,20 +540,20 @@ unchanged and are protected by existing tests:
 
 | Item                                      | File                                          |
 |-------------------------------------------|-----------------------------------------------|
-| `search_facts` implementation             | `src/cognitive_memory/ops.rs`                 |
-| `escape_cypher` helper (shared)           | `src/cognitive_memory/ops.rs`                 |
+| `search_facts` implementation             | `src/cognitive_memory/library_adapter.rs` (`LibraryCognitiveMemory`, delegating to the library) |
+| Historical native query builder / `escape_cypher` | `src/cognitive_memory/ops.rs` (deleted in #2307; history only) |
 | Preparation caller(s)                     | `src/memory_consolidation/mod.rs`             |
 | `PreparedContext` struct                  | `src/memory_consolidation/mod.rs`             |
 | `GOAL_STORE_FACT_CONCEPT` / list limit    | `src/goals/cognitive_memory_store.rs`         |
 | `GoalRecord` shape                        | `src/goals/types.rs`                          |
-| Trait-level tests                         | `src/cognitive_memory/ops.rs`                 |
+| Current backend tests                     | `src/cognitive_memory/tests_library_parity.rs` and related library-adapter tests |
 | Preparation-level tests                   | `src/memory_consolidation/tests_pr_a.rs` (new test), `tests.rs` (existing guards) |
 
 ---
 
 ## Testing
 
-### Trait-level tests in `src/cognitive_memory/ops.rs`
+### Historical native trait-level tests in `src/cognitive_memory/ops.rs`
 
 | Test                                                  | Coverage                                                                 |
 |-------------------------------------------------------|--------------------------------------------------------------------------|

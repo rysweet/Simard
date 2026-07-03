@@ -1,8 +1,8 @@
 ---
 title: Bootstrap procedures and trigger naming
 description: How Simard seeds three baseline procedural memories on daemon boot and how the OODA cycle now stores procedures with recallable names so recall_procedure actually finds them at preparation time.
-last_updated: 2026-06-14
-owner: simard
+last_updated: 2026-07-03
+owner: cognitive-memory
 doc_type: reference
 related:
   - ./ooda-procedural-memory.md
@@ -15,13 +15,13 @@ related:
 
 # Bootstrap procedures and trigger naming
 
-> **De-fork Phase 2b.** The bootstrap-seeding and trigger-naming *behavior*
-> described here is preserved: writes and recalls go through the
-> `CognitiveMemoryOps` trait, now backed solely by `LibraryCognitiveMemory`
-> over `amplihack-memory-lib`. The daemon-boot wiring that this page anchors to
-> `NativeCognitiveMemory::open` is now `LibraryCognitiveMemory::open`, and the
-> `NativeCognitiveMemory::in_memory` test helper is replaced by the library
-> in-memory store; treat those native code citations as historical. See
+> **De-fork Phase 2b (#2307).** The bootstrap-seeding and trigger-naming
+> *behavior* described here is preserved: writes and recalls go through the
+> `CognitiveMemoryOps` trait, now backed solely by `LibraryCognitiveMemory` over
+> the external `amplihack-memory` library. Pre-#2307 citations to
+> `NativeCognitiveMemory::open` or `NativeCognitiveMemory::in_memory` are
+> historical; the current daemon opens `LibraryCognitiveMemory::open`, and tests
+> use `LibraryCognitiveMemory::in_memory`. See
 > [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md).
 
 > Shipped in issue [#2281](https://github.com/rysweet/Simard/issues/2281)
@@ -190,7 +190,7 @@ daemon never produces duplicate procedures.
 ### Wiring
 
 `seed_bootstrap_procedures` is called once during `OodaBridges`
-construction, immediately after `NativeCognitiveMemory::open`
+construction, immediately after `LibraryCognitiveMemory::open`
 succeeds and before the OODA loop starts. The exact call site lands
 at implementation time in whichever of `bin/simard/main.rs` or
 `src/operator_commands_ooda/daemon/mod.rs` constructs the
@@ -470,7 +470,7 @@ procedure count:
 |-----------------------------------------------|-------------------------------------------------------|
 | `seed_bootstrap_procedures`                   | `src/cognitive_memory/bootstrap_procedures.rs`         |
 | `BOOTSTRAP_PROCEDURES` constant               | `src/cognitive_memory/bootstrap_procedures.rs`         |
-| Daemon boot wiring                            | Once-per-start call from the `OodaBridges` constructor, post-`NativeCognitiveMemory::open`, pre-loop. Exact file is `bin/simard/main.rs` or `src/operator_commands_ooda/daemon/mod.rs` depending on which path constructs the bridges; confirmed at PR-C implementation time. |
+| Daemon boot wiring                            | Once-per-start call from the `OodaBridges` constructor, post-`LibraryCognitiveMemory::open`, pre-loop. Current daemon construction is in `src/operator_commands_ooda/daemon/mod.rs`. |
 | OODA cycle procedure storage                  | `src/ooda_loop/cycle.rs` (currently at `cycle.rs:343`, the `format!("ooda:{}", outcome.action.kind)` site) |
 | Runtime pattern + trigger mapping             | `src/ooda_loop/cycle.rs` (next to the storage site)   |
 | `derive_triggers_from_objective` helper       | `src/ooda_loop/cycle.rs`                              |
@@ -511,9 +511,8 @@ In `src/ooda_loop/cycle.rs` tests module:
 ### Unified recall regression gates (ws2 #2295)
 
 In `tests/cognitive_memory_procedure_recall_unified.rs` — run against
-the live `cognitive_memory.ladybug` schema via
-`NativeCognitiveMemory::in_memory` (real `lbug::Database` + real
-`SCHEMA_DDL`, no storage-layer mocks):
+`LibraryCognitiveMemory::in_memory()` (the sole real backend after #2307), with
+no storage-layer mocks:
 
 | Test                                                          | Coverage                                          |
 |---------------------------------------------------------------|---------------------------------------------------|

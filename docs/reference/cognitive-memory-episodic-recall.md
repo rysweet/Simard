@@ -1,8 +1,8 @@
 ---
 title: Episodic recall in preparation
 description: How preparation_memory_operations surfaces similar past episodes via keyword-overlap search, how the results are injected into the prompt, and how self-session noise is filtered.
-last_updated: 2026-06-19
-owner: simard
+last_updated: 2026-07-03
+owner: cognitive-memory
 doc_type: reference
 related:
   - ../architecture/cognitive-memory.md
@@ -16,14 +16,13 @@ related:
 
 # Episodic recall in preparation
 
-> **De-fork Phase 2b.** The *behavior* described here (keyword-overlap episodic
-> recall via `search_episodes_by_keywords`) is preserved through the
-> `CognitiveMemoryOps` trait, now backed solely by `LibraryCognitiveMemory`. The
-> adapter implements this by recalling episodes from the library and filtering on
-> case-insensitive `content.contains` (see
-> [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md)).
-> The native `NativeCognitiveMemory` Cypher implementation and `src/cognitive_memory/ops.rs`
-> citations on this page were **deleted** with the fork; treat them as historical.
+> **De-fork Phase 2b (#2307).** The *behavior* described here
+> (keyword-overlap episodic recall via `search_episodes_by_keywords`) is
+> preserved through the `CognitiveMemoryOps` trait, now backed solely by
+> `LibraryCognitiveMemory`. The adapter recalls episodes from the library and
+> filters with case-insensitive `content.contains`. The native
+> `NativeCognitiveMemory` Cypher implementation and `src/cognitive_memory/ops.rs`
+> citations on this page were deleted with the fork; treat them as historical.
 
 > Shipped in issue [#2281](https://github.com/rysweet/Simard/issues/2281)
 > as PR-C (procedural seeding + episodic recall). PR-C also reshapes
@@ -89,16 +88,12 @@ pub trait CognitiveMemoryOps {
 }
 ```
 
-`NativeCognitiveMemory` overrides with a Cypher query that ORs one
-**case-insensitive** `toLower(e.content) CONTAINS '<lowercased+escaped>'`
-clause per keyword, orders by descending `e.id` (newest first — UUID-v7
-ids are time-prefixed, so descending lex-sort is the same as
-newest-by-creation), and caps the result at `limit`. No reliance on
-`temporal_index` is required for the ordering. Matching is case-insensitive
-on **both** sides: the keyword is lowercased before being escaped, and
-`toLower(e.content)` lowercases the stored content at query time so that
-existing verbatim (mixed-case) episodes match without any write-path change
-or data migration — see [Case-insensitive matching](#case-insensitive-matching-issue-2299).
+`LibraryCognitiveMemory` overrides the trait method by fetching library episodes,
+lowercasing each keyword, filtering episode content with case-insensitive
+`content.contains`, and capping the result at `limit`. The library returns
+newest-first by temporal index, so the observable ordering remains newest-first.
+Existing verbatim (mixed-case) episodes match without any write-path change or
+data migration — see [Case-insensitive matching](#case-insensitive-matching-issue-2299).
 
 ### Why keyword overlap, not embeddings
 
@@ -194,12 +189,10 @@ candidate window and filtering case-insensitively in Rust with
 query-time only and therefore both fix existing stored data identically; the
 observable contract (below) is the same regardless of which is used.
 
-> **Implementation note:** the in-code doc comments on the trait method
-> (`src/cognitive_memory/mod.rs`) and the native implementation
-> (`src/cognitive_memory/ops.rs`) are updated in the same change to describe
-> the case-insensitive `toLower(...) CONTAINS` comparison, replacing the
-> previous case-sensitive `e.content CONTAINS` wording so the code and this
-> reference agree.
+> **Historical implementation note:** before #2307, the native fork used a
+> Cypher `toLower(...) CONTAINS` query here. The current library adapter performs
+> the same case-insensitive contract in Rust after fetching episodes from the
+> library; the observable behavior remains the contract below.
 
 ### Contract
 
@@ -474,10 +467,10 @@ case-folded.
 
 ## Testing
 
-### Re-validation on the library backend (de-fork Phase 2b, #2308)
+### Re-validation on the library backend (de-fork Phase 2b, #2307)
 
 The native `ops.rs` and its #2299 trait-level tests were **deleted** by the
-de-fork (#2308). The fix now lives query-side in
+de-fork (#2307). The fix now lives query-side in
 [`LibraryCognitiveMemory::search_episodes_by_keywords`](../architecture/cognitive-memory-library-adapter.md),
 which lowercases both the stored episode `content` and every keyword before a
 Rust-side substring match — so existing verbatim-stored episodes match
