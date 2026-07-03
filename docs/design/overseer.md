@@ -355,7 +355,7 @@ This design has been reconciled against the code at HEAD before implementation.
 The `src/overseer/` scaffolding matches the [Rust sketch](#rust-sketch) table
 exactly (five modules, wired additively at `src/lib.rs:104`, `#![allow(dead_code)]`,
 **not** reachable from `main`), and every reuse target in the
-[capability map](#capability--action-set--existing-simard-modules) was verified to
+[capability map](#capability-action-set-existing-simard-modules) was verified to
 resolve to a real symbol. The ledger below is the authoritative reference the M1+
 implementation follows — it replaces "trust the citations" with "citations verified".
 
