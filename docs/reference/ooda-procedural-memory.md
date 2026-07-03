@@ -1,8 +1,8 @@
 ---
 title: OODA procedural memory
 description: How the OODA cycle stores successful action outcomes as procedural memories, enabling Simard to recall what worked in past cycles during future preparation phases.
-last_updated: 2026-06-12
-owner: simard
+last_updated: 2026-07-03
+owner: cognitive-memory
 doc_type: reference
 related:
   - ../architecture/cognitive-memory.md
@@ -19,13 +19,13 @@ related:
 
 # OODA procedural memory
 
-> **De-fork Phase 2b.** The store/recall *behavior* described here is
-> preserved: `store_procedure` and `recall_procedure` are reached through the
-> `CognitiveMemoryOps` trait, now backed solely by `LibraryCognitiveMemory`
-> over `amplihack-memory-lib`. The implementation citations on this page —
-> `src/cognitive_memory/ops.rs` (`NativeCognitiveMemory`) and tests that
-> exercise `NativeCognitiveMemory` directly — were **deleted** with the fork;
-> treat those code citations as historical. See
+> **De-fork Phase 2b (#2307).** The store/recall *behavior* described here
+> is preserved: `store_procedure` and `recall_procedure` are reached through the
+> `CognitiveMemoryOps` trait, now backed solely by `LibraryCognitiveMemory` over
+> the external `amplihack-memory` library. Implementation citations to
+> `src/cognitive_memory/ops.rs` (`NativeCognitiveMemory`) and tests that exercised
+> `NativeCognitiveMemory` directly were deleted with the fork; treat those code
+> citations as historical. See
 > [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md).
 
 Shipped in issue [#2280](https://github.com/rysweet/Simard/issues/2280).
@@ -215,8 +215,8 @@ approaches when selecting actions for the current cycle.
 |------|------|
 | Procedural storage loop | `src/ooda_loop/cycle.rs` (after `execution_memory_operations` loop) |
 | `store_procedure` trait method | `src/cognitive_memory/mod.rs` (`CognitiveMemoryOps`) |
-| `store_procedure` implementation | `src/cognitive_memory/ops.rs` (`NativeCognitiveMemory`) |
-| `recall_procedure` implementation | `src/cognitive_memory/ops.rs` (`NativeCognitiveMemory`) |
+| `store_procedure` implementation | `src/cognitive_memory/library_adapter.rs` (`LibraryCognitiveMemory`) |
+| `recall_procedure` implementation | `src/cognitive_memory/library_adapter.rs` (`LibraryCognitiveMemory`) |
 | `ActionOutcome` / `ActionKind` types | `src/ooda_loop/types.rs` |
 | Mock handlers | `tests/ooda.rs`, `tests/ooda_daemon.rs`, `tests/memory_consolidation_lifecycle.rs` |
 
@@ -229,7 +229,7 @@ approaches when selecting actions for the current cycle.
 `successful_outcome_stores_procedural_memory` in the OODA test suite
 verifies that after a cycle containing a successful outcome, the mock
 transport receives a `memory.store_procedure` call (or when using
-`NativeCognitiveMemory` directly, that `get_statistics().procedural_count`
+`LibraryCognitiveMemory` directly, that `get_statistics().procedural_count`
 increases).
 
 ### Mock transport handler

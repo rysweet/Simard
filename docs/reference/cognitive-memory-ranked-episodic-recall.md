@@ -1,7 +1,7 @@
 ---
 title: Ranked episodic recall & memory reinforcement
 description: How OODA preparation recalls past episodes with the library's multi-signal ranked recall (relevance + confidence + importance + recency + usage + graph) instead of a flat keyword scan, how compressed consolidation sources stay recallable through a UNION backfill, and how a usage/recency reinforcement seam (`reinforce_access`) plus `CognitiveFact` usage counters record accesses at the point recalled memories are surfaced into a cycle — not while candidates are merely gathered (per-action attribution remains a future refinement).
-last_updated: 2026-06-23
+last_updated: 2026-07-03
 owner: simard
 doc_type: reference
 related:
@@ -54,13 +54,14 @@ closes both:
    refinement (see
    [Memory reinforcement](#memory-reinforcement-usagerecency-learning)).
 
-The library dependency rev is unchanged (`285de92`, `lbug = "=0.15.4"`,
+As of issue #2395 the library dependency rev was unchanged (`285de92`, `lbug = "=0.15.4"`,
 `features = ["persistent"]`); both capabilities were already present in the
-library and are simply wired through the `CognitiveMemoryOps` trait. There is
+library and are simply wired through the `CognitiveMemoryOps` trait. That change made
 **no** `Cargo.toml` change and **no** on-disk store-format change. (The #2329
-fact-recall doc was written against an earlier pin, `e3ea136`; #2395 reflects the
-current `285de92` rev — the ranked-recall and `record_access` APIs are present in
-both.)
+fact-recall doc was written against an earlier pin, `e3ea136`; #2395 reflected
+`285de92` — the ranked-recall and `record_access` APIs are present in
+both.) The pin has since advanced to `26d49bf8` (`lbug = "=0.17.1"`) in the
+de-fork Phase 2b ([#2307](https://github.com/rysweet/Simard/issues/2307)).
 
 ---
 

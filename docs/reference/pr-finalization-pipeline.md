@@ -88,7 +88,7 @@ until crusty is satisfied or the cap is reached.
 | **Model** | A **high-end reasoning model**, pinned explicitly (the engineer itself runs the Copilot CLI default/auto model, so crusty is invoked through a `copilot --model "$SIMARD_REVIEW_MODEL" --reasoning-effort high --context long_context` subprocess to force the high-end model at **high** reasoning effort over the **1M-token** context tier). Default `gpt-5.5`; see [Configuration](#configuration). |
 | **Per-iteration input** | The **latest** PR state — the engineer re-fetches the current diff each iteration (`gh pr diff <PR>`); it never re-reviews a stale diff. |
 | **Fix discipline** | Every **actionable / blocking** finding is fixed in code and pushed to the **same PR branch** before the next review. |
-| **Termination** | Crusty reports **no blocking/actionable findings** (satisfied), OR the iteration cap is reached. See [Bounded loop & blocker semantics](#bounded-loop--blocker-semantics). |
+| **Termination** | Crusty reports **no blocking/actionable findings** (satisfied), OR the iteration cap is reached. See [Bounded loop & blocker semantics](#bounded-loop-blocker-semantics). |
 | **Satisfied signal** | A **structural sentinel** verdict (the review's first output line is exactly `NO BLOCKING FINDINGS`) gates "satisfied" — not free-text — so a chatty review cannot accidentally pass the gate. |
 
 Each iteration is, in order: **re-fetch latest diff → crusty review on the

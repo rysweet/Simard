@@ -8,9 +8,9 @@ description: >
   cognitive_memory serial key, a regression-guard meta-test enforces it, and the
   rule is documented at the HermeticState source. Extending enforcement to every
   process-global variable is tracked follow-up (issue #2375).
-last_updated: 2026-06-22
+last_updated: 2026-07-03
 review_schedule: when a new process-global env var is read by a production handler, or when serial_test is upgraded
-owner: simard
+owner: cognitive-memory
 doc_type: reference
 related:
   - ./hermetic-tests.md
@@ -175,14 +175,17 @@ if**, at run time, it does any of:
   env, directly or via `resolve_state_root()` / `memory_ipc::socket_path_for`
   default resolution.
 - **(D)** Opens cognitive memory at the **env-derived default path**
-  (`NativeCognitiveMemory::open`, `LibraryCognitiveMemory::open`,
-  `CognitiveMemoryBridge`, `open_native`, `launch_writer_bridge` against a path
-  obtained from the global env) **or** invokes one of the **async dashboard
-  route handlers** that resolve the state root internally via
-  `resolve_state_root()` — `seed_goals`, `add_goal`, `remove_goal`,
-  `update_goal_status`, `promote_backlog_item`, `demote_goal`, and the
-  goal/board snapshot route (all `async fn … -> Json<Value>` in
+  (`LibraryCognitiveMemory::open`, `CognitiveMemoryBridge`, `open_native`,
+  `launch_writer_bridge` against a path obtained from the global env) **or**
+  invokes one of the **async dashboard route handlers** that resolve the state
+  root internally via `resolve_state_root()` — `seed_goals`, `add_goal`,
+  `remove_goal`, `update_goal_status`, `promote_backlog_item`, `demote_goal`,
+  and the goal/board snapshot route (all `async fn … -> Json<Value>` in
   `operator_commands_dashboard/goals.rs`).
+
+  > **Historical note (#2307):** pre-de-fork native-fork tests that used
+  > `NativeCognitiveMemory::open` belong to the same env-derived-path class, but
+  > that symbol is deleted and is no longer a current API.
 
   > **Not rule (D):** `dashboard_goal_board_snapshot(state_root)`,
   > `dashboard_save_goal_board(state_root, board)`, `save_goal_board(board, bridge)`,
