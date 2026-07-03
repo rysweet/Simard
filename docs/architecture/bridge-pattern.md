@@ -1,7 +1,7 @@
 ---
 title: Bridge Pattern
 description: How Simard's bridge infrastructure provides typed interfaces for knowledge and gym services, using native Rust transports with circuit breaker fault tolerance.
-last_updated: 2026-06-02
+last_updated: 2026-07-03
 owner: simard
 doc_type: concept
 ---
@@ -138,10 +138,23 @@ The built-in `bridge.health` method is always registered and returns `{"server_n
 
 ### Data Loss Prevention
 
-- Memory writes are idempotent (LadybugDB `node_id` is primary key)
-- Python bridge wraps each write in a LadybugDB transaction
-- If bridge dies mid-write, the transaction rolls back
-- On reconnect, Simard re-issues the last failed write
+Cognitive-memory writes no longer flow through a `BridgeTransport`. Since the
+de-fork (Phase 2b, issue #2307) they go directly through the in-process
+[`LibraryCognitiveMemory`](cognitive-memory-library-adapter.md) adapter over
+`amplihack-memory-lib`:
+
+- Writes are idempotent — each fact, episode, or procedure is keyed by its
+  LadybugDB `node_id`, so a replayed write reinforces the existing node rather
+  than duplicating it (the *upsert-that-reinforces* contract; see
+  [Procedural Idempotency](../reference/cognitive-memory-procedural-idempotency.md)).
+- Concurrent writers are serialized through a single-writer IPC guard
+  (`memory_ipc::launcher::launch_writer_bridge`), so parallel Simard processes
+  cannot interleave writes to the same store.
+- Durability and recovery are provided by verified backups in the
+  `memory_backup` module (`backup_memory_verified`, `verify_backup`,
+  `restore_from_backup`) rather than by transport-level transaction replay —
+  see [Verified Backups](../operations/verified-backups.md) and
+  [Cognitive-Memory Durability](../operations/cognitive-memory-durability.md).
 
 ## Testing
 

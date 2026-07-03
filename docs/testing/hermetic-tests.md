@@ -1,9 +1,9 @@
 ---
 title: Writing hermetic tests against cognitive memory
 description: Test-author contract for the SIMARD_STATE_ROOT / SIMARD_MEMORY_SOCKET hermeticity guard, the helper APIs that satisfy it, and the regression check that prevents leaks into ~/.simard.
-last_updated: 2026-05-19
+last_updated: 2026-07-03
 review_schedule: at every cognitive-memory schema or socket-path change
-owner: simard
+owner: cognitive-memory
 doc_type: reference
 related:
   - ./cognitive-memory-serial-isolation.md
@@ -112,19 +112,18 @@ intentionally verbose because a tripped guard always indicates the test
 needs a code change — there is no scenario in which retrying or
 ignoring it is correct.
 
-> **De-fork Phase 2b.** The per-method `NativeCognitiveMemory::assert_hermetic_for`
-> guard described below was deleted with the native fork (the `ops.rs` it lived in
-> no longer exists). The library backend (`LibraryCognitiveMemory`) has no
-> per-op hermetic guard: production callers pass a correct `state_root`, tests
-> always pass a `TempDir`, and the remaining enforcement points (the bridge
-> launcher guard and the non-cognitive-memory sites listed below) still apply.
-> The risk the per-op guard mitigated — the native backend writing to the live
-> home store — no longer exists on the library path. The table below is archival.
+> **De-fork Phase 2b (#2307).** The per-method
+> `NativeCognitiveMemory::assert_hermetic_for` symbol described below was deleted
+> with the native fork (the `ops.rs` it lived in no longer exists). Current
+> hermetic enforcement is backend-agnostic: tests allocate isolated state through
+> `HermeticState`, serialize process-global env access with the
+> `cognitive_memory` key, the bridge launcher checks explicit state roots, and
+> `LibraryCognitiveMemory` runs a `cfg(test)` lock-write guard for persistent
+> test stores. The table below is archival history for the removed native symbol.
 
-The guard ran via a `cfg(test)`-only helper
+Before #2307, the native fork ran a `cfg(test)`-only helper
 `NativeCognitiveMemory::assert_hermetic_for(site)` at the top of every
-mutating `CognitiveMemoryOps` method on the native backend. The nine
-guarded cognitive-memory entry points were:
+mutating `CognitiveMemoryOps` method. The nine archived native guard sites were:
 
 | # | Method                | Guard site string |
 |---|----------------------|-------------------|
@@ -146,8 +145,9 @@ Additional enforcement points outside cognitive memory:
 - `memory_ipc::launcher::launch_writer_bridge` (immediately before
   returning a writer bridge, regardless of which tier was selected).
 
-Multiple independent enforcement points means deleting one of them does
-not silently disable the guard — at least one will still fire.
+Current enforcement remains multi-site: `HermeticState`/serial isolation cover
+test setup, the launcher covers bridge acquisition, and the library adapter's
+`cfg(test)` lock-write guard covers persistent library-backed writes.
 
 ## Helpers that satisfy the contract
 

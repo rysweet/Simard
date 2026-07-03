@@ -21,7 +21,6 @@ theme:
         name: Switch to dark mode
   features:
     - navigation.sections
-    - navigation.expand
     - navigation.top
     - search.highlight
     - content.code.copy
@@ -42,8 +41,24 @@ markdown_extensions:
   - toc:
       permalink: true
 
+# Discoverability & link-integrity gate (mkdocs-native; enforced under --strict).
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  nav:
+    omitted_files: warn        # every docs/*.md must appear in nav (0 orphans)
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    anchors: warn              # catch dead #anchors across pages
+    absolute_links: warn
+    unrecognized_links: warn
+
 nav:
   - Home: index.md
+  - What's Changed: whats-changed.md
   - Roadmap: ROADMAP.md
   - Daemon mode: daemon-mode.md
   - Memory architecture: memory.md
@@ -51,99 +66,214 @@ nav:
   - Distributed operations: distributed-operations.md
   - Architecture:
     - Overview: architecture/overview.md
+    - Simard System Architecture: architecture/system-architecture.md
     - Bridge Pattern: architecture/bridge-pattern.md
+    - Agent Composition: architecture/agent-composition.md
+    - Engineer-Loop Agent Orchestration: architecture/engineer-agent-orchestration.md
     - Cognitive Memory: architecture/cognitive-memory.md
     - Cognitive Memory — Library Adapter: architecture/cognitive-memory-library-adapter.md
     - Episode Ingestion Policy & Promotion: architecture/episode-ingestion-policy.md
+    - Episode Distillation: architecture/episode-distillation.md
     - Gym Eval Engine — Library Adapter: architecture/gym-eval-library-adapter.md
-    - Agent Composition: architecture/agent-composition.md
-    - Implementation Plan: architecture/implementation-plan.md
+    - Unified Meeting Backend: architecture/unified-meeting-backend.md
+    - OODA Meeting-Handoff Integration: architecture/ooda-meeting-handoff-integration.md
     - Brain Introspection + Memory Hygiene: architecture/brain-introspection.md
     - Monthly Self-Quality-Audit: architecture/monthly-self-quality-audit.md
+    - Implementation Plan: architecture/implementation-plan.md
   - Concepts:
-    - Truthful Runtime Metadata: concepts/truthful-runtime-metadata.md
-    - Prompt-driven Brain Iteration: concepts/prompt-driven-brain-iteration.md
-    - Improvement context — denser execution evidence: concepts/improvement-context-execution-evidence-gap.md
+    - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
     - OODA Loop Self-Detection: concepts/ooda-loop-self-detection.md
+    - Unified RecipeBrain: concepts/unified-recipe-brain.md
+    - Prompt-Driven OODA Brain: concepts/prompt-driven-ooda-brain.md
+    - Prompt-Driven Brain Iteration: concepts/prompt-driven-brain-iteration.md
+    - Text-Based Brain Protocol: concepts/text-based-brain-protocol.md
+    - Prompt-Driven TDD Discipline: concepts/prompt-driven-tdd-discipline.md
+    - Truthful Runtime Metadata: concepts/truthful-runtime-metadata.md
+    - Trustworthy Confidence + External Completion: concepts/trustworthy-confidence-and-external-completion.md
+    - Progress-Evidence Gating: concepts/progress-evidence-gating.md
+    - Improvement Context — Execution-Evidence Gap: concepts/improvement-context-execution-evidence-gap.md
+    - Closing the Procedural-Learning Loop: concepts/procedural-learning-loop.md
     - Reconcile-and-Self-Deploy: concepts/reconcile-and-self-deploy.md
     - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
-    - Operational Autonomy Model: concepts/operational-autonomy-model.md
-    - Closing the Procedural-Learning Loop: concepts/procedural-learning-loop.md
-    - Trustworthy Confidence + External Completion: concepts/trustworthy-confidence-and-external-completion.md
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
+    - Goal-Board Persistence: concepts/goal-board-persistence.md
+    - Goal-Board Corruption Guards: concepts/goal-board-corruption-guards.md
+    - File-Backed Goal-Store Simplification: concepts/file-backed-goal-store-simplification.md
+    - Goal-Fact Dedup in Preparation: concepts/goal-fact-dedup-in-preparation.md
+    - Compound-Objective Search in Preparation: concepts/preparation-compound-objective-search.md
+    - Goal Stewardship Mode: concepts/stewardship-mode.md
+    - Automated Disk-Health Management: concepts/automated-disk-health.md
+    - Update-Check Design: concepts/update-check-design.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
   - How-To Guides:
     - Terminal to Engineer: howto/move-from-terminal-recipes-into-engineer-runs.md
+    - Use the Agent-Orchestration Engineer Loop: howto/use-agent-orchestration-engineer-loop.md
     - Bootstrap and Reflection: howto/configure-bootstrap-and-inspect-reflection.md
-    - Carry Meeting Decisions: howto/carry-meeting-decisions-into-engineer-sessions.md
-    - Inspect Meeting Records: howto/inspect-meeting-records.md
-    - Inspect Improvements: howto/inspect-improvement-curation-state.md
-    - Reclaim Disk Space: howto/reclaim-disk-space-and-run-low-space-rust-builds.md
-    - Inspect Goal Register: howto/inspect-durable-goal-register.md
-    - Configure Adaptive Scaling: howto/configure-adaptive-scaling.md
-    - Troubleshoot Goal Store: howto/troubleshoot-goal-store.md
-    - Recover from Meeting Close Timeout: howto/recover-from-meeting-close-timeout.md
-    - Configure Pluggable Identity: howto/configure-pluggable-identity.md
-    - Configure Episode Hygiene and Promotion: howto/configure-episode-hygiene-and-promotion.md
-    - Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
-    - Route a Goal to its Target Repo: howto/route-a-goal-to-its-target-repo.md
-    - Self-Maintain Dependency Pins: howto/self-maintain-dependency-pins.md
-    - Verify and Roll Back a Self-Deploy: howto/verify-and-roll-back-a-self-deploy.md
-    - Run Self-Deploy from Any Directory: howto/run-self-deploy-from-any-directory.md
-    - Diagnose a Rejected Goal Completion: howto/diagnose-a-rejected-goal-completion.md
+    - Attach to a Running Engineer: howto/attach-to-a-running-engineer.md
+    - Inspect and Clean Engineer Worktrees: howto/inspect-and-clean-engineer-worktrees.md
+    - Grant Engineer Write Permissions: howto/grant-engineer-write-permissions.md
+    - Edit the Engineer System Prompt: howto/edit-the-engineer-system-prompt.md
+    - Run the OODA Daemon: howto/run-ooda-daemon.md
+    - Spawn Engineers from the OODA Daemon: howto/spawn-engineers-from-ooda-daemon.md
+    - Unblock Stuck OODA Goals: howto/unblock-stuck-ooda-goals.md
+    - Add a New Recipe-Brain Phase: howto/add-a-new-recipe-brain-phase.md
+    - Edit the OODA Brain Prompt: howto/edit-the-ooda-brain-prompt.md
+    - Diagnose Brain Decision Parse Failures: howto/diagnose-brain-decision-parse-failures.md
+    - Diagnose Decide/Orient Parse Failures: howto/diagnose-decide-orient-parse-failures.md
     - Interpret Brain Confidence and Verify Completion: howto/interpret-brain-confidence-and-verify-completion.md
     - Configure Brain Introspection: howto/configure-brain-introspection.md
+    - Start a Meeting: howto/start-a-meeting.md
+    - Resume an Interrupted Meeting: howto/resume-an-interrupted-meeting.md
+    - Recover from Meeting-Close Timeout: howto/recover-from-meeting-close-timeout.md
+    - Use Meeting Templates: howto/use-meeting-templates.md
+    - Export Meeting Markdown: howto/export-meeting-markdown.md
+    - Inspect Meeting Records: howto/inspect-meeting-records.md
+    - Carry Meeting Decisions: howto/carry-meeting-decisions-into-engineer-sessions.md
+    - Diagnose Handoff Accumulation: howto/diagnose-handoff-accumulation.md
+    - Inspect the Durable Goal Register: howto/inspect-durable-goal-register.md
+    - Decompose a Large Goal: howto/decompose-a-large-goal.md
+    - Route a Goal to its Target Repo: howto/route-a-goal-to-its-target-repo.md
+    - Diagnose a Rejected Goal Completion: howto/diagnose-a-rejected-goal-completion.md
+    - Diagnose Rejected Progress Claims: howto/diagnose-rejected-progress-claims.md
+    - Diagnose search_facts Issues: howto/diagnose-search-facts-issues.md
+    - Reconcile Goal–Prospective Drift: howto/reconcile-goal-prospective-drift.md
+    - Recover the Goal Board: howto/recover-goal-board.md
+    - Troubleshoot Goal Store: howto/troubleshoot-goal-store.md
+    - Clean Fixture Leaks: howto/clean-fixture-leaks.md
+    - Verify and Roll Back a Self-Deploy: howto/verify-and-roll-back-a-self-deploy.md
+    - Run Self-Deploy from Any Directory: howto/run-self-deploy-from-any-directory.md
+    - Check for Updates: howto/check-for-updates.md
+    - Self-Maintain Dependency Pins: howto/self-maintain-dependency-pins.md
+    - Configure Adaptive Scaling: howto/configure-adaptive-scaling.md
+    - Configure Pluggable Identity: howto/configure-pluggable-identity.md
+    - Configure Episode Hygiene and Promotion: howto/configure-episode-hygiene-and-promotion.md
+    - Inspect Improvement Curation State: howto/inspect-improvement-curation-state.md
+    - Inspect the Procedural-Learning Loop: howto/inspect-the-procedural-learning-loop.md
+    - File Stewardship Issues from Orchestrator Runs: howto/file-stewardship-issues-from-orchestrator-runs.md
     - Configure the Monthly Self-Quality-Audit: howto/configure-self-quality-audit.md
+    - Configure the Disk-Health Check: howto/configure-disk-health-check.md
+    - Reclaim Disk Space (Low-Space Rust Builds): howto/reclaim-disk-space-and-run-low-space-rust-builds.md
+    - Fix CI Linker OOM: howto/fix-ci-linker-oom.md
     - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
     - Diagnose merge-pr Verdict-Parse Failures: howto/diagnose-merge-pr-verdict-parse-failures.md
-    - Inspect the Procedural-Learning Loop: howto/inspect-the-procedural-learning-loop.md
+    - Monitor Simard with the TUI: howto/monitor-simard-with-tui.md
+    - View Agent Terminal Logs: howto/view-agent-terminal-logs.md
+    - Run Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
     - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
+    - simard-engineer-step CLI: reference/simard-engineer-step.md
+    - simard-tui Dashboard: reference/simard-tui.md
+    - npx / npm Install: reference/npx-npm-install.md
+    - Update Check: reference/update-check.md
+    - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
-    - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
-    - Trustworthy-Confidence API: reference/trustworthy-confidence-api.md
-    - External-Signal Completion Gate: reference/external-signal-completion-gate.md
-    - Memory introspection CLI: reference/simard-memory-cli.md
-    - Cognitive-memory provenance (DERIVES_FROM): reference/cognitive-memory-provenance.md
+    - State-Root Resolution: reference/state-root-resolution.md
+    - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
+    - Runtime Contracts: reference/runtime-contracts.md
+    - Subprocess Prompt Delivery: prompt-delivery.md
+    - Bridge Wire Protocol: reference/bridge-wire-protocol.md
+    - Text-Parsing Wire Formats: reference/text-parsing-wire-formats.md
+    - Recipe Context-Var Sanitization: reference/recipe-context-var-sanitization.md
+    - Engineer-Loop argv Sanitization: reference/engineer-loop-argv-sanitization.md
+    - String-Truncation Helpers: reference/string-truncation-helpers.md
+    - RecipeBrain API: reference/recipe-brain-api.md
+    - OodaBrain API: reference/ooda-brain-api.md
+    - OODA Brain Decision Protocol: reference/ooda-brain-decision-protocol.md
+    - OODA Brain Parse-Failure Record: reference/ooda-brain-parse-failure-record.md
+    - OODA Brain Prompt Schema: reference/ooda-brain-prompt.md
+    - OODA Decide Prompt Schema: reference/ooda-decide-prompt.md
+    - OODA Orient Prompt Schema: reference/ooda-orient-prompt.md
+    - OODA Orient Recipe: reference/ooda-orient-recipe.md
+    - OODA Engineer-Lifecycle Recipe: reference/ooda-engineer-lifecycle-recipe.md
+    - OODA Procedural Memory: reference/ooda-procedural-memory.md
+    - Recipe-Brain Verdict/Decision Parsing: reference/recipe-brain-verdict-parsing.md
+    - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
+    - Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
+    - Base-Type Adapters: reference/base-type-adapters.md
+    - Memory Introspection CLI: reference/simard-memory-cli.md
+    - Cognitive-Memory Provenance (DERIVES_FROM): reference/cognitive-memory-provenance.md
+    - Cognitive-Memory Bootstrap Procedures: reference/cognitive-memory-bootstrap-procedures.md
+    - Cognitive-Memory Bridge Helpers: reference/cognitive-memory-bridge-helpers.md
+    - Cognitive-Memory Preparation Filters: reference/cognitive-memory-preparation-filters.md
+    - Cognitive-Memory Fact Recall: reference/cognitive-memory-fact-recall.md
+    - Cognitive-Memory Ranked Recall: reference/cognitive-memory-ranked-recall.md
+    - Cognitive-Memory Episodic Recall: reference/cognitive-memory-episodic-recall.md
+    - Cognitive-Memory Ranked Episodic Recall: reference/cognitive-memory-ranked-episodic-recall.md
+    - Cognitive-Memory Procedural Idempotency: reference/cognitive-memory-procedural-idempotency.md
+    - Cognitive-Memory Goal Store (superseded): reference/cognitive-memory-goal-store.md
+    - Backup-Pruning API: reference/backup-pruning-api.md
     - Episode Ingestion Classifier API: reference/episode-ingestion-classifier.md
     - Automatic Distillation Scheduler API: reference/automatic-distillation-scheduler.md
     - Procedural-Learning Loop API: reference/procedural-learning-loop.md
-    - Goal-board prospective reconcile: reference/goal-board-prospective-reconcile.md
-    - Runtime Contracts: reference/runtime-contracts.md
-    - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
-    - Bridge Wire Protocol: reference/bridge-wire-protocol.md
-    - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
-    - Recipe Context Var Sanitization: reference/recipe-context-var-sanitization.md
-    - File-backed Goal Store: reference/file-backed-goal-store.md
-    - Adaptive Scaling API: reference/adaptive-scaling-api.md
+    - Prospective-Trigger Firing: reference/prospective-trigger-firing.md
+    - Goal-Board Prospective Reconcile: reference/goal-board-prospective-reconcile.md
+    - Goal–Prospective Memory Mirror: reference/goal-prospective-memory-mirror.md
+    - File-Backed Goal Store: reference/file-backed-goal-store.md
+    - Goal-Board API: reference/goal-board-api.md
+    - Goal-Board Corruption-Guard API: reference/goal-board-corruption-guard-api.md
+    - Goal Decomposition & Goal Graph: reference/goal-decomposition.md
     - Goal Target-Repo Routing: reference/goal-target-repo-routing.md
     - Goal Coverage Allocation: reference/goal-coverage-allocation.md
+    - spawn_agent_for_goal API: reference/spawn-agent-for-goal.md
+    - Stewardship API: reference/stewardship-api.md
     - Maximum Safe Parallelism: reference/maximum-safe-parallelism.md
     - Concurrent Engineer Dispatch: reference/concurrent-engineer-dispatch.md
+    - Engineer Copilot Permissions: reference/engineer-copilot-permissions.md
+    - Engineer Worktree Isolation: reference/engineer-worktree-isolation.md
+    - Subagent Tmux Tracking: reference/subagent-tmux-tracking.md
+    - Terminal Session Idle Detection: reference/terminal-session-idle-detection.md
+    - Agent-Log WebSocket API: reference/agent-log-websocket.md
     - PR-Finalization Review Pipeline: reference/pr-finalization-pipeline.md
     - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md
-    - Pluggable Identity API: reference/pluggable-identity-api.md
+    - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
+    - Progress-Evidence API: reference/progress-evidence-api.md
+    - Trustworthy-Confidence API: reference/trustworthy-confidence-api.md
+    - External-Signal Completion Gate: reference/external-signal-completion-gate.md
+    - Meeting Backend API: reference/meeting-backend-api.md
+    - LightweightChatSession: reference/lightweight-chat-session.md
+    - Copilot Meeting Mode: reference/copilot-meeting-mode.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
-    - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
+    - Meeting Handoff Schema: reference/meeting-handoff-schema.md
+    - Handoff Lifecycle API: reference/handoff-lifecycle-api.md
+    - Pluggable Identity API: reference/pluggable-identity-api.md
+    - Adaptive Scaling API: reference/adaptive-scaling-api.md
     - Brain Introspection API: reference/brain-introspection-api.md
     - Self-Quality-Audit API: reference/self-quality-audit-api.md
+    - Disk-Health API: reference/disk-health-api.md
+    - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
     - Dashboard Action-Detail Humanization: reference/dashboard-action-detail-humanization.md
+    - Azlin Hosts Self-Membership: reference/azlin-hosts-self-membership.md
+    - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     - Supply-Chain Audit & Guardrails: reference/supply-chain-audit.md
     - Dependency Trust Policy: reference/dependency-trust-policy.md
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
-    - Recipe-brain Verdict/Decision Parsing: reference/recipe-brain-verdict-parsing.md
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md
-    - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
-    # Hidden from nav until issue #1590 implementation lands:
-    #   - reference/cognitive-memory-bridge-helpers.md
-    #   - reference/goal-board-api.md
-    #   - concepts/goal-board-persistence.md (rewritten as spec)
-    #   - howto/recover-goal-board.md (rewritten as spec)
-    #   - howto/clean-fixture-leaks.md (#1923 / #1925 — graduates with the rest)
-    #   - testing/hermetic-tests.md (#1923 / #1925 — graduates with the rest)
+  - Operations:
+    - Overview: operations/index.md
+    - Verified Backups of the Live Store: operations/verified-backups.md
+    - Cognitive-Memory Durability: operations/cognitive-memory-durability.md
+    - Meeting REPL & Handoff Ingestion: operations/meeting-handoffs.md
+    - Progress-Evidence Kill Switch: operations/progress-evidence-kill-switch.md
+    - Safe Self-Update: safe-self-update.md
+    - Pre-Commit Setup: operations/pre-commit-setup.md
+  - Operator Dashboard:
+    - Azlin Tmux Sessions Panel: operator-dashboard/azlin-tmux-sessions.md
+    - Event-Bus Stats in Cluster Topology: operator-dashboard/event-bus-stats.md
+    - Hive Event Bus: hive_event_bus/README.md
+  - Testing:
+    - Test-Coverage Baseline: testing/COVERAGE_BASELINE.md
+    - CI-Resilient Test Patterns: testing/ci-resilient-test-patterns.md
+    - Writing Hermetic Tests: testing/hermetic-tests.md
+    - serial(cognitive_memory) Isolation: testing/cognitive-memory-serial-isolation.md
+    - De-Flaking Known Flaky Tests: testing/deflaking-known-flaky-tests.md
+  - Ecosystem & Audits:
+    - Amplihack Ecosystem Map: ecosystem-map.md
+    - amplihack-rs ↔ amplihack Parity Matrix: amplihack-rs-parity.md
+    - amplihack String Audit: amplihack-string-audit.md
+    - Fail-Open Audit: fail-open-audit.md

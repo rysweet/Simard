@@ -155,7 +155,7 @@ the order matters:
 - **`invoke_recipe` checks the process exit code first.** A failed run exits
   non-zero, so `invoke_recipe` returns `Err` *before the parser ever sees the
   envelope*. This is the path that actually fires in production — see
-  [Example 2](#example-2--failed-recipe-run), whose log line is
+  [Example 2](#example-2-failed-recipe-run), whose log line is
   `recipe exited with status 1`.
 - **The parser's `success == false` guard is defense-in-depth.** Because the
   exit-code guard fires first, the parser's check is effectively unreachable

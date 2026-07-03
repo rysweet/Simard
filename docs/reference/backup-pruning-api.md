@@ -1,8 +1,8 @@
 ---
 title: Backup pruning API
-description: Reference for retention-limited cleanup of cognitive memory backup files. The native epoch-based pruner was removed in de-fork Phase 2b; the surviving pruner is the date-based memory_backup/ module.
-last_updated: 2026-06-19
-owner: simard
+description: Reference for pruning verified cognitive-memory backup directories through the current memory_backup module.
+last_updated: 2026-07-03
+owner: cognitive-memory
 doc_type: reference
 related:
   - ../operations/cognitive-memory-durability.md
@@ -13,183 +13,102 @@ related:
 
 # Backup pruning API
 
-> **De-fork Phase 2b.** The epoch-based pruner documented here lived in the
-> native `src/cognitive_memory/backup.rs` module, which was **deleted** along
-> with `NativeCognitiveMemory`. The library backend owns its own durability and
-> emits no `cognitive_memory.ladybug.<epoch>` files, so there is nothing for this
-> pruner to clean. The **surviving** backup pruner is the date-based
-> `prune_old_backups()` in `src/memory_backup/mod.rs` (using `BackupConfig`),
-> which operates through the `CognitiveMemoryOps` trait on file-level snapshots.
-> The remainder of this page is archival: it documents the removed native API.
-
-**Module (removed in Phase 2b):** `src/cognitive_memory/backup.rs`
-
-The `NativeCognitiveMemory::prune_old_backups()` method enforced a
-retention limit on cognitive memory backup files, preventing unbounded
-disk growth in the `backups/` subdirectory of the state root.
-
-> **Surviving implementation:** the date-based `prune_old_backups()` in
-> `src/memory_backup/mod.rs` (using `BackupConfig`) remains the cognitive-memory
-> backup pruner after Phase 2b.
-
----
-
-## Background
-
-Simard creates epoch-timestamped backup files (e.g.,
-`cognitive_memory.ladybug.1718164068`) during cognitive memory
-operations. Over long-running sessions, these accumulate without bound.
-Before issue [#2270](https://github.com/rysweet/Simard/issues/2270),
-there was no automatic cleanup — operators had to manually prune old
-backups or rely on the disk health recipe to reclaim space reactively.
+> **Current API after de-fork #2307.** The native epoch-file pruner
+> `NativeCognitiveMemory::prune_old_backups` was deleted with the native fork.
+> Current pruning is the free function `memory_backup::prune_old_backups` in
+> `src/memory_backup/mod.rs`, operating on verified backup directories described
+> by `BackupConfig`.
 
 ---
 
 ## Public API
 
-### `NativeCognitiveMemory::prune_old_backups()`
-
 ```rust
-pub fn prune_old_backups(state_root: &Path, keep: usize) -> PruneOutcome
-```
+pub fn prune_old_backups(config: &BackupConfig) -> SimardResult<usize>;
 
-**Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `state_root` | `&Path` | Root directory (e.g., `~/.simard/`); backups live in `{state_root}/backups/` |
-| `keep` | `usize` | Number of newest backups to retain |
-
-**Return type:**
-
-```rust
-pub struct PruneOutcome {
-    pub removed: usize,
-    pub failed: Vec<(PathBuf, std::io::Error)>,
+pub struct BackupConfig {
+    pub backup_dir: PathBuf,
+    pub retention_days: u32,
+    pub min_backups_to_keep: usize,
 }
 ```
 
-The caller can inspect `failed` to log or alert on partial failures
-(see daemon integration below).
+`prune_old_backups` returns the number of backup directories removed. Errors from
+listing the backup directory are returned as `SimardError::PersistentStoreIo`.
+Individual stale directories are removed with `remove_dir_all`; failed removals
+are skipped rather than counted as pruned.
 
-**Behavior:**
+`BackupConfig::default()` uses:
 
-1. Resolves the backup directory: `{state_root}/backups/`
-2. If the directory does not exist, returns immediately (`removed: 0`)
-3. Lists all files matching the prefix `cognitive_memory.ladybug.`
-4. Parses the suffix as a `u64` epoch timestamp; non-parseable files
-   are skipped (not counted, not deleted)
-5. Sorts by epoch descending (newest first)
-6. Deletes all main backup files beyond index `keep`
-7. For each deleted main file, also removes paired WAL files with the
-   same epoch suffix (`cognitive_memory.ladybug.wal.{epoch}` and
-   `cognitive_memory.wal.{epoch}`)
+| Field | Default |
+|---|---|
+| `backup_dir` | `$HOME/.simard/backups` |
+| `retention_days` | `30` |
+| `min_backups_to_keep` | `3` |
 
-**Error handling:**
-
-- Directory not found → early return, no error
-- Individual file deletion failure → logged to stderr, added to
-  `failed` list, continues with remaining files (non-fatal)
-- WAL file deletion failure → same treatment as main file failures
-
-All errors are non-fatal. Backup pruning must never crash or block the
-OODA cycle.
-
-**Retention limit:** The `keep` parameter is configurable by the
-caller. The daemon call site (`operator_commands_ooda/daemon/mod.rs`)
-passes `db_backup_keep` from configuration. The design spec for
-issue #2270 specifies passing `20` from the OODA cycle call site.
+The OODA daemon overrides `backup_dir` to `state_root/backups` before calling the
+backup routine.
 
 ---
 
-## Integration points
+## Behavior
 
-### OODA daemon
+1. If `config.backup_dir` does not exist, return `Ok(0)`.
+2. List child directories under `config.backup_dir`.
+3. Sort directory paths descending so newest timestamped directories are first.
+4. Preserve the first `config.min_backups_to_keep` directories unconditionally.
+5. For older entries, read `manifest.json` when present and compare
+   `BackupManifest.created_at` with `Utc::now() - retention_days`.
+6. Prune directories older than the cutoff. Entries with missing or unreadable
+   manifests are prune candidates once they are beyond the minimum-keep window.
 
-The daemon calls `prune_old_backups` after each successful backup
-creation:
+Current backups are directories such as:
+
+```text
+state_root/backups/20260703_003510/
+  manifest.json
+  cognitive_snapshot.json
+  memory_records.json
+```
+
+The removed native fork used files like `cognitive_memory.ladybug.<epoch>` and
+WAL siblings. Those files are historical artifacts; the current pruner does not
+look for them.
+
+---
+
+## Daemon integration
+
+`run_verified_backup` in `src/operator_commands_ooda/daemon/backup.rs` calls the
+pruner only after the new backup verifies:
 
 ```rust
-let prune_outcome =
-    NativeCognitiveMemory::prune_old_backups(&state_root, db_backup_keep);
-if !prune_outcome.failed.is_empty() {
-    daemon_log(&state_root, &format!(
-        "[simard] WARN: prune_old_backups: {} removed, {} failed",
-        prune_outcome.removed, prune_outcome.failed.len()
-    ));
-}
+let manifest = backup_memory_verified(bridge, &file_store, BACKUP_AGENT, &config)?;
+prune_old_backups(&config)?;
+Ok(manifest)
 ```
 
-### OODA cycle (new call site for #2270)
-
-The design spec adds a call in `src/ooda_loop/cycle.rs` after
-`handle_cleanup()`, passing a retention limit of 20:
-
-```rust
-handle_cleanup(&state, &bridge).await?;
-NativeCognitiveMemory::prune_old_backups(&state_root, 20);
-```
-
----
-
-## Filename format and sorting rationale
-
-Backup files use **epoch-based** names:
-
-```
-cognitive_memory.ladybug.1718164068
-cognitive_memory.ladybug.1718250468
-```
-
-The suffix is a `u64` Unix epoch timestamp. The function parses this
-integer and sorts numerically (descending), which produces correct
-chronological ordering regardless of zero-padding or string length.
-
-Paired WAL backup files follow the same epoch convention:
-
-```
-cognitive_memory.ladybug.wal.1718164068
-cognitive_memory.wal.1718164068
-```
-
-Both WAL variants are checked and removed alongside the main file.
-
----
-
-## Operator notes
-
-- **Manual override:** Operators can delete files from the backups
-  directory at any time. The pruning function only removes files when
-  there are more than `keep` — manual cleanup does not conflict.
-
-- **Monitoring:** The daemon logs pruning failures. For verbose output,
-  check stderr for `[simard] failed to remove old backup` messages.
-
-- **Disk health interaction:** The disk health recipe
-  ([Disk health API](./disk-health-api.md)) performs broader cleanup
-  (stale worktrees, cargo target dirs). Backup pruning is narrowly
-  scoped to `.ladybug` backup files and runs after each backup
-  creation, while disk health runs on a configurable schedule.
+This ordering is intentional: a failed or partial backup never causes the
+last-known-good backup to be reclaimed.
 
 ---
 
 ## Code location
 
-| Item | File | Line |
-|------|------|------|
-| `prune_old_backups()` definition | `src/cognitive_memory/backup.rs` | ~709 |
-| `PruneOutcome` struct | `src/cognitive_memory/metrics.rs` | ~49 |
-| Daemon call site | `src/operator_commands_ooda/daemon/mod.rs` | ~486 |
-| Cycle call site (new, #2270) | `src/ooda_loop/cycle.rs` | ~160 |
+| Item | File |
+|---|---|
+| `prune_old_backups` | `src/memory_backup/mod.rs` |
+| `BackupConfig` | `src/memory_backup/mod.rs` |
+| Daemon call site | `src/operator_commands_ooda/daemon/backup.rs` (`run_verified_backup`) |
+| Pruning tests | `src/memory_backup/tests.rs` |
 
 ---
 
 ## Related
 
 - [Cognitive memory durability (operations)](../operations/cognitive-memory-durability.md)
-  — backup creation and restore procedures.
-- [Disk health API](./disk-health-api.md) — broader disk cleanup via
-  recipe.
+  — current backup creation, verification, pruning, and restore procedures.
+- [Disk health API](./disk-health-api.md) — broader disk cleanup via recipe.
 - [Automated disk health (concept)](../concepts/automated-disk-health.md)
   — design rationale for automated cleanup.
 - [Configure disk health check](../howto/configure-disk-health-check.md)
