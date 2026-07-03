@@ -1,11 +1,31 @@
+---
+title: OodaBrain API
+description: Reference for the OodaBrain trait — the engineer-lifecycle seam of Simard's OODA loop — its context and decision types, the RecipeBrain implementation, and the deterministic fallback.
+last_updated: 2026-07-03
+owner: simard
+doc_type: reference
+related:
+  - ../concepts/unified-recipe-brain.md
+  - ./recipe-brain-api.md
+  - ./ooda-brain-decision-protocol.md
+---
+
 # Reference: `OodaBrain` API
 
 Crate: `simard` · Module: `simard::ooda_brain`
 
 The `OodaBrain` trait is the seam between Simard's deterministic OODA loop and
-prompt-driven decision-making. As of this PR it is wired into one site —
-`dispatch_spawn_engineer`'s skip path — but the trait, context, and decision
-types are designed to absorb the other OODA phases incrementally.
+prompt-driven decision-making for the **engineer-lifecycle** phase. It is
+consulted by `dispatch_spawn_engineer`
+(`simard::ooda_actions::advance_goal::spawn`), which calls
+`decide_engineer_lifecycle` before spawning or skipping an engineer
+subprocess. It is one of three sibling brain traits — `OodaBrain`
+(act / engineer-lifecycle), [`OodaDecideBrain`](./recipe-brain-api.md) (decide),
+and `OodaOrientBrain` (orient) — all implemented together by
+[`RecipeBrain`](./recipe-brain-api.md)
+(`simard::ooda_brain::recipe_brain`), each with a deterministic fallback
+(`DeterministicLifecycleBrain`, `DeterministicDecideBrain`,
+`DeterministicOrientBrain`).
 
 ## Trait
 

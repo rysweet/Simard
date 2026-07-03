@@ -1,3 +1,11 @@
+---
+title: Subprocess Prompt Delivery
+description: Reference for simard::prompt_delivery — how Simard hands prompts to engineer and agent subprocesses, why the Simard copy is authoritative, and the planned amplihack-rs migration.
+last_updated: 2026-07-03
+owner: simard
+doc_type: reference
+---
+
 # Subprocess Prompt Delivery
 
 Status: **implemented in Simard** (`src/prompt_delivery/`); adapter wiring

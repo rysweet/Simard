@@ -1,3 +1,11 @@
+---
+title: Grant the Engineer Subprocess Write Permissions
+description: How to grant an engineer subprocess the write permissions it needs to open PRs, when you actually need to, and how to avoid the permission-denied regression.
+last_updated: 2026-07-03
+owner: simard
+doc_type: howto
+---
+
 # Grant the Engineer Subprocess Write Permissions
 
 > **Audience:** Operators wiring new engineer dispatch paths or debugging an

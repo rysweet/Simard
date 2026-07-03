@@ -1,3 +1,14 @@
+---
+title: Progress-evidence API
+description: Reference for simard::goal_curation::progress_evidence — the ProgressEvidenceChecker trait, its implementations, and the update_goal_progress_with_evidence façade that gates completion bumps.
+last_updated: 2026-07-03
+owner: simard
+doc_type: reference
+related:
+  - ../concepts/progress-evidence-gating.md
+  - ../operations/progress-evidence-kill-switch.md
+---
+
 # Reference: Progress-evidence API
 
 Crate: `simard` · Module: `simard::goal_curation::progress_evidence`
