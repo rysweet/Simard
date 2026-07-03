@@ -164,6 +164,8 @@ nav:
     - View Agent Terminal Logs: howto/view-agent-terminal-logs.md
     - Run Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
     - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
+    - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
+    - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
@@ -254,6 +256,7 @@ nav:
     - Dependency Trust Policy: reference/dependency-trust-policy.md
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md
+    - Cognitive-Thread Scheduling: reference/cognitive-thread-scheduling.md
   - Operations:
     - Overview: operations/index.md
     - Verified Backups of the Live Store: operations/verified-backups.md
