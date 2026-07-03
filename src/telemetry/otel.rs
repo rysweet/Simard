@@ -106,21 +106,31 @@ fn to_kv(attrs: &[(&str, &str)]) -> Vec<KeyValue> {
 }
 
 /// Mirror a counter add into the OTel counter of the same name.
+///
+/// The cache is keyed by name; a hit (the steady state, since the metric
+/// catalog is small and fixed) does a borrowed lookup and allocates no key,
+/// so only the first sighting of each name pays for interning.
 pub(super) fn record_counter(name: &str, value: u64, attrs: &[(&str, &str)]) {
     let mut cache = COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
-    let counter = cache
-        .entry(name.to_string())
-        .or_insert_with(|| meter().u64_counter(name.to_string()).build());
+    if let Some(counter) = cache.get(name) {
+        counter.add(value, &to_kv(attrs));
+        return;
+    }
+    let counter = meter().u64_counter(name.to_string()).build();
     counter.add(value, &to_kv(attrs));
+    cache.insert(name.to_string(), counter);
 }
 
 /// Mirror a gauge set into the OTel gauge of the same name.
 pub(super) fn record_gauge(name: &str, value: i64, attrs: &[(&str, &str)]) {
     let mut cache = GAUGES.lock().unwrap_or_else(|e| e.into_inner());
-    let gauge = cache
-        .entry(name.to_string())
-        .or_insert_with(|| meter().i64_gauge(name.to_string()).build());
+    if let Some(gauge) = cache.get(name) {
+        gauge.record(value, &to_kv(attrs));
+        return;
+    }
+    let gauge = meter().i64_gauge(name.to_string()).build();
     gauge.record(value, &to_kv(attrs));
+    cache.insert(name.to_string(), gauge);
 }
 
 /// Mirror a histogram observation into the OTel histogram of the same name.
@@ -129,11 +139,14 @@ pub(super) fn record_gauge(name: &str, value: i64, attrs: &[(&str, &str)]) {
 /// boundaries — the only histogram today is the OODA cycle duration.
 pub(super) fn record_histogram(name: &str, value: f64, attrs: &[(&str, &str)]) {
     let mut cache = HISTOGRAMS.lock().unwrap_or_else(|e| e.into_inner());
-    let hist = cache.entry(name.to_string()).or_insert_with(|| {
-        meter()
-            .f64_histogram(name.to_string())
-            .with_boundaries(names::DAEMON_CYCLE_DURATION_BUCKETS.to_vec())
-            .build()
-    });
+    if let Some(hist) = cache.get(name) {
+        hist.record(value, &to_kv(attrs));
+        return;
+    }
+    let hist = meter()
+        .f64_histogram(name.to_string())
+        .with_boundaries(names::DAEMON_CYCLE_DURATION_BUCKETS.to_vec())
+        .build();
     hist.record(value, &to_kv(attrs));
+    cache.insert(name.to_string(), hist);
 }

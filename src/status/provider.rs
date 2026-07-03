@@ -285,10 +285,30 @@ fn read_disk(path: &str) -> Option<DiskUsage> {
 // ── llm (cost ledger, read within state_root) ───────────────────────────────
 
 fn assemble_llm(opts: &AssembleOptions) -> SectionEnvelope<LlmUsage> {
+    use std::io::BufRead;
+
     let ledger = opts.state_root.join("costs").join("ledger.jsonl");
-    let Ok(text) = std::fs::read_to_string(&ledger) else {
+    let Ok(file) = std::fs::File::open(&ledger) else {
         return SectionEnvelope::absent("cost ledger: absent");
     };
+
+    // Only the four fields the windows need; typed deserialization skips the
+    // per-line `serde_json::Value` map (one allocation + seven interned keys per
+    // entry) that a generic parse would build. `timestamp` stays a raw string so
+    // an entry with a missing or unparseable timestamp still counts toward the
+    // all-time window — matching the prior tolerant behavior — rather than being
+    // dropped by a stricter typed timestamp.
+    #[derive(serde::Deserialize)]
+    struct LedgerLine {
+        #[serde(default)]
+        timestamp: Option<String>,
+        #[serde(default)]
+        cost_usd_est: f64,
+        #[serde(default)]
+        prompt_tokens_est: u64,
+        #[serde(default)]
+        completion_tokens_est: u64,
+    }
 
     let now = chrono::Utc::now();
     let day_ago = now - chrono::Duration::days(1);
@@ -299,31 +319,26 @@ fn assemble_llm(opts: &AssembleOptions) -> SectionEnvelope<LlmUsage> {
     let mut all = LedgerWindow::default();
     let mut last_turn: Option<CopilotTurn> = None;
 
-    for line in text.lines() {
+    // Stream line-by-line so peak memory stays ~one line rather than the whole
+    // append-only ledger, which grows without bound over the daemon's lifetime.
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let Ok(entry) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        let Ok(entry) = serde_json::from_str::<LedgerLine>(trimmed) else {
             continue;
         };
         let ts = entry
-            .get("timestamp")
-            .and_then(|v| v.as_str())
+            .timestamp
+            .as_deref()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.with_timezone(&chrono::Utc));
-        let cost = entry
-            .get("cost_usd_est")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let tin = entry
-            .get("prompt_tokens_est")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let tout = entry
-            .get("completion_tokens_est")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let cost = entry.cost_usd_est;
+        let tin = entry.prompt_tokens_est;
+        let tout = entry.completion_tokens_est;
 
         add_window(&mut all, cost, tin, tout);
         if let Some(ts) = ts {
