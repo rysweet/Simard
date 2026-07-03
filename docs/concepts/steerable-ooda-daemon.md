@@ -249,15 +249,32 @@ Layer 2's `NO ACTION` classification is shipped in the goal-session parser
 (`src/ooda_actions/goal_session/`), reached through the advance-goal dispatch.
 The **no-action** counterpart of the layer-3 escalation — a per-goal
 consecutive-no-progress counter that forces the resolution ladder above — is
-the concept this page defines; it reuses the existing sentinel-`Blocked` +
-file-an-issue machinery and the done-gate rather than introducing a new
-state-machine in the reasoners, to keep the change inside
-`goal_curation` / the advance-goal path (the naming-cleanup rename owns the
+**now shipped**: the pure policy lives in
+`src/goal_curation/no_progress_breaker.rs` (`NoProgressTracker`,
+`resolve_no_progress`, `verify_stuck_goal`), and the OODA curate phase applies
+it through `src/ooda_loop/no_progress.rs`
+(`apply_no_progress_breaker`), which turns each
+`NoProgressResolution` into a board mutation (mark done / drop) or a
+sentinel-`Blocked` + `gh`-filed tracking issue. It reuses the existing
+sentinel-`Blocked` + file-an-issue machinery and the done-gate rather than
+introducing a new state-machine in the reasoners, keeping the change inside
+`goal_curation` / `ooda_loop` (the naming-cleanup rename owns the
 `ooda_brain` / reasoner / bridge files, so those are left untouched).
+
+The no-progress signal is the classifier
+`ooda_actions::outcome_made_no_progress`, co-located with the detail author
+(`assess_only_outcome`) so the two stay in lockstep. The counter lives on
+`OodaState.no_progress_tracker` (the sibling of `goal_failure_counts`) and is
+snapshot-persisted, so a livelock that spans a daemon restart is still bounded.
 
 **Test shape.** A goal that yields `GoalAction::NoAction` N times in a row
 triggers the breaker exactly once and terminates in DONE / DROP / ESCALATE — it
-must **not** produce an (N+1)th no-action cycle.
+must **not** produce an (N+1)th no-action cycle. The pure ladder is unit-tested
+in `goal_curation::tests_no_progress_breaker`; the OODA-curate wiring
+(N no-action cycles → board mutated + one issue filed; real progress resets the
+counter) in `ooda_loop::tests_no_progress`; and the no-progress classifier is
+pinned against its detail author in
+`ooda_actions::goal_session::advance::tests_no_progress_classifier`.
 
 ---
 
@@ -304,9 +321,8 @@ Each fix removes one leg of the same stool:
   evidence, instead of being re-litigated at 0%.
 - **Fix 3** drives a goal that repeatedly produces no progress toward a
   **definitive** resolution instead of an endless "I'll verify" loop — shipped
-  today for brain *failures*, and by design (see
-  [Status and boundaries](#status-and-boundaries)) for the *no-action* livelock
-  counterpart.
+  for both brain *failures* and the *no-action* livelock counterpart (see
+  [Status and boundaries](#status-and-boundaries)).
 - **Fix 4** restores **learning**, so distillation turns episodes back into the
   facts and procedures that let the daemon notice it is repeating itself.
 
@@ -326,13 +342,11 @@ state this incident captured.
 - **No evidence-free completion** and **no evidence-free perpetual re-litigation**:
   a goal with a derivable signal is auto-resolved by the done-gate rather than
   returned to the active set at 0% (Fix 2).
-- **Bounded no-progress** *(design defined here; the no-action breaker is not
-  yet shipped — see [Status and boundaries](#status-and-boundaries))*: a goal
-  must not emit unbounded consecutive no-action cycles; it terminates in DONE /
-  DROP / ESCALATE (Fix 3). Layer 1 (prompt self-detection) and the
-  brain-*failure* escalation are shipped today; the per-goal
-  consecutive-no-action counter that closes this guarantee is the concept this
-  page defines.
+- **Bounded no-progress**: a goal must not emit unbounded consecutive
+  no-action cycles; it terminates in DONE / DROP / ESCALATE (Fix 3). Layer 1
+  (prompt self-detection), the brain-*failure* escalation, **and** the per-goal
+  consecutive-no-action breaker (`ooda_loop::apply_no_progress_breaker`, wired
+  into the curate phase) are all shipped.
 - **Banner-immune distillation**: a launch-banner-prefixed transcript still
   yields facts, verified by regression fixture (Fix 4).
 

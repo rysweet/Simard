@@ -14,6 +14,8 @@ pub mod cycle;
 mod decide;
 mod observe;
 mod orient;
+// Fix 3 (issue #1): no-progress breaker adapter for the curate phase.
+mod no_progress;
 pub mod phase_weights;
 mod priority_kind;
 mod review;
@@ -30,6 +32,10 @@ mod tests_orient_extra;
 mod tests_parse_failure_1890;
 #[cfg(test)]
 mod tests_types;
+
+// Fix 3 (issue #1): integration tests for the no-progress breaker wiring.
+#[cfg(test)]
+mod tests_no_progress;
 
 // Issue #2329: Observe-vs-Decide phase weights yield different ranked-recall
 // ordering of the same fact set, exercised against the real lbug-backed

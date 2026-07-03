@@ -260,8 +260,14 @@ pub fn resolve_no_progress(
 /// [`record_progress`](Self::record_progress) resets it after concrete progress,
 /// and [`record_and_resolve`](Self::record_and_resolve) folds "bump then decide"
 /// into one call, clearing the counter once the breaker fires.
-#[derive(Debug, Default, Clone)]
+///
+/// `Serialize`/`Deserialize` so the counter survives daemon restarts alongside
+/// `OodaState.goal_failure_counts` (a livelock spanning a restart must still be
+/// bounded). `#[serde(default)]` on the field keeps snapshots written before
+/// this counter existed deserializable.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NoProgressTracker {
+    #[serde(default)]
     counts: HashMap<String, u32>,
 }
 
