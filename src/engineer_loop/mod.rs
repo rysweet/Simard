@@ -839,7 +839,14 @@ fn summarize_results(
     .to_string();
 
     let accomplishment = if action.stdout.len() > 200 {
-        format!("{}…", &action.stdout[..200])
+        // Char-boundary-safe truncation: `&action.stdout[..200]` panics when byte
+        // 200 falls inside a multi-byte UTF-8 sequence, and engineer stdout is
+        // arbitrary agent output (emoji, box-drawing, accented text) that hits
+        // this on the every-action summary path. See util::string_truncate.
+        let mut truncated = action.stdout.clone();
+        crate::util::string_truncate::truncate_to_char_boundary(&mut truncated, 200);
+        truncated.push('…');
+        truncated
     } else if action.stdout.is_empty() {
         format!("Completed objective: {objective}")
     } else {

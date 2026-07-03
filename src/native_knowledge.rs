@@ -216,7 +216,13 @@ fn build_answer(conn: &Connection, keywords: &[&str], sources: &[SourceInfo]) ->
                 && let Ok(content) = stmt.query_row([&source.title], |row| row.get::<_, String>(0))
             {
                 let truncated = if content.len() > 500 {
-                    format!("{}...", &content[..500])
+                    // Char-boundary-safe: `&content[..500]` panics when byte 500
+                    // splits a multi-byte UTF-8 sequence, and knowledge-article
+                    // content read from SQLite routinely contains non-ASCII text.
+                    let mut t = content;
+                    crate::util::string_truncate::truncate_to_char_boundary(&mut t, 500);
+                    t.push_str("...");
+                    t
                 } else {
                     content
                 };
