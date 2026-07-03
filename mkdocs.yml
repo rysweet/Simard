@@ -60,6 +60,7 @@ nav:
     - Implementation Plan: architecture/implementation-plan.md
     - Brain Introspection + Memory Hygiene: architecture/brain-introspection.md
     - Monthly Self-Quality-Audit: architecture/monthly-self-quality-audit.md
+    - Conversation Channels: architecture/conversation-channel.md
   - Concepts:
     - Truthful Runtime Metadata: concepts/truthful-runtime-metadata.md
     - Prompt-driven Brain Iteration: concepts/prompt-driven-brain-iteration.md
@@ -87,6 +88,7 @@ nav:
     - Configure Adaptive Scaling: howto/configure-adaptive-scaling.md
     - Troubleshoot Goal Store: howto/troubleshoot-goal-store.md
     - Recover from Meeting Close Timeout: howto/recover-from-meeting-close-timeout.md
+    - Set Up the Signal Channel: howto/set-up-the-signal-channel.md
     - Configure Pluggable Identity: howto/configure-pluggable-identity.md
     - Configure Episode Hygiene and Promotion: howto/configure-episode-hygiene-and-promotion.md
     - Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
@@ -130,6 +132,8 @@ nav:
     - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md
     - Pluggable Identity API: reference/pluggable-identity-api.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
+    - Conversation Channel API: reference/conversation-channel-api.md
+    - Signal Channel: reference/signal-conversation.md
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     - Brain Introspection API: reference/brain-introspection-api.md
     - Self-Quality-Audit API: reference/self-quality-audit-api.md

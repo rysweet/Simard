@@ -1,0 +1,225 @@
+//! TDD tests for the Signal channel guardrails (issue #2527).
+//!
+//! Written **first**: `allowlist::Allowlist::authorize` and the `gating::*`
+//! functions are `todo!()` stubs, so these are the "red" phase pinning the
+//! required security behavior — a fail-closed sender allowlist and high-risk
+//! gating that never auto-executes a mutating command from a text.
+//!
+//! These run under `cargo test --features signal`; no live signal-cli or network
+//! is involved.
+
+use super::allowlist::{Allowlist, AuthDecision};
+use super::config::SignalConfig;
+use super::gating::{self, GateDecision, InboundCommand, RiskClass};
+
+const OPERATOR: &str = "+15557654321";
+const STRANGER: &str = "+15550000000";
+
+// ── Guardrail (a): sender allowlist, fail-closed ─────────────────────────────
+
+#[test]
+fn allowlisted_sender_is_authorized() {
+    let al = Allowlist::new(vec![OPERATOR.to_string()], false);
+    assert_eq!(al.authorize(OPERATOR), AuthDecision::Authorized);
+}
+
+#[test]
+fn unknown_sender_is_ignored_when_read_only_off() {
+    let al = Allowlist::new(vec![OPERATOR.to_string()], false);
+    assert_eq!(al.authorize(STRANGER), AuthDecision::Ignored);
+}
+
+#[test]
+fn unknown_sender_is_read_only_when_enabled() {
+    let al = Allowlist::new(vec![OPERATOR.to_string()], true);
+    assert_eq!(al.authorize(STRANGER), AuthDecision::ReadOnly);
+}
+
+#[test]
+fn empty_allowlist_ignores_everyone_fail_closed() {
+    let al = Allowlist::new(vec![], false);
+    assert_eq!(al.authorize(OPERATOR), AuthDecision::Ignored);
+}
+
+#[test]
+fn read_only_unknown_never_grants_command_authority() {
+    // Even with read_only_unknown, a non-allowlisted number must never be
+    // Authorized to COMMAND — read-only is strictly weaker than authorized.
+    let al = Allowlist::new(vec![], true);
+    assert_ne!(al.authorize(STRANGER), AuthDecision::Authorized);
+}
+
+#[test]
+fn allowlist_from_config_uses_config_fields() {
+    let cfg = SignalConfig {
+        endpoint: "127.0.0.1:7583".to_string(),
+        account: "+15551234567".to_string(),
+        allowlist: vec![OPERATOR.to_string()],
+        read_only_unknown: false,
+    };
+    let al = Allowlist::from_config(&cfg);
+    assert_eq!(al.authorize(OPERATOR), AuthDecision::Authorized);
+    assert_eq!(al.authorize(STRANGER), AuthDecision::Ignored);
+}
+
+// ── Guardrail (c): high-risk gating ──────────────────────────────────────────
+
+#[test]
+fn parse_inbound_recognizes_the_command_set() {
+    assert_eq!(gating::parse_inbound("status"), InboundCommand::Status);
+    assert_eq!(gating::parse_inbound("pause"), InboundCommand::Pause);
+    assert_eq!(gating::parse_inbound("approve"), InboundCommand::Approve);
+    assert_eq!(gating::parse_inbound("deploy"), InboundCommand::Deploy);
+    assert_eq!(
+        gating::parse_inbound("merge #123"),
+        InboundCommand::Merge(123)
+    );
+}
+
+#[test]
+fn parse_inbound_treats_other_text_as_conversation() {
+    match gating::parse_inbound("let's talk about the release plan") {
+        InboundCommand::Conversation(text) => assert!(text.contains("release plan")),
+        other => panic!("expected a Conversation turn, got {other:?}"),
+    }
+}
+
+#[test]
+fn low_risk_commands_classify_low() {
+    for cmd in [
+        InboundCommand::Status,
+        InboundCommand::Pause,
+        InboundCommand::Approve,
+    ] {
+        assert_eq!(gating::classify(&cmd), RiskClass::LowRisk, "{cmd:?}");
+    }
+}
+
+#[test]
+fn high_risk_commands_classify_high() {
+    assert_eq!(
+        gating::classify(&InboundCommand::Deploy),
+        RiskClass::HighRisk
+    );
+    assert_eq!(
+        gating::classify(&InboundCommand::Merge(42)),
+        RiskClass::HighRisk
+    );
+}
+
+#[test]
+fn high_risk_commands_never_auto_execute() {
+    // The core safety invariant: a high-risk action from a text message must
+    // create a pending sign-off, never auto-execute.
+    assert_eq!(
+        gating::gate(&InboundCommand::Deploy),
+        GateDecision::PendingSignOff
+    );
+    assert_eq!(
+        gating::gate(&InboundCommand::Merge(7)),
+        GateDecision::PendingSignOff
+    );
+    assert_ne!(
+        gating::gate(&InboundCommand::Deploy),
+        GateDecision::AutoExecute
+    );
+    assert_ne!(
+        gating::gate(&InboundCommand::Merge(7)),
+        GateDecision::AutoExecute
+    );
+}
+
+#[test]
+fn low_risk_commands_auto_execute() {
+    assert_eq!(
+        gating::gate(&InboundCommand::Status),
+        GateDecision::AutoExecute
+    );
+    assert_eq!(
+        gating::gate(&InboundCommand::Pause),
+        GateDecision::AutoExecute
+    );
+    assert_eq!(
+        gating::gate(&InboundCommand::Approve),
+        GateDecision::AutoExecute
+    );
+}
+
+// ── Config loading: env-first, then file, fail-closed allowlist ──────────────
+
+mod config_loading {
+    use super::super::config::{
+        ENV_ACCOUNT, ENV_ALLOWLIST, ENV_ENDPOINT, ENV_READ_ONLY_UNKNOWN, SignalConfig,
+    };
+    use serial_test::serial;
+
+    fn clear_env() {
+        // SAFETY: serialized via `#[serial(cognitive_memory)]`.
+        unsafe {
+            std::env::remove_var(ENV_ENDPOINT);
+            std::env::remove_var(ENV_ACCOUNT);
+            std::env::remove_var(ENV_ALLOWLIST);
+            std::env::remove_var(ENV_READ_ONLY_UNKNOWN);
+        }
+    }
+
+    #[test]
+    #[serial(cognitive_memory)]
+    fn env_supplies_all_fields_and_wins() {
+        clear_env();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized.
+        unsafe {
+            std::env::set_var(ENV_ENDPOINT, "127.0.0.1:7583");
+            std::env::set_var(ENV_ACCOUNT, "+15551230000");
+            std::env::set_var(ENV_ALLOWLIST, "+15557654321, +15559990000");
+            std::env::set_var(ENV_READ_ONLY_UNKNOWN, "true");
+        }
+        let cfg = SignalConfig::load_from(tmp.path()).unwrap();
+        clear_env();
+
+        assert_eq!(cfg.endpoint, "127.0.0.1:7583");
+        assert_eq!(cfg.account, "+15551230000");
+        assert_eq!(cfg.allowlist, vec!["+15557654321", "+15559990000"]);
+        assert!(cfg.read_only_unknown);
+    }
+
+    #[test]
+    #[serial(cognitive_memory)]
+    fn missing_required_field_is_a_clear_error() {
+        clear_env();
+        let tmp = tempfile::tempdir().unwrap();
+        // No env, no config.toml → endpoint/account cannot be resolved.
+        let err = SignalConfig::load_from(tmp.path()).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("signal."),
+            "expected a MissingRequiredConfig for a signal.* key, got {err:?}"
+        );
+    }
+
+    #[test]
+    #[serial(cognitive_memory)]
+    fn reads_the_signal_table_from_config_toml() {
+        clear_env();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            r#"
+llm_provider = "copilot"
+
+[signal]
+endpoint = "127.0.0.1:9000"
+account = "+15551230000"
+allowlist = ["+15557654321"]
+"#,
+        )
+        .unwrap();
+
+        let cfg = SignalConfig::load_from(tmp.path()).unwrap();
+        assert_eq!(cfg.endpoint, "127.0.0.1:9000");
+        assert_eq!(cfg.account, "+15551230000");
+        assert_eq!(cfg.allowlist, vec!["+15557654321"]);
+        // Fail-closed default: unset read_only_unknown resolves to false.
+        assert!(!cfg.read_only_unknown);
+    }
+}

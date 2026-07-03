@@ -7,6 +7,7 @@ use std::io::{BufRead, Write};
 
 use crate::base_types::BaseTypeSession;
 use crate::cognitive_memory::CognitiveMemoryOps;
+use crate::conversation_channel::apply_record;
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_backend::persist::{
     extract_action_items, extract_decisions, extract_disagreements, extract_open_questions,
@@ -434,57 +435,61 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 writeln!(output).ok();
             }
             MeetingCommand::Theme(text) => {
-                backend.push_theme(text.clone());
-                writeln!(output, "{}", green(&format!("Theme recorded: {text}"))).ok();
+                let rec = apply_record(&mut backend, &MeetingCommand::Theme(text.clone()))
+                    .expect("theme is a record command");
+                writeln!(output, "{}", green(&rec.text)).ok();
                 checkpoint_wip(&backend);
             }
             MeetingCommand::Decision { text, rationale } => {
-                backend.push_explicit_decision(&text, rationale.as_deref());
-                let msg = if let Some(ref r) = rationale {
-                    format!("Decision recorded: {text} (rationale: {r})")
-                } else {
-                    format!("Decision recorded: {text}")
-                };
-                writeln!(output, "{}", cyan(&msg)).ok();
+                let rec = apply_record(
+                    &mut backend,
+                    &MeetingCommand::Decision {
+                        text: text.clone(),
+                        rationale: rationale.clone(),
+                    },
+                )
+                .expect("decision is a record command");
+                writeln!(output, "{}", cyan(&rec.text)).ok();
                 checkpoint_wip(&backend);
                 writeln!(output, "{}", capture_tally(&backend)).ok();
             }
             MeetingCommand::Action(text) => {
-                backend.push_explicit_action_item(&text);
-                writeln!(output, "{}", green(&format!("Action recorded: {text}"))).ok();
+                let rec = apply_record(&mut backend, &MeetingCommand::Action(text.clone()))
+                    .expect("action is a record command");
+                writeln!(output, "{}", green(&rec.text)).ok();
                 checkpoint_wip(&backend);
                 writeln!(output, "{}", capture_tally(&backend)).ok();
             }
             MeetingCommand::Question(text) => {
-                backend.push_explicit_question(&text);
-                writeln!(output, "{}", yellow(&format!("Question recorded: {text}"))).ok();
+                let rec = apply_record(&mut backend, &MeetingCommand::Question(text.clone()))
+                    .expect("question is a record command");
+                writeln!(output, "{}", yellow(&rec.text)).ok();
                 checkpoint_wip(&backend);
                 writeln!(output, "{}", capture_tally(&backend)).ok();
             }
             MeetingCommand::Owner(text) => {
-                backend.push_next_owner(&text);
-                writeln!(output, "{}", cyan(&format!("Next owner recorded: {text}"))).ok();
+                let rec = apply_record(&mut backend, &MeetingCommand::Owner(text.clone()))
+                    .expect("owner is a record command");
+                writeln!(output, "{}", cyan(&rec.text)).ok();
                 checkpoint_wip(&backend);
             }
             MeetingCommand::Goal(text) => {
-                backend.set_goal(&text);
-                writeln!(output, "{}", cyan(&format!("Goal recorded: {text}"))).ok();
+                let rec = apply_record(&mut backend, &MeetingCommand::Goal(text.clone()))
+                    .expect("goal is a record command");
+                writeln!(output, "{}", cyan(&rec.text)).ok();
                 checkpoint_wip(&backend);
             }
             MeetingCommand::Risk(text) => {
-                backend.push_explicit_risk(&text);
-                writeln!(output, "{}", yellow(&format!("Risk recorded: {text}"))).ok();
+                let rec = apply_record(&mut backend, &MeetingCommand::Risk(text.clone()))
+                    .expect("risk is a record command");
+                writeln!(output, "{}", yellow(&rec.text)).ok();
                 checkpoint_wip(&backend);
                 writeln!(output, "{}", capture_tally(&backend)).ok();
             }
             MeetingCommand::Disagree(text) => {
-                backend.push_explicit_disagreement(&text);
-                writeln!(
-                    output,
-                    "{}",
-                    yellow(&format!("Disagreement recorded: {text}"))
-                )
-                .ok();
+                let rec = apply_record(&mut backend, &MeetingCommand::Disagree(text.clone()))
+                    .expect("disagree is a record command");
+                writeln!(output, "{}", yellow(&rec.text)).ok();
                 checkpoint_wip(&backend);
                 writeln!(output, "{}", capture_tally(&backend)).ok();
             }

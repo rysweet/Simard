@@ -75,6 +75,7 @@ pub(crate) async fn ws_chat_handler(ws: WebSocketUpgrade) -> response::Response 
 }
 
 pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
+    use crate::conversation_channel::apply_record;
     use crate::meeting_backend::{
         MeetingBackend, MeetingCommand, parse_command, render_help_plain, unknown_command_notice,
     };
@@ -264,92 +265,96 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                             .await;
                     }
                     MeetingCommand::Theme(theme) => {
-                        backend.push_theme(theme.clone());
-                        let content = format!("Theme recorded: {theme}");
+                        let rec = apply_record(&mut backend, &MeetingCommand::Theme(theme.clone()))
+                            .expect("theme is a record command");
                         let _ = socket
                             .send(Message::Text(
-                                json!({"role":"system","content": content})
+                                json!({"role":"system","content": rec.text})
                                     .to_string()
                                     .into(),
                             ))
                             .await;
                     }
                     MeetingCommand::Decision { text, rationale } => {
-                        backend.push_explicit_decision(&text, rationale.as_deref());
-                        let content = if let Some(ref r) = rationale {
-                            format!("Decision recorded: {text} (rationale: {r})")
-                        } else {
-                            format!("Decision recorded: {text}")
-                        };
+                        let rec = apply_record(
+                            &mut backend,
+                            &MeetingCommand::Decision {
+                                text: text.clone(),
+                                rationale: rationale.clone(),
+                            },
+                        )
+                        .expect("decision is a record command");
                         let _ = socket
                             .send(Message::Text(
-                                json!({"role":"system","content": content})
+                                json!({"role":"system","content": rec.text})
                                     .to_string()
                                     .into(),
                             ))
                             .await;
                     }
                     MeetingCommand::Action(text) => {
-                        backend.push_explicit_action_item(&text);
-                        let content = format!("Action recorded: {text}");
+                        let rec = apply_record(&mut backend, &MeetingCommand::Action(text.clone()))
+                            .expect("action is a record command");
                         let _ = socket
                             .send(Message::Text(
-                                json!({"role":"system","content": content})
+                                json!({"role":"system","content": rec.text})
                                     .to_string()
                                     .into(),
                             ))
                             .await;
                     }
                     MeetingCommand::Question(text) => {
-                        backend.push_explicit_question(&text);
-                        let content = format!("Question recorded: {text}");
+                        let rec =
+                            apply_record(&mut backend, &MeetingCommand::Question(text.clone()))
+                                .expect("question is a record command");
                         let _ = socket
                             .send(Message::Text(
-                                json!({"role":"system","content": content})
+                                json!({"role":"system","content": rec.text})
                                     .to_string()
                                     .into(),
                             ))
                             .await;
                     }
                     MeetingCommand::Owner(text) => {
-                        backend.push_next_owner(&text);
-                        let content = format!("Next owner recorded: {text}");
+                        let rec = apply_record(&mut backend, &MeetingCommand::Owner(text.clone()))
+                            .expect("owner is a record command");
                         let _ = socket
                             .send(Message::Text(
-                                json!({"role":"system","content": content})
+                                json!({"role":"system","content": rec.text})
                                     .to_string()
                                     .into(),
                             ))
                             .await;
                     }
                     MeetingCommand::Goal(text) => {
-                        backend.set_goal(&text);
-                        let content = format!("Goal recorded: {text}");
+                        let rec = apply_record(&mut backend, &MeetingCommand::Goal(text.clone()))
+                            .expect("goal is a record command");
                         let _ = socket
                             .send(Message::Text(
-                                json!({"role":"system","content": content})
+                                json!({"role":"system","content": rec.text})
                                     .to_string()
                                     .into(),
                             ))
                             .await;
                     }
                     MeetingCommand::Risk(text) => {
-                        backend.push_explicit_risk(&text);
-                        let content = format!("Risk recorded: {text}");
+                        let rec = apply_record(&mut backend, &MeetingCommand::Risk(text.clone()))
+                            .expect("risk is a record command");
                         let _ = socket
                             .send(Message::Text(
-                                json!({"role":"system","content": content})
+                                json!({"role":"system","content": rec.text})
                                     .to_string()
                                     .into(),
                             ))
                             .await;
                     }
                     MeetingCommand::Disagree(text) => {
-                        backend.push_explicit_disagreement(&text);
-                        let content = format!("Disagreement recorded: {text}");
+                        let rec =
+                            apply_record(&mut backend, &MeetingCommand::Disagree(text.clone()))
+                                .expect("disagree is a record command");
                         let _ = socket
                             .send(Message::Text(
-                                json!({"role":"system","content": content})
+                                json!({"role":"system","content": rec.text})
                                     .to_string()
                                     .into(),
                             ))

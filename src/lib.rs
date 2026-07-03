@@ -33,6 +33,10 @@ pub mod brain_introspection;
 mod brain_introspection_tests;
 mod copilot_status_probe;
 mod copilot_task_submit;
+// Issue #2527: one clearly-named operator↔Simard conversation abstraction. The
+// CLI/TUI meeting REPL and the dashboard chat are channels over the same
+// `MeetingBackend`; `SignalConversation` (feature-gated below) is a third.
+pub mod conversation_channel;
 pub mod cost_tracking;
 pub mod disk_health;
 pub mod disk_pressure;
@@ -120,6 +124,10 @@ pub mod self_relaunch;
 pub mod self_relaunch_semaphore;
 pub mod session;
 pub mod session_builder;
+// Issue #2527: the Signal implementation of `conversation_channel`. Feature-gated
+// (default off) so the daemon builds and runs fine without signal-cli installed.
+#[cfg(feature = "signal")]
+pub mod signal_conversation;
 pub mod skill_builder;
 pub mod state_root;
 pub mod stewardship;

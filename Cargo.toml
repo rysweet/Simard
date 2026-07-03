@@ -105,6 +105,11 @@ libc = "=0.2.185"
 [features]
 slow-tests = []
 dashboard-audit = ["dep:headless_chrome", "dep:regex", "dep:url"]
+# Issue #2527: the Signal conversation channel (`src/signal_conversation/`).
+# Default OFF so the daemon builds and runs with no signal-cli installed. The
+# transport reuses tokio `net` (already a dependency), so enabling this adds no
+# new mandatory dependency.
+signal = []
 
 [dev-dependencies]
 assert_cmd = "=2.2.1"

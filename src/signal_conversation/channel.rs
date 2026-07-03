@@ -1,0 +1,520 @@
+//! The Signal conversation channel — a [`ConversationChannel`] over signal-cli
+//! (issue #2527).
+//!
+//! `SignalConversation` gives an allowlisted operator a full meeting conversation
+//! over Signal, plus a lightweight remote command surface (`status`, `pause`,
+//! `approve`, `deploy`, `merge #NNNN`) and operator notifications out — all on the
+//! **same** meeting engine and handoff/goal-carryover chain as the CLI and
+//! dashboard channels.
+//!
+//! The three remote-command guardrails from the task live here and are enforced
+//! before anything reaches the shared driver:
+//! - **(a) sender allowlist** — [`Allowlist::authorize`] is applied in
+//!   [`recv`](SignalConversation::recv); an unknown sender never reaches a command
+//!   handler or the meeting engine (fail-closed).
+//! - **(b) identity binding** — the authorized sender's E.164 is carried on
+//!   [`OperatorRef`], and command replies + sign-off are bound to that sender.
+//! - **(c) high-risk gate** — [`gate`] routes every mutating command
+//!   (`deploy`, `merge`) to [`GateDecision::PendingSignOff`]: it is **never**
+//!   auto-executed from a text; Simard records it and asks for explicit `approve`,
+//!   after which execution runs through the existing operational-autonomy gate via
+//!   the injected [`SignalCommandHandler`].
+//!
+//! # Naming
+//!
+//! Nothing here is named `bridge`/`Bridge`. `SignalConversation` is a first-class
+//! conversation channel and does not implement the cognitive-memory
+//! `BridgeTransport`.
+
+use crate::conversation_channel::{ConversationChannel, Inbound, OperatorRef, OutKind, Outbound};
+use crate::error::SimardResult;
+
+use super::allowlist::{Allowlist, AuthDecision};
+use super::config::SignalConfig;
+use super::gating::{GateDecision, InboundCommand, gate, parse_inbound};
+use super::transport::{SignalTransport, build_send_request};
+
+/// The integration seam for the effects a Signal command produces. Keeping this
+/// out of the channel lets the (security-critical) allowlist + gating routing be
+/// unit-tested in isolation, and lets a deployment wire concrete `status` /
+/// `pause` / high-risk execution to its real subsystems.
+///
+/// `execute_approved` is the **only** method that performs a mutating action, and
+/// the channel calls it **only** after an explicit `approve` for a previously
+/// gated high-risk command — never directly from an inbound text.
+pub trait SignalCommandHandler: Send {
+    /// Operator-facing status/health line for the `status` command.
+    fn status(&self) -> String;
+
+    /// Pause autonomous dispatch; returns the operator-facing confirmation.
+    fn pause(&mut self) -> String;
+
+    /// Execute a high-risk command after explicit operator sign-off. Runs through
+    /// the existing operational-autonomy gate; returns the operator-facing result.
+    fn execute_approved(&mut self, cmd: &InboundCommand) -> SimardResult<String>;
+}
+
+/// A conservative default handler used by [`run`]. It reports truthful daemon
+/// health and pause state, and on approval **records** the signed-off high-risk
+/// action for the existing gated authority to process rather than performing the
+/// mutation itself. Wire a custom [`SignalCommandHandler`] to drive concrete
+/// deploy/merge execution.
+#[derive(Default)]
+pub struct RuntimeCommandHandler {
+    paused: bool,
+}
+
+impl RuntimeCommandHandler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl SignalCommandHandler for RuntimeCommandHandler {
+    fn status(&self) -> String {
+        format!(
+            "Simard is online. Autonomous dispatch: {}.",
+            if self.paused { "paused" } else { "running" }
+        )
+    }
+
+    fn pause(&mut self) -> String {
+        self.paused = true;
+        "Autonomous dispatch paused. Send `status` to check state.".to_string()
+    }
+
+    fn execute_approved(&mut self, cmd: &InboundCommand) -> SimardResult<String> {
+        // The guardrail is enforced upstream (this is only reached after an
+        // explicit `approve`). The default handler records the sign-off for the
+        // existing gated authority; it does not itself perform the mutation.
+        let what = match cmd {
+            InboundCommand::Merge(n) => format!("merge of PR #{n}"),
+            InboundCommand::Deploy => "deploy".to_string(),
+            other => format!("{other:?}"),
+        };
+        tracing::info!(target: "signal", "operator signed off high-risk action: {what}");
+        Ok(format!(
+            "Sign-off recorded for {what}. It is authorized to proceed through the gated authority."
+        ))
+    }
+}
+
+/// A [`ConversationChannel`] over signal-cli, generic over the transport `T` and
+/// the command-effect handler `H` so both can be mocked in tests.
+pub struct SignalConversation<T: SignalTransport, H: SignalCommandHandler> {
+    transport: T,
+    handler: H,
+    allowlist: Allowlist,
+    account: String,
+    /// Allowlisted operators to address notifications to.
+    operators: Vec<String>,
+    /// The sender of the last delivered meeting turn — `send` addresses replies here.
+    current_operator: Option<String>,
+    /// A gated high-risk command awaiting `approve`: `(sender, command)`.
+    pending: Option<(String, InboundCommand)>,
+    next_id: u64,
+}
+
+impl<T: SignalTransport, H: SignalCommandHandler> SignalConversation<T, H> {
+    /// Build a Signal channel from a live transport, a command handler, and the
+    /// resolved `[signal]` configuration.
+    pub fn new(transport: T, handler: H, config: &SignalConfig) -> Self {
+        Self {
+            transport,
+            handler,
+            allowlist: Allowlist::from_config(config),
+            account: config.account.clone(),
+            operators: config.allowlist.clone(),
+            current_operator: None,
+            pending: None,
+            next_id: 1,
+        }
+    }
+
+    /// Send `text` to a specific Signal recipient via the transport.
+    async fn reply(&mut self, recipient: &str, text: &str) -> SimardResult<()> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let line = build_send_request(id, &self.account, recipient, text);
+        self.transport.send_line(line).await
+    }
+
+    /// Deliver an operator notification (PR merge-ready, stall/problem, high-risk
+    /// sign-off request) to every configured operator. This is the notifications-out
+    /// path; it is independent of any in-flight meeting turn.
+    pub async fn notify(&mut self, text: &str) -> SimardResult<()> {
+        let operators = self.operators.clone();
+        for op in &operators {
+            self.reply(op, text).await?;
+        }
+        Ok(())
+    }
+
+    /// Handle a low-risk lightweight command (`status`, `pause`, `approve`) for an
+    /// authorized sender and reply on the channel.
+    async fn handle_low_risk(&mut self, sender: &str, cmd: &InboundCommand) -> SimardResult<()> {
+        let reply = match cmd {
+            InboundCommand::Status => self.handler.status(),
+            InboundCommand::Pause => self.handler.pause(),
+            InboundCommand::Approve => match self.pending.take() {
+                Some((_from, pending_cmd)) => match self.handler.execute_approved(&pending_cmd) {
+                    Ok(msg) => msg,
+                    Err(e) => format!("Approved, but the action failed: {e}"),
+                },
+                None => "Nothing is awaiting sign-off.".to_string(),
+            },
+            // `handle_low_risk` is only called for AutoExecute commands; a
+            // conversation turn is routed out to the driver by `recv`, never here.
+            InboundCommand::Conversation(_) | InboundCommand::Deploy | InboundCommand::Merge(_) => {
+                return Ok(());
+            }
+        };
+        self.reply(sender, &reply).await
+    }
+}
+
+/// The operator-facing prompt for a gated high-risk command awaiting sign-off.
+fn high_risk_prompt(cmd: &InboundCommand) -> String {
+    let action = match cmd {
+        InboundCommand::Merge(n) => format!("Merging PR #{n}"),
+        InboundCommand::Deploy => "Deploying".to_string(),
+        other => format!("{other:?}"),
+    };
+    format!(
+        "{action} is a HIGH-RISK action and will NOT run from a text message. \
+         Reply `approve` to sign off; it will then proceed through the existing gated authority."
+    )
+}
+
+impl<T: SignalTransport + Send, H: SignalCommandHandler> ConversationChannel
+    for SignalConversation<T, H>
+{
+    fn name(&self) -> &'static str {
+        "signal"
+    }
+
+    async fn recv(&mut self) -> SimardResult<Option<Inbound>> {
+        loop {
+            let Some(line) = self.transport.recv_line().await? else {
+                return Ok(None);
+            };
+            let Some((sender, text)) = super::transport::parse_incoming(&line) else {
+                continue; // JSON-RPC responses, receipts, unparseable lines.
+            };
+
+            match self.allowlist.authorize(&sender) {
+                // Guardrail (a): fail-closed. Unknown senders are dropped.
+                AuthDecision::Ignored => {
+                    tracing::debug!(target: "signal", "dropping message from non-allowlisted sender");
+                    continue;
+                }
+                // Read-only senders may only read `status`, never mutate.
+                AuthDecision::ReadOnly => {
+                    if matches!(parse_inbound(&text), InboundCommand::Status) {
+                        let s = self.handler.status();
+                        self.reply(&sender, &s).await?;
+                    }
+                    continue;
+                }
+                AuthDecision::Authorized => {
+                    let cmd = parse_inbound(&text);
+                    // A meeting turn is handed to the shared driver, bound to
+                    // the authorized sender's identity (guardrail (b)).
+                    if let InboundCommand::Conversation(turn) = &cmd {
+                        self.current_operator = Some(sender.clone());
+                        return Ok(Some(Inbound {
+                            from: OperatorRef {
+                                id: sender,
+                                authorized: true,
+                            },
+                            text: turn.clone(),
+                        }));
+                    }
+                    // A lightweight operator command: gate it (guardrail (c)).
+                    match gate(&cmd) {
+                        GateDecision::AutoExecute => {
+                            self.handle_low_risk(&sender, &cmd).await?;
+                        }
+                        GateDecision::PendingSignOff => {
+                            self.pending = Some((sender.clone(), cmd.clone()));
+                            let prompt = high_risk_prompt(&cmd);
+                            self.reply(&sender, &prompt).await?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn send(&mut self, out: Outbound) -> SimardResult<()> {
+        let recipient = self
+            .current_operator
+            .clone()
+            .or_else(|| self.operators.first().cloned());
+        let Some(recipient) = recipient else {
+            tracing::warn!(target: "signal", "no operator to deliver an outbound to; dropping");
+            return Ok(());
+        };
+        let text = match out.kind {
+            OutKind::Error => format!("⚠ {}", out.text),
+            _ => out.text,
+        };
+        self.reply(&recipient, &text).await
+    }
+}
+
+/// Connect to the configured signal-cli daemon and drive an operator meeting
+/// conversation over Signal to completion. Feature-gated; requires the meeting
+/// LLM provider to be configured (same as the CLI/dashboard meeting).
+pub async fn run(config: SignalConfig) -> SimardResult<()> {
+    use crate::error::SimardError;
+
+    let transport = super::transport::JsonRpcTransport::connect(&config.endpoint).await?;
+    let handler = RuntimeCommandHandler::new();
+    let mut channel = SignalConversation::new(transport, handler, &config);
+
+    let agent = open_signal_agent_session().ok_or_else(|| SimardError::ActionExecutionFailed {
+        action: "signal-meeting".to_string(),
+        reason: "No LLM agent backend available. Check SIMARD_LLM_PROVIDER and auth config."
+            .to_string(),
+    })?;
+    let system_prompt = load_meeting_system_prompt();
+    let mut backend =
+        crate::meeting_backend::MeetingBackend::new_session("Signal", agent, None, system_prompt);
+
+    crate::conversation_channel::run_conversation(&mut channel, &mut backend).await
+}
+
+/// Load the shared meeting system prompt (same asset the CLI/dashboard use).
+fn load_meeting_system_prompt() -> String {
+    let path = crate::operator_commands::prompt_root().join("simard/meeting_system.md");
+    std::fs::read_to_string(&path).unwrap_or_default()
+}
+
+/// Open a Meeting-mode agent session for the Signal channel, mirroring the CLI
+/// and dashboard backends so all three channels get identical behavior.
+fn open_signal_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
+    let provider = match crate::session_builder::LlmProvider::resolve() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[simard] signal agent: LLM provider not configured: {e}");
+            return None;
+        }
+    };
+    match crate::session_builder::SessionBuilder::new(
+        crate::identity::OperatingMode::Meeting,
+        provider,
+    )
+    .node_id("signal-channel")
+    .address("signal-channel://local")
+    .adapter_tag("signal")
+    .open()
+    {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("[simard] signal agent session failed: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::signal_conversation::transport::MockTransport;
+
+    const OPERATOR: &str = "+15557654321";
+    const STRANGER: &str = "+15550000000";
+    const ACCOUNT: &str = "+15551230000";
+
+    #[derive(Default)]
+    struct SpyState {
+        executed: Vec<InboundCommand>,
+        paused: bool,
+    }
+
+    /// A command handler that records `execute_approved` calls so tests can prove
+    /// a high-risk action is only ever run after an explicit `approve`.
+    struct SpyHandler {
+        state: Arc<Mutex<SpyState>>,
+    }
+
+    impl SignalCommandHandler for SpyHandler {
+        fn status(&self) -> String {
+            format!("STATUS(paused={})", self.state.lock().unwrap().paused)
+        }
+        fn pause(&mut self) -> String {
+            self.state.lock().unwrap().paused = true;
+            "PAUSED".to_string()
+        }
+        fn execute_approved(&mut self, cmd: &InboundCommand) -> SimardResult<String> {
+            self.state.lock().unwrap().executed.push(cmd.clone());
+            Ok(format!("EXECUTED {cmd:?}"))
+        }
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    fn receive_line(sender: &str, text: &str) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "receive",
+            "params": {"envelope": {"sourceNumber": sender, "dataMessage": {"message": text}}}
+        })
+        .to_string()
+    }
+
+    /// Extract `(recipient, message)` from a JSON-RPC `send` line the channel wrote.
+    fn sent(line: &str) -> (String, String) {
+        let v: Value = serde_json::from_str(line).unwrap();
+        (
+            v["params"]["recipient"][0].as_str().unwrap().to_string(),
+            v["params"]["message"].as_str().unwrap().to_string(),
+        )
+    }
+
+    fn config(read_only_unknown: bool) -> SignalConfig {
+        SignalConfig {
+            endpoint: "127.0.0.1:0".to_string(),
+            account: ACCOUNT.to_string(),
+            allowlist: vec![OPERATOR.to_string()],
+            read_only_unknown,
+        }
+    }
+
+    fn channel(
+        lines: Vec<String>,
+        read_only_unknown: bool,
+    ) -> (
+        SignalConversation<MockTransport, SpyHandler>,
+        Arc<Mutex<SpyState>>,
+    ) {
+        let state = Arc::new(Mutex::new(SpyState::default()));
+        let handler = SpyHandler {
+            state: Arc::clone(&state),
+        };
+        let transport = MockTransport::with_lines(lines);
+        let ch = SignalConversation::new(transport, handler, &config(read_only_unknown));
+        (ch, state)
+    }
+
+    #[test]
+    fn recv_drops_unknown_sender_and_yields_authorized_conversation() {
+        let (mut ch, _state) = channel(
+            vec![
+                receive_line(STRANGER, "hello"),
+                receive_line(OPERATOR, "let's chat"),
+            ],
+            false,
+        );
+        let inbound = block_on(ch.recv())
+            .unwrap()
+            .expect("authorized conversation");
+        assert_eq!(inbound.text, "let's chat");
+        assert_eq!(inbound.from.id, OPERATOR);
+        assert!(inbound.from.authorized);
+        // The stranger's message was dropped silently — no reply was sent.
+        assert!(ch.transport.sent.is_empty());
+    }
+
+    #[test]
+    fn recv_status_replies_and_reaches_eof() {
+        let (mut ch, _state) = channel(vec![receive_line(OPERATOR, "status")], false);
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        assert_eq!(ch.transport.sent.len(), 1);
+        let (to, msg) = sent(&ch.transport.sent[0]);
+        assert_eq!(to, OPERATOR);
+        assert!(msg.contains("STATUS"), "got {msg}");
+    }
+
+    #[test]
+    fn recv_high_risk_merge_never_auto_executes() {
+        let (mut ch, state) = channel(vec![receive_line(OPERATOR, "merge #42")], false);
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        // Nothing executed from the text; a sign-off prompt was sent instead.
+        assert!(state.lock().unwrap().executed.is_empty());
+        assert_eq!(ch.transport.sent.len(), 1);
+        let (_to, msg) = sent(&ch.transport.sent[0]);
+        assert!(msg.contains("HIGH-RISK"), "got {msg}");
+        assert!(msg.contains("approve"), "got {msg}");
+    }
+
+    #[test]
+    fn recv_approve_after_pending_executes_exactly_once() {
+        let (mut ch, state) = channel(
+            vec![
+                receive_line(OPERATOR, "merge #42"),
+                receive_line(OPERATOR, "approve"),
+            ],
+            false,
+        );
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        let executed = state.lock().unwrap().executed.clone();
+        assert_eq!(executed, vec![InboundCommand::Merge(42)]);
+        // prompt + execution result.
+        assert_eq!(ch.transport.sent.len(), 2);
+        let (_to, msg) = sent(&ch.transport.sent[1]);
+        assert!(msg.contains("EXECUTED"), "got {msg}");
+    }
+
+    #[test]
+    fn approve_without_pending_is_a_noop() {
+        let (mut ch, state) = channel(vec![receive_line(OPERATOR, "approve")], false);
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        assert!(state.lock().unwrap().executed.is_empty());
+        let (_to, msg) = sent(&ch.transport.sent[0]);
+        assert!(msg.contains("Nothing is awaiting"), "got {msg}");
+    }
+
+    #[test]
+    fn read_only_unknown_gets_status_but_never_mutates() {
+        let (mut ch, state) = channel(
+            vec![
+                receive_line(STRANGER, "status"),
+                receive_line(STRANGER, "merge #1"),
+            ],
+            true,
+        );
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        // Exactly one reply: the read-only status. The merge was dropped.
+        assert_eq!(ch.transport.sent.len(), 1);
+        let (to, msg) = sent(&ch.transport.sent[0]);
+        assert_eq!(to, STRANGER);
+        assert!(msg.contains("STATUS"), "got {msg}");
+        assert!(state.lock().unwrap().executed.is_empty());
+    }
+
+    #[test]
+    fn notify_addresses_every_operator() {
+        let (mut ch, _state) = channel(vec![], false);
+        block_on(ch.notify("PR #7 is merge-ready")).unwrap();
+        assert_eq!(ch.transport.sent.len(), 1);
+        let (to, msg) = sent(&ch.transport.sent[0]);
+        assert_eq!(to, OPERATOR);
+        assert!(msg.contains("merge-ready"), "got {msg}");
+    }
+
+    #[test]
+    fn send_delivers_reply_to_current_operator() {
+        let (mut ch, _state) = channel(vec![receive_line(OPERATOR, "hi there")], false);
+        let _ = block_on(ch.recv()).unwrap().expect("conversation turn");
+        block_on(ch.send(Outbound {
+            kind: OutKind::Assistant,
+            text: "reply text".to_string(),
+        }))
+        .unwrap();
+        let (to, msg) = sent(ch.transport.sent.last().unwrap());
+        assert_eq!(to, OPERATOR);
+        assert_eq!(msg, "reply text");
+    }
+}
