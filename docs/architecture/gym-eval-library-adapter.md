@@ -1,11 +1,11 @@
 ---
 title: Library-backed Gym Evaluation Engine (the sole engine)
-description: How Simard's gym bridge is backed by the amplihack-agent-eval crate's native Rust GymRunner through the thin gym_runner_bridge adapter. As of the de-fork the private native_gym reimplementation has been deleted and the library is the only evaluation engine.
+description: How Simard's gym client is backed by the amplihack-agent-eval crate's native Rust GymRunner through the thin gym_runner_client adapter. As of the de-fork the private native_gym reimplementation has been deleted and the library is the only evaluation engine.
 last_updated: 2026-06-20
 owner: simard
 doc_type: reference
 related:
-  - ./bridge-pattern.md
+  - ./adapter-pattern.md
   - ../reference/bridge-wire-protocol.md
   - ./cognitive-memory-library-adapter.md
   - ../testing/ci-resilient-test-patterns.md
@@ -17,14 +17,14 @@ Simard's progressive evaluation engine (L1–L12 plus the long-horizon memory
 stress test) is implemented by the upstream
 [`amplihack-agent-eval`](https://github.com/rysweet/amplihack-rs) crate. Its
 native Rust `GymRunner` is reached through a single thin Simard adapter,
-**`gym_runner_bridge`** (`src/gym_runner_bridge.rs`), which registers the three
-`gym.*` bridge methods and maps the library's result types onto Simard's
+**`gym_runner_client`** (`src/gym_runner_client.rs`), which registers the three
+`gym.*` server methods and maps the library's result types onto Simard's
 existing wire protocol. This adapter is the **only** evaluation engine Simard
 ships.
 
 > **History.** Simard once maintained a *fork* of the gym/eval engine —
 > `src/native_gym.rs`, a ~468-line native Rust module that "replaced the Python
-> bridge". It hard-coded the twelve `L1`..`L12` scenario definitions and, for
+> subprocess server". It hard-coded the twelve `L1`..`L12` scenario definitions and, for
 > `run_scenario` / `run_suite`, returned **degraded** results whose
 > `error_message` read *"native Rust evaluator: ... not yet implemented; full
 > progressive test suite evaluation is a planned enhancement"*. Only
@@ -42,21 +42,21 @@ same pattern applied to the memory backend.
 
 ## What the de-fork changed
 
-| Aspect | Before (`native_gym`) | Now (`gym_runner_bridge`) |
+| Aspect | Before (`native_gym`) | Now (`gym_runner_client`) |
 |---|---|---|
 | Evaluation engine | private fork, hard-coded L1–L12 metadata | `amplihack_agent_eval::gym::GymRunner` (git dependency) |
 | `run_scenario` / `run_suite` | always returned a degraded "not yet implemented" result | runs the scenario and returns a real, self-graded result |
 | Scenario IDs | bare `"L1"`..`"L12"` | library IDs (`"L1-recall"`, `"L2-multi-source"`, …) + `"long-horizon-memory"` |
-| Wiring module | `src/native_gym.rs` (engine **and** bridge wiring) | `src/gym_runner_bridge.rs` (bridge wiring **only**; engine is the library) |
-| `lib.rs` module decl | `pub mod native_gym;` | `pub mod gym_runner_bridge;` |
-| `bridge_launcher::launch_gym_bridge_native` | `native_gym::register_gym_handlers` | `gym_runner_bridge::register_gym_handlers` |
-| `SIMARD_SKIP_GYM=1` fast path | present in `native_gym` | preserved in `gym_runner_bridge` |
-| Wire protocol (JSON on the bridge) | five-field `dimensions`, `scenario_id`, `success`, `score`, … | **byte-identical** — the adapter preserves the existing contract |
+| Wiring module | `src/native_gym.rs` (engine **and** server wiring) | `src/gym_runner_client.rs` (server wiring **only**; engine is the library) |
+| `lib.rs` module decl | `pub mod native_gym;` | `pub mod gym_runner_client;` |
+| `server_launcher::launch_gym_client_native` | `native_gym::register_gym_handlers` | `gym_runner_client::register_gym_handlers` |
+| `SIMARD_SKIP_GYM=1` fast path | present in `native_gym` | preserved in `gym_runner_client` |
+| Wire protocol (JSON on the server) | five-field `dimensions`, `scenario_id`, `success`, `score`, … | **byte-identical** — the adapter preserves the existing contract |
 
-The **bridge client and every downstream consumer are unchanged.**
-`crate::gym_bridge::GymBridge`, `src/gym_scoring/`, `src/gym_history/`,
+The **client and every downstream consumer are unchanged.**
+`crate::gym_client::GymClient`, `src/gym_scoring/`, `src/gym_history/`,
 `src/gym/`, and the OODA / self-improve call sites continue to depend only on
-the typed `GymBridge` API and the JSON wire shape. Only the *engine* behind the
+the typed `GymClient` API and the JSON wire shape. Only the *engine* behind the
 three handlers moved into the library.
 
 ---
@@ -91,21 +91,21 @@ the dependency tree.
 
 ## Architecture
 
-The stable seam is the bridge wire protocol. Every gym call site depends only
-on the typed `GymBridge` client and the JSON contract, so swapping the engine
+The stable seam is the server wire protocol. Every gym call site depends only
+on the typed `GymClient` and the JSON contract, so swapping the engine
 underneath required **no call-site changes**.
 
 ```text
 callers (operator CLI `simard gym`, OODA, self-improve, dashboards)
         │
         ▼
-   crate::gym_bridge::GymBridge            (typed client — UNCHANGED)
+   crate::gym_client::GymClient            (typed client — UNCHANGED)
         │   list_scenarios / run_scenario / run_suite
         ▼
-   NativeBridgeTransport "simard-gym-eval" (in-process JSON-RPC — UNCHANGED)
+   NativeServerTransport "simard-gym-eval" (in-process JSON-RPC — UNCHANGED)
         │   gym.list_scenarios / gym.run_scenario / gym.run_suite
         ▼
-   crate::gym_runner_bridge                (THIN ADAPTER — this page)
+   crate::gym_runner_client                (THIN ADAPTER — this page)
         │   • validates scenario_id / suite_id
         │   • honours SIMARD_SKIP_GYM
         │   • maps library results → ScoreDimensions wire JSON
@@ -116,13 +116,13 @@ callers (operator CLI `simard gym`, OODA, self-improve, dashboards)
 
 `crate::gym_scoring/` and `crate::gym_history/` sit *beside* this path: they
 consume the typed `GymScenarioResult` / `GymSuiteResult` returned by
-`GymBridge` and are unaffected by the engine swap.
+`GymClient` and are unaffected by the engine swap.
 
 ---
 
-## The adapter boundary (`gym_runner_bridge`)
+## The adapter boundary (`gym_runner_client`)
 
-`register_gym_handlers(transport: &mut NativeBridgeTransport)` registers three
+`register_gym_handlers(transport: &mut NativeServerTransport)` registers three
 closures on the `simard-gym-eval` transport. Each builds (or shares) a
 `GymRunner` and adapts its output to the existing wire JSON.
 
@@ -146,10 +146,10 @@ and in tests.
 
 ### Dimension mapping
 
-The library and the bridge model scoring dimensions differently, so the adapter
+The library and the wire contract model scoring dimensions differently, so the adapter
 translates field-by-field — it never blindly re-serializes the library struct:
 
-| Library type | Bridge type |
+| Library type | Wire type |
 |---|---|
 | `GymScenarioResult.dimensions: HashMap<String, Option<f64>>` | `ScoreDimensions` (five non-nullable `f64` fields) |
 | `GymSuiteResult.dimensions: HashMap<String, f64>` | `ScoreDimensions` (five non-nullable `f64` fields) |
@@ -164,7 +164,7 @@ Mapping rules, applied to all five keys of
 4. Clamp the result to `[0.0, 1.0]`.
 
 This guarantees the wire JSON always carries exactly the five-field
-`dimensions` object the `GymBridge` client deserializes.
+`dimensions` object the `GymClient` deserializes.
 
 > **Engine fidelity (current).** For the L1–L12 levels the engine today derives
 > per-dimension scores from a single self-grade: it sets `factual_accuracy` and
@@ -208,7 +208,7 @@ are passed through unchanged.
 
 ### Identity / path-traversal validation
 
-`scenario_id` **and** `suite_id` are validated at the bridge boundary before
+`scenario_id` **and** `suite_id` are validated at the server boundary before
 they reach the engine. Validation is **two** checks, not one:
 
 ```text
@@ -221,14 +221,14 @@ Both checks are required. Because `.` is an allowed character, the literal `..`
 dot-segment guard is what actually rejects a bare `..`. This is not optional:
 the library's `run_suite` performs `output_dir.join(suite_id)` with **no**
 traversal check of its own (only `run_scenario` rejects `/`, `\`, and `..`
-internally). The bridge therefore validates **both** ids itself rather than
+internally). The server therefore validates **both** ids itself rather than
 delegating. Both `{"suite_id": "../../tmp/x"}` (blocked by the regex's `/`) and
 `{"suite_id": ".."}` (blocked by the dot-segment guard) are rejected at the
 boundary.
 
 ### Error mapping (honest degradation)
 
-| Engine outcome | Bridge response |
+| Engine outcome | Server response |
 |---|---|
 | `Ok(result)` | RPC `result`: the normalized result. `run_scenario.success` is the engine's value; `run_suite.success` is **recomputed** as `scenarios_passed == scenarios_total` (see [Result normalization](#result-normalization-ids-and-suite-success)) |
 | `Err(EvalError)` | RPC `result` with `success: false`, `error_message: Some(...)`, zeroed dimensions, and `degraded_sources` populated — the RPC envelope itself stays `Ok` |
@@ -248,7 +248,7 @@ structured failing result the caller can inspect, not a silent zero.
 | `GymConfig.grader_votes` | adapter default (`3`) | Number of deterministic grader votes per question. |
 | `GymConfig.sdk` | adapter default (`"mini"`) | Deterministic self-grading backend; no LLM or network. |
 
-`SIMARD_SKIP_GYM` is intended for environments that need the bridge to answer
+`SIMARD_SKIP_GYM` is intended for environments that need the server to answer
 quickly without doing real evaluation work. It **fails open**: it always records
 `"SIMARD_SKIP_GYM"` in `degraded_sources` so the synthetic result is never
 mistaken for a real one.
@@ -284,8 +284,8 @@ artifacts, so `scenarios_total` is `12`. The `long-horizon-memory` scenario is
 run it on its own with `run_scenario("long-horizon-memory")`.
 `run_suite("progressive")` is the canonical full-suite invocation.
 
-No live consumer hard-codes scenario IDs against the bridge: `gym_history` and
-`gym_bridge` tests use opaque keys or fixture transports. If a real consumer or
+No live consumer hard-codes scenario IDs against the server: `gym_history` and
+`gym_client` tests use opaque keys or fixture transports. If a real consumer or
 external script later breaks on the ID change, add a bare-`"L1"`..`"L12"` alias
 map in the handler — but only when such a break actually surfaces.
 
@@ -302,15 +302,15 @@ factual_accuracy, specificity, temporal_awareness, source_attribution, confidenc
 
 ## Usage
 
-### From the bridge (the supported path)
+### From the client (the supported path)
 
-Callers use the unchanged typed `GymBridge` client. The launcher wires the
+Callers use the unchanged typed `GymClient`. The launcher wires the
 adapter automatically:
 
 ```rust
-use simard::bridge_launcher::launch_gym_bridge_native;
+use simard::server_launcher::launch_gym_client_native;
 
-let gym = launch_gym_bridge_native()?;           // registers gym_runner_bridge handlers
+let gym = launch_gym_client_native()?;           // registers gym_runner_client handlers
 
 // List scenarios
 for s in gym.list_scenarios()? {
@@ -385,7 +385,7 @@ adapter-specific coverage. They are deterministic and run in CI:
 | Empty `scenario_id` → hard error | `run_scenario_empty_id_is_transport_error` |
 | `SIMARD_SKIP_GYM` fast path | five `#[serial]` env-var tests (migrated from `native_gym`) |
 | Engine error → failing result | `run_scenario_engine_error_maps_to_failure` |
-| Round-trip wire stability | the unchanged `gym_bridge.rs` deserialization tests |
+| Round-trip wire stability | the unchanged `gym_client.rs` deserialization tests |
 
 The five `SIMARD_SKIP_GYM` tests mutate a process-wide env var and are
 annotated `#[serial]`; see
@@ -393,10 +393,10 @@ annotated `#[serial]`; see
 
 ```bash
 # Adapter unit tests
-cargo test -p simard --lib gym_runner_bridge::tests
+cargo test -p simard --lib gym_runner_client::tests
 
 # The full gym module set + the unchanged client contract tests
-cargo test -p simard --lib gym_runner_bridge gym_bridge gym_scoring gym_history
+cargo test -p simard --lib gym_runner_client gym_client gym_scoring gym_history
 
 # Release build gate
 cargo build --release
@@ -407,7 +407,7 @@ cargo build --release
 ## Security considerations
 
 - **Path traversal (critical).** Both `scenario_id` and `suite_id` are
-  allowlisted at the bridge before any `output_dir.join`. Do not rely on the
+  allowlisted at the server before any `output_dir.join`. Do not rely on the
   library's internal checks — `run_suite` has none.
 - **Result integrity.** Non-finite floats are sanitised and dimensions clamped
   to `[0,1]` before serialization, preserving the non-nullable five-field
@@ -426,7 +426,7 @@ cargo build --release
 
 ## See also
 
-- [Bridge Pattern](bridge-pattern.md) — the transport abstraction the gym bridge
+- [Adapter Pattern](adapter-pattern.md) — the transport abstraction the gym client
   uses.
 - [Bridge Wire Protocol Reference](../reference/bridge-wire-protocol.md) — the
   exact `gym.*` method contracts.

@@ -1,36 +1,51 @@
 ---
-title: OodaBrain API
-description: Reference for the OodaBrain trait — the engineer-lifecycle seam of Simard's OODA loop — its context and decision types, the RecipeBrain implementation, and the deterministic fallback.
+title: OODA Reasoners API
+description: Reference for the orient/decide/act reasoner traits of the Brain's OODA thread — their contexts and decision types, the RecipeReasoner and RustyClawd*Reasoner implementations, and the deterministic fallbacks.
 last_updated: 2026-07-03
 owner: simard
 doc_type: reference
 related:
+  - ../architecture/brain-model.md
   - ../concepts/unified-recipe-brain.md
   - ./recipe-brain-api.md
   - ./ooda-brain-decision-protocol.md
+  - ./brain-terminology-migration.md
 ---
 
-# Reference: `OodaBrain` API
+# Reference: OODA Reasoners API
 
-Crate: `simard` · Module: `simard::ooda_brain`
+Crate: `simard` · Module: `simard::ooda_reasoners`
 
-The `OodaBrain` trait is the seam between Simard's deterministic OODA loop and
+The Brain's **OODA thread** performs active cognition. Its three per-phase LLM
+components are **reasoners**, not "brains" — the whole cognition is the
+[Brain](../architecture/brain-model.md); a single phase reasons. There are three
+sibling reasoner traits:
+
+- **`OrientReasoner`** (orient phase),
+- **`DecideReasoner`** (decide phase),
+- **`ActReasoner`** (act / engineer-lifecycle phase).
+
+Each has a deterministic fallback (`DeterministicFallbackOrientReasoner`,
+`DeterministicFallbackDecideReasoner`, `DeterministicFallbackActReasoner`) and a
+production implementation (`RecipeReasoner` and/or `RustyClawd*Reasoner`). The
+three reasoners are **kept separate** — they are named individually, never
+merged.
+
+!!! note "Behavior-preserving"
+    The engineer-lifecycle decision protocol and every wire/serde value are
+    unchanged; only the Rust identifiers differ. For the historical old→new map
+    see the [terminology migration](./brain-terminology-migration.md).
+
+## The `ActReasoner` trait (act / engineer-lifecycle)
+
+The `ActReasoner` trait is the seam between the deterministic OODA loop and
 prompt-driven decision-making for the **engineer-lifecycle** phase. It is
 consulted by `dispatch_spawn_engineer`
 (`simard::ooda_actions::advance_goal::spawn`), which calls
-`decide_engineer_lifecycle` before spawning or skipping an engineer
-subprocess. It is one of three sibling brain traits — `OodaBrain`
-(act / engineer-lifecycle), [`OodaDecideBrain`](./recipe-brain-api.md) (decide),
-and `OodaOrientBrain` (orient) — all implemented together by
-[`RecipeBrain`](./recipe-brain-api.md)
-(`simard::ooda_brain::recipe_brain`), each with a deterministic fallback
-(`DeterministicLifecycleBrain`, `DeterministicDecideBrain`,
-`DeterministicOrientBrain`).
-
-## Trait
+`decide_engineer_lifecycle` before spawning or skipping an engineer subprocess.
 
 ```rust
-pub trait OodaBrain: Send + Sync {
+pub trait ActReasoner: Send + Sync {
     fn decide_engineer_lifecycle(
         &self,
         ctx: &EngineerLifecycleCtx,
@@ -38,14 +53,14 @@ pub trait OodaBrain: Send + Sync {
 }
 ```
 
-* **Synchronous** by design. `RustyClawdBrain` blocks on its async submitter
-  internally so callers in non-async OODA code never deal with futures. The
-  exact bridging mechanism (current-thread runtime owned by the brain, or a
-  borrowed handle) is an implementation detail of `LlmSubmitter`.
+* **Synchronous** by design. `RustyClawdActReasoner` blocks on its async
+  submitter internally so callers in non-async OODA code never deal with
+  futures. The exact bridging mechanism (current-thread runtime owned by the
+  reasoner, or a borrowed handle) is an implementation detail of `LlmSubmitter`.
 * `Send + Sync` so a single instance can be borrowed across the action
   dispatcher.
 
-## Context
+### Context
 
 ```rust
 pub struct EngineerLifecycleCtx {
@@ -74,96 +89,98 @@ Each field is best-effort: missing log files, unreadable mtimes, and absent
 state entries degrade to default values (`0`, `""`, `None`) — they never
 propagate errors.
 
-## Decision
+### Decision
 
 ```rust
 #[derive(serde::Serialize, Debug, Clone)]
 #[serde(tag = "choice", rename_all = "snake_case")]
 pub enum EngineerLifecycleDecision {
-    ContinueSkipping {
-        rationale: String,
-    },
-    ReclaimAndRedispatch {
-        rationale: String,
-        redispatch_context: String,
-    },
-    Deprioritize {
-        rationale: String,
-    },
-    OpenTrackingIssue {
-        rationale: String,
-        title: String,
-        body: String,
-    },
-    MarkGoalBlocked {
-        rationale: String,
-        reason: String,
-    },
-    ConsiderSelfUpdate {
-        rationale: String,
-    },
+    ContinueSkipping { rationale: String },
+    ReclaimAndRedispatch { rationale: String, redispatch_context: String },
+    Deprioritize { rationale: String },
+    OpenTrackingIssue { rationale: String, title: String, body: String },
+    MarkGoalBlocked { rationale: String, reason: String },
+    ConsiderSelfUpdate { rationale: String },
 }
 ```
 
-The enum has **6 variants**. `ConsiderSelfUpdate` is dispatched by
-`apply_lifecycle_decision` to the `simard safe-update` path; it is the only
-variant that can mutate the running daemon binary.
-
-`Deserialize` is no longer derived — the enum is never deserialized from
-JSON. It is constructed from text-parsed fields via the DECISION marker
-protocol (see [text-parsing wire formats § engineer lifecycle](../reference/text-parsing-wire-formats.md#1c-engineer-lifecycle-recipe_brainrs)).
-`Serialize` is retained for logging and state persistence.
+The enum has **6 variants** and its serde tag/values are frozen.
+`ConsiderSelfUpdate` is dispatched by `apply_lifecycle_decision` to the
+`simard safe-update` path; it is the only variant that can mutate the running
+daemon binary. `Deserialize` is not derived — the enum is constructed from
+text-parsed fields via the DECISION marker protocol (see
+[text-parsing wire formats § engineer lifecycle](./text-parsing-wire-formats.md#1c-engineer-lifecycle-recipe_brainrs)).
 
 ## Implementations
 
-### `RustyClawdBrain<S: LlmSubmitter>`
+### `RustyClawdActReasoner<S: LlmSubmitter>`
 
-Production brain. Loads the prompt via
-`include_str!("../../prompt_assets/simard/ooda_brain.md")`, substitutes
+Production act reasoner. Loads the prompt via
+`include_str!("../../prompt_assets/simard/ooda_reasoner_act.md")`, substitutes
 `{{var}}` placeholders from the context, submits to an `LlmSubmitter`, and
 parses the text response using the DECISION marker protocol.
 
-The parser finds the first `DECISION: <variant>` line, extracts labeled
-fields for structured variants, and collects remaining lines as rationale.
-There is no JSON fallback — the DECISION marker is the sole parser. See
-[text-parsing wire formats § engineer lifecycle](../reference/text-parsing-wire-formats.md#1c-engineer-lifecycle-recipe_brainrs)
-for the full grammar.
-
 ```rust
-pub struct RustyClawdBrain<S: LlmSubmitter> {
+pub struct RustyClawdActReasoner<S: LlmSubmitter> {
     submitter: S,
 }
 
-impl<S: LlmSubmitter> RustyClawdBrain<S> {
+impl<S: LlmSubmitter> RustyClawdActReasoner<S> {
     pub fn new(submitter: S) -> Self;
 }
 ```
 
-The free function `build_rustyclawd_brain()` constructs the production
-brain backed by `RustyClawdAdapter`:
+The free function `build_act_reasoner()` (was `build_rustyclawd_brain`)
+constructs the production reasoner backed by `RustyClawdAdapter`:
 
 ```rust
-pub fn build_rustyclawd_brain() -> SimardResult<RustyClawdBrain<RustyClawdSubmitter>>;
+pub fn build_act_reasoner() -> SimardResult<RustyClawdActReasoner<RustyClawdSubmitter>>;
 ```
 
 Returns `Err` when the adapter cannot be constructed (no provider configured,
 no API key, etc.). Callers in `cycle.rs` match on the result and fall back to
-`DeterministicFallbackBrain` on error.
+`DeterministicFallbackActReasoner` on error.
 
 **Adapter session lifetime.** The underlying `RustyClawdAdapter` session is
-opened lazily on the first `submit()` call and dropped when the brain is
-dropped at cycle end (via the adapter's existing `Drop` impl). One brain
-instance therefore corresponds to at most one adapter session per cycle.
+opened lazily on the first `submit()` call and dropped when the reasoner is
+dropped at cycle end. One reasoner instance therefore corresponds to at most one
+adapter session per cycle.
 
-### `DeterministicFallbackBrain`
+### `DeterministicFallbackActReasoner`
 
 ```rust
-pub struct DeterministicFallbackBrain;
+pub struct DeterministicFallbackActReasoner;
 ```
 
 Always returns `ContinueSkipping { rationale: "deterministic fallback" }`.
-Used when `build_rustyclawd_brain()` fails to construct. Preserves the
-exact pre-feature behavior of `dispatch_spawn_engineer`.
+Used when `build_act_reasoner()` fails to construct. Preserves the exact
+pre-feature behavior of `dispatch_spawn_engineer`.
+
+### `RecipeReasoner`
+
+`RecipeReasoner` is the recipe-runner-rs-backed
+implementation that can serve as the orient, decide, or act reasoner. It spawns
+`recipe-runner-rs` as a subprocess with the phase recipe and context variables,
+captures stdout, and scans it for the phase's action keywords. See
+[RecipeReasoner API](./recipe-brain-api.md) for the shared surface.
+
+## The Decide and Orient reasoners
+
+```rust
+pub trait DecideReasoner: Send + Sync {
+    fn judge(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment>;
+}
+
+pub trait OrientReasoner: Send + Sync {
+    fn orient(&self, ctx: &OrientContext) -> SimardResult<Orientation>;
+}
+```
+
+Both are implemented by `RecipeReasoner` (production) with
+`DeterministicFallbackDecideReasoner` / `DeterministicFallbackOrientReasoner`
+as the deterministic floors. The keyword-verdict scanner
+`parse_action_from_text` is unchanged — it always returns a valid
+`DecideJudgment` (defaulting to `AdvanceGoal`).
 
 ## Submitter Seam
 
@@ -174,81 +191,74 @@ pub(crate) trait LlmSubmitter: Send + Sync {
 ```
 
 Production: `RustyClawdSubmitter` (wraps `RustyClawdAdapter`).
-Tests: `StubSubmitter { canned: String }` returns a fixed text response. This is
-the seam used by all hermetic unit tests for the brain.
+Tests: `StubSubmitter { canned: String }` returns a fixed text response — the
+seam used by all hermetic unit tests for the reasoners.
 
 ## Errors
 
-> **New in [#1711](https://github.com/rysweet/Simard/issues/1711).**
-> `BrainResponseUnparseable` is a new `SimardError` variant introduced by
-> this PR. Pre-#1711 callers surfaced parse failures via the generic
-> `BaseTypeInvocation` error path, which is what the legacy `got N bytes`
-> log line was rendering.
-
 ```rust
-SimardError::BrainResponseUnparseable {
+SimardError::ReasonerResponseUnparseable {
     raw: String,
-    source: BrainParseSource,
+    source: ReasonerParseSource,
 }
 
 /// Wraps the underlying cause — marker-grammar failure only.
-/// The legacy `Json(serde_json::Error)` variant was removed in #1980.
-pub enum BrainParseSource {
+pub enum ReasonerParseSource {
     Marker(MarkerParseError),
 }
 ```
 
-* `raw` is the **complete, untruncated** model response text — stored in
-  full so that `Debug` formatting (`{:#?}`) and downstream tooling can see
-  exactly what the model returned. Truncation to `MAX_RAW_LOG_BYTES = 8192`
-  is applied only at log-format time by the shared `truncate_for_log`
-  helper (see [`truncate_for_log` reuse](#truncate_for_log-reuse) below).
-* As of [#1711](https://github.com/rysweet/Simard/issues/1711) every
-  parse-failure log line embeds the full (truncated-for-log) text — the
-  legacy `got N bytes` summary that hid the diagnostic information has
-  been removed at all three lossy parser sites: `rustyclawd.rs`,
-  `decide.rs`, and `orient.rs`.
-* `raw` is rendered with the `{:?}` Debug format wherever it appears in
-  log lines, so control characters and ANSI escapes are escaped (defends
-  against CRLF / log-injection in model output).
+> **Note.** `ReasonerResponseUnparseable` is constructed at the three lossy
+> parser sites (`rustyclawd.rs`, `decide.rs`, `orient.rs`) on a marker-grammar
+> failure. It carries the full raw text so diagnostics never lose the model's
+> output.
 
-### `truncate_for_log` reuse
-
-A `truncate_for_log` helper already exists at
-`src/ooda_actions/advance_goal/spawn.rs:318`. As part of this PR it is
-**hoisted** to a shared module (`src/util/log.rs`) and re-exported as
-`crate::util::log::truncate_for_log`, so all four log sites
-(`spawn.rs`, `rustyclawd.rs`, `decide.rs`, `orient.rs`) call the same
-implementation. The previous private function in `spawn.rs` becomes a
-re-export shim to keep the diff small.
+* `raw` is the **complete, untruncated** model response text. Truncation to
+  `MAX_RAW_LOG_BYTES = 8192` is applied only at log-format time by the shared
+  `crate::util::log::truncate_for_log` helper.
+* Every parse-failure log line embeds the full (truncated-for-log) text,
+  rendered with the `{:?}` Debug format so control characters and ANSI escapes
+  are escaped (defends against CRLF / log-injection in model output).
 
 The caller (`dispatch_spawn_engineer`) logs this and falls back to the
 deterministic skip outcome. The cycle never panics, never aborts.
 
-For the wire format that `parse_decision_from_response` accepts, see
-[Reference: OODA Brain Decision Protocol](ooda-brain-decision-protocol.md).
-For an operator runbook that consumes these logs, see
-[How-to: diagnose brain decision parse failures](../howto/diagnose-brain-decision-parse-failures.md).
-
 ## Construction Pattern
 
 ```rust
-let brain: Box<dyn OodaBrain> = match build_rustyclawd_brain() {
-    Ok(b) => Box::new(b),
+let act_reasoner: Box<dyn ActReasoner> = match build_act_reasoner() {
+    Ok(r) => Box::new(r),
     Err(e) => {
-        eprintln!("[ooda_brain] init failed: {e}; using deterministic fallback");
-        Box::new(DeterministicFallbackBrain)
+        eprintln!("[ooda_reasoners] init failed: {e}; using deterministic fallback");
+        Box::new(DeterministicFallbackActReasoner)
     }
 };
-dispatch_actions(actions, &mut state, brain.as_ref());
+dispatch_actions(actions, &mut state, act_reasoner.as_ref());
 ```
 
 Constructed **once per cycle** in `ooda_loop/cycle.rs`; dropped at cycle end.
+The reasoners are carried alongside memory and the peer clients in
+[`OodaContext`](./brain-executive-api.md#oodacontext), whose
+fields are `orient_reasoner`, `decide_reasoner`, and `act_reasoner`.
+
+### Daemon wire-up and health log
+
+`operator_commands_ooda/daemon/reasoners.rs` builds the
+three reasoners with the loud-fallback discipline unchanged. When every reasoner
+is LLM-backed the daemon logs:
+
+```
+[simard] OODA daemon: brain online — orient/decide/act reasoners LLM-backed (no fallback)
+```
+
+Per-reasoner lines name the reasoner and its implementation, e.g.
+`decide_reasoner = RustyClawdDecideReasoner (prompt-driven)`. A fallback logs
+the degraded line naming the phase and reason.
 
 ## Side-Effect Handler
 
-The decision returned by the brain is applied by a handler in a separate
-module, not in `ooda_brain` itself:
+The decision returned by the act reasoner is applied by a handler in a separate
+module, not in `ooda_reasoners` itself:
 
 ```
 src/ooda_actions/advance_goal/lifecycle.rs::apply_lifecycle_decision(
@@ -259,119 +269,33 @@ src/ooda_actions/advance_goal/lifecycle.rs::apply_lifecycle_decision(
 ) -> ActionOutcome
 ```
 
-Keeping the handler outside `ooda_brain` preserves the brain's purity (input
+Keeping the handler outside the reasoner preserves the reasoner's purity (input
 context → decision) and lets state mutations live alongside the other
 `advance_goal` actions.
 
 ## Module Layout
 
 ```
-src/ooda_brain/
-├── mod.rs            # trait, decision enum, error wiring           (~110 LOC)
-├── ctx.rs            # gather_engineer_lifecycle_ctx + redaction    (~90  LOC)
-├── rustyclawd.rs     # RustyClawdBrain + LlmSubmitter               (~140 LOC)
-├── decide.rs         # OodaDecideBrain trait, DecideJudgment,
-│                     #   DeterministicFallbackDecideBrain            (~200 LOC)
-├── recipe_decide.rs  # RecipeDecideBrain: recipe-runner-rs shim
-│                     #   + keyword scanner + inline tests            (~180 LOC)
-├── fallback.rs       # DeterministicFallbackBrain                   (~35  LOC)
-├── decide_tests.rs   # JSON round-trip + DeterministicFallback tests (~90  LOC)
-└── tests.rs          # parse, ctx, integration tests                (~200 LOC)
+src/ooda_reasoners/
+├── mod.rs            # traits, decision enum, error wiring
+├── ctx.rs            # gather_engineer_lifecycle_ctx + redaction
+├── rustyclawd.rs     # RustyClawd{Act,Decide,Orient}Reasoner + LlmSubmitter
+├── decide.rs         # DecideReasoner trait, DecideJudgment,
+│                     #   DeterministicFallbackDecideReasoner
+├── recipe_reasoner.rs# RecipeReasoner: recipe-runner-rs shim + keyword scanner
+├── fallback.rs       # DeterministicFallbackActReasoner
+├── decide_tests.rs   # JSON round-trip + DeterministicFallback tests
+└── tests.rs          # parse, ctx, integration tests
 ```
 
 All files respect the per-module 400-LOC cap (#1266).
 
-## Decide Brain: `RecipeDecideBrain`
-
-> **New in [#2111](https://github.com/rysweet/Simard/issues/2111).**
-> Replaces `RustyClawdDecideBrain` which parsed `DECISION:` markers.
-
-```rust
-pub struct RecipeDecideBrain {
-    recipe_path: PathBuf,
-}
-
-impl RecipeDecideBrain {
-    /// Returns `Some(brain)` if `recipe-runner-rs` is on $PATH and the
-    /// recipe YAML exists; `None` otherwise.
-    pub fn new(repo_root: &Path) -> Option<Self>;
-}
-
-impl OodaDecideBrain for RecipeDecideBrain {
-    fn judge(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment>;
-}
-```
-
-The `judge` method:
-
-1. Spawns `recipe-runner-rs` as a subprocess with the recipe path and
-   context variables (`goal_id`, `urgency`, `reason`) passed as arguments.
-2. Captures stdout.
-3. Scans stdout for action keywords using `parse_action_from_text()`.
-4. Returns the matched `DecideJudgment` variant.
-
-### `parse_action_from_text`
-
-```rust
-pub(crate) fn parse_action_from_text(text: &str) -> DecideJudgment;
-```
-
-Scans the lowercased text for any of the 10 known action keywords using
-`contains()`. Returns the first match. If no keyword is found, returns
-`DecideJudgment::AdvanceGoal` (the safe default).
-
-This function is the keyword-verdict equivalent of the deleted
-`parse_judgment_from_response` — but simpler, because it has no failure
-mode. It always returns a valid `DecideJudgment`.
-
-### Construction pattern
-
-```rust
-// In daemon/brains.rs:
-pub fn build_decide_brain(
-    state_root: &Path,
-    repo_root: &Path,
-) -> Box<dyn OodaDecideBrain> {
-    match RecipeDecideBrain::new(repo_root) {
-        Some(b) => Box::new(b),
-        None => {
-            eprintln!("[ooda] recipe-runner-rs not found; \
-                       using deterministic decide fallback");
-            Box::new(DeterministicFallbackDecideBrain)
-        }
-    }
-}
-```
-
-### What was deleted
-
-- `RustyClawdDecideBrain` — compiled in prompt via `include_str!`,
-  submitted to `LlmSubmitter`, parsed `DECISION:` markers.
-- `parse_judgment_from_response` — the `DECISION:` marker parser in
-  `decide.rs`.
-- `build_rustyclawd_decide_brain` — factory function.
-- `StubSubmitter` and `RustyClawdDecideBrain` tests in `decide_tests.rs`.
-
-## Test Inventory
-
-`src/ooda_brain/tests.rs` is the authoritative inventory for the
-engineer-lifecycle brain; the file ships the legacy parse / context /
-end-to-end tests **plus** the 15 protocol tests (T1 – T15) enumerated in
-the **Behavior matrix** of the
-[OODA Brain Decision Protocol reference](ooda-brain-decision-protocol.md#behavior-matrix).
-
-`src/ooda_brain/recipe_decide.rs` contains inline `#[cfg(test)]` tests for
-the keyword scanner, covering all 10 action keywords, the no-keyword
-default, mixed-case input, and multi-keyword input.
-
-`src/ooda_brain/decide_tests.rs` retains the JSON round-trip tests for
-`DecideJudgment` serialization and the `DeterministicFallbackDecideBrain`
-tests.
-
 ## See Also
 
-* [Concept: prompt-driven OODA brain](../concepts/prompt-driven-ooda-brain.md)
-* [Reference: `ooda_brain.md` prompt schema](ooda-brain-prompt.md)
-* [Reference: OODA decide recipe and prompt schema](ooda-decide-prompt.md)
+* [The Brain](../architecture/brain-model.md) — the whole cognition these reasoners serve.
+* [Concept: prompt-driven OODA reasoning](../concepts/prompt-driven-ooda-brain.md)
+* [Reference: OODA Brain Decision Protocol](ooda-brain-decision-protocol.md)
+* [Reference: RecipeReasoner API](recipe-brain-api.md)
 * [Reference: text-parsing wire formats](text-parsing-wire-formats.md)
 * [Reference: base type adapters](base-type-adapters.md)
+* [Terminology migration](brain-terminology-migration.md)

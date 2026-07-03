@@ -67,7 +67,8 @@ nav:
   - Architecture:
     - Overview: architecture/overview.md
     - Simard System Architecture: architecture/system-architecture.md
-    - Bridge Pattern: architecture/bridge-pattern.md
+    - The Brain (unified cognition): architecture/brain-model.md
+    - Adapter Pattern: architecture/adapter-pattern.md
     - Agent Composition: architecture/agent-composition.md
     - Engineer-Loop Agent Orchestration: architecture/engineer-agent-orchestration.md
     - Cognitive Memory: architecture/cognitive-memory.md
@@ -191,7 +192,9 @@ nav:
     - Engineer-Loop argv Sanitization: reference/engineer-loop-argv-sanitization.md
     - String-Truncation Helpers: reference/string-truncation-helpers.md
     - RecipeBrain API: reference/recipe-brain-api.md
-    - OodaBrain API: reference/ooda-brain-api.md
+    - OODA Reasoners API: reference/ooda-brain-api.md
+    - Brain Executive API: reference/brain-executive-api.md
+    - Terminology Migration (Brain model): reference/brain-terminology-migration.md
     - OODA Brain Decision Protocol: reference/ooda-brain-decision-protocol.md
     - OODA Brain Parse-Failure Record: reference/ooda-brain-parse-failure-record.md
     - OODA Brain Prompt Schema: reference/ooda-brain-prompt.md

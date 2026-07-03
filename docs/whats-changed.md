@@ -54,8 +54,8 @@ fork. They are free functions in the `memory_backup` module — see
 Reconciled pages: [Cognitive Memory](architecture/cognitive-memory.md),
 [Cognitive Memory — Library Adapter](architecture/cognitive-memory-library-adapter.md),
 the `reference/cognitive-memory-*` recall/idempotency/bootstrap pages, and
-[Bridge Pattern](architecture/bridge-pattern.md) — whose *Data Loss Prevention*
-section no longer attributes memory-write durability to a Python bridge. Writes
+[Adapter Pattern](architecture/adapter-pattern.md) — whose *Data Loss Prevention*
+section no longer attributes memory-write durability to a Python subprocess server. Writes
 now go directly through the in-process `LibraryCognitiveMemory` adapter
 (idempotent by `node_id`), and durability is provided by the `memory_backup`
 verified-backup APIs.
