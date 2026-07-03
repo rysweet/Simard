@@ -22,6 +22,26 @@ pub fn daemon_log(state_root: &std::path::Path, msg: &str) {
     }
 }
 
+/// Default OODA cycle interval (seconds) when `SIMARD_OODA_INTERVAL_SECS` is
+/// unset, empty, non-numeric, or `0`. A `0`/absent interval would busy-loop the
+/// daemon — running full OODA cycles back-to-back with no pause, because
+/// `interruptible_sleep(Duration::ZERO, …)` returns immediately — which is never
+/// intended. Mirrors `backup::backup_interval_secs_from_env`.
+pub const DEFAULT_OODA_INTERVAL_SECS: u64 = 300;
+
+/// Parse `SIMARD_OODA_INTERVAL_SECS` into a SAFE cycle interval. A parseable
+/// value **> 0** is honoured (leading/trailing whitespace trimmed); anything
+/// else — unset, empty, non-numeric, or `0` — falls back to
+/// [`DEFAULT_OODA_INTERVAL_SECS`]. Clamping `0` is what prevents the zero-delay
+/// busy loop (an oversized value merely sleeps a long time and is harmless, so it
+/// is intentionally left unclamped).
+pub fn ooda_interval_secs_from_env(raw: Option<&str>) -> u64 {
+    match raw.and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(n) if n > 0 => n,
+        _ => DEFAULT_OODA_INTERVAL_SECS,
+    }
+}
+
 /// Return the mtime of the currently-running executable, or `None` if it
 /// cannot be determined (e.g. the binary was deleted after launch).
 pub fn exe_mtime() -> Option<SystemTime> {
@@ -59,13 +79,31 @@ pub fn binary_changed(start_time: SystemTime) -> bool {
         // fail-closed: never relaunch on a guess.
         None => return false,
     };
+    // mtime pre-filter FIRST, so the expensive on-disk content hash is NOT
+    // computed on the steady-state hot path (this runs every cycle). Only when
+    // the mtime has actually advanced do we read + SHA-256 the (multi-MB) binary.
+    let on_disk_mtime = exe_mtime();
+    if !mtime_advanced(start_time, on_disk_mtime) {
+        return false;
+    }
     let on_disk_hash = current_exe_path().as_deref().and_then(file_content_hash);
     reload_decision(
         start_time,
-        exe_mtime(),
+        on_disk_mtime,
         on_disk_hash.as_deref(),
         running_hash,
     )
+}
+
+/// Whether the on-disk mtime is strictly newer than the image we started from —
+/// the cheap pre-filter that keeps the multi-MB content hash off the
+/// steady-state hot path. `None` (unreadable mtime) is fail-closed to `false`.
+///
+/// This is the same condition [`reload_decision`] applies internally; extracting
+/// it lets [`binary_changed`] skip computing the on-disk hash entirely when it is
+/// provably unnecessary (and lets that hot-path gate be unit-tested directly).
+fn mtime_advanced(start_time: SystemTime, on_disk_mtime: Option<SystemTime>) -> bool {
+    on_disk_mtime.is_some_and(|mtime| mtime > start_time)
 }
 
 // ── Wave 2: binary-identity reload gate (2026-07-02 operator-review #2) ──────
@@ -95,9 +133,11 @@ pub fn running_image_hash() -> Option<&'static str> {
         .as_deref()
 }
 
-/// Pin the running-image hash at a known-early point (daemon startup), closing
-/// the window in which an in-place replace between `exec` and the first reload
-/// check could otherwise be mistaken for the running image. Idempotent.
+/// Pin the running-image hash at a known-early point (daemon startup),
+/// narrowing the window in which an in-place replace between `exec` and this
+/// capture could otherwise be mistaken for the running image (it does not fully
+/// close it — the hash is read from the on-disk path — but the effect is
+/// bounded: the next genuinely-different rebuild reloads). Idempotent.
 pub fn capture_running_image_hash() {
     let _ = running_image_hash();
 }
@@ -379,6 +419,31 @@ mod tests {
             Some("a-different-hash"),
             RUNNING
         ));
+    }
+
+    // ── mtime_advanced (hot-path gate) ──────────────────────────────
+
+    #[test]
+    fn mtime_advanced_false_when_not_newer_so_hash_is_skipped() {
+        // The gate `binary_changed` uses to AVOID hashing the multi-MB binary on
+        // the steady-state hot path: an mtime not newer than start ⇒ no hash.
+        let start = SystemTime::now();
+        let older = start - Duration::from_secs(60);
+        assert!(!mtime_advanced(start, Some(older)));
+        assert!(!mtime_advanced(start, Some(start)));
+    }
+
+    #[test]
+    fn mtime_advanced_true_only_when_strictly_newer() {
+        let start = SystemTime::now();
+        let newer = start + Duration::from_secs(60);
+        assert!(mtime_advanced(start, Some(newer)));
+    }
+
+    #[test]
+    fn mtime_advanced_false_when_mtime_unreadable() {
+        // Fail-closed: an unreadable mtime must not provoke a content hash.
+        assert!(!mtime_advanced(SystemTime::now(), None));
     }
 
     // ── interruptible_sleep ─────────────────────────────────────────
