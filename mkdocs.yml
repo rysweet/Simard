@@ -140,6 +140,7 @@ nav:
     - Recipe-brain Verdict/Decision Parsing: reference/recipe-brain-verdict-parsing.md
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md
     - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
+    - Cognitive-Thread Scheduling: reference/cognitive-thread-scheduling.md
     # Hidden from nav until issue #1590 implementation lands:
     #   - reference/cognitive-memory-bridge-helpers.md
     #   - reference/goal-board-api.md
