@@ -458,6 +458,7 @@ fn test_all_subcommands_accept_help_flag() {
         "gym",
         "ooda",
         "dashboard",
+        "signal",
         "spawn",
         "merge-pr",
         "worktree-gc",

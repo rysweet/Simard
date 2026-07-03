@@ -7,6 +7,7 @@ use std::io::{BufRead, Write};
 
 use crate::base_types::BaseTypeSession;
 use crate::cognitive_memory::CognitiveMemoryOps;
+use crate::conversation_channel::apply_record;
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_backend::persist::{
     extract_action_items, extract_decisions, extract_disagreements, extract_open_questions,
@@ -433,60 +434,40 @@ pub fn run_meeting_repl<R: BufRead, W: Write>(
                 }
                 writeln!(output).ok();
             }
-            MeetingCommand::Theme(text) => {
-                backend.push_theme(text.clone());
-                writeln!(output, "{}", green(&format!("Theme recorded: {text}"))).ok();
-                checkpoint_wip(&backend);
-            }
-            MeetingCommand::Decision { text, rationale } => {
-                backend.push_explicit_decision(&text, rationale.as_deref());
-                let msg = if let Some(ref r) = rationale {
-                    format!("Decision recorded: {text} (rationale: {r})")
-                } else {
-                    format!("Decision recorded: {text}")
+            // All eight structured-capture commands share one shape: apply the
+            // backend mutation via the shared `apply_record`, echo the canonical
+            // acknowledgement (color-coded by capture kind), checkpoint WIP, and —
+            // for the list-growing captures — print the live capture tally.
+            // Binding the whole command (`cmd @ …`) passes it straight to
+            // `apply_record` with no clone-and-reconstruct.
+            cmd @ (MeetingCommand::Theme(_)
+            | MeetingCommand::Decision { .. }
+            | MeetingCommand::Action(_)
+            | MeetingCommand::Question(_)
+            | MeetingCommand::Owner(_)
+            | MeetingCommand::Goal(_)
+            | MeetingCommand::Risk(_)
+            | MeetingCommand::Disagree(_)) => {
+                let rec = apply_record(&mut backend, &cmd).expect("record command");
+                let ack = match &cmd {
+                    MeetingCommand::Theme(_) | MeetingCommand::Action(_) => green(&rec.text),
+                    MeetingCommand::Decision { .. }
+                    | MeetingCommand::Owner(_)
+                    | MeetingCommand::Goal(_) => cyan(&rec.text),
+                    _ => yellow(&rec.text),
                 };
-                writeln!(output, "{}", cyan(&msg)).ok();
+                writeln!(output, "{ack}").ok();
                 checkpoint_wip(&backend);
-                writeln!(output, "{}", capture_tally(&backend)).ok();
-            }
-            MeetingCommand::Action(text) => {
-                backend.push_explicit_action_item(&text);
-                writeln!(output, "{}", green(&format!("Action recorded: {text}"))).ok();
-                checkpoint_wip(&backend);
-                writeln!(output, "{}", capture_tally(&backend)).ok();
-            }
-            MeetingCommand::Question(text) => {
-                backend.push_explicit_question(&text);
-                writeln!(output, "{}", yellow(&format!("Question recorded: {text}"))).ok();
-                checkpoint_wip(&backend);
-                writeln!(output, "{}", capture_tally(&backend)).ok();
-            }
-            MeetingCommand::Owner(text) => {
-                backend.push_next_owner(&text);
-                writeln!(output, "{}", cyan(&format!("Next owner recorded: {text}"))).ok();
-                checkpoint_wip(&backend);
-            }
-            MeetingCommand::Goal(text) => {
-                backend.set_goal(&text);
-                writeln!(output, "{}", cyan(&format!("Goal recorded: {text}"))).ok();
-                checkpoint_wip(&backend);
-            }
-            MeetingCommand::Risk(text) => {
-                backend.push_explicit_risk(&text);
-                writeln!(output, "{}", yellow(&format!("Risk recorded: {text}"))).ok();
-                checkpoint_wip(&backend);
-                writeln!(output, "{}", capture_tally(&backend)).ok();
-            }
-            MeetingCommand::Disagree(text) => {
-                backend.push_explicit_disagreement(&text);
-                writeln!(
-                    output,
-                    "{}",
-                    yellow(&format!("Disagreement recorded: {text}"))
-                )
-                .ok();
-                checkpoint_wip(&backend);
-                writeln!(output, "{}", capture_tally(&backend)).ok();
+                if matches!(
+                    cmd,
+                    MeetingCommand::Decision { .. }
+                        | MeetingCommand::Action(_)
+                        | MeetingCommand::Question(_)
+                        | MeetingCommand::Risk(_)
+                        | MeetingCommand::Disagree(_)
+                ) {
+                    writeln!(output, "{}", capture_tally(&backend)).ok();
+                }
             }
             MeetingCommand::Recap => {
                 let status = backend.status();

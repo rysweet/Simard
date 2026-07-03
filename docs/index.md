@@ -32,6 +32,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to configure and monitor the disk health check](./howto/configure-disk-health-check.md) - Tune the per-cycle automated disk cleanup that prevents ENOSPC crashes (#2020).
 - [How to diagnose and prevent handoff accumulation](./howto/diagnose-handoff-accumulation.md) - Detect, resolve, and prevent unbounded meeting handoff file growth (#2268).
 - [How to start a meeting with Simard](./howto/start-a-meeting.md) - Have a natural conversation with Simard from CLI or dashboard, with full history and memory.
+- [How to set up the Signal channel](./howto/set-up-the-signal-channel.md) - Command Simard and receive her notifications over Signal, via a locally-run signal-cli JSON-RPC daemon, with an operator allowlist and high-risk sign-off gating (#2527).
 - [How to carry meeting decisions into engineer sessions](./howto/carry-meeting-decisions-into-engineer-sessions.md) - Persist meeting records under a shared state root and confirm later engineer runs carry them forward.
 - [How to inspect meeting records](./howto/inspect-meeting-records.md) - Read back the latest durable meeting record without mutating stored state.
 - [How to inspect improvement-curation state](./howto/inspect-improvement-curation-state.md) - Read back the latest approved, deferred, and promoted improvement state without mutation.
@@ -162,3 +163,4 @@ If you are changing architecture, start with the [architecture overview](./archi
 - [Implementation plan](./architecture/implementation-plan.md) - Phased roadmap with current status and quality gates.
 - [OODA meeting handoff integration](./architecture/ooda-meeting-handoff-integration.md) - Wire meeting handoffs into the OODA daemon and seed default goals (Issues #157, #158).
 - [Unified meeting backend](./architecture/unified-meeting-backend.md) - One conversational engine behind CLI REPL and dashboard WebSocket chat (Issue #462).
+- [Conversation channels](./architecture/conversation-channel.md) - The one clearly-named `ConversationChannel` abstraction: the CLI/TUI meeting REPL, the dashboard chat, and Signal are all thin channels over the same meeting engine (Issue #2527). See the [conversation channel API reference](./reference/conversation-channel-api.md) and the [Signal channel reference](./reference/signal-conversation.md).

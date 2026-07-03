@@ -76,6 +76,7 @@ nav:
     - Episode Distillation: architecture/episode-distillation.md
     - Gym Eval Engine — Library Adapter: architecture/gym-eval-library-adapter.md
     - Unified Meeting Backend: architecture/unified-meeting-backend.md
+    - Conversation Channels: architecture/conversation-channel.md
     - OODA Meeting-Handoff Integration: architecture/ooda-meeting-handoff-integration.md
     - Brain Introspection + Memory Hygiene: architecture/brain-introspection.md
     - Monthly Self-Quality-Audit: architecture/monthly-self-quality-audit.md
@@ -134,6 +135,7 @@ nav:
     - Export Meeting Markdown: howto/export-meeting-markdown.md
     - Inspect Meeting Records: howto/inspect-meeting-records.md
     - Carry Meeting Decisions: howto/carry-meeting-decisions-into-engineer-sessions.md
+    - Set Up the Signal Channel: howto/set-up-the-signal-channel.md
     - Diagnose Handoff Accumulation: howto/diagnose-handoff-accumulation.md
     - Inspect the Durable Goal Register: howto/inspect-durable-goal-register.md
     - Decompose a Large Goal: howto/decompose-a-large-goal.md
@@ -242,6 +244,8 @@ nav:
     - Trustworthy-Confidence API: reference/trustworthy-confidence-api.md
     - External-Signal Completion Gate: reference/external-signal-completion-gate.md
     - Meeting Backend API: reference/meeting-backend-api.md
+    - Conversation Channel API: reference/conversation-channel-api.md
+    - Signal Channel: reference/signal-conversation.md
     - LightweightChatSession: reference/lightweight-chat-session.md
     - Copilot Meeting Mode: reference/copilot-meeting-mode.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
