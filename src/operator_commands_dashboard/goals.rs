@@ -48,7 +48,11 @@ fn human_backlog_id(content: &str, concept: &str) -> String {
     if words.len() >= 2 {
         let slug = words.join(" ");
         if slug.len() > 50 {
-            format!("{}…", &slug[..50].trim_end())
+            // Char-boundary safe: `&slug[..50]` panics when byte 50 splits a
+            // multi-byte char, and the slug is arbitrary memory-graph title text.
+            let mut t = slug;
+            crate::util::string_truncate::truncate_to_char_boundary(&mut t, 50);
+            format!("{}…", t.trim_end())
         } else {
             slug
         }

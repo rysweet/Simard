@@ -141,7 +141,15 @@ fn try_restart(argv: &[&str]) -> Option<String> {
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let tail = if stderr.len() > 800 {
-                format!("…{}", &stderr[stderr.len() - 800..])
+                // Char-boundary-safe tail: `&stderr[stderr.len() - 800..]` panics
+                // when that offset splits a multi-byte sequence, and
+                // `from_utf8_lossy` output routinely has 3-byte U+FFFD chars. This
+                // runs on the rollback recovery path, so a panic here aborts
+                // rollback finalization exactly when the system is already degraded.
+                format!(
+                    "…{}",
+                    crate::util::string_truncate::tail_within_budget(&stderr, 800)
+                )
             } else {
                 stderr.into_owned()
             };
