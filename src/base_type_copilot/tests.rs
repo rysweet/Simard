@@ -526,9 +526,36 @@ fn meeting_outcome_or_skip(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Session creation with all OperatingModes (regression + meeting)
-// ---------------------------------------------------------------------------
+#[test]
+fn meeting_outcome_or_skip_skips_on_adapter_invocation_failure() {
+    // Reproduces the flaky failure mode deterministically: a real `copilot`
+    // subprocess that exits non-zero (e.g. "No authentication information
+    // found") surfaces as AdapterInvocationFailed. The behavioral meeting
+    // tests must skip on this — not `.unwrap()`-panic — since they can only
+    // assert on a successful turn and auth is an ambient, intermittent input.
+    let err = Err(SimardError::AdapterInvocationFailed {
+        base_type: "copilot-meeting-test".to_string(),
+        reason: "copilot meeting subprocess exited with exit status: 1: \
+                 Error: No authentication information found."
+            .to_string(),
+    });
+    assert!(
+        meeting_outcome_or_skip(err).is_none(),
+        "adapter invocation failure should signal a skip (None), not panic"
+    );
+}
+
+#[test]
+fn meeting_outcome_or_skip_returns_outcome_on_success() {
+    let ok = Ok(BaseTypeOutcome {
+        plan: "meeting plan".to_string(),
+        execution_summary: "done".to_string(),
+        evidence: vec!["copilot-meeting-session-id=abc".to_string()],
+    });
+    let outcome = meeting_outcome_or_skip(ok).expect("Ok(outcome) should pass through as Some");
+    assert_eq!(outcome.plan, "meeting plan");
+    assert_eq!(outcome.evidence, vec!["copilot-meeting-session-id=abc"]);
+}
 
 #[test]
 fn session_creation_succeeds_for_meeting_mode() {
