@@ -199,7 +199,7 @@ is an orchestrator over shipped code, not a reimplementation.
 | `Deploy{commit}` | `Deployer` | `self_deploy::orchestrator::SelfDeployOrchestrator::run` (`src/self_deploy/orchestrator.rs:229`); `self_relaunch::{build_canary,verify_canary,all_gates_passed,default_gates,handover}` (`src/self_relaunch/*`); marker `env!("SIMARD_GIT_HASH")` via `self_deploy::health`. |
 | `FileIssue{run}` | `IssueFiler` | `stewardship::process_orchestrator_run` (`src/stewardship/mod.rs:51`); dedup `stewardship::{failure_signature,find_existing}` (`src/stewardship/dedup.rs`); backlog `goal_curation::enqueue_stewardship_issue`. |
 | `TransferGoal{goal}` | `MeetingHost` | `meeting_repl::run_meeting_repl` (`src/meeting_repl/repl.rs:211`); `meeting_facilitator` handoff (`MeetingHandoff`, `write_meeting_handoff`); `meetings::PersistedMeetingGoalUpdate`. |
-| `Report` | `StatusReader` | `status::assemble` rendered via `status::render` / `status::json`. |
+| `Report` | `StatusReader` | `status::provider::assemble` (`src/status/provider.rs:58`) rendered via `status::render::to_terminal` (`src/status/render.rs:28`) / `status::json::to_string_pretty` (`src/status/json.rs:12`); optional operator push via `ConversationChannel` (feature-gated — see [Design consolidation](#design-consolidation)). |
 | `RunAudit{scope}` | `Auditor` | `self_quality_audit::run_self_quality_audit` (`src/self_quality_audit.rs`); recipe `prompt_assets/simard/recipes/monthly-self-quality-audit.yaml`. |
 | `Escalate{reason}` | (guardrail) | surface to the operator; no auto-execution. |
 | (curation) | `GoalCurator` | `goal_curation::{load_goal_board,promote_to_active,save_goal_board}`; `BoardWriteLock` (#2514, `operations.rs:190`); `MAX_ACTIVE_GOALS`. |
@@ -348,6 +348,68 @@ compiles independently of upstream signature drift); the **doc comments carry th
 precise reuse contract** naming each existing function/file. An optional read-only
 `impl CognitiveThread` sensor (M1) is described above; the acting Overseer is the
 co-process.
+
+## Design consolidation
+
+This design has been reconciled against the code at HEAD before implementation.
+The `src/overseer/` scaffolding matches the [Rust sketch](#rust-sketch) table
+exactly (five modules, wired additively at `src/lib.rs:104`, `#![allow(dead_code)]`,
+**not** reachable from `main`), and every reuse target in the
+[capability map](#capability--action-set--existing-simard-modules) was verified to
+resolve to a real symbol. The ledger below is the authoritative reference the M1+
+implementation follows — it replaces "trust the citations" with "citations verified".
+
+### Grounding ledger (verified at HEAD)
+
+| Reuse target | Resolved symbol (file:line) |
+|---|---|
+| Observe input | `status::provider::assemble` (`src/status/provider.rs:58`) → `StatusSnapshot` |
+| Report render | `status::render::to_terminal` (`src/status/render.rs:28`); `status::json::{to_string, to_string_pretty}` (`src/status/json.rs:7,12`) |
+| Merge gates | `stewardship::merge_authority::evaluate_objective_gates` (`src/stewardship/merge_authority.rs:495`) |
+| Merge | `stewardship::merge_authority::merge_pr_if_merge_ready` (`:564`) |
+| Issue filing / dedup | `stewardship::process_orchestrator_run` (`src/stewardship/mod.rs:51`); `failure_signature` / `find_existing` (`src/stewardship/dedup.rs`) |
+| Recipe launch | `amplihack recipe run … smart-orchestrator` (`src/bin/simard_engineer_loop_recipe.rs:51`) |
+| Deploy / canary | `self_deploy::orchestrator::SelfDeployOrchestrator::run` + `self_relaunch` gates |
+| Goal transfer | `meeting_repl::run_meeting_repl` (`src/meeting_repl/repl.rs:211`) |
+
+One drift was found and fixed during consolidation: the `Report` row above
+previously cited the module paths `status::render` / `status::json`; the real
+public entry points are `status::render::to_terminal` and
+`status::json::to_string_pretty`.
+
+### Merge authority takes no `--admin` path (verified)
+
+The Overseer never bypasses branch protection. Grounding confirms `--admin` /
+`--no-verify` appear **only** in comments and the `ResolveConflict` docstring —
+never in the merge path. `merge_pr_if_merge_ready` gates on
+`evaluate_objective_gates` (required checks green + base-branch allowlist) and
+merges through the normal `gh` path, so pr-verify checks #1–2 and the
+"objective gates only" guarantee are code-backed, not aspirational.
+
+### Reporting / operator-delivery seam (feature-independent)
+
+`Report` (and the operator side of `TransferGoal`) render through the same
+telemetry surface `simard status` uses, with **no Cargo-feature dependency**:
+
+- **Default delivery:** `status::render::to_terminal(&snapshot)` (human) /
+  `status::json::to_string_pretty(&snapshot)` (machine) to the log / operator.
+- **Optional push delivery:** the `ConversationChannel` trait
+  (`src/conversation_channel/mod.rs:90`; `send(Outbound)` is **async** —
+  `impl Future + Send`). The concrete `SignalConversation` sender is behind
+  `#[cfg(feature = "signal")]` (`src/lib.rs:139`, **default off**), so **M1
+  `Report` must not hard-depend on `signal`** — it degrades to the render path
+  when the feature is absent.
+- **No-network tests** reuse `MockConversationChannel`
+  (`src/conversation_channel/mock.rs`) and assert on `.sent()`, satisfying the
+  roadmap's "no network" test constraint for the reporting path as well as the
+  issue-filer.
+
+### Terminology note
+
+The daemon-side host type is still `Mind` (the `*Brain` → reasoner rename has
+not landed at HEAD), so this document uses `Mind` deliberately. The pr-verify
+"no `Bridge` naming" scan (check #3) is therefore scoped to **added lines only**
+— pre-existing `terminal_engineer_bridge` code is untouched by the Overseer.
 
 ## Phased roadmap
 
