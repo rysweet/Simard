@@ -300,3 +300,48 @@ fn persist_artifacts_with_different_topologies() {
 }
 
 // --- make_inspection / make_executed helper validation ---
+
+// --- summarize_results char-boundary panic regression (Wave 3) ---
+
+/// `summarize_results` previously did `&action.stdout[..200]` guarded only by a
+/// BYTE-length check, so an engineer subprocess whose stdout put a multi-byte
+/// UTF-8 char across byte 200 panicked the every-action summary path. Assert the
+/// char-boundary-safe truncation no longer panics and drops the split char whole.
+#[test]
+fn summarize_results_does_not_panic_on_multibyte_stdout_at_byte_200() {
+    use super::types::VerificationReport;
+
+    let mut stdout = "a".repeat(199);
+    stdout.push('🎉'); // 4-byte emoji: byte 199 starts it, byte 200 is mid-sequence
+    stdout.push_str("trailing");
+    assert!(
+        !stdout.is_char_boundary(200),
+        "fixture invariant: byte 200 must split the emoji"
+    );
+
+    let mut action = make_executed(EngineerActionKind::ReadOnlyScan);
+    action.stdout = stdout;
+    let verification = VerificationReport {
+        status: "ok".to_string(),
+        summary: "ok".to_string(),
+        checks: Vec::new(),
+    };
+    let inspection = make_inspection();
+
+    // Must not panic (the whole point of the fix).
+    let summary = super::summarize_results("objective", &action, &verification, &inspection);
+
+    assert!(
+        summary.accomplishment.ends_with('…'),
+        "an over-budget summary keeps its ellipsis"
+    );
+    assert!(
+        summary.accomplishment.len() <= 200 + '…'.len_utf8(),
+        "truncated to the byte budget (+ ellipsis), got {} bytes",
+        summary.accomplishment.len()
+    );
+    assert!(
+        !summary.accomplishment.contains('🎉'),
+        "the char straddling the budget is dropped whole, never partially included"
+    );
+}
