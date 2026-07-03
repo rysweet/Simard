@@ -393,6 +393,19 @@ pub fn run_ooda_daemon(
     if auto_reload {
         daemon_log(&state_root, "[simard] OODA daemon: auto-reload enabled");
     }
+    let self_relaunch_interval = crate::self_deploy::restart::self_relaunch_min_interval_from_env(
+        std::env::var(crate::self_deploy::restart::SELF_RELAUNCH_MIN_INTERVAL_ENV)
+            .ok()
+            .as_deref(),
+    );
+    daemon_log(
+        &state_root,
+        &format!(
+            "[simard] self-relaunch: min interval = {} ({}; 0/off disables interval-only relaunches; real binary hash changes bypass the interval)",
+            self_relaunch_interval.label(),
+            crate::self_deploy::restart::SELF_RELAUNCH_MIN_INTERVAL_ENV,
+        ),
+    );
 
     // De-fork Phase 2b (issue #2307): the native lbug-WAL file-copy backup was
     // removed. Issue #2420 reintroduces a periodic **verified** backup below —
