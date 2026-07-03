@@ -24,6 +24,12 @@ pub mod cmd_ensure_deps;
 pub mod cmd_install;
 pub mod cmd_self_update;
 pub mod cognitive_memory;
+// Issue #2419: cognitive-thread scheduling — a `Mind` runs many
+// `CognitiveThread`s (the primary OODA loop + maintenance + engineer-log
+// analysis) on their own cadence/trigger. Sibling of `ooda_scheduler` (the
+// engineer action-slot scheduler), which is unrelated and untouched. See
+// `docs/reference/cognitive-thread-scheduling.md`.
+pub mod cognitive_threads;
 // Issue #2419: periodic brain self-examination + memory-hygiene pass — a
 // higher-level introspection layer that reuses the existing distillation /
 // statistics / expired-sensory infra (mirrors `disk_health`). Tests live in a

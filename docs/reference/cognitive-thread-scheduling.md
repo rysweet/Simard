@@ -394,7 +394,7 @@ therefore *create-suppression*: embed `stewardship-signature:<sig>` in the body,
 `search_issues` → `find_existing`; create **only** when no open issue with the
 signature exists, otherwise it is a no-op (structured telemetry only). When
 issue filing is unavailable (no `gh`/offline/tests), it degrades to **structured
-telemetry only** — never a committed file. The `Box<dyn GhClient>` seam lets
+telemetry only** — never a committed file. The `Box<dyn GhClient + Send>` seam lets
 tests inject a fake client (fixture-driven, no network).
 
 **Bounding:** hard caps on records scanned, findings emitted, and at most one
@@ -451,7 +451,7 @@ paths safe by construction and reuse the crate's existing hardening.**
 | **SR-6** | **Never delete the live store.** The candidate path MUST be asserted `!=` the active cognitive-store path (and its shadow/WAL) reachable via `ThreadContext.memory`. | Runtime equality assert (belt-and-suspenders with the SR-5 deny-list). | New check in the thread. |
 | **SR-7** | **Conservative default posture.** Global `dry_run` honored (`SIMARD_MAINTENANCE_DRY_RUN`); retention **floors** (always keep ≥ N newest) enforced *before* any prune; destructive maintenance ships **dry-run-first / opt-in** until validated in production. Availability > reclaimed bytes. | `ThreadContext.dry_run` + env retention floors. | Design §8. |
 | **SR-8** | **Resource-exhaustion / DoS bounds.** (a) `Mind` caps non-critical fan-out per tick and keeps OODA `Critical`/exempt so no thread flood starves the control loop; (b) `catch_unwind` + **capped** exponential backoff stops a hot-failing thread pinning a core; (c) interval env vars are clamped to a **minimum floor** (reject/normalize `0`/negative) so a hostile/misconfigured env can't make a thread due every tick; (d) `EngineerLogAnalysis` enforces record/window/finding caps **before** reading and ≤ 1 `create_issue` per run. | §5 budget + backoff; interval clamp; scan caps. | Budget/backoff in §5; add interval-floor clamp + pre-read caps. |
-| **SR-9** | **Least authority.** Threads receive only borrowed, scoped resources via `ThreadContext` and MUST NOT reach globals. The two new threads MUST have **no** code path to `self_deploy`/`self_relaunch`/redeploy. `GhClient` is injected as `Box<dyn GhClient>` (fake in tests → no network, no credentials). | `ThreadContext` seam (§4); trait-object `GhClient`. | ✅ Verified: none of `cmd_cleanup`, `memory_backup`, `stewardship`, `disk_pressure` reference `self_deploy`/`self_relaunch`/`redeploy`. |
+| **SR-9** | **Least authority.** Threads receive only borrowed, scoped resources via `ThreadContext` and MUST NOT reach globals. The two new threads MUST have **no** code path to `self_deploy`/`self_relaunch`/redeploy. `GhClient` is injected as `Box<dyn GhClient + Send>` (fake in tests → no network, no credentials). | `ThreadContext` seam (§4); trait-object `GhClient`. | ✅ Verified: none of `cmd_cleanup`, `memory_backup`, `stewardship`, `disk_pressure` reference `self_deploy`/`self_relaunch`/`redeploy`. |
 | **SR-10** | **Credential confidentiality.** New code MUST NOT read, log, embed in an issue body, or emit to telemetry any token/`GH_TOKEN`. Error strings may include `gh` stderr (gh prints no tokens) but MUST NOT be augmented with env dumps. | No secret in fields/bodies/errors. | `gh` auth stays ambient in the CLI. |
 | **SR-11** | **Telemetry integrity (no metric-cardinality injection).** Metric/span **names** use the fixed `simard.thread.<id>` scheme where `<id>` is a per-thread compile-time constant — never derived from untrusted input. Untrusted content appears only as **length-bounded structured field values**, never as a format-string arg (no log forging) and never as a name. | Constant ids; bounded structured fields. | Design §7. |
 | **SR-12** | **Trigger authenticity.** `OnDemand`/`EventDriven` due-ness MUST originate from the internal operator/event channel (in-process flag/predicate on `ThreadContext`), not attacker-influenceable external input. Blast radius of a spurious trigger is bounded by SR-8. | Internal-only trigger source. | Design §4/§5. |
@@ -761,12 +761,12 @@ pub struct EngineerLogAnalysisConfig {
     pub dry_run: bool,        // suppress issue creation; telemetry only
 }
 impl Default for EngineerLogAnalysisConfig { /* safe bounded defaults */ }
-pub struct EngineerLogAnalysisThread { /* cfg, gh: Box<dyn GhClient>, health (private) */ }
+pub struct EngineerLogAnalysisThread { /* cfg, gh: Box<dyn GhClient + Send>, health (private) */ }
 impl EngineerLogAnalysisThread {
     pub fn from_env() -> Self;   // uses stewardship::gh_client::RealGhClient
     pub fn with_client(          // test seam: inject a fake GhClient
         cfg: EngineerLogAnalysisConfig,
-        gh: Box<dyn crate::stewardship::gh_client::GhClient>,
+        gh: Box<dyn crate::stewardship::gh_client::GhClient + Send>,
     ) -> Self;
 }
 // policy() = Interval(cfg.interval_secs); priority() = Low.
