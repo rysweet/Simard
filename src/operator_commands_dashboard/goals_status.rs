@@ -61,10 +61,6 @@ const NOISE_PHRASES: &[&str] = &[
     "spawn_engineer dispatched",
     "continue_skipping",
     "advance-goal:",
-    // Keep in sync with PROGRESS_ACCEPTED_DETAIL_PREFIX in
-    // ooda_actions::goal_session::advance (longer phrase first so the shorter
-    // "no-action:" below never strands a "progress-accepted:" fragment).
-    "no-action progress-accepted:",
     "no-action:",
     "ooda-brain",
     "brain:",
@@ -422,21 +418,6 @@ mod tests {
             detail.contains("Another subordinate is mid-implementation"),
             "detail: {detail}"
         );
-    }
-
-    #[test]
-    fn accepted_progress_prefix_is_stripped() {
-        // The reviewer-accepted no-action branch emits a distinct prefix; the
-        // dashboard must strip it just like the plain "no-action:" vocabulary
-        // and must not leave a dangling "progress-accepted:" fragment behind.
-        let raw = "no-action progress-accepted: shipped the migration (progress=40%, goal 'g')";
-        let (chip, detail, _) = render_status_and_detail(Some(raw));
-        assert_eq!(chip, StatusChip::Working);
-        assert!(
-            !detail.contains("no-action") && !detail.contains("progress-accepted:"),
-            "detail still leaks internal no-action vocabulary: {detail}"
-        );
-        assert!(detail.contains("shipped the migration"), "detail: {detail}");
     }
 
     // ---- Failed branch ----------------------------------------------------

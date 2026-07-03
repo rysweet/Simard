@@ -297,13 +297,8 @@ impl NoProgressTracker {
 
     /// Drop counters for goals no longer on the board (mirrors the
     /// `OodaState.goal_failure_counts` pruning), so stale ids cannot leak.
-    ///
-    /// Takes a borrowed `HashSet<&str>` so callers can prune against the live
-    /// board without cloning every goal id into owned `String`s each cycle —
-    /// the caller in `prune_stale_failure_counts` reuses the same `&str` set it
-    /// already built for `goal_failure_counts`.
-    pub fn retain_goals(&mut self, live: &HashSet<&str>) {
-        self.counts.retain(|id, _| live.contains(id.as_str()));
+    pub fn retain_goals(&mut self, live: &HashSet<String>) {
+        self.counts.retain(|id, _| live.contains(id));
     }
 
     /// Record a no-action cycle for `goal_id` and return the breaker's

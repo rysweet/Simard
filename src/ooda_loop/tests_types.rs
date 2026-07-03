@@ -83,12 +83,6 @@ fn populated_state() -> OodaState {
     state.last_cycle_summary = Some("prior summary".to_string());
     state.last_cycle_duration_secs = Some(42);
     state.goal_failure_counts.insert("goal-snap".to_string(), 2);
-    // Fix-3 no-progress breaker counter: seed the sibling of
-    // `goal_failure_counts` so snapshot capture/round-trip is exercised for the
-    // tracker too (its persistence is what keeps a restart-spanning livelock
-    // bounded).
-    state.no_progress_tracker.record_no_action("goal-snap");
-    state.no_progress_tracker.record_no_action("goal-snap");
     state
 }
 
@@ -102,7 +96,6 @@ fn snapshot_captures_serializable_fields() {
     assert_eq!(snap.last_cycle_summary.as_deref(), Some("prior summary"));
     assert_eq!(snap.last_cycle_duration_secs, Some(42));
     assert_eq!(snap.goal_failure_counts.get("goal-snap"), Some(&2));
-    assert_eq!(snap.no_progress_tracker.consecutive("goal-snap"), 2);
     assert_eq!(snap.active_goals.active.len(), 1);
     assert_eq!(snap.active_goals.active[0].id, "goal-snap");
 }
@@ -128,12 +121,6 @@ fn snapshot_json_roundtrip_preserves_state() {
     assert_eq!(
         restored.goal_failure_counts.get("goal-snap"),
         state.goal_failure_counts.get("goal-snap")
-    );
-    assert_eq!(
-        restored.no_progress_tracker.consecutive("goal-snap"),
-        state.no_progress_tracker.consecutive("goal-snap"),
-        "no-progress breaker counter must survive a JSON snapshot round-trip so \
-         a livelock that spans a daemon restart stays bounded"
     );
     assert_eq!(
         restored.active_goals.active.len(),

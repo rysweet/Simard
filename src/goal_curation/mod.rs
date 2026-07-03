@@ -48,8 +48,9 @@ pub use completion_gate::{
 };
 
 pub use no_progress_breaker::{
-    NO_PROGRESS_BREAKER_THRESHOLD, NoProgressResolution, NoProgressTracker, StuckGoalDisposition,
-    is_no_progress_marker, verify_stuck_goal,
+    NO_PROGRESS_BLOCKED_PREFIX, NO_PROGRESS_BLOCKED_SUFFIX, NO_PROGRESS_BREAKER_THRESHOLD,
+    NoProgressResolution, NoProgressTracker, StuckGoalDisposition, is_no_progress_marker,
+    no_progress_blocked_reason, obsolescence_reason, resolve_no_progress, verify_stuck_goal,
 };
 
 #[cfg(test)]
