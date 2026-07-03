@@ -57,7 +57,7 @@ For the build-from-source merged-but-not-running path, see the
 - [Release packaging contract](#release-packaging-contract)
 - [Backward compatibility](#backward-compatibility)
 - [Examples](#examples)
-- [Configuration & environment](#configuration--environment)
+- [Configuration & environment](#configuration-environment)
 - [Tests](#tests)
 - [See also](#see-also)
 

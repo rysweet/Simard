@@ -105,7 +105,7 @@ accepted) rather than blocking all goals.
   upstream).
 
 (Dashboard operator overrides are not "non-evidence" — they are a separate
-intentional bypass mechanism. See [Bypass set](#bypass-set--when-the-gate-is-not-consulted) and [Scope and exceptions](#scope-and-exceptions).)
+intentional bypass mechanism. See [Bypass set](#bypass-set-when-the-gate-is-not-consulted) and [Scope and exceptions](#scope-and-exceptions).)
 
 ## Bypass set — when the gate is not consulted
 
@@ -140,7 +140,7 @@ ooda_actions/advance_goal/subordinate.rs:223  (Completed after artifacts)
 ```
 
 A fifth caller — `ooda_actions/advance_goal/subordinate.rs:262` — sets
-`Blocked(reason)`, which is in the [bypass set](#bypass-set--when-the-gate-is-not-consulted)
+`Blocked(reason)`, which is in the [bypass set](#bypass-set-when-the-gate-is-not-consulted)
 (`Blocked` keeps the prior percent and cannot inflate the dashboard). It
 intentionally continues to call `update_goal_progress` directly.
 

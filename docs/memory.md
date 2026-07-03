@@ -1,7 +1,7 @@
 ---
 title: Memory architecture
 description: Top-level overview of Simard's six-type cognitive memory, consolidation flow, ranked fact and episodic recall, usage/recency reinforcement, snapshot retention, and on-disk layout. Cross-links to the canonical architecture page.
-last_updated: 2026-06-23
+last_updated: 2026-07-03
 owner: simard
 doc_type: concept
 ---
@@ -130,9 +130,10 @@ for the full API, examples, and invariants.
 Shipped in issue [#2395](https://github.com/rysweet/Simard/issues/2395). This
 extends the #2329 ranked-recall pattern from facts to **episodes**, and turns on
 the **usage/recency reinforcement** the ranker had always scored but Simard
-never recorded. The library dependency rev is unchanged (`285de92`, `lbug`
+never recorded. As of issue #2395 the library dependency rev was unchanged (`285de92`, `lbug`
 pinned at `0.15.4`) — both capabilities were already present in the library and
-are simply wired through the `CognitiveMemoryOps` trait.
+are simply wired through the `CognitiveMemoryOps` trait. (The pin has since
+advanced to `26d49bf8` / `lbug 0.17.1` in de-fork Phase 2b, #2307.)
 
 ### Ranked recall for episodes
 
