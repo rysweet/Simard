@@ -12,10 +12,10 @@ mod curate;
 pub mod coverage;
 pub mod cycle;
 mod decide;
-mod observe;
-mod orient;
 // Fix 3 (issue #1): no-progress breaker adapter for the curate phase.
 mod no_progress;
+mod observe;
+mod orient;
 pub mod phase_weights;
 mod priority_kind;
 mod review;
