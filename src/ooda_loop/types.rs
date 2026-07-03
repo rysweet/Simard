@@ -69,6 +69,17 @@ pub struct OodaState {
     /// persisted across restarts (resets to 0); worst case is an extra
     /// distillation pass shortly after boot. Issue #2327, R4.
     pub last_distill_cycle: u32,
+    /// Per-goal consecutive *no-action* count driving the Fix-3 no-progress
+    /// breaker. The sibling of [`Self::goal_failure_counts`]: that counter
+    /// bounds repeated brain *failures* (`success == false`), this one bounds
+    /// repeated `NO ACTION` / "I'll verify concretely…" cycles that record
+    /// `success == true` but ship nothing. Incremented after the Act phase for
+    /// each goal whose outcome
+    /// [`outcome_made_no_progress`](crate::ooda_actions::outcome_made_no_progress),
+    /// reset on real progress, and — once the breaker fires — resolved via the
+    /// done-gate ladder (mark done / drop / escalate). See
+    /// `docs/concepts/steerable-ooda-daemon.md` ("The no-progress breaker (Fix 3)").
+    pub no_progress_tracker: crate::goal_curation::NoProgressTracker,
 }
 
 impl OodaState {
@@ -86,6 +97,7 @@ impl OodaState {
             goal_failure_counts: HashMap::new(),
             engineer_worktrees: HashMap::new(),
             last_distill_cycle: 0,
+            no_progress_tracker: crate::goal_curation::NoProgressTracker::new(),
         }
     }
 
@@ -101,6 +113,9 @@ impl OodaState {
             .collect();
         self.goal_failure_counts
             .retain(|id, _| active_ids.contains(id.as_str()));
+        // Keep the Fix-3 no-progress counters bounded to live goals too.
+        self.no_progress_tracker
+            .retain_goals(&active_ids.iter().map(|s| s.to_string()).collect());
     }
 }
 
@@ -342,6 +357,10 @@ pub struct OodaStateSnapshot {
     pub last_cycle_summary: Option<String>,
     pub last_cycle_duration_secs: Option<u64>,
     pub goal_failure_counts: HashMap<String, u32>,
+    /// Fix-3 no-progress breaker counters. `#[serde(default)]` so snapshots
+    /// written before this field existed still deserialize (empty tracker).
+    #[serde(default)]
+    pub no_progress_tracker: crate::goal_curation::NoProgressTracker,
 }
 
 impl From<&OodaState> for OodaStateSnapshot {
@@ -357,6 +376,7 @@ impl From<&OodaState> for OodaStateSnapshot {
             last_cycle_summary: state.last_cycle_summary.clone(),
             last_cycle_duration_secs: state.last_cycle_duration_secs,
             goal_failure_counts: state.goal_failure_counts.clone(),
+            no_progress_tracker: state.no_progress_tracker.clone(),
         }
     }
 }
@@ -375,6 +395,7 @@ impl OodaStateSnapshot {
         state.last_cycle_summary = self.last_cycle_summary;
         state.last_cycle_duration_secs = self.last_cycle_duration_secs;
         state.goal_failure_counts = self.goal_failure_counts;
+        state.no_progress_tracker = self.no_progress_tracker;
     }
 
     /// Construct a fresh [`OodaState`] from this snapshot. Worktrees start

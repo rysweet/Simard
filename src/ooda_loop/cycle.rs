@@ -544,6 +544,37 @@ fn run_ooda_cycle_inner(
         }
     }
 
+    // --- Fix 3: no-progress breaker (issue #1) ---
+    // Before curation, bound the *no-action* livelock: a goal that produced a
+    // no-shippable-progress cycle (`NO ACTION` / rejected progress claim) has
+    // its consecutive-no-action counter bumped; at the threshold the done-gate
+    // runs once and the goal is resolved definitively — marked DONE (archived
+    // below), DROPPED as obsolete, or BLOCKED + escalated to a tracking issue —
+    // instead of being re-selected forever. Only runs with an evidence source
+    // (production daemon); tests/non-daemon callers leave it `None`.
+    //
+    // `breaker_dropped` carries goals removed from the board as obsolete so the
+    // corruption guard treats them as a legitimate departure (not a "vanished"
+    // goal) and the persist step force-removes them from the snapshot.
+    let breaker_dropped: Vec<String> = if let Some(source) = &bridges.completion_evidence {
+        let report = crate::ooda_loop::no_progress::apply_no_progress_breaker(
+            state,
+            &outcomes,
+            source.as_ref(),
+            &crate::ooda_loop::no_progress::GhIssueFiler,
+        );
+        if report.fired() {
+            tracing::info!(
+                target: "simard::ooda",
+                summary = %report.log_line(),
+                "OODA no-progress breaker fired",
+            );
+        }
+        report.dropped
+    } else {
+        Vec::new()
+    };
+
     // --- Curate: archive completed goals, promote from backlog ---
     // With a deploy-aware done-gate installed (production daemon, issue #2419),
     // a completed goal archives only with hard evidence — merged PR, closed
@@ -603,11 +634,14 @@ fn run_ooda_cycle_inner(
     // Corruption guard: check that no pre-cycle active goal disappeared
     // without going through archive_completed. A goal may legitimately leave
     // active via archival — those will no longer be in active but will appear
-    // in archived. Any goal that is missing from active AND was not archived
+    // in archived — or via the Fix-3 no-progress breaker DROP (`breaker_dropped`).
+    // Any goal that is missing from active AND was neither archived nor dropped
     // this cycle is a corruption signal; restore the board from the snapshot.
     {
         let archived_ids: std::collections::HashSet<&str> =
             archived.iter().map(|g| g.id.as_str()).collect();
+        let dropped_ids: std::collections::HashSet<&str> =
+            breaker_dropped.iter().map(|s| s.as_str()).collect();
         let post_active_ids: std::collections::HashSet<&str> = state
             .active_goals
             .active
@@ -617,7 +651,11 @@ fn run_ooda_cycle_inner(
         let vanished: Vec<&str> = pre_cycle_active_ids
             .iter()
             .map(|s| s.as_str())
-            .filter(|id| !post_active_ids.contains(*id) && !archived_ids.contains(*id))
+            .filter(|id| {
+                !post_active_ids.contains(*id)
+                    && !archived_ids.contains(*id)
+                    && !dropped_ids.contains(*id)
+            })
             .collect();
         if !vanished.is_empty() {
             eprintln!(
@@ -630,10 +668,13 @@ fn run_ooda_cycle_inner(
             // last-known-good state on disk is preserved.
         } else {
             // Persist the updated board to cognitive memory and disk (best-effort).
-            // When goals were archived, use save_goal_board_with_removals so that
-            // the merge-on-write step cannot resurrect them from the persisted
-            // snapshot (issue #2264 — archived goals reappearing every cycle).
-            let archived_goal_ids: Vec<String> = archived.iter().map(|g| g.id.clone()).collect();
+            // When goals were archived (or DROPPED by the Fix-3 breaker), use
+            // save_goal_board_with_removals so that the merge-on-write step
+            // cannot resurrect them from the persisted snapshot (issue #2264 —
+            // archived/dropped goals reappearing every cycle).
+            let mut archived_goal_ids: Vec<String> =
+                archived.iter().map(|g| g.id.clone()).collect();
+            archived_goal_ids.extend(breaker_dropped.iter().cloned());
             let persist_result = if archived_goal_ids.is_empty() {
                 crate::goal_curation::persist_board(&state.active_goals, &*bridges.memory)
             } else {

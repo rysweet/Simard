@@ -178,6 +178,7 @@ mod advance;
 
 pub(crate) use advance::{
     advance_goal_with_session, apply_goal_advance_result, build_goal_advance_input,
+    outcome_made_no_progress,
 };
 
 #[cfg(test)]

@@ -42,6 +42,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to decompose a large goal into linked sub-goals](./howto/decompose-a-large-goal.md) — break one umbrella goal into 2–6 bounded sub-goals with `simard goal decompose`, verify the parent↔child edges round-trip in the graph, and read parent progress as a roll-up (#2405).
 - [How to configure adaptive scaling](./howto/configure-adaptive-scaling.md) — enable and tune AIMD concurrency scaling.
 - [How to keep Simard's own dependency pins up to date](./howto/self-maintain-dependency-pins.md) — the reactive done-gate and proactive reconcile that bump Simard's own `Cargo.toml` git-rev pins after she lands a change upstream, so the fix runs in her own build (companion to [Safe Self-Update](./safe-self-update.md)).
+- [Concept: keeping the OODA daemon steerable](./concepts/steerable-ooda-daemon.md) — the coherent narrative for the systemic goal-board + OODA-livelock + distillation incident: why operator goal edits appeared not to stick, why the daemon re-selected already-done supply-chain goals forever, and why distillation extracted zero facts — and the four coordinated fixes (read-your-writes goal board, the evidence-gated done-gate, the no-progress breaker, and distillation banner-stripping) that restore steerability, evidence-based completion, forward progress, and learning.
 - [Concept: reconcile-and-self-deploy](./concepts/reconcile-and-self-deploy.md) — how a merged self-change is built-from-source, deployed, health-verified, and left running (or rolled back), closing the "merged != running" gap. See the [self-deploy API reference](./reference/self-deploy-api.md) and the [verify-and-roll-back runbook](./howto/verify-and-roll-back-a-self-deploy.md).
 - [Concept: deploy-aware done-gate](./concepts/deploy-aware-done-gate.md) — why a goal is complete only with a merged PR, a closed issue, and (for self-affecting changes) a verified deploy; the gate that prevents evidence-free done-claims. See the [completion-evidence gate API](./reference/completion-evidence-gate-api.md) and the [rejected-completion runbook](./howto/diagnose-a-rejected-goal-completion.md).
 
@@ -146,6 +147,7 @@ If you are changing architecture, start with the [architecture overview](./archi
 
 - [Architecture overview](./architecture/overview.md) - System diagram, core principles, component descriptions, and module map.
 - [Goal board persistence](./concepts/goal-board-persistence.md) — cognitive-memory single source of truth.
+- [Keeping the OODA daemon steerable](./concepts/steerable-ooda-daemon.md) — read-your-writes goal board, the evidence-gated done-gate, the no-progress breaker, and distillation banner-stripping, unified.
 - [File-backed goal store simplification](./concepts/file-backed-goal-store-simplification.md) — why GoalStore uses a plain JSON file instead of IPC.
 - [Adaptive scaling](./concepts/adaptive-scaling.md) — AIMD concurrency control for the OODA cycle.
 - [Goal board API reference](./reference/goal-board-api.md) — `active_goals_as_records` adapter and load/save semantics.

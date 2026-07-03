@@ -7,6 +7,7 @@
 //! ([`decompose`]) that breaks one large goal into bounded sub-goals.
 
 pub mod completion_gate;
+pub mod no_progress_breaker;
 mod operations;
 pub mod progress_evidence;
 pub mod progress_reviewer;
@@ -46,12 +47,20 @@ pub use completion_gate::{
     record_false_completion_rate,
 };
 
+pub use no_progress_breaker::{
+    NO_PROGRESS_BLOCKED_PREFIX, NO_PROGRESS_BLOCKED_SUFFIX, NO_PROGRESS_BREAKER_THRESHOLD,
+    NoProgressResolution, NoProgressTracker, StuckGoalDisposition, is_no_progress_marker,
+    no_progress_blocked_reason, obsolescence_reason, resolve_no_progress, verify_stuck_goal,
+};
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_adapter;
 #[cfg(test)]
 mod tests_carryover;
+#[cfg(test)]
+mod tests_no_progress_breaker;
 #[cfg(test)]
 mod tests_operations;
 #[cfg(test)]

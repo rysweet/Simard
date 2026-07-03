@@ -14,6 +14,11 @@ mod goal_session;
 mod session;
 mod simple_actions;
 
+// Fix 3 (no-progress breaker): the OODA cycle's curate phase reads this
+// classifier to detect a no-shippable-progress cycle. Co-located with its
+// detail author `goal_session::advance::assess_only_outcome`.
+pub(crate) use goal_session::outcome_made_no_progress;
+
 #[cfg(test)]
 pub(crate) mod test_helpers;
 #[cfg(test)]

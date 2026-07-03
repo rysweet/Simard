@@ -101,6 +101,7 @@ nav:
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
     - Unified Telemetry and Status: concepts/unified-telemetry-and-status.md
     - Goal-Board Persistence: concepts/goal-board-persistence.md
+    - Keeping the OODA Daemon Steerable: concepts/steerable-ooda-daemon.md
     - Goal-Board Corruption Guards: concepts/goal-board-corruption-guards.md
     - File-Backed Goal-Store Simplification: concepts/file-backed-goal-store-simplification.md
     - Goal-Fact Dedup in Preparation: concepts/goal-fact-dedup-in-preparation.md
