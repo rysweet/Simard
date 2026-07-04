@@ -86,6 +86,33 @@ confidence-threshold = 0.8
 crate = "html2md"
 allow = ["GPL-3.0-or-later"]
 
+# webpki-roots ships Mozilla's CA certificate bundle under CDLA-Permissive-2.0
+# (Community Data License Agreement – Permissive 2.0), a *permissive* data
+# license (no copyleft). It enters the graph transitively through the
+# now-default `dashboard-audit` feature (issue #2576):
+# webpki-roots -> ureq -> auto_generate_cdp (build) -> headless_chrome -> simard.
+# Because it is a data license rather than a standard OSI *software* license, it
+# is allowed by an explicit, justified per-crate exception rather than by
+# widening the strictly-permissive global allowlist above. See the licensing
+# note in docs/reference/supply-chain-audit.md.
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
+# auto_generate_cdp is GPL-3.0-or-later (copyleft). It is a BUILD-DEPENDENCY only:
+# a code generator that emits the Chrome DevTools Protocol Rust bindings at build
+# time for headless_chrome. It reaches the graph through the now-default
+# `dashboard-audit` feature (issue #2576):
+# auto_generate_cdp (build) -> headless_chrome -> simard. As a build-time tool it
+# is neither linked into nor distributed with the Simard binary, so its copyleft
+# does not extend to Simard (the GPL does not propagate through build tooling that
+# is not part of the distributed work — the same reasoning that lets GPL compilers
+# build non-GPL programs). Allowed by an explicit, justified per-crate exception,
+# analogous to the html2md exception above. See docs/reference/supply-chain-audit.md.
+[[licenses.exceptions]]
+crate = "auto_generate_cdp"
+allow = ["GPL-3.0-or-later"]
+
 # ── Bans (duplicate / wildcard / explicitly-blocked crates) ──────────────────
 [bans]
 # Duplicate versions of a crate bloat the tree; surface (warn) without blocking
