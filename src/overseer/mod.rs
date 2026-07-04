@@ -46,18 +46,30 @@
 #![allow(dead_code)]
 
 pub mod capabilities;
+pub mod config;
 pub mod guardrails;
 pub mod intervention;
+pub mod observer;
+pub mod sensor;
 pub mod signal;
+
+#[cfg(test)]
+mod tests_m1;
 
 pub use capabilities::{
     Auditor, Deployer, GoalCurator, IssueFiler, MeetingHost, ObservedState, OrchestratorRunBrief,
     OverseerError, PrOps, RecipeBrief, RecipeLauncher, StatusReader,
 };
+pub use config::{daily_budget_usd, overseer_enabled};
 pub use guardrails::{
     AutonomyGate, BudgetGate, ConflictSequencer, RecursionGuard, RiskClass, Subject, classify,
 };
 pub use intervention::{Intervention, PlannedIntervention};
+pub use observer::{StewardshipIssueFiler, decide_read_only, is_m1_permitted};
+pub use sensor::{
+    ObserverReport, OverseerSensorThread, SnapshotSource, SnapshotStatusReader,
+    in_flight_from_board, observed_from_snapshot, run_observer_cycle,
+};
 pub use signal::{Priority, Problem, ProblemKind, Signal, signals_from};
 
 use capabilities::{DeployReport, GoalBrief, InFlightItem, IssueOutcome, WorkstreamHandle};

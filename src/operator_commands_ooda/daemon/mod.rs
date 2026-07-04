@@ -552,6 +552,19 @@ pub fn run_ooda_daemon(
         mind.register(Box::new(
             crate::cognitive_threads::EngineerLogAnalysisThread::from_env(),
         ));
+        // Overseer M1 read-only observer sensor. Additive and default-OFF: only
+        // registered when SIMARD_OVERSEER_ENABLED is truthy (see
+        // `crate::overseer::config`). It Observes → Orients → Reports → files
+        // DEDUPLICATED issues and takes no write action beyond issue-filing, so
+        // it fits the least-authority ThreadContext. The daemon's default
+        // behaviour is unchanged when the flag is unset.
+        if crate::overseer::overseer_enabled() {
+            mind.register(Box::new(crate::overseer::OverseerSensorThread::from_env()));
+            daemon_log(
+                &state_root,
+                "[simard] OODA daemon: Overseer read-only observer ENABLED (M1 sensor; SIMARD_OVERSEER_ENABLED)",
+            );
+        }
         daemon_log(
             &state_root,
             &format!(
