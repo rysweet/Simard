@@ -18,7 +18,8 @@
 //!   - `goal remove <id>…` — variadic, idempotent. Surgically removes the ids
 //!     from the authoritative store under the shared flock and writes durable
 //!     tombstones (issue #1).
-//!   - `goal complete <id>` — mark a goal done, remove it, and tombstone it.
+//!   - `goal complete <id>` — mark a goal done, remove it, and tombstone it
+//!     (a standing/perpetual goal is refused and auto-reopened instead).
 //!   - `goal reprioritize <id> <p>` — alias of `set-priority`.
 //!   - `goal cleanup --placeholders` — defence-in-depth sweep that
 //!     removes every active or backlog goal whose description is exactly
@@ -48,12 +49,16 @@ Usage: simard goal <command> [args]
 
 Commands:
   list                        Print active + backlog goal snapshot.
-  add <priority> [--repo <slug>] <description>
+  add <priority> [--repo <slug>] [--standing] <description>
                               Add a new active goal at given priority (1-7).
                               `--repo <slug>` routes the goal's engineer to
                               ~/src/<slug> (default: the daemon's own repo).
+                              `--standing` marks the goal standing/perpetual —
+                              it never completes or tombstones and rolls to a
+                              fresh cycle when a unit of work finishes.
   complete <goal-id>          Mark a goal done, remove it, and tombstone it so
-                              nothing re-seeds it (idempotent).
+                              nothing re-seeds it (idempotent). A standing goal
+                              is refused and auto-reopened for a fresh cycle.
   reprioritize <goal-id> <p>  Change an active goal's priority (alias of
                               set-priority).
   demote <goal-id>            Move an active goal to the backlog.
@@ -99,14 +104,15 @@ pub(super) fn dispatch_goal_command(
         "add" => {
             let priority_str = next_required(&mut args, "priority (1-7)")?;
             let rest: Vec<String> = args.collect();
-            let (repo, desc_tokens) = extract_repo_flag(rest)?;
+            let (repo, standing, desc_tokens) = extract_add_flags(rest)?;
             let description = desc_tokens.join(" ");
             if description.is_empty() {
                 return Err(
-                    "usage: simard goal add <priority> [--repo <slug>] <description>".into(),
+                    "usage: simard goal add <priority> [--repo <slug>] [--standing] <description>"
+                        .into(),
                 );
             }
-            handle_add(&priority_str, &description, repo.as_deref())
+            handle_add(&priority_str, &description, repo.as_deref(), standing)
         }
         "demote" => {
             let goal_id = next_required(&mut args, "goal id")?;
@@ -304,11 +310,18 @@ fn handle_unblock_all() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// `simard goal add <priority> <description>` — add a new active goal.
+/// Parsed `goal add` flags: `(repo slug, is-standing, description tokens)`.
+type AddFlags = (Option<String>, bool, Vec<String>);
+
+/// `simard goal add <priority> [--standing] <description>` — add a new active
+/// goal. `--standing` marks the goal as standing/perpetual (issue #2580): it
+/// has no terminal done-state, is never tombstoned, and rolls to a fresh cycle
+/// when a unit of work finishes.
 fn handle_add(
     priority_str: &str,
     description: &str,
     repo: Option<&str>,
+    standing: bool,
 ) -> Result<(), Box<dyn Error>> {
     let priority: u32 = priority_str
         .parse()
@@ -322,11 +335,20 @@ fn handle_add(
         crate::ooda_actions::advance_goal::repo_resolver::validate_repo_slug(slug)
             .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
     }
+    // Slug from the operator's original text so the id stays clean; the stored
+    // description carries the durable standing marker when `--standing` is set.
     let id = crate::goals::goal_slug(description);
+    let stored_description = if standing {
+        format!(
+            "{}{description}",
+            crate::goal_curation::STANDING_MARKER_PREFIX
+        )
+    } else {
+        description.to_string()
+    };
     let repo_owned = repo.map(str::to_string);
     {
         let id = id.clone();
-        let description = description.to_string();
         with_board(move |board| {
             if board.active.iter().any(|g| g.id == id) {
                 return Err(format!("goal '{id}' is already active").into());
@@ -341,7 +363,7 @@ fn handle_add(
             board.active.push(crate::goal_curation::ActiveGoal {
                 parent_goal_id: None,
                 id,
-                description,
+                description: stored_description,
                 priority,
                 status: GoalProgress::NotStarted,
                 assigned_to: None,
@@ -356,15 +378,22 @@ fn handle_add(
     let repo_note = repo
         .map(|r| format!(" -> repo '{r}'"))
         .unwrap_or_else(|| " -> repo Simard (daemon)".to_string());
-    eprintln!("[simard] goal add: '{id}' added at p{priority}{repo_note}");
+    let standing_note = if standing {
+        " [standing/perpetual]"
+    } else {
+        ""
+    };
+    eprintln!("[simard] goal add: '{id}' added at p{priority}{repo_note}{standing_note}");
     Ok(())
 }
 
-/// Extract an optional `--repo <slug>` / `--repo=<slug>` flag from the trailing
-/// `goal add` tokens, returning the slug (if any) and the remaining tokens that
-/// form the goal description.
-fn extract_repo_flag(tokens: Vec<String>) -> Result<(Option<String>, Vec<String>), Box<dyn Error>> {
+/// Extract the optional `--repo <slug>` / `--repo=<slug>` and `--standing`
+/// flags from the trailing `goal add` tokens, returning `(repo, standing,
+/// description_tokens)`. Flags may appear in any order relative to the
+/// description; remaining tokens form the goal description.
+fn extract_add_flags(tokens: Vec<String>) -> Result<AddFlags, Box<dyn Error>> {
     let mut repo: Option<String> = None;
+    let mut standing = false;
     let mut rest: Vec<String> = Vec::with_capacity(tokens.len());
     let mut iter = tokens.into_iter();
     while let Some(tok) = iter.next() {
@@ -375,11 +404,13 @@ fn extract_repo_flag(tokens: Vec<String>) -> Result<(Option<String>, Vec<String>
             repo = Some(slug);
         } else if let Some(slug) = tok.strip_prefix("--repo=") {
             repo = Some(slug.to_string());
+        } else if tok == "--standing" || tok == "--perpetual" {
+            standing = true;
         } else {
             rest.push(tok);
         }
     }
-    Ok((repo, rest))
+    Ok((repo, standing, rest))
 }
 
 /// `simard goal demote <goal-id>` — move an active goal to the backlog.
@@ -434,22 +465,57 @@ fn handle_set_priority(goal_id: &str, priority_str: &str) -> Result<(), Box<dyn 
 /// board, and write a durable tombstone so no path (default seeding, memory
 /// recall, a meeting handoff, or the daemon's cycle reconcile) can resurrect it.
 /// Idempotent: completing an absent goal still records the tombstone.
+///
+/// Standing/perpetual goals (issue #2580) are the exception: `complete` refuses
+/// to terminate one and instead **auto-reopens** it for a fresh cycle — no
+/// removal, no tombstone — because a standing goal has no terminal done-state.
 fn handle_complete(goal_id: &str) -> Result<(), Box<dyn Error>> {
-    let existed = with_board(|board| {
+    enum CompleteOutcome {
+        /// A standing goal — reopened for a fresh cycle instead of terminating.
+        Reopened,
+        /// A normal goal that existed and was removed.
+        Completed,
+        /// No matching goal on the board (still recorded as a tombstone).
+        Absent,
+    }
+
+    let outcome = with_board(|board| {
+        if let Some(goal) = board.active.iter_mut().find(|g| g.id == goal_id)
+            && goal.is_perpetual()
+        {
+            goal.roll_to_new_cycle();
+            return Ok(CompleteOutcome::Reopened);
+        }
         let before = board.active.len() + board.backlog.len();
         board.active.retain(|g| g.id != goal_id);
         board.backlog.retain(|b| b.id != goal_id);
-        Ok(before != board.active.len() + board.backlog.len())
+        let existed = before != board.active.len() + board.backlog.len();
+        Ok(if existed {
+            CompleteOutcome::Completed
+        } else {
+            CompleteOutcome::Absent
+        })
     })?;
-    tombstone(&[goal_id.to_string()])?;
-    if existed {
-        eprintln!(
-            "[simard] goal complete: '{goal_id}' marked done, removed from board, and tombstoned"
-        );
-    } else {
-        eprintln!(
-            "[simard] goal complete: '{goal_id}' not on board; recorded tombstone (idempotent)"
-        );
+
+    match outcome {
+        CompleteOutcome::Reopened => {
+            eprintln!(
+                "[simard] goal complete: '{goal_id}' is a standing goal — refused to terminate; \
+                 reopened it for a fresh cycle (no tombstone)"
+            );
+        }
+        CompleteOutcome::Completed => {
+            tombstone(&[goal_id.to_string()])?;
+            eprintln!(
+                "[simard] goal complete: '{goal_id}' marked done, removed from board, and tombstoned"
+            );
+        }
+        CompleteOutcome::Absent => {
+            tombstone(&[goal_id.to_string()])?;
+            eprintln!(
+                "[simard] goal complete: '{goal_id}' not on board; recorded tombstone (idempotent)"
+            );
+        }
     }
     Ok(())
 }
@@ -710,6 +776,50 @@ mod tests {
         assert!(!is_id_placeholder("abc", ""));
     }
 
+    // ---- extract_add_flags (issue #2580 --standing) -----------------------
+
+    fn toks(s: &[&str]) -> Vec<String> {
+        s.iter().map(|t| t.to_string()).collect()
+    }
+
+    #[test]
+    fn extract_add_flags_plain_description() {
+        let (repo, standing, rest) = extract_add_flags(toks(&["ship", "the", "mvp"])).unwrap();
+        assert_eq!(repo, None);
+        assert!(!standing);
+        assert_eq!(rest, toks(&["ship", "the", "mvp"]));
+    }
+
+    #[test]
+    fn extract_add_flags_parses_standing_anywhere() {
+        let (repo, standing, rest) =
+            extract_add_flags(toks(&["--standing", "watch", "CI"])).unwrap();
+        assert!(standing);
+        assert_eq!(repo, None);
+        assert_eq!(rest, toks(&["watch", "CI"]));
+
+        // Flag may trail the description too, and --perpetual is an alias.
+        let (_r, standing2, rest2) =
+            extract_add_flags(toks(&["watch", "CI", "--perpetual"])).unwrap();
+        assert!(standing2);
+        assert_eq!(rest2, toks(&["watch", "CI"]));
+    }
+
+    #[test]
+    fn extract_add_flags_combines_repo_and_standing() {
+        let (repo, standing, rest) = extract_add_flags(toks(&[
+            "--repo",
+            "amplihack-rs",
+            "--standing",
+            "steward",
+            "ci",
+        ]))
+        .unwrap();
+        assert_eq!(repo.as_deref(), Some("amplihack-rs"));
+        assert!(standing);
+        assert_eq!(rest, toks(&["steward", "ci"]));
+    }
+
     #[test]
     fn placeholder_with_empty_id_matches_goal_space() {
         // `format!("Goal {}", "")` produces `"Goal "`, so this matches.
@@ -873,21 +983,21 @@ mod tests {
 
     #[test]
     fn add_rejects_zero_priority() {
-        let result = handle_add("0", "test goal", None);
+        let result = handle_add("0", "test goal", None, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("1-7"));
     }
 
     #[test]
     fn add_rejects_priority_above_7() {
-        let result = handle_add("8", "test goal", None);
+        let result = handle_add("8", "test goal", None, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("1-7"));
     }
 
     #[test]
     fn add_rejects_non_numeric_priority() {
-        let result = handle_add("high", "test goal", None);
+        let result = handle_add("high", "test goal", None, false);
         assert!(result.is_err());
     }
 

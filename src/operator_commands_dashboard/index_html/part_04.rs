@@ -328,6 +328,26 @@ pub(crate) const PART_04: &str = r#"            let fmt;
               <div class="cycle-summary">${esc(humanizeCycleSummary(rpt.summary))}</div>
             </div>`;
           }
+          /* Issue #2580: disposition-aware rendering. A run of identical
+             deferrals to an active engineer is collapsed by the server into a
+             single entry with a repeat_count; render it as one clean line so
+             the tab shows forward progress, not the same line over and over. A
+             genuine stuck loop (loop_suspected) is called out in red. */
+          const disp=rpt.disposition||'';
+          const rc=rpt.repeat_count||1;
+          const cFirst=rpt.cycle_number_first||rpt.cycle_number;
+          const cLast=rpt.cycle_number_last||rpt.cycle_number;
+          const rangeTxt=(cFirst!==cLast)?('Cycles #'+cLast+'–#'+cFirst):('Cycle #'+rpt.cycle_number);
+          let dispoBadge='';
+          if(disp==='deferring'){dispoBadge='<span class="cycle-badge" style="background:#2ea043;color:#fff">deferring'+(rc>1?' ×'+rc:'')+'</span>';}
+          else if(disp==='progressing'){dispoBadge='<span class="cycle-badge" style="background:#1f6feb;color:#fff">progress</span>';}
+          if(rpt.loop_suspected){dispoBadge+='<span class="cycle-badge" style="background:var(--red);color:#fff" title="the same non-progressing decision repeated without the work advancing">⚠ possible loop ×'+rc+'</span>';}
+          if(disp==='deferring'){
+            return `<div class="thinking-cycle">
+              <div class="cycle-header"><span class="cycle-num">${rangeTxt}</span>${dispoBadge}</div>
+              <div class="cycle-summary-inline">${esc(rpt.collapsed_summary||'Deferring to an active engineer')}</div>
+            </div>`;
+          }
           const phases=[];
           if(rpt.observation){
             const obs=rpt.observation;
@@ -394,7 +414,8 @@ pub(crate) const PART_04: &str = r#"            let fmt;
           }
           return `<div class="thinking-cycle">
             <div class="cycle-header">
-              <span class="cycle-num">Cycle #${rpt.cycle_number}</span>
+              <span class="cycle-num">${rangeTxt}</span>
+              ${dispoBadge}
               <span class="cycle-summary-inline">${esc(humanizeCycleSummary(rpt.summary||''))}</span>
             </div>
             <div class="cycle-phases">${phases.join('')}</div>
@@ -492,17 +513,27 @@ pub(crate) const PART_04: &str = r#"            let fmt;
         const sumEl=document.getElementById('brain-failures-summary');
         const listEl=document.getElementById('brain-failures-list');
         const s=d.summary||{};
-        const totalFallbacks=s.total_fallback_count||0;
-        const totalParseFailures=s.total_parse_failure_count||0;
-        const totalFailures=totalFallbacks+totalParseFailures;
         const scanned=s.cycles_scanned||0;
-        const statusClass=totalParseFailures>0?'err':(totalFallbacks>0?'warn':'ok');
-        const statusText=totalFailures===0?'No brain failures detected':''+totalFailures+' failure'+(totalFailures===1?'':'s')+' found';
+        /* Issue #2580: headline the CURRENT bounded window + rate, never a
+           stale cumulative total. Zero current failures renders green. */
+        const rec=d.recent||{};
+        const life=d.lifetime||{};
+        const win=rec.window_minutes||60;
+        const recentTotal=rec.total||0;
+        const recentParse=rec.parse_failure||0;
+        const recentFallback=rec.fallback||0;
+        const rate=Number(rec.rate_per_hour||0);
+        const lifetimeParse=life.parse_failure_count||0;
+        const statusClass=rec.status==='err'?'err':(rec.status==='warn'?'warn':'ok');
+        const statusText=recentTotal===0
+          ?('No brain failures in the last '+win+' min')
+          :(recentTotal+' failure'+(recentTotal===1?'':'s')+' in the last '+win+' min');
         sumEl.innerHTML=`
-          <div class="stat"><span class="label">Status</span><span class="value ${statusClass}">${statusText}</span></div>
-          <div class="stat"><span class="label">Parse failures (model response unparseable)</span><span class="value ${totalParseFailures>0?'err':'ok'}">${totalParseFailures}</span></div>
-          <div class="stat"><span class="label">Deterministic fallbacks (safe rules used instead of model)</span><span class="value ${totalFallbacks>0?'warn':'ok'}">${totalFallbacks}</span></div>
-          <div class="stat"><span class="label">Cycles scanned</span><span class="value">${scanned}</span></div>
+          <div class="stat"><span class="label">Current status (last ${win} min)</span><span class="value ${statusClass}">${statusText}</span></div>
+          <div class="stat"><span class="label">Current failure rate</span><span class="value ${statusClass}">${rate.toFixed(1)} / hr</span></div>
+          <div class="stat"><span class="label">Parse failures (last ${win} min)</span><span class="value ${recentParse>0?'err':'ok'}">${recentParse}</span></div>
+          <div class="stat"><span class="label">Deterministic fallbacks (last ${win} min)</span><span class="value ${recentFallback>0?'warn':'ok'}">${recentFallback}</span></div>
+          <div class="stat"><span class="label">All-time parse failures (cumulative, not current)</span><span class="value" style="opacity:.55">${lifetimeParse}</span></div>
           <div class="stat"><span class="label">Last checked</span><span class="value">${timeAgo(d.timestamp)}</span></div>`;
         const failures=d.failures||[];
         if(!failures.length){

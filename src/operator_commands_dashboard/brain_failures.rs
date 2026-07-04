@@ -17,6 +17,7 @@
 //!     are marked as escalated)
 
 use axum::Json;
+use chrono::{DateTime, Duration, Utc};
 use serde_json::{Value, json};
 
 use super::routes::resolve_state_root;
@@ -27,6 +28,19 @@ const MAX_CYCLES_TO_SCAN: usize = 50;
 /// Maximum number of failure entries to return.
 const MAX_FAILURES_RETURNED: usize = 200;
 
+/// Rolling window (minutes) for the *current* Brain-Failures rate. The tab
+/// headline reports failures in this window plus a per-hour rate, so a scary
+/// cumulative lifetime total can never masquerade as the current state
+/// (issue #2580). Zero failures in the window renders green.
+const RECENT_WINDOW_MINUTES: i64 = 60;
+
+/// Metric names that count as a genuine, post-sanitization brain parse failure.
+/// `brain_parse_error` is the companion workstream's explicit metric that fires
+/// only on a real parse failure after bounded retry; `brain_parse_failure` is
+/// the pre-existing name. Both are read so the recent count stays truthful
+/// across the transition.
+const BRAIN_PARSE_METRIC_NAMES: &[&str] = &["brain_parse_error", "brain_parse_failure"];
+
 pub(crate) async fn brain_failures() -> Json<Value> {
     let state_root = resolve_state_root();
     let cycle_dir = state_root.join("cycle_reports");
@@ -36,6 +50,10 @@ pub(crate) async fn brain_failures() -> Json<Value> {
     let mut total_fallback_count: u64 = 0;
     let mut total_parse_failure_count: u64 = 0;
     let mut cycles_scanned: u32 = 0;
+    // Timestamps of deterministic fallbacks seen in cycle reports, used to
+    // compute the *recent* (bounded-window) count. Parse failures are counted
+    // from the timestamped metric instead (authoritative, see below).
+    let mut fallback_instants: Vec<DateTime<Utc>> = Vec::new();
 
     // Scan cycle reports for brain judgment failures.
     if let Ok(entries) = std::fs::read_dir(&cycle_dir) {
@@ -91,6 +109,9 @@ pub(crate) async fn brain_failures() -> Json<Value> {
 
                 if is_fallback {
                     total_fallback_count += 1;
+                    if let Some(at) = parse_rfc3339(cycle_timestamp) {
+                        fallback_instants.push(at);
+                    }
                 }
                 if has_parse_failure {
                     total_parse_failure_count += 1;
@@ -192,16 +213,101 @@ pub(crate) async fn brain_failures() -> Json<Value> {
     // Quick count from metrics.jsonl for the summary stat.
     let metrics_parse_failure_count = count_brain_parse_failure_metrics(&metrics_path);
 
+    // ── Current (bounded-window) view (issue #2580) ─────────────────────────
+    // Show what is happening NOW, not an accumulated lifetime number. Parse
+    // failures are counted from the timestamped brain parse-error metric (the
+    // honest, post-sanitization signal); deterministic fallbacks from the
+    // cycle-report timestamps gathered above. Zero in the window ⇒ green.
+    let now = Utc::now();
+    let since = now - Duration::minutes(RECENT_WINDOW_MINUTES);
+    let recent_fallback = count_at_or_after(&fallback_instants, since);
+    let recent_parse_failure = recent_parse_failures_from_metrics(&metrics_path, since);
+    let recent_total = recent_fallback + recent_parse_failure;
+    let recent_rate_per_hour = rate_per_hour(recent_total, RECENT_WINDOW_MINUTES);
+    let recent_status = recent_status(recent_total, recent_parse_failure);
+
     Json(json!({
         "failures": failures,
+        // Current state: a bounded, honest window separate from any lifetime
+        // total. The dashboard headline reads from here.
+        "recent": {
+            "window_minutes": RECENT_WINDOW_MINUTES,
+            "total": recent_total,
+            "fallback": recent_fallback,
+            "parse_failure": recent_parse_failure,
+            "rate_per_hour": recent_rate_per_hour,
+            "status": recent_status,
+        },
+        // Lifetime cumulative counts — clearly labelled so they are never
+        // mistaken for the current rate.
+        "lifetime": {
+            "parse_failure_count": metrics_parse_failure_count,
+        },
         "summary": {
             "total_fallback_count": total_fallback_count,
             "total_parse_failure_count": total_parse_failure_count,
             "metrics_parse_failure_count": metrics_parse_failure_count,
             "cycles_scanned": cycles_scanned,
         },
-        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "timestamp": now.to_rfc3339(),
     }))
+}
+
+/// Parse an RFC3339 timestamp string into a UTC instant, returning `None` for
+/// an empty or unparseable value (so it is conservatively excluded from the
+/// recent-window count rather than inflating it).
+fn parse_rfc3339(ts: &str) -> Option<DateTime<Utc>> {
+    if ts.is_empty() {
+        return None;
+    }
+    DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// Count instants at or after `since`.
+fn count_at_or_after(instants: &[DateTime<Utc>], since: DateTime<Utc>) -> u64 {
+    instants.iter().filter(|t| **t >= since).count() as u64
+}
+
+/// Failures-per-hour for `count` events observed over a `window_minutes`
+/// window. Returns `0.0` for a zero or non-positive window.
+fn rate_per_hour(count: u64, window_minutes: i64) -> f64 {
+    if window_minutes <= 0 {
+        return 0.0;
+    }
+    count as f64 / (window_minutes as f64 / 60.0)
+}
+
+/// Traffic-light status for the current window: `ok` (green) when there are no
+/// failures at all, `err` (red) when any genuine parse failure occurred, and
+/// `warn` (amber) for deterministic fallbacks only. Zero ⇒ green, never a
+/// stale large number.
+fn recent_status(recent_total: u64, recent_parse_failure: u64) -> &'static str {
+    if recent_total == 0 {
+        "ok"
+    } else if recent_parse_failure > 0 {
+        "err"
+    } else {
+        "warn"
+    }
+}
+
+/// Count genuine brain parse failures recorded at or after `since`, read from
+/// the timestamped metric log ([`BRAIN_PARSE_METRIC_NAMES`]). This is the
+/// authoritative, honest recent signal — it never returns a lifetime total.
+fn recent_parse_failures_from_metrics(path: &std::path::Path, since: DateTime<Utc>) -> u64 {
+    use crate::self_metrics::MetricEntry;
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    content
+        .lines()
+        .filter_map(|line| serde_json::from_str::<MetricEntry>(line).ok())
+        .filter(|e| BRAIN_PARSE_METRIC_NAMES.contains(&e.metric_name.as_str()))
+        .filter(|e| e.timestamp >= since)
+        .count() as u64
 }
 
 /// Count `brain_parse_failure` metric entries in `metrics.jsonl`.
@@ -398,6 +504,78 @@ mod tests {
         assert!(
             !d.contains("It chose to"),
             "empty decision must omit the choice clause: {d}"
+        );
+    }
+
+    // ── recent (bounded-window) telemetry honesty (issue #2580) ─────────────
+
+    #[test]
+    fn rate_per_hour_scales_by_window() {
+        // 3 events in a 60-minute window ⇒ 3.0/hr.
+        assert_eq!(rate_per_hour(3, 60), 3.0);
+        // 3 events in a 30-minute window ⇒ 6.0/hr.
+        assert_eq!(rate_per_hour(3, 30), 6.0);
+        // Zero events ⇒ zero rate; degenerate window ⇒ zero (no divide-by-zero).
+        assert_eq!(rate_per_hour(0, 60), 0.0);
+        assert_eq!(rate_per_hour(5, 0), 0.0);
+    }
+
+    #[test]
+    fn recent_status_is_green_only_when_zero() {
+        // The core honesty property: zero current failures ⇒ green, never a
+        // large stale number.
+        assert_eq!(recent_status(0, 0), "ok");
+        assert_eq!(recent_status(2, 0), "warn"); // fallbacks only
+        assert_eq!(recent_status(2, 1), "err"); // a real parse failure
+    }
+
+    #[test]
+    fn count_at_or_after_windows_correctly() {
+        let now = Utc::now();
+        let instants = vec![
+            now - Duration::minutes(5),   // in window
+            now - Duration::minutes(59),  // in window
+            now - Duration::minutes(120), // out of window
+        ];
+        let since = now - Duration::minutes(60);
+        assert_eq!(count_at_or_after(&instants, since), 2);
+    }
+
+    #[test]
+    fn parse_rfc3339_rejects_empty_and_garbage() {
+        assert!(parse_rfc3339("").is_none());
+        assert!(parse_rfc3339("not-a-date").is_none());
+        assert!(parse_rfc3339("2026-07-04T16:24:11+00:00").is_some());
+    }
+
+    #[test]
+    fn recent_parse_failures_from_metrics_counts_only_recent_brain_parse_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metrics.jsonl");
+        let now = Utc::now();
+        let recent = (now - Duration::minutes(10)).to_rfc3339();
+        let old = (now - Duration::hours(6)).to_rfc3339();
+        // Two recent genuine parse failures (both accepted metric names), one
+        // old parse failure (out of window), and an unrelated recent metric.
+        let body = format!(
+            "{}\n{}\n{}\n{}\n",
+            json!({"timestamp": recent, "metric_name": "brain_parse_error", "value": 1.0, "context": ""}),
+            json!({"timestamp": recent, "metric_name": "brain_parse_failure", "value": 1.0, "context": ""}),
+            json!({"timestamp": old, "metric_name": "brain_parse_failure", "value": 1.0, "context": ""}),
+            json!({"timestamp": recent, "metric_name": "ooda_cycle", "value": 1.0, "context": ""}),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let since = now - Duration::minutes(RECENT_WINDOW_MINUTES);
+        assert_eq!(recent_parse_failures_from_metrics(&path, since), 2);
+    }
+
+    #[test]
+    fn recent_parse_failures_from_metrics_missing_file_is_zero() {
+        let since = Utc::now() - Duration::minutes(RECENT_WINDOW_MINUTES);
+        assert_eq!(
+            recent_parse_failures_from_metrics(std::path::Path::new("/nonexistent/m.jsonl"), since),
+            0
         );
     }
 }

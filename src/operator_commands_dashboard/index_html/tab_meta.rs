@@ -150,7 +150,7 @@ pub const TAB_METADATA: &[TabMeta] = &[
         label: "🧠 Thinking",
         title: "Thinking · Simard",
         h1: "Thinking",
-        lede: "A live stream of the daemon's internal reasoning between actions, showing what it considered before deciding what to do next.",
+        lede: "A live view of what the daemon decided each cycle - repeated deferring-to-an-active-engineer notes are collapsed with a count so genuine forward progress stands out from a stuck loop.",
         tooltip: "Live stream of the agent's reasoning between actions",
     },
     TabMeta {
@@ -158,7 +158,7 @@ pub const TAB_METADATA: &[TabMeta] = &[
         label: "Brain Failures",
         title: "Brain Failures · Simard",
         h1: "Brain Failures",
-        lede: "Every time the daemon's language-model brain returned an unparseable or invalid response and fell back to safe deterministic rules, listed with the failure type, which component triggered it, when it happened, and whether recovery succeeded.",
+        lede: "How often the daemon's brain failed to parse a model response right now - the current rate and a bounded recent window, kept separate from the all-time total so a stale number never looks like a live problem.",
         tooltip: "When and how the agent's brain failed, and whether it recovered",
     },
     TabMeta {

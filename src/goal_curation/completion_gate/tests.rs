@@ -597,3 +597,72 @@ fn error_class_from_missing_defaults_when_no_concrete_kind() {
     assert_eq!(class, "refuted_unknown");
     assert_eq!(error_class_from_missing(&[]), "refuted_unknown");
 }
+
+// --- standing / perpetual goals never archive (issue #2580) -----------------
+
+/// Build a standing/perpetual goal at the given status.
+fn standing_goal(id: &str, status: GoalProgress) -> ActiveGoal {
+    let mut g = simard_goal(id, status);
+    g.description = "Continuously research and improve cognition. STANDING PERPETUAL goal.".into();
+    assert!(g.is_perpetual(), "test fixture must read as perpetual");
+    g
+}
+
+#[test]
+fn gate_never_archives_a_perpetual_goal_even_with_full_evidence() {
+    let mut board = GoalBoard::new();
+    board
+        .active
+        .push(standing_goal("research", GoalProgress::Completed));
+    // Full evidence would archive a normal goal; a standing goal must not.
+    let gate = CompletionEvidenceGate::new(FakeEvidence::ok(true, true, true));
+    let (archived, blocked) = archive_completed_with_evidence(&mut board, &gate);
+    assert!(
+        archived.is_empty(),
+        "a standing goal must never be archived by the completion gate"
+    );
+    assert!(blocked.is_empty());
+    assert_eq!(board.active.len(), 1, "standing goal stays on the board");
+    // ...and it is rolled to a fresh, actionable cycle rather than left as done.
+    assert_eq!(board.active[0].status, GoalProgress::NotStarted);
+    assert!(board.active[0].is_perpetual());
+}
+
+#[test]
+fn archive_completed_rolls_perpetual_goal_instead_of_removing() {
+    let mut board = GoalBoard::new();
+    board
+        .active
+        .push(standing_goal("research", GoalProgress::Completed));
+    board
+        .active
+        .push(simard_goal("normal-done", GoalProgress::Completed));
+
+    let archived = archive_completed(&mut board);
+
+    // The normal goal archives; the standing goal is rolled and retained.
+    assert_eq!(archived.len(), 1);
+    assert_eq!(archived[0].id, "normal-done");
+    let research = board
+        .active
+        .iter()
+        .find(|g| g.id == "research")
+        .expect("standing goal must remain on the board");
+    assert_eq!(research.status, GoalProgress::NotStarted);
+    assert!(research.assigned_to.is_none());
+    assert!(research.is_perpetual());
+}
+
+#[test]
+fn is_complete_candidate_is_false_for_perpetual_goals() {
+    // Even at 100% progress, a standing goal is not a completion candidate.
+    let done = standing_goal("s", GoalProgress::Completed);
+    let full = standing_goal("s2", GoalProgress::InProgress { percent: 100 });
+    assert!(!super::is_complete_candidate(&done));
+    assert!(!super::is_complete_candidate(&full));
+    // A normal completed goal still is a candidate (regression guard).
+    assert!(super::is_complete_candidate(&simard_goal(
+        "n",
+        GoalProgress::Completed
+    )));
+}
