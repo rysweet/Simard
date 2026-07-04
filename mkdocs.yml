@@ -161,6 +161,7 @@ nav:
     - Inspect the Procedural-Learning Loop: howto/inspect-the-procedural-learning-loop.md
     - File Stewardship Issues from Orchestrator Runs: howto/file-stewardship-issues-from-orchestrator-runs.md
     - Configure the Monthly Self-Quality-Audit: howto/configure-self-quality-audit.md
+    - Operate the Overseer (M2–M4): howto/operate-the-overseer.md
     - Configure the Disk-Health Check: howto/configure-disk-health-check.md
     - Reclaim Disk Space (Low-Space Rust Builds): howto/reclaim-disk-space-and-run-low-space-rust-builds.md
     - Fix CI Linker OOM: howto/fix-ci-linker-oom.md
@@ -258,6 +259,7 @@ nav:
     - Adaptive Scaling API: reference/adaptive-scaling-api.md
     - Brain Introspection API: reference/brain-introspection-api.md
     - Self-Quality-Audit API: reference/self-quality-audit-api.md
+    - Overseer Capabilities (M2–M4): reference/overseer-capabilities.md
     - Disk-Health API: reference/disk-health-api.md
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
     - Dashboard Action-Detail Humanization: reference/dashboard-action-detail-humanization.md

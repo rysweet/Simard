@@ -496,6 +496,10 @@ built, these must be resolved — they are hard gates, not advice.
 
 ## Related reading
 
+- [Overseer capabilities (M2–M4)](../reference/overseer-capabilities.md) — the
+  landed configuration + API reference for the acting capabilities, and
+  [Operate the Overseer](../howto/operate-the-overseer.md) — how to enable,
+  dry-run, and operate them.
 - [Operational autonomy model](../concepts/operational-autonomy-model.md) — the
   autonomy boundary and HIGH-RISK gating this design inherits.
 - [Cognitive-thread scheduling](../reference/cognitive-thread-scheduling.md) and
