@@ -24,7 +24,7 @@ The dashboard is a single-page app with the following tabs:
 
 | Tab | Shows |
 |-----|-------|
-| **Overview** | Daemon status (OODA loop active / stopped), current cycle number, top-priority goal, last cycle's actions, recent actions stream, system status (version, OODA daemon state, active processes, disk usage), open PRs, and open issues. |
+| **Overview** | Daemon status (OODA loop active / stopped), current cycle number, top-priority goal, last cycle's actions, recent actions stream, system status (version, OODA daemon state, active processes, disk usage), open PRs, open issues, and a **Machines & Memory Sharing** card (whether Simard runs on one machine or a group, and how they share what they've learned). |
 | **Goals** | The full goal register: active top-N goals with priority, status, and current activity; the proposed backlog with promote/dismiss controls. |
 | **Traces** | Recent agent traces collected from the cost ledger, journald, and in-process spans, plus OTEL status. Each cost row reads as plain language: **when** (relative time, absolute on hover), **what** (call type, model, estimated tokens, and dollar cost), and **who** (call context and session id) — so an operator can see which calls were most expensive without decoding raw `[cost]` lines. |
 | **Logs** | The **Background Service Log** (live activity from Simard's always-on background process), the cost ledger, and per-cycle reports. The level menu (All / Errors / Warnings / Info) filters the log to a single severity, and a free-text box searches within it. |
@@ -65,6 +65,44 @@ boilerplate, and applies the shared `BANNED_JARGON` strip — while preserving a
 works. The transform is render-layer only: the canonical `brain` / `ooda_brain`
 strings, logs, and API responses are unchanged. See
 [Overview action-detail humanization](reference/dashboard-action-detail-humanization.md).
+
+### Overview tab: plain-English "Machines & Memory Sharing" card
+
+The Overview card that reports whether Simard is running on one machine or a
+cluster (formerly headed **Cluster Topology**) used to render machine-internal
+vocabulary directly: `Topology`, `Memory Sync: DHT+bloom gossip (peer-to-peer)`,
+`Hive Status: standalone`, an `Event Bus` panel with `Subscribers` / `Events/min`
+counters, and one row per **raw event-topic enum name** (`fact_imported`,
+`fact_promoted`, `memory_sync_requested`, `node_joined`, `node_left`). A live
+Playwright audit flagged this as the densest jargon cluster on the landing page.
+
+The card is now titled **Machines & Memory Sharing** with a one-line
+plain-English description, and every label/value is humanized at the render layer:
+
+| Was | Now |
+|-----|-----|
+| `Cluster Topology` (card header) | **Machines & Memory Sharing** |
+| `Topology: distributed` | **Multi-machine mode: Supported (can run across machines)** |
+| `Local Host` | **This machine** |
+| `Memory Sync: DHT+bloom gossip (peer-to-peer)` | **How memory is shared: Peer-to-peer (machines share facts directly)** |
+| `Hive Status: standalone` | **Sharing status: Standalone (this machine only)** |
+| `Peers` | **Other machines connected** |
+| `Event Bus` | **Live internal signals** |
+| `Subscribers` / `Events/min` / `Last event` | **Parts listening** / **Signals per minute** / **Most recent signal** |
+| `fact_imported: 0 subs, …` (raw enum) | **Facts received from other machines: 0 listening, …** |
+
+The transform is render-layer only via the client-side helpers
+`humanizeTopology`, `humanizeSyncProtocol`, `humanizeHiveStatus`, and
+`humanizeEventTopic`. The `/api/distributed` payload, the underlying protocol
+strings, and the stable `data-testid` selectors are unchanged, and each raw
+machine id survives as a `title=` hover tooltip so power users lose nothing.
+Verified outside-in by `tests/gadugi/dashboard-cluster-clarity.sh`.
+
+Before (machine jargon) and after (plain English):
+
+| Before | After |
+|--------|-------|
+| ![Cluster card before](assets/dashboard-cluster-card-before.png) | ![Machines & Memory Sharing card after](assets/dashboard-cluster-card-after.png) |
 
 ## Screenshots
 

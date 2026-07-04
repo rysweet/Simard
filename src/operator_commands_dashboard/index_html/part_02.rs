@@ -248,24 +248,24 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
           const topics=eb.topics||{};
           const rows=Object.keys(topics).sort().map(name=>{
             const t=topics[name]||{};
-            return `<li data-testid="event-bus-topic-${esc(name)}">${esc(name)}: ${t.subscribers||0} subs, ${fmtRate(t.events_per_min)}/min, last ${esc(fmtTs(t.last_event_timestamp))}</li>`;
+            return `<li data-testid="event-bus-topic-${escAttr(name)}" title="internal signal id: ${escAttr(name)}">${esc(humanizeEventTopic(name))}: ${t.subscribers||0} listening, ${fmtRate(t.events_per_min)}/min, last ${esc(fmtTs(t.last_event_timestamp))}</li>`;
           }).join('');
           ebBlock=`
           <div class="event-bus-stats" style="margin-top:1rem;padding-top:.75rem;border-top:1px solid var(--border)">
-            <h3 style="margin:0 0 .5rem 0;color:var(--accent);font-size:1rem">Event Bus</h3>
-            <div class="stat" data-testid="event-bus-total-subscribers"><span class="label">Subscribers</span><span class="value">${eb.total_subscribers||0}</span></div>
-            <div class="stat" data-testid="event-bus-events-per-min"><span class="label">Events/min</span><span class="value">${fmtRate(eb.events_per_min)}</span></div>
-            <div class="stat" data-testid="event-bus-last-event"><span class="label">Last event</span><span class="value">${esc(fmtTs(eb.last_event_timestamp))}</span></div>
+            <h3 style="margin:0 0 .5rem 0;color:var(--accent);font-size:1rem" title="Internal notifications Simard's parts send each other — e.g. when a fact is learned or a machine joins or leaves the group">Live internal signals</h3>
+            <div class="stat" data-testid="event-bus-total-subscribers"><span class="label">Parts listening</span><span class="value">${eb.total_subscribers||0}</span></div>
+            <div class="stat" data-testid="event-bus-events-per-min"><span class="label">Signals per minute</span><span class="value">${fmtRate(eb.events_per_min)}</span></div>
+            <div class="stat" data-testid="event-bus-last-event"><span class="label">Most recent signal</span><span class="value">${esc(fmtTs(eb.last_event_timestamp))}</span></div>
             <ul style="margin:.5rem 0 0 1rem;padding:0;font-size:.85rem;color:#8b949e">${rows}</ul>
           </div>`;
         }
         document.getElementById('cluster-topology').innerHTML=`
-          <div class="stat"><span class="label">Topology</span><span class="value">${esc(d.topology)}</span></div>
-          <div class="stat"><span class="label">Local Host</span><span class="value">${esc(d.local?.hostname||'?')}</span></div>
-          <div class="stat"><span class="label">Memory Sync</span><span class="value">${esc(d.hive_mind?.protocol||'DHT+bloom gossip')}</span></div>
-          <div class="stat"><span class="label">Hive Status</span><span class="value ${d.hive_mind?.status==='active'?'ok':'warn'}">${esc(d.hive_mind?.status||'standalone')}</span></div>
-          ${d.hive_mind?.peers!=null?`<div class="stat"><span class="label">Peers</span><span class="value">${d.hive_mind.peers}</span></div>`:''}
-          ${d.hive_mind?.facts_shared!=null?`<div class="stat"><span class="label">Facts Shared</span><span class="value">${d.hive_mind.facts_shared}</span></div>`:''}
+          <div class="stat"><span class="label" title="Whether Simard can coordinate work across more than one machine">Multi-machine mode</span><span class="value" title="${escAttr(d.topology||'')}">${esc(humanizeTopology(d.topology))}</span></div>
+          <div class="stat"><span class="label">This machine</span><span class="value">${esc(d.local?.hostname||'?')}</span></div>
+          <div class="stat"><span class="label" title="How memory is copied between machines when more than one is running">How memory is shared</span><span class="value" title="${escAttr(d.hive_mind?.protocol||'')}">${esc(humanizeSyncProtocol(d.hive_mind?.protocol))}</span></div>
+          <div class="stat"><span class="label">Sharing status</span><span class="value ${d.hive_mind?.status==='active'?'ok':'warn'}" title="${escAttr(d.hive_mind?.status||'')}">${esc(humanizeHiveStatus(d.hive_mind?.status))}</span></div>
+          ${d.hive_mind?.peers!=null?`<div class="stat"><span class="label">Other machines connected</span><span class="value">${d.hive_mind.peers}</span></div>`:''}
+          ${d.hive_mind?.facts_shared!=null?`<div class="stat"><span class="label">Facts shared with them</span><span class="value">${d.hive_mind.facts_shared}</span></div>`:''}
           <div class="stat"><span class="label">Updated</span><span class="value">${timeAgo(d.timestamp)}</span></div>${ebBlock}`;
         if(d.remote_vms?.length){
           document.getElementById('remote-vms').innerHTML=d.remote_vms.map(vm=>{
