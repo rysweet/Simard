@@ -1282,6 +1282,13 @@ pub(crate) fn parse_recipe_output_full(raw: &str) -> SimardResult<DistillOutput>
 /// intact envelope recovers the payload; preferring the populated candidate
 /// stops the gutted view from shadowing it.
 ///
+/// Post-#2570: the shared `is_copilot_launcher_line` guard now exempts any
+/// `{`/`"`/`[`-leading JSON line, so `strip_recipe_noise` no longer drops that
+/// `"output": …` member line — the line-dropping view recovers this pretty
+/// shape on its own. Candidate selection remains as defence-in-depth for shapes
+/// the line-dropping view can still gut (e.g. a compact envelope sharing a
+/// physical line with a leading banner token, which is dropped wholesale).
+///
 /// Selection precedence:
 /// 1. the first candidate whose `into_distill_output()` is `Ok` **and** carries
 ///    facts or procedures — the intact, populated recovery;
@@ -1335,10 +1342,13 @@ fn recover_distill_output(trimmed: &str) -> Option<SimardResult<DistillOutput>> 
 /// one that yields a populated [`DistillOutput`] (see [`recover_distill_output`]).
 ///
 /// Unlike a first-match scan, ALL candidates are returned: the line-dropping
-/// [`strip_recipe_noise`](crate::recipe_output::strip_recipe_noise) view can gut
-/// a pretty-printed envelope's escaped `output` line to `null` (#2517), so the
-/// line-preserving [`strip_ansi`](crate::recipe_output::strip_ansi) view's
-/// intact envelope must remain available and must not be shadowed.
+/// [`strip_recipe_noise`](crate::recipe_output::strip_recipe_noise) view could
+/// gut a pretty-printed envelope's escaped `output` line to `null` (#2517; since
+/// #2570's structural-token guard that specific `"`-leading member line is
+/// preserved), and it still drops a compact envelope that shares a physical line
+/// with a leading banner token — so the line-preserving
+/// [`strip_ansi`](crate::recipe_output::strip_ansi) view's intact envelope must
+/// remain available and must not be shadowed.
 ///
 /// Two cleaned views are tried, mirroring [`scan_for_facts_object`]:
 ///
@@ -2549,6 +2559,12 @@ mod issue_2512_outer_envelope_banner_tests {
 /// evaluates BOTH cleaned views and commits to the candidate that actually
 /// yields a populated [`DistillOutput`], so the intact line-preserving view wins
 /// over the gutted line-dropping view.
+///
+/// Post-#2570: the structural-token guard now preserves that `"output": …` line,
+/// so the line-dropping view no longer guts THIS pretty shape on its own (see
+/// the renamed `line_dropping_view_preserves_pretty_envelope_output_after_2570_guard`);
+/// the two-view candidate selection stays as defence-in-depth for other shapes
+/// that view can still gut.
 #[cfg(test)]
 mod issue_2517_pretty_envelope_launch_banner_tests {
     use super::*;
@@ -2650,22 +2666,40 @@ mod issue_2517_pretty_envelope_launch_banner_tests {
         assert!(facts.iter().any(|f| f.concept == "lesson-learned"));
     }
 
-    /// Root-cause pin: the line-dropping [`strip_recipe_noise`] view ALONE, on
-    /// this exact fixture, still yields a *structurally valid* envelope but with
-    /// its `output` gutted to `null` — so committing to it (the pre-fix bug)
-    /// fails to yield facts. This documents precisely the trap the fix routes
-    /// around by preferring the populated candidate.
+    /// Post-#2570 interaction pin (was `line_dropping_view_alone_guts_…`): the
+    /// line-dropping [`strip_recipe_noise`] view used to GUT this fixture — it
+    /// matched the pretty envelope's escaped `"output": …` line (which quotes
+    /// `launching copilot binary=`) as launcher noise and dropped it, leaving a
+    /// structurally valid envelope whose `output` was absent, so committing to
+    /// that view (the original #2517 bug) failed to yield facts. The #2570
+    /// structural-token guard now exempts that `"`-leading JSON payload line, so
+    /// the line-dropping view PRESERVES the `output` and recovers the facts on
+    /// its own. The #2517 "prefer the populated candidate" logic
+    /// ([`candidate_runner_envelopes`]) remains as defence-in-depth for a view
+    /// that could still be gutted (e.g. an envelope sharing a physical line with
+    /// a leading banner token); this test pins that #2570 has eliminated the
+    /// specific gutting trap for the real pretty-envelope shape.
     #[test]
-    fn line_dropping_view_alone_guts_the_pretty_envelope_output() {
+    fn line_dropping_view_preserves_pretty_envelope_output_after_2570_guard() {
         let raw = raw_capture();
-        let gutted_view = crate::recipe_output::strip_recipe_noise(raw.trim());
-        let gutted: RecipeRunnerEnvelope = serde_json::from_str(gutted_view.trim()).expect(
-            "the line-dropping view still yields a *structurally valid* envelope (only the \
-             `output` line is dropped)",
+        let recovered_view = crate::recipe_output::strip_recipe_noise(raw.trim());
+        let envelope: RecipeRunnerEnvelope = serde_json::from_str(recovered_view.trim()).expect(
+            "the line-dropping view yields a structurally valid envelope; after the #2570 guard \
+             its escaped `output` JSON line is preserved rather than dropped",
+        );
+        let out = envelope.into_distill_output().expect(
+            "after the #2570 structural-token guard the line-dropping view preserves the \
+             `\"output\"` line, so the envelope yields facts on its own",
+        );
+        assert_eq!(
+            out.facts.len(),
+            2,
+            "both grounded facts are recovered by the line-dropping view post-#2570: {:?}",
+            out.facts
         );
         assert!(
-            gutted.into_distill_output().is_err(),
-            "the gutted view's envelope must fail to yield facts — the trap the #2517 fix avoids"
+            out.facts.iter().all(|f| f.source_episode_id == "epi_2517"),
+            "fact provenance must survive the line-dropping recovery"
         );
     }
 
@@ -2937,5 +2971,121 @@ mod issue_t9664_field_tolerance_tests {
         // Empty content → reliability hard gate quarantines it (score 0.0).
         let score = assess_fact_reliability(&facts[0], &[], &facts);
         assert_eq!(score, 0.0, "empty-content fact must score 0.0");
+    }
+}
+
+/// Issue #2570: a **pretty-printed** inner facts JSON whose legitimate fact
+/// `"content"` line literally quotes the `launching copilot binary=` launcher
+/// substring must not have that line dropped by the shared
+/// `is_copilot_launcher_line` / `strip_recipe_noise` chokepoint.
+///
+/// Mechanism (pre-fix): `is_copilot_launcher_line` matched any physical line
+/// *containing* `launching copilot binary=`. When the distill agent emitted its
+/// `{ "facts": [...] }` object pretty-printed AND a fact's `content` value quoted
+/// that substring, the `strip_recipe_noise` view (tried first in
+/// [`scan_for_facts_object`]) dropped the whole `"content": …` line. The
+/// remaining object still parsed (`content` defaulted to `""` via
+/// [`de_lenient_string`]) and, because its `source_episode_id` was non-empty,
+/// [`scan_cleaned_for_facts`] returned it as a "grounded-capable" answer *before*
+/// the line-preserving `strip_ansi` view was tried — so the fact's real content
+/// was silently lost and the reliability hard gate then quarantined the
+/// now-empty fact. The fix guards `is_copilot_launcher_line` so a line beginning
+/// with a JSON structural token (`{`, `"`, `[`) is never classified as launcher
+/// noise, honouring the module's documented "a JSON payload line is never
+/// launcher noise" contract.
+#[cfg(test)]
+mod issue_2570_pretty_fact_launcher_substring_tests {
+    use super::*;
+
+    /// A single fact whose `content` quotes the launcher substring, emitted
+    /// pretty-printed inside the runner envelope's `distill` step `output`.
+    /// The content is >= 3 words and grounded, so if it survives it is a fully
+    /// promotable fact; if the `"content"` line is dropped it collapses to
+    /// empty and the reliability gate quarantines it.
+    fn pretty_inner_output() -> String {
+        // Hand-written pretty JSON so the `"content"` line begins (after
+        // indentation) with a `"` — the JSON structural token the fix guards on.
+        "{\n  \"facts\": [\n    {\n      \"concept\": \"lesson-learned\",\n      \
+         \"content\": \"the runner printed INFO launching copilot binary=/usr/bin/copilot \
+         before the answer\",\n      \"source_episode_id\": \"epi_2570\"\n    }\n  ]\n}"
+            .to_string()
+    }
+
+    fn envelope(inner: &str) -> String {
+        serde_json::json!({
+            "recipe_name": "distill-episodes",
+            "success": true,
+            "step_results": [{
+                "step_id": "distill",
+                "status": "completed",
+                "output": inner,
+                "error": ""
+            }]
+        })
+        .to_string()
+    }
+
+    /// The headline regression: the pretty-printed fact's full `content`
+    /// (including the launcher substring it quotes) must be preserved, not
+    /// line-dropped to an empty string.
+    #[test]
+    fn pretty_printed_fact_content_quoting_launcher_substring_is_preserved() {
+        let out = parse_recipe_output_full(&envelope(&pretty_inner_output()))
+            .expect("issue #2570 pretty inner facts object must parse");
+        assert_eq!(
+            out.facts.len(),
+            1,
+            "exactly one fact recovered: {:?}",
+            out.facts
+        );
+        let fact = &out.facts[0];
+        assert_eq!(fact.concept, "lesson-learned");
+        assert_eq!(fact.source_episode_id, "epi_2570");
+        assert_eq!(
+            fact.content,
+            "the runner printed INFO launching copilot binary=/usr/bin/copilot before the answer",
+            "the fact content quoting the launcher substring must survive intact, not be \
+             line-dropped to empty"
+        );
+    }
+
+    /// The preserved fact must clear the reliability gate — proving the fix
+    /// actually restores fact-yield (not merely non-empty text). Grounded
+    /// (source in batch) + >= 3 words + known concept clears 0.5.
+    #[test]
+    fn preserved_fact_clears_the_reliability_gate() {
+        let out = parse_recipe_output_full(&envelope(&pretty_inner_output()))
+            .expect("issue #2570 pretty inner facts object must parse");
+        let fact = &out.facts[0];
+        let episode = CognitiveEpisode {
+            node_id: "epi_2570".to_string(),
+            content: "the source episode".to_string(),
+            source_label: "distill-test".to_string(),
+            temporal_index: 1,
+            compressed: false,
+        };
+        let score = assess_fact_reliability(fact, std::slice::from_ref(&episode), &out.facts);
+        assert!(
+            score >= DISTILL_RELIABILITY_THRESHOLD,
+            "preserved grounded fact must clear the promotion threshold, got {score}"
+        );
+    }
+
+    /// Compact (single-line) inner JSON quoting the same substring already
+    /// worked via the line-preserving `strip_ansi` view; pin it so the fix does
+    /// not regress the pre-existing recovery path.
+    #[test]
+    fn compact_fact_content_quoting_launcher_substring_still_recovers() {
+        let inner = "{\"facts\":[{\"concept\":\"bug-pattern\",\
+             \"content\":\"agent logged INFO launching copilot binary=/usr/bin/copilot here\",\
+             \"source_episode_id\":\"epi_2570c\"}]}";
+        let out = parse_recipe_output_full(&envelope(inner))
+            .expect("compact inner facts object must parse");
+        assert_eq!(out.facts.len(), 1);
+        assert_eq!(
+            out.facts[0].content,
+            "agent logged INFO launching copilot binary=/usr/bin/copilot here"
+        );
+        assert_eq!(out.facts[0].source_episode_id, "epi_2570c");
     }
 }

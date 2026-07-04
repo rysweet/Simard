@@ -111,8 +111,19 @@ is therefore deliberately conservative:
 
 - It matches **anchored launcher shapes only** (literal `starts_with`/`contains`
   on known launcher prefixes), never a generic heuristic.
-- It never matches a line that begins with `{` (JSON payload), an action
-  keyword, a bare decimal, or a verdict keyword.
+- It never matches a line that begins (after trimming) with a JSON **structural
+  token** — `{` (a whole object), `"` (a pretty-printed object member such as a
+  fact `"content": …` line), or `[` (an array element). This structural-token
+  guard is an **absolute, code-enforced** exemption
+  ([#2570](https://github.com/rysweet/Simard/issues/2570)): without it the
+  `contains`-based `launching copilot binary=` / `version="GitHub Copilot CLI`
+  arms would drop a pretty-printed fact `"content"` line that legitimately quotes
+  one of those launcher substrings, silently emptying the fact and letting the
+  distill reliability gate quarantine it. (The `launching…` / `version=…` arms
+  match by **containment**, so the payload-safety guarantee is precisely that a
+  line *leading with* a structural token is preserved; a first-word action
+  keyword, bare decimal, or verdict keyword is likewise not one of the anchored
+  launcher shapes.)
 - ANSI is stripped **before** matching, so colour control bytes cannot smuggle a
   launcher line past the anchors or a payload line into a launcher match.
 - Processing is single-pass and bounded; the

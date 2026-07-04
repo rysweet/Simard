@@ -125,15 +125,34 @@ fn starts_with_iso_timestamp(s: &str) -> bool {
 /// - a `… launching copilot binary=… version="GitHub Copilot CLI …"` line,
 /// - a leading `INFO`/`WARN` launcher line that carries no ISO-8601 timestamp.
 ///
-/// A line beginning with `{` (JSON payload), an action keyword, a bare decimal,
-/// or a verdict keyword is **never** classified as launcher noise, so dropping a
-/// launcher line can never discard a decision token or a JSON answer. ANSI
-/// escapes are stripped before this runs (see [`strip_recipe_noise`]), so a
+/// A line beginning with a JSON structural token (`{`, `"`, `[`) — a JSON
+/// payload, a pretty-printed object member (`"key": …`), or an array element —
+/// an action keyword, a bare decimal, or a verdict keyword is **never**
+/// classified as launcher noise, so dropping a launcher line can never discard a
+/// decision token or a JSON answer. The structural-token guard is explicit
+/// (issue #2570): without it the `contains`-based `launching copilot binary=` /
+/// `version="GitHub Copilot CLI` arms would drop a pretty-printed fact
+/// `"content"` line that legitimately quotes one of those launcher substrings.
+/// ANSI escapes are stripped before this runs (see [`strip_recipe_noise`]), so a
 /// colour-coded launcher line still matches and a coloured payload line still
 /// survives. This is correctness-as-safety: the predicate consumes untrusted
 /// agent stdout, so it errs toward keeping a line rather than eating a payload.
 fn is_copilot_launcher_line(line: &str) -> bool {
     let t = line.trim_start();
+
+    // A line that begins with a JSON structural token (`{`, `"`, `[`) is a JSON
+    // payload line — a whole object, a pretty-printed object member (`"key": …`),
+    // or an array element — never a launcher-log preamble line. Every real
+    // launcher shape begins with `\u{2139}` (info marker), `Run`, or an `INFO`/
+    // `WARN` level token, so guarding here loses no launcher line while honouring
+    // the module's documented contract that "a `{`-leading JSON payload line is
+    // never launcher noise". This closes the lossy edge (issue #2570) where the
+    // `contains`-based `launching copilot binary=` / `version="GitHub Copilot CLI`
+    // arms below would otherwise drop a pretty-printed fact `"content"` line that
+    // legitimately quotes a launcher substring, silently emptying that fact.
+    if matches!(t.as_bytes().first(), Some(b'{') | Some(b'"') | Some(b'[')) {
+        return false;
+    }
 
     // An ISO-timestamped line is a tracing line owned by the timestamp arm of
     // `is_noise_line`; never treat it as a launcher line here (keeps this
@@ -728,5 +747,108 @@ mod issue_2496_launcher_tests {
             "clean path must not allocate"
         );
         assert_eq!(out, s);
+    }
+}
+
+/// Issue #2570: a line beginning with a JSON structural token (`{`, `"`, `[`) is
+/// a JSON payload line and must NEVER be classified as launcher noise, even when
+/// it literally quotes a launcher substring (`launching copilot binary=` /
+/// `version="GitHub Copilot CLI`). This is the shared-chokepoint half of the fix
+/// for the distillation fact-yield edge — a pretty-printed fact `"content"` line
+/// that quotes such a substring was being line-dropped, silently emptying the
+/// fact. These tests pin BOTH halves of the contract at the shared predicate the
+/// six consumers (decide, orient, engineer-lifecycle, merge-judge,
+/// progress-checker, distill) all route through: real launcher lines are still
+/// stripped, and structural-token payload lines are preserved.
+#[cfg(test)]
+mod issue_2570_structural_token_guard_tests {
+    use super::*;
+
+    // The real Copilot CLI 1.0.66-2 launcher shapes (ANSI already stripped), the
+    // lines the consumers RELY ON being dropped.
+    const INFO_MARKER: &str = "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 \
+         (saved preference). To change: /home/azureuser/.amplihack/config";
+    const LAUNCHING: &str = "INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot \
+         version=\"GitHub Copilot CLI 1.0.66-2.\"";
+    const UPDATE_NAG: &str = "Run 'copilot update' to check for updates.";
+
+    #[test]
+    fn structural_token_leading_lines_quoting_launcher_substring_are_never_noise() {
+        // A pretty-printed fact `"content"` member line quoting the substring.
+        let content_line =
+            "\"content\": \"the agent logged launching copilot binary=/x before answering\",";
+        // A whole compact object line quoting the substring.
+        let object_line = "{\"content\":\"see launching copilot binary=/x\"}";
+        // An array-element line quoting the launcher substring. Uses the raw
+        // needle (not a JSON-escaped one) so that WITHOUT the guard the
+        // `contains("launching copilot binary=")` arm would match and drop it —
+        // this input actually exercises the `[` arm of the structural-token guard.
+        let array_line = "[\"the agent logged launching copilot binary=/x here\"]";
+        // Pretty (indented) content line — `trim_start` must apply before the guard.
+        let indented_content = "      \"content\": \"launching copilot binary=/x\"";
+        for line in [content_line, object_line, array_line, indented_content] {
+            assert!(
+                !is_copilot_launcher_line(line),
+                "a JSON structural-token line is never launcher noise: {line:?}"
+            );
+            assert!(
+                !is_noise_line(line),
+                "a JSON structural-token line is never noise: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn real_launcher_shapes_are_still_classified_after_the_guard() {
+        // The structural-token guard must not stop any real launcher shape from
+        // being dropped — the property every text consumer depends on.
+        for line in [
+            INFO_MARKER,
+            LAUNCHING,
+            UPDATE_NAG,
+            "INFO using cached login",
+            "WARN extension not pinned",
+        ] {
+            assert!(
+                is_copilot_launcher_line(line),
+                "real launcher line must still be classified: {line:?}"
+            );
+            assert!(
+                is_noise_line(line),
+                "real launcher line must still be dropped: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_recipe_noise_drops_launcher_lines_but_keeps_pretty_content_line() {
+        // The end-to-end shared-chokepoint behaviour: real launcher preamble
+        // lines are dropped, while the `"`-leading fact content line that quotes
+        // the launcher substring survives.
+        let content_line =
+            "\"content\": \"the agent logged launching copilot binary=/x before answering\"";
+        let raw = format!("{LAUNCHING}\n{UPDATE_NAG}\n{INFO_MARKER}\n{content_line}");
+        let cleaned = strip_recipe_noise(&raw);
+        assert_eq!(
+            cleaned.trim(),
+            content_line,
+            "launcher lines dropped; the quoted-substring content line preserved"
+        );
+    }
+
+    #[test]
+    fn pretty_json_object_quoting_launcher_substring_survives_unchanged() {
+        // A full pretty-printed object whose content quotes the substring passes
+        // through the cleaner unchanged (no line is noise) and remains valid JSON.
+        let pretty = "{\n  \"facts\": [\n    {\n      \
+             \"content\": \"see launching copilot binary=/x\"\n    }\n  ]\n}";
+        let cleaned = strip_recipe_noise(pretty);
+        assert_eq!(
+            cleaned.as_ref(),
+            pretty,
+            "no line of a pretty JSON object is launcher noise"
+        );
+        serde_json::from_str::<serde_json::Value>(cleaned.as_ref())
+            .expect("the cleaned view must still be valid JSON");
     }
 }
