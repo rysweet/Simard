@@ -139,6 +139,64 @@ impl BaseTypeSession for LightweightChatSession {
         Ok(outcome)
     }
 
+    fn supports_streaming(&self) -> bool {
+        self.inner
+            .as_ref()
+            .map(|i| i.supports_streaming())
+            .unwrap_or(false)
+    }
+
+    fn run_turn_streaming(
+        &mut self,
+        input: BaseTypeTurnInput,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> SimardResult<BaseTypeOutcome> {
+        ensure_session_not_closed(&self.descriptor, self.is_closed, "run_turn")?;
+        ensure_session_open(&self.descriptor, self.is_open, "run_turn")?;
+
+        self.turn_count += 1;
+
+        let inner = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| SimardError::AdapterInvocationFailed {
+                base_type: "lightweight-chat".to_string(),
+                reason: "inner session not initialized (open() not called?)".to_string(),
+            })?;
+
+        info!(
+            turn = self.turn_count,
+            prompt_len = input.objective.len(),
+            "Lightweight chat: streaming turn via SessionBuilder"
+        );
+        let start = std::time::Instant::now();
+
+        // Delegate to the inner session's streaming path so real streaming (or
+        // the single-delta default) propagates through the wrapper unchanged.
+        let outcome = inner.run_turn_streaming(input, on_delta)?;
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+
+        info!(
+            elapsed_ms,
+            response_len = outcome.execution_summary.len(),
+            turn = self.turn_count,
+            "Lightweight chat: received response"
+        );
+
+        // Record cost estimate
+        if let Err(e) = crate::cost_tracking::record_cost(
+            "lightweight-chat",
+            "session-builder",
+            outcome.plan.len(),
+            outcome.execution_summary.len(),
+            &format!("lightweight chat turn {}", self.turn_count),
+        ) {
+            debug!("Cost tracking write failed: {e}");
+        }
+
+        Ok(outcome)
+    }
+
     fn close(&mut self) -> SimardResult<()> {
         ensure_session_not_closed(&self.descriptor, self.is_closed, "close")?;
         ensure_session_open(&self.descriptor, self.is_open, "close")?;

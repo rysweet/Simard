@@ -10,17 +10,19 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::{SimardError, SimardResult};
-use crate::meeting_backend::{ConversationMessage, Role};
+use crate::meeting_backend::{ConversationMessage, MeetingBackend, MeetingResponse, Role};
 
 /// Maximum size (bytes) of a single inbound chat WebSocket frame / user
 /// message. The channel is text chat, not file transfer; oversized frames are
 /// refused, never persisted.
 const MAX_CHAT_FRAME_BYTES: usize = 64 * 1024;
 
-/// Target character count per streamed assistant `chunk` frame. The completed
-/// reply is split into fixed char windows so the client renders it
-/// incrementally (server-side chunking — see docs/reference/dashboard-chat.md).
-const STREAM_CHUNK_CHARS: usize = 48;
+/// Maximum characters carried in a single streamed `chunk` frame. Real agent
+/// output deltas are typically small (a line at a time); this only splits a
+/// pathologically large single delta so no frame approaches
+/// [`MAX_CHAT_FRAME_BYTES`]. (Worst case a char is 4 bytes, plus the small JSON
+/// envelope — 16K chars stays well under 64 KiB.)
+const MAX_STREAM_CHUNK_CHARS: usize = 16 * 1024;
 
 /// Query parameters for `GET /ws/chat`. `session_id` selects an existing
 /// session to resume; when absent a fresh session is minted lazily on the
@@ -148,13 +150,19 @@ async fn persist_turn(state_root: &std::path::Path, session_id: &str, role: Role
     .await;
 }
 
-/// Deliver a completed assistant reply as an ordered run of `chunk` frames
-/// terminated by a single `done` frame (server-side chunking). Incremental
-/// *appearance* is achieved over the existing socket without a token-level
-/// model API; the wire protocol stays forward-compatible with true streaming.
-async fn stream_assistant(socket: &mut WebSocket, content: &str) {
+/// Send one `chunk` frame carrying `content`, splitting a pathologically large
+/// delta so no single frame approaches [`MAX_CHAT_FRAME_BYTES`]. Returns `false`
+/// when the socket has closed (so the caller can stop streaming).
+///
+/// The client renders `chunk.content` as `textContent`, so no server-side HTML
+/// escaping is required; the meeting sanitizer already strips ANSI/control
+/// sequences upstream, keeping the stream display-safe.
+async fn send_chunk(socket: &mut WebSocket, content: &str) -> bool {
+    if content.is_empty() {
+        return true;
+    }
     let chars: Vec<char> = content.chars().collect();
-    for window in chars.chunks(STREAM_CHUNK_CHARS) {
+    for window in chars.chunks(MAX_STREAM_CHUNK_CHARS) {
         let piece: String = window.iter().collect();
         if socket
             .send(Message::Text(
@@ -165,21 +173,66 @@ async fn stream_assistant(socket: &mut WebSocket, content: &str) {
             .await
             .is_err()
         {
-            return;
+            return false;
         }
-        // A small delay so text visibly streams; each delay is tiny and the
-        // chunk size bounds the frame count for long replies.
-        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
     }
+    true
+}
+
+/// Send the terminating `done` frame that closes a streamed assistant reply.
+async fn send_done(socket: &mut WebSocket) {
     let _ = socket
         .send(Message::Text(json!({ "type": "done" }).to_string().into()))
         .await;
 }
 
+/// Result of a turn produced off the async runtime by [`spawn_turn`].
+type TurnJoin = tokio::task::JoinHandle<(
+    MeetingBackend,
+    std::thread::Result<SimardResult<MeetingResponse>>,
+)>;
+
+/// Run one conversational turn against `backend` off the async runtime,
+/// returning a receiver of output deltas (each a future `chunk` frame) and the
+/// join handle that yields the moved-back backend plus the turn result.
+///
+/// This is the transport-independent core of the `/ws/chat` conversation
+/// handler: `send_message_streaming` forwards each fragment as the agent
+/// produces it (real incremental streaming — the proxy's idle timeout bounds
+/// the turn, so the channel always closes), while a non-streaming backend runs
+/// to completion and the caller emits the whole reply as one chunk. Extracted
+/// so the streaming bridge is unit-testable without a live socket.
+fn spawn_turn(
+    mut backend: MeetingBackend,
+    user_text: String,
+    streaming: bool,
+) -> (tokio::sync::mpsc::UnboundedReceiver<String>, TurnJoin) {
+    let (delta_tx, delta_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let join = tokio::task::spawn_blocking(move || {
+        // `catch_unwind` keeps an agent panic from crashing the chat task.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if streaming {
+                let mut on_delta = |delta: &str| {
+                    // Unbounded send never blocks the synchronous agent thread.
+                    let _ = delta_tx.send(delta.to_string());
+                };
+                backend.send_message_streaming(&user_text, &mut on_delta)
+            } else {
+                // Non-streaming capability: drop the sender (no deltas) and run
+                // to completion; the caller emits the reply as a single chunk.
+                drop(delta_tx);
+                backend.send_message(&user_text)
+            }
+        }));
+        (backend, outcome)
+    });
+    (delta_rx, join)
+}
+
 pub(crate) async fn handle_ws_chat(mut socket: WebSocket, requested_session_id: Option<String>) {
     use crate::conversation_channel::apply_record;
     use crate::meeting_backend::{
-        MeetingBackend, MeetingCommand, parse_command, render_help_plain, unknown_command_notice,
+        MeetingCommand, parse_command, render_help_plain, unknown_command_notice,
     };
 
     let state_root = super::routes::resolve_state_root();
@@ -539,23 +592,27 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket, requested_session_id: 
                         // before the agent replies.
                         persist_turn(&state_root, &session_id, Role::User, user_text.clone()).await;
 
-                        // send_message is synchronous — use spawn_blocking
-                        // wrapped with catch_unwind so a panic in the agent
-                        // doesn't crash the chat task.
-                        let for_agent = user_text.clone();
-                        let result = tokio::task::spawn_blocking(move || {
-                            let outcome =
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    backend.send_message(&for_agent)
-                                }));
-                            (backend, outcome)
-                        })
-                        .await;
-                        match result {
+                        // Real incremental streaming when the backend declares
+                        // the capability; an explicit single-shot path otherwise
+                        // (a declared capability, never a silent fallback).
+                        let streaming = backend.supports_streaming();
+                        let (mut delta_rx, join) =
+                            spawn_turn(backend, user_text.clone(), streaming);
+
+                        // Emit a `chunk` frame per delta as the agent produces
+                        // it. Keep draining even if the socket closed so the
+                        // blocking task can finish and hand the backend back.
+                        let mut socket_alive = true;
+                        while let Some(delta) = delta_rx.recv().await {
+                            if socket_alive && !send_chunk(&mut socket, &delta).await {
+                                socket_alive = false;
+                            }
+                        }
+
+                        match join.await {
                             Ok((returned_backend, Ok(Ok(resp)))) => {
                                 backend = returned_backend;
-                                // Persist the assistant reply as one turn, then
-                                // stream it incrementally to the client.
+                                // Persist the full assistant turn exactly once.
                                 persist_turn(
                                     &state_root,
                                     &session_id,
@@ -563,10 +620,22 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket, requested_session_id: 
                                     resp.content.clone(),
                                 )
                                 .await;
-                                stream_assistant(&mut socket, &resp.content).await;
+                                // Non-streaming path produced no deltas: deliver
+                                // the complete reply as one chunk so the client
+                                // still renders it.
+                                if !streaming && socket_alive && !resp.content.is_empty() {
+                                    socket_alive = send_chunk(&mut socket, &resp.content).await;
+                                }
+                                if socket_alive {
+                                    send_done(&mut socket).await;
+                                }
                             }
                             Ok((returned_backend, Ok(Err(e)))) => {
                                 backend = returned_backend;
+                                // Honest error surface (e.g. the idle-timeout
+                                // degradation). The client's fallback frame
+                                // handler clears the busy state; also send `done`
+                                // so a partially-streamed bubble is finalized.
                                 let _ = socket
                                     .send(Message::Text(
                                         json!({"role":"system","content": format!("[error: {e}]")})
@@ -574,6 +643,7 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket, requested_session_id: 
                                             .into(),
                                     ))
                                     .await;
+                                send_done(&mut socket).await;
                             }
                             Ok((returned_backend, Err(_panic))) => {
                                 eprintln!("[simard][PANIC] ws_chat send_message panicked");
@@ -585,6 +655,7 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket, requested_session_id: 
                                             .into(),
                                     ))
                                     .await;
+                                send_done(&mut socket).await;
                             }
                             Err(e) => {
                                 let _ = socket
@@ -613,6 +684,154 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket, requested_session_id: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base_types::{
+        BaseTypeDescriptor, BaseTypeId, BaseTypeOutcome, BaseTypeSession, BaseTypeTurnInput,
+        standard_session_capabilities,
+    };
+    use crate::metadata::{BackendDescriptor, Freshness};
+    use crate::runtime::RuntimeTopology;
+
+    /// Streaming mock agent that emits its canned reply as several deltas — the
+    /// same real-streaming contract as `PersistentAgentProxy`, without a
+    /// subprocess — so the `/ws/chat` bridge can be exercised offline.
+    struct WsStreamingMock {
+        descriptor: BaseTypeDescriptor,
+        deltas: Vec<String>,
+    }
+
+    impl WsStreamingMock {
+        fn new(deltas: &[&str]) -> Self {
+            Self {
+                descriptor: BaseTypeDescriptor {
+                    id: BaseTypeId::new("ws-streaming-mock"),
+                    backend: BackendDescriptor::for_runtime_type::<Self>(
+                        "ws-streaming-mock",
+                        "test:ws-streaming-mock",
+                        Freshness::now().unwrap(),
+                    ),
+                    capabilities: standard_session_capabilities(),
+                    supported_topologies: [RuntimeTopology::SingleProcess].into_iter().collect(),
+                },
+                deltas: deltas.iter().map(|s| s.to_string()).collect(),
+            }
+        }
+    }
+
+    impl BaseTypeSession for WsStreamingMock {
+        fn descriptor(&self) -> &BaseTypeDescriptor {
+            &self.descriptor
+        }
+        fn open(&mut self) -> SimardResult<()> {
+            Ok(())
+        }
+        fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
+            self.run_turn_streaming(input, &mut |_| {})
+        }
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+        fn run_turn_streaming(
+            &mut self,
+            _input: BaseTypeTurnInput,
+            on_delta: &mut dyn FnMut(&str),
+        ) -> SimardResult<BaseTypeOutcome> {
+            for delta in &self.deltas {
+                on_delta(delta);
+            }
+            Ok(BaseTypeOutcome {
+                plan: String::new(),
+                execution_summary: self.deltas.concat(),
+                evidence: Vec::new(),
+            })
+        }
+        fn close(&mut self) -> SimardResult<()> {
+            Ok(())
+        }
+    }
+
+    /// The `/ws/chat` streaming bridge must emit each agent fragment as it is
+    /// produced (real incremental streaming) and yield the complete reply for
+    /// persistence — no post-hoc char-window chunking of a completed reply.
+    #[tokio::test]
+    async fn spawn_turn_streams_real_deltas_and_returns_full_reply() {
+        let agent = WsStreamingMock::new(&["Hello, ", "incremental ", "world."]);
+        let backend = MeetingBackend::new_session("Chat", Box::new(agent), None, String::new());
+        assert!(backend.supports_streaming());
+
+        let (mut delta_rx, join) = spawn_turn(backend, "hi".to_string(), true);
+        let mut deltas = Vec::new();
+        while let Some(d) = delta_rx.recv().await {
+            deltas.push(d);
+        }
+        let (_backend, outcome) = join.await.expect("blocking task joins");
+        let resp = outcome.expect("no panic").expect("turn ok");
+
+        assert_eq!(
+            deltas,
+            vec![
+                "Hello, ".to_string(),
+                "incremental ".to_string(),
+                "world.".to_string()
+            ],
+            "each fragment must arrive as its own chunk, in order"
+        );
+        assert_eq!(
+            resp.content, "Hello, incremental world.",
+            "the complete reply must be returned for one-time persistence"
+        );
+    }
+
+    /// A non-streaming backend produces no deltas; the handler then delivers the
+    /// whole reply as a single chunk (the explicit non-streaming capability).
+    #[tokio::test]
+    async fn spawn_turn_non_streaming_produces_no_deltas() {
+        struct PlainMock(BaseTypeDescriptor);
+        impl BaseTypeSession for PlainMock {
+            fn descriptor(&self) -> &BaseTypeDescriptor {
+                &self.0
+            }
+            fn open(&mut self) -> SimardResult<()> {
+                Ok(())
+            }
+            fn run_turn(&mut self, _i: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
+                Ok(BaseTypeOutcome {
+                    plan: String::new(),
+                    execution_summary: "whole reply".to_string(),
+                    evidence: Vec::new(),
+                })
+            }
+            fn close(&mut self) -> SimardResult<()> {
+                Ok(())
+            }
+        }
+        let descriptor = BaseTypeDescriptor {
+            id: BaseTypeId::new("plain-mock"),
+            backend: BackendDescriptor::for_runtime_type::<PlainMock>(
+                "plain-mock",
+                "test:plain-mock",
+                Freshness::now().unwrap(),
+            ),
+            capabilities: standard_session_capabilities(),
+            supported_topologies: [RuntimeTopology::SingleProcess].into_iter().collect(),
+        };
+        let backend = MeetingBackend::new_session(
+            "Chat",
+            Box::new(PlainMock(descriptor)),
+            None,
+            String::new(),
+        );
+        assert!(!backend.supports_streaming());
+
+        let (mut delta_rx, join) = spawn_turn(backend, "hi".to_string(), false);
+        let mut deltas = Vec::new();
+        while let Some(d) = delta_rx.recv().await {
+            deltas.push(d);
+        }
+        let (_backend, outcome) = join.await.expect("joins");
+        let resp = outcome.expect("no panic").expect("ok");
+        assert!(deltas.is_empty(), "non-streaming path emits no deltas");
+        assert_eq!(resp.content, "whole reply");
+    }
 
     // ---- load_dashboard_meeting_prompt ------------------------------------
 

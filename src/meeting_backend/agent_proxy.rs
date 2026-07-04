@@ -25,65 +25,37 @@ use crate::error::{SimardError, SimardResult};
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::runtime::RuntimeTopology;
 
-/// Strip copilot CLI noise (usage stats, bootstrap lines, progress indicators)
-/// from raw output, keeping only the substantive response.
-fn strip_copilot_noise(raw: &str) -> String {
-    let mut result = String::with_capacity(raw.len());
-    let mut skip_rest = false;
+use super::streaming_sanitizer::StreamingSanitizer;
 
-    for line in raw.lines() {
-        let trimmed = line.trim();
+/// Env var (removed) that used to impose a fixed wall-clock per-turn timeout.
+/// It is no longer honored: a long-but-productive agent turn must never be
+/// killed by a wall-clock bound (operator directive; mirrors the amplihack
+/// recipe-runner idle-timeout switch, issue #439). If an operator still has it
+/// set, [`resolve_turn_idle_timeout`] emits a deprecation warning pointing at
+/// [`TURN_IDLE_ENV`]. Issue #2586 follow-up.
+const LEGACY_TURN_TIMEOUT_ENV: &str = "SIMARD_MEETING_TURN_TIMEOUT_SECS";
 
-        if result.is_empty() && trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with("Total usage est:")
-            || trimmed.starts_with("API time spent:")
-            || trimmed.starts_with("Total session time:")
-            || trimmed.starts_with("Changes ")
-            || trimmed.starts_with("Requests ")
-            || trimmed.starts_with("Tokens ")
-        {
-            skip_rest = true;
-            continue;
-        }
-        if skip_rest {
-            continue;
-        }
-        if trimmed.contains("Staged") && trimmed.contains("hook") {
-            continue;
-        }
-        if trimmed.contains("XPIA") || trimmed.starts_with("Script started on") {
-            continue;
-        }
-        if trimmed.starts_with("Warning:") {
-            continue;
-        }
-        if trimmed.len() <= 2 && !trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('●') {
-            continue;
-        }
+/// Env var overriding the per-turn *idle* timeout in seconds. A turn is only
+/// terminated when the child produces NO output (stdout content or stderr
+/// heartbeat) for this long; as long as it keeps producing output the turn runs
+/// with no upper bound. Configurable but not disableable — it is the honest
+/// hung-child safety net. Values below [`MIN_TURN_IDLE_SECS`] are clamped up.
+const TURN_IDLE_ENV: &str = "SIMARD_MEETING_TURN_IDLE_SECS";
 
-        result.push_str(line);
-        result.push('\n');
-    }
+/// Default per-turn idle timeout: a generous 10 minutes. A healthy agent emits
+/// tokens/log lines far more often than this; the window only fires for a
+/// genuinely wedged child.
+const DEFAULT_TURN_IDLE_SECS: u64 = 600;
 
-    result.trim().to_string()
-}
+/// Floor for the configured idle window. Guards against an operator setting a
+/// tiny value that would false-positive on a slow-but-live turn (and against a
+/// `0` that would otherwise disable the honest hang detector).
+const MIN_TURN_IDLE_SECS: u64 = 5;
 
-/// Env var override for turn timeout in seconds. When set to a positive value
-/// it overrides [`DEFAULT_TURN_TIMEOUT_SECS`]; when explicitly set to `0` the
-/// per-turn timeout is disabled (unbounded — operator escape hatch); when unset
-/// or malformed the bounded default applies.
-const TURN_TIMEOUT_ENV: &str = "SIMARD_MEETING_TURN_TIMEOUT_SECS";
-
-/// Default per-turn timeout. A hung `copilot -p` child must not block the
-/// meeting REPL indefinitely — after this bound the child is killed and the
-/// turn degrades honestly via the `[meeting:error]`/`[meeting] WARNING` banner
-/// (Pillar 11: honest degradation beats hidden silence). Issue #2549.
-const DEFAULT_TURN_TIMEOUT_SECS: u64 = 120;
+/// Metric emitted (value `1.0`) when a turn is terminated for idle-timeout, so
+/// a real hang is surfaced explicitly, never silently swallowed. Snake_case to
+/// match the `self_metrics` JSONL convention.
+const IDLE_TIMEOUT_METRIC: &str = "meeting_turn_idle_timeout";
 
 /// Env var giving an explicit directory the meeting agent should operate in.
 /// When set to an existing directory it wins over cwd-derived resolution. This
@@ -91,27 +63,39 @@ const DEFAULT_TURN_TIMEOUT_SECS: u64 = 120;
 /// per-operator absolute path baked into the binary.
 const WORKDIR_ENV: &str = "SIMARD_MEETING_AGENT_DIR";
 
-/// Resolve the per-turn timeout from the environment, falling back to the
-/// bounded default. Issue #2549.
-///
-/// - `SIMARD_MEETING_TURN_TIMEOUT_SECS=<n>` with `n > 0` → `Some(n secs)`
-/// - `SIMARD_MEETING_TURN_TIMEOUT_SECS=0` → `None` (explicitly disabled)
-/// - unset or malformed → `Some(DEFAULT_TURN_TIMEOUT_SECS)`
-fn resolve_turn_timeout() -> Option<Duration> {
-    parse_turn_timeout(std::env::var(TURN_TIMEOUT_ENV).ok().as_deref())
+/// Resolve the per-turn idle timeout from the environment, clamped to
+/// [`MIN_TURN_IDLE_SECS`] and defaulting to [`DEFAULT_TURN_IDLE_SECS`]. Emits a
+/// deprecation warning if the removed wall-clock env var is still set.
+fn resolve_turn_idle_timeout() -> Duration {
+    if let Ok(stale) = std::env::var(LEGACY_TURN_TIMEOUT_ENV) {
+        warn!(
+            removed_var = LEGACY_TURN_TIMEOUT_ENV,
+            stale_value = %stale,
+            replacement = TURN_IDLE_ENV,
+            "{LEGACY_TURN_TIMEOUT_ENV} is no longer honored — a productive turn is \
+             never killed by a wall-clock bound; only idle turns time out. Set \
+             {TURN_IDLE_ENV} to tune the idle window instead."
+        );
+    }
+    parse_turn_idle_timeout(std::env::var(TURN_IDLE_ENV).ok().as_deref())
 }
 
-/// Pure (env-free) core of [`resolve_turn_timeout`] so the fallback/override
+/// Pure (env-free) core of [`resolve_turn_idle_timeout`] so the clamp/default
 /// semantics are testable without mutating process-global environment state.
-fn parse_turn_timeout(raw: Option<&str>) -> Option<Duration> {
-    match raw {
+///
+/// - `Some("<n>")` with `n >= MIN` → `n` seconds.
+/// - `Some("<n>")` with `n < MIN` (including `0`) → clamped to
+///   [`MIN_TURN_IDLE_SECS`] — the idle detector is not disableable.
+/// - `None` or malformed → [`DEFAULT_TURN_IDLE_SECS`].
+fn parse_turn_idle_timeout(raw: Option<&str>) -> Duration {
+    let secs = match raw {
         Some(value) => match value.trim().parse::<u64>() {
-            Ok(0) => None,
-            Ok(secs) => Some(Duration::from_secs(secs)),
-            Err(_) => Some(Duration::from_secs(DEFAULT_TURN_TIMEOUT_SECS)),
+            Ok(secs) => secs.max(MIN_TURN_IDLE_SECS),
+            Err(_) => DEFAULT_TURN_IDLE_SECS,
         },
-        None => Some(Duration::from_secs(DEFAULT_TURN_TIMEOUT_SECS)),
-    }
+        None => DEFAULT_TURN_IDLE_SECS,
+    };
+    Duration::from_secs(secs)
 }
 
 /// Resolve the directory the meeting agent should operate in — the active
@@ -201,6 +185,187 @@ fn resolve_agent_command() -> SimardResult<(String, Vec<String>)> {
     }
 }
 
+// ── Idle-liveness drain seams (issue #2586 follow-up) ───────────────────────
+//
+// The per-turn drain loop is extracted behind two tiny traits so its
+// idle-timeout behavior is deterministically testable with a fake child + fake
+// clock — no real subprocess, no real sleeps. [`ChildOutput`] yields the
+// child's output events with idle-aware waiting; [`TurnClock`] supplies
+// monotonic elapsed time for logging/idle accounting.
+
+/// One unit of progress observed from the agent child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChildEvent {
+    /// A line of stdout — substantive content AND a liveness signal.
+    Stdout(String),
+    /// A line of stderr — a liveness heartbeat only (logged at debug).
+    Stderr(String),
+    /// The child's stdout reached EOF: all content has been produced.
+    StdoutEof,
+}
+
+/// Source of [`ChildEvent`]s with idle-aware waiting. The production impl wraps
+/// the reader-thread channel; tests substitute a scripted fake.
+trait ChildOutput {
+    /// Wait up to `idle_budget` for the next event. `Some(event)` if one
+    /// arrived within the budget; `None` if the budget elapsed with no activity
+    /// (the child is idle).
+    fn next_event(&mut self, idle_budget: Duration) -> Option<ChildEvent>;
+}
+
+/// Real [`ChildOutput`] over the stdout/stderr reader-thread channel. A
+/// `recv_timeout` that times out is exactly "no output within the idle window";
+/// a disconnect (all readers gone) is treated as stdout EOF.
+struct PipeChildOutput {
+    rx: std::sync::mpsc::Receiver<ChildEvent>,
+}
+
+impl ChildOutput for PipeChildOutput {
+    fn next_event(&mut self, idle_budget: Duration) -> Option<ChildEvent> {
+        match self.rx.recv_timeout(idle_budget) {
+            Ok(event) => Some(event),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Some(ChildEvent::StdoutEof),
+        }
+    }
+}
+
+/// Monotonic clock seam so idle accounting is deterministic under test.
+trait TurnClock {
+    /// Milliseconds elapsed since the turn started (monotonic, non-decreasing).
+    fn elapsed_ms(&self) -> u64;
+}
+
+/// Production [`TurnClock`] backed by [`Instant`].
+struct SystemClock {
+    start: Instant,
+}
+
+impl SystemClock {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+        }
+    }
+}
+
+impl TurnClock for SystemClock {
+    fn elapsed_ms(&self) -> u64 {
+        self.start.elapsed().as_millis() as u64
+    }
+}
+
+/// Outcome of [`drain_with_liveness`].
+#[derive(Debug, PartialEq, Eq)]
+enum DrainOutcome {
+    /// stdout reached EOF; the turn produced its full output. `elapsed_ms` is
+    /// the total wall time (unbounded — proves there is no wall-clock cap).
+    Completed { elapsed_ms: u64 },
+    /// No output for a full idle window: the child is wedged. `elapsed_ms` is
+    /// the total wall time at the point of detection.
+    IdleTimeout { idle: Duration, elapsed_ms: u64 },
+}
+
+/// Drain a child's output, resetting the idle window on every event and only
+/// giving up when NO output arrives for a full `idle_timeout`.
+///
+/// Productive turns run with no upper time bound: each stdout line is forwarded
+/// to `on_stdout` (a combined content + liveness signal) as it arrives — true
+/// incremental streaming — and stderr heartbeats keep the turn alive without
+/// producing content. Only a genuinely silent child trips the idle timeout.
+fn drain_with_liveness(
+    src: &mut dyn ChildOutput,
+    clock: &dyn TurnClock,
+    idle_timeout: Duration,
+    on_stdout: &mut dyn FnMut(&str),
+) -> DrainOutcome {
+    loop {
+        match src.next_event(idle_timeout) {
+            Some(ChildEvent::Stdout(line)) => on_stdout(&line),
+            Some(ChildEvent::Stderr(line)) => {
+                debug!(stderr_line = %line, "agent stderr (liveness heartbeat)");
+            }
+            Some(ChildEvent::StdoutEof) => {
+                return DrainOutcome::Completed {
+                    elapsed_ms: clock.elapsed_ms(),
+                };
+            }
+            None => {
+                return DrainOutcome::IdleTimeout {
+                    idle: idle_timeout,
+                    elapsed_ms: clock.elapsed_ms(),
+                };
+            }
+        }
+    }
+}
+
+/// Structured description of an idle-timeout hang, used to build the honest
+/// error and emit the surfacing metric.
+struct IdleTimeoutReport {
+    idle: Duration,
+    pid: Option<u32>,
+    turn: u32,
+}
+
+/// Surface an idle-timeout hang: structured error-level tracing plus a metric
+/// (identifiers only — never user/model content), returning the honest
+/// degradation error. `metric` is injected so tests can assert emission without
+/// writing to the metrics store. A real hang is never silently swallowed.
+fn report_idle_timeout(
+    report: &IdleTimeoutReport,
+    metric: &mut dyn FnMut(&str, f64, &str),
+) -> SimardError {
+    let idle_secs = report.idle.as_secs();
+    let context = format!(
+        "idle_secs={idle_secs};pid={};turn={}",
+        report
+            .pid
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        report.turn
+    );
+    tracing::error!(
+        idle_secs,
+        pid = report.pid,
+        turn = report.turn,
+        "meeting agent turn idle-timeout — no output for {idle_secs}s; terminating wedged child ({TURN_IDLE_ENV})"
+    );
+    metric(IDLE_TIMEOUT_METRIC, 1.0, &context);
+    SimardError::AdapterInvocationFailed {
+        base_type: "persistent-agent-proxy".to_string(),
+        reason: format!(
+            "agent turn idle-timeout: no output for {idle_secs}s \
+             ({TURN_IDLE_ENV}); terminated wedged child — honest degradation, \
+             retry your message or /close"
+        ),
+    }
+}
+
+/// Best-effort bounded reap of a child that has already closed stdout. The
+/// turn's full output is already in hand; this only stops a descendant that
+/// lingers after closing stdout from orphaning. Never blocks unbounded — after
+/// a short grace the process group is killed.
+fn reap_after_eof(child: &mut std::process::Child, pid: u32) {
+    let grace = Duration::from_millis(500);
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => {
+                if start.elapsed() >= grace {
+                    kill_process_group(pid);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return,
+        }
+    }
+}
+
 /// A direct-invoke agent proxy that spawns the coding agent per-turn via
 /// `copilot -p "MESSAGE"` with piped stdout.
 ///
@@ -214,7 +379,13 @@ pub struct PersistentAgentProxy {
     is_open: bool,
     is_closed: bool,
     turn_count: u32,
-    turn_timeout: Option<Duration>,
+    /// Per-turn *idle* timeout: the turn is killed only after the child
+    /// produces no output for this long. A productive turn has no upper bound.
+    turn_idle_timeout: Duration,
+    /// Whether idle-timeout terminations emit a metric to the metrics store.
+    /// Always `true` in production; tests set it `false` so the suite never
+    /// writes to `~/.simard`.
+    emit_metrics: bool,
     /// Directory the agent operates in (cwd + `--add-dir` grant), resolved in
     /// `open()` from the active repo / explicit config. `None` when no repo can
     /// be resolved — the agent then inherits the process cwd with no grant.
@@ -236,7 +407,7 @@ impl std::fmt::Debug for PersistentAgentProxy {
 impl PersistentAgentProxy {
     /// Create a new proxy (does NOT validate agent yet — call `open()` first).
     pub fn new() -> SimardResult<Self> {
-        let turn_timeout = resolve_turn_timeout();
+        let turn_idle_timeout = resolve_turn_idle_timeout();
 
         Ok(Self {
             descriptor: BaseTypeDescriptor {
@@ -255,7 +426,8 @@ impl PersistentAgentProxy {
             is_open: false,
             is_closed: false,
             turn_count: 0,
-            turn_timeout,
+            turn_idle_timeout,
+            emit_metrics: true,
             workdir: None,
             agent_cmd: String::new(),
             agent_base_args: Vec::new(),
@@ -281,8 +453,30 @@ impl PersistentAgentProxy {
         Ok(())
     }
 
-    /// Invoke the agent with a prompt and return the response.
+    /// Invoke the agent with a prompt and return the (noise-stripped) response,
+    /// discarding streamed deltas. Thin wrapper over
+    /// [`PersistentAgentProxy::invoke_agent_streaming`], used by the tests that
+    /// assert non-streaming behavior. Production turns go through
+    /// `run_turn_streaming` → `invoke_agent_streaming` directly.
+    #[cfg(test)]
     fn invoke_agent(&self, prompt: &str) -> SimardResult<String> {
+        self.invoke_agent_streaming(prompt, &mut |_| {})
+    }
+
+    /// Invoke the agent, forwarding cleaned output fragments to `on_delta` as
+    /// the child produces them (true incremental streaming) and returning the
+    /// full noise-stripped response.
+    ///
+    /// The turn is terminated ONLY if the child goes idle — no stdout content
+    /// and no stderr heartbeat — for the configured idle window
+    /// ([`TURN_IDLE_ENV`]); a productive turn runs with no upper time bound. An
+    /// idle kill reaps the whole process group, surfaces the hang via
+    /// error-level tracing + a metric, and degrades honestly.
+    fn invoke_agent_streaming(
+        &self,
+        prompt: &str,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> SimardResult<String> {
         info!(
             cmd = %self.agent_cmd,
             prompt_len = prompt.len(),
@@ -297,41 +491,31 @@ impl PersistentAgentProxy {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        // Run the agent as the leader of its own process group so a per-turn
-        // timeout can kill the WHOLE subtree, not just the direct child. The
-        // agent CLIs (`copilot`/`claude`) are Node processes that spawn
-        // descendants which inherit the stdout/stderr pipe write-ends; killing
-        // only the direct child would leave those descendants alive, holding
-        // the pipes open so the reader threads never see EOF (leaked threads +
-        // FDs + orphaned processes). Because the timeout is now default-on
-        // (issue #2549) this kill path is regularly exercised. `process_group(0)`
-        // makes the child's PGID equal its PID; the timeout handler then
-        // signals the negated PGID.
-        //
-        // Tradeoff: the child no longer shares Simard's foreground process
-        // group, so a terminal SIGINT (Ctrl-C) sent to Simard mid-turn no
-        // longer reaches the agent. That is acceptable here — the agent is a
-        // one-shot `-p` invocation that self-terminates, and the bounded
-        // per-turn timeout still reaps a genuinely hung subtree.
+        // Run the agent as the leader of its own process group so an idle-timeout
+        // kill can reap the WHOLE subtree, not just the direct child. The agent
+        // CLIs (`copilot`/`claude`) are Node processes that spawn descendants
+        // inheriting the stdout/stderr pipe write-ends; killing only the direct
+        // child would leave those descendants holding the pipes open so the
+        // reader threads never see EOF (leaked threads + FDs + orphans).
+        // `process_group(0)` makes the child's PGID equal its PID; the idle
+        // handler signals the negated PGID. Tradeoff: a terminal SIGINT to
+        // Simard no longer reaches the agent mid-turn — acceptable for a
+        // one-shot `-p` invocation whose idle timeout still reaps a wedged tree.
         cmd.process_group(0);
 
-        // Operate in the active repository so the agent can inspect code and
-        // run `simard` commands in the correct context. Resolved in `open()`
-        // from the active repo / explicit config — never a hardcoded operator
-        // path (issue #2549). When unresolved, inherit the process cwd.
         if let Some(dir) = &self.workdir {
             cmd.current_dir(dir);
         }
 
-        let start = Instant::now();
+        let clock = SystemClock::new();
         let mut child = cmd
             .spawn()
             .map_err(|e| SimardError::AdapterInvocationFailed {
                 base_type: "persistent-agent-proxy".to_string(),
                 reason: format!("failed to spawn '{}': {e}", self.agent_cmd),
             })?;
+        let child_pid = child.id();
 
-        // Read stdout in a thread with timeout
         let stdout = child
             .stdout
             .take()
@@ -340,116 +524,87 @@ impl PersistentAgentProxy {
                 reason: "failed to capture agent stdout".to_string(),
             })?;
 
-        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        // Both reader threads feed one ordered channel of `ChildEvent`s. The
+        // stdout thread emits an explicit `StdoutEof` at end-of-output — the
+        // authoritative "all content produced" signal — so the drain finishes
+        // without ever blocking on `child.wait()`.
+        let (tx, rx) = std::sync::mpsc::channel::<ChildEvent>();
+        let stdout_tx = tx.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
+                if stdout_tx.send(ChildEvent::Stdout(line)).is_err() {
+                    return;
                 }
             }
+            let _ = stdout_tx.send(ChildEvent::StdoutEof);
         });
-
-        // Drain stderr in a thread
         if let Some(stderr) = child.stderr.take() {
+            let stderr_tx = tx.clone();
             std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().map_while(Result::ok) {
-                    debug!(stderr_line = %line, "agent stderr");
+                    if stderr_tx.send(ChildEvent::Stderr(line)).is_err() {
+                        return;
+                    }
                 }
             });
         }
+        // Drop our own sender so the channel disconnects once both reader
+        // threads finish (defensive: the stdout thread already emits StdoutEof).
+        drop(tx);
 
-        // Collect stdout lines. The channel disconnects EXACTLY when the reader
-        // thread reaches stdout EOF (every writer has closed the pipe) — that is
-        // the authoritative "all output received" signal. Draining via the
-        // blocking `recv_timeout` until `Disconnected` (rather than `try_wait` +
-        // a non-blocking `try_recv` drain) guarantees we never drop a burst the
-        // child flushed just before exiting — critical because `copilot`/`claude`
-        // write to a pipe (block-buffered) and tend to flush a large final chunk.
-        //
-        // The loop stays deadline-centric: it NEVER blocks on `child.wait()`
-        // unbounded, so a child that closes stdout then hangs (`exec 1>&-; sleep
-        // 999`), or one that never closes stdout, still degrades via the per-turn
-        // timeout (issue #2549).
-        let mut lines: Vec<String> = Vec::new();
-        let mut timed_out = false;
-        let mut stdout_eof = false;
-        loop {
-            if let Some(timeout) = self.turn_timeout
-                && start.elapsed() >= timeout
-            {
+        let mut src = PipeChildOutput { rx };
+        let mut sanitizer = StreamingSanitizer::new();
+        let outcome = {
+            // Each raw stdout line runs through the single incremental sanitizer;
+            // kept fragments are forwarded to the live stream. Concatenating the
+            // fragments and trimming equals `sanitizer.finish()` — so what
+            // streams matches what is persisted, by construction.
+            let mut on_stdout = |line: &str| {
+                if let Some(delta) = sanitizer.push_line(line) {
+                    on_delta(&delta);
+                }
+            };
+            drain_with_liveness(&mut src, &clock, self.turn_idle_timeout, &mut on_stdout)
+        };
+
+        match outcome {
+            DrainOutcome::IdleTimeout { idle, elapsed_ms } => {
                 warn!(
-                    timeout_secs = timeout.as_secs(),
-                    "Agent turn timeout reached, killing process"
+                    idle_secs = idle.as_secs(),
+                    elapsed_ms, "Agent turn idle-timeout reached — killing wedged child"
                 );
-                // Kill the entire process group (the agent + any descendants it
-                // spawned) so no orphan keeps the stdout/stderr pipes open —
-                // otherwise the reader threads block on `read()` forever. The
-                // child leads its own group (`process_group(0)` above), so its
-                // PID is the group id; signalling the negated PID reaches the
-                // whole group. Fall back to a direct child kill if the group
-                // signal fails for any reason.
-                kill_process_group(child.id());
+                kill_process_group(child_pid);
                 let _ = child.kill();
                 let _ = child.wait();
-                timed_out = true;
-                break;
+                let report = IdleTimeoutReport {
+                    idle,
+                    pid: Some(child_pid),
+                    turn: self.turn_count,
+                };
+                let emit = self.emit_metrics;
+                let mut sink = |name: &str, value: f64, ctx: &str| {
+                    if emit {
+                        let _ = crate::self_metrics::record_metric(name, value, ctx);
+                    }
+                };
+                Err(report_idle_timeout(&report, &mut sink))
             }
-
-            if stdout_eof {
-                // All output has been received (reader reached EOF). Finish once
-                // the child is reaped; if it closed stdout yet keeps running,
-                // keep polling so the deadline above can still fire.
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    _ => std::thread::sleep(Duration::from_millis(50)),
-                }
-                continue;
-            }
-
-            match rx.recv_timeout(Duration::from_secs(1)) {
-                Ok(line) => lines.push(line),
-                // No line this tick — loop to re-check the deadline.
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                // Reader hit stdout EOF and forwarded every line before dropping
-                // its sender: `lines` is now complete. The child may still be
-                // running (it closed stdout early), so switch to bounded
-                // exit/deadline polling above.
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => stdout_eof = true,
+            DrainOutcome::Completed { elapsed_ms } => {
+                // stdout EOF: the turn's full output is in hand. Reap the child
+                // (bounded, best-effort) so a descendant lingering after closing
+                // stdout doesn't orphan — but never block on it.
+                reap_after_eof(&mut child, child_pid);
+                let response = sanitizer.finish();
+                info!(
+                    elapsed_ms,
+                    raw_len = response.len(),
+                    "Agent invocation complete"
+                );
+                Ok(response)
             }
         }
-
-        // Honest degradation (Pillar 11, issue #2549): a hung child that hit
-        // the per-turn timeout surfaces as a specific error rather than
-        // blocking the REPL or masquerading as an empty response. The REPL's
-        // `render_backend_error` turns this into the `[meeting:error] WARNING`
-        // banner with a "retry or /close" hint.
-        if timed_out {
-            let secs = self
-                .turn_timeout
-                .map(|d| d.as_secs())
-                .unwrap_or(DEFAULT_TURN_TIMEOUT_SECS);
-            return Err(SimardError::AdapterInvocationFailed {
-                base_type: "persistent-agent-proxy".to_string(),
-                reason: format!(
-                    "agent turn exceeded {secs}s per-turn timeout \
-                     ({TURN_TIMEOUT_ENV}); terminated hung child — honest \
-                     degradation, retry your message or /close"
-                ),
-            });
-        }
-
-        let elapsed = start.elapsed();
-        let raw_response = lines.join("\n");
-        info!(
-            elapsed_ms = elapsed.as_millis() as u64,
-            raw_len = raw_response.len(),
-            lines = lines.len(),
-            "Agent invocation complete"
-        );
-
-        Ok(strip_copilot_noise(&raw_response))
     }
 }
 
@@ -492,6 +647,20 @@ impl BaseTypeSession for PersistentAgentProxy {
     }
 
     fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
+        // Single code path: the non-streaming turn is streaming with a no-op
+        // delta sink, so behavior cannot diverge between the two.
+        self.run_turn_streaming(input, &mut |_| {})
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn run_turn_streaming(
+        &mut self,
+        input: BaseTypeTurnInput,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> SimardResult<BaseTypeOutcome> {
         ensure_session_not_closed(&self.descriptor, self.is_closed, "run_turn")?;
         ensure_session_open(&self.descriptor, self.is_open, "run_turn")?;
 
@@ -519,7 +688,7 @@ impl BaseTypeSession for PersistentAgentProxy {
         );
         let start = Instant::now();
 
-        let response_text = self.invoke_agent(&prompt)?;
+        let response_text = self.invoke_agent_streaming(&prompt, on_delta)?;
 
         info!(
             elapsed_ms = start.elapsed().as_millis() as u64,
@@ -590,83 +759,256 @@ mod tests {
         let _result = resolve_agent_command();
     }
 
-    #[test]
-    fn strip_copilot_noise_removes_usage_stats() {
-        let input = "Here is the answer.\nTotal usage est: 1234 tokens\nAPI time spent: 2.3s";
-        let result = strip_copilot_noise(input);
-        assert_eq!(result, "Here is the answer.");
-    }
+    // ── issue #2586 follow-up: idle-liveness timeout config ──
 
     #[test]
-    fn strip_copilot_noise_removes_bootstrap() {
-        let input = "Staged 3 hook files\nXPIA defender loaded\nActual response here.";
-        let result = strip_copilot_noise(input);
-        assert_eq!(result, "Actual response here.");
-    }
-
-    #[test]
-    fn strip_copilot_noise_passes_clean_text() {
-        let input = "Normal response.\nWith multiple lines.";
-        let result = strip_copilot_noise(input);
-        assert_eq!(result, "Normal response.\nWith multiple lines.");
-    }
-
-    // ── issue #2549: default per-turn timeout ──
-
-    #[test]
-    fn parse_turn_timeout_unset_uses_bounded_default() {
+    fn parse_turn_idle_unset_uses_generous_default() {
         assert_eq!(
-            parse_turn_timeout(None),
-            Some(Duration::from_secs(DEFAULT_TURN_TIMEOUT_SECS)),
-            "unset env must yield the bounded default, not None (no hang)"
+            parse_turn_idle_timeout(None),
+            Duration::from_secs(DEFAULT_TURN_IDLE_SECS),
+            "unset env must yield the generous idle default"
         );
     }
 
     #[test]
-    fn parse_turn_timeout_positive_override_wins() {
+    fn parse_turn_idle_positive_override_wins() {
+        assert_eq!(parse_turn_idle_timeout(Some("30")), Duration::from_secs(30));
         assert_eq!(
-            parse_turn_timeout(Some("30")),
-            Some(Duration::from_secs(30))
-        );
-        assert_eq!(
-            parse_turn_timeout(Some("  45  ")),
-            Some(Duration::from_secs(45)),
+            parse_turn_idle_timeout(Some("  45  ")),
+            Duration::from_secs(45),
             "surrounding whitespace must be tolerated"
         );
     }
 
     #[test]
-    fn parse_turn_timeout_zero_disables_explicitly() {
+    fn parse_turn_idle_is_not_disableable_clamps_to_floor() {
+        // The idle detector is the honest hung-child safety net: `0` (or any
+        // sub-floor value) must clamp up, never disable it.
         assert_eq!(
-            parse_turn_timeout(Some("0")),
-            None,
-            "0 is the explicit operator escape hatch (unbounded)"
+            parse_turn_idle_timeout(Some("0")),
+            Duration::from_secs(MIN_TURN_IDLE_SECS),
+            "0 must clamp to the floor — idle detection is not disableable"
+        );
+        assert_eq!(
+            parse_turn_idle_timeout(Some("1")),
+            Duration::from_secs(MIN_TURN_IDLE_SECS),
+            "a below-floor value must clamp up"
         );
     }
 
     #[test]
-    fn parse_turn_timeout_malformed_falls_back_to_default() {
+    fn parse_turn_idle_malformed_falls_back_to_default() {
         assert_eq!(
-            parse_turn_timeout(Some("not-a-number")),
-            Some(Duration::from_secs(DEFAULT_TURN_TIMEOUT_SECS)),
-            "malformed value must degrade to the bounded default, never None"
+            parse_turn_idle_timeout(Some("not-a-number")),
+            Duration::from_secs(DEFAULT_TURN_IDLE_SECS),
+            "malformed value must degrade to the generous default"
         );
     }
 
     #[test]
-    fn new_defaults_to_bounded_turn_timeout_when_env_unset() {
-        // Guard against the reproduction in #2549: with the env unset the
-        // proxy must carry a bounded timeout so a hung child cannot block the
-        // REPL forever. Only assert the default when the operator has NOT set
-        // an override in this environment.
-        if std::env::var(TURN_TIMEOUT_ENV).is_err() {
+    fn new_defaults_to_generous_idle_timeout_when_env_unset() {
+        // With the idle env unset the proxy must carry the generous default.
+        // Only assert when the operator has NOT set an override here.
+        if std::env::var(TURN_IDLE_ENV).is_err() {
             let proxy = PersistentAgentProxy::new().unwrap();
             assert_eq!(
-                proxy.turn_timeout,
-                Some(Duration::from_secs(DEFAULT_TURN_TIMEOUT_SECS)),
-                "new() must default to a bounded per-turn timeout"
+                proxy.turn_idle_timeout,
+                Duration::from_secs(DEFAULT_TURN_IDLE_SECS),
+                "new() must default to the generous idle timeout"
             );
         }
+    }
+
+    // ── issue #2586 follow-up: idle-liveness drain (fake child + fake clock) ──
+
+    /// A deterministic clock whose virtual "now" the test advances explicitly.
+    #[derive(Clone, Default)]
+    struct FakeClock {
+        ms: std::rc::Rc<std::cell::Cell<u64>>,
+    }
+
+    impl FakeClock {
+        fn advance(&self, by_ms: u64) {
+            self.ms.set(self.ms.get() + by_ms);
+        }
+    }
+
+    impl TurnClock for FakeClock {
+        fn elapsed_ms(&self) -> u64 {
+            self.ms.get()
+        }
+    }
+
+    /// A scripted [`ChildOutput`]: each step is either an event (optionally
+    /// advancing the shared clock to model the passage of time between events)
+    /// or an idle gap that returns `None` (no output within the budget).
+    struct FakeChild {
+        clock: FakeClock,
+        /// (advance_ms_before, Some(event) | None-for-idle)
+        steps: std::collections::VecDeque<(u64, Option<ChildEvent>)>,
+    }
+
+    impl ChildOutput for FakeChild {
+        fn next_event(&mut self, _idle_budget: Duration) -> Option<ChildEvent> {
+            match self.steps.pop_front() {
+                Some((advance_ms, event)) => {
+                    self.clock.advance(advance_ms);
+                    event
+                }
+                // No script left: behave as stdout EOF so the drain terminates.
+                None => Some(ChildEvent::StdoutEof),
+            }
+        }
+    }
+
+    /// A turn that keeps producing output for far longer than the former 120s
+    /// wall-clock limit is NOT killed: it completes and every delta streams.
+    #[test]
+    fn drain_productive_turn_over_120s_is_not_killed_and_streams() {
+        let clock = FakeClock::default();
+        // 200 stdout lines, 30 virtual seconds apart → 6000s virtual elapsed,
+        // ~50x the old 120s cap. No wall-clock bound exists any more.
+        let mut steps: std::collections::VecDeque<(u64, Option<ChildEvent>)> = (0..200)
+            .map(|i| {
+                (
+                    30_000u64,
+                    Some(ChildEvent::Stdout(format!("token line {i}"))),
+                )
+            })
+            .collect();
+        steps.push_back((1_000, Some(ChildEvent::StdoutEof)));
+        let mut child = FakeChild {
+            clock: clock.clone(),
+            steps,
+        };
+
+        let mut deltas = Vec::new();
+        let outcome = drain_with_liveness(&mut child, &clock, Duration::from_secs(600), &mut |d| {
+            deltas.push(d.to_string())
+        });
+
+        match outcome {
+            DrainOutcome::Completed { elapsed_ms } => {
+                assert!(
+                    elapsed_ms > 120_000,
+                    "virtual elapsed {elapsed_ms}ms must far exceed the old 120s cap"
+                );
+            }
+            other => panic!("a productive turn must complete, got {other:?}"),
+        }
+        assert_eq!(
+            deltas.len(),
+            200,
+            "every produced line must stream as a delta"
+        );
+        assert_eq!(deltas[0], "token line 0");
+    }
+
+    /// A child that goes fully idle past the window IS terminated, and the hang
+    /// is surfaced explicitly (honest error + metric emitted).
+    #[test]
+    fn drain_idle_child_times_out_and_reports_hang_with_metric() {
+        let clock = FakeClock::default();
+        let mut steps = std::collections::VecDeque::new();
+        steps.push_back((1_000, Some(ChildEvent::Stdout("thinking...".to_string()))));
+        // Then an idle gap: the source returns None (no output within budget).
+        steps.push_back((600_000, None));
+        let mut child = FakeChild {
+            clock: clock.clone(),
+            steps,
+        };
+
+        let outcome =
+            drain_with_liveness(&mut child, &clock, Duration::from_secs(600), &mut |_| {});
+        let idle = match outcome {
+            DrainOutcome::IdleTimeout { idle, .. } => idle,
+            other => panic!("a fully-idle child must idle-timeout, got {other:?}"),
+        };
+
+        // The hang must surface as an honest error AND emit exactly one metric,
+        // via the injected sink (so no write to ~/.simard).
+        let mut emitted: Vec<(String, f64, String)> = Vec::new();
+        let report = IdleTimeoutReport {
+            idle,
+            pid: Some(4321),
+            turn: 2,
+        };
+        let err = report_idle_timeout(&report, &mut |name, value, ctx| {
+            emitted.push((name.to_string(), value, ctx.to_string()));
+        });
+        let msg = err.to_string();
+        assert!(
+            msg.contains("idle-timeout") && msg.contains("honest"),
+            "error must be an honest idle-timeout degradation, got: {msg}"
+        );
+        assert_eq!(emitted.len(), 1, "exactly one metric must be emitted");
+        assert_eq!(emitted[0].0, IDLE_TIMEOUT_METRIC);
+        assert_eq!(emitted[0].1, 1.0);
+        assert!(
+            emitted[0].2.contains("idle_secs=600") && emitted[0].2.contains("pid=4321"),
+            "metric context must carry identifiers only, got: {}",
+            emitted[0].2
+        );
+    }
+
+    /// Continued output past the idle window keeps the turn alive: streaming
+    /// deltas reset the idle clock, so a turn producing output for longer than
+    /// the idle window is never killed.
+    #[test]
+    fn drain_streaming_deltas_reset_the_idle_clock() {
+        let clock = FakeClock::default();
+        // Each line arrives just under the idle budget; total elapsed (5 * 90s
+        // = 450s) exceeds the 100s idle window many times over, yet — because
+        // every event resets the window — the turn completes, never idles out.
+        let mut steps: std::collections::VecDeque<(u64, Option<ChildEvent>)> = (0..5)
+            .map(|i| (90_000u64, Some(ChildEvent::Stdout(format!("chunk {i}")))))
+            .collect();
+        steps.push_back((10_000, Some(ChildEvent::StdoutEof)));
+        let mut child = FakeChild {
+            clock: clock.clone(),
+            steps,
+        };
+
+        let mut deltas = 0u32;
+        let outcome =
+            drain_with_liveness(&mut child, &clock, Duration::from_secs(100), &mut |_| {
+                deltas += 1
+            });
+        assert!(
+            matches!(outcome, DrainOutcome::Completed { .. }),
+            "continued output must keep resetting the idle clock (no kill)"
+        );
+        assert_eq!(deltas, 5, "each output should have streamed a delta");
+    }
+
+    /// A stderr heartbeat (no stdout content) also proves liveness and resets
+    /// the idle window — a child logging progress on stderr is not "idle".
+    #[test]
+    fn drain_stderr_heartbeat_keeps_turn_alive() {
+        let clock = FakeClock::default();
+        let mut steps = std::collections::VecDeque::new();
+        for _ in 0..4 {
+            steps.push_back((90_000, Some(ChildEvent::Stderr("progress...".to_string()))));
+        }
+        steps.push_back((1_000, Some(ChildEvent::StdoutEof)));
+        let mut child = FakeChild {
+            clock: clock.clone(),
+            steps,
+        };
+
+        let mut deltas = 0u32;
+        let outcome =
+            drain_with_liveness(&mut child, &clock, Duration::from_secs(100), &mut |_| {
+                deltas += 1
+            });
+        assert!(
+            matches!(outcome, DrainOutcome::Completed { .. }),
+            "stderr heartbeats must keep the turn alive"
+        );
+        assert_eq!(
+            deltas, 0,
+            "stderr heartbeats are liveness only, not content"
+        );
     }
 
     // ── issue #2549: repo-derived workdir (no hardcoded operator path) ──
@@ -742,17 +1084,19 @@ mod tests {
         );
     }
 
-    // ── issue #2549: honest degradation on a hung turn ──
+    // ── idle-liveness: honest degradation on a wedged turn ──
 
     #[test]
-    fn invoke_agent_degrades_honestly_on_timeout() {
+    fn invoke_agent_degrades_honestly_on_idle_timeout() {
         // Drive `invoke_agent` against a child that never produces output and
-        // never exits within the bound. `sh -c 'sleep 30'` ignores the trailing
-        // `-p <prompt>` args (they become $0/$1), so it hangs deterministically.
+        // never exits. `sh -c 'sleep 30'` ignores the trailing `-p <prompt>`
+        // args (they become $0/$1), so it stays silent — a genuine hang the
+        // idle window must reap.
         let mut proxy = PersistentAgentProxy::new().unwrap();
         proxy.agent_cmd = "sh".to_string();
         proxy.agent_base_args = vec!["-c".to_string(), "sleep 30".to_string()];
-        proxy.turn_timeout = Some(Duration::from_millis(500));
+        proxy.turn_idle_timeout = Duration::from_millis(500);
+        proxy.emit_metrics = false; // never write to ~/.simard from the test suite
 
         let started = Instant::now();
         let result = proxy.invoke_agent("hello");
@@ -760,27 +1104,30 @@ mod tests {
 
         assert!(
             elapsed < Duration::from_secs(10),
-            "invoke_agent must not block indefinitely on a hung child (took {elapsed:?})"
+            "invoke_agent must not block indefinitely on a wedged child (took {elapsed:?})"
         );
-        let err = result.expect_err("a timed-out turn must surface an error, not Ok");
+        let err = result.expect_err("an idle-timed-out turn must surface an error, not Ok");
         let msg = err.to_string();
         assert!(
-            msg.contains("timeout") && msg.contains("honest"),
-            "error must be a clear honest-degradation timeout, got: {msg}"
+            msg.contains("idle-timeout") && msg.contains("honest"),
+            "error must be a clear honest idle-timeout degradation, got: {msg}"
         );
     }
 
     #[test]
-    fn invoke_agent_degrades_when_child_closes_stdout_then_hangs() {
-        // Regression for the disconnected-branch hang (issue #2549 review): a
-        // child that closes its stdout but keeps running must STILL hit the
-        // per-turn timeout, not block the REPL forever. `exec 1>&-` closes the
-        // stdout write-end (the reader thread sees EOF immediately) and then the
-        // shell sleeps — the deadline-centric loop must reap it via timeout.
+    fn invoke_agent_returns_output_when_child_closes_stdout_then_lingers() {
+        // Idle semantics: stdout EOF means the turn's output is complete. A
+        // child that prints, closes stdout (`exec 1>&-`), then lingers must
+        // return its output PROMPTLY — never wait on the lingering process — and
+        // the linger must be reaped (no orphan).
         let mut proxy = PersistentAgentProxy::new().unwrap();
         proxy.agent_cmd = "sh".to_string();
-        proxy.agent_base_args = vec!["-c".to_string(), "exec 1>&-; sleep 30".to_string()];
-        proxy.turn_timeout = Some(Duration::from_secs(2));
+        proxy.agent_base_args = vec![
+            "-c".to_string(),
+            "printf 'partial-answer\\n'; exec 1>&-; sleep 30".to_string(),
+        ];
+        proxy.turn_idle_timeout = Duration::from_secs(30);
+        proxy.emit_metrics = false;
 
         let started = Instant::now();
         let result = proxy.invoke_agent("hello");
@@ -788,23 +1135,23 @@ mod tests {
 
         assert!(
             elapsed < Duration::from_secs(10),
-            "must not block when the child closes stdout then hangs (took {elapsed:?})"
+            "EOF means output complete — must not block on the lingering child (took {elapsed:?})"
         );
-        let err = result.expect_err("a hung turn (stdout closed) must surface a timeout error");
-        assert!(
-            err.to_string().contains("timeout"),
-            "error must name the timeout, got: {err}"
+        assert_eq!(
+            result.expect("output produced before stdout close must return Ok"),
+            "partial-answer",
+            "the produced output must be returned as soon as stdout closes"
         );
     }
 
     #[test]
-    fn invoke_agent_timeout_reaps_descendant_processes() {
-        // A hung turn must kill the WHOLE agent subtree, not just the direct
+    fn invoke_agent_idle_timeout_reaps_descendant_processes() {
+        // A wedged turn must kill the WHOLE agent subtree, not just the direct
         // child — otherwise a descendant holding the stdout pipe leaks (and the
         // reader thread blocks forever). We spawn a shell that backgrounds a
-        // grandchild `sleep` and records its PID, then force a timeout. After
-        // the group-kill the grandchild must be gone. Without the process-group
-        // kill (only `child.kill()`), the grandchild would survive its full 30s.
+        // grandchild `sleep` and records its PID, then wait (no output → idle).
+        // After the group-kill the grandchild must be gone. Without the
+        // process-group kill (only `child.kill()`), it would survive its 30s.
         //
         // A process is treated as terminated when `/proc/<pid>` is gone OR the
         // process is a zombie (state `Z`) — a zombie no longer holds the pipe
@@ -830,18 +1177,22 @@ mod tests {
         proxy.agent_cmd = "sh".to_string();
         // Single-quote the pidfile path so an unusual temp path can't break the
         // shell word-splitting. The grandchild PID is recorded immediately, well
-        // before the timeout fires.
+        // before the idle window fires.
         proxy.agent_base_args = vec![
             "-c".to_string(),
             format!("sleep 30 & echo $! > '{pidpath}'; wait"),
         ];
-        // 3s is comfortably longer than the shell needs to record the PID, and
-        // far shorter than the grandchild's 30s sleep, so the grandchild is
-        // guaranteed alive when the group-kill fires.
-        proxy.turn_timeout = Some(Duration::from_secs(3));
+        // 3s idle window: comfortably longer than the shell needs to record the
+        // PID, far shorter than the grandchild's 30s sleep, so it is guaranteed
+        // alive when the group-kill fires.
+        proxy.turn_idle_timeout = Duration::from_secs(3);
+        proxy.emit_metrics = false;
 
         let result = proxy.invoke_agent("hello");
-        assert!(result.is_err(), "hung turn must surface a timeout error");
+        assert!(
+            result.is_err(),
+            "wedged turn must surface an idle-timeout error"
+        );
 
         // Read the grandchild PID the shell recorded before it was killed.
         let mut grandchild_pid = None;
@@ -874,7 +1225,7 @@ mod tests {
         }
         assert!(
             reaped,
-            "timeout must reap the agent's descendant (pid {pid}); it survived the group-kill"
+            "idle timeout must reap the agent's descendant (pid {pid}); it survived the group-kill"
         );
     }
 
@@ -895,7 +1246,7 @@ mod tests {
              printf ' stdout='; if [ -t 1 ]; then printf 'tty'; else printf 'notty'; fi"
                 .to_string(),
         ];
-        proxy.turn_timeout = Some(Duration::from_secs(30));
+        proxy.turn_idle_timeout = Duration::from_secs(30);
 
         let response = proxy
             .invoke_agent("hello")
@@ -914,7 +1265,7 @@ mod tests {
         let mut proxy = PersistentAgentProxy::new().unwrap();
         proxy.agent_cmd = "sh".to_string();
         proxy.agent_base_args = vec!["-c".to_string(), "printf 'meeting-proxy-ok\\n'".to_string()];
-        proxy.turn_timeout = Some(Duration::from_secs(30));
+        proxy.turn_idle_timeout = Duration::from_secs(30);
 
         let response = proxy
             .invoke_agent("hello")
@@ -935,7 +1286,7 @@ mod tests {
         let mut proxy = PersistentAgentProxy::new().unwrap();
         proxy.agent_cmd = "sh".to_string();
         proxy.agent_base_args = vec!["-c".to_string(), "seq 1000 7000".to_string()];
-        proxy.turn_timeout = Some(Duration::from_secs(30));
+        proxy.turn_idle_timeout = Duration::from_secs(30);
 
         let response = proxy
             .invoke_agent("hello")

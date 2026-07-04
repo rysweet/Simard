@@ -10,12 +10,45 @@ use super::sanitize::extract_response;
 use super::types::{MeetingResponse, Role};
 
 impl MeetingBackend {
+    /// Whether the underlying agent streams incremental output during a turn.
+    ///
+    /// A declared capability (not a silent fallback): callers use it to decide
+    /// whether to advertise real streaming. The meeting agent
+    /// (`PersistentAgentProxy`) streams; other adapters fall back to the
+    /// single-delta default in [`send_message_streaming`].
+    pub fn supports_streaming(&self) -> bool {
+        self.agent
+            .as_ref()
+            .map(|a| a.supports_streaming())
+            .unwrap_or(false)
+    }
+
     /// Send a user message and get Simard's response.
     ///
     /// Appends both the user message and the assistant response to history.
     /// The full conversation context is sent to the LLM on each turn.
     #[tracing::instrument(skip(self), fields(input_len = user_input.len()))]
     pub fn send_message(&mut self, user_input: &str) -> SimardResult<MeetingResponse> {
+        // Non-streaming callers get the exact same behavior via a no-op delta
+        // sink — one code path, so streaming and non-streaming cannot diverge.
+        self.send_message_streaming(user_input, &mut |_| {})
+    }
+
+    /// Send a user message, forwarding the agent's output fragments to
+    /// `on_delta` as they are produced (true incremental streaming), and return
+    /// the complete assistant reply once the turn finishes.
+    ///
+    /// The full assistant turn is still assembled and appended to history
+    /// exactly once, so persistence is unchanged from the non-streaming path.
+    /// Backends whose agent does not support streaming (`supports_streaming()`
+    /// is `false`) transparently emit the whole reply as a single delta via the
+    /// `BaseTypeSession::run_turn_streaming` default — an explicit declared
+    /// capability, never a silent failure.
+    pub fn send_message_streaming(
+        &mut self,
+        user_input: &str,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> SimardResult<MeetingResponse> {
         if !self.is_open {
             return Err(SimardError::ActionExecutionFailed {
                 action: "send-message".to_string(),
@@ -66,7 +99,7 @@ impl MeetingBackend {
                 reason: "meeting agent is no longer available (close pipeline took it)".to_string(),
             })?;
 
-        let outcome = match agent.run_turn(turn_input) {
+        let outcome = match agent.run_turn_streaming(turn_input, on_delta) {
             Ok(o) => {
                 info!(
                     elapsed_ms = start.elapsed().as_millis() as u64,
@@ -102,7 +135,7 @@ impl MeetingBackend {
         }
         let response_text = extracted;
 
-        // Append assistant response
+        // Append assistant response (the full turn, persisted exactly once)
         self.push_message(Role::Assistant, response_text.clone());
 
         // Auto-save transcript after every turn so killed meetings don't lose data

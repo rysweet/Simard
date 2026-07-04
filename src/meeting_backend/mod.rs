@@ -9,6 +9,7 @@ pub mod close_guard;
 pub mod command;
 pub mod lightweight;
 pub mod persist;
+pub mod streaming_sanitizer;
 #[cfg(test)]
 mod tests_goal_records_migration;
 #[cfg(test)]

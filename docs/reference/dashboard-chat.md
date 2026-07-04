@@ -308,13 +308,14 @@ Immediately after upgrade the server sends a `ready` frame:
 | `streaming` | `true` when the server will emit `chunk`/`done` frames for assistant replies; `false` when it will emit single `assistant` frames. |
 | `protocol_version` | Wire-protocol version. Currently `1`. |
 
-`streaming` advertises a **server capability**, not a per-provider outcome.
-Because replies are chunked server-side (see the streaming implementation note
-below), the current implementation reports `true` for every connection; the
-field exists so a future true token-stream — or a deployment that disables
-chunking — can flip it without a protocol change. Clients must therefore branch
-on the **frame shape they actually receive** (`type: "chunk"`/`"done"` vs. a
-single `role: "assistant"` frame), not assume a path from the flag alone.
+`streaming` advertises a **backend capability** (`MeetingBackend::supports_streaming()`),
+not a per-provider outcome. The meeting backend (`PersistentAgentProxy`) streams
+the agent's stdout **incrementally as it is produced**, so it reports `true`; a
+backend that cannot stream reports `false` and the server emits the whole reply
+as one chunk (an explicit declared capability, not a silent failure). Clients
+must therefore branch on the **frame shape they actually receive**
+(`type: "chunk"`/`"done"` vs. a single `role: "assistant"` frame), not assume a
+path from the flag alone.
 
 ### Restore — server → client (resume only)
 
@@ -353,7 +354,8 @@ clients.
 ### Streaming an assistant reply — server → client
 
 When `streaming: true`, an assistant reply is delivered as an ordered run of
-`chunk` frames terminated by a single `done` frame:
+`chunk` frames — one per output fragment **as the agent produces it** —
+terminated by a single `done` frame:
 
 ```json
 { "type": "chunk", "content": "Start by inspecting " }
@@ -364,15 +366,19 @@ When `streaming: true`, an assistant reply is delivered as an ordered run of
 
 The client appends each `chunk.content` to the in-progress assistant bubble and
 finalizes it on `done`. The full assistant text is persisted as one
-`ConversationMessage` regardless of how many chunks were emitted.
+`ConversationMessage` exactly once, regardless of how many chunks were emitted.
 
-> **Streaming implementation note.** The meeting backend's `run_turn` is
-> synchronous and returns the complete reply. Streaming is implemented as
-> **server-side chunking** of that completed text over the existing WebSocket:
-> incremental *appearance* is achieved without a token-level model API. The
-> `streaming` capability flag and the `chunk`/`done` frames keep the wire
-> protocol forward-compatible with a future true token-stream — the client code
-> path does not change when real token streaming lands.
+> **Streaming implementation note.** This is *true incremental* streaming: the
+> meeting backend exposes `MeetingBackend::send_message_streaming`, which drives
+> the agent's `run_turn_streaming` and forwards each cleaned stdout fragment to
+> the `/ws/chat` handler as the child process emits it. The handler bridges the
+> synchronous, blocking turn to the async socket over an unbounded channel and
+> emits one `chunk` frame per fragment (no post-hoc char-window chunking, no
+> artificial delays). Each streamed fragment also resets the agent proxy's
+> idle-liveness clock, so continued output both drives the stream and proves the
+> turn is alive. A backend that cannot stream falls back — explicitly, via the
+> `supports_streaming()` capability — to a single `chunk` carrying the whole
+> reply, followed by `done`.
 
 ### Non-streaming (fallback) reply — server → client
 

@@ -61,6 +61,143 @@ impl BaseTypeSession for MockAgent {
     }
 }
 
+/// Mock agent that streams its canned response as several deltas, so backend
+/// streaming can be asserted without a real subprocess.
+struct StreamingMockAgent {
+    descriptor: BaseTypeDescriptor,
+    deltas: Vec<String>,
+    is_open: bool,
+    is_closed: bool,
+}
+
+impl StreamingMockAgent {
+    fn new(deltas: &[&str]) -> Self {
+        Self {
+            descriptor: BaseTypeDescriptor {
+                id: BaseTypeId::new("streaming-mock-meeting-backend"),
+                backend: BackendDescriptor::for_runtime_type::<Self>(
+                    "streaming-mock",
+                    "test:streaming-mock-meeting-backend",
+                    Freshness::now().unwrap(),
+                ),
+                capabilities: standard_session_capabilities(),
+                supported_topologies: [RuntimeTopology::SingleProcess].into_iter().collect(),
+            },
+            deltas: deltas.iter().map(|s| s.to_string()).collect(),
+            is_open: true,
+            is_closed: false,
+        }
+    }
+}
+
+impl BaseTypeSession for StreamingMockAgent {
+    fn descriptor(&self) -> &BaseTypeDescriptor {
+        &self.descriptor
+    }
+    fn open(&mut self) -> SimardResult<()> {
+        self.is_open = true;
+        Ok(())
+    }
+    fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
+        self.run_turn_streaming(input, &mut |_| {})
+    }
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+    fn run_turn_streaming(
+        &mut self,
+        _input: BaseTypeTurnInput,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> SimardResult<BaseTypeOutcome> {
+        ensure_session_open(&self.descriptor, self.is_open, "run_turn")?;
+        for delta in &self.deltas {
+            on_delta(delta);
+        }
+        Ok(BaseTypeOutcome {
+            plan: String::new(),
+            execution_summary: self.deltas.concat(),
+            evidence: Vec::new(),
+        })
+    }
+    fn close(&mut self) -> SimardResult<()> {
+        self.is_closed = true;
+        Ok(())
+    }
+}
+
+#[test]
+fn send_message_streaming_forwards_deltas_and_returns_full_reply() {
+    let agent = StreamingMockAgent::new(&["Hello, ", "streaming ", "world."]);
+    let mut backend = MeetingBackend::new_session("Stream", Box::new(agent), None, String::new());
+    assert!(
+        backend.supports_streaming(),
+        "backend must declare streaming when its agent streams"
+    );
+
+    let mut deltas = Vec::new();
+    let resp = backend
+        .send_message_streaming("hi", &mut |d| deltas.push(d.to_string()))
+        .unwrap();
+
+    assert_eq!(
+        deltas,
+        vec![
+            "Hello, ".to_string(),
+            "streaming ".to_string(),
+            "world.".to_string()
+        ],
+        "each fragment must stream incrementally as produced"
+    );
+    assert_eq!(
+        resp.content, "Hello, streaming world.",
+        "the complete reply must still be returned"
+    );
+    // The full assistant turn is persisted to history exactly once (user +
+    // assistant == 2), matching the non-streaming path.
+    assert_eq!(resp.message_count, 2);
+}
+
+#[test]
+fn non_streaming_capability_path_returns_complete_reply_as_one_delta() {
+    // A backend whose agent does not override streaming still works via the
+    // default single-delta path — an explicit declared capability, not a
+    // silent failure.
+    let agent = MockAgent::new("complete non-streaming reply");
+    let mut backend = MeetingBackend::new_session("Plain", Box::new(agent), None, String::new());
+    assert!(
+        !backend.supports_streaming(),
+        "a non-streaming agent must declare no streaming capability"
+    );
+
+    let mut deltas = Vec::new();
+    let resp = backend
+        .send_message_streaming("hi", &mut |d| deltas.push(d.to_string()))
+        .unwrap();
+
+    assert_eq!(
+        deltas,
+        vec!["complete non-streaming reply".to_string()],
+        "the whole reply is emitted as a single delta"
+    );
+    assert_eq!(resp.content, "complete non-streaming reply");
+    assert_eq!(resp.message_count, 2);
+}
+
+#[test]
+fn send_message_persists_assistant_turn_exactly_once() {
+    // Regression guard for #2586 persistence: one turn appends exactly one
+    // assistant message (never zero, never duplicated).
+    let agent = StreamingMockAgent::new(&["a", "b"]);
+    let mut backend = MeetingBackend::new_session("Once", Box::new(agent), None, String::new());
+    backend.send_message("q").unwrap();
+    let assistant_msgs = backend
+        .history()
+        .iter()
+        .filter(|m| matches!(m.role, Role::Assistant))
+        .count();
+    assert_eq!(assistant_msgs, 1, "exactly one assistant turn persisted");
+}
+
 #[test]
 fn new_session_creates_open_session() {
     let agent = MockAgent::new("hello");

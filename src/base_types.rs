@@ -178,6 +178,44 @@ pub trait BaseTypeSession: Send {
 
     fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome>;
 
+    /// Whether this session can stream incremental output deltas during a turn.
+    ///
+    /// Defaults to `false`: the session produces the whole reply and returns it
+    /// in one piece. Adapters that expose the underlying agent's output as it is
+    /// generated (e.g. `PersistentAgentProxy`) override this to return `true` so
+    /// callers can advertise *real* streaming rather than faking it. This is a
+    /// declared capability, not a silent fallback — see
+    /// [`BaseTypeSession::run_turn_streaming`].
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
+    /// Run a turn, invoking `on_delta` with output fragments as they are
+    /// produced.
+    ///
+    /// The default implementation runs the turn to completion via
+    /// [`BaseTypeSession::run_turn`] and emits the whole reply as a single
+    /// delta, so every existing adapter keeps working unchanged and callers get
+    /// one honest code path regardless of streaming support. Streaming adapters
+    /// override this to emit fragments incrementally as the child produces them;
+    /// each emitted fragment doubles as a liveness signal (see the meeting
+    /// proxy's idle-timeout).
+    ///
+    /// `on_delta` is a synchronous `&mut dyn FnMut(&str)` so the trait stays
+    /// object-safe (`Box<dyn BaseTypeSession>`); callers bridge it to async
+    /// channels themselves.
+    fn run_turn_streaming(
+        &mut self,
+        input: BaseTypeTurnInput,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> SimardResult<BaseTypeOutcome> {
+        let outcome = self.run_turn(input)?;
+        if !outcome.execution_summary.is_empty() {
+            on_delta(&outcome.execution_summary);
+        }
+        Ok(outcome)
+    }
+
     fn close(&mut self) -> SimardResult<()>;
 
     /// Optional memory + knowledge bridges used to enrich each turn.
@@ -299,6 +337,97 @@ pub fn process_output_evidence(prefix: &str, output: &std::process::Output) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::{BackendDescriptor, Freshness};
+    use crate::runtime::RuntimeTopology;
+
+    /// Minimal `BaseTypeSession` returning a canned reply, used to exercise the
+    /// default (non-overridden) streaming methods.
+    struct CannedSession {
+        descriptor: BaseTypeDescriptor,
+        reply: String,
+        run_turn_calls: u32,
+    }
+
+    impl CannedSession {
+        fn new(reply: &str) -> Self {
+            Self {
+                descriptor: BaseTypeDescriptor {
+                    id: BaseTypeId::new("canned-test-session"),
+                    backend: BackendDescriptor::for_runtime_type::<Self>(
+                        "canned",
+                        "test:canned-session",
+                        Freshness::now().unwrap(),
+                    ),
+                    capabilities: standard_session_capabilities(),
+                    supported_topologies: [RuntimeTopology::SingleProcess].into_iter().collect(),
+                },
+                reply: reply.to_string(),
+                run_turn_calls: 0,
+            }
+        }
+    }
+
+    impl BaseTypeSession for CannedSession {
+        fn descriptor(&self) -> &BaseTypeDescriptor {
+            &self.descriptor
+        }
+        fn open(&mut self) -> SimardResult<()> {
+            Ok(())
+        }
+        fn run_turn(&mut self, _input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
+            self.run_turn_calls += 1;
+            Ok(BaseTypeOutcome {
+                plan: String::new(),
+                execution_summary: self.reply.clone(),
+                evidence: Vec::new(),
+            })
+        }
+        fn close(&mut self) -> SimardResult<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_supports_streaming_is_false() {
+        let session = CannedSession::new("hi");
+        assert!(!session.supports_streaming());
+    }
+
+    #[test]
+    fn default_run_turn_streaming_emits_single_delta() {
+        let mut session = CannedSession::new("hello world");
+        let mut deltas = Vec::new();
+        let outcome = session
+            .run_turn_streaming(BaseTypeTurnInput::objective_only("x"), &mut |d| {
+                deltas.push(d.to_string())
+            })
+            .unwrap();
+        assert_eq!(deltas, vec!["hello world".to_string()]);
+        assert_eq!(outcome.execution_summary, "hello world");
+    }
+
+    #[test]
+    fn default_run_turn_streaming_matches_run_turn_noop() {
+        let mut a = CannedSession::new("abc def");
+        let via_run_turn = a.run_turn(BaseTypeTurnInput::objective_only("x")).unwrap();
+        let mut b = CannedSession::new("abc def");
+        let via_stream = b
+            .run_turn_streaming(BaseTypeTurnInput::objective_only("x"), &mut |_| {})
+            .unwrap();
+        assert_eq!(via_run_turn.execution_summary, via_stream.execution_summary);
+    }
+
+    #[test]
+    fn default_run_turn_streaming_skips_empty_delta() {
+        let mut session = CannedSession::new("");
+        let mut delta_count = 0u32;
+        let _ = session
+            .run_turn_streaming(BaseTypeTurnInput::objective_only("x"), &mut |_| {
+                delta_count += 1
+            })
+            .unwrap();
+        assert_eq!(delta_count, 0, "an empty reply must not emit a delta");
+    }
 
     #[test]
     fn capability_set_collects_unique_capabilities() {

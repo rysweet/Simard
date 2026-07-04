@@ -294,17 +294,26 @@ If you launch a meeting from **outside any git checkout** and set no override,
 the agent runs in the process working directory with **no explicit repo
 grant** — it never falls back to some other worktree.
 
-Each agent turn is bounded by a **default per-turn timeout** so a hung agent
-turn cannot freeze the REPL:
+Each agent turn is protected by an **idle-liveness timeout** so a genuinely
+wedged agent cannot freeze the REPL — while a long-but-productive turn is
+*never* killed by a fixed wall-clock bound:
 
 | Env var | Default | Effect |
 |---------|---------|--------|
-| `SIMARD_MEETING_TURN_TIMEOUT_SECS` | `120` | Per-turn bound in seconds. A positive value overrides the default; `0` disables the timeout (unbounded — operator escape hatch); an unset or malformed value uses the bounded default. |
+| `SIMARD_MEETING_TURN_IDLE_SECS` | `600` | Idle window in seconds. A turn is terminated only after the agent produces **no output** (stdout content or stderr heartbeat) for this long. As long as the agent keeps producing output the turn runs with **no upper time bound**. Configurable but **not disableable** (the honest hung-child safety net); values below `5 s` clamp up; an unset or malformed value uses the default. |
 
-When a turn exceeds the timeout, the child process is terminated and the turn
-**degrades honestly** with a `[meeting:error] WARNING` banner (the meeting
-stays usable — retry your message or `/close`) rather than blocking silently
-(Pillar 11: honest degradation beats hidden silence).
+As long as the agent keeps streaming output, the turn continues indefinitely —
+there is deliberately **no wall-clock cap** (mirrors the amplihack recipe-runner
+idle-timeout rule, issue #439). When a turn goes fully idle past the window, the
+child process group is terminated and the turn **degrades honestly** with a
+`[meeting:error] WARNING` banner (the meeting stays usable — retry your message
+or `/close`) rather than blocking silently (Pillar 11: honest degradation beats
+hidden silence). The idle-timeout is also surfaced as an error-level trace and a
+`meeting_turn_idle_timeout` metric, so a real hang is never swallowed.
+
+> The removed `SIMARD_MEETING_TURN_TIMEOUT_SECS` wall-clock variable is no
+> longer honored. If it is still set, the proxy logs a one-time deprecation
+> warning pointing at `SIMARD_MEETING_TURN_IDLE_SECS`.
 
 ## 9. Carry meeting outcomes into engineer sessions
 
@@ -324,13 +333,15 @@ If you see the prompt cursor blinking with no response after 2–3 minutes, chec
 2. **`copilot` on PATH?** Meeting mode invokes the `copilot` binary directly (not
    `amplihack copilot`). Run `which copilot` to verify. If the binary is not found,
    the turn returns an `AdapterInvocationFailed` error immediately.
-3. **Long compute in progress?** Each agent turn is bounded by
-   `SIMARD_MEETING_TURN_TIMEOUT_SECS` (default 120 s). If a turn exceeds it,
-   the child is killed and the turn degrades honestly with a `[meeting:error]
+3. **Long compute in progress?** Each agent turn is protected by an
+   **idle-liveness** window, `SIMARD_MEETING_TURN_IDLE_SECS` (default 600 s) —
+   the turn is killed only if the agent produces *no* output for that long. A
+   long-but-productive turn is never killed by a wall-clock bound, so slow
+   providers that keep streaming are fine. If a turn goes fully idle, the child
+   is terminated and the turn degrades honestly with a `[meeting:error]
    WARNING` banner — the REPL never hangs indefinitely. If your provider is
-   consistently slow, raise the bound (e.g.
-   `SIMARD_MEETING_TURN_TIMEOUT_SECS=300 simard meeting repl`) or set it to `0`
-   to disable the per-turn timeout entirely.
+   consistently slow to *start*, raise the idle window (e.g.
+   `SIMARD_MEETING_TURN_IDLE_SECS=1200 simard meeting repl`).
 
 ### Simard responds with OODA action plans instead of conversation
 
