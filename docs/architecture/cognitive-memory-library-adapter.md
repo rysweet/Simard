@@ -351,6 +351,52 @@ The library returns `HashMap<String, usize>` keyed by `MemoryCategory::as_str()`
 the adapter folds it into the typed `CognitiveStatistics`. Keys the library does
 not emit default to `0`.
 
+> **Caveat (issue #2561).** At the pinned commit the library counts via reads
+> (`query_nodes(...).len()`) that **swallow a query failure as an empty result**
+> (`Err(_) => Vec::new()`). A transient read failure at daemon startup therefore
+> surfaces to the adapter as a legitimate all-zeros `Ok(..)` rather than an
+> `Err` — an "empty" reading that may be a *read failure*, not a *confirmed-empty
+> store*. Any consumer that acts on emptiness (below) must treat this as a
+> fail-closed decision, not a bare count.
+
+### Fail-closed emptiness probe & auto-restore (`probe_emptiness`, #2561)
+
+`CognitiveMemoryOps::probe_emptiness()` is the single seam that decides whether a
+store is *confirmed empty* — the precondition the snapshot auto-restore path
+(`memory_snapshot::auto_restore_if_empty`) is **intended** to use to self-heal a
+fresh or corruption-reset (#2550) store from its newest on-disk snapshot. It
+returns a three-way answer via `Result<StoreEmptiness>`:
+
+| Outcome | Meaning | Auto-restore action |
+|---|---|---|
+| `Ok(ConfirmedEmpty)` | read succeeded, zero memories | hydrate from snapshot |
+| `Ok(NonEmpty)` | read succeeded, ≥1 memory | skip (re-import would duplicate) |
+| `Err(..)` | read **failed** | **propagate; import nothing** |
+
+The `Err` arm is the crux: a read failure is never coerced into "empty", so a
+snapshot can never be layered on top of still-present-but-unreadable durable
+memory (which would duplicate every memory once reads recover). The default trait
+implementation derives the answer from `get_statistics()?`, so every backend that
+*surfaces* its read/transport errors (the bridge and IPC clients, test mocks)
+fails closed automatically.
+
+**Residual gap.** For the direct library backend the last gap stays open until
+the pinned `amplihack-memory-lib` propagates the read error it currently swallows
+(see the `get_statistics` caveat above) — the complete fix is upstream, as issue
+#2561 records. Until then this seam guarantees the *decision path* is fail-closed
+for every backend that can surface the error and centralises the one place the
+upstream error-propagating count will plug in. A Simard-side filesystem "is the
+store file large?" heuristic is deliberately **not** used: after the #2550
+corruption-reset this feature is meant to heal, a large-but-reset file could
+wrongly block a legitimate self-heal.
+
+**Not yet wired.** `auto_restore_if_empty` / `auto_restore_latest_if_empty` /
+`probe_emptiness` are the correctly-gated primitives only — no session/daemon
+startup path invokes them yet. Activating snapshot auto-restore at startup is
+deferred (the on-disk snapshot API is `#[deprecated]` in favour of hive-mind
+replication), so no production restore path exists to be made unsafe in the
+interim.
+
 ### Fact recency ordering (sequence stamping)
 
 Several Simard call sites select "the most recent fact for concept X" by taking
