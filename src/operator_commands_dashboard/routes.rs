@@ -9,6 +9,7 @@ use super::agent_log::{WS_AGENT_LOG_ROUTE, ws_agent_log_handler};
 use super::auth::{login, login_page, require_auth};
 use super::brain_failures::brain_failures;
 use super::chat::ws_chat_handler;
+use super::chat_store::{chat_session_by_id, chat_sessions};
 use super::current_work::current_work;
 use super::distributed::{distributed, vacate_vm};
 use super::goals::{
@@ -80,6 +81,8 @@ pub fn build_router() -> Router {
         .route("/api/prs", get(pr_readiness))
         .route("/api/status/snapshot", get(status_snapshot))
         .route("/api/subagent-sessions", get(subagent_sessions))
+        .route("/api/chat/sessions", get(chat_sessions))
+        .route("/api/chat/sessions/{id}", get(chat_session_by_id))
         .route("/ws/chat", get(ws_chat_handler))
         .route(WS_AGENT_LOG_ROUTE, get(ws_agent_log_handler))
         .route("/api/azlin/tmux-sessions", get(azlin_tmux_sessions))

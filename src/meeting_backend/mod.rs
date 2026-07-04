@@ -306,6 +306,21 @@ impl MeetingBackend {
         });
     }
 
+    /// Seed the in-memory conversation history from a persisted session so a
+    /// reopened chat regains full prior context. Generalizes the test-only
+    /// [`push_test_message`](Self::push_test_message) seeding path into a public
+    /// rehydration hook used by the dashboard Chat resume flow (issue #2577).
+    ///
+    /// When the persisted history exceeds [`MAX_HISTORY`] turns, only the
+    /// **most-recent** `MAX_HISTORY` turns are seeded into the live working set —
+    /// the same ceiling live turns obey via [`push_message`](Self::push_message).
+    /// The caller's transcript vector is left untouched; the durable store keeps
+    /// the full, uncapped history and replays it into the UI independently.
+    pub fn restore(&mut self, history: Vec<ConversationMessage>) {
+        let start = history.len().saturating_sub(MAX_HISTORY);
+        self.history = history.into_iter().skip(start).collect();
+    }
+
     /// Record an explicit theme for this meeting.
     ///
     /// Themes recorded here are merged with inferred themes on `close()`.

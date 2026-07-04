@@ -33,25 +33,108 @@ pub(crate) const PART_04: &str = r#"            let fmt;
     fetchBudget();
 
     /* --- Chat --- */
-    let ws=null,chatInit=false;
-    function initChat(){
+    let ws=null, currentSessionId=null, streamSpan=null, streamText='';
+
+    async function loadChatSessions(){
+      const box=document.getElementById('chat-sessions');
+      if(!box) return;
+      try{
+        const d=await apiFetch('/api/chat/sessions');
+        const sessions=(d&&d.sessions)||[];
+        box.textContent='';
+        if(sessions.length===0){
+          const empty=document.createElement('div');
+          empty.className='chat-session-empty';
+          empty.textContent='No saved chats yet. Start a new conversation.';
+          box.appendChild(empty);
+          return;
+        }
+        sessions.forEach(s=>{
+          const item=document.createElement('div');
+          item.className='chat-session-item'+(s.id===currentSessionId?' active':'');
+          item.dataset.id=s.id;
+          const title=document.createElement('div');
+          title.className='cs-title';
+          title.textContent=s.title||s.id;
+          const time=document.createElement('div');
+          time.className='cs-time';
+          time.textContent=timeAgo(s.updated_at);
+          item.appendChild(title);
+          item.appendChild(time);
+          item.addEventListener('click',()=>openSession(s.id));
+          box.appendChild(item);
+        });
+      }catch(e){
+        box.textContent='';
+        const err=document.createElement('div');
+        err.className='chat-session-empty';
+        err.textContent='Failed to load chats.';
+        box.appendChild(err);
+      }
+    }
+
+    async function openSession(id){
+      currentSessionId=id;
+      document.querySelectorAll('.chat-session-item').forEach(el=>{
+        el.classList.toggle('active', el.dataset.id===id);
+      });
+      clearMessages();
+      try{
+        const d=await apiFetch('/api/chat/sessions/'+encodeURIComponent(id));
+        (d.history||[]).forEach(m=>appendMsg(m.role||'system', m.content||''));
+      }catch(e){ appendMsg('system','Failed to load session history.'); }
+      initChat(id);
+    }
+
+    function newChat(){
+      currentSessionId=null;
+      document.querySelectorAll('.chat-session-item.active').forEach(el=>el.classList.remove('active'));
+      clearMessages();
+      initChat(null);
+    }
+
+    function initChat(sessionId){
+      if(sessionId!==undefined) currentSessionId=sessionId;
       if(ws){try{ws.close();}catch(e){}}
-      chatInit=true;
       const proto=location.protocol==='https:'?'wss:':'ws:';
-      ws=new WebSocket(`${proto}//${location.host}/ws/chat`);
+      const qs=currentSessionId?('?session_id='+encodeURIComponent(currentSessionId)):'';
+      ws=new WebSocket(`${proto}//${location.host}/ws/chat${qs}`);
       const st=document.getElementById('ws-status');
+      st.className='ws-status';
       st.innerHTML='<span style="color:var(--yellow)">● Connecting…</span>';
       ws.onopen=()=>{st.innerHTML='<span style="color:var(--green)">● Connected</span>';};
       ws.onclose=()=>{
         st.innerHTML='<span style="color:var(--red)">● Disconnected</span> <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button>';
-        chatInit=false;removeTypingIndicator();setChatBusy(false);
+        removeTypingIndicator();setChatBusy(false);finalizeStream();
       };
       ws.onerror=()=>{
         st.innerHTML='<span style="color:var(--red)">● Error</span> <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Retry</button>';
         removeTypingIndicator();setChatBusy(false);
       };
-      ws.onmessage=ev=>{removeTypingIndicator();setChatBusy(false);try{const m=JSON.parse(ev.data);appendMsg(m.role||'system',m.content||ev.data);}catch(ex){appendMsg('system',ev.data);}};
+      ws.onmessage=onChatFrame;
     }
+
+    function onChatFrame(ev){
+      let m;
+      try{ m=JSON.parse(ev.data); }
+      catch(ex){ removeTypingIndicator();setChatBusy(false);appendMsg('system',ev.data); return; }
+      // Handshake: bind the session id + streaming capability.
+      if(m && m.type==='ready'){ if(m.session_id) currentSessionId=m.session_id; return; }
+      // Resume: replay persisted history into the panel.
+      if(m && m.type==='restore'){
+        clearMessages();
+        (m.messages||[]).forEach(msg=>appendMsg(msg.role||'system', msg.content||''));
+        removeTypingIndicator();setChatBusy(false);
+        return;
+      }
+      // Streaming: coalesce chunk frames into one assistant bubble.
+      if(m && m.type==='chunk'){ removeTypingIndicator(); appendChunk(m.content||''); return; }
+      if(m && m.type==='done'){ finalizeStream(); setChatBusy(false); return; }
+      // Legacy / fallback frames: {role, content} rendered in one update.
+      removeTypingIndicator();setChatBusy(false);finalizeStream();
+      appendMsg((m&&m.role)||'system', (m&&m.content!==undefined)?m.content:ev.data);
+    }
+
     function sendChat(){
       const inp=document.getElementById('chat-input'); const txt=inp.value.trim();
       if(!txt) return;
@@ -62,13 +145,40 @@ pub(crate) const PART_04: &str = r#"            let fmt;
       appendMsg('user',txt); ws.send(txt); inp.value='';
       showTypingIndicator(); setChatBusy(true);
     }
+
+    function appendChunk(text){
+      if(!streamSpan){
+        const el=document.getElementById('chat-messages');
+        const div=document.createElement('div');
+        div.className='chat-msg';
+        const roleSpan=document.createElement('span');
+        roleSpan.className='role assistant';
+        roleSpan.textContent='assistant:';
+        div.appendChild(roleSpan);
+        streamSpan=document.createElement('span');
+        div.appendChild(streamSpan);
+        el.appendChild(div);
+        streamText='';
+      }
+      streamText+=text;
+      streamSpan.textContent=' '+streamText;
+      const el=document.getElementById('chat-messages');
+      el.scrollTop=el.scrollHeight;
+    }
+    function finalizeStream(){ streamSpan=null; streamText=''; }
+
+    function clearMessages(){
+      finalizeStream();
+      const el=document.getElementById('chat-messages');
+      if(el) el.textContent='';
+    }
     function showTypingIndicator(){
       removeTypingIndicator();
       const el=document.getElementById('chat-messages');
       const div=document.createElement('div');
       div.id='typing-indicator';
-      div.className='chat-msg';
-      div.innerHTML='<span class="role assistant">simard:</span> <span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>';
+      div.className='chat-typing';
+      div.innerHTML='<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>';
       el.appendChild(div);
       el.scrollTop=el.scrollHeight;
     }
