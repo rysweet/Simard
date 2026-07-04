@@ -45,6 +45,7 @@
 
 #![allow(dead_code)]
 
+pub mod audit;
 pub mod capabilities;
 pub mod config;
 pub mod conflict;
@@ -59,6 +60,7 @@ pub mod observer;
 pub mod pr_verify;
 pub mod sensor;
 pub mod signal;
+pub mod tuning;
 
 #[cfg(test)]
 mod tests_m1;
