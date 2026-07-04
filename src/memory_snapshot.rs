@@ -205,11 +205,10 @@ pub fn restore_snapshot(
 /// into any startup path**: this change ships the correctly-gated primitive, and
 /// activating it at startup is deliberately deferred (the on-disk snapshot API is
 /// `#[deprecated]` in favour of hive-mind replication). The guard is the crux of
-/// #2561: the
-/// decision to hydrate is taken from [`CognitiveMemoryOps::probe_emptiness`],
-/// which distinguishes a *confirmed-empty* store from one whose reads are
-/// *failing*, rather than from a bare count that a swallowed read error can
-/// silently zero out.
+/// #2561: the decision to hydrate is taken from
+/// [`CognitiveMemoryOps::probe_emptiness`], which distinguishes a
+/// *confirmed-empty* store from one whose reads are *failing*, rather than from a
+/// bare count that a swallowed read error can silently zero out.
 ///
 /// Behaviour:
 ///
@@ -223,9 +222,26 @@ pub fn restore_snapshot(
 ///   never be mistaken for an empty store and cause a snapshot to be layered on
 ///   top of still-present-but-unreadable durable memory.
 ///
-/// The order matters: emptiness is confirmed *before* any write, so the import
-/// side effect is unreachable on the error path.
-#[allow(deprecated)] // restore_snapshot wraps the legacy snapshot API
+/// The order matters: emptiness is confirmed *before* any write, so a **probe**
+/// error can never trigger an import. The import itself, however, is **not
+/// transactional**: `restore_snapshot` → `import_memory_snapshot` writes each
+/// fact/procedure individually, so an `Err` returned *after the probe succeeded*
+/// (a mid-import write failure) can leave the store **partially** hydrated.
+/// Because that only happens on a store already confirmed empty, it can never
+/// duplicate or overwrite pre-existing durable memory (the #2561 invariant
+/// holds); but a subsequent startup then observes `NonEmpty` and skips, so the
+/// partial restore is not retried. "Nothing is imported" therefore applies to
+/// the *probe*-error path specifically; an atomic/idempotent import is a
+/// prerequisite for the deferred startup-activation work.
+///
+/// # Concurrency
+///
+/// The probe→import sequence is **not atomic** and this primitive is not
+/// internally synchronized. The caller must run it as the sole writer for the
+/// duration of the call (the single-writer startup precondition): a concurrent
+/// writer landing between the emptiness probe and the import could duplicate
+/// memories. Activation outside a single-writer context must wrap the call in the
+/// store's cross-process lock (cf. `goal_board_store`'s advisory `flock`, #2514).
 pub fn auto_restore_if_empty(
     bridge: &dyn CognitiveMemoryOps,
     snapshot: &MemorySnapshot,
@@ -248,11 +264,12 @@ pub fn auto_restore_if_empty(
 ///
 /// * store confirmed empty and a snapshot exists → `Ok(Some(count))`.
 /// * store confirmed empty but no loadable snapshot in `dir` → `Ok(None)`
-///   (nothing to restore; the fresh store is left as-is). Note: a *corrupt or
-///   unreadable* newest snapshot is currently treated the same as *absent* here
-///   — [`load_latest_snapshot`] logs and returns `None`, so this wrapper returns
-///   `Ok(None)` rather than surfacing the load error. Surfacing that as `Err`
-///   (fail-closed on the snapshot *source*) is deferred to the activation work.
+///   (nothing to restore; the fresh store is left as-is). [`load_latest_snapshot`]
+///   walks newest → oldest and returns the most recent *valid* snapshot, so a
+///   *corrupt or unreadable newest* snapshot degrades to an older valid one
+///   (`Ok(Some(..))`) rather than aborting the self-heal; `Ok(None)` results only
+///   when the directory holds no snapshot or **every** retained snapshot is
+///   unreadable.
 /// * store non-empty → `Ok(None)` (skip; re-importing would duplicate).
 /// * probe read failure → `Err(..)`, nothing imported (fail closed).
 pub fn auto_restore_latest_if_empty(
@@ -734,8 +751,10 @@ mod tests {
     fn auto_restore_latest_returns_none_when_confirmed_empty_but_no_snapshot() {
         // Confirmed-empty store with an empty snapshot dir: nothing to restore, so
         // the fresh store is left as-is (`Ok(None)`, zero writes). This exercises
-        // the "no loadable snapshot" branch — an absent (or corrupt/unreadable)
-        // newest snapshot both surface here as `None`.
+        // the "no loadable snapshot" branch, reached when the directory holds no
+        // snapshot (or, with the newest→oldest loader, when every retained
+        // snapshot is unreadable — a corrupt *newest* alone would instead recover
+        // an older valid snapshot).
         let dir = std::env::temp_dir().join(format!(
             "simard-test-autorestore-latest-nosnapshot-{}",
             std::process::id()
