@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::bridge_launcher::{launch_gym_bridge_native, launch_knowledge_bridge_native};
 use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
-use crate::goal_curation::{load_goal_board, persist_board};
+use crate::goal_curation::persist_board;
 use crate::identity::OperatingMode;
 use crate::memory_ipc;
 use crate::ooda_loop::{
@@ -304,8 +304,21 @@ pub fn run_ooda_daemon(
         completion_evidence,
     };
 
-    let board = load_goal_board(&*bridges.memory).unwrap_or_default();
+    // Issue #1: the authoritative goal board lives in
+    // `<state_root>/state/goal_board.json` (a single durable, flock-guarded,
+    // read-your-writes store), NOT the cognitive-memory snapshot. On first
+    // adoption the current memory snapshot is migrated into the file so no live
+    // goal is lost; thereafter the file is the source of truth and the memory
+    // snapshot is a derived cache. The persisted `no_progress` tracker is
+    // restored into `OodaState` so the no-progress breaker's per-goal counters
+    // survive the daemon's periodic restarts (the production bug where the
+    // counter reset to zero every ~hour before it could reach the threshold).
+    let persistent =
+        crate::goal_board_store::load_or_migrate(&state_root, &*bridges.memory).unwrap_or_default();
+    let tombstones = crate::ooda_loop::load_tombstones(&state_root);
+    let board = crate::goal_board_store::filter_tombstoned(persistent.board, &tombstones);
     let mut state = OodaState::new(board);
+    state.no_progress_tracker = persistent.no_progress;
     let config = OodaConfig::default();
 
     // Issue #1197: sweep orphaned engineer worktrees from prior crashed
@@ -823,6 +836,38 @@ pub fn run_ooda_daemon(
             .unwrap_or(0);
         state.cycle_start_epoch = cycle_start_epoch;
 
+        // ── Issue #1: re-sync the authoritative goal board at cycle start ──
+        // Load the single source of truth (`goal_board.json`) so operator
+        // mutations (`goal add/remove/complete/reprioritize`) and meeting
+        // handoffs made since the last cycle take effect and STICK. Restore the
+        // persisted no-progress tracker so the breaker's per-goal counters
+        // survive the daemon's periodic exec-reload restarts, and overwrite the
+        // cognitive-memory snapshot cache so `run_ooda_cycle`'s internal board
+        // read sees exactly the authoritative (tombstone-filtered) board.
+        {
+            let cycle_tombstones = crate::ooda_loop::load_tombstones(&state_root);
+            let persistent = crate::goal_board_store::load(&state_root);
+            state.active_goals =
+                crate::goal_board_store::filter_tombstoned(persistent.board, &cycle_tombstones);
+            state.no_progress_tracker = persistent.no_progress;
+            if let Err(e) =
+                crate::goal_curation::overwrite_memory_cache(&state.active_goals, &*bridges.memory)
+            {
+                daemon_log(
+                    &state_root,
+                    &format!("[simard] OODA cycle: memory cache sync failed: {e}"),
+                );
+            }
+        }
+        // Snapshot the pre-cycle active ids so the post-cycle commit can
+        // tombstone any goal that left the board (archived / dropped / done).
+        let pre_cycle_active_ids: std::collections::HashSet<String> = state
+            .active_goals
+            .active
+            .iter()
+            .map(|g| g.id.clone())
+            .collect();
+
         // Write heartbeat at cycle START so the dashboard never sees "stale"
         // during a long-running cycle.
         {
@@ -853,6 +898,92 @@ pub fn run_ooda_daemon(
                 state.last_cycle_duration_secs = Some(cycle_elapsed.as_secs());
                 state.current_phase = OodaPhase::Sleep;
                 daemon_log(&state_root, &format!("[simard] {summary}"));
+
+                // ── Issue #1: commit the post-cycle board authoritatively ──
+                // 1. Run the every-cycle done-gate over the WHOLE active board
+                //    (cross-repo aware) so a goal whose objective was completed
+                //    out-of-band — a merged PR / closed issue on ANY governed
+                //    repo — is auto-completed instead of being re-litigated
+                //    forever. 2. Tombstone every goal that left the board this
+                //    cycle (archived, dropped by the no-progress breaker, or
+                //    just-completed by the done-gate) so nothing re-seeds it.
+                //    3. Commit the reconciled board + persisted no-progress
+                //    tracker to the authoritative store, then regenerate the
+                //    memory cache from the committed board.
+                {
+                    let mut newly_done: Vec<String> = Vec::new();
+                    if let Some(evidence) = &bridges.completion_evidence {
+                        newly_done = crate::goal_board_store::sweep_done_goals(
+                            &mut state.active_goals,
+                            evidence.as_ref(),
+                        );
+                        if !newly_done.is_empty() {
+                            let done: std::collections::HashSet<&str> =
+                                newly_done.iter().map(String::as_str).collect();
+                            state
+                                .active_goals
+                                .active
+                                .retain(|g| !done.contains(g.id.as_str()));
+                            daemon_log(
+                                &state_root,
+                                &format!(
+                                    "[simard] OODA done-gate: auto-completed {} goal(s) with cross-repo evidence: {}",
+                                    newly_done.len(),
+                                    newly_done.join(", "),
+                                ),
+                            );
+                        }
+                    }
+
+                    let post_active: std::collections::HashSet<&str> = state
+                        .active_goals
+                        .active
+                        .iter()
+                        .map(|g| g.id.as_str())
+                        .collect();
+                    let post_backlog: std::collections::HashSet<&str> = state
+                        .active_goals
+                        .backlog
+                        .iter()
+                        .map(|b| b.id.as_str())
+                        .collect();
+                    let mut tombstones: Vec<String> = pre_cycle_active_ids
+                        .iter()
+                        .filter(|id| {
+                            !post_active.contains(id.as_str())
+                                && !post_backlog.contains(id.as_str())
+                        })
+                        .cloned()
+                        .collect();
+                    tombstones.extend(newly_done);
+
+                    match crate::goal_board_store::commit_cycle(
+                        &state_root,
+                        &state.active_goals,
+                        &state.no_progress_tracker,
+                        &tombstones,
+                    ) {
+                        Ok(committed) => {
+                            state.active_goals = committed;
+                            if let Err(e) = crate::goal_curation::overwrite_memory_cache(
+                                &state.active_goals,
+                                &*bridges.memory,
+                            ) {
+                                daemon_log(
+                                    &state_root,
+                                    &format!(
+                                        "[simard] OODA cycle: memory cache refresh failed: {e}"
+                                    ),
+                                );
+                            }
+                        }
+                        Err(e) => daemon_log(
+                            &state_root,
+                            &format!("[simard] OODA cycle: authoritative commit failed: {e}"),
+                        ),
+                    }
+                }
+
                 // Persist the cycle report to filesystem for auditability.
                 persist_cycle_report(&state_root, &report);
                 // Persist the cycle summary to cognitive memory as an episode.
@@ -1056,6 +1187,21 @@ fn shutdown_daemon(
     signal_driven: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     daemon_log(state_root, "[simard] OODA daemon: shutdown sequence start");
+
+    // 0. Commit the board + persisted no-progress tracker to the authoritative
+    //    store (issue #1) so the last live state — including the breaker's
+    //    counters — survives the restart. Best-effort; a failure is logged.
+    if let Err(e) = crate::goal_board_store::commit_cycle(
+        state_root,
+        &state.active_goals,
+        &state.no_progress_tracker,
+        &[],
+    ) {
+        daemon_log(
+            state_root,
+            &format!("[simard] shutdown: authoritative goal-board commit failed: {e}"),
+        );
+    }
 
     // 1. Persist the goal board through the live writer.
     if let Err(e) = persist_board(&state.active_goals, &*bridges.memory) {

@@ -15,6 +15,18 @@ related:
 
 # Goal board persistence — cognitive-memory single source of truth
 
+> **Update (issue [#1](https://github.com/rysweet/Simard/issues/1)):** the
+> "cognitive memory is the single source of truth" design described here is
+> **superseded**. As of issue #1 the authoritative goal board is the durable,
+> flock-guarded file `<state_root>/state/goal_board.json`; the
+> `goal-board:snapshot` cognitive-memory fact is demoted to a **derived cache**
+> the daemon overwrites from that file each cycle. The persistence *mechanics*
+> below (the shared flock, atomic write, corruption guard, and the
+> `load_goal_board` / `save_goal_board` helpers) remain accurate for that
+> derived cache — only the "source of truth" claim has moved to disk. See
+> [Authoritative goal-board store](./authoritative-goal-board-store.md) for the
+> current design.
+
 > **Status: partially implemented.** Issue
 > [#1590](https://github.com/rysweet/Simard/issues/1590) and its merged
 > follow-up PRs migrated the OODA cycle, the dashboard handlers, the

@@ -147,24 +147,15 @@ pub fn simard_state_root() -> std::path::PathBuf {
     crate::state_root::simard_state_root()
 }
 
-/// Filename of the cross-process advisory lock that serializes the goal-board
-/// read-merge-write window across independent OS processes (issue
-/// [#2511](https://github.com/rysweet/Simard/issues/2511)).
-#[cfg(unix)]
-const BOARD_WRITE_LOCK_FILE: &str = "goal-board.lock";
-
 /// Resolve the path of the cross-process goal-board write lock.
 ///
-/// Co-located with the canonical goal store under `<state_root>/state/` (see
-/// [`crate::state_root::goal_store_path`]) so every process that resolves the
-/// same `SIMARD_STATE_ROOT` rendezvouses on the same lock file. Both the OODA
-/// daemon and the `simard goal` CLI resolve their state root through
-/// [`simard_state_root`], so they agree on this path.
+/// Delegates to [`crate::state_root::goal_board_lock_path`] so the daemon, the
+/// `simard goal` CLI, and the authoritative [`crate::goal_board_store`]
+/// rendezvous on the one shared lock file `<state_root>/state/goal-board.lock`
+/// (issue #2511).
 #[cfg(unix)]
 pub(super) fn board_lock_path() -> std::path::PathBuf {
-    crate::state_root::simard_state_root()
-        .join("state")
-        .join(BOARD_WRITE_LOCK_FILE)
+    crate::state_root::goal_board_lock_path()
 }
 
 /// RAII guard holding an exclusive `flock` over [`board_lock_path`] for the
@@ -749,6 +740,38 @@ pub fn persist_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Sima
         &board.durable_summary(),
         "goal-curator",
         Some(&json!({"active_count": board.active.len(), "backlog_count": board.backlog.len()})),
+    )?;
+    Ok(())
+}
+
+/// Overwrite the cognitive-memory board **cache** with `board` exactly,
+/// bypassing the merge-on-write path.
+///
+/// Issue #1: with [`crate::goal_board_store`] now the single authoritative
+/// source of truth, the cognitive-memory `goal-board:snapshot` fact is a
+/// *derived cache* the daemon regenerates from the authoritative file each
+/// cycle. [`save_goal_board`] performs a union merge-on-write (correct when
+/// memory *was* the source of truth) which would resurrect goals the authority
+/// dropped; this helper instead stores `board` verbatim via the CallerKey-dedup
+/// fact so `read_latest_snapshot` returns exactly the authoritative board.
+///
+/// Best-effort by contract: the dashboard and recall read this cache, but the
+/// authoritative file governs, so a cache-write failure is non-fatal.
+pub fn overwrite_memory_cache(
+    board: &GoalBoard,
+    bridge: &dyn CognitiveMemoryOps,
+) -> SimardResult<()> {
+    let snapshot = serde_json::to_string(board).map_err(|e| SimardError::InvalidGoalRecord {
+        field: "board".to_string(),
+        reason: format!("failed to serialize goal board: {e}"),
+    })?;
+    bridge.store_fact_with_caller_key(
+        "goal-board:snapshot",
+        "goal-board:snapshot",
+        &snapshot,
+        1.0,
+        &["goal-board".to_string()],
+        "goal-curator",
     )?;
     Ok(())
 }

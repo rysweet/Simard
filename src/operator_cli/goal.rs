@@ -15,24 +15,27 @@
 //!     safeguard marker (`is_brain_failure_marker`). Operator-set,
 //!     scope-blocked, dependency-blocked, and subordinate-blocked
 //!     goals are untouched.
-//!   - `goal remove <id>…` — variadic, idempotent. Persists via
-//!     `save_goal_board_with_removals` so the PR #1926 merge-on-write
-//!     resurrection failure mode is defeated.
+//!   - `goal remove <id>…` — variadic, idempotent. Surgically removes the ids
+//!     from the authoritative store under the shared flock and writes durable
+//!     tombstones (issue #1).
+//!   - `goal complete <id>` — mark a goal done, remove it, and tombstone it.
+//!   - `goal reprioritize <id> <p>` — alias of `set-priority`.
 //!   - `goal cleanup --placeholders` — defence-in-depth sweep that
 //!     removes every active or backlog goal whose description is exactly
 //!     `Goal <id>` (the placeholder pattern emitted by test fixtures).
 //!
-//! Persistence is cognitive memory via `launch_writer_bridge` against
-//! `simard_state_root()` (honours `SIMARD_STATE_ROOT`). Audit traces are
-//! emitted to stderr so operators can grep `journalctl --user -u
-//! simard-ooda` after the runbook step.
+//! Persistence is the authoritative goal store
+//! ([`crate::goal_board_store`]) — `<state_root>/state/goal_board.json`, guarded
+//! by the shared `goal-board.lock` flock, atomic read-modify-write, read-your-
+//! writes (issue #1). Every mutation runs under the lock so it cannot be
+//! clobbered by (or clobber) a concurrent OODA daemon cycle, and is mirrored to
+//! the cognitive-memory cache so the dashboard and daemon see it immediately.
+//! Honours `SIMARD_STATE_ROOT`. Audit traces are emitted to stderr so operators
+//! can grep `journalctl --user -u simard-ooda` after the runbook step.
 
 use std::error::Error;
 
-use crate::goal_curation::{
-    GoalDecomposer, GoalProgress, load_goal_board, save_goal_board, save_goal_board_with_removals,
-    simard_state_root,
-};
+use crate::goal_curation::{GoalDecomposer, GoalProgress, simard_state_root};
 use crate::memory_ipc::launch_writer_bridge;
 use crate::ooda_actions::advance_goal::spawn::is_brain_failure_marker;
 
@@ -49,6 +52,10 @@ Commands:
                               Add a new active goal at given priority (1-7).
                               `--repo <slug>` routes the goal's engineer to
                               ~/src/<slug> (default: the daemon's own repo).
+  complete <goal-id>          Mark a goal done, remove it, and tombstone it so
+                              nothing re-seeds it (idempotent).
+  reprioritize <goal-id> <p>  Change an active goal's priority (alias of
+                              set-priority).
   demote <goal-id>            Move an active goal to the backlog.
   set-priority <goal-id> <p>  Change an active goal's priority.
   unblock <goal-id>           Clear Blocked status (unconditional).
@@ -112,6 +119,17 @@ pub(super) fn dispatch_goal_command(
             reject_extra_args(args)?;
             handle_set_priority(&goal_id, &priority_str)
         }
+        "reprioritize" => {
+            let goal_id = next_required(&mut args, "goal id")?;
+            let priority_str = next_required(&mut args, "priority (1-7)")?;
+            reject_extra_args(args)?;
+            handle_set_priority(&goal_id, &priority_str)
+        }
+        "complete" => {
+            let goal_id = next_required(&mut args, "goal id")?;
+            reject_extra_args(args)?;
+            handle_complete(&goal_id)
+        }
         "remove" => {
             let ids: Vec<String> = args.collect();
             handle_remove(&ids)
@@ -129,40 +147,85 @@ pub(super) fn dispatch_goal_command(
     }
 }
 
-/// Load the persisted goal board from cognitive memory at the operator's
-/// state root. Surfaces I/O / parse failures as `Err` so the CLI exits
-/// non-zero; callers should not silently degrade.
+/// Load the authoritative goal board (issue #1).
+///
+/// Reads `<state_root>/state/goal_board.json` (the single durable, flock-guarded
+/// source of truth) with read-your-writes semantics, migrating the legacy
+/// cognitive-memory snapshot into it on first use so a fresh CLI still sees the
+/// live board. Surfaces I/O / parse failures as `Err` so the CLI exits non-zero.
 fn load_board() -> Result<crate::goal_curation::GoalBoard, Box<dyn Error>> {
     let state_root = simard_state_root();
     let bridge = launch_writer_bridge(&state_root)
         .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    let board = load_goal_board(bridge.ops())
-        .map_err(|e| format!("failed to read goal board from cognitive memory: {e}"))?;
-    Ok(board)
+    let persistent = crate::goal_board_store::load_or_migrate(&state_root, bridge.ops())
+        .map_err(|e| format!("failed to load authoritative goal store: {e}"))?;
+    Ok(persistent.board)
 }
 
-/// Persist the mutated board back to cognitive memory.
-fn save_board(board: &crate::goal_curation::GoalBoard) -> Result<(), Box<dyn Error>> {
+/// Atomically apply `f` to the authoritative goal board **under the shared store
+/// flock**, then mirror the committed board to the cognitive-memory cache so the
+/// dashboard and the running OODA daemon observe the change immediately.
+///
+/// This is the anti-clobber write path (issue #1): the whole read-modify-write
+/// runs while the cross-process lock is held, so an operator mutation cannot be
+/// lost to (or lose) a concurrent daemon cycle flush. `f` must **validate before
+/// mutating**: on `Err` the board is restored to its pre-image and the error is
+/// surfaced, so a rejected command (unknown id, board at capacity) never leaves
+/// a partial write.
+fn with_board<R>(
+    f: impl FnOnce(&mut crate::goal_curation::GoalBoard) -> Result<R, Box<dyn Error>>,
+) -> Result<R, Box<dyn Error>> {
     let state_root = simard_state_root();
     let bridge = launch_writer_bridge(&state_root)
         .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    save_goal_board(board, bridge.ops())
-        .map_err(|e| format!("failed to persist goal board: {e}"))?;
+    crate::goal_board_store::load_or_migrate(&state_root, bridge.ops())
+        .map_err(|e| format!("failed to load authoritative goal store: {e}"))?;
+    let out = crate::goal_board_store::mutate(&state_root, move |s| {
+        let snapshot = s.board.clone();
+        match f(&mut s.board) {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                s.board = snapshot;
+                Err(e)
+            }
+        }
+    })
+    .map_err(|e| -> Box<dyn Error> {
+        format!("failed to persist authoritative goal store: {e}").into()
+    })??;
+    let committed = crate::goal_board_store::load(&state_root).board;
+    if let Err(e) = crate::goal_curation::overwrite_memory_cache(&committed, bridge.ops()) {
+        eprintln!("[simard] goal: warning: memory cache refresh failed: {e}");
+    }
+    Ok(out)
+}
+
+/// Blind-overwrite the authoritative board with `board` under the store lock,
+/// then refresh the memory cache. Used only by `goal decompose`, where the
+/// mutated board (parent placement + new child goals) IS the operator's explicit
+/// intent, so a surgical merge would fight the demotion the operator asked for.
+fn commit_board_blind(board: &crate::goal_curation::GoalBoard) -> Result<(), Box<dyn Error>> {
+    let state_root = simard_state_root();
+    let b = board.clone();
+    crate::goal_board_store::mutate(&state_root, move |s| {
+        s.board = b;
+    })
+    .map_err(|e| format!("failed to persist goal board: {e}"))?;
+    let bridge = launch_writer_bridge(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
+    if let Err(e) = crate::goal_curation::overwrite_memory_cache(board, bridge.ops()) {
+        eprintln!("[simard] goal: warning: memory cache refresh failed: {e}");
+    }
     Ok(())
 }
 
-/// Persist the in-flight `board` with explicit removal of `ids`. Used by
-/// `goal remove` and `goal cleanup --placeholders` so both routes share
-/// the post-merge filter that defeats PR #1926's resurrection failure.
-fn save_board_with_removals(
-    board: &crate::goal_curation::GoalBoard,
-    ids: &[String],
-) -> Result<(), Box<dyn Error>> {
+/// Record `ids` as durable tombstones so no path — default seeding, memory
+/// recall, a meeting handoff, or the daemon's cycle reconcile — can resurrect a
+/// removed or completed goal (issue #1, requirement 3).
+fn tombstone(ids: &[String]) -> Result<(), Box<dyn Error>> {
     let state_root = simard_state_root();
-    let bridge = launch_writer_bridge(&state_root)
-        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    save_goal_board_with_removals(board, ids, bridge.ops())
-        .map_err(|e| format!("failed to persist goal board with removals: {e}"))?;
+    crate::ooda_loop::tombstone_goals(&state_root, ids)
+        .map_err(|e| format!("failed to record tombstones: {e}"))?;
     Ok(())
 }
 
@@ -197,38 +260,39 @@ fn handle_list() -> Result<(), Box<dyn Error>> {
 }
 
 fn handle_unblock(goal_id: &str) -> Result<(), Box<dyn Error>> {
-    let mut board = load_board()?;
-    let goal = board
-        .active
-        .iter_mut()
-        .find(|g| g.id == goal_id)
-        .ok_or_else(|| {
-            format!("goal '{goal_id}' not found on active board (no Blocked status to clear)")
-        })?;
-    let prior = goal.status.clone();
-    goal.status = GoalProgress::NotStarted;
-    save_board(&board)?;
+    let prior = with_board(|board| {
+        let goal = board
+            .active
+            .iter_mut()
+            .find(|g| g.id == goal_id)
+            .ok_or_else(|| -> Box<dyn Error> {
+                format!("goal '{goal_id}' not found on active board (no Blocked status to clear)")
+                    .into()
+            })?;
+        let prior = goal.status.clone();
+        goal.status = GoalProgress::NotStarted;
+        Ok(prior)
+    })?;
     eprintln!("[simard] goal unblock: '{goal_id}' restored to NotStarted (was: {prior})");
     Ok(())
 }
 
 fn handle_unblock_all() -> Result<(), Box<dyn Error>> {
-    let mut board = load_board()?;
-    let mut cleared = Vec::new();
-    let mut left = 0usize;
-    for goal in board.active.iter_mut() {
-        match &goal.status {
-            GoalProgress::Blocked(reason) if is_brain_failure_marker(reason) => {
-                cleared.push(goal.id.clone());
-                goal.status = GoalProgress::NotStarted;
+    let (cleared, left) = with_board(|board| {
+        let mut cleared = Vec::new();
+        let mut left = 0usize;
+        for goal in board.active.iter_mut() {
+            match &goal.status {
+                GoalProgress::Blocked(reason) if is_brain_failure_marker(reason) => {
+                    cleared.push(goal.id.clone());
+                    goal.status = GoalProgress::NotStarted;
+                }
+                GoalProgress::Blocked(_) => left += 1,
+                _ => {}
             }
-            GoalProgress::Blocked(_) => left += 1,
-            _ => {}
         }
-    }
-    if !cleared.is_empty() {
-        save_board(&board)?;
-    }
+        Ok((cleared, left))
+    })?;
     eprintln!(
         "[simard] goal unblock-all: cleared {} brain-failure marker(s); left {} non-marker Blocked goal(s) untouched",
         cleared.len(),
@@ -259,30 +323,36 @@ fn handle_add(
             .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
     }
     let id = crate::goals::goal_slug(description);
-    let mut board = load_board()?;
-    if board.active.iter().any(|g| g.id == id) {
-        return Err(format!("goal '{id}' is already active").into());
+    let repo_owned = repo.map(str::to_string);
+    {
+        let id = id.clone();
+        let description = description.to_string();
+        with_board(move |board| {
+            if board.active.iter().any(|g| g.id == id) {
+                return Err(format!("goal '{id}' is already active").into());
+            }
+            if board.active.len() >= crate::goal_curation::MAX_ACTIVE_GOALS {
+                return Err(format!(
+                    "board is at capacity ({}); demote or remove a goal first",
+                    crate::goal_curation::MAX_ACTIVE_GOALS
+                )
+                .into());
+            }
+            board.active.push(crate::goal_curation::ActiveGoal {
+                parent_goal_id: None,
+                id,
+                description,
+                priority,
+                status: GoalProgress::NotStarted,
+                assigned_to: None,
+                repo: repo_owned,
+                current_activity: None,
+                wip_refs: vec![],
+                last_progress_update_at: None,
+            });
+            Ok(())
+        })?;
     }
-    if board.active.len() >= crate::goal_curation::MAX_ACTIVE_GOALS {
-        return Err(format!(
-            "board is at capacity ({}); demote or remove a goal first",
-            crate::goal_curation::MAX_ACTIVE_GOALS
-        )
-        .into());
-    }
-    board.active.push(crate::goal_curation::ActiveGoal {
-        parent_goal_id: None,
-        id: id.clone(),
-        description: description.to_string(),
-        priority,
-        status: GoalProgress::NotStarted,
-        assigned_to: None,
-        repo: repo.map(str::to_string),
-        current_activity: None,
-        wip_refs: vec![],
-        last_progress_update_at: None,
-    });
-    save_board(&board)?;
     let repo_note = repo
         .map(|r| format!(" -> repo '{r}'"))
         .unwrap_or_else(|| " -> repo Simard (daemon)".to_string());
@@ -314,25 +384,29 @@ fn extract_repo_flag(tokens: Vec<String>) -> Result<(Option<String>, Vec<String>
 
 /// `simard goal demote <goal-id>` — move an active goal to the backlog.
 fn handle_demote(goal_id: &str) -> Result<(), Box<dyn Error>> {
-    let mut board = load_board()?;
-    let position = board
-        .active
-        .iter()
-        .position(|g| g.id == goal_id)
-        .ok_or_else(|| format!("goal '{goal_id}' not found on active board"))?;
-    let goal = board.active.remove(position);
-    board.backlog.push(crate::goal_curation::BacklogItem {
-        id: goal.id.clone(),
-        description: goal.description,
-        source: "operator:demote".to_string(),
-        score: 0.5,
-    });
-    save_board(&board)?;
+    with_board(|board| {
+        let position = board
+            .active
+            .iter()
+            .position(|g| g.id == goal_id)
+            .ok_or_else(|| -> Box<dyn Error> {
+                format!("goal '{goal_id}' not found on active board").into()
+            })?;
+        let goal = board.active.remove(position);
+        board.backlog.push(crate::goal_curation::BacklogItem {
+            id: goal.id.clone(),
+            description: goal.description,
+            source: "operator:demote".to_string(),
+            score: 0.5,
+        });
+        Ok(())
+    })?;
     eprintln!("[simard] goal demote: '{goal_id}' moved to backlog");
     Ok(())
 }
 
-/// `simard goal set-priority <goal-id> <priority>` — change priority.
+/// `simard goal set-priority <goal-id> <priority>` — change priority. Also the
+/// implementation behind `simard goal reprioritize <goal-id> <priority>`.
 fn handle_set_priority(goal_id: &str, priority_str: &str) -> Result<(), Box<dyn Error>> {
     let priority: u32 = priority_str
         .parse()
@@ -340,33 +414,63 @@ fn handle_set_priority(goal_id: &str, priority_str: &str) -> Result<(), Box<dyn 
     if priority == 0 || priority > 7 {
         return Err(format!("priority must be 1-7, got {priority}").into());
     }
-    let mut board = load_board()?;
-    let goal = board
-        .active
-        .iter_mut()
-        .find(|g| g.id == goal_id)
-        .ok_or_else(|| format!("goal '{goal_id}' not found on active board"))?;
-    let old = goal.priority;
-    goal.priority = priority;
-    save_board(&board)?;
+    let old = with_board(|board| {
+        let goal = board
+            .active
+            .iter_mut()
+            .find(|g| g.id == goal_id)
+            .ok_or_else(|| -> Box<dyn Error> {
+                format!("goal '{goal_id}' not found on active board").into()
+            })?;
+        let old = goal.priority;
+        goal.priority = priority;
+        Ok(old)
+    })?;
     eprintln!("[simard] goal set-priority: '{goal_id}' changed from p{old} to p{priority}");
     Ok(())
 }
 
-/// `simard goal remove <id>…` — variadic, idempotent. Routes through
-/// `save_goal_board_with_removals` so the post-merge filter defeats the
-/// PR #1926 resurrection failure mode.
+/// `simard goal complete <goal-id>` — mark a goal done, remove it from the
+/// board, and write a durable tombstone so no path (default seeding, memory
+/// recall, a meeting handoff, or the daemon's cycle reconcile) can resurrect it.
+/// Idempotent: completing an absent goal still records the tombstone.
+fn handle_complete(goal_id: &str) -> Result<(), Box<dyn Error>> {
+    let existed = with_board(|board| {
+        let before = board.active.len() + board.backlog.len();
+        board.active.retain(|g| g.id != goal_id);
+        board.backlog.retain(|b| b.id != goal_id);
+        Ok(before != board.active.len() + board.backlog.len())
+    })?;
+    tombstone(&[goal_id.to_string()])?;
+    if existed {
+        eprintln!(
+            "[simard] goal complete: '{goal_id}' marked done, removed from board, and tombstoned"
+        );
+    } else {
+        eprintln!(
+            "[simard] goal complete: '{goal_id}' not on board; recorded tombstone (idempotent)"
+        );
+    }
+    Ok(())
+}
+
+/// `simard goal remove <id>…` — variadic, idempotent. Surgically removes the
+/// ids from the authoritative store under the shared flock and writes durable
+/// tombstones so the daemon's cycle reconcile (and memory recall / meeting
+/// handoffs) can never resurrect them (issue #1).
 fn handle_remove(ids: &[String]) -> Result<(), Box<dyn Error>> {
     if ids.is_empty() {
         return Err("usage: simard goal remove <id> [<id>...]; at least one id is required".into());
     }
-    let board = load_board()?;
-    save_board_with_removals(&board, ids)?;
-    // Record tombstones so meeting handoffs don't re-ingest these goals.
-    let state_root = crate::state_root::simard_state_root();
-    if let Err(e) = crate::ooda_loop::tombstone_goals(&state_root, ids) {
-        eprintln!("[simard] warning: failed to record tombstones: {e}");
-    }
+    with_board(|board| {
+        let removals: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        board.active.retain(|g| !removals.contains(g.id.as_str()));
+        board.backlog.retain(|b| !removals.contains(b.id.as_str()));
+        Ok(())
+    })?;
+    // Record tombstones so nothing (default seeding, memory recall, meeting
+    // handoffs, or the daemon's cycle reconcile) re-ingests these goals.
+    tombstone(ids)?;
     eprintln!(
         "[simard] goal remove: requested removal of {} id(s): {}",
         ids.len(),
@@ -416,8 +520,9 @@ fn handle_decompose(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn Error
         .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
     let ops = bridge.ops();
 
-    let mut board = load_goal_board(ops)
-        .map_err(|e| format!("failed to read goal board from cognitive memory: {e}"))?;
+    // Load from the authoritative store (issue #1); the memory bridge is still
+    // used below for the durable graph-edge writes performed by decompose_goal.
+    let mut board = load_board()?;
     let parent = board
         .active
         .iter()
@@ -457,7 +562,11 @@ fn handle_decompose(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn Error
         crate::goal_curation::decompose_goal(ops, &mut board, goal_id, &decomposer, max_children)
             .map_err(|e| format!("decomposition failed: {e}"))?;
 
-    save_goal_board(&board, ops)
+    // Persist the decomposition (parent placement + new child goals) to the
+    // authoritative store (issue #1) so it sticks across daemon cycles. The
+    // mutated `board` IS the operator's explicit intent, so a blind commit is
+    // correct here (a surgical merge would fight the parent demotion).
+    commit_board_blind(&board)
         .map_err(|e| format!("failed to persist decomposed goal board: {e}"))?;
 
     eprintln!(
@@ -524,25 +633,34 @@ fn handle_cleanup(flags: &[String]) -> Result<(), Box<dyn Error>> {
         );
     }
 
-    let board = load_board()?;
-    let mut removals: Vec<String> = Vec::new();
-    for g in &board.active {
-        if is_id_placeholder(&g.id, &g.description) {
-            removals.push(g.id.clone());
-        }
-    }
-    for b in &board.backlog {
-        if is_id_placeholder(&b.id, &b.description) && !removals.contains(&b.id) {
-            removals.push(b.id.clone());
-        }
-    }
+    let removals = with_board(|board| {
+        let mut removals: Vec<String> = Vec::new();
+        board.active.retain(|g| {
+            if is_id_placeholder(&g.id, &g.description) {
+                removals.push(g.id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        board.backlog.retain(|b| {
+            if is_id_placeholder(&b.id, &b.description) {
+                if !removals.contains(&b.id) {
+                    removals.push(b.id.clone());
+                }
+                false
+            } else {
+                true
+            }
+        });
+        Ok(removals)
+    })?;
 
     if removals.is_empty() {
         eprintln!("[simard] goal cleanup --placeholders: no placeholder goals found; no-op");
         return Ok(());
     }
 
-    save_board_with_removals(&board, &removals)?;
     eprintln!(
         "[simard] goal cleanup --placeholders: removed {} placeholder goal(s): {}",
         removals.len(),

@@ -20,7 +20,7 @@
 //! empty / relative / NUL-bearing values are silently ignored (with a WARN
 //! emitted at first use) so a malformed env var never crashes boot.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use tracing::warn;
@@ -61,6 +61,30 @@ pub fn resolve_subdir(name: &str) -> PathBuf {
 /// single helper to avoid path inconsistencies.
 pub fn goal_store_path() -> PathBuf {
     simard_state_root().join("state").join("goal_store.json")
+}
+
+/// Canonical path of the authoritative goal-board file (issue #1).
+///
+/// Resolves to `<state_root>/state/goal_board.json`. This is the single durable
+/// source of truth for the OODA goal board (see [`crate::goal_board_store`]);
+/// distinct from the legacy [`goal_store_path`] (`goal_store.json`) used by the
+/// pre-memory goal-records migration.
+pub fn goal_board_json_path() -> PathBuf {
+    crate::goal_board_store::store_path(&simard_state_root())
+}
+
+/// Canonical path of the cross-process goal-board advisory `flock` file for a
+/// given `state_root`. Both [`crate::goal_curation::save_goal_board`] and
+/// [`crate::goal_board_store`] rendezvous on this one file (issue #2511) so the
+/// daemon's snapshot flush and a concurrent `simard goal` CLI mutation cannot
+/// interleave.
+pub fn goal_board_lock_path_in(state_root: &Path) -> PathBuf {
+    state_root.join("state").join("goal-board.lock")
+}
+
+/// [`goal_board_lock_path_in`] rooted at the resolved [`simard_state_root`].
+pub fn goal_board_lock_path() -> PathBuf {
+    goal_board_lock_path_in(&simard_state_root())
 }
 
 /// Look up `SIMARD_STATE_ROOT` and return `Some(path)` only if it passes the

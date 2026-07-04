@@ -16,6 +16,17 @@ related:
 
 # How to recover a corrupted or missing goal board
 
+> **Update (issue [#1](https://github.com/rysweet/Simard/issues/1)):** the goal
+> board is no longer "stored exclusively in cognitive memory". As of issue #1
+> the authoritative board is the durable file
+> `<state_root>/state/goal_board.json`, and the `goal-board:snapshot`
+> cognitive-memory fact is a **derived cache** rebuilt from that file each
+> cycle. To recover, restore or delete `goal_board.json` (a missing or corrupt
+> file makes the daemon start from an empty board and re-migrate from the
+> snapshot); the cognitive-memory steps below apply to the derived cache. See
+> [Authoritative goal-board store](../concepts/authoritative-goal-board-store.md)
+> for the current design.
+
 > **Status: design specification — partially implemented (issue [#1590](https://github.com/rysweet/Simard/issues/1590)).**
 >
 > This how-to relies on three CLI subcommands that are part of the issue

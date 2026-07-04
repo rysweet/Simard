@@ -15,6 +15,18 @@ related:
 
 # Goal board API reference
 
+> **Update (issue [#1](https://github.com/rysweet/Simard/issues/1)):** the
+> "single source of truth (target state)" and "cognitive memory is the sole
+> authoritative store" claims below are **superseded**. As of issue #1 the
+> authoritative goal board is the durable, flock-guarded file
+> `<state_root>/state/goal_board.json` (see
+> [`goal_board_store`](../concepts/authoritative-goal-board-store.md)); the
+> `goal-board:snapshot` cognitive-memory fact is now a **derived cache**. The
+> `load_goal_board` / `save_goal_board` / `persist_board` API described here
+> still exists and now services that derived cache. Read the
+> [Authoritative goal-board store](../concepts/authoritative-goal-board-store.md)
+> concept for the current design.
+
 > **Status: design specification — partially implemented (issue [#1590](https://github.com/rysweet/Simard/issues/1590)).**
 >
 > The persistence functions (`load_goal_board`, `save_goal_board`,

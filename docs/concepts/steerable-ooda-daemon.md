@@ -22,6 +22,15 @@ related:
 
 # Concept: keeping the OODA daemon steerable
 
+> **Update (issue #1):** the fixes narrated here (#2534) were sound in intent
+> but never *fired* in production — the board was still a versioned
+> cognitive-memory snapshot, so operator edits were clobbered, the breaker's
+> counter reset on every ~hourly restart, and done goals were never swept. They
+> are superseded by the
+> [authoritative goal-board store](./authoritative-goal-board-store.md), which
+> makes `goal_board.json` the single durable source of truth. Read that page for
+> the current design.
+
 This document is the **single coherent narrative** for a systemic incident in
 which the autonomous OODA daemon became *un-steerable and stuck*. It ties
 together four fixes that each already have their own focused reference and
