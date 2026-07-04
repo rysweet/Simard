@@ -72,7 +72,7 @@ pub fn assemble(opts: &AssembleOptions) -> StatusSnapshot {
         schema_version: super::SCHEMA_VERSION,
         generated_at: snapshot::now_rfc3339(),
         daemon,
-        resources: assemble_resources(main_pid),
+        resources: assemble_resources(main_pid, &opts.state_root),
         memory: assemble_memory(metrics.as_ref(), &opts.state_root),
         gym: assemble_gym(gym_skipped),
         goals: SectionEnvelope::absent("goal board read deferred (see dashboard/TUI goal board)"),
@@ -154,7 +154,10 @@ fn assemble_daemon(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
 
 // ── resources ───────────────────────────────────────────────────────────────
 
-fn assemble_resources(daemon_pid: Option<u32>) -> SectionEnvelope<Resources> {
+fn assemble_resources(
+    daemon_pid: Option<u32>,
+    state_root: &std::path::Path,
+) -> SectionEnvelope<Resources> {
     let (load_1, load_5, load_15) = read_loadavg();
     let (total, avail) = read_meminfo();
     let used = match (total, avail) {
@@ -162,7 +165,14 @@ fn assemble_resources(daemon_pid: Option<u32>) -> SectionEnvelope<Resources> {
         _ => None,
     };
     let rss_bytes = daemon_pid.and_then(read_process_rss_bytes);
-    let live_engineers = count_live_engineers();
+    // #2432 design G4/G5: the authoritative live-engineer count is the set of
+    // live worktree dispatch claims (a sentinel PID per real engineer worktree,
+    // verified alive), NOT a fragile process-name grep. The retired pgrep pattern
+    // matched `simard-engineer` (hyphen) while engineers actually run as
+    // `simard engineer run single-process …` (space), silently undercounting the
+    // live fleet (observed 17 real → 1 matched). The claim file is written by the
+    // spawn path itself, so it cannot drift the way a name pattern can.
+    let live_engineers = Some(crate::ooda_brain::count_live_engineer_claims(state_root));
 
     let any = load_1.is_some() || total.is_some();
     if !any {
@@ -196,20 +206,6 @@ fn read_process_rss_bytes(pid: u32) -> Option<u64> {
         }
     }
     None
-}
-
-/// Count live engineer/agent subprocesses via `pgrep`. `None` when `pgrep` is
-/// unavailable; `Some(0)` when it ran and found none.
-fn count_live_engineers() -> Option<u32> {
-    let output = std::process::Command::new("pgrep")
-        .args(["-f", "-c", "simard-engineer|RustyClawd|copilot.*--auto"])
-        .output()
-        .ok()?;
-    // pgrep exits 1 with "0\n" when there are no matches; still a valid count.
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u32>()
-        .ok()
 }
 
 /// Resolve and stat the operator's home mount for the disk row.

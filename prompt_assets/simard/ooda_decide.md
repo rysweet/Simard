@@ -1,4 +1,4 @@
-CRITICAL: Your first non-blank line MUST be `DECISION: <variant>`. Do NOT output JSON.
+CRITICAL: Emit your decision as a single fenced ```json envelope — `{"decision": "<variant>", "rationale": "..."}` — whose required `decision` field is exactly one of the OPTIONS variants. The legacy `DECISION: <variant>` first-line marker remains accepted for backward compatibility.
 
 # OODA Brain — Decide Phase: Action-Kind Routing
 
@@ -93,40 +93,34 @@ goals mean distinct engineers on distinct items.
 
 ## OUTPUT_FORMAT
 
-Use the **prose-first DECISION marker protocol** (matching the format the
-other OODA brains have already migrated to — see `ooda_brain.md`).
+Emit your decision as a **single fenced JSON envelope** — the machine-parseable
+`decision` block the daemon's shared extractor reads (issue #2432). This is the
+required, unambiguous contract; it replaces free-prose keyword-sniffing.
 
-**Do NOT output JSON.** The daemon parser reads the first non-blank line for a
-`DECISION:` marker — a JSON object on the first line is an immediate parse
-failure.
+**Rule 1 — the structured decision envelope.** Return exactly one fenced
+```json ... ``` block whose required `"decision"` field is one of the OPTIONS
+variants:
 
-
-**Rule 1 — first non-blank line is the decision.** Begin your response with:
-
-```
-DECISION: <variant>
+```json
+{"decision": "advance_goal", "rationale": "ordinary goal slug, default routing"}
 ```
 
-where `<variant>` is exactly one of the snake_case tags from the OPTIONS
-section: `advance_goal`, `consolidate_memory`, `run_improvement`,
+where the `decision` value is exactly one of the snake_case tags from the
+OPTIONS section: `advance_goal`, `consolidate_memory`, `run_improvement`,
 `poll_developer_activity`, `extract_ideas`, `safe_update`, `research_query`,
-`run_gym_eval`, `build_skill`, `launch_session`. The keyword `DECISION` is
-matched case-insensitively but the variant token must match exactly. Only the
-first non-blank line is inspected — a `DECISION:` line later in the response
-is ignored.
+`run_gym_eval`, `build_skill`, `launch_session`. The `rationale` cites the
+`goal_id` or `reason` from the input.
 
-**Rule 2 — rationale follows on subsequent lines.** After the marker line,
-provide a short free-form rationale citing the `goal_id` or `reason` from the
-input. Example:
+**Rule 2 — backward-compatible fallback.** If you cannot emit the JSON
+envelope, a first line consisting of the variant token alone (e.g.
+`advance_goal`), followed by a free-form rationale on later lines, is still
+accepted. The daemon reads the structured `decision` field first and falls back
+to the first whitespace-delimited token only when no envelope is present.
 
-```
-DECISION: advance_goal
-ordinary goal slug, default routing
-```
-
-If neither a `DECISION:` marker nor a parseable variant can be found, the
-daemon falls back to the deterministic prefix mapping (`__memory__` →
-consolidate_memory etc., else `advance_goal`). Extra fields are silently
+If neither a JSON `decision` envelope nor a parseable first-word variant can be
+found, the daemon falls back to the deterministic prefix mapping (`__memory__` →
+consolidate_memory etc., else `advance_goal`) and records a loud
+`brain_parse_error` — a silent default is forbidden. Extra fields are silently
 ignored (forward compatible).
 
 ## EXAMPLES

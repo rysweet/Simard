@@ -329,9 +329,12 @@ fn maybe_escalate_to_gh_issue(record: &ParseFailureRecord) {
         .output()
     {
         Ok(out) if out.status.success() => {
-            eprintln!(
-                "[simard] DETERMINISTIC SAFEGUARD: gh issue filed for {} brain parse-failure on goal '{}' ({} consecutive cycles)",
-                record.phase, record.goal_id, record.consecutive_count,
+            tracing::info!(
+                target: "simard::ooda_brain",
+                phase = %record.phase,
+                goal_id = %record.goal_id,
+                consecutive_count = record.consecutive_count,
+                "deterministic safeguard: gh issue filed for brain parse-failure",
             );
         }
         Ok(out) => {

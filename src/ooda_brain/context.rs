@@ -100,25 +100,39 @@ pub(crate) fn compute_commits_behind() -> u32 {
         .unwrap_or(0)
 }
 
-/// Count engineer worktrees under `<state_root>/engineer-worktrees/` that
-/// have a live `.simard-engineer-claim` heartbeat (sentinel pid still alive).
-/// Best-effort — returns 0 on missing dir / IO failure / parse failure.
+/// A live engineer worktree dispatch claim: the sentinel PID that allocated the
+/// worktree (verified still alive) and the worktree directory name (which
+/// encodes the goal slug). This is the most truthful "an engineer is in-flight"
+/// signal — the claim file is written by the spawn path itself and gated on a
+/// live PID, so it cannot silently drift the way a process-name pattern or a
+/// registration side-effect can (issue #2432, design G4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveEngineerClaim {
+    /// The still-alive sentinel PID recorded in `.simard-engineer-claim`.
+    pub pid: i32,
+    /// The worktree directory name (`<goal-slug>-<suffix>`), used as a task
+    /// label on operator surfaces.
+    pub worktree_name: String,
+}
+
+/// Enumerate engineer worktrees under `<state_root>/engineer-worktrees/` whose
+/// `.simard-engineer-claim` sentinel names a still-live PID. Best-effort —
+/// returns an empty vec on missing dir / IO failure / parse failure.
 ///
-/// Used by the `consider_self_update` doctrine: the safe-update orchestrator
-/// drains in-flight engineers as phase 1, so a non-zero count means the
-/// drain would block (or time out). The brain uses this to decide whether
-/// "now" is the right moment to consider an upgrade.
-pub fn count_live_engineer_claims(state_root: &Path) -> u32 {
+/// The single source of truth for "which engineers are live" (issue #2432,
+/// design G4): the dashboard active-engineers gauge and the status snapshot both
+/// derive from this, rather than a fragile process-name grep that undercounts
+/// (design G5). [`count_live_engineer_claims`] is a thin count over this.
+pub fn live_engineer_claims(state_root: &Path) -> Vec<LiveEngineerClaim> {
     let worktrees_root = state_root.join(crate::engineer_worktree::WORKTREES_SUBDIR);
     let entries = match std::fs::read_dir(&worktrees_root) {
         Ok(e) => e,
-        Err(_) => return 0,
+        Err(_) => return Vec::new(),
     };
-    let mut count: u32 = 0;
+    let mut claims = Vec::new();
     for entry in entries.flatten() {
-        let claim = entry
-            .path()
-            .join(crate::engineer_worktree::ENGINEER_CLAIM_FILE);
+        let path = entry.path();
+        let claim = path.join(crate::engineer_worktree::ENGINEER_CLAIM_FILE);
         let raw = match std::fs::read_to_string(&claim) {
             Ok(s) => s,
             Err(_) => continue,
@@ -128,10 +142,28 @@ pub fn count_live_engineer_claims(state_root: &Path) -> u32 {
             None => continue,
         };
         if crate::engineer_worktree::is_pid_alive_public(pid) {
-            count = count.saturating_add(1);
+            let worktree_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            claims.push(LiveEngineerClaim { pid, worktree_name });
         }
     }
-    count
+    claims
+}
+
+/// Count engineer worktrees under `<state_root>/engineer-worktrees/` that
+/// have a live `.simard-engineer-claim` heartbeat (sentinel pid still alive).
+/// Best-effort — returns 0 on missing dir / IO failure / parse failure. Derives
+/// from [`live_engineer_claims`], the single source of truth (design G4).
+///
+/// Used by the `consider_self_update` doctrine: the safe-update orchestrator
+/// drains in-flight engineers as phase 1, so a non-zero count means the
+/// drain would block (or time out). The brain uses this to decide whether
+/// "now" is the right moment to consider an upgrade.
+pub fn count_live_engineer_claims(state_root: &Path) -> u32 {
+    live_engineer_claims(state_root).len() as u32
 }
 
 /// Minutes since the last safe-update attempt (success or failure), inferred

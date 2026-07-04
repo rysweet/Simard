@@ -497,7 +497,6 @@ mod tests_b {
     // sessions), so an empty registry with a live engineer can never render 0.
     #[tokio::test]
     #[serial_test::serial(cognitive_memory)]
-    #[ignore = "TDD red (issue #2432): un-ignore when the workboard active-engineers gauge unions live worktree dispatch claims with the subagent registry"]
     async fn workboard_active_engineers_not_zero_when_registry_empty_but_claim_live() {
         use crate::operator_commands_dashboard::workboard::workboard;
         use crate::test_support::HermeticState;

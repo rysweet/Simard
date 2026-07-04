@@ -60,6 +60,24 @@ just because the engineer process is alive:
 
 ## OUTPUT_FORMAT
 
+**Rule 0 — preferred structured decision envelope (issue #2432).** The
+machine-parseable contract the daemon's shared extractor reads is a single
+fenced JSON envelope whose required `decision` field is one of the OPTIONS
+variants:
+
+```json
+{"decision": "continue_skipping", "rationale": "engineer healthy; 2 commits last cycle"}
+```
+
+The `decision` value is exactly one of `continue_skipping`,
+`reclaim_and_redispatch`, `deprioritize`, `open_tracking_issue`,
+`mark_goal_blocked`, `consider_self_update`. Variants with required fields add
+them alongside `decision` (`redispatch_context`, `title`/`body`, `reason`). The
+daemon reads this structured `decision` field first; the prose-first `DECISION:`
+marker below remains accepted for backward compatibility. A parse-miss that
+survives the bounded escalation ladder is surfaced as a loud `brain_parse_error`
+— never a silent default.
+
 Use the **prose-first DECISION marker protocol** (defined normatively in
 [`docs/reference/ooda-brain-decision-protocol.md`](../../docs/reference/ooda-brain-decision-protocol.md),
 introduced in [#1711](https://github.com/rysweet/Simard/issues/1711)).

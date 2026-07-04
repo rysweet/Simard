@@ -286,9 +286,6 @@ pub fn distill_recent_episodes_with_runner(
             min = DISTILL_MIN_EPISODES,
             "distill: {pulled} episodes pulled, below min {DISTILL_MIN_EPISODES}, skipped"
         );
-        eprintln!(
-            "[simard] distill: {pulled} episodes pulled, below min {DISTILL_MIN_EPISODES}, skipped"
-        );
         return Ok(DistillReport::skipped());
     }
 
@@ -298,9 +295,6 @@ pub fn distill_recent_episodes_with_runner(
         batch = DISTILL_BATCH_SIZE,
         min = DISTILL_MIN_EPISODES,
         "distill: {pulled} episodes pulled (batch size {DISTILL_BATCH_SIZE}, min {DISTILL_MIN_EPISODES})"
-    );
-    eprintln!(
-        "[simard] distill: {pulled} episodes pulled (batch size {DISTILL_BATCH_SIZE}, min {DISTILL_MIN_EPISODES})"
     );
 
     // Run the recipe with a bounded in-cycle retry on TRANSIENT failures only
@@ -341,10 +335,6 @@ pub fn distill_recent_episodes_with_runner(
                         error = %e,
                         "distill: transient failure, retrying in-cycle with format reinforcement"
                     );
-                    eprintln!(
-                        "[simard] distill: transient {} on attempt {attempt}, retrying in-cycle (strict json)",
-                        class.as_str()
-                    );
                     continue;
                 }
                 tracing::warn!(
@@ -354,9 +344,6 @@ pub fn distill_recent_episodes_with_runner(
                     class = class.as_str(),
                     error = %e,
                     "distill: {pulled} episodes pulled, recipe error, no markers set, retry next pass"
-                );
-                eprintln!(
-                    "[simard] distill: {pulled} episodes pulled, recipe error: {e}, no markers set, retry next pass"
                 );
                 // Make the previously-silent non-fatal failure visible (#2461).
                 // Recorded BEFORE the early return; episodes stay unmarked, so
@@ -428,10 +415,6 @@ pub fn distill_recent_episodes_with_runner(
                 threshold = DISTILL_RELIABILITY_THRESHOLD,
                 "distill: quarantined low-reliability fact (below threshold), not promoted"
             );
-            eprintln!(
-                "[simard] distill: quarantined low-reliability fact concept={} confidence={:.2} < {:.2}",
-                fact.concept, confidence, DISTILL_RELIABILITY_THRESHOLD
-            );
             continue;
         }
 
@@ -469,10 +452,6 @@ pub fn distill_recent_episodes_with_runner(
                 concept = %fact.concept,
                 confidence,
                 "distill: an equal-or-stronger copy of this fact already exists; not downgrading prior"
-            );
-            eprintln!(
-                "[simard] distill: kept stronger prior for concept={} (new confidence={:.2} would downgrade an identical fact)",
-                fact.concept, confidence
             );
             continue;
         }
@@ -531,9 +510,6 @@ pub fn distill_recent_episodes_with_runner(
         marked,
         reduction_pct,
         "distill: {pulled} episodes → {stored} facts, {stored_procs} procedures, {marked} marked (reduction {reduction_pct:.0}%)"
-    );
-    eprintln!(
-        "[simard] distill: {pulled} episodes → {stored} facts, {stored_procs} procedures, {marked} marked"
     );
 
     // Issue #2528: mirror the distill outcome into the unified telemetry facade

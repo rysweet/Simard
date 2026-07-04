@@ -218,7 +218,6 @@ fn retry_budget_is_bounded_and_exhaustion_is_a_parse_failure() {
 
 #[test]
 #[serial(cognitive_memory)]
-#[ignore = "TDD red (issue #2432): un-ignore when ladder exhaustion emits the loud `brain_parse_error` metric instead of a silent deterministic default"]
 fn ladder_exhaustion_emits_brain_parse_error_metric() {
     with_temp_home("exhaustion-metric", || {
         let before = count_metric("brain_parse_error");
@@ -246,7 +245,6 @@ fn ladder_exhaustion_emits_brain_parse_error_metric() {
 
 #[test]
 #[serial(cognitive_memory)]
-#[ignore = "TDD red (issue #2432): un-ignore when a genuine take-no-action is a DISTINCT outcome, provably separate from a parse-failure default"]
 fn genuine_no_action_is_distinct_from_a_parse_failure_default() {
     with_temp_home("noop-distinct", || {
         // A GENUINELY PARSED continue_skipping: healthy engineer, nothing to do.
@@ -361,7 +359,6 @@ fn every_reasoner_capture_path_routes_through_the_shared_chokepoint() {
 // ===========================================================================
 
 #[test]
-#[ignore = "TDD red (issue #2432): un-ignore when every reasoner prompt mandates a fenced JSON envelope with a required `decision` field (replacing free-prose keyword/first-word sniffing)"]
 fn reasoner_prompts_mandate_a_json_envelope_decision_block() {
     for rel in [
         "prompt_assets/simard/ooda_decide.md",
@@ -498,7 +495,6 @@ fn distillation_parses_banner_and_ansi_polluted_facts_object() {
 }
 
 #[test]
-#[ignore = "TDD red (issue #2432): un-ignore when the distillation parser survives the observed ~78%-failing capture shapes; replace these with the real captured fixtures the fix collects"]
 fn distillation_parses_observed_failure_fixtures() {
     // Placeholder fixtures approximating the observed failures: a newer copilot
     // launcher version string, a text-mode status banner, and a leading bare
@@ -529,7 +525,6 @@ fn distillation_parses_observed_failure_fixtures() {
 // ===========================================================================
 
 #[test]
-#[ignore = "TDD red (issue #2432): un-ignore when the escalation ladder + reasoner + distillation paths emit STRUCTURED TRACING ONLY (the fix removes the stderr/stdout print macros they use today)"]
 fn changed_reasoner_code_uses_structured_tracing_only() {
     // Needles assembled via concat! so this test file itself never contains the
     // literal print-macro tokens (keeps the operator's git-grep contract clean).

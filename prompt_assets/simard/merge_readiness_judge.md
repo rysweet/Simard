@@ -56,6 +56,11 @@ PR_BODY:
 
 Return exactly one JSON object, nothing else. No markdown fences, no prose around it.
 
+This reasoner's structured **decision field** is `verdict` — the machine-parseable
+decision the merge authority acts on (issue #2432). It is read through the shared
+extractor; a parse-miss that survives escalation fails **closed** to `unclear`
+and is surfaced as a loud `brain_parse_error`, never a silent `ready`.
+
 Schema (the verdict is one of `ready`, `not_ready`, `unclear`):
 
 ```json
