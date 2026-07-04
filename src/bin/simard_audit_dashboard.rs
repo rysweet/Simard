@@ -6,7 +6,10 @@
 //! - Runs a jargon scan across every captured DOM dump.
 //! - Emits a consolidated `out/REPORT.md` ready to paste into an epic body.
 //!
-//! Build: `cargo build --features dashboard-audit --bin simard-audit-dashboard`
+//! Build: `cargo build --bin simard-audit-dashboard` (the `dashboard-audit`
+//!        feature is on by default since #2576; `--features dashboard-audit` is
+//!        now redundant). Needs a real Chrome binary at runtime, so the bin
+//!        keeps its `required-features` marker and stays out of the release tarball.
 //! Run:   `target/debug/simard-audit-dashboard`
 //!
 //! Prerequisites: same as `simard-audit-pass01` (daemon on :8080, dashkey, Chrome).
