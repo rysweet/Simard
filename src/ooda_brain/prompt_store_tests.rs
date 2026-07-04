@@ -1623,7 +1623,8 @@ fn engineer_system_dep_bump_preserves_2410_landing() {
 
 #[test]
 fn progress_reviewer_rejects_unbumped_dep_after_upstream_landing() {
-    // The reviewer cannot diff git revs (text-only, fails open on unknown verdicts),
+    // The reviewer cannot diff git revs (text-only; it fails CLOSED on a
+    // semantic verdict parse-miss but cannot inspect commits),
     // so the rule is EVIDENCE-ABSENCE: reject a done/100% claim that describes landing
     // an upstream build-dependency change but shows no evidence of BOTH the own
     // Cargo.toml rev bump AND a verified `cargo build`.

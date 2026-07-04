@@ -72,10 +72,15 @@ The reviewer **rejects** when the claimed percent looks hallucinated:
 - A 100% claim with no shipped artifact in the plan or WIP.
 - A claim that contradicts the plan (e.g. "blocked on review" but claims 90%).
 
-On **LLM infrastructure failure** (transport error, parse error, empty
-response), the reviewer **accepts** with a diagnostic rationale. The gate's
+On a **genuine infrastructure gap** (LLM transport error, or an *empty*
+response), the reviewer **accepts** with a diagnostic rationale — the gate's
 purpose is to catch hallucinated jumps, not to block goals on LLM
-availability.
+availability. But a **semantic parse-miss** — a *successful, non-empty*
+response that carries no recognizable `accept`/`reject` verdict (unparseable
+output, or an unknown verdict string) — is treated as evidence-absence and
+**rejected**, so a hallucinated "no verdict" bump cannot land. (`Reject`
+keeps the prior percent and logs a hallucination alert; it does not stall the
+goal.)
 
 > **History:** Prior to PR #2007/#2011, evidence was gathered via `git log`
 > and `gh pr list` shellouts (the `DefaultProgressEvidenceChecker`). Per user
@@ -91,9 +96,11 @@ time the brain makes a progress claim. An LLM reviewer can assess whether a
 claimed delta is *proportional to the described plan* — a judgment call that
 a fixed-rule state machine cannot make.
 
-The trade-off is that the reviewer depends on LLM availability. The fail-open
-design means an LLM outage degrades to pre-#1967 behavior (all claims
-accepted) rather than blocking all goals.
+The trade-off is that the reviewer depends on LLM availability. The
+fail-open-on-**infra** design means an LLM outage degrades to pre-#1967
+behavior (claims accepted) rather than blocking all goals — while a
+successful run that produces no parseable verdict still fails **closed**, so
+the outage tolerance never becomes a blanket "accept everything".
 
 ### What does *not* count as evidence
 

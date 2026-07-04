@@ -41,7 +41,7 @@ sites in the codebase parsed JSON from LLM or recipe output:
 | `decide.rs` | `DecideJudgment` from LLM response | `find('{')..rfind('}')` extraction — boundary attacks, partial objects |
 | `orient.rs` | `OrientJudgment` from LLM response | Same extraction pattern |
 | `rustyclawd.rs` | `EngineerLifecycleDecision` from LLM response | JSON fallback path after DECISION marker — two parsers, double failure surface |
-| `progress_reviewer.rs` | `ReviewerResponse` from LLM response | Dead code — replaced by recipe_progress_checker |
+| `progress_reviewer.rs` | `ReviewerResponse` from LLM response | Retained as the live direct-LLM fallback tier (used when `recipe-runner-rs` is unavailable); its tolerant `parse_reviewer_response` is now also reused by `recipe_progress_checker.rs` for JSON-first verdict extraction |
 | `merge_judge.rs` | `JudgeOutcome` from LLM response | Dead code — replaced by recipe_merge_judge |
 
 Every one of these was brittle and unnecessary:
@@ -227,9 +227,12 @@ Several modules were deleted or cleaned up as part of the text-migration changes
   `parse_orient_from_text`, `parse_lifecycle_from_text`) rewritten as trivial
   first-word/first-float extractors.
 
-The daemon wiring in `operator_commands_ooda/daemon/mod.rs` was updated to
-match: the `LlmReviewerProgressChecker` fallback arm was removed. The chain
-is now `RecipeProgressChecker` → `NoopProgressEvidenceChecker`.
+The daemon wiring in `operator_commands_ooda/daemon/mod.rs` resolves the
+progress-evidence gate in three tiers: `RecipeProgressChecker` (recipe-runner
+backed, primary) → `LlmReviewerProgressChecker` (direct-LLM fallback, in
+`progress_reviewer.rs`) → `NoopProgressEvidenceChecker`. Both live LLM tiers
+share the same infra-fail-open / semantic-parse-miss-fail-closed verdict policy
+(see [Progress-evidence API](../reference/progress-evidence-api.md)).
 
 ## Why this matters for engineer spawning
 

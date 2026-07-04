@@ -16,10 +16,20 @@
 //! Prompt template: `prompt_assets/simard/progress_assessment_reviewer.md`.
 //! Response shape: `{"verdict": "accept"|"reject", "rationale": "..."}`.
 //!
-//! Failure handling: on LLM transport error, JSON parse error, or empty
-//! response, the reviewer **accepts** with a diagnostic rationale. The
-//! purpose of this gate is to catch hallucinated progress jumps — not to
-//! block goals on LLM infrastructure issues.
+//! Failure handling splits INFRA failures from SEMANTIC parse-misses
+//! (reasoner-reliability; the sibling of the #2462/#2463/#2569 verdict
+//! family that made the merge judge fail closed to `Unclear`):
+//!   * **Infra failure** — no usable response was produced (LLM transport
+//!     error, or an *empty* response). The reviewer **accepts** with a
+//!     diagnostic so goals are never blocked on LLM infrastructure hiccups.
+//!   * **Semantic parse-miss** — the LLM *did* return a non-empty response
+//!     but it carries no recognizable `accept`/`reject` verdict (unparseable
+//!     JSON, or a valid object with an unknown verdict string). The reviewer
+//!     **rejects**: refusing an unverified upward progress bump is safe
+//!     (`Reject` keeps the prior percent, it does not stall the goal) and
+//!     stops a hallucinated "0%→100% with no verdict" jump from landing.
+//!
+//! The purpose of this gate is to catch hallucinated progress jumps.
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -107,11 +117,26 @@ impl<S: LlmSubmitter> ProgressEvidenceChecker for LlmReviewerProgressChecker<S> 
 
         match parse_reviewer_response(&raw) {
             Ok(parsed) => decision_from_response(parsed),
-            Err(parse_err) => EvidenceDecision::Accept {
-                reason: format!(
-                    "{ADAPTER_TAG}: parse error ({parse_err}); accepting to avoid blocking goal"
-                ),
-            },
+            Err(parse_err) => {
+                if raw.trim().is_empty() {
+                    // Empty response = LLM infra hiccup (no output produced).
+                    // Keep fail-OPEN so goals are not blocked on transport gaps.
+                    EvidenceDecision::Accept {
+                        reason: format!(
+                            "{ADAPTER_TAG}: empty LLM response ({parse_err}); accepting to avoid blocking goal on infra"
+                        ),
+                    }
+                } else {
+                    // Non-empty but unparseable = the reviewer ran yet produced
+                    // no recognizable verdict. Fail CLOSED so a hallucinated
+                    // progress bump is not silently accepted.
+                    EvidenceDecision::Reject {
+                        reason: format!(
+                            "{ADAPTER_TAG}: unparseable non-empty response ({parse_err}); rejecting unverified progress"
+                        ),
+                    }
+                }
+            }
         }
     }
 }
@@ -152,10 +177,12 @@ fn decision_from_response(r: ReviewerResponse) -> EvidenceDecision {
             reason: format!("{ADAPTER_TAG}: reject — {rationale}"),
         }
     } else {
-        // Unknown verdict string — accept with diagnostic.
-        EvidenceDecision::Accept {
+        // Unknown verdict string on a successful, non-empty response — the
+        // reviewer ran but gave no clear accept/reject. Fail CLOSED: refuse
+        // the unverified progress bump rather than silently accepting it.
+        EvidenceDecision::Reject {
             reason: format!(
-                "{ADAPTER_TAG}: unknown verdict {:?}; accepting to avoid blocking goal",
+                "{ADAPTER_TAG}: unknown verdict {:?}; rejecting unverified progress",
                 r.verdict
             ),
         }
@@ -412,32 +439,57 @@ mod tests {
     }
 
     #[test]
-    fn parse_error_falls_back_to_accept() {
+    fn unparseable_nonempty_response_fails_closed_to_reject() {
+        // The LLM returned non-empty text that carries no parseable verdict.
+        // This is a SEMANTIC parse-miss (not an infra gap), so the gate must
+        // fail CLOSED and refuse the unverified progress bump.
         let stub = StubSubmitter {
             response: Ok("this is not json at all".to_string()),
         };
         let c = LlmReviewerProgressChecker::new(stub);
         let g = goal_with_activity(None);
         match c.check(&g, 10, 20, now()) {
-            EvidenceDecision::Accept { reason } => {
-                assert!(reason.contains("parse error"), "got: {reason}");
+            EvidenceDecision::Reject { reason } => {
+                assert!(reason.contains("unparseable"), "got: {reason}");
             }
-            EvidenceDecision::Reject { .. } => panic!("expected accept on parse failure"),
+            EvidenceDecision::Accept { .. } => {
+                panic!("expected reject on unparseable non-empty response")
+            }
         }
     }
 
     #[test]
-    fn unknown_verdict_falls_back_to_accept() {
+    fn empty_response_falls_back_to_accept() {
+        // An EMPTY LLM response is treated as an infra hiccup (no output
+        // produced), so the gate stays fail-OPEN to avoid blocking the goal.
+        let stub = StubSubmitter {
+            response: Ok("   ".to_string()),
+        };
+        let c = LlmReviewerProgressChecker::new(stub);
+        let g = goal_with_activity(None);
+        match c.check(&g, 10, 20, now()) {
+            EvidenceDecision::Accept { reason } => {
+                assert!(reason.contains("empty LLM response"), "got: {reason}");
+            }
+            EvidenceDecision::Reject { .. } => panic!("expected accept on empty response"),
+        }
+    }
+
+    #[test]
+    fn unknown_verdict_fails_closed_to_reject() {
+        // A valid JSON object with an unrecognized verdict string is a
+        // SEMANTIC parse-miss: the reviewer ran but gave no clear accept/
+        // reject, so the gate must fail CLOSED (reasoner-reliability).
         let stub = StubSubmitter {
             response: Ok(r#"{"verdict": "maybe", "rationale": "shrug"}"#.to_string()),
         };
         let c = LlmReviewerProgressChecker::new(stub);
         let g = goal_with_activity(None);
         match c.check(&g, 10, 20, now()) {
-            EvidenceDecision::Accept { reason } => {
+            EvidenceDecision::Reject { reason } => {
                 assert!(reason.contains("unknown verdict"), "got: {reason}");
             }
-            EvidenceDecision::Reject { .. } => panic!("expected accept on unknown verdict"),
+            EvidenceDecision::Accept { .. } => panic!("expected reject on unknown verdict"),
         }
     }
 

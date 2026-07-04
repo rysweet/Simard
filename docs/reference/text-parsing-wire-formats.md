@@ -377,16 +377,35 @@ The parser scans the entire stdout for a verdict keyword. Everything else
 
 ### 2a. Progress checker (`recipe_progress_checker.rs`)
 
-**Keywords:**
+**Resolution order (structured verdict first, then keyword prose):** the
+recipe's prompt contract emits a JSON object
+`{"verdict": "accept"|"reject", "rationale": "..."}`, so the parser tries the
+**structured JSON verdict first** (via the shared
+`progress_reviewer::parse_reviewer_response` extractor — as-is / fenced /
+brace-balanced / outermost), mirroring the merge judge's
+`parse_judge_response`-first path. Parsing the object first avoids substring
+false-positives — e.g. an `accept` verdict whose *rationale* mentions "reject"
+(a naive `contains("reject")` scan would wrongly flip it to Reject), or
+"unacceptable" containing the `accept` substring. A valid JSON object with an
+*unknown* verdict string is a semantic parse-miss → `Reject` (fail-closed).
+Only when no verdict JSON parses does it fall back to the plain keyword scan.
+
+**Keywords (prose fallback):**
 
 | Keyword | Maps to | Priority |
 |---------|---------|----------|
 | `reject` | `EvidenceDecision::Reject` | Checked first |
 | `accept` | `EvidenceDecision::Accept` | Checked second |
 
-**Default (no keyword):** `EvidenceDecision::Accept` — fail-open. The gate's
-purpose is to catch hallucinated jumps, not to block goals on keyword-detection
-availability.
+**Default (no verdict):** splits on whether the run produced output. A
+**successful, non-empty** stdout with no `accept`/`reject` verdict is a
+*semantic parse-miss* → `EvidenceDecision::Reject` (**fail-closed**): the
+reviewer ran but gave no verdict, so the unverified progress bump is refused
+rather than silently accepted. Output that strips to **empty** is treated as an
+*infra gap* → `EvidenceDecision::Accept` (**fail-open**), so a lost-output
+hiccup does not block the goal. Genuine invocation failures (spawn / non-zero
+exit) likewise fail open. The gate's purpose is to catch hallucinated jumps
+without blocking goals on infrastructure availability.
 
 **Example recipe stdout:**
 
@@ -399,23 +418,18 @@ WIP summary references new test files in tests/integration/.
 
 The 8-point increase is proportional to the described work.
 
-accept
+{"verdict": "accept", "rationale": "8pt delta matches the described test work"}
 ```
 
-Parser result: `EvidenceDecision::Accept { reason: "After reviewing the plan and progress claims: ..." }`
+Parser result: `EvidenceDecision::Accept { reason: "recipe-progress-checker: accept — …" }`
 
-**Changes from prior implementation:**
-
-- `parse_reviewer_response` (which parsed JSON `ReviewerResponse`) is removed.
-- `RecipeProgressChecker::check()` now calls `parse_verdict_from_text()`
-  directly and returns `EvidenceDecision` without the intermediate
-  `ReviewerResponse` type.
-- The `progress_reviewer.rs` module (containing `LlmReviewerProgressChecker`)
-  is deleted. It was dead code — the daemon wiring already used
-  `RecipeProgressChecker` as the primary tier.
-- The daemon fallback chain is now: `RecipeProgressChecker` →
-  `NoopProgressEvidenceChecker` (was: `RecipeProgressChecker` →
-  `LlmReviewerProgressChecker` → `NoopProgressEvidenceChecker`).
+**Tier relationship:** `RecipeProgressChecker` is the primary tier;
+`progress_reviewer.rs`'s `LlmReviewerProgressChecker` is the live **direct-LLM
+fallback** tier (used when `recipe-runner-rs` is unavailable). The daemon
+resolution chain is `RecipeProgressChecker` → `LlmReviewerProgressChecker` →
+`NoopProgressEvidenceChecker`. Both live tiers share the same
+infra-fail-open / semantic-parse-miss-fail-closed policy and reuse the same
+`parse_reviewer_response` verdict extractor.
 
 ---
 
