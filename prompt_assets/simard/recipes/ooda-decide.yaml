@@ -222,8 +222,27 @@ steps:
 
       ## Instructions
 
-      Output the action keyword as the very first word of your response
-      (e.g. `advance_goal`, `consolidate_memory`). Follow with a brief
-      rationale citing the goal_id or reason. The daemon reads only the
-      first whitespace-delimited token; everything after is rationale.
+      **Preferred — emit a structured JSON decision envelope.** Respond with a
+      single JSON object of this exact shape (a fenced ```json block is fine;
+      the daemon strips any surrounding banner/prose before parsing):
+
+      ```json
+      {"decision": "<action_keyword>", "rationale": "<brief reason citing goal_id or reason>"}
+      ```
+
+      where `<action_keyword>` is exactly one of: `advance_goal`,
+      `consolidate_memory`, `run_improvement`, `poll_developer_activity`,
+      `extract_ideas`, `safe_update`, `research_query`, `run_gym_eval`,
+      `build_skill`, `launch_session`.
+
+      **Accepted fallback** — if you cannot emit JSON, output the action keyword
+      as the very first word of your response (e.g. `advance_goal ...`), followed
+      by a brief rationale. The daemon's fallback scanner reads the first
+      whitespace-delimited token.
+
+      Do NOT wrap your answer so it can't be parsed as either form. If your
+      output is unparseable, the daemon does NOT guess a default — it records a
+      `brain_parse_error`, retries you with a schema-repair prompt, and surfaces
+      an explicit error only if the bounded retry still fails (never a silent
+      fabricated decision).
     output: "decide_result"

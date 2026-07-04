@@ -75,17 +75,30 @@ steps:
 
       ## DECISION
 
-      Choose how strongly to demote `base_urgency`. Output the adjusted
-      urgency as a bare decimal number (e.g. `0.42`) as the very first
-      token of your response. Follow with your rationale.
+      Choose how strongly to demote `base_urgency`.
 
-      The daemon reads only the first `N.N` pattern; everything after is
-      rationale text. The value must satisfy `0 ≤ adjusted_urgency ≤ base_urgency`.
-      If no valid decimal is found, the daemon falls back to the deterministic
-      floor (`urgency − 0.2 × failure_count`).
+      **Preferred — emit a structured JSON envelope.** Respond with a single JSON
+      object of this exact shape (a fenced ```json block is fine; the daemon
+      strips any surrounding banner/prose before parsing):
 
-      Reference scale (deterministic floor — match this unless the situation
-      clearly differs):
+      ```json
+      {"adjusted_urgency": <float>, "confidence": <float 0..1>, "rationale": "<short reason>"}
+      ```
+
+      **Accepted fallback** — if you cannot emit JSON, output the adjusted
+      urgency as a bare decimal number (e.g. `0.42`) as the very first token of
+      your response, followed by your rationale (the daemon's fallback scanner
+      reads the first `N.N` pattern).
+
+      In BOTH forms the value must satisfy `0 ≤ adjusted_urgency ≤ base_urgency`;
+      an out-of-range or missing value is treated as unparseable. When your
+      output is unparseable the daemon does NOT silently apply the deterministic
+      floor as if it were your decision — it records a `brain_parse_error`,
+      retries you with a schema-repair prompt, and surfaces an explicit error
+      only if the bounded retry still fails (the goal keeps its base urgency,
+      never a fabricated demotion).
+
+      Reference scale (use this unless the situation clearly differs):
 
       - `failure_count = 1` → light penalty, ~0.2 below base.
       - `failure_count = 2` → moderate, ~0.4 below base.
