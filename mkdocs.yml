@@ -113,6 +113,7 @@ nav:
     - Goal Stewardship Mode: concepts/stewardship-mode.md
     - Automated Disk-Health Management: concepts/automated-disk-health.md
     - Update-Check Design: concepts/update-check-design.md
+    - The amplihack Freshness Gate: concepts/amplihack-freshness-gate.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
@@ -155,6 +156,7 @@ nav:
     - Verify and Roll Back a Self-Deploy: howto/verify-and-roll-back-a-self-deploy.md
     - Run Self-Deploy from Any Directory: howto/run-self-deploy-from-any-directory.md
     - Check for Updates: howto/check-for-updates.md
+    - Configure the amplihack Freshness Gate: howto/configure-amplihack-freshness-gate.md
     - Self-Maintain Dependency Pins: howto/self-maintain-dependency-pins.md
     - Configure Adaptive Scaling: howto/configure-adaptive-scaling.md
     - Configure Pluggable Identity: howto/configure-pluggable-identity.md
@@ -183,6 +185,7 @@ nav:
     - simard-tui Dashboard: reference/simard-tui.md
     - npx / npm Install: reference/npx-npm-install.md
     - Update Check: reference/update-check.md
+    - amplihack Freshness Gate: reference/amplihack-freshness-gate.md
     - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md

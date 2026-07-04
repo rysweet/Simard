@@ -72,6 +72,23 @@ pub fn run_ooda_daemon(
 
     std::fs::create_dir_all(&state_root)?;
 
+    // Freshness gate at daemon startup (issue #439): belt-and-suspenders run of
+    // `amplihack update` under the same cross-process lock and TTL the per-spawn
+    // gate uses, so the very first engineer of the boot already runs on the
+    // latest amplihack-rs. A failed update is surfaced (warn/error log +
+    // `amplihack_update_failure` metric); the daemon still boots on the
+    // last-known-good install (strict mode gates engineer spawns, not boot).
+    {
+        let outcome = crate::amplihack_freshness_gate::ensure_amplihack_fresh_in(&state_root);
+        daemon_log(
+            &state_root,
+            &format!(
+                "[simard] OODA daemon: amplihack freshness gate at startup -> {}",
+                outcome.as_str()
+            ),
+        );
+    }
+
     // Reap any stale lock file from a prior crashed daemon before we open.
     if let Err(e) = memory_ipc::reap_stale_open_lock(&state_root) {
         eprintln!("[simard] OODA daemon: stale-lock reap failed: {e}");

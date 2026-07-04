@@ -111,6 +111,28 @@ and **Ecosystem & Audits** sections. A native MkDocs
 block now makes `mkdocs build --strict` fail on future orphaned pages and dead
 anchors, so discoverability cannot silently regress.
 
+### 7. amplihack freshness gate before each engineer spawn (#439)
+
+Engineers run on an installed `amplihack-rs` (its recipes, `recipe-runner`, and
+SDK adapters), refreshed by the operator command `amplihack update`. A **stale**
+installed bundle had carried per-step agent timeouts that upstream already
+**removed**; those leftover timeouts killed working agent steps mid-run. Per the
+operator directive — "Simard must always be using the latest `amplihack-rs`" and
+"run `amplihack update` before starting each engineer" — the freshness gate now
+runs `amplihack update` immediately before `spawn_subordinate` in
+`src/ooda_actions/advance_goal/spawn.rs::dispatch_spawn_engineer`, and once at
+startup in `run_ooda_daemon`. The gate is serialized and deduplicated by a
+`flock(2)` advisory lock at `<state_root>/amplihack-update.lock` plus a durable
+last-success TTL in `<state_root>/amplihack-update-state.json` (default
+`SIMARD_AMPLIHACK_UPDATE_TTL_SECS=300`), so a spawn burst performs one update,
+not one per engineer. A failed update is **surfaced, never swallowed**: it logs
+via `tracing` and records an `amplihack_update_failure` metric, then by default
+proceeds on the last-known-good install, or — under
+`SIMARD_REQUIRE_FRESH_AMPLIHACK=1` — refuses the spawn with an explicit error.
+See [The amplihack freshness gate](concepts/amplihack-freshness-gate.md), the
+[freshness-gate reference](reference/amplihack-freshness-gate.md), and
+[Configure the amplihack freshness gate](howto/configure-amplihack-freshness-gate.md).
+
 ## Relationship to the PRD
 
 The original product requirements document,
