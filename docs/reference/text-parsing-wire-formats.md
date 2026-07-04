@@ -68,7 +68,7 @@ Used by: **every** recipe-backed parser below, before it runs.
 |---|---|
 | `strip_ansi(&str) -> Cow` | Single ANSI (CSI/OSC/two-char) stripper. `Cow::Borrowed` on the clean path (no `ESC` byte). |
 | `strip_recipe_noise(&str) -> Cow` | `strip_ansi` + drop ISO-8601 tracing lines, runner-banner lines, **and Copilot launch-log preamble lines** (via `is_noise_line`). `Cow::Borrowed` on the clean path. |
-| `is_noise_line(&str) -> bool` *(private)* | Per-line predicate: `true` for an ISO-timestamp tracing line, a runner summary-banner line, **or** a Copilot launcher line (`is_copilot_launcher_line`). A JSON payload (`{`-leading), action keyword, bare decimal, or verdict keyword never matches, so dropping such a line never discards the answer. |
+| `is_noise_line(&str) -> bool` *(private)* | Per-line predicate: `true` for an ISO-timestamp tracing line, a runner summary-banner line, **or** a Copilot launcher line (`is_copilot_launcher_line`). A JSON payload line beginning (after `trim_start`) with a structural token (`{`, `"`, `[`), an action keyword, a bare decimal, or a verdict keyword never matches, so dropping such a line never discards the answer. |
 | `is_copilot_launcher_line(&str) -> bool` *(private)* | The launcher-only arm (#2496). Anchored `starts_with`/`contains` matches on the four launcher shapes below; matches **no** payload line. ANSI is stripped before it runs. |
 | `balanced_objects` / `last_balanced_object` / `extract_json_payload` | String-literal-aware balanced `{…}` scan. JSON extraction is **dual-pass** (line-dropped **and** ANSI-only) so the payload survives both an interleaved log line inside a pretty body and a same-line log prefix. |
 | `extract_verdict(raw, keywords)` | Precedence keyword scan over cleaned text. |
@@ -87,10 +87,14 @@ no decision token, JSON payload, decimal, or verdict keyword is ever eaten:
 | contains `launching copilot binary=` / `version="GitHub Copilot CLI` | `… INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot version="GitHub Copilot CLI 1.0.66-2."` |
 | leading `INFO`/`WARN` launcher line with **no** ISO-8601 timestamp | `INFO using cached login`, `WARN extension not pinned` |
 
-A line that begins with `{`, a known action keyword, a bare decimal, or a
-verdict keyword is **never** classified as a launcher line. ANSI escapes are
-stripped first, so an ANSI-coloured `INFO`/`WARN` launcher line still matches and
-a coloured payload line still survives. See
+A line that begins (after `trim_start`) with a JSON **structural token** — `{`,
+`"`, or `[` — a known action keyword, a bare decimal, or a verdict keyword is
+**never** classified as a launcher line. The structural-token guard is explicit
+([#2570](https://github.com/rysweet/Simard/issues/2570)) so the `contains`-based
+`launching copilot binary=` / `version="GitHub Copilot CLI` arms above cannot
+drop a pretty-printed fact `"content"` line that quotes one of those substrings.
+ANSI escapes are stripped first, so an ANSI-coloured `INFO`/`WARN` launcher line
+still matches and a coloured payload line still survives. See
 [Concept: Copilot launch-log preamble stripping § correctness as safety](../concepts/copilot-launcher-preamble-stripping.md#correctness-as-safety-never-eat-the-payload).
 
 #### Example: launcher preamble + ANSI around a decide decision

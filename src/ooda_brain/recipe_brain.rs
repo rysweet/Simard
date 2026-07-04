@@ -4248,3 +4248,82 @@ mod issue_2496_decide_orient_launcher_tests {
         assert_eq!(v3["cause"], "ok");
     }
 }
+
+/// Issue #2570: the distillation fact-yield fix tightened the shared
+/// `is_copilot_launcher_line` predicate so a JSON structural-token line (`{`,
+/// `"`, `[`) is never launcher noise. `is_copilot_launcher_line` /
+/// `strip_recipe_noise` is a shared chokepoint, so these decide/orient/lifecycle
+/// consumers must keep stripping the REAL launcher preamble (the property they
+/// depend on) — the guard only exempts JSON payload lines, which real launcher
+/// lines never are. This module is the decide/orient/lifecycle third of the
+/// cross-consumer regression coverage the issue asks for.
+#[cfg(test)]
+mod issue_2570_cross_consumer_launcher_guard_tests {
+    use super::*;
+
+    /// The real Copilot CLI 1.0.66-2 launch preamble the consumers must still
+    /// strip. None of these lines begins with a JSON structural token, so the
+    /// #2570 guard leaves them classified as launcher noise.
+    fn launcher_preamble() -> String {
+        "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: cfg\n\
+         INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot \
+         version=\"GitHub Copilot CLI 1.0.66-2.\"\n\
+         Run 'copilot update' to check for updates.\n"
+            .to_string()
+    }
+
+    #[test]
+    fn decide_still_strips_real_launcher_preamble() {
+        let raw = format!("{}run_improvement fix the flaky test", launcher_preamble());
+        let (decision, outcome) = parse_action_outcome(&raw);
+        assert_eq!(
+            outcome,
+            LifecycleParseOutcome::Parsed,
+            "decide must still strip the real launcher preamble after the #2570 guard"
+        );
+        assert!(
+            matches!(decision, DecideJudgment::RunImprovement { .. }),
+            "the model's real action must be read, not launcher noise"
+        );
+    }
+
+    #[test]
+    fn orient_still_strips_real_launcher_preamble() {
+        // The version string 1.0.66-2 sits on a launcher line that must still be
+        // dropped, so the model's real 0.37 is the first float read.
+        let raw = format!("{}0.37 demote after one failure", launcher_preamble());
+        let (judgment, outcome) = parse_orient_outcome(&raw, 0.80, 1);
+        assert_eq!(outcome, LifecycleParseOutcome::Parsed);
+        assert!(
+            (judgment.adjusted_urgency - 0.37).abs() < 1e-9,
+            "must read the model's 0.37, not the version string; got {}",
+            judgment.adjusted_urgency
+        );
+    }
+
+    #[test]
+    fn lifecycle_still_strips_real_launcher_preamble() {
+        let raw = format!("{}deprioritize the goal is stalled", launcher_preamble());
+        let (decision, outcome) = parse_lifecycle_outcome(&raw);
+        assert_eq!(outcome, LifecycleParseOutcome::Parsed);
+        assert!(
+            matches!(decision, EngineerLifecycleDecision::Deprioritize { .. }),
+            "the model's real lifecycle decision must be read, not launcher noise"
+        );
+    }
+
+    #[test]
+    fn shared_cleaner_preserves_pretty_fact_content_line_quoting_launcher_substring() {
+        // The other half of the #2570 contract on the exact shared chokepoint
+        // these consumers call: a `"`-leading fact content line that quotes the
+        // launcher substring is preserved, not dropped.
+        let content_line =
+            "\"content\": \"the agent logged launching copilot binary=/x before answering\"";
+        let cleaned = crate::recipe_output::strip_recipe_noise(content_line);
+        assert_eq!(
+            cleaned.as_ref(),
+            content_line,
+            "a JSON payload line must survive the shared cleaner"
+        );
+    }
+}

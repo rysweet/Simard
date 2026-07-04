@@ -20,9 +20,12 @@ description: >
   The fix (`recover_distill_output` + `candidate_runner_envelopes`) evaluates
   BOTH cleaned views and commits to the candidate that actually yields a
   populated `DistillOutput`, so the intact `strip_ansi` view wins over the
-  gutted `strip_recipe_noise` view. This scenario pins the full ANSI-wrapped
-  multi-line `1.0.66-2` banner + pretty envelope + inner-banner `output` shape
-  end-to-end (facts AND procedures recovered), preserves the
+  gutted `strip_recipe_noise` view. (Post-#2570: the shared structural-token
+  guard now preserves that `"output": …` line, so the line-dropping view
+  recovers this pretty shape on its own; the two-view selection remains as
+  defence-in-depth for shapes it can still gut.) This scenario pins the full
+  ANSI-wrapped multi-line `1.0.66-2` banner + pretty envelope + inner-banner
+  `output` shape end-to-end (facts AND procedures recovered), preserves the
   `success == false` -> RecipeReportedFailure contract, and keeps a genuinely
   empty "nothing to distill" answer an empty Ok (no burned retry) so the
   `distill_parse_success_rate` metric path stays green.
@@ -67,7 +70,7 @@ steps:
       outputContains:
         - "full_1_0_66_2_launch_banner_with_ansi_and_envelope_recovers_facts_and_procedures ... ok"
         - "facts_only_wrapper_recovers_facts_from_pretty_envelope ... ok"
-        - "line_dropping_view_alone_guts_the_pretty_envelope_output ... ok"
+        - "line_dropping_view_preserves_pretty_envelope_output_after_2570_guard ... ok"
         - "banner_prefixed_failed_pretty_envelope_reports_recipe_failure ... ok"
         - "banner_prefixed_pretty_envelope_with_nothing_to_distill_returns_empty_ok ... ok"
         - "test result: ok"

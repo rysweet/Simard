@@ -433,3 +433,60 @@ mod tests {
         assert!(matched_reject, "a real verdict must report matched=true");
     }
 }
+
+/// Issue #2570: `is_copilot_launcher_line` / `strip_recipe_noise` is a shared
+/// chokepoint. The distillation fact-yield fix exempts JSON structural-token
+/// lines (`{`, `"`, `[`) from launcher-noise classification; this
+/// progress-checker consumer must keep stripping the REAL launcher preamble
+/// (which never begins with a JSON token) so a noise-obscured verdict is still
+/// read. This is the progress-checker slice of the cross-consumer regression
+/// coverage.
+#[cfg(test)]
+mod issue_2570_cross_consumer_tests {
+    use super::*;
+
+    fn launcher_preamble() -> String {
+        "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: cfg\n\
+         INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot \
+         version=\"GitHub Copilot CLI 1.0.66-2.\"\n\
+         Run 'copilot update' to check for updates.\n"
+            .to_string()
+    }
+
+    #[test]
+    fn progress_checker_still_strips_real_launcher_preamble() {
+        let raw = format!(
+            "{}reject — no measurable progress this cycle",
+            launcher_preamble()
+        );
+        let (decision, matched) = parse_verdict_outcome(&raw);
+        assert!(
+            matched,
+            "the real reject must be read, not silently defaulted"
+        );
+        match decision {
+            EvidenceDecision::Reject { reason } => {
+                assert!(reason.contains("reject"), "got: {reason}");
+                assert!(
+                    !reason.contains("launching copilot"),
+                    "launcher preamble must be dropped from the rationale: {reason}"
+                );
+            }
+            EvidenceDecision::Accept { .. } => {
+                panic!("noise-obscured reject must be recovered after the #2570 guard")
+            }
+        }
+    }
+
+    #[test]
+    fn shared_cleaner_preserves_pretty_fact_content_line_quoting_launcher_substring() {
+        let content_line =
+            "\"content\": \"the agent logged launching copilot binary=/x before answering\"";
+        let cleaned = crate::recipe_output::strip_recipe_noise(content_line);
+        assert_eq!(
+            cleaned.as_ref(),
+            content_line,
+            "a JSON payload line must survive the shared cleaner"
+        );
+    }
+}

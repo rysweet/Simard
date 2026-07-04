@@ -984,3 +984,54 @@ mod issue_2501_2555_real_envelope_tests {
         );
     }
 }
+
+/// Issue #2570: `is_copilot_launcher_line` / `strip_recipe_noise` is a shared
+/// chokepoint. The distillation fact-yield fix exempts JSON structural-token
+/// lines (`{`, `"`, `[`) from launcher-noise classification; this merge-judge
+/// consumer must keep stripping the REAL launcher preamble (which never begins
+/// with a JSON token) so a noise-obscured verdict is still read. This is the
+/// merge-judge slice of the cross-consumer regression coverage.
+#[cfg(test)]
+mod issue_2570_cross_consumer_tests {
+    use super::*;
+    use crate::ooda_brain::LifecycleParseOutcome;
+
+    fn launcher_preamble() -> String {
+        "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: cfg\n\
+         INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot \
+         version=\"GitHub Copilot CLI 1.0.66-2.\"\n\
+         Run 'copilot update' to check for updates.\n"
+            .to_string()
+    }
+
+    #[test]
+    fn merge_judge_still_strips_real_launcher_preamble() {
+        let raw = format!(
+            "{}not_ready the quality audit is incomplete",
+            launcher_preamble()
+        );
+        let (out, outcome) = parse_merge_outcome(&raw);
+        assert_eq!(
+            outcome,
+            LifecycleParseOutcome::Parsed,
+            "merge-judge must still strip the launcher preamble after the #2570 guard"
+        );
+        assert_eq!(
+            out.verdict,
+            Verdict::NotReady,
+            "the model's real verdict must be read, not launcher noise"
+        );
+    }
+
+    #[test]
+    fn shared_cleaner_preserves_pretty_fact_content_line_quoting_launcher_substring() {
+        let content_line =
+            "\"content\": \"the agent logged launching copilot binary=/x before answering\"";
+        let cleaned = crate::recipe_output::strip_recipe_noise(content_line);
+        assert_eq!(
+            cleaned.as_ref(),
+            content_line,
+            "a JSON payload line must survive the shared cleaner"
+        );
+    }
+}
