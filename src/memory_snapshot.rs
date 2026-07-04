@@ -70,10 +70,23 @@ pub fn save_session_snapshot(
     Ok(path)
 }
 
-/// Find the most recent snapshot file in `dir` and load it.
+/// Find the most recent *loadable* snapshot in `dir` and return it.
 ///
-/// Returns `None` when the directory is empty or contains no valid
-/// snapshot files.
+/// Snapshots are tried newest → oldest. If the newest snapshot file is
+/// corrupt or otherwise unreadable — e.g. a partial write from an older
+/// binary that predates the crash-safe writer (issue #1918), on-disk
+/// corruption, or a payload the current schema can no longer parse — the
+/// loader transparently falls back to the most recent snapshot that *does*
+/// load instead of discarding the entire retained snapshot history. A
+/// session teardown persists up to `keep` snapshots (see
+/// [`prune_snapshots`]), so a single bad snapshot at the tip must never
+/// silently wipe memory across a restart; graceful degradation to the last
+/// good snapshot preserves durable recall. This mirrors the library
+/// backend's own "fall back to the most recent verified backup" startup
+/// recovery.
+///
+/// Returns `None` only when the directory is empty, cannot be read, or
+/// contains no loadable snapshot file.
 #[allow(deprecated)] // we intentionally use the legacy snapshot API
 pub fn load_latest_snapshot(dir: &Path) -> Option<MemorySnapshot> {
     let mut entries: Vec<PathBuf> = match std::fs::read_dir(dir) {
@@ -101,21 +114,41 @@ pub fn load_latest_snapshot(dir: &Path) -> Option<MemorySnapshot> {
         return None;
     }
 
-    // Sort by filename descending — filenames contain an epoch timestamp so
-    // lexicographic order == chronological order.
+    // Sort by filename ascending — filenames embed an epoch timestamp so
+    // lexicographic order == chronological order. Walk newest → oldest so a
+    // corrupt or unreadable newest snapshot degrades to the most recent VALID
+    // snapshot rather than returning `None` and discarding the entire retained
+    // history (durable recall: one bad snapshot must not silently wipe memory
+    // across a restart).
     entries.sort();
-    let latest = entries.last().expect("entries is non-empty after sort");
-
-    match crate::remote_transfer::load_snapshot_from_file(latest) {
-        Ok(snapshot) => Some(snapshot),
-        Err(e) => {
-            eprintln!(
-                "[simard] snapshot: failed to load {}: {e}",
-                latest.display()
-            );
-            None
+    let total = entries.len();
+    for (skipped, path) in entries.iter().rev().enumerate() {
+        match crate::remote_transfer::load_snapshot_from_file(path) {
+            Ok(snapshot) => {
+                if skipped > 0 {
+                    eprintln!(
+                        "[simard] snapshot: recovered older snapshot {} after skipping {} newer unreadable snapshot(s)",
+                        path.display(),
+                        skipped
+                    );
+                }
+                return Some(snapshot);
+            }
+            Err(e) => {
+                eprintln!(
+                    "[simard] snapshot: failed to load {} ({} of {total}): {e}; trying an older snapshot",
+                    path.display(),
+                    skipped + 1
+                );
+            }
         }
     }
+
+    eprintln!(
+        "[simard] snapshot: all {total} snapshot(s) in {} were unreadable; no memory restored",
+        dir.display()
+    );
+    None
 }
 
 /// Prune old snapshot files, retaining only the `keep` most recent.
@@ -243,6 +276,77 @@ mod tests {
         assert_eq!(count, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Issue: durable recall must survive a corrupt/partial "tip" snapshot.
+    // A session teardown persists up to `keep` snapshots; if the newest one is
+    // unreadable (e.g. a partial write from a pre-#1918 binary, on-disk
+    // corruption, or a payload the current schema can no longer parse), the
+    // loader must fall back to the most recent snapshot that *does* load rather
+    // than returning `None` and silently discarding the entire history.
+    #[test]
+    fn load_latest_snapshot_falls_back_to_older_valid_when_newest_corrupt() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+
+        // Older, VALID snapshot (bare legacy format is accepted by the loader).
+        std::fs::write(
+            dir.join("agent-0000000100.json"),
+            r#"{"facts":[],"procedures":[],"exported_at":100,"source_agent":"old-valid"}"#,
+        )
+        .expect("write valid snapshot");
+        // Newer, CORRUPT snapshot (simulates an interrupted/partial write).
+        std::fs::write(
+            dir.join("agent-0000000200.json"),
+            b"{ this is not valid json",
+        )
+        .expect("write corrupt snapshot");
+
+        let loaded = load_latest_snapshot(dir)
+            .expect("must fall back to the older valid snapshot instead of returning None");
+        assert_eq!(
+            loaded.source_agent, "old-valid",
+            "loader must recover the most recent LOADABLE snapshot, not surface None for a corrupt tip"
+        );
+    }
+
+    #[test]
+    fn load_latest_snapshot_returns_none_when_all_snapshots_corrupt() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+
+        std::fs::write(dir.join("agent-0000000100.json"), b"not json either")
+            .expect("write corrupt snapshot");
+        std::fs::write(dir.join("agent-0000000200.json"), b"{ broken")
+            .expect("write corrupt snapshot");
+
+        assert!(
+            load_latest_snapshot(dir).is_none(),
+            "when no snapshot in the directory is loadable the loader must report None"
+        );
+    }
+
+    #[test]
+    fn load_latest_snapshot_prefers_newest_when_valid() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+
+        std::fs::write(
+            dir.join("agent-0000000100.json"),
+            r#"{"facts":[],"procedures":[],"exported_at":100,"source_agent":"older"}"#,
+        )
+        .expect("write older snapshot");
+        std::fs::write(
+            dir.join("agent-0000000200.json"),
+            r#"{"facts":[],"procedures":[],"exported_at":200,"source_agent":"newer"}"#,
+        )
+        .expect("write newer snapshot");
+
+        let loaded = load_latest_snapshot(dir).expect("load newest valid snapshot");
+        assert_eq!(
+            loaded.source_agent, "newer",
+            "when the newest snapshot is valid it must be returned unchanged (no needless fallback)"
+        );
     }
 
     #[test]
