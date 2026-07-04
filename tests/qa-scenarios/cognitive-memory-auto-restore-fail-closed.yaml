@@ -1,0 +1,81 @@
+name: cognitive-memory-auto-restore-fail-closed
+app_type: cli
+description: |
+  Verify the cognitive-memory auto-restore path distinguishes a *confirmed-empty*
+  store from a *swallowed read-failure* (issue #2561, follow-up to #2550/#2559).
+
+  `memory_snapshot::auto_restore_if_empty` hydrates a store from an on-disk
+  snapshot only when `CognitiveMemoryOps::probe_emptiness` reports
+  `ConfirmedEmpty`. A read *failure* is surfaced as `Err` (never coerced to
+  "empty"), so a transient read error at daemon startup can never cause a
+  snapshot to be layered on top of still-present-but-unreadable durable memory
+  and duplicate it once reads recover.
+
+  Behaviour is proven by the hermetic unit tests this scenario drives (in-memory
+  bridge + tempdir; no `$HOME/.simard`, no live store — no destructive action
+  against the host). The CLI runner rejects any non-zero exit, so a failing test
+  fails the scenario.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # Path (a): a confirmed-empty store (reads cleanly as all-zeros) restores the
+  # whole snapshot. First invocation may compile the test binary; later filters
+  # reuse it.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_snapshot::tests::auto_restore_hydrates_a_confirmed_empty_store"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Path (b) — the core #2561 guard: an injected read-failure is surfaced as an
+  # error AND performs zero writes, so existing durable memory is neither wiped
+  # nor duplicated.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_snapshot::tests::auto_restore_fails_closed_on_read_error_without_wiping_memory"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Non-empty store is left untouched (re-importing would duplicate memories).
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_snapshot::tests::auto_restore_skips_a_non_empty_store"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Disk-sourced convenience wrapper also fails closed before reading a snapshot.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_snapshot::tests::auto_restore_latest_fails_closed_on_read_error"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
