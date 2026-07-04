@@ -71,6 +71,7 @@ nav:
     - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Closing the Procedural-Learning Loop: concepts/procedural-learning-loop.md
+    - Rust Domain-Expertise Gym (first experiment): concepts/rust-expertise-gym.md
     - Trustworthy Confidence + External Completion: concepts/trustworthy-confidence-and-external-completion.md
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
   - Tutorials:

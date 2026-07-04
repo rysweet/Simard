@@ -9,6 +9,10 @@ name = "simard-gym"
 path = "src/bin/simard_gym.rs"
 
 [[bin]]
+name = "simard-rust-gym"
+path = "src/bin/simard_rust_gym.rs"
+
+[[bin]]
 name = "simard-ooda-step"
 path = "src/bin/simard_ooda_step.rs"
 
