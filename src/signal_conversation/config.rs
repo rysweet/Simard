@@ -24,12 +24,25 @@ pub struct SignalConfig {
     /// If true, non-allowlisted senders may receive READ-ONLY results (e.g.
     /// `status`) but can never trigger a mutation. Default false.
     pub read_only_unknown: bool,
+    /// signal-cli's OWN linked-device id, for single-number linked-device setups
+    /// (issue #2575). Used as defence-in-depth loop prevention: a Note-to-Self
+    /// (sync-sent) message whose source device equals this id is rejected so
+    /// Simard never reprocesses her own synced-back replies. Optional — the
+    /// primary-phone (device 1) gate is the primary loop guard and needs no
+    /// configuration. When set it must be `>= 2` (device 1 is always the
+    /// operator's primary phone); a value `< 2` is a hard error at load.
+    pub own_device_id: Option<u32>,
 }
 
 pub const ENV_ENDPOINT: &str = "SIMARD_SIGNAL_ENDPOINT";
 pub const ENV_ACCOUNT: &str = "SIMARD_SIGNAL_ACCOUNT";
 pub const ENV_ALLOWLIST: &str = "SIMARD_SIGNAL_ALLOWLIST";
 pub const ENV_READ_ONLY_UNKNOWN: &str = "SIMARD_SIGNAL_READ_ONLY_UNKNOWN";
+pub const ENV_OWN_DEVICE_ID: &str = "SIMARD_SIGNAL_OWN_DEVICE_ID";
+
+/// The lowest valid `own_device_id`: signal-cli, as a linked device, is always
+/// `>= 2`. Device 1 is reserved for the account owner's primary phone.
+const MIN_OWN_DEVICE_ID: u32 = 2;
 
 /// The `[signal]` table as read from `config.toml` (every field optional so env
 /// can supply or override it).
@@ -39,6 +52,7 @@ struct SignalTable {
     account: Option<String>,
     allowlist: Option<Vec<String>>,
     read_only_unknown: Option<bool>,
+    own_device_id: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -77,11 +91,14 @@ impl SignalConfig {
             Err(_) => table.read_only_unknown.unwrap_or(false),
         };
 
+        let own_device_id = resolve_own_device_id(table.own_device_id)?;
+
         Ok(Self {
             endpoint,
             account,
             allowlist,
             read_only_unknown,
+            own_device_id,
         })
     }
 }
@@ -123,5 +140,49 @@ fn resolve_string(env_key: &str, file_value: Option<String>, field: &str) -> Sim
             key: format!("signal.{field}"),
             help: format!("set `{env_key}` or add `{field}` to the [signal] table of config.toml"),
         }),
+    }
+}
+
+/// Resolve the optional `own_device_id` env-first, then the config file.
+///
+/// Absent everywhere → `None` (fail-safe: the primary-phone/device-1 gate is the
+/// primary loop guard and needs no configuration). A present-but-unparseable env
+/// value, or any resolved value `< 2`, is a hard error — never a silent default —
+/// matching the fail-loud contract of the other `[signal]` fields.
+fn resolve_own_device_id(file_value: Option<u32>) -> SimardResult<Option<u32>> {
+    let resolved = match std::env::var(ENV_OWN_DEVICE_ID) {
+        Ok(v) => {
+            let v = v.trim();
+            if v.is_empty() {
+                file_value
+            } else {
+                let parsed = v
+                    .parse::<u32>()
+                    .map_err(|_| SimardError::InvalidConfigValue {
+                        key: "signal.own_device_id".to_string(),
+                        value: v.to_string(),
+                        help: format!(
+                            "own_device_id must be an integer >= {MIN_OWN_DEVICE_ID} \
+                         (signal-cli's own linked-device id; device 1 is always the \
+                         operator's primary phone)"
+                        ),
+                    })?;
+                Some(parsed)
+            }
+        }
+        Err(_) => file_value,
+    };
+
+    match resolved {
+        Some(id) if id < MIN_OWN_DEVICE_ID => Err(SimardError::InvalidConfigValue {
+            key: "signal.own_device_id".to_string(),
+            value: id.to_string(),
+            help: format!(
+                "own_device_id must be >= {MIN_OWN_DEVICE_ID}; device 1 is always the \
+                 operator's primary phone, so a value < {MIN_OWN_DEVICE_ID} would reject \
+                 genuine Note-to-Self commands"
+            ),
+        }),
+        other => Ok(other),
     }
 }

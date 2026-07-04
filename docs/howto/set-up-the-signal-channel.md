@@ -1,11 +1,11 @@
 ---
 title: How to set up the Signal channel
-description: Connect Simard to Signal so an allowlisted operator can command her and receive notifications, using a locally-run signal-cli JSON-RPC daemon. Covers the signal feature build, linking a device (or using a dedicated number), configuration, the allowlist, and verification.
-last_updated: 2026-07-03
+description: Connect Simard to Signal so an allowlisted operator can command her and receive notifications, using a locally-run signal-cli JSON-RPC daemon. Covers the signal feature build, linking a device (or using a dedicated number), the Note-to-Self flow for single-number linked-device setups, loop prevention, configuration, the allowlist, and verification.
+last_updated: 2026-07-04
 review_schedule: as-needed
 owner: simard
 doc_type: howto
-issues: ["#2527"]
+issues: ["#2527", "#2575"]
 related:
   - ../index.md
   - ../reference/signal-conversation.md
@@ -69,6 +69,25 @@ signal-cli prints a `sgnl://linkdevice?...` URI (and a QR code). On your phone:
 the URI). When linking finishes, note the account number (your own E.164, e.g.
 `+15551234567`) — that is the `account` value below.
 
+> **Single number? You chat with Simard via _Note to Self._** When signal-cli is a
+> linked device on your *own* account, the number you message Simard **from** and the
+> `account` she receives **on** are the **same** number. There is no separate number
+> to text, so the operator commands Simard by messaging **themselves** — Signal's
+> **Note to Self** conversation. signal-cli delivers those to Simard as *sync-sent*
+> messages, and she accepts a Note-to-Self message from your **primary phone** as an
+> operator command. See [Chatting via Note to Self](#chatting-via-note-to-self-single-number-setups)
+> below for the trust boundary and how this stays loop-free.
+
+While you are linked, record signal-cli's own **device id** — you will use it for
+defence-in-depth loop prevention (`own_device_id`, step 4):
+
+```bash
+signal-cli -a +15551234567 listDevices
+```
+
+Your phone is **always device 1**; the `simard-daemon` device you just linked has a
+higher id (e.g. `2`). Note that number.
+
 ### Option B — Register a dedicated number
 
 Register a separate number that Simard owns:
@@ -105,17 +124,35 @@ The `[signal]` table is only parsed and applied in a `--features signal` build
 
 ```toml
 [signal]
-endpoint = "127.0.0.1:7583"     # the signal-cli daemon from step 3
+endpoint = "127.0.0.1:7583"      # the signal-cli daemon from step 3
 account  = "+15551234567"        # the linked/dedicated account from step 2
 allowlist = ["+15559876543"]     # YOUR operator number(s) — who may command Simard
 read_only_unknown = false        # keep unknown senders fully ignored (default)
+# own_device_id = 2              # single-number setups only: signal-cli's OWN linked
+                                 # device id (>= 2) from `listDevices` — defence-in-depth
+                                 # loop prevention. A value < 2 is rejected at load. Omit
+                                 # it for a dedicated number.
 ```
 
 - **`allowlist` is the security boundary.** Only the E.164 numbers listed here may
   command Simard. It is **fail-closed**: an empty or missing allowlist means
   *nobody* may command her. Put the operator's own phone number here — the number
-  you message Simard *from*, which is different from `account` (the number Simard
-  receives *on*).
+  you message Simard *from*.
+    - **Dedicated number (Option B):** the operator number is **different** from
+      `account` (the number Simard receives *on*).
+    - **Single-number linked device (Option A):** the operator number **is** the
+      `account` number, so `account` and `allowlist` hold the **same** E.164. This is
+      correct and required — a Note-to-Self command's sender *is* the account. It does
+      **not** weaken fail-closed behavior: an unknown sender is still ignored, and a
+      Note-to-Self message is accepted only when it comes from your **primary phone**
+      (device 1) — see [Chatting via Note to Self](#chatting-via-note-to-self-single-number-setups).
+- **`own_device_id` (optional, single-number setups).** signal-cli's own linked
+  device id (from `signal-cli … listDevices`, an integer `>= 2`, e.g. `2`). It is
+  defence-in-depth: even without it Simard already rejects her own echoes (only device 1
+  may command), but setting it makes the own-device rejection explicit. Resolve it
+  env-first with `SIMARD_SIGNAL_OWN_DEVICE_ID`. Omit it for a dedicated number. A present
+  value that is unparseable **or `< 2`** is a hard config error (device 1 is your phone,
+  so `own_device_id = 1` would disable Note to Self) — never a silent default.
 - Set `read_only_unknown = true` only if you want non-allowlisted senders to be
   able to read `status`; they can never trigger a mutation.
 
@@ -143,8 +180,12 @@ with the feature — no Signal code is compiled into a default build.
 
 ## 6. Verify the round trip
 
-From your **operator** phone (an allowlisted number), message Simard's Signal
-account:
+Message Simard from your **operator** phone (an allowlisted number):
+
+- **Dedicated number (Option B):** open the conversation with Simard's Signal
+  `account` and send to it.
+- **Single-number linked device (Option A):** open **Note to Self** (you are the
+  account) and send there — that is the only way to reach Simard on a single number.
 
 ```text
 status
@@ -170,6 +211,58 @@ merge then proceeds through the gated
 [operational autonomy model](../concepts/operational-autonomy-model.md) for the full
 HIGH-RISK boundary.
 
+## Chatting via Note to Self (single-number setups)
+
+When signal-cli is a **linked device on your own account** (Option A), you and Simard
+share one number, so you command her from **Note to Self**. This section explains how
+that works and — critically — how Simard avoids an infinite self-reply loop.
+
+### Why Note to Self
+
+A linked device receives everything the account does. When you type into **Note to
+Self** on your phone, Signal syncs that to every linked device as a **sync-sent**
+message (`syncMessage.sentMessage`) — a transcript of a message the account sent to
+itself. signal-cli forwards it to Simard, who reads the body (`status`, a question,
+`merge #NNNN`, …) and treats the **account itself** as the sender. Because the account
+number is on the `allowlist`, the command is authorized and answered right back into
+Note to Self.
+
+> A dedicated-number setup (Option B) never uses this path: those are ordinary
+> `dataMessage`s from a separate operator number and behave exactly as before.
+
+### The loop problem — and the three guards
+
+A linked device **also** receives sync-sent transcripts of the messages **Simard
+herself** sends via signal-cli (her replies are sent *from* the account, so they sync
+back too). Naïvely, Simard would read her own reply as a new command and answer it
+forever. Three layered guards prevent this; a sync-sent message is accepted as a
+command **only if all of them pass**:
+
+1. **Primary-phone gate (device 1).** Signal guarantees the account owner's **phone is
+   always device 1**; every linked device (signal-cli, Signal Desktop, an iPad) has a
+   higher id. Simard accepts a Note-to-Self command **only** when the envelope's source
+   device is **device 1** — i.e. it was typed on your phone. Her own replies originate
+   from signal-cli's linked device (id ≥ 2) and are therefore rejected. This gate alone
+   closes the loop, even with no extra configuration.
+2. **Own-device rejection (defence-in-depth).** If you set `own_device_id` (step 4),
+   Simard *also* explicitly rejects any sync-sent message whose source device equals
+   signal-cli's own id. This is redundant with the device-1 gate by design.
+3. **Recent-outbound echo suppression (defence-in-depth).** Simard remembers the bodies
+   of the messages she just sent (a small, bounded, in-memory window — the last 64
+   messages, expiring after 5 minutes) and ignores a sync-sent message whose body
+   exactly matches one of them. This catches any echo the first two guards might miss.
+
+Only **your primary phone's** Note-to-Self messages are newly accepted. Commands from
+Signal Desktop or any other linked device are **not** honored — issue commands from
+your phone. And a genuinely unknown sender is still dropped, fail-closed, exactly as
+for a dedicated number.
+
+> **Third-party syncs are ignored too.** When you text *someone else* from your phone,
+> your linked device receives a sync-sent transcript of that message as well. Simard
+> only treats a sync-sent message as a command when it is a **true Note to Self** — its
+> destination is the account itself. Messages you send to other people never reach her
+> command surface.
+
 ## What you can do over Signal
 
 | You send | Simard does |
@@ -193,12 +286,26 @@ HIGH-RISK boundary.
 
 1. **Are you allowlisted?** Your sending number must be in `[signal].allowlist`
    (E.164, e.g. `+15559876543`). Unknown senders are dropped and logged at `debug`
-   — enable debug logging to see the drop. `allowlist` is *your* number, not
-   `account`.
+   — enable debug logging to see the drop. On a **dedicated number** the allowlist is
+   *your* number, not `account`; on a **single-number linked device** the allowlist is
+   the `account` number itself (they are the same).
 2. **Is the daemon reachable?** Confirm `signal-cli -a … daemon --tcp 127.0.0.1:7583`
    is running and `endpoint` matches host:port exactly.
 3. **Built with the feature?** A default build has no Signal code. Rebuild with
    `cargo build --features signal`.
+
+### My Note-to-Self messages are ignored (single-number setup)
+
+1. **Are you sending from your phone?** Simard accepts a Note-to-Self command **only**
+   from **device 1** (your primary phone). Messages typed in **Note to Self** on Signal
+   Desktop, a linked iPad, or any other linked device are rejected by the loop-prevention
+   gate. Send from your phone.
+2. **Is the account number allowlisted?** For a single-number linked device the sender
+   *is* the `account`, so `account` must appear in `allowlist`.
+3. **Is `own_device_id` set to the wrong id?** It must be signal-cli's **own** linked
+   device id (≥ 2) from `listDevices`. A value `< 2` (e.g. `1`, your phone) is rejected
+   at startup with a config error, because it would disable every Note-to-Self command.
+   When in doubt, omit it — the device-1 gate already prevents loops.
 
 ### Simard receives but never replies
 

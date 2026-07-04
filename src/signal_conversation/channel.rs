@@ -28,13 +28,19 @@
 //! conversation channel and does not implement the cognitive-memory
 //! `BridgeTransport`.
 
+use std::collections::VecDeque;
+use std::time::Instant;
+
 use crate::conversation_channel::{ConversationChannel, Inbound, OperatorRef, OutKind, Outbound};
 use crate::error::SimardResult;
 
 use super::allowlist::{Allowlist, AuthDecision};
 use super::config::SignalConfig;
 use super::gating::{GateDecision, InboundCommand, gate, parse_inbound};
-use super::transport::{SignalTransport, build_send_request};
+use super::transport::{
+    PRIMARY_DEVICE_ID, RECENT_OUTBOUND_CAP, RECENT_OUTBOUND_TTL, SignalTransport,
+    build_send_request, matches_recent_outbound, should_accept_sync_sent,
+};
 
 /// The integration seam for the effects a Signal command produces. Keeping this
 /// out of the channel lets the (security-critical) allowlist + gating routing be
@@ -114,6 +120,15 @@ pub struct SignalConversation<T: SignalTransport, H: SignalCommandHandler> {
     current_operator: Option<String>,
     /// A gated high-risk command awaiting `approve`: `(sender, command)`.
     pending: Option<(String, InboundCommand)>,
+    /// signal-cli's OWN linked-device id, if configured — defence-in-depth loop
+    /// guard for Note-to-Self setups (issue #2575). A sync-sent message from this
+    /// device is rejected. `None` is safe: the primary-phone (device 1) gate is
+    /// the primary loop guard.
+    own_device_id: Option<u32>,
+    /// Bodies of recently-sent outbound messages (with send time) used to suppress
+    /// a synced-back echo of Simard's own reply on a linked-device setup. Bounded
+    /// to [`RECENT_OUTBOUND_CAP`] entries, each expiring after [`RECENT_OUTBOUND_TTL`].
+    recent_outbound: VecDeque<(String, Instant)>,
     next_id: u64,
 }
 
@@ -129,6 +144,8 @@ impl<T: SignalTransport, H: SignalCommandHandler> SignalConversation<T, H> {
             operators: config.allowlist.clone(),
             current_operator: None,
             pending: None,
+            own_device_id: config.own_device_id,
+            recent_outbound: VecDeque::new(),
             next_id: 1,
         }
     }
@@ -138,7 +155,29 @@ impl<T: SignalTransport, H: SignalCommandHandler> SignalConversation<T, H> {
         let id = self.next_id;
         self.next_id += 1;
         let line = build_send_request(id, &self.account, recipient, text);
-        self.transport.send_line(line).await
+        self.transport.send_line(line).await?;
+        // Remember what we just sent so a synced-back echo of it (on a
+        // linked-device setup) is suppressed rather than reprocessed (#2575).
+        self.record_outbound(text);
+        Ok(())
+    }
+
+    /// Track an outbound body (with the current time) for echo suppression,
+    /// dropping expired and over-cap entries to keep the window small and bounded.
+    fn record_outbound(&mut self, text: &str) {
+        let now = Instant::now();
+        self.recent_outbound.push_back((text.to_string(), now));
+        // Entries are pushed in send order, so expired ones cluster at the front.
+        while self
+            .recent_outbound
+            .front()
+            .is_some_and(|(_, t)| now.saturating_duration_since(*t) > RECENT_OUTBOUND_TTL)
+        {
+            self.recent_outbound.pop_front();
+        }
+        while self.recent_outbound.len() > RECENT_OUTBOUND_CAP {
+            self.recent_outbound.pop_front();
+        }
     }
 
     /// Deliver an operator notification (PR merge-ready, stall/problem, high-risk
@@ -203,9 +242,39 @@ impl<T: SignalTransport + Send, H: SignalCommandHandler> ConversationChannel
             let Some(line) = self.transport.recv_line().await? else {
                 return Ok(None);
             };
-            let Some((sender, text)) = super::transport::parse_incoming(&line) else {
+            let Some(parsed) = super::transport::parse_incoming(&line) else {
                 continue; // JSON-RPC responses, receipts, unparseable lines.
             };
+
+            // Loop prevention for sync-sent (Note-to-Self) messages, issue #2575.
+            // A linked device receives sync-sent transcripts of BOTH the operator's
+            // Note-to-Self commands AND Simard's own replies; only the former (from
+            // the operator's primary phone, destined for the account) is a command.
+            if parsed.is_sync_sent {
+                if !should_accept_sync_sent(
+                    parsed.source_device,
+                    self.own_device_id,
+                    parsed.sync_destination.as_deref(),
+                    &self.account,
+                    PRIMARY_DEVICE_ID,
+                ) {
+                    tracing::debug!(
+                        target: "signal",
+                        "ignoring sync-sent message that is not a primary-phone Note to Self"
+                    );
+                    continue;
+                }
+                if matches_recent_outbound(&parsed.body, &self.recent_outbound, Instant::now()) {
+                    tracing::debug!(
+                        target: "signal",
+                        "ignoring sync-sent echo of a recently-sent outbound message"
+                    );
+                    continue;
+                }
+            }
+
+            let sender = parsed.sender;
+            let text = parsed.body;
 
             match self.allowlist.authorize(&sender) {
                 // Guardrail (a): fail-closed. Unknown senders are dropped.
@@ -335,6 +404,7 @@ mod tests {
     const OPERATOR: &str = "+15557654321";
     const STRANGER: &str = "+15550000000";
     const ACCOUNT: &str = "+15551230000";
+    const THIRD_PARTY: &str = "+15559990000";
 
     #[derive(Default)]
     struct SpyState {
@@ -394,6 +464,7 @@ mod tests {
             account: ACCOUNT.to_string(),
             allowlist: vec![OPERATOR.to_string()],
             read_only_unknown,
+            own_device_id: None,
         }
     }
 
@@ -521,5 +592,163 @@ mod tests {
         let (to, msg) = sent(ch.transport.sent.last().unwrap());
         assert_eq!(to, OPERATOR);
         assert_eq!(msg, "reply text");
+    }
+
+    // ── Note-to-Self acceptance + loop prevention (issue #2575) ──────────────
+    //
+    // On a single-number linked-device setup the operator and Simard share one
+    // E.164; the operator commands Simard from Signal's "Note to Self", which
+    // signal-cli delivers as a sync-sent message. These scenarios pin the
+    // conjunctive acceptance predicate and the three layered loop guards.
+
+    /// A signal-cli `receive` line for a Note-to-Self (sync-sent) message: the
+    /// account sent `body` to `destination` from device `source_device`.
+    fn sync_sent_line(source_device: u32, destination: &str, body: &str) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "receive",
+            "params": {"envelope": {
+                "source": ACCOUNT,
+                "sourceNumber": ACCOUNT,
+                "sourceDevice": source_device,
+                "syncMessage": {"sentMessage": {"destinationNumber": destination, "message": body}}
+            }}
+        })
+        .to_string()
+    }
+
+    /// Config for the single-number linked-device setup: the account's own number
+    /// is the allowlisted operator, with an optional signal-cli own-device id.
+    fn note_config(own_device_id: Option<u32>) -> SignalConfig {
+        SignalConfig {
+            endpoint: "127.0.0.1:0".to_string(),
+            account: ACCOUNT.to_string(),
+            allowlist: vec![ACCOUNT.to_string()],
+            read_only_unknown: false,
+            own_device_id,
+        }
+    }
+
+    fn note_channel(
+        lines: Vec<String>,
+        own_device_id: Option<u32>,
+    ) -> (
+        SignalConversation<MockTransport, SpyHandler>,
+        Arc<Mutex<SpyState>>,
+    ) {
+        let state = Arc::new(Mutex::new(SpyState::default()));
+        let handler = SpyHandler {
+            state: Arc::clone(&state),
+        };
+        let transport = MockTransport::with_lines(lines);
+        let ch = SignalConversation::new(transport, handler, &note_config(own_device_id));
+        (ch, state)
+    }
+
+    #[test]
+    fn note_to_self_status_from_primary_phone_runs_as_command() {
+        // A sync-sent message from device 1, destined for the account, is a genuine
+        // Note to Self → treated as a `status` command from the (allowlisted) account.
+        let (mut ch, _state) = note_channel(vec![sync_sent_line(1, ACCOUNT, "status")], None);
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        assert_eq!(ch.transport.sent.len(), 1, "one status reply");
+        let (to, msg) = sent(&ch.transport.sent[0]);
+        assert_eq!(
+            to, ACCOUNT,
+            "the reply goes back to the account (Note to Self)"
+        );
+        assert!(msg.contains("STATUS"), "got {msg}");
+    }
+
+    #[test]
+    fn note_to_self_conversation_turn_is_bound_to_the_account() {
+        let (mut ch, _state) = note_channel(
+            vec![sync_sent_line(1, ACCOUNT, "let's plan the release")],
+            None,
+        );
+        let inbound = block_on(ch.recv()).unwrap().expect("a conversation turn");
+        assert_eq!(inbound.text, "let's plan the release");
+        assert_eq!(inbound.from.id, ACCOUNT);
+        assert!(inbound.from.authorized);
+    }
+
+    #[test]
+    fn sync_sent_from_signal_cli_own_device_is_ignored() {
+        // A reply Simard emitted syncs back from signal-cli's linked device (>= 2).
+        // It must be ignored — never processed as a new command (loop prevention).
+        let (mut ch, state) = note_channel(vec![sync_sent_line(2, ACCOUNT, "status")], Some(2));
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        assert!(
+            ch.transport.sent.is_empty(),
+            "no reply to our own synced-back message"
+        );
+        assert!(state.lock().unwrap().executed.is_empty());
+    }
+
+    #[test]
+    fn sync_sent_from_linked_device_ignored_without_own_device_id() {
+        // Even with own_device_id unset, the primary-phone gate rejects a device>=2
+        // sync-sent — the loop-free guarantee does not depend on configuration.
+        let (mut ch, _state) = note_channel(vec![sync_sent_line(3, ACCOUNT, "status")], None);
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        assert!(ch.transport.sent.is_empty());
+    }
+
+    #[test]
+    fn sync_sent_echo_of_recent_outbound_is_ignored() {
+        // Simard sends a notification; the linked device syncs it back as a device-1
+        // sync-sent with an identical body. Echo suppression drops it even though it
+        // clears the primary-phone gate.
+        let echo = "PR #7 is merge-ready";
+        let (mut ch, _state) = note_channel(vec![sync_sent_line(1, ACCOUNT, echo)], None);
+        // Record the outbound first — this is what reply() tracks.
+        block_on(ch.notify(echo)).unwrap();
+        assert_eq!(ch.transport.sent.len(), 1, "just the notification");
+        // The synced-back echo is ignored: recv reaches EOF with no new send.
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        assert_eq!(ch.transport.sent.len(), 1, "no reply to the echo");
+    }
+
+    #[test]
+    fn sync_sent_to_third_party_is_ignored() {
+        // The operator texts someone else from their phone; it syncs to the linked
+        // device but is NOT a Note to Self, so Simard ignores it.
+        let (mut ch, state) = note_channel(vec![sync_sent_line(1, THIRD_PARTY, "status")], None);
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        assert!(ch.transport.sent.is_empty(), "not a command; no reply");
+        assert!(state.lock().unwrap().executed.is_empty());
+    }
+
+    #[test]
+    fn sync_sent_high_risk_from_primary_phone_is_still_gated() {
+        // Even a genuine Note-to-Self high-risk command must not auto-execute.
+        let (mut ch, state) = note_channel(vec![sync_sent_line(1, ACCOUNT, "merge #42")], None);
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        assert!(
+            state.lock().unwrap().executed.is_empty(),
+            "no auto-execute from a text"
+        );
+        assert_eq!(ch.transport.sent.len(), 1);
+        let (_to, msg) = sent(&ch.transport.sent[0]);
+        assert!(msg.contains("HIGH-RISK"), "got {msg}");
+    }
+
+    #[test]
+    fn normal_data_message_from_separate_number_still_parsed() {
+        // Regression: the dedicated-number path is unchanged. A normal dataMessage
+        // from a separate allowlisted operator still yields a conversation turn.
+        let (mut ch, _state) = channel(vec![receive_line(OPERATOR, "let's chat")], false);
+        let inbound = block_on(ch.recv()).unwrap().expect("a conversation turn");
+        assert_eq!(inbound.text, "let's chat");
+        assert_eq!(inbound.from.id, OPERATOR);
+        assert!(inbound.from.authorized);
+    }
+
+    #[test]
+    fn receipt_and_unparseable_lines_are_skipped() {
+        let receipt = r#"{"jsonrpc":"2.0","method":"receive","params":{"envelope":{"sourceNumber":"+15551230000","receiptMessage":{"isDelivery":true}}}}"#.to_string();
+        let (mut ch, _state) = note_channel(vec![receipt, "not json".to_string()], None);
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        assert!(ch.transport.sent.is_empty());
     }
 }
