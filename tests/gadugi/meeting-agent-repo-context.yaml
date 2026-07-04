@@ -1,0 +1,55 @@
+name: "Meeting agent repo context + per-turn timeout (#2549)"
+description: "Outside-in verification that the meeting-mode agent proxy (PersistentAgentProxy, used by `simard meeting repl`) derives its working directory and --add-dir grant from the active repository / explicit config instead of the hardcoded operator path /home/azureuser/src/Simard/worktrees/main, and enforces a bounded DEFAULT per-turn timeout that degrades honestly instead of blocking the REPL on a hung child. Layers: (A) source guard the hardcoded literal is gone; (B) deterministic unit coverage of repo-root derivation, explicit override, bounded-default timeout, and honest degradation on a hung child; (C) a CLI smoke that launches `simard meeting repl` from an arbitrary throwaway git repo and asserts it never hangs, never references the hardcoded path, and either binds the agent to that repo or degrades honestly within the timeout."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Meeting agent derives repo context from cwd and bounds the turn"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/meeting-agent-repo-context.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "meeting"
+    - "repl"
+    - "repo-context"
+    - "timeout"
+    - "outside-in"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
+  issue: "2549"

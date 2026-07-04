@@ -11,18 +11,26 @@ use crate::overseer::intervention::Intervention;
 
 /// Risk classification for an intervention. Routine interventions execute
 /// autonomously (per the operator directive "for most operations she should not
-/// need outside-party validation"); HIGH-RISK ones are gated and surface to the
-/// human via `Intervention::Escalate`.
+/// need outside-party validation"); `MergeAuthority` and `HighRisk` ones are
+/// gated and surface to the human via `Intervention::Escalate` unless the
+/// operator has explicitly opted in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RiskClass {
     Routine,
+    /// PR verify-and-merge. **Opt-in, NOT Routine on day one** (crusty review
+    /// risk #1): autonomous-merge is a closed self-modification loop gated only
+    /// by "CI green", which is the absence of one signal, not judgment. It stays
+    /// human-in-the-loop until M1's signal quality is proven — autonomy is
+    /// earned, not defaulted.
+    MergeAuthority,
     HighRisk,
 }
 
-/// Classify an intervention. HIGH-RISK maps to the five gated operations of the
+/// Classify an intervention. `HighRisk` maps to the gated operations of the
 /// autonomy model (deploy is the Overseer's one self-mutating action; conflict
 /// resolution can involve force-adjacent pushes; escalation is inherently a
-/// hand-off). Everything else is routine.
+/// hand-off). `VerifyAndMergePr` is `MergeAuthority` — deliberately opt-in
+/// rather than Routine (crusty risk #1). Everything else is routine.
 pub fn classify(iv: &Intervention) -> RiskClass {
     match iv {
         // Self-mutating binary swap of the live daemon.
@@ -32,23 +40,34 @@ pub fn classify(iv: &Intervention) -> RiskClass {
         Intervention::ResolveConflict { .. } => RiskClass::HighRisk,
         // Escalation is, by definition, a request for human sign-off.
         Intervention::Escalate { .. } => RiskClass::HighRisk,
+        // Merge authority is opt-in until proven (crusty risk #1).
+        Intervention::VerifyAndMergePr { .. } => RiskClass::MergeAuthority,
         _ => RiskClass::Routine,
     }
 }
 
-/// Admits routine interventions; gates HIGH-RISK ones unless the operator has
-/// explicitly opted in (default `false`). A gated intervention is not executed —
-/// it is turned into an `Escalate` in the plan.
+/// Admits routine interventions; gates `MergeAuthority` and `HighRisk` ones
+/// unless the operator has explicitly opted in (both default `false`). A gated
+/// intervention is not executed — it is turned into an `Escalate` in the plan.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AutonomyGate {
+    /// Opt into autonomous HIGH-RISK execution (deploy / conflict-resolution).
     pub allow_high_risk: bool,
+    /// Opt into autonomous PR verify-and-merge (crusty risk #1: default `false`
+    /// — the operator must enable it, and only after M1 signals are proven).
+    pub allow_verify_merge: bool,
 }
 
 impl AutonomyGate {
     pub fn admit(&self, iv: &Intervention) -> Result<(), OverseerError> {
         match classify(iv) {
             RiskClass::Routine => Ok(()),
+            RiskClass::MergeAuthority if self.allow_verify_merge => Ok(()),
             RiskClass::HighRisk if self.allow_high_risk => Ok(()),
+            RiskClass::MergeAuthority => Err(OverseerError::Gated {
+                intervention: iv.label().to_string(),
+                risk: "merge-authority",
+            }),
             RiskClass::HighRisk => Err(OverseerError::Gated {
                 intervention: iv.label().to_string(),
                 risk: "high",
@@ -342,5 +361,36 @@ mod tests {
         // (never the removed hardcoded duplicate).
         assert!(BudgetGate::from_env().daily_budget_usd > 0.0);
         assert!(BudgetGate::default().daily_budget_usd > 0.0);
+    }
+
+    // ── crusty risk #1: VerifyAndMergePr is opt-in, not Routine ──────────────
+
+    #[test]
+    fn verify_merge_is_opt_in_not_routine() {
+        let iv = Intervention::VerifyAndMergePr {
+            repo: "rysweet/Simard".to_string(),
+            pr: 1,
+        };
+        assert_eq!(
+            classify(&iv),
+            RiskClass::MergeAuthority,
+            "merge authority is its own opt-in class, never Routine"
+        );
+        // The default gate REFUSES it — autonomy is earned, not defaulted.
+        assert!(AutonomyGate::default().admit(&iv).is_err());
+        // Opt-in admits merge WITHOUT enabling high-risk deploy…
+        let gate = AutonomyGate {
+            allow_verify_merge: true,
+            allow_high_risk: false,
+        };
+        assert!(gate.admit(&iv).is_ok());
+        // …and enabling merge must NOT enable deploy/conflict-resolution.
+        assert!(
+            gate.admit(&Intervention::Deploy {
+                commit: "abc".to_string()
+            })
+            .is_err(),
+            "merge opt-in must not leak into HIGH-RISK deploy authority"
+        );
     }
 }

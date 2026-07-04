@@ -45,16 +45,27 @@
 
 #![allow(dead_code)]
 
+pub mod audit;
 pub mod capabilities;
 pub mod config;
+pub mod conflict;
+pub mod deploy;
 pub mod guardrails;
 pub mod intervention;
+pub mod launch;
+pub mod meeting_ops;
+pub mod merge_ops;
+pub mod notify;
 pub mod observer;
+pub mod pr_verify;
 pub mod sensor;
 pub mod signal;
+pub mod tuning;
 
 #[cfg(test)]
 mod tests_m1;
+#[cfg(test)]
+mod tests_m2;
 
 pub use capabilities::{
     Auditor, Deployer, GoalCurator, IssueFiler, MeetingHost, ObservedState, OrchestratorRunBrief,
@@ -143,6 +154,14 @@ impl Overseer {
     /// Off by default: those interventions escalate instead.
     pub fn with_high_risk_autonomy(mut self, allow: bool) -> Self {
         self.autonomy.allow_high_risk = allow;
+        self
+    }
+
+    /// Opt into autonomous PR verify-and-merge (crusty risk #1). Off by default:
+    /// `VerifyAndMergePr` escalates until the operator explicitly enables it,
+    /// once M1's signal quality is proven. Independent of HIGH-RISK autonomy.
+    pub fn with_verify_merge_autonomy(mut self, allow: bool) -> Self {
+        self.autonomy.allow_verify_merge = allow;
         self
     }
 
