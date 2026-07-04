@@ -249,6 +249,13 @@ corruption-reset recoverable without a code harness:
   memories from … cognitive_snapshot.json` line, so a corruption-reset self-heals
   instead of losing everything.
 
+Both paths **preserve prospective status** across the restore (issue #2562): a
+trigger that was already `triggered` or `resolved` when the snapshot was taken is
+restored to a terminal, non-firing state rather than reset to `pending`, so an
+auto-restore or `simard memory import` can never re-fire a goal the daemon had
+already completed. Genuinely `pending` triggers restore as `pending` and stay
+eligible to fire.
+
 For a corruption incident (recover the pre-reset store, choose a snapshot, and
 run the import), follow the
 [Cognitive-Memory WAL Recovery Runbook](cognitive-memory-wal-recovery-runbook.md).

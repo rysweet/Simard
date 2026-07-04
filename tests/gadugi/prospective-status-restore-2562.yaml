@@ -1,0 +1,126 @@
+name: "Cognitive Memory — Prospective Status Preserved on Restore (#2562)"
+description: >
+  Outside-in gate for issue #2562: the verified-snapshot restore path
+  (`remote_transfer::import_full_snapshot`, reached by `simard memory import` and
+  the daemon startup auto-restore) rebuilt every prospective via
+  `store_prospective`, which always creates a "pending" record — so a trigger
+  that was already "triggered"/"resolved" came back "pending" and
+  `check_triggers` could re-fire a goal the daemon had already completed. The fix
+  re-resolves any non-pending prospective to a terminal, non-firing status after
+  it is written, while genuinely pending triggers restore as pending. These steps
+  drive the RESTORE-side regression gates in `src/remote_transfer/tests.rs`.
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "#2562 — a restored resolved trigger stays resolved and does not re-fire"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib
+        remote_transfer::tests::restored_resolved_prospective_stays_resolved_so_completed_goal_does_not_refire
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test remote_transfer::tests::restored_resolved_prospective_stays_resolved_so_completed_goal_does_not_refire ... ok"
+
+  - name: "#2562 — a restored triggered trigger does not regress to pending and re-fire"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib
+        remote_transfer::tests::restored_triggered_prospective_does_not_come_back_pending_and_refire
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test remote_transfer::tests::restored_triggered_prospective_does_not_come_back_pending_and_refire ... ok"
+
+  - name: "#2562 — a genuinely pending trigger restores as pending and can still fire"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib
+        remote_transfer::tests::restored_pending_prospective_stays_pending_and_can_still_fire
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test remote_transfer::tests::restored_pending_prospective_stays_pending_and_can_still_fire ... ok"
+
+  - name: "#2562 — re-import self-heals a pre-existing stale pending duplicate"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib
+        remote_transfer::tests::reimport_resolves_a_preexisting_stale_pending_duplicate
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test remote_transfer::tests::reimport_resolves_a_preexisting_stale_pending_duplicate ... ok"
+
+  - name: "#2562 — re-import leaves a matching pending trigger firable (no over-correction)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib
+        remote_transfer::tests::reimport_leaves_a_matching_pending_trigger_firable
+        -- --nocapture --test-threads=1
+    timeout: 300000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "test remote_transfer::tests::reimport_leaves_a_matching_pending_trigger_firable ... ok"
+
+assertions: []
+
+cleanup:
+  - name: "Test agent cleanup"
+    agent: "test-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "cognitive-memory"
+    - "prospective-triggers"
+    - "snapshot-restore"
+    - "regression"
+    - "issue-2562"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

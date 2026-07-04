@@ -395,3 +395,214 @@ fn load_full_snapshot_from_file_reads_full_bare_and_enveloped_shapes() {
         "a corrupt snapshot file must error rather than yield an empty snapshot"
     );
 }
+
+/// Issue #2562: a prospective trigger that was already `resolved` when the
+/// snapshot was taken must restore as `resolved` — NOT `pending` — so an
+/// auto-restore / `simard memory import` can never re-fire a goal the daemon
+/// already completed via `check_triggers`. Pins the RESTORE side of the
+/// status-preservation contract documented on `import_full_snapshot`.
+#[test]
+fn restored_resolved_prospective_stays_resolved_so_completed_goal_does_not_refire() {
+    use crate::cognitive_memory::LibraryCognitiveMemory;
+
+    // Source store: create a prospective, then resolve it (a completed goal).
+    let source = LibraryCognitiveMemory::in_memory().unwrap();
+    let node_id = source
+        .store_prospective("ship the CLI", "deploy", "Pursue goal", 1)
+        .unwrap();
+    source.resolve_prospective(&node_id).unwrap();
+
+    // The snapshot must capture the terminal status verbatim (export side).
+    let snapshot = export_full_memory_snapshot(&source, "issue-2562").unwrap();
+    assert_eq!(snapshot.prospective.len(), 1);
+    assert_eq!(
+        snapshot.prospective[0].status, "resolved",
+        "export must capture the resolved status the source store holds"
+    );
+
+    // Restore into a fresh store.
+    let target = LibraryCognitiveMemory::in_memory().unwrap();
+    import_full_snapshot(&target, &snapshot).unwrap();
+
+    // The restored record must keep its resolved status (equals the snapshot),
+    // never regressing to pending.
+    let restored = target.list_all_prospective(u32::MAX).unwrap();
+    assert_eq!(restored.len(), 1, "the prospective must be restored");
+    assert_eq!(
+        restored[0].status, "resolved",
+        "restored status must equal the snapshotted status, not reset to pending"
+    );
+
+    // The behavioural guarantee: a completed trigger must not re-fire.
+    let fired = target
+        .check_triggers("please deploy the release now")
+        .unwrap();
+    assert!(
+        fired.is_empty(),
+        "a restored resolved trigger must not re-fire after restore (issue #2562)"
+    );
+}
+
+/// Issue #2562: a prospective captured as `triggered` (it fired but was not yet
+/// resolved) must not come back `pending` and re-fire on restore. It restores to
+/// a terminal, non-firing status so an auto-restore cannot resurrect an
+/// already-fired trigger.
+#[test]
+fn restored_triggered_prospective_does_not_come_back_pending_and_refire() {
+    use crate::cognitive_memory::LibraryCognitiveMemory;
+
+    let source = LibraryCognitiveMemory::in_memory().unwrap();
+    source
+        .store_prospective("ship the CLI", "deploy", "Pursue goal", 1)
+        .unwrap();
+    // Fire it: check_triggers moves the matched record to "triggered".
+    let fired = source.check_triggers("time to deploy").unwrap();
+    assert_eq!(fired.len(), 1, "the trigger must fire on the source store");
+
+    let snapshot = export_full_memory_snapshot(&source, "issue-2562").unwrap();
+    assert_eq!(snapshot.prospective.len(), 1);
+    assert_eq!(
+        snapshot.prospective[0].status, "triggered",
+        "export must capture the triggered status"
+    );
+
+    let target = LibraryCognitiveMemory::in_memory().unwrap();
+    import_full_snapshot(&target, &snapshot).unwrap();
+
+    let restored = target.list_all_prospective(u32::MAX).unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(
+        restored[0].status, "resolved",
+        "a triggered trigger restores to the terminal, non-firing resolved \
+         status (the library has no arbitrary status setter) — never pending \
+         (issue #2562)"
+    );
+    let refired = target.check_triggers("time to deploy again").unwrap();
+    assert!(
+        refired.is_empty(),
+        "a restored already-fired trigger must not re-fire (issue #2562)"
+    );
+}
+
+/// Issue #2562 (guard): a genuinely `pending` prospective must still restore as
+/// `pending` and stay eligible to fire — the status-preservation fix must not
+/// blanket-resolve live triggers.
+#[test]
+fn restored_pending_prospective_stays_pending_and_can_still_fire() {
+    use crate::cognitive_memory::LibraryCognitiveMemory;
+
+    let source = LibraryCognitiveMemory::in_memory().unwrap();
+    source
+        .store_prospective("ship the CLI", "deploy", "Pursue goal", 1)
+        .unwrap();
+
+    let snapshot = export_full_memory_snapshot(&source, "issue-2562").unwrap();
+    assert_eq!(snapshot.prospective.len(), 1);
+    assert_eq!(
+        snapshot.prospective[0].status, "pending",
+        "a freshly stored trigger is pending"
+    );
+
+    let target = LibraryCognitiveMemory::in_memory().unwrap();
+    import_full_snapshot(&target, &snapshot).unwrap();
+
+    let restored = target.list_all_prospective(u32::MAX).unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(
+        restored[0].status, "pending",
+        "a pending trigger must restore as pending"
+    );
+
+    let fired = target.check_triggers("please deploy now").unwrap();
+    assert_eq!(
+        fired.len(),
+        1,
+        "a restored pending trigger must still be able to fire"
+    );
+}
+
+/// Issue #2562 (idempotent self-heal): re-importing a snapshot must correct a
+/// store that a pre-fix restore left with a stale `pending` copy of an
+/// already-handled trigger. When the target already holds the same
+/// `(trigger_condition, description)` as `pending` but the snapshot marks it
+/// terminal, the import resolves the existing record so it can no longer fire.
+#[test]
+fn reimport_resolves_a_preexisting_stale_pending_duplicate() {
+    use crate::cognitive_memory::LibraryCognitiveMemory;
+
+    // Snapshot captured a resolved (already-handled) trigger.
+    let source = LibraryCognitiveMemory::in_memory().unwrap();
+    let src_node = source
+        .store_prospective("ship the CLI", "deploy", "Pursue goal", 1)
+        .unwrap();
+    source.resolve_prospective(&src_node).unwrap();
+    let snapshot = export_full_memory_snapshot(&source, "issue-2562").unwrap();
+    assert_eq!(snapshot.prospective[0].status, "resolved");
+
+    // Target already holds the SAME trigger as a stale `pending` record — the
+    // exact residue a pre-#2562 restore would have left behind.
+    let target = LibraryCognitiveMemory::in_memory().unwrap();
+    target
+        .store_prospective("ship the CLI", "deploy", "Pursue goal", 1)
+        .unwrap();
+    let before = target.list_all_prospective(u32::MAX).unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(
+        before[0].status, "pending",
+        "precondition: stale pending record"
+    );
+
+    // Re-import: dedup skips a fresh insert (0 new items) but must still resolve
+    // the pre-existing stale record.
+    let imported = import_full_snapshot(&target, &snapshot).unwrap();
+    assert_eq!(imported, 0, "the duplicate must not be inserted again");
+
+    let after = target.list_all_prospective(u32::MAX).unwrap();
+    assert_eq!(after.len(), 1, "no duplicate row is created");
+    assert_eq!(
+        after[0].status, "resolved",
+        "the stale pending duplicate must be resolved so it can no longer fire"
+    );
+    let fired = target.check_triggers("please deploy now").unwrap();
+    assert!(
+        fired.is_empty(),
+        "the self-healed trigger must not fire after re-import (issue #2562)"
+    );
+}
+
+/// Issue #2562 (guard against over-correction): a live `pending` trigger whose
+/// `(trigger_condition, description)` also appears as `pending` in the snapshot
+/// must stay `pending` and remain able to fire — the self-heal only resolves
+/// records the snapshot marks terminal.
+#[test]
+fn reimport_leaves_a_matching_pending_trigger_firable() {
+    use crate::cognitive_memory::LibraryCognitiveMemory;
+
+    let source = LibraryCognitiveMemory::in_memory().unwrap();
+    source
+        .store_prospective("ship the CLI", "deploy", "Pursue goal", 1)
+        .unwrap();
+    let snapshot = export_full_memory_snapshot(&source, "issue-2562").unwrap();
+    assert_eq!(snapshot.prospective[0].status, "pending");
+
+    let target = LibraryCognitiveMemory::in_memory().unwrap();
+    target
+        .store_prospective("ship the CLI", "deploy", "Pursue goal", 1)
+        .unwrap();
+
+    let imported = import_full_snapshot(&target, &snapshot).unwrap();
+    assert_eq!(imported, 0, "the duplicate must not be inserted again");
+
+    let after = target.list_all_prospective(u32::MAX).unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(
+        after[0].status, "pending",
+        "a pending trigger matching a pending snapshot record stays pending"
+    );
+    let fired = target.check_triggers("please deploy now").unwrap();
+    assert_eq!(
+        fired.len(),
+        1,
+        "the still-pending trigger must remain firable"
+    );
+}
