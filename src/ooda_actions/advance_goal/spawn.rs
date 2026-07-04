@@ -379,6 +379,29 @@ pub fn dispatch_spawn_engineer(
         current_depth,
     };
 
+    // Freshness gate (issue #439): ensure the installed amplihack-rs is current
+    // before launching the engineer, so it runs on the LATEST recipes,
+    // recipe-runner, and SDK adapters (a stale bundle once carried per-step
+    // agent timeouts that killed working steps). The gate is serialized +
+    // TTL-deduped across a burst of spawners, so it never rebuilds redundantly.
+    // A failed update is surfaced (warn/error log + `amplihack_update_failure`
+    // metric), and by default we still spawn on the last-known-good install —
+    // honest, surfaced degradation, not a silent fallback. Under
+    // `SIMARD_REQUIRE_FRESH_AMPLIHACK=1` a failed update blocks this spawn with
+    // an explicit error instead. The just-created worktree guard drops (cleans
+    // up) on the block path.
+    let freshness = crate::amplihack_freshness_gate::ensure_amplihack_fresh();
+    if !freshness.should_spawn() {
+        return make_outcome(
+            action,
+            false,
+            format!(
+                "engineer spawn for goal '{goal_id}' blocked: `amplihack update` failed and \
+                 SIMARD_REQUIRE_FRESH_AMPLIHACK=1 requires a fresh amplihack-rs install",
+            ),
+        );
+    }
+
     match spawn_subordinate(&config) {
         Ok(handle) => {
             // Record the assignment + worktree ownership under one short
