@@ -104,6 +104,52 @@ Before (machine jargon) and after (plain English):
 |--------|-------|
 | ![Cluster card before](assets/dashboard-cluster-card-before.png) | ![Machines & Memory Sharing card after](assets/dashboard-cluster-card-after.png) |
 
+### Workboard tab: plain-English Task Memory & Recent Actions
+
+A live Playwright audit of the **Workboard** tab flagged two machine-jargon
+offenders that leaked raw internal representations onto the page:
+
+- **Task Memory** rendered raw goal-board **JSON blobs** directly — e.g.
+  `{"active":[{"id":…,"status":{"InProgress":{"percent":8}}}]}` — exposing the
+  serialized `GoalProgress` enum (`InProgress`) to the operator.
+- **Recent Actions** showed the raw daemon result string — e.g.
+  `brain: continue_skipping (recipe-engineer-lifecycle-brain: no decision keyword
+  found in recipe output; defaulting to continue_skipping)`.
+
+Both are now humanized at the render layer:
+
+| Was | Now |
+|-----|-----|
+| `{"active":[{"id":"enhance-simard-meeting-experience","description":"Improve …","status":{"InProgress":{"percent":8}}}]}` | **Improve the interactive meeting facilitator … — In progress — 8%** |
+| `status:{"InProgress":{"percent":5}}` (raw enum) | **In progress — 5%** |
+| `status:{"Blocked":"waiting on CI"}` (raw enum) | **Blocked — waiting on CI** |
+| `brain: continue_skipping (recipe-engineer-lifecycle-brain: no decision keyword found…)` | **continued without acting** |
+| `no-action: I'll triage the adopt-tdd goal…` | **I'll triage the adopt-tdd goal…** |
+
+The transform is render-layer only. Task Memory routes each fact's content
+through the new client-side `humanizeTaskMemory` helper (which parses a
+goal-board snapshot and renders each active goal as a plain line via
+`humanizeGoalProgress`), and Recent Actions routes the daemon result through the
+existing, tested `humanizeActionDetail` brain-decision humanizer (the same one
+the Overview tab uses) before `renderActionDetail` performs its single escape —
+so the inline **Attach →** button still works. The `/api/workboard` payload, the
+`GoalProgress` serialization, and the stable `#wb-actions` / `#wb-facts-list`
+render slots are unchanged, and the raw JSON / raw daemon string each survives
+as an `escAttr()`-hardened `title=` hover tooltip so power users lose nothing.
+Verified outside-in by `tests/gadugi/dashboard-workboard-clarity.sh`.
+
+Task Memory — before (raw goal-board JSON) and after (plain English):
+
+| Before | After |
+|--------|-------|
+| ![Task Memory before](assets/dashboard-workboard-task-memory-before.png) | ![Task Memory after](assets/dashboard-workboard-task-memory-after.png) |
+
+Recent Actions — before (raw brain enum) and after (plain English):
+
+| Before | After |
+|--------|-------|
+| ![Recent Actions before](assets/dashboard-workboard-recent-actions-before.png) | ![Recent Actions after](assets/dashboard-workboard-recent-actions-after.png) |
+
 ## Screenshots
 
 Overview — what the daemon did this cycle, top priority, recent actions, open PRs, system status, open issues:

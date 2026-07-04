@@ -1,0 +1,52 @@
+name: "Dashboard Workboard De-Jargon (Task Memory + Recent Actions)"
+description: "Outside-in operator check that the Workboard tab reads in plain English. A live Playwright audit found two machine-jargon offenders: (#4) the 'Task Memory' panel rendered raw goal-board JSON blobs like {\"active\":[{\"id\":…,\"status\":{\"InProgress\":{\"percent\":5}}}]}, exposing the raw GoalProgress enum; and (#5) 'Recent Actions' showed the raw daemon result string 'brain: continue_skipping (recipe-engineer-lifecycle-brain: no decision keyword found…)'. Boots the real dashboard binary, authenticates with the dashkey, and asserts the served HTML now wires the plain-language humanizers (humanizeTaskMemory / humanizeGoalProgress / humanizeActionDetail) while keeping the stable #wb-actions / #wb-facts-list slots and the escAttr()-hardened title= tooltips that carry the raw machine values for power users."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Workboard Task Memory + Recent Actions are jargon-free"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/dashboard-workboard-clarity.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "dashboard"
+    - "usability"
+    - "jargon"
+    - "self-serve-dashboard-improvement"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
