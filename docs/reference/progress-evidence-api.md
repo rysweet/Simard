@@ -24,12 +24,14 @@ sibling `simard::goal_curation::operations` module.
 > **History:** Prior to PR #2007, the production implementation was
 > `DefaultProgressEvidenceChecker`, which shelled out to `git log` and
 > `gh pr list`. That struct and its helper traits (`GitRunner`, `GhRunner`)
-> were removed in PR #2011. The gate then delegated to `LlmReviewerProgressChecker`
-> (JSON-based LLM response parsing), which was replaced by
-> `RecipeProgressChecker` with text-based keyword verdict parsing in #1980.
-> The `LlmReviewerProgressChecker` and its module (`progress_reviewer.rs`)
-> have been deleted — they were dead code once the recipe-based checker
-> became the primary tier.
+> were removed in PR #2011. `LlmReviewerProgressChecker`
+> (`progress_reviewer.rs`, JSON-based LLM response parsing) was superseded as
+> the *primary* tier by `RecipeProgressChecker` (text-based keyword verdict
+> parsing) in #1980, but is **retained as the direct-LLM fallback tier**: at
+> daemon boot the gate resolves `RecipeProgressChecker` (recipe-runner-rs
+> backed) first, then `LlmReviewerProgressChecker` (direct LLM), then
+> `NoopProgressEvidenceChecker`. Both live tiers share the same
+> infra-fail-open / semantic-parse-miss-fail-closed policy.
 
 All public symbols below are re-exported from `simard::goal_curation`.
 
@@ -78,9 +80,13 @@ can be installed on `OodaBridges` and shared across all OODA actions.
   a few times per OODA cycle, only on progress-increase attempts.
 - `check` MUST return `Accept` when evidence supports the claim and
   `Reject` otherwise. The production `RecipeProgressChecker`
-  accepts on infrastructure failure (recipe not found, runner not
-  installed, non-zero exit) — the gate's purpose is to catch
-  hallucinated jumps, not to block goals on recipe availability. See
+  splits **infrastructure failure** from a **semantic parse-miss**:
+  it **accepts** on infra failure (recipe not found, runner not
+  installed, non-zero exit, or *empty* output) — the gate's purpose is
+  to catch hallucinated jumps, not to block goals on recipe availability
+  — but it **rejects** on a semantic parse-miss (a *successful,
+  non-empty* run whose output carries no `accept`/`reject` verdict), so
+  a hallucinated "no verdict" bump cannot land. See
   [`SIMARD_PROGRESS_EVIDENCE`](../operations/progress-evidence-kill-switch.md)
   for the operator escape hatch.
 - The `since` argument is provided by the caller; the trait does not
@@ -99,18 +105,22 @@ can be installed on `OodaBridges` and shared across all OODA actions.
 
 The production implementation (`src/goal_curation/recipe_progress_checker.rs`)
 invokes a recipe that runs an LLM agent to review goal progress. The recipe
-stdout is parsed using the keyword verdict protocol — the checker scans for
-`"accept"` or `"reject"` keywords in the text output. See
+stdout is parsed **structured JSON verdict first** (`{"verdict":
+"accept"|"reject", …}`, via the shared `parse_reviewer_response` extractor),
+falling back to an `"accept"`/`"reject"` keyword scan for prose. Parsing the
+JSON object first avoids substring false-positives (e.g. an `accept` verdict
+whose rationale mentions "reject"). See
 [text-parsing wire formats § progress checker](../reference/text-parsing-wire-formats.md#2a-progress-checker-recipe_progress_checkerrs)
 for the full grammar.
 
 | Condition | Result | `reason` template |
 |---|---|---|
-| `new_percent <= old_percent` | `Accept` (auto, no recipe call) | `"progress-assessment-reviewer: downward / no-change (<old> -> <new>) auto-accepted"` |
-| Recipe stdout contains `"accept"` keyword | `Accept` | `"progress-assessment-reviewer: accept — <surrounding text as rationale>"` |
-| Recipe stdout contains `"reject"` keyword | `Reject` | `"progress-assessment-reviewer: reject — <surrounding text as rationale>"` |
-| No keyword found in recipe stdout | `Accept` (fail-open) | `"progress-assessment-reviewer: no verdict keyword found; accepting to avoid blocking goal"` |
-| Recipe invocation failure | `Accept` (fail-open) | `"progress-assessment-reviewer: recipe failed (<error>); accepting to avoid blocking goal"` |
+| `new_percent <= old_percent` | `Accept` (auto, no recipe call) | `"recipe-progress-checker: downward / no-change (<old> -> <new>) auto-accepted"` |
+| Recipe stdout contains `"accept"` keyword | `Accept` | `"recipe-progress-checker: accept — <surrounding text as rationale>"` |
+| Recipe stdout contains `"reject"` keyword | `Reject` | `"recipe-progress-checker: reject — <surrounding text as rationale>"` |
+| No keyword in **non-empty** recipe stdout | `Reject` (fail-closed: semantic parse-miss) | `"recipe-progress-checker: no verdict keyword in non-empty recipe output; rejecting unverified progress"` |
+| **Empty** recipe stdout on a successful run | `Accept` (fail-open: infra gap) | `"recipe-progress-checker: empty recipe output; accepting to avoid blocking goal on infra"` |
+| Recipe invocation failure (spawn / non-zero exit) | `Accept` (fail-open: infra) | `"recipe-progress-checker: recipe … accepting to avoid blocking goal …"` |
 
 The recipe template lives at
 `prompt_assets/simard/recipes/progress-assessment.yaml`. The prompt within
@@ -134,18 +144,23 @@ impl RecipeProgressChecker {
 ```
 
 The production checker. Invokes the progress-assessment recipe via
-`recipe-runner-rs` and parses the verdict from the text output using keyword
-scanning. No JSON parsing. No intermediate `ReviewerResponse` type.
+`recipe-runner-rs` and resolves the verdict **structured JSON first**
+(`{"verdict": …}`, via the shared `parse_reviewer_response` extractor), with an
+`"accept"`/`"reject"` keyword scan as a prose fallback.
 
 The checker:
 
 1. Auto-accepts downward/no-change moves without a recipe call.
 2. Resolves the recipe YAML (hot-reload path, then in-tree).
 3. Invokes `recipe-runner-rs` with goal context as variables.
-4. Scans stdout for `"accept"` or `"reject"` (case-insensitive).
-5. Maps the keyword to `EvidenceDecision`, using surrounding text as rationale.
-6. Fails open on any infrastructure error (recipe not found, runner not
-   installed, non-zero exit).
+4. Parses the structured `{"verdict": …}` JSON first; on a JSON miss, scans
+   stdout for `"accept"` or `"reject"` (case-insensitive).
+5. Maps the verdict to `EvidenceDecision`, using the rationale/surrounding text.
+6. Fails **open** on an infrastructure error (recipe not found, runner not
+   installed, non-zero exit, or empty output) — but fails **closed**
+   (`Reject`) on a semantic parse-miss: a successful, non-empty run whose
+   output carries no `accept`/`reject` verdict, so a hallucinated "no
+   verdict" progress bump is not silently accepted.
 
 ---
 

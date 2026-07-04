@@ -781,6 +781,34 @@ mod issue_2428_production_tests {
     }
 
     #[test]
+    fn issue_2569_reported_banners_fail_closed_to_unclear() {
+        // #2569 (a user-reported duplicate of the #2462/#2463 family, filed
+        // against released v0.22.0): `simard merge-pr` hard-FAILED because the
+        // SUCCESS-with-no-verdict banner produced "no verdict keyword found".
+        // The reporter observed it at BOTH 30s and 102s ("not a timeout race").
+        // On current main both must fail CLOSED to `Unclear` (→ merge Refused),
+        // never a hard error and never a `ready`-without-verdict.
+        for secs in ["30.0s", "102.0s"] {
+            let banner = format!(
+                "Recipe: merge-readiness-judge (v1.0.0)\nSteps: 1\n\nRecipe 'merge-readiness-judge': SUCCESS ({secs})\n  [completed] judge-merge-readiness ({secs})\n\n"
+            );
+            let (out, oc) = parse_merge_outcome(&banner);
+            assert_eq!(
+                out.verdict,
+                Verdict::Unclear,
+                "banner @ {secs} must fail closed to Unclear (issue #2569)"
+            );
+            assert!(
+                oc.is_parse_failure(),
+                "banner @ {secs} must classify as a parse-failure, not a real verdict"
+            );
+            // Never a hard error, never a spurious `ready` (the #2569 impact was
+            // that NO PR could land): a defaulted verdict must be non-`ready`.
+            assert_ne!(out.verdict, Verdict::Ready);
+        }
+    }
+
+    #[test]
     fn verdict_label_covers_all_variants() {
         assert_eq!(verdict_label(&Verdict::Ready), "ready");
         assert_eq!(verdict_label(&Verdict::NotReady), "not_ready");

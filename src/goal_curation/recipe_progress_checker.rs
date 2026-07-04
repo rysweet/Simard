@@ -13,9 +13,16 @@
 //! with `-c` context vars and parses its stdout using the same
 //! `parse_reviewer_response` logic from `progress_reviewer`.
 //!
-//! Fallback on recipe failure: accept with diagnostic (matches the
-//! existing `LlmReviewerProgressChecker` behaviour so goals are never
-//! blocked on infrastructure issues).
+//! Fallback policy splits INFRA failures from SEMANTIC parse-misses
+//! (reasoner-reliability; the sibling of the merge judge's
+//! fail-closed-to-`Unclear` for the same class of parse-miss):
+//!   * **Infra failure** — no usable output was produced (recipe spawn
+//!     failure, non-zero exit, or an *empty* stdout): accept with a
+//!     diagnostic so goals are never blocked on infrastructure issues.
+//!   * **Semantic parse-miss** — the recipe exited 0 with non-empty output
+//!     that carries no `accept`/`reject` keyword: reject, refusing the
+//!     unverified progress bump so a hallucinated "no verdict" jump cannot
+//!     land (`Reject` keeps the prior percent; it does not stall the goal).
 
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
@@ -169,28 +176,35 @@ fn render_wip_summary(goal: &ActiveGoal) -> String {
     s
 }
 
-/// Parse recipe stdout text for verdict keywords (accept/reject).
+/// Parse recipe stdout for the progress verdict.
 ///
-/// The recipe runs an agent that produces natural language output.
-/// We scan for the verdict keyword and use the surrounding text as
-/// the rationale. No JSON parsing needed — the agent already makes
-/// the decision; we just need to read it.
+/// The recipe's prompt contract emits a JSON object
+/// `{"verdict": "accept"|"reject", "rationale": "..."}`. This parser tries the
+/// **structured JSON verdict first** — mirroring the merge judge's
+/// `parse_judge_response`-first path and the direct-LLM tier's
+/// [`super::progress_reviewer::decision_from_response`] — and only falls back
+/// to a plain keyword scan for prose. Parsing the object first avoids substring
+/// false-positives, e.g. an `accept` verdict whose *rationale* mentions
+/// "reject" (which a naive `contains("reject")` scan would wrongly flip to
+/// Reject), or "unacceptable" containing the `accept` substring.
 ///
-/// Scan rules:
-/// - Case-insensitive search for "accept" or "reject"
-/// - First match wins
-/// - The full text (truncated) becomes the rationale
-/// - If neither keyword found, accept with diagnostic (same fallback
-///   as the old JSON parse-error path)
+/// Resolution:
+/// 1. Structured `{"verdict": …}` JSON → exact accept/reject; an unknown
+///    verdict string is a semantic parse-miss → reject (fail-closed).
+/// 2. Prose keyword scan (negative keyword first) for non-JSON output.
+/// 3. Non-empty output with no keyword → reject (semantic parse-miss: the
+///    recipe ran but gave no verdict, so the unverified bump is refused).
+/// 4. Output that strips to empty → accept (infra gap: no verdict produced,
+///    keep fail-open so a lost-output hiccup does not block the goal).
 pub fn parse_verdict_from_text(text: &str) -> EvidenceDecision {
     parse_verdict_outcome(text).0
 }
 
-/// Like [`parse_verdict_from_text`] but also returns whether a verdict keyword
-/// was actually found (`true`) versus the permissive accept-to-avoid-blocking
-/// default firing (`false`). The flag drives the `recipe_parse_*_total{phase}`
-/// counter at the subprocess call site (issue #2484); the pure parser stays
-/// metric-free so unit tests write no metrics.
+/// Like [`parse_verdict_from_text`] but also returns whether a real verdict was
+/// resolved (`true`) versus a parse-miss default firing (`false`). The flag
+/// drives the `recipe_parse_*_total{phase}` counter at the subprocess call site
+/// (issue #2484); the pure parser stays metric-free so unit tests write no
+/// metrics.
 pub fn parse_verdict_outcome(text: &str) -> (EvidenceDecision, bool) {
     // Strip ANSI escapes + drop whole tracing-log / runner-banner lines first
     // (shared #2484 extractor) so a noise-obscured verdict is not silently
@@ -198,6 +212,42 @@ pub fn parse_verdict_outcome(text: &str) -> (EvidenceDecision, bool) {
     // ANSI-coloured log prefix, and an "already"/"accepted" substring inside a
     // dropped log line cannot fabricate a verdict.
     let cleaned = crate::recipe_output::strip_recipe_noise(text);
+
+    // 1. Structured JSON verdict first (robust against rationale text that
+    //    happens to contain the opposite keyword). Reuses the direct-LLM tier's
+    //    tolerant extractor (as-is / fenced / brace-balanced / outermost).
+    if let Ok(parsed) = super::progress_reviewer::parse_reviewer_response(&cleaned) {
+        let verdict_lc = parsed.verdict.trim().to_ascii_lowercase();
+        let rationale = truncate(parsed.rationale.trim(), RATIONALE_MAX_CHARS);
+        return match verdict_lc.as_str() {
+            "accept" => (
+                EvidenceDecision::Accept {
+                    reason: format!("{ADAPTER_TAG}: accept — {rationale}"),
+                },
+                true,
+            ),
+            "reject" => (
+                EvidenceDecision::Reject {
+                    reason: format!("{ADAPTER_TAG}: reject — {rationale}"),
+                },
+                true,
+            ),
+            // Valid JSON object but an unknown verdict string → semantic
+            // parse-miss → fail CLOSED (refuse the unverified progress bump).
+            _ => (
+                EvidenceDecision::Reject {
+                    reason: format!(
+                        "{ADAPTER_TAG}: unknown verdict {:?}; rejecting unverified progress",
+                        parsed.verdict
+                    ),
+                },
+                false,
+            ),
+        };
+    }
+
+    // 2. Prose keyword fallback (no parseable JSON object). Negative keyword
+    //    first so a "cannot accept … reject" ordering resolves to reject.
     let lower = cleaned.to_ascii_lowercase();
     let rationale = truncate(cleaned.trim(), RATIONALE_MAX_CHARS);
 
@@ -215,11 +265,29 @@ pub fn parse_verdict_outcome(text: &str) -> (EvidenceDecision, bool) {
             },
             true,
         )
-    } else {
+    } else if cleaned.trim().is_empty() {
+        // No reviewable content after noise-stripping — the run produced only
+        // banner/log noise (or nothing at all), so no verdict was ever
+        // emitted. Treat as an infra gap and keep fail-OPEN so a lost-output
+        // hiccup does not block the goal. (Real, substantive prose that simply
+        // omits a verdict keyword falls through to the fail-CLOSED branch.)
         (
             EvidenceDecision::Accept {
                 reason: format!(
-                    "{ADAPTER_TAG}: no verdict keyword found in recipe output; accepting to avoid blocking goal"
+                    "{ADAPTER_TAG}: empty recipe output; accepting to avoid blocking goal on infra"
+                ),
+            },
+            false,
+        )
+    } else {
+        // Successful, non-empty output but NO accept/reject keyword: the
+        // reviewer ran yet produced no recognizable verdict. Fail CLOSED —
+        // refuse the unverified progress bump so a hallucinated "no verdict"
+        // jump cannot land (reasoner-reliability).
+        (
+            EvidenceDecision::Reject {
+                reason: format!(
+                    "{ADAPTER_TAG}: no verdict keyword in non-empty recipe output; rejecting unverified progress"
                 ),
             },
             false,
@@ -307,6 +375,70 @@ mod tests {
     // Text-based verdict parser (issue #1980)
     // ------------------------------------------------------------------
 
+    // ------------------------------------------------------------------
+    // Structured JSON verdict first (robustness against rationale text that
+    // contains the opposite keyword — the recipe tier now parses the object
+    // before the prose keyword scan, matching the merge judge + direct-LLM tier).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn json_accept_verdict_with_reject_in_rationale_accepts() {
+        // Regression: a naive `contains("reject")`-first scan would wrongly
+        // flip this legitimate accept to Reject because the RATIONALE mentions
+        // "reject". Parsing the JSON verdict first fixes that.
+        let text =
+            r#"{"verdict": "accept", "rationale": "8pt delta matches plan; no reason to reject"}"#;
+        let (decision, matched) = parse_verdict_outcome(text);
+        match decision {
+            EvidenceDecision::Accept { reason } => {
+                assert!(reason.contains("accept"), "got: {reason}");
+                assert!(reason.contains("no reason to reject"), "got: {reason}");
+            }
+            EvidenceDecision::Reject { .. } => {
+                panic!("JSON accept must win even when the rationale mentions 'reject'")
+            }
+        }
+        assert!(matched, "a real JSON verdict must report matched=true");
+    }
+
+    #[test]
+    fn json_reject_verdict_parses() {
+        let text = r#"{"verdict": "reject", "rationale": "100% claim with no shipped artifact"}"#;
+        let (decision, matched) = parse_verdict_outcome(text);
+        assert!(matches!(decision, EvidenceDecision::Reject { .. }));
+        assert!(matched);
+    }
+
+    #[test]
+    fn json_unknown_verdict_fails_closed() {
+        // A valid JSON object with an unrecognized verdict string is a semantic
+        // parse-miss → fail CLOSED.
+        let text = r#"{"verdict": "accepted", "rationale": "typo verdict"}"#;
+        let (decision, matched) = parse_verdict_outcome(text);
+        match decision {
+            EvidenceDecision::Reject { reason } => {
+                assert!(reason.contains("unknown verdict"), "got: {reason}");
+            }
+            EvidenceDecision::Accept { .. } => {
+                panic!("unknown JSON verdict string must fail closed, not accept")
+            }
+        }
+        assert!(
+            !matched,
+            "unknown verdict default must report matched=false"
+        );
+    }
+
+    #[test]
+    fn json_fenced_verdict_parses() {
+        let text =
+            "Here is my verdict:\n```json\n{\"verdict\":\"reject\",\"rationale\":\"stalled\"}\n```";
+        assert!(matches!(
+            parse_verdict_from_text(text),
+            EvidenceDecision::Reject { .. }
+        ));
+    }
+
     #[test]
     fn text_verdict_accept_detected() {
         let text = "After reviewing the evidence, I accept the claimed progress.";
@@ -353,24 +485,30 @@ mod tests {
     }
 
     #[test]
-    fn text_verdict_no_keyword_falls_back_to_accept() {
+    fn text_verdict_no_keyword_fails_closed_to_reject() {
+        // Non-empty output with no accept/reject keyword is a SEMANTIC
+        // parse-miss: the recipe ran but gave no verdict, so the gate must
+        // fail CLOSED and refuse the unverified progress bump.
         let text = "The progress looks reasonable for this stage.";
         match parse_verdict_from_text(text) {
-            EvidenceDecision::Accept { reason } => {
+            EvidenceDecision::Reject { reason } => {
                 assert!(reason.contains("no verdict keyword"), "got: {reason}");
+                assert!(reason.contains("non-empty"), "got: {reason}");
             }
-            EvidenceDecision::Reject { .. } => {
-                panic!("expected accept fallback when no keyword found")
+            EvidenceDecision::Accept { .. } => {
+                panic!("expected reject fallback when no keyword found in non-empty output")
             }
         }
     }
 
     #[test]
     fn text_verdict_empty_falls_back_to_accept() {
+        // EMPTY output is an infra gap (no verdict produced), so the gate
+        // stays fail-OPEN to avoid blocking the goal.
         let text = "";
         match parse_verdict_from_text(text) {
             EvidenceDecision::Accept { reason } => {
-                assert!(reason.contains("no verdict keyword"), "got: {reason}");
+                assert!(reason.contains("empty recipe output"), "got: {reason}");
             }
             EvidenceDecision::Reject { .. } => panic!("expected accept on empty text"),
         }
@@ -424,13 +562,98 @@ mod tests {
     #[test]
     fn parse_verdict_outcome_reports_match_flag_for_counter() {
         // The `bool` drives the `recipe_parse_*_total{progress_checker}` counter:
-        // a real keyword ⇒ true (success), the permissive default ⇒ false.
+        // a real keyword ⇒ true (success), a parse-miss default ⇒ false.
+        // A non-empty parse-miss now fails CLOSED (reject) rather than the old
+        // permissive accept.
         let (decision, matched) = parse_verdict_outcome("just prose, no verdict keyword here");
-        assert!(matches!(decision, EvidenceDecision::Accept { .. }));
-        assert!(!matched, "permissive default must report matched=false");
+        assert!(matches!(decision, EvidenceDecision::Reject { .. }));
+        assert!(!matched, "parse-miss default must report matched=false");
+
+        // An EMPTY body stays fail-open (infra gap) and also reports matched=false.
+        let (empty_decision, empty_matched) = parse_verdict_outcome("   ");
+        assert!(matches!(empty_decision, EvidenceDecision::Accept { .. }));
+        assert!(
+            !empty_matched,
+            "empty-output default must report matched=false"
+        );
 
         let (_, matched_reject) = parse_verdict_outcome("Verdict: reject — insufficient evidence");
         assert!(matched_reject, "a real verdict must report matched=true");
+    }
+
+    #[test]
+    fn no_verdict_keyword_rejects_unverified_progress_bump() {
+        // Reasoner-reliability regression (the "0%→100% with no verdict keyword"
+        // false-done scenario): a recipe that runs and emits prose WITHOUT an
+        // accept/reject keyword must NOT wave through the claimed progress.
+        let recipe_output =
+            "Looking at the plan and the WIP, the work appears to be moving along nicely.";
+        let (decision, matched) = parse_verdict_outcome(recipe_output);
+        assert!(
+            matches!(decision, EvidenceDecision::Reject { .. }),
+            "unverified progress must be rejected, not accepted"
+        );
+        assert!(!matched, "no keyword ⇒ matched=false");
+    }
+
+    #[test]
+    fn text_verdict_multiline_no_keyword_fails_closed() {
+        let text = "Reviewing the evidence:\n\n- some commits exist\n- plan referenced\n\nOverall this seems fine.";
+        assert!(matches!(
+            parse_verdict_from_text(text),
+            EvidenceDecision::Reject { .. }
+        ));
+    }
+
+    #[test]
+    fn log_noise_only_output_is_infra_accept() {
+        // Output that is ONLY strippable log/banner noise that collapses to
+        // *nothing* (ISO-timestamp tracing lines, `Recipe:`, `Steps:`,
+        // `[completed]`) is treated as an infra gap → fail-OPEN. This is the
+        // safety net for a genuinely content-free run; it must NOT be conflated
+        // with the fail-CLOSED semantic parse-miss (real prose without verdict).
+        let esc = '\u{1b}';
+        let noise = format!(
+            "{esc}[2m2026-06-28T08:08:58.151133Z{esc}[0m  INFO runner: starting\n\
+             Recipe: progress-assessment SUCCESS (12.0s)\n\
+             Steps: 1/1 completed\n\
+             [completed] assess (12.0s)\n"
+        );
+        let (decision, matched) = parse_verdict_outcome(&noise);
+        match decision {
+            EvidenceDecision::Accept { reason } => {
+                assert!(reason.contains("empty recipe output"), "got: {reason}");
+            }
+            EvidenceDecision::Reject { .. } => {
+                panic!("fully-stripped noise-only output must be infra-accept")
+            }
+        }
+        assert!(!matched, "noise-only default must report matched=false");
+    }
+
+    #[test]
+    fn production_success_banner_without_verdict_fails_closed() {
+        // The real recipe-runner-rs SUCCESS banner keeps its
+        // `Recipe '<name>': SUCCESS (Ns)` summary line (it starts with
+        // `Recipe '`, NOT `Recipe:`, so `strip_recipe_noise` does not drop it).
+        // A run that emits ONLY this banner and no agent verdict therefore
+        // leaves non-empty residue → fail-CLOSED (Reject), the progress-gate
+        // analogue of the merge judge's #2569 banner → `Unclear`. This is the
+        // reliability win: a recipe that ran but produced no verdict must not
+        // wave through the claimed progress.
+        let banner = "Recipe: progress-assessment (v1.0.0)\n\
+                      Steps: 1\n\
+                      Recipe 'progress-assessment': SUCCESS (30.0s)\n\
+                      \x20 [completed] assess (30.0s)\n";
+        match parse_verdict_from_text(banner) {
+            EvidenceDecision::Reject { reason } => {
+                assert!(reason.contains("no verdict keyword"), "got: {reason}");
+                assert!(reason.contains("non-empty"), "got: {reason}");
+            }
+            EvidenceDecision::Accept { .. } => {
+                panic!("a SUCCESS-banner-only progress run must fail closed, not accept")
+            }
+        }
     }
 }
 

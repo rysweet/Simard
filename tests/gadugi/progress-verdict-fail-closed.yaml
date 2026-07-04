@@ -1,0 +1,57 @@
+name: "Progress-evidence verdict fails closed on semantic parse-miss (#2569 family)"
+description: "Outside-in proof that the progress-evidence gate fails CLOSED (Reject) on a semantic verdict parse-miss — a successful, non-empty reviewer run with no accept/reject verdict — while staying fail-OPEN (Accept) on a genuine infra gap (empty output / transport error). Covers both live tiers (RecipeProgressChecker + LlmReviewerProgressChecker fallback) and pins the merge judge's #2569 SUCCESS-with-no-verdict banner regression (30s AND 102s) as fail-closed to Unclear. Runs the in-tree parser/decision tests and asserts the NAMED tests actually ran so a rename cannot silently no-op the scenario."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Progress-evidence + merge-judge verdict fail-closed policy (parser + decision tests)"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/progress-verdict-fail-closed.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "ooda"
+    - "goal-curation"
+    - "progress-evidence"
+    - "reasoner-reliability"
+    - "verdict-parsing"
+    - "issue-2569"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
