@@ -13,7 +13,7 @@ credentials — so the baseline and pack-lift numbers are reproducible in CI.
 | Pillar | Roadmap | Where it lives |
 |---|---|---|
 | **Acquisition** | #2491 Pillar 1 / #2493 | [`rust_expertise::pack`] — the `rust-expert` knowledge pack |
-| **Retention** | #2491 Pillar 2 / #2493 | [`rust_expertise::bridge`] — pack → cognitive-memory ingestion |
+| **Retention** | #2491 Pillar 2 / #2493 | [`rust_expertise::ingest`] — pack → cognitive-memory ingestion |
 | **Measurement** | #2491 Pillar 3 / #2492 | [`rust_expertise::scenarios`] + [`rust_expertise::measurement`] |
 
 ## The `rust-expert` knowledge pack
@@ -29,7 +29,7 @@ A small, provenance-tracked pack (`src/rust_expertise/pack.rs`):
   traces back to a specific authoritative source (the book, the Reference, the
   API Guidelines, `thiserror`/`anyhow` docs).
 
-## The pack → memory bridge
+## The pack -> memory ingest
 
 Ingesting the pack **populates Simard's cognitive memory** rather than leaving
 knowledge in an external index (roadmap Pillar 2a):
@@ -43,7 +43,7 @@ knowledge in an external index (roadmap Pillar 2a):
   procedure stays traceable to its source (procedural storage has no dedicated
   provenance fields).
 
-The bridge returns an `IngestReport` with the fact/procedure **yield** (how many
+The ingest module returns an `IngestReport` with the fact/procedure **yield** (how many
 durable items reached memory).
 
 ## The competency scenarios and scorecard
@@ -130,6 +130,6 @@ pass-rate lift the pack produces end-to-end — turning "recall coverage" into
 
 [#2491]: https://github.com/rysweet/Simard/issues/2491
 [`rust_expertise::pack`]: https://github.com/rysweet/Simard/blob/main/src/rust_expertise/pack.rs
-[`rust_expertise::bridge`]: https://github.com/rysweet/Simard/blob/main/src/rust_expertise/bridge.rs
+[`rust_expertise::ingest`]: https://github.com/rysweet/Simard/blob/main/src/rust_expertise/ingest.rs
 [`rust_expertise::scenarios`]: https://github.com/rysweet/Simard/blob/main/src/rust_expertise/scenarios.rs
 [`rust_expertise::measurement`]: https://github.com/rysweet/Simard/blob/main/src/rust_expertise/measurement.rs

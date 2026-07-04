@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use serde::Serialize;
-use simard::rust_expertise::bridge::IngestReport;
+use simard::rust_expertise::ingest::IngestReport;
 use simard::rust_expertise::measurement::{
     CALIBRATION_DEGRADED_MAX, CALIBRATION_HEALTHY_MIN, CALIBRATION_MIN_GAP, calibration_gap,
 };

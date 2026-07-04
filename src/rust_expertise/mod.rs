@@ -7,7 +7,7 @@
 //!
 //! * **Acquisition** — a small in-process [`pack`] (the `rust-expert` knowledge
 //!   pack: durable facts + reusable procedures, each with source provenance).
-//! * **Retention** — the [`bridge`] that ingests the pack into Simard's
+//! * **Retention** — the [`ingest`] that ingests the pack into Simard's
 //!   cognitive memory so learned facts/procedures persist and can be recalled.
 //! * **Measurement** — a Rust competency [`scenarios`] set graded by
 //!   [`measurement`] into a per-domain scorecard with a novice → competent →
@@ -17,7 +17,7 @@
 //! network / LLM auth), so the baseline and pack-lift numbers are reproducible
 //! in CI. See `docs/rust-expertise-gym.md`.
 
-pub mod bridge;
+pub mod ingest;
 pub mod measurement;
 pub mod pack;
 pub mod scenarios;
@@ -25,7 +25,7 @@ pub mod scenarios;
 #[cfg(test)]
 mod tests;
 
-pub use bridge::{IngestReport, IngestScope, ingest_pack_into_memory, ingest_pack_scoped};
+pub use ingest::{IngestReport, IngestScope, ingest_pack_into_memory, ingest_pack_scoped};
 pub use measurement::{
     CompetencyLevel, RustScorecard, ScenarioResult, SubskillScore, calibration_gap, measure,
     run_baseline, run_degraded, run_with_pack,

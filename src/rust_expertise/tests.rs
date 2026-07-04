@@ -6,7 +6,7 @@
 
 use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 
-use super::bridge::{COMPETENCY_PREFIX, IngestScope, ingest_pack_into_memory, ingest_pack_scoped};
+use super::ingest::{COMPETENCY_PREFIX, IngestScope, ingest_pack_into_memory, ingest_pack_scoped};
 use super::measurement::{
     CALIBRATION_DEGRADED_MAX, CALIBRATION_HEALTHY_MIN, CALIBRATION_MIN_GAP, CompetencyLevel,
     calibration_gap, measure, run_baseline, run_degraded, run_with_pack,
@@ -122,7 +122,7 @@ fn scenarios_cover_each_subskill_once() {
     }
 }
 
-// --- Bridge / ingestion ------------------------------------------------------
+// --- Ingestion ------------------------------------------------------
 
 #[test]
 fn ingest_writes_full_pack_yield_into_memory() {

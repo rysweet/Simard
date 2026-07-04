@@ -17,7 +17,7 @@ use serde::Serialize;
 use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use crate::error::SimardResult;
 
-use super::bridge::{COMPETENCY_PREFIX, IngestReport, IngestScope, ingest_pack_scoped};
+use super::ingest::{COMPETENCY_PREFIX, IngestReport, IngestScope, ingest_pack_scoped};
 use super::pack::{RUST_EXPERT_PACK, SUBSKILL_OWNERSHIP, SUBSKILLS};
 use super::scenarios::{RustScenario, rust_scenarios};
 

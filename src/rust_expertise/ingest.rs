@@ -1,4 +1,4 @@
-//! Pack → cognitive-memory bridge (roadmap #2491 Pillar 2a; child #2493).
+//! Pack -> cognitive-memory ingest (roadmap #2491 Pillar 2a; child #2493).
 //!
 //! Ingesting a knowledge pack must *populate cognitive memory* — durable
 //! semantic facts and reusable procedures — rather than leaving the knowledge in

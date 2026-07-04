@@ -9,7 +9,7 @@
 //! Every fact and procedure carries [`PackProvenance`] (source + URL + section +
 //! version + retrieval date) so that, per the agent-kgpacks guarantee, every
 //! learned item traces back to a specific authoritative source. Ingesting the
-//! pack into cognitive memory (see [`super::bridge`]) turns these into durable
+//! pack into cognitive memory (see [`super::ingest`]) turns these into durable
 //! semantic facts and reusable procedures.
 
 use serde::Serialize;
