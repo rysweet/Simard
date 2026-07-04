@@ -239,11 +239,33 @@ pub fn export_full_memory_snapshot(
 /// counted). This is the restore/import counterpart of
 /// [`export_full_memory_snapshot`]; it is *not* deprecated (unlike the legacy
 /// [`import_memory_snapshot`] replication path, which does not dedup).
+///
+/// **Prospective status is preserved across the round-trip (issue #2562).**
+/// [`CognitiveMemoryOps::store_prospective`] always creates a fresh `"pending"`
+/// record, so a snapshot trigger that was already `"triggered"` or `"resolved"`
+/// would otherwise come back `"pending"` — and
+/// [`CognitiveMemoryOps::check_triggers`] would **re-fire a goal the daemon had
+/// already handled** after an auto-restore or `simard memory import`. To close
+/// that, any non-`pending` prospective is re-resolved to the terminal,
+/// non-firing `"resolved"` status immediately after it is written. Genuinely
+/// `pending` records restore as `pending` and stay eligible to fire. The
+/// library exposes no arbitrary status setter and `"resolved"` is the correct
+/// terminal state for both prior `"triggered"` and `"resolved"` records —
+/// neither should fire again on a recovery restore, where no in-flight action
+/// remains to resume.
+///
+/// Because the restore is idempotent, this also **self-heals** a store that a
+/// pre-#2562 restore left with a stale `"pending"` copy of an already-handled
+/// trigger: re-running the import resolves that pre-existing record when the
+/// snapshot marks the same `(trigger_condition, description)` as terminal.
+///
+/// [`CognitiveMemoryOps::store_prospective`]: crate::cognitive_memory::CognitiveMemoryOps::store_prospective
+/// [`CognitiveMemoryOps::check_triggers`]: crate::cognitive_memory::CognitiveMemoryOps::check_triggers
 pub fn import_full_snapshot(
     memory: &dyn CognitiveMemoryOps,
     snapshot: &FullMemorySnapshot,
 ) -> SimardResult<usize> {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     let mut imported = 0;
 
@@ -293,23 +315,63 @@ pub fn import_full_snapshot(
         }
     }
 
-    // Prospective: dedup by (trigger_condition, description).
-    let mut seen_pros: HashSet<(String, String)> = memory
+    // Prospective: dedup by (trigger_condition, description). Track each
+    // existing record's (node_id, status) — not just its key — so a snapshot
+    // record that is already terminal can also correct a *pre-existing* stale
+    // "pending" duplicate (e.g. a store left half-restored by the pre-#2562
+    // bug), keeping the restore idempotent with respect to status (issue #2562).
+    let mut seen_pros: HashMap<(String, String), (String, String)> = memory
         .list_all_prospective(u32::MAX)?
         .into_iter()
-        .map(|p| (p.trigger_condition, p.description))
+        .map(|p| ((p.trigger_condition, p.description), (p.node_id, p.status)))
         .collect();
     for pm in &snapshot.prospective {
         let key = (pm.trigger_condition.clone(), pm.description.clone());
-        if seen_pros.insert(key) {
-            memory.store_prospective(
-                &pm.description,
-                &pm.trigger_condition,
-                &pm.action_on_trigger,
-                pm.priority,
-            )?;
-            imported += 1;
+        // Any status other than "pending" is a trigger the daemon already
+        // handled; it must restore non-firing so `check_triggers` (which fires
+        // only "pending" records) cannot resurrect a completed goal.
+        let snapshot_is_terminal = !pm.status.eq_ignore_ascii_case("pending");
+
+        if let Some((existing_node_id, existing_status)) = seen_pros.get(&key) {
+            // Already present in the target. Only act on the stale-bug case:
+            // the snapshot marks this trigger as already-handled but the live
+            // record is still "pending". Resolve it so a re-run of the restore
+            // cannot leave a completed trigger eligible to re-fire. A live
+            // record that is already terminal is left untouched.
+            if snapshot_is_terminal && existing_status.eq_ignore_ascii_case("pending") {
+                memory.resolve_prospective(existing_node_id)?;
+            }
+            continue;
         }
+
+        let node_id = memory.store_prospective(
+            &pm.description,
+            &pm.trigger_condition,
+            &pm.action_on_trigger,
+            pm.priority,
+        )?;
+        // `store_prospective` always creates a "pending" record; re-resolve any
+        // non-pending snapshot record to the terminal, non-firing "resolved"
+        // status so a recovery restore cannot resurrect a completed trigger.
+        if snapshot_is_terminal {
+            memory.resolve_prospective(&node_id)?;
+        }
+        // Register the freshly written record so a later duplicate of this key
+        // within the same snapshot is treated as already-present (mirrors the
+        // dedup for the other memory types).
+        seen_pros.insert(
+            key,
+            (
+                node_id,
+                if snapshot_is_terminal {
+                    "resolved"
+                } else {
+                    "pending"
+                }
+                .to_string(),
+            ),
+        );
+        imported += 1;
     }
 
     Ok(imported)
