@@ -608,19 +608,13 @@ pub fn run_ooda_daemon(
         mind.register(Box::new(
             crate::cognitive_threads::EngineerLogAnalysisThread::from_env(),
         ));
-        // Overseer M1 read-only observer sensor. Additive and default-OFF: only
-        // registered when SIMARD_OVERSEER_ENABLED is truthy (see
-        // `crate::overseer::config`). It Observes → Orients → Reports → files
-        // DEDUPLICATED issues and takes no write action beyond issue-filing, so
-        // it fits the least-authority ThreadContext. The daemon's default
-        // behaviour is unchanged when the flag is unset.
-        if crate::overseer::overseer_enabled() {
-            mind.register(Box::new(crate::overseer::OverseerSensorThread::from_env()));
-            daemon_log(
-                &state_root,
-                "[simard] OODA daemon: Overseer read-only observer ENABLED (M1 sensor; SIMARD_OVERSEER_ENABLED)",
-            );
-        }
+        // NOTE: the Overseer M1 read-only observer sensor that previously
+        // registered here (default-OFF, `SIMARD_OVERSEER_ENABLED` truthy) is
+        // SUPERSEDED by the acting Overseer periodic task driven below in the
+        // main loop (default-ON). Both observe and file DEDUPLICATED issues;
+        // running both would double-file and split the enable-gate, so the
+        // acting co-process owns Observe→Orient→Decide→Act now. See
+        // `crate::overseer::wiring`.
         daemon_log(
             &state_root,
             &format!(
@@ -629,6 +623,36 @@ pub fn run_ooda_daemon(
             ),
         );
     }
+
+    // ── Acting Overseer co-process (issue #2539 wiring) ─────────────────
+    // ADDITIVE and DEFAULT-ON: the daemon drives the Overseer's meta-OODA loop
+    // (Observe→Orient→Decide→Act) on its own cadence, in THIS process but on a
+    // background thread so it never runs inside or blocks the authoritative OODA
+    // cycle. The operator opts OUT with `SIMARD_OVERSEER_ENABLED=0`. A panic or
+    // error in a tick is caught and logged and never crashes or stalls the
+    // daemon (see `crate::overseer::wiring::run_overseer_tick_isolated`). The
+    // Overseer runs under a DISTINCT anti-recursion identity so it never
+    // verifies/merges/deploys its own PRs and never fights the OODA loop.
+    let overseer_acting_enabled = crate::overseer::overseer_acting_enabled();
+    let overseer_interval_secs = crate::overseer::overseer_tick_interval_secs();
+    // Monotonic origin for the cadence; virtual seconds since daemon start.
+    let overseer_epoch = Instant::now();
+    let mut overseer_cadence = crate::overseer::OverseerCadence::new(overseer_interval_secs, 0);
+    // Prevents overlapping ticks from stacking up if one runs long.
+    let overseer_tick_running = Arc::new(AtomicBool::new(false));
+    let overseer_repo_root = bridges.repo_root.clone();
+    daemon_log(
+        &state_root,
+        &format!(
+            "[simard] OODA daemon: acting Overseer {} (interval = {overseer_interval_secs}s; \
+             SIMARD_OVERSEER_ENABLED opt-out)",
+            if overseer_acting_enabled {
+                "ENABLED (default)"
+            } else {
+                "DISABLED"
+            }
+        ),
+    );
 
     let mut cycles_run = 0u32;
 
@@ -1167,6 +1191,73 @@ pub fn run_ooda_daemon(
                     daemon_log(
                         &state_root,
                         &format!("[simard] cognitive-thread: {}", outcome.summary),
+                    );
+                }
+            }
+        }
+
+        // ── Acting Overseer meta-OODA tick (issue #2539 wiring) ─────────
+        // DEFAULT-ON. Fires on its own cadence, AFTER the authoritative OODA
+        // cycle so OODA is never starved. Runs on a background thread — never
+        // inline — so a long (network-bound) tick cannot block or stall the
+        // OODA loop; an overlap guard drops a tick if the previous one is still
+        // running. The tick builds a fresh Overseer under the DISTINCT identity
+        // and runs panic-isolated, so a panic/error is caught and logged and
+        // never crashes the daemon.
+        if overseer_acting_enabled {
+            let now_secs = overseer_epoch.elapsed().as_secs();
+            if overseer_cadence.due(now_secs)
+                && overseer_tick_running
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                let running = Arc::clone(&overseer_tick_running);
+                let mem_for_tick = Arc::clone(&shared_mem);
+                let repo_root_for_tick = overseer_repo_root.clone();
+                let state_root_for_tick = state_root.clone();
+                let spawn = std::thread::Builder::new()
+                    .name("overseer-tick".to_string())
+                    .spawn(move || {
+                        // Always clear the overlap guard, even on panic.
+                        struct ClearOnDrop(Arc<AtomicBool>);
+                        impl Drop for ClearOnDrop {
+                            fn drop(&mut self) {
+                                self.0.store(false, Ordering::SeqCst);
+                            }
+                        }
+                        let _clear = ClearOnDrop(running);
+
+                        let mut overseer = crate::overseer::build_overseer(
+                            mem_for_tick,
+                            repo_root_for_tick,
+                            state_root_for_tick.clone(),
+                        );
+                        let report = crate::overseer::run_overseer_tick_isolated(&mut overseer);
+                        daemon_log(
+                            &state_root_for_tick,
+                            &format!(
+                                "[simard] overseer tick: problems={} issues_filed={} \
+                                 recipes_launched={} prs_merged={} deploys={} escalations={} \
+                                 held={} errors={} panicked={} ({}ms)",
+                                report.problems,
+                                report.issues_filed,
+                                report.recipes_launched,
+                                report.prs_merged,
+                                report.deploys,
+                                report.escalations,
+                                report.held,
+                                report.errors,
+                                report.panicked,
+                                report.duration_ms,
+                            ),
+                        );
+                    });
+                if let Err(e) = spawn {
+                    // Spawn failed — clear the guard so the next cadence retries.
+                    overseer_tick_running.store(false, Ordering::SeqCst);
+                    daemon_log(
+                        &state_root,
+                        &format!("[simard] WARN: overseer tick thread spawn failed: {e}"),
                     );
                 }
             }
