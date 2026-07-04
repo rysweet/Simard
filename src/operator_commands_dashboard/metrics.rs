@@ -151,6 +151,12 @@ pub(crate) async fn ooda_thinking() -> Json<Value> {
         }
     }
 
+    // Issue #2580: collapse consecutive identical deferrals ("goal already has
+    // a live, healthy engineer") into a single counted entry and flag a genuine
+    // loop only when a non-progressing decision repeats, so the tab shows
+    // forward progress instead of the same line over and over.
+    let reports = super::thinking_collapse::collapse_reports(reports);
+
     Json(json!({ "reports": reports }))
 }
 

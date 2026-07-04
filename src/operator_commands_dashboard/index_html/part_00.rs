@@ -355,7 +355,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
 
   <div class="tab-content" id="tab-thinking">
     <h1 class="page-h1">Thinking</h1>
-    <p class="page-lede">A live stream of the daemon's internal reasoning between actions, showing what it considered before deciding what to do next.</p>
+    <p class="page-lede">A live view of what the daemon decided each cycle - repeated deferring-to-an-active-engineer notes are collapsed with a count so genuine forward progress stands out from a stuck loop.</p>
     <div class="card" style="margin-bottom:1rem">
       <h2>Cycle History <button class="btn" onclick="fetchOodaCycles()">Refresh</button></h2>
       <div id="ooda-cycle-trend" style="margin-bottom:.75rem"><span class="loading">Loading…</span></div>
@@ -369,7 +369,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
 
   <div class="tab-content" id="tab-brain-failures">
     <h1 class="page-h1">Brain Failures</h1>
-    <p class="page-lede">Every time the daemon's language-model brain returned an unparseable or invalid response and fell back to safe deterministic rules, listed with the failure type, which component triggered it, when it happened, and whether recovery succeeded.</p>
+    <p class="page-lede">How often the daemon's brain failed to parse a model response right now - the current rate and a bounded recent window, kept separate from the all-time total so a stale number never looks like a live problem.</p>
     <div class="card" style="margin-bottom:1rem">
       <h2>Summary <button class="btn" onclick="fetchBrainFailures()">Refresh</button></h2>
       <div id="brain-failures-summary"><span class="loading">Loading…</span></div>

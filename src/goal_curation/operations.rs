@@ -1107,16 +1107,26 @@ pub fn clear_goal_assignment(board: &mut GoalBoard, goal_id: &str) -> SimardResu
 }
 
 /// Remove completed goals from the active list. Returns the removed goals.
+///
+/// Standing/perpetual goals (issue #2580) are never removed: a standing goal
+/// that reached a terminal-looking status is rolled into a fresh cycle in place
+/// (see [`ActiveGoal::roll_to_new_cycle`]) and kept on the board, so perpetual
+/// research / stewardship work is never silently dropped.
 pub fn archive_completed(board: &mut GoalBoard) -> Vec<ActiveGoal> {
     let mut archived = Vec::new();
-    board.active.retain(|goal| {
+    board.active.retain_mut(|goal| {
         let dominated = matches!(goal.status, GoalProgress::Completed)
             || matches!(goal.status, GoalProgress::InProgress { percent } if percent >= 100);
-        if dominated {
+        if !dominated {
+            return true;
+        }
+        if goal.is_perpetual() {
+            // Never terminate a standing goal — roll it to a fresh cycle.
+            goal.roll_to_new_cycle();
+            true
+        } else {
             archived.push(goal.clone());
             false
-        } else {
-            true
         }
     });
     archived

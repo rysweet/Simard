@@ -22,6 +22,7 @@ mod registry;
 pub(crate) mod routes;
 mod status;
 mod subagent;
+mod thinking_collapse;
 mod tmux;
 mod workboard;
 

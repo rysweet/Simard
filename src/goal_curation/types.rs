@@ -48,6 +48,65 @@ impl Display for GoalProgress {
     }
 }
 
+/// Canonical marker that `simard goal add --standing` prepends to a goal's
+/// description so the standing/perpetual nature is durable in the persisted
+/// board without adding a new field to every `ActiveGoal` construction site
+/// (issue #2580). Detection is by description marker rather than a bool field
+/// so pre-existing live standing goals — whose descriptions already read
+/// "STANDING PERPETUAL goal" / "Standing goal" — are reconciled automatically
+/// without touching `~/.simard`.
+pub const STANDING_MARKER_PREFIX: &str = "[standing] ";
+
+/// Whole-phrase, case-insensitive markers in a goal description that make it a
+/// standing/perpetual goal. Matched with a leading word boundary so ordinary
+/// words that merely *contain* one of these substrings (e.g. "understanding",
+/// "outstanding") never trigger a false positive.
+const STANDING_DESCRIPTION_MARKERS: &[&str] = &[
+    "standing perpetual",
+    "perpetual/standing",
+    "standing/perpetual",
+    "standing goal",
+    "perpetual goal",
+];
+
+/// The `[standing]` sentinel written by `--standing`. Detected verbatim
+/// (bracket-delimited, so no word-boundary check is needed).
+const STANDING_SENTINEL: &str = "[standing]";
+
+/// True when `description` durably marks the goal as standing/perpetual.
+///
+/// A standing goal has no terminal done-state: it is never marked
+/// `Completed` by goal-curation or the completion gate, is never tombstoned,
+/// and when its current unit of work finishes it rolls to a fresh cycle
+/// (see [`ActiveGoal::roll_to_new_cycle`]).
+pub fn description_marks_standing(description: &str) -> bool {
+    let lower = description.to_ascii_lowercase();
+    if lower.contains(STANDING_SENTINEL) {
+        return true;
+    }
+    STANDING_DESCRIPTION_MARKERS
+        .iter()
+        .any(|phrase| contains_phrase_on_word_boundary(&lower, phrase))
+}
+
+/// `haystack_lower.contains(phrase)` but only where the match begins on a word
+/// boundary (start-of-string or a non-alphanumeric char before it). Both
+/// arguments must already be lowercase. Keeps "understanding goal" from
+/// matching "standing goal".
+fn contains_phrase_on_word_boundary(haystack_lower: &str, phrase: &str) -> bool {
+    let bytes = haystack_lower.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = haystack_lower[from..].find(phrase) {
+        let idx = from + rel;
+        let prev_is_word = idx > 0 && bytes[idx - 1].is_ascii_alphanumeric();
+        if !prev_is_word {
+            return true;
+        }
+        from = idx + 1;
+    }
+    false
+}
+
 /// A reference to work-in-progress associated with a goal.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WipRef {
@@ -146,6 +205,44 @@ impl ActiveGoal {
     /// Short label for display.
     pub fn concise_label(&self) -> String {
         format!("p{} [{}] {}", self.priority, self.status, self.description)
+    }
+
+    /// True when this is a standing/perpetual goal — one with no terminal
+    /// done-state (issue #2580). Backed by a durable description marker so the
+    /// live research + CI-stewardship standing goals are recognised without a
+    /// data migration. A standing goal must never be marked `Completed` by
+    /// curation or the completion gate, and must never be tombstoned.
+    pub fn is_perpetual(&self) -> bool {
+        description_marks_standing(&self.description)
+    }
+
+    /// Builder: durably mark this goal as standing/perpetual by prepending the
+    /// [`STANDING_MARKER_PREFIX`] to its description (idempotent — a goal that
+    /// already reads as standing is returned unchanged). Set by
+    /// `simard goal add --standing`.
+    #[must_use]
+    pub fn mark_standing(mut self) -> Self {
+        if !self.is_perpetual() {
+            self.description = format!("{STANDING_MARKER_PREFIX}{}", self.description);
+        }
+        self
+    }
+
+    /// Roll a standing/perpetual goal into a fresh cycle after its current unit
+    /// of work finishes, instead of terminating it (issue #2580). Resets the
+    /// goal to an actionable, re-dispatchable state: status back to
+    /// `NotStarted`, assignment cleared, and stale work-in-progress refs
+    /// dropped so the next OODA cycle re-enters the spawn path. The
+    /// standing-goal description marker (and thus [`is_perpetual`]) is
+    /// preserved.
+    ///
+    /// [`is_perpetual`]: ActiveGoal::is_perpetual
+    pub fn roll_to_new_cycle(&mut self) {
+        self.status = GoalProgress::NotStarted;
+        self.assigned_to = None;
+        self.wip_refs.clear();
+        self.current_activity =
+            Some("standing goal — finished a unit of work; rolled to a fresh cycle".to_string());
     }
 }
 
@@ -491,6 +588,77 @@ mod tests {
         let json = serde_json::to_string(&g).unwrap();
         let g2: ActiveGoal = serde_json::from_str(&json).unwrap();
         assert_eq!(g2.assigned_to, None);
+    }
+
+    // ── Standing / perpetual goals (issue #2580) ────────────────────
+
+    #[test]
+    fn description_marks_standing_recognizes_live_markers() {
+        // The exact phrasings on the live board must be recognised so they are
+        // reconciled without a data migration or touching ~/.simard.
+        assert!(description_marks_standing("STANDING PERPETUAL goal"));
+        assert!(description_marks_standing("Standing goal"));
+        assert!(description_marks_standing(
+            "Continuously research and improve your own cognition. STANDING PERPETUAL goal."
+        ));
+        assert!(description_marks_standing(&format!(
+            "{STANDING_MARKER_PREFIX}watch CI health"
+        )));
+    }
+
+    #[test]
+    fn description_marks_standing_rejects_false_positives() {
+        // Ordinary words that merely contain "standing" must not match.
+        assert!(!description_marks_standing(
+            "Improve understanding of goals"
+        ));
+        assert!(!description_marks_standing(
+            "Fix an outstanding goal-board bug"
+        ));
+        assert!(!description_marks_standing("Ship the MVP"));
+        assert!(!description_marks_standing(""));
+    }
+
+    #[test]
+    fn is_perpetual_tracks_description() {
+        let normal = ActiveGoal::new("g", "Ship the MVP", 1);
+        assert!(!normal.is_perpetual());
+        let standing = ActiveGoal::new("g", "Steward CI health. Standing goal.", 1);
+        assert!(standing.is_perpetual());
+    }
+
+    #[test]
+    fn mark_standing_makes_goal_perpetual_and_is_idempotent() {
+        let g = ActiveGoal::new("g", "watch CI", 1).mark_standing();
+        assert!(g.is_perpetual());
+        assert!(g.description.starts_with(STANDING_MARKER_PREFIX));
+        // Idempotent: a goal already read as standing is not double-marked.
+        let again = g.clone().mark_standing();
+        assert_eq!(again.description, g.description);
+    }
+
+    #[test]
+    fn roll_to_new_cycle_resets_to_actionable_and_stays_perpetual() {
+        let mut g = sample_goal();
+        g.description = "Research cognition. STANDING PERPETUAL goal.".to_string();
+        g.status = GoalProgress::Completed;
+        g.assigned_to = Some("engineer-x".to_string());
+        g.wip_refs = vec![WipRef {
+            kind: "pr".to_string(),
+            ref_id: "1".to_string(),
+            label: "old".to_string(),
+            url: None,
+        }];
+        assert!(g.is_perpetual());
+
+        g.roll_to_new_cycle();
+        assert_eq!(g.status, GoalProgress::NotStarted);
+        assert_eq!(g.assigned_to, None);
+        assert!(g.wip_refs.is_empty());
+        assert!(
+            g.is_perpetual(),
+            "must remain a standing goal after rolling to a new cycle"
+        );
     }
 
     // ── BacklogItem ─────────────────────────────────────────────────
