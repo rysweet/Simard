@@ -5,8 +5,8 @@
 //! required security behavior — a fail-closed sender allowlist and high-risk
 //! gating that never auto-executes a mutating command from a text.
 //!
-//! These run under `cargo test --features signal`; no live signal-cli or network
-//! is involved.
+//! These run under the default `cargo test` (the `signal` feature is on by
+//! default since issue #2576); no live signal-cli or network is involved.
 
 use super::allowlist::{Allowlist, AuthDecision};
 use super::config::SignalConfig;

@@ -1,11 +1,11 @@
 ---
 title: How to set up the Signal channel
-description: Connect Simard to Signal so an allowlisted operator can command her and receive notifications, using a locally-run signal-cli JSON-RPC daemon. Covers the signal feature build, linking a device (or using a dedicated number), the Note-to-Self flow for single-number linked-device setups, loop prevention, configuration, the allowlist, and verification.
+description: Connect Simard to Signal so an allowlisted operator can command her and receive notifications, using a locally-run signal-cli JSON-RPC daemon. Covers linking a device (or using a dedicated number), the Note-to-Self flow for single-number linked-device setups, loop prevention, configuration, the allowlist, and verification. The signal feature is built by default, so a plain build is signal-capable.
 last_updated: 2026-07-04
 review_schedule: as-needed
 owner: simard
 doc_type: howto
-issues: ["#2527", "#2575"]
+issues: ["#2527", "#2575", "#2576"]
 related:
   - ../index.md
   - ../reference/signal-conversation.md
@@ -23,8 +23,10 @@ and receive notifications (PR merge-ready, stalls, high-risk sign-off requests).
 
 Simard does not implement Signal herself. She connects to a locally-run
 [`signal-cli`](https://github.com/AsamK/signal-cli) daemon over JSON-RPC. This
-guide installs signal-cli, links or registers an account, builds Simard with the
-`signal` feature, configures the `[signal]` table, and verifies the round trip.
+guide installs signal-cli, links or registers an account, configures the
+`[signal]` table, and verifies the round trip. The `signal` feature is **built by
+default** (issue #2576), so a plain `cargo build` already ships the channel — no
+`--features signal` needed.
 
 For the full contract (config keys, commands, guardrails), see the
 [Signal channel reference](../reference/signal-conversation.md).
@@ -119,8 +121,9 @@ Add a `[signal]` table to the runtime config file at `<state_root>/config.toml`
 (the same file Simard uses for the LLM provider; `<state_root>` is
 `$SIMARD_STATE_ROOT` or, by default, `~/.simard`, so `~/.simard/config.toml` out of
 the box). Environment variables still win over the file; there is no silent default.
-The `[signal]` table is only parsed and applied in a `--features signal` build
-(step 5) — a default build ignores it.
+The `[signal]` table is parsed and applied by any default build (the `signal`
+feature is on by default since issue #2576). Only a deliberately minimal
+`--no-default-features` build ignores it.
 
 ```toml
 [signal]
@@ -156,15 +159,16 @@ read_only_unknown = false        # keep unknown senders fully ignored (default)
 - Set `read_only_unknown = true` only if you want non-allowlisted senders to be
   able to read `status`; they can never trigger a mutation.
 
-## 5. Build and run Simard with the `signal` feature
+## 5. Build and run Simard
 
-The Signal channel compiles only with the `signal` feature:
+The Signal channel is compiled into a stock build (the `signal` feature is a
+default), so the plain build command already includes it:
 
 ```bash
-cargo build --features signal
+cargo build
 ```
 
-Then launch the Signal channel with the `signal run` subcommand from that build:
+Then launch the Signal channel with the `signal run` subcommand:
 
 ```bash
 simard signal run
@@ -174,9 +178,9 @@ On startup Simard reads the `[signal]` table, connects to the signal-cli endpoin
 and begins receiving inbound messages from allowlisted senders and sending
 notifications out. Leave it running (systemd unit, tmux, or a supervisor) alongside
 the signal-cli daemon from step 3. `simard signal run` exits when the signal-cli
-socket closes; supervise it if you want it to reconnect. A build **without**
-`--features signal` still recognizes `simard signal run` but tells you to rebuild
-with the feature — no Signal code is compiled into a default build.
+socket closes; supervise it if you want it to reconnect. Only a deliberately
+minimal `--no-default-features` build omits the Signal code; it still recognizes
+`simard signal run` but tells you to rebuild with the feature.
 
 ## 6. Verify the round trip
 
@@ -291,8 +295,9 @@ for a dedicated number.
    the `account` number itself (they are the same).
 2. **Is the daemon reachable?** Confirm `signal-cli -a … daemon --tcp 127.0.0.1:7583`
    is running and `endpoint` matches host:port exactly.
-3. **Built with the feature?** A default build has no Signal code. Rebuild with
-   `cargo build --features signal`.
+3. **Built with the feature?** A default build already includes the Signal
+   channel. You would only be missing it in a deliberately minimal
+   `--no-default-features` build — rebuild with a plain `cargo build`.
 
 ### My Note-to-Self messages are ignored (single-number setup)
 
@@ -320,9 +325,11 @@ authorize; the action then runs through its existing gated authority.
 
 ### The daemon runs but I never wanted Signal
 
-Nothing to do — the Signal channel is off unless you build with `--features signal`
-*and* provide a `[signal]` table. A plain `cargo build` has no Signal code and needs
-no signal-cli.
+The Signal channel is built by default, but it stays dormant until you provide a
+`[signal]` table (with a fail-closed, empty-by-default allowlist) — without it,
+`simard signal run` simply reports missing config and Simard never touches
+signal-cli. If you want a binary with no Signal code at all, build with
+`--no-default-features`.
 
 ## Related reading
 

@@ -156,6 +156,15 @@ jobs:
         # run first.
         run: python -m pre_commit run --all-files --show-diff-on-failure --hook-stage pre-push cargo-clippy
 
+      - name: Build minimal binary (--no-default-features contract, issue #2576)
+        # Issue #2576 made every runtime feature (signal, dashboard-audit) part
+        # of the default set, so the default `cargo build` below already exercises
+        # the fully-capable path. This step locks the OTHER edge: that the crate
+        # still compiles and links with NO features, i.e. the deliberately minimal
+        # binary keeps building (the signal channel drops to its feature-off stub).
+        # `--locked` guards against Cargo.lock churn on the feature-off resolution.
+        run: cargo build --release --bin simard --no-default-features --locked
+
       - name: Build simard binary for downstream jobs
         # cargo test above already compiles the simard library + bins for the
         # test profile. Producing the dev-profile binary here is incremental

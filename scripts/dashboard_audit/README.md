@@ -12,8 +12,9 @@ complaints.
 
 ## Binaries
 
-The audit tools are compiled as Rust binaries gated behind the `dashboard-audit`
-Cargo feature. Source lives in `src/bin/`:
+The audit tools are compiled as Rust binaries. They live behind the
+`dashboard-audit` Cargo feature, which is **on by default** (issue #2576), so a
+stock build compiles them. Source lives in `src/bin/`:
 
 | Binary                    | Source                               | Former Python          |
 | ------------------------- | ------------------------------------ | ---------------------- |
@@ -73,14 +74,20 @@ should be regenerated per audit pass against the live daemon.
 
 ## How to build
 
+The `dashboard-audit` feature is on by default, so a plain build produces the
+audit binaries:
+
 ```bash
-cargo build --features dashboard-audit \
+cargo build \
   --bin simard-audit-pass01 \
   --bin simard-audit-dashboard
 ```
 
-The `dashboard-audit` feature gates the `headless_chrome`, `regex`, and `url`
-dependencies so normal builds are unaffected.
+The `dashboard-audit` feature carries the `headless_chrome`, `regex`, and `url`
+dependencies; drop them from a build with `--no-default-features` if you need a
+minimal binary. The `headless_chrome` crate is a build-time dependency only — the
+actual Chrome/Chromium binary is a **runtime** concern, so these tools compile
+anywhere and only require Chrome when you actually run an audit pass.
 
 ## How to re-run an audit pass
 
@@ -95,10 +102,10 @@ Run a pass:
 
 ```bash
 # raw captures
-cargo run --features dashboard-audit --bin simard-audit-pass01
+cargo run --bin simard-audit-pass01
 
 # structured audit with REPORT.md
-cargo run --features dashboard-audit --bin simard-audit-dashboard
+cargo run --bin simard-audit-dashboard
 ```
 
 Or use the pre-built binaries:

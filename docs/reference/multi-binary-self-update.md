@@ -116,13 +116,14 @@ At the time of writing the producer packages these Cargo `bin` targets:
 | `simard_operator_probe` | Operator self-probe helper (note: underscore-named) | Auxiliary — best-effort |
 
 > **Feature-gated targets are NOT shipped.** Cargo `bin` targets carrying a
-> non-default `required-features` (for example `simard-audit-pass01` and
+> `required-features` marker (for example `simard-audit-pass01` and
 > `simard-audit-dashboard`, gated behind the `dashboard-audit` feature) are
-> **excluded** from the release tarball, because the release job builds with the
-> default feature set and never compiles them. The producer filter drops any
-> target whose `required-features` is non-empty (see
-> [Release packaging contract](#release-packaging-contract)). To ship such a
-> tool, the release build must first enable its feature.
+> **excluded** from the release tarball. Since issue #2576 `dashboard-audit` is a
+> default feature, so the release build DOES compile them — but they need a real
+> Chrome binary at runtime and are dev/ops tooling, not part of the deployed
+> daemon payload. The producer filter drops any target whose `required-features`
+> is non-empty (see [Release packaging contract](#release-packaging-contract)),
+> which keeps them out of the shipped set regardless.
 
 The table is **illustrative, not authoritative**. The authoritative set is
 whatever `cargo metadata` reports as `bin` targets *buildable with the release
@@ -388,10 +389,12 @@ set** into each platform tarball, instead of only `simard`. Without this, the
 consumer refactor installs nothing extra.
 
 The "Package binary" step enumerates Cargo `bin` targets dynamically rather than
-naming a literal `simard`. It also filters out targets gated behind a non-default
-`required-features` (such as the `dashboard-audit` audit tools), because the
-release build uses the default feature set and never compiles them — packaging a
-never-built target would make `tar` fail:
+naming a literal `simard`. It also filters out targets carrying a
+`required-features` marker (such as the `dashboard-audit` audit tools). Since
+issue #2576 the default feature set includes `dashboard-audit`, so the release
+build now compiles those tools — but they need a real Chrome binary at runtime,
+so they are intentionally kept out of the shipped tarball; the filter also keeps
+`tar` from failing should a target's feature ever leave the default set:
 
 ```bash
 set -euo pipefail
