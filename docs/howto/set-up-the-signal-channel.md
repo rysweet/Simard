@@ -129,8 +129,9 @@ account  = "+15551234567"        # the linked/dedicated account from step 2
 allowlist = ["+15559876543"]     # YOUR operator number(s) — who may command Simard
 read_only_unknown = false        # keep unknown senders fully ignored (default)
 # own_device_id = 2              # single-number setups only: signal-cli's OWN linked
-                                 # device id from `listDevices` — defence-in-depth
-                                 # loop prevention. Omit it for a dedicated number.
+                                 # device id (>= 2) from `listDevices` — defence-in-depth
+                                 # loop prevention. A value < 2 is rejected at load. Omit
+                                 # it for a dedicated number.
 ```
 
 - **`allowlist` is the security boundary.** Only the E.164 numbers listed here may
@@ -146,11 +147,12 @@ read_only_unknown = false        # keep unknown senders fully ignored (default)
       Note-to-Self message is accepted only when it comes from your **primary phone**
       (device 1) — see [Chatting via Note to Self](#chatting-via-note-to-self-single-number-setups).
 - **`own_device_id` (optional, single-number setups).** signal-cli's own linked
-  device id (from `signal-cli … listDevices`, e.g. `2`). It is defence-in-depth: even
-  without it Simard already rejects her own echoes (only device 1 may command), but
-  setting it makes the own-device rejection explicit. Resolve it env-first with
-  `SIMARD_SIGNAL_OWN_DEVICE_ID`. Omit it for a dedicated number. A present-but-unparseable
-  value is a hard error (like the other keys) — never a silent default.
+  device id (from `signal-cli … listDevices`, an integer `>= 2`, e.g. `2`). It is
+  defence-in-depth: even without it Simard already rejects her own echoes (only device 1
+  may command), but setting it makes the own-device rejection explicit. Resolve it
+  env-first with `SIMARD_SIGNAL_OWN_DEVICE_ID`. Omit it for a dedicated number. A present
+  value that is unparseable **or `< 2`** is a hard config error (device 1 is your phone,
+  so `own_device_id = 1` would disable Note to Self) — never a silent default.
 - Set `read_only_unknown = true` only if you want non-allowlisted senders to be
   able to read `status`; they can never trigger a mutation.
 
@@ -301,8 +303,9 @@ for a dedicated number.
 2. **Is the account number allowlisted?** For a single-number linked device the sender
    *is* the `account`, so `account` must appear in `allowlist`.
 3. **Is `own_device_id` set to the wrong id?** It must be signal-cli's **own** linked
-   device id (≥ 2) from `listDevices`, never `1`. Setting it to `1` would reject your
-   phone. When in doubt, omit it — the device-1 gate already prevents loops.
+   device id (≥ 2) from `listDevices`. A value `< 2` (e.g. `1`, your phone) is rejected
+   at startup with a config error, because it would disable every Note-to-Self command.
+   When in doubt, omit it — the device-1 gate already prevents loops.
 
 ### Simard receives but never replies
 

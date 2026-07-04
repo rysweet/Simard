@@ -87,8 +87,10 @@ signal-cli -a +15551234567 daemon --tcp 127.0.0.1:7583
 and speaks **newline-delimited JSON-RPC 2.0**:
 
 - **inbound** — signal-cli `receive` notifications are parsed by the pure
-  `parse_incoming` helper into a `ParsedInbound` (see below), which the channel maps
-  to `Inbound { from: OperatorRef { id: <E.164>, authorized }, text }`.
+  `parse_incoming` helper into a `ParsedInbound` (see below). The channel dispatches a
+  recognized command (`status`, `pause`, `approve`, `merge #NNNN`, …) internally; only
+  an ordinary conversation turn surfaces to the driver as
+  `Inbound { from: OperatorRef { id: <E.164>, authorized }, text }`.
 - **outbound** — an `Outbound` is mapped to a JSON-RPC `send` request addressed to
   the operator number.
 
@@ -122,6 +124,26 @@ unchanged. A missing or non-numeric `sourceDevice` becomes `None` — it is **ne
 coerced to `1`, so a malformed sync envelope fails the primary-phone gate and is
 rejected (fail-closed).
 
+> **Implementation assumption — verify against a captured envelope before building.**
+> This design commits to the JSON-RPC field name **`sourceDevice`** and to two semantics
+> that the issue #2575 production logs do **not** prove (they only show the inbound-phone
+> case, `sourceDevice: 1`):
+>
+> 1. a `syncMessage.sentMessage` envelope **carries `sourceDevice`**, and it is the id
+>    of the device that *originated* the message — so Simard's own replies, emitted from
+>    signal-cli's linked device, stamp `>= 2`; and
+> 2. a genuine Note to Self exposes the account's own E.164 via
+>    `sentMessage.destinationNumber` (or `destination`), so `sync_destination == account`
+>    can be evaluated.
+>
+> **Confirm both against a real signal-cli line** (capture the raw `jsonRpc` output for a
+> Note-to-Self message *and* for one of Simard's own replies) before implementing. If the
+> field is actually named differently (`sourceDeviceId`, …) or is absent, or if
+> `destination` is only a UUID with no E.164, `parse_incoming` yields `None` / the
+> acceptance predicate fails and **every Note-to-Self command is silently rejected — the
+> exact failure mode #2575 fixes.** The parser is fail-closed by construction, but these
+> field names must be validated for the feature to *work*, not merely to be safe.
+
 ## Configuration
 
 Signal settings live in the `[signal]` table of the runtime config file at
@@ -142,9 +164,11 @@ ignored.
 > `SIMARD_SIGNAL_ACCOUNT`, `SIMARD_SIGNAL_ALLOWLIST` (comma-separated),
 > `SIMARD_SIGNAL_READ_ONLY_UNKNOWN`, and `SIMARD_SIGNAL_OWN_DEVICE_ID`. `endpoint`
 > and `account` are required; `allowlist` defaults to empty (fail-closed),
-> `read_only_unknown` to false, and `own_device_id` to `None` (absent). A
-> present-but-unparseable `own_device_id` is a hard error, consistent with the other
-> keys — never a silent default.
+> `read_only_unknown` to false, and `own_device_id` to `None` (absent). A present
+> `own_device_id` that is unparseable **or `< 2`** is a hard error — never a silent
+> default. (Device 1 is always the operator's primary phone, so `own_device_id = 1`
+> would disable every Note-to-Self command; the loader rejects it at startup rather than
+> letting it fail closed at runtime.)
 
 ```toml
 [signal]
@@ -163,9 +187,10 @@ allowlist = ["+15557654321"]
 # They can never trigger a mutation. Default false (unknown senders fully ignored).
 read_only_unknown = false
 
-# Optional (single-number linked-device setups): signal-cli's OWN linked device id
-# (>= 2, from `signal-cli … listDevices`). Defence-in-depth loop prevention; the
-# device-1 gate already closes the loop without it. Omit for a dedicated number.
+# Optional (single-number linked-device setups): signal-cli's OWN linked device id,
+# an integer >= 2 from `signal-cli … listDevices`. A present value < 2 is rejected at
+# load (device 1 is your phone). Defence-in-depth loop prevention; the device-1 gate
+# already closes the loop without it. Omit for a dedicated number.
 # own_device_id = 2
 ```
 
@@ -175,7 +200,7 @@ read_only_unknown = false
 | `account` | E.164 string | — (required) | the Signal account signal-cli operates |
 | `allowlist` | array of E.164 | `[]` | numbers permitted to issue commands |
 | `read_only_unknown` | bool | `false` | if true, unknown senders may read status only |
-| `own_device_id` | integer `>= 2` | `None` (absent) | signal-cli's own linked device id; defence-in-depth Note-to-Self loop prevention |
+| `own_device_id` | integer `>= 2` (validated) | `None` (absent) | signal-cli's own linked device id; defence-in-depth Note-to-Self loop prevention. A present value `< 2` is a hard config error. |
 
 ## Guardrails
 
@@ -299,7 +324,11 @@ destination, account, primary_device_id = 1)` and `matches_recent_outbound(body,
    `VecDeque<(String, Instant)>` (cap **64**, TTL **300 s**, pruned on insert) and
    rejects a sync-sent message whose body **exactly** matches a recent outbound. This
    catches any echo the first two guards miss. The window is in-memory only — never
-   persisted, never logged.
+   persisted, never logged. Because `reply()` records **every** outbound — command
+   replies *and* notifications — an operator Note-to-Self whose body is byte-identical
+   to a message Simard sent within the TTL is transiently suppressed. That is a
+   deliberate fail-safe bias: guard (1) is the primary loop guard, so this rare
+   false-negative is preferred over risking an unbroken echo.
 
 Two further properties keep the change **monotonic** — the sync path only ever *adds*
 gates, it never widens acceptance:
