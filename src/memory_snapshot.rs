@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::cognitive_memory::CognitiveMemoryOps;
+use crate::cognitive_memory::{CognitiveMemoryOps, StoreEmptiness};
 use crate::error::SimardResult;
 use crate::remote_transfer::MemorySnapshot;
 
@@ -196,6 +196,74 @@ pub fn restore_snapshot(
     crate::remote_transfer::import_memory_snapshot(bridge, snapshot)
 }
 
+/// Hydrate `bridge` from `snapshot` **only when the store is confirmed empty**,
+/// failing closed on a read error (issue #2561).
+///
+/// This is the guarded entry point a session/daemon startup uses to self-heal a
+/// freshly-initialised — or corruption-reset (issue #2550) — cognitive store
+/// from its most recent on-disk snapshot. The guard is the crux of #2561: the
+/// decision to hydrate is taken from [`CognitiveMemoryOps::probe_emptiness`],
+/// which distinguishes a *confirmed-empty* store from one whose reads are
+/// *failing*, rather than from a bare count that a swallowed read error can
+/// silently zero out.
+///
+/// Behaviour:
+///
+/// * [`StoreEmptiness::ConfirmedEmpty`] — the store was read successfully and is
+///   genuinely empty → import the snapshot and return `Ok(Some(count))` where
+///   `count` is the number of restored items.
+/// * [`StoreEmptiness::NonEmpty`] — the store already holds memories → do
+///   nothing and return `Ok(None)`. Re-importing would duplicate memories.
+/// * `Err(..)` from the probe — a read *failed*. We **fail closed**: the error
+///   is propagated and nothing is imported, so a transient read failure can
+///   never be mistaken for an empty store and cause a snapshot to be layered on
+///   top of still-present-but-unreadable durable memory.
+///
+/// The order matters: emptiness is confirmed *before* any write, so the import
+/// side effect is unreachable on the error path.
+#[allow(deprecated)] // restore_snapshot wraps the legacy snapshot API
+pub fn auto_restore_if_empty(
+    bridge: &dyn CognitiveMemoryOps,
+    snapshot: &MemorySnapshot,
+) -> SimardResult<Option<usize>> {
+    // `?` propagates a read failure BEFORE `restore_snapshot` runs — the
+    // fail-closed guarantee that protects durable memory (issue #2561).
+    match bridge.probe_emptiness()? {
+        StoreEmptiness::ConfirmedEmpty => Ok(Some(restore_snapshot(bridge, snapshot)?)),
+        StoreEmptiness::NonEmpty => Ok(None),
+    }
+}
+
+/// Load the most recent snapshot from `dir` and hydrate `bridge` from it **only
+/// when the store is confirmed empty**, failing closed on a read error (issue
+/// #2561).
+///
+/// A convenience wrapper over [`auto_restore_if_empty`] that sources the
+/// snapshot with [`load_latest_snapshot`]. Emptiness is confirmed *first*, so a
+/// non-empty (or unreadable) store never even reads a snapshot off disk:
+///
+/// * store confirmed empty and a snapshot exists → `Ok(Some(count))`.
+/// * store confirmed empty but no loadable snapshot in `dir` → `Ok(None)`
+///   (nothing to restore; the fresh store is left as-is).
+/// * store non-empty → `Ok(None)` (skip; re-importing would duplicate).
+/// * probe read failure → `Err(..)`, nothing imported (fail closed).
+pub fn auto_restore_latest_if_empty(
+    bridge: &dyn CognitiveMemoryOps,
+    dir: &Path,
+) -> SimardResult<Option<usize>> {
+    // Fail closed BEFORE touching a snapshot: only a confirmed-empty store is
+    // eligible for hydration.
+    match bridge.probe_emptiness()? {
+        StoreEmptiness::NonEmpty => return Ok(None),
+        StoreEmptiness::ConfirmedEmpty => {}
+    }
+    match load_latest_snapshot(dir) {
+        // Emptiness is already confirmed above, so restore directly.
+        Some(snapshot) => Ok(Some(restore_snapshot(bridge, &snapshot)?)),
+        None => Ok(None),
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Tests
 // ────────────────────────────────────────────────────────────────────────────
@@ -378,6 +446,230 @@ mod tests {
             let path = dir.join(format!("agent-{i:010}.json"));
             assert!(path.exists(), "recent snapshot {i} should still exist");
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Auto-restore fail-closed regression tests (issue #2561)
+    //
+    // These are fully hermetic: they drive an in-memory bridge transport and
+    // (for the disk-sourced path) a per-test tempdir. Nothing touches
+    // `$HOME/.simard` or any real cognitive store.
+    // ────────────────────────────────────────────────────────────────────
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::bridge::BridgeErrorPayload;
+    use crate::bridge_subprocess::InMemoryBridgeTransport;
+    use crate::memory_bridge::CognitiveMemoryBridge;
+    use serde_json::json;
+
+    /// A one-fact, one-procedure snapshot. Restoring it issues exactly two
+    /// writes (`store_fact` + `store_procedure`), so an import-side-effect
+    /// counter of 2 means the whole snapshot was applied and 0 means nothing
+    /// was written.
+    fn two_item_snapshot() -> MemorySnapshot {
+        serde_json::from_value(json!({
+            "facts": [{
+                "node_id": "f1",
+                "concept": "restore-guard",
+                "content": "durable knowledge",
+                "confidence": 0.9,
+                "source_id": "test",
+                "tags": []
+            }],
+            "procedures": [{
+                "node_id": "p1",
+                "name": "rebuild",
+                "steps": ["compile", "test"],
+                "prerequisites": [],
+                "usage_count": 0
+            }],
+            "exported_at": 0,
+            "source_agent": "test-agent"
+        }))
+        .expect("construct snapshot")
+    }
+
+    /// Build a destination bridge whose `memory.get_statistics` response is
+    /// produced by `stats`, and whose write ops (`store_fact` /
+    /// `store_procedure`) bump the returned counter. The counter is the
+    /// "durable memory touched" probe: a fail-closed restore must leave it at 0.
+    fn dest_bridge(
+        stats: impl Fn() -> Result<serde_json::Value, BridgeErrorPayload> + Send + Sync + 'static,
+    ) -> (CognitiveMemoryBridge, Arc<AtomicUsize>) {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let writes_h = Arc::clone(&writes);
+        let transport =
+            InMemoryBridgeTransport::new("test-dest", move |method, _params| match method {
+                "memory.get_statistics" => stats(),
+                "memory.store_fact" => {
+                    writes_h.fetch_add(1, Ordering::SeqCst);
+                    Ok(json!({"id": "imported-fact"}))
+                }
+                "memory.store_procedure" => {
+                    writes_h.fetch_add(1, Ordering::SeqCst);
+                    Ok(json!({"id": "imported-proc"}))
+                }
+                _ => Err(BridgeErrorPayload {
+                    code: -32601,
+                    message: format!("unexpected method: {method}"),
+                }),
+            });
+        (CognitiveMemoryBridge::new(Box::new(transport)), writes)
+    }
+
+    fn zero_stats() -> serde_json::Value {
+        json!({
+            "sensory_count": 0,
+            "working_count": 0,
+            "episodic_count": 0,
+            "semantic_count": 0,
+            "procedural_count": 0,
+            "prospective_count": 0
+        })
+    }
+
+    #[test]
+    fn auto_restore_hydrates_a_confirmed_empty_store() {
+        // Path (a): a store that reads cleanly as all-zeros is genuinely empty,
+        // so the snapshot is applied in full.
+        let (bridge, writes) = dest_bridge(|| Ok(zero_stats()));
+        let snapshot = two_item_snapshot();
+
+        let restored = auto_restore_if_empty(&bridge, &snapshot).expect("confirmed-empty restore");
+
+        assert_eq!(restored, Some(2), "both snapshot items should be restored");
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            2,
+            "restore should have written the fact and the procedure",
+        );
+    }
+
+    #[test]
+    fn auto_restore_fails_closed_on_read_error_without_wiping_memory() {
+        // Path (b): the emptiness probe FAILS (a swallowed read-failure surfaced
+        // as an error). The gate must propagate the error and perform NO writes,
+        // so still-present-but-unreadable durable memory is never overwritten or
+        // duplicated. This is the core #2561 regression guard.
+        let (bridge, writes) = dest_bridge(|| {
+            Err(BridgeErrorPayload {
+                code: -32000,
+                message: "transient read failure at startup".to_string(),
+            })
+        });
+        let snapshot = two_item_snapshot();
+
+        let result = auto_restore_if_empty(&bridge, &snapshot);
+
+        assert!(
+            result.is_err(),
+            "a read failure must be surfaced as Err, never coerced to empty",
+        );
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            0,
+            "fail-closed restore must not write anything (durable memory intact)",
+        );
+    }
+
+    #[test]
+    fn auto_restore_skips_a_non_empty_store() {
+        // Path (c): a store that already holds memories must not be re-imported —
+        // doing so would duplicate every memory.
+        let (bridge, writes) = dest_bridge(|| {
+            Ok(json!({
+                "sensory_count": 0,
+                "working_count": 0,
+                "episodic_count": 0,
+                "semantic_count": 5,
+                "procedural_count": 0,
+                "prospective_count": 0
+            }))
+        });
+        let snapshot = two_item_snapshot();
+
+        let restored = auto_restore_if_empty(&bridge, &snapshot).expect("non-empty skip is Ok");
+
+        assert_eq!(restored, None, "a non-empty store must be left untouched");
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            0,
+            "no snapshot items should be written into a non-empty store",
+        );
+    }
+
+    #[test]
+    fn auto_restore_latest_loads_and_hydrates_when_confirmed_empty() {
+        // End-to-end over the disk-sourced convenience wrapper, hermetic via a
+        // per-test tempdir: a confirmed-empty store hydrates from the newest
+        // on-disk snapshot.
+        let dir = std::env::temp_dir().join(format!(
+            "simard-test-autorestore-empty-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+
+        let snapshot = two_item_snapshot();
+        let envelope = crate::remote_transfer::PersistedEnvelope {
+            schema_version: crate::remote_transfer::ENVELOPE_SCHEMA_VERSION,
+            payload: snapshot,
+        };
+        std::fs::write(
+            dir.join("test-agent-0000000001.json"),
+            serde_json::to_vec_pretty(&envelope).expect("serialize snapshot"),
+        )
+        .expect("write snapshot file");
+
+        let (bridge, writes) = dest_bridge(|| Ok(zero_stats()));
+        let restored =
+            auto_restore_latest_if_empty(&bridge, &dir).expect("confirmed-empty latest restore");
+
+        assert_eq!(restored, Some(2), "the latest snapshot should be restored");
+        assert_eq!(writes.load(Ordering::SeqCst), 2, "both items written");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_restore_latest_fails_closed_on_read_error() {
+        // The disk-sourced wrapper must also fail closed: a probe error aborts
+        // BEFORE any snapshot is read or applied.
+        let dir = std::env::temp_dir().join(format!(
+            "simard-test-autorestore-failclosed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+
+        let envelope = crate::remote_transfer::PersistedEnvelope {
+            schema_version: crate::remote_transfer::ENVELOPE_SCHEMA_VERSION,
+            payload: two_item_snapshot(),
+        };
+        std::fs::write(
+            dir.join("test-agent-0000000001.json"),
+            serde_json::to_vec_pretty(&envelope).expect("serialize snapshot"),
+        )
+        .expect("write snapshot file");
+
+        let (bridge, writes) = dest_bridge(|| {
+            Err(BridgeErrorPayload {
+                code: -32000,
+                message: "transient read failure at startup".to_string(),
+            })
+        });
+        let result = auto_restore_latest_if_empty(&bridge, &dir);
+
+        assert!(result.is_err(), "probe error must abort the restore");
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            0,
+            "no writes on the fail-closed path (durable memory intact)",
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

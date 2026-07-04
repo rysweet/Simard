@@ -80,6 +80,27 @@ pub enum MemoryKind {
     Procedure,
 }
 
+/// Outcome of a **fail-closed** emptiness probe over a cognitive store (issue
+/// #2561).
+///
+/// This deliberately has only two variants: a store that was *read
+/// successfully* is either [`ConfirmedEmpty`](StoreEmptiness::ConfirmedEmpty)
+/// or [`NonEmpty`](StoreEmptiness::NonEmpty). A read *failure* is **never**
+/// represented here — it is surfaced as `Err` by
+/// [`CognitiveMemoryOps::probe_emptiness`] so the auto-restore gate
+/// ([`crate::memory_snapshot::auto_restore_if_empty`]) can fail closed instead
+/// of mistaking an unreadable store for an empty one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreEmptiness {
+    /// The store was read successfully and holds zero memories across every
+    /// cognitive type. Safe to hydrate from a snapshot.
+    ConfirmedEmpty,
+    /// The store was read successfully and holds at least one memory. The
+    /// auto-restore gate must NOT hydrate — re-importing a snapshot would
+    /// duplicate memories.
+    NonEmpty,
+}
+
 /// Forgetting threshold for [`CognitiveMemoryOps::forget_low_value_facts`]
 /// (issue #2434): live facts whose value falls below this fade during the
 /// controlled-forgetting hygiene pass.
@@ -543,6 +564,43 @@ pub trait CognitiveMemoryOps: Send + Sync {
     }
 
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics>;
+
+    /// Probe whether the store is *confirmed* empty, **failing closed** on a
+    /// read error (issue #2561).
+    ///
+    /// The auto-restore gate
+    /// ([`crate::memory_snapshot::auto_restore_if_empty`]) hydrates a store from
+    /// an on-disk snapshot only when it is genuinely empty (e.g. a fresh install
+    /// or a corruption-reset self-heal, issue #2550). Deciding "empty" purely
+    /// from a count is unsafe when the underlying read can *fail silently*: if a
+    /// transient read error is coerced into an all-zeros count, the gate would
+    /// re-import a snapshot on top of still-present-but-unreadable durable data
+    /// and duplicate every memory once reads recover.
+    ///
+    /// This method therefore returns a `Result` so a surfaced read error is
+    /// **propagated as `Err`**, never mapped to
+    /// [`StoreEmptiness::ConfirmedEmpty`]. The default implementation derives the
+    /// answer from [`get_statistics`](Self::get_statistics) — which already
+    /// returns a `Result`, so any backend that surfaces its read/transport
+    /// errors (the bridge and IPC clients, test mocks) fails closed for free, and
+    /// this is the single seam a future error-propagating count plugs into.
+    ///
+    /// # Backend note
+    ///
+    /// The direct library backend ([`LibraryCognitiveMemory`]) cannot yet
+    /// observe a read error that the pinned `amplihack-memory-lib` swallows
+    /// internally (`Err(_) => Vec::new()`); closing that last gap needs the
+    /// upstream library to propagate the error (issue #2561). Until then this
+    /// seam guarantees the *decision path* is fail-closed for every backend that
+    /// can surface the error and centralises where the fix lands.
+    fn probe_emptiness(&self) -> SimardResult<StoreEmptiness> {
+        let stats = self.get_statistics()?;
+        Ok(if stats.total() == 0 {
+            StoreEmptiness::ConfirmedEmpty
+        } else {
+            StoreEmptiness::NonEmpty
+        })
+    }
 
     /// Store a semantic fact and record where it was distilled from.
     ///
