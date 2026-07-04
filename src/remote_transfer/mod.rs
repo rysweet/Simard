@@ -336,6 +336,26 @@ pub fn load_full_snapshot_from_file(path: &Path) -> SimardResult<FullMemorySnaps
         reason: e.to_string(),
     })?;
 
+    // Fast path: a bare or full snapshot object deserializes straight into
+    // `FullMemorySnapshot` in a single streaming pass (the `#[serde(default)]`
+    // on `episodes`/`prospective` lets a legacy bare snapshot load too). This
+    // skips building — and, for an envelope, deep-cloning — an intermediate
+    // `serde_json::Value` DOM, which for a large snapshot (the incident held
+    // tens of thousands of records) costs several times the final struct in
+    // transient allocation on the P0 recovery/restore path. `facts`,
+    // `procedures`, `exported_at` and `source_agent` are required fields, so an
+    // envelope (which lacks them at top level) can never mis-parse here — it
+    // fails and falls through to the byte-for-byte-identical envelope unwrap
+    // below. For a plain snapshot object the two routes are equivalent (a direct
+    // `from_str` and a `from_value` over the parsed DOM replay the same
+    // `Deserialize`), so this is a pure resource-usage win with no behavior
+    // change.
+    if let Ok(snapshot) = serde_json::from_str::<FullMemorySnapshot>(&content) {
+        return Ok(snapshot);
+    }
+
+    // Slow path (rare): a PersistedEnvelope-wrapped snapshot (session-boundary
+    // files). Only these need the DOM to unwrap the payload before deserializing.
     let json: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| SimardError::PersistentStoreIo {
             store: "memory-snapshot".to_string(),
@@ -344,8 +364,6 @@ pub fn load_full_snapshot_from_file(path: &Path) -> SimardResult<FullMemorySnaps
             reason: e.to_string(),
         })?;
 
-    // Unwrap a PersistedEnvelope (session-boundary snapshots) to its payload;
-    // otherwise the value is already a bare/full snapshot object.
     let payload = if json.get("schema_version").is_some() {
         json.get("payload").cloned().unwrap_or(json)
     } else {
