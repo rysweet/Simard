@@ -295,6 +295,49 @@ pub(crate) const PART_01: &str = r#"      </div>
       if(v==='standalone'||v==='single')return'Single machine';
       return String(t);
     }
+    /* Workboard "Task Memory" de-jargon (#2552 finding #4): the Task Memory
+       table surfaces raw semantic-fact contents, some of which are goal-board
+       snapshots serialized as JSON — e.g.
+       {"active":[{"id":…,"status":{"InProgress":{"percent":5}}}]} — which leak
+       the raw GoalProgress enum onto the page. These helpers render such a
+       snapshot as plain-English lines (goal name + a plain status such as
+       "In progress — 5%"). Plain-text facts and any JSON that is not a
+       recognized goal board pass through unchanged; callers keep the raw
+       content in a title= tooltip so power users lose nothing. Each returns
+       PLAIN TEXT — callers must escape last (escape-last invariant). */
+    function humanizeGoalProgress(status){
+      if(status==null)return'';
+      if(typeof status==='string'){
+        const M={Proposed:'Proposed',NotStarted:'Not started',InProgress:'In progress',Paused:'Paused',Completed:'Completed',Done:'Done',Blocked:'Blocked'};
+        return M[status]||String(status).replace(/[_-]+/g,' ');
+      }
+      if(typeof status==='object'){
+        if(status.InProgress&&typeof status.InProgress.percent==='number')return'In progress — '+status.InProgress.percent+'%';
+        if(Object.prototype.hasOwnProperty.call(status,'Blocked')){const r=status.Blocked;return(r&&typeof r==='string')?'Blocked — '+r:'Blocked';}
+        if(status.InProgress!=null)return'In progress';
+        const k=Object.keys(status)[0];
+        if(k)return String(k).replace(/([a-z])([A-Z])/g,'$1 $2').replace(/^./,c=>c.toUpperCase());
+      }
+      return'';
+    }
+    function humanizeTaskMemory(content){
+      const raw=(content==null)?'':String(content);
+      const trimmed=raw.trim();
+      if(trimmed.charAt(0)!=='{'&&trimmed.charAt(0)!=='[')return raw;
+      let obj;
+      try{obj=JSON.parse(trimmed);}catch(e){return raw;}
+      if(obj&&Array.isArray(obj.active)){
+        const lines=obj.active.map(g=>{
+          const name=(g&&(g.description||g.name||g.id))||'(unnamed goal)';
+          const st=humanizeGoalProgress(g&&g.status);
+          return st?(String(name)+' — '+st):String(name);
+        });
+        let out=lines.length?lines.join(' · '):'No active goals';
+        if(Array.isArray(obj.backlog)&&obj.backlog.length)out+=' · '+obj.backlog.length+' in backlog';
+        return out;
+      }
+      return raw;
+    }
     function copyLogContent(id){
       const el=document.getElementById(id);if(!el)return;
       navigator.clipboard.writeText(el.textContent||'').then(

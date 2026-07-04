@@ -153,7 +153,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             return`<div style="display:flex;gap:.5rem;padding:.35rem 0;border-bottom:1px solid var(--border);font-size:.85rem">
               <span style="color:var(--accent);min-width:2.5rem;font-weight:600">#${a.cycle}</span>
               <span style="min-width:5rem;color:${isCurrent?'var(--green)':'#8b949e'}">${esc(humanizeActionKind(a.action))}</span>
-              <span style="flex:1">${renderActionDetail(a.result)}</span>
+              <span style="flex:1" title="${escAttr(a.result||'')}">${renderActionDetail(humanizeActionDetail(a.result))}</span>
               ${a.at?'<span style="color:#8b949e;font-size:.75rem">'+timeAgo(a.at)+'</span>':''}
             </div>`;
           }).join('');
@@ -167,8 +167,11 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             const cat=esc(f.category||f.concept||'');
             const conf=typeof f.confidence==='number'?Math.round(f.confidence*100)+'%':'—';
             const tags=(f.tags||[]).map(t=>'<span style="background:var(--border);padding:0 .3rem;border-radius:3px;font-size:.7rem;margin-right:.3rem">'+esc(t)+'</span>').join('')||'—';
-            const content=esc((f.content||'').substring(0,200));
-            return'<tr><td style="white-space:nowrap;color:var(--accent);font-weight:600;font-size:.8rem">'+cat+'</td><td style="font-size:.85rem">'+content+'</td><td style="text-align:center;font-size:.8rem">'+conf+'</td><td>'+tags+'</td></tr>';
+            const rawContent=(f.content||'');
+            const humanizedContent=humanizeTaskMemory(rawContent);
+            const content=esc(humanizedContent.substring(0,200));
+            const contentTitle=(humanizedContent!==rawContent)?(' title="'+escAttr(rawContent)+'"'):'';
+            return'<tr><td style="white-space:nowrap;color:var(--accent);font-weight:600;font-size:.8rem">'+cat+'</td><td style="font-size:.85rem"'+contentTitle+'>'+content+'</td><td style="text-align:center;font-size:.8rem">'+conf+'</td><td>'+tags+'</td></tr>';
           }).join('')+'</table>';
         }else{document.getElementById('wb-facts-list').innerHTML='<span style="color:#8b949e">No recent facts in memory</span>';}
         // Working memory (human-readable — #1683). The slot count comes from

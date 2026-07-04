@@ -577,3 +577,100 @@ fn rendered_html_action_detail_humanizer_preserves_attach_button_contract() {
          Attach button contract survives the humanization change"
     );
 }
+
+// ----- #2552 finding #4: Workboard "Task Memory" JSON/enum de-jargon -----
+//
+// The Workboard's Task Memory table surfaces raw semantic-fact contents. Some
+// facts are goal-board snapshots serialized as JSON, e.g.
+// {"active":[{"id":…,"status":{"InProgress":{"percent":5}}}]}, which leaked the
+// raw GoalProgress enum ("InProgress") onto the page. The client-side
+// humanizeTaskMemory / humanizeGoalProgress helpers must render such a snapshot
+// as plain-English lines while the raw JSON survives as a title= tooltip, and
+// non-JSON facts must pass through byte-identically. This is the Rust half of
+// the contract; the behavioral half is tests/gadugi/dashboard-workboard-clarity.sh.
+
+#[test]
+fn rendered_html_defines_task_memory_humanizers() {
+    assert!(
+        INDEX_HTML.contains("function humanizeTaskMemory("),
+        "humanizeTaskMemory must be defined so the Task Memory table stops \
+         rendering raw goal-board JSON blobs"
+    );
+    assert!(
+        INDEX_HTML.contains("function humanizeGoalProgress("),
+        "humanizeGoalProgress must be defined to map the raw GoalProgress enum \
+         (InProgress/Blocked/…) to plain English"
+    );
+    // The InProgress struct-variant enum must be turned into a plain phrase.
+    assert!(
+        INDEX_HTML.contains("'In progress — '+status.InProgress.percent+'%'"),
+        "humanizeGoalProgress must render the InProgress percent variant as \
+         'In progress — N%' instead of leaking the raw enum name"
+    );
+}
+
+#[test]
+fn rendered_html_task_memory_wires_humanizer_with_raw_tooltip() {
+    // The content cell must be humanized before the terminal esc() (escape-last),
+    // and the truncation happens on the humanized text.
+    assert!(
+        INDEX_HTML.contains("const humanizedContent=humanizeTaskMemory(rawContent)"),
+        "Task Memory must humanize the fact content via humanizeTaskMemory"
+    );
+    assert!(
+        INDEX_HTML.contains("esc(humanizedContent.substring(0,200))"),
+        "Task Memory content must be esc()'d as the terminal op over the \
+         humanized text (escape-last, truncate-before-escape)"
+    );
+    // The raw content survives as an attribute-escaped title= tooltip so power
+    // users lose nothing — only when the humanizer actually transformed it.
+    assert!(
+        INDEX_HTML.contains("' title=\"'+escAttr(rawContent)+'\"'"),
+        "the raw fact content must survive as an escAttr()-hardened title= \
+         tooltip when humanizeTaskMemory transforms it"
+    );
+    // The old raw-JSON path (esc of the raw fact content) must be gone.
+    assert!(
+        !INDEX_HTML.contains("esc((f.content||'').substring(0,200))"),
+        "Task Memory must no longer render the raw fact content directly"
+    );
+    // escape-first anti-pattern must never appear.
+    assert!(
+        !INDEX_HTML.contains("humanizeTaskMemory(esc("),
+        "humanizeTaskMemory must never run on already-escaped text"
+    );
+}
+
+// ----- #2552 finding #5: Workboard "Recent Actions" brain-enum de-jargon -----
+//
+// The Workboard "Recent Actions" list rendered the raw daemon result string —
+// e.g. `brain: continue_skipping (recipe-engineer-lifecycle-brain: no decision
+// keyword found…)`. It must route through the existing, tested
+// humanizeActionDetail brain-decision humanizer (the same one the Overview
+// uses) before renderActionDetail() escapes it once, and preserve the raw
+// result as an escAttr()-hardened title= tooltip.
+
+#[test]
+fn rendered_html_workboard_recent_actions_humanized_with_raw_tooltip() {
+    assert!(
+        INDEX_HTML.contains("renderActionDetail(humanizeActionDetail(a.result))"),
+        "Workboard Recent Actions must humanize a.result via humanizeActionDetail \
+         before renderActionDetail() escapes it (finding #5)"
+    );
+    // The old raw path must be gone.
+    assert!(
+        !INDEX_HTML.contains("<span style=\"flex:1\">${renderActionDetail(a.result)}</span>"),
+        "Workboard Recent Actions must no longer render the raw a.result string"
+    );
+    // Raw result preserved as a hover tooltip, attribute-hardened.
+    assert!(
+        INDEX_HTML.contains("title=\"${escAttr(a.result||'')}\""),
+        "raw a.result must survive as an escAttr()-hardened title= tooltip so \
+         power users lose nothing"
+    );
+    // escape-last invariant: no double-escape / escape-first anti-patterns.
+    assert!(
+        !INDEX_HTML.contains("renderActionDetail(esc("),
+        "Workboard must not pre-escape before renderActionDetail() (double-escape)"
+    );
+}
