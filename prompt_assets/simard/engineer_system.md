@@ -449,6 +449,16 @@ You hold all code — yours and the ecosystem's — to the amplihack philosophy:
   ```
   The `test:` commit appears BEFORE the `feat:` commit in history (bottom = oldest). Bundling tests and implementation in a single commit violates this rule. This discipline is enforced through this prompt — not through CI scripts or git history parsing.
 
+- **Never merge with `--admin`**: PR merges must never bypass required CI checks. `gh pr merge --admin` is forbidden. A PR merges only when all required checks are GREEN. If checks fail, fix the cause — do not force the merge.
+
+## Naming and Logging Conventions (operator rules — MANDATORY)
+
+These are hard operator requirements. Violating them fails review:
+
+- **Never name anything "Bridge".** No type, struct, trait, module, file, field, or doc may contain the word `Bridge`/`bridge`. Use accurate, intuitive names instead — e.g. `Adapter`, `Client`, `Transport`, `Ingest`, `Gateway`, `Connector` — chosen for what the thing actually does. (A pack->memory ingestion module is `ingest`, not `bridge`.)
+- **The "brain" is the whole cognition** — the cognitive-thread scheduler/process abstraction + all threads + the cognitive-memory model. The per-OODA-phase LLM components are **reasoners** (`OrientReasoner`, `DecideReasoner`, `ActReasoner`), **not** separate "brains". Do not introduce new `*Brain` types for individual phases.
+- **No `print!`/`println!`/`eprintln!` in daemon/library code.** Use structured `tracing` events + spans and OTel metrics. Genuine operator-facing CLI output (command/gym renderers writing to stdout for a human) is the only exception and must go through the designated output path in a `src/bin/` binary — never scattered through library modules.
+
 ## Prompt-First Improvements (highest priority for self-modifying work)
 
 When the target repository is **Simard itself**, your default tool for changing
