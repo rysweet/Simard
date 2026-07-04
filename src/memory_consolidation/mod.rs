@@ -981,6 +981,14 @@ pub mod scheduler;
 #[cfg(test)]
 mod distillation_tests;
 
+// Perpetual-cognition sub-goal: raise distillation fact-yield. A deterministic,
+// DB-free benchmark that records a baseline facts-per-consolidation-input number
+// over a fixed sample corpus and proves the concept-canonicalization change
+// raises yield without lowering precision. See
+// `docs/architecture/episode-distillation.md` §"Fact-yield benchmark".
+#[cfg(test)]
+mod distillation_fact_yield_bench;
+
 // PR-C (issue #2281, problem 4): episodic recall tests for
 // `preparation_memory_operations`. Pins the tokenizer rules,
 // self-session noise filter, and no-tokens short-circuit

@@ -46,6 +46,11 @@ use crate::memory_consolidation::distillation::{
     DISTILL_RELIABILITY_THRESHOLD, DistillRecipeRunner, DistilledFact, KNOWN_DISTILL_CONCEPTS,
     assess_fact_reliability, distill_recent_episodes_with_runner,
 };
+// Fixed fact-yield corpus, shared with `distillation_fact_yield_bench` so the
+// full-pass test below measures the identical input the benchmark records.
+use crate::memory_consolidation::distillation_fact_yield_bench::{
+    BASELINE_PROMOTED, CORPUS_EPISODE_COUNT, CORPUS_RECIPE_JSON, IMPROVED_PROMOTED,
+};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
@@ -1880,4 +1885,89 @@ fn surviving_parse_failure_writes_nothing_when_capture_disabled() {
         !created_any,
         "capture is default-off: no sample may be written when the toggle is falsy"
     );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Full-pass companion to the deterministic fact-yield benchmark
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Runner that parses a fixed raw recipe-output envelope through the REAL
+/// production parse path (`parse_recipe_output_full`), so the concept
+/// canonicalization in `RecipeEnvelope::into_facts` is exercised end-to-end via
+/// `distill_recent_episodes_with_runner` (parse → gate → dedup guard → store)
+/// rather than bypassed by a facts-returning stub.
+struct RawEnvelopeRunner {
+    raw: &'static str,
+    call_count: AtomicU32,
+}
+
+impl DistillRecipeRunner for RawEnvelopeRunner {
+    fn run(&self, _episodes: &[CognitiveEpisode]) -> SimardResult<Vec<DistilledFact>> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        parse_recipe_output_full(self.raw).map(|o| o.facts)
+    }
+}
+
+/// Full-pass companion to `distillation_fact_yield_bench`. Routes the SAME fixed
+/// corpus through the real `distill_recent_episodes_with_runner` — parse +
+/// concept canonicalization + reliability gate + the identity dedup guard +
+/// storage — against a FRESH (empty) memory, and confirms all `IMPROVED_PROMOTED`
+/// canonical / surface-variant grounded facts are actually stored while the
+/// ungrounded and empty candidates are quarantined. This upgrades the
+/// benchmark's "dedup-neutral corpus ⇒ parse+gate survivors == full-pass
+/// promoted" claim from *asserted* to *exercised*, closing the gap between the
+/// DB-free benchmark and a real production pass.
+#[test]
+fn full_pass_promotes_canonicalized_surface_variants_through_dedup() {
+    let rows: Vec<EpisodeRow> = (0..CORPUS_EPISODE_COUNT)
+        .map(|i| EpisodeRow {
+            node_id: format!("ep-{i:03}"),
+            content: format!("episode {i} body"),
+            source_label: "distill-bench".to_string(),
+            temporal_index: i as i64,
+            compressed: false,
+            distilled: false,
+        })
+        .collect();
+    let mock = EpisodeMock::with_episodes(rows);
+    let runner = RawEnvelopeRunner {
+        raw: CORPUS_RECIPE_JSON,
+        call_count: AtomicU32::new(0),
+    };
+
+    let report = distill_recent_episodes_with_runner(&mock, &runner).unwrap();
+
+    // The runner (and thus the LLM-side parse) ran exactly once — no transient
+    // retry, since the fixed corpus parses cleanly.
+    assert_eq!(runner.call_count.load(Ordering::SeqCst), 1);
+
+    // All eight canonical/surface-variant grounded facts are promoted through the
+    // FULL pipeline (dedup guard included), matching the benchmark's parse+gate
+    // survivor count. The two precision-guard candidates (ungrounded ep-999 and
+    // empty content) are quarantined by the reliability gate; the three off-spec
+    // concepts are dropped at the concept filter (not counted as quarantined).
+    assert_eq!(
+        report.fact_count, IMPROVED_PROMOTED as u32,
+        "full pass must promote all recovered surface-variant facts"
+    );
+    assert_eq!(
+        report.quarantined_count, 2,
+        "ungrounded + empty candidates must be quarantined by the reliability gate"
+    );
+    assert!(
+        report.fact_count > BASELINE_PROMOTED as u32,
+        "full-pass yield must exceed the exact-match baseline"
+    );
+
+    // Every stored fact carries a canonical lower-hyphen concept label, proving
+    // canonicalization normalized the surface variants before storage.
+    for (concept, _content) in mock.facts_stored() {
+        assert!(
+            matches!(
+                concept.as_str(),
+                "pr-pattern" | "bug-pattern" | "lesson-learned"
+            ),
+            "stored concept was not canonicalized: {concept:?}"
+        );
+    }
 }
