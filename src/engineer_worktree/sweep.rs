@@ -10,19 +10,76 @@ use super::{MAX_GOAL_ID_LEN, WORKTREES_SUBDIR};
 use crate::error::SimardError;
 
 use super::{SweepReport, claim_is_live, read_engineer_claim_full};
+use crate::worktree_gc::liveness::{LiveProcessProbe, ProcfsLiveProcessProbe};
 
-/// Sweep `<state_root>/engineer-worktrees/` for orphans on daemon boot.
+/// Why the sweep physically removed an orphan directory. Recorded 1:1 with
+/// each entry in [`SweepReport::removed_orphan_dirs`] so every deletion is
+/// observable and attributable (issue #2553).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemovalReason {
+    /// The directory was an unregistered orphan that passed every safety
+    /// guard: it is inside the engineer-worktrees root (SCOPE), is not the CWD
+    /// of any live process (LIVE_CWD), has no live engineer claim (LIVE_CLAIM),
+    /// and carries no recoverable git work — either it is not a git worktree at
+    /// all, or a clean worktree whose HEAD is not ahead of a configured
+    /// upstream (WORK_STATE). `had_dead_claim` records whether a stale
+    /// (dead-PID) `.simard-engineer-claim` sentinel was present.
+    OrphanedNoLiveNoWork { had_dead_claim: bool },
+}
+
+/// Sweep `<state_root>/engineer-worktrees/` for orphans on daemon boot and on
+/// the periodic timer.
 ///
-/// Runs `git worktree prune` first, then removes any directory in the
-/// worktrees root that is not registered with the parent repository.
-///
-/// Symlinks under the worktrees root are NEVER followed: a planted symlink
-/// pointing at e.g. `$HOME` would otherwise be classified as an orphan
-/// directory and trigger `remove_dir_all` against the symlink target. They
-/// are skipped with a WARN so an operator notices.
+/// This is the production entry point used by the OODA daemon. It delegates to
+/// [`sweep_orphaned_worktrees_inner`] with the real [`ProcfsLiveProcessProbe`]
+/// (which reads `/proc/<pid>/cwd`). See that function for the full guard
+/// contract.
 pub fn sweep_orphaned_worktrees(
     parent_repo: &Path,
     state_root: &Path,
+) -> Result<SweepReport, SimardError> {
+    let probe = ProcfsLiveProcessProbe::new();
+    sweep_orphaned_worktrees_inner(parent_repo, state_root, &probe)
+}
+
+/// Core sweep with an injectable liveness probe (issue #2553).
+///
+/// Runs `git worktree prune` first, then removes directories under the
+/// engineer-worktrees root that are not registered with the parent repository
+/// — but ONLY after each candidate passes every safety guard, applied
+/// cheapest-first / most-destructive-last:
+///
+///   1. **SCOPE** — the sweep only ever reads
+///      `<state_root>/engineer-worktrees/`; every candidate is canonicalized
+///      and asserted to resolve *inside* that root. A directory that
+///      canonicalizes outside the root (symlink, race) is skipped, never
+///      removed. Directories elsewhere on disk — e.g. the operator's own
+///      `~/src/Simard/worktrees/` checkouts — are never even enumerated.
+///   2. **LIVE_CLAIM** — a directory whose `.simard-engineer-claim` sentinel
+///      names a live PID (with matching starttime) is skipped (issues
+///      #1213 / #1238): `git worktree prune` can transiently drop a
+///      registration while an engineer subprocess is still running in it.
+///   3. **LIVE_CWD** — a directory that is the current working directory of ANY
+///      live process is skipped (reuses [`crate::worktree_gc::liveness`]). The
+///      probe fail-closes: if it cannot answer authoritatively it reports
+///      "live" and we keep the worktree. This is the direct fix for the
+///      verified incident (an in-use rebase/build worktree removed mid-op).
+///   4. **WORK_STATE** — a real git worktree with uncommitted changes, unpushed
+///      commits, no provable upstream, or an unverifiable git state is skipped
+///      so no unsaved work is ever destroyed. Only a directory that is NOT a
+///      git worktree, or a clean worktree whose HEAD is not ahead of a
+///      configured upstream, is eligible to be reaped.
+///   5. **REAP** — the surviving orphan is removed with `remove_dir_all`, logged
+///      at INFO with its [`RemovalReason`], and recorded in the report.
+///
+/// Symlinks under the worktrees root are NEVER followed: a planted symlink
+/// pointing at e.g. `$HOME` would otherwise be classified as an orphan
+/// directory and trigger `remove_dir_all` against the symlink target. They are
+/// skipped with a WARN so an operator notices.
+pub fn sweep_orphaned_worktrees_inner(
+    parent_repo: &Path,
+    state_root: &Path,
+    probe: &dyn LiveProcessProbe,
 ) -> Result<SweepReport, SimardError> {
     const ACTION: &str = "engineer_worktree::sweep_orphaned_worktrees";
     let mut report = SweepReport::default();
@@ -113,8 +170,8 @@ pub fn sweep_orphaned_worktrees(
                 path.display()
             ))
         })?;
-        // Defense-in-depth: even after canonicalization, refuse to operate
-        // on anything that resolves outside the canonical worktrees root.
+        // SCOPE guard: even after canonicalization, refuse to operate on
+        // anything that resolves outside the canonical worktrees root.
         if !canonical.starts_with(&worktrees_root_canonical) {
             tracing::warn!(
                 target: "simard::engineer_worktree",
@@ -127,26 +184,57 @@ pub fn sweep_orphaned_worktrees(
         if registered.contains(&canonical) {
             continue;
         }
-        // Issue #1213 / #1238: skip dirs whose engineer-claim sentinel
-        // names a live PID whose starttime still matches. Git's
-        // `worktree prune` can transiently drop a registration (observed
-        // during concurrent worktree mutations) and we must not delete
-        // a worktree out from under a running engineer subprocess.
-        // Starttime validation prevents the recycled-PID false positive
-        // after a daemon restart.
-        if let Some(claim) = read_engineer_claim_full(&canonical)
-            && claim_is_live(&claim)
+        // LIVE_CLAIM guard (issues #1213 / #1238): skip dirs whose
+        // engineer-claim sentinel names a live PID whose starttime still
+        // matches. Git's `worktree prune` can transiently drop a
+        // registration (observed during concurrent worktree mutations) and
+        // we must not delete a worktree out from under a running engineer
+        // subprocess. Starttime validation prevents the recycled-PID false
+        // positive after a daemon restart. We keep the parsed claim to
+        // record `had_dead_claim` on the eventual removal reason.
+        let claim = read_engineer_claim_full(&canonical);
+        if let Some(ref c) = claim
+            && claim_is_live(c)
         {
             tracing::debug!(
                 target: "simard::engineer_worktree",
                 worktree = %canonical.display(),
-                pid = claim.pid,
-                starttime = ?claim.starttime,
+                pid = c.pid,
+                starttime = ?c.starttime,
                 "skipping unregistered worktree with live engineer-claim",
             );
             report.skipped_live_dirs.push(canonical);
             continue;
         }
+        let had_dead_claim = claim.is_some();
+
+        // LIVE_CWD guard (issue #2553): never remove a worktree that is the
+        // CWD of any live process. The probe fail-closes — on any error it
+        // reports "live" and we keep the directory.
+        if probe.worktree_has_live_process(&path) {
+            tracing::debug!(
+                target: "simard::engineer_worktree",
+                worktree = %canonical.display(),
+                "skipping unregistered worktree: a live process has its CWD here (#2553)",
+            );
+            report.skipped_live_cwd_dirs.push(canonical);
+            continue;
+        }
+
+        // WORK_STATE guard (issue #2553): never destroy uncommitted or
+        // unpushed work. A directory that is not a git worktree has no
+        // git-tracked work to lose and falls through to REAP.
+        if worktree_has_recoverable_work(&path) {
+            tracing::debug!(
+                target: "simard::engineer_worktree",
+                worktree = %canonical.display(),
+                "skipping unregistered worktree: uncommitted / unpushed / unverifiable work (#2553)",
+            );
+            report.skipped_dirty_dirs.push(canonical);
+            continue;
+        }
+
+        // REAP: every guard passed. Remove and record an observable reason.
         if let Err(e) = fs::remove_dir_all(&path) {
             tracing::warn!(
                 target: "simard::engineer_worktree",
@@ -156,10 +244,58 @@ pub fn sweep_orphaned_worktrees(
             );
             continue;
         }
-        report.removed_orphan_dirs.push(path);
+        let reason = RemovalReason::OrphanedNoLiveNoWork { had_dead_claim };
+        tracing::info!(
+            target: "simard::engineer_worktree",
+            orphan = %path.display(),
+            had_dead_claim,
+            reason = ?reason,
+            "reaped orphaned engineer worktree \
+             (scope+live-claim+live-cwd+work-state guards passed)",
+        );
+        report.removed_orphan_dirs.push(path.clone());
+        report.removal_reasons.push((path, reason));
     }
 
     Ok(report)
+}
+
+/// Return `true` if the git worktree at `dir` holds work that a sweep must not
+/// destroy (issue #2553): uncommitted changes, unpushed commits, no provable
+/// upstream, or an unverifiable git state.
+///
+/// Returns `false` only when the directory is provably safe to remove: either
+/// it is not a git worktree at all (no `.git` entry — a plain leftover
+/// directory), or a clean worktree whose HEAD is not ahead of a configured
+/// upstream.
+///
+/// The daemon sweep is deliberately MORE conservative than the operator GC:
+/// it has no merged-PR / branch-deletion policy to independently prove a
+/// branch's commits are safe, so a clean worktree with **no** configured
+/// upstream is kept (we cannot prove its commits were pushed). Every error is
+/// treated as "has work" (fail-safe keep).
+fn worktree_has_recoverable_work(dir: &Path) -> bool {
+    // Not a git worktree (no `.git` file or dir) → nothing git-tracked to lose.
+    if !dir.join(".git").exists() {
+        return false;
+    }
+    // Uncommitted changes (tracked or untracked) → keep.
+    match git_capture(dir, &["status", "--porcelain"]) {
+        Ok(out) => {
+            if !out.trim().is_empty() {
+                return true;
+            }
+        }
+        // Broken / unreadable git state → conservative keep.
+        Err(_) => return true,
+    }
+    // Clean tree. Prove every commit is pushed: HEAD must not be ahead of a
+    // configured upstream. A missing upstream errors here → cannot prove
+    // pushed → keep.
+    match git_capture(dir, &["rev-list", "--count", "@{u}..HEAD"]) {
+        Ok(count) => count.trim() != "0",
+        Err(_) => true,
+    }
 }
 
 /// Run a `git` subcommand in `repo` and return stdout on success.

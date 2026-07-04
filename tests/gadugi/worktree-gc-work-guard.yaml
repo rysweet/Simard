@@ -1,0 +1,35 @@
+name: "Worktree GC work-guard (#2553)"
+description: "End-to-end operator coverage for the worktree data-loss fix: `simard worktree-gc --apply` must not delete a worktree carrying uncommitted work, even when it is old enough that the idle policy would otherwise prune it. Regression guard for the verified operator incident in issue #2553."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "worktree-gc --apply preserves a dirty, idle worktree"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/worktree-gc-work-guard.sh"
+    timeout: 300000

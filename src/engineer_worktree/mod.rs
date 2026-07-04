@@ -46,6 +46,8 @@ mod tests;
 mod tests_extra;
 #[cfg(test)]
 mod tests_more;
+#[cfg(test)]
+mod tests_reaping_safety;
 
 /// Subdirectory under the supervisor state root that holds all engineer worktrees.
 pub const WORKTREES_SUBDIR: &str = "engineer-worktrees";
@@ -119,6 +121,42 @@ pub struct SweepReport {
     /// because their `.simard-engineer-claim` sentinel named a live PID
     /// (issue #1213). Useful for diagnostics and tests.
     pub skipped_live_dirs: Vec<PathBuf>,
+    /// Directories skipped because a live process has its current working
+    /// directory inside them (issue #2553, LIVE_CWD guard). Includes the
+    /// fail-closed case where the liveness probe could not answer.
+    pub skipped_live_cwd_dirs: Vec<PathBuf>,
+    /// Directories skipped because they are a git worktree carrying
+    /// uncommitted / unpushed / unverifiable work (issue #2553, WORK_STATE
+    /// guard).
+    pub skipped_dirty_dirs: Vec<PathBuf>,
+    /// The reason each removed directory was reaped, paired 1:1 (and in the
+    /// same order) with [`SweepReport::removed_orphan_dirs`]. Makes every
+    /// deletion observable and attributable (issue #2553).
+    pub removal_reasons: Vec<(PathBuf, RemovalReason)>,
+}
+
+impl SweepReport {
+    /// True when the sweep did something worth logging: it removed an orphan,
+    /// or a safety guard kept a directory that was otherwise an orphan
+    /// candidate (LIVE_CWD or WORK_STATE). A pure LIVE_CLAIM skip is routine
+    /// steady-state behaviour and does not, on its own, count as noteworthy.
+    pub fn is_noteworthy(&self) -> bool {
+        !self.removed_orphan_dirs.is_empty()
+            || !self.skipped_live_cwd_dirs.is_empty()
+            || !self.skipped_dirty_dirs.is_empty()
+    }
+
+    /// One-line `(kept N live-claim, N live-cwd, N with work)` summary of the
+    /// directories the guards preserved. Shared by the daemon's boot-time and
+    /// periodic sweep log lines so both stay in sync.
+    pub fn kept_summary(&self) -> String {
+        format!(
+            "(kept {} live-claim, {} live-cwd, {} with work)",
+            self.skipped_live_dirs.len(),
+            self.skipped_live_cwd_dirs.len(),
+            self.skipped_dirty_dirs.len(),
+        )
+    }
 }
 
 impl EngineerWorktree {
@@ -412,8 +450,10 @@ impl Drop for EngineerWorktree {
 mod cleanup;
 use cleanup::{assert_under_root, cleanup_inner, create_worktrees_root, unique_suffix};
 mod sweep;
+pub use sweep::{
+    RemovalReason, sweep_orphaned_worktrees, sweep_orphaned_worktrees_inner, validate_goal_id,
+};
 use sweep::{git_capture, is_valid_sha40};
-pub use sweep::{sweep_orphaned_worktrees, validate_goal_id};
 
 /// Walk up from `path`, returning the first ancestor that exists on
 /// disk. Used by the disk-pressure precheck to find a path that
