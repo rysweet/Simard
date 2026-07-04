@@ -538,8 +538,19 @@ fn reason_is_ambient_auth_failure(reason: &str) -> bool {
 /// `AdapterInvocationFailed` whose `reason` matches a known auth/rate-limit
 /// marker signals a skip (`None`), consistent with the `copilot_on_path()` gate.
 /// Every other error — including an `AdapterInvocationFailed` with a non-auth
-/// `reason` — is a real bug and panics, so a genuine regression cannot be
-/// silently skipped in auth-less CI.
+/// `reason` — is a real bug and panics.
+///
+/// Detection is by `reason` substring, so the "don't skip a regression" guarantee
+/// only holds for regressions that surface a *non-auth* reason. A regression that
+/// manifests as an auth-flavored error is treated as ambient and skipped —
+/// notably the empty-output branch in `run_meeting_turn`, whose reason hardcodes
+/// "auth failure, rate limit, or empty response". A genuine empty-copilot-output
+/// regression therefore skips rather than fails. This is an accepted trade-off:
+/// the reason string alone cannot distinguish an empty response caused by missing
+/// auth from one caused by a defect, and biasing toward skip keeps auth-less CI
+/// green at the cost of not catching that specific (rare) regression class. The
+/// markers are deliberately broad substrings for the same reason — catching every
+/// phrasing of an auth/rate-limit failure is worth the occasional false skip.
 fn meeting_outcome_or_skip(
     result: Result<BaseTypeOutcome, SimardError>,
 ) -> Option<BaseTypeOutcome> {
@@ -616,6 +627,31 @@ fn meeting_outcome_or_skip_panics_on_non_auth_adapter_failure() {
             .to_string(),
     });
     let _ = meeting_outcome_or_skip(err);
+}
+
+#[test]
+fn every_ambient_marker_is_detected_and_non_auth_reason_is_rejected() {
+    // Lock every declared marker: a typo or accidental removal here would
+    // silently disable a skip condition and reintroduce the flaky auth-less
+    // CI panics this helper exists to prevent.
+    for marker in AMBIENT_AUTH_FAILURE_MARKERS {
+        let reason = format!("copilot meeting subprocess failed: {marker} problem");
+        assert!(
+            reason_is_ambient_auth_failure(&reason),
+            "marker {marker:?} should be recognized as an ambient auth/rate-limit failure"
+        );
+    }
+    // Detection is case-insensitive.
+    assert!(reason_is_ambient_auth_failure("HTTP 429 Too Many Requests"));
+    assert!(reason_is_ambient_auth_failure(
+        "Error: Bad CREDENTIAL supplied"
+    ));
+    // A clearly non-auth turn-execution failure must NOT be treated as ambient,
+    // so a genuine regression still panics instead of skipping.
+    assert!(
+        !reason_is_ambient_auth_failure("failed to parse structured decision from model output"),
+        "a non-auth regression reason must not be misclassified as ambient"
+    );
 }
 
 #[test]
