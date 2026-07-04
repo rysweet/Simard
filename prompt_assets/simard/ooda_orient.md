@@ -73,6 +73,12 @@ goal_id pattern or reason suggests the goal itself is malformed.
 
 ## OUTPUT_FORMAT
 
+This reasoner's structured **decision field** is `adjusted_urgency` — the
+demoted urgency the daemon acts on. Emit it in the fenced JSON envelope below
+(the machine-parseable block the shared extractor reads, issue #2432); a
+parse-miss that survives the bounded escalation ladder is surfaced as a loud
+`brain_parse_error`, never a silent floor.
+
 Return a single JSON object on a single line. No prose before or after, no
 markdown fences. Schema:
 

@@ -83,6 +83,7 @@ nav:
     - Implementation Plan: architecture/implementation-plan.md
   - Design:
     - "Overseer — operator/observer co-process (spike)": design/overseer.md
+    - "Eliminate deterministic fallbacks": design/eliminate-deterministic-fallbacks.md
   - Concepts:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
