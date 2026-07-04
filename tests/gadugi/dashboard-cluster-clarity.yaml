@@ -1,0 +1,52 @@
+name: "Dashboard Cluster and Memory-Sharing De-Jargon (Overview card)"
+description: "Outside-in operator check that the Overview landing page's machine/event-bus card reads in plain English. The live Playwright audit found the densest jargon cluster here: 'Cluster Topology', 'DHT+bloom gossip', 'Hive Status', 'Event Bus/Subscribers/Events/min', and raw snake_case event-topic enum names (fact_imported, node_joined, …). Boots the real dashboard binary, authenticates with the dashkey, and asserts the served HTML now uses plain-language labels/values while keeping the stable data-testids and title tooltips that carry the raw machine ids for power users."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Overview machines/memory-sharing card is jargon-free"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/dashboard-cluster-clarity.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "dashboard"
+    - "usability"
+    - "jargon"
+    - "self-serve-dashboard-improvement"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
