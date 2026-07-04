@@ -135,6 +135,30 @@ pub struct SweepReport {
     pub removal_reasons: Vec<(PathBuf, RemovalReason)>,
 }
 
+impl SweepReport {
+    /// True when the sweep did something worth logging: it removed an orphan,
+    /// or a safety guard kept a directory that was otherwise an orphan
+    /// candidate (LIVE_CWD or WORK_STATE). A pure LIVE_CLAIM skip is routine
+    /// steady-state behaviour and does not, on its own, count as noteworthy.
+    pub fn is_noteworthy(&self) -> bool {
+        !self.removed_orphan_dirs.is_empty()
+            || !self.skipped_live_cwd_dirs.is_empty()
+            || !self.skipped_dirty_dirs.is_empty()
+    }
+
+    /// One-line `(kept N live-claim, N live-cwd, N with work)` summary of the
+    /// directories the guards preserved. Shared by the daemon's boot-time and
+    /// periodic sweep log lines so both stay in sync.
+    pub fn kept_summary(&self) -> String {
+        format!(
+            "(kept {} live-claim, {} live-cwd, {} with work)",
+            self.skipped_live_dirs.len(),
+            self.skipped_live_cwd_dirs.len(),
+            self.skipped_dirty_dirs.len(),
+        )
+    }
+}
+
 impl EngineerWorktree {
     /// Allocate a fresh git worktree for an engineer pursuing `goal_id`.
     ///

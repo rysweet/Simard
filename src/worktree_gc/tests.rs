@@ -55,11 +55,21 @@ impl GhClient for FakeGh {
 // ------------------------------------------------------------------
 
 fn run_git(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .expect("git spawn");
+    // Clear inherited git env (GIT_DIR/GIT_WORK_TREE/etc.) so a poisoned or
+    // ambient value cannot leak into the test's temp repos, mirroring the
+    // production `git_capture` isolation. Without this, a concurrent test that
+    // sets GIT_DIR process-globally (see engineer_worktree::tests_extra) makes
+    // these `git worktree add` calls fail nondeterministically under parallel
+    // `cargo test`.
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(repo).env_clear();
+    if let Ok(p) = std::env::var("PATH") {
+        cmd.env("PATH", p);
+    }
+    if let Ok(h) = std::env::var("HOME") {
+        cmd.env("HOME", h);
+    }
+    let out = cmd.output().expect("git spawn");
     assert!(
         out.status.success(),
         "git {args:?} failed in {}: {}",

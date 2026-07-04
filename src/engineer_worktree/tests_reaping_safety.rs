@@ -28,7 +28,7 @@ use std::process::Command;
 use tempfile::{TempDir, tempdir};
 
 use super::{
-    ENGINEER_CLAIM_FILE, RemovalReason, WORKTREES_SUBDIR, sweep_orphaned_worktrees,
+    ENGINEER_CLAIM_FILE, RemovalReason, SweepReport, WORKTREES_SUBDIR, sweep_orphaned_worktrees,
     sweep_orphaned_worktrees_inner,
 };
 use crate::worktree_gc::liveness::{FakeLiveProcessProbe, LiveProcessProbe};
@@ -524,5 +524,61 @@ fn public_sweep_wrapper_reaps_junk_orphan() {
         report.removed_orphan_dirs.iter().any(|p| p == &orphan),
         "public wrapper must record the removal; got {:?}",
         report.removed_orphan_dirs
+    );
+}
+
+// ===========================================================================
+// SweepReport observability helpers (shared by the daemon's boot + periodic
+// sweep log lines). Pure, no IO.
+// ===========================================================================
+
+#[test]
+fn sweep_report_is_noteworthy_only_for_removals_or_guard_keeps() {
+    // A clean, empty report is routine: nothing to log.
+    assert!(!SweepReport::default().is_noteworthy());
+
+    // A pure LIVE_CLAIM skip is steady-state and must NOT be noteworthy on
+    // its own, matching the daemon's pre-existing logging behaviour.
+    let live_claim_only = SweepReport {
+        skipped_live_dirs: vec![PathBuf::from("/wt/live-claim")],
+        ..Default::default()
+    };
+    assert!(!live_claim_only.is_noteworthy());
+
+    // Each of a removal, a LIVE_CWD keep, and a WORK_STATE keep is noteworthy.
+    let removed = SweepReport {
+        removed_orphan_dirs: vec![PathBuf::from("/wt/gone")],
+        ..Default::default()
+    };
+    assert!(removed.is_noteworthy());
+
+    let live_cwd = SweepReport {
+        skipped_live_cwd_dirs: vec![PathBuf::from("/wt/live-cwd")],
+        ..Default::default()
+    };
+    assert!(live_cwd.is_noteworthy());
+
+    let dirty = SweepReport {
+        skipped_dirty_dirs: vec![PathBuf::from("/wt/dirty")],
+        ..Default::default()
+    };
+    assert!(dirty.is_noteworthy());
+}
+
+#[test]
+fn sweep_report_kept_summary_counts_each_guard_bucket() {
+    let report = SweepReport {
+        skipped_live_dirs: vec![PathBuf::from("/a"), PathBuf::from("/b")],
+        skipped_live_cwd_dirs: vec![PathBuf::from("/c")],
+        skipped_dirty_dirs: vec![
+            PathBuf::from("/d"),
+            PathBuf::from("/e"),
+            PathBuf::from("/f"),
+        ],
+        ..Default::default()
+    };
+    assert_eq!(
+        report.kept_summary(),
+        "(kept 2 live-claim, 1 live-cwd, 3 with work)"
     );
 }
