@@ -30,7 +30,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
-use crate::memory_cognitive::{CognitiveFact, CognitiveProcedure};
+use crate::memory_cognitive::{
+    CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective,
+};
 
 /// Maximum number of facts to export in a single snapshot.
 const MAX_EXPORT_FACTS: u32 = 1000;
@@ -106,29 +108,95 @@ impl MemorySnapshot {
     }
 }
 
-/// Export the **complete** cognitive memory (every fact + procedure) for a
-/// verified backup of the live store (issue #2420).
+/// A **complete** portable snapshot of cognitive memory (issue #2550).
+///
+/// [`MemorySnapshot`] carries only the migration-worthy subset (facts +
+/// procedures). A verified backup that a corruption-reset must be recoverable
+/// from has to capture **every** durable memory type — the incident that
+/// motivated this type (a WAL corruption reset the store to empty) was
+/// unrecoverable precisely because the on-disk `cognitive_snapshot.json` held
+/// only facts + procedures, so episodes and prospective triggers were lost for
+/// good.
+///
+/// It is a strict superset of [`MemorySnapshot`]: `episodes` and `prospective`
+/// are `#[serde(default)]`, so a bare `MemorySnapshot` JSON (the legacy backup
+/// shape) deserializes into a `FullMemorySnapshot` with empty
+/// episodes/prospective, and a `FullMemorySnapshot` JSON deserializes into a
+/// [`MemorySnapshot`] (the extra keys are ignored) — the count-verification
+/// gate keeps working unchanged.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FullMemorySnapshot {
+    /// Semantic facts (durable knowledge).
+    pub facts: Vec<CognitiveFact>,
+    /// Procedural memories (reusable workflows).
+    pub procedures: Vec<CognitiveProcedure>,
+    /// Autobiographical episodes. `#[serde(default)]` so a legacy bare-snapshot
+    /// file (facts + procedures only) still loads.
+    #[serde(default)]
+    pub episodes: Vec<CognitiveEpisode>,
+    /// Prospective (trigger → action) memories. `#[serde(default)]` for the
+    /// same back-compat reason as `episodes`.
+    #[serde(default)]
+    pub prospective: Vec<CognitiveProspective>,
+    /// Unix epoch seconds when this snapshot was created.
+    pub exported_at: u64,
+    /// The agent name that produced this snapshot.
+    pub source_agent: String,
+}
+
+impl FullMemorySnapshot {
+    /// Total number of durable items across all captured types.
+    pub fn total_items(&self) -> usize {
+        self.facts.len() + self.procedures.len() + self.episodes.len() + self.prospective.len()
+    }
+
+    /// Whether the snapshot holds no durable memories at all.
+    pub fn is_empty(&self) -> bool {
+        self.total_items() == 0
+    }
+}
+
+impl Display for FullMemorySnapshot {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "FullMemorySnapshot(facts={}, procedures={}, episodes={}, prospective={}, agent={}, at={})",
+            self.facts.len(),
+            self.procedures.len(),
+            self.episodes.len(),
+            self.prospective.len(),
+            self.source_agent,
+            self.exported_at
+        )
+    }
+}
+
+/// Export the **complete** cognitive memory — every fact, procedure, episode,
+/// and prospective trigger — for a verified backup of the live store (issues
+/// #2420, #2550).
 ///
 /// Unlike [`export_memory_snapshot`] — which caps at [`MAX_EXPORT_FACTS`] /
 /// [`MAX_EXPORT_PROCEDURES`] to keep replication/migration payloads bounded — a
-/// verified backup must capture the *entire* store so a restore can round-trip
-/// the **current** memory count. With the live store already past 10k memories
-/// and growing daily, a fixed export cap would silently drop the tail and make
-/// the count-verification gate ([`crate::memory_backup::verify_backup_memory_count`])
-/// fail forever — exactly the silent-rot failure class this issue exists to
-/// kill. It therefore requests with the maximum limit (`u32::MAX`), the same
-/// unbounded retrieval [`CognitiveMemoryOps::graph_stats`] already performs
-/// safely via `get_all_facts(usize::MAX)`, so the snapshot can never be capped
-/// below the store size.
+/// verified backup must capture the *entire* store so a restore round-trips the
+/// **current** memory count and every type. With the live store already past
+/// 10k memories and growing daily, a fixed export cap would silently drop the
+/// tail and make the count-verification gate
+/// ([`crate::memory_backup::verify_backup_memory_count`]) fail forever — exactly
+/// the silent-rot failure class this path exists to kill. It therefore requests
+/// with the maximum limit (`u32::MAX`), the same unbounded retrieval
+/// [`CognitiveMemoryOps::graph_stats`] already performs safely, so the snapshot
+/// can never be capped below the store size.
 ///
-/// Selection semantics are otherwise identical to [`export_memory_snapshot`]
-/// (wildcard query, `min_confidence = 0.0`); only the truncation is removed.
-/// This is *not* deprecated: it is the backup path, distinct from the legacy
-/// JSON replication this module otherwise superseded.
+/// Issue #2550 extends the capture beyond facts + procedures to **all** durable
+/// memory types: episodes ([`CognitiveMemoryOps::list_all_episodes`]) and
+/// prospective triggers ([`CognitiveMemoryOps::list_all_prospective`]). Backends
+/// without an enumerator for a type (the IPC client, test stubs) return an empty
+/// list via the trait default, so the export degrades to the facts+procedures
+/// subset rather than failing.
 pub fn export_full_memory_snapshot(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     agent_name: &str,
-) -> SimardResult<MemorySnapshot> {
+) -> SimardResult<FullMemorySnapshot> {
     if agent_name.is_empty() {
         return Err(SimardError::InvalidConfigValue {
             key: "agent_name".to_string(),
@@ -140,15 +208,173 @@ pub fn export_full_memory_snapshot(
     // `u32::MAX` is the "return all" limit: the library's `get_all_facts` is
     // already called with `usize::MAX` by `graph_stats`, so an unbounded request
     // is safe (no per-limit pre-allocation). No real store approaches u32::MAX
-    // facts, so this can never truncate.
-    let facts = bridge.search_facts("*", u32::MAX, 0.0)?;
-    let procedures = bridge.recall_procedure("*", u32::MAX)?;
+    // records, so this can never truncate.
+    let facts = memory.search_facts("*", u32::MAX, 0.0)?;
+    let procedures = memory.recall_procedure("*", u32::MAX)?;
+    let episodes = memory.list_all_episodes(u32::MAX)?;
+    let prospective = memory.list_all_prospective(u32::MAX)?;
 
-    Ok(MemorySnapshot {
+    Ok(FullMemorySnapshot {
         facts,
         procedures,
+        episodes,
+        prospective,
         exported_at: current_epoch_seconds()?,
         source_agent: agent_name.to_string(),
+    })
+}
+
+/// Import a [`FullMemorySnapshot`] into a store, **idempotently** (issue #2550).
+///
+/// Every item is deduplicated by content before it is written, so re-running a
+/// restore — or auto-restoring a snapshot the store already partially holds —
+/// never duplicates memories. Dedup keys per type:
+///
+/// * facts — `(concept, content)`
+/// * procedures — `name`
+/// * episodes — `content`
+/// * prospective — `(trigger_condition, description)`
+///
+/// Returns the number of items actually written (skipped duplicates are not
+/// counted). This is the restore/import counterpart of
+/// [`export_full_memory_snapshot`]; it is *not* deprecated (unlike the legacy
+/// [`import_memory_snapshot`] replication path, which does not dedup).
+pub fn import_full_snapshot(
+    memory: &dyn CognitiveMemoryOps,
+    snapshot: &FullMemorySnapshot,
+) -> SimardResult<usize> {
+    use std::collections::HashSet;
+
+    let mut imported = 0;
+
+    // Facts: dedup by (concept, content).
+    let mut seen_facts: HashSet<(String, String)> = memory
+        .search_facts("*", u32::MAX, 0.0)?
+        .into_iter()
+        .map(|f| (f.concept, f.content))
+        .collect();
+    for fact in &snapshot.facts {
+        let key = (fact.concept.clone(), fact.content.clone());
+        if seen_facts.insert(key) {
+            memory.store_fact(
+                &fact.concept,
+                &fact.content,
+                fact.confidence,
+                &fact.tags,
+                &fact.source_id,
+            )?;
+            imported += 1;
+        }
+    }
+
+    // Procedures: dedup by name.
+    let mut seen_procs: HashSet<String> = memory
+        .recall_procedure("*", u32::MAX)?
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    for proc in &snapshot.procedures {
+        if seen_procs.insert(proc.name.clone()) {
+            memory.store_procedure(&proc.name, &proc.steps, &proc.prerequisites)?;
+            imported += 1;
+        }
+    }
+
+    // Episodes: dedup by content.
+    let mut seen_eps: HashSet<String> = memory
+        .list_all_episodes(u32::MAX)?
+        .into_iter()
+        .map(|e| e.content)
+        .collect();
+    for ep in &snapshot.episodes {
+        if seen_eps.insert(ep.content.clone()) {
+            memory.store_episode(&ep.content, &ep.source_label, None)?;
+            imported += 1;
+        }
+    }
+
+    // Prospective: dedup by (trigger_condition, description).
+    let mut seen_pros: HashSet<(String, String)> = memory
+        .list_all_prospective(u32::MAX)?
+        .into_iter()
+        .map(|p| (p.trigger_condition, p.description))
+        .collect();
+    for pm in &snapshot.prospective {
+        let key = (pm.trigger_condition.clone(), pm.description.clone());
+        if seen_pros.insert(key) {
+            memory.store_prospective(
+                &pm.description,
+                &pm.trigger_condition,
+                &pm.action_on_trigger,
+                pm.priority,
+            )?;
+            imported += 1;
+        }
+    }
+
+    Ok(imported)
+}
+
+/// Load a [`FullMemorySnapshot`] from a JSON file on disk (issue #2550).
+///
+/// Transparently accepts every snapshot shape Simard has written:
+///
+/// * a **full** snapshot (facts + procedures + episodes + prospective),
+/// * a legacy **bare** [`MemorySnapshot`] (facts + procedures only — the
+///   `episodes`/`prospective` keys default to empty), and
+/// * a [`PersistedEnvelope`]-wrapped `MemorySnapshot` (session-boundary
+///   snapshots): if a top-level `schema_version` key is present the `payload`
+///   is unwrapped first.
+///
+/// This is what `simard memory import` and the daemon startup auto-restore read
+/// `cognitive_snapshot.json` through.
+pub fn load_full_snapshot_from_file(path: &Path) -> SimardResult<FullMemorySnapshot> {
+    let content = std::fs::read_to_string(path).map_err(|e| SimardError::PersistentStoreIo {
+        store: "memory-snapshot".to_string(),
+        action: "read".to_string(),
+        path: path.to_path_buf(),
+        reason: e.to_string(),
+    })?;
+
+    // Fast path: a bare or full snapshot object deserializes straight into
+    // `FullMemorySnapshot` in a single streaming pass (the `#[serde(default)]`
+    // on `episodes`/`prospective` lets a legacy bare snapshot load too). This
+    // skips building — and, for an envelope, deep-cloning — an intermediate
+    // `serde_json::Value` DOM, which for a large snapshot (the incident held
+    // tens of thousands of records) costs several times the final struct in
+    // transient allocation on the P0 recovery/restore path. `facts`,
+    // `procedures`, `exported_at` and `source_agent` are required fields, so an
+    // envelope (which lacks them at top level) can never mis-parse here — it
+    // fails and falls through to the byte-for-byte-identical envelope unwrap
+    // below. For a plain snapshot object the two routes are equivalent (a direct
+    // `from_str` and a `from_value` over the parsed DOM replay the same
+    // `Deserialize`), so this is a pure resource-usage win with no behavior
+    // change.
+    if let Ok(snapshot) = serde_json::from_str::<FullMemorySnapshot>(&content) {
+        return Ok(snapshot);
+    }
+
+    // Slow path (rare): a PersistedEnvelope-wrapped snapshot (session-boundary
+    // files). Only these need the DOM to unwrap the payload before deserializing.
+    let json: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| SimardError::PersistentStoreIo {
+            store: "memory-snapshot".to_string(),
+            action: "deserialize".to_string(),
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+
+    let payload = if json.get("schema_version").is_some() {
+        json.get("payload").cloned().unwrap_or(json)
+    } else {
+        json
+    };
+
+    serde_json::from_value(payload).map_err(|e| SimardError::PersistentStoreIo {
+        store: "memory-snapshot".to_string(),
+        action: "deserialize-snapshot".to_string(),
+        path: path.to_path_buf(),
+        reason: e.to_string(),
     })
 }
 

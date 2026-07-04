@@ -80,6 +80,31 @@ pub fn run_ooda_daemon(
     let shared_mem: Arc<dyn CognitiveMemoryOps> =
         Arc::new(LibraryCognitiveMemory::open(&state_root)?);
 
+    // Issue #2550: self-heal a corruption-reset store BEFORE anything seeds it.
+    // If the library backend had to quarantine a corrupt store and rebuild it
+    // empty, restore the newest non-empty verified-backup snapshot so a
+    // WAL-corruption reset does not permanently lose memories. A populated store
+    // (the normal case) is left untouched. Best-effort: a failure is logged and
+    // never aborts daemon startup.
+    {
+        let backup_config = crate::memory_backup::BackupConfig {
+            backup_dir: state_root.join("backups"),
+            ..crate::memory_backup::BackupConfig::default()
+        };
+        match crate::memory_backup::auto_restore_if_empty(shared_mem.as_ref(), &backup_config) {
+            Ok(Some(report)) => daemon_log(
+                &state_root,
+                &format!(
+                    "[simard] OODA daemon: store was empty — auto-restored {} memories from {}",
+                    report.restored,
+                    report.from.display()
+                ),
+            ),
+            Ok(None) => {}
+            Err(e) => eprintln!("[simard] OODA daemon: startup auto-restore check failed: {e}"),
+        }
+    }
+
     // Register the live writer for in-process callers (dashboard, OODA
     // loop, reflection, etc.) so they bypass IPC and disk re-open and
     // share this exact handle. This eliminates the dashboard's

@@ -1,6 +1,6 @@
 ---
 title: Memory introspection CLI
-description: Operator reference for `simard memory stats` and `simard memory dump` — the read-only introspection commands that report per-type cognitive-memory counts and sample rows from the library backend, lock-safely while the daemon holds the store (issue #2308).
+description: Operator reference for `simard memory stats` / `dump` — the read-only introspection commands that report per-type cognitive-memory counts and sample rows from the library backend, lock-safely while the daemon holds the store (issue #2308) — and `simard memory import`, the guarded snapshot-restore command (issue #2550).
 last_updated: 2026-06-20
 owner: simard
 doc_type: reference
@@ -28,11 +28,17 @@ was no command-line way to confirm that episodes, triggers, facts, and
 procedures are actually populating the live store. `simard memory stats`
 and `simard memory dump` fill that gap.
 
-Both commands are **read-only** and **safe to run while the OODA daemon
+Both `stats` and `dump` are **read-only** and **safe to run while the OODA daemon
 holds the store** — they route through the daemon's memory socket when it
 is up, and fall back to a direct open of the on-disk store when it is
 down. Neither command spawns an engineer, mutates memory, or fires
 triggers.
+
+A third command, [`simard memory import`](#simard-memory-import) (issue #2550),
+is the one **write** path on this surface: a guarded snapshot-restore used to
+recover a corrupted/reset store. Unlike `stats`/`dump` it must be run with the
+daemon **stopped**. It is not a free-form mutation command — it only ingests a
+`cognitive_snapshot.json` and deduplicates by content.
 
 ---
 
@@ -466,18 +472,71 @@ and [Prospective-trigger firing](./prospective-trigger-firing.md).
 
 ---
 
+## `simard memory import`
+
+Restore a cognitive-memory snapshot back into the store. This is the operator
+recovery path introduced by issue #2550 after the 2026-07-04 corrupt-WAL
+data-loss incident, where a periodic `cognitive_snapshot.json` existed but there
+was **no command** to load it back.
+
+```text
+Usage: simard memory import <snapshot.json> [state-root] [--json]
+```
+
+| Argument | Meaning |
+|----------|---------|
+| `<snapshot.json>` | Path to a backup's `cognitive_snapshot.json` (or any snapshot in the same envelope format). Required. |
+| `[state-root]` | As for `stats`. Resolves `$SIMARD_STATE_ROOT`, then `$HOME/.simard`. |
+| `--json` | Emit a single JSON result object (`{ imported, new, deduplicated, store }`) instead of the human line. |
+
+### Behaviour
+
+- **Restore-only, not free-form mutation.** `import` ingests the snapshot's
+  records (facts, procedures, and — for snapshots written post-#2550 — episodes
+  and prospective/triggers). Provenance/similarity **edges** are not serialized:
+  they are reconstructable and their endpoints change across a content-dedup
+  restore, so only the durable memory *nodes* are carried. `import` never accepts
+  ad-hoc content and has no `set`/`clear`/`forget` surface.
+- **Idempotent — dedup by content.** Re-running `import`, or importing onto a
+  store that already holds some of the records, deduplicates by content, so it is
+  safe to run more than once and safe to run onto a partially-populated store.
+  The output reports how many items were new versus deduplicated.
+- **Run with the daemon stopped.** `import` writes to the store, so unlike
+  `stats`/`dump` it does **not** route through the read socket. Stop
+  `simard-ooda` first so nothing writes concurrently.
+
+```text
+$ sudo systemctl stop simard-ooda
+$ simard memory import ~/.simard/backups/20260704_001500/cognitive_snapshot.json
+imported 40488 items (40488 new, 0 deduplicated) -> /home/azureuser/.simard/cognitive
+$ sudo systemctl start simard-ooda
+```
+
+The daemon also performs an **automatic** import on startup: if the live store is
+empty and a newer non-empty snapshot exists, it restores from the newest good
+snapshot and logs a `store was empty — auto-restored <n> memories from …
+cognitive_snapshot.json` line, so a corruption-reset self-heals without operator
+action. See the
+[Cognitive-Memory WAL Recovery Runbook](../operations/cognitive-memory-wal-recovery-runbook.md)
+for the full incident-driven procedure.
+
+---
+
 ## Out of scope
 
 Deliberately excluded from this change:
 
-- **Any mutation command.** `simard memory` is read-only: there is no
-  `set`, `clear`, `forget`, or `compact` subcommand. Memory is written
-  only by the daemon's OODA loop and consolidation.
-- **A read-only prospective (trigger) enumerator.** The library exposes no
-  side-effect-free way to list prospects, so `stats`/`dump` report the
-  prospective **count only** and never sample trigger rows. Adding a
-  read-only enumerator to the backend + trait is possible future work; it
-  is the prerequisite for row-level trigger inspection.
+- **Free-form mutation commands.** `simard memory` has no `set`, `clear`,
+  `forget`, or `compact` subcommand. `stats`/`dump` are read-only; the only
+  write path is [`import`](#simard-memory-import), a guarded snapshot-restore
+  that ingests a `cognitive_snapshot.json` and deduplicates by content. Ordinary
+  memory is written only by the daemon's OODA loop and consolidation.
+- **Sampling prospective (trigger) rows in `stats`/`dump`.** Issue #2550 added a
+  read-only, side-effect-free prospective enumerator to the library
+  (`get_all_prospective`, used by the verified backup to capture triggers), but
+  wiring it into the `stats`/`dump` sample tables is out of scope here: those
+  commands still report the prospective **count only** and never sample trigger
+  rows. `check_triggers` remains unsuitable for sampling — it mutates status.
 - **Working / sensory row sampling.** Neither type has a trait enumerator;
   both are count-only.
 - **Dashboard parity.** The Memory tab's graph view and full-text search
@@ -491,7 +550,9 @@ Deliberately excluded from this change:
 | Situation | Exit |
 |-----------|------|
 | Counts printed (including all-zeros on a fresh root) | `0` |
-| Unparseable arguments (unknown flag, bad `--limit`) | non-zero, usage to stderr |
+| `import` completes (items restored, including 0 on an empty snapshot) | `0` |
+| Unparseable arguments (unknown flag, bad `--limit`, missing `import` path) | non-zero, usage to stderr |
+| `import` snapshot file missing or not a valid snapshot envelope | non-zero, error to stderr |
 | Bridge open fails on every tier | non-zero, error to stderr |
 
 A successful read of an empty store is **not** an error — the all-zeros
@@ -506,6 +567,8 @@ bridge-open failure exits non-zero.
 |------|------|
 | `memory` subcommand dispatch | `src/operator_cli/memory.rs` |
 | Subcommand registration | `src/operator_cli/mod.rs` |
+| Snapshot import / restore (`import_memory_snapshot`, `restore_snapshot`) | `src/remote_transfer/mod.rs`, `src/memory_snapshot.rs` |
+| Startup auto-restore (empty store + newer snapshot) | `src/operator_commands_ooda/daemon/` |
 | Read bridge (`open_reader_bridge`) | `src/memory_ipc/launcher.rs` |
 | `CognitiveStatistics` (`get_statistics`) | `src/memory_cognitive.rs` |
 | `GraphStats` (edges / dedup, issue #2331) | `src/memory_cognitive.rs` |
@@ -531,6 +594,9 @@ bridge-open failure exits non-zero.
 | `dump` notes when neutral episode rows need direct open | Force the daemon-socket tier; assert the episode count prints with the "keyword samples only over IPC" note and no crash |
 | `dump --type=triggers` is rejected or count-only | Assert triggers cannot be row-sampled (count-only), consistent with the no-mutation guarantee |
 | Argument parsing rejects unknown flags / bad `--limit` | Assert non-zero exit and a usage message |
+| `import` round-trips a snapshot | Export a snapshot from a seeded store, `import` it into a fresh `TempDir` store, and assert the counts match |
+| `import` is idempotent (dedup by content) | Import the same snapshot twice; assert the second run reports items as deduplicated and the store count does not double |
+| `import` rejects a missing / malformed snapshot file | Assert non-zero exit and an error message, with the store left unchanged |
 
 ---
 
@@ -549,4 +615,8 @@ bridge-open failure exits non-zero.
   `[state-root]`, `$SIMARD_STATE_ROOT`, and `$HOME/.simard` are resolved.
 - [Library-backed Cognitive Memory](../architecture/cognitive-memory-library-adapter.md)
   — the `amplihack-memory-lib` backend the commands read from.
+- [Cognitive-Memory WAL Recovery Runbook](../operations/cognitive-memory-wal-recovery-runbook.md)
+  — when and how to use `simard memory import` to recover a corrupted/reset store.
+- [Verified Backups of the Live Cognitive Store](../operations/verified-backups.md)
+  — where the `cognitive_snapshot.json` files `import` consumes come from.
 - [Memory architecture](../memory.md) — the six memory types overview.

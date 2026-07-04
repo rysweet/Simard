@@ -98,6 +98,17 @@ is the most recent verified backup under `state_root/backups`.
   per-write fsync barrier after a lost-write incident. That barrier was deleted
   with `NativeCognitiveMemory` in issue #2307; it is not a current API or current
   guarantee.
+- **2026-07-04 / issue #2550** — a corrupt WAL
+  (`wal/wal_record.cpp:76 UNREACHABLE_CODE`) triggered a resilient prefix-recovery
+  that salvaged 40,488 records, but the **checkpoint after recovery failed**
+  (`Cannot open … cognitive.wal(.checkpoint)`), so nothing durable landed; a later
+  open re-quarantined and **reset the store to empty**, dropping ~20,480 memories
+  to 128, with no restore path. The #2550 change locks durable prefix-recovery
+  with a boundary regression test (the pinned library already recovers without
+  resetting a store that salvaged records), adds `simard memory import` + startup
+  auto-restore, completes the snapshot to all durable memory types, and preserves
+  recovery assets. See the
+  [Cognitive-Memory WAL Recovery Runbook](cognitive-memory-wal-recovery-runbook.md).
 
 ---
 
@@ -223,6 +234,24 @@ This is the same graceful-degradation contract as `restore_from_backup` above
 (fall back to the next-most-recent good copy): a single bad snapshot at the tip
 of the retained history must never silently wipe durable recall across a
 restart.
+### Operator restore and self-healing (issue #2550)
+
+Two operator-facing paths built on the same snapshot format make a
+corruption-reset recoverable without a code harness:
+
+- **`simard memory import <snapshot.json>`** ingests a backup's
+  `cognitive_snapshot.json` back into the store, deduplicating by content so it
+  is idempotent and safe to re-run or run onto a partially-populated store. See
+  the [Memory introspection CLI](../reference/simard-memory-cli.md#simard-memory-import).
+- **Startup auto-restore.** When the daemon starts and finds the live store
+  empty **and** a newer non-empty snapshot on disk, it restores from
+  the newest good snapshot and logs a `store was empty — auto-restored <n>
+  memories from … cognitive_snapshot.json` line, so a corruption-reset self-heals
+  instead of losing everything.
+
+For a corruption incident (recover the pre-reset store, choose a snapshot, and
+run the import), follow the
+[Cognitive-Memory WAL Recovery Runbook](cognitive-memory-wal-recovery-runbook.md).
 
 ---
 
@@ -393,8 +422,11 @@ Review them only for migration forensics; current live data is under
 
 - [`docs/memory.md`](../memory.md) — cognitive-memory data model
 - [`docs/daemon-mode.md`](../daemon-mode.md) — OODA daemon overview
+- [Cognitive-Memory WAL Recovery Runbook](cognitive-memory-wal-recovery-runbook.md) — corrupt-WAL recovery, `memory import`, startup auto-restore
+- [Verified Backups of the Live Cognitive Store](verified-backups.md) — verify-before-prune, whole-store export, bounded quarantines
 - [`CONTRIBUTING.md`](https://github.com/rysweet/Simard/blob/main/CONTRIBUTING.md) — contributor durability notes
 - [GitHub issue #2307](https://github.com/rysweet/Simard/issues/2307) — native cognitive-memory fork deletion
 - [GitHub issue #2420](https://github.com/rysweet/Simard/issues/2420) — verified backup of the live library store
+- [GitHub issue #2550](https://github.com/rysweet/Simard/issues/2550) — durable WAL recovery + snapshot import/auto-restore
 - [GitHub issue #1631](https://github.com/rysweet/Simard/issues/1631) — SIGTERM-safe shutdown
 - [GitHub issue #1973](https://github.com/rysweet/Simard/issues/1973) — historical native per-write barrier

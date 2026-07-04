@@ -97,6 +97,15 @@ bounded at `MAX_EXPORT_FACTS` / `MAX_EXPORT_PROCEDURES`. `backup_memory` uses th
 full export so the backup is a faithful copy of the live store, no matter how
 large it grows.
 
+> **Snapshot completeness (issue #2550).** The export is extended to include
+> **all durable memory types** — episodes and prospective/triggers, alongside
+> facts and procedures — so a snapshot is a complete restore source for the
+> cognitive-memory *nodes*. Provenance/similarity **edges** are not serialized:
+> they are reconstructable and their endpoints change across a content-dedup
+> restore. The export stays size-bounded for large stores. Snapshots written
+> before #2550 hold facts + procedures only; a restore from one of those is
+> partial by construction.
+
 ### The verify-before-prune gate
 
 `backup_memory_verified` wraps backup creation with a hard verification gate:
@@ -147,15 +156,37 @@ unbounded (this host saw 88 MB / 112 artifacts pile up). Neither bound *protects
 an entry the other would drop — a quarantine within the newest N but older than 7
 days is still deleted by the age check.
 
-### WAL durability — verify-only
+> **Preserve recovery assets (issue #2550).** These caps must never sweep away
+> the inputs an operator needs to recover from a corruption-reset. The retention
+> floors keep the quarantined `cognitive.corrupt-*` store and recent
+> `cognitive_snapshot.json` backups long enough to recover from before either
+> cap reclaims them. During an active incident, do **not** run `simard cleanup`
+> until you have restored or copied the quarantine and newest snapshots out —
+> see the [Cognitive-Memory WAL Recovery Runbook](cognitive-memory-wal-recovery-runbook.md).
+
+### WAL durability — recovery must be durable
 
 The library backend's write-ahead-log durability (corrupt-WAL recovery +
-checkpoint) is already present in the pinned `amplihack-memory` dependency. The
+checkpoint) is present in the pinned `amplihack-memory` dependency. The
 WAL-durability commit (`7b81590`, PR #89) is an **ancestor** of the current pin
-(`26d49bf8`, lbug-0.17.1), so **no dependency bump is performed** — re-bumping
-would be a no-op or a regression. See
-[Cognitive Memory Durability](cognitive-memory-durability.md) for the
-WAL/CHECKPOINT model.
+(`26d49bf8`, lbug-0.17.1), so no dependency bump was needed for the *recovery
+attempt* itself.
+
+> **Issue #2550.** The 2026-07-04 incident showed that recovery *attempting* is
+> not enough: a prefix-recovery salvaged 40,488 records, but the **checkpoint
+> after recovery failed** and a later open **reset the store to empty**. The
+> current pinned library (`26d49bf8`) already recovers durably — it quarantines
+> the corrupt WAL *before* the resilient open and **never** resets a store that
+> recovered records (a reset only happens for a genuinely corrupt main DB with
+> zero recovered records, and it moves the store aside, never deletes). The
+> #2550 change **locks that contract with a boundary regression test** and adds
+> snapshot import + startup auto-restore as a backstop for the genuine-reset
+> case. (The dependency bump in this change adds a read-only prospective
+> enumerator for complete snapshots — not a recovery change.) See
+> [Cognitive Memory Durability](cognitive-memory-durability.md) for the
+> WAL/CHECKPOINT model and the
+> [WAL Recovery Runbook](cognitive-memory-wal-recovery-runbook.md) for the
+> incident and operator recovery.
 
 ---
 
@@ -479,6 +510,23 @@ journalctl -u simard-ooda -n 50
 `restore_from_backup` verifies the backup before importing; if a backup is
 rejected as corrupt/incomplete, fall back to the next-most-recent directory.
 
+Since issue #2550 there is a first-class operator command that wraps this path —
+`simard memory import <snapshot.json>` — so you no longer need a one-shot Rust
+harness. It is idempotent (dedup by content), so it is safe to re-run and safe to
+run onto a partially-populated store:
+
+```bash
+sudo systemctl stop simard-ooda
+mv ~/.simard/cognitive ~/.simard/cognitive.prerestore-$(date +%Y%m%d_%H%M%S)
+simard memory import "$(ls -1dt ~/.simard/backups/*/ | head -1)cognitive_snapshot.json"
+sudo systemctl start simard-ooda
+journalctl -u simard-ooda -n 50
+```
+
+The full incident-driven procedure (detect, preserve assets, choose a snapshot,
+verify) is the
+[Cognitive-Memory WAL Recovery Runbook](cognitive-memory-wal-recovery-runbook.md).
+
 ---
 
 ## Tests
@@ -507,6 +555,12 @@ rejected as corrupt/incomplete, fall back to the next-most-recent directory.
 
 - [Cognitive Memory Durability](cognitive-memory-durability.md) — SIGTERM-safe
   shutdown, WAL/CHECKPOINT model, quarantine background
+- [Cognitive-Memory WAL Recovery Runbook](cognitive-memory-wal-recovery-runbook.md)
+  — corrupt-WAL recovery, `simard memory import`, startup auto-restore (#2550)
+- [Memory introspection CLI](../reference/simard-memory-cli.md) —
+  `simard memory stats` / `dump` / `import`
 - [Operations index](index.md)
 - [GitHub issue #2420](https://github.com/rysweet/Simard/issues/2420) — verified
   backups of the live store + quarantine bounding (this feature)
+- [GitHub issue #2550](https://github.com/rysweet/Simard/issues/2550) — durable
+  WAL recovery + snapshot import/auto-restore + complete snapshots

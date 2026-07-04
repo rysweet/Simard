@@ -238,3 +238,160 @@ fn full_export_captures_more_than_capped_export() {
         "full export must exceed the legacy cap"
     );
 }
+
+/// Issue #2550: a full snapshot must round-trip **every** durable memory type
+/// through export → import, and re-importing must be idempotent (dedup by
+/// content). Complements the export-completeness test in
+/// `tests/memory_snapshot_completeness_2550.rs` by pinning the RESTORE side.
+#[test]
+fn full_snapshot_round_trips_all_types_and_import_is_idempotent() {
+    use crate::cognitive_memory::LibraryCognitiveMemory;
+
+    let source = LibraryCognitiveMemory::in_memory().unwrap();
+    source
+        .store_fact("rust", "Rust is a systems language", 0.9, &[], "issue-2550")
+        .unwrap();
+    source
+        .store_procedure("ooda:consolidate", &["distill episodes".to_string()], &[])
+        .unwrap();
+    source
+        .store_episode(
+            "episode: ran cargo test; 0 failures",
+            "engineer-cycle",
+            None,
+        )
+        .unwrap();
+    source
+        .store_prospective("ship the CLI", "trigger:ship-cli", "Pursue goal", 1)
+        .unwrap();
+
+    let snapshot = export_full_memory_snapshot(&source, "issue-2550").unwrap();
+    assert_eq!(snapshot.facts.len(), 1);
+    assert_eq!(snapshot.procedures.len(), 1);
+    assert_eq!(snapshot.episodes.len(), 1);
+    assert_eq!(snapshot.prospective.len(), 1);
+
+    // Import into a fresh store: every type must land.
+    let target = LibraryCognitiveMemory::in_memory().unwrap();
+    let first = import_full_snapshot(&target, &snapshot).unwrap();
+    assert_eq!(first, 4, "all four durable memories must be imported");
+
+    let stats = target.get_statistics().unwrap();
+    assert_eq!(stats.semantic_count, 1, "fact restored");
+    assert_eq!(stats.procedural_count, 1, "procedure restored");
+    assert_eq!(stats.episodic_count, 1, "episode restored");
+    assert_eq!(stats.prospective_count, 1, "prospective restored");
+
+    // Re-importing the same snapshot must dedup by content — nothing new.
+    let second = import_full_snapshot(&target, &snapshot).unwrap();
+    assert_eq!(
+        second, 0,
+        "re-import must deduplicate every item by content"
+    );
+    let after = target.get_statistics().unwrap();
+    assert_eq!(after.total(), 4, "counts must be stable across re-import");
+}
+
+/// Issue #2550: `load_full_snapshot_from_file` must transparently accept every
+/// on-disk shape Simard has written — a full snapshot, a legacy bare
+/// `MemorySnapshot`, and a `PersistedEnvelope`-wrapped snapshot — and surface a
+/// clear error on a corrupt file. This pins the loader's behavior across the
+/// fast (direct-deserialize) path and the envelope-unwrap fallback so the
+/// resource-usage optimization on the P0 recovery path cannot regress any shape.
+#[test]
+fn load_full_snapshot_from_file_reads_full_bare_and_enveloped_shapes() {
+    use crate::cognitive_memory::LibraryCognitiveMemory;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+
+    // Build a full snapshot (all four durable types) from a live store.
+    let source = LibraryCognitiveMemory::in_memory().unwrap();
+    source
+        .store_fact("rust", "Rust is a systems language", 0.9, &[], "issue-2550")
+        .unwrap();
+    source
+        .store_procedure("ooda:consolidate", &["distill episodes".to_string()], &[])
+        .unwrap();
+    source
+        .store_episode(
+            "episode: ran cargo test; 0 failures",
+            "engineer-cycle",
+            None,
+        )
+        .unwrap();
+    source
+        .store_prospective("ship the CLI", "trigger:ship-cli", "Pursue goal", 1)
+        .unwrap();
+    let full = export_full_memory_snapshot(&source, "issue-2550").unwrap();
+
+    // (1) Full snapshot: the fast path must round-trip every durable type.
+    let full_path = dir.join("full.json");
+    std::fs::write(&full_path, serde_json::to_vec(&full).unwrap()).unwrap();
+    let loaded_full = load_full_snapshot_from_file(&full_path).unwrap();
+    assert_eq!(
+        loaded_full.total_items(),
+        4,
+        "full snapshot must load all four durable types"
+    );
+    assert_eq!(
+        loaded_full.episodes.len(),
+        1,
+        "episodes must survive the load"
+    );
+    assert_eq!(
+        loaded_full.prospective.len(),
+        1,
+        "prospective triggers must survive the load"
+    );
+
+    // (2) Legacy bare snapshot (facts + procedures only, no episodes/prospective
+    // keys): the fast path must still load it, defaulting the missing types.
+    let bare = MemorySnapshot {
+        facts: full.facts.clone(),
+        procedures: full.procedures.clone(),
+        exported_at: full.exported_at,
+        source_agent: full.source_agent.clone(),
+    };
+    let bare_path = dir.join("bare.json");
+    std::fs::write(&bare_path, serde_json::to_vec(&bare).unwrap()).unwrap();
+    let loaded_bare = load_full_snapshot_from_file(&bare_path).unwrap();
+    assert_eq!(loaded_bare.facts.len(), 1);
+    assert_eq!(loaded_bare.procedures.len(), 1);
+    assert!(
+        loaded_bare.episodes.is_empty(),
+        "a legacy bare snapshot carries no episodes"
+    );
+    assert!(
+        loaded_bare.prospective.is_empty(),
+        "a legacy bare snapshot carries no prospective triggers"
+    );
+
+    // (3) PersistedEnvelope-wrapped snapshot (session-boundary file): the
+    // envelope-unwrap fallback must recover the payload.
+    let envelope = PersistedEnvelope {
+        schema_version: ENVELOPE_SCHEMA_VERSION,
+        payload: bare.clone(),
+    };
+    let env_path = dir.join("enveloped.json");
+    std::fs::write(&env_path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+    let loaded_env = load_full_snapshot_from_file(&env_path).unwrap();
+    assert_eq!(
+        loaded_env.facts.len(),
+        1,
+        "the enveloped payload's facts must load via the unwrap fallback"
+    );
+    assert_eq!(
+        loaded_env.procedures.len(),
+        1,
+        "the enveloped payload's procedures must load via the unwrap fallback"
+    );
+
+    // (4) A corrupt file must surface an error, not a silent empty snapshot.
+    let bad_path = dir.join("corrupt.json");
+    std::fs::write(&bad_path, b"{ this is not valid json").unwrap();
+    assert!(
+        load_full_snapshot_from_file(&bad_path).is_err(),
+        "a corrupt snapshot file must error rather than yield an empty snapshot"
+    );
+}

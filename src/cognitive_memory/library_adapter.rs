@@ -1116,6 +1116,20 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         Ok(())
     }
 
+    fn list_all_prospective(&self, limit: u32) -> SimardResult<Vec<CognitiveProspective>> {
+        // Issue #2550: read-only enumeration of every prospective memory (all
+        // statuses), priority-ordered, for the verified backup. Routes through
+        // the library's `get_all_prospective` (a pure `&self` read over
+        // `query_nodes(NT_PROSPECTIVE, agent_filter)`), so it neither mutates
+        // status nor filters by content the way `check_triggers` does.
+        Ok(self
+            .lock()?
+            .get_all_prospective(limit as usize)
+            .into_iter()
+            .map(to_prospective)
+            .collect())
+    }
+
     fn mark_episode_distilled(&self, node_id: &str) -> SimardResult<()> {
         // De-fork Phase 2b (issue #2307): the library now exposes a persistent,
         // one-way distilled latch. Delegate to it. The library returns `false`
@@ -1136,6 +1150,19 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         Ok(self
             .lock()?
             .list_undistilled_episodes(limit as usize)
+            .into_iter()
+            .map(to_episode)
+            .collect())
+    }
+
+    fn list_all_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+        // Issue #2550: unfiltered enumeration of every episode (including
+        // compressed/consolidated ones), newest-first, for the verified backup.
+        // `get_episodes(_, true)` is the same "return all" read
+        // `search_episodes_by_keywords` builds on, minus the keyword gate.
+        Ok(self
+            .lock()?
+            .get_episodes(limit as usize, true)
             .into_iter()
             .map(to_episode)
             .collect())
