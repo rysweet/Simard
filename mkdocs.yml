@@ -102,6 +102,7 @@ nav:
     - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
     - Rust Domain-Expertise Gym (first experiment): concepts/rust-expertise-gym.md
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
+    - Zero-Fallback Reasoners: concepts/zero-fallback-reasoners.md
     - Unified Telemetry and Status: concepts/unified-telemetry-and-status.md
     - Goal-Board Persistence: concepts/goal-board-persistence.md
     - Keeping the OODA Daemon Steerable: concepts/steerable-ooda-daemon.md
