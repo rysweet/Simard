@@ -15,8 +15,10 @@
 # Only Linux x86_64 ships today; scope the check to the target the release
 # binary is built for so platform-specific crates elsewhere don't skew bans.
 # Default features only — this mirrors the shipped `cargo build --release`
-# binary; the optional `dashboard-audit` feature (headless_chrome) is opt-in
-# and not part of the released artifact.
+# binary. Since issue #2576 the default set includes `dashboard-audit`
+# (headless_chrome), but the audit binaries that use it carry a
+# `required-features` marker and are filtered OUT of the released tarball, so
+# headless_chrome is still absent from the shipped `simard` artifact.
 targets = [{ triple = "x86_64-unknown-linux-gnu" }]
 
 # ── Advisories (RUSTSEC) ─────────────────────────────────────────────────────

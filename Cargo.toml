@@ -1,6 +1,6 @@
 [package]
 name = "simard"
-version = "0.25.0"
+version = "0.26.0"
 edition = "2024"
 default-run = "simard"
 
@@ -117,12 +117,27 @@ url = { version = "=2.5.8", optional = true }
 libc = "=0.2.185"
 
 [features]
+# Issue #2576: every FUNCTIONAL/runtime capability ships in a plain `cargo build`
+# — no shippable feature is opt-in. `default` therefore enables `signal` (the
+# operator Signal conversation channel) and `dashboard-audit` (the headless
+# dashboard audit tools), so a stock binary is fully capable and `simard signal
+# run` reaches its real config path instead of a "not compiled in" stub. Build a
+# deliberately minimal binary with `--no-default-features`.
+default = ["signal", "dashboard-audit"]
+
+# THE ONE INTENTIONAL EXCEPTION to the "features are default" rule (issue #2576):
+# `slow-tests` is NOT a shippable product capability — it is a TEST-SELECTION gate
+# that turns on the slow, long-running `#[cfg(feature = "slow-tests")]` tests.
+# Defaulting it would force those slow tests into every `cargo test` / CI run and
+# blow up CI time for zero runtime benefit, so it stays opt-in. Enable explicitly
+# with `cargo test --features slow-tests` when you want the slow suite.
 slow-tests = []
 dashboard-audit = ["dep:headless_chrome", "dep:regex", "dep:url"]
 # Issue #2527: the Signal conversation channel (`src/signal_conversation/`).
-# Default OFF so the daemon builds and runs with no signal-cli installed. The
-# transport reuses tokio `net` (already a dependency), so enabling this adds no
-# new mandatory dependency.
+# Built by DEFAULT since issue #2576 (see `default` above) so the daemon ships
+# signal-capable with no opt-in flag. The transport reuses tokio `net` (already a
+# dependency), so enabling this adds no new mandatory dependency. Drop it only via
+# an explicit `--no-default-features` minimal build.
 signal = []
 
 [dev-dependencies]

@@ -9,10 +9,10 @@
 //! until the socket closes.
 //!
 //! The subcommand is **always recognized** so the operator gets a clear message
-//! either way; the Signal implementation itself compiles only under the `signal`
-//! Cargo feature (default off). A default build recognizes `simard signal` and
-//! tells the operator to rebuild with `--features signal` instead of failing
-//! with a bare "unsupported command".
+//! either way. The Signal implementation is compiled in by DEFAULT (issue #2576);
+//! only a deliberately minimal `--no-default-features` build omits it, and even
+//! then `simard signal` is recognized and tells the operator to rebuild with the
+//! feature instead of failing with a bare "unsupported command".
 //!
 //! # Naming
 //!
@@ -30,12 +30,13 @@ Usage: simard signal <command>
 Commands:
   run               Connect to the configured signal-cli JSON-RPC daemon and run
                     the operator Signal conversation channel until the socket
-                    closes. Requires a build with `--features signal` and a
-                    [signal] config table (endpoint, account, allowlist).
+                    closes. Built in by default; needs a [signal] config table
+                    (endpoint, account, allowlist).
   help, -h, --help  Show this help message and exit.
 
-The Signal channel is OPTIONAL and OFF by default; a plain build has no Signal
-code compiled in. See docs/howto/set-up-the-signal-channel.md for full setup.
+The Signal channel is built by DEFAULT (issue #2576) and stays dormant until a
+[signal] config table is present. Only a `--no-default-features` build omits the
+Signal code. See docs/howto/set-up-the-signal-channel.md for full setup.
 ";
 
 pub fn dispatch_signal_command(
