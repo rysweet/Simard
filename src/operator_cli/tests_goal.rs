@@ -322,3 +322,197 @@ fn simard_goal_unblock_all_does_not_touch_completed_or_in_progress_goals() {
     );
     assert_eq!(by_id("pending").status, GoalProgress::NotStarted);
 }
+
+// ─── Issue #1: steerability — operator edits stick, survive cycles/restarts ──
+
+/// An operator `goal add` is reflected by the very next read of the
+/// authoritative store (read-your-writes) and survives a daemon restart.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn operator_add_reflected_immediately_and_survives_restart() {
+    let (_tmp, root) = isolated_state_root();
+
+    dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "add".to_string(),
+        "1".to_string(),
+        "steer".to_string(),
+        "the".to_string(),
+        "board".to_string(),
+    ])
+    .expect("`goal add` must succeed");
+
+    let id = crate::goals::goal_slug("steer the board");
+
+    // Reflected immediately in the authoritative store.
+    let persistent = crate::goal_board_store::load(&root);
+    assert!(
+        persistent.board.active.iter().any(|g| g.id == id),
+        "operator add must be reflected by the next authoritative read"
+    );
+
+    // Survives a daemon restart (a fresh load from goal_board.json).
+    let after_restart = crate::goal_board_store::load(&root);
+    assert!(
+        after_restart.board.active.iter().any(|g| g.id == id),
+        "operator add must survive a restart"
+    );
+}
+
+/// An operator `goal remove` survives a full daemon cycle: even though the
+/// daemon's in-flight board still carries the removed goal (it loaded before the
+/// remove), the tombstone-aware reconcile at cycle-commit drops it — the
+/// production clobber bug is closed. It also survives a subsequent restart.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn operator_remove_via_cli_survives_daemon_cycle_and_restart() {
+    let (_tmp, root) = isolated_state_root();
+    seed_board(
+        &root,
+        vec![
+            active_goal("keep-me", GoalProgress::NotStarted),
+            active_goal("remove-me", GoalProgress::NotStarted),
+        ],
+    );
+
+    // Daemon adopts the board; its in-flight copy holds BOTH goals.
+    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let daemon_in_flight = crate::goal_board_store::load_or_migrate(&root, bridge.ops())
+        .expect("migrate")
+        .board;
+    assert_eq!(daemon_in_flight.active.len(), 2);
+
+    // Operator removes one goal via the CLI (writes a tombstone).
+    dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "remove".to_string(),
+        "remove-me".to_string(),
+    ])
+    .expect("`goal remove` must succeed");
+
+    // Daemon commits its now-stale in-flight board at cycle end.
+    let committed = crate::goal_board_store::commit_cycle(
+        &root,
+        &daemon_in_flight,
+        &crate::goal_curation::NoProgressTracker::new(),
+        &[],
+    )
+    .expect("cycle commit");
+
+    let ids: std::collections::HashSet<&str> =
+        committed.active.iter().map(|g| g.id.as_str()).collect();
+    assert!(ids.contains("keep-me"));
+    assert!(
+        !ids.contains("remove-me"),
+        "operator remove must survive a full daemon cycle (anti-clobber via tombstone reconcile)"
+    );
+
+    // Survives a restart.
+    let after_restart = crate::goal_board_store::load(&root);
+    assert!(
+        !after_restart
+            .board
+            .active
+            .iter()
+            .any(|g| g.id == "remove-me"),
+        "operator remove must survive a restart"
+    );
+}
+
+/// `goal complete` tombstones a goal so a later recall/curation pass that tries
+/// to re-introduce it (the ladybug re-seeding failure mode) cannot resurrect it.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn operator_complete_tombstones_and_blocks_reseed() {
+    let (_tmp, root) = isolated_state_root();
+    seed_board(
+        &root,
+        vec![active_goal("ladybug-hardening", GoalProgress::NotStarted)],
+    );
+
+    dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "complete".to_string(),
+        "ladybug-hardening".to_string(),
+    ])
+    .expect("`goal complete` must succeed");
+
+    // Tombstone recorded and the goal is off the board.
+    assert!(crate::ooda_loop::load_tombstones(&root).contains("ladybug-hardening"));
+
+    // A recall pass proposing the completed goal again is filtered out.
+    let recalled = GoalBoard {
+        active: vec![active_goal("ladybug-hardening", GoalProgress::NotStarted)],
+        backlog: Vec::new(),
+    };
+    let tombstones = crate::ooda_loop::load_tombstones(&root);
+    let filtered = crate::goal_board_store::filter_tombstoned(recalled, &tombstones);
+    assert!(
+        filtered.active.is_empty(),
+        "a completed+tombstoned goal must never be re-seeded from recalled memory"
+    );
+}
+
+/// `goal reprioritize <id> <p>` (the required alias of `set-priority`) changes an
+/// existing goal's priority in the authoritative store, is reflected by the very
+/// next read (read-your-writes), and survives a daemon restart — an operator
+/// steer that must STICK and not be clobbered. An unknown id is a hard error.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn operator_reprioritize_via_cli_sticks_and_survives_restart() {
+    let (_tmp, root) = isolated_state_root();
+
+    // Seed a goal at priority 5 so the change to p2 is observable.
+    let seeded = {
+        let mut g = active_goal("steer-me", GoalProgress::NotStarted);
+        g.priority = 5;
+        g
+    };
+    seed_board(&root, vec![seeded]);
+
+    dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "reprioritize".to_string(),
+        "steer-me".to_string(),
+        "2".to_string(),
+    ])
+    .expect("`goal reprioritize` must succeed");
+
+    // Reflected immediately in the authoritative store (read-your-writes).
+    let after = crate::goal_board_store::load(&root).board;
+    let g = after
+        .active
+        .iter()
+        .find(|g| g.id == "steer-me")
+        .expect("goal must survive reprioritize");
+    assert_eq!(
+        g.priority, 2,
+        "reprioritize must change the persisted priority immediately"
+    );
+
+    // Survives a daemon restart (a fresh load of goal_board.json).
+    let after_restart = crate::goal_board_store::load(&root).board;
+    assert_eq!(
+        after_restart
+            .active
+            .iter()
+            .find(|g| g.id == "steer-me")
+            .expect("goal must survive restart")
+            .priority,
+        2,
+        "reprioritize must survive a restart"
+    );
+
+    // Reprioritizing an unknown id is a hard error (non-zero exit) and never
+    // silently succeeds.
+    let err = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "reprioritize".to_string(),
+        "no-such-goal".to_string(),
+        "3".to_string(),
+    ]);
+    assert!(
+        err.is_err(),
+        "reprioritize of an unknown goal id must return a non-zero exit"
+    );
+}

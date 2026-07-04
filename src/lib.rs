@@ -52,6 +52,7 @@ pub mod error;
 pub mod eval_watchdog;
 pub mod evidence;
 pub mod git_guardrails;
+pub mod goal_board_store;
 pub mod goal_curation;
 pub mod goals;
 pub mod greeting_banner;
