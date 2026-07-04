@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 use tempfile::tempdir;
@@ -426,4 +427,157 @@ fn under_any_root_handles_missing_root_gracefully() {
     ];
     assert!(under_any_root(&inside, &roots));
     assert!(!under_any_root(Path::new("/etc"), &roots));
+}
+
+// ------------------------------------------------------------------
+// Performance: local vetoes short-circuit the upstream network calls.
+//
+// `gather_inputs` computes the two cheap, local vetoes (live-CWD and
+// uncommitted/unpushed work) before the expensive `gh pr list` /
+// `git ls-remote` round-trips. When either veto fires the candidate outcome
+// is fixed (`None`) regardless of the upstream answer, so the network calls
+// are skipped entirely. These tests pin that contract via a call-counting
+// GhClient so the optimization cannot silently regress.
+// ------------------------------------------------------------------
+
+struct CountingGh {
+    inner: FakeGh,
+    calls: AtomicUsize,
+}
+
+impl Default for CountingGh {
+    fn default() -> Self {
+        Self {
+            inner: FakeGh::default(),
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl GhClient for CountingGh {
+    fn merged_prs_for_branch(&self, branch: &str) -> Result<Vec<u32>, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.merged_prs_for_branch(branch)
+    }
+    fn branch_exists_on_remote(&self, remote: &str, branch: &str) -> Result<Option<bool>, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.branch_exists_on_remote(remote, branch)
+    }
+}
+
+#[test]
+fn live_worktree_skips_upstream_network_calls() {
+    let parent_tmp = tempdir().unwrap();
+    let parent = parent_tmp.path();
+    init_repo(parent);
+
+    let roots_tmp = tempdir().unwrap();
+    let wt_dir = roots_tmp.path().join("eng-live-fast");
+    add_worktree(parent, "engineer/eng-live-fast", &wt_dir);
+
+    // Branch is merged — without the short-circuit, gather_inputs would still
+    // query gh even though the live veto makes the answer irrelevant.
+    let gh = CountingGh::default();
+    gh.inner
+        .merged
+        .lock()
+        .unwrap()
+        .insert("engineer/eng-live-fast".to_string(), vec![1]);
+
+    let probe = FakeLiveProcessProbe::default();
+    probe.mark_live(&wt_dir);
+
+    let cfg = GcConfig {
+        roots: vec![roots_tmp.path().to_path_buf()],
+        parent_repo: parent.to_path_buf(),
+        apply: false,
+        idle_days: 7,
+        now: SystemTime::now(),
+    };
+    let report = run_gc(&cfg, &gh, &probe).expect("gc");
+
+    assert_eq!(report.worktrees_examined, 1);
+    assert!(
+        report.candidates.is_empty(),
+        "live worktree must not be a candidate: {report:?}",
+    );
+    assert_eq!(
+        gh.calls.load(Ordering::SeqCst),
+        0,
+        "a live worktree must trigger zero gh / ls-remote network calls",
+    );
+}
+
+#[test]
+fn dirty_worktree_skips_upstream_network_calls() {
+    let parent_tmp = tempdir().unwrap();
+    let parent = parent_tmp.path();
+    init_repo(parent);
+
+    let roots_tmp = tempdir().unwrap();
+    let wt_dir = roots_tmp.path().join("eng-dirty-fast");
+    add_worktree(parent, "engineer/eng-dirty-fast", &wt_dir);
+
+    // Uncommitted change → local work veto fires.
+    std::fs::write(wt_dir.join("wip.txt"), "work in progress").unwrap();
+
+    let gh = CountingGh::default();
+    gh.inner
+        .merged
+        .lock()
+        .unwrap()
+        .insert("engineer/eng-dirty-fast".to_string(), vec![1]);
+
+    let probe = FakeLiveProcessProbe::default();
+
+    let cfg = GcConfig {
+        roots: vec![roots_tmp.path().to_path_buf()],
+        parent_repo: parent.to_path_buf(),
+        apply: false,
+        idle_days: 7,
+        now: SystemTime::now(),
+    };
+    let report = run_gc(&cfg, &gh, &probe).expect("gc");
+
+    assert!(
+        report.candidates.is_empty(),
+        "dirty worktree must not be a candidate: {report:?}",
+    );
+    assert_eq!(
+        gh.calls.load(Ordering::SeqCst),
+        0,
+        "a dirty worktree must trigger zero gh / ls-remote network calls",
+    );
+}
+
+#[test]
+fn clean_worktree_still_consults_upstream() {
+    // Control: with no local veto, the upstream lookups MUST still run — the
+    // short-circuit must not over-skip and disable GC.
+    let parent_tmp = tempdir().unwrap();
+    let parent = parent_tmp.path();
+    init_repo(parent);
+
+    let roots_tmp = tempdir().unwrap();
+    let wt_dir = roots_tmp.path().join("eng-clean-fast");
+    add_worktree(parent, "engineer/eng-clean-fast", &wt_dir);
+
+    let gh = CountingGh::default(); // clean, nothing merged, branch on origin
+    let probe = FakeLiveProcessProbe::default();
+
+    let cfg = GcConfig {
+        roots: vec![roots_tmp.path().to_path_buf()],
+        parent_repo: parent.to_path_buf(),
+        apply: false,
+        idle_days: 7,
+        now: SystemTime::now(),
+    };
+    let report = run_gc(&cfg, &gh, &probe).expect("gc");
+
+    assert_eq!(report.worktrees_examined, 1);
+    assert!(
+        gh.calls.load(Ordering::SeqCst) >= 2,
+        "a clean, non-live worktree must still consult gh (merged + on-origin); got {}",
+        gh.calls.load(Ordering::SeqCst),
+    );
 }

@@ -159,6 +159,14 @@ This guard is purely additive: it can only turn a would-be candidate into a
 keep. Existing GC behavior for clean, merged/deleted/idle worktrees is
 unchanged.
 
+`gather_inputs` evaluates the two cheap, local vetoes — live-CWD and this
+uncommitted/unpushed-work check — **before** the upstream lookups. Because
+either veto forces `evaluate_candidate` to return `None` regardless of the
+upstream answer, a live or work-carrying worktree skips the `gh pr list` and
+`git ls-remote` round-trips entirely. This is a performance-only
+short-circuit: the prune decision is identical, but the network calls (which
+dominate GC cost) are avoided for worktrees that are already disqualified.
+
 ### Reasons and logging (already present)
 
 Requirement #4 (log every removal with its reason) is already satisfied on this

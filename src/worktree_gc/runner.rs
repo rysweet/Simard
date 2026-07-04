@@ -187,6 +187,29 @@ fn gather_inputs(
     probe: &dyn LiveProcessProbe,
     _now: SystemTime,
 ) -> CandidateInputs {
+    // Cheap, local signals first. Both are hard vetoes in `evaluate_candidate`
+    // (issues #1886 / #2553): if either fires, the worktree is never a prune
+    // candidate regardless of the upstream (merged / deleted / idle) signals.
+    let last_activity = super::policy::worktree_last_activity(&entry.path);
+    let has_live_process = probe.worktree_has_live_process(&entry.path);
+    let has_uncommitted_or_unpushed_work = worktree_has_uncommitted_or_unpushed_work(&entry.path);
+
+    // A vetoing local signal makes the network inputs irrelevant to the outcome
+    // (`evaluate_candidate` returns `None` either way), so skip the `gh pr list`
+    // and `git ls-remote` round-trips entirely — those dominate GC cost by 2-3
+    // orders of magnitude (see `liveness` module docs). This is behaviour-
+    // preserving: the candidate decision is identical, we just don't pay for
+    // upstream lookups whose result cannot change it.
+    if has_live_process || has_uncommitted_or_unpushed_work {
+        return CandidateInputs {
+            merged_prs: Vec::new(),
+            branch_on_origin: None,
+            last_activity,
+            has_live_process,
+            has_uncommitted_or_unpushed_work,
+        };
+    }
+
     let merged_prs = if let Some(ref branch) = entry.branch {
         gh.merged_prs_for_branch(branch).unwrap_or_else(|e| {
             tracing::warn!(
@@ -215,10 +238,6 @@ fn gather_inputs(
     } else {
         None
     };
-
-    let last_activity = super::policy::worktree_last_activity(&entry.path);
-    let has_live_process = probe.worktree_has_live_process(&entry.path);
-    let has_uncommitted_or_unpushed_work = worktree_has_uncommitted_or_unpushed_work(&entry.path);
 
     CandidateInputs {
         merged_prs,
