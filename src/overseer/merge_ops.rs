@@ -29,17 +29,23 @@ use crate::stewardship::{
 };
 
 use crate::overseer::capabilities::{CheckItem, OverseerError, PrOps, VerifyReport};
+use crate::overseer::guardrails::{RecursionGuard, Subject};
 use crate::overseer::notify::{DualChannelNotifier, MergeNotification};
 use crate::overseer::pr_verify::run_diff_scans;
 
 // ─────────────────────────── injected seams ────────────────────────────────
 
-/// Source of a PR's unified diff + title. `PrGhClient` (the shipped trait) has
-/// no diff/title reader, so this adds one — the real impl shells `gh pr diff` /
-/// `gh pr view --json title`; tests inject canned values (no network).
+/// Source of a PR's unified diff + title + author. `PrGhClient` (the shipped
+/// trait) has no such reader, so this adds one — the real impl shells
+/// `gh pr diff` / `gh pr view --json title,author`; tests inject canned values.
 pub trait PrSource {
     fn diff(&self, repo: &str, pr: u32) -> Result<String, OverseerError>;
     fn title(&self, repo: &str, pr: u32) -> Result<String, OverseerError>;
+    /// PR author login (for the anti-recursion check). Defaults to empty so
+    /// existing fakes need not implement it; the real impl reads it from `gh`.
+    fn author(&self, _repo: &str, _pr: u32) -> Result<String, OverseerError> {
+        Ok(String::new())
+    }
 }
 
 /// The review gate (#7). Injected so tests exercise `should_commit` without an
@@ -48,6 +54,14 @@ pub trait PrSource {
 /// merges unreviewed.
 pub trait DiffReviewer {
     fn review(&self, diff: &str) -> Result<Vec<ReviewFinding>, OverseerError>;
+}
+
+/// Resolves a PR's merge conflicts. Deliberately its own seam so the real
+/// implementation ([`GitConflictResolver`](crate::overseer::conflict)) — which
+/// runs guarded git commands and **never** `--no-verify` — is injected only when
+/// the operator opts into HIGH-RISK conflict resolution.
+pub trait ConflictResolver {
+    fn resolve(&self, repo: &str, pr: u32) -> Result<(), OverseerError>;
 }
 
 /// Injected clock so the poll loop has **no real sleeps in tests**. Production
@@ -105,6 +119,21 @@ impl PrSource for RealPrSource {
         ])
         .map(|s| s.trim().to_string())
     }
+
+    fn author(&self, repo: &str, pr: u32) -> Result<String, OverseerError> {
+        run_gh(&[
+            "pr",
+            "view",
+            &pr.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "author",
+            "--jq",
+            ".author.login",
+        ])
+        .map(|s| s.trim().to_string())
+    }
 }
 
 fn run_gh(args: &[&str]) -> Result<String, OverseerError> {
@@ -137,6 +166,11 @@ pub struct MergePrOps {
     clock: Box<dyn PollClock>,
     base_allowlist: Vec<String>,
     poll: PollConfig,
+    /// HIGH-RISK conflict resolver, wired only when the operator opts in (M3).
+    conflict: Option<Box<dyn ConflictResolver>>,
+    /// Anti-recursion identity. When set, the Overseer refuses to merge its OWN
+    /// PRs (M3). Fails CLOSED when the guard is unconfigured.
+    recursion: Option<RecursionGuard>,
 }
 
 impl MergePrOps {
@@ -161,7 +195,24 @@ impl MergePrOps {
             clock,
             base_allowlist,
             poll,
+            conflict: None,
+            recursion: None,
         }
+    }
+
+    /// Opt into HIGH-RISK conflict resolution by wiring a resolver (M3). Default
+    /// is `None` — `resolve_conflict` refuses until a resolver is provided.
+    pub fn with_conflict_resolver(mut self, resolver: Box<dyn ConflictResolver>) -> Self {
+        self.conflict = Some(resolver);
+        self
+    }
+
+    /// Wire the Overseer's anti-recursion identity so `merge` refuses its OWN
+    /// PRs (M3). The guard fails CLOSED when unconfigured; the Overseer must run
+    /// under a DISTINCT identity, never the operator's login.
+    pub fn with_recursion_guard(mut self, guard: RecursionGuard) -> Self {
+        self.recursion = Some(guard);
+        self
     }
 
     /// Production adapter: real `gh` client + diff source, the env merge-judge,
@@ -316,6 +367,19 @@ impl PrOps for MergePrOps {
     /// merges. On a successful merge it fires the dual-channel notification; the
     /// merge is not complete until that notification has dispatched.
     fn merge(&self, repo: &str, pr: u32) -> Result<(), OverseerError> {
+        // 0. Anti-recursion: never merge the Overseer's OWN PR (M3). Fails
+        //    CLOSED when the guard is configured but the subject is its own.
+        if let Some(guard) = &self.recursion {
+            let author = self.source.author(repo, pr)?;
+            guard
+                .admit(&Subject::Pr {
+                    repo: repo.to_string(),
+                    pr,
+                    author,
+                })
+                .map_err(|e| cap("merge.recursion", e.to_string()))?;
+        }
+
         // 1. Full checklist must pass.
         let report = self.verify(repo, pr)?;
         if !report.ready {
@@ -354,7 +418,7 @@ impl PrOps for MergePrOps {
                     .title(repo, pr)
                     .unwrap_or_else(|_| format!("PR #{pr}"));
                 let notification = self.notification(repo, pr, &title);
-                let nreport = self.notifier.notify(&notification);
+                let nreport = self.notifier.notify(&notification.to_operator());
                 debug_assert!(
                     nreport.dispatched(),
                     "merge completed without a dispatched operator notification"
@@ -365,13 +429,19 @@ impl PrOps for MergePrOps {
         }
     }
 
-    /// HIGH-RISK conflict resolution. Deliberately **not** implemented in M2 and
-    /// **never** uses `--no-verify`. Wired in M3 under `git_guardrails`.
-    fn resolve_conflict(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
-        Err(OverseerError::Capability {
-            what: "resolve_conflict",
-            detail: "HIGH-RISK conflict resolution is wired in M3 (never --no-verify)".to_string(),
-        })
+    /// HIGH-RISK conflict resolution. Delegates to the injected
+    /// [`ConflictResolver`] (which **never** uses `--no-verify`); refuses when no
+    /// resolver is wired. Opt-in only.
+    fn resolve_conflict(&self, repo: &str, pr: u32) -> Result<(), OverseerError> {
+        match &self.conflict {
+            Some(resolver) => resolver.resolve(repo, pr),
+            None => Err(OverseerError::Capability {
+                what: "resolve_conflict",
+                detail:
+                    "no conflict resolver wired (HIGH-RISK; operator opt-in, never --no-verify)"
+                        .to_string(),
+            }),
+        }
     }
 }
 
@@ -402,7 +472,7 @@ fn classify_state(state: &str) -> CheckClass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::overseer::notify::{ChannelDelivery, MergeNotification, NotifyChannel};
+    use crate::overseer::notify::{ChannelDelivery, NotifyChannel, OperatorNotification};
     use crate::stewardship::merge_authority::CheckRollupEntry;
     use crate::stewardship::{JudgeOutcome, MergeJudgeKind, PrSnapshot, Verdict};
     use std::sync::{Arc, Mutex};
@@ -495,13 +565,13 @@ mod tests {
     /// Records every notification it is handed.
     struct CapturingChannel {
         name: String,
-        seen: Arc<Mutex<Vec<MergeNotification>>>,
+        seen: Arc<Mutex<Vec<OperatorNotification>>>,
     }
     impl NotifyChannel for CapturingChannel {
         fn name(&self) -> &str {
             &self.name
         }
-        fn deliver(&self, n: &MergeNotification) -> ChannelDelivery {
+        fn deliver(&self, n: &OperatorNotification) -> ChannelDelivery {
             self.seen.lock().unwrap().push(n.clone());
             ChannelDelivery::Sent
         }
@@ -549,8 +619,8 @@ mod tests {
         poll: PollConfig,
     ) -> (
         MergePrOps,
-        Arc<Mutex<Vec<MergeNotification>>>,
-        Arc<Mutex<Vec<MergeNotification>>>,
+        Arc<Mutex<Vec<OperatorNotification>>>,
+        Arc<Mutex<Vec<OperatorNotification>>>,
     ) {
         let email_seen = Arc::new(Mutex::new(vec![]));
         let signal_seen = Arc::new(Mutex::new(vec![]));
@@ -688,7 +758,7 @@ mod tests {
         assert_eq!(signal.lock().unwrap().len(), 1, "signal notified");
         // The notification carries the problem + PR title + link.
         let n = &email.lock().unwrap()[0];
-        assert!(n.pr_url.contains("/pull/7"));
+        assert!(n.link.as_deref().unwrap().contains("/pull/7"));
         assert!(n.autonomous);
         assert!(n.problem.contains("merge-ready"));
     }
@@ -753,7 +823,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_conflict_is_m3_and_never_no_verify() {
+    fn resolve_conflict_refuses_without_resolver_and_delegates_when_wired() {
+        // No resolver wired → refuse (never a silent no-op, never --no-verify).
         let gh = ScriptedGh::new(vec![green()]);
         let (ops, _, _) = adapter_with(
             gh,
@@ -762,7 +833,75 @@ mod tests {
             Arc::new(CountingClock::default()),
             PollConfig::default(),
         );
-        let err = ops.resolve_conflict("rysweet/Simard", 1).unwrap_err();
-        assert!(format!("{err}").contains("M3"));
+        assert!(ops.resolve_conflict("rysweet/Simard", 1).is_err());
+
+        // With a resolver wired, resolve_conflict delegates to it.
+        struct OkResolver(Arc<Mutex<usize>>);
+        impl ConflictResolver for OkResolver {
+            fn resolve(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
+                *self.0.lock().unwrap() += 1;
+                Ok(())
+            }
+        }
+        let calls = Arc::new(Mutex::new(0));
+        let gh2 = ScriptedGh::new(vec![green()]);
+        let (ops2, _, _) = adapter_with(
+            gh2,
+            CLEAN_DIFF,
+            None,
+            Arc::new(CountingClock::default()),
+            PollConfig::default(),
+        );
+        let ops2 = ops2.with_conflict_resolver(Box::new(OkResolver(calls.clone())));
+        ops2.resolve_conflict("rysweet/Simard", 1)
+            .expect("delegates");
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn merge_refuses_its_own_pr_via_recursion_guard() {
+        use crate::overseer::guardrails::RecursionGuard;
+        struct OwnAuthorSource;
+        impl PrSource for OwnAuthorSource {
+            fn diff(&self, _r: &str, _p: u32) -> Result<String, OverseerError> {
+                Ok(CLEAN_DIFF.to_string())
+            }
+            fn title(&self, _r: &str, _p: u32) -> Result<String, OverseerError> {
+                Ok("t".to_string())
+            }
+            fn author(&self, _r: &str, _p: u32) -> Result<String, OverseerError> {
+                Ok("simard-overseer[bot]".to_string())
+            }
+        }
+        let gh = ScriptedGh::new(vec![green()]);
+        let email = Arc::new(Mutex::new(vec![]));
+        let notifier = DualChannelNotifier::new(vec![Box::new(CapturingChannel {
+            name: "email".to_string(),
+            seen: email.clone(),
+        })]);
+        let ops = MergePrOps::new(
+            Box::new(gh.clone()),
+            Box::new(OwnAuthorSource),
+            Some(Box::new(FakeReviewer(vec![]))),
+            Box::new(ReadyJudge),
+            notifier,
+            Box::new(Arc::new(CountingClock::default())),
+            vec!["main".to_string()],
+            PollConfig::default(),
+        )
+        .with_recursion_guard(RecursionGuard {
+            author_login: "simard-overseer[bot]".to_string(),
+            branch_prefix: "overseer/".to_string(),
+            goal_source_tag: "overseer:".to_string(),
+        });
+        assert!(
+            ops.merge("rysweet/Simard", 7).is_err(),
+            "the Overseer must refuse to merge its OWN PR"
+        );
+        assert_eq!(gh.merges(), 0, "no merge of an own PR");
+        assert!(
+            email.lock().unwrap().is_empty(),
+            "no notify on a refused own PR"
+        );
     }
 }
