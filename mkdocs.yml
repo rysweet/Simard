@@ -100,6 +100,7 @@ nav:
     - Closing the Procedural-Learning Loop: concepts/procedural-learning-loop.md
     - Reconcile-and-Self-Deploy: concepts/reconcile-and-self-deploy.md
     - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
+    - Rust Domain-Expertise Gym (first experiment): concepts/rust-expertise-gym.md
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
     - Unified Telemetry and Status: concepts/unified-telemetry-and-status.md
     - Goal-Board Persistence: concepts/goal-board-persistence.md

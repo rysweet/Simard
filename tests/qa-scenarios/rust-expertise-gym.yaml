@@ -1,0 +1,37 @@
+name: simard-rust-expertise-gym
+app_type: cli
+description: |
+  Roadmap #2491 first experiment: the Rust competency gym must produce a
+  reproducible baseline scorecard, a measurable pack lift, and pass the
+  issue-#1241 calibration guard end-to-end.
+
+  Runs the `simard-rust-gym` binary and asserts, in a single bounded run:
+    * baseline (no pack)         => rust 0.00 (0/5) novice   — the "before" number
+    * with the rust-expert pack  => rust 1.00 (5/5) expert   — the acquired lift
+    * degraded (ownership only)  => rust 0.20 (1/5) novice   — sabotaged state
+    * pack yield                 => 13 facts + 5 procedures ingested into memory
+    * calibration guard (#1241)  => healthy>0.9, degraded<0.5, gap>=0.4 => PASS
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner only gates on
+  `run`-step exit codes, so the assertions are encoded in a `bash -lc` wrapper
+  that captures the binary's output and exits zero only when every expected line
+  is present. A non-zero exit from `simard-rust-gym` itself (calibration failure)
+  also fails the scenario.
+metadata:
+  tags:
+    - cli
+    - gym
+    - rust-expertise
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'OUT=$(cargo run --quiet --bin simard-rust-gym 2>&1); echo \"$OUT\"; echo \"$OUT\" | grep -q \"baseline  rust: 0.00 (0/5) \\[novice\\]\" && echo \"$OUT\" | grep -q \"with-pack rust: 1.00 (5/5) \\[expert\\]\" && echo \"$OUT\" | grep -q \"degraded  rust: 0.20 (1/5) \\[novice\\]\" && echo \"$OUT\" | grep -q \"pack yield: 13 facts + 5 procedures\" && echo \"$OUT\" | grep -q \"gap 0.80 >= 0.40 => PASS\"'"
+    timeout: 600000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

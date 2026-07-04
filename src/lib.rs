@@ -119,6 +119,7 @@ pub mod runtime;
 pub mod runtime_config;
 pub mod runtime_ipc;
 pub mod runtime_reflection;
+pub mod rust_expertise;
 pub mod safe_update;
 mod sanitization;
 pub mod self_deploy;
