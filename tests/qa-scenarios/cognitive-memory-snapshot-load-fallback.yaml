@@ -1,0 +1,63 @@
+name: cognitive-memory-snapshot-load-fallback
+app_type: cli
+description: |
+  Verify that session-boundary cognitive-memory recall survives a corrupt or
+  partial "tip" snapshot. A session teardown persists up to 10 JSON snapshots to
+  ~/.simard/snapshots/ and prunes older ones; on reload `load_latest_snapshot`
+  previously tried ONLY the single newest file and returned None on any load
+  failure — silently discarding the entire retained history and wiping memory
+  across a restart (same failure class as amplihack-memory-lib #15: one failed
+  step must not silently destroy durable state).
+
+  The hardened loader walks snapshots newest -> oldest and returns the most
+  recent one that loads, only reporting None when EVERY snapshot is unreadable.
+  Behavior is proven by hermetic tempdir unit tests (no destructive action
+  against the live host). The CLI runner rejects any non-zero exit, so a failing
+  test fails the scenario. First invocation may compile the test binary;
+  subsequent filters reuse it.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # A corrupt NEWEST snapshot must degrade to the most recent VALID one, not None.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_snapshot::tests::load_latest_snapshot_falls_back_to_older_valid_when_newest_corrupt"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # When NO snapshot in the directory is loadable, the loader reports None.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_snapshot::tests::load_latest_snapshot_returns_none_when_all_snapshots_corrupt"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # No needless fallback: when the newest snapshot is valid it is returned as-is.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_snapshot::tests::load_latest_snapshot_prefers_newest_when_valid"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

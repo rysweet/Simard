@@ -195,6 +195,35 @@ let restored = restore_from_backup(bridge, file_store, &backup_dir)?;
 imports the cognitive snapshot and file-backed records. If a backup fails
 verification, choose the next-most-recent directory from `list_backups`.
 
+### Session-boundary snapshot recovery
+
+Separate from the `memory_backup/` verified backups above, a session teardown
+writes a JSON snapshot of cognitive memory to `~/.simard/snapshots/`
+(`memory_snapshot::save_session_snapshot`) through the crash-safe writer
+(temp + fsync + rename + parent fsync, issue #1918) and prunes to the 10 most
+recent (`prune_snapshots`). The writer is atomic, so a crash *during* a save
+leaves only an unrenamed temp file — never a corrupt final snapshot.
+
+On reload, `memory_snapshot::load_latest_snapshot` walks the retained snapshots
+**newest → oldest** and returns the first one that loads. If the newest snapshot
+is unreadable — a partial write from a binary that predates the crash-safe
+writer, on-disk corruption, or a payload the current schema can no longer parse
+— the loader transparently degrades to the most recent snapshot that *does*
+load rather than returning "no memory" and discarding the entire retained
+history. Only when **every** snapshot in the directory fails to load does it
+report `None`. Skipped files and the all-unreadable case are logged to stderr
+with the `[simard] snapshot:` prefix:
+
+```text
+[simard] snapshot: failed to load .../agent-1750000200.json (1 of 10): ...; trying an older snapshot
+[simard] snapshot: recovered older snapshot .../agent-1750000100.json after skipping 1 newer unreadable snapshot(s)
+```
+
+This is the same graceful-degradation contract as `restore_from_backup` above
+(fall back to the next-most-recent good copy): a single bad snapshot at the tip
+of the retained history must never silently wipe durable recall across a
+restart.
+
 ---
 
 ## Current public API
