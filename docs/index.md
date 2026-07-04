@@ -1,7 +1,7 @@
 ---
 title: Simard documentation
 description: Start here for the shipped `simard` operator CLI, the shared-state-root bridge from bounded terminal sessions into the repo-grounded engineer loop, the `engineer read` audit companion, compatibility binaries, runtime contracts, and benchmark flow.
-last_updated: 2026-04-03
+last_updated: 2026-07-03
 review_schedule: as-needed
 owner: simard
 ---
@@ -16,6 +16,12 @@ The shipped command tree covers `engineer`, `meeting`, `goal-curation`, `improve
 
 Terminal sessions and repo-grounded engineer runs now bridge through one explicit local `state-root`. That bridge is file-backed and operator-visible. It does not imply hidden resume logic, external orchestration, or automatic continuation.
 
+!!! note "Recently reconciled"
+    The docs were audited against the current source: the cognitive-memory
+    pages were de-forked to the library backend (issue #2307), and every page
+    is now reachable from the navigation. See
+    [What's Changed](./whats-changed.md) for the full change index.
+
 ## Start here
 
 - [Tutorial: Run your first local session](./tutorials/run-your-first-local-session.md) - Exercise the local runtime through the primary CLI.
@@ -26,6 +32,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to configure and monitor the disk health check](./howto/configure-disk-health-check.md) - Tune the per-cycle automated disk cleanup that prevents ENOSPC crashes (#2020).
 - [How to diagnose and prevent handoff accumulation](./howto/diagnose-handoff-accumulation.md) - Detect, resolve, and prevent unbounded meeting handoff file growth (#2268).
 - [How to start a meeting with Simard](./howto/start-a-meeting.md) - Have a natural conversation with Simard from CLI or dashboard, with full history and memory.
+- [How to set up the Signal channel](./howto/set-up-the-signal-channel.md) - Command Simard and receive her notifications over Signal, via a locally-run signal-cli JSON-RPC daemon, with an operator allowlist and high-risk sign-off gating (#2527).
 - [How to carry meeting decisions into engineer sessions](./howto/carry-meeting-decisions-into-engineer-sessions.md) - Persist meeting records under a shared state root and confirm later engineer runs carry them forward.
 - [How to inspect meeting records](./howto/inspect-meeting-records.md) - Read back the latest durable meeting record without mutating stored state.
 - [How to inspect improvement-curation state](./howto/inspect-improvement-curation-state.md) - Read back the latest approved, deferred, and promoted improvement state without mutation.
@@ -35,6 +42,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [How to decompose a large goal into linked sub-goals](./howto/decompose-a-large-goal.md) — break one umbrella goal into 2–6 bounded sub-goals with `simard goal decompose`, verify the parent↔child edges round-trip in the graph, and read parent progress as a roll-up (#2405).
 - [How to configure adaptive scaling](./howto/configure-adaptive-scaling.md) — enable and tune AIMD concurrency scaling.
 - [How to keep Simard's own dependency pins up to date](./howto/self-maintain-dependency-pins.md) — the reactive done-gate and proactive reconcile that bump Simard's own `Cargo.toml` git-rev pins after she lands a change upstream, so the fix runs in her own build (companion to [Safe Self-Update](./safe-self-update.md)).
+- [Concept: keeping the OODA daemon steerable](./concepts/steerable-ooda-daemon.md) — the coherent narrative for the systemic goal-board + OODA-livelock + distillation incident: why operator goal edits appeared not to stick, why the daemon re-selected already-done supply-chain goals forever, and why distillation extracted zero facts — and the four coordinated fixes (read-your-writes goal board, the evidence-gated done-gate, the no-progress breaker, and distillation banner-stripping) that restore steerability, evidence-based completion, forward progress, and learning.
 - [Concept: reconcile-and-self-deploy](./concepts/reconcile-and-self-deploy.md) — how a merged self-change is built-from-source, deployed, health-verified, and left running (or rolled back), closing the "merged != running" gap. See the [self-deploy API reference](./reference/self-deploy-api.md) and the [verify-and-roll-back runbook](./howto/verify-and-roll-back-a-self-deploy.md).
 - [Concept: deploy-aware done-gate](./concepts/deploy-aware-done-gate.md) — why a goal is complete only with a merged PR, a closed issue, and (for self-affecting changes) a verified deploy; the gate that prevents evidence-free done-claims. See the [completion-evidence gate API](./reference/completion-evidence-gate-api.md) and the [rejected-completion runbook](./howto/diagnose-a-rejected-goal-completion.md).
 
@@ -139,6 +147,7 @@ If you are changing architecture, start with the [architecture overview](./archi
 
 - [Architecture overview](./architecture/overview.md) - System diagram, core principles, component descriptions, and module map.
 - [Goal board persistence](./concepts/goal-board-persistence.md) — cognitive-memory single source of truth.
+- [Keeping the OODA daemon steerable](./concepts/steerable-ooda-daemon.md) — read-your-writes goal board, the evidence-gated done-gate, the no-progress breaker, and distillation banner-stripping, unified.
 - [File-backed goal store simplification](./concepts/file-backed-goal-store-simplification.md) — why GoalStore uses a plain JSON file instead of IPC.
 - [Adaptive scaling](./concepts/adaptive-scaling.md) — AIMD concurrency control for the OODA cycle.
 - [Goal board API reference](./reference/goal-board-api.md) — `active_goals_as_records` adapter and load/save semantics.
@@ -156,3 +165,4 @@ If you are changing architecture, start with the [architecture overview](./archi
 - [Implementation plan](./architecture/implementation-plan.md) - Phased roadmap with current status and quality gates.
 - [OODA meeting handoff integration](./architecture/ooda-meeting-handoff-integration.md) - Wire meeting handoffs into the OODA daemon and seed default goals (Issues #157, #158).
 - [Unified meeting backend](./architecture/unified-meeting-backend.md) - One conversational engine behind CLI REPL and dashboard WebSocket chat (Issue #462).
+- [Conversation channels](./architecture/conversation-channel.md) - The one clearly-named `ConversationChannel` abstraction: the CLI/TUI meeting REPL, the dashboard chat, and Signal are all thin channels over the same meeting engine (Issue #2527). See the [conversation channel API reference](./reference/conversation-channel-api.md) and the [Signal channel reference](./reference/signal-conversation.md).

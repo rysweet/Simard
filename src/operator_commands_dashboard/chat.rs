@@ -75,6 +75,7 @@ pub(crate) async fn ws_chat_handler(ws: WebSocketUpgrade) -> response::Response 
 }
 
 pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
+    use crate::conversation_channel::apply_record;
     use crate::meeting_backend::{
         MeetingBackend, MeetingCommand, parse_command, render_help_plain, unknown_command_notice,
     };
@@ -263,93 +264,23 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                             ))
                             .await;
                     }
-                    MeetingCommand::Theme(theme) => {
-                        backend.push_theme(theme.clone());
-                        let content = format!("Theme recorded: {theme}");
+                    // Every structured-capture command renders identically on the
+                    // dashboard: apply the backend mutation via the shared
+                    // `apply_record` and echo its canonical acknowledgement as a
+                    // `system` chat line. Binding the whole command (`cmd @ …`)
+                    // passes it straight through with no clone-and-reconstruct.
+                    cmd @ (MeetingCommand::Theme(_)
+                    | MeetingCommand::Decision { .. }
+                    | MeetingCommand::Action(_)
+                    | MeetingCommand::Question(_)
+                    | MeetingCommand::Owner(_)
+                    | MeetingCommand::Goal(_)
+                    | MeetingCommand::Risk(_)
+                    | MeetingCommand::Disagree(_)) => {
+                        let rec = apply_record(&mut backend, &cmd).expect("record command");
                         let _ = socket
                             .send(Message::Text(
-                                json!({"role":"system","content": content})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await;
-                    }
-                    MeetingCommand::Decision { text, rationale } => {
-                        backend.push_explicit_decision(&text, rationale.as_deref());
-                        let content = if let Some(ref r) = rationale {
-                            format!("Decision recorded: {text} (rationale: {r})")
-                        } else {
-                            format!("Decision recorded: {text}")
-                        };
-                        let _ = socket
-                            .send(Message::Text(
-                                json!({"role":"system","content": content})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await;
-                    }
-                    MeetingCommand::Action(text) => {
-                        backend.push_explicit_action_item(&text);
-                        let content = format!("Action recorded: {text}");
-                        let _ = socket
-                            .send(Message::Text(
-                                json!({"role":"system","content": content})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await;
-                    }
-                    MeetingCommand::Question(text) => {
-                        backend.push_explicit_question(&text);
-                        let content = format!("Question recorded: {text}");
-                        let _ = socket
-                            .send(Message::Text(
-                                json!({"role":"system","content": content})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await;
-                    }
-                    MeetingCommand::Owner(text) => {
-                        backend.push_next_owner(&text);
-                        let content = format!("Next owner recorded: {text}");
-                        let _ = socket
-                            .send(Message::Text(
-                                json!({"role":"system","content": content})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await;
-                    }
-                    MeetingCommand::Goal(text) => {
-                        backend.set_goal(&text);
-                        let content = format!("Goal recorded: {text}");
-                        let _ = socket
-                            .send(Message::Text(
-                                json!({"role":"system","content": content})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await;
-                    }
-                    MeetingCommand::Risk(text) => {
-                        backend.push_explicit_risk(&text);
-                        let content = format!("Risk recorded: {text}");
-                        let _ = socket
-                            .send(Message::Text(
-                                json!({"role":"system","content": content})
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await;
-                    }
-                    MeetingCommand::Disagree(text) => {
-                        backend.push_explicit_disagreement(&text);
-                        let content = format!("Disagreement recorded: {text}");
-                        let _ = socket
-                            .send(Message::Text(
-                                json!({"role":"system","content": content})
+                                json!({"role":"system","content": rec.text})
                                     .to_string()
                                     .into(),
                             ))

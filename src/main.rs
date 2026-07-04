@@ -15,6 +15,7 @@ fn main() -> std::process::ExitCode {
     };
 
     opentelemetry::global::shutdown_tracer_provider();
+    simard::telemetry::shutdown_metrics();
     result
 }
 
@@ -48,6 +49,14 @@ fn init_tracing() {
     if let Some(ref ep) = endpoint {
         eprintln!("[simard] OTEL tracing enabled → {ep}");
     }
+
+    // Install the unified telemetry MeterProvider alongside the tracer. The
+    // provider is ALWAYS installed (so the facade's instruments are real, not
+    // the global no-op); OTLP metric export is attached only when the endpoint
+    // is set — identical gating to traces — so the default deployment stays
+    // fully in-process. The in-process registry read by `simard status` is
+    // unaffected either way (issue #2528).
+    simard::telemetry::init_metrics(endpoint.as_deref());
 
     // Logs go to STDERR, not stdout, so they never corrupt a command's stdout
     // result (e.g. `simard memory stats --json`, whose stdout must be parseable

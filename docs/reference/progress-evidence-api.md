@@ -1,3 +1,14 @@
+---
+title: Progress-evidence API
+description: Reference for simard::goal_curation::progress_evidence — the ProgressEvidenceChecker trait, its implementations, and the update_goal_progress_with_evidence façade that gates completion bumps.
+last_updated: 2026-07-03
+owner: simard
+doc_type: reference
+related:
+  - ../concepts/progress-evidence-gating.md
+  - ../operations/progress-evidence-kill-switch.md
+---
+
 # Reference: Progress-evidence API
 
 Crate: `simard` · Module: `simard::goal_curation::progress_evidence`
@@ -188,7 +199,7 @@ pub fn update_goal_progress_with_evidence(
     | `Blocked(_)` | the goal's *current* percent (no change) |
     | `Completed` | `100` |
 
-2. Determine `since` via the [three-step fallback chain](../concepts/progress-evidence-gating.md#sourcing-since--the-last-update-timestamp).
+2. Determine `since` via the [three-step fallback chain](../concepts/progress-evidence-gating.md#sourcing-since-the-last-update-timestamp).
 
 3. **Bypass set.** If any of the following hold, call the underlying
    `update_goal_progress` directly and return

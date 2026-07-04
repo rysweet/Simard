@@ -403,3 +403,183 @@ pub(crate) fn apply_goal_advance_result(
         },
     }
 }
+
+/// Classify an [`ActionOutcome`] as a *no shippable progress* cycle — the signal
+/// the Fix-3 no-progress breaker counts (see
+/// [`crate::goal_curation::no_progress_breaker`]).
+///
+/// A goal-advance cycle makes **no shippable progress** when the orchestrator
+/// resolved to `NO ACTION` and either recorded no progress marker at all
+/// ("I'll verify concretely…") **or** claimed a progress bump the reviewer
+/// **rejected**. It makes *real* progress when it spawned an engineer or when
+/// the reviewer **accepted** a progress advance.
+///
+/// This is the classifier half of the detail contract authored by
+/// [`assess_only_outcome`] in this same module — kept co-located so the two stay
+/// in lockstep (pinned by the tests below). The three success-`true` no-action
+/// details are:
+///
+/// - pure no-action: `"no-action: {reason} (goal '{id}')"`               → no progress
+/// - accepted bump:  `"no-action: {reason} (progress={pct}%, goal '{id}')"` → progress
+/// - rejected bump:  `"no-action: progress claim rejected (reviewer): … (goal '{id}', proposed={pct}%)"` → no progress
+///
+/// The accepted-bump branch is the only one that emits the deterministic
+/// `"(progress="` token, so the predicate keys on that token rather than the
+/// free-form reviewer/orchestrator prose. A `success=false` outcome (empty
+/// response, run error, or a failed progress update) is *not* a no-progress
+/// no-op — it is already counted by the brain-failure safeguard's
+/// `goal_failure_counts`, so this predicate excludes it to avoid double-counting.
+pub(crate) fn outcome_made_no_progress(outcome: &ActionOutcome) -> bool {
+    outcome.success
+        && outcome.action.goal_id.is_some()
+        && outcome.detail.starts_with("no-action:")
+        && !outcome.detail.contains("(progress=")
+}
+
+#[cfg(test)]
+mod tests_no_progress_classifier {
+    use super::*;
+    use crate::goal_curation::progress_evidence::{
+        EvidenceDecision, NoopProgressEvidenceChecker, ProgressEvidenceChecker,
+    };
+    use crate::goal_curation::{ActiveGoal, GoalBoard};
+    use crate::ooda_loop::PlannedAction;
+
+    /// A progress-evidence checker that rejects every proposed increase — models
+    /// the reviewer refuting an LLM progress claim.
+    struct RejectAllChecker;
+    impl ProgressEvidenceChecker for RejectAllChecker {
+        fn check(
+            &self,
+            _goal: &ActiveGoal,
+            _current: u32,
+            _proposed: u32,
+            _now: chrono::DateTime<Utc>,
+        ) -> EvidenceDecision {
+            EvidenceDecision::Reject {
+                reason: "no commits or PR to substantiate the claimed progress".to_string(),
+            }
+        }
+    }
+
+    fn advance_goal_action(goal_id: &str) -> PlannedAction {
+        PlannedAction {
+            kind: crate::ooda_loop::ActionKind::AdvanceGoal,
+            goal_id: Some(goal_id.to_string()),
+            description: "advance".to_string(),
+        }
+    }
+
+    fn board_with(goal_id: &str) -> GoalBoard {
+        let mut board = GoalBoard::new();
+        board
+            .active
+            .push(ActiveGoal::new(goal_id, "harden the supply chain", 1));
+        board
+    }
+
+    fn mem() -> Box<dyn crate::cognitive_memory::CognitiveMemoryOps> {
+        crate::ooda_actions::test_helpers::mock_memory()
+    }
+
+    // The classifier and `assess_only_outcome` are pinned together: these drive
+    // the REAL author so a change to either detail format or predicate fails CI.
+
+    #[test]
+    fn pure_no_action_is_no_progress() {
+        let action = advance_goal_action("g");
+        let mut board = board_with("g");
+        let outcome = assess_only_outcome(
+            &action,
+            &*mem(),
+            &NoopProgressEvidenceChecker,
+            &mut board,
+            "g",
+            "I'll verify concretely next cycle",
+            None,
+        );
+        assert!(outcome.success);
+        assert!(
+            outcome_made_no_progress(&outcome),
+            "pure no-action must count as no progress: {}",
+            outcome.detail
+        );
+    }
+
+    #[test]
+    fn accepted_progress_bump_is_progress_not_no_progress() {
+        let action = advance_goal_action("g");
+        let mut board = board_with("g");
+        let outcome = assess_only_outcome(
+            &action,
+            &*mem(),
+            &NoopProgressEvidenceChecker, // accepts the bump
+            &mut board,
+            "g",
+            "made real headway",
+            Some(40),
+        );
+        assert!(outcome.success);
+        assert!(
+            !outcome_made_no_progress(&outcome),
+            "an accepted progress advance must NOT count as no progress: {}",
+            outcome.detail
+        );
+    }
+
+    #[test]
+    fn rejected_progress_bump_is_no_progress() {
+        let action = advance_goal_action("g");
+        let mut board = board_with("g");
+        let outcome = assess_only_outcome(
+            &action,
+            &*mem(),
+            &RejectAllChecker, // reviewer refutes the claim
+            &mut board,
+            "g",
+            "claiming 60% with no evidence",
+            Some(60),
+        );
+        assert!(outcome.success);
+        assert!(
+            outcome_made_no_progress(&outcome),
+            "a rejected progress claim must count as no progress: {}",
+            outcome.detail
+        );
+    }
+
+    #[test]
+    fn spawn_engineer_outcome_is_progress() {
+        // A spawn-engineer detail does not start with "no-action:".
+        let action = advance_goal_action("g");
+        let outcome = make_outcome(
+            &action,
+            true,
+            "spawn_engineer (from prose) for goal 'g': do the work".to_string(),
+        );
+        assert!(!outcome_made_no_progress(&outcome));
+    }
+
+    #[test]
+    fn failed_no_action_update_is_not_counted() {
+        // success=false is owned by the brain-failure safeguard, not this one.
+        let action = advance_goal_action("g");
+        let outcome = make_outcome(
+            &action,
+            false,
+            "no-action failed: update_goal_progress error for goal 'g': boom".to_string(),
+        );
+        assert!(!outcome_made_no_progress(&outcome));
+    }
+
+    #[test]
+    fn outcome_without_goal_id_is_not_counted() {
+        let action = PlannedAction {
+            kind: crate::ooda_loop::ActionKind::SafeUpdate,
+            goal_id: None,
+            description: "update".to_string(),
+        };
+        let outcome = make_outcome(&action, true, "no-action: whatever".to_string());
+        assert!(!outcome_made_no_progress(&outcome));
+    }
+}

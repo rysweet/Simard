@@ -24,6 +24,12 @@ pub mod cmd_ensure_deps;
 pub mod cmd_install;
 pub mod cmd_self_update;
 pub mod cognitive_memory;
+// Issue #2419: cognitive-thread scheduling — a `Mind` runs many
+// `CognitiveThread`s (the primary OODA loop + maintenance + engineer-log
+// analysis) on their own cadence/trigger. Sibling of `ooda_scheduler` (the
+// engineer action-slot scheduler), which is unrelated and untouched. See
+// `docs/reference/cognitive-thread-scheduling.md`.
+pub mod cognitive_threads;
 // Issue #2419: periodic brain self-examination + memory-hygiene pass — a
 // higher-level introspection layer that reuses the existing distillation /
 // statistics / expired-sensory infra (mirrors `disk_health`). Tests live in a
@@ -33,6 +39,10 @@ pub mod brain_introspection;
 mod brain_introspection_tests;
 mod copilot_status_probe;
 mod copilot_task_submit;
+// Issue #2527: one clearly-named operator↔Simard conversation abstraction. The
+// CLI/TUI meeting REPL and the dashboard chat are channels over the same
+// `MeetingBackend`; `SignalConversation` (feature-gated below) is a third.
+pub mod conversation_channel;
 pub mod cost_tracking;
 pub mod disk_health;
 pub mod disk_pressure;
@@ -42,6 +52,7 @@ pub mod error;
 pub mod eval_watchdog;
 pub mod evidence;
 pub mod git_guardrails;
+pub mod goal_board_store;
 pub mod goal_curation;
 pub mod goals;
 pub mod greeting_banner;
@@ -88,6 +99,10 @@ mod operator_commands_meeting;
 mod operator_commands_ooda;
 mod operator_commands_review;
 mod operator_commands_terminal;
+// Design spike (#2419): additive type/trait sketch for the Overseer
+// operator/observer co-process. NOT wired into `main` or the daemon loop —
+// nothing here is constructed at runtime. See docs/design/overseer.md.
+pub mod overseer;
 mod persistence;
 pub mod prompt_assets;
 pub mod prompt_delivery;
@@ -121,10 +136,20 @@ pub mod self_relaunch;
 pub mod self_relaunch_semaphore;
 pub mod session;
 pub mod session_builder;
+// Issue #2527: the Signal implementation of `conversation_channel`. Feature-gated
+// (default off) so the daemon builds and runs fine without signal-cli installed.
+#[cfg(feature = "signal")]
+pub mod signal_conversation;
 pub mod skill_builder;
 pub mod state_root;
 pub mod stewardship;
 pub mod subagent_sessions;
+// Issue #2528: unified telemetry facade + one `simard status` snapshot. The
+// `telemetry` module is the OpenTelemetry-backed metric facade + in-process
+// registry; `status` is the single typed StatusSnapshot the CLI, dashboard, and
+// TUI all render.
+pub mod status;
+pub mod telemetry;
 pub mod terminal_engineer_bridge;
 mod terminal_session;
 #[doc(hidden)]

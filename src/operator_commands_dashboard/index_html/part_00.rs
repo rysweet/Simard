@@ -133,7 +133,8 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <div class="card"><h2>System Status</h2><div id="status"><span class="loading">Loading…</span></div></div>
       <div class="card"><h2>Open Issues</h2><ul id="issues-list"><li class="loading">Loading…</li></ul></div>
       <div class="card">
-        <h2>Cluster Topology <button class="btn" onclick="fetchDistributed()">Refresh</button></h2>
+        <h2>Machines &amp; Memory Sharing <button class="btn" onclick="fetchDistributed()">Refresh</button></h2>
+        <p class="card-lede" style="margin:0 0 .75rem;color:#8b949e;font-size:.8rem;line-height:1.5">Whether Simard is running on a single machine or coordinating a group of them, and how those machines share what they've learned. On a single-machine setup the counters below stay at zero.</p>
         <div id="cluster-topology"><span class="loading">Loading…</span></div>
       </div>
       <div class="card">

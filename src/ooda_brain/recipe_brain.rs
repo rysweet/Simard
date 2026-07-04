@@ -591,6 +591,12 @@ pub fn run_brain_ladder<D>(
     } else {
         LadderTermination::Exhausted
     };
+    if matches!(termination, LadderTermination::Exhausted) {
+        // Issue #2528: the decide/orient escalation ladder was fully exhausted
+        // with no parseable decision — surface it as a structured telemetry
+        // signal (read by `simard status`) alongside the log lines below.
+        crate::telemetry::counter_add(crate::telemetry::names::BRAIN_LADDER_EXHAUSTED, 1, &[]);
+    }
     if cfg.max_escalations > 0 {
         tracing::warn!(
             target: "simard::ooda_brain",

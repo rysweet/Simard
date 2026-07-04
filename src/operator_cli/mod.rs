@@ -13,6 +13,8 @@ mod review;
 mod safe_update;
 mod self_deploy;
 mod self_health;
+mod signal;
+mod status;
 mod worktree_gc;
 
 use std::path::PathBuf;
@@ -100,12 +102,20 @@ Product modes:
   gym run-suite <suite-id>
   ooda run [--cycles=N] [--no-auto-reload] [state-root]
   dashboard serve [--port=8080]
+  signal run             — connect to the configured signal-cli JSON-RPC daemon
+                           and run the operator Signal conversation channel
+                           (requires a build with --features signal + a [signal]
+                           config table; see docs/howto/set-up-the-signal-channel.md)
   memory stats [state-root] [--json]
                          — read-only per-type cognitive-memory counts +
                            graph-edge / dedup section + sample rows
                            (safe while the daemon holds the store)
   memory dump [state-root] [--type=TYPE] [--limit=N] [--json]
                          — counts plus a larger set of sample rows per type
+  status [--json]        — one consolidated operational report (daemon,
+                           resources, LLM usage, memory/brain, gym, goals,
+                           workstreams, merged PRs, self-improvement, telemetry
+                           anomalies); the unified telemetry status snapshot
   spawn <agent-name> <goal> <worktree-path> [--depth=N]
   merge-pr <pr-number> [--repo <owner/repo>]
                          — squash-merge a PR through Simard's gated merge
@@ -233,7 +243,9 @@ where
         "gym" => gym::dispatch_gym_command(args),
         "ooda" => ooda::dispatch_ooda_command(args),
         "dashboard" => dashboard::dispatch_dashboard_command(args),
+        "signal" => signal::dispatch_signal_command(args),
         "memory" => memory::dispatch_memory_command(args),
+        "status" => status::dispatch_status_command(args),
         "spawn" => dispatch_spawn_command(args),
         "merge-pr" => merge::dispatch_merge_pr_command(args),
         "worktree-gc" => worktree_gc::dispatch_worktree_gc_command(args),
@@ -340,7 +352,7 @@ where
 }
 
 pub fn operator_cli_usage() -> &'static str {
-    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|memory|spawn|merge-pr|worktree-gc|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap> ..."
+    "usage: simard <engineer|meeting|goal-curation|improvement-curation|gym|ooda|memory|status|spawn|merge-pr|worktree-gc|handover|update|safe-update|rollback|rollback-watchdog|install|review|bootstrap|signal> ..."
 }
 
 pub fn operator_cli_help() -> &'static str {

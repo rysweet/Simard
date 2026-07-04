@@ -1,5 +1,5 @@
-name: "Merge-Judge Verdict Parse (#2428/#2430/#2435/#2462/#2463)"
-description: "Outside-in proof that simard merge-pr's recipe-backed merge-readiness judge surfaces a real structured verdict from recipe-runner-rs JSON output instead of parsing the text-mode SUCCESS banner (which carries no verdict keyword and blocks every gated merge). Reproduces the text-mode banner bug and validates the json-mode fix at the recipe-runner boundary (no LLM), then runs the in-tree verdict-extraction + fail-closed unit tests."
+name: "Merge-Judge Verdict Parse (#2428/#2430/#2435/#2462/#2463, #2501/#2555)"
+description: "Outside-in proof that simard merge-pr's recipe-backed merge-readiness judge surfaces a real structured verdict from recipe-runner-rs JSON output instead of parsing the text-mode SUCCESS banner (which carries no verdict keyword and blocks every gated merge). Reproduces the text-mode banner bug and validates the json-mode fix at the recipe-runner boundary (no LLM), reproduces the real Copilot-launcher-preamble agent wire format from #2501/#2555, then runs the in-tree verdict-extraction + fail-closed unit tests."
 version: "1.0.0"
 
 config:
@@ -52,6 +52,8 @@ metadata:
     - "issue-2428"
     - "issue-2462"
     - "issue-2463"
+    - "issue-2501"
+    - "issue-2555"
   priority: "high"
   author: "copilot"
   test_type: "outside-in"

@@ -14,6 +14,7 @@ const ALL_TABS = [
   'brain-failures',
   'merge-decisions',
   'pr-readiness',
+  'status',
 ] as const;
 
 // Mock all API endpoints so tabs render without a live backend
@@ -30,6 +31,17 @@ async function mockAllApis(page: import('@playwright/test').Page) {
         git_hash: 'test',
         ooda_status: 'idle',
         uptime_secs: 0,
+      }),
+    }),
+  );
+  await page.route('**/api/status/snapshot', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: { schema_version: 1, generated_at: '2026-07-03T00:00:00Z' },
+        rendered: 'SIMARD STATUS  ·  2026-07-03T00:00:00Z\n\nDAEMON / UPTIME\n',
+        generated_at: '2026-07-03T00:00:00Z',
       }),
     }),
   );

@@ -1,0 +1,74 @@
+name: cognitive-memory-wal-recovery-durability
+app_type: cli
+description: |
+  Outside-in coverage for the issue #2550 P0 cognitive-memory data-loss fix: a
+  corrupt lbug WAL must recover its good prefix *durably* (survive a re-open,
+  never reset to empty), snapshots must capture every memory type, and a
+  corruption-reset must self-heal via `simard memory import` / startup
+  auto-restore. Each user-visible contract is pinned by a hermetic regression
+  test (temp dirs, injected WAL-tail corruption, no sleeps, no network). The CLI
+  runner rejects any non-zero exit, so a broken contract fails the scenario.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # Contract 1 — durable WAL recovery: a store that recovered a good prefix
+  # survives a strict re-open and is never reset to empty (the incident).
+  - action: run
+    params:
+      command: "cargo test --locked --test wal_recovery_durability_2550"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Contract 2 — restore path: `simard memory import <snapshot.json>` ingests a
+  # snapshot back into the store and is idempotent by content (safe to re-run).
+  - action: run
+    params:
+      command: "cargo test --locked --test memory_import_roundtrip_2550"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Contract 3 — self-heal: daemon startup auto-restore fires on an empty store
+  # when a newer non-empty snapshot exists, and is a no-op otherwise.
+  - action: run
+    params:
+      command: "cargo test --locked --test memory_auto_restore_2550"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Contract 4 — complete snapshots: export enumerates episodes + prospective
+  # alongside facts + procedures, so a restore round-trips every memory type.
+  - action: run
+    params:
+      command: "cargo test --locked --test memory_snapshot_completeness_2550"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

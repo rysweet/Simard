@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::memory::{MemoryRecord, MemoryStore};
-use crate::remote_transfer::MemorySnapshot;
+use crate::remote_transfer::{FullMemorySnapshot, MemorySnapshot};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -264,9 +264,13 @@ pub fn verify_backup(backup_dir: &Path) -> SimardResult<BackupVerification> {
 /// Restore memory from a verified backup.
 ///
 /// Verifies the backup first. Returns the total count of restored items.
-#[allow(deprecated)] // import_memory_snapshot is deprecated but needed here
+/// Cognitive memory is restored via [`crate::remote_transfer::import_full_snapshot`]
+/// (issue #2550), which round-trips **all** durable types — facts, procedures,
+/// episodes, and prospective triggers — and dedups by content, so a restore into
+/// a partially-populated store never duplicates memories. Legacy bare snapshots
+/// (facts + procedures only) still restore correctly.
 pub fn restore_from_backup(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     store: &dyn MemoryStore,
     backup_dir: &Path,
 ) -> SimardResult<usize> {
@@ -297,11 +301,10 @@ pub fn restore_from_backup(
     let snapshot_path = backup_dir.join(SNAPSHOT_FILE);
     let records_path = backup_dir.join(RECORDS_FILE);
 
-    // Restore cognitive memory.
-    let snapshot_bytes = read_bytes(&snapshot_path)?;
-    let snapshot: MemorySnapshot = serde_json::from_slice(&snapshot_bytes)
-        .map_err(|e| store_error("deserialize-snapshot", &snapshot_path, e.to_string()))?;
-    let cognitive_count = crate::remote_transfer::import_memory_snapshot(bridge, &snapshot)?;
+    // Restore cognitive memory — ALL durable types (issue #2550), deduped by
+    // content so a restore into a non-empty store is idempotent.
+    let snapshot = crate::remote_transfer::load_full_snapshot_from_file(&snapshot_path)?;
+    let cognitive_count = crate::remote_transfer::import_full_snapshot(memory, &snapshot)?;
 
     // Restore file-backed memory records.
     let records_bytes = read_bytes(&records_path)?;
@@ -383,6 +386,95 @@ pub fn backup_memory_verified(
 ) -> SimardResult<BackupManifest> {
     let manifest = backup_memory(bridge, store, agent_name, config)?;
     ensure_backup_valid(&manifest.backup_dir)
+}
+
+/// Outcome of an automatic startup restore (issue #2550).
+#[derive(Clone, Debug)]
+pub struct AutoRestoreReport {
+    /// Number of memories imported from the snapshot.
+    pub restored: usize,
+    /// The `cognitive_snapshot.json` the restore was sourced from.
+    pub from: PathBuf,
+}
+
+/// Auto-restore the newest good cognitive snapshot when the live store is
+/// empty (issue #2550).
+///
+/// The daemon calls this at startup, immediately after opening the store and
+/// **before** any bootstrap seeding, so a corruption-reset self-heals instead
+/// of permanently losing everything. If the just-opened `memory` holds no
+/// memories at all and a non-empty `cognitive_snapshot.json` exists under
+/// `config.backup_dir/<ts>/`, the **newest** such snapshot is imported
+/// (idempotently, via [`crate::remote_transfer::import_full_snapshot`]),
+/// checkpointed, and an [`AutoRestoreReport`] is returned.
+///
+/// A store that holds *any* memory is left untouched (`Ok(None)`): restoring
+/// over live data could duplicate or clobber it, and a healthy store never
+/// needs healing. The absence of any non-empty snapshot also yields `Ok(None)`.
+pub fn auto_restore_if_empty(
+    memory: &dyn CognitiveMemoryOps,
+    config: &BackupConfig,
+) -> SimardResult<Option<AutoRestoreReport>> {
+    // Only self-heal a genuinely empty store. Any existing memory means either a
+    // healthy store or one already (partly) restored — never clobber it.
+    if memory.get_statistics()?.total() > 0 {
+        return Ok(None);
+    }
+
+    let Some((snapshot, from)) = newest_nonempty_snapshot(config)? else {
+        return Ok(None);
+    };
+
+    let restored = crate::remote_transfer::import_full_snapshot(memory, &snapshot)?;
+
+    // Fold the restored records into the main DB so the self-heal survives even
+    // if the process exits before the store's next auto-checkpoint.
+    memory.checkpoint()?;
+
+    Ok(Some(AutoRestoreReport { restored, from }))
+}
+
+/// Find the newest non-empty `cognitive_snapshot.json` under
+/// `config.backup_dir/<ts>/`, returning it plus its path (issue #2550).
+///
+/// Backup directories are timestamp-named (`%Y%m%d_%H%M%S`), so a lexical
+/// descending sort is chronological newest-first. The first snapshot that loads
+/// and holds at least one memory wins; unreadable or empty snapshots are skipped
+/// so a truncated tip cannot mask an older good backup.
+fn newest_nonempty_snapshot(
+    config: &BackupConfig,
+) -> SimardResult<Option<(FullMemorySnapshot, PathBuf)>> {
+    let dir = &config.backup_dir;
+    if !dir.exists() {
+        return Ok(None);
+    }
+
+    let mut entries: Vec<PathBuf> = fs::read_dir(dir)
+        .map_err(|e| store_error("list-dir", dir, e.to_string()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.path())
+        .collect();
+
+    // Newest first (timestamp-named dirs sort chronologically).
+    entries.sort_by(|a, b| b.cmp(a));
+
+    for entry in entries {
+        let snapshot_path = entry.join(SNAPSHOT_FILE);
+        if !snapshot_path.exists() {
+            continue;
+        }
+        // Skip a snapshot that will not load (corrupt tip) so an older good one
+        // can still be found, rather than aborting the whole self-heal.
+        match crate::remote_transfer::load_full_snapshot_from_file(&snapshot_path) {
+            Ok(snapshot) if !snapshot.is_empty() => {
+                return Ok(Some((snapshot, snapshot_path)));
+            }
+            _ => continue,
+        }
+    }
+
+    Ok(None)
 }
 
 /// List available backups sorted newest-first, each with verification status.

@@ -17,22 +17,28 @@ use crate::memory_cognitive::{CognitiveStatistics, GraphStats};
 use crate::memory_ipc::{open_reader_bridge, socket_path_for};
 
 pub(super) const MEMORY_HELP: &str = "\
-Simard memory subcommand — cognitive-memory introspection (read-only)
+Simard memory subcommand — cognitive-memory introspection & restore
 
 Usage:
-  simard memory stats [state-root] [--json]
-  simard memory dump  [state-root] [--type=TYPE] [--limit=N] [--json]
+  simard memory stats  [state-root] [--json]
+  simard memory dump   [state-root] [--type=TYPE] [--limit=N] [--json]
+  simard memory import <snapshot.json> [state-root]
 
 stats  Print per-type counts (sensory, working, episodic, semantic/facts,
        procedural/procedures, prospective/triggers), a graph-edge / dedup
        (\"edges / connections\") section, plus a few sample rows.
 dump   Print counts plus a larger set of sample rows per type for eyeballing
        content. --type restricts to one of: facts, episodes, procedures.
+import Ingest a cognitive_snapshot.json (as written by the periodic verified
+       backup under ~/.simard/backups/<ts>/) back into the store. Idempotent:
+       memories already present are skipped (dedup by content), so re-running a
+       restore never duplicates. Run with the OODA daemon stopped so the import
+       writes to the same store the daemon serves.
 
-Both commands are read-only and safe to run while the OODA daemon holds the
-store: they route through the daemon socket when it is up and fall back to a
-direct open when it is down. With no [state-root] they resolve
-$SIMARD_STATE_ROOT, then $HOME/.simard.
+stats/dump are read-only and safe to run while the OODA daemon holds the store:
+they route through the daemon socket when it is up and fall back to a direct
+open when it is down. With no [state-root] they resolve $SIMARD_STATE_ROOT, then
+$HOME/.simard.
 ";
 
 /// Default number of sample rows per type for `stats`.
@@ -161,6 +167,7 @@ pub(crate) fn dispatch_memory_command(
         }
         "stats" => run_stats(args),
         "dump" => run_dump(args),
+        "import" => run_import(args),
         other => Err(format!("unsupported command 'memory {other}'").into()),
     }
 }
@@ -199,6 +206,78 @@ fn run_stats(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::erro
         println!("{}", render_json(&report, false));
     } else {
         print!("{}", render_human(&report, false));
+    }
+    Ok(())
+}
+
+/// `simard memory import <snapshot.json> [state-root] [--json]` — restore a
+/// `cognitive_snapshot.json` back into the store (issue #2550).
+///
+/// Idempotent: [`crate::remote_transfer::import_full_snapshot`] dedups by
+/// content, so re-running an import never duplicates memories. Opens the store
+/// **for write** via a direct on-disk open, which requires the daemon to be
+/// stopped (it holds the store lock while running) — enforced below with a clear
+/// error rather than a lock-contention failure.
+fn run_import(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut snapshot_arg: Option<PathBuf> = None;
+    let mut state_root_opt: Option<PathBuf> = None;
+    let mut json = false;
+    for arg in args {
+        if arg == "--help" || arg == "-h" {
+            print!("{MEMORY_HELP}");
+            return Ok(());
+        } else if arg == "--json" {
+            json = true;
+        } else if arg.starts_with("--") {
+            return Err(format!("unexpected flag: {arg}").into());
+        } else if snapshot_arg.is_none() {
+            snapshot_arg = Some(PathBuf::from(arg));
+        } else if state_root_opt.is_none() {
+            state_root_opt = Some(PathBuf::from(arg));
+        } else {
+            return Err(format!("unexpected argument: {arg}").into());
+        }
+    }
+
+    let snapshot_path = snapshot_arg.ok_or_else(|| {
+        Box::<dyn std::error::Error>::from(
+            "usage: simard memory import <snapshot.json> [state-root] [--json]",
+        )
+    })?;
+    let state_root = resolve_state_root(state_root_opt);
+
+    // A direct write open cannot coexist with the daemon's store lock. Fail
+    // loudly and actionably instead of blocking on / corrupting a live store.
+    if socket_path_for(&state_root).exists() {
+        return Err(format!(
+            "the OODA daemon appears to be running for {} (socket present); \
+             stop it before importing so the restore writes to the store the \
+             daemon serves",
+            state_root.display()
+        )
+        .into());
+    }
+
+    let snapshot = crate::remote_transfer::load_full_snapshot_from_file(&snapshot_path)?;
+    let items = snapshot.total_items();
+    let memory = crate::cognitive_memory::LibraryCognitiveMemory::open(&state_root)?;
+    let new = crate::remote_transfer::import_full_snapshot(&memory, &snapshot)?;
+    // Fold the writes into the main DB so a subsequent reader (e.g. `memory
+    // stats`) sees them without needing a WAL replay.
+    memory.checkpoint()?;
+    let deduplicated = items.saturating_sub(new);
+    let store_path = state_root.join(crate::cognitive_memory::LIVE_STORE_SUBDIR);
+
+    if json {
+        println!(
+            "{{\"imported\":{items},\"new\":{new},\"deduplicated\":{deduplicated},\"store\":{}}}",
+            serde_json::Value::String(store_path.display().to_string())
+        );
+    } else {
+        println!(
+            "imported {items} items ({new} new, {deduplicated} deduplicated) -> {}",
+            store_path.display()
+        );
     }
     Ok(())
 }

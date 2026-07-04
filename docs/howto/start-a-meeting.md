@@ -1,7 +1,7 @@
 ---
 title: How to start a meeting with Simard
 description: Start a conversational meeting with Simard from the CLI or dashboard. Simard maintains conversation context, remembers past meetings, and persists outcomes on close.
-last_updated: 2026-06-22
+last_updated: 2026-07-04
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -277,6 +277,35 @@ See [Copilot meeting mode](../reference/copilot-meeting-mode.md) for the full
 technical reference, or [LightweightChatSession API reference](../reference/lightweight-chat-session.md)
 for the alternative `SessionBuilder`-based path.
 
+### Repository context and per-turn timeout
+
+The meeting agent operates **in the repository you launched the meeting from**,
+so it can inspect code and run `simard` commands in the right context. The
+working directory and the agent's `--add-dir` grant are derived from the launch
+context — there is **no operator-specific path baked into the binary** (issue
+#2549):
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `SIMARD_MEETING_AGENT_DIR` | _(unset)_ | Explicit directory the agent operates in. Wins over cwd-derivation when it names an existing directory. |
+| _(cwd)_ | current git repo root | When `SIMARD_MEETING_AGENT_DIR` is unset, the agent uses the repository root of your current directory (`git rev-parse --show-toplevel`). |
+
+If you launch a meeting from **outside any git checkout** and set no override,
+the agent runs in the process working directory with **no explicit repo
+grant** — it never falls back to some other worktree.
+
+Each agent turn is bounded by a **default per-turn timeout** so a hung agent
+turn cannot freeze the REPL:
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `SIMARD_MEETING_TURN_TIMEOUT_SECS` | `120` | Per-turn bound in seconds. A positive value overrides the default; `0` disables the timeout (unbounded — operator escape hatch); an unset or malformed value uses the bounded default. |
+
+When a turn exceeds the timeout, the child process is terminated and the turn
+**degrades honestly** with a `[meeting:error] WARNING` banner (the meeting
+stays usable — retry your message or `/close`) rather than blocking silently
+(Pillar 11: honest degradation beats hidden silence).
+
 ## 9. Carry meeting outcomes into engineer sessions
 
 Meeting handoffs still integrate with the OODA loop and engineer sessions. See [How to carry meeting decisions into engineer sessions](./carry-meeting-decisions-into-engineer-sessions.md) for the full flow.
@@ -295,10 +324,13 @@ If you see the prompt cursor blinking with no response after 2–3 minutes, chec
 2. **`copilot` on PATH?** Meeting mode invokes the `copilot` binary directly (not
    `amplihack copilot`). Run `which copilot` to verify. If the binary is not found,
    the turn returns an `AdapterInvocationFailed` error immediately.
-3. **Long compute in progress?** LLM calls can take up to 15 minutes. The 900 s
-   timeout is intentionally generous. If Simard responds eventually, no action needed.
-   If the process exits with "timed out after 900s", the LLM invocation is hung — check
-   network connectivity and provider status.
+3. **Long compute in progress?** Each agent turn is bounded by
+   `SIMARD_MEETING_TURN_TIMEOUT_SECS` (default 120 s). If a turn exceeds it,
+   the child is killed and the turn degrades honestly with a `[meeting:error]
+   WARNING` banner — the REPL never hangs indefinitely. If your provider is
+   consistently slow, raise the bound (e.g.
+   `SIMARD_MEETING_TURN_TIMEOUT_SECS=300 simard meeting repl`) or set it to `0`
+   to disable the per-turn timeout entirely.
 
 ### Simard responds with OODA action plans instead of conversation
 

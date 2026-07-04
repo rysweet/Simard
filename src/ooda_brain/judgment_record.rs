@@ -261,6 +261,34 @@ pub fn with_cycle_scope<R>(f: impl FnOnce() -> R) -> R {
 /// Append one judgment to the current cycle's accumulator. Silently no-ops
 /// outside a [`with_cycle_scope`] (e.g., in tests with no scope set up).
 pub fn push(record: BrainJudgmentRecord) {
+    // Issue #2528: mirror every brain decision into the unified telemetry facade
+    // so decision volume, parse-fallback rate, and escalations become structured
+    // signals for `simard status` instead of a journald grep. Emitted
+    // unconditionally — telemetry, unlike the task-local accumulator below, is
+    // process-global and needs no cycle scope.
+    {
+        use crate::telemetry::{self, names};
+        let result = if record.parse_failure.is_some() {
+            "default_malformed"
+        } else if record.fallback {
+            "error"
+        } else {
+            "parsed"
+        };
+        telemetry::counter_add(
+            names::BRAIN_DECISION,
+            1,
+            &[
+                (names::ATTR_PHASE, record.phase.as_str()),
+                (names::ATTR_RESULT, result),
+            ],
+        );
+        // A parse failure that fell through to the deterministic fallback is an
+        // escalation off the healthy path.
+        if record.parse_failure.is_some() {
+            telemetry::counter_add(names::BRAIN_ESCALATIONS, 1, &[]);
+        }
+    }
     let _ = BRAIN_JUDGMENTS.try_with(|cell| cell.borrow_mut().push(record));
 }
 

@@ -37,6 +37,15 @@ pub(crate) const PART_01: &str = r#"      </div>
     </div>
   </div>
 
+  <div class="tab-content" id="tab-status">
+    <h1 class="page-h1">Status</h1>
+    <p class="page-lede">One consolidated operational report — the daemon, system resources, model spending, memory and brain health, gym, goals, active work, merged pull requests, and unexpected telemetry signals, all on a single page.</p>
+    <div class="card" style="max-width:1100px">
+      <h2>Operational Status <button class="btn" onclick="fetchStatusSnapshot()" style="font-size:.75rem">Refresh</button></h2>
+      <div id="status-snapshot-panel"><span class="loading">Loading…</span></div>
+    </div>
+  </div>
+
   <div class="tab-content" id="tab-terminal">
     <h1 class="page-h1">Terminal</h1>
     <p class="page-lede">Attach to the live terminal of a running Simard sub-agent and watch its standard output and standard error stream in real time.</p>
@@ -95,6 +104,11 @@ pub(crate) const PART_01: &str = r#"      </div>
     /* --- Helpers --- */
     function fmtB(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB';}
     function esc(s){if(s==null)return'';const d=document.createElement('div');d.textContent=String(s);return d.innerHTML;}
+    /* Attribute-context escape: esc() handles element-content (& < >) but does
+       NOT neutralize the " that would break out of a double-quoted attribute
+       value. Use this for any interpolated title="…" / other quoted attribute
+       sink so a future dynamic/peer-supplied value cannot inject attributes. */
+    function escAttr(s){return esc(s).replace(/"/g,'&quot;');}
     async function apiFetch(url,opts){
       const r=await fetch(url,opts);
       if(r.status===401){window.location.href='/login';throw new Error('Session expired — redirecting to login');}
@@ -244,6 +258,43 @@ pub(crate) const PART_01: &str = r#"      </div>
       const word=n>0.7?'high':n>0.4?'medium':'low';
       return word+' urgency ('+n.toFixed(2)+' of 1.0)';
     }
+    /* Cluster-topology / event-bus de-jargon: map the machine-internal labels
+       on the Overview "Machines & Memory Sharing" card to plain English. Every
+       helper preserves the raw machine term (callers surface it as a hover
+       tooltip via title=) so power users lose no information. Each returns
+       PLAIN TEXT — callers must escape last (escape-last invariant). */
+    function humanizeEventTopic(name){
+      const MAP={
+        fact_promoted:'Facts this machine shared out',
+        fact_imported:'Facts received from other machines',
+        memory_sync_requested:'Memory-sync requests',
+        node_joined:'A machine joined the group',
+        node_left:'A machine left the group'
+      };
+      if(!name)return'';
+      if(MAP[name])return MAP[name];
+      return String(name).replace(/[_-]+/g,' ').replace(/^./,c=>c.toUpperCase());
+    }
+    function humanizeSyncProtocol(p){
+      if(!p)return'Not sharing (this machine only)';
+      const s=String(p);
+      if(s.indexOf('DHT')>=0||s.indexOf('gossip')>=0)return'Peer-to-peer (machines share facts directly)';
+      return s;
+    }
+    function humanizeHiveStatus(s){
+      if(!s)return'Standalone (this machine only)';
+      const v=String(s).toLowerCase();
+      if(v==='standalone')return'Standalone (this machine only)';
+      if(v==='active')return'Active (sharing with other machines)';
+      return String(s);
+    }
+    function humanizeTopology(t){
+      if(!t)return'';
+      const v=String(t).toLowerCase();
+      if(v==='distributed')return'Supported (can run across machines)';
+      if(v==='standalone'||v==='single')return'Single machine';
+      return String(t);
+    }
     function copyLogContent(id){
       const el=document.getElementById(id);if(!el)return;
       navigator.clipboard.writeText(el.textContent||'').then(
@@ -357,6 +408,7 @@ pub(crate) const PART_01: &str = r#"      </div>
         if(tab.dataset.tab==='brain-failures') {fetchBrainFailures();tabRefreshTimers.brainFailures=setInterval(fetchBrainFailures,30000);}
         if(tab.dataset.tab==='merge-decisions') {fetchMergeJudge();tabRefreshTimers.mergeJudge=setInterval(fetchMergeJudge,30000);}
         if(tab.dataset.tab==='pr-readiness') {fetchPrReadiness();tabRefreshTimers.prReadiness=setInterval(fetchPrReadiness,30000);}
+        if(tab.dataset.tab==='status') {fetchStatusSnapshot();tabRefreshTimers.status=setInterval(fetchStatusSnapshot,30000);}
         if(tab.dataset.tab==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
       });
     });

@@ -46,6 +46,8 @@ pub mod runner;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_work_guard;
 
 pub use liveness::{LiveProcessProbe, ProcfsLiveProcessProbe};
 pub use parse::{WorktreeEntry, parse_worktree_list};

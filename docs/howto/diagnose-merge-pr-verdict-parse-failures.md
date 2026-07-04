@@ -1,7 +1,7 @@
 ---
 title: Diagnose simard merge-pr verdict-parse failures
 description: Operator runbook for the gated merge path. simard merge-pr now surfaces a real verdict via the JSON envelope and fails closed to unclear (refused) when no verdict parses. Explains how to tell a real not_ready/unclear verdict from an infra error or a genuine not-ready PR, and why never to coerce unclear/empty into ready.
-last_updated: 2026-06-28
+last_updated: 2026-07-04
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -30,7 +30,9 @@ the PR and returns one verdict: `ready`, `not_ready`, or `unclear`.
 > [#2430](https://github.com/rysweet/Simard/issues/2430) /
 > [#2435](https://github.com/rysweet/Simard/issues/2435) /
 > [#2462](https://github.com/rysweet/Simard/issues/2462) /
-> [#2463](https://github.com/rysweet/Simard/issues/2463)).** `RecipeMergeJudge::judge`
+> [#2463](https://github.com/rysweet/Simard/issues/2463) /
+> [#2501](https://github.com/rysweet/Simard/issues/2501) /
+> [#2555](https://github.com/rysweet/Simard/issues/2555)).** `RecipeMergeJudge::judge`
 > (`src/stewardship/recipe_merge_judge.rs`) invokes `recipe-runner-rs` with
 > `--output-format json`, extracts the agent verdict from the envelope, runs the
 > shared escalation ladder on a parse-miss, and **fails closed to `unclear`**
@@ -40,6 +42,17 @@ the PR and returns one verdict: `ready`, `not_ready`, or `unclear`.
 > verdict (or a fail-closed `unclear`, or an explicit infra error) on every run.
 > See
 > [Recipe-brain verdict/decision parsing](../reference/recipe-brain-verdict-parsing.md#merge-judge-phase-2462).
+>
+> **The real agent wire format is regression-pinned** ([#2501](https://github.com/rysweet/Simard/issues/2501)
+> / [#2555](https://github.com/rysweet/Simard/issues/2555), duplicates of the
+> above). `recipe-runner-rs 0.3.6 --output-format json --agent-binary copilot`
+> captures the agent's stdout into `step_results[].output` with the GitHub
+> Copilot CLI launcher preamble line (`ℹ … NODE_OPTIONS=… (saved preference)…`)
+> **prepended** to the verdict. The shared noise stripper drops that preamble
+> and the balanced-JSON scan reads past it, so the verdict still parses. The
+> `issue_2501_2555_real_envelope_tests` module and step (d)/(e) of
+> `tests/gadugi/merge-judge-verdict.sh` pin this end-to-end against the exact
+> live envelope so a regression cannot silently reintroduce the abort.
 
 ## Step 1: Read the verdict
 

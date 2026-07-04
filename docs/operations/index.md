@@ -8,6 +8,7 @@ Simard deployment.
 | [Pre-Commit Setup](pre-commit-setup.md) | Local hooks that mirror CI |
 | [Cognitive Memory Durability](cognitive-memory-durability.md) | SIGTERM-safe shutdown + periodic backups |
 | [Verified Backups of the Live Cognitive Store](verified-backups.md) | Live-store backups, verify-before-prune, bounded quarantines (#2420) |
+| [Cognitive-Memory WAL Recovery Runbook](cognitive-memory-wal-recovery-runbook.md) | Corrupt-WAL recovery, `memory import`, startup auto-restore, asset preservation (#2550) |
 | [Meeting REPL & Handoff Ingestion](meeting-handoffs.md) | Routing operator intent into the OODA loop |
 | [Progress-Evidence Kill Switch](progress-evidence-kill-switch.md) | `SIMARD_PROGRESS_EVIDENCE=off` and when to use it |
 

@@ -1,7 +1,7 @@
 ---
 title: Base Type Adapters
 description: Reference for the pluggable agent execution substrates that Simard delegates work to — traits, shipped adapters, capability contracts, and topology support.
-last_updated: 2026-06-22
+last_updated: 2026-07-03
 owner: simard
 doc_type: reference
 ---
@@ -110,7 +110,7 @@ A PTY-backed shell adapter that runs a configurable local command through the te
 
 ### `rusty-clawd` — `RustyClawdAdapter`
 
-**Module:** `src/base_type_rustyclawd.rs`
+**Module:** `src/base_type_rustyclawd/` (`RustyClawdAdapter` in `adapter.rs`)
 
 The RustyClawd session backend. Supports both single-process and multi-process topologies via the loopback mesh driver. Produces structured plan/execution/evidence outcomes.
 
@@ -136,7 +136,7 @@ The RustyClawd session backend. Supports both single-process and multi-process t
 
 ### `copilot-sdk` — `CopilotSdkAdapter`
 
-**Module:** `src/base_type_copilot.rs`
+**Module:** `src/base_type_copilot/` (`CopilotSdkAdapter` in `mod.rs`)
 
 Drives `amplihack copilot` through the PTY infrastructure with memory and knowledge context injection. Each turn:
 

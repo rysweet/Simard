@@ -187,6 +187,29 @@ fn gather_inputs(
     probe: &dyn LiveProcessProbe,
     _now: SystemTime,
 ) -> CandidateInputs {
+    // Cheap, local signals first. Both are hard vetoes in `evaluate_candidate`
+    // (issues #1886 / #2553): if either fires, the worktree is never a prune
+    // candidate regardless of the upstream (merged / deleted / idle) signals.
+    let last_activity = super::policy::worktree_last_activity(&entry.path);
+    let has_live_process = probe.worktree_has_live_process(&entry.path);
+    let has_uncommitted_or_unpushed_work = worktree_has_uncommitted_or_unpushed_work(&entry.path);
+
+    // A vetoing local signal makes the network inputs irrelevant to the outcome
+    // (`evaluate_candidate` returns `None` either way), so skip the `gh pr list`
+    // and `git ls-remote` round-trips entirely — those dominate GC cost by 2-3
+    // orders of magnitude (see `liveness` module docs). This is behaviour-
+    // preserving: the candidate decision is identical, we just don't pay for
+    // upstream lookups whose result cannot change it.
+    if has_live_process || has_uncommitted_or_unpushed_work {
+        return CandidateInputs {
+            merged_prs: Vec::new(),
+            branch_on_origin: None,
+            last_activity,
+            has_live_process,
+            has_uncommitted_or_unpushed_work,
+        };
+    }
+
     let merged_prs = if let Some(ref branch) = entry.branch {
         gh.merged_prs_for_branch(branch).unwrap_or_else(|e| {
             tracing::warn!(
@@ -216,14 +239,52 @@ fn gather_inputs(
         None
     };
 
-    let last_activity = super::policy::worktree_last_activity(&entry.path);
-    let has_live_process = probe.worktree_has_live_process(&entry.path);
-
     CandidateInputs {
         merged_prs,
         branch_on_origin,
         last_activity,
         has_live_process,
+        has_uncommitted_or_unpushed_work,
+    }
+}
+
+/// Return `true` if the worktree at `dir` holds work that a prune would
+/// destroy (issue #2553): a dirty working tree, or commits ahead of a
+/// configured upstream.
+///
+/// Unlike the daemon sweep (`engineer_worktree::sweep`), the GC has an
+/// independent merged-PR / branch-deleted policy that already proves a
+/// candidate branch's commits are safe upstream. So a *clean* worktree with
+/// **no** configured upstream is NOT treated as unpushed here — otherwise GC
+/// could never reap a merged branch whose local checkout simply lacks a
+/// tracking ref. Only two conditions count as recoverable work:
+///   1. `git status --porcelain` is non-empty (uncommitted changes), or
+///   2. `git rev-list --count @{u}..HEAD` > 0 (ahead of a configured upstream).
+///
+/// Every error is treated conservatively as "has work" (fail-safe keep) EXCEPT
+/// a missing upstream, which is expected for many merged branches and yields
+/// "no unpushed work".
+fn worktree_has_uncommitted_or_unpushed_work(dir: &Path) -> bool {
+    match git_capture(dir, &["status", "--porcelain"]) {
+        Ok(out) if !out.trim().is_empty() => return true,
+        Ok(_) => {}
+        // Broken / unreadable git state — cannot verify, keep.
+        Err(e) => {
+            tracing::warn!(
+                target: "simard::worktree_gc",
+                error = %e,
+                worktree = %dir.display(),
+                "git status failed during work-guard check; treating as having work",
+            );
+            return true;
+        }
+    }
+    // Clean tree. Ahead of a configured upstream? A missing upstream errors
+    // here and is treated as "not ahead" — the merge/branch-deletion policy is
+    // responsible for proving that case safe.
+    match git_capture(dir, &["rev-list", "--count", "@{u}..HEAD"]) {
+        Ok(count) => count.trim() != "0",
+        Err(_) => false,
     }
 }
 

@@ -7,6 +7,7 @@
 //! ([`decompose`]) that breaks one large goal into bounded sub-goals.
 
 pub mod completion_gate;
+pub mod no_progress_breaker;
 mod operations;
 pub mod progress_evidence;
 pub mod progress_reviewer;
@@ -21,9 +22,9 @@ pub use operations::CarryoverVerification;
 pub use operations::{
     DEFAULT_SEED_GOALS, DEFAULT_STEWARD_SCORE, active_goals_as_records, add_active_goal,
     add_backlog_item, archive_completed, board_snapshot_hash, clear_goal_assignment,
-    enqueue_stewardship_issue, load_goal_board, persist_board, promote_to_active,
-    read_latest_carryover, rollup_parent_progress, save_goal_board, save_goal_board_with_removals,
-    seed_default_board, simard_state_root, update_goal_progress,
+    enqueue_stewardship_issue, load_goal_board, overwrite_memory_cache, persist_board,
+    promote_to_active, read_latest_carryover, rollup_parent_progress, save_goal_board,
+    save_goal_board_with_removals, seed_default_board, simard_state_root, update_goal_progress,
     update_goal_progress_with_evidence, verify_goal_carryover, write_goal_carryover,
 };
 pub use types::{
@@ -46,12 +47,20 @@ pub use completion_gate::{
     record_false_completion_rate,
 };
 
+pub use no_progress_breaker::{
+    NO_PROGRESS_BLOCKED_PREFIX, NO_PROGRESS_BLOCKED_SUFFIX, NO_PROGRESS_BREAKER_THRESHOLD,
+    NoProgressResolution, NoProgressTracker, StuckGoalDisposition, is_no_progress_marker,
+    no_progress_blocked_reason, obsolescence_reason, resolve_no_progress, verify_stuck_goal,
+};
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_adapter;
 #[cfg(test)]
 mod tests_carryover;
+#[cfg(test)]
+mod tests_no_progress_breaker;
 #[cfg(test)]
 mod tests_operations;
 #[cfg(test)]

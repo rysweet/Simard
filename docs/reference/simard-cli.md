@@ -67,6 +67,7 @@ simard
 |- memory
 |  |- stats [state-root] [--json]
 |  `- dump [state-root] [--type=TYPE] [--limit=N] [--json]
+|- status [--json]
 |- act-on-decisions
 |- spawn <agent-name> <goal> <worktree-path>
 |- handover [--canary-dir=PATH]
@@ -241,11 +242,13 @@ Invoking `simard goal cleanup` with no criteria flag is an error
 The `simard memory` subcommand tree is the operator surface for
 **inspecting** the six-type cognitive-memory store on the
 [`amplihack-memory-lib`](../architecture/cognitive-memory-library-adapter.md)
-backend. Both subcommands are **read-only** and **safe to run while the
-OODA daemon holds the store** — they route through the daemon's memory
-socket when it is up and fall back to a direct on-disk open when it is
-down. The state root resolves via `$SIMARD_STATE_ROOT` then `$HOME/.simard`,
-matching the daemon, so a bare invocation always targets the live store.
+backend, plus a guarded snapshot-restore. `stats` and `dump` are **read-only**
+and **safe to run while the OODA daemon holds the store** — they route through
+the daemon's memory socket when it is up and fall back to a direct on-disk open
+when it is down. `import` is the one **write** path (restore-only) and must run
+with the daemon stopped. The state root resolves via `$SIMARD_STATE_ROOT` then
+`$HOME/.simard`, matching the daemon, so a bare invocation always targets the
+live store.
 
 See the full reference — output schema, type→field mapping, sampling
 caveats, and the stored-vs-recalled episode distinction — in
@@ -291,6 +294,48 @@ prospective enumerator, so `dump` never row-samples triggers (see
 unavailable over the daemon socket (e.g. the library's `get_episodes`),
 `dump` prints the count with `(samples unavailable over IPC)` and
 continues — run with the daemon stopped for full rows.
+
+### `simard memory import <snapshot.json> [state-root] [--json]`
+
+Restore a cognitive-memory snapshot (a backup's `cognitive_snapshot.json`) back
+into the store. Introduced by issue #2550 as the recovery path after the
+2026-07-04 corrupt-WAL data-loss incident. `import` is **idempotent** — it
+deduplicates by content, so it is safe to re-run and safe to run onto a
+partially-populated store — and must run with the daemon **stopped** because it
+writes to the store. The daemon also auto-restores from the newest good snapshot
+on startup when the live store is empty. See
+[Memory introspection CLI](./simard-memory-cli.md#simard-memory-import) and the
+[WAL Recovery Runbook](../operations/cognitive-memory-wal-recovery-runbook.md).
+
+## Status subcommand
+
+`simard status [--json]` prints one consolidated operational report — the
+**unified telemetry status snapshot**. It assembles a single
+[`StatusSnapshot`](./status-snapshot-api.md) from **durable, process-agnostic
+sources** (the daemon's `~/.simard/telemetry/metrics_snapshot.json`, the cost
+ledger, `self_metrics`, memory IPC, `systemctl show simard.service` + `/proc`,
+and `gh`) — never by grepping journald — so it returns the same numbers whether
+or not it runs in the daemon process. The dashboard **Status** tab and the TUI
+**Status** tab render the same snapshot.
+
+- **Default** — the canonical terminal layout: `DAEMON / UPTIME`,
+  `RESOURCE SNAPSHOT`, `LLM USAGE`, `MEMORY / BRAIN`, `GYM`, `GOAL BOARD`,
+  `ACTIVE WORKSTREAMS`, `COMPLETED WORK`, `SELF-IMPROVEMENT`, and
+  `TELEMETRY / UNEXPECTED SIGNALS`.
+- `--json` — the serialized `StatusSnapshot`; each section is wrapped in an
+  envelope with `availability` (`ok`/`unavailable`/`error`) and `freshness`
+  (`live`/`stale`/`absent`) so scripts can tell a real `0` from "unknown".
+
+The command never panics and always exits zero on a successful assembly, even
+when individual sources are degraded — those sections render `stale`/`absent`
+rather than failing the report. The state root resolves via `$SIMARD_STATE_ROOT`
+then `$HOME/.simard`, matching the daemon.
+
+See the [operator how-to](../howto/simard-status.md) for a full rendered example
+and per-section interpretation, the
+[StatusSnapshot API](./status-snapshot-api.md) for the types and `--json`
+schema, and the [telemetry metrics reference](./telemetry-metrics.md) for the
+metric catalog behind it.
 
 ## Self-management commands
 
@@ -1078,6 +1123,21 @@ Runs a benchmark suite.
 Artifacts are written under `target/simard-gym/`.
 
 Each scenario run within the suite emits the same scorecard fields as `simard gym run <scenario-id>`, so single-run reports and suite-generated reports remain directly comparable.
+
+**Exit code.** `run-suite` exits **non-zero** when the suite does not pass
+(`Suite passed: false`) and zero when it passes. This is what makes the
+`self-test` / `self-update` health gate trustworthy: both shell out to
+`gym run-suite starter` and branch on its exit code, so a failing suite can no
+longer be reported as a false-green (rysweet/Simard#2548). Skipped scenarios
+(e.g. a backend whose auth is unavailable at gate time) do not count as failures.
+
+**The `starter` suite is the health gate.** It runs only the deterministic,
+credential-free session-quality scenarios whose correctness depends on the
+binary's own runtime machinery rather than an external reasoning backend, so a
+healthy binary's `self-test` is genuinely and deterministically green. The
+`repo-exploration`, `documentation`, and `safe-code-change` scenarios remain in
+the catalogue (`gym list`) and are runnable individually with
+`gym run <scenario-id>` as benchmarks for capable reasoning backends.
 
 ## Benchmark gym configuration
 

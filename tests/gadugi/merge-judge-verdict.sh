@@ -22,6 +22,16 @@
 # via `cargo test` (issue_2428_tests) so the JSON-envelope verdict extraction,
 # prose keyword fallback, and the empty-output fail-closed contract are all
 # validated end-to-end.
+#
+# Steps (d)/(e) extend this to the REAL agent wire format reported in
+# #2501 / #2555 (duplicates of the above): the GitHub Copilot CLI launcher
+# prints a preamble line (`ℹ … NODE_OPTIONS=… (saved preference)…`) to stdout
+# BEFORE the agent answer, so recipe-runner captures it into
+# step_results[].output PREPENDED to the verdict JSON. (d) reproduces that exact
+# shape deterministically (no LLM) and proves json mode still surfaces a
+# parseable `ready`; (e) runs the in-tree production-path regression module
+# (issue_2501_2555_real_envelope_tests) that drives the real
+# `extract_recipe_decision_output` on the same preamble-bearing envelope.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -104,4 +114,57 @@ grep -qF 'issue_2428_tests::empty_final_step_output_fails_closed' "$TEST_LOG" \
   || { echo "FAIL: the fail-closed contract test did not run" >&2; exit 1; }
 echo "OK: JSON-envelope verdict extraction + fail-closed contract pass (${PASSED} tests)."
 
-echo "PASS: merge-judge-verdict scenario (#2428/#2430/#2435/#2462/#2463)"
+# --- (d) REAL agent wire format (#2501/#2555): launcher preamble + verdict -----
+# recipe-runner captures the Copilot launcher preamble into step_results[].output
+# ahead of the verdict JSON. Reproduce that exact shape (no LLM) and prove the
+# verdict is still surfaced and parses to `ready` — the preamble must not shadow
+# the real answer, and the merge must NOT abort with "no verdict keyword".
+echo "== (d) real agent wire format: launcher preamble + verdict JSON =="
+PREAMBLE='ℹ NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: /home/azureuser/.amplihack/config'
+RECIPE_D="$WORK/merge-judge-preamble.yaml"
+cat > "$RECIPE_D" <<EOF
+name: "merge-judge-preamble-2501"
+description: "deterministic real-wire-format fixture: launcher preamble + verdict (no LLM)"
+version: "1.0.0"
+context: {}
+steps:
+  - id: "judge-merge-readiness"
+    type: "bash"
+    command: |
+      printf '%s\n%s\n' '${PREAMBLE}' '${VERDICT_JSON}'
+    output: "judge_result"
+EOF
+JSON_OUT_D="$(recipe-runner-rs "$RECIPE_D" --output-format json 2>/dev/null)"
+printf '%s' "$JSON_OUT_D" | jq -e '.success == true' >/dev/null \
+  || { echo "FAIL: preamble fixture did not report success in json mode" >&2; exit 1; }
+STEP_OUTPUT_D="$(printf '%s' "$JSON_OUT_D" | jq -r '.step_results | last | .output')"
+echo "json-mode final step output (with preamble):"
+printf '%s\n' "$STEP_OUTPUT_D"
+# The captured output must carry BOTH the launcher preamble AND the verdict JSON.
+printf '%s' "$STEP_OUTPUT_D" | grep -qF 'NODE_OPTIONS=' \
+  || { echo "FAIL: expected the launcher preamble in the captured step output" >&2; exit 1; }
+printf '%s' "$STEP_OUTPUT_D" | grep -qF '"verdict"' \
+  || { echo "FAIL: verdict JSON missing from the preamble-prefixed step output" >&2; exit 1; }
+# The verdict (last line) must still parse to `ready` despite the leading preamble.
+VERDICT_D="$(printf '%s\n' "$STEP_OUTPUT_D" | tail -1 | jq -r '.verdict')"
+echo "parsed verdict (past preamble): ${VERDICT_D}"
+[ "$VERDICT_D" = "ready" ] \
+  || { echo "FAIL: verdict past the launcher preamble is not the expected 'ready'" >&2; exit 1; }
+echo "OK: json mode surfaces a parseable verdict even behind the launcher preamble."
+
+# --- (e) in-tree production-path regression on the real 0.3.6 envelope ---------
+echo "== (e) production extractor on the real 0.3.6 envelope (#2501/#2555) =="
+TEST_LOG_E="$WORK/issue-2501-cargo-test.log"
+cargo test --lib --locked issue_2501_2555_real_envelope_tests -- --nocapture >"$TEST_LOG_E" 2>&1
+PASSED_E="$(grep -oE 'test result: ok\. [0-9]+ passed' "$TEST_LOG_E" | grep -oE '[0-9]+' | head -1)"
+PASSED_E="${PASSED_E:-0}"
+echo "issue_2501/2555 real-envelope tests passed: ${PASSED_E}"
+[ "$PASSED_E" -ge 1 ] \
+  || { echo "FAIL: issue_2501_2555_real_envelope_tests matched zero tests (module renamed?)" >&2; cat "$TEST_LOG_E" >&2; exit 1; }
+grep -qF 'real_copilot_envelope_recovers_ready_verdict' "$TEST_LOG_E" \
+  || { echo "FAIL: the real-envelope ready-verdict test did not run" >&2; exit 1; }
+grep -qF 'real_copilot_envelope_preamble_only_fails_closed_never_ready' "$TEST_LOG_E" \
+  || { echo "FAIL: the preamble-only fail-closed test did not run" >&2; exit 1; }
+echo "OK: production extractor recovers a verdict from the real preamble-bearing envelope."
+
+echo "PASS: merge-judge-verdict scenario (#2428/#2430/#2435/#2462/#2463, #2501/#2555)"

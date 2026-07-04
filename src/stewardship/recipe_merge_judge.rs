@@ -802,3 +802,185 @@ mod issue_2428_production_tests {
         );
     }
 }
+
+// =====================================================================
+// issue_2501_2555_real_envelope_tests — the REAL recipe-runner wire format.
+//
+// #2501 and #2555 are duplicates of the #2428/#2496 verdict-capture family:
+// `simard merge-pr` aborted with
+//   `no verdict keyword (ready/not_ready/unclear) found in recipe output;
+//    raw="Recipe: merge-readiness-judge … SUCCESS …"`
+// The root cause (agent-step stdout not surfaced to the verdict extractor —
+// only the text-mode SUCCESS banner) was fixed by the `--output-format json`
+// transport (#2486) and the shared launcher-preamble strip (#2496/#2504); the
+// residual sightings were a STALE deployed binary.
+//
+// The modules above pin the parse composition with an INLINE envelope mirror
+// (`extract_final_step_output`) and synthetic clean step outputs. This module
+// closes the remaining gap: it drives the PRODUCTION
+// `extract_recipe_decision_output` on the EXACT `recipe-runner-rs 0.3.6
+// --output-format json --agent-binary copilot` envelope — where the GitHub
+// Copilot CLI launcher preamble line (`ℹ … NODE_OPTIONS=… (saved preference)…`)
+// is PREPENDED to the verdict inside the agent step's `output` — and then runs
+// the production `parse_merge_outcome`, so the whole capture → strip → parse
+// path is validated end-to-end against the real wire format that produced the
+// bug reports. Captured live: see `tests/gadugi/merge-judge-verdict.sh` step (d).
+// =====================================================================
+#[cfg(test)]
+mod issue_2501_2555_real_envelope_tests {
+    use super::*;
+    use crate::ooda_brain::LifecycleParseOutcome;
+
+    /// The GitHub Copilot CLI launcher preamble line the agent binary prints to
+    /// stdout *before* its real answer. Captured verbatim from a live
+    /// `recipe-runner-rs --output-format json --agent-binary copilot` run; it
+    /// lands inside the agent step's `output` field, ahead of the verdict.
+    const LAUNCHER_PREAMBLE: &str = "ℹ NODE_OPTIONS=--max-old-space-size=32768 (saved preference). \
+         To change: /home/azureuser/.amplihack/config";
+
+    /// Build a real `recipe-runner-rs 0.3.6` JSON envelope whose single agent
+    /// step's `output` is `agent_stdout` (the launcher preamble + whatever the
+    /// judge emitted). Mirrors the exact shape observed live.
+    fn real_envelope(agent_stdout: &str) -> Vec<u8> {
+        let envelope = serde_json::json!({
+            "recipe_name": "merge-readiness-judge",
+            "success": true,
+            "step_results": [{
+                "step_id": "judge-merge-readiness",
+                "status": "completed",
+                "output": agent_stdout,
+                "error": "",
+                "duration": 32.0
+            }],
+            "context": { "judge_result": agent_stdout },
+            "duration": 32.0
+        });
+        serde_json::to_vec(&envelope).expect("envelope serialises")
+    }
+
+    #[test]
+    fn real_copilot_envelope_recovers_ready_verdict() {
+        // The exact #2501/#2555 scenario, now proven to recover a verdict: the
+        // launcher preamble is prepended to a bare `{"verdict":"ready",…}` JSON
+        // inside the agent step output. The production extractor must surface
+        // that output and `parse_merge_outcome` must recover a REAL `ready`
+        // (Parsed) — NOT the fail-closed `unclear`, and NEVER the old
+        // "no verdict keyword" abort.
+        let agent_stdout = format!(
+            "{LAUNCHER_PREAMBLE}\n\
+             {{\"verdict\": \"ready\", \"rationale\": \"All six skill criteria present and substantive.\"}}"
+        );
+        let stdout = real_envelope(&agent_stdout);
+
+        let extracted = extract_recipe_decision_output(&stdout, ADAPTER_TAG)
+            .expect("production extractor must decode the real 0.3.6 envelope");
+        assert!(
+            extracted.contains("\"verdict\""),
+            "extracted agent output must carry the verdict JSON, not the banner: {extracted:?}"
+        );
+
+        let (outcome, parse) = parse_merge_outcome(&extracted);
+        assert_eq!(
+            outcome.verdict,
+            Verdict::Ready,
+            "the preamble-prefixed verdict JSON must parse as ready"
+        );
+        assert_eq!(parse, LifecycleParseOutcome::Parsed);
+        assert!(
+            !parse.is_parse_failure(),
+            "a real verdict was recovered — this must NOT count as a parse failure"
+        );
+    }
+
+    #[test]
+    fn real_copilot_envelope_recovers_not_ready_with_blockers() {
+        // Same wire format, `not_ready` with a structured blocker: the blocker
+        // must survive extraction + parse (operators act on it).
+        let agent_stdout = format!(
+            "{LAUNCHER_PREAMBLE}\n\
+             {{\"verdict\": \"not_ready\", \"rationale\": \"Quality-audit section is one line.\", \
+             \"blockers\": [{{\"section\": \"Quality-audit\", \"severity\": \"high\", \
+             \"observation\": \"No SEEK/VALIDATE/FIX cycle counts.\", \"fix\": \"Run three cycles.\"}}]}}"
+        );
+        let stdout = real_envelope(&agent_stdout);
+
+        let extracted = extract_recipe_decision_output(&stdout, ADAPTER_TAG).unwrap();
+        let (outcome, parse) = parse_merge_outcome(&extracted);
+        assert_eq!(outcome.verdict, Verdict::NotReady);
+        assert_eq!(
+            outcome.blockers.len(),
+            1,
+            "blocker must survive the real wire format"
+        );
+        assert_eq!(outcome.blockers[0].section, "Quality-audit");
+        assert_eq!(parse, LifecycleParseOutcome::Parsed);
+    }
+
+    #[test]
+    fn real_copilot_envelope_prose_verdict_falls_back_to_keyword() {
+        // The judge sometimes answers in prose. The launcher preamble must be
+        // stripped (it is not a verdict) and the keyword fallback must surface
+        // the real `ready` — proving the preamble never masks a prose verdict.
+        let agent_stdout = format!(
+            "{LAUNCHER_PREAMBLE}\n\
+             After reviewing all six sections I find this PR ready to merge."
+        );
+        let stdout = real_envelope(&agent_stdout);
+
+        let extracted = extract_recipe_decision_output(&stdout, ADAPTER_TAG).unwrap();
+        let (outcome, parse) = parse_merge_outcome(&extracted);
+        assert_eq!(outcome.verdict, Verdict::Ready);
+        assert_eq!(parse, LifecycleParseOutcome::Parsed);
+        assert!(
+            !outcome.rationale.contains("NODE_OPTIONS"),
+            "the launcher preamble must be stripped from the rationale: {}",
+            outcome.rationale
+        );
+    }
+
+    #[test]
+    fn real_copilot_envelope_preamble_only_fails_closed_never_ready() {
+        // Defence-in-depth: if the agent emits ONLY the launcher preamble (no
+        // verdict at all), the preamble must NOT be mined as a `ready` — the
+        // judge must fail CLOSED to `unclear` (a parse failure), so a stripped
+        // banner can never fabricate a merge authorisation.
+        let stdout = real_envelope(LAUNCHER_PREAMBLE);
+
+        let extracted = extract_recipe_decision_output(&stdout, ADAPTER_TAG).unwrap();
+        let (outcome, parse) = parse_merge_outcome(&extracted);
+        assert_eq!(
+            outcome.verdict,
+            Verdict::Unclear,
+            "preamble-only output must fail closed to unclear, never a false ready"
+        );
+        assert!(
+            parse.is_parse_failure(),
+            "preamble-only is a parse-miss (fail-closed), not a real verdict"
+        );
+        assert!(
+            outcome.rationale.contains("failing closed"),
+            "fail-closed rationale must name the miss: {}",
+            outcome.rationale
+        );
+    }
+
+    #[test]
+    fn text_mode_banner_bytes_are_a_loud_infra_error_not_a_silent_default() {
+        // If a STALE runner (or a missing `--output-format json`) ever feeds the
+        // text-mode SUCCESS banner in as the envelope bytes, the production
+        // extractor must fail LOUDLY (the banner is not a JSON envelope) rather
+        // than silently returning it for the keyword scanner — which is exactly
+        // how the original `no verdict keyword; raw="Recipe: … SUCCESS"` abort
+        // arose. This keeps a stale-binary environment diagnosable as infra.
+        let banner = b"Recipe: merge-readiness-judge (v1.0.0)\nSteps: 1\n\n\
+                       Recipe 'merge-readiness-judge': SUCCESS (32.0s)\n  \
+                       [completed] judge-merge-readiness (32.0s)\n\n";
+        let err = extract_recipe_decision_output(banner, ADAPTER_TAG)
+            .expect_err("the text-mode banner is not a decodable JSON envelope");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("deserialize") || msg.contains("recipe-merge-judge"),
+            "a stale-runner text banner must surface as a loud decode error: {msg}"
+        );
+    }
+}

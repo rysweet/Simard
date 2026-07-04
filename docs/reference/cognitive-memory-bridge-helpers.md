@@ -1,8 +1,8 @@
 ---
 title: Cognitive memory bridge helpers
 description: Reference for launch_writer_bridge and open_reader_bridge — the canonical entry points for obtaining a CognitiveMemoryOps adapter, including the planned in-process Arc shortcut and strict no-silent-degradation contract.
-last_updated: 2026-05-09
-owner: simard
+last_updated: 2026-07-03
+owner: cognitive-memory
 doc_type: reference
 related:
   - ./goal-board-api.md
@@ -96,9 +96,10 @@ read-only fallback:
 | 3 (fallback) | `LibraryCognitiveMemory::open(state_root)` | Both writer attempts failed; the library has no read-only constructor at the pinned commit, so the fallback re-opens the writer handle |
 
 Tier 3 is the **degradation point** that issue #1590's follow-up
-work targets — see "Planned changes" below. (Phase 2b note: before the de-fork,
-tier 2 used `NativeCognitiveMemory::open` and tier 3 used the native
-`open_read_only`; both now resolve to `LibraryCognitiveMemory::open`.)
+work targets — see "Planned changes" below. (Phase 2b / #2307 history: before
+the de-fork, tier 2 used `NativeCognitiveMemory::open` and tier 3 used the
+native `open_read_only`; both current paths resolve to
+`LibraryCognitiveMemory::open`.)
 
 ### Planned: tier 0 in-process `Arc` shortcut
 

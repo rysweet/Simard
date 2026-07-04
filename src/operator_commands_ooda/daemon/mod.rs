@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::bridge_launcher::{launch_gym_bridge_native, launch_knowledge_bridge_native};
 use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
-use crate::goal_curation::{load_goal_board, persist_board};
+use crate::goal_curation::persist_board;
 use crate::identity::OperatingMode;
 use crate::memory_ipc;
 use crate::ooda_loop::{
@@ -79,6 +79,31 @@ pub fn run_ooda_daemon(
 
     let shared_mem: Arc<dyn CognitiveMemoryOps> =
         Arc::new(LibraryCognitiveMemory::open(&state_root)?);
+
+    // Issue #2550: self-heal a corruption-reset store BEFORE anything seeds it.
+    // If the library backend had to quarantine a corrupt store and rebuild it
+    // empty, restore the newest non-empty verified-backup snapshot so a
+    // WAL-corruption reset does not permanently lose memories. A populated store
+    // (the normal case) is left untouched. Best-effort: a failure is logged and
+    // never aborts daemon startup.
+    {
+        let backup_config = crate::memory_backup::BackupConfig {
+            backup_dir: state_root.join("backups"),
+            ..crate::memory_backup::BackupConfig::default()
+        };
+        match crate::memory_backup::auto_restore_if_empty(shared_mem.as_ref(), &backup_config) {
+            Ok(Some(report)) => daemon_log(
+                &state_root,
+                &format!(
+                    "[simard] OODA daemon: store was empty — auto-restored {} memories from {}",
+                    report.restored,
+                    report.from.display()
+                ),
+            ),
+            Ok(None) => {}
+            Err(e) => eprintln!("[simard] OODA daemon: startup auto-restore check failed: {e}"),
+        }
+    }
 
     // Register the live writer for in-process callers (dashboard, OODA
     // loop, reflection, etc.) so they bypass IPC and disk re-open and
@@ -304,8 +329,21 @@ pub fn run_ooda_daemon(
         completion_evidence,
     };
 
-    let board = load_goal_board(&*bridges.memory).unwrap_or_default();
+    // Issue #1: the authoritative goal board lives in
+    // `<state_root>/state/goal_board.json` (a single durable, flock-guarded,
+    // read-your-writes store), NOT the cognitive-memory snapshot. On first
+    // adoption the current memory snapshot is migrated into the file so no live
+    // goal is lost; thereafter the file is the source of truth and the memory
+    // snapshot is a derived cache. The persisted `no_progress` tracker is
+    // restored into `OodaState` so the no-progress breaker's per-goal counters
+    // survive the daemon's periodic restarts (the production bug where the
+    // counter reset to zero every ~hour before it could reach the threshold).
+    let persistent =
+        crate::goal_board_store::load_or_migrate(&state_root, &*bridges.memory).unwrap_or_default();
+    let tombstones = crate::ooda_loop::load_tombstones(&state_root);
+    let board = crate::goal_board_store::filter_tombstoned(persistent.board, &tombstones);
     let mut state = OodaState::new(board);
+    state.no_progress_tracker = persistent.no_progress;
     let config = OodaConfig::default();
 
     // Issue #1197: sweep orphaned engineer worktrees from prior crashed
@@ -313,12 +351,13 @@ pub fn run_ooda_daemon(
     if let Ok(parent_repo) = std::env::current_dir() {
         match crate::engineer_worktree::sweep_orphaned_worktrees(&parent_repo, &state_root) {
             Ok(report) => {
-                if !report.removed_orphan_dirs.is_empty() {
+                if report.is_noteworthy() {
                     daemon_log(
                         &state_root,
                         &format!(
-                            "[simard] OODA daemon: swept {} orphan engineer worktree(s)",
-                            report.removed_orphan_dirs.len()
+                            "[simard] OODA daemon: swept {} orphan engineer worktree(s) {}",
+                            report.removed_orphan_dirs.len(),
+                            report.kept_summary(),
                         ),
                     );
                 }
@@ -513,6 +552,67 @@ pub fn run_ooda_daemon(
     );
     // -------------------------------------------------------------------
 
+    // ── Cognitive-thread scheduler (issue #2419) ───────────────────────
+    // ADDITIVE and OFF by default. When SIMARD_COGNITIVE_THREADS_ENABLED is
+    // truthy, a `Mind` hosts NEW background cognitive threads (safe
+    // maintenance/cleanup + engineer-log analysis) on their own cadence,
+    // subsuming the ad-hoc periodic-task pattern for these threads. OODA
+    // itself stays driven by this loop's authoritative inline cycle below so
+    // its external cadence and side-effects are byte-for-byte preserved; the
+    // scheduler is invoked only AFTER the inline cycle and never gates it.
+    let cognitive_threads_enabled = std::env::var("SIMARD_COGNITIVE_THREADS_ENABLED")
+        .ok()
+        .map(|s| matches!(s.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false);
+    let cognitive_repo_root = bridges.repo_root.clone();
+    let cognitive_runtime = if cognitive_threads_enabled {
+        match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => Some(rt),
+            Err(e) => {
+                daemon_log(
+                    &state_root,
+                    &format!("[simard] WARN: cognitive-thread runtime build failed: {e}"),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut mind = crate::cognitive_threads::Mind::new();
+    if cognitive_runtime.is_some() {
+        mind.register(Box::new(
+            crate::cognitive_threads::MaintenanceThread::from_env(),
+        ));
+        mind.register(Box::new(
+            crate::cognitive_threads::EngineerLogAnalysisThread::from_env(),
+        ));
+        // Overseer M1 read-only observer sensor. Additive and default-OFF: only
+        // registered when SIMARD_OVERSEER_ENABLED is truthy (see
+        // `crate::overseer::config`). It Observes → Orients → Reports → files
+        // DEDUPLICATED issues and takes no write action beyond issue-filing, so
+        // it fits the least-authority ThreadContext. The daemon's default
+        // behaviour is unchanged when the flag is unset.
+        if crate::overseer::overseer_enabled() {
+            mind.register(Box::new(crate::overseer::OverseerSensorThread::from_env()));
+            daemon_log(
+                &state_root,
+                "[simard] OODA daemon: Overseer read-only observer ENABLED (M1 sensor; SIMARD_OVERSEER_ENABLED)",
+            );
+        }
+        daemon_log(
+            &state_root,
+            &format!(
+                "[simard] OODA daemon: cognitive-thread scheduler ENABLED ({} background thread(s))",
+                mind.len()
+            ),
+        );
+    }
+
     let mut cycles_run = 0u32;
 
     loop {
@@ -666,12 +766,14 @@ pub fn run_ooda_daemon(
                 match crate::engineer_worktree::sweep_orphaned_worktrees(&parent_repo, &state_root)
                 {
                     Ok(report) => {
-                        if !report.removed_orphan_dirs.is_empty() {
+                        if report.is_noteworthy() {
                             daemon_log(
                                 &state_root,
                                 &format!(
-                                    "[simard] periodic sweep: removed {} orphan engineer worktree(s)",
-                                    report.removed_orphan_dirs.len()
+                                    "[simard] periodic sweep: removed {} orphan engineer \
+                                     worktree(s) {}",
+                                    report.removed_orphan_dirs.len(),
+                                    report.kept_summary(),
                                 ),
                             );
                         }
@@ -762,6 +864,38 @@ pub fn run_ooda_daemon(
             .unwrap_or(0);
         state.cycle_start_epoch = cycle_start_epoch;
 
+        // ── Issue #1: re-sync the authoritative goal board at cycle start ──
+        // Load the single source of truth (`goal_board.json`) so operator
+        // mutations (`goal add/remove/complete/reprioritize`) and meeting
+        // handoffs made since the last cycle take effect and STICK. Restore the
+        // persisted no-progress tracker so the breaker's per-goal counters
+        // survive the daemon's periodic exec-reload restarts, and overwrite the
+        // cognitive-memory snapshot cache so `run_ooda_cycle`'s internal board
+        // read sees exactly the authoritative (tombstone-filtered) board.
+        {
+            let cycle_tombstones = crate::ooda_loop::load_tombstones(&state_root);
+            let persistent = crate::goal_board_store::load(&state_root);
+            state.active_goals =
+                crate::goal_board_store::filter_tombstoned(persistent.board, &cycle_tombstones);
+            state.no_progress_tracker = persistent.no_progress;
+            if let Err(e) =
+                crate::goal_curation::overwrite_memory_cache(&state.active_goals, &*bridges.memory)
+            {
+                daemon_log(
+                    &state_root,
+                    &format!("[simard] OODA cycle: memory cache sync failed: {e}"),
+                );
+            }
+        }
+        // Snapshot the pre-cycle active ids so the post-cycle commit can
+        // tombstone any goal that left the board (archived / dropped / done).
+        let pre_cycle_active_ids: std::collections::HashSet<String> = state
+            .active_goals
+            .active
+            .iter()
+            .map(|g| g.id.clone())
+            .collect();
+
         // Write heartbeat at cycle START so the dashboard never sees "stale"
         // during a long-running cycle.
         {
@@ -792,6 +926,92 @@ pub fn run_ooda_daemon(
                 state.last_cycle_duration_secs = Some(cycle_elapsed.as_secs());
                 state.current_phase = OodaPhase::Sleep;
                 daemon_log(&state_root, &format!("[simard] {summary}"));
+
+                // ── Issue #1: commit the post-cycle board authoritatively ──
+                // 1. Run the every-cycle done-gate over the WHOLE active board
+                //    (cross-repo aware) so a goal whose objective was completed
+                //    out-of-band — a merged PR / closed issue on ANY governed
+                //    repo — is auto-completed instead of being re-litigated
+                //    forever. 2. Tombstone every goal that left the board this
+                //    cycle (archived, dropped by the no-progress breaker, or
+                //    just-completed by the done-gate) so nothing re-seeds it.
+                //    3. Commit the reconciled board + persisted no-progress
+                //    tracker to the authoritative store, then regenerate the
+                //    memory cache from the committed board.
+                {
+                    let mut newly_done: Vec<String> = Vec::new();
+                    if let Some(evidence) = &bridges.completion_evidence {
+                        newly_done = crate::goal_board_store::sweep_done_goals(
+                            &mut state.active_goals,
+                            evidence.as_ref(),
+                        );
+                        if !newly_done.is_empty() {
+                            let done: std::collections::HashSet<&str> =
+                                newly_done.iter().map(String::as_str).collect();
+                            state
+                                .active_goals
+                                .active
+                                .retain(|g| !done.contains(g.id.as_str()));
+                            daemon_log(
+                                &state_root,
+                                &format!(
+                                    "[simard] OODA done-gate: auto-completed {} goal(s) with cross-repo evidence: {}",
+                                    newly_done.len(),
+                                    newly_done.join(", "),
+                                ),
+                            );
+                        }
+                    }
+
+                    let post_active: std::collections::HashSet<&str> = state
+                        .active_goals
+                        .active
+                        .iter()
+                        .map(|g| g.id.as_str())
+                        .collect();
+                    let post_backlog: std::collections::HashSet<&str> = state
+                        .active_goals
+                        .backlog
+                        .iter()
+                        .map(|b| b.id.as_str())
+                        .collect();
+                    let mut tombstones: Vec<String> = pre_cycle_active_ids
+                        .iter()
+                        .filter(|id| {
+                            !post_active.contains(id.as_str())
+                                && !post_backlog.contains(id.as_str())
+                        })
+                        .cloned()
+                        .collect();
+                    tombstones.extend(newly_done);
+
+                    match crate::goal_board_store::commit_cycle(
+                        &state_root,
+                        &state.active_goals,
+                        &state.no_progress_tracker,
+                        &tombstones,
+                    ) {
+                        Ok(committed) => {
+                            state.active_goals = committed;
+                            if let Err(e) = crate::goal_curation::overwrite_memory_cache(
+                                &state.active_goals,
+                                &*bridges.memory,
+                            ) {
+                                daemon_log(
+                                    &state_root,
+                                    &format!(
+                                        "[simard] OODA cycle: memory cache refresh failed: {e}"
+                                    ),
+                                );
+                            }
+                        }
+                        Err(e) => daemon_log(
+                            &state_root,
+                            &format!("[simard] OODA cycle: authoritative commit failed: {e}"),
+                        ),
+                    }
+                }
+
                 // Persist the cycle report to filesystem for auditability.
                 persist_cycle_report(&state_root, &report);
                 // Persist the cycle summary to cognitive memory as an episode.
@@ -825,6 +1045,78 @@ pub fn run_ooda_daemon(
                 if let Err(e) = crate::self_metrics::collect_and_record_all(cycle_elapsed) {
                     eprintln!("[simard] OODA metrics: failed to record: {e}");
                 }
+
+                // Issue #2528: emit unified cycle telemetry (OTel + in-process
+                // registry) and push per-cycle gauges, then flush the metrics
+                // snapshot so `simard status` and the TUI — separate processes —
+                // read live daemon metrics with no external OTLP collector. All
+                // best-effort: a telemetry hiccup never disrupts the cycle.
+                {
+                    use crate::telemetry::{self, names};
+                    telemetry::counter_add(names::DAEMON_CYCLE, 1, &[]);
+                    telemetry::histogram_record(
+                        names::DAEMON_CYCLE_DURATION_SECONDS,
+                        cycle_elapsed.as_secs_f64(),
+                        &[],
+                    );
+                    telemetry::gauge_set(
+                        names::GOAL_ACTIVE,
+                        state.active_goals.active.len() as i64,
+                        &[],
+                    );
+                    if let Ok(stats) = bridges.memory.get_statistics() {
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.episodic_count as i64,
+                            &[(names::ATTR_TYPE, "episodic")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.semantic_count as i64,
+                            &[(names::ATTR_TYPE, "semantic")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.prospective_count as i64,
+                            &[(names::ATTR_TYPE, "prospective")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.working_count as i64,
+                            &[(names::ATTR_TYPE, "working")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.procedural_count as i64,
+                            &[(names::ATTR_TYPE, "procedural")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_NODES,
+                            stats.sensory_count as i64,
+                            &[(names::ATTR_TYPE, "sensory")],
+                        );
+                    }
+                    if let Ok(g) = bridges.memory.graph_stats() {
+                        telemetry::gauge_set(
+                            names::MEMORY_EDGES,
+                            g.derives_from_edges as i64,
+                            &[(names::ATTR_TYPE, "DERIVES_FROM")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_EDGES,
+                            g.similar_to_edges as i64,
+                            &[(names::ATTR_TYPE, "SIMILAR_TO")],
+                        );
+                        telemetry::gauge_set(
+                            names::MEMORY_EDGES,
+                            g.supersedes_edges as i64,
+                            &[(names::ATTR_TYPE, "SUPERSEDES")],
+                        );
+                    }
+                    if let Err(e) = telemetry::flush_snapshot(&state_root) {
+                        eprintln!("[simard] telemetry: failed to flush metrics snapshot: {e}");
+                    }
+                }
             }
             Err(e) => {
                 daemon_log(&state_root, &format!("[simard] OODA cycle error: {e}"));
@@ -832,6 +1124,36 @@ pub fn run_ooda_daemon(
         }
 
         cycles_run += 1;
+
+        // ── Cognitive-thread scheduler tick (issue #2419) ───────────────
+        // Runs AFTER the authoritative OODA cycle so OODA is never starved.
+        // Background threads (maintenance, engineer-log analysis) run on their
+        // own cadence under the `Mind`'s priority/failure-isolation budget; a
+        // thread erroring or panicking is caught and backed off, never taking
+        // down the daemon or the OODA loop. No-op unless explicitly enabled.
+        if let Some(ref rt) = cognitive_runtime {
+            let now_epoch = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let mut ctx = crate::cognitive_threads::ThreadContext {
+                state_root: &state_root,
+                repo_root: &cognitive_repo_root,
+                memory: shared_mem.as_ref(),
+                runtime: rt.handle().clone(),
+                shutdown: &shutdown,
+                now_epoch,
+                dry_run: false,
+            };
+            for outcome in mind.run_due(&mut ctx) {
+                if outcome.ran {
+                    daemon_log(
+                        &state_root,
+                        &format!("[simard] cognitive-thread: {}", outcome.summary),
+                    );
+                }
+            }
+        }
 
         // Skip the inter-cycle sleep if this was the last requested cycle.
         if max_cycles > 0 && cycles_run >= max_cycles {
@@ -893,6 +1215,21 @@ fn shutdown_daemon(
     signal_driven: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     daemon_log(state_root, "[simard] OODA daemon: shutdown sequence start");
+
+    // 0. Commit the board + persisted no-progress tracker to the authoritative
+    //    store (issue #1) so the last live state — including the breaker's
+    //    counters — survives the restart. Best-effort; a failure is logged.
+    if let Err(e) = crate::goal_board_store::commit_cycle(
+        state_root,
+        &state.active_goals,
+        &state.no_progress_tracker,
+        &[],
+    ) {
+        daemon_log(
+            state_root,
+            &format!("[simard] shutdown: authoritative goal-board commit failed: {e}"),
+        );
+    }
 
     // 1. Persist the goal board through the live writer.
     if let Err(e) = persist_board(&state.active_goals, &*bridges.memory) {

@@ -781,6 +781,68 @@ fn corrupt_db_removes_aged_library_backend_quarantines() {
     assert!(report.errors.is_empty(), "no errors expected: {report:?}");
 }
 
+/// Issue #2550: the LARGEST *substantial* quarantine is the recovery asset (a
+/// corrupt store a prefix-recovery salvaged tens of thousands of records from).
+/// It must survive BOTH caps — a burst of newer small quarantines (keep-last-N)
+/// AND the age cap — so a corruption-reset stays recoverable. Trivial
+/// quarantines below the size floor are still reclaimed normally.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_preserves_largest_recovery_asset() {
+    let tmp = tempfile::tempdir().unwrap();
+    let simard = tmp.path().join(".simard");
+    std::fs::create_dir_all(&simard).unwrap();
+
+    // The recovery asset: a multi-MB quarantine, made OLDER than the age cap AND
+    // (below) buried behind more than CORRUPT_DB_KEEP newer quarantines — either
+    // cap alone would otherwise reclaim it.
+    let asset = simard.join("cognitive.corrupt-1700000000");
+    std::fs::write(
+        &asset,
+        vec![0u8; (CORRUPT_DB_PROTECT_MIN_BYTES + 512) as usize],
+    )
+    .unwrap();
+    backdate(&asset, CORRUPT_DB_MAX_AGE_DAYS + 5);
+
+    // A burst of CORRUPT_DB_KEEP + 3 newer, trivially-small quarantines.
+    let burst = CORRUPT_DB_KEEP + 3;
+    let mut small = Vec::with_capacity(burst);
+    for i in 0..burst {
+        let p = simard.join(format!("cognitive.wal.corrupt-{i:04}"));
+        std::fs::write(&p, b"tiny").unwrap();
+        // Newer than the asset (recent), strictly decreasing so ranks are stable.
+        let mtime =
+            std::time::SystemTime::now() - std::time::Duration::from_secs((i as u64 + 1) * 60);
+        let times = std::fs::FileTimes::new().set_modified(mtime);
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        small.push(p);
+    }
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    assert!(
+        asset.exists(),
+        "the largest substantial quarantine (recovery asset) must be preserved \
+         despite being aged and buried behind newer quarantines"
+    );
+    // The small burst is still bounded to keep-last-N (the asset does not consume
+    // a keep slot — protection is independent of the count cap).
+    let small_remaining = small.iter().filter(|p| p.exists()).count();
+    assert_eq!(
+        small_remaining, CORRUPT_DB_KEEP,
+        "trivial quarantines below the size floor are still bounded by keep-last-N"
+    );
+    assert!(
+        !report.dirs_removed.contains(&asset),
+        "recovery asset must not be reported as removed"
+    );
+}
+
 /// Safety invariant: a name without the `.corrupt-` infix is the live store and
 /// must NEVER be deleted — even if it is older than the threshold. Guards
 /// against a future over-broad matcher wiping `~/.simard/cognitive` and

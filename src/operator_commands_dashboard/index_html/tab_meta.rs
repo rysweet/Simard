@@ -185,6 +185,14 @@ pub const TAB_METADATA: &[TabMeta] = &[
         lede: "Attach to the live terminal of a running Simard sub-agent and watch its standard output and standard error stream in real time.",
         tooltip: "Attach to the agent's tmux terminal session and watch live stdout",
     },
+    TabMeta {
+        slug: "status",
+        label: "Status",
+        title: "Status · Simard",
+        h1: "Status",
+        lede: "One consolidated operational report — the daemon, system resources, model spending, memory and brain health, gym, goals, active work, merged pull requests, and unexpected telemetry signals, all on a single page.",
+        tooltip: "One consolidated operational status report across every subsystem",
+    },
 ];
 
 /// Browser title shown on first page load. The client-side tab handler

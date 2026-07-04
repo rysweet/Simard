@@ -1,3 +1,14 @@
+---
+title: Meeting REPL & Handoff Ingestion
+description: How to drive a real meeting through the REPL, what the structured handoff JSON contains, and how the OODA daemon and engineer loop ingest handoff artifacts on their next cycle.
+last_updated: 2026-07-03
+owner: simard
+doc_type: howto
+related:
+  - ../architecture/ooda-meeting-handoff-integration.md
+  - ../reference/meeting-handoff-schema.md
+---
+
 # Meeting REPL & Handoff Ingestion
 
 How to drive a real meeting through the REPL, what the structured
@@ -573,7 +584,7 @@ issue tracker by hand.
 
 For a **reviewable** alternative that does *not* file anything
 automatically, see the per-meeting
-[issue stubs](#ready-to-file-issue-stubs-issues--2309) written into the
+[issue stubs](#ready-to-file-issue-stubs-issues-2309) written into the
 bundle's `issues/` directory on `/close`.
 
 ---
