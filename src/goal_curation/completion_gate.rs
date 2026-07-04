@@ -469,7 +469,22 @@ pub fn completion_evidence_enabled() -> bool {
 
 /// True for goals whose status makes them archive candidates under the legacy
 /// rule (`Completed`, or `InProgress` at ≥ 100%).
+///
+/// Standing/perpetual goals (issue #2580) are never candidates: they have no
+/// terminal done-state, so the gate must not archive them regardless of status.
 fn is_complete_candidate(goal: &ActiveGoal) -> bool {
+    if goal.is_perpetual() {
+        return false;
+    }
+    matches!(goal.status, GoalProgress::Completed)
+        || matches!(goal.status, GoalProgress::InProgress { percent } if percent >= 100)
+}
+
+/// True when a goal's status *looks* terminal (`Completed`, or `InProgress` at
+/// ≥ 100%), independent of whether the goal is perpetual. Used to detect a
+/// standing goal whose unit of work finished so it can be rolled to a fresh
+/// cycle instead of stalling in a done-looking state.
+fn has_dominant_progress(goal: &ActiveGoal) -> bool {
     matches!(goal.status, GoalProgress::Completed)
         || matches!(goal.status, GoalProgress::InProgress { percent } if percent >= 100)
 }
@@ -487,6 +502,17 @@ pub fn archive_completed_with_evidence<E: EvidenceSource>(
     let mut retained = Vec::new();
 
     for goal in std::mem::take(&mut board.active) {
+        // Standing/perpetual goals never archive (issue #2580). If a unit of
+        // work drove one to a terminal-looking status, roll it to a fresh cycle
+        // in place instead of retaining it stuck as "done".
+        if goal.is_perpetual() {
+            let mut g = goal;
+            if has_dominant_progress(&g) {
+                g.roll_to_new_cycle();
+            }
+            retained.push(g);
+            continue;
+        }
         if !is_complete_candidate(&goal) {
             retained.push(goal);
             continue;

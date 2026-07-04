@@ -10,7 +10,10 @@
 //!    pass entirely — no LLM call, no markers.
 //! 3. Otherwise invokes a pluggable [`DistillRecipeRunner`] that
 //!    classifies each episode into one of three concept labels
-//!    (`pr-pattern`, `bug-pattern`, `lesson-learned`) or `skip`.
+//!    (`pr-pattern`, `bug-pattern`, `lesson-learned`) or `skip`. Surface-form
+//!    variants of those labels (case, whitespace, `_`↔`-`) are canonicalized by
+//!    [`canonical_distill_concept`] so a well-formed fact is not lost to
+//!    cosmetics; genuinely off-spec labels are still dropped.
 //! 4. Self-assesses each candidate fact's reliability (issue #2433,
 //!    BGML's ISAO) and GATES on `Fact.confidence`: low-reliability facts
 //!    are quarantined (not promoted) and a weaker new fact never clobbers
@@ -286,6 +289,9 @@ pub fn distill_recent_episodes_with_runner(
             min = DISTILL_MIN_EPISODES,
             "distill: {pulled} episodes pulled, below min {DISTILL_MIN_EPISODES}, skipped"
         );
+        eprintln!(
+            "[simard] distill: {pulled} episodes pulled, below min {DISTILL_MIN_EPISODES}, skipped"
+        );
         return Ok(DistillReport::skipped());
     }
 
@@ -295,6 +301,9 @@ pub fn distill_recent_episodes_with_runner(
         batch = DISTILL_BATCH_SIZE,
         min = DISTILL_MIN_EPISODES,
         "distill: {pulled} episodes pulled (batch size {DISTILL_BATCH_SIZE}, min {DISTILL_MIN_EPISODES})"
+    );
+    eprintln!(
+        "[simard] distill: {pulled} episodes pulled (batch size {DISTILL_BATCH_SIZE}, min {DISTILL_MIN_EPISODES})"
     );
 
     // Run the recipe with a bounded in-cycle retry on TRANSIENT failures only
@@ -335,6 +344,10 @@ pub fn distill_recent_episodes_with_runner(
                         error = %e,
                         "distill: transient failure, retrying in-cycle with format reinforcement"
                     );
+                    eprintln!(
+                        "[simard] distill: transient {} on attempt {attempt}, retrying in-cycle (strict json)",
+                        class.as_str()
+                    );
                     continue;
                 }
                 tracing::warn!(
@@ -344,6 +357,9 @@ pub fn distill_recent_episodes_with_runner(
                     class = class.as_str(),
                     error = %e,
                     "distill: {pulled} episodes pulled, recipe error, no markers set, retry next pass"
+                );
+                eprintln!(
+                    "[simard] distill: {pulled} episodes pulled, recipe error: {e}, no markers set, retry next pass"
                 );
                 // Make the previously-silent non-fatal failure visible (#2461).
                 // Recorded BEFORE the early return; episodes stay unmarked, so
@@ -415,6 +431,10 @@ pub fn distill_recent_episodes_with_runner(
                 threshold = DISTILL_RELIABILITY_THRESHOLD,
                 "distill: quarantined low-reliability fact (below threshold), not promoted"
             );
+            eprintln!(
+                "[simard] distill: quarantined low-reliability fact concept={} confidence={:.2} < {:.2}",
+                fact.concept, confidence, DISTILL_RELIABILITY_THRESHOLD
+            );
             continue;
         }
 
@@ -452,6 +472,10 @@ pub fn distill_recent_episodes_with_runner(
                 concept = %fact.concept,
                 confidence,
                 "distill: an equal-or-stronger copy of this fact already exists; not downgrading prior"
+            );
+            eprintln!(
+                "[simard] distill: kept stronger prior for concept={} (new confidence={:.2} would downgrade an identical fact)",
+                fact.concept, confidence
             );
             continue;
         }
@@ -510,6 +534,9 @@ pub fn distill_recent_episodes_with_runner(
         marked,
         reduction_pct,
         "distill: {pulled} episodes → {stored} facts, {stored_procs} procedures, {marked} marked (reduction {reduction_pct:.0}%)"
+    );
+    eprintln!(
+        "[simard] distill: {pulled} episodes → {stored} facts, {stored_procs} procedures, {marked} marked"
     );
 
     // Issue #2528: mirror the distill outcome into the unified telemetry facade
@@ -1653,23 +1680,80 @@ struct RecipeProcedure {
     source_episode_ids: Vec<String>,
 }
 
+/// Canonicalize a recipe-emitted concept label to one of the fixed
+/// [`KNOWN_DISTILL_CONCEPTS`], or `None` if it is genuinely off-spec.
+///
+/// The distillation recipe's prompt constrains the label to the closed set
+/// `{pr-pattern, bug-pattern, lesson-learned}`, but an LLM routinely varies the
+/// *surface form* of a label it clearly intends: title/upper case
+/// (`"PR-Pattern"`, `"BUG-PATTERN"`), surrounding whitespace or quotes/sentence
+/// punctuation (`" bug-pattern "`, `"pr-pattern."`), and space/underscore
+/// separators (`"pr_pattern"`, `"lesson learned"`). The legacy exact-match
+/// filter silently dropped every such fact — a well-formed, grounded fact lost
+/// purely to cosmetics, depressing distillation fact-yield.
+///
+/// Canonicalization recovers those facts (higher yield) **without weakening
+/// precision**: normalization only folds case, trims surrounding
+/// whitespace/quotes/sentence-punctuation, and unifies `_`/space→`-` (collapsing
+/// repeated hyphens) before an EXACT match against the three labels. A concept
+/// that does not normalize to one of them — `"made-up-label"`, `"skip"`,
+/// `"pr-patterns"`, `"pull-request"` — still returns `None` and is dropped. The
+/// three labels are lexically distinct, so no genuinely different concept can
+/// alias onto another. The returned value is the canonical lower-hyphen form,
+/// so the stored concept is uniform for downstream dedup/recall regardless of
+/// how the model spelled it.
+pub(crate) fn canonical_distill_concept(raw: &str) -> Option<&'static str> {
+    // Fold case, then strip surrounding whitespace and the quote/sentence
+    // punctuation a model sometimes wraps a label in.
+    let trimmed = raw
+        .trim()
+        .trim_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '.' | ',' | ':' | ';')
+        })
+        .to_ascii_lowercase();
+
+    // Unify separators (`_` and interior spaces behave as `-`) and collapse runs
+    // of hyphens, then trim any leading/trailing hyphens the folding produced.
+    let mut canon = String::with_capacity(trimmed.len());
+    let mut prev_hyphen = false;
+    for ch in trimmed.chars() {
+        let c = if ch == '_' || ch == ' ' { '-' } else { ch };
+        if c == '-' {
+            if !prev_hyphen {
+                canon.push('-');
+            }
+            prev_hyphen = true;
+        } else {
+            canon.push(c);
+            prev_hyphen = false;
+        }
+    }
+    let canon = canon.trim_matches('-');
+
+    match canon {
+        "pr-pattern" => Some("pr-pattern"),
+        "bug-pattern" => Some("bug-pattern"),
+        "lesson-learned" => Some("lesson-learned"),
+        _ => None,
+    }
+}
+
 impl RecipeEnvelope {
     fn into_facts(self) -> Vec<DistilledFact> {
-        // Keep only the three documented concepts so the recipe cannot
-        // sneak new labels past the contract. Everything else (incl.
-        // `skip` if it ever lands here) is dropped.
+        // Keep only facts whose concept canonicalizes to one of the three
+        // documented labels so the recipe cannot sneak new labels past the
+        // contract — but tolerate the LLM's surface-form variation (case /
+        // whitespace / `_`↔`-`) of a label it clearly intends. Off-spec
+        // concepts (incl. `skip` if it ever lands here) still return `None` and
+        // are dropped; recovered facts are stored under the canonical label.
         self.facts
             .into_iter()
-            .filter(|f| {
-                matches!(
-                    f.concept.as_str(),
-                    "pr-pattern" | "bug-pattern" | "lesson-learned"
-                )
-            })
-            .map(|f| DistilledFact {
-                concept: f.concept,
-                content: f.content,
-                source_episode_id: f.source_episode_id,
+            .filter_map(|f| {
+                canonical_distill_concept(&f.concept).map(|concept| DistilledFact {
+                    concept: concept.to_string(),
+                    content: f.content,
+                    source_episode_id: f.source_episode_id,
+                })
             })
             .collect()
     }
@@ -1794,6 +1878,77 @@ mod unit_tests {
         let facts = parse_recipe_output(raw).unwrap();
         assert_eq!(facts.len(), 1, "made-up-label must be filtered out");
         assert_eq!(facts[0].concept, "lesson-learned");
+    }
+
+    #[test]
+    fn canonical_concept_accepts_surface_form_variants() {
+        // Case, surrounding whitespace/quotes/punctuation, and `_`/space
+        // separators of a clearly-intended label all normalize to the canonical
+        // lower-hyphen form (higher fact-yield without lowering precision).
+        for (raw, want) in [
+            ("pr-pattern", "pr-pattern"),
+            ("PR-Pattern", "pr-pattern"),
+            ("BUG-PATTERN", "bug-pattern"),
+            (" bug-pattern ", "bug-pattern"),
+            ("Lesson-Learned", "lesson-learned"),
+            ("pr_pattern", "pr-pattern"),
+            ("lesson learned", "lesson-learned"),
+            ("pr--pattern", "pr-pattern"),
+            ("\"pr-pattern\"", "pr-pattern"),
+            ("bug-pattern.", "bug-pattern"),
+        ] {
+            assert_eq!(
+                canonical_distill_concept(raw),
+                Some(want),
+                "surface variant {raw:?} should canonicalize to {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_concept_rejects_offspec_labels() {
+        // Precision guard: anything that does not normalize to exactly one of the
+        // three labels is still dropped — the canonicalizer must not admit
+        // near-misses, plurals, or unrelated labels.
+        for raw in [
+            "made-up-label",
+            "skip",
+            "observation",
+            "pr-patterns",
+            "pull-request",
+            "bug",
+            "pattern",
+            "",
+            "   ",
+            "pr-pattern-v2",
+            "prpattern",
+        ] {
+            assert_eq!(
+                canonical_distill_concept(raw),
+                None,
+                "off-spec label {raw:?} must be dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn into_facts_recovers_surface_variant_but_drops_offspec() {
+        // End-to-end through the production parser: a case/whitespace/underscore
+        // variant is recovered (and stored canonical); an off-spec label is
+        // dropped.
+        let raw = r#"{"facts":[
+            {"concept":"PR-Pattern","content":"squash fixups","source_episode_id":"epi_1"},
+            {"concept":" bug_pattern ","content":"off by one","source_episode_id":"epi_2"},
+            {"concept":"made-up-label","content":"nope","source_episode_id":"epi_3"}
+        ]}"#;
+        let facts = parse_recipe_output(raw).unwrap();
+        assert_eq!(
+            facts.len(),
+            2,
+            "two surface variants recovered, off-spec dropped"
+        );
+        assert_eq!(facts[0].concept, "pr-pattern");
+        assert_eq!(facts[1].concept, "bug-pattern");
     }
 
     #[test]

@@ -61,6 +61,7 @@ pub mod pr_verify;
 pub mod sensor;
 pub mod signal;
 pub mod tuning;
+pub mod wiring;
 
 #[cfg(test)]
 mod tests_m1;
@@ -71,7 +72,9 @@ pub use capabilities::{
     Auditor, Deployer, GoalCurator, IssueFiler, MeetingHost, ObservedState, OrchestratorRunBrief,
     OverseerError, PrOps, RecipeBrief, RecipeLauncher, StatusReader,
 };
-pub use config::{daily_budget_usd, overseer_enabled};
+pub use config::{
+    daily_budget_usd, overseer_acting_enabled, overseer_author_login, overseer_enabled,
+};
 pub use guardrails::{
     AutonomyGate, BudgetGate, ConflictSequencer, RecursionGuard, RiskClass, Subject, classify,
 };
@@ -82,6 +85,11 @@ pub use sensor::{
     in_flight_from_board, observed_from_snapshot, run_observer_cycle,
 };
 pub use signal::{Priority, Problem, ProblemKind, Signal, signals_from};
+pub use wiring::{
+    BoardGoalCurator, OverseerCadence, OverseerTickReport, RefuseDeployer, assemble_capabilities,
+    build_overseer, overseer_identity, overseer_tick, overseer_tick_interval_secs,
+    run_overseer_tick_isolated,
+};
 
 use capabilities::{DeployReport, GoalBrief, InFlightItem, IssueOutcome, WorkstreamHandle};
 

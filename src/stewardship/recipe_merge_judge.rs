@@ -143,7 +143,6 @@ impl MergeJudge for RecipeMergeJudge {
         // merge authority refuses on `Unclear`, so the merge does not proceed.
         let cfg = EscalationConfig::from_env();
         let (final_judgment, final_outcome, attempts, termination) = run_brain_ladder(
-            "merge_judge",
             &pr_label,
             &base_raw,
             outcome,

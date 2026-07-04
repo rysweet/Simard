@@ -24,6 +24,13 @@ pub const DISTILL_EPISODES_MARKED: &str = "simard.distill.episodes_marked";
 pub const BRAIN_DECISION: &str = "simard.brain.decision";
 /// The `decide` ladder was exhausted with no keyword match.
 pub const BRAIN_LADDER_EXHAUSTED: &str = "simard.brain.ladder_exhausted";
+/// A reasoner's bounded escalation ladder ended (exhausted / invoke-error) with
+/// no parseable decision, so the phase surfaced an EXPLICIT hard parse error to
+/// its caller instead of a silent deterministic default (issue #2580 —
+/// operator zero-fallback contract). Fires only on a genuine, post-sanitization,
+/// post-bounded-retry parse failure — never on a first-try parse or a ladder
+/// recovery — so it is the honest "current fallback rate" signal.
+pub const BRAIN_PARSE_ERROR: &str = "simard.brain.parse_error";
 /// A decision escalated (degraded / quarantine / SIGTERM path).
 pub const BRAIN_ESCALATIONS: &str = "simard.brain.escalations";
 

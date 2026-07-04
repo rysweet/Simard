@@ -199,66 +199,30 @@ pub(crate) async fn workboard() -> Json<Value> {
         })
         .unwrap_or_default();
 
-    // --- 3. Active engineers from the live subagent-session registry ---
-    // Read from the same source the Terminal tab uses
-    // (`/api/subagent-sessions`) so the Whiteboard's "Active Engineers" panel
-    // agrees with it. The agent registry used previously is empty for the
-    // running daemon, which produced the "No spawned engineers" contradiction
-    // (#1678). "Live" == no recorded end time, matching the Terminal tab.
-    let mut sessions: Vec<crate::subagent_sessions::SubagentSession> =
-        crate::subagent_sessions::load()
-            .sessions
-            .into_iter()
-            .filter(|s| s.ended_at.is_none())
-            .collect();
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
-    let mut spawned_engineers: Vec<Value> = sessions
-        .iter()
-        .map(|s| {
-            let alive = super::routes::is_pid_alive(s.pid);
-            let started_at = chrono::DateTime::from_timestamp(s.created_at, 0)
+    // --- 3. Active engineers — the TRUE live set (issue #2580) ---
+    // Union of live subagent sessions (tmux-tracked) AND live engineer-worktree
+    // claim sentinels. Reading subagent sessions alone (#1678 fix) still missed
+    // bare `bin/simard engineer run single-process` engineers, which never
+    // register a tmux session — so the panel could still read ZERO while the
+    // daemon ran them. The worktree-claim scan is the same liveness the daemon
+    // itself trusts to avoid a duplicate spawn. "Live" == pid alive / claim live.
+    let spawned_engineers: Vec<Value> = super::live_engineers::live_engineers(&state_root)
+        .into_iter()
+        .map(|e| {
+            let started_at = e
+                .started_at
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_default();
-            let task = if !s.goal_id.is_empty() {
-                s.goal_id.clone()
-            } else {
-                s.session_name.clone()
-            };
             json!({
-                "pid": s.pid,
-                "task": task,
-                "alive": alive,
-                "host": s.host,
+                "pid": e.pid,
+                "task": e.goal_id,
+                "alive": e.alive,
+                "source": e.source,
                 "started_at": started_at,
             })
         })
         .collect();
-
-    // --- 3b. Union live worktree dispatch claims (#2432, the TRUE live set) ---
-    // Root-cause fix for the "ZERO active engineers" defect: on a cold-start or
-    // after a daemon restart the subagent registry can be empty/stale while
-    // engineers are genuinely in-flight as worktree dispatch claims (a live PID
-    // holding a `.simard-engineer-claim` sentinel). Union those live claims —
-    // the single source of truth (design G4) — so the gauge reflects the real
-    // live engineer set and can never render 0 while an engineer is running.
-    // Dedup by PID so a claim already surfaced as a subagent session above is
-    // not double-counted.
-    let mut seen_pids: std::collections::HashSet<i64> = spawned_engineers
-        .iter()
-        .filter_map(|e| e["pid"].as_i64())
-        .collect();
-    for claim in crate::ooda_brain::live_engineer_claims(&state_root) {
-        if !seen_pids.insert(claim.pid as i64) {
-            continue;
-        }
-        spawned_engineers.push(json!({
-            "pid": claim.pid,
-            "task": claim.worktree_name,
-            "alive": true,
-            "host": "local",
-            "started_at": "",
-        }));
-    }
 
     // --- 4. Recent actions from cycle reports ---
     let recent_reports = read_recent_cycle_reports(&state_root, 5);

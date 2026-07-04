@@ -35,8 +35,6 @@ mod orient_tests;
 mod prompt_store_tests;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod zero_fallback_tests;
 
 pub use confidence::{
     CalibrationWindow, ECE_BINS, ECE_METRIC, ECE_WINDOW, HIGH_STAKES_URGENCY, JudgedDecision,
@@ -44,10 +42,7 @@ pub use confidence::{
     effective_k, is_high_stakes, is_irreversible_lifecycle, lifecycle_conservative_rank,
     self_consistency_vote, should_self_consistency_sample, validate_confidence,
 };
-pub use context::{
-    LiveEngineerClaim, count_live_engineer_claims, gather_engineer_lifecycle_ctx,
-    live_engineer_claims, redact_secrets,
-};
+pub use context::{count_live_engineer_claims, gather_engineer_lifecycle_ctx, redact_secrets};
 pub use decide::{
     DecideContext, DecideJudgment, DeterministicDecideBrain, OodaDecideBrain,
     PROMPT_NAME as DECIDE_PROMPT_NAME,

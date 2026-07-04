@@ -115,10 +115,16 @@ allow = [
 ]
 confidence-threshold = 0.8
 # Per-crate exceptions. The global allowlist stays strictly permissive; a
-# non-permissive crate is allowed ONLY by an explicit, justified per-crate
-# exception so it stays visible in every CI run.
+# non-permissive (or non-standard-software) license is allowed ONLY by an
+# explicit, justified per-crate exception so it stays visible in every CI run.
 [[licenses.exceptions]]
 crate = "html2md"          # GPL-3.0-or-later (copyleft) — see the note below
+allow = ["GPL-3.0-or-later"]
+[[licenses.exceptions]]
+crate = "webpki-roots"     # CDLA-Permissive-2.0 (permissive data license)
+allow = ["CDLA-Permissive-2.0"]
+[[licenses.exceptions]]
+crate = "auto_generate_cdp" # GPL-3.0-or-later, BUILD-ONLY code generator
 allow = ["GPL-3.0-or-later"]
 ```
 
@@ -136,6 +142,26 @@ all — fails `cargo deny check licenses`.
 > and reviewable. Removing it is upstream (`rustyclawd-tools`) work; until then
 > the exception is the sanctioned, tracked path — the licensing analogue of the
 > `rsa` advisory `ignore`.
+
+> **Flagged findings — the `dashboard-audit` default chain (issue #2576).**
+> Making `dashboard-audit` a **default** feature brought its `headless_chrome`
+> subtree into the default-feature license graph, surfacing two crates that were
+> previously outside the checked set:
+>
+> - [`webpki-roots`](https://crates.io/crates/webpki-roots) ships Mozilla's CA
+>   certificate bundle under **CDLA-Permissive-2.0** — a *permissive* data
+>   license (no copyleft), not a standard OSI *software* license. Chain:
+>   `webpki-roots -> ureq -> auto_generate_cdp (build) -> headless_chrome`.
+> - [`auto_generate_cdp`](https://crates.io/crates/auto_generate_cdp) is
+>   **GPL-3.0-or-later** but is a **build-dependency only** — a code generator
+>   that emits the Chrome DevTools Protocol bindings at build time. It is neither
+>   linked into nor distributed with the Simard binary, so its copyleft does not
+>   extend to Simard (the same reasoning that lets a GPL compiler build a
+>   non-GPL program).
+>
+> Both are allowed by explicit, justified `[[licenses.exceptions]]` entries
+> rather than by widening the global permissive allowlist, keeping them visible
+> and reviewable in every CI run.
 
 ### `[bans]`
 

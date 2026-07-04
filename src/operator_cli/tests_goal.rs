@@ -516,3 +516,112 @@ fn operator_reprioritize_via_cli_sticks_and_survives_restart() {
         "reprioritize of an unknown goal id must return a non-zero exit"
     );
 }
+
+// ─── standing / perpetual goals (issue #2580) ───────────────────────────────
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn simard_goal_add_standing_marks_goal_perpetual() {
+    let (_tmp, root) = isolated_state_root();
+
+    let result = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "add".to_string(),
+        "5".to_string(),
+        "--standing".to_string(),
+        "continuously research and improve cognition".to_string(),
+    ]);
+    assert!(
+        result.is_ok(),
+        "`goal add --standing` must exit 0; got: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+
+    let board = load_board(&root);
+    let g = board
+        .active
+        .iter()
+        .find(|g| g.is_perpetual())
+        .expect("a standing goal must be on the board after --standing add");
+    assert!(
+        g.description.contains("continuously research"),
+        "operator description must be preserved: {}",
+        g.description
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn simard_goal_complete_reopens_standing_goal_without_tombstone() {
+    let (_tmp, root) = isolated_state_root();
+    // A standing goal that a done-claim drove to Completed.
+    let mut standing = active_goal("research-loop", GoalProgress::Completed);
+    standing.description = "Research cognition. STANDING PERPETUAL goal.".to_string();
+    standing.assigned_to = Some("engineer-x".to_string());
+    seed_board(&root, vec![standing]);
+
+    let result = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "complete".to_string(),
+        "research-loop".to_string(),
+    ]);
+    assert!(
+        result.is_ok(),
+        "`goal complete` on a standing goal must exit 0; got: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+
+    let board = load_board(&root);
+    let g = board
+        .active
+        .iter()
+        .find(|g| g.id == "research-loop")
+        .expect("a standing goal must NOT be removed by `goal complete`");
+    assert_eq!(
+        g.status,
+        GoalProgress::NotStarted,
+        "standing goal must be reopened (rolled to a fresh cycle)"
+    );
+    assert!(
+        g.assigned_to.is_none(),
+        "assignment must be cleared on reopen"
+    );
+    // Never tombstoned: a fresh add of the same id must succeed / not be filtered.
+    let tombstones = crate::ooda_loop::load_tombstones(&root);
+    assert!(
+        !tombstones.contains("research-loop"),
+        "a standing goal must never be tombstoned by `goal complete`"
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn simard_goal_complete_still_removes_and_tombstones_normal_goal() {
+    // Regression guard: a normal goal completes as before.
+    let (_tmp, root) = isolated_state_root();
+    seed_board(
+        &root,
+        vec![active_goal("one-shot", GoalProgress::Completed)],
+    );
+
+    let result = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "complete".to_string(),
+        "one-shot".to_string(),
+    ]);
+    assert!(
+        result.is_ok(),
+        "`goal complete` on a normal goal must exit 0"
+    );
+
+    let board = load_board(&root);
+    assert!(
+        board.active.iter().all(|g| g.id != "one-shot"),
+        "a normal goal must be removed by `goal complete`"
+    );
+    let tombstones = crate::ooda_loop::load_tombstones(&root);
+    assert!(
+        tombstones.contains("one-shot"),
+        "a normal completed goal must be tombstoned"
+    );
+}

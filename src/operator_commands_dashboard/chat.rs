@@ -1,11 +1,35 @@
 use axum::{
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::{
+        Query,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     response,
 };
 
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::{SimardError, SimardResult};
+use crate::meeting_backend::{ConversationMessage, Role};
+
+/// Maximum size (bytes) of a single inbound chat WebSocket frame / user
+/// message. The channel is text chat, not file transfer; oversized frames are
+/// refused, never persisted.
+const MAX_CHAT_FRAME_BYTES: usize = 64 * 1024;
+
+/// Target character count per streamed assistant `chunk` frame. The completed
+/// reply is split into fixed char windows so the client renders it
+/// incrementally (server-side chunking — see docs/reference/dashboard-chat.md).
+const STREAM_CHUNK_CHARS: usize = 48;
+
+/// Query parameters for `GET /ws/chat`. `session_id` selects an existing
+/// session to resume; when absent a fresh session is minted lazily on the
+/// first user message.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ChatWsParams {
+    #[serde(default)]
+    session_id: Option<String>,
+}
 
 // ---------------------------------------------------------------------------
 // WebSocket chat — bridges to Simard's meeting facilitator conversation model
@@ -70,15 +94,116 @@ fn open_dashboard_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeS
     }
 }
 
-pub(crate) async fn ws_chat_handler(ws: WebSocketUpgrade) -> response::Response {
-    ws.on_upgrade(handle_ws_chat)
+pub(crate) async fn ws_chat_handler(
+    Query(params): Query<ChatWsParams>,
+    ws: WebSocketUpgrade,
+) -> response::Response {
+    // Validate any requested session_id BEFORE upgrading — mirroring the
+    // agent-log WS handler: a malformed id is a 400, never a path join.
+    let requested = params.session_id.filter(|s| !s.is_empty());
+    if let Some(ref id) = requested
+        && !super::chat_store::validate_session_id(id)
+    {
+        return response::Response::builder()
+            .status(400)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(axum::body::Body::from(
+                "invalid session_id: must match ^[A-Za-z0-9_-]{1,64}$",
+            ))
+            .unwrap();
+    }
+    ws.max_message_size(MAX_CHAT_FRAME_BYTES)
+        .max_frame_size(MAX_CHAT_FRAME_BYTES)
+        .on_upgrade(move |socket| handle_ws_chat(socket, requested))
 }
 
-pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
+/// Extract the user text from an inbound frame. Accepts the structured
+/// `{"content":"…"}` shape sent by the dashboard client, and falls back to a
+/// bare text frame (the raw message string) for backward compatibility.
+fn extract_user_text(raw: &str) -> String {
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(raw)
+        && let Some(serde_json::Value::String(content)) = map.get("content")
+    {
+        return content.clone();
+    }
+    raw.to_string()
+}
+
+/// Append one conversational turn to the durable chat store off the async
+/// runtime. Persistence failures are logged and swallowed so a disk hiccup
+/// never breaks the live conversation.
+async fn persist_turn(state_root: &std::path::Path, session_id: &str, role: Role, content: String) {
+    let sr = state_root.to_path_buf();
+    let sid = session_id.to_string();
+    let message = ConversationMessage {
+        role,
+        content,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Err(e) = super::chat_store::append_turn_at(&sr, &sid, &message) {
+            eprintln!("[simard] chat persist failed: {e}");
+        }
+    })
+    .await;
+}
+
+/// Deliver a completed assistant reply as an ordered run of `chunk` frames
+/// terminated by a single `done` frame (server-side chunking). Incremental
+/// *appearance* is achieved over the existing socket without a token-level
+/// model API; the wire protocol stays forward-compatible with true streaming.
+async fn stream_assistant(socket: &mut WebSocket, content: &str) {
+    let chars: Vec<char> = content.chars().collect();
+    for window in chars.chunks(STREAM_CHUNK_CHARS) {
+        let piece: String = window.iter().collect();
+        if socket
+            .send(Message::Text(
+                json!({ "type": "chunk", "content": piece })
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        // A small delay so text visibly streams; each delay is tiny and the
+        // chunk size bounds the frame count for long replies.
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    }
+    let _ = socket
+        .send(Message::Text(json!({ "type": "done" }).to_string().into()))
+        .await;
+}
+
+pub(crate) async fn handle_ws_chat(mut socket: WebSocket, requested_session_id: Option<String>) {
     use crate::conversation_channel::apply_record;
     use crate::meeting_backend::{
         MeetingBackend, MeetingCommand, parse_command, render_help_plain, unknown_command_notice,
     };
+
+    let state_root = super::routes::resolve_state_root();
+
+    // Resolve the session this connection is bound to: resume an existing id,
+    // or mint a fresh time-ordered id (used from the `ready` handshake onward
+    // and persisted lazily on the first user message).
+    let is_resume = requested_session_id.is_some();
+    let session_id = requested_session_id.unwrap_or_else(super::chat_store::new_session_id);
+
+    // Handshake: announce the bound session id + streaming capability before
+    // any other traffic, so the client can adapt to streaming/fallback.
+    let _ = socket
+        .send(Message::Text(
+            json!({
+                "type": "ready",
+                "session_id": session_id,
+                "streaming": true,
+                "protocol_version": 1,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await;
 
     // Use the full agent session (SessionBuilder) for chat.
     // The lightweight piped-subprocess path is disabled — it spawns
@@ -124,6 +249,27 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
     };
     let mut backend = MeetingBackend::new_session("Dashboard Chat", agent, None, system_prompt);
 
+    // Resume: replay persisted history into the backend (agent context) and
+    // the UI (restore frame) before accepting new input, so replies stay
+    // contextually coherent across reloads and process restarts.
+    if is_resume {
+        let sr = state_root.clone();
+        let sid = session_id.clone();
+        let loaded =
+            tokio::task::spawn_blocking(move || super::chat_store::load_session_at(&sr, &sid))
+                .await;
+        if let Ok(Ok(Some(session))) = loaded {
+            backend.restore(session.history.clone());
+            let _ = socket
+                .send(Message::Text(
+                    json!({ "type": "restore", "messages": session.history })
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+        }
+    }
+
     let _ = socket
         .send(Message::Text(
             json!({"role":"system","content":"Connected to Simard. Speak naturally — /help for commands, /close to end."})
@@ -135,7 +281,19 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
     while let Some(Ok(msg)) = socket.recv().await {
         match msg {
             Message::Text(text) => {
-                let text = text.to_string();
+                let raw = text.to_string();
+                if raw.len() > MAX_CHAT_FRAME_BYTES {
+                    // Defense in depth: max_message_size already bounds frames.
+                    let _ = socket
+                        .send(Message::Text(
+                            json!({"role":"system","content":"[message too large — refused]"})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await;
+                    continue;
+                }
+                let text = extract_user_text(&raw);
                 let trimmed = text.trim();
                 if trimmed.is_empty() {
                     continue;
@@ -376,13 +534,19 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                             .await;
                     }
                     MeetingCommand::Conversation(user_text) => {
+                        // Persist the user turn first so the session is created
+                        // lazily (its title keys off the first user message)
+                        // before the agent replies.
+                        persist_turn(&state_root, &session_id, Role::User, user_text.clone()).await;
+
                         // send_message is synchronous — use spawn_blocking
                         // wrapped with catch_unwind so a panic in the agent
                         // doesn't crash the chat task.
+                        let for_agent = user_text.clone();
                         let result = tokio::task::spawn_blocking(move || {
                             let outcome =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    backend.send_message(&user_text)
+                                    backend.send_message(&for_agent)
                                 }));
                             (backend, outcome)
                         })
@@ -390,13 +554,16 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket) {
                         match result {
                             Ok((returned_backend, Ok(Ok(resp)))) => {
                                 backend = returned_backend;
-                                let _ = socket
-                                    .send(Message::Text(
-                                        json!({"role":"assistant","content": resp.content})
-                                            .to_string()
-                                            .into(),
-                                    ))
-                                    .await;
+                                // Persist the assistant reply as one turn, then
+                                // stream it incrementally to the client.
+                                persist_turn(
+                                    &state_root,
+                                    &session_id,
+                                    Role::Assistant,
+                                    resp.content.clone(),
+                                )
+                                .await;
+                                stream_assistant(&mut socket, &resp.content).await;
                             }
                             Ok((returned_backend, Ok(Err(e)))) => {
                                 backend = returned_backend;

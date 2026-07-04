@@ -84,11 +84,16 @@ jobs:
           #
           # CRITICAL: only ship targets the release build actually produces. The
           # "Build release binary" step runs `cargo build --release` with the
-          # DEFAULT feature set, so bin targets gated behind a non-default
-          # `required-features` (e.g. the `dashboard-audit` audit tools
-          # simard-audit-pass01 / simard-audit-dashboard) are NOT compiled. They
-          # must be filtered out here; otherwise `tar` aborts trying to stat a
-          # binary that was never built (exit 2, every release).
+          # DEFAULT feature set. Since issue #2576 that set includes
+          # `dashboard-audit`, so the audit tools (simard-audit-pass01 /
+          # simard-audit-dashboard) now DO compile — but they still carry a
+          # `required-features` marker and are intentionally kept OUT of the
+          # shipped tarball: they need a real Chrome binary at runtime and are
+          # dev/ops tooling, not part of the deployed daemon payload. Filtering on
+          # a non-empty `required-features` still excludes exactly those targets.
+          # If a target's `required-features` ever left the default set again, it
+          # would (correctly) both stop building here and stay filtered, so `tar`
+          # never aborts trying to stat a binary that was never built.
           mapfile -t BIN_TARGETS < <(
             cargo metadata --no-deps --format-version 1 \
               | jq -r '

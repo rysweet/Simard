@@ -7,7 +7,10 @@
 //!    dump (`out/NN-<slug>.txt`).
 //! 4. Writes `out/_index.json` summarising the capture.
 //!
-//! Build: `cargo build --features dashboard-audit --bin simard-audit-pass01`
+//! Build: `cargo build --bin simard-audit-pass01` (the `dashboard-audit`
+//!        feature is on by default since #2576; `--features dashboard-audit` is
+//!        now redundant). Needs a real Chrome binary at runtime, so the bin
+//!        keeps its `required-features` marker and stays out of the release tarball.
 //! Run:   `target/debug/simard-audit-pass01`
 //!
 //! Prerequisites:

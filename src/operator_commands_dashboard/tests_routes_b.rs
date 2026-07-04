@@ -488,49 +488,4 @@ mod tests_b {
         assert_eq!(engineers[0]["task"], "self-serve-dashboard-improvement");
         assert_eq!(engineers[0]["alive"], true);
     }
-
-    // ── #2432: "Active Engineers" must union live worktree dispatch claims ──
-    // Root-cause guard for the "ZERO active engineers" defect: on a cold-start
-    // or after a restart the subagent registry can be empty/stale while
-    // engineers are genuinely in-flight as worktree dispatch claims. The gauge
-    // must reflect the TRUE live set (live dispatch claims UNION live subagent
-    // sessions), so an empty registry with a live engineer can never render 0.
-    #[tokio::test]
-    #[serial_test::serial(cognitive_memory)]
-    async fn workboard_active_engineers_not_zero_when_registry_empty_but_claim_live() {
-        use crate::operator_commands_dashboard::workboard::workboard;
-        use crate::test_support::HermeticState;
-
-        let state = HermeticState::new();
-
-        // Empty subagent registry (the cold-start / stale-telemetry condition).
-        let reg_dir = state.state_root().join("state");
-        std::fs::create_dir_all(&reg_dir).unwrap();
-        std::fs::write(reg_dir.join("subagent_sessions.json"), "{\"sessions\":[]}").unwrap();
-
-        // But a genuinely live worktree dispatch claim exists (this process).
-        let wt = state
-            .state_root()
-            .join(crate::engineer_worktree::WORKTREES_SUBDIR)
-            .join("wt-live-1");
-        std::fs::create_dir_all(&wt).unwrap();
-        std::fs::write(
-            wt.join(crate::engineer_worktree::ENGINEER_CLAIM_FILE),
-            format!("{}\n", std::process::id()),
-        )
-        .unwrap();
-
-        let result = workboard().await;
-        let engineers = result.0["spawned_engineers"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-
-        assert!(
-            !engineers.is_empty(),
-            "the active-engineers gauge MUST reflect the true live set (live dispatch \
-             claims), not just the subagent registry — an empty registry with a live \
-             engineer must never render 0"
-        );
-    }
 }

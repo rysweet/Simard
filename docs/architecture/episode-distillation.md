@@ -221,6 +221,27 @@ useful. Adding labels expands the search surface without immediately
 improving fact relevance; new labels should be added only when a
 clear retrieval pattern motivates them.
 
+#### Surface-form canonicalization
+
+The prompt constrains the label to those three strings, but an LLM
+routinely varies the *surface form* of a label it clearly intends —
+title/upper case (`PR-Pattern`, `BUG-PATTERN`), surrounding whitespace
+or quotes/sentence punctuation (`" bug-pattern "`, `pr-pattern.`), and
+`_`/space separators (`pr_pattern`, `lesson learned`). The parser's
+concept filter (`canonical_distill_concept`) folds these variants back
+to the canonical lower-hyphen label **before** the closed-set match, so
+a well-formed, grounded fact is not lost to cosmetics. Normalization is
+limited to case-folding, trimming, and `_`/space→`-` (with repeated
+hyphens collapsed); a concept that does not normalize to exactly one of
+the three labels — `made-up-label`, `pr-patterns`, `pull-request` — is
+still dropped. Recovered facts are stored under the canonical label, so
+the concept column is uniform for downstream dedup and recall regardless
+of how the model spelled it. This raises fact-yield (fewer legitimate
+facts dropped) without weakening precision (off-spec labels still
+dropped, and the reliability gate still quarantines ungrounded/empty
+facts). See the [fact-yield benchmark](#fact-yield-benchmark) for the
+recorded before/after numbers.
+
 ---
 
 ## Trait surface
@@ -397,6 +418,58 @@ measure different things and must not be summed or compared
 directly; they are emitted on separate log lines so an operator can
 tell which pass — textual or semantic — is doing the work on a given
 cycle.
+
+---
+
+## Fact-yield benchmark
+
+Fact-yield is the number of facts a pass promotes per unit of
+consolidation input (facts-per-episode-batch). Because the LLM recipe
+call is non-deterministic, the yield of the *deterministic* portion of a
+pass — the JSON parse + concept filter + reliability gate — is pinned by
+a fixed-corpus **regression benchmark**. This records a concrete baseline
+so a regression fails CI; it is **not** an estimate of real-world
+end-to-end LLM yield. The numbers are a property of the fixed corpus
+(which deliberately contains five recoverable surface-form-variant
+labels), not a global production delta.
+
+`src/memory_consolidation/distillation_fact_yield_bench.rs` runs a fixed
+batch of 25 episodes and a fixed recipe-output envelope of 13 candidate
+facts (canonical, surface-form-variant, off-spec, ungrounded, and
+empty-content cases) through the real production path
+(`parse_recipe_output_full` + `assess_fact_reliability`). It embeds an
+exact-match baseline oracle so the before/after comparison is
+self-contained: reverting the concept canonicalization collapses
+`improved` to `baseline` and fails the strict-improvement assertion.
+
+Recorded numbers (`cargo test --lib
+memory_consolidation::distillation_fact_yield_bench -- --nocapture`):
+
+```
+[fact-yield-bench] corpus_episodes=25 candidate_facts=13 \
+  baseline_promoted=3 improved_promoted=8 \
+  baseline_yield=0.120 improved_yield=0.320 \
+  baseline_structural_precision=1.000 improved_structural_precision=1.000
+```
+
+On this fixed corpus the canonicalization recovers the five
+surface-form-variant facts the exact-match filter dropped, raising the
+parse+gate fact-yield from **0.120 to 0.320** while **structural
+precision** stays at **1.000**. Precision here is *structural* — every
+promoted fact remains grounded, non-empty, and known-concept (the
+reliability gate's admission invariant); it is not a claim that the
+fact's content is semantically supported by the cited episode. No
+baseline-promoted fact is dropped.
+
+The benchmark is DB-free (parse + reliability gate only). Because the
+corpus is dedup-neutral against an empty store, its parse+gate survivor
+count equals a full pass's promoted count for a fresh memory — and that
+equality is *exercised*, not merely asserted, by
+`distillation_tests::full_pass_promotes_canonicalized_surface_variants_through_dedup`,
+which routes the same corpus through the real
+`distill_recent_episodes_with_runner` (parse → gate → **dedup guard** →
+store) and confirms all eight survive with the ungrounded and empty
+candidates quarantined.
 
 ---
 

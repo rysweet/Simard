@@ -8,8 +8,14 @@
 //! for different circumstances."
 //!
 //! Each trait impl invokes `recipe-runner-rs` as a subprocess with `-c`
-//! context vars, then parses via trivial first-word / first-number
-//! extractors (issue #2144 — no keyword scanners, no JSON extraction).
+//! context vars, then parses the agent's decision through the shared #2484
+//! sanitizing chokepoint. Parsing prefers a structured JSON-envelope decision
+//! block (`{"decision": ...}` / `{"adjusted_urgency": ...}`, issue #2580) and
+//! falls back to a first-word / first-number scan for the bare-word contract.
+//! On a parse-miss the confidence-gated escalation ladder (issue #2432) spends
+//! bounded extra compute; if it is exhausted with no parseable decision the
+//! phase surfaces an EXPLICIT `Err` + `brain_parse_error` metric — never a
+//! silent deterministic default (issue #2580 operator zero-fallback contract).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -52,6 +58,19 @@ const LIFECYCLE_DECISION_METRIC: &str = "brain_lifecycle_decision";
 /// `parse_success_rate{phase} = parsed / (parsed + defaulted)` is what the
 /// monitoring path alerts on.
 const VERDICT_PARSE_METRIC: &str = "brain_verdict_parsed_total";
+
+/// Metric emitted ONLY when a reasoner's bounded escalation ladder is exhausted
+/// (or a rung's own invocation failed) with no parseable decision — a GENUINE,
+/// post-sanitization, post-bounded-retry parse failure that is now surfaced to
+/// the caller as an explicit `Err` instead of a silent deterministic default
+/// (issue #2580 — operator zero-fallback contract).
+///
+/// Unlike [`VERDICT_PARSE_METRIC`] (which fires on every invocation, parsed OR
+/// defaulted), `brain_parse_error` fires *only* on the hard-failure terminal.
+/// It is the honest "current fallback rate" signal: zero when the brain is
+/// healthy, non-zero only on a real, unrecoverable parse failure — never a
+/// stale/cumulative count of decisions that actually parsed.
+const BRAIN_PARSE_ERROR_METRIC: &str = "brain_parse_error";
 
 /// Cap on the `first_word` token recorded in the metric context. Generous
 /// enough to capture any legitimate variant name plus stray punctuation, but
@@ -459,7 +478,6 @@ pub fn run_escalation_ladder(
     // [`LadderTermination`] accounting. This keeps the decide / orient /
     // merge-judge phases on the SAME ladder rather than reinventing it.
     run_brain_ladder(
-        "engineer_lifecycle",
         &ctx.goal_id,
         base_raw,
         base_outcome,
@@ -499,14 +517,8 @@ pub fn run_escalation_ladder(
 /// Returns the final decision, its outcome (`Repaired`/`Escalated` on recovery,
 /// else the original parse-miss), the total brain invocations (base + rungs),
 /// and the [`LadderTermination`] reason.
-///
-/// `phase` is a short reasoner label (`"decide"`, `"orient"`,
-/// `"engineer_lifecycle"`, `"merge_judge"`) recorded on the loud
-/// `brain_parse_error` metric emitted on ladder exhaustion (issue #2432) so the
-/// dashboard can attribute an unrecoverable parse-miss to its reasoner.
 #[allow(clippy::too_many_arguments)]
 pub fn run_brain_ladder<D>(
-    phase: &str,
     goal_id: &str,
     base_raw: &str,
     base_outcome: LifecycleParseOutcome,
@@ -536,6 +548,10 @@ pub fn run_brain_ladder<D>(
             base_outcome = base_outcome.label(),
             "brain decision parse-miss → escalating (confidence-gated ladder, issue #2432)"
         );
+        eprintln!(
+            "[simard] BRAIN ESCALATION goal={} rung={:?} attempt={} (parse-miss recovery)",
+            goal_id, rung, attempts
+        );
 
         match invoke(rung, &prior) {
             Err(e) => {
@@ -545,6 +561,10 @@ pub fn run_brain_ladder<D>(
                     rung = ?rung,
                     error = %e,
                     "brain escalation attempt failed to invoke; stopping ladder, using deterministic default"
+                );
+                eprintln!(
+                    "[simard] BRAIN ESCALATION goal={} rung={:?} invoke failed: {e} — falling back to default",
+                    goal_id, rung
                 );
                 invoke_failed = true;
                 break;
@@ -565,6 +585,10 @@ pub fn run_brain_ladder<D>(
                         attempt = attempts,
                         decision = %label,
                         "brain decision RECOVERED via escalation ladder (issue #2432)"
+                    );
+                    eprintln!(
+                        "[simard] BRAIN ESCALATION goal={} RECOVERED decision={} via {:?} (attempt {})",
+                        goal_id, label, rung, attempts
                     );
                     return (decision, recovered, attempts, LadderTermination::Recovered);
                 }
@@ -591,22 +615,20 @@ pub fn run_brain_ladder<D>(
         // with no parseable decision — surface it as a structured telemetry
         // signal (read by `simard status`) alongside the log lines below.
         crate::telemetry::counter_add(crate::telemetry::names::BRAIN_LADDER_EXHAUSTED, 1, &[]);
-        // Issue #2432 (zero-fallback): a genuinely unparseable model turn that
-        // exhausts the bounded ladder is a LOUD, explicit error — NEVER a silent
-        // deterministic default. Emit the dashboard-visible `brain_parse_error`
-        // metric (plus a structured `tracing::error!`) so the floor returned
-        // below can never be mistaken for — or hide behind — a real decision.
-        record_brain_parse_error_metric(phase, goal_id, base_outcome, attempts);
     }
     if cfg.max_escalations > 0 {
         tracing::warn!(
             target: "simard::ooda_brain",
-            phase,
             goal = %goal_id,
             attempts,
             base_outcome = base_outcome.label(),
             termination = ?termination,
             "brain escalation ladder ended without a parseable decision; deterministic default"
+        );
+        eprintln!(
+            "[simard] BRAIN ESCALATION goal={} ladder ended ({}) after {attempts} attempts — deterministic default",
+            goal_id,
+            termination.cause_label()
         );
     }
     (default(), base_outcome, attempts, termination)
@@ -728,7 +750,6 @@ impl OodaDecideBrain for RecipeBrain {
 
         let cfg = EscalationConfig::from_env();
         let (final_decision, final_outcome, attempts, termination) = run_brain_ladder(
-            "decide",
             &ctx.goal_id,
             &base_raw,
             outcome,
@@ -742,14 +763,6 @@ impl OodaDecideBrain for RecipeBrain {
         // surface — log it distinctly so it is never read as a real LLM
         // `advance_goal`/no-new-action decision, and attribute it to its precise
         // `LadderTermination` cause (previously discarded as `_termination`).
-        if final_outcome.is_parse_failure() {
-            warn_parse_failure_default(
-                BrainPhase::Decide,
-                &ctx.goal_id,
-                final_outcome,
-                termination,
-            );
-        }
         record_verdict_parse_metric(
             BrainPhase::Decide,
             &ctx.goal_id,
@@ -758,7 +771,19 @@ impl OodaDecideBrain for RecipeBrain {
             attempts,
         );
         crate::recipe_output::record_parse_outcome("decide", !final_outcome.is_parse_failure());
-        Ok(final_decision)
+        // Operator zero-fallback contract (issue #2580): a parse-failure
+        // terminal is surfaced as an EXPLICIT Err (never a silent
+        // `Ok(advance_goal)`); the Decide caller records it and SKIPS the
+        // priority — never a fabricated action.
+        finalize_ladder_result(
+            DECIDE_ADAPTER_TAG,
+            BrainPhase::Decide,
+            &ctx.goal_id,
+            final_decision,
+            final_outcome,
+            termination,
+            attempts,
+        )
     }
 }
 
@@ -788,7 +813,6 @@ impl OodaOrientBrain for RecipeBrain {
 
         let cfg = EscalationConfig::from_env();
         let (final_judgment, final_outcome, attempts, termination) = run_brain_ladder(
-            "orient",
             &ctx.goal_id,
             &base_raw,
             outcome,
@@ -802,14 +826,6 @@ impl OodaOrientBrain for RecipeBrain {
         // parse miss (e.g. the launcher version string mis-scraped as urgency)
         // from a genuinely low urgency the model emitted — log it distinctly and
         // attribute it to its `LadderTermination` cause (previously discarded).
-        if final_outcome.is_parse_failure() {
-            warn_parse_failure_default(
-                BrainPhase::Orient,
-                &ctx.goal_id,
-                final_outcome,
-                termination,
-            );
-        }
         record_verdict_parse_metric(
             BrainPhase::Orient,
             &ctx.goal_id,
@@ -818,7 +834,20 @@ impl OodaOrientBrain for RecipeBrain {
             attempts,
         );
         crate::recipe_output::record_parse_outcome("orient", !final_outcome.is_parse_failure());
-        Ok(final_judgment)
+        // Operator zero-fallback contract (issue #2580): a parse-failure
+        // terminal is surfaced as an EXPLICIT Err (never a silent
+        // `Ok(deterministic_floor)`); the Orient caller records it and keeps the
+        // goal's BASE urgency — never a fabricated demotion mined from a
+        // mis-parsed banner.
+        finalize_ladder_result(
+            ORIENT_ADAPTER_TAG,
+            BrainPhase::Orient,
+            &ctx.goal_id,
+            final_judgment,
+            final_outcome,
+            termination,
+            attempts,
+        )
     }
 }
 
@@ -1106,29 +1135,6 @@ impl OodaBrain for RecipeBrain {
         let cfg = EscalationConfig::from_env();
         let (final_decision, final_outcome, attempts, termination) =
             run_escalation_ladder(self, ctx, &base_raw, outcome, &cfg);
-        // issue #2496: when the deterministic `continue_skipping` default is
-        // reached because a transient parse miss EXHAUSTED the ladder (or a rung
-        // failed to invoke), say so loudly and distinctly — it is NOT a
-        // deliberate NO-ACTION decision; it is a transient parse-failure skip
-        // that is re-evaluated next cycle. The conservative default itself is
-        // unchanged; only its visibility improves.
-        if final_outcome.is_parse_failure()
-            && matches!(
-                termination,
-                LadderTermination::Exhausted | LadderTermination::InvokeError
-            )
-        {
-            tracing::warn!(
-                target: "simard::ooda_brain",
-                goal = %ctx.goal_id,
-                outcome_detail = final_outcome.label(),
-                cause = termination.cause_label(),
-                "engineer-lifecycle fell to continue_skipping via a PARSE FAILURE \
-                 (ladder {}) — a TRANSIENT parse-failure skip, re-evaluated next \
-                 cycle, NOT a deliberate NO-ACTION (issue #2496)",
-                termination.cause_label()
-            );
-        }
         // NOTE: `first_word` intentionally always reflects the *base* attempt's
         // token — it is the diagnostic record of what the cheap first pass
         // produced (e.g. the banner regression or a malformed reply), even on a
@@ -1147,43 +1153,70 @@ impl OodaBrain for RecipeBrain {
             "engineer_lifecycle",
             !final_outcome.is_parse_failure(),
         );
-        Ok(final_decision)
+        // Operator zero-fallback contract (issue #2580): never return
+        // `Ok(continue_skipping)` on a parse-failure — that is a parse-failure
+        // masquerading as a deliberate no-action (the exact "deterministic
+        // fallback" the operator forbids). Surface an EXPLICIT hard error; the
+        // `spawn.rs` caller records it as a cycle failure and, after N
+        // consecutive failures, marks the goal blocked / files a tracking issue.
+        // A genuine "nothing to do" is a real, model-emitted `continue_skipping`
+        // decision (parsed) — distinct, and it never reaches this branch.
+        finalize_ladder_result(
+            LIFECYCLE_ADAPTER_TAG,
+            BrainPhase::Act,
+            &ctx.goal_id,
+            final_decision,
+            final_outcome,
+            termination,
+            attempts,
+        )
     }
 }
 
 // ---------------------------------------------------------------------------
-// Parse functions — structured JSON-envelope `decision` field first (issue
-// #2432), then a first-word / first-number fallback for legacy bare replies.
+// Parse functions — structured JSON-envelope decision block FIRST, with a
+// backward-compatible first-word / first-number scan as a fallback (issue
+// #2580). The recipe prompts emit a fenced `{"decision": ...}` / `{"adjusted_
+// urgency": ...}` envelope; the extractor consumes THAT through the shared
+// sanitizing chokepoint rather than relying on free-prose keyword-sniffing.
 // ---------------------------------------------------------------------------
 
-/// Extract this reasoner's structured `decision` field from a fenced or bare
-/// JSON envelope in `text` (the #2432 machine-parseable output contract) and
-/// return it as a normalized "`<decision> <rationale>`" line, so the phase's
-/// variant matcher consumes the STRUCTURED field instead of sniffing the first
-/// free-prose word. Routes through the shared `recipe_output` chokepoint
-/// ([`crate::recipe_output::extract_json_payload`] → wrapper banner + ANSI + log
-/// noise stripped) so a launcher-polluted envelope still yields the decision.
-///
-/// Returns `None` when no JSON envelope carrying a non-empty `decision` field is
-/// present, so a legacy bare-first-word reply still parses unchanged (backward
-/// compatible — the escalation-ladder GREEN locks depend on this).
-fn structured_decision_line(text: &str) -> Option<String> {
+/// A structured decision envelope a reasoner emits as a JSON object. Consumed in
+/// preference to the legacy first-word scan so well-formed structured output
+/// parses deterministically (issue #2580 — operator zero-fallback contract).
+/// `decision` is the required machine-parseable variant token (the action word
+/// for decide, the lifecycle variant for act); `rationale` is optional prose.
+/// Unknown extra fields are ignored for forward-compatibility.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct DecisionEnvelope {
+    decision: String,
+    #[serde(default)]
+    rationale: String,
+}
+
+/// Extract the `{"decision": "...", "rationale": "..."}` envelope from recipe
+/// output, if present. Routes through the shared #2484 sanitizing chokepoint
+/// ([`crate::recipe_output::extract_json_payload`] strips the banner, ANSI, and
+/// interleaved log lines) so a banner-polluted envelope still parses. Returns
+/// `None` when no balanced JSON object with a non-empty string `decision` field
+/// is present — the caller then falls back to the legacy first-word scan.
+fn extract_decision_envelope(text: &str) -> Option<DecisionEnvelope> {
     let payload = crate::recipe_output::extract_json_payload(text)?;
-    let value: serde_json::Value = serde_json::from_str(&payload).ok()?;
-    let decision = match value.get("decision")? {
-        serde_json::Value::String(s) if !s.trim().is_empty() => s.trim().to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        _ => return None,
-    };
-    let rationale = value
-        .get("rationale")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    if rationale.is_empty() {
-        Some(decision)
+    let env: DecisionEnvelope = serde_json::from_str(&payload).ok()?;
+    if env.decision.trim().is_empty() {
+        return None;
+    }
+    Some(env)
+}
+
+/// Choose the rationale string for a parsed [`DecisionEnvelope`]: the model's
+/// `rationale` when present, else the decision token itself (bounded).
+fn envelope_rationale(env: &DecisionEnvelope) -> String {
+    let r = env.rationale.trim();
+    if r.is_empty() {
+        truncate(env.decision.trim(), MAX_RATIONALE_CHARS)
     } else {
-        Some(format!("{decision} {rationale}"))
+        truncate(r, MAX_RATIONALE_CHARS)
     }
 }
 
@@ -1210,83 +1243,66 @@ pub fn parse_action_from_text(text: &str) -> DecideJudgment {
 /// indistinguishable — which is exactly what let the text-mode banner masquerade
 /// as "working" (the first word `Recipe:` always defaulted to `AdvanceGoal`).
 pub fn parse_action_outcome(text: &str) -> (DecideJudgment, LifecycleParseOutcome) {
-    // #2432 structured-output contract: prefer the machine-parseable fenced JSON
-    // envelope's `decision` field over free-prose first-word sniffing. Only when
-    // no such envelope carries a known variant do we fall through to the legacy
-    // first-word parse (keeps the bare-keyword replies the escalation-ladder
-    // GREEN locks exercise working).
-    if let Some(structured) = structured_decision_line(text) {
-        let (decision, outcome) = parse_action_first_word(&structured);
-        if !outcome.is_parse_failure() {
-            return (decision, outcome);
-        }
+    // Structured JSON envelope FIRST (issue #2580): a well-formed
+    // `{"decision":"<variant>","rationale":"..."}` block — extracted through the
+    // shared #2484 sanitizing chokepoint (`extract_json_payload` strips the
+    // banner + ANSI + log noise) — parses deterministically, so the daemon no
+    // longer *relies* on free-prose first-word sniffing to route a decision.
+    if let Some(env) = extract_decision_envelope(text)
+        && let Some(judgment) =
+            decide_judgment_from_variant(env.decision.trim(), envelope_rationale(&env))
+    {
+        return (judgment, LifecycleParseOutcome::Parsed);
     }
-    parse_action_first_word(text)
-}
 
-/// Legacy first-word decide parser: matches the first whitespace-delimited token
-/// (after shared banner/ANSI stripping) against the closed action-variant set.
-/// The fallback for [`parse_action_outcome`] when no structured JSON envelope
-/// with a known `decision` variant is present.
-fn parse_action_first_word(text: &str) -> (DecideJudgment, LifecycleParseOutcome) {
-    // Strip ANSI escapes + drop tracing-log / runner-banner lines first (shared
-    // #2484 extractor) so a noise-obscured first-word action keyword is not
-    // silently defaulted to `advance_goal`. Clean-path zero-copy preserves
-    // today's behaviour on clean recipe output.
+    // Backward-compatible fallback: strip ANSI escapes + drop tracing-log /
+    // runner-banner lines (shared #2484 extractor) so a noise-obscured first-word
+    // action keyword is not silently defaulted to `advance_goal`. Clean-path
+    // zero-copy preserves today's behaviour on clean recipe output.
     let cleaned = crate::recipe_output::strip_recipe_noise(text);
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
         return (default_advance_goal(), LifecycleParseOutcome::DefaultEmpty);
     }
     let first_word = trimmed.split_whitespace().next().unwrap_or("");
-
-    // Rationale allocation is deferred into the match arm — avoids a
-    // wasted heap alloc on the (no-match) default path.
-    type Ctor = fn(String) -> DecideJudgment;
-    let pairs: &[(&str, Ctor)] = &[
-        ("poll_developer_activity", |r| {
-            DecideJudgment::PollDeveloperActivity { rationale: r }
-        }),
-        ("consolidate_memory", |r| {
-            DecideJudgment::ConsolidateMemory { rationale: r }
-        }),
-        ("run_improvement", |r| DecideJudgment::RunImprovement {
-            rationale: r,
-        }),
-        ("extract_ideas", |r| DecideJudgment::ExtractIdeas {
-            rationale: r,
-        }),
-        ("safe_update", |r| DecideJudgment::SafeUpdate {
-            rationale: r,
-        }),
-        ("research_query", |r| DecideJudgment::ResearchQuery {
-            rationale: r,
-        }),
-        ("run_gym_eval", |r| DecideJudgment::RunGymEval {
-            rationale: r,
-        }),
-        ("build_skill", |r| DecideJudgment::BuildSkill {
-            rationale: r,
-        }),
-        ("launch_session", |r| DecideJudgment::LaunchSession {
-            rationale: r,
-        }),
-        ("advance_goal", |r| DecideJudgment::AdvanceGoal {
-            rationale: r,
-        }),
-    ];
-    for (kw, ctor) in pairs {
-        if first_word.eq_ignore_ascii_case(kw) {
-            return (
-                ctor(truncate(trimmed, MAX_RATIONALE_CHARS)),
-                LifecycleParseOutcome::Parsed,
-            );
-        }
+    match decide_judgment_from_variant(first_word, truncate(trimmed, MAX_RATIONALE_CHARS)) {
+        Some(judgment) => (judgment, LifecycleParseOutcome::Parsed),
+        None => (
+            default_advance_goal(),
+            LifecycleParseOutcome::DefaultMalformed,
+        ),
     }
-    (
-        default_advance_goal(),
-        LifecycleParseOutcome::DefaultMalformed,
-    )
+}
+
+/// Map a decide action variant token (case-insensitive) to a [`DecideJudgment`]
+/// carrying `rationale`; `None` for an unknown token. Shared by the structured
+/// JSON-envelope path and the legacy first-word scan so both honour the exact
+/// same closed variant set (kept in sync with [`DECIDE_VARIANT_LIST`]).
+fn decide_judgment_from_variant(word: &str, rationale: String) -> Option<DecideJudgment> {
+    let w = word.trim();
+    if w.eq_ignore_ascii_case("poll_developer_activity") {
+        Some(DecideJudgment::PollDeveloperActivity { rationale })
+    } else if w.eq_ignore_ascii_case("consolidate_memory") {
+        Some(DecideJudgment::ConsolidateMemory { rationale })
+    } else if w.eq_ignore_ascii_case("run_improvement") {
+        Some(DecideJudgment::RunImprovement { rationale })
+    } else if w.eq_ignore_ascii_case("extract_ideas") {
+        Some(DecideJudgment::ExtractIdeas { rationale })
+    } else if w.eq_ignore_ascii_case("safe_update") {
+        Some(DecideJudgment::SafeUpdate { rationale })
+    } else if w.eq_ignore_ascii_case("research_query") {
+        Some(DecideJudgment::ResearchQuery { rationale })
+    } else if w.eq_ignore_ascii_case("run_gym_eval") {
+        Some(DecideJudgment::RunGymEval { rationale })
+    } else if w.eq_ignore_ascii_case("build_skill") {
+        Some(DecideJudgment::BuildSkill { rationale })
+    } else if w.eq_ignore_ascii_case("launch_session") {
+        Some(DecideJudgment::LaunchSession { rationale })
+    } else if w.eq_ignore_ascii_case("advance_goal") {
+        Some(DecideJudgment::AdvanceGoal { rationale })
+    } else {
+        None
+    }
 }
 
 /// The loud deterministic decide default — `advance_goal` with a rationale that
@@ -1345,10 +1361,22 @@ pub fn parse_orient_outcome(
     base_urgency: f64,
     failure_count: u32,
 ) -> (OrientJudgment, LifecycleParseOutcome) {
-    // Strip ANSI escapes + drop tracing-log / runner-banner lines first (shared
-    // #2484 extractor): a banner timing string like `(0.0s)` or a decimal inside
-    // a tracing line must not be scraped as the urgency float and demote the
-    // goal. Clean-path zero-copy preserves today's behaviour on clean output.
+    // Structured JSON envelope FIRST (issue #2580): the orient prompt emits
+    // `{"adjusted_urgency": <f>, "confidence": <f>, "rationale": "...",
+    // "demotion_applied": <f>}`. Consume THAT via the shared #2484 sanitizing
+    // chokepoint rather than scraping the first decimal out of free prose (the
+    // banner timing string `(0.0s)` used to be mis-scraped as a `0.0` urgency).
+    if let Some(env) = extract_orient_envelope(text)
+        && let Some(judgment) = orient_judgment_from_envelope(&env, base_urgency)
+    {
+        return (judgment, LifecycleParseOutcome::Parsed);
+    }
+
+    // Backward-compatible fallback: strip ANSI escapes + drop tracing-log /
+    // runner-banner lines (shared #2484 extractor): a banner timing string like
+    // `(0.0s)` or a decimal inside a tracing line must not be scraped as the
+    // urgency float and demote the goal. Clean-path zero-copy preserves today's
+    // behaviour on clean output.
     let cleaned = crate::recipe_output::strip_recipe_noise(text);
     let s: &str = cleaned.as_ref();
     // Hoist trim above the scanner — avoids re-trimming on each candidate.
@@ -1396,6 +1424,55 @@ pub fn parse_orient_outcome(
     (deterministic_floor(base_urgency, failure_count), miss)
 }
 
+/// The orient reasoner's structured JSON envelope, matching the schema pinned in
+/// `prompt_assets/simard/ooda_orient.md`. `adjusted_urgency` is the required
+/// machine-parseable field; the rest are optional.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct OrientEnvelope {
+    adjusted_urgency: f64,
+    #[serde(default)]
+    confidence: Option<f64>,
+    #[serde(default)]
+    rationale: String,
+}
+
+/// Extract the orient `{"adjusted_urgency": ...}` envelope from recipe output,
+/// through the shared #2484 sanitizing chokepoint. `None` when no balanced JSON
+/// object with a numeric `adjusted_urgency` field is present.
+fn extract_orient_envelope(text: &str) -> Option<OrientEnvelope> {
+    let payload = crate::recipe_output::extract_json_payload(text)?;
+    serde_json::from_str::<OrientEnvelope>(&payload).ok()
+}
+
+/// Validate and project a parsed [`OrientEnvelope`] onto an [`OrientJudgment`].
+/// Returns `None` (→ caller falls back / defaults) when `adjusted_urgency` is
+/// out of range `[0, base_urgency]` or non-finite, mirroring the first-decimal
+/// scanner's validation so a malformed envelope can never *raise* urgency.
+fn orient_judgment_from_envelope(
+    env: &OrientEnvelope,
+    base_urgency: f64,
+) -> Option<OrientJudgment> {
+    let val = env.adjusted_urgency;
+    if !val.is_finite() || !(0.0..=1.0).contains(&val) || val > base_urgency + 1e-9 {
+        return None;
+    }
+    let confidence = env
+        .confidence
+        .filter(|c| c.is_finite() && (0.0..=1.0).contains(c))
+        .unwrap_or(1.0);
+    let rationale = if env.rationale.trim().is_empty() {
+        format!("{ORIENT_ADAPTER_TAG}: structured urgency {val:.3}")
+    } else {
+        truncate(env.rationale.trim(), MAX_RATIONALE_CHARS)
+    };
+    Some(OrientJudgment {
+        adjusted_urgency: val,
+        rationale,
+        confidence,
+        demotion_applied: base_urgency - val,
+    })
+}
+
 /// Compute the deterministic floor judgment.
 fn deterministic_floor(base_urgency: f64, failure_count: u32) -> OrientJudgment {
     let penalty = FAILURE_PENALTY_PER_CONSECUTIVE * failure_count as f64;
@@ -1440,29 +1517,22 @@ pub fn parse_lifecycle_from_text(text: &str) -> EngineerLifecycleDecision {
 /// parse-failure rate measurable per issue #2419 — before this split, a real
 /// `continue_skipping` decision and a silent fallback were indistinguishable.
 pub fn parse_lifecycle_outcome(text: &str) -> (EngineerLifecycleDecision, LifecycleParseOutcome) {
-    // #2432 structured-output contract: prefer the machine-parseable fenced JSON
-    // envelope's `decision` field over free-prose first-word sniffing. Only when
-    // no such envelope carries a known variant do we fall through to the legacy
-    // first-word parse (keeps the bare-keyword replies the escalation-ladder
-    // GREEN locks exercise working).
-    if let Some(structured) = structured_decision_line(text) {
-        let (decision, outcome) = parse_lifecycle_first_word(&structured);
-        if !outcome.is_parse_failure() {
-            return (decision, outcome);
-        }
+    // Structured JSON envelope FIRST (issue #2580): a well-formed
+    // `{"decision":"<variant>","rationale":"..."}` block — extracted through the
+    // shared #2484 sanitizing chokepoint — parses deterministically, so the
+    // daemon no longer *relies* on free-prose first-word sniffing.
+    if let Some(env) = extract_decision_envelope(text)
+        && let Some(decision) =
+            lifecycle_decision_from_variant(env.decision.trim(), envelope_rationale(&env))
+    {
+        return (decision, LifecycleParseOutcome::Parsed);
     }
-    parse_lifecycle_first_word(text)
-}
 
-/// Legacy first-word lifecycle parser: matches the first whitespace-delimited
-/// token (after shared banner/ANSI stripping) against the closed lifecycle
-/// variant set. The fallback for [`parse_lifecycle_outcome`] when no structured
-/// JSON envelope with a known `decision` variant is present.
-fn parse_lifecycle_first_word(text: &str) -> (EngineerLifecycleDecision, LifecycleParseOutcome) {
-    // Strip ANSI escapes + drop tracing-log / runner-banner lines first (shared
-    // #2484 extractor) so a noise-obscured first-word decision keyword is not
-    // silently defaulted to `continue_skipping` — the #2419-family non-progress
-    // loop. Clean-path zero-copy preserves today's behaviour on clean output.
+    // Backward-compatible fallback: strip ANSI escapes + drop tracing-log /
+    // runner-banner lines (shared #2484 extractor) so a noise-obscured first-word
+    // decision keyword is not silently defaulted to `continue_skipping` — the
+    // #2419-family non-progress loop. Clean-path zero-copy preserves today's
+    // behaviour on clean output.
     let cleaned = crate::recipe_output::strip_recipe_noise(text);
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
@@ -1472,41 +1542,53 @@ fn parse_lifecycle_first_word(text: &str) -> (EngineerLifecycleDecision, Lifecyc
         );
     }
     let first_word = trimmed.split_whitespace().next().unwrap_or("");
-    let rest = || truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
-
-    // Use eq_ignore_ascii_case instead of to_ascii_lowercase() — avoids a
-    // heap-allocated String on every call.
-    let decision = if first_word.eq_ignore_ascii_case("continue_skipping") {
-        EngineerLifecycleDecision::ContinueSkipping { rationale: rest() }
-    } else if first_word.eq_ignore_ascii_case("deprioritize") {
-        EngineerLifecycleDecision::Deprioritize { rationale: rest() }
-    } else if first_word.eq_ignore_ascii_case("consider_self_update") {
-        EngineerLifecycleDecision::ConsiderSelfUpdate { rationale: rest() }
-    } else if first_word.eq_ignore_ascii_case("reclaim_and_redispatch") {
-        EngineerLifecycleDecision::ReclaimAndRedispatch {
-            rationale: rest(),
-            redispatch_context: String::new(),
-        }
-    } else if first_word.eq_ignore_ascii_case("open_tracking_issue") {
-        let rest = rest();
-        EngineerLifecycleDecision::OpenTrackingIssue {
-            title: "OODA stuck".to_string(),
-            body: rest.clone(),
-            rationale: rest,
-        }
-    } else if first_word.eq_ignore_ascii_case("mark_goal_blocked") {
-        let rest = rest();
-        EngineerLifecycleDecision::MarkGoalBlocked {
-            reason: rest.clone(),
-            rationale: rest,
-        }
-    } else {
-        return (
+    let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
+    match lifecycle_decision_from_variant(first_word, rest) {
+        Some(decision) => (decision, LifecycleParseOutcome::Parsed),
+        None => (
             default_continue_skipping(),
             LifecycleParseOutcome::DefaultMalformed,
-        );
-    };
-    (decision, LifecycleParseOutcome::Parsed)
+        ),
+    }
+}
+
+/// Map a lifecycle decision variant token (case-insensitive) to an
+/// [`EngineerLifecycleDecision`] carrying `rationale`; `None` for an unknown
+/// token. Shared by the structured JSON-envelope path and the legacy first-word
+/// scan so both honour the exact same closed variant set (kept in sync with
+/// [`LIFECYCLE_VARIANT_LIST`]). Variants with extra fields
+/// (`reclaim_and_redispatch`, `open_tracking_issue`, `mark_goal_blocked`) reuse
+/// `rationale` for the body/reason, matching the first-word parser's behaviour.
+fn lifecycle_decision_from_variant(
+    word: &str,
+    rationale: String,
+) -> Option<EngineerLifecycleDecision> {
+    let w = word.trim();
+    if w.eq_ignore_ascii_case("continue_skipping") {
+        Some(EngineerLifecycleDecision::ContinueSkipping { rationale })
+    } else if w.eq_ignore_ascii_case("deprioritize") {
+        Some(EngineerLifecycleDecision::Deprioritize { rationale })
+    } else if w.eq_ignore_ascii_case("consider_self_update") {
+        Some(EngineerLifecycleDecision::ConsiderSelfUpdate { rationale })
+    } else if w.eq_ignore_ascii_case("reclaim_and_redispatch") {
+        Some(EngineerLifecycleDecision::ReclaimAndRedispatch {
+            rationale,
+            redispatch_context: String::new(),
+        })
+    } else if w.eq_ignore_ascii_case("open_tracking_issue") {
+        Some(EngineerLifecycleDecision::OpenTrackingIssue {
+            title: "OODA stuck".to_string(),
+            body: rationale.clone(),
+            rationale,
+        })
+    } else if w.eq_ignore_ascii_case("mark_goal_blocked") {
+        Some(EngineerLifecycleDecision::MarkGoalBlocked {
+            reason: rationale.clone(),
+            rationale,
+        })
+    } else {
+        None
+    }
 }
 
 fn default_continue_skipping() -> EngineerLifecycleDecision {
@@ -1709,78 +1791,132 @@ fn warn_parse_failure_default(
          re-evaluated next cycle (issue #2496)",
         termination.cause_label()
     );
+    eprintln!(
+        "[simard] BRAIN PARSE-FAILURE DEFAULT phase={} goal={} outcome={} cause={} \
+         (transient miss, NOT a real no-action decision)",
+        phase.as_str(),
+        goal_id,
+        outcome.label(),
+        termination.cause_label()
+    );
 }
 
-/// Emit the loud, dashboard-visible `brain_parse_error` metric when a reasoner's
-/// bounded escalation ladder is EXHAUSTED with no parseable decision (issue
-/// #2432). This is the explicit, non-silent counterpart to the deterministic
-/// floor: a genuinely unparseable model turn is ALWAYS surfaced (a structured
-/// `tracing::error!` plus this metric), never silently laundered into a default.
+/// Record the `brain_parse_error` metric (value `1.0`) and the
+/// `simard.brain.parse_error` telemetry counter for a GENUINE ladder-exhausted
+/// parse failure — the hard-failure terminal that a reasoner now surfaces to
+/// its caller as an explicit `Err` rather than a silent deterministic default
+/// (issue #2580, operator zero-fallback contract).
 ///
-/// Unlike the other brain metrics this is intentionally NOT blanket
-/// `cfg!(test)`-gated: its contract
-/// (`zero_fallback_tests::ladder_exhaustion_emits_brain_parse_error_metric`) is
-/// verified by reading the metric back under a hermetic temp `HOME`. To keep
-/// ordinary unit runs from writing into the operator's real `~/.simard` (the
-/// live daemon directory), under `cfg!(test)` the write is suppressed unless
-/// `HOME` has been redirected into a build `target/` directory by a
-/// `with_temp_home` helper — see [`brain_parse_error_metric_write_allowed`].
-fn record_brain_parse_error_metric(
-    phase: &str,
+/// Fires ONLY on the terminal parse failure (ladder `Exhausted` / `InvokeError`
+/// with no parseable decision), never on a first-try parse or a ladder
+/// recovery, so `brain_parse_error` is the honest current-fallback-rate signal.
+///
+/// Best-effort telemetry: a metrics-write failure is logged, never propagated —
+/// the explicit `Err` the caller receives is unaffected. The `metrics.jsonl`
+/// write is a no-op under `cfg!(test)` so unit tests never touch the operator's
+/// real metrics file (the returned `Err` is what tests assert on).
+fn record_brain_parse_error(
+    phase: BrainPhase,
     goal_id: &str,
     outcome: LifecycleParseOutcome,
+    termination: LadderTermination,
     attempts: u32,
 ) {
-    tracing::error!(
-        target: "simard::ooda_brain",
-        phase,
-        goal = %goal_id,
-        outcome_detail = outcome.label(),
-        attempts,
-        cause = "ladder_exhausted",
-        "brain reasoner EXHAUSTED its bounded escalation ladder with no parseable \
-         decision — surfacing a loud brain_parse_error (issue #2432); a silent \
-         deterministic default is forbidden"
-    );
-    if !brain_parse_error_metric_write_allowed() {
+    crate::telemetry::counter_add(crate::telemetry::names::BRAIN_PARSE_ERROR, 1, &[]);
+    if cfg!(test) {
         return;
     }
-    let context = format!(
-        "{{\"phase\":\"{}\",\"goal_id\":{},\"outcome\":\"{}\",\"attempts\":{},\"cause\":\"ladder_exhausted\"}}",
-        phase,
-        serde_json::to_string(goal_id).unwrap_or_else(|_| "\"\"".to_string()),
-        outcome.label(),
-        attempts,
-    );
-    if let Err(e) = crate::self_metrics::record_metric("brain_parse_error", 1.0, &context) {
+    let context = serde_json::json!({
+        "phase": phase.as_str(),
+        "goal_id": goal_id,
+        "outcome_detail": outcome.label(),
+        "cause": termination.cause_label(),
+        "attempts": attempts,
+    })
+    .to_string();
+    if let Err(e) = crate::self_metrics::record_metric(BRAIN_PARSE_ERROR_METRIC, 1.0, &context) {
         tracing::warn!(
             target: "simard::ooda_brain",
             error = %e,
-            phase,
-            "failed to record brain_parse_error metric (deterministic floor unaffected)"
+            phase = phase.as_str(),
+            "failed to record brain_parse_error metric (explicit Err still surfaced to caller)",
         );
     }
 }
 
-/// Whether a `brain_parse_error` metric write is permitted in the current build.
+/// Build the explicit hard error a reasoner returns when its bounded escalation
+/// ladder is exhausted with no parseable decision.
 ///
-/// Always `true` in production. Under `cfg!(test)` it is `true` ONLY when `HOME`
-/// resolves inside a build `target/` directory — i.e. a `with_temp_home` helper
-/// has redirected it — so unit runs never append to the operator's real
-/// `~/.simard/metrics/metrics.jsonl` (the live daemon directory this workflow
-/// must not touch).
-fn brain_parse_error_metric_write_allowed() -> bool {
-    if !cfg!(test) {
-        return true;
-    }
-    std::env::var_os("HOME")
-        .map(|h| {
-            std::path::Path::new(&h)
-                .components()
-                .any(|c| c.as_os_str() == "target")
-        })
-        .unwrap_or(false)
+/// Surfacing this as an `Err` (instead of a silent deterministic default) is the
+/// operator's zero-fallback contract (issue #2580): the caller records it
+/// loudly and takes an explicit, observable path (Decide skips the priority,
+/// Orient keeps base urgency, Act marks the goal blocked after N) — never a
+/// fabricated `advance_goal` / `continue_skipping` / demotion masquerading as a
+/// real model decision.
+fn brain_parse_error_result<T>(
+    adapter_tag: &str,
+    phase: BrainPhase,
+    goal_id: &str,
+    outcome: LifecycleParseOutcome,
+    termination: LadderTermination,
+    attempts: u32,
+) -> SimardResult<T> {
+    Err(SimardError::AdapterInvocationFailed {
+        base_type: adapter_tag.to_string(),
+        reason: format!(
+            "{phase}: bounded escalation ladder {cause} after {attempts} attempt(s) with no \
+             parseable decision (outcome={outcome}); surfacing an explicit parse error rather \
+             than a silent deterministic default (goal={goal_id})",
+            phase = phase.as_str(),
+            cause = termination.cause_label(),
+            outcome = outcome.label(),
+        ),
+    })
 }
+
+/// Convert a completed escalation-ladder result into the reasoner's final
+/// [`SimardResult`], enforcing the operator's zero-fallback contract
+/// (issue #2580) at ONE shared chokepoint for every recipe-backed phase.
+///
+/// - A first-try parse or a ladder recovery (`Repaired`/`Escalated`) →
+///   `Ok(decision)`.
+/// - A GENUINE parse-failure terminal (`final_outcome.is_parse_failure()` — the
+///   ladder was exhausted, a rung's invocation failed, or the ladder was
+///   disabled and the base attempt parse-missed) → the loud
+///   [`warn_parse_failure_default`] log, the [`record_brain_parse_error`] metric,
+///   and an EXPLICIT `Err` from [`brain_parse_error_result`]. NEVER the
+///   deterministic `default()` masquerading as a real decision.
+///
+/// Pure enough to unit-test the Ok/Err branch directly (the metric write is a
+/// no-op under `cfg!(test)`), which is how the "no code path can emit a
+/// deterministic-default decision from a parse-failure" contract is asserted.
+fn finalize_ladder_result<D>(
+    adapter_tag: &str,
+    phase: BrainPhase,
+    goal_id: &str,
+    final_decision: D,
+    final_outcome: LifecycleParseOutcome,
+    termination: LadderTermination,
+    attempts: u32,
+) -> SimardResult<D> {
+    if final_outcome.is_parse_failure() {
+        warn_parse_failure_default(phase, goal_id, final_outcome, termination);
+        record_brain_parse_error(phase, goal_id, final_outcome, termination, attempts);
+        return brain_parse_error_result(
+            adapter_tag,
+            phase,
+            goal_id,
+            final_outcome,
+            termination,
+            attempts,
+        );
+    }
+    Ok(final_decision)
+}
+
+// ---------------------------------------------------------------------------
+// Tests — behavioral contracts for the unified RecipeBrain struct.
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -2777,19 +2913,24 @@ mod tests {
             assert!(j.rationale.chars().count() <= MAX_RATIONALE_CHARS + 1);
         }
 
-        // === No JSON extraction (parser eliminated) ===
+        // === Structured JSON envelope IS consumed (issue #2580) ===
 
         #[test]
-        fn json_text_uses_bare_float_not_json_parser() {
-            // JSON text with float inside — bare float scanner finds 0.4
-            let text = r#"{"adjusted_urgency": 0.4, "rationale": "test"}"#;
+        fn json_envelope_is_parsed_via_structured_extractor() {
+            // The orient prompt emits `{"adjusted_urgency": ..., "rationale": ...}`.
+            // Post-#2580 the extractor consumes that structured envelope (via the
+            // shared sanitizing chokepoint) rather than scraping the first bare
+            // decimal out of free prose.
+            let text = r#"{"adjusted_urgency": 0.4, "rationale": "test", "confidence": 0.9}"#;
             let j = parse_orient_from_text(text, 0.8, 2);
-            // Should find 0.4 as first decimal float pattern
+            // adjusted_urgency comes from the JSON field, not a decimal scan.
             assert!((j.adjusted_urgency - 0.4).abs() < 1e-9);
-            // Rationale is full text, NOT the JSON "rationale" field
-            assert!(
-                j.rationale.contains("adjusted_urgency"),
-                "rationale should be full text, not extracted JSON field; got: {}",
+            // Confidence is taken from the envelope, not hard-coded to 1.0.
+            assert!((j.confidence - 0.9).abs() < 1e-9);
+            // Rationale is the STRUCTURED `rationale` field, not the full raw text.
+            assert_eq!(
+                j.rationale, "test",
+                "rationale should come from the JSON envelope field; got: {}",
                 j.rationale
             );
         }
@@ -4137,7 +4278,6 @@ mod tests {
             // only "parses" when the text is "good". The first rung returns it.
             let cfg = EscalationConfig { max_escalations: 2 };
             let (decision, outcome, attempts, term) = run_brain_ladder(
-                "test",
                 "g",
                 "bad-base",
                 LifecycleParseOutcome::DefaultMalformed,
@@ -4163,7 +4303,6 @@ mod tests {
         fn generic_ladder_exhausts_to_loud_default_for_arbitrary_type() {
             let cfg = EscalationConfig { max_escalations: 2 };
             let (decision, outcome, attempts, term) = run_brain_ladder(
-                "test",
                 "g",
                 "bad",
                 LifecycleParseOutcome::DefaultMalformed,
@@ -4446,6 +4585,314 @@ mod issue_2570_cross_consumer_launcher_guard_tests {
             cleaned.as_ref(),
             content_line,
             "a JSON payload line must survive the shared cleaner"
+        );
+    }
+}
+
+/// Zero-fallback contract (issue #2580): a reasoner NEVER launders a
+/// post-sanitization, post-bounded-retry parse failure into a silent
+/// deterministic default. On exhaustion it surfaces an EXPLICIT `Err` +
+/// `brain_parse_error` metric; a bounded retry that parses is a SUCCESS; a
+/// well-formed structured JSON envelope parses through the shared sanitizing
+/// chokepoint on every phase; and a legitimate model "no action" is a distinct,
+/// observable `Ok(...)` outcome that never touches the parse-failure path.
+#[cfg(test)]
+mod zero_fallback_2580_tests {
+    use super::*;
+
+    /// The real Copilot CLI launch preamble + an ANSI-coloured tracing line —
+    /// the exact stdout contamination the shared #2484 chokepoint must strip on
+    /// every reasoner capture path before the structured decision is read.
+    fn banner_and_ansi_noise() -> String {
+        "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: cfg\n\
+         INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot \
+         version=\"GitHub Copilot CLI 1.0.66-2.\"\n\
+         Run 'copilot update' to check for updates.\n\
+         \x1b[2m2026-07-04T16:00:00.000000Z\x1b[0m \x1b[32mINFO\x1b[0m simard: cycle begin\n"
+            .to_string()
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // AC1: no code path emits a deterministic-default decision from a
+    // parse-failure — the shared terminal returns an EXPLICIT Err + metric.
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_failure_terminal_returns_explicit_error_never_a_default() {
+        // Every parse-failure outcome, at every non-recovery termination, must
+        // become an Err — never `Ok(default)`. A String stands in for any
+        // phase's decision type (finalize is decision-type-agnostic).
+        for outcome in [
+            LifecycleParseOutcome::DefaultEmpty,
+            LifecycleParseOutcome::DefaultMalformed,
+            LifecycleParseOutcome::Error,
+        ] {
+            for termination in [
+                LadderTermination::Exhausted,
+                LadderTermination::InvokeError,
+                LadderTermination::Disabled,
+            ] {
+                let result: SimardResult<String> = finalize_ladder_result(
+                    "recipe-decide-brain",
+                    BrainPhase::Decide,
+                    "goal-x",
+                    "SILENT_DEFAULT_SENTINEL".to_string(),
+                    outcome,
+                    termination,
+                    3,
+                );
+                let err = result.expect_err(&format!(
+                    "parse-failure {outcome:?}/{termination:?} must surface as Err, not a default"
+                ));
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("explicit parse error rather than a silent deterministic default"),
+                    "error must state the zero-fallback contract; got: {msg}"
+                );
+                assert!(
+                    msg.contains("recipe-decide-brain"),
+                    "error must name the adapter tag; got: {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_failure_terminal_increments_brain_parse_error_metric() {
+        // The `brain_parse_error` counter is the honest current-fallback-rate
+        // signal (issue #2580). It MUST increment on a genuine parse-failure
+        // terminal. Counters are monotonic, so `>= before + 1` is race-safe.
+        let name = crate::telemetry::names::BRAIN_PARSE_ERROR;
+        let before = crate::telemetry::registry::capture()
+            .counter(name, &[])
+            .unwrap_or(0);
+        let result: SimardResult<String> = finalize_ladder_result(
+            "recipe-orient-brain",
+            BrainPhase::Orient,
+            "goal-y",
+            "SILENT_DEFAULT_SENTINEL".to_string(),
+            LifecycleParseOutcome::DefaultMalformed,
+            LadderTermination::Exhausted,
+            3,
+        );
+        assert!(result.is_err(), "parse-failure must be an Err");
+        let after = crate::telemetry::registry::capture()
+            .counter(name, &[])
+            .unwrap_or(0);
+        assert!(
+            after > before,
+            "brain_parse_error must increment on a parse-failure terminal (before={before}, after={after})"
+        );
+    }
+
+    #[test]
+    fn recovered_or_parsed_outcome_returns_ok_decision() {
+        // A first-try parse and both ladder-recovery outcomes are real
+        // decisions — finalize returns them as `Ok`, unchanged.
+        for outcome in [
+            LifecycleParseOutcome::Parsed,
+            LifecycleParseOutcome::Repaired,
+            LifecycleParseOutcome::Escalated,
+        ] {
+            let result: SimardResult<String> = finalize_ladder_result(
+                "recipe-engineer-lifecycle-brain",
+                BrainPhase::Act,
+                "goal-z",
+                "REAL_DECISION".to_string(),
+                outcome,
+                LadderTermination::Recovered,
+                2,
+            );
+            assert_eq!(
+                result.expect("a parsed/recovered decision must be Ok"),
+                "REAL_DECISION",
+                "the real decision must pass through unchanged for {outcome:?}"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // AC4: bounded retry — a first-turn unparseable response followed by a
+    // parseable retry is a SUCCESS; exhaustion is an explicit hard error.
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn retry_recovers_then_finalize_is_ok() {
+        // Base attempt parse-misses; the first (schema-repair) rung returns a
+        // parseable decision → Recovered → finalize yields Ok. This is the
+        // "retry that eventually parses is success" contract.
+        let (decision, outcome, _attempts, termination) = run_brain_ladder(
+            "goal-retry",
+            "not a variant word", // base parse-miss text
+            LifecycleParseOutcome::DefaultMalformed,
+            &EscalationConfig::default(),
+            |_rung, _prior| Ok("advance_goal recovered on retry".to_string()),
+            parse_action_outcome,
+            default_advance_goal,
+            |d| decide_decision_choice(d).to_string(),
+        );
+        assert_eq!(termination, LadderTermination::Recovered);
+        assert!(
+            !outcome.is_parse_failure(),
+            "a recovered decision is not a parse-failure"
+        );
+        let result = finalize_ladder_result(
+            "recipe-decide-brain",
+            BrainPhase::Decide,
+            "goal-retry",
+            decision,
+            outcome,
+            termination,
+            2,
+        );
+        assert!(
+            matches!(result, Ok(DecideJudgment::AdvanceGoal { .. })),
+            "a retry that parses must be a SUCCESS, not an error"
+        );
+    }
+
+    #[test]
+    fn retry_exhaustion_then_finalize_is_explicit_error() {
+        // Every rung still parse-misses → Exhausted → finalize yields an
+        // explicit Err (never the `advance_goal` default masquerading as real).
+        let (decision, final_outcome, _attempts, termination) = run_brain_ladder(
+            "goal-exhaust",
+            "banner noise only",
+            LifecycleParseOutcome::DefaultMalformed,
+            &EscalationConfig::default(),
+            |_rung, _prior| Ok("still not a variant".to_string()),
+            parse_action_outcome,
+            default_advance_goal,
+            |d| decide_decision_choice(d).to_string(),
+        );
+        assert_eq!(termination, LadderTermination::Exhausted);
+        assert!(final_outcome.is_parse_failure());
+        let result = finalize_ladder_result(
+            "recipe-decide-brain",
+            BrainPhase::Decide,
+            "goal-exhaust",
+            decision,
+            final_outcome,
+            termination,
+            _attempts,
+        );
+        assert!(
+            result.is_err(),
+            "bounded-retry exhaustion must be an explicit Err, never a silent default"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // AC2 + AC3: the shared sanitizing chokepoint covers EVERY reasoner
+    // capture path, and the extractor consumes a structured JSON envelope
+    // (well-formed structured output parses; no free-prose keyword reliance).
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn decide_consumes_json_envelope_through_chokepoint() {
+        let raw = format!(
+            "{}{{\"decision\": \"consolidate_memory\", \"rationale\": \"memory is stale\"}}",
+            banner_and_ansi_noise()
+        );
+        let (decision, outcome) = parse_action_outcome(&raw);
+        assert_eq!(outcome, LifecycleParseOutcome::Parsed);
+        match decision {
+            DecideJudgment::ConsolidateMemory { rationale } => {
+                assert_eq!(rationale, "memory is stale")
+            }
+            other => panic!("expected ConsolidateMemory from the envelope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lifecycle_consumes_json_envelope_through_chokepoint() {
+        let raw = format!(
+            "{}{{\"decision\": \"reclaim_and_redispatch\", \"rationale\": \"worktree wedged\"}}",
+            banner_and_ansi_noise()
+        );
+        let (decision, outcome) = parse_lifecycle_outcome(&raw);
+        assert_eq!(outcome, LifecycleParseOutcome::Parsed);
+        assert!(
+            matches!(
+                decision,
+                EngineerLifecycleDecision::ReclaimAndRedispatch { .. }
+            ),
+            "expected ReclaimAndRedispatch from the envelope, got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn orient_consumes_json_envelope_through_chokepoint() {
+        let raw = format!(
+            "{}{{\"adjusted_urgency\": 0.3, \"confidence\": 0.8, \"rationale\": \"repeated failures\"}}",
+            banner_and_ansi_noise()
+        );
+        let (judgment, outcome) = parse_orient_outcome(&raw, 0.9, 2);
+        assert_eq!(outcome, LifecycleParseOutcome::Parsed);
+        assert!((judgment.adjusted_urgency - 0.3).abs() < 1e-9);
+        assert!((judgment.confidence - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn merge_judge_envelope_survives_banner_and_ansi() {
+        // The merge-judge capture path also routes through the shared chokepoint
+        // (`extract_json_payload`); a banner+ANSI-polluted verdict envelope must
+        // still yield the balanced JSON object, not the launcher noise.
+        let raw = format!(
+            "{}{{\"verdict\": \"not_ready\", \"rationale\": \"CI red\", \"blockers\": []}}",
+            banner_and_ansi_noise()
+        );
+        let payload = crate::recipe_output::extract_json_payload(&raw)
+            .expect("the chokepoint must recover the JSON verdict envelope from banner+ANSI noise");
+        assert!(payload.contains("\"verdict\""));
+        assert!(payload.contains("not_ready"));
+        assert!(
+            !payload.contains("launching copilot") && !payload.contains("NODE_OPTIONS"),
+            "the sanitized payload must not carry launcher-preamble noise: {payload}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // A legitimate take-no-action is a DISTINCT, observable outcome — a real
+    // model-emitted `continue_skipping` parses (Ok), verifiably separate from
+    // a parse-failure (which is an Err), so a genuine no-op is never confused
+    // with a laundered default.
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn genuine_no_action_is_a_distinct_ok_outcome_not_a_parse_failure() {
+        // A real model no-action: `continue_skipping` parses cleanly (Parsed).
+        let (decision, outcome) = parse_lifecycle_outcome(
+            r#"{"decision": "continue_skipping", "rationale": "engineer healthy, making progress"}"#,
+        );
+        assert_eq!(
+            outcome,
+            LifecycleParseOutcome::Parsed,
+            "a genuine no-action must be a real parsed decision, not a parse-failure"
+        );
+        assert!(
+            !outcome.is_parse_failure(),
+            "a genuine no-action is NOT on the parse-failure path"
+        );
+        let ok = finalize_ladder_result(
+            "recipe-engineer-lifecycle-brain",
+            BrainPhase::Act,
+            "healthy-goal",
+            decision,
+            outcome,
+            LadderTermination::Recovered,
+            1,
+        );
+        assert!(
+            matches!(ok, Ok(EngineerLifecycleDecision::ContinueSkipping { .. })),
+            "a genuine no-action passes through as Ok(ContinueSkipping) — distinct from a parse-failure Err"
+        );
+
+        // Contrast: an UNPARSEABLE response is a parse-failure (not a no-action).
+        let (_default_decision, miss) = parse_lifecycle_outcome("...garbled banner, no variant...");
+        assert!(
+            miss.is_parse_failure(),
+            "unparseable output is a parse-failure, distinct from a real continue_skipping"
         );
     }
 }

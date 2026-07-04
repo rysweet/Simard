@@ -569,3 +569,42 @@ fn env_flag(name: &str) -> bool {
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod live_engineers_tests {
+    use super::*;
+
+    /// Issue #2432 (design G4/G5): `resources.live_engineers` must derive from the
+    /// authoritative live worktree dispatch-claim set — a sentinel PID per real
+    /// engineer worktree, verified alive — NOT the retired `pgrep 'simard-engineer'`
+    /// (hyphen) pattern that never matched the real `simard engineer` (space) argv.
+    /// A live claim under the state root must be counted.
+    #[test]
+    fn live_engineers_derives_from_live_worktree_claims() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("status-live-engineers-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let wt = dir
+            .join(crate::engineer_worktree::WORKTREES_SUBDIR)
+            .join("goal-live-1");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(
+            wt.join(crate::engineer_worktree::ENGINEER_CLAIM_FILE),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+
+        let resources = assemble_resources(None, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let data = resources
+            .data
+            .expect("resources section should be live on a host with /proc");
+        assert_eq!(
+            data.live_engineers,
+            Some(1),
+            "the one live worktree dispatch claim must be counted as a live engineer"
+        );
+    }
+}

@@ -92,15 +92,39 @@ steps:
 
       ## OUTPUT FORMAT
 
-      Output the variant name as the very first word of your response.
-      The daemon reads only the first whitespace-delimited token (case-insensitive).
-      Everything after the first word is treated as rationale text.
+      **Preferred — emit a structured JSON decision envelope.** Respond with a
+      single JSON object of this exact shape (a fenced ```json block is fine; the
+      daemon strips any surrounding banner/prose before parsing):
+
+      ```json
+      {"decision": "<variant>", "rationale": "<short reason>"}
+      ```
+
+      where `<variant>` is exactly one of: `continue_skipping`,
+      `reclaim_and_redispatch`, `deprioritize`, `open_tracking_issue`,
+      `mark_goal_blocked`, `consider_self_update`.
+
+      **Accepted fallback** — if you cannot emit JSON, output the variant name as
+      the very first word of your response, followed by your rationale (the
+      daemon's fallback scanner reads the first whitespace-delimited token,
+      case-insensitive).
+
+      A genuine "the engineer is healthy, do nothing" answer is a REAL decision:
+      emit `continue_skipping` explicitly. If your output is unparseable the
+      daemon does NOT default to `continue_skipping` on your behalf — it records
+      a `brain_parse_error`, retries you with a schema-repair prompt, and
+      surfaces an explicit error only if the bounded retry still fails (never a
+      parse-failure masquerading as a no-action decision).
 
       ## EXAMPLES
 
+      Preferred (JSON envelope):
+
+      ```json
+      {"decision": "continue_skipping", "rationale": "engineer committed 2 minutes ago, healthy progress"}
       ```
-      continue_skipping engineer committed 2 minutes ago, healthy progress
-      ```
+
+      Accepted fallback (bare first word):
 
       ```
       reclaim_and_redispatch worktree idle 7h, log truncated mid-tool-call

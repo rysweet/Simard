@@ -44,9 +44,28 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     .proc-tree .proc-uptime{min-width:6rem}
     .proc-tree .proc-kids.collapsed{display:none}
     .proc-tree .proc-kids{border-left:1px solid #30363d;margin-left:8px}
-    #chat-messages{background:#010409;border:1px solid var(--border);border-radius:6px;padding:.75rem;height:400px;overflow-y:auto;font-size:.9rem;margin-bottom:.75rem}
+    #chat-messages{background:#010409;border:1px solid var(--border);border-radius:6px;padding:.6rem;flex:1;min-height:0;overflow-y:auto;font-size:.9rem;margin-bottom:.5rem}
     .chat-msg{margin-bottom:.5rem} .chat-msg .role{font-weight:700;margin-right:.5rem}
     .chat-msg .role.user{color:var(--accent)} .chat-msg .role.system{color:var(--yellow)} .chat-msg .role.assistant{color:var(--green)}
+    .chat-typing{padding:.25rem 0;color:#8b949e}
+    #tab-chat.active{display:flex;flex-direction:column;height:calc(100vh - 106px);padding:.4rem 1.25rem .6rem}
+    #tab-chat .page-h1{margin-bottom:.1rem}
+    #tab-chat .page-lede{margin:0 0 .4rem;padding:.3rem .6rem}
+    .chat-layout{display:flex;gap:1rem;flex:1;min-height:0}
+    #chat-sidebar{flex:0 0 240px;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.6rem;min-height:0}
+    #chat-new{width:100%;padding:.5rem;border:none;border-radius:6px;background:var(--accent);color:#0d1117;font-weight:600;cursor:pointer;margin-bottom:.5rem;font-size:.85rem}
+    #chat-new:hover{opacity:.9}
+    #chat-sessions{flex:1;overflow-y:auto;min-height:0}
+    .chat-session-item{padding:.45rem .5rem;border-radius:6px;cursor:pointer;border:1px solid transparent;margin-bottom:.25rem}
+    .chat-session-item:hover{background:rgba(88,166,255,0.08)}
+    .chat-session-item.active{background:rgba(88,166,255,0.12);border-color:var(--accent)}
+    .chat-session-item .cs-title{color:var(--fg);font-weight:600;font-size:.8rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .chat-session-item .cs-time{color:#8b949e;font-size:.7rem;margin-top:.1rem}
+    .chat-session-empty{color:#8b949e;font-size:.8rem;padding:.5rem;line-height:1.4}
+    #chat-panel{flex:1;display:flex;flex-direction:column;min-height:0;padding:.7rem}
+    #chat-panel h2{margin-bottom:.4rem}
+    #chat-panel .ws-status{margin-bottom:.35rem}
+    .typing-dots span{animation:blink 1.4s infinite both;font-size:1.2em}
     .typing-dots span{animation:blink 1.4s infinite both;font-size:1.2em}
     .typing-dots span:nth-child(2){animation-delay:.2s}
     .typing-dots span:nth-child(3){animation-delay:.4s}
@@ -355,7 +374,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
 
   <div class="tab-content" id="tab-thinking">
     <h1 class="page-h1">Thinking</h1>
-    <p class="page-lede">A live stream of the daemon's internal reasoning between actions, showing what it considered before deciding what to do next.</p>
+    <p class="page-lede">A live view of what the daemon decided each cycle - repeated deferring-to-an-active-engineer notes are collapsed with a count so genuine forward progress stands out from a stuck loop.</p>
     <div class="card" style="margin-bottom:1rem">
       <h2>Cycle History <button class="btn" onclick="fetchOodaCycles()">Refresh</button></h2>
       <div id="ooda-cycle-trend" style="margin-bottom:.75rem"><span class="loading">Loading…</span></div>
@@ -369,7 +388,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
 
   <div class="tab-content" id="tab-brain-failures">
     <h1 class="page-h1">Brain Failures</h1>
-    <p class="page-lede">Every time the daemon's language-model brain returned an unparseable or invalid response and fell back to safe deterministic rules, listed with the failure type, which component triggered it, when it happened, and whether recovery succeeded.</p>
+    <p class="page-lede">How often the daemon's brain failed to parse a model response right now - the current rate and a bounded recent window, kept separate from the all-time total so a stale number never looks like a live problem.</p>
     <div class="card" style="margin-bottom:1rem">
       <h2>Summary <button class="btn" onclick="fetchBrainFailures()">Refresh</button></h2>
       <div id="brain-failures-summary"><span class="loading">Loading…</span></div>
@@ -383,18 +402,23 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
   <div class="tab-content" id="tab-chat">
     <h1 class="page-h1">Chat</h1>
     <p class="page-lede">Talk to the running Simard agent in real time — anything you say here can become a new goal, and slash-commands like /close, /goals, and /status are available.</p>
-    <div class="card" style="max-width:720px">
-      <h2>Chat</h2>
-      <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.75rem;margin-bottom:1rem;font-size:.85rem;color:#8b949e">
-        <strong style="color:var(--accent)">💡 Chat Help:</strong>
-        Talk directly with Simard — ask about your goals, check system status, or start a conversation about anything on your mind.
-        Commands: <code>/close</code> end session, <code>/goals</code> review goals, <code>/status</code> system status.
+    <div class="chat-layout">
+      <div id="chat-sidebar">
+        <button id="chat-new" onclick="newChat()">+ New chat</button>
+        <div id="chat-sessions"></div>
       </div>
-      <div class="ws-status disconnected" id="ws-status">● Disconnected <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button></div>
-      <div id="chat-messages"></div>
-      <div id="chat-input-row">
-        <textarea id="chat-input" placeholder="Type a message… (/close to end session)"></textarea>
-        <button id="chat-send" onclick="sendChat()">Send</button>
+      <div class="card" id="chat-panel">
+        <h2>Chat</h2>
+        <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.5rem .75rem;margin-bottom:.5rem;font-size:.8rem;color:#8b949e">
+          <strong style="color:var(--accent)">💡</strong>
+          Talk directly with Simard — ask about your goals, check system status, or start a conversation. Commands: <code>/close</code> end session, <code>/goals</code> review goals, <code>/status</code> system status.
+        </div>
+        <div class="ws-status disconnected" id="ws-status">● Disconnected <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button></div>
+        <div id="chat-messages"></div>
+        <div id="chat-input-row">
+          <textarea id="chat-input" placeholder="Type a message… (/close to end session)"></textarea>
+          <button id="chat-send" onclick="sendChat()">Send</button>
+        </div>
       </div>
     </div>
   </div>

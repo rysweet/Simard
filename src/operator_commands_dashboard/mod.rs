@@ -3,6 +3,7 @@ mod agent_log;
 mod auth;
 mod brain_failures;
 mod chat;
+mod chat_store;
 mod current_work;
 mod cycle_source;
 mod distributed;
@@ -10,6 +11,7 @@ mod goals;
 mod goals_status;
 mod hosts;
 mod index_html;
+mod live_engineers;
 mod logs;
 mod memory;
 mod merge_judge;
@@ -22,6 +24,7 @@ mod registry;
 pub(crate) mod routes;
 mod status;
 mod subagent;
+mod thinking_collapse;
 mod tmux;
 mod workboard;
 
@@ -29,6 +32,10 @@ mod workboard;
 mod tests_activity;
 #[cfg(test)]
 mod tests_attach;
+#[cfg(test)]
+mod tests_chat_routes;
+#[cfg(test)]
+mod tests_chat_store;
 #[cfg(test)]
 mod tests_goal_records_migration;
 #[cfg(test)]

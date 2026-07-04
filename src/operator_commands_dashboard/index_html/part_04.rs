@@ -33,25 +33,108 @@ pub(crate) const PART_04: &str = r#"            let fmt;
     fetchBudget();
 
     /* --- Chat --- */
-    let ws=null,chatInit=false;
-    function initChat(){
+    let ws=null, currentSessionId=null, streamSpan=null, streamText='';
+
+    async function loadChatSessions(){
+      const box=document.getElementById('chat-sessions');
+      if(!box) return;
+      try{
+        const d=await apiFetch('/api/chat/sessions');
+        const sessions=(d&&d.sessions)||[];
+        box.textContent='';
+        if(sessions.length===0){
+          const empty=document.createElement('div');
+          empty.className='chat-session-empty';
+          empty.textContent='No saved chats yet. Start a new conversation.';
+          box.appendChild(empty);
+          return;
+        }
+        sessions.forEach(s=>{
+          const item=document.createElement('div');
+          item.className='chat-session-item'+(s.id===currentSessionId?' active':'');
+          item.dataset.id=s.id;
+          const title=document.createElement('div');
+          title.className='cs-title';
+          title.textContent=s.title||s.id;
+          const time=document.createElement('div');
+          time.className='cs-time';
+          time.textContent=timeAgo(s.updated_at);
+          item.appendChild(title);
+          item.appendChild(time);
+          item.addEventListener('click',()=>openSession(s.id));
+          box.appendChild(item);
+        });
+      }catch(e){
+        box.textContent='';
+        const err=document.createElement('div');
+        err.className='chat-session-empty';
+        err.textContent='Failed to load chats.';
+        box.appendChild(err);
+      }
+    }
+
+    async function openSession(id){
+      currentSessionId=id;
+      document.querySelectorAll('.chat-session-item').forEach(el=>{
+        el.classList.toggle('active', el.dataset.id===id);
+      });
+      clearMessages();
+      try{
+        const d=await apiFetch('/api/chat/sessions/'+encodeURIComponent(id));
+        (d.history||[]).forEach(m=>appendMsg(m.role||'system', m.content||''));
+      }catch(e){ appendMsg('system','Failed to load session history.'); }
+      initChat(id);
+    }
+
+    function newChat(){
+      currentSessionId=null;
+      document.querySelectorAll('.chat-session-item.active').forEach(el=>el.classList.remove('active'));
+      clearMessages();
+      initChat(null);
+    }
+
+    function initChat(sessionId){
+      if(sessionId!==undefined) currentSessionId=sessionId;
       if(ws){try{ws.close();}catch(e){}}
-      chatInit=true;
       const proto=location.protocol==='https:'?'wss:':'ws:';
-      ws=new WebSocket(`${proto}//${location.host}/ws/chat`);
+      const qs=currentSessionId?('?session_id='+encodeURIComponent(currentSessionId)):'';
+      ws=new WebSocket(`${proto}//${location.host}/ws/chat${qs}`);
       const st=document.getElementById('ws-status');
+      st.className='ws-status';
       st.innerHTML='<span style="color:var(--yellow)">● Connecting…</span>';
       ws.onopen=()=>{st.innerHTML='<span style="color:var(--green)">● Connected</span>';};
       ws.onclose=()=>{
         st.innerHTML='<span style="color:var(--red)">● Disconnected</span> <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button>';
-        chatInit=false;removeTypingIndicator();setChatBusy(false);
+        removeTypingIndicator();setChatBusy(false);finalizeStream();
       };
       ws.onerror=()=>{
         st.innerHTML='<span style="color:var(--red)">● Error</span> <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Retry</button>';
         removeTypingIndicator();setChatBusy(false);
       };
-      ws.onmessage=ev=>{removeTypingIndicator();setChatBusy(false);try{const m=JSON.parse(ev.data);appendMsg(m.role||'system',m.content||ev.data);}catch(ex){appendMsg('system',ev.data);}};
+      ws.onmessage=onChatFrame;
     }
+
+    function onChatFrame(ev){
+      let m;
+      try{ m=JSON.parse(ev.data); }
+      catch(ex){ removeTypingIndicator();setChatBusy(false);appendMsg('system',ev.data); return; }
+      // Handshake: bind the session id + streaming capability.
+      if(m && m.type==='ready'){ if(m.session_id) currentSessionId=m.session_id; return; }
+      // Resume: replay persisted history into the panel.
+      if(m && m.type==='restore'){
+        clearMessages();
+        (m.messages||[]).forEach(msg=>appendMsg(msg.role||'system', msg.content||''));
+        removeTypingIndicator();setChatBusy(false);
+        return;
+      }
+      // Streaming: coalesce chunk frames into one assistant bubble.
+      if(m && m.type==='chunk'){ removeTypingIndicator(); appendChunk(m.content||''); return; }
+      if(m && m.type==='done'){ finalizeStream(); setChatBusy(false); return; }
+      // Legacy / fallback frames: {role, content} rendered in one update.
+      removeTypingIndicator();setChatBusy(false);finalizeStream();
+      appendMsg((m&&m.role)||'system', (m&&m.content!==undefined)?m.content:ev.data);
+    }
+
     function sendChat(){
       const inp=document.getElementById('chat-input'); const txt=inp.value.trim();
       if(!txt) return;
@@ -62,13 +145,40 @@ pub(crate) const PART_04: &str = r#"            let fmt;
       appendMsg('user',txt); ws.send(txt); inp.value='';
       showTypingIndicator(); setChatBusy(true);
     }
+
+    function appendChunk(text){
+      if(!streamSpan){
+        const el=document.getElementById('chat-messages');
+        const div=document.createElement('div');
+        div.className='chat-msg';
+        const roleSpan=document.createElement('span');
+        roleSpan.className='role assistant';
+        roleSpan.textContent='assistant:';
+        div.appendChild(roleSpan);
+        streamSpan=document.createElement('span');
+        div.appendChild(streamSpan);
+        el.appendChild(div);
+        streamText='';
+      }
+      streamText+=text;
+      streamSpan.textContent=' '+streamText;
+      const el=document.getElementById('chat-messages');
+      el.scrollTop=el.scrollHeight;
+    }
+    function finalizeStream(){ streamSpan=null; streamText=''; }
+
+    function clearMessages(){
+      finalizeStream();
+      const el=document.getElementById('chat-messages');
+      if(el) el.textContent='';
+    }
     function showTypingIndicator(){
       removeTypingIndicator();
       const el=document.getElementById('chat-messages');
       const div=document.createElement('div');
       div.id='typing-indicator';
-      div.className='chat-msg';
-      div.innerHTML='<span class="role assistant">simard:</span> <span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>';
+      div.className='chat-typing';
+      div.innerHTML='<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>';
       el.appendChild(div);
       el.scrollTop=el.scrollHeight;
     }
@@ -218,6 +328,26 @@ pub(crate) const PART_04: &str = r#"            let fmt;
               <div class="cycle-summary">${esc(humanizeCycleSummary(rpt.summary))}</div>
             </div>`;
           }
+          /* Issue #2580: disposition-aware rendering. A run of identical
+             deferrals to an active engineer is collapsed by the server into a
+             single entry with a repeat_count; render it as one clean line so
+             the tab shows forward progress, not the same line over and over. A
+             genuine stuck loop (loop_suspected) is called out in red. */
+          const disp=rpt.disposition||'';
+          const rc=rpt.repeat_count||1;
+          const cFirst=rpt.cycle_number_first||rpt.cycle_number;
+          const cLast=rpt.cycle_number_last||rpt.cycle_number;
+          const rangeTxt=(cFirst!==cLast)?('Cycles #'+cLast+'–#'+cFirst):('Cycle #'+rpt.cycle_number);
+          let dispoBadge='';
+          if(disp==='deferring'){dispoBadge='<span class="cycle-badge" style="background:#2ea043;color:#fff">deferring'+(rc>1?' ×'+rc:'')+'</span>';}
+          else if(disp==='progressing'){dispoBadge='<span class="cycle-badge" style="background:#1f6feb;color:#fff">progress</span>';}
+          if(rpt.loop_suspected){dispoBadge+='<span class="cycle-badge" style="background:var(--red);color:#fff" title="the same non-progressing decision repeated without the work advancing">⚠ possible loop ×'+rc+'</span>';}
+          if(disp==='deferring'){
+            return `<div class="thinking-cycle">
+              <div class="cycle-header"><span class="cycle-num">${rangeTxt}</span>${dispoBadge}</div>
+              <div class="cycle-summary-inline">${esc(rpt.collapsed_summary||'Deferring to an active engineer')}</div>
+            </div>`;
+          }
           const phases=[];
           if(rpt.observation){
             const obs=rpt.observation;
@@ -284,7 +414,8 @@ pub(crate) const PART_04: &str = r#"            let fmt;
           }
           return `<div class="thinking-cycle">
             <div class="cycle-header">
-              <span class="cycle-num">Cycle #${rpt.cycle_number}</span>
+              <span class="cycle-num">${rangeTxt}</span>
+              ${dispoBadge}
               <span class="cycle-summary-inline">${esc(humanizeCycleSummary(rpt.summary||''))}</span>
             </div>
             <div class="cycle-phases">${phases.join('')}</div>
@@ -382,17 +513,27 @@ pub(crate) const PART_04: &str = r#"            let fmt;
         const sumEl=document.getElementById('brain-failures-summary');
         const listEl=document.getElementById('brain-failures-list');
         const s=d.summary||{};
-        const totalFallbacks=s.total_fallback_count||0;
-        const totalParseFailures=s.total_parse_failure_count||0;
-        const totalFailures=totalFallbacks+totalParseFailures;
         const scanned=s.cycles_scanned||0;
-        const statusClass=totalParseFailures>0?'err':(totalFallbacks>0?'warn':'ok');
-        const statusText=totalFailures===0?'No brain failures detected':''+totalFailures+' failure'+(totalFailures===1?'':'s')+' found';
+        /* Issue #2580: headline the CURRENT bounded window + rate, never a
+           stale cumulative total. Zero current failures renders green. */
+        const rec=d.recent||{};
+        const life=d.lifetime||{};
+        const win=rec.window_minutes||60;
+        const recentTotal=rec.total||0;
+        const recentParse=rec.parse_failure||0;
+        const recentFallback=rec.fallback||0;
+        const rate=Number(rec.rate_per_hour||0);
+        const lifetimeParse=life.parse_failure_count||0;
+        const statusClass=rec.status==='err'?'err':(rec.status==='warn'?'warn':'ok');
+        const statusText=recentTotal===0
+          ?('No brain failures in the last '+win+' min')
+          :(recentTotal+' failure'+(recentTotal===1?'':'s')+' in the last '+win+' min');
         sumEl.innerHTML=`
-          <div class="stat"><span class="label">Status</span><span class="value ${statusClass}">${statusText}</span></div>
-          <div class="stat"><span class="label">Parse failures (model response unparseable)</span><span class="value ${totalParseFailures>0?'err':'ok'}">${totalParseFailures}</span></div>
-          <div class="stat"><span class="label">Deterministic fallbacks (safe rules used instead of model)</span><span class="value ${totalFallbacks>0?'warn':'ok'}">${totalFallbacks}</span></div>
-          <div class="stat"><span class="label">Cycles scanned</span><span class="value">${scanned}</span></div>
+          <div class="stat"><span class="label">Current status (last ${win} min)</span><span class="value ${statusClass}">${statusText}</span></div>
+          <div class="stat"><span class="label">Current failure rate</span><span class="value ${statusClass}">${rate.toFixed(1)} / hr</span></div>
+          <div class="stat"><span class="label">Parse failures (last ${win} min)</span><span class="value ${recentParse>0?'err':'ok'}">${recentParse}</span></div>
+          <div class="stat"><span class="label">Deterministic fallbacks (last ${win} min)</span><span class="value ${recentFallback>0?'warn':'ok'}">${recentFallback}</span></div>
+          <div class="stat"><span class="label">All-time parse failures (cumulative, not current)</span><span class="value" style="opacity:.55">${lifetimeParse}</span></div>
           <div class="stat"><span class="label">Last checked</span><span class="value">${timeAgo(d.timestamp)}</span></div>`;
         const failures=d.failures||[];
         if(!failures.length){

@@ -36,32 +36,34 @@ installation and linking.
 
 ## Feature gate
 
-The Signal channel is compiled only when the `signal` Cargo feature is enabled; it
-is **off by default**. The default build has no Signal code and needs no signal-cli
-installed.
+The Signal channel lives behind the `signal` Cargo feature, which is **on by
+default** (issue #2576): a stock `cargo build` compiles the channel in. Only a
+deliberately minimal `--no-default-features` build omits the Signal code and needs
+no signal-cli installed.
 
 ```toml
 # Cargo.toml
 [features]
-signal = []  # default-OFF; adds no new dependency
+default = ["signal", "dashboard-audit"]  # signal is built in by default
+signal = []                              # adds no new dependency
 ```
 
 ```bash
-# Default build — no Signal, no signal-cli needed:
+# Default build — Signal channel included:
 cargo build
 cargo test
 
-# With the Signal channel:
-cargo build --features signal
-cargo test  --features signal
+# Minimal build — no Signal code:
+cargo build --no-default-features
+cargo test  --no-default-features
 ```
 
-The transport uses tokio `net` (already a dependency), so enabling `signal` pulls in
+The transport uses tokio `net` (already a dependency), so the `signal` feature pulls in
 no new crate — there is no HTTP client and no `async-trait`.
 
 ## Launching
 
-Start the channel with the operator subcommand from a `--features signal` build:
+Start the channel with the operator subcommand from any default build:
 
 ```bash
 simard signal run
@@ -71,9 +73,9 @@ simard signal run
 builds a tokio runtime, and calls `signal_conversation::run`
 (`src/signal_conversation/channel.rs`), which connects to the signal-cli endpoint
 and drives the operator conversation to completion. It exits when the signal-cli
-socket closes; supervise it (systemd/tmux) to reconnect. A default build (no
-`signal` feature) still recognizes `simard signal run` but returns a clear error
-telling the operator to rebuild with `--features signal`.
+socket closes; supervise it (systemd/tmux) to reconnect. A minimal
+`--no-default-features` build still recognizes `simard signal run` but returns a
+clear error telling the operator to rebuild with the feature.
 
 ## Transport
 
@@ -415,7 +417,8 @@ handoff under `default_handoff_dir()` (`$SIMARD_HANDOFF_DIR`, else
 
 ## Testing
 
-All Signal tests run under `cargo test --features signal` against a **mock JSON-RPC
+All Signal tests run under the default `cargo test` (the `signal` feature is on by
+default; explicit `--features signal` is redundant) against a **mock JSON-RPC
 transport** and a spy command handler — no live signal-cli or network is required:
 
 - **Allowlist enforcement** — an unknown E.164 is dropped (no dispatch, no reply);

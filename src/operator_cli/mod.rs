@@ -104,8 +104,8 @@ Product modes:
   dashboard serve [--port=8080]
   signal run             — connect to the configured signal-cli JSON-RPC daemon
                            and run the operator Signal conversation channel
-                           (requires a build with --features signal + a [signal]
-                           config table; see docs/howto/set-up-the-signal-channel.md)
+                           (built by default; needs a [signal] config table; see
+                           docs/howto/set-up-the-signal-channel.md)
   memory stats [state-root] [--json]
                          — read-only per-type cognitive-memory counts +
                            graph-edge / dedup section + sample rows
