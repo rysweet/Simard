@@ -8,6 +8,7 @@ doc_type: reference
 related:
   - ../howto/spawn-engineers-from-ooda-daemon.md
   - ./engineer-loop-argv-sanitization.md
+  - ./engineer-worktree-sweep-safety.md
   - ../howto/run-ooda-daemon.md
 ---
 
@@ -360,6 +361,7 @@ git -C /home/azureuser/src/Simard worktree prune
 
 - [How OODA spawns engineer agents](../howto/spawn-engineers-from-ooda-daemon.md)
 - [Engineer loop argv sanitization](./engineer-loop-argv-sanitization.md)
+- [Engineer worktree sweep safety guards](./engineer-worktree-sweep-safety.md)
 - [Run the OODA daemon](../howto/run-ooda-daemon.md)
 - Source: `src/engineer_worktree.rs`,
   `src/ooda_actions/advance_goal.rs::dispatch_spawn_engineer`,

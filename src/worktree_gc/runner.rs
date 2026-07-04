@@ -218,12 +218,54 @@ fn gather_inputs(
 
     let last_activity = super::policy::worktree_last_activity(&entry.path);
     let has_live_process = probe.worktree_has_live_process(&entry.path);
+    let has_uncommitted_or_unpushed_work = worktree_has_uncommitted_or_unpushed_work(&entry.path);
 
     CandidateInputs {
         merged_prs,
         branch_on_origin,
         last_activity,
         has_live_process,
+        has_uncommitted_or_unpushed_work,
+    }
+}
+
+/// Return `true` if the worktree at `dir` holds work that a prune would
+/// destroy (issue #2553): a dirty working tree, or commits ahead of a
+/// configured upstream.
+///
+/// Unlike the daemon sweep (`engineer_worktree::sweep`), the GC has an
+/// independent merged-PR / branch-deleted policy that already proves a
+/// candidate branch's commits are safe upstream. So a *clean* worktree with
+/// **no** configured upstream is NOT treated as unpushed here — otherwise GC
+/// could never reap a merged branch whose local checkout simply lacks a
+/// tracking ref. Only two conditions count as recoverable work:
+///   1. `git status --porcelain` is non-empty (uncommitted changes), or
+///   2. `git rev-list --count @{u}..HEAD` > 0 (ahead of a configured upstream).
+///
+/// Every error is treated conservatively as "has work" (fail-safe keep) EXCEPT
+/// a missing upstream, which is expected for many merged branches and yields
+/// "no unpushed work".
+fn worktree_has_uncommitted_or_unpushed_work(dir: &Path) -> bool {
+    match git_capture(dir, &["status", "--porcelain"]) {
+        Ok(out) if !out.trim().is_empty() => return true,
+        Ok(_) => {}
+        // Broken / unreadable git state — cannot verify, keep.
+        Err(e) => {
+            tracing::warn!(
+                target: "simard::worktree_gc",
+                error = %e,
+                worktree = %dir.display(),
+                "git status failed during work-guard check; treating as having work",
+            );
+            return true;
+        }
+    }
+    // Clean tree. Ahead of a configured upstream? A missing upstream errors
+    // here and is treated as "not ahead" — the merge/branch-deletion policy is
+    // responsible for proving that case safe.
+    match git_capture(dir, &["rev-list", "--count", "@{u}..HEAD"]) {
+        Ok(count) => count.trim() != "0",
+        Err(_) => false,
     }
 }
 

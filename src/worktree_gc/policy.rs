@@ -71,6 +71,14 @@ pub struct CandidateInputs {
     /// a worktree under a running engineer destroys its CWD and forces
     /// the agent to spin until its 1-hour timeout fires.
     pub has_live_process: bool,
+    /// `true` if the worktree holds work that a prune would destroy: a dirty
+    /// working tree (`git status --porcelain` non-empty) or commits ahead of a
+    /// configured upstream (issue #2553). When set, the policy refuses to mark
+    /// the worktree as a GC candidate regardless of merged / deleted / idle
+    /// signals — the operator incident showed `--apply` deleting an in-use
+    /// worktree carrying unsaved edits. This is a fail-safe: the runner sets it
+    /// to `true` whenever the git state cannot be verified.
+    pub has_uncommitted_or_unpushed_work: bool,
 }
 
 /// Apply the policy to one worktree entry. Returns `Some(GcCandidate)`
@@ -97,6 +105,20 @@ pub fn evaluate_candidate(
             worktree = %entry.path.display(),
             branch = entry.branch.as_deref().unwrap_or("<detached>"),
             "skipping prune: live process detected in worktree (#1886)",
+        );
+        return None;
+    }
+
+    // #2553: uncommitted or unpushed work beats every other signal. Even a
+    // merged / deleted / long-idle branch may carry unsaved operator edits or
+    // commits that never reached the remote. Pruning would silently destroy
+    // them, so we refuse regardless of the prune signals below.
+    if inputs.has_uncommitted_or_unpushed_work {
+        tracing::info!(
+            target: "simard::worktree_gc",
+            worktree = %entry.path.display(),
+            branch = entry.branch.as_deref().unwrap_or("<detached>"),
+            "skipping prune: uncommitted or unpushed work in worktree (#2553)",
         );
         return None;
     }
@@ -186,6 +208,7 @@ mod tests {
             branch_on_origin: Some(true),
             last_activity: Some(SystemTime::now()),
             has_live_process: false,
+            has_uncommitted_or_unpushed_work: false,
         };
         let now = SystemTime::now();
         assert!(evaluate_candidate(&e, &inputs, now, 7).is_none());
@@ -199,6 +222,7 @@ mod tests {
             branch_on_origin: Some(true),
             last_activity: Some(SystemTime::now()),
             has_live_process: false,
+            has_uncommitted_or_unpushed_work: false,
         };
         let cand = evaluate_candidate(&e, &inputs, SystemTime::now(), 7).expect("merged → cand");
         assert_eq!(cand.reasons.len(), 1);
@@ -216,6 +240,7 @@ mod tests {
             branch_on_origin: Some(false),
             last_activity: Some(SystemTime::now()),
             has_live_process: false,
+            has_uncommitted_or_unpushed_work: false,
         };
         let cand =
             evaluate_candidate(&e, &inputs, SystemTime::now(), 7).expect("deleted → candidate");
@@ -235,6 +260,7 @@ mod tests {
             branch_on_origin: Some(true),
             last_activity: Some(activity),
             has_live_process: false,
+            has_uncommitted_or_unpushed_work: false,
         };
         let cand = evaluate_candidate(&e, &inputs, now, 7).expect("idle → candidate");
         match &cand.reasons[0] {
@@ -253,6 +279,7 @@ mod tests {
             branch_on_origin: Some(true),
             last_activity: Some(activity),
             has_live_process: false,
+            has_uncommitted_or_unpushed_work: false,
         };
         assert!(evaluate_candidate(&e, &inputs, now, 7).is_none());
     }
@@ -266,6 +293,7 @@ mod tests {
             branch_on_origin: Some(false),
             last_activity: Some(SystemTime::UNIX_EPOCH),
             has_live_process: false,
+            has_uncommitted_or_unpushed_work: false,
         };
         assert!(
             evaluate_candidate(&e, &inputs, SystemTime::now(), 7).is_none(),
@@ -286,6 +314,7 @@ mod tests {
             branch_on_origin: Some(false),
             last_activity: Some(activity),
             has_live_process: false,
+            has_uncommitted_or_unpushed_work: false,
         };
         let cand = evaluate_candidate(&e, &inputs, now, 7).expect("idle still applies on detached");
         assert!(
@@ -308,6 +337,7 @@ mod tests {
             branch_on_origin: None,
             last_activity: Some(SystemTime::now()),
             has_live_process: false,
+            has_uncommitted_or_unpushed_work: false,
         };
         assert!(evaluate_candidate(&e, &inputs, SystemTime::now(), 7).is_none());
     }
@@ -322,6 +352,7 @@ mod tests {
             branch_on_origin: Some(false),
             last_activity: Some(activity),
             has_live_process: false,
+            has_uncommitted_or_unpushed_work: false,
         };
         let cand = evaluate_candidate(&e, &inputs, now, 7).expect("hot in 3 ways");
         assert!(matches!(
@@ -340,6 +371,7 @@ mod tests {
             branch_on_origin: Some(false),
             last_activity: Some(activity),
             has_live_process: false,
+            has_uncommitted_or_unpushed_work: false,
         };
         let cand = evaluate_candidate(&e, &inputs, now, 7).expect("hot in 2 ways");
         assert!(matches!(

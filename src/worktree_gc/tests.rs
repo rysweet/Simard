@@ -279,6 +279,7 @@ branch refs/heads/feat/x
         branch_on_origin: Some(true),
         last_activity: Some(SystemTime::now()),
         has_live_process: false,
+        has_uncommitted_or_unpushed_work: false,
     };
     assert!(evaluate_candidate(&entries[0], &inputs, SystemTime::now(), 7).is_none());
     assert!(evaluate_candidate(&entries[1], &inputs, SystemTime::now(), 7).is_some());
@@ -369,6 +370,7 @@ branch refs/heads/feat/x
         branch_on_origin: Some(false),
         last_activity: Some(now - std::time::Duration::from_secs(365 * 24 * 3600)),
         has_live_process: true,
+        has_uncommitted_or_unpushed_work: false,
     };
     assert!(
         evaluate_candidate(&entries[0], &inputs_with_every_signal, now, 7).is_none(),
@@ -377,6 +379,7 @@ branch refs/heads/feat/x
 
     let same_inputs_no_liveness = CandidateInputs {
         has_live_process: false,
+        has_uncommitted_or_unpushed_work: false,
         ..inputs_with_every_signal
     };
     let cand = evaluate_candidate(&entries[0], &same_inputs_no_liveness, now, 7)

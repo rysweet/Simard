@@ -313,12 +313,19 @@ pub fn run_ooda_daemon(
     if let Ok(parent_repo) = std::env::current_dir() {
         match crate::engineer_worktree::sweep_orphaned_worktrees(&parent_repo, &state_root) {
             Ok(report) => {
-                if !report.removed_orphan_dirs.is_empty() {
+                if !report.removed_orphan_dirs.is_empty()
+                    || !report.skipped_live_cwd_dirs.is_empty()
+                    || !report.skipped_dirty_dirs.is_empty()
+                {
                     daemon_log(
                         &state_root,
                         &format!(
-                            "[simard] OODA daemon: swept {} orphan engineer worktree(s)",
-                            report.removed_orphan_dirs.len()
+                            "[simard] OODA daemon: swept {} orphan engineer worktree(s) \
+                             (kept {} live-claim, {} live-cwd, {} with work)",
+                            report.removed_orphan_dirs.len(),
+                            report.skipped_live_dirs.len(),
+                            report.skipped_live_cwd_dirs.len(),
+                            report.skipped_dirty_dirs.len(),
                         ),
                     );
                 }
@@ -727,12 +734,19 @@ pub fn run_ooda_daemon(
                 match crate::engineer_worktree::sweep_orphaned_worktrees(&parent_repo, &state_root)
                 {
                     Ok(report) => {
-                        if !report.removed_orphan_dirs.is_empty() {
+                        if !report.removed_orphan_dirs.is_empty()
+                            || !report.skipped_live_cwd_dirs.is_empty()
+                            || !report.skipped_dirty_dirs.is_empty()
+                        {
                             daemon_log(
                                 &state_root,
                                 &format!(
-                                    "[simard] periodic sweep: removed {} orphan engineer worktree(s)",
-                                    report.removed_orphan_dirs.len()
+                                    "[simard] periodic sweep: removed {} orphan engineer \
+                                     worktree(s) (kept {} live-claim, {} live-cwd, {} with work)",
+                                    report.removed_orphan_dirs.len(),
+                                    report.skipped_live_dirs.len(),
+                                    report.skipped_live_cwd_dirs.len(),
+                                    report.skipped_dirty_dirs.len(),
                                 ),
                             );
                         }

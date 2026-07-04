@@ -44,6 +44,7 @@ The daemon sleeps 60 seconds between cycles and logs one-line summaries to stder
 | --- | --- | --- |
 | `SIMARD_STATE_ROOT` | `/tmp/simard-ooda` | State root directory (overridden by the positional `[state-root]` argument) |
 | `SIMARD_AGENT_NAME` | `simard-ooda` | Agent name for bridge registration |
+| `SIMARD_WORKTREE_SWEEP_INTERVAL_SECS` | `1800` | Seconds between periodic sweeps of orphaned engineer worktrees ([sweep safety guards](../reference/engineer-worktree-sweep-safety.md)) |
 | `ANTHROPIC_API_KEY` | (none) | Required when RustyClawd-backed actions are enabled |
 
 ```bash
