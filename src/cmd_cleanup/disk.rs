@@ -314,7 +314,13 @@ pub fn cap_home_cargo_targets(report: &mut CleanupReport, cap_bytes: u64) {
 }
 
 /// Maximum age (in days) of corrupted memory DB files before deletion.
-pub const CORRUPT_DB_MAX_AGE_DAYS: u64 = 7;
+///
+/// Widened to 30 days (issue #2550) to match the verified-backup retention
+/// window: a quarantined `cognitive.corrupt-*` store is a recovery asset (the
+/// incident salvaged tens of thousands of records from one) and must survive
+/// long enough for an operator to notice a reset and recover from it — a 7-day
+/// window could sweep the only copy of the lost data before anyone looked.
+pub const CORRUPT_DB_MAX_AGE_DAYS: u64 = 30;
 
 /// Maximum number of quarantined corrupt cognitive-memory artifacts to retain,
 /// regardless of age (issue #2420).
@@ -328,6 +334,14 @@ pub const CORRUPT_DB_MAX_AGE_DAYS: u64 = 7;
 /// the keep-last-N retention already used for [`BINARY_BACKUPS_KEEP`] /
 /// [`SNAPSHOTS_KEEP`].
 pub const CORRUPT_DB_KEEP: usize = 5;
+
+/// Size floor (bytes) below which the largest-quarantine protection does not
+/// apply (issue #2550). A recovery asset — a corrupt store a prefix-recovery
+/// salvaged real data from — is many megabytes; a stray truncated WAL sidecar or
+/// an empty rebuilt store is trivially small and carries nothing worth
+/// preserving. Only quarantines at or above this floor are shielded from the age
+/// / keep-last-N caps, so trivial quarantines are still reclaimed normally.
+pub const CORRUPT_DB_PROTECT_MIN_BYTES: u64 = 1024 * 1024;
 
 /// Returns `true` when `name` is a quarantined corrupt cognitive-memory
 /// artifact (safe to garbage-collect) and `false` for the live store.
@@ -379,10 +393,12 @@ pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
     let max_age = std::time::Duration::from_secs(CORRUPT_DB_MAX_AGE_DAYS * 24 * 3600);
     let now = std::time::SystemTime::now();
 
-    // Collect every quarantine candidate with its mtime so we can apply both the
-    // age cap and the keep-last-N cap over the full set (read_dir order is
-    // unspecified, so we cannot rank by iteration order).
-    let mut candidates: Vec<(PathBuf, std::fs::Metadata, std::time::SystemTime)> = Vec::new();
+    // Collect every quarantine candidate with its size + mtime so we can apply
+    // the age cap, the keep-last-N cap, AND the largest-asset protection over the
+    // full set (read_dir order is unspecified, so we cannot rank by iteration
+    // order). Size is computed once here rather than lazily at removal time
+    // because the largest-asset guard below needs it for every candidate.
+    let mut candidates: Vec<(PathBuf, bool, u64, std::time::SystemTime)> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if !is_corrupt_quarantine_name(&name) {
@@ -392,35 +408,51 @@ pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
         let Ok(modified) = meta.modified() else {
             continue;
         };
-        candidates.push((entry.path(), meta, modified));
+        // A cognitive-memory store may be backed by a single file or a
+        // directory, so a quarantine can be either.
+        let is_dir = meta.is_dir();
+        let size = if is_dir {
+            dir_size(&entry.path()).unwrap_or(0)
+        } else {
+            meta.len()
+        };
+        candidates.push((entry.path(), is_dir, size, modified));
     }
 
-    // Newest first, so index 0..CORRUPT_DB_KEEP are the survivors of the count cap.
-    candidates.sort_by_key(|c| std::cmp::Reverse(c.2));
+    // Issue #2550: never sweep the LARGEST *substantial* quarantine — it is the
+    // most likely recovery asset. A corrupt store that a prefix-recovery salvaged
+    // tens of thousands of records from is many megabytes; losing it is exactly
+    // the permanent data-loss this issue exists to prevent, so it is protected
+    // from BOTH the age cap and the keep-last-N cap. Trivial quarantines (a
+    // truncated WAL sidecar, an empty rebuilt store) fall below
+    // `CORRUPT_DB_PROTECT_MIN_BYTES` and are reclaimed normally. Ties break
+    // toward the newest.
+    let protected: Option<PathBuf> = candidates
+        .iter()
+        .filter(|c| c.2 >= CORRUPT_DB_PROTECT_MIN_BYTES)
+        .max_by(|a, b| a.2.cmp(&b.2).then_with(|| a.3.cmp(&b.3)))
+        .map(|c| c.0.clone());
 
-    for (rank, (path, meta, modified)) in candidates.iter().enumerate() {
+    // Newest first, so index 0..CORRUPT_DB_KEEP are the survivors of the count cap.
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.3));
+
+    for (rank, (path, is_dir, size, modified)) in candidates.iter().enumerate() {
+        // The recovery asset is never reclaimed, regardless of age or rank.
+        if protected.as_deref() == Some(path.as_path()) {
+            continue;
+        }
         let too_old = now.duration_since(*modified).unwrap_or_default() >= max_age;
         let beyond_keep = rank >= CORRUPT_DB_KEEP;
         if !too_old && !beyond_keep {
             continue;
         }
-        // A cognitive-memory store may be backed by a single file or a
-        // directory, so a quarantine snapshot can be either. Size and remove
-        // accordingly; `remove_file` on a directory would otherwise fail and
-        // leave the quarantine in place.
-        let is_dir = meta.is_dir();
-        let size = if is_dir {
-            dir_size(path).unwrap_or(0)
-        } else {
-            meta.len()
-        };
         let reason = if too_old { "age" } else { "keep-last-N" };
         eprintln!(
             "  Removing corrupt DB {} ({} MB, {reason})",
             path.display(),
             size / (1024 * 1024)
         );
-        let removed = if is_dir {
+        let removed = if *is_dir {
             std::fs::remove_dir_all(path)
         } else {
             std::fs::remove_file(path)

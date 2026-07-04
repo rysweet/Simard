@@ -238,3 +238,56 @@ fn full_export_captures_more_than_capped_export() {
         "full export must exceed the legacy cap"
     );
 }
+
+/// Issue #2550: a full snapshot must round-trip **every** durable memory type
+/// through export → import, and re-importing must be idempotent (dedup by
+/// content). Complements the export-completeness test in
+/// `tests/memory_snapshot_completeness_2550.rs` by pinning the RESTORE side.
+#[test]
+fn full_snapshot_round_trips_all_types_and_import_is_idempotent() {
+    use crate::cognitive_memory::LibraryCognitiveMemory;
+
+    let source = LibraryCognitiveMemory::in_memory().unwrap();
+    source
+        .store_fact("rust", "Rust is a systems language", 0.9, &[], "issue-2550")
+        .unwrap();
+    source
+        .store_procedure("ooda:consolidate", &["distill episodes".to_string()], &[])
+        .unwrap();
+    source
+        .store_episode(
+            "episode: ran cargo test; 0 failures",
+            "engineer-cycle",
+            None,
+        )
+        .unwrap();
+    source
+        .store_prospective("ship the CLI", "trigger:ship-cli", "Pursue goal", 1)
+        .unwrap();
+
+    let snapshot = export_full_memory_snapshot(&source, "issue-2550").unwrap();
+    assert_eq!(snapshot.facts.len(), 1);
+    assert_eq!(snapshot.procedures.len(), 1);
+    assert_eq!(snapshot.episodes.len(), 1);
+    assert_eq!(snapshot.prospective.len(), 1);
+
+    // Import into a fresh store: every type must land.
+    let target = LibraryCognitiveMemory::in_memory().unwrap();
+    let first = import_full_snapshot(&target, &snapshot).unwrap();
+    assert_eq!(first, 4, "all four durable memories must be imported");
+
+    let stats = target.get_statistics().unwrap();
+    assert_eq!(stats.semantic_count, 1, "fact restored");
+    assert_eq!(stats.procedural_count, 1, "procedure restored");
+    assert_eq!(stats.episodic_count, 1, "episode restored");
+    assert_eq!(stats.prospective_count, 1, "prospective restored");
+
+    // Re-importing the same snapshot must dedup by content — nothing new.
+    let second = import_full_snapshot(&target, &snapshot).unwrap();
+    assert_eq!(
+        second, 0,
+        "re-import must deduplicate every item by content"
+    );
+    let after = target.get_statistics().unwrap();
+    assert_eq!(after.total(), 4, "counts must be stable across re-import");
+}

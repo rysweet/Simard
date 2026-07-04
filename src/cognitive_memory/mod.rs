@@ -513,6 +513,35 @@ pub trait CognitiveMemoryOps: Send + Sync {
         Ok(())
     }
 
+    /// Return up to `limit` episodes for this agent, newest-first, **including
+    /// compressed/consolidated ones** (issue #2550).
+    ///
+    /// Unlike [`list_undistilled_episodes`](Self::list_undistilled_episodes)
+    /// (distillation-gated) or
+    /// [`search_episodes_by_keywords`](Self::search_episodes_by_keywords)
+    /// (keyword-gated), this is an unfiltered enumeration used by the verified
+    /// backup to capture **every** episode so a restore round-trips episodic
+    /// memory. The default returns empty so non-library backends (IPC client,
+    /// test stubs) degrade gracefully; only [`LibraryCognitiveMemory`] overrides
+    /// it.
+    fn list_all_episodes(&self, _limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+        Ok(vec![])
+    }
+
+    /// Return up to `limit` prospective (trigger → action) memories for this
+    /// agent, in **every** status, priority-ordered (issue #2550).
+    ///
+    /// A pure read: unlike [`check_triggers`](Self::check_triggers) it neither
+    /// filters by content nor mutates any status, so it is safe on the backup
+    /// path. The default returns empty so non-library backends degrade
+    /// gracefully; only [`LibraryCognitiveMemory`] overrides it (via the
+    /// library's `get_all_prospective`). This is the enumerator the verified
+    /// backup needs so a restore round-trips prospective triggers — the memory
+    /// type the incident lost with no way back.
+    fn list_all_prospective(&self, _limit: u32) -> SimardResult<Vec<CognitiveProspective>> {
+        Ok(vec![])
+    }
+
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics>;
 
     /// Store a semantic fact and record where it was distilled from.
