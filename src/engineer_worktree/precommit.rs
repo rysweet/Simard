@@ -133,6 +133,15 @@ mod tests {
         );
     }
 
+    // Serialized on `cognitive_memory`: this test reads the process-global
+    // `HOME` (both here via `install_hooks` and inside the spawned
+    // `pre-commit` subprocess, whose `#!/usr/bin/python3` shebang resolves
+    // `pre_commit` from `$HOME/.local/lib/...`). Concurrent env-mutating tests
+    // temporarily reassign `HOME` to a temp dir; without this key our read can
+    // land mid-window, pointing the subprocess at a HOME with no `pre_commit`
+    // module and failing `pre-commit install`. All env writers carry the same
+    // key, so sharing it guarantees mutual exclusion.
+    #[serial_test::serial(cognitive_memory)]
     #[test]
     fn install_hooks_succeeds_in_real_git_repo_with_real_pre_commit() {
         // Skip when the test environment has no pre-commit binary — the
