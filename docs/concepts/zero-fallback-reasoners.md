@@ -35,6 +35,25 @@ related:
 > error is an acceptable terminal state; a parse failure laundered into a
 > "continue skipping" or "0 facts" outcome is not.
 
+> **Implementation status (2026-07-04).** This page states the **target**
+> zero-fallback *contract* and reconciles it with the #2432 incident. It is
+> **not** a claim that every reasoner already satisfies it. Verified against the
+> current tree: **Fix 1 (the single sanitizing chokepoint) is implemented**, and
+> the **merge-judge verdict** reasoner already parses a `{"verdict": …}` JSON
+> envelope and *fails closed* to `Unclear`
+> (`src/stewardship/recipe_merge_judge.rs`). However, the **OODA Decide and
+> engineer-lifecycle reasoners still use first-word prose extraction and still
+> emit a deterministic default** (`AdvanceGoal` / `ContinueSkipping`) on
+> empty/unrecognised output (`src/ooda_brain/recipe_brain.rs` —
+> `parse_action_outcome` / `parse_lifecycle_outcome` → `DefaultEmpty` /
+> `DefaultMalformed`), and the `DeterministicLifecycleBrain` on-`Err` safety
+> floor is still wired in (`src/ooda_brain/fallback.rs`;
+> `src/operator_commands_ooda/daemon/brains.rs`, logged as "DEGRADED mode").
+> Sections below that describe *removed* defaults or a *guaranteed* no-default
+> state are the **required end state**; where the code still diverges they are
+> flagged inline with **⏳ not yet enforced**. Treat this page as the spec to
+> build to, not a description of shipped behaviour.
+
 This document is the **single coherent narrative** for the #2432 incident, in
 which Simard's one Brain — its per-phase **reasoners** (Orient, Decide, Act, the
 merge-judge verdict, and the distillation parser) — kept converting *unreadable
@@ -129,6 +148,14 @@ take-no-action is a *separate, independently-evidenced* outcome (see
 [Fix 4](#fix-4-take-no-action-is-a-distinct-evidenced-outcome)), reached by
 reasoning, never by a parse miss.
 
+> **⏳ Not yet enforced for OODA Decide/lifecycle.** The current
+> `parse_action_outcome` / `parse_lifecycle_outcome` in
+> `src/ooda_brain/recipe_brain.rs` still contain exactly such an else-default
+> leg (`DefaultEmpty` / `DefaultMalformed` → `default_advance_goal()` /
+> `default_continue_skipping()`). This state machine is the target that removes
+> it. The merge-judge verdict path already follows it (fails closed to
+> `Unclear`).
+
 ---
 
 ## Fix 1 — One sanitizing chokepoint, every capture path
@@ -189,6 +216,15 @@ exact expected decision; a response that only *mentions* the keyword in prose,
 with no envelope, is treated as a parse failure — proving the extractor relies on
 the structured block, not on keyword presence.
 
+> **⏳ Status.** Implemented for the **merge-judge verdict**
+> (`{"verdict": …}` JSON-first, `src/stewardship/recipe_merge_judge.rs`). The
+> **OODA Decide and engineer-lifecycle** reasoners still extract the *first
+> word* of prose (`src/ooda_brain/recipe_brain.rs`; the module comment states it
+> "parses via trivial first-word / first-number extractors (issue #2144 — no
+> keyword scanners, no JSON extraction)") and do **not** yet emit or consume a
+> JSON envelope. The envelope-vs-prose test described above exists for the
+> verdict path, not yet for Decide/lifecycle.
+
 ---
 
 ## Fix 3 — A parse failure is a loud, retried error, never a default
@@ -209,7 +245,7 @@ the operator forbids — the loop never stalls, so no one ever learns it is brok
 
 - **Remove the deterministic default paths.** The `ContinueSkipping`-on-error
   floor and every `unwrap_or(default_decision)` / ladder-exhausted-→-default site
-  are replaced with explicit error propagation. A genuinely-missing LLM
+  must be replaced with explicit error propagation. A genuinely-missing LLM
   configuration is an explicit **startup/config error**, surfaced at boot, not a
   per-cycle silent skip.
 - **Make the failure loud.** A parse failure fires the four visibility channels
@@ -234,6 +270,20 @@ Exhausting the bounded retry budget yields an **explicit hard error** plus a
 verdict "accept", or a `0 facts` default. (3) A guard test asserts no code path
 can reach a deterministic-default decision from a parse-failure branch.
 
+> **⏳ Status: not yet implemented for Decide/lifecycle.**
+> `src/ooda_brain/fallback.rs::DeterministicLifecycleBrain` still returns
+> `ContinueSkipping` and is still selected on `Err` by `build_act_brain`
+> (`src/operator_commands_ooda/daemon/brains.rs`, logged "DEGRADED mode");
+> `parse_action_outcome` / `parse_lifecycle_outcome` still return
+> `default_advance_goal()` / `default_continue_skipping()` on `DefaultEmpty` /
+> `DefaultMalformed`. The current tests pin the **old** contract
+> (`fallback_returns_ok_never_err`, `… -> ContinueSkipping`), i.e. the opposite
+> of guard test (3) above. The **merge-judge** path is the closest to this
+> contract today: it fails closed to `Unclear` (never a permissive "accept")
+> and emits a `brain_verdict_parsed_total{phase="merge_judge"}` metric — though
+> "fail closed to `Unclear`" is still a deterministic terminal outcome, not the
+> propagated hard error this contract ultimately requires.
+
 ---
 
 ## Fix 4 — Take-no-action is a distinct, evidenced outcome
@@ -255,6 +305,13 @@ it.
 **Tests.** The reasoned no-op and the parse-failure paths produce
 distinguishable, independently-asserted results; a parse failure is never
 observable as a take-no-action outcome.
+
+> **⏳ Status.** Today the *decision shape* is identical (`ContinueSkipping`) for
+> a reasoned skip and a defaulted parse miss; they are distinguished only by the
+> `LifecycleParseOutcome` label (`Parsed` vs `DefaultEmpty` / `DefaultMalformed`)
+> on the `brain_lifecycle_decision` metric, not by a distinct decision variant.
+> A first-class, independently-evidenced no-op *outcome* is not yet emitted, so a
+> defaulted skip and a reasoned skip are currently separable only in telemetry.
 
 ---
 
@@ -296,6 +353,17 @@ silently reading zero. See
 [Concurrent engineer dispatch](../reference/concurrent-engineer-dispatch.md) and
 [Adaptive scaling API](../reference/adaptive-scaling-api.md).
 
+> **Scope of "not telemetry."** This verdict is about the **Workboard** gauge,
+> which is registry-derived and test-pinned. A *separate* engineer counter on
+> the `simard status` surface — `count_live_engineers()` in
+> `src/status/provider.rs` — is **not** registry-pinned: it shells out to
+> `pgrep -f -c "simard-engineer|RustyClawd|copilot.*--auto"` and is **not** covered
+> by the test above. Because it matches on process-name patterns rather than the
+> live subagent-session set, it can disagree with the Workboard gauge. Until that
+> counter is reconciled against the registry, trust the Workboard gauge, not the
+> `simard status` engineer line — the "no future telemetry defect can hide it"
+> guarantee currently holds only for the Workboard surface.
+
 ---
 
 ## Why these ship together
@@ -321,24 +389,30 @@ daemon can talk itself into an idle dashboard again.
 
 ## Guarantees and non-guarantees
 
-**Guaranteed**
+**Target guarantees (contract)** — ✅ = enforced today · ⏳ = required end state, not yet enforced
 
 - **No deterministic default from a parse failure.** No code path emits a
   `continue_skipping` / verdict-accept / `0 facts` outcome as the *result of a
   parse miss*; a parse miss is a loud error + bounded retry + hard error on
-  exhaustion.
+  exhaustion. **⏳** (Decide/lifecycle still default; merge-judge fails closed to
+  `Unclear`.)
 - **Single-chokepoint coverage.** Every reasoner capture path
   (Orient/Decide/Act/merge-judge/distill) sanitizes through
-  `src/recipe_output/extract.rs`; no path parses raw stdout.
+  `src/recipe_output/extract.rs`; no path parses raw stdout. **✅**
 - **Structured decision contract.** Each reasoner emits and consumes a required
   JSON-envelope decision field; well-formed output parses without prose
-  keyword-sniffing.
+  keyword-sniffing. **⏳** (merge-judge verdict **✅**; Decide/lifecycle still
+  first-word extraction.)
 - **Visible failures.** Every parse failure increments the dashboard-visible
-  `brain_parse_failure` metric and records a `ParseFailureRecord`.
+  `brain_parse_failure` metric and records a `ParseFailureRecord`. **✅ (partial)**
+  — Decide/lifecycle parse misses are counted, but currently *as a default
+  decision* (`DefaultMalformed`), not as a propagated error.
 - **Honest engineer count.** The active-engineers gauge equals the live
-  subagent-session set, enforced by test.
+  subagent-session set, enforced by test. **✅** for the Workboard gauge; **⏳**
+  reconcile the `simard status` `count_live_engineers()` counter.
 - **Distinct no-op.** A reasoned take-no-action is observably separate from any
-  parse-failure path.
+  parse-failure path. **⏳** (currently the same `ContinueSkipping` shape,
+  separated only by a metric label.)
 
 **Not guaranteed**
 
