@@ -8,6 +8,7 @@ use axum::{
 
 use serde::Deserialize;
 use serde_json::json;
+use tracing::warn;
 
 use crate::error::{SimardError, SimardResult};
 use crate::meeting_backend::{ConversationMessage, Role};
@@ -539,23 +540,50 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket, requested_session_id: 
                         // before the agent replies.
                         persist_turn(&state_root, &session_id, Role::User, user_text.clone()).await;
 
-                        // send_message is synchronous — use spawn_blocking
-                        // wrapped with catch_unwind so a panic in the agent
-                        // doesn't crash the chat task.
+                        // True incremental streaming (issue #2581): run the turn
+                        // on a blocking thread and tee each agent output chunk to
+                        // the client as a `chunk` frame the moment it is produced.
+                        // The proxy's idle-liveness clock resets on every chunk, so
+                        // a long-but-productive turn streams unbounded and is never
+                        // killed by a wall-clock timeout.
+                        let (chunk_tx, mut chunk_rx) =
+                            tokio::sync::mpsc::unbounded_channel::<String>();
                         let for_agent = user_text.clone();
-                        let result = tokio::task::spawn_blocking(move || {
+                        let handle = tokio::task::spawn_blocking(move || {
+                            let mut on_chunk = move |c: &str| {
+                                let _ = chunk_tx.send(c.to_string());
+                            };
                             let outcome =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    backend.send_message(&for_agent)
+                                    backend.send_message_streaming(&for_agent, &mut on_chunk)
                                 }));
                             (backend, outcome)
-                        })
-                        .await;
-                        match result {
+                        });
+
+                        // Forward interim chunks until the turn completes (the
+                        // blocking task drops its sender). Each agent line is one
+                        // `chunk` frame; the trailing newline keeps multi-line
+                        // replies readable as the client coalesces them.
+                        let mut streamed_any = false;
+                        while let Some(chunk) = chunk_rx.recv().await {
+                            streamed_any = true;
+                            if socket
+                                .send(Message::Text(
+                                    json!({ "type": "chunk", "content": format!("{chunk}\n") })
+                                        .to_string()
+                                        .into(),
+                                ))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+
+                        match handle.await {
                             Ok((returned_backend, Ok(Ok(resp)))) => {
                                 backend = returned_backend;
-                                // Persist the assistant reply as one turn, then
-                                // stream it incrementally to the client.
+                                // Persist the authoritative assistant reply.
                                 persist_turn(
                                     &state_root,
                                     &session_id,
@@ -563,10 +591,34 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket, requested_session_id: 
                                     resp.content.clone(),
                                 )
                                 .await;
-                                stream_assistant(&mut socket, &resp.content).await;
+                                if streamed_any {
+                                    // Finalize the streamed bubble, replacing the
+                                    // live preview with the authoritative
+                                    // (sanitized) text via the `done` frame.
+                                    let _ = socket
+                                        .send(Message::Text(
+                                            json!({ "type": "done", "content": resp.content })
+                                                .to_string()
+                                                .into(),
+                                        ))
+                                        .await;
+                                } else {
+                                    // A non-incremental adapter produced no interim
+                                    // chunks — deliver the reply as chunk/done now.
+                                    stream_assistant(&mut socket, &resp.content).await;
+                                }
                             }
                             Ok((returned_backend, Ok(Err(e)))) => {
                                 backend = returned_backend;
+                                // Close any open streamed bubble, then surface the
+                                // honest error (idle-liveness, empty response, …).
+                                if streamed_any {
+                                    let _ = socket
+                                        .send(Message::Text(
+                                            json!({ "type": "done" }).to_string().into(),
+                                        ))
+                                        .await;
+                                }
                                 let _ = socket
                                     .send(Message::Text(
                                         json!({"role":"system","content": format!("[error: {e}]")})
@@ -576,8 +628,15 @@ pub(crate) async fn handle_ws_chat(mut socket: WebSocket, requested_session_id: 
                                     .await;
                             }
                             Ok((returned_backend, Err(_panic))) => {
-                                eprintln!("[simard][PANIC] ws_chat send_message panicked");
+                                warn!("ws_chat send_message panicked");
                                 backend = returned_backend;
+                                if streamed_any {
+                                    let _ = socket
+                                        .send(Message::Text(
+                                            json!({ "type": "done" }).to_string().into(),
+                                        ))
+                                        .await;
+                                }
                                 let _ = socket
                                     .send(Message::Text(
                                         json!({"role":"system","content":"[error: agent panicked — recovered, conversation continues]"})
