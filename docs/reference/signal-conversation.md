@@ -1,11 +1,11 @@
 ---
 title: Signal channel reference
-description: Reference for SignalConversation — the optional, feature-gated ConversationChannel that connects Simard to a locally-run signal-cli JSON-RPC daemon, with a sender allowlist, operator-identity binding, high-risk gating, inbound commands, and outbound notifications.
-last_updated: 2026-07-03
+description: Reference for SignalConversation — the optional, feature-gated ConversationChannel that connects Simard to a locally-run signal-cli JSON-RPC daemon, with a sender allowlist, operator-identity binding, high-risk gating, Note-to-Self (sync-sent) command handling with loop prevention, inbound commands, and outbound notifications.
+last_updated: 2026-07-04
 review_schedule: as-needed
 owner: simard
 doc_type: reference
-issues: ["#2527"]
+issues: ["#2527", "#2575"]
 related:
   - ../index.md
   - ../architecture/conversation-channel.md
@@ -86,13 +86,41 @@ signal-cli -a +15551234567 daemon --tcp 127.0.0.1:7583
 `src/signal_conversation/transport.rs` opens a tokio `TcpStream` to that endpoint
 and speaks **newline-delimited JSON-RPC 2.0**:
 
-- **inbound** — signal-cli `receive` notifications are mapped to
-  `Inbound { from: OperatorRef { id: <E.164>, authorized }, text }`.
+- **inbound** — signal-cli `receive` notifications are parsed by the pure
+  `parse_incoming` helper into a `ParsedInbound` (see below), which the channel maps
+  to `Inbound { from: OperatorRef { id: <E.164>, authorized }, text }`.
 - **outbound** — an `Outbound` is mapped to a JSON-RPC `send` request addressed to
   the operator number.
 
 `signal-cli-rest-api` and any HTTP-based transport are out of scope for this
 version; the JSON-RPC-over-TCP daemon is the supported transport.
+
+### Inbound parsing (`ParsedInbound`)
+
+`parse_incoming(line: &str) -> Option<ParsedInbound>` is pure, I/O-free, and total —
+every unrecognized shape resolves to `None` (dropped), never to a coerced default. It
+recognizes two envelope shapes and ignores everything else (JSON-RPC responses to our
+own `send` calls, receipts, typing indicators, unparseable lines):
+
+```rust
+pub struct ParsedInbound {
+    pub sender: String,               // E.164 the command is attributed to
+    pub body: String,                 // the message text
+    pub source_device: Option<u32>,   // envelope source device id (None if absent)
+    pub is_sync_sent: bool,           // true for a syncMessage.sentMessage
+    pub sync_destination: Option<String>, // sentMessage destination (sync only)
+}
+```
+
+| Envelope shape | `is_sync_sent` | `sender` | `body` | `source_device` | `sync_destination` |
+|----------------|----------------|----------|--------|-----------------|--------------------|
+| `dataMessage` (normal inbound) | `false` | `sourceNumber`, else `source` | `dataMessage.message` | envelope `sourceDevice` (if present) | `None` |
+| `syncMessage.sentMessage` (Note to Self / a message the account sent) | `true` | the **account**'s own number | `sentMessage.message` | envelope `sourceDevice` | `sentMessage.destinationNumber`, else `destination` |
+
+`dataMessage` is checked **first**, so the normal dedicated-number path is byte-for-byte
+unchanged. A missing or non-numeric `sourceDevice` becomes `None` — it is **never**
+coerced to `1`, so a malformed sync envelope fails the primary-phone gate and is
+rejected (fail-closed).
 
 ## Configuration
 
@@ -111,9 +139,12 @@ ignored.
 > via the already-present `serde` + `toml` crates — no new dependency. It keeps the
 > same env-wins → file → error resolution and no-silent-default guarantee. Each
 > field also has an environment override: `SIMARD_SIGNAL_ENDPOINT`,
-> `SIMARD_SIGNAL_ACCOUNT`, `SIMARD_SIGNAL_ALLOWLIST` (comma-separated), and
-> `SIMARD_SIGNAL_READ_ONLY_UNKNOWN`. `endpoint` and `account` are required;
-> `allowlist` defaults to empty (fail-closed) and `read_only_unknown` to false.
+> `SIMARD_SIGNAL_ACCOUNT`, `SIMARD_SIGNAL_ALLOWLIST` (comma-separated),
+> `SIMARD_SIGNAL_READ_ONLY_UNKNOWN`, and `SIMARD_SIGNAL_OWN_DEVICE_ID`. `endpoint`
+> and `account` are required; `allowlist` defaults to empty (fail-closed),
+> `read_only_unknown` to false, and `own_device_id` to `None` (absent). A
+> present-but-unparseable `own_device_id` is a hard error, consistent with the other
+> keys — never a silent default.
 
 ```toml
 [signal]
@@ -125,11 +156,17 @@ account = "+15551234567"
 
 # E.164 operator numbers permitted to COMMAND Simard. Everyone else is ignored
 # (or read-only, if read_only_unknown = true). Fail-closed: empty ⇒ nobody may command.
+# On a single-number linked device this is the `account` number itself (Note to Self).
 allowlist = ["+15557654321"]
 
 # Opt-in: allow non-allowlisted senders to receive READ-ONLY results (e.g. status).
 # They can never trigger a mutation. Default false (unknown senders fully ignored).
 read_only_unknown = false
+
+# Optional (single-number linked-device setups): signal-cli's OWN linked device id
+# (>= 2, from `signal-cli … listDevices`). Defence-in-depth loop prevention; the
+# device-1 gate already closes the loop without it. Omit for a dedicated number.
+# own_device_id = 2
 ```
 
 | Key | Type | Default | Meaning |
@@ -138,12 +175,16 @@ read_only_unknown = false
 | `account` | E.164 string | — (required) | the Signal account signal-cli operates |
 | `allowlist` | array of E.164 | `[]` | numbers permitted to issue commands |
 | `read_only_unknown` | bool | `false` | if true, unknown senders may read status only |
+| `own_device_id` | integer `>= 2` | `None` (absent) | signal-cli's own linked device id; defence-in-depth Note-to-Self loop prevention |
 
 ## Guardrails
 
 The Signal channel is a **remote command surface**, so it adds three guardrails on
 top of the shared abstraction. They are layered — a message must clear all three to
-cause any mutation.
+cause any mutation. On a single-number linked-device setup, a Note-to-Self (sync-sent)
+message must **additionally** pass the loop-prevention predicate in
+[Note to Self (sync-sent) and loop prevention](#note-to-self-sync-sent-and-loop-prevention)
+before it is treated as a command.
 
 ### (a) Sender allowlist — fail-closed
 
@@ -215,6 +256,68 @@ routing be unit-tested in isolation (a spy handler proves `execute_approved` is
 never called before an `approve`), and lets a deployment wire concrete
 status/pause/execution to its real subsystems.
 
+## Note to Self (sync-sent) and loop prevention
+
+When signal-cli is a **linked device on the operator's own account** (a single-number
+setup), the operator and Simard share one E.164. The operator commands Simard from
+Signal's **Note to Self** conversation, which the account "sends" to itself; signal-cli
+delivers it to Simard as a **sync-sent** message (`syncMessage.sentMessage`), not a
+`dataMessage`. The channel treats a qualifying Note-to-Self message as an operator
+command whose sender is the account itself.
+
+Because a linked device also receives sync-sent transcripts of the messages **Simard
+herself** sends (her replies are sent from the account and sync back), the channel
+must not process its own output as new commands. It applies a **conjunctive** acceptance
+predicate — a sync-sent message is accepted **only if every condition holds**:
+
+```text
+is_sync_sent
+  && sync_destination == account          // a TRUE Note to Self, not a message to a third party
+  && source_device == Some(1)             // typed on the operator's PRIMARY PHONE (device 1)
+  && source_device != own_device_id       // defence-in-depth: not signal-cli's own linked device
+  && !matches_recent_outbound(body)       // defence-in-depth: not an echo of something Simard just sent
+  && allowlist.authorize(account) == Authorized  // the account is allowlisted (fail-closed, unchanged)
+```
+
+The pure decision lives in `should_accept_sync_sent(source_device, own_device_id,
+destination, account, primary_device_id = 1)` and `matches_recent_outbound(body,
+&recent, now)` in `transport.rs`; the stateful window and the allowlist call live in
+`channel.rs`. The three loop guards are layered, not alternatives:
+
+1. **Primary-phone gate (`source_device == Some(1)`).** Signal guarantees the
+   account owner's **phone is always device 1**; every linked device (signal-cli,
+   Desktop, iPad) is `>= 2`. Simard's own replies originate from signal-cli's linked
+   device, so they are rejected. **This gate alone closes the loop**, even with
+   `own_device_id == None` and an empty recent-outbound window — the loop-free
+   guarantee does not depend on configuration.
+2. **Own-device rejection (`source_device != own_device_id`).** If `own_device_id`
+   is configured, a sync-sent message from signal-cli's own device id is explicitly
+   rejected. Redundant with (1) by design; it satisfies the literal "reject signal-cli's
+   own device" requirement as defence-in-depth.
+3. **Recent-outbound echo suppression (`!matches_recent_outbound(body)`).** The
+   channel records the body of each message it sends in a bounded
+   `VecDeque<(String, Instant)>` (cap **64**, TTL **300 s**, pruned on insert) and
+   rejects a sync-sent message whose body **exactly** matches a recent outbound. This
+   catches any echo the first two guards miss. The window is in-memory only — never
+   persisted, never logged.
+
+Two further properties keep the change **monotonic** — the sync path only ever *adds*
+gates, it never widens acceptance:
+
+- **True Note to Self only.** A linked device also receives sync-sent transcripts of
+  messages the operator sends to **other people**. `sync_destination == account`
+  admits only genuine Note-to-Self messages; syncs destined for a third party are
+  ignored, so Simard never reacts to the operator's unrelated conversations.
+- **Fail-closed everywhere.** The account still runs through `Allowlist::authorize`,
+  so an account that is not allowlisted is dropped. Any missing/malformed field
+  (absent `sourceDevice`, absent destination) resolves to a rejection. Only the
+  account's own **device-1** Note-to-Self is newly accepted; genuinely unknown senders
+  are dropped exactly as before.
+
+The **dedicated-number** path is untouched: a normal `dataMessage` from a separate
+operator number carries `is_sync_sent = false`, skips this predicate entirely, and is
+authorized and gated exactly as in the original channel.
+
 ## Commands in
 
 `src/signal_conversation/gating.rs` parses a small lightweight command vocabulary;
@@ -253,11 +356,20 @@ gated action then proceeds through its authority; a text alone never executes it
 **Inbound command:**
 
 ```text
-signal-cli ─▶ transport.recv_line ─▶ parse_incoming ─▶ allowlist gate ─▶ parse_inbound
+signal-cli ─▶ transport.recv_line ─▶ parse_incoming ─▶ ParsedInbound
+   ├─ dataMessage (is_sync_sent = false) ─────────────────────────────────┐
+   └─ syncMessage.sentMessage (is_sync_sent = true) ─▶ sync predicate ─────┤
+        (dest == account && source_device == 1 && != own_device_id         │
+         && !recent-outbound echo)  ── fail ▶ ignore (loop prevention)     │
+                                                                            ▼
+                                                      allowlist gate ─▶ parse_inbound
            ─▶ gate ┬─ AutoExecute    ─▶ handler (status/pause/approve) ─▶ reply
                    └─ PendingSignOff ─▶ record pending ─▶ reply "sign off?"
                                         (execute only after `approve`)
 ```
+
+A `reply` also records the outbound body in the bounded recent-outbound window used by
+the echo-suppression guard (guard 3 above).
 
 **Notification out:**
 
@@ -285,11 +397,28 @@ transport** and a spy command handler — no live signal-cli or network is requi
   explicit `approve`, and exactly once; `status`/`pause`/`approve` run immediately.
 - **Identity binding** — replies and the delivered conversation `Inbound` are bound
   to the sender's E.164.
-- **Wire helpers** — `parse_incoming` maps a signal-cli `receive` notification to
-  `(sender, text)` and ignores responses/receipts/unparseable lines;
+- **Wire helpers** — `parse_incoming` maps a signal-cli `receive` notification to a
+  `ParsedInbound`. It parses a normal `dataMessage` to `(sender, body)` with
+  `is_sync_sent = false` (byte-identical to the original behavior), parses a
+  `syncMessage.sentMessage` to a sync-sent `ParsedInbound` carrying `source_device`
+  and `sync_destination`, and ignores responses/receipts/typing/unparseable lines;
   `build_send_request` produces valid JSON-RPC.
-- **Config** — env-first resolution, the `[signal]` table from `config.toml`, and a
-  clear error for a missing required key.
+- **Note-to-Self acceptance + loop prevention** — driven by canned JSON-RPC envelope
+  lines (no network), the tests assert the acceptance predicate exactly:
+    - a sync-sent envelope from **device 1** (phone) with body `status`, destined for
+      the account → parsed as an operator command from the account number;
+    - a sync-sent envelope from signal-cli's **own device id** (`>= 2`) → **ignored**
+      (loop prevention);
+    - a sync-sent envelope whose body matches a **recent Simard outbound** → **ignored**
+      (echo suppression);
+    - a sync-sent envelope whose destination is a **third party** (not the account) →
+      **ignored**;
+    - a normal `dataMessage` from a separate allowlisted number → still parsed
+      (regression — the dedicated-number path is unchanged);
+    - a receipt / typing / unparseable line → still ignored.
+- **Config** — env-first resolution, the `[signal]` table from `config.toml`, a clear
+  error for a missing required key, and `own_device_id` resolving to `None` when absent
+  and a hard error when present-but-unparseable.
 
 ## Related reading
 
