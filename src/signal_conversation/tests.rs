@@ -56,6 +56,7 @@ fn allowlist_from_config_uses_config_fields() {
         account: "+15551234567".to_string(),
         allowlist: vec![OPERATOR.to_string()],
         read_only_unknown: false,
+        own_device_id: None,
     };
     let al = Allowlist::from_config(&cfg);
     assert_eq!(al.authorize(OPERATOR), AuthDecision::Authorized);
@@ -187,7 +188,8 @@ fn low_risk_commands_auto_execute() {
 
 mod config_loading {
     use super::super::config::{
-        ENV_ACCOUNT, ENV_ALLOWLIST, ENV_ENDPOINT, ENV_READ_ONLY_UNKNOWN, SignalConfig,
+        ENV_ACCOUNT, ENV_ALLOWLIST, ENV_ENDPOINT, ENV_OWN_DEVICE_ID, ENV_READ_ONLY_UNKNOWN,
+        SignalConfig,
     };
     use serial_test::serial;
 
@@ -198,6 +200,7 @@ mod config_loading {
             std::env::remove_var(ENV_ACCOUNT);
             std::env::remove_var(ENV_ALLOWLIST);
             std::env::remove_var(ENV_READ_ONLY_UNKNOWN);
+            std::env::remove_var(ENV_OWN_DEVICE_ID);
         }
     }
 
@@ -220,6 +223,9 @@ mod config_loading {
         assert_eq!(cfg.account, "+15551230000");
         assert_eq!(cfg.allowlist, vec!["+15557654321", "+15559990000"]);
         assert!(cfg.read_only_unknown);
+        // own_device_id is optional; unset resolves to None (fail-safe: the
+        // device-1 gate is the primary loop guard and needs no configuration).
+        assert_eq!(cfg.own_device_id, None);
     }
 
     #[test]
@@ -259,5 +265,98 @@ allowlist = ["+15557654321"]
         assert_eq!(cfg.allowlist, vec!["+15557654321"]);
         // Fail-closed default: unset read_only_unknown resolves to false.
         assert!(!cfg.read_only_unknown);
+    }
+
+    // ── own_device_id: optional loop-prevention defence-in-depth (issue #2575) ──
+
+    #[test]
+    #[serial(cognitive_memory)]
+    fn own_device_id_absent_resolves_to_none() {
+        clear_env();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized.
+        unsafe {
+            std::env::set_var(ENV_ENDPOINT, "127.0.0.1:7583");
+            std::env::set_var(ENV_ACCOUNT, "+15551230000");
+        }
+        let cfg = SignalConfig::load_from(tmp.path()).unwrap();
+        clear_env();
+        assert_eq!(cfg.own_device_id, None);
+    }
+
+    #[test]
+    #[serial(cognitive_memory)]
+    fn own_device_id_from_env_is_parsed() {
+        clear_env();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized.
+        unsafe {
+            std::env::set_var(ENV_ENDPOINT, "127.0.0.1:7583");
+            std::env::set_var(ENV_ACCOUNT, "+15551230000");
+            std::env::set_var(ENV_OWN_DEVICE_ID, "2");
+        }
+        let cfg = SignalConfig::load_from(tmp.path()).unwrap();
+        clear_env();
+        assert_eq!(cfg.own_device_id, Some(2));
+    }
+
+    #[test]
+    #[serial(cognitive_memory)]
+    fn own_device_id_reads_from_config_toml() {
+        clear_env();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            r#"
+[signal]
+endpoint = "127.0.0.1:9000"
+account = "+15551230000"
+own_device_id = 4
+"#,
+        )
+        .unwrap();
+        let cfg = SignalConfig::load_from(tmp.path()).unwrap();
+        assert_eq!(cfg.own_device_id, Some(4));
+    }
+
+    #[test]
+    #[serial(cognitive_memory)]
+    fn own_device_id_unparseable_is_a_hard_error() {
+        clear_env();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized.
+        unsafe {
+            std::env::set_var(ENV_ENDPOINT, "127.0.0.1:7583");
+            std::env::set_var(ENV_ACCOUNT, "+15551230000");
+            std::env::set_var(ENV_OWN_DEVICE_ID, "not-a-number");
+        }
+        let err = SignalConfig::load_from(tmp.path()).unwrap_err();
+        clear_env();
+        assert!(
+            format!("{err:?}").contains("own_device_id"),
+            "expected an InvalidConfigValue for signal.own_device_id, got {err:?}"
+        );
+    }
+
+    #[test]
+    #[serial(cognitive_memory)]
+    fn own_device_id_below_two_is_a_hard_error() {
+        // Device 1 is always the operator's primary phone; signal-cli's linked
+        // device is always >= 2. A configured own_device_id < 2 is a mistake, never
+        // a silent default.
+        clear_env();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: serialized.
+        unsafe {
+            std::env::set_var(ENV_ENDPOINT, "127.0.0.1:7583");
+            std::env::set_var(ENV_ACCOUNT, "+15551230000");
+            std::env::set_var(ENV_OWN_DEVICE_ID, "1");
+        }
+        let err = SignalConfig::load_from(tmp.path()).unwrap_err();
+        clear_env();
+        assert!(
+            format!("{err:?}").contains("own_device_id"),
+            "expected a hard error for own_device_id < 2, got {err:?}"
+        );
     }
 }
