@@ -51,10 +51,14 @@ path = "src/bin/simard_tui/main.rs"
 # `lbug = "=0.17.1"` crate.
 #
 # Pinned to the amplihack-memory-lib commit that carries the lbug 0.15.4 -> 0.17.1
-# engine migration AND the issue #107 silent-empty-read fix (the `_deleted`
-# tombstone read-path fix + the empty-read safety gate). This rev is the
-# squash-merge commit of amplihack-memory-lib PR #108 on `main`.
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "26d49bf864ac2c03b80c4ab075c4a907c51f82a8", features = ["persistent"] }
+# engine migration, the issue #107 silent-empty-read fix (the `_deleted`
+# tombstone read-path fix + the empty-read safety gate), AND the issue #2550
+# durable corrupt-WAL open recovery fix — a failed checkpoint-after-recovery now
+# salvages the recovered graph into a fresh, strict-reopen-verified database
+# instead of leaving records only in the quarantined WAL (which a later open reset
+# to empty, permanently dropping tens of thousands of memories). This rev is the
+# squash-merge commit of amplihack-memory-lib PR #110 on `main`.
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "88893a93c897541abbccfb24ced224c5e28f3121", features = ["persistent"] }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
 # De-fork (issue #2323): the gym/eval RUNNER is now the upstream
