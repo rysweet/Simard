@@ -41,8 +41,9 @@ For the full contract (config keys, commands, guardrails), see the
 - [ ] A phone number for Simard's Signal identity: either an existing Signal
       account you will **link** as a device, or a **dedicated** number to register.
 
-> The Signal channel is **optional and off by default.** If you skip this guide,
-> Simard's daemon runs exactly as before with no Signal code compiled in.
+> The Signal channel is **built by default but dormant until configured.** If you
+> skip this guide, the Signal code is still compiled in, but with no `[signal]`
+> config Simard's daemon runs exactly as before — the channel never starts.
 
 ## 1. Install signal-cli
 
