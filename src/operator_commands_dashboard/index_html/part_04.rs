@@ -129,7 +129,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
       }
       // Streaming: coalesce chunk frames into one assistant bubble.
       if(m && m.type==='chunk'){ removeTypingIndicator(); appendChunk(m.content||''); return; }
-      if(m && m.type==='done'){ finalizeStream(); setChatBusy(false); return; }
+      if(m && m.type==='done'){ finalizeStream(m.content); setChatBusy(false); return; }
       // Legacy / fallback frames: {role, content} rendered in one update.
       removeTypingIndicator();setChatBusy(false);finalizeStream();
       appendMsg((m&&m.role)||'system', (m&&m.content!==undefined)?m.content:ev.data);
@@ -165,7 +165,15 @@ pub(crate) const PART_04: &str = r#"            let fmt;
       const el=document.getElementById('chat-messages');
       el.scrollTop=el.scrollHeight;
     }
-    function finalizeStream(){ streamSpan=null; streamText=''; }
+    function finalizeStream(finalText){
+      // On `done`, replace the streamed preview with the authoritative
+      // (sanitized) reply when the server supplies one (issue #2581); otherwise
+      // keep whatever was streamed (server-side chunking fallback).
+      if(streamSpan && finalText!==undefined && finalText!==null && finalText!==''){
+        streamSpan.textContent=' '+finalText;
+      }
+      streamSpan=null; streamText='';
+    }
 
     function clearMessages(){
       finalizeStream();

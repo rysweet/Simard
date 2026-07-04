@@ -178,6 +178,26 @@ pub trait BaseTypeSession: Send {
 
     fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome>;
 
+    /// Run a turn, streaming incremental output chunks to `on_chunk` as the
+    /// agent produces them, and returning the final outcome.
+    ///
+    /// The default implementation runs the turn to completion via
+    /// [`BaseTypeSession::run_turn`] and emits the full result as a single
+    /// chunk, so adapters that cannot stream incrementally still satisfy the
+    /// contract (the caller sees exactly one chunk equal to the final text).
+    /// Adapters that support true incremental output (e.g. the
+    /// `persistent-agent-proxy`) override this to tee each line as it arrives
+    /// (issue #2581).
+    fn run_turn_streaming(
+        &mut self,
+        input: BaseTypeTurnInput,
+        on_chunk: &mut dyn FnMut(&str),
+    ) -> SimardResult<BaseTypeOutcome> {
+        let outcome = self.run_turn(input)?;
+        on_chunk(&outcome.execution_summary);
+        Ok(outcome)
+    }
+
     fn close(&mut self) -> SimardResult<()>;
 
     /// Optional memory + knowledge bridges used to enrich each turn.

@@ -107,10 +107,12 @@ agent is first validated.
 The lifecycle is:
 
 ```
-new()        → allocates struct, reads optional SIMARD_MEETING_TURN_TIMEOUT_SECS
-               (with fallback default), does NOT call RuntimeConfig::load()
+new()        → allocates struct, reads optional SIMARD_MEETING_IDLE_LIVENESS_SECS
+               (deprecated alias SIMARD_MEETING_TURN_TIMEOUT_SECS, with fallback
+               default), does NOT call RuntimeConfig::load()
 open()       → resolves agent command from RuntimeConfig, validates agent
-run_turn()   → sends a prompt and collects the response
+run_turn()   → sends a prompt and streams/collects the response (no wall-clock
+               cap; only a genuinely idle child is reaped via idle-liveness)
 Drop         → tears down the agent process
 ```
 

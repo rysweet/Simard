@@ -277,7 +277,7 @@ See [Copilot meeting mode](../reference/copilot-meeting-mode.md) for the full
 technical reference, or [LightweightChatSession API reference](../reference/lightweight-chat-session.md)
 for the alternative `SessionBuilder`-based path.
 
-### Repository context and per-turn timeout
+### Repository context and idle-liveness
 
 The meeting agent operates **in the repository you launched the meeting from**,
 so it can inspect code and run `simard` commands in the right context. The
@@ -294,14 +294,18 @@ If you launch a meeting from **outside any git checkout** and set no override,
 the agent runs in the process working directory with **no explicit repo
 grant** — it never falls back to some other worktree.
 
-Each agent turn is bounded by a **default per-turn timeout** so a hung agent
-turn cannot freeze the REPL:
+There is **no wall-clock cap** on a turn (issue #2581): a long-but-productive
+turn runs unbounded as long as it keeps producing output. Liveness is instead
+governed by an **idle-liveness window** — the agent child is reaped only when it
+produces *no* output for the whole window (a genuinely hung/dead child). Every
+streamed chunk resets the clock, so a working turn is never killed:
 
 | Env var | Default | Effect |
 |---------|---------|--------|
-| `SIMARD_MEETING_TURN_TIMEOUT_SECS` | `120` | Per-turn bound in seconds. A positive value overrides the default; `0` disables the timeout (unbounded — operator escape hatch); an unset or malformed value uses the bounded default. |
+| `SIMARD_MEETING_IDLE_LIVENESS_SECS` | `300` | Idle-liveness window in seconds — max time with **no output** before the child is treated as hung. `0` disables idle detection (fully unbounded escape hatch); unset/malformed uses the default. |
+| `SIMARD_MEETING_TURN_TIMEOUT_SECS` | _(unset)_ | **Deprecated alias** for `SIMARD_MEETING_IDLE_LIVENESS_SECS`, kept working for existing config. It is **no longer a wall-clock cap** — when set it configures the same idle-liveness window. |
 
-When a turn exceeds the timeout, the child process is terminated and the turn
+When a child is idle for the whole window it is terminated and the turn
 **degrades honestly** with a `[meeting:error] WARNING` banner (the meeting
 stays usable — retry your message or `/close`) rather than blocking silently
 (Pillar 11: honest degradation beats hidden silence).
@@ -324,13 +328,13 @@ If you see the prompt cursor blinking with no response after 2–3 minutes, chec
 2. **`copilot` on PATH?** Meeting mode invokes the `copilot` binary directly (not
    `amplihack copilot`). Run `which copilot` to verify. If the binary is not found,
    the turn returns an `AdapterInvocationFailed` error immediately.
-3. **Long compute in progress?** Each agent turn is bounded by
-   `SIMARD_MEETING_TURN_TIMEOUT_SECS` (default 120 s). If a turn exceeds it,
-   the child is killed and the turn degrades honestly with a `[meeting:error]
-   WARNING` banner — the REPL never hangs indefinitely. If your provider is
-   consistently slow, raise the bound (e.g.
-   `SIMARD_MEETING_TURN_TIMEOUT_SECS=300 simard meeting repl`) or set it to `0`
-   to disable the per-turn timeout entirely.
+3. **Long compute in progress?** A turn has **no wall-clock cap** — it runs as
+   long as it keeps producing output. Only a genuinely idle child (no output for
+   `SIMARD_MEETING_IDLE_LIVENESS_SECS`, default 300 s) is reaped, degrading
+   honestly with a `[meeting:error] WARNING` banner — the REPL never hangs
+   indefinitely and never kills a working turn. To change the idle window use
+   `SIMARD_MEETING_IDLE_LIVENESS_SECS=600 simard meeting repl`, or set it to `0`
+   to disable idle detection entirely.
 
 ### Simard responds with OODA action plans instead of conversation
 

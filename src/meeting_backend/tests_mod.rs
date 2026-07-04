@@ -587,3 +587,63 @@ fn snapshot_session_round_trips_through_wip_persistence() {
     let gone = crate::meeting_facilitator::load_session_wip(dir.path()).expect("load after remove");
     assert!(gone.is_none(), "WIP file should be gone after remove");
 }
+
+// ── issue #2581: streaming turns + resume continuity ──
+
+#[test]
+fn send_message_streaming_tees_chunks_and_accumulates_history() {
+    // The streaming turn tees output to `on_chunk` and still records the
+    // user+assistant pair in history. A `MockAgent` uses the trait's default
+    // `run_turn_streaming` (one chunk == the full reply), which is exactly the
+    // contract non-incremental adapters must honour.
+    let agent = MockAgent::new("streamed reply");
+    let mut backend = MeetingBackend::new_session("Stream", Box::new(agent), None, String::new());
+
+    let mut chunks: Vec<String> = Vec::new();
+    let resp = backend
+        .send_message_streaming("hello there", &mut |c| chunks.push(c.to_string()))
+        .expect("streaming turn must succeed");
+
+    assert_eq!(resp.content, "streamed reply");
+    assert_eq!(resp.message_count, 2, "user + assistant recorded");
+    assert_eq!(
+        chunks,
+        vec!["streamed reply".to_string()],
+        "chunk must be teed"
+    );
+}
+
+#[test]
+fn restored_history_continues_the_same_conversation() {
+    // AC (c) continuity: a resumed session restores its transcript and the next
+    // turn continues on top of it (same conversation), not a fresh one.
+    let prior = vec![
+        ConversationMessage {
+            role: Role::User,
+            content: "what is the plan?".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+        },
+        ConversationMessage {
+            role: Role::Assistant,
+            content: "first reply".to_string(),
+            timestamp: "2026-01-01T00:00:01Z".to_string(),
+        },
+    ];
+    let agent = MockAgent::new("second reply");
+    let mut backend = MeetingBackend::new_session("Chat", Box::new(agent), None, String::new());
+    backend.restore(prior.clone());
+    assert_eq!(
+        backend.history(),
+        prior.as_slice(),
+        "prior transcript restored"
+    );
+
+    let resp = backend
+        .send_message("and the next step?")
+        .expect("resumed turn");
+    assert_eq!(resp.content, "second reply");
+    assert_eq!(
+        resp.message_count, 4,
+        "the new turn continues on top of the restored 2-message transcript"
+    );
+}

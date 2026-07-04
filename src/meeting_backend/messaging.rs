@@ -115,4 +115,103 @@ impl MeetingBackend {
             message_count: self.history.len(),
         })
     }
+
+    /// Streaming variant of [`MeetingBackend::send_message`] (issue #2581).
+    ///
+    /// Behaves identically — appends the user message, dispatches the turn with
+    /// full conversation context, records the assistant reply, and auto-saves —
+    /// but tees each incremental output chunk to `on_chunk` as the agent
+    /// produces it, so a caller (the dashboard chat websocket) can render a live
+    /// preview. The returned [`MeetingResponse`] still carries the final,
+    /// authoritative (sanitized) assistant text, which is what gets persisted to
+    /// history; the streamed chunks are a live preview only.
+    pub fn send_message_streaming(
+        &mut self,
+        user_input: &str,
+        on_chunk: &mut dyn FnMut(&str),
+    ) -> SimardResult<MeetingResponse> {
+        if !self.is_open {
+            return Err(SimardError::ActionExecutionFailed {
+                action: "send-message".to_string(),
+                reason: "meeting session is closed".to_string(),
+            });
+        }
+
+        let trimmed = user_input.trim();
+        if trimmed.is_empty() {
+            return Ok(MeetingResponse {
+                content: String::new(),
+                message_count: self.history.len(),
+            });
+        }
+
+        self.push_message(Role::User, trimmed.to_string());
+        let preamble = self.build_conversation_preamble();
+        let turn_input = BaseTypeTurnInput {
+            objective: trimmed.to_string(),
+            identity_context: self.system_prompt.clone(),
+            prompt_preamble: preamble,
+        };
+
+        info!(
+            topic = self.topic,
+            messages = self.history.len(),
+            input_len = trimmed.len(),
+            "Streaming message to LLM agent…"
+        );
+        let start = std::time::Instant::now();
+
+        let agent = self
+            .agent
+            .as_mut()
+            .ok_or_else(|| SimardError::ActionExecutionFailed {
+                action: "send-message".to_string(),
+                reason: "meeting agent is no longer available (close pipeline took it)".to_string(),
+            })?;
+
+        let outcome = match agent.run_turn_streaming(turn_input, on_chunk) {
+            Ok(o) => {
+                info!(
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    response_len = o.execution_summary.len(),
+                    "LLM agent returned streamed response"
+                );
+                o
+            }
+            Err(e) => {
+                warn!(elapsed_ms = start.elapsed().as_millis() as u64, error = %e, "LLM agent returned error");
+                return Err(e);
+            }
+        };
+
+        let extracted = extract_response(&outcome);
+        if extracted.trim().is_empty() {
+            error!(
+                raw_len = outcome.execution_summary.len(),
+                topic = self.topic,
+                "MeetingBackend: adapter returned empty streamed response — failing the turn"
+            );
+            return Err(SimardError::ActionExecutionFailed {
+                action: "send-message".to_string(),
+                reason: format!(
+                    "empty_adapter_response: extract_response produced empty result \
+                     (raw_summary_len={})",
+                    outcome.execution_summary.len()
+                ),
+            });
+        }
+        let response_text = extracted;
+
+        self.push_message(Role::Assistant, response_text.clone());
+        self.auto_save_transcript();
+        debug!(
+            messages = self.history.len(),
+            "Meeting streamed turn completed"
+        );
+
+        Ok(MeetingResponse {
+            content: response_text,
+            message_count: self.history.len(),
+        })
+    }
 }

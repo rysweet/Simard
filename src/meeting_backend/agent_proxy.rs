@@ -25,6 +25,26 @@ use crate::error::{SimardError, SimardResult};
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::runtime::RuntimeTopology;
 
+/// True when a single agent output line is copilot CLI noise (usage stats,
+/// bootstrap banners, progress indicators) that should never be surfaced as
+/// substantive response content. Shared by [`strip_copilot_noise`] (final
+/// authoritative text) and the incremental streaming path (issue #2581) so the
+/// live preview and the final message filter the same lines.
+fn line_is_noise(trimmed: &str) -> bool {
+    trimmed.starts_with("Total usage est:")
+        || trimmed.starts_with("API time spent:")
+        || trimmed.starts_with("Total session time:")
+        || trimmed.starts_with("Changes ")
+        || trimmed.starts_with("Requests ")
+        || trimmed.starts_with("Tokens ")
+        || (trimmed.contains("Staged") && trimmed.contains("hook"))
+        || trimmed.contains("XPIA")
+        || trimmed.starts_with("Script started on")
+        || trimmed.starts_with("Warning:")
+        || (trimmed.len() <= 2 && !trimmed.is_empty())
+        || trimmed.starts_with('●')
+}
+
 /// Strip copilot CLI noise (usage stats, bootstrap lines, progress indicators)
 /// from raw output, keeping only the substantive response.
 fn strip_copilot_noise(raw: &str) -> String {
@@ -37,6 +57,7 @@ fn strip_copilot_noise(raw: &str) -> String {
         if result.is_empty() && trimmed.is_empty() {
             continue;
         }
+        // The usage-stats footer (and everything after it) is discarded wholesale.
         if trimmed.starts_with("Total usage est:")
             || trimmed.starts_with("API time spent:")
             || trimmed.starts_with("Total session time:")
@@ -50,19 +71,7 @@ fn strip_copilot_noise(raw: &str) -> String {
         if skip_rest {
             continue;
         }
-        if trimmed.contains("Staged") && trimmed.contains("hook") {
-            continue;
-        }
-        if trimmed.contains("XPIA") || trimmed.starts_with("Script started on") {
-            continue;
-        }
-        if trimmed.starts_with("Warning:") {
-            continue;
-        }
-        if trimmed.len() <= 2 && !trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('●') {
+        if line_is_noise(trimmed) {
             continue;
         }
 
@@ -73,17 +82,24 @@ fn strip_copilot_noise(raw: &str) -> String {
     result.trim().to_string()
 }
 
-/// Env var override for turn timeout in seconds. When set to a positive value
-/// it overrides [`DEFAULT_TURN_TIMEOUT_SECS`]; when explicitly set to `0` the
-/// per-turn timeout is disabled (unbounded — operator escape hatch); when unset
-/// or malformed the bounded default applies.
+/// Primary env var setting the idle-liveness window in seconds — the maximum
+/// time the agent child may produce **no output** before it is treated as
+/// genuinely hung and terminated. Issue #2581: this replaces the old
+/// wall-clock per-turn cap. A long-but-productive turn is never killed because
+/// every streamed chunk resets the clock (see [`PersistentAgentProxy::invoke_agent_streaming`]).
+const IDLE_LIVENESS_ENV: &str = "SIMARD_MEETING_IDLE_LIVENESS_SECS";
+
+/// Deprecated alias for [`IDLE_LIVENESS_ENV`], kept working so existing
+/// operator config does not break. It is NO LONGER a wall-clock per-turn cap
+/// (issue #2581): when set it now configures the same idle-liveness window.
 const TURN_TIMEOUT_ENV: &str = "SIMARD_MEETING_TURN_TIMEOUT_SECS";
 
-/// Default per-turn timeout. A hung `copilot -p` child must not block the
-/// meeting REPL indefinitely — after this bound the child is killed and the
-/// turn degrades honestly via the `[meeting:error]`/`[meeting] WARNING` banner
-/// (Pillar 11: honest degradation beats hidden silence). Issue #2549.
-const DEFAULT_TURN_TIMEOUT_SECS: u64 = 120;
+/// Default idle-liveness window. A child that emits nothing for this long is
+/// treated as hung and reaped, so a dead/stuck `copilot -p` child cannot block
+/// the chat/meeting REPL forever (Pillar 11: honest degradation beats hidden
+/// silence). Generous on purpose: real turns stream output within seconds, so
+/// only a genuinely stalled child stays silent this long. Issues #2549, #2581.
+const DEFAULT_IDLE_LIVENESS_SECS: u64 = 300;
 
 /// Env var giving an explicit directory the meeting agent should operate in.
 /// When set to an existing directory it wins over cwd-derived resolution. This
@@ -91,26 +107,32 @@ const DEFAULT_TURN_TIMEOUT_SECS: u64 = 120;
 /// per-operator absolute path baked into the binary.
 const WORKDIR_ENV: &str = "SIMARD_MEETING_AGENT_DIR";
 
-/// Resolve the per-turn timeout from the environment, falling back to the
-/// bounded default. Issue #2549.
+/// Resolve the idle-liveness window from the environment, falling back to the
+/// generous default. The primary [`IDLE_LIVENESS_ENV`] wins; the deprecated
+/// [`TURN_TIMEOUT_ENV`] alias is consulted only when the primary is unset.
+/// Issues #2549, #2581.
 ///
-/// - `SIMARD_MEETING_TURN_TIMEOUT_SECS=<n>` with `n > 0` → `Some(n secs)`
-/// - `SIMARD_MEETING_TURN_TIMEOUT_SECS=0` → `None` (explicitly disabled)
-/// - unset or malformed → `Some(DEFAULT_TURN_TIMEOUT_SECS)`
-fn resolve_turn_timeout() -> Option<Duration> {
+/// - `<n>` with `n > 0` → `Some(n secs)` idle window.
+/// - `0` → `None` (idle detection explicitly disabled — fully unbounded escape hatch).
+/// - unset or malformed → `Some(DEFAULT_IDLE_LIVENESS_SECS)`.
+fn resolve_idle_window() -> Option<Duration> {
+    if let Ok(raw) = std::env::var(IDLE_LIVENESS_ENV) {
+        return parse_turn_timeout(Some(&raw));
+    }
     parse_turn_timeout(std::env::var(TURN_TIMEOUT_ENV).ok().as_deref())
 }
 
-/// Pure (env-free) core of [`resolve_turn_timeout`] so the fallback/override
+/// Pure (env-free) core of [`resolve_idle_window`] so the fallback/override
 /// semantics are testable without mutating process-global environment state.
+/// The returned `Duration` is the idle-liveness window (issue #2581).
 fn parse_turn_timeout(raw: Option<&str>) -> Option<Duration> {
     match raw {
         Some(value) => match value.trim().parse::<u64>() {
             Ok(0) => None,
             Ok(secs) => Some(Duration::from_secs(secs)),
-            Err(_) => Some(Duration::from_secs(DEFAULT_TURN_TIMEOUT_SECS)),
+            Err(_) => Some(Duration::from_secs(DEFAULT_IDLE_LIVENESS_SECS)),
         },
-        None => Some(Duration::from_secs(DEFAULT_TURN_TIMEOUT_SECS)),
+        None => Some(Duration::from_secs(DEFAULT_IDLE_LIVENESS_SECS)),
     }
 }
 
@@ -214,7 +236,11 @@ pub struct PersistentAgentProxy {
     is_open: bool,
     is_closed: bool,
     turn_count: u32,
-    turn_timeout: Option<Duration>,
+    /// Idle-liveness window: the child is reaped only after producing no output
+    /// for this long (`None` = idle detection disabled). Every streamed chunk
+    /// resets the clock, so a productive turn of any length is never killed
+    /// (issue #2581). Replaces the former wall-clock per-turn cap.
+    idle_window: Option<Duration>,
     /// Directory the agent operates in (cwd + `--add-dir` grant), resolved in
     /// `open()` from the active repo / explicit config. `None` when no repo can
     /// be resolved — the agent then inherits the process cwd with no grant.
@@ -236,7 +262,7 @@ impl std::fmt::Debug for PersistentAgentProxy {
 impl PersistentAgentProxy {
     /// Create a new proxy (does NOT validate agent yet — call `open()` first).
     pub fn new() -> SimardResult<Self> {
-        let turn_timeout = resolve_turn_timeout();
+        let idle_window = resolve_idle_window();
 
         Ok(Self {
             descriptor: BaseTypeDescriptor {
@@ -255,7 +281,7 @@ impl PersistentAgentProxy {
             is_open: false,
             is_closed: false,
             turn_count: 0,
-            turn_timeout,
+            idle_window,
             workdir: None,
             agent_cmd: String::new(),
             agent_base_args: Vec::new(),
@@ -281,12 +307,33 @@ impl PersistentAgentProxy {
         Ok(())
     }
 
-    /// Invoke the agent with a prompt and return the response.
+    /// Invoke the agent with a prompt and return the full (noise-stripped)
+    /// response. Thin wrapper over [`Self::invoke_agent_streaming`] with a
+    /// no-op chunk sink, for callers that don't need incremental output.
+    #[cfg(test)]
     fn invoke_agent(&self, prompt: &str) -> SimardResult<String> {
+        self.invoke_agent_streaming(prompt, &mut |_| {})
+    }
+
+    /// Invoke the agent, streaming each substantive output line to `on_chunk`
+    /// as it is produced, and returning the full noise-stripped response.
+    ///
+    /// Liveness model (issue #2581): there is **no** wall-clock cap on the
+    /// turn. The child is terminated only when it produces no output for the
+    /// idle-liveness window ([`Self::idle_window`]) — every line received
+    /// resets that clock, so a long-but-productive turn streams indefinitely
+    /// and is never killed. A genuinely hung/dead child (no output for the full
+    /// window) is still reaped and surfaced as an honest idle-timeout error.
+    fn invoke_agent_streaming(
+        &self,
+        prompt: &str,
+        on_chunk: &mut dyn FnMut(&str),
+    ) -> SimardResult<String> {
         info!(
             cmd = %self.agent_cmd,
             prompt_len = prompt.len(),
-            "Invoking agent"
+            idle_window_secs = self.idle_window.map(|d| d.as_secs()),
+            "Invoking agent (streaming)"
         );
 
         let mut cmd = Command::new(&self.agent_cmd);
@@ -297,22 +344,20 @@ impl PersistentAgentProxy {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        // Run the agent as the leader of its own process group so a per-turn
-        // timeout can kill the WHOLE subtree, not just the direct child. The
+        // Run the agent as the leader of its own process group so the liveness
+        // reaper can kill the WHOLE subtree, not just the direct child. The
         // agent CLIs (`copilot`/`claude`) are Node processes that spawn
         // descendants which inherit the stdout/stderr pipe write-ends; killing
         // only the direct child would leave those descendants alive, holding
         // the pipes open so the reader threads never see EOF (leaked threads +
-        // FDs + orphaned processes). Because the timeout is now default-on
-        // (issue #2549) this kill path is regularly exercised. `process_group(0)`
-        // makes the child's PGID equal its PID; the timeout handler then
-        // signals the negated PGID.
+        // FDs + orphaned processes). `process_group(0)` makes the child's PGID
+        // equal its PID; the reaper then signals the negated PGID.
         //
         // Tradeoff: the child no longer shares Simard's foreground process
         // group, so a terminal SIGINT (Ctrl-C) sent to Simard mid-turn no
         // longer reaches the agent. That is acceptable here — the agent is a
-        // one-shot `-p` invocation that self-terminates, and the bounded
-        // per-turn timeout still reaps a genuinely hung subtree.
+        // one-shot `-p` invocation that self-terminates, and the idle-liveness
+        // reaper still reaps a genuinely hung subtree.
         cmd.process_group(0);
 
         // Operate in the active repository so the agent can inspect code and
@@ -331,7 +376,7 @@ impl PersistentAgentProxy {
                 reason: format!("failed to spawn '{}': {e}", self.agent_cmd),
             })?;
 
-        // Read stdout in a thread with timeout
+        // Read stdout in a thread, forwarding each line over a channel.
         let stdout = child
             .stdout
             .take()
@@ -360,28 +405,32 @@ impl PersistentAgentProxy {
             });
         }
 
-        // Collect stdout lines. The channel disconnects EXACTLY when the reader
-        // thread reaches stdout EOF (every writer has closed the pipe) — that is
-        // the authoritative "all output received" signal. Draining via the
-        // blocking `recv_timeout` until `Disconnected` (rather than `try_wait` +
-        // a non-blocking `try_recv` drain) guarantees we never drop a burst the
-        // child flushed just before exiting — critical because `copilot`/`claude`
-        // write to a pipe (block-buffered) and tend to flush a large final chunk.
+        // Collect stdout lines, streaming each substantive one to `on_chunk`.
+        // The channel disconnects EXACTLY when the reader thread reaches stdout
+        // EOF (every writer has closed the pipe) — the authoritative "all output
+        // received" signal. Draining via the blocking `recv_timeout` until
+        // `Disconnected` (rather than `try_wait` + a non-blocking `try_recv`
+        // drain) guarantees we never drop a burst the child flushed just before
+        // exiting — critical because `copilot`/`claude` write to a pipe
+        // (block-buffered) and tend to flush a large final chunk.
         //
-        // The loop stays deadline-centric: it NEVER blocks on `child.wait()`
-        // unbounded, so a child that closes stdout then hangs (`exec 1>&-; sleep
-        // 999`), or one that never closes stdout, still degrades via the per-turn
-        // timeout (issue #2549).
+        // Liveness (issue #2581): the loop tracks `last_activity`, reset on every
+        // line. It NEVER blocks on `child.wait()` unbounded, so a child that
+        // closes stdout then hangs (`exec 1>&-; sleep 999`), or one that never
+        // closes stdout, still degrades once it has been idle for the full
+        // window — while a child that keeps producing output runs unbounded.
         let mut lines: Vec<String> = Vec::new();
-        let mut timed_out = false;
+        let mut hung = false;
         let mut stdout_eof = false;
+        let mut last_activity = Instant::now();
         loop {
-            if let Some(timeout) = self.turn_timeout
-                && start.elapsed() >= timeout
+            if let Some(idle) = self.idle_window
+                && last_activity.elapsed() >= idle
             {
                 warn!(
-                    timeout_secs = timeout.as_secs(),
-                    "Agent turn timeout reached, killing process"
+                    idle_window_secs = idle.as_secs(),
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "Agent produced no output for the idle-liveness window — reaping genuinely-hung child"
                 );
                 // Kill the entire process group (the agent + any descendants it
                 // spawned) so no orphan keeps the stdout/stderr pipes open —
@@ -393,14 +442,14 @@ impl PersistentAgentProxy {
                 kill_process_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
-                timed_out = true;
+                hung = true;
                 break;
             }
 
             if stdout_eof {
                 // All output has been received (reader reached EOF). Finish once
                 // the child is reaped; if it closed stdout yet keeps running,
-                // keep polling so the deadline above can still fire.
+                // keep polling so the idle deadline above can still fire.
                 match child.try_wait() {
                     Ok(Some(_)) => break,
                     _ => std::thread::sleep(Duration::from_millis(50)),
@@ -408,33 +457,42 @@ impl PersistentAgentProxy {
                 continue;
             }
 
-            match rx.recv_timeout(Duration::from_secs(1)) {
-                Ok(line) => lines.push(line),
-                // No line this tick — loop to re-check the deadline.
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(line) => {
+                    // Fresh output — reset the idle-liveness clock so a
+                    // productive turn is never reaped regardless of total length.
+                    last_activity = Instant::now();
+                    if !line_is_noise(line.trim()) {
+                        on_chunk(&line);
+                    }
+                    lines.push(line);
+                }
+                // No line this tick — loop to re-check the idle deadline.
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 // Reader hit stdout EOF and forwarded every line before dropping
                 // its sender: `lines` is now complete. The child may still be
                 // running (it closed stdout early), so switch to bounded
-                // exit/deadline polling above.
+                // exit/idle polling above.
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => stdout_eof = true,
             }
         }
 
-        // Honest degradation (Pillar 11, issue #2549): a hung child that hit
-        // the per-turn timeout surfaces as a specific error rather than
-        // blocking the REPL or masquerading as an empty response. The REPL's
-        // `render_backend_error` turns this into the `[meeting:error] WARNING`
-        // banner with a "retry or /close" hint.
-        if timed_out {
+        // Honest degradation (Pillar 11, issues #2549/#2581): a child that went
+        // idle for the full liveness window is genuinely hung — surface a
+        // specific error rather than blocking the REPL or masquerading as an
+        // empty response. The REPL's `render_backend_error` turns this into the
+        // `[meeting:error] WARNING` banner with a "retry or /close" hint. This
+        // fires ONLY on genuine inactivity, never on a still-streaming turn.
+        if hung {
             let secs = self
-                .turn_timeout
+                .idle_window
                 .map(|d| d.as_secs())
-                .unwrap_or(DEFAULT_TURN_TIMEOUT_SECS);
+                .unwrap_or(DEFAULT_IDLE_LIVENESS_SECS);
             return Err(SimardError::AdapterInvocationFailed {
                 base_type: "persistent-agent-proxy".to_string(),
                 reason: format!(
-                    "agent turn exceeded {secs}s per-turn timeout \
-                     ({TURN_TIMEOUT_ENV}); terminated hung child — honest \
+                    "agent produced no output for {secs}s (idle-liveness timeout, \
+                     {IDLE_LIVENESS_ENV}); terminated genuinely-hung child — honest \
                      degradation, retry your message or /close"
                 ),
             });
@@ -450,6 +508,79 @@ impl PersistentAgentProxy {
         );
 
         Ok(strip_copilot_noise(&raw_response))
+    }
+
+    /// Shared turn logic behind both [`BaseTypeSession::run_turn`] and
+    /// [`BaseTypeSession::run_turn_streaming`]. Builds the prompt, invokes the
+    /// agent (streaming each chunk to `on_chunk`), records cost, and returns the
+    /// outcome. A no-op `on_chunk` yields the classic blocking behaviour.
+    fn run_turn_streaming_impl(
+        &mut self,
+        input: BaseTypeTurnInput,
+        on_chunk: &mut dyn FnMut(&str),
+    ) -> SimardResult<BaseTypeOutcome> {
+        ensure_session_not_closed(&self.descriptor, self.is_closed, "run_turn")?;
+        ensure_session_open(&self.descriptor, self.is_open, "run_turn")?;
+
+        self.turn_count += 1;
+
+        // Build the full prompt including context on first turn
+        let prompt = if self.turn_count == 1 {
+            let mut parts = Vec::new();
+            if !input.identity_context.is_empty() {
+                parts.push(input.identity_context.as_str());
+            }
+            if !input.prompt_preamble.is_empty() {
+                parts.push(input.prompt_preamble.as_str());
+            }
+            parts.push(&input.objective);
+            parts.join("\n\n")
+        } else {
+            input.objective.clone()
+        };
+
+        info!(
+            turn = self.turn_count,
+            prompt_len = prompt.len(),
+            "Agent proxy: sending turn"
+        );
+        let start = Instant::now();
+
+        let response_text = self.invoke_agent_streaming(&prompt, on_chunk)?;
+
+        info!(
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            response_len = response_text.len(),
+            turn = self.turn_count,
+            "Agent proxy: received response"
+        );
+
+        if response_text.trim().is_empty() {
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: "persistent-agent-proxy".to_string(),
+                reason: "agent returned empty response".to_string(),
+            });
+        }
+
+        // Record cost estimate
+        if let Err(e) = crate::cost_tracking::record_cost(
+            "persistent-agent-proxy",
+            "direct-invoke",
+            prompt.len(),
+            response_text.len(),
+            &format!("agent proxy turn {}", self.turn_count),
+        ) {
+            debug!("Cost tracking write failed: {e}");
+        }
+
+        Ok(BaseTypeOutcome {
+            plan: format!("Agent proxy turn {} (direct-invoke).", self.turn_count),
+            execution_summary: response_text,
+            evidence: vec![
+                format!("agent-proxy-turn={}", self.turn_count),
+                format!("elapsed-ms={}", start.elapsed().as_millis()),
+            ],
+        })
     }
 }
 
@@ -492,68 +623,15 @@ impl BaseTypeSession for PersistentAgentProxy {
     }
 
     fn run_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
-        ensure_session_not_closed(&self.descriptor, self.is_closed, "run_turn")?;
-        ensure_session_open(&self.descriptor, self.is_open, "run_turn")?;
+        self.run_turn_streaming_impl(input, &mut |_| {})
+    }
 
-        self.turn_count += 1;
-
-        // Build the full prompt including context on first turn
-        let prompt = if self.turn_count == 1 {
-            let mut parts = Vec::new();
-            if !input.identity_context.is_empty() {
-                parts.push(input.identity_context.as_str());
-            }
-            if !input.prompt_preamble.is_empty() {
-                parts.push(input.prompt_preamble.as_str());
-            }
-            parts.push(&input.objective);
-            parts.join("\n\n")
-        } else {
-            input.objective.clone()
-        };
-
-        info!(
-            turn = self.turn_count,
-            prompt_len = prompt.len(),
-            "Agent proxy: sending turn"
-        );
-        let start = Instant::now();
-
-        let response_text = self.invoke_agent(&prompt)?;
-
-        info!(
-            elapsed_ms = start.elapsed().as_millis() as u64,
-            response_len = response_text.len(),
-            turn = self.turn_count,
-            "Agent proxy: received response"
-        );
-
-        if response_text.trim().is_empty() {
-            return Err(SimardError::AdapterInvocationFailed {
-                base_type: "persistent-agent-proxy".to_string(),
-                reason: "agent returned empty response".to_string(),
-            });
-        }
-
-        // Record cost estimate
-        if let Err(e) = crate::cost_tracking::record_cost(
-            "persistent-agent-proxy",
-            "direct-invoke",
-            prompt.len(),
-            response_text.len(),
-            &format!("agent proxy turn {}", self.turn_count),
-        ) {
-            debug!("Cost tracking write failed: {e}");
-        }
-
-        Ok(BaseTypeOutcome {
-            plan: format!("Agent proxy turn {} (direct-invoke).", self.turn_count),
-            execution_summary: response_text,
-            evidence: vec![
-                format!("agent-proxy-turn={}", self.turn_count),
-                format!("elapsed-ms={}", start.elapsed().as_millis()),
-            ],
-        })
+    fn run_turn_streaming(
+        &mut self,
+        input: BaseTypeTurnInput,
+        on_chunk: &mut dyn FnMut(&str),
+    ) -> SimardResult<BaseTypeOutcome> {
+        self.run_turn_streaming_impl(input, on_chunk)
     }
 
     fn close(&mut self) -> SimardResult<()> {
@@ -611,14 +689,14 @@ mod tests {
         assert_eq!(result, "Normal response.\nWith multiple lines.");
     }
 
-    // ── issue #2549: default per-turn timeout ──
+    // ── issues #2549/#2581: default idle-liveness window ──
 
     #[test]
     fn parse_turn_timeout_unset_uses_bounded_default() {
         assert_eq!(
             parse_turn_timeout(None),
-            Some(Duration::from_secs(DEFAULT_TURN_TIMEOUT_SECS)),
-            "unset env must yield the bounded default, not None (no hang)"
+            Some(Duration::from_secs(DEFAULT_IDLE_LIVENESS_SECS)),
+            "unset env must yield the bounded idle-liveness default, not None (no hang)"
         );
     }
 
@@ -640,7 +718,7 @@ mod tests {
         assert_eq!(
             parse_turn_timeout(Some("0")),
             None,
-            "0 is the explicit operator escape hatch (unbounded)"
+            "0 is the explicit operator escape hatch (idle detection fully disabled)"
         );
     }
 
@@ -648,23 +726,23 @@ mod tests {
     fn parse_turn_timeout_malformed_falls_back_to_default() {
         assert_eq!(
             parse_turn_timeout(Some("not-a-number")),
-            Some(Duration::from_secs(DEFAULT_TURN_TIMEOUT_SECS)),
+            Some(Duration::from_secs(DEFAULT_IDLE_LIVENESS_SECS)),
             "malformed value must degrade to the bounded default, never None"
         );
     }
 
     #[test]
     fn new_defaults_to_bounded_turn_timeout_when_env_unset() {
-        // Guard against the reproduction in #2549: with the env unset the
-        // proxy must carry a bounded timeout so a hung child cannot block the
-        // REPL forever. Only assert the default when the operator has NOT set
-        // an override in this environment.
-        if std::env::var(TURN_TIMEOUT_ENV).is_err() {
+        // With neither env var set the proxy must carry a bounded idle-liveness
+        // window so a genuinely-hung child cannot block the REPL forever (a
+        // still-streaming child is never reaped — the clock resets per chunk).
+        // Only assert the default when the operator has NOT set an override.
+        if std::env::var(TURN_TIMEOUT_ENV).is_err() && std::env::var(IDLE_LIVENESS_ENV).is_err() {
             let proxy = PersistentAgentProxy::new().unwrap();
             assert_eq!(
-                proxy.turn_timeout,
-                Some(Duration::from_secs(DEFAULT_TURN_TIMEOUT_SECS)),
-                "new() must default to a bounded per-turn timeout"
+                proxy.idle_window,
+                Some(Duration::from_secs(DEFAULT_IDLE_LIVENESS_SECS)),
+                "new() must default to a bounded idle-liveness window"
             );
         }
     }
@@ -742,17 +820,20 @@ mod tests {
         );
     }
 
-    // ── issue #2549: honest degradation on a hung turn ──
+    // ── issues #2549/#2581: honest degradation on a genuinely idle/hung turn ──
 
     #[test]
     fn invoke_agent_degrades_honestly_on_timeout() {
-        // Drive `invoke_agent` against a child that never produces output and
-        // never exits within the bound. `sh -c 'sleep 30'` ignores the trailing
-        // `-p <prompt>` args (they become $0/$1), so it hangs deterministically.
+        // AC (b): a genuinely idle/hung child — one that produces NO output for
+        // the whole idle-liveness window — must still be detected and reaped,
+        // surfacing an honest idle-timeout error (never a silent hang, never a
+        // masqueraded empty response). `sh -c 'sleep 30'` ignores the trailing
+        // `-p <prompt>` args (they become $0/$1), so it hangs, silent,
+        // deterministically.
         let mut proxy = PersistentAgentProxy::new().unwrap();
         proxy.agent_cmd = "sh".to_string();
         proxy.agent_base_args = vec!["-c".to_string(), "sleep 30".to_string()];
-        proxy.turn_timeout = Some(Duration::from_millis(500));
+        proxy.idle_window = Some(Duration::from_millis(500));
 
         let started = Instant::now();
         let result = proxy.invoke_agent("hello");
@@ -762,25 +843,26 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "invoke_agent must not block indefinitely on a hung child (took {elapsed:?})"
         );
-        let err = result.expect_err("a timed-out turn must surface an error, not Ok");
+        let err = result.expect_err("a genuinely-idle turn must surface an error, not Ok");
         let msg = err.to_string();
         assert!(
-            msg.contains("timeout") && msg.contains("honest"),
-            "error must be a clear honest-degradation timeout, got: {msg}"
+            msg.contains("idle-liveness") && msg.contains("timeout") && msg.contains("honest"),
+            "error must be a clear honest idle-liveness timeout, got: {msg}"
         );
     }
 
     #[test]
     fn invoke_agent_degrades_when_child_closes_stdout_then_hangs() {
         // Regression for the disconnected-branch hang (issue #2549 review): a
-        // child that closes its stdout but keeps running must STILL hit the
-        // per-turn timeout, not block the REPL forever. `exec 1>&-` closes the
-        // stdout write-end (the reader thread sees EOF immediately) and then the
-        // shell sleeps — the deadline-centric loop must reap it via timeout.
+        // child that closes its stdout but keeps running (and produces no
+        // output) must STILL be reaped by idle-liveness, not block the REPL
+        // forever. `exec 1>&-` closes the stdout write-end (the reader thread
+        // sees EOF immediately) and then the shell sleeps — the idle-centric
+        // loop must reap it once the window elapses with no activity.
         let mut proxy = PersistentAgentProxy::new().unwrap();
         proxy.agent_cmd = "sh".to_string();
         proxy.agent_base_args = vec!["-c".to_string(), "exec 1>&-; sleep 30".to_string()];
-        proxy.turn_timeout = Some(Duration::from_secs(2));
+        proxy.idle_window = Some(Duration::from_secs(2));
 
         let started = Instant::now();
         let result = proxy.invoke_agent("hello");
@@ -838,7 +920,7 @@ mod tests {
         // 3s is comfortably longer than the shell needs to record the PID, and
         // far shorter than the grandchild's 30s sleep, so the grandchild is
         // guaranteed alive when the group-kill fires.
-        proxy.turn_timeout = Some(Duration::from_secs(3));
+        proxy.idle_window = Some(Duration::from_secs(3));
 
         let result = proxy.invoke_agent("hello");
         assert!(result.is_err(), "hung turn must surface a timeout error");
@@ -895,7 +977,7 @@ mod tests {
              printf ' stdout='; if [ -t 1 ]; then printf 'tty'; else printf 'notty'; fi"
                 .to_string(),
         ];
-        proxy.turn_timeout = Some(Duration::from_secs(30));
+        proxy.idle_window = Some(Duration::from_secs(30));
 
         let response = proxy
             .invoke_agent("hello")
@@ -914,7 +996,7 @@ mod tests {
         let mut proxy = PersistentAgentProxy::new().unwrap();
         proxy.agent_cmd = "sh".to_string();
         proxy.agent_base_args = vec!["-c".to_string(), "printf 'meeting-proxy-ok\\n'".to_string()];
-        proxy.turn_timeout = Some(Duration::from_secs(30));
+        proxy.idle_window = Some(Duration::from_secs(30));
 
         let response = proxy
             .invoke_agent("hello")
@@ -935,7 +1017,7 @@ mod tests {
         let mut proxy = PersistentAgentProxy::new().unwrap();
         proxy.agent_cmd = "sh".to_string();
         proxy.agent_base_args = vec!["-c".to_string(), "seq 1000 7000".to_string()];
-        proxy.turn_timeout = Some(Duration::from_secs(30));
+        proxy.idle_window = Some(Duration::from_secs(30));
 
         let response = proxy
             .invoke_agent("hello")
@@ -949,5 +1031,81 @@ mod tests {
         );
         assert_eq!(received.first().copied(), Some("1000"));
         assert_eq!(received.last().copied(), Some("7000"));
+    }
+
+    // ── issue #2581: idle-liveness never kills a productive turn + streaming ──
+
+    #[test]
+    fn long_productive_turn_is_not_killed_and_streams_incrementally() {
+        // AC (a): a turn whose TOTAL runtime far exceeds the idle-liveness
+        // window must NOT be killed, as long as it keeps producing output — and
+        // its output must arrive incrementally (streamed), not in one final
+        // blob. The child prints a 4-digit line (survives noise-stripping) every
+        // 100 ms for 20 lines (~2 s total) with a 1 s idle window: 2× the window
+        // overall, but each gap (0.1 s) is well under it, so the clock keeps
+        // resetting. Under the OLD wall-clock cap this turn would have been
+        // killed at 1 s; under idle-liveness it runs to completion. This is the
+        // bounded, CI-safe stand-in for the ">120 s productive turn" case — the
+        // property proven (no upper bound while output flows) is identical.
+        let mut proxy = PersistentAgentProxy::new().unwrap();
+        proxy.agent_cmd = "sh".to_string();
+        proxy.agent_base_args = vec![
+            "-c".to_string(),
+            "i=1000; while [ $i -lt 1020 ]; do echo $i; i=$((i+1)); sleep 0.1; done".to_string(),
+        ];
+        proxy.idle_window = Some(Duration::from_secs(1));
+
+        let mut chunks: Vec<String> = Vec::new();
+        let started = Instant::now();
+        let response = proxy
+            .invoke_agent_streaming("hello", &mut |c| chunks.push(c.to_string()))
+            .expect("a long-but-productive turn must return Ok, never be killed");
+        let elapsed = started.elapsed();
+
+        // It ran the full duration — proof it was not reaped early at ~1 s.
+        assert!(
+            elapsed >= Duration::from_millis(1500),
+            "productive turn was cut short (took only {elapsed:?}) — idle-liveness wrongly killed it"
+        );
+        // Output arrived incrementally: one streamed chunk per produced line.
+        assert_eq!(
+            chunks.len(),
+            20,
+            "expected 20 incrementally-streamed chunks, got {}",
+            chunks.len()
+        );
+        assert_eq!(chunks.first().map(String::as_str), Some("1000"));
+        assert_eq!(chunks.last().map(String::as_str), Some("1019"));
+        // The final aggregate response carries every line.
+        assert_eq!(response.lines().count(), 20);
+    }
+
+    #[test]
+    fn streaming_filters_noise_lines_from_chunks() {
+        // Streamed chunks are the substantive lines only — copilot usage/banner
+        // noise is filtered from the live preview exactly as it is from the
+        // final text, so the two never disagree.
+        let mut proxy = PersistentAgentProxy::new().unwrap();
+        proxy.agent_cmd = "sh".to_string();
+        proxy.agent_base_args = vec![
+            "-c".to_string(),
+            "printf 'hello world\\nTotal usage est: 5 tokens\\n'".to_string(),
+        ];
+        proxy.idle_window = Some(Duration::from_secs(30));
+
+        let mut chunks: Vec<String> = Vec::new();
+        let response = proxy
+            .invoke_agent_streaming("hi", &mut |c| chunks.push(c.to_string()))
+            .expect("clean child must return Ok");
+
+        assert_eq!(
+            chunks,
+            vec!["hello world".to_string()],
+            "noise must be filtered from stream"
+        );
+        assert_eq!(
+            response, "hello world",
+            "final text must match the streamed substantive content"
+        );
     }
 }
