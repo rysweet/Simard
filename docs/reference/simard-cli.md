@@ -1110,6 +1110,21 @@ Artifacts are written under `target/simard-gym/`.
 
 Each scenario run within the suite emits the same scorecard fields as `simard gym run <scenario-id>`, so single-run reports and suite-generated reports remain directly comparable.
 
+**Exit code.** `run-suite` exits **non-zero** when the suite does not pass
+(`Suite passed: false`) and zero when it passes. This is what makes the
+`self-test` / `self-update` health gate trustworthy: both shell out to
+`gym run-suite starter` and branch on its exit code, so a failing suite can no
+longer be reported as a false-green (rysweet/Simard#2548). Skipped scenarios
+(e.g. a backend whose auth is unavailable at gate time) do not count as failures.
+
+**The `starter` suite is the health gate.** It runs only the deterministic,
+credential-free session-quality scenarios whose correctness depends on the
+binary's own runtime machinery rather than an external reasoning backend, so a
+healthy binary's `self-test` is genuinely and deterministically green. The
+`repo-exploration`, `documentation`, and `safe-code-change` scenarios remain in
+the catalogue (`gym list`) and are runnable individually with
+`gym run <scenario-id>` as benchmarks for capable reasoning backends.
+
 ## Benchmark gym configuration
 
 The benchmark metric reporting surface does not require feature flags or environment variables.

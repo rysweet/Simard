@@ -32,9 +32,11 @@ All runnable examples below use the canonical benchmark surface.
 
 ## Step 1: List the shipped benchmark scenarios
 
-The starter suite is intentionally small and curated: a high-signal set rather
-than a large, noisy one (see `Specs/ProductArchitecture.md` line 214). It holds
-twelve scenarios — three for each of the four sanctioned benchmark classes.
+The scenario **catalogue** is intentionally small and curated: a high-signal set
+rather than a large, noisy one (see `Specs/ProductArchitecture.md` line 214). It
+holds twelve scenarios — three for each of the four sanctioned benchmark classes.
+`gym list` shows the whole catalogue; you can run any of them individually with
+`gym run <scenario-id>`.
 
 ```bash
 cargo run --quiet -- gym list
@@ -63,9 +65,17 @@ Together they cover:
 
 If you need exact legacy output for an older script, `cargo run --quiet --bin simard-gym -- list` still works as a compatibility surface.
 
-## Step 2: Run the starter benchmark suite
+## Step 2: Run the starter suite (the self-test health gate)
 
-Run the full shipped suite like an operator would:
+The `starter` suite is the deterministic **health gate** that `simard self-test`
+and the `self-update` relaunch check run. It must be genuinely green on a healthy
+binary, so it runs only the session-quality scenarios whose correctness is a
+property of the binary's own runtime machinery — not the reasoning quality of an
+external LLM backend. The `repo-exploration`, `documentation`, and
+`safe-code-change` scenarios are graded by content checks that scan the agent's
+prose for domain keywords; those require a capable reasoning backend, so they are
+benchmarks you run individually with `gym run <scenario-id>`, not health-gate
+checks.
 
 ```bash
 cargo run --quiet -- gym run-suite starter
@@ -76,13 +86,15 @@ You should see output shaped like:
 ```text
 Suite: starter
 Suite passed: true
-- repo-exploration-local: passed (target/simard-gym/...)
-- docs-refresh-copilot: passed (target/simard-gym/...)
-- safe-code-change-rusty-clawd: passed (target/simard-gym/...)
 - composite-session-review: passed (target/simard-gym/...)
 - interactive-terminal-driving: passed (target/simard-gym/...)
+- session-quality-memory-export: passed (target/simard-gym/...)
 Suite artifact report: target/simard-gym/suites/starter.json
 ```
+
+`gym run-suite` exits **non-zero** whenever `Suite passed: false`, so a failing
+suite can no longer be reported as a false-green by `self-test` or the
+`self-update` relaunch gate (rysweet/Simard#2548).
 
 ## Step 3: Inspect the generated artifacts
 

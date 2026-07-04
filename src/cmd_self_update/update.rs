@@ -52,7 +52,11 @@ pub fn handle_self_test() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     } else {
         eprintln!("{}", stdout.trim());
-        eprintln!("{}", stderr.trim());
+        let stderr = stderr.trim();
+        if !stderr.is_empty() {
+            eprintln!("{stderr}");
+        }
+        eprintln!("SELF-TEST FAILED");
         Err("SELF-TEST FAILED: gym run-suite starter did not pass".into())
     }
 }
@@ -152,5 +156,57 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Self-test failed"));
+    }
+
+    #[test]
+    fn run_self_test_on_binary_with_passing_command() {
+        // /usr/bin/true always exits 0, so the binary is treated as healthy.
+        let result = run_self_test_on_binary(Path::new("/usr/bin/true"));
+        assert!(
+            result.is_ok(),
+            "a zero-exit self-test must be healthy: {result:?}"
+        );
+    }
+
+    /// Full false-green chain regression (issue #2548): a binary whose starter
+    /// suite fails now exits non-zero from `gym run-suite`, so its `self-test`
+    /// exits non-zero, so `run_self_test_on_binary` — the exact gate
+    /// `handle_self_update` branches on before relaunching — returns `Err` and
+    /// the relaunch is refused. This fabricates such a binary as a tiny script
+    /// that mimics `simard self-test` printing `Suite passed: false` and exiting
+    /// non-zero, and asserts the gate rejects it.
+    #[test]
+    fn self_update_relaunch_gate_rejects_failing_self_test() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("simard-2548-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let script = dir.join("fake-simard-failing");
+        {
+            let mut f = std::fs::File::create(&script).expect("create script");
+            writeln!(
+                f,
+                "#!/bin/sh\necho 'Suite: starter'\necho 'Suite passed: false'\necho 'SELF-TEST FAILED' 1>&2\nexit 1"
+            )
+            .expect("write script");
+        }
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let result = run_self_test_on_binary(&script);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let err = result.expect_err("a binary whose self-test fails must not be relaunched");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Self-test failed"),
+            "gate error should be explicit: {msg}"
+        );
+        // The captured suite diagnostics are surfaced for the operator.
+        assert!(
+            msg.contains("Suite passed: false"),
+            "gate should surface the failing suite output: {msg}"
+        );
     }
 }
