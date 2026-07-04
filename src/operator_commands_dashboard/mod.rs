@@ -3,6 +3,7 @@ mod agent_log;
 mod auth;
 mod brain_failures;
 mod chat;
+mod chat_store;
 mod current_work;
 mod cycle_source;
 mod distributed;
@@ -29,6 +30,10 @@ mod workboard;
 mod tests_activity;
 #[cfg(test)]
 mod tests_attach;
+#[cfg(test)]
+mod tests_chat_routes;
+#[cfg(test)]
+mod tests_chat_store;
 #[cfg(test)]
 mod tests_goal_records_migration;
 #[cfg(test)]

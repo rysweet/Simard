@@ -31,7 +31,7 @@ The dashboard is a single-page app with the following tabs:
 | **Processes** | Live process tree under the daemon — engineer subprocesses, LLM sessions, and their resource usage. |
 | **Memory** | Cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters; full-text memory search; a **Memory Overview** with the live **Memory Store** counts; and a **Memory Files** panel showing the goals snapshot plus any non-empty legacy snapshot files. See [Memory architecture](memory.md). |
 | **Costs** | Per-provider, per-model token spend across the active session. |
-| **Chat** | Direct chat with Simard. |
+| **Chat** | Direct chat with Simard. Conversations are saved as durable, resumable **sessions**: a sidebar lists every saved chat, the panel fills the page, and assistant replies stream in incrementally. See [Chat tab: durable, resumable sessions](#chat-tab-durable-resumable-sessions). |
 | **Workboard** | Shared scratch canvas. (Renamed from "Whiteboard" — see [Tab identity contract](#tab-identity-contract).) |
 | **Thinking** | Live thinking-cycle stream (planner output before action dispatch). |
 | **Terminal** | Browser-attached PTY into the daemon host. |
@@ -50,6 +50,48 @@ array parallel to `daemon_log_lines`, with an identical client-side fallback
 classifier. This is required because the daemon emits human-readable lines with
 no level token of their own — without classification, selecting any level
 (even *Info*) matched nothing and the control appeared inert.
+
+### Chat tab: durable, resumable sessions
+
+The **Chat** tab is a full conversational surface over Simard's meeting
+backend. Every conversation is a **durable, resumable session** — the complete
+turn history is written to disk and survives both page reloads and daemon
+restarts.
+
+**Session sidebar.** The tab lists every saved chat session (newest first),
+each showing its title — derived from the first message you sent — and when it
+was last active. Click a session to reopen it: the panel loads the entire prior
+conversation, and the connection resumes with full context on both the UI and
+the agent side (the agent is re-seeded with the history, so replies stay
+coherent). A **New chat** control starts a fresh session; the session record is
+created the moment you send your first message, so empty windows never clutter
+the list.
+
+**Full-height layout.** The chat panel fills the available vertical and
+horizontal space. The transcript scrolls inside a flex-grown message area while
+the input row stays anchored at the bottom, and the panel grows with the browser
+window — no fixed small box.
+
+**Streaming with graceful fallback.** Assistant replies appear **incrementally**,
+word-by-word, rather than all at once. A client that only understands the legacy
+single-message shape still works — it simply receives the reply as one complete
+message — so the conversation renders cleanly either way and is persisted
+identically.
+
+**Real agent, real memory.** Chat turns flow through the same
+`SessionBuilder` / `MeetingBackend` path as the CLI meeting REPL (governed by
+`SIMARD_LLM_PROVIDER`), so anything you say can become a goal and slash-commands
+like `/status`, `/goal`, and `/close` work exactly as they do on the command
+line. See [How to start a meeting](howto/start-a-meeting.md).
+
+Sessions are stored under `<state_root>/chat_sessions/` (keyed by a stable
+session id, honoring `SIMARD_STATE_ROOT`). Two REST endpoints back the sidebar —
+`GET /api/chat/sessions` (list) and `GET /api/chat/sessions/{id}` (full
+history) — and the live conversation runs over `GET /ws/chat` (optionally
+`?session_id=<id>` to resume). Full storage layout, the REST contract, and the
+WebSocket wire protocol (handshake, `restore`, `chunk`/`done`, and the
+non-streaming fallback frame) are documented in the
+[Dashboard Chat reference](reference/dashboard-chat.md).
 
 ### Overview tab: plain-English action details (#2358)
 

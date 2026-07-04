@@ -445,7 +445,7 @@ pub(crate) const PART_01: &str = r#"      </div>
         if(tab.dataset.tab==='goals') fetchGoals();
         if(tab.dataset.tab==='costs') fetchCosts();
         if(tab.dataset.tab==='traces') fetchTraces();
-        if(tab.dataset.tab==='chat') initChat();
+        if(tab.dataset.tab==='chat') loadChatSessions();
         if(tab.dataset.tab==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
         if(tab.dataset.tab==='thinking') {fetchThinking();fetchOodaCycles();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);tabRefreshTimers.oodaCycles=setInterval(fetchOodaCycles,30000);}
         if(tab.dataset.tab==='brain-failures') {fetchBrainFailures();tabRefreshTimers.brainFailures=setInterval(fetchBrainFailures,30000);}
