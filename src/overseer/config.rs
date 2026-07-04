@@ -28,6 +28,17 @@ pub const DAILY_BUDGET_ENV: &str = "SIMARD_DAILY_BUDGET_USD";
 /// self-tuning (M4) can never drive the observer into a hot loop.
 pub const OVERSEER_INTERVAL_ENV: &str = "SIMARD_OVERSEER_INTERVAL_SECS";
 
+/// GitHub login the acting Overseer authors its own workstreams under. Sourced
+/// here so the daemon and the merge/recursion path agree on ONE stable, DISTINCT
+/// identity (never the human operator's login). Defaults to
+/// [`DEFAULT_OVERSEER_AUTHOR_LOGIN`] when unset.
+pub const OVERSEER_AUTHOR_LOGIN_ENV: &str = "SIMARD_OVERSEER_AUTHOR_LOGIN";
+
+/// The Overseer's well-known bot login, distinct from the engineer/OODA
+/// identity. Used by the anti-recursion guard so the Overseer never
+/// verifies/merges/deploys its OWN PRs and never re-opens its own goals.
+pub const DEFAULT_OVERSEER_AUTHOR_LOGIN: &str = "simard-overseer[bot]";
+
 /// Default observer cadence: 15 minutes — frequent enough to catch churn, far
 /// below any launch/merge cadence (M1 files at most one deduped issue per
 /// recurring signature, so a tighter interval adds no writes).
@@ -54,6 +65,41 @@ pub fn overseer_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
 /// Production entry point: read the real process environment.
 pub fn overseer_enabled() -> bool {
     overseer_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the **acting** Overseer master flag with **default ON** semantics
+/// (M2+ co-process). The daemon runs the acting Overseer UNLESS
+/// `SIMARD_OVERSEER_ENABLED` is explicitly set to a falsey value
+/// (`0`/`false`/`no`/`off`, case-insensitive). This is deliberately the inverse
+/// default of [`overseer_enabled_from`] — which gates the M1 read-only sensor
+/// default-**OFF** — because the acting co-process is opt-**out**: the operator
+/// disables it explicitly, and an unset/empty var leaves it enabled.
+pub fn overseer_acting_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    // Enabled unless an explicit falsey value is set. `matches!` returns true for
+    // the falsey case; negate for the enabled result.
+    !matches!(
+        lookup(OVERSEER_ENABLED_ENV).as_deref().map(str::trim),
+        Some(v) if is_falsey(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn overseer_acting_enabled() -> bool {
+    overseer_acting_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the Overseer's DISTINCT author login. Falls back to
+/// [`DEFAULT_OVERSEER_AUTHOR_LOGIN`] when unset or empty.
+pub fn overseer_author_login_from(lookup: impl Fn(&str) -> Option<String>) -> String {
+    match lookup(OVERSEER_AUTHOR_LOGIN_ENV).as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => DEFAULT_OVERSEER_AUTHOR_LOGIN.to_string(),
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn overseer_author_login() -> String {
+    overseer_author_login_from(|k| std::env::var(k).ok())
 }
 
 /// Resolve the daily budget from an env resolver, falling back to
@@ -98,6 +144,15 @@ fn is_truthy(v: &str) -> bool {
     matches!(norm.as_str(), "1" | "true" | "yes" | "on")
 }
 
+/// Recognise an explicit falsey env value used by the **acting** Overseer's
+/// opt-out gate. Case-insensitive; trims surrounding whitespace. Only these
+/// exact values disable the acting Overseer; everything else (including unset,
+/// empty, or garbage) leaves it enabled.
+fn is_falsey(v: &str) -> bool {
+    let norm = v.trim().to_ascii_lowercase();
+    matches!(norm.as_str(), "0" | "false" | "no" | "off")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +194,54 @@ mod tests {
                 "{falsey:?} must NOT enable the Overseer"
             );
         }
+    }
+
+    #[test]
+    fn acting_overseer_enabled_by_default_when_unset() {
+        // Opt-OUT semantics: an unset var leaves the acting co-process ENABLED.
+        assert!(overseer_acting_enabled_from(env(&[])));
+    }
+
+    #[test]
+    fn acting_overseer_disabled_only_on_explicit_falsey_values() {
+        for falsey in ["0", "false", "FALSE", "False", "no", "off", "  off  "] {
+            assert!(
+                !overseer_acting_enabled_from(env(&[(OVERSEER_ENABLED_ENV, falsey)])),
+                "{falsey:?} should DISABLE the acting Overseer"
+            );
+        }
+    }
+
+    #[test]
+    fn acting_overseer_stays_on_for_truthy_empty_or_garbage_values() {
+        // Anything that is not an explicit falsey value leaves it ON, including
+        // empty/whitespace (treated as unset) and unrecognised strings.
+        for on in ["1", "true", "yes", "on", "", "  ", "maybe", "2", "enabled"] {
+            assert!(
+                overseer_acting_enabled_from(env(&[(OVERSEER_ENABLED_ENV, on)])),
+                "{on:?} must leave the acting Overseer ON (default)"
+            );
+        }
+    }
+
+    #[test]
+    fn author_login_defaults_to_the_distinct_bot_identity() {
+        assert_eq!(
+            overseer_author_login_from(env(&[])),
+            DEFAULT_OVERSEER_AUTHOR_LOGIN
+        );
+        assert_eq!(
+            overseer_author_login_from(env(&[(OVERSEER_AUTHOR_LOGIN_ENV, "  ")])),
+            DEFAULT_OVERSEER_AUTHOR_LOGIN
+        );
+    }
+
+    #[test]
+    fn author_login_reads_explicit_value() {
+        assert_eq!(
+            overseer_author_login_from(env(&[(OVERSEER_AUTHOR_LOGIN_ENV, " simard-bot ")])),
+            "simard-bot"
+        );
     }
 
     #[test]
