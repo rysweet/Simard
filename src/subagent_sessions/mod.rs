@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -104,8 +104,15 @@ fn now_epoch_seconds() -> i64 {
 
 /// Load the registry from disk. Returns empty `Registry` on missing/corrupt.
 pub fn load() -> Registry {
-    let path = registry_path();
-    let bytes = match fs::read(&path) {
+    load_from(&registry_path())
+}
+
+/// Load the registry from an explicit `<state_root>/state/subagent_sessions.json`
+/// path. Parameterized so the dashboard's live-engineer view (issue #2580) can
+/// read a specific state root hermetically. Returns an empty `Registry` on a
+/// missing or corrupt file (never panics).
+pub fn load_from(path: &Path) -> Registry {
+    let bytes = match fs::read(path) {
         Ok(b) => b,
         Err(e) => {
             if e.kind() != io::ErrorKind::NotFound {
@@ -131,6 +138,12 @@ pub fn load() -> Registry {
             Registry::default()
         }
     }
+}
+
+/// Path of the registry under an explicit state root:
+/// `<state_root>/state/subagent_sessions.json`.
+pub fn registry_path_under(state_root: &Path) -> PathBuf {
+    state_root.join("state").join("subagent_sessions.json")
 }
 
 /// Atomic write: write to a uniquely-named temp file in the same directory,

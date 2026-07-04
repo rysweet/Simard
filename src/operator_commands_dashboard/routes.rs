@@ -196,10 +196,6 @@ async fn issues() -> Json<Value> {
     }
 }
 
-pub(crate) fn is_pid_alive(pid: u32) -> bool {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
-}
-
 /// Run a `gh` CLI command and parse JSON output, returning a `Value`.
 pub(crate) async fn run_gh_json(args: &[&str]) -> Value {
     match tokio::process::Command::new("gh").args(args).output().await {

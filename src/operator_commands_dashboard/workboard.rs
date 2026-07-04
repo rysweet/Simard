@@ -199,36 +199,26 @@ pub(crate) async fn workboard() -> Json<Value> {
         })
         .unwrap_or_default();
 
-    // --- 3. Active engineers from the live subagent-session registry ---
-    // Read from the same source the Terminal tab uses
-    // (`/api/subagent-sessions`) so the Whiteboard's "Active Engineers" panel
-    // agrees with it. The agent registry used previously is empty for the
-    // running daemon, which produced the "No spawned engineers" contradiction
-    // (#1678). "Live" == no recorded end time, matching the Terminal tab.
-    let mut sessions: Vec<crate::subagent_sessions::SubagentSession> =
-        crate::subagent_sessions::load()
-            .sessions
-            .into_iter()
-            .filter(|s| s.ended_at.is_none())
-            .collect();
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
-    let spawned_engineers: Vec<Value> = sessions
-        .iter()
-        .map(|s| {
-            let alive = super::routes::is_pid_alive(s.pid);
-            let started_at = chrono::DateTime::from_timestamp(s.created_at, 0)
+    // --- 3. Active engineers — the TRUE live set (issue #2580) ---
+    // Union of live subagent sessions (tmux-tracked) AND live engineer-worktree
+    // claim sentinels. Reading subagent sessions alone (#1678 fix) still missed
+    // bare `bin/simard engineer run single-process` engineers, which never
+    // register a tmux session — so the panel could still read ZERO while the
+    // daemon ran them. The worktree-claim scan is the same liveness the daemon
+    // itself trusts to avoid a duplicate spawn. "Live" == pid alive / claim live.
+    let spawned_engineers: Vec<Value> = super::live_engineers::live_engineers(&state_root)
+        .into_iter()
+        .map(|e| {
+            let started_at = e
+                .started_at
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_default();
-            let task = if !s.goal_id.is_empty() {
-                s.goal_id.clone()
-            } else {
-                s.session_name.clone()
-            };
             json!({
-                "pid": s.pid,
-                "task": task,
-                "alive": alive,
-                "host": s.host,
+                "pid": e.pid,
+                "task": e.goal_id,
+                "alive": e.alive,
+                "source": e.source,
                 "started_at": started_at,
             })
         })
