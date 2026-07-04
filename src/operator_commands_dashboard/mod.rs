@@ -10,6 +10,7 @@ mod goals;
 mod goals_status;
 mod hosts;
 mod index_html;
+mod live_engineers;
 mod logs;
 mod memory;
 mod merge_judge;

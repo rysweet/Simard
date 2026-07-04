@@ -2,8 +2,7 @@ use axum::Json;
 use serde_json::{Value, json};
 
 use super::dashboard_goal_board_snapshot;
-use super::routes::{is_pid_alive, resolve_state_root, truncate_with_ellipsis};
-use crate::agent_registry::{AgentRegistry, FileBackedAgentRegistry};
+use super::routes::{resolve_state_root, truncate_with_ellipsis};
 
 /// Real-time snapshot of what Simard is doing right now.
 ///
@@ -135,23 +134,27 @@ pub(crate) async fn current_work() -> Json<Value> {
         })
         .unwrap_or_default();
 
-    // Spawned engineers from agent registry
-    let reg = FileBackedAgentRegistry::new(&state_root);
-    let spawned_engineers: Vec<Value> = reg
-        .list()
-        .unwrap_or_default()
+    // Active engineers — the TRUE live set (issue #2580). Previously this read
+    // the `FileBackedAgentRegistry` (`agent_registry.json`), which nothing
+    // writes in production, so the panel always showed ZERO even while the
+    // daemon ran engineers. Now unions live subagent sessions with live
+    // engineer-worktree claim sentinels (which also surface bare
+    // `bin/simard engineer run single-process` subprocesses).
+    let spawned_engineers: Vec<Value> = super::live_engineers::live_engineers(&state_root)
         .into_iter()
-        .map(|entry| {
-            let alive = is_pid_alive(entry.pid);
+        .map(|e| {
+            let started_at = e
+                .started_at
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                .map(|dt| dt.to_rfc3339());
             json!({
-                "id": entry.id,
-                "pid": entry.pid,
-                "role": entry.role,
-                "host": entry.host,
-                "state": format!("{:?}", entry.state),
-                "alive": alive,
-                "start_time": entry.start_time.to_rfc3339(),
-                "last_heartbeat": entry.last_heartbeat.to_rfc3339(),
+                "id": e.goal_id,
+                "pid": e.pid,
+                "role": "engineer",
+                "task": e.goal_id,
+                "source": e.source,
+                "alive": e.alive,
+                "start_time": started_at,
             })
         })
         .collect();

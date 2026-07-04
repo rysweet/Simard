@@ -68,9 +68,11 @@ pub const WORKTREES_SUBDIR: &str = "engineer-worktrees";
 pub const ENGINEER_CLAIM_FILE: &str = ".simard-engineer-claim";
 
 mod claim;
+mod discovery;
 mod precommit;
 use claim::{claim_is_live, format_engineer_claim, read_engineer_claim_full};
 pub use claim::{is_pid_alive_public, read_pid_starttime_public};
+pub use discovery::{LiveEngineerWorktree, live_claimed_engineers};
 
 /// Maximum length of a `goal_id` accepted by [`EngineerWorktree::allocate`].
 ///
