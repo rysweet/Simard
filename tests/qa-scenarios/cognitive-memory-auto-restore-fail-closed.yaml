@@ -14,7 +14,11 @@ description: |
   Behaviour is proven by the hermetic unit tests this scenario drives (in-memory
   bridge + tempdir; no `$HOME/.simard`, no live store — no destructive action
   against the host). The CLI runner rejects any non-zero exit, so a failing test
-  fails the scenario.
+  fails the scenario. Each step asserts `. 1 passed;` (a positive pass count),
+  not just `test result: ok`: a `cargo test` filter matching zero tests also
+  prints `test result: ok` and exits 0, so a renamed/removed test would pass the
+  scenario vacuously — the pass-count assertion closes that hollow-verification
+  gap.
 agents:
   - name: simard-cli
     type: cli
@@ -29,7 +33,7 @@ steps:
     timeout: 600000
   - action: wait_for_output
     params:
-      value: "test result: ok"
+      value: ". 1 passed;"
     timeout: 8000
   - action: validate_exit_code
     params:
@@ -45,7 +49,7 @@ steps:
     timeout: 300000
   - action: wait_for_output
     params:
-      value: "test result: ok"
+      value: ". 1 passed;"
     timeout: 8000
   - action: validate_exit_code
     params:
@@ -59,7 +63,7 @@ steps:
     timeout: 300000
   - action: wait_for_output
     params:
-      value: "test result: ok"
+      value: ". 1 passed;"
     timeout: 8000
   - action: validate_exit_code
     params:
@@ -73,7 +77,7 @@ steps:
     timeout: 300000
   - action: wait_for_output
     params:
-      value: "test result: ok"
+      value: ". 1 passed;"
     timeout: 8000
   - action: validate_exit_code
     params:

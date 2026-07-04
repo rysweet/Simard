@@ -199,9 +199,13 @@ pub fn restore_snapshot(
 /// Hydrate `bridge` from `snapshot` **only when the store is confirmed empty**,
 /// failing closed on a read error (issue #2561).
 ///
-/// This is the guarded entry point a session/daemon startup uses to self-heal a
-/// freshly-initialised — or corruption-reset (issue #2550) — cognitive store
-/// from its most recent on-disk snapshot. The guard is the crux of #2561: the
+/// This is the **intended** guarded entry point for a session/daemon startup to
+/// self-heal a freshly-initialised — or corruption-reset (issue #2550) —
+/// cognitive store from its most recent on-disk snapshot. It is **not yet wired
+/// into any startup path**: this change ships the correctly-gated primitive, and
+/// activating it at startup is deliberately deferred (the on-disk snapshot API is
+/// `#[deprecated]` in favour of hive-mind replication). The guard is the crux of
+/// #2561: the
 /// decision to hydrate is taken from [`CognitiveMemoryOps::probe_emptiness`],
 /// which distinguishes a *confirmed-empty* store from one whose reads are
 /// *failing*, rather than from a bare count that a swallowed read error can
@@ -244,7 +248,11 @@ pub fn auto_restore_if_empty(
 ///
 /// * store confirmed empty and a snapshot exists → `Ok(Some(count))`.
 /// * store confirmed empty but no loadable snapshot in `dir` → `Ok(None)`
-///   (nothing to restore; the fresh store is left as-is).
+///   (nothing to restore; the fresh store is left as-is). Note: a *corrupt or
+///   unreadable* newest snapshot is currently treated the same as *absent* here
+///   — [`load_latest_snapshot`] logs and returns `None`, so this wrapper returns
+///   `Ok(None)` rather than surfacing the load error. Surfacing that as `Err`
+///   (fail-closed on the snapshot *source*) is deferred to the activation work.
 /// * store non-empty → `Ok(None)` (skip; re-importing would duplicate).
 /// * probe read failure → `Err(..)`, nothing imported (fail closed).
 pub fn auto_restore_latest_if_empty(
@@ -669,6 +677,84 @@ mod tests {
             writes.load(Ordering::SeqCst),
             0,
             "no writes on the fail-closed path (durable memory intact)",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_restore_latest_skips_a_non_empty_store() {
+        // Wrapper ordering guard: a non-empty store returns `Ok(None)` from the
+        // emptiness check BEFORE any snapshot is read off disk. The tempdir holds
+        // a valid snapshot precisely to prove it is never consulted.
+        let dir = std::env::temp_dir().join(format!(
+            "simard-test-autorestore-latest-nonempty-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+
+        let envelope = crate::remote_transfer::PersistedEnvelope {
+            schema_version: crate::remote_transfer::ENVELOPE_SCHEMA_VERSION,
+            payload: two_item_snapshot(),
+        };
+        std::fs::write(
+            dir.join("test-agent-0000000001.json"),
+            serde_json::to_vec_pretty(&envelope).expect("serialize snapshot"),
+        )
+        .expect("write snapshot file");
+
+        let (bridge, writes) = dest_bridge(|| {
+            Ok(json!({
+                "sensory_count": 0,
+                "working_count": 0,
+                "episodic_count": 0,
+                "semantic_count": 5,
+                "procedural_count": 0,
+                "prospective_count": 0
+            }))
+        });
+        let restored =
+            auto_restore_latest_if_empty(&bridge, &dir).expect("non-empty latest skip is Ok");
+
+        assert_eq!(
+            restored, None,
+            "a non-empty store must be left untouched even when a snapshot exists",
+        );
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            0,
+            "no snapshot items should be written into a non-empty store",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_restore_latest_returns_none_when_confirmed_empty_but_no_snapshot() {
+        // Confirmed-empty store with an empty snapshot dir: nothing to restore, so
+        // the fresh store is left as-is (`Ok(None)`, zero writes). This exercises
+        // the "no loadable snapshot" branch — an absent (or corrupt/unreadable)
+        // newest snapshot both surface here as `None`.
+        let dir = std::env::temp_dir().join(format!(
+            "simard-test-autorestore-latest-nosnapshot-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+
+        let (bridge, writes) = dest_bridge(|| Ok(zero_stats()));
+        let restored = auto_restore_latest_if_empty(&bridge, &dir)
+            .expect("confirmed-empty with no snapshot is Ok");
+
+        assert_eq!(
+            restored, None,
+            "a confirmed-empty store with no loadable snapshot restores nothing",
+        );
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            0,
+            "no writes when there is no snapshot to restore",
         );
 
         let _ = std::fs::remove_dir_all(&dir);

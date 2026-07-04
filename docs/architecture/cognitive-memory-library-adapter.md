@@ -363,9 +363,9 @@ not emit default to `0`.
 
 `CognitiveMemoryOps::probe_emptiness()` is the single seam that decides whether a
 store is *confirmed empty* — the precondition the snapshot auto-restore path
-(`memory_snapshot::auto_restore_if_empty`) uses to self-heal a fresh or
-corruption-reset (#2550) store from its newest on-disk snapshot. It returns a
-three-way answer via `Result<StoreEmptiness>`:
+(`memory_snapshot::auto_restore_if_empty`) is **intended** to use to self-heal a
+fresh or corruption-reset (#2550) store from its newest on-disk snapshot. It
+returns a three-way answer via `Result<StoreEmptiness>`:
 
 | Outcome | Meaning | Auto-restore action |
 |---|---|---|
@@ -389,6 +389,13 @@ upstream error-propagating count will plug in. A Simard-side filesystem "is the
 store file large?" heuristic is deliberately **not** used: after the #2550
 corruption-reset this feature is meant to heal, a large-but-reset file could
 wrongly block a legitimate self-heal.
+
+**Not yet wired.** `auto_restore_if_empty` / `auto_restore_latest_if_empty` /
+`probe_emptiness` are the correctly-gated primitives only — no session/daemon
+startup path invokes them yet. Activating snapshot auto-restore at startup is
+deferred (the on-disk snapshot API is `#[deprecated]` in favour of hive-mind
+replication), so no production restore path exists to be made unsafe in the
+interim.
 
 ### Fact recency ordering (sequence stamping)
 
