@@ -1,6 +1,6 @@
 use crate::operator_commands::{print_display, print_text};
 use crate::{
-    benchmark_scenarios, compare_latest_benchmark_runs, default_output_root,
+    BenchmarkSuiteReport, benchmark_scenarios, compare_latest_benchmark_runs, default_output_root,
     run_benchmark_scenario, run_benchmark_suite,
 };
 
@@ -143,12 +143,41 @@ pub fn run_gym_suite(suite_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     println!("Suite artifact report: {}", report.artifact_path);
-    Ok(())
+    // A failing suite MUST surface as a non-zero process exit. `simard self-test`
+    // and the `self-update` relaunch gate shell out to `gym run-suite starter`
+    // and branch on its exit code; returning `Ok(())` here regardless of
+    // `report.passed` is the false-green root cause (issue #2548).
+    evaluate_suite_result(&report)
+}
+
+/// Convert a completed suite report into a process-level result.
+///
+/// Returns `Ok(())` for a passing suite and an `Err` (which the CLI turns into a
+/// non-zero exit) for a failing one. Skipped scenarios (e.g. auth unavailable)
+/// are not failures — the suite's `passed` flag already excludes them — so the
+/// error message lists only the scenarios that actually ran and failed.
+fn evaluate_suite_result(report: &BenchmarkSuiteReport) -> Result<(), Box<dyn std::error::Error>> {
+    if report.passed {
+        return Ok(());
+    }
+    let failed: Vec<&str> = report
+        .scenarios
+        .iter()
+        .filter(|scenario| !scenario.skipped && !scenario.passed)
+        .map(|scenario| scenario.scenario_id.as_str())
+        .collect();
+    let detail = if failed.is_empty() {
+        "no scenario-level failures were recorded".to_string()
+    } else {
+        format!("{} scenario(s) failed: {}", failed.len(), failed.join(", "))
+    };
+    Err(format!("gym suite '{}' did not pass ({detail})", report.suite_id).into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BenchmarkSuiteScenarioSummary;
 
     // ── benchmark_scenarios ─────────────────────────────────────────
 
@@ -217,5 +246,84 @@ mod tests {
         // This function just prints to stdout, so we verify it does not error
         let result = run_gym_list();
         assert!(result.is_ok());
+    }
+
+    // ── evaluate_suite_result (issue #2548) ─────────────────────────
+
+    fn scenario_summary(id: &str, passed: bool, skipped: bool) -> BenchmarkSuiteScenarioSummary {
+        BenchmarkSuiteScenarioSummary {
+            scenario_id: id.to_string(),
+            passed,
+            skipped,
+            skip_reason: skipped.then(|| "auth unavailable".to_string()),
+            session_id: format!("session-{id}"),
+            report_json: format!("target/simard-gym/{id}/report.json"),
+        }
+    }
+
+    fn suite_report(
+        passed: bool,
+        scenarios: Vec<BenchmarkSuiteScenarioSummary>,
+    ) -> BenchmarkSuiteReport {
+        BenchmarkSuiteReport {
+            suite_id: "starter".to_string(),
+            run_started_at_unix_ms: 0,
+            passed,
+            scenarios,
+            artifact_path: "target/simard-gym/suites/starter.json".to_string(),
+        }
+    }
+
+    #[test]
+    fn evaluate_suite_result_ok_when_passed() {
+        let report = suite_report(true, vec![scenario_summary("a", true, false)]);
+        assert!(evaluate_suite_result(&report).is_ok());
+    }
+
+    #[test]
+    fn evaluate_suite_result_err_when_failed_names_failing_scenarios() {
+        let report = suite_report(
+            false,
+            vec![
+                scenario_summary("passing-one", true, false),
+                scenario_summary("failing-one", false, false),
+            ],
+        );
+        let err = evaluate_suite_result(&report).expect_err("failing suite must be an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("starter"),
+            "message should name the suite: {msg}"
+        );
+        assert!(
+            msg.contains("failing-one"),
+            "message should name the failing scenario: {msg}"
+        );
+        assert!(
+            !msg.contains("passing-one"),
+            "message should not list passing scenarios: {msg}"
+        );
+    }
+
+    #[test]
+    fn evaluate_suite_result_err_ignores_skipped_scenarios() {
+        let report = suite_report(
+            false,
+            vec![
+                scenario_summary("skipped-one", false, true),
+                scenario_summary("failing-one", false, false),
+            ],
+        );
+        let msg = evaluate_suite_result(&report)
+            .expect_err("failing suite must be an error")
+            .to_string();
+        assert!(
+            !msg.contains("skipped-one"),
+            "skipped scenarios are not failures: {msg}"
+        );
+        assert!(
+            msg.contains("failing-one"),
+            "should list real failures: {msg}"
+        );
     }
 }

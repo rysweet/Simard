@@ -58,6 +58,38 @@ pub use types::{
 const STARTER_SUITE_ID: &str = "starter";
 const DEFAULT_OUTPUT_ROOT: &str = "target/simard-gym";
 
+/// Base types that execute deterministically at self-test gate time without
+/// external credentials. The self-test / self-update health gate only runs
+/// scenarios on these backends so its result never depends on network auth.
+const GATE_BASE_TYPES: [&str; 2] = ["local-harness", "terminal-shell"];
+
+/// Returns `true` when `scenario` belongs in the `starter` suite, which is the
+/// deterministic health gate run by `simard self-test` and the `self-update`
+/// relaunch check (issue #2548).
+///
+/// The gate must be *genuinely green on a healthy binary*, so it only runs
+/// scenarios whose correctness is a property of the binary's own runtime
+/// machinery rather than the reasoning quality of an external LLM backend:
+///
+/// * `SessionQuality` scenarios are graded by backend-agnostic *structural*
+///   checks (session lifecycle, memory-export completeness, PTY driving) that a
+///   deterministic base type satisfies on every run.
+/// * `RepoExploration`, `Documentation`, and `SafeCodeChange` scenarios are
+///   graded by *content* checks that scan the agent's prose for domain keywords
+///   (e.g. "cargo.toml", "///", "derive"). The deterministic `local-harness`
+///   executor returns a fixed template summary and cannot satisfy them, so those
+///   scenarios are benchmarks for capable reasoning backends — run them with
+///   `simard gym run <scenario-id>` — not health-gate checks.
+///
+/// Keeping the content-check scenarios out of the gate (rather than weakening
+/// their checks) is what lets `self-test` report an honest, deterministic
+/// pass/fail instead of a false-green. The full scenario catalogue is unchanged
+/// and still surfaced by `gym list` and runnable individually via `gym run`.
+fn is_starter_gate_scenario(scenario: &BenchmarkScenario) -> bool {
+    matches!(scenario.class, BenchmarkClass::SessionQuality)
+        && GATE_BASE_TYPES.contains(&scenario.base_type)
+}
+
 pub fn run_benchmark_scenario(
     scenario_id: &str,
     output_root: impl AsRef<Path>,
@@ -81,7 +113,11 @@ pub fn run_benchmark_suite(
     let mut scenario_summaries = Vec::new();
     let mut suite_passed = true;
 
-    for scenario in benchmark_scenarios().iter().copied() {
+    for scenario in benchmark_scenarios()
+        .iter()
+        .copied()
+        .filter(is_starter_gate_scenario)
+    {
         match executor::execute_scenario(scenario, suite_id, output_root) {
             Ok(report) => {
                 suite_passed &= report.passed;
@@ -94,25 +130,23 @@ pub fn run_benchmark_suite(
                     report_json: report.artifacts.report_json.clone(),
                 });
             }
-            Err(ref e) if is_skippable_auth_error(e, scenario.base_type) => {
-                eprintln!(
-                    "WARN: skipping scenario '{}' (base_type={}): \
-                     backend requires authentication that is not available at gate-time",
-                    scenario.id, scenario.base_type,
-                );
-                scenario_summaries.push(BenchmarkSuiteScenarioSummary {
-                    scenario_id: scenario.id.to_string(),
-                    passed: false,
-                    skipped: true,
-                    skip_reason: Some(format!(
-                        "backend '{}' requires authentication unavailable at gate-time",
-                        scenario.base_type,
-                    )),
-                    session_id: String::new(),
-                    report_json: String::new(),
-                });
-            }
-            Err(e) => return Err(e),
+            Err(e) => match gate_prerequisite_skip(&e, scenario.base_type) {
+                Some(reason) => {
+                    eprintln!(
+                        "WARN: skipping scenario '{}' (base_type={}): {reason}",
+                        scenario.id, scenario.base_type,
+                    );
+                    scenario_summaries.push(BenchmarkSuiteScenarioSummary {
+                        scenario_id: scenario.id.to_string(),
+                        passed: false,
+                        skipped: true,
+                        skip_reason: Some(reason),
+                        session_id: String::new(),
+                        report_json: String::new(),
+                    });
+                }
+                None => return Err(e),
+            },
         }
     }
 
@@ -228,6 +262,64 @@ fn is_skippable_auth_error(err: &SimardError, base_type: &str) -> bool {
         SimardError::AdapterNotRegistered { .. } => true,
         _ => false,
     }
+}
+
+/// Signature of the launch-failure message emitted by the `terminal-shell`
+/// base type when its PTY launcher (`script`) cannot be spawned — see
+/// `PtyTerminalSession::launch` ("failed to launch local PTY shell via
+/// '<launcher>': <error>"). Matching this specific prefix keeps the skip
+/// deliberately narrow: only a *missing / unspawnable* launcher counts as an
+/// unavailable prerequisite. A launcher that spawns but then yields wrong
+/// output or a non-zero exit surfaces through a different path and remains a
+/// genuine, non-skippable failure — skipping that would reintroduce the very
+/// false-green issue #2548 fixes.
+const PTY_LAUNCH_FAILURE_SIGNATURE: &str = "failed to launch local PTY shell via";
+
+/// Returns `true` when `err` is a `terminal-shell` failure caused by the PTY
+/// launcher being unavailable on the host.
+///
+/// The `interactive-terminal-driving` gate scenario spawns `script` to allocate
+/// its *own* PTY, so it runs fine when the parent process has no controlling
+/// terminal (exactly how `self-update` invokes `self-test` head-less). But on a
+/// host where the launcher is entirely absent (no `script` on `PATH`, or a
+/// sandbox with no PTY support), that scenario cannot launch at all. Treating
+/// that as an unavailable *environment prerequisite* — rather than a defect in
+/// the binary — lets a genuinely healthy binary still self-test green on
+/// no-PTY hosts, mirroring the auth-unavailable skip (Pillar 11: honest
+/// degradation beats a false-RED).
+fn is_skippable_pty_unavailable(err: &SimardError, base_type: &str) -> bool {
+    if base_type != "terminal-shell" {
+        return false;
+    }
+    matches!(
+        err,
+        SimardError::AdapterInvocationFailed { reason, .. }
+            if reason.contains(PTY_LAUNCH_FAILURE_SIGNATURE)
+    )
+}
+
+/// Classifies a gate-scenario failure as a skippable *environment prerequisite*
+/// (returning the operator-facing skip reason) or as a genuine failure
+/// (returning `None`, so the health gate fails honestly).
+///
+/// Two prerequisites are recognised, both of which are properties of the *host*
+/// rather than defects in the binary under test:
+///
+/// * external **auth** for credentialed backends (issue #1743), and
+/// * a usable **PTY launcher** for the `terminal-shell` base type on a host
+///   with no PTY support (issue #2548 / no-PTY hosts).
+fn gate_prerequisite_skip(err: &SimardError, base_type: &str) -> Option<String> {
+    if is_skippable_auth_error(err, base_type) {
+        return Some(format!(
+            "backend '{base_type}' requires authentication unavailable at gate-time"
+        ));
+    }
+    if is_skippable_pty_unavailable(err, base_type) {
+        return Some(format!(
+            "base type '{base_type}' requires a PTY launcher unavailable at gate-time"
+        ));
+    }
+    None
 }
 
 fn restore_from_handoff(
