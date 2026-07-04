@@ -35,6 +35,8 @@ mod orient_tests;
 mod prompt_store_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod zero_fallback_tests;
 
 pub use confidence::{
     CalibrationWindow, ECE_BINS, ECE_METRIC, ECE_WINDOW, HIGH_STAKES_URGENCY, JudgedDecision,
