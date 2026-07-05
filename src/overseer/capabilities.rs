@@ -349,6 +349,21 @@ pub trait GoalCurator {
         Ok(Vec::new())
     }
 
+    /// Observe the goal board **once** and project both the blocked-goal health
+    /// list ([`blocked_goals`](Self::blocked_goals)) and the in-flight dedup set
+    /// ([`in_flight`](Self::in_flight)) from a single read.
+    ///
+    /// The Observe/Orient pass needs both projections every tick; reading them
+    /// through the two single-projection methods loads (and JSON-deserializes)
+    /// the very same board snapshot twice. Real adapters override this to load
+    /// once and project twice. The default composes the two methods so fakes
+    /// that do not model a shared board need no change.
+    ///
+    /// Returns `(blocked_goals, in_flight)`.
+    fn observe_board(&self) -> Result<(Vec<BlockedGoal>, Vec<InFlightItem>), OverseerError> {
+        Ok((self.blocked_goals()?, self.in_flight()?))
+    }
+
     /// Auto-unblock + reactivate a false-parked goal — the exact operation
     /// `simard goal unblock` performs: restore a `Blocked` goal to `NotStarted`
     /// so the next OODA cycle re-enters the spawn path.

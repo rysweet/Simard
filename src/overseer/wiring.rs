@@ -331,6 +331,18 @@ impl GoalCurator for BoardGoalCurator {
         Ok(blocked_goals_from_board(&self.load()?))
     }
 
+    fn observe_board(&self) -> Result<(Vec<BlockedGoal>, Vec<InFlightItem>), OverseerError> {
+        // Single board read projected two ways. The split
+        // `blocked_goals()` + `in_flight()` path the Observe pass would
+        // otherwise take loads (and JSON-deserializes) the same snapshot
+        // twice per tick; project both from one `load()` instead.
+        let board = self.load()?;
+        Ok((
+            blocked_goals_from_board(&board),
+            in_flight_from_board(&board),
+        ))
+    }
+
     fn unblock(&self, goal_id: &str) -> Result<(), OverseerError> {
         // The exact `simard goal unblock` mutation: restore the blocked goal to
         // `NotStarted` so the next OODA cycle re-enters the spawn path. Reuses
