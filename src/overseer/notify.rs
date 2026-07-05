@@ -415,11 +415,38 @@ impl EmailSender for TcpSmtpSender {
     }
 }
 
+/// Neutralize email header / SMTP command injection (CWE-93) for any value that
+/// is written into a DATA header line or the `MAIL FROM` / `RCPT TO` envelope.
+/// CR, LF and every other control character are replaced with a space (so an
+/// injected `\r\n` can no longer terminate the current line and smuggle a header
+/// or SMTP verb), and the result is length-bounded well under the RFC 5322
+/// 998-octet line limit. Some fields are board-derived (e.g. a `goal_id` carried
+/// into the Subject), so sanitizing at this single transport choke point covers
+/// every caller regardless of how the field was constructed.
+fn sanitize_header_value(value: &str) -> String {
+    const MAX_HEADER_LEN: usize = 512;
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(MAX_HEADER_LEN)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 /// Minimal plaintext SMTP conversation. Kept small and defensive.
 fn smtp_send_plaintext(host: &str, port: u16, msg: &EmailMessage) -> Result<(), String> {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpStream;
     use std::time::Duration;
+
+    // Defense-in-depth: strip CRLF from every header- and envelope-bound field
+    // before it touches the wire so untrusted content (e.g. a goal id in the
+    // Subject) cannot inject SMTP headers or commands. The body is CRLF
+    // *normalized* separately below (multi-line bodies are legitimate).
+    let from = sanitize_header_value(&msg.from);
+    let recipients: Vec<String> = msg.to.iter().map(|r| sanitize_header_value(r)).collect();
+    let subject = sanitize_header_value(&msg.subject);
 
     let addr = format!("{host}:{port}");
     let stream = TcpStream::connect(&addr).map_err(|e| format!("connect {addr} failed: {e}"))?;
@@ -447,9 +474,9 @@ fn smtp_send_plaintext(host: &str, port: u16, msg: &EmailMessage) -> Result<(), 
     expect(&mut reader, 2)?; // greeting 220
     writeln!(writer, "EHLO simard-overseer").map_err(|e| e.to_string())?;
     expect(&mut reader, 2)?;
-    writeln!(writer, "MAIL FROM:<{}>", msg.from).map_err(|e| e.to_string())?;
+    writeln!(writer, "MAIL FROM:<{from}>").map_err(|e| e.to_string())?;
     expect(&mut reader, 2)?;
-    for rcpt in &msg.to {
+    for rcpt in &recipients {
         writeln!(writer, "RCPT TO:<{rcpt}>").map_err(|e| e.to_string())?;
         expect(&mut reader, 2)?;
     }
@@ -458,9 +485,9 @@ fn smtp_send_plaintext(host: &str, port: u16, msg: &EmailMessage) -> Result<(), 
     write!(
         writer,
         "From: {}\r\nTo: {}\r\nSubject: {}\r\n\r\n{}\r\n.\r\n",
-        msg.from,
-        msg.to.join(", "),
-        msg.subject,
+        from,
+        recipients.join(", "),
+        subject,
         msg.body.replace("\r\n", "\n").replace('\n', "\r\n"),
     )
     .map_err(|e| e.to_string())?;
@@ -600,6 +627,41 @@ mod tests {
         assert!(body.contains("abcdef1234567890"));
         assert!(body.contains("0011223344556677"));
         assert!(body.contains("canary green"));
+    }
+
+    // ── security: email header / SMTP command injection (CWE-93) ─────────────
+
+    #[test]
+    fn sanitize_header_value_strips_crlf_injection() {
+        // A board-derived goal id carrying CRLF must not be able to terminate the
+        // Subject line and smuggle extra headers or an injected message body.
+        let malicious = "goal-42\r\nBcc: attacker@evil.test\r\n\r\nInjected body";
+        let cleaned = sanitize_header_value(malicious);
+        assert!(!cleaned.contains('\r'), "CR must be stripped: {cleaned:?}");
+        assert!(!cleaned.contains('\n'), "LF must be stripped: {cleaned:?}");
+        // The legitimate leading token survives (just space-normalized).
+        assert!(cleaned.starts_with("goal-42"));
+    }
+
+    #[test]
+    fn sanitize_header_value_neutralizes_smtp_command_injection() {
+        // A from/recipient value carrying CRLF must not inject an SMTP verb into
+        // the MAIL FROM / RCPT TO envelope conversation.
+        let malicious = "ops@simard.test\r\nDATA\r\nSpoofed";
+        let cleaned = sanitize_header_value(malicious);
+        assert!(!cleaned.contains('\r') && !cleaned.contains('\n'));
+    }
+
+    #[test]
+    fn sanitize_header_value_is_length_bounded() {
+        let cleaned = sanitize_header_value(&"a".repeat(10_000));
+        assert!(cleaned.len() <= 512, "header value must be bounded");
+    }
+
+    #[test]
+    fn sanitize_header_value_preserves_benign_input() {
+        let s = "[Overseer] goal-blocked: goal abc123 needs human review";
+        assert_eq!(sanitize_header_value(s), s);
     }
 
     // ── fakes ────────────────────────────────────────────────────────────────
