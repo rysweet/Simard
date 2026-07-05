@@ -1,0 +1,29 @@
+name: engineer-claim-sentinel-guard
+app_type: cli
+description: |
+  Regression coverage for issue #2621: the Simard-managed
+  `.simard-engineer-claim` sentinel must never trip the engineer-loop
+  pre-mutation guard in a target repo that does not gitignore it.
+
+  Belt-and-suspenders fix, verified end to end:
+  - `engineer_worktree::allocate` appends the sentinel to the worktree's
+    `.git/info/exclude` so `git status` reports a clean tree (idempotent).
+  - `inspect_workspace` filters the sentinel out of `changed_files` and
+    `worktree_dirty`, while still flagging genuine changes.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner only gates on
+  `run`-step exit codes and reads command text from `params.command`, so the
+  three regression tests are run under a single `bash -lc` wrapper that exits
+  zero only when all three report a passing "test result: ok".
+metadata:
+  tags:
+    - cli
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; OUT=$(cargo test --lib -- engineer_worktree::tests_extra::allocate_excludes_claim_sentinel_from_git_status engineer_loop::tests_claim_sentinel::inspect_workspace_treats_claim_only_worktree_as_clean engineer_loop::tests_claim_sentinel::inspect_workspace_still_flags_real_changes_alongside_claim 2>&1); echo \"$OUT\"; echo \"$OUT\" | grep -q \"3 passed\"'"
+    timeout: 300000
