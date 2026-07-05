@@ -48,6 +48,14 @@ steps:
       rationale so the goal-action brain re-scopes or executes rather than
       re-triaging the same state.
 
+      **Engineering guidelines (G1/G2/G3).** When routing cognition,
+      memory-architecture, or output-parsing work, apply Simard's three durable
+      engineering guidelines (canonical in `CONTRIBUTING.md`): prove cognition
+      gains on a benchmark AND a live, trended self-metric (G1); route
+      memory-architecture work upstream to `amplihack-memory-lib` (G2); and prefer
+      agentic extraction over brittle parsing, and recipes/prompts over code (G3).
+      This does not change your output contract below.
+
       ## CONTEXT
 
       A single priority entry produced by the Orient phase:

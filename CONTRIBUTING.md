@@ -16,6 +16,7 @@ they are the same gates CI enforces.
 5. [Local Data Retention Disclosure](#local-data-retention-disclosure)
 6. [Pre-Existing Test Failure Disposition](#pre-existing-test-failure-disposition)
 7. [Real-Meeting & Dashboard E2E Verification](#real-meeting--dashboard-e2e-verification)
+8. [Engineering Guidelines (G1/G2/G3)](#engineering-guidelines-g1g2g3)
 
 ---
 
@@ -568,6 +569,192 @@ Dashboard rendering smoke tests caught only Unicode bugs; they could not
 detect (and did not detect) the WAL-checkpoint data-loss bug. Real E2E
 exercise on a live daemon is the only verification gate that catches
 durability and ingestion regressions before they reach production.
+
+---
+
+## Engineering Guidelines (G1/G2/G3)
+
+These are **durable engineering principles**, not a point-in-time
+snapshot. They apply to human contributors *and* to Simard's own OODA
+reasoners and engineer sessions. They are encoded declaratively in the
+hot-reloaded prompt assets under `prompt_assets/simard/` (mirrored into
+the recipe YAML the daemon runs), enforced as soft review gates in the
+merge-readiness judge and the code-review reasoner, and pinned by a
+presence test at
+[`tests/engineering_guidelines_prompts.rs`](tests/engineering_guidelines_prompts.rs).
+
+> **Why these three?** Each guideline is a lesson learned from a
+> specific merged PR where a change looked complete but left a durable
+> gap. The guidelines exist so the same class of gap is caught the next
+> time — by a reviewer, by the merge-judge, or by Simard herself while
+> planning the work.
+
+> **Terminology.** Simard runs a single **Brain** (the one-Brain
+> model). The interpretive reasoners named below — OODA Orient, Decide,
+> and the engineer-lifecycle brain — are phases of that one Brain, not a
+> separate "Bridge" reasoner. Do not introduce new "Bridge" naming for
+> the Brain or its OODA phases. (This is distinct from the existing
+> memory/knowledge *bridge adapters*, which keep their established
+> names.)
+
+### G1 — Prove gains on BOTH a fixed benchmark AND live self-measurement
+
+Cognition and self-improvement work must iterate toward proving its
+gains on **both**:
+
+1. a **fixed benchmark** — a stable corpus or regression baseline, and
+2. a **live self-measurement** — a production self-metric that Simard
+   emits about her own running behaviour, **trended over time**.
+
+A benchmark-corpus number, or a coarse proxy metric, is **not
+sufficient on its own**. The bar is a **hybrid benchmark + live**
+result: the improvement must also show up in a live self-metric drawn
+from the running daemon, not only on an offline corpus.
+
+This bar is enforced as a **soft advisory flag**, not a hard CI block —
+see [How the review gates read](#how-the-review-gates-read-soft-flags-not-hard-blocks)
+below. The imperative wording ("must", "not sufficient") describes what a
+reviewer or the merge-judge will flag, not a gate that fails the build.
+
+**Motivating context.** PR #2584 reported +86% on a fixed distillation
+corpus, and PR #2601 added `recall_precision_at_k` via a coarse
+substring proxy. Both proved gains on benchmarks/proxies — neither yet
+showed the gain in a live, trended self-metric. G1 closes that gap:
+benchmark **and** live, never either alone.
+
+**What "done" looks like for a G1-affected change:**
+
+- A fixed-benchmark result (corpus name, before/after, baseline commit).
+- A named live self-metric the daemon emits (for example a `*_at_k`
+  recall metric or equivalent), with a plan or link showing it is
+  **trended over time** in production — not a one-shot offline number.
+- If the live metric cannot yet move within the PR, the PR says so
+  explicitly and links the follow-up that will land the live
+  measurement.
+
+### G2 — Memory-architecture work belongs upstream in `amplihack-memory-lib`
+
+All memory-architecture work — distillation, recall, ranking, storage,
+WAL, forgetting — must land in **`rysweet/amplihack-memory-lib`** (the
+memory engine). Simard then **bumps** her pinned `amplihack-memory`
+dependency to pick it up.
+
+**Do not fork memory logic into Simard's own repo**
+(`src/memory_consolidation`, `src/cognitive_memory`). Where Simard-side
+memory logic already exists, **prefer migrating it upstream** over
+extending it locally.
+
+**Motivating context.** PR #2584 placed distillation fact-yield logic
+in Simard's repo instead of in the library. G2 routes that class of
+work to the engine repo so there is a single source of truth for the
+memory architecture, and Simard consumes it by bumping the pinned
+`amplihack-memory` git rev.
+
+**What "done" looks like for a G2-affected change:**
+
+- The memory-architecture change is a PR against
+  `rysweet/amplihack-memory-lib`.
+- Simard's PR is (or is immediately followed by) a **dependency bump**
+  of the pinned `amplihack-memory` git rev (the dependency is pinned by
+  commit SHA, not a semver range) — not a re-implementation under `src/`.
+- If a change touches `src/memory_consolidation` or
+  `src/cognitive_memory`, the PR justifies why it is a thin
+  consumer/adapter and not new engine logic that belongs upstream.
+
+### G3 — Prefer agentic steps over brittle parsing; prefer recipes/prompts over code
+
+Treat string/line parsing of LLM or tool output as a **brittle-parsing
+antipattern**. Whenever code parses or extracts model or tool output,
+stop and weigh the brittleness, and prefer an **agentic step** — a
+structured **JSON output contract** plus agent extraction — that is
+robust to rewording, reordering, and extra prose.
+
+More broadly: whenever a change or architecture improvement can be
+accomplished through **recipes + prompts** alone, that is the
+**preferred choice over writing code**. This guidelines document, and
+this whole change set, is itself an application of G3 — it moves policy
+into prompt assets rather than into new deterministic code.
+
+**Motivating context.** PR #2573 shipped a line-dropping parser in
+`src/recipe_output/extract.rs`. Line/substring parsers silently
+mis-handle output the moment the model reformats. G3 pushes extraction
+toward a structured contract read by an agent, and pushes new behaviour
+toward prompts/recipes before code.
+
+**What "done" looks like for a G3-affected change:**
+
+- New extraction of model/tool output uses a structured/JSON contract,
+  not ad-hoc line/substring slicing. (The merge-judge's `verdict` field
+  is the reference pattern: a machine-parseable field read through the
+  shared extractor that fails **closed** on a parse-miss, never
+  silently to `ready`.)
+- If new code parses output, the PR explains why an agentic step was
+  not viable.
+- If the same outcome was reachable via recipes/prompts, the change
+  uses recipes/prompts.
+
+**Scope.** G3 targets **new** brittle parsing. The existing shared
+extractor in `src/recipe_output/extract.rs` — which the merge-judge reads
+and which fails **closed** to `unclear` on a parse-miss — is the
+**sanctioned reference pattern**, not a G3 violation. Route new extraction
+of model/tool output through that same fail-closed, structured path rather
+than adding fresh line/substring slicing.
+
+### Where the guidelines are encoded
+
+| Layer | Assets | Effect |
+|---|---|---|
+| Engineer + OODA reasoner prompts | `engineer_system.md`, `engineer_planning.md`, `ooda_orient.md`, `ooda_decide.md`, `ooda_brain.md` (+ mirrored recipes `ooda-orient.yaml`, `ooda-decide.yaml`, `ooda-engineer-lifecycle.yaml`) | Simard's engineers and OODA Brain apply G1/G2/G3 while planning and doing cognition/memory/parsing work. |
+| Review gates (soft) | `merge_readiness_judge.md` (+ `merge-readiness-judge.yaml`), `review_pipeline.md`, `progress_assessment_reviewer.md` (+ `progress-assessment.yaml`) | Reviewers FLAG (a) cognition changes with no live self-measurement, (b) memory-arch changes in Simard's repo that belong in `amplihack-memory-lib`, (c) new/extended brittle output-parsing where an agentic step is cleaner. |
+| Goal framing | `goal_session_objective.md`, `goal_decomposition.md` (+ `goal-decomposition.yaml`), `goal_curator_system.md` | Standing cognition/self-improvement goals inherit G1 (hybrid benchmark + live) and G2 (route memory-arch upstream) in their success criteria. Those goals are **seeded at runtime into `~/.simard` state**, not stored as repo assets — so the presence test pins the G1/G2 framing in the goal *prompts*, not any specific goal slug. |
+| Durable doc | this section | Human-facing source of truth for G1/G2/G3. |
+| Presence test | `tests/engineering_guidelines_prompts.rs` | Pins keyword invariants so a future prompt edit cannot silently drop a guideline. |
+
+**Why not `AGENTS.md`?** `AGENTS.md` is regenerated amplihack boilerplate —
+its body is overwritten on each agent-context sync (the file even opens with
+a corrupted marker line). It is therefore **deliberately excluded** as a
+durable layer: a cross-reference added there would not survive regeneration.
+This `CONTRIBUTING.md` section is the single canonical, human-facing source
+of truth for G1/G2/G3, and no `AGENTS.md` edit is required for parity.
+
+**Hot reload.** The `prompt_assets/simard/` files hot-reload from
+`~/.simard/prompt_assets/`. After this PR merges, the operator syncs
+prompt assets / redeploys to activate the updated prompts on the running
+daemon — the merge alone does not change live behaviour.
+
+### How the review gates read (soft flags, not hard blocks)
+
+The review gates add **advisory flags** — they do not change the
+machine verdict enum (`ready` / `not_ready` / `unclear` for the
+merge-judge, and the severity scale for the code reviewer). A reviewer
+or the merge-judge raises a G1/G2/G3 flag as a finding or blocker with a
+`fix` suggestion; the author either addresses it or justifies why it
+does not apply. What fires a flag:
+
+- **G1 flag** — a PR that improves recall/distillation/ranking and
+  reports only a corpus or proxy number, with no live self-metric
+  trended over time.
+- **G2 flag** — a diff that adds distillation/recall/ranking/WAL logic
+  under `src/memory_consolidation` or `src/cognitive_memory` instead of
+  `amplihack-memory-lib` plus a dependency bump.
+- **G3 flag** — a new or extended line/substring parser over model/tool
+  output where a structured JSON contract + agent extraction would be
+  cleaner.
+
+### Verifying the guidelines are present
+
+```bash
+cargo test --test engineering_guidelines_prompts
+```
+
+The test reads the prompt assets, lowercases them, and asserts stable
+keyword invariants for each guideline (for example `live
+self-measurement` and `trended over time` for G1, `amplihack-memory-lib`
+for G2, `brittle parsing` and `agentic step` for G3), asserts each
+edited reasoner `.md` stays in parity with its recipe `.yaml` mirror,
+and asserts the edited reasoner regions do not rename the one-Brain
+OODA phases as a "Bridge". It asserts **keywords, not full sentences**,
+so ordinary rewording does not break it — deleting a guideline does.
 
 ---
 

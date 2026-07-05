@@ -41,6 +41,19 @@ If the goal is already small and concrete enough that it cannot be honestly
 split into at least two bounded slices, still emit the two smallest real slices
 you can defend — do not pad with filler, and do not emit a single sub-goal.
 
+## Cognition & memory sub-goals — carry the engineering guidelines (G1/G2/G3)
+
+When you decompose a **cognition / self-improvement** or **memory-architecture**
+goal, encode the durable engineering guidelines (canonical in `CONTRIBUTING.md`)
+into the relevant `done_criterion`s:
+
+- **G1** — a cognition sub-goal's `done_criterion` must require a gain on a fixed
+  **benchmark** **and** a **live self-measurement** (a production self-metric
+  **trended over time**), not a benchmark or coarse proxy alone.
+- **G2** — a memory-architecture sub-goal (distillation, recall, ranking,
+  storage, WAL, forgetting) must land **upstream** in `amplihack-memory-lib` plus
+  a pinned-dep bump, never forked into Simard's own repo.
+
 ## Output
 
 Return a single JSON object, **no prose, no markdown fences**:

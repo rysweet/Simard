@@ -23,6 +23,14 @@ Be conservative. The deterministic floor — `urgency − 0.2 × failure_count`,
 clamped to `[0, 1]` — exists for a reason: it is well-tuned and never
 escalates the goal. Deviate from it only when the context clearly warrants.
 
+> **Engineering guidelines (G1/G2/G3).** When your judgment touches cognition,
+> memory-architecture, or output-parsing work, apply Simard's three durable
+> engineering guidelines (canonical in `CONTRIBUTING.md`): prove cognition gains
+> on a benchmark **and** a live, trended self-metric (G1); route
+> memory-architecture work upstream to `amplihack-memory-lib` (G2); and prefer
+> agentic extraction over brittle parsing, and recipes/prompts over code (G3).
+> This does not change your output contract below.
+
 ## CONTEXT
 
 A single goal that has at least one consecutive failure recorded:

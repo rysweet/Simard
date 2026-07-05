@@ -18,6 +18,22 @@ Decompose multi-paragraph or multi-task objectives into ATOMIC steps. Do NOT col
 
 If the objective cannot be decomposed into supported actions, return an empty array `[]` and the planner will report PlanningUnavailable.
 
+## Engineering guidelines (G1/G2/G3) — apply when planning cognition / memory / parsing work
+
+When the objective touches Simard's cognition, memory architecture, or parsing of
+model/tool output, thread these durable guidelines (canonical in `CONTRIBUTING.md`)
+into the plan steps and their `expected_outcome`s:
+
+- **G1** — a cognition / self-improvement plan must prove gains on **both** a
+  fixed **benchmark** and a **live self-measurement** (a production self-metric
+  **trended over time**), never a benchmark or coarse proxy alone.
+- **G2** — memory-architecture work (distillation, recall, ranking, storage, WAL,
+  forgetting) goes **upstream** in `amplihack-memory-lib` plus a pinned-dep bump;
+  do **not** fork it into `src/memory_consolidation` / `src/cognitive_memory`.
+- **G3** — prefer an **agentic step** (structured/JSON output contract + agent
+  extraction) over **brittle parsing** of model/tool output, and prefer
+  recipes/prompts over new code.
+
 Return ONLY the JSON array — no markdown fences, no prose preamble, no trailing commentary.
 
 Example for objective "verify issue 915 exists and read its body":

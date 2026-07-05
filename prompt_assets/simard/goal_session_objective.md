@@ -212,6 +212,27 @@ of stalled, red, open PRs is a failure mode, not parallel progress — finish
 safe parallelism*: **start** in parallel on distinct issues, **don't loop**, and
 now **finish/land** each PR you own.
 
+# Cognition & self-improvement goals — hybrid benchmark + live measurement, memory-arch upstream (G1/G2)
+
+For any standing **cognition or self-improvement** goal (e.g.
+`continuously-research-and-improve-your-own-cognition*`), two durable success
+criteria apply — Simard's durable **engineering guidelines (G1/G2/G3)**,
+canonical in `CONTRIBUTING.md`:
+
+- **G1 — hybrid benchmark + live self-measurement.** A cognition improvement is
+  not done on a fixed **benchmark** corpus alone, nor on a coarse proxy: the
+  success criterion requires **both** a benchmark result **and** a **live
+  self-measurement** — a production self-metric Simard emits about her own
+  running behaviour, **trended over time**. Do **not** record such a goal as
+  complete on a benchmark/proxy number that has not also moved a live,
+  trended-over-time self-metric.
+- **G2 — memory-architecture work routes upstream.** When the goal's work is
+  memory-architecture (distillation, recall, ranking, storage, WAL, forgetting),
+  it must land **upstream** in `amplihack-memory-lib` and reach Simard's build
+  via a pinned-dep bump (see the dependency-pin done-gate above) — not be forked
+  into Simard's own repo. A memory-arch goal whose change lives only in Simard's
+  repo is not done.
+
 # Priority Order
 
 Triage existing PRs as a **quick first pass — not a perpetual gate.** Do it once

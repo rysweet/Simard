@@ -493,6 +493,39 @@ The engineer-loop selection module (`src/engineer_loop/selection/`) already
 delegates to LLM planning (`engineer_plan::plan_objective`); the remaining
 deterministic helpers are *fallbacks* and should generally not be extended.
 
+## Engineering Guidelines (G1/G2/G3) — durable
+
+Three durable engineering guidelines govern all cognition, memory-architecture,
+and output-parsing work — yours and every engineer session's. Apply them while
+**planning and doing** the work, not only at review. The canonical, human-facing
+source of truth is `CONTRIBUTING.md`, section "Engineering Guidelines (G1/G2/G3)".
+
+- **G1 — Prove gains on BOTH a fixed benchmark AND live self-measurement.**
+  Cognition / self-improvement work must iterate toward proving its gains on
+  *both* a fixed **benchmark** corpus *and* a **live self-measurement** — a
+  production self-metric Simard emits about her own running behaviour,
+  **trended over time**. A benchmark-corpus number, or a coarse proxy, is
+  **not sufficient on its own**; the improvement must also move a live
+  self-metric. (Context: PRs
+  #2584 (+86% on a fixed corpus) and #2601 (`recall_precision_at_k` via a coarse
+  substring proxy) proved benchmark/proxy gains but not yet a live, trended one.)
+- **G2 — Memory-architecture work belongs upstream in `amplihack-memory-lib`.**
+  All memory-architecture work — distillation, recall, ranking, storage, WAL,
+  forgetting — must land in `rysweet/amplihack-memory-lib`, then Simard **bumps**
+  her pinned `amplihack-memory` dep to pick it up. Do **not** fork memory logic
+  into Simard's own repo (`src/memory_consolidation`, `src/cognitive_memory`);
+  where such Simard-side memory logic already exists, prefer **migrating it
+  upstream** over extending it locally. (Context: #2584 put distillation
+  fact-yield logic in Simard's repo instead of the library.)
+- **G3 — Prefer agentic steps over brittle parsing; prefer recipes/prompts over
+  code.** Treat string/line parsing of LLM or tool output as a **brittle parsing**
+  antipattern (e.g. #2573's line-dropping parser in `src/recipe_output/extract.rs`).
+  Whenever code parses/extracts model or tool output, prefer an **agentic step**
+  — a structured/JSON output contract plus agent extraction — that is robust to
+  rewording and reordering. And whenever a change or architecture improvement can
+  be accomplished through **recipes/prompts** alone, that is the preferred choice
+  over writing code. (This section itself is an application of G3.)
+
 ## Engineer Mode Boundaries
 
 - Prefer explicit repo-grounded actions over speculative narration.

@@ -41,6 +41,31 @@ referenced commit **is** substantive.
 You do **not** need to verify CI status, mergeability, or base branch — the deterministic
 gate has already done that before calling you. You are judging **evidence quality only**.
 
+## Engineering-guideline flags (G1/G2/G3) — advisory
+
+Beyond the six skill criteria, raise an **advisory flag** — a `blocker` entry with
+a `fix`, or a note in `rationale` — when a PR trips one of Simard's durable
+engineering guidelines (canonical in `CONTRIBUTING.md`, "Engineering Guidelines
+(G1/G2/G3)"). These are **soft**: they do not by themselves change the `verdict`
+enum (`ready` / `not_ready` / `unclear`); they surface a finding the author either
+addresses or justifies.
+
+- **G1 flag — benchmark without live self-measurement.** The PR improves cognition
+  (recall / distillation / ranking) and reports only a fixed **benchmark** corpus
+  number or a coarse proxy, with **no live self-measurement** — a production
+  self-metric **trended over time**. Flag it: the bar is benchmark **and** live,
+  not either alone.
+- **G2 flag — memory-arch forked into Simard's repo.** The diff adds
+  distillation / recall / ranking / WAL / forgetting logic under
+  `src/memory_consolidation` or `src/cognitive_memory` instead of landing it
+  upstream in `amplihack-memory-lib` plus a pinned-dep bump. Flag it: that class
+  of work belongs in `amplihack-memory-lib`.
+- **G3 flag — new brittle parsing where an agentic step is cleaner.** The diff
+  adds or extends line/substring **brittle parsing** of model or tool output where
+  a structured/JSON output contract read by an **agentic step** would be robust —
+  or writes new code where recipes/prompts would suffice. Flag it and point at the
+  agentic / prompt-first alternative.
+
 ## Inputs
 
 You receive:

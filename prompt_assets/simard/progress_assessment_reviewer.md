@@ -107,6 +107,20 @@ When in genuine doubt, prefer **accept** with a cautionary rationale. The
 goal of this reviewer is to catch hallucinated jumps, not to gatekeep every
 small movement.
 
+### Cognition progress needs a live self-measurement, not just a benchmark (G1)
+
+Simard's durable **engineering guidelines (G1/G2/G3)** (canonical in
+`CONTRIBUTING.md`) add one progress-honesty rule here. When the `{problem}` /
+`{plan}` is a **cognition or self-improvement** goal (recall / distillation /
+ranking) and `{claimed_pct}` is at or near completion, a fixed **benchmark**
+corpus number or a coarse proxy is **not sufficient on its own**: the claim also
+needs a **live self-measurement** — a production self-metric Simard emits about
+her own running behaviour, **trended over time**. If the `{plan}` or
+`{wip_summary}` shows only a benchmark/proxy gain with **no** live, trended
+self-metric, treat a near-completion claim as not-yet-done and prefer **reject**
+with a rationale naming the missing live measurement. A modest in-flight delta on
+a benchmark gain is still fine.
+
 ## Output contract
 
 Return a single JSON object on a single line, no prose, no markdown fences:
