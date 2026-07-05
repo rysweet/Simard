@@ -731,22 +731,78 @@ mod tests {
         );
     }
 
-    /// Sanity-check on the page-lede count: there must be exactly 15
+    /// Sanity-check on the page-lede count: there must be exactly 16
     /// (one per tab) — a stricter bound than the existing `>= 13`
-    /// assertion. If a refactor accidentally adds a 16th, we want to
+    /// assertion. If a refactor accidentally adds a 17th, we want to
     /// know immediately so we can decide whether the new container is
     /// actually a new tab or a misuse of the class.
     #[test]
     fn index_html_has_exactly_eleven_page_intros() {
         let count = INDEX_HTML.matches(r#"class="page-lede""#).count();
         assert_eq!(
-            count, 15,
-            "expected exactly 15 page-lede paragraphs (one per top-level tab), got {count}"
+            count, 16,
+            "expected exactly 16 page-lede paragraphs (one per top-level tab), got {count}"
         );
         let h1_count = INDEX_HTML.matches(r#"class="page-h1""#).count();
         assert_eq!(
-            h1_count, 15,
-            "expected exactly 15 page-h1 headings (one per top-level tab), got {h1_count}"
+            h1_count, 16,
+            "expected exactly 16 page-h1 headings (one per top-level tab), got {h1_count}"
+        );
+    }
+
+    /// #2419 — the Overseer tab must be wired end-to-end in the SPA: a
+    /// nav entry, a content panel, a fetch function that hits the auth-gated
+    /// `/api/overseer` endpoint, and an auto-refresh dispatch on activation.
+    #[test]
+    fn index_html_wires_overseer_tab() {
+        assert!(
+            INDEX_HTML.contains(r#"data-tab="overseer""#),
+            "Overseer nav entry missing"
+        );
+        assert!(
+            INDEX_HTML.contains(r#"id="tab-overseer""#),
+            "Overseer content panel missing"
+        );
+        assert!(
+            INDEX_HTML.contains("/api/overseer"),
+            "Overseer tab must fetch /api/overseer"
+        );
+        assert!(
+            INDEX_HTML.contains("function fetchOverseer()"),
+            "fetchOverseer() must be defined"
+        );
+        assert!(
+            INDEX_HTML.contains("tab.dataset.tab==='overseer'"),
+            "Overseer tab must be wired into the activation dispatch"
+        );
+    }
+
+    /// #2419 — every value the Overseer tab interpolates into innerHTML must
+    /// pass through `esc(...)` so a feed value that ever contained markup
+    /// renders inert. This locks the XSS-safety contract for the tab.
+    #[test]
+    fn overseer_tab_escapes_all_interpolated_values() {
+        let body = js_fn_body("function fetchOverseer()");
+        // The thread id, health, timestamps, note, author, and per-tick text
+        // are all attacker-influenceable in principle; each must be escaped.
+        for needle in [
+            "esc(summary)",
+            "esc(t.id)",
+            "esc(t.health||'—')",
+            "esc(rec.timestamp||'')",
+            "esc(overseerTickHuman(rec.report))",
+            "esc(data.author_login||'—')",
+        ] {
+            assert!(
+                body.contains(needle),
+                "fetchOverseer must escape interpolated value via `{needle}`; \
+                 an unescaped feed value is an XSS vector.\nbody:\n{body}"
+            );
+        }
+        // And it must never inject a raw feed value straight into innerHTML.
+        assert!(
+            !body.contains("+data.author_login+"),
+            "author_login must not be concatenated unescaped into innerHTML"
         );
     }
 

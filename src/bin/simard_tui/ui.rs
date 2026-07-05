@@ -51,15 +51,16 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::Meeting => tabs::meeting::draw(f, app, chunks[1]),
         Tab::Stats => tabs::stats::draw(f, app, chunks[1]),
         Tab::Status => tabs::status::draw(f, app, chunks[1]),
+        Tab::Overseer => tabs::overseer::draw(f, app, chunks[1]),
     }
 
     // If an update notice is available, show it in the footer area
     let footer_text = if let Some(ref notice) = app.update_notice {
         format!(
-            "{notice}  | Alt+1\u{2013}7: tabs | Tab/Shift+Tab: cycle | \u{2190}/\u{2192}: prev/next | q: quit"
+            "{notice}  | Alt+1\u{2013}8: tabs | Tab/Shift+Tab: cycle | \u{2190}/\u{2192}: prev/next | q: quit"
         )
     } else {
-        "Alt+1\u{2013}7: tabs | Tab/Shift+Tab: cycle | \u{2190}/\u{2192}: prev/next | q: quit"
+        "Alt+1\u{2013}8: tabs | Tab/Shift+Tab: cycle | \u{2190}/\u{2192}: prev/next | q: quit"
             .to_string()
     };
     let footer_style = if app.update_notice.is_some() {

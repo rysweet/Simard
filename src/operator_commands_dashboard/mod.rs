@@ -19,6 +19,7 @@ mod merge_readiness;
 mod metrics;
 mod monitoring;
 mod ooda_cycles;
+mod overseer;
 mod pr_readiness;
 mod registry;
 pub(crate) mod routes;
