@@ -42,6 +42,10 @@ pub fn classify(iv: &Intervention) -> RiskClass {
         Intervention::Escalate { .. } => RiskClass::HighRisk,
         // Merge authority is opt-in until proven (crusty risk #1).
         Intervention::VerifyAndMergePr { .. } => RiskClass::MergeAuthority,
+        // A whisper takes NO action on Simard's behalf and spends no budget — it
+        // is advisory context only. Routine; its own dedup/identity gates
+        // ([`WhisperGate`] / [`RecursionGuard`]) apply in the act path.
+        Intervention::Whisper { .. } => RiskClass::Routine,
         _ => RiskClass::Routine,
     }
 }
@@ -245,6 +249,84 @@ impl ConflictSequencer {
     /// Release a sequence group when its sweep completes.
     pub fn release(&mut self, group: &str) {
         self.active_groups.retain(|a| a != group);
+    }
+}
+
+/// A whisper gate's decision: deliver the whisper, or suppress it as a duplicate
+/// (same signature within the dedup window) or because the per-hour cap is spent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WhisperDecision {
+    Deliver,
+    SuppressDuplicate,
+    SuppressCapReached,
+}
+
+/// Dedup + rate-limit gate for whispers (mirrors the [`BudgetGate`] /
+/// [`ConflictSequencer`] guardrail style). Two limits, both on an INJECTED clock
+/// (`now_secs`) so the daemon uses wall-clock while tests drive a virtual clock:
+///
+/// 1. **Dedup window** — the same whisper signature is suppressed while it is
+///    within `window_secs` of its last delivery, so a persistent condition is
+///    not re-injected every cycle.
+/// 2. **Per-hour cap** — at most `cap_per_hour` whispers are delivered within any
+///    rolling hour, so a noisy Overseer cannot flood Simard's inbox.
+///
+/// Only DELIVERED whispers count toward either limit; a suppressed whisper is
+/// never recorded. [`admit`](WhisperGate::admit) is the combined decide+commit
+/// used in unit tests; the act path peeks then commits only on a successful
+/// delivery so a failed/panicking sink does not consume the dedup slot.
+#[derive(Clone, Debug)]
+pub struct WhisperGate {
+    window_secs: i64,
+    cap_per_hour: usize,
+    last_delivered: std::collections::HashMap<String, i64>,
+    deliveries: Vec<i64>,
+}
+
+impl WhisperGate {
+    /// A gate with a `window_secs` dedup window and a `cap_per_hour` rolling-hour
+    /// delivery cap.
+    pub fn new(window_secs: i64, cap_per_hour: usize) -> Self {
+        Self {
+            window_secs,
+            cap_per_hour,
+            last_delivered: std::collections::HashMap::new(),
+            deliveries: Vec::new(),
+        }
+    }
+
+    /// Decide WITHOUT recording — the act path uses this so it can commit only
+    /// after a successful delivery.
+    pub fn peek(&self, signature: &str, now_secs: i64) -> WhisperDecision {
+        if let Some(&last) = self.last_delivered.get(signature)
+            && now_secs - last < self.window_secs
+        {
+            return WhisperDecision::SuppressDuplicate;
+        }
+        let hour_ago = now_secs - 3600;
+        let recent = self.deliveries.iter().filter(|&&t| t > hour_ago).count();
+        if recent >= self.cap_per_hour {
+            return WhisperDecision::SuppressCapReached;
+        }
+        WhisperDecision::Deliver
+    }
+
+    /// Record a successful delivery of `signature` at `now_secs` (updates the
+    /// dedup window and the rolling-hour budget, pruning stale entries).
+    pub fn commit(&mut self, signature: &str, now_secs: i64) {
+        self.last_delivered.insert(signature.to_string(), now_secs);
+        self.deliveries.push(now_secs);
+        let hour_ago = now_secs - 3600;
+        self.deliveries.retain(|&t| t > hour_ago);
+    }
+
+    /// Decide and, on `Deliver`, record the delivery in one call.
+    pub fn admit(&mut self, signature: &str, now_secs: i64) -> WhisperDecision {
+        let decision = self.peek(signature, now_secs);
+        if decision == WhisperDecision::Deliver {
+            self.commit(signature, now_secs);
+        }
+        decision
     }
 }
 

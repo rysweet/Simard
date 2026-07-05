@@ -365,6 +365,95 @@ pub fn reap_old_handoffs(handoff_dir: &std::path::Path) -> SimardResult<u32> {
     Ok(deleted)
 }
 
+/// Drain unprocessed **Overseer whisper** handoffs from `handoff_dir`, folding
+/// each advisory steering note into the caller's next-cycle context and marking
+/// the handoff processed so it is never re-injected on a later cycle.
+///
+/// This is the OODA-side ingest of the Simard Whisperer: whispers are delivered
+/// (by [`crate::overseer::whisper_ops::MeetingHandoffWhisperSink`]) as advisory
+/// `handoff-*.json` files tagged with
+/// [`crate::overseer::whisper_ops::WHISPER_THEME`] and carrying the note in
+/// `open_questions`. Called at cycle start (Observe/Orient), it returns the notes
+/// in FIFO order so the reasoners see them as ADDITIONAL context — they still
+/// decide; a whisper never becomes a goal (its empty `decisions`/`action_items`
+/// mean the normal [`check_meeting_handoffs`] path could only fast-mark it).
+///
+/// Non-whisper handoffs are left untouched for the normal curate path.
+pub fn drain_overseer_whispers(handoff_dir: &Path) -> SimardResult<Vec<String>> {
+    let whisper_theme = crate::overseer::whisper_ops::WHISPER_THEME;
+    let mut notes: Vec<String> = Vec::new();
+
+    // Collect timestamped handoff files (FIFO by lexicographically-sortable name).
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(handoff_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("handoff-") && name.ends_with(".json") {
+                files.push(entry.path());
+            }
+        }
+    }
+    files.sort();
+
+    for path in files {
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "drain_overseer_whispers: skipping unreadable handoff"
+                );
+                continue;
+            }
+        };
+        let mut handoff: crate::meeting_facilitator::MeetingHandoff =
+            match serde_json::from_str(&raw) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "drain_overseer_whispers: skipping malformed handoff JSON"
+                    );
+                    continue;
+                }
+            };
+
+        // Only unprocessed whisper handoffs; leave everything else for curate.
+        if handoff.processed || !handoff.themes.iter().any(|t| t == whisper_theme) {
+            continue;
+        }
+
+        for q in &handoff.open_questions {
+            notes.push(q.text.clone());
+        }
+
+        // Mark processed so the whisper is folded exactly once (never re-injected).
+        handoff.processed = true;
+        let json = serde_json::to_string_pretty(&handoff).map_err(|e| {
+            crate::error::SimardError::ArtifactIo {
+                path: path.clone(),
+                reason: format!("serializing whisper handoff: {e}"),
+            }
+        })?;
+        std::fs::write(&path, &json).map_err(|e| crate::error::SimardError::ArtifactIo {
+            path: path.clone(),
+            reason: format!("writing whisper handoff: {e}"),
+        })?;
+
+        tracing::info!(
+            target: "overseer::whisper",
+            path = %path.display(),
+            notes = handoff.open_questions.len(),
+            "OODA folded an overseer whisper into the next cycle's context"
+        );
+    }
+
+    Ok(notes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

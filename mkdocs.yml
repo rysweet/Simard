@@ -113,6 +113,7 @@ nav:
     - Goal-Fact Dedup in Preparation: concepts/goal-fact-dedup-in-preparation.md
     - Compound-Objective Search in Preparation: concepts/preparation-compound-objective-search.md
     - Goal Stewardship Mode: concepts/stewardship-mode.md
+    - The Simard Whisperer: concepts/simard-whisperer.md
     - Automated Disk-Health Management: concepts/automated-disk-health.md
     - Update-Check Design: concepts/update-check-design.md
     - The amplihack Freshness Gate: concepts/amplihack-freshness-gate.md
@@ -166,6 +167,7 @@ nav:
     - Inspect Improvement Curation State: howto/inspect-improvement-curation-state.md
     - Inspect the Procedural-Learning Loop: howto/inspect-the-procedural-learning-loop.md
     - File Stewardship Issues from Orchestrator Runs: howto/file-stewardship-issues-from-orchestrator-runs.md
+    - Configure the Simard Whisperer: howto/configure-the-simard-whisperer.md
     - Configure the Monthly Self-Quality-Audit: howto/configure-self-quality-audit.md
     - Configure the Disk-Health Check: howto/configure-disk-health-check.md
     - Reclaim Disk Space (Low-Space Rust Builds): howto/reclaim-disk-space-and-run-low-space-rust-builds.md
@@ -242,6 +244,7 @@ nav:
     - Goal Coverage Allocation: reference/goal-coverage-allocation.md
     - spawn_agent_for_goal API: reference/spawn-agent-for-goal.md
     - Stewardship API: reference/stewardship-api.md
+    - Simard Whisperer API: reference/simard-whisperer-api.md
     - Maximum Safe Parallelism: reference/maximum-safe-parallelism.md
     - Concurrent Engineer Dispatch: reference/concurrent-engineer-dispatch.md
     - Engineer Copilot Permissions: reference/engineer-copilot-permissions.md

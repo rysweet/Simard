@@ -28,6 +28,13 @@ pub const DAILY_BUDGET_ENV: &str = "SIMARD_DAILY_BUDGET_USD";
 /// self-tuning (M4) can never drive the observer into a hot loop.
 pub const OVERSEER_INTERVAL_ENV: &str = "SIMARD_OVERSEER_INTERVAL_SECS";
 
+/// Opt-out flag for the **Simard Whisperer**. The Overseer's lightweight
+/// steering channel is ON by default whenever the acting Overseer runs; an
+/// explicit falsey value (`0`/`false`/`no`/`off`) disables it. Whispering only
+/// makes sense while the Overseer runs, so a disabled Overseer forces the
+/// whisperer off regardless of this flag.
+pub const SIMARD_OVERSEER_WHISPER_ENV: &str = "SIMARD_OVERSEER_WHISPER";
+
 /// GitHub login the acting Overseer authors its own workstreams under. Sourced
 /// here so the daemon and the merge/recursion path agree on ONE stable, DISTINCT
 /// identity (never the human operator's login). Defaults to
@@ -86,6 +93,28 @@ pub fn overseer_acting_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> 
 /// Production entry point: read the real process environment.
 pub fn overseer_acting_enabled() -> bool {
     overseer_acting_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve whether the **Simard Whisperer** is enabled, with **default ON**
+/// opt-out semantics consistent with the acting Overseer. The whisperer is
+/// enabled UNLESS [`SIMARD_OVERSEER_WHISPER_ENV`] is an explicit falsey value —
+/// AND only while the acting Overseer itself is enabled (an explicitly-disabled
+/// Overseer forces the whisperer off regardless of the whisper flag).
+pub fn whisper_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    // No Overseer ⇒ no whisperer.
+    if !overseer_acting_enabled_from(&lookup) {
+        return false;
+    }
+    // Opt-out: enabled unless an explicit falsey value is set.
+    !matches!(
+        lookup(SIMARD_OVERSEER_WHISPER_ENV).as_deref().map(str::trim),
+        Some(v) if is_falsey(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn whisper_enabled() -> bool {
+    whisper_enabled_from(|k| std::env::var(k).ok())
 }
 
 /// Resolve the Overseer's DISTINCT author login. Falls back to

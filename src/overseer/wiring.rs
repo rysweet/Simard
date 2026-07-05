@@ -41,7 +41,7 @@ use crate::overseer::audit::SelfQualityAuditor;
 use crate::overseer::capabilities::{
     DeployReport, Deployer, GoalBrief, GoalCurator, InFlightItem, OverseerError,
 };
-use crate::overseer::config::{overseer_author_login, overseer_interval_secs};
+use crate::overseer::config::{overseer_author_login, overseer_interval_secs, whisper_enabled};
 use crate::overseer::deploy::GuardedDeployer;
 use crate::overseer::guardrails::RecursionGuard;
 use crate::overseer::launch::SmartOrchestratorLauncher;
@@ -119,6 +119,10 @@ pub struct OverseerTickReport {
     pub escalations: usize,
     /// Interventions the gates held (autonomy/budget/conflict).
     pub held: usize,
+    /// Advisory whispers delivered into Simard's OODA inbox this tick.
+    pub whispers: usize,
+    /// Whispers suppressed by the dedup window / per-hour cap this tick.
+    pub whispers_suppressed: usize,
     /// Capability errors encountered while acting (isolated, never fatal).
     pub errors: usize,
     /// Set when the tick itself panicked and was isolated by
@@ -183,6 +187,8 @@ pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
         deploys = report.deploys,
         escalations = report.escalations,
         held = report.held,
+        whispers = report.whispers,
+        whispers_suppressed = report.whispers_suppressed,
         errors = report.errors,
         duration_ms = report.duration_ms,
         "overseer tick complete"
@@ -221,6 +227,8 @@ fn tally_outcome(report: &mut OverseerTickReport, outcome: &ActOutcome) {
         ActOutcome::Deployed(_) => report.deploys += 1,
         ActOutcome::IssueFiled(_) => report.issues_filed += 1,
         ActOutcome::Escalated => report.escalations += 1,
+        ActOutcome::Whispered { .. } => report.whispers += 1,
+        ActOutcome::WhisperSuppressed { .. } => report.whispers_suppressed += 1,
         ActOutcome::ConflictResolved
         | ActOutcome::GoalTransferred
         | ActOutcome::Reported
@@ -385,6 +393,16 @@ pub fn build_overseer(
         .with_verify_merge_autonomy(true)
         .with_high_risk_autonomy(true)
         .with_identity(overseer_identity())
+        // The Simard Whisperer: advisory steering notes onto the SAME
+        // meeting-handoff inbox the OODA observe step scans. Enabled by default
+        // (opt-out via SIMARD_OVERSEER_WHISPER), consistent with the acting
+        // Overseer's opt-out gate.
+        .with_whisper_enabled(whisper_enabled())
+        .with_whisper_sink(Box::new(
+            crate::overseer::whisper_ops::MeetingHandoffWhisperSink::new(
+                crate::meeting_facilitator::default_handoff_dir(),
+            ),
+        ))
 }
 
 /// Resolve the acting Overseer's tick cadence (seconds), clamped to the config

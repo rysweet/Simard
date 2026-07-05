@@ -4,6 +4,7 @@
 //! variants are gated by `guardrails::classify`.
 
 use crate::overseer::capabilities::{AuditScope, GoalBrief, OrchestratorRunBrief, RecipeBrief};
+use crate::overseer::whisper_ops::WhisperUrgency;
 
 /// A single action the Overseer can take. Each variant names the capability it
 /// dispatches through; see the trait doc comments for the exact reused function.
@@ -36,6 +37,15 @@ pub enum Intervention {
     RunAudit { scope: AuditScope },
     /// Surface a HIGH-RISK or low-confidence decision to the human operator.
     Escalate { reason: String },
+    /// Inject a lightweight ADVISORY steering note ("whisper") into Simard's OODA
+    /// loop — additional/corrective context she picks up at the start of her next
+    /// cycle, WITHOUT the Overseer taking the action for her. Delivered onto the
+    /// existing meeting-handoff inbox as an advisory (non-promoting) handoff.
+    /// Capability: `whisper_ops::WhisperSink`.
+    Whisper {
+        note: String,
+        urgency: WhisperUrgency,
+    },
 }
 
 impl Intervention {
@@ -51,6 +61,7 @@ impl Intervention {
             Self::Report => "report",
             Self::RunAudit { .. } => "run_audit",
             Self::Escalate { .. } => "escalate",
+            Self::Whisper { .. } => "whisper",
         }
     }
 }

@@ -62,12 +62,15 @@ pub mod pr_verify;
 pub mod sensor;
 pub mod signal;
 pub mod tuning;
+pub mod whisper_ops;
 pub mod wiring;
 
 #[cfg(test)]
 mod tests_m1;
 #[cfg(test)]
 mod tests_m2;
+#[cfg(test)]
+mod tests_whisper;
 
 pub use capabilities::{
     Auditor, Deployer, GoalCurator, IssueFiler, MeetingHost, ObservedState, OrchestratorRunBrief,
@@ -77,7 +80,8 @@ pub use config::{
     daily_budget_usd, overseer_acting_enabled, overseer_author_login, overseer_enabled,
 };
 pub use guardrails::{
-    AutonomyGate, BudgetGate, ConflictSequencer, RecursionGuard, RiskClass, Subject, classify,
+    AutonomyGate, BudgetGate, ConflictSequencer, RecursionGuard, RiskClass, Subject,
+    WhisperDecision, WhisperGate, classify,
 };
 pub use intervention::{Intervention, PlannedIntervention};
 pub use observer::{StewardshipIssueFiler, decide_read_only, is_m1_permitted};
@@ -86,13 +90,19 @@ pub use sensor::{
     in_flight_from_board, observed_from_snapshot, run_observer_cycle,
 };
 pub use signal::{Priority, Problem, ProblemKind, Signal, signals_from};
+pub use whisper_ops::{
+    MeetingHandoffWhisperSink, WhisperRecord, WhisperSink, WhisperUrgency, compose_whisper_note,
+    note_signature, whisper_signature,
+};
 pub use wiring::{
     BoardGoalCurator, OverseerCadence, OverseerTickReport, RefuseDeployer, assemble_capabilities,
     build_overseer, overseer_identity, overseer_tick, overseer_tick_interval_secs,
     run_overseer_tick_isolated,
 };
 
+use crate::goal_curation::no_progress_breaker::NO_PROGRESS_BREAKER_THRESHOLD;
 use capabilities::{DeployReport, GoalBrief, InFlightItem, IssueOutcome, WorkstreamHandle};
+use std::path::PathBuf;
 
 /// The capability handles the Overseer acts through — one per reused Simard
 /// subsystem. Grouping them keeps the `Overseer` constructor to a single
@@ -119,6 +129,14 @@ pub struct Overseer {
     /// Cap on how many cost-bearing launches one cycle may plan (concurrency
     /// bound layered on top of the AIMD engineer cap the launcher already obeys).
     max_launches_per_cycle: usize,
+    /// The Simard Whisperer's delivery seam (advisory steering notes onto the
+    /// meeting-handoff inbox). `None` until wired; whispers require it.
+    whisper_sink: Option<Box<dyn WhisperSink>>,
+    /// Dedup + rate-limit gate for whispers (shared across ticks).
+    whisper_gate: WhisperGate,
+    /// Whether the whisperer is enabled (config opt-out). When off, whispers are
+    /// held (never delivered) even if the observed condition holds.
+    whisper_enabled: bool,
 }
 
 /// The result of one meta-OODA turn. Side-effect free: it reports what was
@@ -144,6 +162,16 @@ pub enum ActOutcome {
     Reported,
     Audited,
     Escalated,
+    /// A lightweight advisory whisper was delivered into Simard's OODA inbox.
+    Whispered {
+        path: PathBuf,
+        signature: String,
+    },
+    /// A whisper was suppressed by the [`WhisperGate`] (duplicate within the
+    /// dedup window, or the per-hour cap was reached) — not re-injected.
+    WhisperSuppressed {
+        reason: &'static str,
+    },
 }
 
 impl Overseer {
@@ -156,7 +184,24 @@ impl Overseer {
             budget: BudgetGate::default(),
             sequencer: ConflictSequencer::default(),
             max_launches_per_cycle: 2,
+            whisper_sink: None,
+            // 15-minute dedup window; at most 5 whispers per rolling hour.
+            whisper_gate: WhisperGate::new(900, 5),
+            whisper_enabled: false,
         }
+    }
+
+    /// Wire the Simard Whisperer's delivery seam (advisory steering notes).
+    pub fn with_whisper_sink(mut self, sink: Box<dyn WhisperSink>) -> Self {
+        self.whisper_sink = Some(sink);
+        self
+    }
+
+    /// Enable/disable the whisperer (config opt-out). Off by default; the daemon
+    /// sets this from [`config::whisper_enabled`].
+    pub fn with_whisper_enabled(mut self, enabled: bool) -> Self {
+        self.whisper_enabled = enabled;
+        self
     }
 
     /// Opt into autonomous HIGH-RISK execution (deploy / conflict-resolution).
@@ -217,6 +262,16 @@ impl Overseer {
         observed: &ObservedState,
         launches: &mut usize,
     ) -> PlannedIntervention {
+        // Whisper opt-out: when the whisperer is disabled, hold the whisper (it
+        // is never delivered) even though the observed condition holds.
+        if matches!(iv, Intervention::Whisper { .. }) && !self.whisper_enabled {
+            return PlannedIntervention {
+                intervention: iv.clone(),
+                admitted: false,
+                note: "held: whisper disabled (SIMARD_OVERSEER_WHISPER)".to_string(),
+            };
+        }
+
         // Autonomy: HIGH-RISK requires opt-in, else it is escalated (held).
         if let Err(e) = self.autonomy.admit(iv) {
             return PlannedIntervention {
@@ -301,8 +356,106 @@ impl Overseer {
                 Ok(ActOutcome::Audited)
             }
             Intervention::Escalate { .. } => Ok(ActOutcome::Escalated),
+            Intervention::Whisper { note, urgency } => self.act_whisper(note, *urgency),
         }
     }
+
+    /// Deliver an advisory whisper: fail CLOSED without a distinct steward
+    /// identity (anti-recursion — the Overseer must never whisper without a
+    /// configured DISTINCT identity, and never about its own whisper), dedup +
+    /// rate-limit via the [`WhisperGate`], then deliver through the sink. The
+    /// dedup slot is consumed only on a SUCCESSFUL delivery, so a failed or
+    /// panicking sink never silently swallows a future whisper.
+    fn act_whisper(
+        &mut self,
+        note: &str,
+        urgency: WhisperUrgency,
+    ) -> Result<ActOutcome, OverseerError> {
+        // Fail closed: a whisper requires the Overseer's DISTINCT steward
+        // identity (RecursionGuard). An unconfigured guard REFUSES the whisper.
+        if !self.recursion.is_configured() {
+            return Err(OverseerError::Recursion {
+                subject: format!("whisper (unconfigured steward identity): {note}"),
+            });
+        }
+
+        let signature = note_signature(note);
+        let now = now_secs();
+        match self.whisper_gate.peek(&signature, now) {
+            WhisperDecision::Deliver => {
+                let sink = self
+                    .whisper_sink
+                    .as_ref()
+                    .ok_or(OverseerError::Capability {
+                        what: "whisper.sink",
+                        detail: "no whisper sink configured".to_string(),
+                    })?;
+                let rec = WhisperRecord {
+                    note: note.to_string(),
+                    urgency,
+                    // The originating problem is not carried on the intervention;
+                    // the note itself encodes the goal + trigger. Kept generic
+                    // here — the delivered note carries the specifics.
+                    problem: ProblemKind::LoopDetected,
+                    goal_id: None,
+                    author: self.recursion.author_login.clone(),
+                    signature: signature.clone(),
+                };
+                let path = sink.deliver(&rec)?;
+                // Consume the dedup slot only after a successful delivery.
+                self.whisper_gate.commit(&signature, now);
+                tracing::info!(
+                    target: "overseer::whisper",
+                    trigger = "overseer-decide",
+                    note = %note,
+                    urgency = urgency.label(),
+                    delivered = true,
+                    signature = %signature,
+                    path = %path.display(),
+                    "overseer delivered an advisory whisper into Simard's OODA inbox"
+                );
+                Ok(ActOutcome::Whispered { path, signature })
+            }
+            WhisperDecision::SuppressDuplicate => {
+                tracing::debug!(
+                    target: "overseer::whisper",
+                    note = %note,
+                    urgency = urgency.label(),
+                    delivered = false,
+                    signature = %signature,
+                    reason = "duplicate",
+                    "overseer suppressed a duplicate whisper within the dedup window"
+                );
+                Ok(ActOutcome::WhisperSuppressed {
+                    reason: "duplicate",
+                })
+            }
+            WhisperDecision::SuppressCapReached => {
+                tracing::debug!(
+                    target: "overseer::whisper",
+                    note = %note,
+                    urgency = urgency.label(),
+                    delivered = false,
+                    signature = %signature,
+                    reason = "cap_reached",
+                    "overseer suppressed a whisper: per-hour cap reached"
+                );
+                Ok(ActOutcome::WhisperSuppressed {
+                    reason: "cap_reached",
+                })
+            }
+        }
+    }
+}
+
+/// Current wall-clock time in whole seconds since the Unix epoch, for the
+/// whisper dedup/rate-limit clock. Monotonic enough for windowing; tests drive
+/// the [`WhisperGate`] directly with a virtual clock.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// True for interventions that spend LLM budget / spawn work.
@@ -416,6 +569,21 @@ fn classify_signal(s: &Signal) -> (ProblemKind, Priority, String, String) {
             format!("anomaly:{detail}"),
             format!("telemetry anomaly: {detail}"),
         ),
+        Signal::LoopDetected {
+            goal_id,
+            consecutive_no_action,
+        } => (
+            ProblemKind::LoopDetected,
+            Priority::High,
+            format!("loop:{goal_id}"),
+            format!("goal {goal_id} looping — no progress for {consecutive_no_action} cycles"),
+        ),
+        Signal::DriftCorrection { goal_id, detail } => (
+            ProblemKind::DriftCorrection,
+            Priority::Normal,
+            format!("drift:{goal_id}"),
+            format!("goal {goal_id} drifting from intent: {detail}"),
+        ),
     }
 }
 
@@ -476,6 +644,44 @@ pub fn decide(problem: &Problem) -> Intervention {
                 priority: 3,
                 target_repo: "rysweet/Simard".to_string(),
             },
+        },
+        // A looping goal is steered with a LIGHTWEIGHT whisper by default. Only
+        // once the loop reaches Simard's no-progress breaker threshold (the
+        // whisper was insufficient) does the Overseer escalate to a full meeting
+        // via the existing MeetingHost/TransferGoal path.
+        ProblemKind::LoopDetected => {
+            let consecutive = problem.evidence.iter().find_map(|s| match s {
+                Signal::LoopDetected {
+                    consecutive_no_action,
+                    ..
+                } => Some(*consecutive_no_action),
+                _ => None,
+            });
+            let acute = consecutive
+                .map(|n| n >= NO_PROGRESS_BREAKER_THRESHOLD)
+                .unwrap_or(false);
+            if acute {
+                Intervention::TransferGoal {
+                    goal: GoalBrief {
+                        title: problem.summary.clone(),
+                        rationale: "repeated no-progress loop — a lightweight whisper was \
+                                    insufficient; escalate to a meeting with Simard"
+                            .to_string(),
+                        priority: 2,
+                        target_repo: "rysweet/Simard".to_string(),
+                    },
+                }
+            } else {
+                Intervention::Whisper {
+                    note: compose_whisper_note(problem, &ObservedState::default()),
+                    urgency: WhisperUrgency::Normal,
+                }
+            }
+        }
+        // Drift is always steered with an advisory whisper.
+        ProblemKind::DriftCorrection => Intervention::Whisper {
+            note: compose_whisper_note(problem, &ObservedState::default()),
+            urgency: WhisperUrgency::Normal,
         },
     }
 }

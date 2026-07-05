@@ -24,6 +24,7 @@
 use std::sync::Mutex;
 
 use crate::conversation_channel::{ConversationChannel, OutKind, Outbound};
+use crate::overseer::whisper_ops::WhisperUrgency;
 
 // ─────────────────────────── notification content ──────────────────────────
 
@@ -119,6 +120,24 @@ impl OperatorNotification {
             problem: format!("Deployed {commit} (previous {previous}); {gate_summary}"),
             link: None,
             repo: repo.to_string(),
+            autonomous: true,
+        }
+    }
+
+    /// Build a whisper notification: surfaces an advisory steering note the
+    /// Overseer injected into Simard's loop so whispers are TRANSPARENT to the
+    /// operator (never a hidden side-channel). `trigger` is the observed problem
+    /// (e.g. `"loop_detected"`); `goal_id` is the goal being steered.
+    pub fn whisper(note: &str, trigger: &str, urgency: WhisperUrgency, goal_id: &str) -> Self {
+        Self {
+            kind: "whisper",
+            headline: format!(
+                "steering goal {goal_id} ({trigger}, {} urgency)",
+                urgency.label()
+            ),
+            problem: note.to_string(),
+            link: None,
+            repo: "rysweet/Simard".to_string(),
             autonomous: true,
         }
     }
