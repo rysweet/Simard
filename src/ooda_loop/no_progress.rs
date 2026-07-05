@@ -86,10 +86,20 @@ pub(crate) struct NoProgressBreakerReport {
     pub dropped: Vec<String>,
     /// Goals set `Blocked` with the sentinel and escalated to a tracking issue.
     pub escalated: Vec<String>,
+    /// Standing/perpetual goals (issue #2589) that produced a no-action ("idle")
+    /// cycle. Such a goal is inherently bursty — it ships a durable improvement
+    /// periodically and idles between — so it is **exempt** from the breaker:
+    /// its consecutive-no-action counter is reset and it stays active rather than
+    /// being blocked/escalated. Recorded for the cycle log because an idling
+    /// standing goal is normal, not a fault. Never contributes to
+    /// [`fired`](Self::fired).
+    pub perpetual_idled: Vec<String>,
 }
 
 impl NoProgressBreakerReport {
-    /// True when the breaker fired for at least one goal this cycle.
+    /// True when the breaker fired for at least one goal this cycle. A
+    /// standing/perpetual idle is deliberately **not** a firing — it is the
+    /// exemption working as intended — so `perpetual_idled` is excluded.
     pub fn fired(&self) -> bool {
         !self.marked_done.is_empty() || !self.dropped.is_empty() || !self.escalated.is_empty()
     }
@@ -97,10 +107,11 @@ impl NoProgressBreakerReport {
     /// Compact one-line summary for the cycle log.
     pub fn log_line(&self) -> String {
         format!(
-            "done={} dropped={} escalated={}",
+            "done={} dropped={} escalated={} perpetual_idled={}",
             self.marked_done.len(),
             self.dropped.len(),
             self.escalated.len(),
+            self.perpetual_idled.len(),
         )
     }
 }
@@ -164,6 +175,32 @@ pub(crate) fn apply_no_progress_breaker_with_threshold(
             if outcome.success {
                 tracker.record_progress(goal_id);
             }
+            continue;
+        }
+
+        // Standing/perpetual exemption (issue #2589). A standing/perpetual goal
+        // is inherently bursty — it ships a durable improvement periodically and
+        // idles between while there is nothing new to ship. An idle no-action
+        // cycle is NORMAL, not the livelock the breaker guards against, so such a
+        // goal must NEVER be hard-blocked / parked "needs human review": that is
+        // the production defect this fixes. Reset its counter and keep it active
+        // for the next cycle. Detection reuses the *same* `is_perpetual()` flag
+        // (issue #2580) the non-completability path keys on — there is exactly one
+        // notion of "standing/perpetual", never a second one.
+        if state
+            .active_goals
+            .active
+            .iter()
+            .any(|g| g.id == goal_id && g.is_perpetual())
+        {
+            tracker.record_progress(goal_id);
+            report.perpetual_idled.push(goal_id.to_string());
+            tracing::info!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                "no-progress breaker: standing/perpetual goal idled this cycle \
+                 (normal, not a fault) — counter reset, goal stays active",
+            );
             continue;
         }
 

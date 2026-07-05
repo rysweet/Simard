@@ -345,3 +345,163 @@ fn stale_counter_is_pruned_when_goal_leaves_the_board() {
         "counter for a departed goal must be pruned"
     );
 }
+
+// --- perpetual/standing-goal exemption (issue #2589) ------------------------
+
+/// A STANDING/PERPETUAL goal (issues #2580/#2589): its description carries the
+/// durable standing marker, so it is recognised by the *same* `is_perpetual()`
+/// flag the non-completability path keys on. Modeled on the live
+/// `continuously-research-and-improve-your-own-cogn-*` research goal, at 0%.
+fn perpetual_goal(id: &str) -> ActiveGoal {
+    let g = ActiveGoal::new(
+        id,
+        "STANDING PERPETUAL goal — never mark complete; continuously research \
+         and improve your own cognition",
+        5,
+    );
+    assert!(
+        g.is_perpetual(),
+        "fixture must be recognised as standing/perpetual by the shared #2580/#2589 flag"
+    );
+    g
+}
+
+#[test]
+fn perpetual_goal_idles_instead_of_blocking_past_threshold() {
+    // The production defect: a STANDING/PERPETUAL goal is inherently bursty — it
+    // ships durable improvements periodically and idles between. Idle cycles are
+    // NORMAL, not a livelock, so the no-progress SAFEGUARD must NEVER hard-block
+    // it. Driven N+1 consecutive no-action cycles (one past where a normal goal
+    // is parked), it must: stay ACTIVE (never Blocked), file NO tracking issue,
+    // set NO [OODA-SAFEGUARD] sentinel, never be escalated, be reported as a
+    // perpetual idle, and have its no-action counter reset every cycle.
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "continuously-research-and-improve";
+    let mut goal = perpetual_goal(id);
+    goal.wip_refs = vec![pr_ref("7")]; // an open, unmerged PR
+    let mut state = state_with(goal);
+    // No completion evidence and no obsolescence signal: a NORMAL goal in this
+    // exact situation would be escalated + Blocked at the threshold.
+    let evidence = FakeEvidence {
+        pr_merged: false,
+        issue_closed: false,
+        deployed: false,
+    };
+    let filer = RecordingFiler::default();
+
+    for cycle in 1..=(threshold + 1) {
+        let report = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+
+        assert!(
+            !report.fired(),
+            "cycle {cycle}: a perpetual goal idling must not fire the breaker"
+        );
+        assert!(
+            report.escalated.is_empty(),
+            "cycle {cycle}: a perpetual goal must never be escalated"
+        );
+        assert_eq!(
+            report.perpetual_idled,
+            vec![id.to_string()],
+            "cycle {cycle}: the idle must be recorded as a perpetual idle (normal, not a fault)"
+        );
+        assert!(
+            !matches!(
+                state.active_goals.active[0].status,
+                GoalProgress::Blocked(_)
+            ),
+            "cycle {cycle}: a perpetual goal must never be Blocked by the no-progress breaker"
+        );
+        assert!(
+            !state.active_goals.active.iter().any(|g| matches!(
+                &g.status,
+                GoalProgress::Blocked(r) if is_no_progress_marker(r)
+            )),
+            "cycle {cycle}: no [OODA-SAFEGUARD] sentinel may ever be set on a perpetual goal"
+        );
+        assert_eq!(
+            state.no_progress_tracker.consecutive(id),
+            0,
+            "cycle {cycle}: the perpetual goal's no-action counter must reset each idle cycle"
+        );
+    }
+
+    // The goal is still on the board, available for the next cycle, and nothing
+    // was ever escalated to a human.
+    assert_eq!(
+        state.active_goals.active.len(),
+        1,
+        "the perpetual goal must remain active and re-selectable"
+    );
+    assert!(
+        filer.calls.borrow().is_empty(),
+        "a perpetual goal must never file an [OODA-SAFEGUARD] tracking issue"
+    );
+}
+
+#[test]
+fn non_perpetual_goal_still_escalates_and_is_never_reported_idled() {
+    // Regression guard: a NORMAL (non-standing) goal at the same N+1 no-action
+    // cycles keeps the existing safeguard behaviour EXACTLY — escalated, Blocked
+    // with the sentinel, one issue filed — and is never mistaken for a perpetual
+    // idle. This proves the exemption keys on the shared perpetual flag only.
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let id = "normal-livelocked-goal";
+    let mut goal = stuck_goal(id);
+    assert!(
+        !goal.is_perpetual(),
+        "control fixture must NOT be standing/perpetual"
+    );
+    goal.wip_refs = vec![pr_ref("9")];
+    let mut state = state_with(goal);
+    let evidence = FakeEvidence {
+        pr_merged: false,
+        issue_closed: false,
+        deployed: false,
+    };
+    let filer = RecordingFiler::default();
+
+    // Below threshold: nothing fires, and no perpetual-idle is ever reported.
+    for cycle in 1..threshold {
+        let report = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+        assert!(!report.fired(), "cycle {cycle} must not fire");
+        assert!(
+            report.perpetual_idled.is_empty(),
+            "cycle {cycle}: a normal goal is never a perpetual idle"
+        );
+    }
+
+    // Threshold cycle: escalate + Block with the sentinel, exactly as before.
+    let report = apply_no_progress_breaker_with_threshold(
+        &mut state,
+        &[no_action_outcome(id)],
+        &evidence,
+        &filer,
+        threshold,
+    );
+    assert_eq!(report.escalated, vec![id.to_string()]);
+    assert!(
+        report.perpetual_idled.is_empty(),
+        "a normal goal must never be reported as a perpetual idle"
+    );
+    assert_eq!(filer.calls.borrow().len(), 1, "exactly one issue filed");
+    match &state.active_goals.active[0].status {
+        GoalProgress::Blocked(reason) => assert!(
+            is_no_progress_marker(reason),
+            "the normal goal must still carry the no-progress sentinel: {reason}"
+        ),
+        other => panic!("expected Blocked, got {other:?}"),
+    }
+}

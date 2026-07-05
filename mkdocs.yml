@@ -106,6 +106,7 @@ nav:
     - Unified Telemetry and Status: concepts/unified-telemetry-and-status.md
     - Goal-Board Persistence: concepts/goal-board-persistence.md
     - Keeping the OODA Daemon Steerable: concepts/steerable-ooda-daemon.md
+    - Perpetual Goals Exempt from No-Progress Hard-Block: concepts/perpetual-goal-no-progress-exemption.md
     - Authoritative Goal-Board Store: concepts/authoritative-goal-board-store.md
     - Goal-Board Corruption Guards: concepts/goal-board-corruption-guards.md
     - File-Backed Goal-Store Simplification: concepts/file-backed-goal-store-simplification.md
@@ -250,6 +251,7 @@ nav:
     - PR-Finalization Review Pipeline: reference/pr-finalization-pipeline.md
     - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md
     - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
+    - No-Progress Breaker API: reference/no-progress-breaker-api.md
     - Progress-Evidence API: reference/progress-evidence-api.md
     - Trustworthy-Confidence API: reference/trustworthy-confidence-api.md
     - External-Signal Completion Gate: reference/external-signal-completion-gate.md
