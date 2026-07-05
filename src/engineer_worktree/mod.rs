@@ -352,7 +352,20 @@ impl EngineerWorktree {
         //     Fail-loud-but-non-fatal: log at WARN and continue; the
         //     `inspect_workspace` filter still hides the sentinel if this
         //     fails.
-        if let Err(e) = exclude_engineer_claim(&dir) {
+        //
+        //     Serialized under `worktree_mutation_lock` (the same lock guarding
+        //     `git worktree add`): `git rev-parse --git-path info/exclude`
+        //     resolves to the *shared common* git dir for linked worktrees, so
+        //     concurrent allocations against the same parent repo would
+        //     otherwise race on a non-atomic read-modify-write of that shared
+        //     file and could clobber the repo's pre-existing exclude entries.
+        let exclude_result = {
+            let _guard = worktree_mutation_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            exclude_engineer_claim(&dir)
+        };
+        if let Err(e) = exclude_result {
             tracing::warn!(
                 target: "simard::engineer_worktree",
                 error = %e,

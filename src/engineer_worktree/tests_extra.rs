@@ -417,3 +417,39 @@ fn allocate_excludes_claim_sentinel_from_git_status() {
 
     wt.cleanup().expect("cleanup");
 }
+
+/// Issue #2621 (hardening): the exclude append must be idempotent AND must
+/// never clobber the parent repo's pre-existing `.git/info/exclude` entries,
+/// even across repeated allocations against the same repo. This is the
+/// single-threaded proof that the read-modify-write preserves content; the
+/// concurrent case is additionally serialized under `worktree_mutation_lock`
+/// at the `allocate` call site.
+#[test]
+#[serial_test::serial]
+fn exclude_engineer_claim_is_idempotent_and_preserves_existing_entries() {
+    let repo_dir = tempdir().unwrap();
+    let repo = init_parent_repo(repo_dir.path());
+
+    // Pre-seed a genuine user exclude pattern.
+    let exclude_path = repo.join(".git/info/exclude");
+    fs::create_dir_all(exclude_path.parent().unwrap()).unwrap();
+    fs::write(&exclude_path, "# user rules\n*.log\n").unwrap();
+
+    // Two appends mirror two allocations against the same parent repo.
+    super::exclude_engineer_claim(&repo).expect("first exclude append");
+    super::exclude_engineer_claim(&repo).expect("second exclude append (idempotent)");
+
+    let body = fs::read_to_string(&exclude_path).expect("exclude present");
+    assert!(
+        body.contains("*.log"),
+        "pre-existing user exclude entry must be preserved; got:\n{body}"
+    );
+    let sentinel_lines = body
+        .lines()
+        .filter(|l| l.trim() == super::ENGINEER_CLAIM_FILE)
+        .count();
+    assert_eq!(
+        sentinel_lines, 1,
+        "sentinel must be appended exactly once across repeated calls; got:\n{body}"
+    );
+}

@@ -633,6 +633,25 @@ fn count_new_status_paths(before: &[String], after: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Drop the Simard-managed claim sentinel (`.simard-engineer-claim`, issue
+/// #2621) from a parsed `git status` path list.
+///
+/// Simard writes this private liveness sentinel into every engineer worktree;
+/// it is Simard infra, not a user change, so **every** `git status` consumer in
+/// the engineer loop must ignore it. Applied to both `inspect_workspace` (the
+/// pre-mutation-guard input) and `verify_agent_spawn_artifacts` (the
+/// post-session evidence report) so the sentinel can never surface as a
+/// spurious change in either — including the degraded path where the
+/// worktree-allocation `.git/info/exclude` append failed (see
+/// `engineer_worktree::exclude_engineer_claim`), which is exactly when raw
+/// `git status` still lists the sentinel.
+fn strip_claim_sentinel(paths: Vec<String>) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter(|path| path != crate::engineer_worktree::ENGINEER_CLAIM_FILE)
+        .collect()
+}
+
 /// Synthesize a [`VerificationReport`] from observable side-effects after an
 /// agent session completes (issue #1670). Replaces the previous hardcoded
 /// `"agent-completed"` status with post-hoc verification that checks:
@@ -685,7 +704,13 @@ fn verify_agent_spawn_artifacts(
         &["git", "status", "--short", "--untracked-files=all"],
     )
     .ok()
-    .map(|out| parse_status_paths(&out.stdout))
+    // Filter the Simard-managed claim sentinel here too (issue #2621): the
+    // pre-spawn baseline (`inspection.changed_files`) is already filtered, so
+    // leaving the sentinel in `post_status` would make `count_new_status_paths`
+    // (= after \ before) report it as a spurious "new changed file" whenever
+    // the `.git/info/exclude` append failed — falsely flipping a no-op session
+    // to "verified". Both consumers must strip the sentinel identically.
+    .map(|out| strip_claim_sentinel(parse_status_paths(&out.stdout)))
     .unwrap_or_default();
 
     let new_files = count_new_status_paths(&inspection.changed_files, &post_status);
@@ -906,10 +931,9 @@ pub fn inspect_workspace(workspace_root: &Path, state_root: &Path) -> SimardResu
     // it — aborting every mutating engineer before the coding agent spawns.
     // Belt-and-suspenders with the `.git/info/exclude` append performed at
     // worktree-allocation time (see `engineer_worktree::exclude_engineer_claim`).
-    let changed_files: Vec<String> = parse_status_paths(&status_output.stdout)
-        .into_iter()
-        .filter(|path| path != crate::engineer_worktree::ENGINEER_CLAIM_FILE)
-        .collect();
+    // Shared with `verify_agent_spawn_artifacts` via `strip_claim_sentinel` so
+    // both `git status` consumers ignore the sentinel identically.
+    let changed_files = strip_claim_sentinel(parse_status_paths(&status_output.stdout));
     let worktree_dirty = !changed_files.is_empty();
     let active_goals = {
         use crate::goals::GoalStore as _;

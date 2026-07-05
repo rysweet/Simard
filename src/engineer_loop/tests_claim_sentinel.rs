@@ -9,7 +9,8 @@ use std::process::Command;
 use serial_test::serial;
 use tempfile::tempdir;
 
-use super::inspect_workspace;
+use super::{inspect_workspace, strip_claim_sentinel};
+use crate::engineer_worktree::ENGINEER_CLAIM_FILE;
 
 fn git(repo: &Path, args: &[&str]) {
     let out = Command::new("git")
@@ -100,5 +101,34 @@ fn inspect_workspace_still_flags_real_changes_alongside_claim() {
         inspection.changed_files,
         vec!["user_change.txt".to_string()],
         "only the real change must be reported; the sentinel must be filtered"
+    );
+}
+
+/// `strip_claim_sentinel` is the shared filter used by BOTH `git status`
+/// consumers (`inspect_workspace` and `verify_agent_spawn_artifacts`). It must
+/// remove exactly the root sentinel and preserve every other path in order.
+#[test]
+fn strip_claim_sentinel_removes_only_the_root_sentinel() {
+    let input = vec![
+        "src/main.rs".to_string(),
+        ENGINEER_CLAIM_FILE.to_string(),
+        "Cargo.toml".to_string(),
+    ];
+    assert_eq!(
+        strip_claim_sentinel(input),
+        vec!["src/main.rs".to_string(), "Cargo.toml".to_string()],
+        "only the claim sentinel is removed; all other paths are preserved in order"
+    );
+}
+
+/// The filter is an exact root-path match, so a genuine change in a
+/// subdirectory that merely shares the sentinel's basename is NOT swallowed.
+#[test]
+fn strip_claim_sentinel_keeps_subdir_same_basename() {
+    let nested = format!("subdir/{ENGINEER_CLAIM_FILE}");
+    assert_eq!(
+        strip_claim_sentinel(vec![nested.clone(), ENGINEER_CLAIM_FILE.to_string()]),
+        vec![nested],
+        "a same-basename file under a subdirectory is a real change and must be kept"
     );
 }
