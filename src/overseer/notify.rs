@@ -141,6 +141,24 @@ impl OperatorNotification {
             autonomous: true,
         }
     }
+
+    /// Build a blocked-goal escalation: a goal carrying a "needs human review"
+    /// safeguard marker that a human must resolve. Sent on BOTH channels (email
+    /// and Signal) with the goal id and reason so the marker actually reaches a
+    /// person — closing the silent-failure gap where a "needs human review"
+    /// marker reached no human.
+    pub fn goal_blocked(goal_id: &str, reason: &str) -> Self {
+        Self {
+            kind: "goal-blocked",
+            headline: format!("goal {goal_id} needs human review"),
+            problem: format!(
+                "Goal `{goal_id}` is blocked and needs human review.\n  Reason: {reason}"
+            ),
+            link: None,
+            repo: "rysweet/Simard".to_string(),
+            autonomous: true,
+        }
+    }
 }
 
 fn short_commit(commit: &str) -> &str {
@@ -204,6 +222,21 @@ pub trait NotifyChannel: Send + Sync {
 /// Constructed with an email channel and a Signal channel so both fire.
 pub struct DualChannelNotifier {
     channels: Vec<Box<dyn NotifyChannel>>,
+}
+
+/// Object-safe seam the acting Overseer notifies the operator through. Lets the
+/// Overseer hold the mandatory [`DualChannelNotifier`] (email + Signal) in
+/// production while tests inject a fake that records the notification — reusing
+/// the ONE "notify on both channels, never drop" guarantee rather than adding a
+/// second notification path.
+pub trait OperatorNotifier: Send + Sync {
+    fn notify(&self, notification: &OperatorNotification) -> NotifyReport;
+}
+
+impl OperatorNotifier for DualChannelNotifier {
+    fn notify(&self, notification: &OperatorNotification) -> NotifyReport {
+        DualChannelNotifier::notify(self, notification)
+    }
 }
 
 impl DualChannelNotifier {

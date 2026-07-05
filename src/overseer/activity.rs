@@ -55,6 +55,10 @@ pub struct OverseerTotals {
     pub prs_merged: u64,
     pub deploys: u64,
     pub escalations: u64,
+    /// False-parked perpetual goals self-healed (auto-unblocked + reactivated).
+    pub goals_unblocked: u64,
+    /// Genuinely-blocked "needs human review" goals escalated to the operator.
+    pub goals_escalated: u64,
     pub held: u64,
     pub errors: u64,
 }
@@ -216,6 +220,8 @@ impl OverseerActivity {
             t.prs_merged += rep.prs_merged as u64;
             t.deploys += rep.deploys as u64;
             t.escalations += rep.escalations as u64;
+            t.goals_unblocked += rep.goals_unblocked as u64;
+            t.goals_escalated += rep.goals_escalated as u64;
             t.held += rep.held as u64;
             t.errors += rep.errors as u64;
         }
@@ -223,11 +229,18 @@ impl OverseerActivity {
     }
 
     /// Count of *actions taken* over the retained window (issues filed, fix
-    /// workstreams launched, PRs merged, deploys, escalations). `held` is
-    /// deliberately excluded: holding is observing-and-waiting, not an action.
+    /// workstreams launched, PRs merged, deploys, escalations, goal-board
+    /// self-heals + escalations). `held` is deliberately excluded: holding is
+    /// observing-and-waiting, not an action.
     pub fn interventions(&self) -> u64 {
         let t = &self.totals;
-        t.issues_filed + t.recipes_launched + t.prs_merged + t.deploys + t.escalations
+        t.issues_filed
+            + t.recipes_launched
+            + t.prs_merged
+            + t.deploys
+            + t.escalations
+            + t.goals_unblocked
+            + t.goals_escalated
     }
 
     /// The honest one-line status summary rendered on every surface.
@@ -397,6 +410,20 @@ pub fn humanize_tick(r: &OverseerTickReport) -> String {
     }
     if r.escalations > 0 {
         did.push(format!("escalated {} to the operator", r.escalations));
+    }
+    if r.goals_unblocked > 0 {
+        did.push(format!(
+            "self-healed {} blocked goal{}",
+            r.goals_unblocked,
+            plural(r.goals_unblocked)
+        ));
+    }
+    if r.goals_escalated > 0 {
+        did.push(format!(
+            "escalated {} blocked goal{} for human review",
+            r.goals_escalated,
+            plural(r.goals_escalated)
+        ));
     }
 
     let saw = format!("saw {} problem{}", r.problems, plural(r.problems));
