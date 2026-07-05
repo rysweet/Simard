@@ -45,6 +45,12 @@ mod copilot_task_submit;
 // `MeetingBackend`; `SignalConversation` (feature-gated below) is a third.
 pub mod conversation_channel;
 pub mod cost_tracking;
+// Issue #2419 (design spike): the Creative Ideas subsystem — an idea-generation
+// cognitive thread + four-reviewer pipeline that primes a pool of candidate
+// self-improvement ideas. Typed foundation + tests only; gated OFF by default
+// (`SIMARD_CREATIVE_IDEAS_ENABLED`) and not wired into the daemon. See
+// `docs/design/creative-ideas-thread.md`.
+pub mod creative_ideas;
 pub mod disk_health;
 pub mod disk_pressure;
 pub mod engineer_loop;
