@@ -781,7 +781,22 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
             .map_err(|e| map_op_err("recall_facts_ranked", e))?;
         // The library already sorted by descending score; preserve that order
         // (ordering *is* the ranking — no score is surfaced on `CognitiveFact`).
-        Ok(scored.into_iter().map(|s| to_fact(s.item)).collect())
+        let facts: Vec<CognitiveFact> = scored.into_iter().map(|s| to_fact(s.item)).collect();
+        // Release the whole-memory write lock BEFORE the metric step: `facts` is
+        // fully owned here, and precision folding allocates lowercased copies and
+        // takes a second (metrics) lock — none of which should run inside the
+        // serialized recall critical section on this hot path.
+        drop(guard);
+        // Fold this recall's precision@k into the in-process recall-quality
+        // aggregate so the per-cycle metric sweep emits ONE durable
+        // `recall_precision_at_k` sample (cycle mean) — no `metrics.jsonl` write
+        // on this hot path. Undefined-precision recalls (wildcard/empty query or
+        // an empty result) contribute no sample. Pure observation: it never
+        // changes the returned set.
+        if let Some(p) = super::metrics::precision_at_k(query, &facts, facts.len()) {
+            super::metrics::observe_recall_precision(super::metrics::RECALL_PRECISION_SITE, p);
+        }
+        Ok(facts)
     }
 
     fn recall_facts_ranked_reinforced(
@@ -821,7 +836,7 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         let scored = guard
             .recall_facts_ranked(query, options)
             .map_err(|e| map_op_err("recall_facts_ranked_reinforced", e))?;
-        let facts = scored
+        let facts: Vec<CognitiveFact> = scored
             .into_iter()
             .map(|s| {
                 let item = s.item;
@@ -839,6 +854,16 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
                 to_fact(item)
             })
             .collect();
+        // Release the whole-memory write lock before folding the metric (same
+        // rationale as `recall_facts_ranked`). Fold precision here too so the
+        // `recall_precision_at_k` coverage does NOT silently drop to zero if a
+        // future production caller is wired to this reinforced path instead of
+        // the pure `recall_facts_ranked` (invariant #8 — every ranked fact
+        // recall is measured).
+        drop(guard);
+        if let Some(p) = super::metrics::precision_at_k(query, &facts, facts.len()) {
+            super::metrics::observe_recall_precision(super::metrics::RECALL_PRECISION_SITE, p);
+        }
         Ok(facts)
     }
 

@@ -1,0 +1,120 @@
+name: "Ranked-Recall Precision@k Baseline"
+description: >
+  qa-team outside-in gate for the perpetual-cognition sub-goal "recall quality".
+  Simard's ranked fact-recall path
+  (src/cognitive_memory/library_adapter.rs::recall_facts_ranked) now emits a
+  measurable recall-quality signal: on every recall it folds precision@k over
+  the returned order into an in-process running mean, which the OODA daemon
+  drains once per cycle into the durable `recall_precision_at_k` series in
+  metrics.jsonl (via self_metrics::record_metric). precision@k is the fraction
+  of the top-k returned facts that are query-relevant (keyword proxy: the fact's
+  concept/content shares a query token) — the same signal the ranker's
+  text_relevance term rewards, so no external labels are needed. A wildcard/empty
+  query or empty result is undefined (None) and emits no sample, so structural
+  reads never drag the mean toward zero, and the recall path never writes
+  metrics.jsonl on the hot path. A deterministic fixed-corpus benchmark pins the
+  baseline (recall_precision_at_1=1.000 recall_precision_at_2=1.000
+  recall_precision_at_full=0.500): two topic-relevant facts must occupy the top
+  two slots of a four-fact recall, so a ranking change that floats an off-topic
+  fact into the top-k drops precision@2 below 1.0 and fails CI. This scenario
+  pins that behaviour end-to-end.
+version: "1.0.0"
+
+config:
+  timeout: 900000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "test-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 900000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Precision@k baseline pinned over the real ranked-recall path"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib
+        cognitive_memory::tests_ranked_recall::recall_precision
+        -- --nocapture
+    timeout: 900000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "recall_precision_at_1=1.000 recall_precision_at_2=1.000 recall_precision_at_full=0.500"
+        - "recall_precision_at_k_baseline ... ok"
+        - "recall_precision_isolates_text_relevance ... ok"
+        - "recall_precision_baseline_line_is_stable_across_runs ... ok"
+        - "test result: ok"
+
+  - name: "precision@k pure-function + running-aggregate contract (undefined-safe, mean, drain)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib
+        cognitive_memory::metrics::tests
+        -- --nocapture
+    timeout: 900000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "precision_all_relevant_is_one ... ok"
+        - "precision_half_relevant_in_window ... ok"
+        - "precision_zero_when_top_k_all_irrelevant ... ok"
+        - "precision_is_none_for_empty_results ... ok"
+        - "precision_is_none_for_wildcard_or_empty_query ... ok"
+        - "aggregate_folds_running_mean ... ok"
+        - "drain_returns_mean_and_resets ... ok"
+        - "test result: ok"
+
+  - name: "Full ranked-recall contract still green (no regression)"
+    agent: "test-agent"
+    action: "execute_command"
+    params:
+      command: >
+        cargo test --lib cognitive_memory::tests_ranked_recall
+        -- --nocapture
+    timeout: 900000
+    expect:
+      exitCode: 0
+      outputContains:
+        - "recall_facts_ranked_orders_by_descending_score ... ok"
+        - "recall_facts_ranked_respects_min_confidence ... ok"
+        - "recall_facts_ranked_default_delegates_to_search_facts ... ok"
+        - "test result: ok"
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "test-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "memory"
+    - "cognitive-memory"
+    - "recall"
+    - "recall-precision"
+    - "regression"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

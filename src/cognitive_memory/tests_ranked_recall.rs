@@ -235,8 +235,186 @@ fn prune_superseded_no_op_when_nothing_superseded() {
     assert_eq!(all_physical_facts(&mem).len(), 1, "live fact retained");
 }
 
-// ─── minimal non-library mock for the default-delegation test ────────────────
+// ─── recall precision@k regression baseline (recall-quality lever) ──────────
 
+/// Fixed-corpus baseline that pins the ranked fact-recall path's **precision@k**
+/// so a future ranking change that floats off-topic facts into the top-k fails
+/// CI instead of silently degrading recall quality.
+///
+/// Corpus: two `kafka`-topic facts (higher confidence) plus two unrelated facts
+/// (`postgres`, `redis`, lower confidence). Query `"kafka"` at `min_confidence
+/// 0.0` returns all four in ranked order. The `text_relevance` + `confidence`
+/// signals must place BOTH kafka facts in the top two slots:
+///
+/// * `precision@1 == 1.000` and `precision@2 == 1.000` — the relevant facts are
+///   ranked first (this is the anti-regression teeth: if an off-topic fact
+///   intrudes into the top two, precision@2 drops below 1.0 and this fails).
+/// * `precision@full (k=4) == 0.500` — two of the four returned facts are
+///   relevant, and precision is non-increasing past the relevant prefix.
+///
+/// Note: here the relevant facts also carry higher confidence, so this pins the
+/// *combined-signal* ranking (relevance + confidence together). The
+/// text_relevance signal is isolated separately — with confidence held equal —
+/// by [`recall_precision_isolates_text_relevance`], which is the teeth against a
+/// pure relevance-signal regression.
+///
+/// The `recall_precision_at_k` value emitted per OODA cycle is exactly this
+/// `precision_at_k` computed over the same returned order, so pinning it here
+/// pins the production self-metric too.
+#[test]
+fn recall_precision_at_k_baseline() {
+    let mem = test_mem();
+    // Relevant to "kafka" — higher confidence so they naturally rank on top.
+    mem.store_fact(
+        "kafka streaming",
+        "backpressure and consumer lag tuning",
+        0.9,
+        &[],
+        "src",
+    )
+    .expect("store kafka-1");
+    mem.store_fact(
+        "kafka partitions",
+        "rebalance and offset commit",
+        0.85,
+        &[],
+        "src",
+    )
+    .expect("store kafka-2");
+    // Unrelated to "kafka" — lower confidence so they rank below.
+    mem.store_fact(
+        "postgres indexing",
+        "btree bloat and vacuum",
+        0.6,
+        &[],
+        "src",
+    )
+    .expect("store pg");
+    mem.store_fact("redis eviction", "lru and ttl policy", 0.55, &[], "src")
+        .expect("store redis");
+
+    let ranked = mem
+        .recall_facts_ranked("kafka", 10, 0.0, RecallWeightSet::default())
+        .expect("ranked recall");
+    assert_eq!(
+        ranked.len(),
+        4,
+        "all four facts are returned at min_confidence 0.0"
+    );
+
+    let p_at_1 = super::metrics::precision_at_k("kafka", &ranked, 1).expect("precision@1 defined");
+    let p_at_2 = super::metrics::precision_at_k("kafka", &ranked, 2).expect("precision@2 defined");
+    let p_full = super::metrics::precision_at_k("kafka", &ranked, ranked.len())
+        .expect("precision@full defined");
+
+    // Greppable baseline line (mirrors the distill fact-yield benchmark style).
+    println!(
+        "recall_precision_at_1={p_at_1:.3} recall_precision_at_2={p_at_2:.3} \
+         recall_precision_at_full={p_full:.3}"
+    );
+
+    assert_eq!(p_at_1, 1.000, "top-1 recalled fact must be relevant");
+    assert_eq!(
+        p_at_2, 1.000,
+        "both relevant facts must occupy the top 2 slots (ranking-quality guard)"
+    );
+    assert_eq!(
+        p_full, 0.500,
+        "2 of 4 returned facts are relevant → full-window precision baseline"
+    );
+    assert!(
+        p_at_2 >= p_full,
+        "precision must be non-increasing past the relevant prefix"
+    );
+}
+
+/// The precision baseline is deterministic across repeated recalls of the same
+/// fixed corpus: recall twice and assert the precision@k values are identical
+/// (the ranked order, hence precision, must not vary run to run), and that the
+/// top-2 precision stays pinned at 1.0. Asserts via the pure `precision_at_k`
+/// over each recall's returned order — it does not touch the process-global
+/// aggregate, so it stays isolation-safe under parallel `--test-threads`.
+#[test]
+fn recall_precision_baseline_line_is_stable_across_runs() {
+    // Determinism guard: the ranked order (hence precision) must not vary run to
+    // run for the fixed corpus. Recall twice and compare.
+    let mem = test_mem();
+    mem.store_fact("kafka streaming", "backpressure", 0.9, &[], "src")
+        .expect("s1");
+    mem.store_fact("kafka partitions", "rebalance", 0.85, &[], "src")
+        .expect("s2");
+    mem.store_fact("postgres indexing", "vacuum", 0.6, &[], "src")
+        .expect("s3");
+
+    let run = || {
+        let ranked = mem
+            .recall_facts_ranked("kafka", 10, 0.0, RecallWeightSet::default())
+            .expect("ranked recall");
+        (
+            super::metrics::precision_at_k("kafka", &ranked, 2),
+            super::metrics::precision_at_k("kafka", &ranked, ranked.len()),
+        )
+    };
+    let first = run();
+    let second = run();
+    assert_eq!(first, second, "precision baseline must be deterministic");
+    assert_eq!(first.0, Some(1.0), "top-2 precision pinned at 1.0");
+}
+
+/// Text-relevance-isolating baseline (the anti-regression teeth the metric is
+/// for). Unlike [`recall_precision_at_k_baseline`] — where the relevant facts
+/// also carry higher confidence, so the combined signals could mask a broken
+/// `text_relevance` term — this corpus gives **every** fact the *same*
+/// confidence (0.7) and no usage/recency/graph advantage, so `text_relevance`
+/// is the ONLY signal that can differentiate them.
+///
+/// Two `kafka` facts (relevant) and two unrelated facts, all at confidence 0.7,
+/// recalled with query `"kafka"`. The two relevant facts must occupy the top
+/// two slots (`precision@2 == 1.000`) — and that can ONLY happen because
+/// `text_relevance` ranks the token-matching facts above the non-matching ones.
+/// If a future change zeroed or broke the `text_relevance` weight, all four
+/// facts would tie on every signal, the relevant pair would no longer be
+/// guaranteed on top, and this precision@2 assertion would fail. Empirically
+/// verified: at equal confidence the ranker orders the `kafka` facts first
+/// (`precision@1 == 1.0`), whereas a low-confidence relevant fact loses to
+/// high-confidence irrelevant ones — i.e. the default weights are
+/// confidence-dominated, which is exactly why the confidence must be held equal
+/// to isolate the relevance signal here.
+#[test]
+fn recall_precision_isolates_text_relevance() {
+    let mem = test_mem();
+    // Relevant to "kafka" — SAME confidence as the irrelevant facts.
+    mem.store_fact("kafka streaming", "consumer lag tuning", 0.7, &[], "src")
+        .expect("rel-1");
+    mem.store_fact("kafka partitions", "offset rebalance", 0.7, &[], "src")
+        .expect("rel-2");
+    // Unrelated — SAME confidence, so only text_relevance separates them.
+    mem.store_fact("postgres vacuum", "btree bloat autovacuum", 0.7, &[], "src")
+        .expect("irr-1");
+    mem.store_fact("redis eviction", "lru ttl policy", 0.7, &[], "src")
+        .expect("irr-2");
+
+    let ranked = mem
+        .recall_facts_ranked("kafka", 10, 0.0, RecallWeightSet::default())
+        .expect("ranked recall");
+    assert_eq!(ranked.len(), 4, "all four equal-confidence facts returned");
+
+    let p_at_1 = super::metrics::precision_at_k("kafka", &ranked, 1).expect("p@1");
+    let p_at_2 = super::metrics::precision_at_k("kafka", &ranked, 2).expect("p@2");
+    println!("recall_precision_relevance_isolated_at_1={p_at_1:.3} at_2={p_at_2:.3}");
+
+    assert_eq!(
+        p_at_1, 1.000,
+        "top-1 must be relevant purely on text_relevance (confidence held equal)"
+    );
+    assert_eq!(
+        p_at_2, 1.000,
+        "both relevant facts must occupy the top 2 slots on text_relevance alone \
+         — this fails if the relevance signal regresses"
+    );
+}
+
+// ─── minimal non-library mock for the default-delegation test ────────────────
 fn fact(concept: &str, content: &str, confidence: f64) -> CognitiveFact {
     CognitiveFact {
         node_id: format!("node-{concept}"),
