@@ -75,6 +75,7 @@ pub mod identity_auth;
 pub mod identity_composition;
 pub mod identity_precedence;
 pub mod improvements;
+pub mod journal;
 pub mod knowledge_bridge;
 pub mod knowledge_context;
 pub mod meeting_backend;

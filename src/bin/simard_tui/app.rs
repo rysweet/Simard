@@ -24,10 +24,11 @@ pub enum Tab {
     Stats,
     Status,
     Overseer,
+    Journal,
 }
 
 /// All tabs in display order.
-pub const ALL_TABS: [Tab; 8] = [
+pub const ALL_TABS: [Tab; 9] = [
     Tab::Overview,
     Tab::Goals,
     Tab::Engineers,
@@ -36,6 +37,7 @@ pub const ALL_TABS: [Tab; 8] = [
     Tab::Stats,
     Tab::Status,
     Tab::Overseer,
+    Tab::Journal,
 ];
 
 impl Tab {
@@ -50,6 +52,7 @@ impl Tab {
             Self::Stats => "Stats",
             Self::Status => "Status",
             Self::Overseer => "Overseer",
+            Self::Journal => "Journal",
         }
     }
 
@@ -71,6 +74,7 @@ impl Tab {
             KeyCode::Char('6') => Some(Tab::Stats),
             KeyCode::Char('7') => Some(Tab::Status),
             KeyCode::Char('8') => Some(Tab::Overseer),
+            KeyCode::Char('9') => Some(Tab::Journal),
             _ => None,
         }
     }
@@ -86,6 +90,7 @@ impl Tab {
             Self::Stats => 6,
             Self::Status => 7,
             Self::Overseer => 8,
+            Self::Journal => 9,
         }
     }
 }
@@ -145,6 +150,17 @@ pub struct App {
     pub gh_receiver: Option<mpsc::Receiver<(Option<usize>, Option<usize>)>>,
     pub gh_in_flight: bool,
     pub tick_count: u32,
+    // Journal tab (issue #2606)
+    /// The day's journal entries, newest day first (read from cognitive memory).
+    pub journal_entries: Vec<crate::journal::JournalEntry>,
+    /// Index into the *filtered* entry list of the currently selected day.
+    pub journal_selected: usize,
+    /// Current free-text search over the journal (empty = browse all).
+    pub journal_search: String,
+    /// When true, keystrokes edit [`Self::journal_search`] instead of browsing.
+    pub journal_search_mode: bool,
+    /// Whether the journal has been loaded for the current Journal-tab visit.
+    pub journal_loaded: bool,
     // Update notice (polled from background check)
     update_rx: Option<mpsc::Receiver<String>>,
     pub update_notice: Option<String>,
@@ -187,6 +203,11 @@ impl App {
             gh_receiver: None,
             gh_in_flight: false,
             tick_count: 0,
+            journal_entries: Vec::new(),
+            journal_selected: 0,
+            journal_search: String::new(),
+            journal_search_mode: false,
+            journal_loaded: false,
             update_rx,
             update_notice: None,
             waiting_for_response: false,
@@ -272,6 +293,56 @@ impl App {
             return;
         }
 
+        // Journal tab: browse days + full-text search (issue #2606). Up/Down
+        // (or j/k) move through the day list; `/` starts a search, `r` reloads.
+        // In search mode every keystroke edits the query; Enter/Esc leave it.
+        // Anything not handled here falls through so Left/Right still cycle
+        // tabs and `q` still quits.
+        if self.active_tab == Tab::Journal {
+            if self.journal_search_mode {
+                match code {
+                    KeyCode::Enter => {
+                        self.journal_search_mode = false;
+                        self.journal_selected = 0;
+                    }
+                    KeyCode::Esc => {
+                        self.journal_search.clear();
+                        self.journal_search_mode = false;
+                        self.journal_selected = 0;
+                    }
+                    KeyCode::Backspace => {
+                        self.journal_search.pop();
+                        self.journal_selected = 0;
+                    }
+                    KeyCode::Char(c) if self.journal_search.len() < 128 => {
+                        self.journal_search.push(c);
+                        self.journal_selected = 0;
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            match code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.journal_select_prev();
+                    return;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.journal_select_next();
+                    return;
+                }
+                KeyCode::Char('/') => {
+                    self.journal_search_mode = true;
+                    return;
+                }
+                KeyCode::Char('r') => {
+                    self.reload_journal();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // Left/Right arrow tab cycling (outside active meeting)
         match code {
             KeyCode::Right => {
@@ -288,6 +359,54 @@ impl App {
         // Default key handling
         if let KeyCode::Char('q' | 'Q') = code {
             self.should_quit = true;
+        }
+    }
+
+    /// The journal entries matching the current search, newest day first.
+    ///
+    /// Borrows into [`Self::journal_entries`]; an empty search returns every
+    /// entry. Uses the same match rule as the store's query so the TUI and the
+    /// dashboard agree on what "matches".
+    pub fn journal_filtered(&self) -> Vec<&crate::journal::JournalEntry> {
+        let query = self.journal_search.trim();
+        self.journal_entries
+            .iter()
+            .filter(|e| query.is_empty() || crate::journal::entry_matches(e, query))
+            .collect()
+    }
+
+    /// The currently selected entry (clamped into the filtered list), if any.
+    pub fn journal_selected_entry(&self) -> Option<&crate::journal::JournalEntry> {
+        let filtered = self.journal_filtered();
+        if filtered.is_empty() {
+            return None;
+        }
+        let idx = self.journal_selected.min(filtered.len() - 1);
+        Some(filtered[idx])
+    }
+
+    /// Reload the journal entries from cognitive memory and clamp the selection.
+    fn reload_journal(&mut self) {
+        self.journal_entries = crate::journal::read_journal_entries(&self.state_root);
+        let len = self.journal_filtered().len();
+        if len == 0 {
+            self.journal_selected = 0;
+        } else if self.journal_selected >= len {
+            self.journal_selected = len - 1;
+        }
+        self.journal_loaded = true;
+    }
+
+    /// Move the day selection one entry earlier (toward the newest).
+    fn journal_select_prev(&mut self) {
+        self.journal_selected = self.journal_selected.saturating_sub(1);
+    }
+
+    /// Move the day selection one entry later (toward the oldest).
+    fn journal_select_next(&mut self) {
+        let len = self.journal_filtered().len();
+        if len > 0 && self.journal_selected + 1 < len {
+            self.journal_selected += 1;
         }
     }
 
@@ -760,6 +879,17 @@ impl App {
             self.refresh_stats();
         }
 
+        // Journal tab: load lazily the first time it becomes active, then keep
+        // the cached entries until the operator leaves and returns (or presses
+        // `r`). Re-entering the tab reloads so newly written days appear.
+        if self.active_tab == Tab::Journal {
+            if !self.journal_loaded {
+                self.reload_journal();
+            }
+        } else {
+            self.journal_loaded = false;
+        }
+
         // Meeting tab: auto-spawn + drain output
         if self.active_tab == Tab::Meeting
             && self.meeting_status == MeetingStatus::NotStarted
@@ -932,7 +1062,7 @@ mod tests {
 
     #[test]
     fn all_tabs_count() {
-        assert_eq!(ALL_TABS.len(), 8);
+        assert_eq!(ALL_TABS.len(), 9);
     }
 
     #[test]
@@ -952,6 +1082,7 @@ mod tests {
         assert_eq!(Tab::Stats.label(), "Stats");
         assert_eq!(Tab::Status.label(), "Status");
         assert_eq!(Tab::Overseer.label(), "Overseer");
+        assert_eq!(Tab::Journal.label(), "Journal");
     }
 
     #[test]
@@ -1629,7 +1760,7 @@ mod tests {
     #[test]
     fn handle_key_right_arrow_wraps_at_end() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Overseer; // index 7 (last)
+        app.active_tab = Tab::Journal; // index 8 (last)
 
         app.handle_key(key_code(KeyCode::Right));
         assert_eq!(app.active_tab, Tab::Overview); // wraps to index 0
@@ -1641,7 +1772,7 @@ mod tests {
         assert_eq!(app.active_tab, Tab::Overview); // index 0
 
         app.handle_key(key_code(KeyCode::Left));
-        assert_eq!(app.active_tab, Tab::Overseer); // wraps to index 7 (last)
+        assert_eq!(app.active_tab, Tab::Journal); // wraps to index 8 (last)
     }
 
     #[test]

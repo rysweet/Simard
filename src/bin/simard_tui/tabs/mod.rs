@@ -3,6 +3,7 @@
 pub mod activity;
 pub mod engineers;
 pub mod goals;
+pub mod journal;
 pub mod meeting;
 pub mod overseer;
 pub mod overview;

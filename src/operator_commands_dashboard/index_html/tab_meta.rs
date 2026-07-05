@@ -201,6 +201,14 @@ pub const TAB_METADATA: &[TabMeta] = &[
         lede: "One consolidated operational report — the daemon, system resources, model spending, memory and brain health, gym, goals, active work, merged pull requests, and unexpected telemetry signals, all on a single page.",
         tooltip: "One consolidated operational status report across every subsystem",
     },
+    TabMeta {
+        slug: "journal",
+        label: "Journal",
+        title: "Journal · Simard",
+        h1: "Journal",
+        lede: "A plain-language daily diary of what Simard and its steward the Overseer did each day, with a simple table of the code changes proposed. Browse by date and search the full history.",
+        tooltip: "A plain-language daily diary of what Simard did, browseable by date",
+    },
 ];
 
 /// Browser title shown on first page load. The client-side tab handler

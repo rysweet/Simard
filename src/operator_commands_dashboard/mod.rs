@@ -11,6 +11,7 @@ mod goals;
 mod goals_status;
 mod hosts;
 mod index_html;
+mod journal;
 mod live_engineers;
 mod logs;
 mod memory;

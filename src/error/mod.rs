@@ -70,6 +70,12 @@ pub enum SimardError {
         field: String,
         reason: String,
     },
+    /// A stored journal entry (issue #2606) could not be parsed — a
+    /// `journal:`-keyed cognitive-memory fact whose JSON content is corrupt.
+    InvalidJournalRecord {
+        field: String,
+        reason: String,
+    },
     InvalidSessionId {
         value: String,
         reason: String,
