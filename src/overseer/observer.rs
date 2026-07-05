@@ -233,6 +233,7 @@ fn signal_kind_label(s: &Signal) -> &'static str {
         Signal::Anomaly { .. } => "Anomaly",
         Signal::LoopDetected { .. } => "LoopDetected",
         Signal::DriftCorrection { .. } => "DriftCorrection",
+        Signal::GoalBlocked { .. } => "GoalBlocked",
     }
 }
 

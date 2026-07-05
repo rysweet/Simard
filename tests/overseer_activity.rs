@@ -62,12 +62,9 @@ fn report(
         issues_filed,
         recipes_launched,
         prs_merged,
-        deploys: 0,
-        escalations: 0,
         held,
-        errors: 0,
-        panicked: false,
         duration_ms: 42,
+        ..OverseerTickReport::default()
     }
 }
 

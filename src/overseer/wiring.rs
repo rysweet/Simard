@@ -32,23 +32,28 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
-use crate::goal_curation::{BacklogItem, GoalBoard};
+use crate::goal_curation::{BacklogItem, GoalBoard, GoalProgress};
 use crate::goal_curation::{
     DEFAULT_STEWARD_SCORE, add_backlog_item, load_goal_board, save_goal_board,
 };
 
 use crate::overseer::audit::SelfQualityAuditor;
 use crate::overseer::capabilities::{
-    DeployReport, Deployer, GoalBrief, GoalCurator, InFlightItem, OverseerError,
+    BlockedGoal, DeployReport, Deployer, GoalBrief, GoalCurator, InFlightItem, OverseerError,
 };
-use crate::overseer::config::{overseer_author_login, overseer_interval_secs, whisper_enabled};
+use crate::overseer::config::{
+    goal_health_enabled, overseer_author_login, overseer_interval_secs, whisper_enabled,
+};
 use crate::overseer::deploy::GuardedDeployer;
 use crate::overseer::guardrails::RecursionGuard;
 use crate::overseer::launch::SmartOrchestratorLauncher;
 use crate::overseer::meeting_ops::MeetingGoalTransfer;
 use crate::overseer::merge_ops::MergePrOps;
+use crate::overseer::notify::DualChannelNotifier;
 use crate::overseer::observer::StewardshipIssueFiler;
-use crate::overseer::sensor::{SnapshotStatusReader, in_flight_from_board};
+use crate::overseer::sensor::{
+    SnapshotStatusReader, blocked_goals_from_board, in_flight_from_board,
+};
 use crate::overseer::{ActOutcome, Capabilities, Overseer};
 
 // ─────────────────────────── cadence scheduler ─────────────────────────────
@@ -123,6 +128,15 @@ pub struct OverseerTickReport {
     pub whispers: usize,
     /// Whispers suppressed by the dedup window / per-hour cap this tick.
     pub whispers_suppressed: usize,
+    /// False-parked standing/perpetual goals auto-unblocked + reactivated this
+    /// tick (the self-heal path).
+    pub goals_unblocked: usize,
+    /// Genuinely-blocked "needs human review" goals escalated to the operator
+    /// (email + Signal) this tick.
+    pub goals_escalated: usize,
+    /// Goal-board self-heal / escalation actions suppressed by the dedup gate
+    /// this tick.
+    pub goals_health_suppressed: usize,
     /// Capability errors encountered while acting (isolated, never fatal).
     pub errors: usize,
     /// Set when the tick itself panicked and was isolated by
@@ -189,6 +203,9 @@ pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
         held = report.held,
         whispers = report.whispers,
         whispers_suppressed = report.whispers_suppressed,
+        goals_unblocked = report.goals_unblocked,
+        goals_escalated = report.goals_escalated,
+        goals_health_suppressed = report.goals_health_suppressed,
         errors = report.errors,
         duration_ms = report.duration_ms,
         "overseer tick complete"
@@ -229,6 +246,9 @@ fn tally_outcome(report: &mut OverseerTickReport, outcome: &ActOutcome) {
         ActOutcome::Escalated => report.escalations += 1,
         ActOutcome::Whispered { .. } => report.whispers += 1,
         ActOutcome::WhisperSuppressed { .. } => report.whispers_suppressed += 1,
+        ActOutcome::GoalUnblocked { .. } => report.goals_unblocked += 1,
+        ActOutcome::GoalEscalated { .. } => report.goals_escalated += 1,
+        ActOutcome::GoalHealthSuppressed { .. } => report.goals_health_suppressed += 1,
         ActOutcome::ConflictResolved
         | ActOutcome::GoalTransferred
         | ActOutcome::Reported
@@ -305,6 +325,31 @@ impl GoalCurator for BoardGoalCurator {
 
     fn in_flight(&self) -> Result<Vec<InFlightItem>, OverseerError> {
         Ok(in_flight_from_board(&self.load()?))
+    }
+
+    fn blocked_goals(&self) -> Result<Vec<BlockedGoal>, OverseerError> {
+        Ok(blocked_goals_from_board(&self.load()?))
+    }
+
+    fn unblock(&self, goal_id: &str) -> Result<(), OverseerError> {
+        // The exact `simard goal unblock` mutation: restore the blocked goal to
+        // `NotStarted` so the next OODA cycle re-enters the spawn path. Reuses
+        // the shipped `load_goal_board` / `save_goal_board` under the flock
+        // write-lock (`save_goal_board` acquires `BoardWriteLock`).
+        let mut board = self.load()?;
+        let goal = board
+            .active
+            .iter_mut()
+            .find(|g| g.id == goal_id)
+            .ok_or_else(|| OverseerError::Capability {
+                what: "goal_board.unblock",
+                detail: format!("goal '{goal_id}' not found on the active board"),
+            })?;
+        goal.status = GoalProgress::NotStarted;
+        save_goal_board(&board, self.mem.as_ref()).map_err(|e| OverseerError::Capability {
+            what: "goal_board.save",
+            detail: e.to_string(),
+        })
     }
 }
 
@@ -403,6 +448,12 @@ pub fn build_overseer(
                 crate::meeting_facilitator::default_handoff_dir(),
             ),
         ))
+        // Goal-board health: self-heal false-parked perpetual goals and escalate
+        // genuine "needs human review" blocks to the operator on BOTH channels
+        // (email + Signal) via the SAME mandatory notifier the merge path uses.
+        // Enabled by default (opt-out via SIMARD_OVERSEER_GOAL_HEALTH).
+        .with_goal_health_enabled(goal_health_enabled())
+        .with_operator_notifier(Box::new(DualChannelNotifier::from_env()))
 }
 
 /// Resolve the acting Overseer's tick cadence (seconds), clamped to the config
