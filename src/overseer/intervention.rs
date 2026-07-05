@@ -46,6 +46,18 @@ pub enum Intervention {
         note: String,
         urgency: WhisperUrgency,
     },
+    /// SELF-HEAL a false-parked standing/perpetual goal: auto-unblock + reactivate
+    /// it — the exact operation `simard goal unblock` performs — so a perpetual
+    /// goal wrongly hard-blocked by the no-progress safeguard re-enters the OODA
+    /// spawn path. Deduped so it never fights itself; optionally followed by an
+    /// advisory whisper steering Simard to carve a bounded shippable sub-goal.
+    /// Capability: `GoalCurator::unblock` (+ optional `whisper_ops::WhisperSink`).
+    UnblockGoal { goal_id: String, reason: String },
+    /// ESCALATE a genuinely-blocked goal carrying a "needs human review" marker to
+    /// the operator (email + Signal) with the goal id + reason, so the marker
+    /// actually reaches a human — closing the silent-failure gap.
+    /// Capability: `notify::OperatorNotifier`.
+    EscalateBlockedGoal { goal_id: String, reason: String },
 }
 
 impl Intervention {
@@ -62,6 +74,8 @@ impl Intervention {
             Self::RunAudit { .. } => "run_audit",
             Self::Escalate { .. } => "escalate",
             Self::Whisper { .. } => "whisper",
+            Self::UnblockGoal { .. } => "unblock_goal",
+            Self::EscalateBlockedGoal { .. } => "escalate_blocked_goal",
         }
     }
 }

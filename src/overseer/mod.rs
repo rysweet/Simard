@@ -66,6 +66,8 @@ pub mod whisper_ops;
 pub mod wiring;
 
 #[cfg(test)]
+mod tests_goal_health;
+#[cfg(test)]
 mod tests_m1;
 #[cfg(test)]
 mod tests_m2;
@@ -73,11 +75,12 @@ mod tests_m2;
 mod tests_whisper;
 
 pub use capabilities::{
-    Auditor, Deployer, GoalCurator, IssueFiler, MeetingHost, ObservedState, OrchestratorRunBrief,
-    OverseerError, PrOps, RecipeBrief, RecipeLauncher, StatusReader,
+    Auditor, BlockedGoal, Deployer, GoalCurator, IssueFiler, MeetingHost, ObservedState,
+    OrchestratorRunBrief, OverseerError, PrOps, RecipeBrief, RecipeLauncher, StatusReader,
 };
 pub use config::{
-    daily_budget_usd, overseer_acting_enabled, overseer_author_login, overseer_enabled,
+    daily_budget_usd, goal_health_enabled, overseer_acting_enabled, overseer_author_login,
+    overseer_enabled,
 };
 pub use guardrails::{
     AutonomyGate, BudgetGate, ConflictSequencer, RecursionGuard, RiskClass, Subject,
@@ -87,7 +90,7 @@ pub use intervention::{Intervention, PlannedIntervention};
 pub use observer::{StewardshipIssueFiler, decide_read_only, is_m1_permitted};
 pub use sensor::{
     ObserverReport, OverseerSensorThread, SnapshotSource, SnapshotStatusReader,
-    in_flight_from_board, observed_from_snapshot, run_observer_cycle,
+    blocked_goals_from_board, in_flight_from_board, observed_from_snapshot, run_observer_cycle,
 };
 pub use signal::{Priority, Problem, ProblemKind, Signal, signals_from};
 pub use whisper_ops::{
@@ -100,7 +103,10 @@ pub use wiring::{
     run_overseer_tick_isolated,
 };
 
-use crate::goal_curation::no_progress_breaker::NO_PROGRESS_BREAKER_THRESHOLD;
+use crate::goal_curation::no_progress_breaker::{
+    NO_PROGRESS_BREAKER_THRESHOLD, is_no_progress_marker,
+};
+use crate::overseer::notify::{OperatorNotification, OperatorNotifier};
 use capabilities::{DeployReport, GoalBrief, InFlightItem, IssueOutcome, WorkstreamHandle};
 use std::path::PathBuf;
 
@@ -137,6 +143,16 @@ pub struct Overseer {
     /// Whether the whisperer is enabled (config opt-out). When off, whispers are
     /// held (never delivered) even if the observed condition holds.
     whisper_enabled: bool,
+    /// The operator-notification seam (email + Signal) the ESCALATE-blocked-goal
+    /// path fires through so a "needs human review" marker reaches a human.
+    /// `None` until wired; escalation requires it.
+    notifier: Option<Box<dyn OperatorNotifier>>,
+    /// Dedup + rate-limit gate for goal-board self-heal / escalation actions, so
+    /// the same blocked goal is not re-unblocked or re-escalated every tick.
+    blocked_goal_gate: WhisperGate,
+    /// Whether goal-board health handling (self-heal + escalate) is enabled
+    /// (config opt-out). When off, both actions are held (never taken).
+    goal_health_enabled: bool,
 }
 
 /// The result of one meta-OODA turn. Side-effect free: it reports what was
@@ -172,6 +188,21 @@ pub enum ActOutcome {
     WhisperSuppressed {
         reason: &'static str,
     },
+    /// A false-parked standing/perpetual goal was auto-unblocked + reactivated
+    /// (the `simard goal unblock` operation) by the self-heal path.
+    GoalUnblocked {
+        goal_id: String,
+    },
+    /// A genuinely-blocked "needs human review" goal was escalated to the
+    /// operator on both channels (email + Signal).
+    GoalEscalated {
+        goal_id: String,
+    },
+    /// A goal-board self-heal / escalation was suppressed by the dedup gate
+    /// (duplicate within the window, or the per-hour cap was reached).
+    GoalHealthSuppressed {
+        reason: &'static str,
+    },
 }
 
 impl Overseer {
@@ -188,12 +219,32 @@ impl Overseer {
             // 15-minute dedup window; at most 5 whispers per rolling hour.
             whisper_gate: WhisperGate::new(900, 5),
             whisper_enabled: false,
+            notifier: None,
+            // 15-minute dedup window so a persistent blocked goal is self-healed
+            // / escalated once per window (never in a per-tick loop); a generous
+            // per-hour cap covers many distinct goals without flooding.
+            blocked_goal_gate: WhisperGate::new(900, 20),
+            goal_health_enabled: false,
         }
     }
 
     /// Wire the Simard Whisperer's delivery seam (advisory steering notes).
     pub fn with_whisper_sink(mut self, sink: Box<dyn WhisperSink>) -> Self {
         self.whisper_sink = Some(sink);
+        self
+    }
+
+    /// Wire the operator-notification seam (email + Signal) used by the
+    /// ESCALATE-blocked-goal path. `None` until wired; escalation requires it.
+    pub fn with_operator_notifier(mut self, notifier: Box<dyn OperatorNotifier>) -> Self {
+        self.notifier = Some(notifier);
+        self
+    }
+
+    /// Enable/disable goal-board health handling (self-heal + escalate). Off by
+    /// default; the daemon sets this from [`config::goal_health_enabled`].
+    pub fn with_goal_health_enabled(mut self, enabled: bool) -> Self {
+        self.goal_health_enabled = enabled;
         self
     }
 
@@ -229,7 +280,11 @@ impl Overseer {
     /// execute side effects; returns the plan for M2+ Act to run.
     pub fn run_cycle(&mut self) -> Result<CycleReport, OverseerError> {
         // Observe.
-        let observed = self.caps.status.snapshot()?;
+        let mut observed = self.caps.status.snapshot()?;
+        // Enrich with goal-board health: the goals currently BLOCKED on Simard's
+        // board (false-parks + genuine "needs human review" blocks). Read-only;
+        // a board-read failure degrades to "no blocked goals", never aborts.
+        observed.blocked_goals = self.caps.goals.blocked_goals().unwrap_or_default();
         let signals = signals_from(&observed);
 
         // Orient (dedup against Simard's in-flight work; failure to read the
@@ -269,6 +324,20 @@ impl Overseer {
                 intervention: iv.clone(),
                 admitted: false,
                 note: "held: whisper disabled (SIMARD_OVERSEER_WHISPER)".to_string(),
+            };
+        }
+
+        // Goal-board health opt-out: when disabled, hold the self-heal /
+        // escalation (no action taken) even though a blocked goal was observed.
+        if matches!(
+            iv,
+            Intervention::UnblockGoal { .. } | Intervention::EscalateBlockedGoal { .. }
+        ) && !self.goal_health_enabled
+        {
+            return PlannedIntervention {
+                intervention: iv.clone(),
+                admitted: false,
+                note: "held: goal-board health disabled (SIMARD_OVERSEER_GOAL_HEALTH)".to_string(),
             };
         }
 
@@ -357,6 +426,10 @@ impl Overseer {
             }
             Intervention::Escalate { .. } => Ok(ActOutcome::Escalated),
             Intervention::Whisper { note, urgency } => self.act_whisper(note, *urgency),
+            Intervention::UnblockGoal { goal_id, reason } => self.act_unblock_goal(goal_id, reason),
+            Intervention::EscalateBlockedGoal { goal_id, reason } => {
+                self.act_escalate_blocked_goal(goal_id, reason)
+            }
         }
     }
 
@@ -445,6 +518,158 @@ impl Overseer {
                 })
             }
         }
+    }
+
+    /// SELF-HEAL a false-parked standing/perpetual goal: auto-unblock +
+    /// reactivate it (the exact `simard goal unblock` operation), deduped so it
+    /// never re-fires in a tight loop, then OPTIONALLY whisper Simard to carve a
+    /// bounded shippable sub-goal. Fails CLOSED without a DISTINCT steward
+    /// identity (anti-recursion — the Overseer must never self-heal a goal
+    /// without a configured distinct identity, which also prevents a self-heal
+    /// loop). The whisper is best-effort: a whisper failure never fails the
+    /// unblock.
+    fn act_unblock_goal(
+        &mut self,
+        goal_id: &str,
+        reason: &str,
+    ) -> Result<ActOutcome, OverseerError> {
+        if !self.recursion.is_configured() {
+            return Err(OverseerError::Recursion {
+                subject: format!("unblock goal (unconfigured steward identity): {goal_id}"),
+            });
+        }
+        let signature = format!("unblock:{goal_id}");
+        let now = now_secs();
+        match self.blocked_goal_gate.peek(&signature, now) {
+            WhisperDecision::Deliver => {
+                self.caps.goals.unblock(goal_id)?;
+                // Consume the dedup slot only after a successful unblock.
+                self.blocked_goal_gate.commit(&signature, now);
+                tracing::info!(
+                    target: "overseer::goal_health",
+                    goal_id,
+                    reason,
+                    action = "unblock",
+                    "overseer self-healed a false-parked perpetual goal: auto-unblocked + reactivated"
+                );
+                // Optional advisory whisper: steer Simard to carve a bounded,
+                // shippable sub-goal instead of re-attempting the whole standing
+                // goal at once. Best-effort and reuses the whisper gate/identity.
+                self.try_whisper_carve_subgoal(goal_id);
+                Ok(ActOutcome::GoalUnblocked {
+                    goal_id: goal_id.to_string(),
+                })
+            }
+            WhisperDecision::SuppressDuplicate => {
+                tracing::debug!(
+                    target: "overseer::goal_health",
+                    goal_id,
+                    action = "unblock",
+                    reason = "duplicate",
+                    "overseer suppressed a duplicate self-heal within the dedup window"
+                );
+                Ok(ActOutcome::GoalHealthSuppressed {
+                    reason: "duplicate",
+                })
+            }
+            WhisperDecision::SuppressCapReached => {
+                tracing::debug!(
+                    target: "overseer::goal_health",
+                    goal_id,
+                    action = "unblock",
+                    reason = "cap_reached",
+                    "overseer suppressed a self-heal: per-hour cap reached"
+                );
+                Ok(ActOutcome::GoalHealthSuppressed {
+                    reason: "cap_reached",
+                })
+            }
+        }
+    }
+
+    /// ESCALATE a genuinely-blocked "needs human review" goal to the operator on
+    /// BOTH channels (email + Signal) with the goal id + reason, so the marker
+    /// actually reaches a human. Deduped so it never re-fires in a loop; fails
+    /// CLOSED without a DISTINCT steward identity (anti-recursion).
+    fn act_escalate_blocked_goal(
+        &mut self,
+        goal_id: &str,
+        reason: &str,
+    ) -> Result<ActOutcome, OverseerError> {
+        if !self.recursion.is_configured() {
+            return Err(OverseerError::Recursion {
+                subject: format!(
+                    "escalate blocked goal (unconfigured steward identity): {goal_id}"
+                ),
+            });
+        }
+        let signature = format!("escalate:{goal_id}");
+        let now = now_secs();
+        match self.blocked_goal_gate.peek(&signature, now) {
+            WhisperDecision::Deliver => {
+                let notifier = self.notifier.as_ref().ok_or(OverseerError::Capability {
+                    what: "notify.operator",
+                    detail: "no operator notifier configured".to_string(),
+                })?;
+                let notification = OperatorNotification::goal_blocked(goal_id, reason);
+                let report = notifier.notify(&notification);
+                // Consume the dedup slot only after a dispatch attempt (the
+                // notifier itself never drops — it queues/logs on failure).
+                self.blocked_goal_gate.commit(&signature, now);
+                tracing::info!(
+                    target: "overseer::goal_health",
+                    goal_id,
+                    reason,
+                    action = "escalate",
+                    dispatched = report.dispatched(),
+                    all_sent = report.all_sent(),
+                    "overseer escalated a genuinely-blocked needs-human-review goal to the operator"
+                );
+                Ok(ActOutcome::GoalEscalated {
+                    goal_id: goal_id.to_string(),
+                })
+            }
+            WhisperDecision::SuppressDuplicate => {
+                tracing::debug!(
+                    target: "overseer::goal_health",
+                    goal_id,
+                    action = "escalate",
+                    reason = "duplicate",
+                    "overseer suppressed a duplicate escalation within the dedup window"
+                );
+                Ok(ActOutcome::GoalHealthSuppressed {
+                    reason: "duplicate",
+                })
+            }
+            WhisperDecision::SuppressCapReached => {
+                tracing::debug!(
+                    target: "overseer::goal_health",
+                    goal_id,
+                    action = "escalate",
+                    reason = "cap_reached",
+                    "overseer suppressed an escalation: per-hour cap reached"
+                );
+                Ok(ActOutcome::GoalHealthSuppressed {
+                    reason: "cap_reached",
+                })
+            }
+        }
+    }
+
+    /// Best-effort advisory whisper steering Simard to carve ONE bounded,
+    /// shippable sub-goal from a just-unblocked standing goal. Silently skipped
+    /// when the whisperer is disabled/unwired; a delivery error or suppression is
+    /// ignored (the self-heal already succeeded).
+    fn try_whisper_carve_subgoal(&mut self, goal_id: &str) {
+        if !self.whisper_enabled || self.whisper_sink.is_none() {
+            return;
+        }
+        let note = format!(
+            "Overseer steering note for goal {goal_id}: this standing goal was auto-unblocked \
+             after a no-progress false-park. Carve ONE bounded, shippable sub-goal from it and \
+             ship that next, rather than re-attempting the whole standing goal at once."
+        );
+        let _ = self.act_whisper(&note, WhisperUrgency::Normal);
     }
 }
 
@@ -584,6 +809,28 @@ fn classify_signal(s: &Signal) -> (ProblemKind, Priority, String, String) {
             format!("drift:{goal_id}"),
             format!("goal {goal_id} drifting from intent: {detail}"),
         ),
+        Signal::GoalBlocked {
+            goal_id,
+            needs_review,
+            consecutive_no_action,
+            ..
+        } => (
+            ProblemKind::GoalHygiene,
+            if *needs_review {
+                Priority::High
+            } else {
+                Priority::Normal
+            },
+            format!("goal:blocked:{goal_id}"),
+            format!(
+                "goal {goal_id} blocked{} ({consecutive_no_action} no-action cycle(s))",
+                if *needs_review {
+                    " — needs human review"
+                } else {
+                    ""
+                }
+            ),
+        ),
     }
 }
 
@@ -637,14 +884,35 @@ pub fn decide(problem: &Problem) -> Intervention {
         ProblemKind::ResourcePressure => Intervention::Escalate {
             reason: problem.summary.clone(),
         },
-        ProblemKind::GoalHygiene => Intervention::TransferGoal {
-            goal: GoalBrief {
-                title: problem.summary.clone(),
-                rationale: "stale / re-litigated goal — transfer to Simard for closure".to_string(),
-                priority: 3,
-                target_repo: "rysweet/Simard".to_string(),
-            },
-        },
+        ProblemKind::GoalHygiene => {
+            // Goal-board health takes precedence when the evidence is a blocked
+            // goal: self-heal a false-parked perpetual goal, or escalate a
+            // genuine "needs human review" block. A stale/re-litigated goal
+            // (no `GoalBlocked` evidence) still transfers to Simard for closure.
+            if let Some((goal_id, reason, perpetual, needs_review)) =
+                problem.evidence.iter().find_map(|s| match s {
+                    Signal::GoalBlocked {
+                        goal_id,
+                        reason,
+                        perpetual,
+                        needs_review,
+                        ..
+                    } => Some((goal_id.clone(), reason.clone(), *perpetual, *needs_review)),
+                    _ => None,
+                })
+            {
+                return decide_blocked_goal(goal_id, reason, perpetual, needs_review);
+            }
+            Intervention::TransferGoal {
+                goal: GoalBrief {
+                    title: problem.summary.clone(),
+                    rationale: "stale / re-litigated goal — transfer to Simard for closure"
+                        .to_string(),
+                    priority: 3,
+                    target_repo: "rysweet/Simard".to_string(),
+                },
+            }
+        }
         // A looping goal is steered with a LIGHTWEIGHT whisper by default. Only
         // once the loop reaches Simard's no-progress breaker threshold (the
         // whisper was insufficient) does the Overseer escalate to a full meeting
@@ -684,6 +952,36 @@ pub fn decide(problem: &Problem) -> Intervention {
             urgency: WhisperUrgency::Normal,
         },
     }
+}
+
+/// Route a blocked goal to the right stewardship action (defense-in-depth for
+/// #2609):
+///
+/// - a PERPETUAL/standing goal false-parked by the **no-progress** safeguard is
+///   SELF-HEALED — auto-unblocked + reactivated (never escalated: it is a false
+///   park, not a genuine block);
+/// - ANY OTHER goal carrying a "needs human review" marker (a normal no-progress
+///   block, or any brain-failure block) is ESCALATED to the operator so the
+///   marker reaches a human;
+/// - a plain operator-set / dependency block is surfaced in the periodic Report
+///   and left untouched (respect the deliberate block).
+///
+/// Reuses the EXISTING no-progress marker predicate ([`is_no_progress_marker`])
+/// and the perpetual flag derived from #2589/#2609 — it invents no new notion of
+/// either.
+fn decide_blocked_goal(
+    goal_id: String,
+    reason: String,
+    perpetual: bool,
+    needs_review: bool,
+) -> Intervention {
+    if perpetual && is_no_progress_marker(&reason) {
+        return Intervention::UnblockGoal { goal_id, reason };
+    }
+    if needs_review {
+        return Intervention::EscalateBlockedGoal { goal_id, reason };
+    }
+    Intervention::Report
 }
 
 #[cfg(test)]

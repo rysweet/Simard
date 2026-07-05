@@ -35,6 +35,12 @@ pub const OVERSEER_INTERVAL_ENV: &str = "SIMARD_OVERSEER_INTERVAL_SECS";
 /// whisperer off regardless of this flag.
 pub const SIMARD_OVERSEER_WHISPER_ENV: &str = "SIMARD_OVERSEER_WHISPER";
 
+/// Opt-out flag for **goal-board health handling** (the self-heal + escalate
+/// paths). ON by default whenever the acting Overseer runs; an explicit falsey
+/// value (`0`/`false`/`no`/`off`) disables it. Goal-board health only makes
+/// sense while the Overseer runs, so a disabled Overseer forces it off.
+pub const SIMARD_OVERSEER_GOAL_HEALTH_ENV: &str = "SIMARD_OVERSEER_GOAL_HEALTH";
+
 /// GitHub login the acting Overseer authors its own workstreams under. Sourced
 /// here so the daemon and the merge/recursion path agree on ONE stable, DISTINCT
 /// identity (never the human operator's login). Defaults to
@@ -115,6 +121,29 @@ pub fn whisper_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
 /// Production entry point: read the real process environment.
 pub fn whisper_enabled() -> bool {
     whisper_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve whether **goal-board health handling** (self-heal false-parked
+/// perpetual goals + escalate genuine "needs human review" blocks) is enabled,
+/// with **default ON** opt-out semantics consistent with the acting Overseer.
+/// Enabled UNLESS [`SIMARD_OVERSEER_GOAL_HEALTH_ENV`] is an explicit falsey
+/// value — AND only while the acting Overseer itself is enabled (an
+/// explicitly-disabled Overseer forces goal-board health off).
+pub fn goal_health_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    // No Overseer ⇒ no goal-board health handling.
+    if !overseer_acting_enabled_from(&lookup) {
+        return false;
+    }
+    // Opt-out: enabled unless an explicit falsey value is set.
+    !matches!(
+        lookup(SIMARD_OVERSEER_GOAL_HEALTH_ENV).as_deref().map(str::trim),
+        Some(v) if is_falsey(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn goal_health_enabled() -> bool {
+    goal_health_enabled_from(|k| std::env::var(k).ok())
 }
 
 /// Resolve the Overseer's DISTINCT author login. Falls back to

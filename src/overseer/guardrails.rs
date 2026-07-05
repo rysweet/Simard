@@ -46,6 +46,13 @@ pub fn classify(iv: &Intervention) -> RiskClass {
         // is advisory context only. Routine; its own dedup/identity gates
         // ([`WhisperGate`] / [`RecursionGuard`]) apply in the act path.
         Intervention::Whisper { .. } => RiskClass::Routine,
+        // Goal-board self-heal and escalation are routine stewardship: unblocking
+        // a false-parked perpetual goal restores the shipped `simard goal unblock`
+        // state, and escalation is a notification. Both are deduped and
+        // identity-gated (fail-closed) in the act path, and spend no LLM budget.
+        Intervention::UnblockGoal { .. } | Intervention::EscalateBlockedGoal { .. } => {
+            RiskClass::Routine
+        }
         _ => RiskClass::Routine,
     }
 }

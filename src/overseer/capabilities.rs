@@ -86,6 +86,12 @@ pub struct ObservedState {
     pub ready_prs: Vec<PrRef>,
     /// CI-failure clusters observed across recent runs.
     pub ci_failures: Vec<CiFailure>,
+    /// Blocked goals observed on Simard's goal board this Observe pass — the
+    /// goal-board *health* signal. Populated by the sensor from the durable
+    /// board markers (`BLOCKED`, the `🔒 [OODA-SAFEGUARD] … needs human review`
+    /// no-progress marker, and the brain-failure marker). Empty when the board
+    /// is clean or unreadable (degrade-to-empty, never a panic).
+    pub blocked_goals: Vec<BlockedGoal>,
     /// Consecutive OODA cycles the active goal has produced no action / no
     /// progress. Mirrors the OODA no-progress tracker; drives the loop-whisper.
     /// `None` when unknown (e.g. no active goal).
@@ -110,6 +116,33 @@ pub struct PrRef {
 pub struct CiFailure {
     pub repo: String,
     pub failing: u32,
+}
+
+/// One blocked goal observed on Simard's goal board — the unit of goal-board
+/// *health* the Overseer observes and (in the acting loop) acts on.
+///
+/// Derived from a `GoalProgress::Blocked(reason)` on the live board by the
+/// sensor's pure projection (`sensor::blocked_goals_from_board`). It reuses the
+/// EXISTING standing/perpetual detection (`ActiveGoal::is_perpetual`, #2589/#2609)
+/// and the EXISTING safeguard-marker predicates
+/// (`goal_curation::no_progress_breaker::is_no_progress_marker`,
+/// `ooda_actions::advance_goal::is_brain_failure_marker`) — it never invents a
+/// second notion of either.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockedGoal {
+    /// The blocked goal's id on the active board.
+    pub id: String,
+    /// The verbatim `GoalProgress::Blocked` reason string (carries the marker).
+    pub reason: String,
+    /// True when the goal is standing/perpetual (`ActiveGoal::is_perpetual`).
+    pub perpetual: bool,
+    /// True when the block carries a "needs human review" safeguard marker
+    /// (the no-progress OODA-SAFEGUARD marker or the brain-failure marker) —
+    /// the signal that a human must be reached.
+    pub needs_review: bool,
+    /// Consecutive no-action / no-progress cycles parsed from the safeguard
+    /// marker, or `0` when the block is not a counted safeguard marker.
+    pub consecutive_no_action: u32,
 }
 
 // ─────────────────────────── Capability briefs ─────────────────────────────
@@ -304,6 +337,29 @@ pub trait IssueFiler {
 pub trait GoalCurator {
     fn propose(&self, goal: &GoalBrief) -> Result<(), OverseerError>;
     fn in_flight(&self) -> Result<Vec<InFlightItem>, OverseerError>;
+
+    /// Read the goal-board *health* — the goals currently `Blocked` — so the
+    /// Observe pass can surface them into [`ObservedState::blocked_goals`].
+    ///
+    /// **Reuse:** `crate::goal_curation::load_goal_board` projected by
+    /// `crate::overseer::sensor::blocked_goals_from_board`. Read-only; a board
+    /// read failure degrades to an empty list, never a panic. The default
+    /// returns an empty list for fakes that do not model a board.
+    fn blocked_goals(&self) -> Result<Vec<BlockedGoal>, OverseerError> {
+        Ok(Vec::new())
+    }
+
+    /// Auto-unblock + reactivate a false-parked goal — the exact operation
+    /// `simard goal unblock` performs: restore a `Blocked` goal to `NotStarted`
+    /// so the next OODA cycle re-enters the spawn path.
+    ///
+    /// **Reuse:** the `simard goal unblock` board mutation
+    /// (`src/operator_cli/goal.rs`) via `load_goal_board` → set status
+    /// `NotStarted` → `save_goal_board`. The default is a no-op for fakes that
+    /// do not model a board (real adapters override it).
+    fn unblock(&self, _goal_id: &str) -> Result<(), OverseerError> {
+        Ok(())
+    }
 }
 
 /// Run a quality-audit loop (crusty-old-engineer-gated).

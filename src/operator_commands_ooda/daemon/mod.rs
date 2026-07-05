@@ -1295,7 +1295,8 @@ pub fn run_ooda_daemon(
                             &format!(
                                 "[simard] overseer tick: problems={} issues_filed={} \
                                  recipes_launched={} prs_merged={} deploys={} escalations={} \
-                                 held={} errors={} panicked={} ({}ms)",
+                                 held={} goals_unblocked={} goals_escalated={} errors={} \
+                                 panicked={} ({}ms)",
                                 report.problems,
                                 report.issues_filed,
                                 report.recipes_launched,
@@ -1303,6 +1304,8 @@ pub fn run_ooda_daemon(
                                 report.deploys,
                                 report.escalations,
                                 report.held,
+                                report.goals_unblocked,
+                                report.goals_escalated,
                                 report.errors,
                                 report.panicked,
                                 report.duration_ms,

@@ -27,12 +27,18 @@ use crate::cognitive_threads::{
     CognitiveThread, Priority, SchedulePolicy, ThreadContext, ThreadHealth, ThreadKind,
     ThreadOutcome,
 };
-use crate::goal_curation::{GoalBoard, load_goal_board};
+use crate::goal_curation::no_progress_breaker::{
+    NO_PROGRESS_BLOCKED_PREFIX, is_no_progress_marker,
+};
+use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, load_goal_board};
+use crate::ooda_actions::advance_goal::spawn::{
+    BRAIN_FAILURE_BLOCKED_PREFIX, is_brain_failure_marker,
+};
 use crate::status::{AssembleOptions, StatusSnapshot, assemble};
 use crate::stewardship::RealGhClient;
 
 use crate::overseer::capabilities::{
-    InFlightItem, IssueFiler, IssueOutcome, ObservedState, OverseerError, StatusReader,
+    BlockedGoal, InFlightItem, IssueFiler, IssueOutcome, ObservedState, OverseerError, StatusReader,
 };
 use crate::overseer::config;
 use crate::overseer::intervention::Intervention;
@@ -121,6 +127,11 @@ pub fn observed_from_snapshot(snap: &StatusSnapshot) -> ObservedState {
         anomalies: telemetry.map(|t| t.anomalies.clone()).unwrap_or_default(),
         ready_prs: Vec::new(),
         ci_failures: Vec::new(),
+        // Goal-board health (blocked goals) is projected from the live board by
+        // the acting Overseer's Observe pass via the goal curator, not from the
+        // read-only status snapshot; left empty here so this projection stays
+        // additive and side-effect free.
+        blocked_goals: Vec::new(),
         // Loop/drift are surfaced from the OODA no-progress tracker, which the
         // read-only status snapshot does not yet expose. Left `None` here so the
         // adapter stays additive; a follow-up enriches this from the goal board's
@@ -160,6 +171,49 @@ pub fn in_flight_from_board(board: &GoalBoard) -> Vec<InFlightItem> {
         });
     }
     items
+}
+
+/// Project the goal board's *health* onto the Overseer's [`BlockedGoal`]s: one
+/// per active goal in a [`GoalProgress::Blocked`] state. Read-only and pure.
+///
+/// Reuses the EXISTING notions rather than inventing new ones:
+/// - `perpetual` ← [`ActiveGoal::is_perpetual`] (the standing/perpetual marker
+///   from #2589/#2609);
+/// - `needs_review` ← the two EXISTING "needs human review" safeguard-marker
+///   predicates ([`is_no_progress_marker`] and [`is_brain_failure_marker`]);
+/// - `consecutive_no_action` ← parsed from the safeguard marker's `{prefix}{n}`
+///   shape (`0` for a non-safeguard block, e.g. an operator-set one).
+///
+/// [`GoalProgress::Blocked`]: crate::goal_curation::GoalProgress::Blocked
+pub fn blocked_goals_from_board(board: &GoalBoard) -> Vec<BlockedGoal> {
+    board.active.iter().filter_map(blocked_goal_of).collect()
+}
+
+/// Project one active goal onto a [`BlockedGoal`] when it is `Blocked`.
+fn blocked_goal_of(goal: &ActiveGoal) -> Option<BlockedGoal> {
+    let GoalProgress::Blocked(reason) = &goal.status else {
+        return None;
+    };
+    let needs_review = is_no_progress_marker(reason) || is_brain_failure_marker(reason);
+    Some(BlockedGoal {
+        id: goal.id.clone(),
+        reason: reason.clone(),
+        perpetual: goal.is_perpetual(),
+        needs_review,
+        consecutive_no_action: safeguard_marker_count(reason).unwrap_or(0),
+    })
+}
+
+/// Parse the leading no-action/no-progress count from a safeguard-marker reason.
+/// Both markers share the `{prefix}{count}{suffix}` shape, so stripping whichever
+/// prefix matches and reading the leading digits yields the count. Returns `None`
+/// for a non-safeguard block.
+fn safeguard_marker_count(reason: &str) -> Option<u32> {
+    let rest = reason
+        .strip_prefix(NO_PROGRESS_BLOCKED_PREFIX)
+        .or_else(|| reason.strip_prefix(BRAIN_FAILURE_BLOCKED_PREFIX))?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<u32>().ok()
 }
 
 // ─────────────────────────── Read-only cycle ───────────────────────────────

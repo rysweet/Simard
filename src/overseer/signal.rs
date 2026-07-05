@@ -43,6 +43,19 @@ pub enum Signal {
     /// Active work appears to be drifting from a goal's stated intent. From
     /// `ObservedState.{drift_detail, active_goal_id}`.
     DriftCorrection { goal_id: String, detail: String },
+    /// A goal is `Blocked` on Simard's goal board — the goal-board *health*
+    /// signal. From `ObservedState.blocked_goals`. `perpetual` reuses the
+    /// standing/perpetual detection (#2589/#2609); `needs_review` is true when
+    /// the block carries a "needs human review" safeguard marker. Routed to
+    /// [`ProblemKind::GoalHygiene`]: a false-parked perpetual goal is
+    /// self-healed, a genuine "needs human review" block is escalated.
+    GoalBlocked {
+        goal_id: String,
+        reason: String,
+        perpetual: bool,
+        needs_review: bool,
+        consecutive_no_action: u32,
+    },
 }
 
 /// Coarse relative importance. `Ord` sorts ascending so `Critical` comes first,
@@ -176,6 +189,17 @@ pub fn signals_from(state: &ObservedState) -> Vec<Signal> {
         out.push(Signal::DriftCorrection {
             goal_id: goal_id.clone(),
             detail: detail.clone(),
+        });
+    }
+
+    // Goal-board health: one signal per blocked goal observed on the board.
+    for bg in &state.blocked_goals {
+        out.push(Signal::GoalBlocked {
+            goal_id: bg.id.clone(),
+            reason: bg.reason.clone(),
+            perpetual: bg.perpetual,
+            needs_review: bg.needs_review,
+            consecutive_no_action: bg.consecutive_no_action,
         });
     }
 
