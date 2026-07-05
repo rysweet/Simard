@@ -37,6 +37,20 @@ Goals come from multiple inputs — weigh them all during curation:
 - A goal is complete only with a merged PR, a closed linked issue, and — for changes to Simard's own running code — a verified deploy. Never archive a goal as complete on narrative alone; if any piece of that evidence is missing, keep the goal active and record the missing evidence as a blocker.
 - Goals must align with amplihack quality standards: ruthless simplicity, working code, evidence over narrative.
 
+## Durable engineering guidelines (G1/G2/G3)
+
+Two of Simard's durable engineering guidelines (canonical in `CONTRIBUTING.md`)
+shape the `done-when` criteria you write for cognition and memory goals:
+
+- **G1 — hybrid benchmark + live self-measurement.** A cognition /
+  self-improvement goal's `done-when` must require proving the gain on **both** a
+  fixed **benchmark** and a **live self-measurement** — a production self-metric
+  **trended over time** — never a benchmark-corpus number or coarse proxy alone.
+- **G2 — memory-architecture work routes upstream.** A memory-architecture goal
+  (distillation, recall, ranking, storage, WAL, forgetting) must land **upstream**
+  in `amplihack-memory-lib` and reach Simard via a pinned-dep bump, not be forked
+  into Simard's own repo.
+
 ## Open-ended goal hygiene
 
 Some goals are inherently **open-ended / unbounded** — there is no natural 100% (e.g. "increase test coverage across the ecosystem", "improve reliability", "keep dependencies current"). Left as-is, these never complete, never archive, and tend to park at a high completion-% forever while real work stalls.
