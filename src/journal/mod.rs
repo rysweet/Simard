@@ -32,6 +32,7 @@ pub mod jargon;
 pub mod providers;
 pub mod render;
 pub mod store;
+pub mod thread;
 pub mod types;
 
 #[cfg(test)]
@@ -44,6 +45,8 @@ mod tests_jargon;
 mod tests_render;
 #[cfg(test)]
 mod tests_store;
+#[cfg(test)]
+mod tests_thread;
 
 pub use generate::{
     GlossaryReviewer, JournalDrafter, JournalGenerator, JournalReviewer, TemplateDrafter,
@@ -51,8 +54,12 @@ pub use generate::{
 pub use jargon::{JOURNAL_GLOSSARY, scrub_jargon};
 pub use providers::{
     DayExtras, EpisodeSource, JournalClock, PrListSource, SystemClock, assemble_day_context,
-    generate_and_store,
+    generate_and_store, generate_and_store_ops,
 };
 pub use render::{html_escape, render_entry_html, render_entry_tui_lines};
-pub use store::{JOURNAL_CONCEPT_PREFIX, JOURNAL_TAG, JournalStore, journal_caller_key};
+pub use store::{
+    JOURNAL_CONCEPT_PREFIX, JOURNAL_TAG, JournalStore, all_entries, entry_matches,
+    get_entry_by_date, journal_caller_key, query_entries, save_entry,
+};
+pub use thread::{journal_enabled, journal_interval_secs, run_journal_tick};
 pub use types::{DayContext, JournalEntry, MemoryGrowth, PrSummary};

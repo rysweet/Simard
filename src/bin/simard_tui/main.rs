@@ -5,6 +5,7 @@
 
 mod app;
 mod goals;
+mod journal;
 mod system;
 mod tabs;
 mod types;

@@ -112,3 +112,21 @@ pub fn generate_and_store(
     store.save(&entry)?;
     Ok(entry)
 }
+
+/// Borrowed-ops variant of [`generate_and_store`] for callers that hold a
+/// `&dyn CognitiveMemoryOps` rather than a [`JournalStore`] (the background
+/// journal thread runs against [`ThreadContext::memory`]). Persists via
+/// [`store::save_entry`](crate::journal::store::save_entry).
+pub fn generate_and_store_ops(
+    date: NaiveDate,
+    episodes: &dyn EpisodeSource,
+    prs: &dyn PrListSource,
+    extras: DayExtras,
+    generator: &JournalGenerator,
+    mem: &dyn crate::cognitive_memory::CognitiveMemoryOps,
+) -> SimardResult<JournalEntry> {
+    let day = assemble_day_context(date, episodes, prs, extras)?;
+    let entry = generator.generate(&day);
+    crate::journal::store::save_entry(mem, &entry)?;
+    Ok(entry)
+}

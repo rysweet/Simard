@@ -116,6 +116,96 @@ pub(crate) const PART_01: &str = r#"      </div>
     </section>
   </div>
 
+  <div class="tab-content" id="tab-journal">
+    <h1 class="page-h1">Journal</h1>
+    <p class="page-lede">A plain-language daily diary of what Simard and its steward the Overseer did each day, with a simple table of the code changes proposed. Browse by date and search the full history.</p>
+    <div class="card" style="max-width:1100px">
+      <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.75rem;flex-wrap:wrap">
+        <input id="journal-search-input" placeholder="Search the journal…" style="flex:1;min-width:220px;padding:6px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px">
+        <button class="btn" onclick="searchJournal()">Search</button>
+        <button class="btn" onclick="loadJournal()">Refresh</button>
+      </div>
+      <div style="display:flex;gap:1rem;align-items:flex-start">
+        <div id="journal-dates" data-testid="journal-dates" style="width:230px;max-height:70vh;overflow-y:auto;border-right:1px solid #21262d;padding-right:.5rem"><span class="loading">Loading…</span></div>
+        <div id="journal-entry" data-testid="journal-entry" style="flex:1;min-height:220px"><span class="loading">Loading…</span></div>
+      </div>
+    </div>
+  </div>
+  <script>
+    /* --- Journal tab (issue #2606) --- */
+    (function(){
+      let journalLoaded=false, journalSelected=null;
+      function renderJournalDateList(items){
+        const box=document.getElementById('journal-dates');
+        if(!items.length){box.innerHTML='<span style="color:#8b949e">No entries yet.</span>';return;}
+        box.innerHTML=items.map(e=>{
+          const sel=e.date===journalSelected?'background:#1f6feb33;':'';
+          const badge=e.quiet_day
+            ?'<span style="color:#8b949e;font-size:.7rem"> quiet day</span>'
+            :(e.pr_count?'<span style="color:#3fb950;font-size:.7rem"> '+e.pr_count+' change'+(e.pr_count===1?'':'s')+'</span>':'');
+          return '<div class="journal-date-item" data-date="'+escAttr(e.date)+'" style="cursor:pointer;padding:.35rem .5rem;border-radius:4px;'+sel+'">'+esc(e.date)+badge+'</div>';
+        }).join('');
+        box.querySelectorAll('.journal-date-item').forEach(el=>{
+          el.addEventListener('click',()=>selectJournalDate(el.dataset.date));
+        });
+      }
+      async function selectJournalDate(date){
+        journalSelected=date;
+        const target=document.getElementById('journal-entry');
+        target.innerHTML='<span class="loading">Loading…</span>';
+        document.querySelectorAll('#journal-dates .journal-date-item').forEach(el=>{
+          el.style.background=el.dataset.date===date?'#1f6feb33':'';
+        });
+        try{
+          const r=await fetch('/api/journal/render/'+encodeURIComponent(date));
+          if(r.status===401){window.location.href='/login';return;}
+          /* Server-rendered fragment: the narrative and PR table are already
+             HTML-escaped server-side, so assigning to innerHTML is XSS-safe. */
+          target.innerHTML=await r.text();
+          if(typeof annotateJargon==='function') annotateJargon(target);
+        }catch(e){target.innerHTML='<span class="err">Could not load this day\u2019s journal.</span>';}
+      }
+      async function loadJournal(){
+        const box=document.getElementById('journal-dates');
+        box.innerHTML='<span class="loading">Loading…</span>';
+        try{
+          const d=await apiFetch('/api/journal/dates');
+          const dates=d.dates||[];
+          renderJournalDateList(dates);
+          if(dates.length){
+            const keep=journalSelected&&dates.some(x=>x.date===journalSelected);
+            selectJournalDate(keep?journalSelected:dates[0].date);
+          }else{
+            document.getElementById('journal-entry').innerHTML='<div class="journal-entry"><p class="journal-empty">Simard has not written any journal entries yet. They appear here once the daily journal has run.</p></div>';
+          }
+          journalLoaded=true;
+        }catch(e){box.innerHTML='<span class="err">Could not load the journal — check /api/journal/dates</span>';}
+      }
+      async function searchJournal(){
+        const q=(document.getElementById('journal-search-input').value||'').trim();
+        const box=document.getElementById('journal-dates');
+        box.innerHTML='<span class="loading">Searching…</span>';
+        try{
+          const d=await apiFetch('/api/journal/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})});
+          const results=d.results||[];
+          if(!results.length){
+            box.innerHTML='<span style="color:#8b949e">No entries match \u201c'+esc(q)+'\u201d.</span>';
+            document.getElementById('journal-entry').innerHTML='';
+            return;
+          }
+          renderJournalDateList(results);
+          selectJournalDate(results[0].date);
+        }catch(e){box.innerHTML='<span class="err">Search failed — check /api/journal/search</span>';}
+      }
+      window.loadJournal=loadJournal;
+      window.searchJournal=searchJournal;
+      const jt=document.querySelector('.tab[data-tab="journal"]');
+      if(jt) jt.addEventListener('click',()=>{ if(!journalLoaded) loadJournal(); });
+      const ji=document.getElementById('journal-search-input');
+      if(ji) ji.addEventListener('keypress',e=>{if(e.key==='Enter')searchJournal();});
+    })();
+  </script>
+
   {{TAB_META_JS}}
   <script>
     /* --- Helpers --- */

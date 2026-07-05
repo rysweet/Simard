@@ -118,9 +118,11 @@ nav:
     - Automated Disk-Health Management: concepts/automated-disk-health.md
     - Update-Check Design: concepts/update-check-design.md
     - The amplihack Freshness Gate: concepts/amplihack-freshness-gate.md
+    - The Simard Journal: concepts/simard-journal.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
+    - Read Simard's Daily Journal: tutorials/read-simards-daily-journal.md
   - How-To Guides:
     - Terminal to Engineer: howto/move-from-terminal-recipes-into-engineer-runs.md
     - Use the Agent-Orchestration Engineer Loop: howto/use-agent-orchestration-engineer-loop.md
@@ -176,6 +178,7 @@ nav:
     - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
     - Diagnose merge-pr Verdict-Parse Failures: howto/diagnose-merge-pr-verdict-parse-failures.md
     - Monitor Simard with the TUI: howto/monitor-simard-with-tui.md
+    - Browse the Simard Journal: howto/browse-the-simard-journal.md
     - View Agent Terminal Logs: howto/view-agent-terminal-logs.md
     - Run Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
     - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
@@ -191,6 +194,7 @@ nav:
     - Overseer Activity Feed: reference/overseer-activity-feed.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
+    - Journal API: reference/journal-api.md
     - npx / npm Install: reference/npx-npm-install.md
     - Update Check: reference/update-check.md
     - amplihack Freshness Gate: reference/amplihack-freshness-gate.md

@@ -16,6 +16,7 @@ use super::goals::{
     add_goal, demote_goal, goals, promote_backlog_item, remove_goal, seed_goals, update_goal_status,
 };
 use super::hosts::{add_host, get_hosts, remove_host};
+use super::journal::{journal_dates, journal_entry, journal_render, journal_search};
 use super::logs::{logs, processes};
 use super::memory::{memory_graph, memory_history, memory_recent, memory_search};
 use super::merge_judge::merge_judge_decisions;
@@ -81,6 +82,10 @@ pub fn build_router() -> Router {
         .route("/api/brain-failures", get(brain_failures))
         .route("/api/overseer", get(overseer))
         .route("/api/prs", get(pr_readiness))
+        .route("/api/journal/dates", get(journal_dates))
+        .route("/api/journal/search", post(journal_search))
+        .route("/api/journal/entry/{date}", get(journal_entry))
+        .route("/api/journal/render/{date}", get(journal_render))
         .route("/api/status/snapshot", get(status_snapshot))
         .route("/api/subagent-sessions", get(subagent_sessions))
         .route("/api/chat/sessions", get(chat_sessions))

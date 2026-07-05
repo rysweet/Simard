@@ -731,22 +731,22 @@ mod tests {
         );
     }
 
-    /// Sanity-check on the page-lede count: there must be exactly 16
+    /// Sanity-check on the page-lede count: there must be exactly 17
     /// (one per tab) — a stricter bound than the existing `>= 13`
-    /// assertion. If a refactor accidentally adds a 17th, we want to
+    /// assertion. If a refactor accidentally adds an 18th, we want to
     /// know immediately so we can decide whether the new container is
     /// actually a new tab or a misuse of the class.
     #[test]
     fn index_html_has_exactly_eleven_page_intros() {
         let count = INDEX_HTML.matches(r#"class="page-lede""#).count();
         assert_eq!(
-            count, 16,
-            "expected exactly 16 page-lede paragraphs (one per top-level tab), got {count}"
+            count, 17,
+            "expected exactly 17 page-lede paragraphs (one per top-level tab), got {count}"
         );
         let h1_count = INDEX_HTML.matches(r#"class="page-h1""#).count();
         assert_eq!(
-            h1_count, 16,
-            "expected exactly 16 page-h1 headings (one per top-level tab), got {h1_count}"
+            h1_count, 17,
+            "expected exactly 17 page-h1 headings (one per top-level tab), got {h1_count}"
         );
     }
 

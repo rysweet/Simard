@@ -29,12 +29,19 @@ use crate::memory_cognitive::{
 #[derive(Default)]
 pub(crate) struct FakeMemory {
     facts: Mutex<Vec<CognitiveFact>>,
+    episodes: Mutex<Vec<CognitiveEpisode>>,
     seq: AtomicUsize,
 }
 
 impl FakeMemory {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Seed an episode so [`list_all_episodes`](CognitiveMemoryOps::list_all_episodes)
+    /// (and thus the journal thread's episode source) has material to narrate.
+    pub(crate) fn add_episode(&self, ep: CognitiveEpisode) {
+        self.episodes.lock().expect("episodes lock").push(ep);
     }
 
     fn mk_fact(
@@ -77,11 +84,30 @@ impl CognitiveMemoryOps for FakeMemory {
     }
     fn store_episode(
         &self,
-        _c: &str,
-        _s: &str,
+        content: &str,
+        source: &str,
         _m: Option<&serde_json::Value>,
     ) -> SimardResult<String> {
-        Ok("epi".into())
+        let id = self.seq.fetch_add(1, Ordering::SeqCst);
+        let node_id = format!("epi-{id}");
+        self.episodes
+            .lock()
+            .expect("episodes lock")
+            .push(CognitiveEpisode {
+                node_id: node_id.clone(),
+                content: content.to_string(),
+                source_label: source.to_string(),
+                temporal_index: id as i64,
+                compressed: false,
+            });
+        Ok(node_id)
+    }
+    fn list_all_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+        let episodes = self.episodes.lock().expect("episodes lock");
+        // Newest-first, mirroring the real backend's ordering.
+        let mut out: Vec<CognitiveEpisode> = episodes.iter().rev().cloned().collect();
+        out.truncate(limit as usize);
+        Ok(out)
     }
     fn consolidate_episodes(&self, _b: u32) -> SimardResult<Option<String>> {
         Ok(None)

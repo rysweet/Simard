@@ -45,6 +45,93 @@ fn date_from_concept(concept: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(rest, "%Y-%m-%d").ok()
 }
 
+// ---------------------------------------------------------------------------
+// Borrowed-ops free functions.
+//
+// The same persistence logic, expressed against a borrowed
+// `&dyn CognitiveMemoryOps` rather than an owned `Arc`. Callers that only hold
+// a borrowed handle — the dashboard's `open_reader_bridge(...).ops()` and the
+// background journal thread's `ThreadContext::memory` — reuse these directly
+// instead of forcing an `Arc` they do not have. [`JournalStore`] delegates to
+// them so there is exactly one implementation.
+// ---------------------------------------------------------------------------
+
+/// Persist (or roll-forward) `entry` against a borrowed backend. See
+/// [`JournalStore::save`].
+pub fn save_entry(mem: &dyn CognitiveMemoryOps, entry: &JournalEntry) -> SimardResult<String> {
+    let key = journal_caller_key(entry.date);
+    // Our own plain-data type — serialization cannot fail in practice, so an
+    // `expect` here mirrors the codebase convention for known-safe
+    // serialization (e.g. tab-meta JSON).
+    let content = serde_json::to_string(entry).expect("JournalEntry is JSON-serializable");
+    let node_id = mem.store_fact_with_caller_key(
+        &key,
+        &key,
+        &content,
+        1.0,
+        &[JOURNAL_TAG.to_string()],
+        JOURNAL_SOURCE,
+    )?;
+    tracing::debug!(
+        target: "simard::journal",
+        date = %entry.date,
+        quiet_day = entry.quiet_day,
+        prs = entry.prs.len(),
+        "journal entry saved"
+    );
+    Ok(node_id)
+}
+
+/// Fetch the entry for an exact day against a borrowed backend. See
+/// [`JournalStore::get_by_date`].
+pub fn get_entry_by_date(
+    mem: &dyn CognitiveMemoryOps,
+    date: NaiveDate,
+) -> SimardResult<Option<JournalEntry>> {
+    let key = journal_caller_key(date);
+    let facts = mem.search_facts(&key, 64, 0.0)?;
+    for fact in facts {
+        if fact.concept == key {
+            return Ok(Some(parse_entry(&fact.concept, &fact.content)?));
+        }
+    }
+    Ok(None)
+}
+
+/// Every stored entry, newest day first, against a borrowed backend. See
+/// [`JournalStore::all_entries`].
+pub fn all_entries(mem: &dyn CognitiveMemoryOps) -> SimardResult<Vec<JournalEntry>> {
+    let facts = mem.search_facts(JOURNAL_SEARCH_TOKEN, ENUMERATION_LIMIT, 0.0)?;
+    let mut entries: Vec<JournalEntry> = facts
+        .iter()
+        .filter(|f| date_from_concept(&f.concept).is_some())
+        .filter_map(|f| serde_json::from_str::<JournalEntry>(&f.content).ok())
+        .collect();
+    // Newest day first.
+    entries.sort_by_key(|e| std::cmp::Reverse(e.date));
+    Ok(entries)
+}
+
+/// Filter entries by an inclusive date `range` and/or free `text`, newest day
+/// first, against a borrowed backend. See [`JournalStore::query`].
+pub fn query_entries(
+    mem: &dyn CognitiveMemoryOps,
+    range: Option<(NaiveDate, NaiveDate)>,
+    text: Option<&str>,
+) -> SimardResult<Vec<JournalEntry>> {
+    let mut entries = all_entries(mem)?;
+    if let Some((from, to)) = range {
+        entries.retain(|e| e.date >= from && e.date <= to);
+    }
+    if let Some(t) = text {
+        let needle = t.to_lowercase();
+        if !needle.is_empty() {
+            entries.retain(|e| entry_matches_text(e, &needle));
+        }
+    }
+    Ok(entries)
+}
+
 /// Durable store for journal entries, backed by cognitive memory.
 ///
 /// Cloneable and cheap to pass around — it holds only an `Arc` to the shared
@@ -68,39 +155,12 @@ impl JournalStore {
     /// supersede rather than accumulate (idempotent rolling update). Returns
     /// the backend node id.
     pub fn save(&self, entry: &JournalEntry) -> SimardResult<String> {
-        let key = journal_caller_key(entry.date);
-        // Our own plain-data type — serialization cannot fail in practice, so
-        // an `expect` here mirrors the codebase convention for known-safe
-        // serialization (e.g. tab-meta JSON).
-        let content = serde_json::to_string(entry).expect("JournalEntry is JSON-serializable");
-        let node_id = self.mem.store_fact_with_caller_key(
-            &key,
-            &key,
-            &content,
-            1.0,
-            &[JOURNAL_TAG.to_string()],
-            JOURNAL_SOURCE,
-        )?;
-        tracing::debug!(
-            target: "simard::journal",
-            date = %entry.date,
-            quiet_day = entry.quiet_day,
-            prs = entry.prs.len(),
-            "journal entry saved"
-        );
-        Ok(node_id)
+        save_entry(&*self.mem, entry)
     }
 
     /// Fetch the entry for an exact day, if one exists.
     pub fn get_by_date(&self, date: NaiveDate) -> SimardResult<Option<JournalEntry>> {
-        let key = journal_caller_key(date);
-        let facts = self.mem.search_facts(&key, 64, 0.0)?;
-        for fact in facts {
-            if fact.concept == key {
-                return Ok(Some(parse_entry(&fact.concept, &fact.content)?));
-            }
-        }
-        Ok(None)
+        get_entry_by_date(&*self.mem, date)
     }
 
     /// Every stored entry, newest day first.
@@ -109,17 +169,7 @@ impl JournalStore {
     /// [`JournalEntry`] is skipped (it is simply not a journal record), so a
     /// broad backend search that returns unrelated facts cannot break browsing.
     pub fn all_entries(&self) -> SimardResult<Vec<JournalEntry>> {
-        let facts = self
-            .mem
-            .search_facts(JOURNAL_SEARCH_TOKEN, ENUMERATION_LIMIT, 0.0)?;
-        let mut entries: Vec<JournalEntry> = facts
-            .iter()
-            .filter(|f| date_from_concept(&f.concept).is_some())
-            .filter_map(|f| serde_json::from_str::<JournalEntry>(&f.content).ok())
-            .collect();
-        // Newest day first.
-        entries.sort_by_key(|e| std::cmp::Reverse(e.date));
-        Ok(entries)
+        all_entries(&*self.mem)
     }
 
     /// The dates that have an entry, newest first (for a date picker / list).
@@ -141,17 +191,7 @@ impl JournalStore {
         range: Option<(NaiveDate, NaiveDate)>,
         text: Option<&str>,
     ) -> SimardResult<Vec<JournalEntry>> {
-        let mut entries = self.all_entries()?;
-        if let Some((from, to)) = range {
-            entries.retain(|e| e.date >= from && e.date <= to);
-        }
-        if let Some(t) = text {
-            let needle = t.to_lowercase();
-            if !needle.is_empty() {
-                entries.retain(|e| entry_matches_text(e, &needle));
-            }
-        }
-        Ok(entries)
+        query_entries(&*self.mem, range, text)
     }
 }
 
@@ -179,4 +219,17 @@ fn entry_matches_text(entry: &JournalEntry, needle: &str) -> bool {
             || pr.outcome.to_lowercase().contains(needle)
             || pr.number.to_string().contains(needle)
     })
+}
+
+/// Case-insensitive test of whether `entry` matches free-text `query` (over the
+/// narrative, the date, and each code-change proposal's summary/outcome/number).
+///
+/// Public so a caller holding an already-loaded list of entries — the TUI
+/// Journal pane — can filter it with the *same* rule the store's
+/// [`JournalStore::query`] applies, keeping the two surfaces in agreement. An
+/// empty `query` matches every entry.
+#[must_use]
+pub fn entry_matches(entry: &JournalEntry, query: &str) -> bool {
+    let needle = query.trim().to_lowercase();
+    needle.is_empty() || entry_matches_text(entry, &needle)
 }

@@ -658,6 +658,30 @@ pub fn run_ooda_daemon(
         ),
     );
 
+    // ── Daily journal thread (issue #2606) ─────────────────────────────
+    // DEFAULT-ON, opt-out via SIMARD_JOURNAL_ENABLED=0. On its own slow cadence
+    // (default hourly) the daemon regenerates *today's* diary-like, layperson
+    // journal entry from episodic memory and the day's activity, persisting it
+    // in cognitive memory (a `journal:YYYY-MM-DD` fact). It is a pure, offline,
+    // fast tick run panic-isolated AFTER the authoritative OODA cycle, so it can
+    // never stall or crash the loop. The dashboard Journal tab and the TUI
+    // Journal pane read these entries back.
+    let journal_thread_enabled = crate::journal::journal_enabled();
+    let journal_interval_secs = crate::journal::journal_interval_secs();
+    let mut last_journal: Option<Instant> = None;
+    daemon_log(
+        &state_root,
+        &format!(
+            "[simard] OODA daemon: daily journal {} (interval = {journal_interval_secs}s; \
+             SIMARD_JOURNAL_ENABLED opt-out)",
+            if journal_thread_enabled {
+                "ENABLED (default)"
+            } else {
+                "DISABLED"
+            }
+        ),
+    );
+
     let mut cycles_run = 0u32;
 
     loop {
@@ -1328,6 +1352,47 @@ pub fn run_ooda_daemon(
                         &format!("[simard] WARN: overseer tick thread spawn failed: {e}"),
                     );
                 }
+            }
+        }
+
+        // ── Daily journal rolling tick (issue #2606) ────────────────────
+        // Default-on, interval-gated, panic-isolated. Regenerates today's diary
+        // entry from episodic memory + the day's activity and persists it under
+        // the day key (idempotent rolling update). Pure and offline, so it runs
+        // inline; a panic or error is caught and logged and never stalls the
+        // OODA loop. Fires on the first iteration so a fresh daemon writes the
+        // day's entry immediately, then on its own slow cadence.
+        if journal_thread_enabled {
+            let due = last_journal
+                .map(|t| t.elapsed().as_secs() >= journal_interval_secs)
+                .unwrap_or(true);
+            if due {
+                let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::journal::run_journal_tick(
+                        shared_mem.as_ref(),
+                        &crate::journal::SystemClock,
+                    )
+                }));
+                match tick {
+                    Ok(Ok(entry)) => daemon_log(
+                        &state_root,
+                        &format!(
+                            "[simard] journal: entry for {} regenerated ({} proposal(s), quiet={})",
+                            entry.date,
+                            entry.prs.len(),
+                            entry.quiet_day
+                        ),
+                    ),
+                    Ok(Err(e)) => daemon_log(
+                        &state_root,
+                        &format!("[simard] WARN: journal tick failed: {e}"),
+                    ),
+                    Err(_) => daemon_log(
+                        &state_root,
+                        "[simard] WARN: journal tick panicked (isolated; loop continues)",
+                    ),
+                }
+                last_journal = Some(Instant::now());
             }
         }
 
