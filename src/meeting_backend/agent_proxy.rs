@@ -98,8 +98,13 @@ const TURN_TIMEOUT_ENV: &str = "SIMARD_MEETING_TURN_TIMEOUT_SECS";
 /// treated as hung and reaped, so a dead/stuck `copilot -p` child cannot block
 /// the chat/meeting REPL forever (Pillar 11: honest degradation beats hidden
 /// silence). Generous on purpose: real turns stream output within seconds, so
-/// only a genuinely stalled child stays silent this long. Issues #2549, #2581.
-const DEFAULT_IDLE_LIVENESS_SECS: u64 = 300;
+/// only a genuinely stalled child stays silent this long. The default is an
+/// *hours*-scale window, not a minutes-scale one, so a legitimately
+/// long-thinking-but-momentarily-silent agent is never killed prematurely;
+/// only a truly wedged child hits this bound. Operators can still tighten or
+/// disable it via `SIMARD_MEETING_IDLE_LIVENESS_SECS` (`0` = unbounded).
+/// Issues #2549, #2581.
+const DEFAULT_IDLE_LIVENESS_SECS: u64 = 3600;
 
 /// Env var giving an explicit directory the meeting agent should operate in.
 /// When set to an existing directory it wins over cwd-derived resolution. This
