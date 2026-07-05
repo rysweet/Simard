@@ -11,6 +11,7 @@ use std::error::Error;
 use std::path::PathBuf;
 
 use crate::base_types::BaseTypeCapability;
+use crate::cognitive_memory::creative_idea::IdeaStatus;
 use crate::runtime::{RuntimeState, RuntimeTopology};
 use crate::session::SessionPhase;
 
@@ -52,6 +53,20 @@ pub enum SimardError {
         reason: String,
     },
     InvalidImprovementRecord {
+        field: String,
+        reason: String,
+    },
+    /// Creative-ideas subsystem (#2419): an illegal `IdeaStatus` transition,
+    /// from `try_transition` or an illegal synthesis `next_status`. Mirrors
+    /// `InvalidRuntimeTransition` / `InvalidSessionTransition`.
+    InvalidIdeaTransition {
+        from: IdeaStatus,
+        to: IdeaStatus,
+    },
+    /// Creative-ideas subsystem (#2419): a malformed `CreativeIdea` record —
+    /// a serde (de)serialize failure, an unknown enum string, or a too-new
+    /// `payload_version`. Mirrors `InvalidGoalRecord` / `InvalidImprovementRecord`.
+    InvalidCreativeIdeaRecord {
         field: String,
         reason: String,
     },

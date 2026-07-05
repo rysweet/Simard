@@ -747,6 +747,11 @@ pub trait CognitiveMemoryOps: Send + Sync {
 const EXACT_NAME_RECALL_LIMIT: u32 = 16;
 pub mod metrics;
 
+// Issue #2419 (design spike): the `CreativeIdea` prospective-memory type + its
+// `IdeaStatus` state machine + `CreativeIdeaStore` round-trip seam. Additive;
+// no schema change to prospective memory. Gated OFF at the subsystem level.
+pub mod creative_idea;
+
 // De-fork Phase 2b (issue #2307): the library-backed `CognitiveMemoryOps`
 // adapter is now the sole cognitive-memory backend. Re-exported at the
 // module root so callers reference `cognitive_memory::LibraryCognitiveMemory`.

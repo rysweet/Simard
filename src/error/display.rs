@@ -38,6 +38,15 @@ impl Display for SimardError {
                 field: identity,
                 reason,
             } => fmt_field_reason(f, self, identity, reason),
+            Self::InvalidCreativeIdeaRecord { field, reason } => {
+                write!(f, "invalid creative-idea record field '{field}': {reason}")
+            }
+            Self::InvalidIdeaTransition { from, to } => {
+                write!(
+                    f,
+                    "invalid creative-idea transition from '{from}' to '{to}'"
+                )
+            }
             Self::InvalidSessionId { value, reason } => {
                 write!(f, "invalid session id '{value}': {reason}")
             }

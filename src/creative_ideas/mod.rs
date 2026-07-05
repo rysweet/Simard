@@ -1,0 +1,118 @@
+//! Creative Ideas subsystem (design spike #2419) — an idea-generation subsystem
+//! that primes a pool of candidate self-improvement ideas inside the single
+//! Simard brain.
+//!
+//! **Status: design + typed foundation + tests, gated OFF.** This module owns
+//! the reviewer-pipeline trait and adapters ([`reviewers`]), the synthesis step
+//! ([`synthesis`]), the routing functions ([`routing`]), the dedup/portfolio/
+//! budget helpers ([`dedup`]), and the config flag ([`CreativeIdeasConfig`]).
+//! The `CreativeIdea` prospective type lives in
+//! [`crate::cognitive_memory::creative_idea`] and the generator thread in
+//! [`crate::cognitive_threads::threads::creative_ideas`]. Nothing here is wired
+//! into the daemon; the generator is OFF by default behind
+//! `SIMARD_CREATIVE_IDEAS_ENABLED`. The operator redeploys after merge.
+//!
+//! No type or module contains the word "Bridge" — this is one brain with
+//! cognitive threads and reviewers, not a separate service.
+#![allow(dead_code)]
+
+pub mod dedup;
+pub mod reviewers;
+pub mod routing;
+pub mod synthesis;
+
+#[cfg(test)]
+mod tests;
+
+/// Master switch env var. When falsey/unset the thread never ticks and nothing
+/// is generated or routed.
+pub const ENABLED_ENV: &str = "SIMARD_CREATIVE_IDEAS_ENABLED";
+/// Generator cadence env var (seconds); a large (>= 24h) observation window.
+pub const INTERVAL_SECS_ENV: &str = "SIMARD_CREATIVE_IDEAS_INTERVAL_SECS";
+/// Ideas targeted per run env var.
+pub const BATCH_ENV: &str = "SIMARD_CREATIVE_IDEAS_BATCH";
+
+/// Default cadence: 24 hours.
+pub const DEFAULT_INTERVAL_SECS: u64 = 86_400;
+/// Default batch: ten ideas per run (the design's fixed batch).
+pub const DEFAULT_BATCH: usize = 10;
+
+/// Issue label applied to a human-review issue minted from an idea.
+pub const CREATIVE_IDEA_ISSUE_LABEL: &str = "creative-idea";
+/// Merge-blocking PR label for a creative-idea PR (human-review gate).
+pub const CREATIVE_IDEA_PR_LABEL: &str = "creative-idea-needs-human-review";
+/// Repo owner tagged as issue assignee / PR reviewer for the human gate.
+pub const CREATIVE_IDEA_OWNER: &str = "rysweet";
+
+/// Configuration + gating for the Creative Ideas subsystem.
+///
+/// A default-constructed config is **disabled**. [`Self::from_env`] is the
+/// single source of truth for gating and cadence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreativeIdeasConfig {
+    /// `SIMARD_CREATIVE_IDEAS_ENABLED` (default `false`).
+    pub enabled: bool,
+    /// `SIMARD_CREATIVE_IDEAS_INTERVAL_SECS` (default `86_400`).
+    pub interval_secs: u64,
+    /// `SIMARD_CREATIVE_IDEAS_BATCH` (default `10`).
+    pub batch: usize,
+}
+
+impl Default for CreativeIdeasConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: DEFAULT_INTERVAL_SECS,
+            batch: DEFAULT_BATCH,
+        }
+    }
+}
+
+impl CreativeIdeasConfig {
+    /// Parse the config from the real process environment.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    /// Parse from an arbitrary env resolver (test seam).
+    ///
+    /// The truthy check mirrors the Overseer's gate: only an explicit truthy
+    /// value enables the subsystem; unset/empty/garbage leaves it OFF.
+    #[must_use]
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let enabled = lookup(ENABLED_ENV)
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(is_truthy);
+        let interval_secs = lookup(INTERVAL_SECS_ENV)
+            .as_deref()
+            .map(str::trim)
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_INTERVAL_SECS);
+        let batch = lookup(BATCH_ENV)
+            .as_deref()
+            .map(str::trim)
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_BATCH);
+        Self {
+            enabled,
+            interval_secs,
+            batch,
+        }
+    }
+
+    /// True only when the master switch is truthy.
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+/// Recognise an explicit truthy env value (case-insensitive; trimmed). Anything
+/// else — including `0`/`false`/empty/unset — is falsey.
+fn is_truthy(v: &str) -> bool {
+    matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+}

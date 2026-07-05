@@ -83,6 +83,7 @@ nav:
     - Implementation Plan: architecture/implementation-plan.md
   - Design:
     - "Overseer — operator/observer co-process (spike)": design/overseer.md
+    - "Creative Ideas background thread (spike)": design/creative-ideas-thread.md
     - "Eliminate deterministic fallbacks": design/eliminate-deterministic-fallbacks.md
   - Concepts:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
@@ -182,6 +183,7 @@ nav:
     - Watch Overseer Activity: howto/watch-overseer-activity.md
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
+    - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Telemetry Metrics: reference/telemetry-metrics.md
@@ -284,6 +286,7 @@ nav:
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md
     - Cognitive-Thread Scheduling: reference/cognitive-thread-scheduling.md
+    - Creative Ideas Subsystem API: reference/creative-ideas-api.md
   - Operations:
     - Overview: operations/index.md
     - Verified Backups of the Live Store: operations/verified-backups.md
