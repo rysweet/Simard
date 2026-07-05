@@ -406,13 +406,47 @@ fn allocate_excludes_claim_sentinel_from_git_status() {
         }
     };
     let exclude_body = fs::read_to_string(&exclude_path).expect("exclude file present");
+    let anchored = format!("/{}", super::ENGINEER_CLAIM_FILE);
     let sentinel_lines = exclude_body
         .lines()
-        .filter(|l| l.trim() == super::ENGINEER_CLAIM_FILE)
+        .filter(|l| l.trim() == anchored)
         .count();
     assert_eq!(
         sentinel_lines, 1,
-        "exclude must contain the sentinel exactly once (idempotent append); got:\n{exclude_body}"
+        "exclude must contain the anchored sentinel exactly once (idempotent append); got:\n{exclude_body}"
+    );
+
+    wt.cleanup().expect("cleanup");
+}
+
+/// Issue #2621 (hardening): the exclude entry is root-anchored, so a genuine
+/// agent-created file that merely shares the sentinel's basename in a
+/// subdirectory is NOT silently hidden from `git status` (and therefore is
+/// still counted by `inspect_workspace` / `verify_agent_spawn_artifacts`).
+#[test]
+#[serial_test::serial]
+fn allocate_exclude_does_not_hide_subdir_same_basename() {
+    let parent_dir = tempdir().unwrap();
+    let state_dir = tempdir().unwrap();
+    let parent_repo = init_parent_repo(parent_dir.path());
+
+    let wt = EngineerWorktree::allocate(&parent_repo, state_dir.path(), "claim-subdir")
+        .expect("allocate");
+
+    // A real change nested under a subdir that happens to share the sentinel's
+    // basename. With an UNANCHORED exclude this would be swallowed; with the
+    // root-anchored pattern it must still surface as an untracked change.
+    let nested_dir = wt.path().join("subdir");
+    fs::create_dir_all(&nested_dir).unwrap();
+    fs::write(nested_dir.join(super::ENGINEER_CLAIM_FILE), "real\n").unwrap();
+
+    let status = git_output(
+        wt.path(),
+        &["status", "--porcelain", "--untracked-files=all"],
+    );
+    assert!(
+        status.contains("subdir/.simard-engineer-claim"),
+        "a same-basename file in a subdirectory must NOT be hidden by the anchored exclude; got:\n{status}"
     );
 
     wt.cleanup().expect("cleanup");
@@ -444,12 +478,10 @@ fn exclude_engineer_claim_is_idempotent_and_preserves_existing_entries() {
         body.contains("*.log"),
         "pre-existing user exclude entry must be preserved; got:\n{body}"
     );
-    let sentinel_lines = body
-        .lines()
-        .filter(|l| l.trim() == super::ENGINEER_CLAIM_FILE)
-        .count();
+    let anchored = format!("/{}", super::ENGINEER_CLAIM_FILE);
+    let sentinel_lines = body.lines().filter(|l| l.trim() == anchored).count();
     assert_eq!(
         sentinel_lines, 1,
-        "sentinel must be appended exactly once across repeated calls; got:\n{body}"
+        "anchored sentinel must be appended exactly once across repeated calls; got:\n{body}"
     );
 }

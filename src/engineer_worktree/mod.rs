@@ -507,15 +507,25 @@ fn first_existing_ancestor(path: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Append [`ENGINEER_CLAIM_FILE`] to `worktree_dir`'s git exclude file so the
-/// Simard-managed sentinel is never reported as an untracked change by
-/// `git status` in the target repo (issue #2621).
+/// Append an anchored exclude entry for [`ENGINEER_CLAIM_FILE`] to
+/// `worktree_dir`'s git exclude file so the Simard-managed sentinel is never
+/// reported as an untracked change by `git status` in the target repo (issue
+/// #2621).
 ///
 /// The real exclude path is resolved via `git rev-parse --git-path
 /// info/exclude`, run *inside the worktree* so git returns the correct path
 /// into the linked worktree's git dir (git keeps `info/exclude` in the shared
 /// common dir, which is exactly what we want: excluding the sentinel filename
 /// is harmless and repo-local — `.git/info/exclude` is never committed).
+///
+/// The written pattern is **root-anchored** (`/.simard-engineer-claim`): the
+/// sentinel is only ever placed at the worktree root, and an unanchored bare
+/// filename would (per gitignore semantics) also hide any `subdir/…` file that
+/// happens to share the basename — silently dropping a real agent-created file
+/// from both `inspect_workspace` and `verify_agent_spawn_artifacts`. Anchoring
+/// keeps the exclude semantics identical to the exact-root `strip_claim_sentinel`
+/// filter (verified: an anchored entry in the shared exclude, evaluated from a
+/// linked worktree, hides only the root sentinel).
 ///
 /// The parent directory and file are created if absent, and the append is
 /// idempotent (an exact-line match short-circuits) so repeated allocations
@@ -545,11 +555,17 @@ fn exclude_engineer_claim(worktree_dir: &Path) -> Result<(), String> {
         Err(e) => return Err(format!("read {}: {e}", exclude_path.display())),
     };
 
+    // Root-anchored pattern (leading `/`) so only `<worktree>/.simard-engineer-claim`
+    // is excluded, never a same-basename file nested in a subdirectory.
+    let anchored = format!("/{ENGINEER_CLAIM_FILE}");
+
     // Idempotent: skip if the sentinel is already excluded (exact-line match,
     // ignoring surrounding whitespace so a hand-edited exclude still matches).
+    // A legacy bare `.simard-engineer-claim` line also counts as present so we
+    // never stack a duplicate on a worktree written by an earlier build.
     if existing
         .lines()
-        .any(|line| line.trim() == ENGINEER_CLAIM_FILE)
+        .any(|line| line.trim() == anchored || line.trim() == ENGINEER_CLAIM_FILE)
     {
         return Ok(());
     }
@@ -558,7 +574,7 @@ fn exclude_engineer_claim(worktree_dir: &Path) -> Result<(), String> {
     if !updated.is_empty() && !updated.ends_with('\n') {
         updated.push('\n');
     }
-    updated.push_str(ENGINEER_CLAIM_FILE);
+    updated.push_str(&anchored);
     updated.push('\n');
 
     fs::write(&exclude_path, updated).map_err(|e| format!("write {}: {e}", exclude_path.display()))
