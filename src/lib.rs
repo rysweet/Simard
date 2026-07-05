@@ -137,6 +137,7 @@ pub mod self_relaunch;
 pub mod self_relaunch_semaphore;
 pub mod session;
 pub mod session_builder;
+pub mod session_id;
 // Issue #2527: the Signal implementation of `conversation_channel`. Feature-gated
 // (default off) so the daemon builds and runs fine without signal-cli installed.
 #[cfg(feature = "signal")]

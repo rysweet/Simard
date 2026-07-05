@@ -8,6 +8,7 @@ doc_type: reference
 issues: ["#2527", "#2575"]
 related:
   - ../index.md
+  - ./signal-continuous-conversation.md
   - ../architecture/conversation-channel.md
   - ./conversation-channel-api.md
   - ../howto/set-up-the-signal-channel.md
@@ -368,6 +369,11 @@ conversationally by Simard, exactly as on the CLI/dashboard channels — so the 
 meeting experience (including `/goal`, `/decision`, `/action`, … capture and
 `/close`) is available over Signal too.
 
+Successive turns from the same operator form **one continuous, durable
+conversation** — the session is keyed by operator identity, persisted across daemon
+restarts, and controlled with `/new` (reset), `/help`, and `/close`. See
+[Signal continuous conversation](./signal-continuous-conversation.md).
+
 ## Notifications out
 
 `SignalConversation::notify` (`src/signal_conversation/channel.rs`) sends a message
@@ -459,5 +465,7 @@ transport** and a spy command handler — no live signal-cli or network is requi
 - [How to set up the Signal channel](../howto/set-up-the-signal-channel.md)
 - [Operational autonomy model](../concepts/operational-autonomy-model.md) — the
   HIGH-RISK boundary the gating reuses.
+- [Signal continuous conversation](./signal-continuous-conversation.md) — how
+  successive operator messages form one durable, resumable session.
 - [Cross-repo merge authority](./cross-repo-merge-authority.md) — the gated
   authority `merge #NNNN` flows through.

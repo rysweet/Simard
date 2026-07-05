@@ -114,29 +114,12 @@ impl Default for ChatSessionIndex {
 // Session-id validation & generation (path-traversal guard)
 // ---------------------------------------------------------------------------
 
-/// Return `true` when `id` matches `^[A-Za-z0-9_-]{1,64}$`.
-///
-/// This is the single choke point every id passes before it is joined onto a
-/// filesystem path. Rejecting `.`, `/`, `\`, NUL, and every other character
-/// keeps a hostile `session_id` from escaping the `chat_sessions/` subtree.
-pub fn validate_session_id(id: &str) -> bool {
-    let len = id.len();
-    if len == 0 || len > 64 {
-        return false;
-    }
-    // Every accepted character is ASCII, so byte length == char length and a
-    // byte-wise scan is both correct and traversal-safe.
-    id.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
-/// Generate a fresh, unique, time-ordered session id (UUIDv7, hyphenated).
-///
-/// The hyphenated UUID form is pure `[0-9a-f-]`, so it always satisfies
-/// [`validate_session_id`].
-pub fn new_session_id() -> String {
-    uuid::Uuid::now_v7().to_string()
-}
+// The security-critical id guard + generator now live in the shared,
+// channel-agnostic `crate::session_id` module (issue #2577) so the dashboard
+// chat store and the Signal session store validate ids identically, in exactly
+// one place. Re-exported here to preserve the `chat_store::validate_session_id`
+// / `chat_store::new_session_id` public surface.
+pub use crate::session_id::{new_session_id, validate_session_id};
 
 fn invalid_session_id_err(id: &str) -> SimardError {
     SimardError::InvalidSessionId {
