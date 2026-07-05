@@ -52,6 +52,8 @@ src/overseer/capabilities.rs   + struct BlockedGoal
                                + ObservedState.blocked_goals: Vec<BlockedGoal>
                                + GoalCurator::blocked_goals() (defaulted, read-only)
                                + GoalCurator::unblock(goal_id) (defaulted no-op)
+                               + GoalCurator::observe_board() (defaulted: one read,
+                                 projects blocked_goals + in_flight)
 src/overseer/sensor.rs         + blocked_goals_from_board(&GoalBoard) -> Vec<BlockedGoal>
                                + blocked_goal_of / safeguard_marker_count (private)
 src/overseer/signal.rs         + Signal::GoalBlocked{ … } + signals_from arm
@@ -65,7 +67,7 @@ src/overseer/activity.rs       + OverseerTotals.{goals_unblocked, goals_escalate
                                + humanize_tick arms; interventions() includes them
 src/overseer/wiring.rs         + OverseerTickReport.{goals_unblocked, goals_escalated,
                                  goals_health_suppressed}; tally_outcome arms;
-                               + BoardGoalCurator::{blocked_goals, unblock};
+                               + BoardGoalCurator::{blocked_goals, unblock, observe_board};
                                + build_overseer wires goal-health + operator notifier
 src/overseer/mod.rs            + Overseer.{notifier, blocked_goal_gate, goal_health_enabled}
                                + with_operator_notifier / with_goal_health_enabled
@@ -115,9 +117,12 @@ pub blocked_goals: Vec<BlockedGoal>,
 ```
 
 The acting Overseer's `run_cycle` populates this field via
-`self.caps.goals.blocked_goals().unwrap_or_default()`. The read-only
-`observed_from_snapshot` adapter leaves it empty (the status snapshot does not
-carry the board), keeping that projection side-effect free.
+`self.caps.goals.observe_board().unwrap_or_default()`, which reads the board
+**once** and projects both `blocked_goals` and the in-flight dedup set from that
+single snapshot (see [`observe_board`](#goalcurator-new-capability-methods)). A
+board-read failure degrades both to empty, never aborting the cycle. The
+read-only `observed_from_snapshot` adapter leaves it empty (the status snapshot
+does not carry the board), keeping that projection side-effect free.
 
 ## `GoalCurator` — new capability methods
 
@@ -131,10 +136,19 @@ fn blocked_goals(&self) -> Result<Vec<BlockedGoal>, OverseerError> { Ok(Vec::new
 /// unblock` operation: restore a `Blocked` goal to `NotStarted`. Defaulted to a
 /// no-op for fakes that do not model a board.
 fn unblock(&self, _goal_id: &str) -> Result<(), OverseerError> { Ok(()) }
+
+/// Observe the board **once** and project both the blocked-goal health list and
+/// the in-flight dedup set from that single read (the Observe/Orient pass needs
+/// both every tick). Defaulted to compose `blocked_goals()` + `in_flight()` so
+/// fakes without a shared board need no change; the production adapter overrides
+/// it to `load()` once and project twice.
+fn observe_board(&self) -> Result<(Vec<BlockedGoal>, Vec<InFlightItem>), OverseerError> {
+    Ok((self.blocked_goals()?, self.in_flight()?))
+}
 ```
 
-Both have **defaulted bodies** so existing `GoalCurator` fakes compile unchanged.
-The production adapter overrides them (see [Wiring](#wiring)).
+All three have **defaulted bodies** so existing `GoalCurator` fakes compile
+unchanged. The production adapter overrides them (see [Wiring](#wiring)).
 
 ## `sensor::blocked_goals_from_board`
 
