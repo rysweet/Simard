@@ -186,6 +186,14 @@ pub const TAB_METADATA: &[TabMeta] = &[
         tooltip: "Attach to the agent's tmux terminal session and watch live stdout",
     },
     TabMeta {
+        slug: "overseer",
+        label: "Overseer",
+        title: "Overseer · Simard",
+        h1: "Overseer",
+        lede: "What Simard's steward has been doing on its own — what it noticed across the system, what it changed, and, when it chose to wait, why it held back. Refreshes automatically.",
+        tooltip: "What the steward has done on its own, and why it sometimes waits",
+    },
+    TabMeta {
         slug: "status",
         label: "Status",
         title: "Status · Simard",

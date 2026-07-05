@@ -16,6 +16,7 @@ use super::{
     CopilotTurn, Daemon, DiskUsage, EdgeCounts, Gym, LedgerWindow, LlmUsage, MemoryBrain,
     NodeCounts, Resources, SectionEnvelope, StatusSnapshot, TelemetrySignals,
 };
+use crate::overseer::activity::{self, OverseerActivity};
 use crate::telemetry::{names, snapshot};
 
 /// How the snapshot is assembled.
@@ -81,6 +82,7 @@ pub fn assemble(opts: &AssembleOptions) -> StatusSnapshot {
         self_improvement: SectionEnvelope::absent("gh: not queried in this context"),
         telemetry: assemble_telemetry(metrics.as_ref(), gym_skipped, n_restarts, budget_over),
         llm,
+        overseer: assemble_overseer(&opts.state_root),
     }
 }
 
@@ -559,6 +561,98 @@ fn snapshot_is_stale(captured_at: &str) -> bool {
         Ok(ts) => {
             let age = chrono::Utc::now().signed_duration_since(ts.with_timezone(&chrono::Utc));
             age.num_seconds() > SNAPSHOT_FRESHNESS_SECS
+        }
+        Err(_) => false,
+    }
+}
+
+// ── overseer activity feed (#2419) ───────────────────────────────────────────
+
+/// Build the OVERSEER section from the durable
+/// [activity feed](crate::overseer::activity), distinguishing the honest states
+/// the feed reference pins. The acting-Overseer gate
+/// ([`overseer_acting_enabled`](crate::overseer::config::overseer_acting_enabled))
+/// is the live source of truth for `enabled`, so a disabled Overseer is a
+/// *present* state (`Overseer: disabled`), never a blank panel — even when no
+/// feed file exists yet. Assembled in isolation; never panics.
+///
+/// Freshness is **cadence-relative** (`2 × cadence_secs`), NOT the fixed
+/// [`SNAPSHOT_FRESHNESS_SECS`]: the Overseer ticks on its own (default 15-minute)
+/// cadence, so reusing the 300 s telemetry threshold would mark a healthy feed
+/// `stale` for two-thirds of every cadence window.
+fn assemble_overseer(state_root: &std::path::Path) -> SectionEnvelope<OverseerActivity> {
+    use crate::overseer::config;
+
+    let enabled = config::overseer_acting_enabled();
+    let path = activity::activity_path(state_root);
+    let file_exists = path.is_file();
+
+    match activity::read(&path) {
+        Some(mut feed) => {
+            // The config gate is the live truth for the acting Overseer; the
+            // stored flag only reflects the state at the last write.
+            feed.enabled = enabled;
+            let note = format!("Overseer: {}", feed.status_summary());
+
+            if !enabled {
+                // Disabled is PRESENT (live), so the UI says "disabled" plainly
+                // rather than pretending there is no data.
+                let as_of = feed.last_tick_at.clone();
+                let mut env = SectionEnvelope::live(feed, as_of);
+                env.note = Some(note);
+                return env;
+            }
+
+            match feed.last_tick_at.clone() {
+                Some(ts) => {
+                    let stale = feed_is_stale(&ts, feed.cadence_secs);
+                    let mut env = if stale {
+                        SectionEnvelope::stale(feed, Some(ts))
+                    } else {
+                        SectionEnvelope::live(feed, Some(ts))
+                    };
+                    env.note = Some(note);
+                    env
+                }
+                // Enabled, file present, but no ticks recorded in it.
+                None => SectionEnvelope::absent("Overseer: no ticks recorded yet"),
+            }
+        }
+        None => {
+            if !enabled {
+                // Disabled with no readable file: synthesize a present, honest
+                // "disabled" section from config so the surfaces still say so.
+                let feed = OverseerActivity {
+                    enabled: false,
+                    cadence_secs: config::overseer_interval_secs(),
+                    author_login: config::overseer_author_login(),
+                    last_tick_at: None,
+                    ..OverseerActivity::default()
+                };
+                let mut env = SectionEnvelope::live(feed, None);
+                env.note = Some("Overseer: disabled".to_string());
+                return env;
+            }
+            // Enabled but unreachable: distinguish "never ticked" (no file) from
+            // "unreadable/corrupt" (file present but did not parse) honestly.
+            if file_exists {
+                SectionEnvelope::absent("Overseer activity feed unavailable")
+            } else {
+                SectionEnvelope::absent("Overseer: no ticks recorded yet")
+            }
+        }
+    }
+}
+
+/// Whether a feed's last tick is older than `2 × cadence_secs`. An unparseable
+/// timestamp is treated as fresh (not stale), matching the telemetry provider's
+/// tolerant behavior.
+fn feed_is_stale(last_tick_at: &str, cadence_secs: u64) -> bool {
+    match chrono::DateTime::parse_from_rfc3339(last_tick_at) {
+        Ok(ts) => {
+            let age = chrono::Utc::now().signed_duration_since(ts.with_timezone(&chrono::Utc));
+            let window = 2 * cadence_secs.max(1) as i64;
+            age.num_seconds() > window
         }
         Err(_) => false,
     }

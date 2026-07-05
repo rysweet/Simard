@@ -29,6 +29,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
+
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::goal_curation::{BacklogItem, GoalBoard};
 use crate::goal_curation::{
@@ -96,7 +98,12 @@ impl OverseerCadence {
 
 /// Structured tally of one Overseer tick. Every field is emitted as a
 /// `tracing` key so a tick is fully observable without `println!`/`eprintln!`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// Derives `Serialize`/`Deserialize` (additive; no logic change) so the acting
+/// tick's outcome can be recorded verbatim into the durable
+/// [activity feed](crate::overseer::activity).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OverseerTickReport {
     /// Problems raised this cycle (post-dedup against in-flight work).
     pub problems: usize,

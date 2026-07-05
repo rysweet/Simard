@@ -107,6 +107,8 @@ Bare `simard` prints the unified help text instead of attempting a hidden enviro
 
 - [How to monitor Simard with the TUI](./howto/monitor-simard-with-tui.md) - Launch `simard-tui` and read daemon health, goals, and system stats from a single terminal pane.
 - [simard-tui reference](./reference/simard-tui.md) - Full specification of tabs, data sources, refresh behaviour, environment variables, and security model.
+- [How to watch what the Overseer is doing](./howto/watch-overseer-activity.md) - See the acting Overseer's recent activity — what it observed, what it changed, and why it held — from the dashboard **Overseer** tab, the TUI **Overseer** pane, `simard status`, and `GET /api/overseer`, with the honest disabled/observing/absent states (#2419).
+- [Overseer activity feed reference](./reference/overseer-activity-feed.md) - The bounded, durable "recent Overseer activity" feed: the `OverseerActivity`/`Record`/`ThreadStatus` model, the cross-process `activity.json` file contract, the `StatusSnapshot.overseer` section, and the auth-gated `GET /api/overseer` endpoint that lights up the dashboard/TUI Overseer surfaces (#2419).
 - [Multi-binary self-update reference](./reference/multi-binary-self-update.md) - How `simard update` now replaces the **full** binary set (`simard` plus `simard-tui`, `simard-gym`, and the rest), the dynamic discovery and `InstallReport` main-fatal/aux-best-effort contract, the SHA-256 checksum gate, and the matching release-packaging producer contract (#2252).
 
 ## Compatibility binaries

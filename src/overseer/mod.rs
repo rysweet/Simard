@@ -45,6 +45,7 @@
 
 #![allow(dead_code)]
 
+pub mod activity;
 pub mod audit;
 pub mod capabilities;
 pub mod config;

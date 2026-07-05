@@ -315,6 +315,100 @@ pub(crate) const PART_05: &str = r#"      try {
       }
     }
 
+    /* --- Overseer activity feed (#2419) --- */
+    function overseerCadenceHuman(secs){
+      secs=Number(secs)||0;
+      if(secs<=0) return '—';
+      if(secs%3600===0) return (secs/3600)+' h';
+      if(secs%60===0) return (secs/60)+' min';
+      return secs+' s';
+    }
+    function overseerTickHuman(r){
+      r=r||{};
+      const n=k=>Number(r[k])||0;
+      const s=x=>x===1?'':'s';
+      const did=[];
+      if(n('issues_filed')>0) did.push('filed '+n('issues_filed')+' issue'+s(n('issues_filed')));
+      if(n('recipes_launched')>0) did.push('launched '+n('recipes_launched')+' workstream'+s(n('recipes_launched')));
+      if(n('prs_merged')>0) did.push('merged '+n('prs_merged')+' PR'+s(n('prs_merged')));
+      if(n('deploys')>0) did.push('ran '+n('deploys')+' deploy'+s(n('deploys')));
+      if(n('escalations')>0) did.push('escalated '+n('escalations')+' to the operator');
+      const saw='saw '+n('problems')+' problem'+s(n('problems'));
+      let action;
+      if(did.length) action=did.join(', ');
+      else if(n('held')>0) action='held '+n('held')+' (waiting on a gate)';
+      else if(r.panicked) action='tick panicked — isolated';
+      else action='observing, no action needed';
+      return saw+' · '+action;
+    }
+    async function fetchOverseer(){
+      const statusEl=document.getElementById('overseer-status');
+      const threadsEl=document.getElementById('overseer-threads');
+      const recentEl=document.getElementById('overseer-recent');
+      if(!statusEl||!threadsEl||!recentEl) return;
+      try {
+        const d = await apiFetch('/api/overseer');
+        if(d.error){
+          statusEl.innerHTML='<span class="err">Failed to load Overseer activity: '+esc(d.error)+'</span>';
+          threadsEl.innerHTML='';recentEl.innerHTML='';
+          return;
+        }
+        const section=d.section||{};
+        const avail=String(section.availability||'unavailable');
+        const note=section.note?String(section.note):'';
+        const data=section.data;
+        if(!data || avail!=='ok'){
+          const msg=note||'The steward has not recorded any activity yet. It starts writing after the daemon is redeployed.';
+          statusEl.innerHTML='<div style="color:#9bb1c4;font-size:.9rem">'+esc(msg)+'</div>';
+          threadsEl.innerHTML='<span style="color:#8b949e;font-size:.85rem">No thread status available.</span>';
+          recentEl.innerHTML='<span style="color:#8b949e;font-size:.85rem">No recent activity.</span>';
+          return;
+        }
+        const staleTag=section.freshness==='stale'?' <span style="color:#d29922">(stale)</span>':'';
+        const summary=note||('Overseer: '+(data.enabled?'enabled':'disabled'));
+        statusEl.innerHTML=
+          '<div style="font-size:1rem;color:#c9d1d9;margin-bottom:.4rem">'+esc(summary)+staleTag+'</div>'
+          +'<div style="font-size:.85rem;color:#8b949e">Runs every '+esc(overseerCadenceHuman(data.cadence_secs))
+          +' · acting as '+esc(data.author_login||'—')
+          +' · last check '+esc(data.last_tick_at||'never')+'</div>';
+
+        const threads=Array.isArray(data.threads)?data.threads:[];
+        if(threads.length===0){
+          threadsEl.innerHTML='<span style="color:#8b949e;font-size:.85rem">Only the steward loop is running; no other operator threads reported.</span>';
+        } else {
+          let rows='';
+          for(const t of threads){
+            rows+='<tr>'
+              +'<td>'+esc(t.id)+'</td>'
+              +'<td>'+(t.enabled?'on':'off')+'</td>'
+              +'<td>'+esc(t.last_run||'—')+'</td>'
+              +'<td>'+esc(t.next_due||'—')+'</td>'
+              +'<td>'+esc(t.health||'—')+'</td>'
+              +'</tr>';
+          }
+          threadsEl.innerHTML='<table class="proc-table" data-testid="overseer-threads-table">'
+            +'<thead><tr><th>Thread</th><th>Enabled</th><th>Last run</th><th>Next due</th><th>Health</th></tr></thead>'
+            +'<tbody>'+rows+'</tbody></table>';
+        }
+
+        const recent=Array.isArray(data.recent)?data.recent:[];
+        if(recent.length===0){
+          recentEl.innerHTML='<span style="color:#8b949e;font-size:.85rem">Enabled and observing — 0 interventions so far.</span>';
+        } else {
+          let items='';
+          for(const rec of recent){
+            items+='<div style="padding:.35rem .1rem;border-bottom:1px solid #21262d;font-size:.85rem">'
+              +'<span style="color:#8b949e">'+esc(rec.timestamp||'')+'</span> — '
+              +'<span style="color:#c9d1d9">'+esc(overseerTickHuman(rec.report))+'</span>'
+              +'</div>';
+          }
+          recentEl.innerHTML='<div data-testid="overseer-recent-list">'+items+'</div>';
+        }
+      } catch(e) {
+        statusEl.innerHTML='<span class="err">Failed to load Overseer activity: '+esc(e.message||e)+'</span>';
+      }
+    }
+
     /* --- Merge Readiness (#1880) --- */
     async function fetchMergeReadiness(){
       const el=document.getElementById('merge-readiness-panel');

@@ -20,6 +20,7 @@ pub const SECTION_HEADERS: &[&str] = &[
     "COMPLETED WORK",
     "SELF-IMPROVEMENT",
     "TELEMETRY / UNEXPECTED SIGNALS",
+    "OVERSEER",
 ];
 
 const LABEL_WIDTH: usize = 18;
@@ -40,6 +41,7 @@ pub fn to_terminal(snapshot: &StatusSnapshot) -> String {
     render_completed(&mut out, &snapshot.completed);
     render_self_improvement(&mut out, &snapshot.self_improvement);
     render_telemetry(&mut out, &snapshot.telemetry);
+    render_overseer(&mut out, &snapshot.overseer);
 
     out
 }
@@ -481,3 +483,76 @@ fn render_telemetry(out: &mut String, env: &SectionEnvelope<super::TelemetrySign
     }
     out.push('\n');
 }
+
+// ── overseer activity feed (#2419) ────────────────────────────────────────────
+
+fn render_overseer(
+    out: &mut String,
+    env: &SectionEnvelope<crate::overseer::activity::OverseerActivity>,
+) {
+    header(out, "OVERSEER");
+    if absent_marker(out, env)
+        && let Some(a) = &env.data
+    {
+        // Honest one-line status: "disabled" / "enabled, observing, 0
+        // interventions" / "enabled, N interventions".
+        label(
+            out,
+            "overseer",
+            format!("Overseer: {}{}", a.status_summary(), stale_suffix(env)),
+        );
+        label(
+            out,
+            "cadence",
+            format!(
+                "every {}  ·  as {}",
+                crate::overseer::activity::human_cadence(a.cadence_secs),
+                a.author_login
+            ),
+        );
+        label(out, "last tick", opt_str(&a.last_tick_at));
+
+        // Per-thread status rows (name, on/off, last run, next due, health).
+        if a.threads.is_empty() {
+            label(out, "threads", "none reported");
+        } else {
+            for t in &a.threads {
+                let _ = writeln!(
+                    out,
+                    "  thread {:<16} {}  ·  last {}  ·  next {}  ·  {}",
+                    t.id,
+                    if t.enabled { "on" } else { "off" },
+                    opt_str(&t.last_run),
+                    opt_str(&t.next_due),
+                    t.health,
+                );
+            }
+        }
+
+        // Recent-activity timeline, newest-first, in plain language.
+        if a.recent.is_empty() {
+            label(out, "recent", "no ticks recorded yet");
+        } else {
+            let shown = a.recent.len().min(RECENT_ROWS);
+            for r in a.recent.iter().take(RECENT_ROWS) {
+                let _ = writeln!(
+                    out,
+                    "  {}  {}",
+                    r.timestamp,
+                    crate::overseer::activity::humanize_tick(&r.report)
+                );
+            }
+            if a.recent.len() > shown {
+                label(
+                    out,
+                    "",
+                    format!("… {} older tick(s) retained", a.recent.len() - shown),
+                );
+            }
+        }
+    }
+    out.push('\n');
+}
+
+/// How many recent-activity rows the terminal render shows before summarizing.
+const RECENT_ROWS: usize = 20;

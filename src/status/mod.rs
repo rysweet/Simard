@@ -153,6 +153,10 @@ pub struct StatusSnapshot {
     pub self_improvement: SectionEnvelope<SelfImprovement>,
     #[serde(default)]
     pub telemetry: SectionEnvelope<TelemetrySignals>,
+    /// OVERSEER — the acting Overseer meta-loop's recent activity feed (#2419):
+    /// last-N ticks, per-thread status, and the honest disabled/observing state.
+    #[serde(default)]
+    pub overseer: SectionEnvelope<crate::overseer::activity::OverseerActivity>,
 }
 
 impl StatusSnapshot {
@@ -171,6 +175,7 @@ impl StatusSnapshot {
             completed: SectionEnvelope::default(),
             self_improvement: SectionEnvelope::default(),
             telemetry: SectionEnvelope::default(),
+            overseer: SectionEnvelope::default(),
         }
     }
 }

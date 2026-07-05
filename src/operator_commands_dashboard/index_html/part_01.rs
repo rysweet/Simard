@@ -37,6 +37,23 @@ pub(crate) const PART_01: &str = r#"      </div>
     </div>
   </div>
 
+  <div class="tab-content" id="tab-overseer">
+    <h1 class="page-h1">Overseer</h1>
+    <p class="page-lede">What Simard's steward has been doing on its own — what it noticed across the system, what it changed, and, when it chose to wait, why it held back. Refreshes automatically.</p>
+    <div class="card" style="max-width:1100px;margin-bottom:1rem">
+      <h2>Steward Status <button class="btn" onclick="fetchOverseer()" style="font-size:.75rem">Refresh</button></h2>
+      <div id="overseer-status"><span class="loading">Loading…</span></div>
+    </div>
+    <div class="card" style="max-width:1100px;margin-bottom:1rem">
+      <h2>Operator Threads</h2>
+      <div id="overseer-threads"><span class="loading">Loading…</span></div>
+    </div>
+    <div class="card" style="max-width:1100px">
+      <h2>Recent Activity</h2>
+      <div id="overseer-recent"><span class="loading">Loading…</span></div>
+    </div>
+  </div>
+
   <div class="tab-content" id="tab-status">
     <h1 class="page-h1">Status</h1>
     <p class="page-lede">One consolidated operational report — the daemon, system resources, model spending, memory and brain health, gym, goals, active work, merged pull requests, and unexpected telemetry signals, all on a single page.</p>
@@ -451,6 +468,7 @@ pub(crate) const PART_01: &str = r#"      </div>
         if(tab.dataset.tab==='brain-failures') {fetchBrainFailures();tabRefreshTimers.brainFailures=setInterval(fetchBrainFailures,30000);}
         if(tab.dataset.tab==='merge-decisions') {fetchMergeJudge();tabRefreshTimers.mergeJudge=setInterval(fetchMergeJudge,30000);}
         if(tab.dataset.tab==='pr-readiness') {fetchPrReadiness();tabRefreshTimers.prReadiness=setInterval(fetchPrReadiness,30000);}
+        if(tab.dataset.tab==='overseer') {fetchOverseer();tabRefreshTimers.overseer=setInterval(fetchOverseer,30000);}
         if(tab.dataset.tab==='status') {fetchStatusSnapshot();tabRefreshTimers.status=setInterval(fetchStatusSnapshot,30000);}
         if(tab.dataset.tab==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
       });

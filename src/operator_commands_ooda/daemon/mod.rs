@@ -1235,6 +1235,13 @@ pub fn run_ooda_daemon(
                 let mem_for_tick = Arc::clone(&shared_mem);
                 let repo_root_for_tick = overseer_repo_root.clone();
                 let state_root_for_tick = state_root.clone();
+                // Capture the cognitive-thread heartbeats + feed context on the
+                // main loop thread (before the tick spawns) so the Overseer
+                // activity feed (#2419) lists every operator/steward thread, not
+                // just the Overseer meta-thread. Cheap, additive, read-only.
+                let thread_healths = mind.health();
+                let feed_cadence_secs = crate::overseer::config::overseer_interval_secs();
+                let feed_author_login = crate::overseer::config::overseer_author_login();
                 let spawn = std::thread::Builder::new()
                     .name("overseer-tick".to_string())
                     .spawn(move || {
@@ -1271,6 +1278,47 @@ pub fn run_ooda_daemon(
                                 report.duration_ms,
                             ),
                         );
+
+                        // Record this tick into the durable, cross-process
+                        // Overseer activity feed (#2419) so the dashboard, TUI,
+                        // and `simard status` can surface what the steward has
+                        // been doing. Read-only surfacing: this only *records*
+                        // the outcome that already happened; it never changes
+                        // the Overseer's decisions. Write failure is non-fatal —
+                        // the tick already completed — so it is logged and the
+                        // daemon continues.
+                        let mut feed_threads = Vec::with_capacity(thread_healths.len() + 1);
+                        feed_threads.push(
+                            crate::overseer::activity::OverseerThreadStatus::overseer_meta(
+                                feed_cadence_secs,
+                                !report.panicked && report.errors == 0,
+                            ),
+                        );
+                        for h in &thread_healths {
+                            feed_threads.push(
+                                crate::overseer::activity::OverseerThreadStatus::from_thread_health(
+                                    h,
+                                ),
+                            );
+                        }
+                        let feed_record = crate::overseer::activity::OverseerActivityRecord {
+                            timestamp: crate::telemetry::snapshot::now_rfc3339(),
+                            enabled: true,
+                            report,
+                        };
+                        if let Err(e) = crate::overseer::activity::record_tick(
+                            &state_root_for_tick,
+                            feed_record,
+                            feed_threads,
+                            true,
+                            feed_cadence_secs,
+                            &feed_author_login,
+                        ) {
+                            daemon_log(
+                                &state_root_for_tick,
+                                &format!("[simard] WARN: overseer activity feed write failed: {e}"),
+                            );
+                        }
                     });
                 if let Err(e) = spawn {
                     // Spawn failed — clear the guard so the next cadence retries.
