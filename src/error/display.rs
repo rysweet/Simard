@@ -37,6 +37,10 @@ impl Display for SimardError {
             | Self::InvalidImprovementRecord {
                 field: identity,
                 reason,
+            }
+            | Self::InvalidJournalRecord {
+                field: identity,
+                reason,
             } => fmt_field_reason(f, self, identity, reason),
             Self::InvalidCreativeIdeaRecord { field, reason } => {
                 write!(f, "invalid creative-idea record field '{field}': {reason}")
@@ -357,6 +361,7 @@ fn fmt_field_reason(
         SimardError::InvalidResearchRecord { .. } => "invalid research record field",
         SimardError::InvalidMeetingRecord { .. } => "invalid meeting record field",
         SimardError::InvalidImprovementRecord { .. } => "invalid improvement record field",
+        SimardError::InvalidJournalRecord { .. } => "invalid journal record field",
         _ => unreachable!(),
     };
     if matches!(variant, SimardError::InvalidIdentityComposition { .. }) {
