@@ -9,6 +9,7 @@ status: implemented
 related:
   - ./steerable-ooda-daemon.md
   - ./ooda-loop-self-detection.md
+  - ./overseer-goal-board-health.md
   - ../reference/no-progress-breaker-api.md
   - ../reference/completion-evidence-gate-api.md
   - ../howto/unblock-stuck-ooda-goals.md
@@ -156,6 +157,9 @@ for the (now rare) cases that still need a human.
 ## Related
 
 - [No-progress breaker API reference](../reference/no-progress-breaker-api.md)
+- [Overseer goal-board health](./overseer-goal-board-health.md) — the steward-side
+  defense-in-depth complement (#2616): if a standing goal is parked anyway, the
+  acting Overseer observes it and self-heals it (or escalates a genuine block).
 - [Keeping the OODA daemon steerable](./steerable-ooda-daemon.md) — where the
   no-progress breaker was introduced.
 - [Completion-evidence gate API](../reference/completion-evidence-gate-api.md) —

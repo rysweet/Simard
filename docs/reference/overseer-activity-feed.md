@@ -9,6 +9,7 @@ related:
   - ./status-snapshot-api.md
   - ./telemetry-metrics.md
   - ./stewardship-api.md
+  - ./overseer-goal-board-health-api.md
   - ./cognitive-thread-scheduling.md
   - ../howto/watch-overseer-activity.md
   - ../howto/simard-status.md
