@@ -560,30 +560,7 @@ impl Overseer {
                     goal_id: goal_id.to_string(),
                 })
             }
-            WhisperDecision::SuppressDuplicate => {
-                tracing::debug!(
-                    target: "overseer::goal_health",
-                    goal_id,
-                    action = "unblock",
-                    reason = "duplicate",
-                    "overseer suppressed a duplicate self-heal within the dedup window"
-                );
-                Ok(ActOutcome::GoalHealthSuppressed {
-                    reason: "duplicate",
-                })
-            }
-            WhisperDecision::SuppressCapReached => {
-                tracing::debug!(
-                    target: "overseer::goal_health",
-                    goal_id,
-                    action = "unblock",
-                    reason = "cap_reached",
-                    "overseer suppressed a self-heal: per-hour cap reached"
-                );
-                Ok(ActOutcome::GoalHealthSuppressed {
-                    reason: "cap_reached",
-                })
-            }
+            other => Ok(Self::goal_health_suppressed("unblock", goal_id, other)),
         }
     }
 
@@ -629,31 +606,33 @@ impl Overseer {
                     goal_id: goal_id.to_string(),
                 })
             }
-            WhisperDecision::SuppressDuplicate => {
-                tracing::debug!(
-                    target: "overseer::goal_health",
-                    goal_id,
-                    action = "escalate",
-                    reason = "duplicate",
-                    "overseer suppressed a duplicate escalation within the dedup window"
-                );
-                Ok(ActOutcome::GoalHealthSuppressed {
-                    reason: "duplicate",
-                })
-            }
-            WhisperDecision::SuppressCapReached => {
-                tracing::debug!(
-                    target: "overseer::goal_health",
-                    goal_id,
-                    action = "escalate",
-                    reason = "cap_reached",
-                    "overseer suppressed an escalation: per-hour cap reached"
-                );
-                Ok(ActOutcome::GoalHealthSuppressed {
-                    reason: "cap_reached",
-                })
-            }
+            other => Ok(Self::goal_health_suppressed("escalate", goal_id, other)),
         }
+    }
+
+    /// Map a non-`Deliver` dedup-gate decision for a goal-board health action
+    /// (self-heal or escalate) to its suppressed [`ActOutcome`], logging why.
+    /// The caller handles [`WhisperDecision::Deliver`] inline and only routes
+    /// the two suppression variants here, so this stays a single shared tail for
+    /// both act paths (deduped within the window, or the per-hour cap reached).
+    fn goal_health_suppressed(
+        action: &'static str,
+        goal_id: &str,
+        decision: WhisperDecision,
+    ) -> ActOutcome {
+        // `Deliver` is handled inline by the caller and never reaches here.
+        let reason = match decision {
+            WhisperDecision::SuppressCapReached => "cap_reached",
+            _ => "duplicate",
+        };
+        tracing::debug!(
+            target: "overseer::goal_health",
+            goal_id,
+            action,
+            reason,
+            "overseer suppressed a goal-board health action (dedup window / per-hour cap)"
+        );
+        ActOutcome::GoalHealthSuppressed { reason }
     }
 
     /// Best-effort advisory whisper steering Simard to carve ONE bounded,
