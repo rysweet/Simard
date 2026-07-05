@@ -30,13 +30,20 @@ pub mod allowlist;
 pub mod channel;
 pub mod config;
 pub mod gating;
+pub mod session_store;
 pub mod transport;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_continuity;
+#[cfg(test)]
+mod tests_session_store;
 
 pub use allowlist::{Allowlist, AuthDecision};
-pub use channel::{RuntimeCommandHandler, SignalCommandHandler, SignalConversation, run};
+pub use channel::{
+    RuntimeCommandHandler, SignalCommandHandler, SignalConversation, run, run_continuous,
+};
 pub use config::SignalConfig;
 pub use gating::{GateDecision, InboundCommand, RiskClass, classify, gate, parse_inbound};
 pub use transport::{JsonRpcTransport, SignalTransport};

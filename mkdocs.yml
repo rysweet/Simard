@@ -256,6 +256,7 @@ nav:
     - Meeting Backend API: reference/meeting-backend-api.md
     - Conversation Channel API: reference/conversation-channel-api.md
     - Signal Channel: reference/signal-conversation.md
+    - Signal Continuous Conversation: reference/signal-continuous-conversation.md
     - LightweightChatSession: reference/lightweight-chat-session.md
     - Dashboard Chat: reference/dashboard-chat.md
     - Copilot Meeting Mode: reference/copilot-meeting-mode.md

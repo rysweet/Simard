@@ -9,6 +9,7 @@ issues: ["#2527", "#2575", "#2576"]
 related:
   - ../index.md
   - ../reference/signal-conversation.md
+  - ../reference/signal-continuous-conversation.md
   - ../architecture/conversation-channel.md
   - ../reference/conversation-channel-api.md
   - ../concepts/operational-autonomy-model.md

@@ -337,9 +337,14 @@ impl<T: SignalTransport + Send, H: SignalCommandHandler> ConversationChannel
     }
 }
 
-/// Connect to the configured signal-cli daemon and drive an operator meeting
-/// conversation over Signal to completion. Feature-gated; requires the meeting
-/// LLM provider to be configured (same as the CLI/dashboard meeting).
+/// Connect to the configured signal-cli daemon and drive **continuous,
+/// multi-turn, per-operator** meeting conversations over Signal (issue #2577).
+///
+/// Each allowlisted operator gets a persistent conversation session (keyed by
+/// their Signal address) that is reused across successive inbound messages and
+/// survives daemon restarts via [`super::session_store`]. Feature-gated;
+/// requires the meeting LLM provider to be configured (same as the
+/// CLI/dashboard meeting).
 pub async fn run(config: SignalConfig) -> SimardResult<()> {
     use crate::error::SimardError;
 
@@ -347,16 +352,303 @@ pub async fn run(config: SignalConfig) -> SimardResult<()> {
     let handler = RuntimeCommandHandler::new();
     let mut channel = SignalConversation::new(transport, handler, &config);
 
-    let agent = open_signal_agent_session().ok_or_else(|| SimardError::ActionExecutionFailed {
-        action: "signal-meeting".to_string(),
-        reason: "No LLM agent backend available. Check SIMARD_LLM_PROVIDER and auth config."
-            .to_string(),
-    })?;
-    let system_prompt = load_meeting_system_prompt();
-    let mut backend =
-        crate::meeting_backend::MeetingBackend::new_session("Signal", agent, None, system_prompt);
+    // Fail fast on a misconfigured provider (the only realistic agent-open
+    // failure), so the operator sees a clear startup error rather than a
+    // per-turn failure once messages start arriving.
+    if let Err(e) = crate::session_builder::LlmProvider::resolve() {
+        return Err(SimardError::ActionExecutionFailed {
+            action: "signal-meeting".to_string(),
+            reason: format!(
+                "No LLM agent backend available: {e}. Check SIMARD_LLM_PROVIDER and auth config."
+            ),
+        });
+    }
 
-    crate::conversation_channel::run_conversation(&mut channel, &mut backend).await
+    let system_prompt = load_meeting_system_prompt();
+    let state_root = crate::state_root::simard_state_root();
+
+    // Per-operator backend factory: each operator gets an independent meeting
+    // backend (its own agent session + its own history), so two operators never
+    // share context. `run_continuous` calls this once per operator on first
+    // touch and replays that operator's persisted history into the fresh
+    // backend. A post-startup agent-open failure (unexpected after the provider
+    // check above) degrades to a backend that reports the outage per turn rather
+    // than crashing the daemon that serves every operator.
+    let mut make_backend = |_operator: &str| -> crate::meeting_backend::MeetingBackend {
+        let agent: Box<dyn crate::base_types::BaseTypeSession> = match open_signal_agent_session() {
+            Some(a) => a,
+            None => {
+                eprintln!(
+                    "[simard][ERROR] signal: agent session open failed after startup validation; \
+                     replies will report the outage until it recovers"
+                );
+                Box::new(UnavailableAgent::new())
+            }
+        };
+        crate::meeting_backend::MeetingBackend::new_session(
+            "signal",
+            agent,
+            None,
+            system_prompt.clone(),
+        )
+    };
+
+    run_continuous(&mut channel, &state_root, &mut make_backend).await
+}
+
+/// Lifecycle commands an operator can send over Signal to control the
+/// conversation itself (as opposed to a normal turn or a remote command). These
+/// are handled entirely inside [`run_continuous`] — they never reach the
+/// reasoner and are never persisted as conversation turns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lifecycle {
+    /// `/new` or `/reset` — rotate onto a fresh session (previous retained).
+    Reset,
+    /// `/help` — show the command banner.
+    Help,
+    /// `/close` — end the current conversation.
+    Close,
+}
+
+/// Classify an inbound line as a conversation-lifecycle command, or `None` for
+/// an ordinary turn. Matched case-insensitively on the trimmed text so `/NEW`
+/// and `/New` also work.
+fn lifecycle_command(text: &str) -> Option<Lifecycle> {
+    let t = text.trim();
+    if t.eq_ignore_ascii_case("/new") || t.eq_ignore_ascii_case("/reset") {
+        Some(Lifecycle::Reset)
+    } else if t.eq_ignore_ascii_case("/help") {
+        Some(Lifecycle::Help)
+    } else if t.eq_ignore_ascii_case("/close") {
+        Some(Lifecycle::Close)
+    } else {
+        None
+    }
+}
+
+/// The operator-facing lifecycle banner surfaced by `/help`.
+fn help_banner() -> String {
+    "[simard] Commands:\n\
+     \x20 /help          — show this help\n\
+     \x20 /new  (/reset) — start a fresh conversation (clears prior context)\n\
+     \x20 /close         — end this conversation and write the handoff\n\
+     \x20 status | pause | approve | deploy | merge #NNNN — operator commands\n\
+     Anything else is a message in our ongoing conversation."
+        .to_string()
+}
+
+/// Redact an operator address for structured logs: keep only the last four
+/// characters so a session id (safe) and a coarse operator hint are logged
+/// without persisting a full phone number to the daemon log.
+fn redact_operator(operator: &str) -> String {
+    let n = operator.chars().count();
+    if n <= 4 {
+        return "…".to_string();
+    }
+    let tail: String = operator.chars().skip(n - 4).collect();
+    format!("…{tail}")
+}
+
+/// Drive a **continuous, multi-turn, per-operator** Signal conversation
+/// (issue #2577).
+///
+/// Unlike [`crate::conversation_channel::run_conversation`] — which owns a
+/// single [`MeetingBackend`] for the life of the process — this driver keeps a
+/// registry of backends keyed by the inbound operator identity
+/// (`inbound.from.id`, the authorized Signal E.164 that `recv` binds), so two
+/// operators never share history. Each operator's conversation is:
+///
+///   1. **Continuous in-process** — successive inbound messages route to the
+///      SAME backend, so the reasoner sees the accumulated prior-turn history.
+///   2. **Durable** — every turn is appended to the operator's session file via
+///      [`super::session_store`], so a daemon restart replays the persisted
+///      history back into a fresh backend and the conversation resumes rather
+///      than starting over.
+///   3. **Operator-controllable** — `/new` (alias `/reset`) rotates the operator
+///      onto a fresh session id (previous history retained on disk); `/help`
+///      shows the lifecycle banner; `/close` ends the current conversation.
+///
+/// `make_backend(operator)` mints a fresh backend for a given operator key; the
+/// real `run` supplies the meeting agent + system prompt, tests inject a fake.
+/// Loop-prevention (device gate + echo suppression) stays entirely inside
+/// [`SignalConversation::recv`], so Simard's own outbound is never re-consumed
+/// as a new turn.
+pub async fn run_continuous<T, H, F>(
+    channel: &mut SignalConversation<T, H>,
+    state_root: &std::path::Path,
+    make_backend: &mut F,
+) -> SimardResult<()>
+where
+    T: SignalTransport + Send,
+    H: SignalCommandHandler,
+    F: FnMut(&str) -> crate::meeting_backend::MeetingBackend,
+{
+    use std::collections::HashMap;
+
+    use super::session_store;
+    use crate::meeting_backend::MeetingBackend;
+
+    // Per-operator live backends (in-process continuity) and the durable
+    // session id each is bound to. Keyed by the authorized operator identity
+    // that `recv` binds onto the inbound.
+    let mut backends: HashMap<String, MeetingBackend> = HashMap::new();
+    let mut sessions: HashMap<String, String> = HashMap::new();
+
+    while let Some(inbound) = channel.recv().await? {
+        let operator = inbound.from.id.clone();
+        let text = inbound.text.trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+
+        // ── Conversation-lifecycle commands (never a turn, never persisted) ──
+        match lifecycle_command(&text) {
+            Some(Lifecycle::Reset) => {
+                // Rotate onto a fresh session id; the previous session file is
+                // retained on disk, and the live backend is dropped so the next
+                // turn starts from an empty (resumed-as-empty) context.
+                let new_sid = crate::session_id::new_session_id();
+                session_store::set_active_session(state_root, &operator, &new_sid)?;
+                backends.remove(&operator);
+                sessions.remove(&operator);
+                tracing::info!(
+                    target: "signal",
+                    operator = %redact_operator(&operator),
+                    session_id = %new_sid,
+                    "session.reset"
+                );
+                channel
+                    .send(Outbound {
+                        kind: OutKind::Status,
+                        text: "[simard] Started a new conversation.".to_string(),
+                    })
+                    .await?;
+                continue;
+            }
+            Some(Lifecycle::Help) => {
+                channel
+                    .send(Outbound {
+                        kind: OutKind::Status,
+                        text: help_banner(),
+                    })
+                    .await?;
+                continue;
+            }
+            Some(Lifecycle::Close) => {
+                let out = match backends.remove(&operator) {
+                    Some(mut backend) => match backend.close() {
+                        Ok(s) => {
+                            let mut body = format!(
+                                "[simard] Conversation closed. {} messages. Summary: {}",
+                                s.message_count, s.summary_text
+                            );
+                            if let Some(dir) = &s.bundle_dir {
+                                body.push_str(&format!("\nBundle: {dir}"));
+                            }
+                            Outbound {
+                                kind: OutKind::Status,
+                                text: body,
+                            }
+                        }
+                        Err(e) => Outbound {
+                            kind: OutKind::Error,
+                            text: format!("Conversation closed with error: {e}"),
+                        },
+                    },
+                    None => Outbound {
+                        kind: OutKind::Status,
+                        text: "[simard] No active conversation to close.".to_string(),
+                    },
+                };
+                // Rotate to a fresh session so the next message starts a brand
+                // new conversation rather than resuming the closed one.
+                let new_sid = crate::session_id::new_session_id();
+                session_store::set_active_session(state_root, &operator, &new_sid)?;
+                sessions.remove(&operator);
+                tracing::info!(
+                    target: "signal",
+                    operator = %redact_operator(&operator),
+                    "session.close"
+                );
+                channel.send(out).await?;
+                continue;
+            }
+            None => {}
+        }
+
+        // ── Ensure a live backend for this operator, resuming on first touch ──
+        if !backends.contains_key(&operator) {
+            let sid = match session_store::active_session_for(state_root, &operator)? {
+                Some(existing) => existing,
+                None => {
+                    let fresh = crate::session_id::new_session_id();
+                    session_store::set_active_session(state_root, &operator, &fresh)?;
+                    fresh
+                }
+            };
+            let mut backend = make_backend(&operator);
+            let resumed = match session_store::load_session_at(state_root, &sid)? {
+                Some(sess) => {
+                    let n = sess.history.len();
+                    // Replay the persisted (uncapped) history into the fresh
+                    // backend so the next turn is context-aware after a restart.
+                    backend.restore(sess.history);
+                    n
+                }
+                None => 0,
+            };
+            if resumed > 0 {
+                tracing::info!(
+                    target: "signal",
+                    operator = %redact_operator(&operator),
+                    session_id = %sid,
+                    turns = resumed,
+                    "session.resume"
+                );
+            } else {
+                tracing::info!(
+                    target: "signal",
+                    operator = %redact_operator(&operator),
+                    session_id = %sid,
+                    "session.create"
+                );
+            }
+            backends.insert(operator.clone(), backend);
+            sessions.insert(operator.clone(), sid);
+        }
+
+        let sid = sessions
+            .get(&operator)
+            .cloned()
+            .expect("session id recorded alongside the backend");
+        let backend = backends
+            .get_mut(&operator)
+            .expect("backend just ensured for this operator");
+
+        // ── Run the turn, then persist the newly-appended user+assistant pair ─
+        let out = match backend.send_message(&text) {
+            Ok(resp) => {
+                // The two messages send_message just appended are the newest in
+                // history (eviction, if any, is at the front), so the tail is
+                // exactly this turn's user + assistant pair — cap-independent.
+                let hist = backend.history();
+                let start = hist.len().saturating_sub(2);
+                for msg in &hist[start..] {
+                    session_store::append_turn_at(state_root, &sid, msg)?;
+                }
+                Outbound {
+                    kind: OutKind::Assistant,
+                    text: resp.content,
+                }
+            }
+            Err(e) => Outbound {
+                kind: OutKind::Error,
+                text: format!("[error: {e}]"),
+            },
+        };
+        channel.send(out).await?;
+    }
+    Ok(())
 }
 
 /// Load the shared meeting system prompt (same asset the CLI/dashboard use).
@@ -389,6 +681,60 @@ fn open_signal_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSess
             eprintln!("[simard] signal agent session failed: {e}");
             None
         }
+    }
+}
+
+/// A degraded [`crate::base_types::BaseTypeSession`] used only when an agent
+/// session cannot be opened for an operator *after* startup provider validation
+/// already passed (an unexpected transient). Every turn returns a clear error so
+/// the operator is told the reasoner is unavailable, while the daemon keeps
+/// serving other operators rather than crashing.
+struct UnavailableAgent {
+    descriptor: crate::base_types::BaseTypeDescriptor,
+}
+
+impl UnavailableAgent {
+    fn new() -> Self {
+        use crate::base_types::{BaseTypeDescriptor, BaseTypeId, standard_session_capabilities};
+        use crate::metadata::{BackendDescriptor, Freshness};
+        use crate::runtime::RuntimeTopology;
+        Self {
+            descriptor: BaseTypeDescriptor {
+                id: BaseTypeId::new("signal-unavailable-agent"),
+                backend: BackendDescriptor::for_runtime_type::<Self>(
+                    "signal-unavailable-agent",
+                    "signal:unavailable",
+                    // `now()` only fails if the system clock predates 1970.
+                    Freshness::now().expect("system clock is before the unix epoch"),
+                ),
+                capabilities: standard_session_capabilities(),
+                supported_topologies: [RuntimeTopology::SingleProcess].into_iter().collect(),
+            },
+        }
+    }
+}
+
+impl crate::base_types::BaseTypeSession for UnavailableAgent {
+    fn descriptor(&self) -> &crate::base_types::BaseTypeDescriptor {
+        &self.descriptor
+    }
+
+    fn open(&mut self) -> SimardResult<()> {
+        Ok(())
+    }
+
+    fn run_turn(
+        &mut self,
+        _input: crate::base_types::BaseTypeTurnInput,
+    ) -> SimardResult<crate::base_types::BaseTypeOutcome> {
+        Err(crate::error::SimardError::ActionExecutionFailed {
+            action: "signal-meeting".to_string(),
+            reason: "the reasoner is temporarily unavailable; please retry shortly".to_string(),
+        })
+    }
+
+    fn close(&mut self) -> SimardResult<()> {
+        Ok(())
     }
 }
 
