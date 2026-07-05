@@ -1,0 +1,74 @@
+name: overseer-activity-report-fields
+app_type: cli
+description: |
+  Regression coverage for issue #2615 — the `verify` workflow was red on `main`
+  for every commit after the Whisperer feature (#2605/#2611) because the
+  `report()` test helper in `tests/overseer_activity.rs` constructed
+  `OverseerTickReport { … }` with an exhaustive struct literal that was missing
+  the two new fields (`whispers`, `whispers_suppressed`), producing:
+
+      error[E0063]: missing fields `whispers` and `whispers_suppressed`
+                    in initializer of `OverseerTickReport`
+
+  A compile break in one test target fails `cargo test`, taking down the whole
+  `verify` workflow. This scenario pins the fix end to end (the CLI runner
+  rejects any non-zero exit, so every `run` step below is also an assertion):
+  1. The `OverseerTickReport` struct still declares both fields.
+  2. The `report()` helper initializes both fields (the exact regression site).
+  3. The previously-broken `overseer_activity` test target compiles and passes.
+  4. The build no longer emits the E0063 "missing fields" error.
+agents:
+  - name: shell
+    type: cli
+    command: bash
+steps:
+  # 1. The struct definition declares the two Whisperer tally fields.
+  - action: run
+    params:
+      command: "grep -Eq 'pub whispers: usize' src/overseer/wiring.rs && grep -Eq 'pub whispers_suppressed: usize' src/overseer/wiring.rs"
+    timeout: 15000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # 2. The report() test helper initializes BOTH fields (the exact fix site).
+  - action: run
+    params:
+      command: "grep -Eq '^[[:space:]]*whispers: 0,' tests/overseer_activity.rs && grep -Eq '^[[:space:]]*whispers_suppressed: 0,' tests/overseer_activity.rs"
+    timeout: 15000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # 3. The previously-broken test target compiles and passes cleanly.
+  #    Exit 0 only happens once the E0063 initializer gap is closed.
+  - action: run
+    params:
+      command: "cargo test --test overseer_activity > /tmp/qa-overseer-activity.log 2>&1"
+    timeout: 1200000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # 4. The build did NOT hit the #2615 E0063 missing-fields error.
+  - action: run
+    params:
+      command: "bash -c '! grep -qiE \"missing fields .?whispers.? and .?whispers_suppressed.?\" /tmp/qa-overseer-activity.log'"
+    timeout: 15000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # 5. The full overseer_activity contract suite reports an all-green result.
+  - action: run
+    params:
+      command: "grep -Eq 'test result: ok\\. [0-9]+ passed; 0 failed' /tmp/qa-overseer-activity.log"
+    timeout: 15000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
