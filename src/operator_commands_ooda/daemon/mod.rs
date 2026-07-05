@@ -359,6 +359,10 @@ pub fn run_ooda_daemon(
         crate::goal_board_store::load_or_migrate(&state_root, &*bridges.memory).unwrap_or_default();
     let tombstones = crate::ooda_loop::load_tombstones(&state_root);
     let board = crate::goal_board_store::filter_tombstoned(persistent.board, &tombstones);
+    // Issue #2589: self-heal any stale [OODA-SAFEGUARD] no-progress block an
+    // older daemon build may have parked on a standing/perpetual goal, so a
+    // continuous research goal is never left "needs human review" on startup.
+    let board = crate::goal_board_store::heal_stale_no_progress_blocks(board);
     let mut state = OodaState::new(board);
     state.no_progress_tracker = persistent.no_progress;
     let config = OodaConfig::default();
@@ -916,8 +920,17 @@ pub fn run_ooda_daemon(
         {
             let cycle_tombstones = crate::ooda_loop::load_tombstones(&state_root);
             let persistent = crate::goal_board_store::load(&state_root);
-            state.active_goals =
-                crate::goal_board_store::filter_tombstoned(persistent.board, &cycle_tombstones);
+            // Issue #2589: self-heal any stale [OODA-SAFEGUARD] no-progress block
+            // an older daemon build parked on a standing/perpetual goal. This
+            // per-cycle heal is load-bearing: the board is re-read from disk each
+            // cycle, so a startup-only heal would be undone here (disk still says
+            // Blocked) and a Blocked goal is never dispatched — so the runtime
+            // exemption could never fire. Healing before `overwrite_memory_cache`
+            // makes the healed board reach the snapshot `run_ooda_cycle` reads;
+            // the cleared status is persisted by the next `commit_cycle`.
+            state.active_goals = crate::goal_board_store::heal_stale_no_progress_blocks(
+                crate::goal_board_store::filter_tombstoned(persistent.board, &cycle_tombstones),
+            );
             state.no_progress_tracker = persistent.no_progress;
             if let Err(e) =
                 crate::goal_curation::overwrite_memory_cache(&state.active_goals, &*bridges.memory)

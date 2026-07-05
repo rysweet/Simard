@@ -473,3 +473,102 @@ fn load_or_migrate_writes_file_from_memory_snapshot() {
     let again = load_or_migrate(root, bridge.ops()).expect("reload");
     assert_eq!(again.board.active.len(), 1);
 }
+
+// --- perpetual/standing-goal self-heal on load (issue #2589) ----------------
+
+/// A standing/perpetual goal (issues #2580/#2589): recognised by the *same*
+/// `is_perpetual()` flag the non-completability path keys on.
+fn standing_goal(id: &str) -> ActiveGoal {
+    let g = ActiveGoal::new(
+        id,
+        format!("STANDING PERPETUAL goal — {id}; never mark complete"),
+        5,
+    );
+    assert!(
+        g.is_perpetual(),
+        "fixture must be recognised as standing/perpetual by the shared #2580/#2589 flag"
+    );
+    g
+}
+
+#[test]
+fn heals_stale_perpetual_no_progress_block() {
+    use crate::goal_curation::no_progress_breaker::no_progress_blocked_reason;
+
+    // A prior daemon build parked a standing/perpetual goal with the
+    // [OODA-SAFEGUARD] no-progress sentinel. On load it must SELF-HEAL back to an
+    // actionable, re-dispatchable state (NotStarted) — a standing goal must never
+    // stay parked or require a manual unblock.
+    let mut g = standing_goal("continuously-research-and-improve");
+    g.status = GoalProgress::Blocked(no_progress_blocked_reason(3));
+
+    let healed = heal_stale_no_progress_blocks(board(vec![g]));
+
+    assert_eq!(
+        healed.active[0].status,
+        GoalProgress::NotStarted,
+        "a stale no-progress block on a perpetual goal must be cleared to NotStarted"
+    );
+}
+
+#[test]
+fn leaves_non_perpetual_no_progress_block_intact() {
+    use crate::goal_curation::no_progress_breaker::no_progress_blocked_reason;
+
+    // Regression: a NORMAL goal parked by the same safeguard is a legitimate
+    // human-review block and must stay Blocked — self-heal never touches it.
+    let mut g = goal("normal-stuck", 1, None);
+    assert!(!g.is_perpetual());
+    let reason = no_progress_blocked_reason(3);
+    g.status = GoalProgress::Blocked(reason.clone());
+
+    let healed = heal_stale_no_progress_blocks(board(vec![g]));
+
+    assert_eq!(
+        healed.active[0].status,
+        GoalProgress::Blocked(reason),
+        "a normal goal's no-progress block must be preserved (no regression)"
+    );
+}
+
+#[test]
+fn leaves_perpetual_non_safeguard_block_intact() {
+    use crate::goal_curation::no_progress_breaker::is_no_progress_marker;
+
+    // A perpetual goal Blocked for a DIFFERENT reason (operator hold / scope /
+    // dependency) is a legitimate block a human set. Self-heal keys STRICTLY on
+    // the no-progress sentinel, so this block must survive untouched.
+    let mut g = standing_goal("standing-on-hold");
+    let reason = "operator hold: paused pending design review".to_string();
+    assert!(
+        !is_no_progress_marker(&reason),
+        "control reason must NOT be a no-progress sentinel"
+    );
+    g.status = GoalProgress::Blocked(reason.clone());
+
+    let healed = heal_stale_no_progress_blocks(board(vec![g]));
+
+    assert_eq!(
+        healed.active[0].status,
+        GoalProgress::Blocked(reason),
+        "a non-safeguard block on a perpetual goal must be preserved"
+    );
+}
+
+#[test]
+fn heal_stale_no_progress_blocks_is_idempotent() {
+    use crate::goal_curation::no_progress_breaker::no_progress_blocked_reason;
+
+    let mut g = standing_goal("continuously-research");
+    g.status = GoalProgress::Blocked(no_progress_blocked_reason(4));
+
+    let once = heal_stale_no_progress_blocks(board(vec![g]));
+    assert_eq!(once.active[0].status, GoalProgress::NotStarted);
+
+    let twice = heal_stale_no_progress_blocks(once.clone());
+    assert_eq!(
+        twice.active[0].status,
+        GoalProgress::NotStarted,
+        "a second heal pass must be a no-op"
+    );
+}

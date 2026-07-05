@@ -46,7 +46,7 @@ use crate::goal_curation::completion_gate::{
     CompletionEvidenceGate, CompletionVerdict, EvidenceSource,
 };
 use crate::goal_curation::{
-    ActiveGoal, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS, NoProgressTracker,
+    ActiveGoal, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS, NoProgressTracker, is_no_progress_marker,
 };
 
 #[cfg(test)]
@@ -250,6 +250,46 @@ pub fn mutate<R>(
 pub fn filter_tombstoned(mut board: GoalBoard, tombstones: &HashSet<String>) -> GoalBoard {
     board.active.retain(|g| !tombstones.contains(&g.id));
     board.backlog.retain(|b| !tombstones.contains(&b.id));
+    board
+}
+
+/// Self-heal a stale no-progress hard-block on a standing/perpetual goal
+/// (issue #2589).
+///
+/// A standing/perpetual goal is inherently bursty and is **exempt** from the
+/// no-progress breaker at runtime (see
+/// [`crate::ooda_loop::no_progress::apply_no_progress_breaker`]). But a goal
+/// parked by an *older* daemon build — before that exemption existed — can load
+/// carrying the `[OODA-SAFEGUARD]` sentinel [`GoalProgress::Blocked`] reason,
+/// leaving a continuous research goal stuck "needs human review" and requiring a
+/// manual `simard goal unblock`. Applied at load and at the top of every cycle,
+/// this clears exactly that stale block back to [`GoalProgress::NotStarted`] —
+/// the canonical actionable, re-dispatchable state — so the goal is available
+/// again next cycle with no operator intervention. A standing goal must be
+/// continuous and self-sustaining.
+///
+/// It is deliberately narrow: it heals a goal **only** when it
+/// [`is_perpetual`](ActiveGoal::is_perpetual) **and** its block reason is a
+/// [`is_no_progress_marker`] sentinel. A normal goal's no-progress block (a
+/// legitimate human-review request) is preserved, and any operator / scope /
+/// dependency / brain-failure block on a standing goal is left untouched.
+/// Idempotent — a goal already cleared is a no-op.
+#[must_use]
+pub fn heal_stale_no_progress_blocks(mut board: GoalBoard) -> GoalBoard {
+    for goal in &mut board.active {
+        let stale_no_progress_block = goal.is_perpetual()
+            && matches!(&goal.status, GoalProgress::Blocked(reason) if is_no_progress_marker(reason));
+        if stale_no_progress_block {
+            tracing::info!(
+                target: "simard::ooda",
+                goal = %goal.id,
+                "no-progress breaker: self-healing stale [OODA-SAFEGUARD] block on \
+                 standing/perpetual goal — restoring to not-started (a standing goal \
+                 must never require a manual unblock)",
+            );
+            goal.status = GoalProgress::NotStarted;
+        }
+    }
     board
 }
 

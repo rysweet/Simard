@@ -11,6 +11,8 @@ related:
   - ./run-ooda-daemon.md
   - ./spawn-engineers-from-ooda-daemon.md
   - ../concepts/ooda-loop-self-detection.md
+  - ../concepts/perpetual-goal-no-progress-exemption.md
+  - ../reference/no-progress-breaker-api.md
 ---
 
 # Unblock OODA goals stuck after a brain-failure lockout
@@ -97,6 +99,36 @@ simard goal remove <goal-id>
 # board stays at its active cap rather than idling on one stalled item.
 simard goal add <priority> "module X line coverage >= 80%, PR merged"
 ```
+
+## Standing/perpetual goals never need unblocking (#2589)
+
+A **standing/perpetual** goal — one described "STANDING PERPETUAL goal" /
+"Standing goal", i.e. `is_perpetual()` (issue #2580) — is **exempt from the
+no-progress safeguard entirely**. Such a goal is inherently *bursty*: it ships a
+durable improvement, idles for a few cycles while there is nothing new to ship,
+then ships again. As of #2589 the no-progress breaker recognises this:
+
+- **Runtime:** when a standing goal produces a no-action cycle, the breaker
+  resets its consecutive-no-action counter and keeps it active instead of
+  climbing toward the threshold. It never sets the `[OODA-SAFEGUARD]` marker and
+  never files a review issue. The idle is recorded in the cycle's
+  `perpetual_idled` list and logged at `info` — normal, not a fault.
+- **Load-time self-heal:** if a standing goal was already parked by an *older*
+  daemon build, the daemon clears that stale `[OODA-SAFEGUARD]` block back to
+  `not-started` automatically — on the next daemon start **and again at the top
+  of every cycle** (`heal_stale_no_progress_blocks`, run after tombstone
+  filtering). No `simard goal unblock` needed.
+
+So a standing goal that used to appear as
+`p5 [blocked: 🔒 [OODA-SAFEGUARD] …]` now stays `p5 [not-started]` across idle
+cycles and self-heals if it was parked. You should not have to unblock it by
+hand. If a standing goal *is* still parked, it means it was blocked by a
+**different** path (operator hold, scope, dependency, or the brain-failure
+safeguard) — those are out of scope for the self-heal and legitimately need the
+manual steps below. See
+[Standing/perpetual goals are exempt from the no-progress hard-block](../concepts/perpetual-goal-no-progress-exemption.md)
+and the [no-progress breaker API](../reference/no-progress-breaker-api.md) for
+details.
 
 ## Manual recovery via the CLI
 
