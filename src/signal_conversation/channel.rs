@@ -657,6 +657,28 @@ fn load_meeting_system_prompt() -> String {
     std::fs::read_to_string(&path).unwrap_or_default()
 }
 
+/// The [`crate::identity::OperatingMode`] the Signal channel opens its agent
+/// session in.
+///
+/// This MUST remain [`crate::identity::OperatingMode::Meeting`]. Meeting mode is
+/// the seam that routes the session through
+/// [`crate::meeting_backend::agent_proxy::PersistentAgentProxy`], whose turn
+/// lifecycle reaps the agent child **only on idle-liveness** — no output for a
+/// generous window, with every streamed chunk resetting the clock — and
+/// **never on a wall-clock elapsed-time cap**. That is precisely what gives the
+/// Signal channel turn-lifecycle parity with the meeting REPL and dashboard
+/// chat: a long-but-productive turn is never killed.
+///
+/// Changing this to any non-Meeting mode would drop Signal onto the per-turn
+/// adapter path and silently reintroduce the wall-clock turn timeout that
+/// issue #2607 forbids, breaking the cross-transport parity issue #2604
+/// requires. The `signal_opens_agent_in_meeting_mode_for_idle_liveness_parity`
+/// regression test pins this decision. (Idle-liveness: #2581; hours-scale
+/// default: PR #2608.)
+pub(crate) const fn signal_agent_mode() -> crate::identity::OperatingMode {
+    crate::identity::OperatingMode::Meeting
+}
+
 /// Open a Meeting-mode agent session for the Signal channel, mirroring the CLI
 /// and dashboard backends so all three channels get identical behavior.
 fn open_signal_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSession>> {
@@ -667,14 +689,11 @@ fn open_signal_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSess
             return None;
         }
     };
-    match crate::session_builder::SessionBuilder::new(
-        crate::identity::OperatingMode::Meeting,
-        provider,
-    )
-    .node_id("signal-channel")
-    .address("signal-channel://local")
-    .adapter_tag("signal")
-    .open()
+    match crate::session_builder::SessionBuilder::new(signal_agent_mode(), provider)
+        .node_id("signal-channel")
+        .address("signal-channel://local")
+        .adapter_tag("signal")
+        .open()
     {
         Ok(s) => Some(s),
         Err(e) => {
