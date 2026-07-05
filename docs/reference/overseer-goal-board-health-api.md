@@ -75,7 +75,7 @@ src/overseer/mod.rs            + Overseer.{notifier, blocked_goal_gate, goal_hea
                                  try_whisper_carve_subgoal
                                + classify_signal + decide arm + decide_blocked_goal
 src/operator_commands_ooda/daemon/mod.rs  tick log line + goals_unblocked/goals_escalated
-src/overseer/tests_goal_health.rs  NEW: 10 tests (fakes only, no network)
+src/overseer/tests_goal_health.rs  NEW: 11 tests (fakes only, no network)
 ```
 
 ## `BlockedGoal`
@@ -368,7 +368,7 @@ Signal notifier the merge path uses.
 
 ## Test coverage
 
-`src/overseer/tests_goal_health.rs` (10 tests, fakes only, no network):
+`src/overseer/tests_goal_health.rs` (11 tests, fakes only, no network):
 `blocked_goals_projection_surfaces_perpetual_and_needs_review_goals`,
 `run_cycle_populates_observed_blocked_goals_and_emits_signals`,
 `goal_blocked_signal_maps_to_a_goal_hygiene_problem`,
