@@ -302,7 +302,7 @@ streamed chunk resets the clock, so a working turn is never killed:
 
 | Env var | Default | Effect |
 |---------|---------|--------|
-| `SIMARD_MEETING_IDLE_LIVENESS_SECS` | `300` | Idle-liveness window in seconds — max time with **no output** before the child is treated as hung. `0` disables idle detection (fully unbounded escape hatch); unset/malformed uses the default. |
+| `SIMARD_MEETING_IDLE_LIVENESS_SECS` | `3600` | Idle-liveness window in seconds — max time with **no output** before the child is treated as hung. Default is an hours-scale window (1 hour), not a minutes-scale one, so a legitimately long-thinking-but-momentarily-silent agent is never killed prematurely. `0` disables idle detection (fully unbounded escape hatch); unset/malformed uses the default. |
 | `SIMARD_MEETING_TURN_TIMEOUT_SECS` | _(unset)_ | **Deprecated alias** for `SIMARD_MEETING_IDLE_LIVENESS_SECS`, kept working for existing config. It is **no longer a wall-clock cap** — when set it configures the same idle-liveness window. |
 
 When a child is idle for the whole window it is terminated and the turn
@@ -330,7 +330,7 @@ If you see the prompt cursor blinking with no response after 2–3 minutes, chec
    the turn returns an `AdapterInvocationFailed` error immediately.
 3. **Long compute in progress?** A turn has **no wall-clock cap** — it runs as
    long as it keeps producing output. Only a genuinely idle child (no output for
-   `SIMARD_MEETING_IDLE_LIVENESS_SECS`, default 300 s) is reaped, degrading
+   `SIMARD_MEETING_IDLE_LIVENESS_SECS`, default 3600 s / 1 hour) is reaped, degrading
    honestly with a `[meeting:error] WARNING` banner — the REPL never hangs
    indefinitely and never kills a working turn. To change the idle window use
    `SIMARD_MEETING_IDLE_LIVENESS_SECS=600 simard meeting repl`, or set it to `0`
