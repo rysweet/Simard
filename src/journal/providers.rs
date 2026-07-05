@@ -11,15 +11,14 @@
 //!
 //! In production the [`SystemClock`] reads the UTC calendar day and adapters
 //! wrap cognitive memory / the PR-readiness view behind [`EpisodeSource`] /
-//! [`PrListSource`]; those adapters (and the background cognitive thread that
-//! drives [`generate_and_store`]) are wired in a later step and consume exactly
-//! these seams.
+//! [`PrListSource`]; those adapters (and the background cognitive thread in
+//! [`crate::journal::thread`] that the OODA daemon runs to drive
+//! [`generate_and_store`]) consume exactly these seams.
 
 use chrono::{NaiveDate, Utc};
 
 use crate::error::SimardResult;
 use crate::journal::generate::JournalGenerator;
-use crate::journal::store::JournalStore;
 use crate::journal::types::{DayContext, JournalEntry, MemoryGrowth, PrSummary};
 use crate::memory_cognitive::CognitiveEpisode;
 
@@ -96,28 +95,14 @@ pub fn assemble_day_context(
 
 /// End-to-end: assemble the day, generate the reviewed entry, and persist it.
 ///
-/// This is the single unit the background cognitive thread calls once per day
+/// This is the single unit the background journal thread calls once per day
 /// (and again as the day rolls forward — the store's caller-key dedup makes the
-/// repeat idempotent). Returns the entry that was stored.
+/// repeat idempotent). It persists through a borrowed
+/// [`CognitiveMemoryOps`](crate::cognitive_memory::CognitiveMemoryOps) handle
+/// (the thread runs against `ThreadContext::memory`, which it only holds by
+/// reference) via [`store::save_entry`](crate::journal::store::save_entry).
+/// Returns the entry that was stored.
 pub fn generate_and_store(
-    date: NaiveDate,
-    episodes: &dyn EpisodeSource,
-    prs: &dyn PrListSource,
-    extras: DayExtras,
-    generator: &JournalGenerator,
-    store: &JournalStore,
-) -> SimardResult<JournalEntry> {
-    let day = assemble_day_context(date, episodes, prs, extras)?;
-    let entry = generator.generate(&day);
-    store.save(&entry)?;
-    Ok(entry)
-}
-
-/// Borrowed-ops variant of [`generate_and_store`] for callers that hold a
-/// `&dyn CognitiveMemoryOps` rather than a [`JournalStore`] (the background
-/// journal thread runs against [`ThreadContext::memory`]). Persists via
-/// [`store::save_entry`](crate::journal::store::save_entry).
-pub fn generate_and_store_ops(
     date: NaiveDate,
     episodes: &dyn EpisodeSource,
     prs: &dyn PrListSource,

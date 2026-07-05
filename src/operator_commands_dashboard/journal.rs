@@ -187,11 +187,15 @@ fn date_summary(entry: &JournalEntry) -> Value {
 
 /// Search-result summary: the per-day fields plus a short narrative snippet.
 fn entry_summary(entry: &JournalEntry) -> Value {
-    let snippet: String = entry.narrative.chars().take(SNIPPET_CHARS).collect();
-    let snippet = if entry.narrative.chars().count() > SNIPPET_CHARS {
-        format!("{}…", snippet.trim_end())
+    // Single pass: build the snippet, then peek one char past it to decide on
+    // the ellipsis — avoids re-walking the whole narrative with `chars().count()`
+    // (O(n)) just to test whether it exceeds the snippet length.
+    let mut chars = entry.narrative.chars();
+    let head: String = chars.by_ref().take(SNIPPET_CHARS).collect();
+    let snippet = if chars.next().is_some() {
+        format!("{}…", head.trim_end())
     } else {
-        snippet
+        head
     };
     json!({
         "date": entry.date.format("%Y-%m-%d").to_string(),

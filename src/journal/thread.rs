@@ -150,7 +150,7 @@ pub fn run_journal_tick_with_prs(
     };
     let extras = gather_extras(mem);
     let generator = JournalGenerator::default_pipeline();
-    let entry = crate::journal::providers::generate_and_store_ops(
+    let entry = crate::journal::providers::generate_and_store(
         date, &episodes, prs, extras, &generator, mem,
     )?;
     tracing::info!(

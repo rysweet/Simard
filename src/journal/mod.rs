@@ -60,7 +60,7 @@ pub use pr_source::{
 };
 pub use providers::{
     DayExtras, EpisodeSource, JournalClock, PrListSource, SystemClock, assemble_day_context,
-    generate_and_store, generate_and_store_ops,
+    generate_and_store,
 };
 pub use render::{html_escape, render_entry_html, render_entry_tui_lines};
 pub use store::{

@@ -17,10 +17,8 @@
 
 use std::path::Path;
 
+use simard::journal::JOURNAL_CONCEPT_PREFIX;
 pub use simard::journal::{JournalEntry, entry_matches, render_entry_tui_lines};
-
-/// The `journal:` concept prefix every journal fact carries.
-const JOURNAL_PREFIX: &str = "journal:";
 
 /// Read every stored journal entry, newest day first.
 ///
@@ -44,15 +42,17 @@ fn read_inner(state_root: &Path) -> Option<Vec<JournalEntry>> {
     let result = conn
         .query("MATCH (f:Fact) RETURN f.concept, f.content")
         .ok()?;
-    let rows: Vec<Vec<lbug::Value>> = result.collect();
 
     let mut entries: Vec<JournalEntry> = Vec::new();
-    for row in rows {
+    // Iterate the result rows directly rather than collecting them into an
+    // intermediate `Vec<Vec<Value>>` first — only the journal facts are kept,
+    // so materializing every fact up front is wasted allocation.
+    for row in result {
         let concept = match row.first() {
             Some(lbug::Value::String(s)) => s.as_str(),
             _ => continue,
         };
-        if !concept.starts_with(JOURNAL_PREFIX) {
+        if !concept.starts_with(JOURNAL_CONCEPT_PREFIX) {
             continue;
         }
         let content = match row.get(1) {

@@ -12,6 +12,8 @@
 //! swapped in behind the [`JournalReviewer`](crate::journal::generate::JournalReviewer)
 //! trait when available.
 
+use std::sync::LazyLock;
+
 /// The journal jargon glossary: `(term, replacement)`.
 ///
 /// Matching is **whole-word** and case-insensitive (see [`scrub_jargon`]).
@@ -59,6 +61,23 @@ pub const JOURNAL_GLOSSARY: &[(&str, &str)] = &[
     ("PR", "code-change proposal (PR)"),
 ];
 
+/// The glossary terms lowercased into `Vec<char>` keys once, paired with their
+/// replacement text. The glossary is a `const`, so folding each term to
+/// lowercase chars is the same work on every call — [`scrub_jargon`] runs once
+/// per narrative and once per code-change-proposal title, so this precompute is
+/// cached here rather than rebuilt each time.
+static LOWERED_TERMS: LazyLock<Vec<(Vec<char>, &'static str)>> = LazyLock::new(|| {
+    JOURNAL_GLOSSARY
+        .iter()
+        .map(|(term, replacement)| {
+            (
+                term.chars().map(|c| c.to_ascii_lowercase()).collect(),
+                *replacement,
+            )
+        })
+        .collect()
+});
+
 /// Rewrite `input`, replacing every whole-word occurrence of a
 /// [`JOURNAL_GLOSSARY`] term with its plain-language replacement.
 ///
@@ -77,16 +96,8 @@ pub fn scrub_jargon(input: &str) -> String {
     // `str::to_lowercase`, which can change length). Glossary terms are ASCII,
     // so ASCII folding is sufficient for matching.
     let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
-    // Precompute each term's lowercased char vector once.
-    let terms: Vec<(Vec<char>, &str)> = JOURNAL_GLOSSARY
-        .iter()
-        .map(|(term, replacement)| {
-            (
-                term.chars().map(|c| c.to_ascii_lowercase()).collect(),
-                *replacement,
-            )
-        })
-        .collect();
+    // The lowercased glossary keys are precomputed once (see `LOWERED_TERMS`).
+    let terms = &*LOWERED_TERMS;
 
     let n = chars.len();
     let mut out = String::with_capacity(input.len() + 64);
@@ -95,7 +106,7 @@ pub fn scrub_jargon(input: &str) -> String {
         let boundary_before = i == 0 || !chars[i - 1].is_alphanumeric();
         let mut matched = false;
         if boundary_before {
-            for (term, replacement) in &terms {
+            for (term, replacement) in terms {
                 let tlen = term.len();
                 if i + tlen > n {
                     continue;

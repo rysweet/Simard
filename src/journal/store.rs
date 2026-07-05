@@ -98,18 +98,40 @@ pub fn get_entry_by_date(
     Ok(None)
 }
 
-/// Every stored entry, newest day first, against a borrowed backend. See
-/// [`JournalStore::all_entries`].
-pub fn all_entries(mem: &dyn CognitiveMemoryOps) -> SimardResult<Vec<JournalEntry>> {
+/// Enumerate stored entries whose concept-encoded date falls within `range`
+/// (or all of them when `range` is `None`), newest day first.
+///
+/// The date is read from the cheap `journal:YYYY-MM-DD` **concept** and the
+/// range bound is applied *before* the fact's JSON content is deserialized, so
+/// entries outside a requested range are never parsed. The concept check also
+/// doubles as the "is this a journal fact?" guard — a non-journal concept
+/// yields `None` and is skipped without a deserialize attempt.
+fn entries_in_range(
+    mem: &dyn CognitiveMemoryOps,
+    range: Option<(NaiveDate, NaiveDate)>,
+) -> SimardResult<Vec<JournalEntry>> {
     let facts = mem.search_facts(JOURNAL_SEARCH_TOKEN, ENUMERATION_LIMIT, 0.0)?;
     let mut entries: Vec<JournalEntry> = facts
         .iter()
-        .filter(|f| date_from_concept(&f.concept).is_some())
-        .filter_map(|f| serde_json::from_str::<JournalEntry>(&f.content).ok())
+        .filter_map(|f| {
+            let date = date_from_concept(&f.concept)?;
+            if let Some((from, to)) = range
+                && (date < from || date > to)
+            {
+                return None;
+            }
+            serde_json::from_str::<JournalEntry>(&f.content).ok()
+        })
         .collect();
     // Newest day first.
     entries.sort_by_key(|e| std::cmp::Reverse(e.date));
     Ok(entries)
+}
+
+/// Every stored entry, newest day first, against a borrowed backend. See
+/// [`JournalStore::all_entries`].
+pub fn all_entries(mem: &dyn CognitiveMemoryOps) -> SimardResult<Vec<JournalEntry>> {
+    entries_in_range(mem, None)
 }
 
 /// Filter entries by an inclusive date `range` and/or free `text`, newest day
@@ -119,10 +141,9 @@ pub fn query_entries(
     range: Option<(NaiveDate, NaiveDate)>,
     text: Option<&str>,
 ) -> SimardResult<Vec<JournalEntry>> {
-    let mut entries = all_entries(mem)?;
-    if let Some((from, to)) = range {
-        entries.retain(|e| e.date >= from && e.date <= to);
-    }
+    // The date `range` is pushed into the enumeration so out-of-range entries
+    // are never deserialized; only the free-text filter needs the parsed entry.
+    let mut entries = entries_in_range(mem, range)?;
     if let Some(t) = text {
         let needle = t.to_lowercase();
         if !needle.is_empty() {
