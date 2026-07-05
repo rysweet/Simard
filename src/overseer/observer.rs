@@ -134,8 +134,13 @@ pub fn decide_read_only(problem: &Problem) -> Intervention {
         },
         // Transient resource pressure / positive delivery signals — report, do
         // not file. Filing per-cycle issues for e.g. momentary budget pressure
-        // would be noise; the value is in the rolled-up Report.
-        ProblemKind::ResourcePressure | ProblemKind::DeliveryReady => Intervention::Report,
+        // would be noise; the value is in the rolled-up Report. Loop/drift
+        // conditions are advisory: the read-only sensor surfaces them in the
+        // Report (the acting Overseer whispers; M1 does not).
+        ProblemKind::ResourcePressure
+        | ProblemKind::DeliveryReady
+        | ProblemKind::LoopDetected
+        | ProblemKind::DriftCorrection => Intervention::Report,
     }
 }
 
@@ -178,6 +183,8 @@ fn kind_step_label(kind: ProblemKind) -> &'static str {
         ProblemKind::QualityRegression => "quality_regression",
         ProblemKind::GoalHygiene => "goal_hygiene",
         ProblemKind::CrossCutting => "cross_cutting",
+        ProblemKind::LoopDetected => "loop_detected",
+        ProblemKind::DriftCorrection => "drift_correction",
     }
 }
 
@@ -224,6 +231,8 @@ fn signal_kind_label(s: &Signal) -> &'static str {
         Signal::PrReadyToMerge { .. } => "PrReadyToMerge",
         Signal::StaleGoal { .. } => "StaleGoal",
         Signal::Anomaly { .. } => "Anomaly",
+        Signal::LoopDetected { .. } => "LoopDetected",
+        Signal::DriftCorrection { .. } => "DriftCorrection",
     }
 }
 

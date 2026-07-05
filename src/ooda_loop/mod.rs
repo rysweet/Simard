@@ -58,8 +58,8 @@ mod tests_pr_c_procedures;
 // Re-export all public items so `crate::ooda_loop::X` still works.
 pub use bridge_factory::{bridges_from_state_root, connect_memory};
 pub use curate::{
-    check_meeting_handoffs, load_tombstones, promote_from_backlog, reap_old_handoffs,
-    tombstone_goals,
+    check_meeting_handoffs, drain_overseer_whispers, load_tombstones, promote_from_backlog,
+    reap_old_handoffs, tombstone_goals,
 };
 pub use decide::{decide, decide_with_brain};
 pub use observe::{gather_environment, observe};

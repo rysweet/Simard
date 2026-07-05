@@ -32,6 +32,17 @@ pub enum Signal {
     StaleGoal { goal_id: String },
     /// A free-form anomaly surfaced by `TelemetrySignals.anomalies[]`.
     Anomaly { detail: String },
+    /// A live goal has gone `consecutive_no_action` cycles without progress —
+    /// the primary lightweight-whisper trigger. Fires strictly BELOW Simard's
+    /// no-progress breaker so the Overseer can nudge before the hard breaker
+    /// trips. From `ObservedState.{consecutive_no_action, active_goal_id}`.
+    LoopDetected {
+        goal_id: String,
+        consecutive_no_action: u32,
+    },
+    /// Active work appears to be drifting from a goal's stated intent. From
+    /// `ObservedState.{drift_detail, active_goal_id}`.
+    DriftCorrection { goal_id: String, detail: String },
 }
 
 /// Coarse relative importance. `Ord` sorts ascending so `Critical` comes first,
@@ -59,6 +70,10 @@ pub enum ProblemKind {
     GoalHygiene,
     /// Naming/architecture sweeps, terminology cleanups, cross-repo initiatives.
     CrossCutting,
+    /// A live goal looping without progress — steered by a lightweight whisper.
+    LoopDetected,
+    /// Active work drifting from a goal's intent — nudged by an advisory whisper.
+    DriftCorrection,
 }
 
 /// A classified, deduplicated, prioritised problem — the output of Orient and the
@@ -82,6 +97,12 @@ const DISTILL_FAIL_PCT_THRESHOLD: f64 = 20.0;
 const RESTART_CHURN_THRESHOLD: u64 = 3;
 const BUDGET_PRESSURE_FRACTION: f64 = 0.8;
 const ENGINEER_SPAWN_THRESHOLD: u32 = 8;
+
+/// Consecutive no-action cycles at (or above) which the Overseer whispers a
+/// loop-correction. Deliberately BELOW
+/// [`crate::goal_curation::no_progress_breaker::NO_PROGRESS_BREAKER_THRESHOLD`]
+/// so the lightweight whisper nudges Simard before the hard breaker escalates.
+pub const WHISPER_LOOP_THRESHOLD: u32 = 2;
 
 /// Pure Observe→Signal derivation. No I/O; unit-testable with a hand-built
 /// `ObservedState`. Real thresholds would be env-tunable.
@@ -134,6 +155,26 @@ pub fn signals_from(state: &ObservedState) -> Vec<Signal> {
     }
     for detail in &state.anomalies {
         out.push(Signal::Anomaly {
+            detail: detail.clone(),
+        });
+    }
+
+    // A live goal looping without progress: whisper trigger. Requires an active
+    // goal (idle churn with no goal is not a goal loop to steer).
+    if let (Some(n), Some(goal_id)) = (state.consecutive_no_action, state.active_goal_id.as_ref())
+        && n >= WHISPER_LOOP_THRESHOLD
+    {
+        out.push(Signal::LoopDetected {
+            goal_id: goal_id.clone(),
+            consecutive_no_action: n,
+        });
+    }
+    // Active work drifting from a goal's intent: advisory whisper trigger.
+    if let (Some(detail), Some(goal_id)) =
+        (state.drift_detail.as_ref(), state.active_goal_id.as_ref())
+    {
+        out.push(Signal::DriftCorrection {
+            goal_id: goal_id.clone(),
             detail: detail.clone(),
         });
     }

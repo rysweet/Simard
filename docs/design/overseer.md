@@ -8,13 +8,16 @@ description: >
   modules, the guardrails (autonomy boundary, anti-recursion, budget/concurrency,
   conflict-avoidance), persisted state, the explicit boundary against Simard's own OODA, and a
   phased roadmap. Design + scaffolding only — no daemon runtime behavior change.
-last_updated: 2026-07-03
+last_updated: 2026-07-05
 review_schedule: as-needed
 owner: simard
 doc_type: design
 status: draft
 related:
   - ../concepts/operational-autonomy-model.md
+  - ../concepts/simard-whisperer.md
+  - ../reference/simard-whisperer-api.md
+  - ../howto/configure-the-simard-whisperer.md
   - ../reference/cognitive-thread-scheduling.md
   - ../howto/add-a-new-cognitive-thread.md
   - ../reference/status-snapshot-api.md

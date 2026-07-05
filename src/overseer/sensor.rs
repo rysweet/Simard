@@ -121,6 +121,14 @@ pub fn observed_from_snapshot(snap: &StatusSnapshot) -> ObservedState {
         anomalies: telemetry.map(|t| t.anomalies.clone()).unwrap_or_default(),
         ready_prs: Vec::new(),
         ci_failures: Vec::new(),
+        // Loop/drift are surfaced from the OODA no-progress tracker, which the
+        // read-only status snapshot does not yet expose. Left `None` here so the
+        // adapter stays additive; a follow-up enriches this from the goal board's
+        // progress state to activate production whispers (the daemon is not
+        // redeployed by this change).
+        consecutive_no_action: None,
+        active_goal_id: None,
+        drift_detail: None,
     }
 }
 

@@ -86,6 +86,16 @@ pub struct ObservedState {
     pub ready_prs: Vec<PrRef>,
     /// CI-failure clusters observed across recent runs.
     pub ci_failures: Vec<CiFailure>,
+    /// Consecutive OODA cycles the active goal has produced no action / no
+    /// progress. Mirrors the OODA no-progress tracker; drives the loop-whisper.
+    /// `None` when unknown (e.g. no active goal).
+    pub consecutive_no_action: Option<u32>,
+    /// The goal Simard is currently working, if any — the subject a whisper
+    /// steers. `None` when idle.
+    pub active_goal_id: Option<String>,
+    /// A short description of observed drift from the active goal's intent, when
+    /// the Overseer can see it. `None` when no drift is observed.
+    pub drift_detail: Option<String>,
 }
 
 /// A `(repo, pr)` pair. `repo` is an `owner/name` slug.
