@@ -339,6 +339,28 @@ impl EngineerWorktree {
             });
         }
 
+        // 4b. Exclude the Simard-managed claim sentinel from `git status` in
+        //     the target repo via the worktree's git exclude file (issue
+        //     #2621). Belt-and-suspenders with the `inspect_workspace`
+        //     sentinel filter: Simard drops `.simard-engineer-claim` into
+        //     every engineer worktree but must NOT depend on each *target*
+        //     repo gitignoring Simard's private infra file. Without this, an
+        //     external governed repo that doesn't gitignore the sentinel makes
+        //     `inspect_workspace().worktree_dirty == true`, so the engineer-
+        //     loop pre-mutation guard aborts every mutating engineer before
+        //     the coding agent is ever spawned — an infinite dispatch loop.
+        //     Fail-loud-but-non-fatal: log at WARN and continue; the
+        //     `inspect_workspace` filter still hides the sentinel if this
+        //     fails.
+        if let Err(e) = exclude_engineer_claim(&dir) {
+            tracing::warn!(
+                target: "simard::engineer_worktree",
+                error = %e,
+                worktree = %dir.display(),
+                "failed to add engineer-claim sentinel to git exclude; inspect_workspace filter still hides it",
+            );
+        }
+
         // 5. Write the per-worktree liveness sentinel (issue #1213, refined
         //    in #1238). If the sweep ever runs against this worktree while
         //    git's registration is transiently missing, the live PID +
@@ -470,4 +492,61 @@ fn first_existing_ancestor(path: &Path) -> Option<std::path::PathBuf> {
         cur = p.parent();
     }
     None
+}
+
+/// Append [`ENGINEER_CLAIM_FILE`] to `worktree_dir`'s git exclude file so the
+/// Simard-managed sentinel is never reported as an untracked change by
+/// `git status` in the target repo (issue #2621).
+///
+/// The real exclude path is resolved via `git rev-parse --git-path
+/// info/exclude`, run *inside the worktree* so git returns the correct path
+/// into the linked worktree's git dir (git keeps `info/exclude` in the shared
+/// common dir, which is exactly what we want: excluding the sentinel filename
+/// is harmless and repo-local — `.git/info/exclude` is never committed).
+///
+/// The parent directory and file are created if absent, and the append is
+/// idempotent (an exact-line match short-circuits) so repeated allocations
+/// against the same parent repo never duplicate the entry.
+fn exclude_engineer_claim(worktree_dir: &Path) -> Result<(), String> {
+    let raw = git_capture(worktree_dir, &["rev-parse", "--git-path", "info/exclude"])?;
+    let rel = raw.trim();
+    if rel.is_empty() {
+        return Err("`git rev-parse --git-path info/exclude` returned empty output".to_string());
+    }
+    let candidate = Path::new(rel);
+    let exclude_path = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        // git resolves the path relative to the worktree cwd it was invoked in.
+        worktree_dir.join(candidate)
+    };
+
+    if let Some(parent) = exclude_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("create exclude parent {}: {e}", parent.display()))?;
+    }
+
+    let existing = match fs::read_to_string(&exclude_path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("read {}: {e}", exclude_path.display())),
+    };
+
+    // Idempotent: skip if the sentinel is already excluded (exact-line match,
+    // ignoring surrounding whitespace so a hand-edited exclude still matches).
+    if existing
+        .lines()
+        .any(|line| line.trim() == ENGINEER_CLAIM_FILE)
+    {
+        return Ok(());
+    }
+
+    let mut updated = existing;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(ENGINEER_CLAIM_FILE);
+    updated.push('\n');
+
+    fs::write(&exclude_path, updated).map_err(|e| format!("write {}: {e}", exclude_path.display()))
 }

@@ -351,3 +351,69 @@ fn sweep_removes_unregistered_dir_with_dead_engineer_claim() {
         report.removed_orphan_dirs
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #2621 — the Simard-managed claim sentinel must never surface as an
+// untracked change in the target repo, even when that repo does NOT gitignore
+// `.simard-engineer-claim`. `allocate` appends it to the worktree's
+// `.git/info/exclude`, so `git status` reports a clean tree and the engineer-
+// loop pre-mutation guard does not trip.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial_test::serial]
+fn allocate_excludes_claim_sentinel_from_git_status() {
+    let parent_dir = tempdir().unwrap();
+    let state_dir = tempdir().unwrap();
+    // NOTE: `init_parent_repo` deliberately does NOT gitignore the sentinel —
+    // this mirrors an external governed repo (e.g. agent-kgpacks-rs) that has
+    // no knowledge of Simard's private infra file.
+    let parent_repo = init_parent_repo(parent_dir.path());
+
+    let wt = EngineerWorktree::allocate(&parent_repo, state_dir.path(), "claim-exclude")
+        .expect("allocate");
+
+    // The sentinel MUST exist on disk (it's the liveness claim)...
+    let claim = wt.path().join(super::ENGINEER_CLAIM_FILE);
+    assert!(
+        claim.exists(),
+        "claim sentinel must be written to the worktree"
+    );
+
+    // ...but MUST NOT appear in `git status`, because allocate excluded it.
+    let status = git_output(
+        wt.path(),
+        &["status", "--porcelain", "--untracked-files=all"],
+    );
+    assert!(
+        !status.contains(super::ENGINEER_CLAIM_FILE),
+        "claim sentinel must be excluded from git status; got:\n{status}"
+    );
+    assert!(
+        status.trim().is_empty(),
+        "worktree containing only the claim sentinel must be clean; got:\n{status}"
+    );
+
+    // The exclude entry must be discoverable via git's own path resolution.
+    let exclude_rel = git_output(wt.path(), &["rev-parse", "--git-path", "info/exclude"]);
+    let exclude_rel = exclude_rel.trim();
+    let exclude_path = {
+        let p = Path::new(exclude_rel);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            wt.path().join(p)
+        }
+    };
+    let exclude_body = fs::read_to_string(&exclude_path).expect("exclude file present");
+    let sentinel_lines = exclude_body
+        .lines()
+        .filter(|l| l.trim() == super::ENGINEER_CLAIM_FILE)
+        .count();
+    assert_eq!(
+        sentinel_lines, 1,
+        "exclude must contain the sentinel exactly once (idempotent append); got:\n{exclude_body}"
+    );
+
+    wt.cleanup().expect("cleanup");
+}

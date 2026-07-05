@@ -29,6 +29,8 @@ mod tests_types_inline;
 #[cfg(test)]
 mod tests_checkpoint;
 #[cfg(test)]
+mod tests_claim_sentinel;
+#[cfg(test)]
 mod tests_meeting_decisions;
 
 use std::fs;
@@ -896,7 +898,18 @@ pub fn inspect_workspace(workspace_root: &Path, state_root: &Path) -> SimardResu
         &repo_root,
         &["git", "status", "--short", "--untracked-files=all"],
     )?;
-    let changed_files = parse_status_paths(&status_output.stdout);
+    // Filter the Simard-managed claim sentinel out of the reported changes
+    // (issue #2621). Simard drops `.simard-engineer-claim` into every engineer
+    // worktree; it is private infra, not a user change, and must never count
+    // toward `worktree_dirty` or the engineer-loop pre-mutation guard would
+    // trip on the untracked sentinel in any target repo that doesn't gitignore
+    // it — aborting every mutating engineer before the coding agent spawns.
+    // Belt-and-suspenders with the `.git/info/exclude` append performed at
+    // worktree-allocation time (see `engineer_worktree::exclude_engineer_claim`).
+    let changed_files: Vec<String> = parse_status_paths(&status_output.stdout)
+        .into_iter()
+        .filter(|path| path != crate::engineer_worktree::ENGINEER_CLAIM_FILE)
+        .collect();
     let worktree_dirty = !changed_files.is_empty();
     let active_goals = {
         use crate::goals::GoalStore as _;

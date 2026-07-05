@@ -1,0 +1,104 @@
+//! Regression tests for issue #2621: `inspect_workspace` must filter the
+//! Simard-managed `.simard-engineer-claim` sentinel out of `changed_files`
+//! and `worktree_dirty`, so the engineer-loop pre-mutation guard never trips
+//! on the untracked sentinel in a target repo that doesn't gitignore it.
+
+use std::path::Path;
+use std::process::Command;
+
+use serial_test::serial;
+use tempfile::tempdir;
+
+use super::inspect_workspace;
+
+fn git(repo: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@test.com")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@test.com")
+        .output()
+        .expect("spawn git");
+    assert!(
+        out.status.success(),
+        "git {:?} failed in {}: {}",
+        args,
+        repo.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Initialise a git repo that, like an external governed repo, does NOT
+/// gitignore Simard's private `.simard-engineer-claim` sentinel.
+fn init_repo(dir: &Path) {
+    git(dir, &["init", "--initial-branch=main", "--quiet"]);
+    git(dir, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join("README.md"), "seed\n").unwrap();
+    git(dir, &["add", "README.md"]);
+    git(dir, &["commit", "-m", "seed", "--quiet"]);
+}
+
+#[test]
+#[serial(cognitive_memory)]
+fn inspect_workspace_treats_claim_only_worktree_as_clean() {
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    let state_root = dir.path().join("state");
+    std::fs::create_dir_all(&state_root).unwrap();
+
+    // The ONLY change is the untracked Simard sentinel — the exact repro from
+    // issue #2621 (`?? .simard-engineer-claim`).
+    std::fs::write(
+        dir.path()
+            .join(crate::engineer_worktree::ENGINEER_CLAIM_FILE),
+        format!("{}\n", std::process::id()),
+    )
+    .unwrap();
+
+    let inspection = inspect_workspace(dir.path(), &state_root).expect("inspect_workspace");
+
+    assert!(
+        !inspection.worktree_dirty,
+        "worktree containing only the claim sentinel must report clean; changed_files={:?}",
+        inspection.changed_files
+    );
+    assert!(
+        inspection.changed_files.is_empty(),
+        "claim sentinel must be filtered out of changed_files; got {:?}",
+        inspection.changed_files
+    );
+}
+
+#[test]
+#[serial(cognitive_memory)]
+fn inspect_workspace_still_flags_real_changes_alongside_claim() {
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    let state_root = dir.path().join("state");
+    std::fs::create_dir_all(&state_root).unwrap();
+
+    // A genuine user change plus the sentinel: the sentinel must be filtered
+    // but the real change must still mark the tree dirty. Guards against an
+    // over-broad filter that would swallow real changes.
+    std::fs::write(
+        dir.path()
+            .join(crate::engineer_worktree::ENGINEER_CLAIM_FILE),
+        format!("{}\n", std::process::id()),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("user_change.txt"), "real edit\n").unwrap();
+
+    let inspection = inspect_workspace(dir.path(), &state_root).expect("inspect_workspace");
+
+    assert!(
+        inspection.worktree_dirty,
+        "a genuine change must still mark the worktree dirty"
+    );
+    assert_eq!(
+        inspection.changed_files,
+        vec!["user_change.txt".to_string()],
+        "only the real change must be reported; the sentinel must be filtered"
+    );
+}
