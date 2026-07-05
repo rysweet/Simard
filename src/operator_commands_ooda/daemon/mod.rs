@@ -1163,6 +1163,13 @@ pub fn run_ooda_daemon(
                 daemon_log(&state_root, &format!("[simard] OODA cycle error: {e}"));
             }
         }
+        // Flush this cycle's aggregated ranked-recall precision@k into the
+        // durable `recall_precision_at_k` series once per cycle, regardless of
+        // cycle outcome. Draining unconditionally here (not inside the `Ok` arm)
+        // ensures a cycle that recalled and then errored cannot bleed its
+        // observations into the next successful cycle's emission. Best-effort;
+        // no-op when no ranked recall ran this cycle.
+        crate::cognitive_memory::metrics::flush_recall_precision_metric();
 
         cycles_run += 1;
 

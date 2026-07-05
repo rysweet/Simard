@@ -1,7 +1,7 @@
 ---
 title: Phase-weighted ranked fact recall & snapshot retention
 description: How OODA preparation recalls semantic facts with the library's multi-signal ranked recall (relevance + confidence + importance + recency + usage + graph), how Simard tunes the ranking per OODA phase, and how snapshot/goal-record writes deduplicate via CallerKey so repeated records SUPERSEDE instead of accumulating.
-last_updated: 2026-06-21
+last_updated: 2026-07-04
 owner: simard
 doc_type: reference
 related:
@@ -131,6 +131,66 @@ path:
 
 `search_facts` itself is unchanged and remains available for backward
 compatibility and for callers that want keyword recall without ranking.
+
+### Recall-precision self-metric (`recall_precision_at_k`)
+
+Ranked recall emits a **recall-quality** signal so the ranking cannot silently
+regress. On every `recall_facts_ranked` call the adapter computes
+**precision@k** over the returned order and folds it into an in-process running
+mean; the OODA daemon drains that mean once per cycle into the durable
+`recall_precision_at_k` series in `~/.simard/metrics/metrics.jsonl` (queryable
+via `self_metrics::query_metrics` and surfaced on the dashboard `metrics`
+endpoint alongside `controlled_forgetting` and the distillation rates).
+
+- **Precision@k** = of the top-`k` returned facts, the fraction that are
+  *query-relevant*. Relevance is a coarse keyword proxy: a fact counts when its
+  lowercased `concept` or `content` contains at least one query token
+  (whitespace-split, punctuation-only tokens like the wildcard `*` dropped).
+  This uses the same `.contains` keyword gate as the episodic recall path — it
+  is deliberately **broader** than the ranker's exact token/Jaccard
+  `text_relevance` score (e.g. `cat` matches `concatenate`), which is acceptable
+  for a self-metric baseline: the query itself is the relevance oracle (no
+  external labels), and the proxy moves in the same direction as ranking
+  quality.
+- **Emitted over the returned window.** The durable per-recall value is
+  precision@k with `k` = the number of returned facts (precision over the whole
+  returned set: "of everything surfaced, how much is on-topic"). The fixed-k
+  ordering guarantee (relevant facts occupy the *top* slots) is pinned
+  separately by the regression test below at `k = 1, 2`.
+- **Undefined, not zero.** A wildcard/empty query (no usable tokens) or an empty
+  result set yields `None` and contributes **no** sample, so structural reads do
+  not drag the mean toward zero. The emitted per-cycle value is the mean over
+  the recalls that *had* a measurable relevance target.
+- **Hot-path safe.** The recall path only touches a lock-guarded in-process
+  accumulator — no `metrics.jsonl` write per recall, and the whole-memory recall
+  lock is released before the metric is folded. The single durable write happens
+  once per cycle in the daemon sweep, **unconditionally** (on both successful and
+  errored cycles, so a cycle that recalled then errored cannot bleed its samples
+  into the next emission). No ranked recall in the window ⇒ no sample emitted.
+- **Windowed, cross-source mean.** The emitted value is the mean over every
+  ranked fact recall folded since the last drain, across all in-process sources
+  sharing the store (OODA preparation, IPC-served recalls, consolidation) — not a
+  single-recall or single-source figure. The `samples` count in the metric
+  context conveys the volume behind each mean.
+- **Pure observation.** Computing/recording precision never changes the returned
+  fact set or its order.
+
+The math lives in the pure, deterministic `cognitive_memory::metrics::precision_at_k`
+function, and two fixed-corpus regression tests pin the baseline:
+
+- `recall_precision_at_k_baseline` pins the *combined-signal* baseline
+  `recall_precision_at_1=1.000 recall_precision_at_2=1.000 recall_precision_at_full=0.500`:
+  two topic-relevant facts (also higher-confidence) must occupy the top two slots
+  of a four-fact recall.
+- `recall_precision_isolates_text_relevance` pins the same top-2 precision on a
+  corpus where **every fact has equal confidence**, so `text_relevance` is the
+  only signal that can differentiate them. This is the anti-regression teeth: if
+  the relevance weight were zeroed or broken, the equal-confidence facts would
+  tie on every signal, the relevant pair would no longer be guaranteed on top,
+  and precision@2 would fall below `1.0`. (Empirically, the default weights are
+  confidence-dominated — a *low*-confidence relevant fact loses to
+  high-confidence irrelevant ones — which is exactly why confidence is held
+  equal here to isolate the relevance signal.)
 
 ---
 
@@ -415,6 +475,11 @@ assert):
    leaves `usage_count` and `last_accessed_at` unchanged.
 7. **Superseded never recalled** — preparation recall
    (`include_superseded = false`) never surfaces superseded snapshots.
+8. **Recall-precision is monitored** — every `recall_facts_ranked` with a
+   measurable relevance target folds `precision@k` into the per-cycle
+   `recall_precision_at_k` self-metric; the fixed-corpus baseline
+   (`precision@2 == 1.0`, `precision@full == 0.5`) is pinned so a ranking
+   regression that demotes relevant facts fails CI.
 
 ---
 
