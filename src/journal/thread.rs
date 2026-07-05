@@ -1,20 +1,27 @@
 //! The background journal thread (issue #2606).
 //!
-//! Once per interval the daemon calls [`run_journal_tick`], which builds
-//! *today's* [`DayContext`](crate::journal::types::DayContext) from the live
+//! Once per interval the daemon runs a journal tick, which builds *today's*
+//! [`DayContext`](crate::journal::types::DayContext) from the live
 //! cognitive-memory store, generates the reviewed entry, and persists it. It is
 //! a **rolling** update: the store keys each entry by its UTC day, so the many
 //! ticks across a day supersede one another (idempotent) and the entry grows as
 //! the day's remembered moments accumulate.
 //!
-//! The tick is deliberately **offline** — it never reaches the network — so it
-//! can run inside the daemon loop without stalling the authoritative OODA
-//! cycle. The day's code-change proposals (pull requests) are supplied through
-//! the [`PrListSource`] seam; the in-daemon source here degrades honestly to an
-//! empty list rather than blocking on a `gh` call, while tests and the
-//! dashboard exercise the full plain-language proposal table through the same
-//! seam. Episodics (the primary source) and the active goals are read straight
-//! from the borrowed store.
+//! There are two tick entry points, differing only in where the day's
+//! code-change proposals come from:
+//!
+//! * [`run_journal_tick`] uses the offline [`NoNetworkPrs`] source (empty
+//!   proposal table). Pure and network-free — used by tests and as a fallback.
+//! * [`run_journal_tick_with_prs`] takes an injected [`PrListSource`]. In
+//!   production the daemon passes a
+//!   [`GhPrListSource`](crate::journal::pr_source::GhPrListSource) that wraps
+//!   the `gh pr list` PR-readiness service, so the entry carries the real
+//!   plain-language proposal table. That source degrades honestly to an empty
+//!   list on a `gh` failure, and the daemon runs the tick on a background
+//!   thread so the network fetch never stalls the authoritative OODA cycle.
+//!
+//! Either way, episodics (the primary source) and the active goals are read
+//! straight from the borrowed store.
 
 use chrono::NaiveDate;
 
@@ -104,30 +111,54 @@ fn gather_extras(mem: &dyn CognitiveMemoryOps) -> DayExtras {
     extras
 }
 
-/// Run one rolling journal tick against the borrowed store: assemble today's
-/// context (episodics primary + best-effort augmentations), generate the
-/// reviewed entry, and persist it. `clock` fixes "today" (UTC) so the tick is
-/// deterministic under test. Returns the entry that was stored.
+/// Run one rolling journal tick against the borrowed store using the **offline**
+/// PR source ([`NoNetworkPrs`]): assemble today's context (episodics primary +
+/// best-effort augmentations), generate the reviewed entry, and persist it.
+/// `clock` fixes "today" (UTC) so the tick is deterministic under test. Returns
+/// the entry that was stored.
+///
+/// This is the pure, network-free variant. Callers that can supply the day's
+/// real code-change proposals (the daemon wraps the `gh pr list` PR-readiness
+/// service behind a [`PrListSource`]) use [`run_journal_tick_with_prs`] instead.
 pub fn run_journal_tick(
     mem: &dyn CognitiveMemoryOps,
     clock: &dyn JournalClock,
+) -> SimardResult<JournalEntry> {
+    run_journal_tick_with_prs(mem, clock, &NoNetworkPrs)
+}
+
+/// Run one rolling journal tick with an injected [`PrListSource`], so the day's
+/// entry carries the real plain-language code-change-proposal table.
+///
+/// Everything except the proposal source is identical to [`run_journal_tick`]:
+/// episodics (the primary source) and the active goals are read from the
+/// borrowed store, the entry is drafted and jargon-reviewed, and it is persisted
+/// under the UTC day key (idempotent rolling update). `prs` is the only seam
+/// that may touch the network — in production the daemon passes a
+/// [`GhPrListSource`](crate::journal::pr_source::GhPrListSource) that degrades
+/// honestly to an empty table on a `gh` failure, so a network blip never fails
+/// the tick.
+pub fn run_journal_tick_with_prs(
+    mem: &dyn CognitiveMemoryOps,
+    clock: &dyn JournalClock,
+    prs: &dyn PrListSource,
 ) -> SimardResult<JournalEntry> {
     let date = clock.today();
     let episodes = MemoryEpisodeSource {
         mem,
         limit: MAX_EPISODES,
     };
-    let prs = NoNetworkPrs;
     let extras = gather_extras(mem);
     let generator = JournalGenerator::default_pipeline();
     let entry = crate::journal::providers::generate_and_store_ops(
-        date, &episodes, &prs, extras, &generator, mem,
+        date, &episodes, prs, extras, &generator, mem,
     )?;
     tracing::info!(
         target: "simard::journal",
         date = %entry.date,
         quiet_day = entry.quiet_day,
         episodes = entry.narrative.len(),
+        prs = entry.prs.len(),
         "journal tick generated and stored today's entry"
     );
     Ok(entry)

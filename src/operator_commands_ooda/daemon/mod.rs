@@ -661,14 +661,20 @@ pub fn run_ooda_daemon(
     // ── Daily journal thread (issue #2606) ─────────────────────────────
     // DEFAULT-ON, opt-out via SIMARD_JOURNAL_ENABLED=0. On its own slow cadence
     // (default hourly) the daemon regenerates *today's* diary-like, layperson
-    // journal entry from episodic memory and the day's activity, persisting it
-    // in cognitive memory (a `journal:YYYY-MM-DD` fact). It is a pure, offline,
-    // fast tick run panic-isolated AFTER the authoritative OODA cycle, so it can
-    // never stall or crash the loop. The dashboard Journal tab and the TUI
-    // Journal pane read these entries back.
+    // journal entry from episodic memory and the day's activity — including the
+    // day's real code-change proposals pulled from the `gh pr list` PR-readiness
+    // service — persisting it in cognitive memory (a `journal:YYYY-MM-DD` fact).
+    // Because it touches the network it runs on a background thread (never
+    // inline) AFTER the authoritative OODA cycle, panic-isolated and
+    // overlap-guarded, so it can never stall or crash the loop. The dashboard
+    // Journal tab and the TUI Journal pane read these entries back.
     let journal_thread_enabled = crate::journal::journal_enabled();
     let journal_interval_secs = crate::journal::journal_interval_secs();
     let mut last_journal: Option<Instant> = None;
+    // Overlap guard: the journal tick now runs on a background thread (it fetches
+    // the day's PRs from the `gh pr list` PR-readiness service), so a slow tick
+    // must not stack on top of the previous one.
+    let journal_tick_running = Arc::new(AtomicBool::new(false));
     daemon_log(
         &state_root,
         &format!(
@@ -1356,41 +1362,81 @@ pub fn run_ooda_daemon(
         }
 
         // ── Daily journal rolling tick (issue #2606) ────────────────────
-        // Default-on, interval-gated, panic-isolated. Regenerates today's diary
-        // entry from episodic memory + the day's activity and persists it under
-        // the day key (idempotent rolling update). Pure and offline, so it runs
-        // inline; a panic or error is caught and logged and never stalls the
-        // OODA loop. Fires on the first iteration so a fresh daemon writes the
-        // day's entry immediately, then on its own slow cadence.
+        // Default-on, interval-gated, overlap-guarded, panic-isolated.
+        // Regenerates today's diary entry from episodic memory + the day's real
+        // code-change proposals and persists it under the day key (idempotent
+        // rolling update). The proposal table is fetched from the `gh pr list`
+        // PR-readiness service, so the tick runs on a background thread — never
+        // inline — and that network fetch can never stall the OODA loop; an
+        // overlap guard drops a tick if the previous one is still running, and a
+        // panic/error is caught and logged. Fires on the first iteration so a
+        // fresh daemon writes the day's entry promptly, then on its slow cadence.
         if journal_thread_enabled {
             let due = last_journal
                 .map(|t| t.elapsed().as_secs() >= journal_interval_secs)
                 .unwrap_or(true);
-            if due {
-                let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::journal::run_journal_tick(
-                        shared_mem.as_ref(),
-                        &crate::journal::SystemClock,
-                    )
-                }));
-                match tick {
-                    Ok(Ok(entry)) => daemon_log(
+            if due
+                && journal_tick_running
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                let running = Arc::clone(&journal_tick_running);
+                let mem_for_journal = Arc::clone(&shared_mem);
+                let state_root_for_journal = state_root.clone();
+                let spawn = std::thread::Builder::new()
+                    .name("journal-tick".to_string())
+                    .spawn(move || {
+                        // Always clear the overlap guard, even on panic.
+                        struct ClearOnDrop(Arc<AtomicBool>);
+                        impl Drop for ClearOnDrop {
+                            fn drop(&mut self) {
+                                self.0.store(false, Ordering::SeqCst);
+                            }
+                        }
+                        let _clear = ClearOnDrop(running);
+
+                        // Wrap the real `gh pr list` PR-readiness service behind
+                        // the journal's PrListSource seam; it degrades honestly
+                        // to an empty proposal table on a `gh` failure.
+                        let gh = crate::stewardship::RealPrGhClient::new();
+                        let repo = crate::stewardship::TargetRepo::Simard.slug();
+                        let base_allowlist = crate::stewardship::base_allowlist_from_env();
+                        let prs = crate::journal::GhPrListSource::new(&gh, repo, base_allowlist);
+
+                        let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            crate::journal::run_journal_tick_with_prs(
+                                mem_for_journal.as_ref(),
+                                &crate::journal::SystemClock,
+                                &prs,
+                            )
+                        }));
+                        match tick {
+                            Ok(Ok(entry)) => daemon_log(
+                                &state_root_for_journal,
+                                &format!(
+                                    "[simard] journal: entry for {} regenerated ({} proposal(s), quiet={})",
+                                    entry.date,
+                                    entry.prs.len(),
+                                    entry.quiet_day
+                                ),
+                            ),
+                            Ok(Err(e)) => daemon_log(
+                                &state_root_for_journal,
+                                &format!("[simard] WARN: journal tick failed: {e}"),
+                            ),
+                            Err(_) => daemon_log(
+                                &state_root_for_journal,
+                                "[simard] WARN: journal tick panicked (isolated; loop continues)",
+                            ),
+                        }
+                    });
+                if let Err(e) = spawn {
+                    // Spawn failed — clear the guard so the next cadence retries.
+                    journal_tick_running.store(false, Ordering::SeqCst);
+                    daemon_log(
                         &state_root,
-                        &format!(
-                            "[simard] journal: entry for {} regenerated ({} proposal(s), quiet={})",
-                            entry.date,
-                            entry.prs.len(),
-                            entry.quiet_day
-                        ),
-                    ),
-                    Ok(Err(e)) => daemon_log(
-                        &state_root,
-                        &format!("[simard] WARN: journal tick failed: {e}"),
-                    ),
-                    Err(_) => daemon_log(
-                        &state_root,
-                        "[simard] WARN: journal tick panicked (isolated; loop continues)",
-                    ),
+                        &format!("[simard] WARN: journal tick thread spawn failed: {e}"),
+                    );
                 }
                 last_journal = Some(Instant::now());
             }

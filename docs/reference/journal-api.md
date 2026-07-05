@@ -206,22 +206,34 @@ the day's entry current as remembered moments accumulate.
 
 ```rust
 pub fn run_journal_tick(mem: &dyn CognitiveMemoryOps, clock: &dyn JournalClock)
-    -> SimardResult<JournalEntry>;
+    -> SimardResult<JournalEntry>;                       // offline PR source (empty table)
+pub fn run_journal_tick_with_prs(mem: &dyn CognitiveMemoryOps, clock: &dyn JournalClock,
+    prs: &dyn PrListSource) -> SimardResult<JournalEntry>; // inject the day's real proposals
 pub fn journal_enabled() -> bool;        // default true (opt-out)
 pub fn journal_interval_secs() -> u64;   // default 3600, floor 60
 ```
 
-`run_journal_tick` reads the day's episodics from the store (primary source), folds in
-the active goals (best-effort augmentation), generates the reviewed entry with the
-default pipeline, and persists it via `save_entry`. It is **pure and offline** — it
-never touches the network — so it runs safely inside the daemon loop. The in-daemon PR
-source is offline and degrades honestly to an empty list; the plain-language proposal
-table is exercised whenever a richer `PrListSource` is injected (tests, future
-adapters).
+Both ticks read the day's episodics from the store (primary source), fold in the active
+goals (best-effort augmentation), generate the reviewed entry with the default pipeline,
+and persist it via `save_entry`. They differ only in where the day's code-change
+proposals come from:
 
-Wiring: the OODA daemon runs the tick default-on, interval-gated, and panic-isolated,
-**after** the authoritative OODA cycle so it can never stall or crash the loop. It
-fires on the first iteration so a fresh daemon writes the day's entry immediately.
+- `run_journal_tick` uses the offline `NoNetworkPrs` source (empty proposal table). Pure
+  and network-free — used by tests and as a fallback.
+- `run_journal_tick_with_prs` takes an injected `PrListSource`. In production the daemon
+  passes a **`GhPrListSource`**, which wraps the `gh pr list` PR-readiness service (the
+  same external view the dashboard's Merge Readiness panel uses) and maps each open PR
+  into a layperson row: the title has its Conventional-Commits prefix stripped and its
+  jargon scrubbed, and the outcome is a plain-language readiness phrase ("still open —
+  ready to combine into the main code", "…checks still running", "…not ready yet"). A
+  `gh` failure **degrades honestly** to an empty table (logged) so the narrative is still
+  written.
+
+Wiring: the OODA daemon runs `run_journal_tick_with_prs` default-on, interval-gated, and
+panic-isolated, **after** the authoritative OODA cycle so it can never stall or crash the
+loop. Because it fetches PRs over the network it runs on a background thread (never
+inline), overlap-guarded so a slow tick never stacks. It fires on the first iteration so
+a fresh daemon writes the day's entry promptly.
 
 ## Dashboard: HTTP routes and the Journal tab
 
