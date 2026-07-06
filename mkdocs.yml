@@ -85,6 +85,8 @@ nav:
     - "Overseer — operator/observer co-process (spike)": design/overseer.md
     - "Creative Ideas background thread (spike)": design/creative-ideas-thread.md
     - "Eliminate deterministic fallbacks": design/eliminate-deterministic-fallbacks.md
+  - Research:
+    - "COIN benchmark & skwaq gym study": research/coin-benchmark-and-skwaq-study.md
   - Concepts:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
