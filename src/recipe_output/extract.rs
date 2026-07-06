@@ -250,54 +250,27 @@ pub fn strip_recipe_noise(raw: &str) -> Cow<'_, str> {
 /// rewritten.
 pub fn strip_json_trailing_commas(s: &str) -> Cow<'_, str> {
     let bytes = s.as_bytes();
-    if !has_structural_trailing_comma(bytes) {
-        // No structural trailing comma anywhere ⇒ pass-through, no allocation.
-        return Cow::Borrowed(s);
-    }
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    // Single string-aware pass with lazy allocation: `out` stays `None` — and the
+    // result stays `Cow::Borrowed` — until the FIRST structural trailing comma is
+    // found, at which point the prefix seen so far is materialised once and every
+    // later byte is appended. Clean input therefore never allocates, and a
+    // `Cow::Owned` result is exactly the "a comma was removed" discriminant.
+    let mut out: Option<Vec<u8>> = None;
     let mut in_string = false;
     let mut escaped = false;
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i];
-        if in_string {
+        if !in_string && c == b',' && next_nonspace_is_close(bytes, i + 1) {
+            // Structural trailing comma — drop this byte. Materialise the buffer
+            // (the prefix before the comma) on the first removal; any surrounding
+            // whitespace is copied verbatim on the following iterations.
+            out.get_or_insert_with(|| bytes[..i].to_vec());
+        } else if let Some(out) = out.as_mut() {
             out.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == b'\\' {
-                escaped = true;
-            } else if c == b'"' {
-                in_string = false;
-            }
-        } else {
-            match c {
-                b'"' => {
-                    in_string = true;
-                    out.push(c);
-                }
-                b',' if next_nonspace_is_close(bytes, i + 1) => {
-                    // Structural trailing comma — drop this byte only; any
-                    // surrounding whitespace is copied on the next iterations.
-                }
-                _ => out.push(c),
-            }
         }
-        i += 1;
-    }
-    // Only ASCII `,` bytes were dropped and every other byte copied verbatim,
-    // so a valid-UTF-8 input remains valid UTF-8; the `expect` can never fire.
-    Cow::Owned(String::from_utf8(out).expect("delete-only ASCII comma removal preserves UTF-8"))
-}
-
-/// `true` when `bytes` contains at least one structural trailing comma (a comma,
-/// outside a string literal, whose next non-whitespace byte is `}` or `]`). Used
-/// to keep [`strip_json_trailing_commas`] zero-allocation on clean input.
-fn has_structural_trailing_comma(bytes: &[u8]) -> bool {
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
+        // Advance the string-literal state machine so a comma inside a `"…"` value
+        // is never treated as structural. An escaped quote (`\"`) does not end it.
         if in_string {
             if escaped {
                 escaped = false;
@@ -308,12 +281,16 @@ fn has_structural_trailing_comma(bytes: &[u8]) -> bool {
             }
         } else if c == b'"' {
             in_string = true;
-        } else if c == b',' && next_nonspace_is_close(bytes, i + 1) {
-            return true;
         }
         i += 1;
     }
-    false
+    match out {
+        // Only ASCII `,` bytes were ever dropped, so valid UTF-8 stays valid.
+        Some(out) => Cow::Owned(
+            String::from_utf8(out).expect("delete-only ASCII comma removal preserves UTF-8"),
+        ),
+        None => Cow::Borrowed(s),
+    }
 }
 
 /// `true` when the first non-ASCII-whitespace byte at or after `from` is a
