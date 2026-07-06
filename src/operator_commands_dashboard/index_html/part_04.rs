@@ -33,7 +33,14 @@ pub(crate) const PART_04: &str = r#"            let fmt;
     fetchBudget();
 
     /* --- Chat --- */
-    let ws=null, currentSessionId=null, streamSpan=null, streamText='';
+    // Persist the active chat session id across page reloads so the
+    // conversation stays continuous (issue #2581). Without this the id lived
+    // only in memory, so any reload reset it to null and silently started a
+    // fresh, empty session — the agent "forgot" the whole conversation.
+    const CHAT_SESSION_KEY='simardChatSession';
+    function loadStoredChatSession(){ try{ return localStorage.getItem(CHAT_SESSION_KEY)||null; }catch(e){ return null; } }
+    function storeChatSession(id){ try{ if(id) localStorage.setItem(CHAT_SESSION_KEY,id); else localStorage.removeItem(CHAT_SESSION_KEY); }catch(e){} }
+    let ws=null, currentSessionId=loadStoredChatSession(), streamSpan=null, streamText='';
 
     async function loadChatSessions(){
       const box=document.getElementById('chat-sessions');
@@ -64,6 +71,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
           item.addEventListener('click',()=>openSession(s.id));
           box.appendChild(item);
         });
+        maybeResumeChat();
       }catch(e){
         box.textContent='';
         const err=document.createElement('div');
@@ -73,8 +81,27 @@ pub(crate) const PART_04: &str = r#"            let fmt;
       }
     }
 
+    // After a page reload, transparently reconnect to the last conversation
+    // (persisted in localStorage) so the chat stays continuous instead of
+    // starting a fresh, empty session (issue #2581). Only connects when there
+    // is no live socket, and only for a session that still exists on disk
+    // (verified against the freshly-rendered session list).
+    function maybeResumeChat(){
+      if(ws && (ws.readyState===WebSocket.OPEN || ws.readyState===WebSocket.CONNECTING)) return;
+      if(!currentSessionId) return;
+      let found=false;
+      document.querySelectorAll('.chat-session-item').forEach(el=>{
+        const match=el.dataset.id===currentSessionId;
+        el.classList.toggle('active', match);
+        if(match) found=true;
+      });
+      if(!found){ storeChatSession(null); currentSessionId=null; return; }
+      initChat(currentSessionId);
+    }
+
     async function openSession(id){
       currentSessionId=id;
+      storeChatSession(id);
       document.querySelectorAll('.chat-session-item').forEach(el=>{
         el.classList.toggle('active', el.dataset.id===id);
       });
@@ -88,6 +115,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
 
     function newChat(){
       currentSessionId=null;
+      storeChatSession(null);
       document.querySelectorAll('.chat-session-item.active').forEach(el=>el.classList.remove('active'));
       clearMessages();
       initChat(null);
@@ -119,7 +147,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
       try{ m=JSON.parse(ev.data); }
       catch(ex){ removeTypingIndicator();setChatBusy(false);appendMsg('system',ev.data); return; }
       // Handshake: bind the session id + streaming capability.
-      if(m && m.type==='ready'){ if(m.session_id) currentSessionId=m.session_id; return; }
+      if(m && m.type==='ready'){ if(m.session_id){ currentSessionId=m.session_id; storeChatSession(currentSessionId); } return; }
       // Resume: replay persisted history into the panel.
       if(m && m.type==='restore'){
         clearMessages();
