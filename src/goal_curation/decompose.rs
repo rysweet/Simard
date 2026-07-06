@@ -84,6 +84,28 @@ pub trait GoalDecomposer {
     ) -> SimardResult<Vec<SubGoalProposal>>;
 }
 
+/// The `sub_goals` transport error (issue #2708). Every failure to obtain a
+/// usable sub-goals result from the decomposition agent's dedicated result file
+/// — missing, empty, oversized, malformed, or fewer than [`MIN_SUBGOALS`] — is
+/// the same loud `InvalidGoalRecord` on the `sub_goals` field.
+fn sub_goals_error(reason: String) -> SimardError {
+    SimardError::InvalidGoalRecord {
+        field: "sub_goals".to_string(),
+        reason,
+    }
+}
+
+/// The `decomposer` process error: the `recipe-runner-rs` subprocess itself
+/// failed (result dir could not be created, spawn failed, or a non-zero exit) —
+/// a loud `InvalidGoalRecord` on the `decomposer` field, kept distinct from a
+/// `sub_goals` transport failure so the two failure classes never blur.
+fn decomposer_error(reason: String) -> SimardError {
+    SimardError::InvalidGoalRecord {
+        field: "decomposer".to_string(),
+        reason,
+    }
+}
+
 /// Decompose `goal_id` (which must be on the active board) into 2..=6 linked
 /// sub-goals, writing the parent↔child edges into the graph and placing the
 /// children on the board (replacing the parent) or in the backlog (parent kept
@@ -118,13 +140,10 @@ pub fn decompose_goal(
     //    as a loud fallback (a single slice is not a decomposition).
     proposals.truncate(effective_max);
     if proposals.len() < MIN_SUBGOALS {
-        return Err(SimardError::InvalidGoalRecord {
-            field: "sub_goals".to_string(),
-            reason: format!(
-                "decomposition of '{goal_id}' produced {} sub-goal(s); a real decomposition needs at least {MIN_SUBGOALS}",
-                proposals.len()
-            ),
-        });
+        return Err(sub_goals_error(format!(
+            "decomposition of '{goal_id}' produced {} sub-goal(s); a real decomposition needs at least {MIN_SUBGOALS}",
+            proposals.len()
+        )));
     }
 
     // 3) Assign deterministic child ids (stable so a re-run dedups its edges).
@@ -387,9 +406,8 @@ impl GoalDecomposer for RecipeGoalDecomposer {
         let result_dir = tempfile::Builder::new()
             .prefix("simard-decompose-")
             .tempdir()
-            .map_err(|e| SimardError::InvalidGoalRecord {
-                field: "decomposer".to_string(),
-                reason: format!("failed to create sub-goals output tempdir: {e}"),
+            .map_err(|e| {
+                decomposer_error(format!("failed to create sub-goals output tempdir: {e}"))
             })?;
         let result_path = result_dir.path().join("sub_goals.json");
         let result_path_arg = result_path.to_string_lossy().into_owned();
@@ -408,10 +426,7 @@ impl GoalDecomposer for RecipeGoalDecomposer {
             .arg("-c")
             .arg(format!("sub_goals_output={result_path_arg}"))
             .output()
-            .map_err(|e| SimardError::InvalidGoalRecord {
-                field: "decomposer".to_string(),
-                reason: format!("recipe-runner-rs spawn failed: {e}"),
-            })?;
+            .map_err(|e| decomposer_error(format!("recipe-runner-rs spawn failed: {e}")))?;
 
         // Read the agent's proposals from the dedicated result file — NEVER
         // from stdout (issue #2708). `result_dir` stays alive until this call
@@ -464,53 +479,42 @@ fn harvest_subgoals_file(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(SimardError::InvalidGoalRecord {
-            field: "decomposer".to_string(),
-            reason: format!(
-                "recipe-runner-rs exited with {}: stderr={} stdout={}",
-                output.status,
-                truncate(stderr.trim(), 200),
-                truncate(stdout.trim(), 200)
-            ),
-        });
+        return Err(decomposer_error(format!(
+            "recipe-runner-rs exited with {}: stderr={} stdout={}",
+            output.status,
+            truncate(stderr.trim(), 200),
+            truncate(stdout.trim(), 200)
+        )));
     }
 
     // Size guard BEFORE the read. A missing file surfaces here as a loud
     // `sub_goals` error (the agent produced no result), never a stdout fallback.
-    let meta = std::fs::metadata(path).map_err(|e| SimardError::InvalidGoalRecord {
-        field: "sub_goals".to_string(),
-        reason: format!(
+    let meta = std::fs::metadata(path).map_err(|e| {
+        sub_goals_error(format!(
             "decomposition result file {} was not written by the agent: {e}",
             path.display()
-        ),
+        ))
     })?;
     if meta.len() > MAX_SUBGOALS_FILE_BYTES {
-        return Err(SimardError::InvalidGoalRecord {
-            field: "sub_goals".to_string(),
-            reason: format!(
-                "decomposition result file {} is {} bytes, exceeding the {MAX_SUBGOALS_FILE_BYTES}-byte cap",
-                path.display(),
-                meta.len()
-            ),
-        });
+        return Err(sub_goals_error(format!(
+            "decomposition result file {} is {} bytes, exceeding the {MAX_SUBGOALS_FILE_BYTES}-byte cap",
+            path.display(),
+            meta.len()
+        )));
     }
 
-    let contents = std::fs::read_to_string(path).map_err(|e| SimardError::InvalidGoalRecord {
-        field: "sub_goals".to_string(),
-        reason: format!(
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        sub_goals_error(format!(
             "decomposition result file {} could not be read: {e}",
             path.display()
-        ),
+        ))
     })?;
 
     if contents.trim().is_empty() {
-        return Err(SimardError::InvalidGoalRecord {
-            field: "sub_goals".to_string(),
-            reason: format!(
-                "decomposition result file {} was empty; the agent wrote no sub-goals",
-                path.display()
-            ),
-        });
+        return Err(sub_goals_error(format!(
+            "decomposition result file {} was empty; the agent wrote no sub-goals",
+            path.display()
+        )));
     }
 
     parse_subgoals_json(&contents)
@@ -529,12 +533,11 @@ pub fn parse_subgoals_json(text: &str) -> SimardResult<Vec<SubGoalProposal>> {
     let cleaned = strip_optional_code_fence(text);
     serde_json::from_str::<SubGoalsPayload>(cleaned)
         .map(SubGoalsPayload::into_subgoals)
-        .map_err(|e| SimardError::InvalidGoalRecord {
-            field: "sub_goals".to_string(),
-            reason: format!(
+        .map_err(|e| {
+            sub_goals_error(format!(
                 "could not parse sub-goals from decomposition result: {e} (input: {})",
                 truncate(text.trim(), 200)
-            ),
+            ))
         })
 }
 
