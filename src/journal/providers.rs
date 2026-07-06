@@ -70,7 +70,40 @@ pub struct DayExtras {
     pub memory_growth: Option<MemoryGrowth>,
     /// Any other notable events worth calling out.
     pub notable: Vec<String>,
+    /// Plain-language substance of the day's prepared-context facts (issue
+    /// #2606) — carried onto the [`DayContext`] so the report can summarise
+    /// *what* was learned, not just how many.
+    pub facts: Vec<String>,
+    /// Plain-language substance of the day's prepared-context triggers.
+    pub triggers: Vec<String>,
+    /// Plain-language substance of the day's prepared-context procedures.
+    pub procedures: Vec<String>,
 }
+
+/// Format an episode's `temporal_index` as a human-readable timestamp label for
+/// the report (issue #2606: remembered moments must show *when* they occurred).
+///
+/// The cognitive store uses `temporal_index` two ways: production episodes carry
+/// a Unix epoch-second magnitude, while some in-process/test fixtures use a
+/// small monotonic counter. A value at or above [`EPOCH_LABEL_FLOOR`] (roughly
+/// the year 2001) is treated as a real wall-clock time and formatted as a UTC
+/// label; a smaller value degrades to a stable `"moment N"` ordinal so a
+/// counter-based fixture still renders sensibly rather than as a nonsensical
+/// 1970s date.
+#[must_use]
+pub fn episode_time_label(temporal_index: i64) -> String {
+    if temporal_index >= EPOCH_LABEL_FLOOR {
+        chrono::DateTime::<Utc>::from_timestamp(temporal_index, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_else(|| format!("moment {temporal_index}"))
+    } else {
+        format!("moment {temporal_index}")
+    }
+}
+
+/// Values at or above this magnitude are treated as Unix epoch seconds (≈ year
+/// 2001); anything smaller is a monotonic counter, not a wall-clock time.
+const EPOCH_LABEL_FLOOR: i64 = 1_000_000_000;
 
 /// Assemble the [`DayContext`] for `date` from the injected sources plus
 /// `extras`. Episodics are pulled first (the primary source); the code-change
@@ -90,6 +123,9 @@ pub fn assemble_day_context(
         overseer_events: extras.overseer_events,
         memory_growth: extras.memory_growth,
         notable: extras.notable,
+        facts: extras.facts,
+        triggers: extras.triggers,
+        procedures: extras.procedures,
     })
 }
 

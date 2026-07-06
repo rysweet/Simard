@@ -120,9 +120,10 @@ fn plain_summary_strips_prefix_and_scrubs_jargon() {
 
     let p = plainify_pr_title("feat: close the PR faster");
     assert!(
-        p.contains("code-change proposal"),
-        "PR is explained for a layperson: {p}"
+        p.contains("pull request"),
+        "PR is expanded for a layperson: {p}"
     );
+    assert!(!p.contains("PR "), "no bare 'PR' acronym remains: {p}");
 
     // A non-conventional colon sentence is left intact.
     let plain = plainify_pr_title("Note: the login page is faster now");

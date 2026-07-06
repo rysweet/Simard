@@ -1,0 +1,64 @@
+# journal-plain-language.yaml — Recipe for the plain-language REWRITE of a
+# journal draft (issue #2606).
+#
+# The second of the two journal passes. Given a report draft (which may still
+# contain engineering jargon), it rewrites the report so a non-engineer can read
+# it end to end — WITH TEETH: acronyms are expanded, raw code identifiers and
+# internal code names are removed, and any unavoidable technical term is briefly
+# explained in plain words. The structure (## headings, bullet lists, the PR
+# table lead-in) is preserved so the rewritten report still renders cleanly in
+# both the dashboard Journal tab and the TUI Journal pane.
+#
+# The deterministic glossary scrubber (src/journal/jargon.rs) is the offline
+# fallback if this recipe is unavailable, and the Rust generator ALWAYS runs an
+# unconditional secret-redaction pass over whatever this step returns — so a
+# credential never survives even if the model leaves one in.
+#
+# Context vars (passed via -c):
+#   draft — the report draft (Markdown text) to rewrite.
+#
+# Output: the rewritten, plain-language report as Markdown text (NOT JSON),
+# returned verbatim as the final narrative.
+
+name: "journal-plain-language"
+description: "Rewrite a journal report draft into plain, layperson-readable language"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "journal", "plain-language"]
+
+context:
+  draft: ""
+
+steps:
+  - id: "dejargon"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are Simard's **plain-language editor**. You are given a daily report
+      draft and you rewrite it so that a NON-ENGINEER can read and understand it
+      completely, while preserving every fact and the report's structure.
+
+      ## Draft to rewrite
+
+      {{draft}}
+
+      ## Rewrite rules (be thorough — this check has teeth)
+
+      - Keep it a professional, third-person REPORT. Do NOT introduce a diary
+        voice ("Dear diary", "I, Simard", ...). If the draft contains any, remove
+        it.
+      - EXPAND every acronym into plain words on first use, e.g. "PR" ->
+        "pull request", "CI" -> "the automated checks", "OODA" -> "decision
+        cycle". Never leave a bare initialism.
+      - REMOVE raw code identifiers and internal code names a reader would trip
+        over (for example anything in snake_case or CamelCase, or a database /
+        module / variable name). Describe the idea in plain words instead.
+      - If a technical term is genuinely unavoidable, keep it but add a brief
+        plain-language explanation in the same sentence.
+      - Preserve ALL factual content, every section heading (`## ...`), every
+        bullet list, the timestamps on remembered moments, and the PR-table
+        lead-in. Do not add facts, and do not drop any.
+      - Never include secrets, tokens, keys, or credentials.
+
+      Output ONLY the rewritten Markdown report — no preamble, no code fence,
+      nothing before or after it.

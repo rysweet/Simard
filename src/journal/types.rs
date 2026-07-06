@@ -47,6 +47,12 @@ pub struct MemoryGrowth {
 /// built largely from these moment-by-moment memories. Every other field is a
 /// best-effort augmentation; a missing augmentation is simply omitted from the
 /// narrative (honest degradation), it never fabricates content.
+///
+/// The [`facts`](Self::facts), [`triggers`](Self::triggers), and
+/// [`procedures`](Self::procedures) fields carry the *substance* of the day's
+/// prepared context (issue #2606): rather than a bare "10 facts, 2 triggers, 5
+/// procedures" count line, the report summarises **what** each of them actually
+/// was, so a reader learns the material and not just the totals.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DayContext {
     /// The calendar day (UTC) this context describes.
@@ -65,6 +71,15 @@ pub struct DayContext {
     pub memory_growth: Option<MemoryGrowth>,
     /// Any other notable events worth calling out.
     pub notable: Vec<String>,
+    /// Plain-language summaries of the facts Simard learned/held that day — the
+    /// *substance* behind the prepared-context "facts" count.
+    pub facts: Vec<String>,
+    /// Plain-language summaries of the reminders/triggers that fired — the
+    /// *substance* behind the prepared-context "triggers" count.
+    pub triggers: Vec<String>,
+    /// Plain-language summaries of the know-how (procedures) in play — the
+    /// *substance* behind the prepared-context "procedures" count.
+    pub procedures: Vec<String>,
 }
 
 impl DayContext {
@@ -77,7 +92,8 @@ impl DayContext {
     }
 
     /// `true` when nothing happened worth narrating — no episodes, proposals,
-    /// goals, deploys, Overseer activity, memory growth, or notable events.
+    /// goals, deploys, Overseer activity, memory growth, prepared-context
+    /// substance, or notable events.
     ///
     /// A quiet day still produces an honest entry (see the drafter) rather than
     /// an empty or fabricated one.
@@ -89,6 +105,9 @@ impl DayContext {
             && self.overseer_events.is_empty()
             && self.notable.is_empty()
             && self.memory_growth.is_none()
+            && self.facts.is_empty()
+            && self.triggers.is_empty()
+            && self.procedures.is_empty()
     }
 }
 

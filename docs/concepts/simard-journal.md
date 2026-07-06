@@ -1,11 +1,13 @@
 ---
-title: "The Simard Journal — a daily diary written from memory"
+title: "The Simard Journal — a daily narrative engineering & research report"
 description: >
-  Why Simard keeps a daily journal: a diary-style, first-person-steward narrative of
-  what the one Brain (including the Overseer) did each day, written largely from episodic
-  memories, jargon-scrubbed in a mandatory two-pass review, and stored durably in cognitive
-  memory as a first-class journal record — never as per-day files committed to the repo.
-last_updated: 2026-07-05
+  Why Simard keeps a daily journal: a professional, third-person NARRATIVE REPORT of the
+  day's engineering and research — an overview paragraph, clearly delineated sections, a
+  plain-language pull-request summary table, timestamped remembered moments, and a verbose
+  "what context was prepared" summary. Built largely from episodic memories, rewritten into
+  genuinely jargon-free language by a mandatory two-pass (draft then de-jargon) pipeline,
+  and stored durably in cognitive memory — never as per-day files committed to the repo.
+last_updated: 2026-07-06
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -22,85 +24,163 @@ related:
   - ../reference/simard-tui.md
 ---
 
-# The Simard Journal — a daily diary written from memory
+# The Simard Journal — a daily narrative engineering & research report
 
-The **Journal** gives Simard a daily diary. Once per day (rolling, regenerated as
-the day unfolds) Simard writes a short, plain-language story of what it did — the
-goals it worked, the engineers it ran, the pull requests it opened and merged, the
-deploys it made, what the **Overseer** steward was up to, how its memory grew, and
-any notable events. It reads like a diary entry written by the system about its own
-day, in a voice a non-engineer can follow.
+The **Journal** gives Simard a daily written record of its work. Once per day (rolling,
+regenerated as the day unfolds) Simard produces a short, plain-language **narrative
+report** of what happened — the goals worked, the engineering built or investigated,
+the research conducted, the pull requests worked on, the updates shipped to the
+live system, what the **Overseer** steward did, how memory grew, and the day's key
+observations, decisions, and outcomes.
 
-The journal exists so a human who was not watching the daemon minute-by-minute can
-open one page and understand *what happened today* — without reading logs, without
-knowing what "OODA", "episodic recall", or "CI" mean, and without scrolling a wall
-of telemetry.
+It is written as a **professional, third-person report**, the way an engineering team
+might summarise a day for a mixed audience — factual, structured, and readable. It is
+**not** a personal diary: there is no "Dear diary", no first-person confessional voice,
+and no diary framing. The reader gets a clear account of *what was worked on, what was
+built or investigated, what was observed, what was decided, and how it turned out.*
+
+The journal exists so a human who was not watching the daemon minute-by-minute can open
+one page and understand *what happened today* — without reading logs, without knowing
+what "OODA", "episodic recall", or "CI" mean, and without scrolling a wall of telemetry.
+
+!!! warning "Implementation status — target design under issue #2606"
+    This page describes the Simard Journal as it is being **rebuilt** under issue #2606: a
+    third-person narrative report, structured sections, timestamped moments, a verbose
+    prepared-context summary, and a prompt-first generation pipeline. Parts of this are the
+    intended end state and are **not yet reflected in the shipped code** — the pre-fix #2618
+    build still writes a first-person "Dear diary" narrative. Read this as the design we are
+    building toward, not as a description of current behaviour.
 
 !!! quote "What an entry sounds like"
-    *"Today I focused on tightening how I recall my own past work. I ran two
-    engineers on the auth module; one opened a code-change proposal (a "pull
-    request", or PR) that added tests, and I merged it after the automated checks
-    passed. My steward — the Overseer — flagged a stale proposal from last week and
-    nudged it along. My memory grew by 14 new moment-by-moment records of what I
-    did. A quiet, productive day."*
+    *"**Overview.** Simard spent the day improving how it recalls its own past work and
+    validating those changes against the live system. Two engineering efforts landed and
+    a measurement study was started."*
+
+    *"**Engineering work.** A change that adds automated tests to the sign-in code was
+    prepared and, once the automated checks passed, combined into the main code…"*
+
+    *(followed by Research, Key observations, Decisions and Outcomes sections, then a
+    plain-language table summarising each pull request.)*
 
 ## The core ideas
 
-### One Brain, one voice
+### A narrative report, not a personal diary
 
-Simard is a single mind. The journal is written in **first person, singular** — "I
-worked", "I merged", "I decided" — never as a committee and never as separate
-"bridges" or subsystems narrating themselves. The **Overseer** is not a second
-narrator; it is Simard's **steward**, and its actions appear *inside* Simard's
-story ("my steward flagged…", "the Overseer paused engineer #3 because…"). There is
-exactly one point of view.
+Simard is a single system, and the journal is written about that system's day in the
+**third person** — "Simard prepared…", "the change was combined into the main code…",
+"the Overseer flagged a stale proposal…". There is no diary voice and no personal
+framing; the register is that of a clear engineering/research report a non-engineer can
+still follow.
 
-This matters because the whole point is legibility. A reader should feel they are
-reading one coherent diary, not stitching together the outputs of many processes.
+The **Overseer** is Simard's **steward**, and its actions appear *inside* the report
+("the Overseer flagged a stale proposal and nudged it forward") rather than as a second
+narrator. There is one coherent account, not a stitched-together set of subsystem logs.
 
-### Written largely from episodic memory
+This matters because the whole point is legibility. A reader should feel they are reading
+one well-structured report, not a private diary and not raw telemetry.
 
-Simard already remembers its day as **episodes** — moment-by-moment records of what
-it observed and did (see
+### Structured: overview, sections, and a PR table
+
+Every entry has a **deliberate, readable structure** rather than a wall of prose:
+
+1. A short **Overview** paragraph — the two-or-three-sentence "what happened today".
+2. Clearly delineated **sections**, each under its own heading, covering (as applicable):
+   **Engineering work**, **Research**, **Key observations**, **Decisions**, and
+   **Outcomes**. Empty sections are simply omitted (honest degradation) rather than
+   padded.
+3. A **pull-request summary table** — a markdown table with one row per open code-change
+   proposal: its **number**, a plain-language **"what changed & why it matters"** summary,
+   and a plain-language **outcome** — a readiness phrase for the open proposal ("ready to
+   combine into the main code", "automated checks still running", or "not ready yet"). Each
+   row is written so a layperson understands what the change was for. (The journal reflects
+   the *open* proposal readiness view, so it reports readiness rather than lifecycle states
+   like "merged" or "closed".)
+
+The same structure renders cleanly in **both** operator surfaces — the dashboard Journal
+tab and the TUI Journal pane — because both are produced by one shared renderer (see
+[Journal API — rendering](../reference/journal-api.md#rendering-the-shared-renderer)).
+
+### Built largely from timestamped episodic memory
+
+Simard already remembers its day as **episodes** — moment-by-moment records of what it
+observed and did (see
 [Episodic recall](../reference/cognitive-memory-episodic-recall.md) and the
-[cognitive-memory architecture](../architecture/cognitive-memory.md)). The journal
-is built *primarily* from those episodes: the day's episodes are the raw material,
-and the narrative is their retelling in prose.
+[cognitive-memory architecture](../architecture/cognitive-memory.md)). The report is
+built *primarily* from those episodes: the day's episodes are the raw material, and the
+narrative is their retelling in report form.
 
-Episodes are the **primary, required** source. Everything else — the day's goals,
-engineer runs, pull requests, deploys, Overseer activity, memory-growth counts,
-notable events — is **augmentation**. Each augmentation source is best-effort: if
-the daemon cannot supply the day's deploy list, the entry simply omits deploys
-rather than inventing them or failing. Episodes carry the story; the rest adds
-colour and structure.
+Two properties make the episodic material legible:
 
-### Two passes: draft, then a mandatory jargon review
+- **Timestamps.** Each remembered moment referenced in the report shows **when it
+  occurred** (a human-readable time label), so the reader can place events in the day —
+  not a bare, undated list.
+- **Chronological order.** Remembered moments are presented **oldest-to-newest**, so the
+  report reads as the day actually unfolded.
 
-Generation is deliberately **two-pass**:
+Episodes are the **primary, required** source. Everything else — goals, engineering runs,
+pull requests, deploys, Overseer activity, memory-growth counts, notable events, and the
+prepared-context summary — is **augmentation**. Each augmentation is best-effort: if the
+daemon cannot supply the day's deploy list, the entry simply omits deploys rather than
+inventing them or failing.
 
-1. **Draft.** Assemble the day's context (episodes first, then augmentation) and
-   write a first-person narrative plus a pull-request table. The default drafter is
-   deterministic template assembly; a language-model drafter is a drop-in swap. This
-   pass produces honest but *engineer-flavoured* prose — it may still say "PR", "CI",
-   "idempotent", "daemon".
-2. **Review / rewrite.** A **mandatory** second pass hands the draft to a
-   **reviewer** whose job is to make the text safe for a layperson: it **explains
-   jargon on first use** ("a code-change proposal (a "pull request", or PR)"),
-   strips corporate jargon, and redacts anything that looks like a secret. The
-   generator *always* runs this pass — an entry is never stored un-reviewed.
+### A verbose "prepared context" summary — substance, not counts
 
-The review pass is a first-class, structurally-required stage, not an optional
-polish. Tests assert both that the reviewer *ran* and that sampled jargon terms are
-gone or explained in the stored entry. See
-[Journal API — the review pass](../reference/journal-api.md#the-review-pass).
+Earlier journal output emitted a bare line of totals — *"Prepared context: 10 facts, 2
+triggers, 5 procedures, 5 remembered moments"* — which told the reader nothing useful.
+The report now summarises **what those items actually were**: a brief, readable
+description of the day's key **facts**, **triggers**, **procedures**, and **remembered
+moments**, so the reader learns the substance rather than a total. Counts alone are never
+the whole story.
 
-!!! note "Why explain-on-first-use rather than ban words outright"
-    Some terms (PR, CI, deploy, merge) are unavoidable when describing engineering
-    work. Deleting them would make entries vague. Instead the reviewer keeps the
-    term but teaches it once, so the reader learns the vocabulary as they read. The
-    existing dashboard `BANNED_JARGON` list targets consultant-speak and insider
-    acronyms; the journal adds its own **explain-glossary** for the everyday
-    engineering words that list intentionally leaves alone.
+### Two passes: draft, then a mandatory de-jargon rewrite that has teeth
+
+Generation is deliberately **two-pass** so the jargon-free guarantee is structural, not
+incidental:
+
+1. **Draft.** Assemble the day's context (episodes first, then augmentation) and write
+   the structured, third-person report plus the pull-request table.
+2. **De-jargon rewrite.** A **mandatory** second pass rewrites the draft into language a
+   non-engineer can genuinely read: it **expands acronyms** ("PR" → "pull request", "CI"
+   → "the automated checks"), **removes raw code identifiers, internal code names, and
+   insider terms**, and **explains any unavoidable technical term in plain words**.
+
+Finally — regardless of whether that rewrite ran as a prompt or as the offline glossary
+pass — a **mandatory secret-redaction step** runs over the reviewed text, so anything that
+looks like a token, key, or private-key block is scrubbed before the entry is stored. The
+LLM reviewer's output is never trusted to be secret-free on its own.
+
+The rewrite pass is **effective by design, not a no-op**. The generator *always* runs it,
+it **materially changes** the text, and the tests prove it: an entry retains both its
+pre-review `draft` and its final `narrative`, and the test suite asserts (a) that a
+representative list of banned jargon tokens does **not** appear in the final narrative and
+(b) that the narrative genuinely **differs** from the draft. See
+[Journal API — the de-jargon pass](../reference/journal-api.md#the-de-jargon-rewrite-pass).
+
+!!! note "Why the earlier de-jargon step was strengthened"
+    #2618 added a de-jargon review step, but in production the final entries were still
+    full of jargon — the pass was effectively a no-op. #2606 gives it teeth: a
+    prompt-first rewrite (below) plus a strengthened deterministic glossary, verified by
+    tests that fail if banned tokens survive into the narrative.
+
+### Prompt-first generation, with an honest offline fallback
+
+Following the project's *agentic-over-brittle-parsing* guideline (G3), the report is
+written and de-jargoned by **prompts**, not by fragile string manipulation:
+
+- **Primary (prompt-first).** A recipe-runner-backed **drafter** and **de-jargon
+  reviewer** run the `journal-narrative` and `journal-plain-language`
+  [recipes](../reference/journal-api.md#the-generation-recipes). The prompts own the
+  narrative-report shaping and the plain-language rewrite. Recipe assets **hot-reload**
+  from `~/.simard/prompt_assets/simard/…` so a deploy can update them without a rebuild.
+- **Fallback (offline).** When `recipe-runner-rs` (or a recipe asset) is unavailable —
+  as in the hermetic test suite — generation degrades **honestly** to a deterministic
+  template drafter plus a strengthened glossary reviewer that still produce a structured,
+  jargon-free report. No network, no LLM, still readable.
+
+The generator that a deployment uses is selected by
+`JournalGenerator::for_repo(repo_root)`, which prefers the prompt-first pipeline and falls
+back to the deterministic one — so the feature always works, just with an LLM ceiling when
+one is available.
 
 ### Stored in memory, not in the repo
 
@@ -109,19 +189,18 @@ markdown snapshots checked into git. Instead each entry is a **first-class recor
 cognitive memory**, keyed by date:
 
 - One entry per day, stored as a **semantic fact** under the stable key
-  `journal:YYYY-MM-DD` (tag `journal`), with the full `JournalEntry` serialized as
-  the fact's content.
+  `journal:YYYY-MM-DD` (tag `journal`), with the full `JournalEntry` serialized as the
+  fact's content.
 - Because the store keeps **at most one live fact per key**
   ([`store_fact_with_caller_key`](../reference/cognitive-memory-fact-recall.md)),
-  regenerating today's entry **supersedes** the previous version rather than piling
-  up duplicates. That is what makes the "rolling, regenerate as the day progresses"
+  regenerating today's entry **supersedes** the previous version rather than piling up
+  duplicates. That is what makes the "rolling, regenerate as the day progresses"
   behaviour safe to repeat.
-- Entries **survive restarts** (they live in the durable cognitive-memory store) and
-  are **searchable** by date range and by free text.
+- Entries **survive restarts** (they live in the durable cognitive-memory store) and are
+  **searchable** by date range and by free text.
 
-This reuses the datastore Simard already has. The journal does **not** invent a
-parallel database, a new file format, or a second source of truth. It is one more
-record type in cognitive memory, sitting alongside facts, episodes, and procedures.
+This reuses the datastore Simard already has. The journal does **not** invent a parallel
+database, a new file format, or a second source of truth.
 
 ### Browseable by date, searchable by text — everywhere
 
@@ -132,10 +211,9 @@ newest-first) backs both operator surfaces:
 - a **Journal pane** in the [`simard-tui`](../reference/simard-tui.md) terminal
   dashboard.
 
-Both let the operator pick a date (newest-first list/picker) or search across all
-entries, and both render the narrative plus the pull-request table jargon-free and
-XSS-safe. The Journal tab is a **distinct, additive** tab with its own `journal`
-slug; it does not collide with any existing dashboard tab.
+Both let the operator pick a date (newest-first list/picker) or search across all entries,
+and both render the structured report plus the pull-request table jargon-free and XSS-safe.
+This searchable, browse-by-date behaviour is **preserved unchanged** from #2618.
 
 ## What a journal entry contains
 
@@ -144,43 +222,43 @@ Every entry is a small, self-describing record:
 | Part | What it is |
 | --- | --- |
 | **Date** | The calendar day (UTC) the entry describes; also its key. |
-| **Narrative** | The first-person diary story, jargon-scrubbed. |
-| **PR table** | Every pull request of the day: number, a plain-language "what changed & why it matters", and the outcome (merged / open / closed). |
+| **Narrative** | The final, reviewed, jargon-free **report**: an overview paragraph, sectioned narrative, timestamped chronological remembered moments, and the verbose prepared-context summary. |
+| **PR table** | Every open code-change proposal of the day: number, a plain-language "what changed & why it matters" summary, and a plain-language readiness outcome. |
+| **Draft** | The pre-review draft, retained so the de-jargon pass is provably not a no-op (`draft` ≠ `narrative`). |
 | **Quiet-day flag** | If nothing meaningful happened, the entry says so honestly ("a quiet day") rather than fabricating activity. |
-| **Reviewed flag** | Records that the mandatory jargon-review pass ran. |
 
-The pull-request table is the backbone of the "what shipped today" story. It is
-described in prose *and* rendered as a table so a non-engineer can skim outcomes at
-a glance. See the exact shape in the
-[Journal API reference](../reference/journal-api.md#data-model).
+The pull-request table is the backbone of the "what shipped today" story. It is described
+in prose *and* rendered as a table so a non-engineer can skim outcomes at a glance. See
+the exact shape in the [Journal API reference](../reference/journal-api.md#data-model).
 
 ## Honesty on quiet days
 
-Not every day is busy. When the day's episodes and augmentation sources are empty,
-Simard does **not** pad the entry with filler. It writes a short, honest
-placeholder — *"A quiet day. Nothing of note to report."* — and marks the entry as
-quiet. Both the dashboard and the TUI render that honestly. Truthfulness beats
-volume; a fabricated busy day would be worse than an empty one. This mirrors
-Simard's broader [truthful-runtime-metadata](./truthful-runtime-metadata.md)
-principle.
+Not every day is busy. When the day's episodes and augmentation sources are empty, Simard
+does **not** pad the entry with filler. It writes a short, honest placeholder — *"A quiet
+day. Nothing of note to report."* — and marks the entry as quiet. Both the dashboard and
+the TUI render that honestly. Truthfulness beats volume; a fabricated busy day would be
+worse than an empty one. This mirrors Simard's broader
+[truthful-runtime-metadata](./truthful-runtime-metadata.md) principle.
 
 ## How it fits the rest of Simard
 
 The journal is a thin narrative layer over subsystems that already exist:
 
-- **Cognitive memory** supplies the episodes (the story) and stores the finished
-  entry (the record). No new datastore.
-- **The OODA daemon** already knows the day's goals, engineer runs, deploys, and
-  Overseer activity; the journal reads those as augmentation.
+- **Cognitive memory** supplies the timestamped episodes (the story) and stores the
+  finished entry (the record). No new datastore.
+- **The OODA daemon** already knows the day's goals, engineer runs, deploys, and Overseer
+  activity; the journal reads those as augmentation.
+- **The prompt-first recipes** (`journal-narrative`, `journal-plain-language`) own the
+  report shaping and the de-jargon rewrite; the deterministic pipeline is the offline
+  fallback.
 - **A daily background task** in the OODA daemon regenerates today's entry on a fixed
-  cadence (default hourly), running *after* the decision cycle so it never competes
-  with it — narrating the day is a lightweight form of memory consolidation. It runs
-  by default and can be turned off with a single environment variable.
-- **The dashboard and TUI** already have a tab/pane pattern, styling, and an
-  escaping discipline; the Journal surfaces slot into those.
+  cadence (default hourly), running *after* the decision cycle so it never competes with
+  it. It runs by default and can be turned off with a single environment variable.
+- **The dashboard and TUI** already have a tab/pane pattern, styling, and an escaping
+  discipline; the Journal surfaces slot into those and share one renderer.
 
-Nothing here changes the live daemon's decision-making. The journal only *reads*
-what Simard did and *writes* a human-readable record of it.
+Nothing here changes the live daemon's decision-making. The journal only *reads* what
+Simard did and *writes* a human-readable report of it.
 
 ## Where to go next
 
