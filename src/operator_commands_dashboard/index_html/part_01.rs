@@ -590,6 +590,39 @@ pub(crate) const PART_01: &str = r#"      </div>
       }catch(e){document.getElementById('status').innerHTML='<span class="err">Failed to reach /api/status — is the dashboard server running?</span>';}
     }
 
+    /* --- Cognition: hybrid recall precision (#2491 / #2494) --- */
+    function recallVerdictClass(v){
+      if(v==='confirmed') return 'ok';
+      if(v==='diverging'||v==='regressed') return 'err';
+      if(v==='benchmark-only'||v==='live-only') return 'warn';
+      return '';
+    }
+    async function fetchRecallPrecision(){
+      const el=document.getElementById('cognition-recall-precision');
+      if(!el) return;
+      try{
+        const d=await apiFetch('/api/cognition/recall-precision');
+        const c=d.correlation||{};
+        const verdict=c.verdict||'insufficient';
+        const bench=d.benchmark;
+        const live=d.live;
+        const benchLine=bench
+          ? `${bench.score.toFixed(4)} <span class="value ${bench.previous_score!=null&&bench.score>bench.previous_score?'ok':''}">(${esc(bench.signal||'n/a')})</span>`
+          : '<span class="warn">no benchmark runs yet</span>';
+        const liveLine=live
+          ? `${live.first.toFixed(4)} → ${live.latest.toFixed(4)} <span class="value">(${live.samples} sample${live.samples===1?'':'s'}, ${live.window_hours}h)</span>`
+          : '<span class="warn">no live samples yet</span>';
+        let html=`
+          <div class="stat"><span class="label">Verdict</span><span class="value ${recallVerdictClass(verdict)}">${esc(verdict)}</span></div>
+          <div class="stat"><span class="label">Benchmark</span><span class="value">${benchLine}</span></div>
+          <div class="stat"><span class="label">Live trend</span><span class="value">${liveLine}</span></div>
+          <div class="stat"><span class="label">Updated</span><span class="value">${timeAgo(d.generated_at)}</span></div>`;
+        if(c.explanation) html+=`<p style="margin:.5rem 0 0;color:#8b949e;font-size:.8rem">${esc(c.explanation)}</p>`;
+        if(d.error) html+=`<p class="err" style="margin:.5rem 0 0;font-size:.8rem">${esc(d.error)}</p>`;
+        el.innerHTML=html;
+      }catch(e){el.innerHTML='<span class="err">Failed to reach /api/cognition/recall-precision</span>';}
+    }
+
     async function fetchAgentOverview(){
       try{
         const d=await apiFetch('/api/activity');

@@ -100,6 +100,7 @@ Product modes:
   gym run <scenario-id>
   gym compare <scenario-id>
   gym run-suite <suite-id>
+  gym recall-precision
   ooda run [--cycles=N] [--no-auto-reload] [state-root]
   dashboard serve [--port=8080]
   signal run             — connect to the configured signal-cli JSON-RPC daemon

@@ -1,10 +1,17 @@
 use axum::Json;
+use axum::extract::Query;
+use axum::http::StatusCode;
 use serde_json::{Value, json};
+use std::path::Path;
 
 use super::dashboard_goal_board_snapshot;
 use super::routes::resolve_state_root;
 use super::subagent::{count_json_records, file_metrics};
+use crate::cognitive_memory::metrics::RECALL_PRECISION_METRIC;
+use crate::cognitive_memory::recall_precision_bench::RECALL_PRECISION_SUITE;
+use crate::gym_history::{ScoreHistory, generate_signals};
 use crate::memory_ipc::open_reader_bridge;
+use crate::self_metrics::MetricEntry;
 
 // ---------------------------------------------------------------------------
 // Memory metrics panel
@@ -158,6 +165,334 @@ pub(crate) async fn ooda_thinking() -> Json<Value> {
     let reports = super::thinking_collapse::collapse_reports(reports);
 
     Json(json!({ "reports": reports }))
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid recall-precision correlation endpoint (issue #2491 / #2494)
+// ---------------------------------------------------------------------------
+//
+// The read-only, query-time join that makes the measurement *hybrid*: it pairs
+// the latest FIXED-corpus benchmark score with the recent LIVE trend on the same
+// metric name (`recall_precision_at_k`) and emits a correlation verdict — so a
+// claimed cognition improvement is validated on the benchmark AND observed live,
+// not just one. Reference: docs/reference/recall-precision-hybrid-api.md.
+
+/// The gym regression threshold, reused so the correlation classifies a rail's
+/// direction with the same ±band the gym already uses for regressions.
+const CORRELATION_THRESHOLD: f64 = 0.01;
+
+/// The hybrid correlation verdict — a total function of the two rails' recent
+/// directions (see [`correlation_verdict`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CorrelationVerdict {
+    /// Both rails improved beyond the threshold — the claim holds.
+    Confirmed,
+    /// Benchmark up, live flat — possible overfit / unrepresentative corpus.
+    BenchmarkOnly,
+    /// Live up, benchmark flat — possible drift; the corpus may miss the case.
+    LiveOnly,
+    /// One rail up while the other regressed — the rails contradict each other.
+    Diverging,
+    /// A drop on at least one rail with no offsetting rise on the other.
+    Regressed,
+    /// Neither rail moved beyond the threshold.
+    Stable,
+    /// Not enough history on one or both rails to judge.
+    Insufficient,
+}
+
+impl CorrelationVerdict {
+    /// The documented kebab-case wire string for this verdict.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::BenchmarkOnly => "benchmark-only",
+            Self::LiveOnly => "live-only",
+            Self::Diverging => "diverging",
+            Self::Regressed => "regressed",
+            Self::Stable => "stable",
+            Self::Insufficient => "insufficient",
+        }
+    }
+
+    /// One-line human explanation for the response body.
+    fn explanation(self) -> &'static str {
+        match self {
+            Self::Confirmed => "Benchmark and live trend both improved beyond the threshold.",
+            Self::BenchmarkOnly => {
+                "Benchmark improved but the live trend held flat — suspect overfit or an \
+                 unrepresentative corpus."
+            }
+            Self::LiveOnly => {
+                "Live trend improved but the benchmark held flat — the frozen corpus may be \
+                 missing the improved case."
+            }
+            Self::Diverging => {
+                "The rails disagree in direction (one improved while the other regressed) — do \
+                 not trust the gain."
+            }
+            Self::Regressed => "At least one rail regressed with no offsetting rise on the other.",
+            Self::Stable => "Neither rail moved beyond the threshold.",
+            Self::Insufficient => {
+                "Not enough history on one or both rails (needs at least two benchmark runs and \
+                 two in-window live samples)."
+            }
+        }
+    }
+}
+
+/// Classify the hybrid correlation from the benchmark run-over-run delta and the
+/// live first→latest trend delta, each against `threshold`.
+///
+/// `benchmark_delta`/`live_trend_delta` are `None` when the corresponding rail
+/// has fewer than two comparable points, which yields [`CorrelationVerdict::Insufficient`].
+/// Otherwise each rail is reduced to a direction — up (`> +t`), flat (`|d| <= t`),
+/// or down (`< -t`) — and the nine combinations map onto exactly one verdict.
+pub(crate) fn correlation_verdict(
+    benchmark_delta: Option<f64>,
+    live_trend_delta: Option<f64>,
+    threshold: f64,
+) -> CorrelationVerdict {
+    let (b, l) = match (benchmark_delta, live_trend_delta) {
+        (Some(b), Some(l)) => (b, l),
+        _ => return CorrelationVerdict::Insufficient,
+    };
+    let dir = |d: f64| -> i8 {
+        if d > threshold {
+            1
+        } else if d < -threshold {
+            -1
+        } else {
+            0
+        }
+    };
+    match (dir(b), dir(l)) {
+        (1, 1) => CorrelationVerdict::Confirmed,
+        (1, 0) => CorrelationVerdict::BenchmarkOnly,
+        (0, 1) => CorrelationVerdict::LiveOnly,
+        (1, -1) | (-1, 1) => CorrelationVerdict::Diverging,
+        (0, 0) => CorrelationVerdict::Stable,
+        // (0, -1), (-1, 0), (-1, -1): a drop with no offsetting rise.
+        _ => CorrelationVerdict::Regressed,
+    }
+}
+
+/// How many recent benchmark records to load (default 20, clamped 1..=200).
+pub(crate) fn clamp_bench_limit(v: Option<u64>) -> u64 {
+    v.unwrap_or(20).clamp(1, 200)
+}
+
+/// Max live `metrics.jsonl` samples to scan within the window (default 200,
+/// clamped 1..=2000).
+pub(crate) fn clamp_live_limit(v: Option<u64>) -> u64 {
+    v.unwrap_or(200).clamp(1, 2000)
+}
+
+/// Live look-back window in hours (default 168 = one week, clamped 1..=8760).
+pub(crate) fn clamp_window_hours(v: Option<u64>) -> u64 {
+    v.unwrap_or(168).clamp(1, 8760)
+}
+
+/// Load the benchmark rail: the latest score, its previous score, the gym
+/// signal, and the run-over-run delta. Returns `(benchmark_json, delta, had_error)`;
+/// `benchmark_json` is `null` when there are fewer than two records or a read
+/// error occurred. A read error is logged (specifics to `tracing::warn!` only)
+/// and never leaked into the body.
+fn benchmark_rail(bench_db_path: &Path, bench_limit: u64) -> (Value, Option<f64>, bool) {
+    let history = match ScoreHistory::open(bench_db_path) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(
+                target: "simard::dashboard",
+                error = %e,
+                "recall-precision correlation: failed to open benchmark score history",
+            );
+            return (Value::Null, None, true);
+        }
+    };
+    let records = match history.history(
+        RECALL_PRECISION_SUITE,
+        RECALL_PRECISION_METRIC,
+        bench_limit as usize,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                target: "simard::dashboard",
+                error = %e,
+                "recall-precision correlation: failed to read benchmark score history",
+            );
+            return (Value::Null, None, true);
+        }
+    };
+    if records.len() < 2 {
+        return (Value::Null, None, false);
+    }
+    let latest = &records[records.len() - 1];
+    let previous = &records[records.len() - 2];
+    let delta = latest.score - previous.score;
+    let signal = generate_signals(&history, RECALL_PRECISION_SUITE)
+        .ok()
+        .and_then(|sigs| {
+            sigs.into_iter()
+                .find(|s| s.scenario_id == RECALL_PRECISION_METRIC)
+        })
+        .map(|s| s.signal.to_string());
+    let obj = json!({
+        "suite_id": latest.suite_id,
+        "scenario_id": latest.scenario_id,
+        "score": latest.score,
+        "timestamp": latest.timestamp,
+        "commit_hash": latest.commit_hash,
+        "signal": signal,
+        "previous_score": previous.score,
+    });
+    (obj, Some(delta), false)
+}
+
+/// Load the live rail from `<state_root>/metrics/metrics.jsonl`: the recent
+/// in-window `recall_precision_at_k` samples and their first→latest trend.
+/// Corrupt JSONL rows are skipped (VAL-3). Returns `(live_json, trend_delta, had_error)`;
+/// `live_json` is `null` when no in-window samples exist. A missing file is an
+/// empty rail (not an error); an unreadable existing file is a logged error.
+fn live_rail(state_root: &Path, live_limit: u64, window_hours: u64) -> (Value, Option<f64>, bool) {
+    let path = state_root.join("metrics").join("metrics.jsonl");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (Value::Null, None, false);
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "simard::dashboard",
+                error = %e,
+                "recall-precision correlation: failed to read live metrics.jsonl",
+            );
+            return (Value::Null, None, true);
+        }
+    };
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(window_hours as i64);
+    let mut samples: Vec<(chrono::DateTime<chrono::Utc>, f64, u64)> = Vec::new();
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Skip corrupt rows rather than failing the whole endpoint (VAL-3).
+        let entry: MetricEntry = match serde_json::from_str(line) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.metric_name != RECALL_PRECISION_METRIC || entry.timestamp < cutoff {
+            continue;
+        }
+        let ctx_samples = serde_json::from_str::<Value>(&entry.context)
+            .ok()
+            .and_then(|v| v.get("samples").and_then(Value::as_u64))
+            .unwrap_or(0);
+        samples.push((entry.timestamp, entry.value, ctx_samples));
+    }
+
+    samples.sort_by_key(|(ts, _, _)| *ts);
+    if samples.len() > live_limit as usize {
+        let start = samples.len() - live_limit as usize;
+        samples.drain(0..start);
+    }
+    if samples.is_empty() {
+        return (Value::Null, None, false);
+    }
+
+    let first = samples.first().map(|s| s.1).unwrap_or(0.0);
+    let latest = samples.last().map(|s| s.1).unwrap_or(0.0);
+    let mean = samples.iter().map(|s| s.1).sum::<f64>() / samples.len() as f64;
+    let trend_delta = if samples.len() >= 2 {
+        Some(latest - first)
+    } else {
+        None
+    };
+    let series: Vec<Value> = samples
+        .iter()
+        .map(|(ts, v, s)| {
+            json!({
+                "timestamp": ts.to_rfc3339(),
+                "value": v,
+                "samples": s,
+            })
+        })
+        .collect();
+    let obj = json!({
+        "window_hours": window_hours,
+        "samples": samples.len() as u64,
+        "first": first,
+        "latest": latest,
+        "mean": mean,
+        "trend_delta": trend_delta,
+        "series": series,
+    });
+    (obj, trend_delta, false)
+}
+
+/// Compute the hybrid recall-precision correlation from the benchmark score
+/// history at `bench_db_path` and the live metrics under `state_root`.
+///
+/// Degrades, never panics or leaks: a missing/empty rail is `null` with an
+/// `insufficient` verdict; a read error nulls the affected rail and adds a
+/// generic top-level `error` (specifics go to `tracing::warn!`); HTTP stays 200.
+pub(crate) fn recall_precision_correlation_core(
+    bench_db_path: &Path,
+    state_root: &Path,
+    bench_limit: Option<u64>,
+    live_limit: Option<u64>,
+    window_hours: Option<u64>,
+) -> (StatusCode, Json<Value>) {
+    let bench_limit = clamp_bench_limit(bench_limit);
+    let live_limit = clamp_live_limit(live_limit);
+    let window_hours = clamp_window_hours(window_hours);
+
+    let (benchmark_json, benchmark_delta, bench_err) = benchmark_rail(bench_db_path, bench_limit);
+    let (live_json, live_trend_delta, live_err) = live_rail(state_root, live_limit, window_hours);
+
+    let verdict = correlation_verdict(benchmark_delta, live_trend_delta, CORRELATION_THRESHOLD);
+
+    let mut body = json!({
+        "metric": RECALL_PRECISION_METRIC,
+        "benchmark": benchmark_json,
+        "live": live_json,
+        "correlation": {
+            "verdict": verdict.as_str(),
+            "benchmark_delta": benchmark_delta,
+            "live_trend_delta": live_trend_delta,
+            "threshold": CORRELATION_THRESHOLD,
+            "explanation": verdict.explanation(),
+        },
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    if bench_err || live_err {
+        // Generic message only — no paths, SQL, or engine specifics (DATA-1).
+        body["error"] =
+            json!("failed to read one or more measurement rails; see server logs for details");
+    }
+
+    (StatusCode::OK, Json(body))
+}
+
+/// `GET /api/cognition/recall-precision` — the hybrid correlation endpoint.
+///
+/// Query params (`bench_limit`, `live_limit`, `window_hours`) are parsed
+/// leniently and clamped, never rejected: an unparseable value falls back to the
+/// default bound rather than erroring.
+pub(crate) async fn recall_precision_correlation(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<Value>) {
+    let parse = |key: &str| params.get(key).and_then(|v| v.parse::<u64>().ok());
+    recall_precision_correlation_core(
+        &crate::gym_history::default_db_path(),
+        &resolve_state_root(),
+        parse("bench_limit"),
+        parse("live_limit"),
+        parse("window_hours"),
+    )
 }
 
 #[cfg(test)]
