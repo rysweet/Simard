@@ -1261,8 +1261,27 @@ pub(crate) fn parse_facts_document(document: &str) -> SimardResult<DistillOutput
             "distill: facts document was empty; the agent produced no output".to_string(),
         ));
     }
-    if let Some(output) = scan_cleaned_for_facts(trimmed) {
-        return Ok(output);
+    if let Some(selected) = scan_cleaned_for_facts(trimmed) {
+        // Pass-level yield-loss signal (issue #2672), keyed off the
+        // finally-selected candidate — NOT any intermediate/shadowed one — so it
+        // fires exactly once per pass. The selected answer parsed cleanly and DID
+        // carry facts, yet every one was dropped by the concept allow-list. This
+        // is a *yield-loss*, telemetrically distinct from a parse failure (the
+        // `Err` below, which defers and retries the batch): the overseer must
+        // never conflate "the agent answered but nothing survived the allow-list"
+        // with "the output would not parse". A genuinely empty `{"facts":[]}`
+        // pass carries zero raw facts, so it is not yield-loss and stays silent.
+        if selected.raw_facts > 0 && selected.output.facts.is_empty() {
+            tracing::warn!(
+                target: "simard::distill",
+                input_concepts = selected.raw_facts,
+                kept_facts = 0,
+                "valid distill parse yielded zero allow-listed facts \
+                 (valid-parse-yields-zero-facts); distinct from a parse failure, \
+                 which returns Err and defers the batch",
+            );
+        }
+        return Ok(selected.output);
     }
     Err(SimardError::RpcError(format!(
         "distill: facts document did not contain a parseable {{ \"facts\": [...] }} object: {}",
@@ -1274,10 +1293,43 @@ pub(crate) fn parse_facts_document(document: &str) -> SimardResult<DistillOutput
 /// object, preferring (in order) the LAST balanced object candidate that carries
 /// a **grounded-capable** fact — one with a non-empty `source_episode_id` — then
 /// the last otherwise-non-empty object, then the last parseable empty object.
+///
+/// Strict `serde_json` is the sole acceptance gate: [`strict_scan_for_facts`]
+/// runs first and unchanged. Only when it misses entirely is the bounded,
+/// delete-only, string-aware trailing-comma recovery appended (issue #2672) —
+/// and only when a structural trailing comma was actually removable. The
+/// empty-document guard and the caller contract live in [`parse_facts_document`].
+fn scan_cleaned_for_facts(trimmed: &str) -> Option<SelectedCandidate> {
+    // Strict acceptance first — recovery never widens what is *trusted*, only
+    // the syntax Simard *tolerates*.
+    if let Some(selected) = strict_scan_for_facts(trimmed) {
+        return Some(selected);
+    }
+    // Trailing-comma recovery (issue #2672), appended as a LAST resort. The
+    // distiller agent's one recurring malformed shape is a trailing comma before
+    // `}`/`]` (`{"facts":[ {…}, ]}`), which strict `serde_json` (JSON, not JSON5)
+    // rejects — pinning `anomaly:distill parse-fail rate` at 100%.
+    // `strip_json_trailing_commas` returns `Cow::Borrowed` (nothing removed) for
+    // any text without a structural trailing comma, so a `Cow::Owned` result is
+    // itself the "a comma was present and stripped" discriminant: recover ONLY
+    // then, re-running the identical strict scan on the cleaned text. Genuinely
+    // malformed JSON either strips to `Cow::Borrowed` (skip) or still fails
+    // strict parsing (`None`), so the `None` → `Err` → deferred-batch contract is
+    // preserved and a hollow `Ok` can never be manufactured.
+    if let std::borrow::Cow::Owned(cleaned) =
+        crate::recipe_output::strip_json_trailing_commas(trimmed)
+    {
+        return strict_scan_for_facts(&cleaned);
+    }
+    None
+}
+
+/// Strict (no-recovery) scan of `text` for the best `{ "facts": [...] }` object.
+///
 /// Candidates are the balanced `{...}` substrings returned by
 /// [`crate::recipe_output::balanced_objects`] (string-aware, and resilient to an
-/// unmatched `{` in leading prose). The empty-document guard and the caller
-/// contract live in [`parse_facts_document`].
+/// unmatched `{` in leading prose), each parsed with strict
+/// `serde_json::from_str::<RecipeEnvelope>`.
 ///
 /// The grounded-capable tier exists because field-level leniency
 /// ([`de_lenient_string`]) lets a *source-less* facts object now parse as
@@ -1286,10 +1338,10 @@ pub(crate) fn parse_facts_document(document: &str) -> SimardResult<DistillOutput
 /// fully-attributed answer and silently discard its promotable facts. Preferring
 /// the grounded-capable object keeps the agent's real, attributed answer winning
 /// while still recovering a source-less answer when that is all the output holds.
-fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
+fn strict_scan_for_facts(text: &str) -> Option<SelectedCandidate> {
     // Fast path — the text IS the JSON object.
-    if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
-        return Some(parsed.into_output());
+    if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(text) {
+        return Some(SelectedCandidate::from_envelope(parsed));
     }
     // Slow path — among every balanced `{...}` substring (string-aware, so a
     // brace inside a JSON string cannot split an object), scanned from the END
@@ -1303,31 +1355,55 @@ fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
     //   1. last object with a grounded-capable fact (non-empty source_episode_id),
     //   2. last otherwise-non-empty object (facts/procedures present),
     //   3. last parseable empty `{"facts":[]}` ("nothing worth distilling").
-    let mut nonempty_fallback: Option<DistillOutput> = None;
-    let mut empty_fallback: Option<DistillOutput> = None;
-    for span in crate::recipe_output::balanced_objects(trimmed)
+    let mut nonempty_fallback: Option<SelectedCandidate> = None;
+    let mut empty_fallback: Option<SelectedCandidate> = None;
+    for span in crate::recipe_output::balanced_objects(text)
         .into_iter()
         .rev()
     {
         if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(span) {
-            let output = parsed.into_output();
-            if output
+            let candidate = SelectedCandidate::from_envelope(parsed);
+            if candidate
+                .output
                 .facts
                 .iter()
                 .any(|f| !f.source_episode_id.trim().is_empty())
             {
-                return Some(output);
+                return Some(candidate);
             }
-            if !output.facts.is_empty() || !output.procedures.is_empty() {
+            if !candidate.output.facts.is_empty() || !candidate.output.procedures.is_empty() {
                 if nonempty_fallback.is_none() {
-                    nonempty_fallback = Some(output);
+                    nonempty_fallback = Some(candidate);
                 }
             } else if empty_fallback.is_none() {
-                empty_fallback = Some(output);
+                empty_fallback = Some(candidate);
             }
         }
     }
     nonempty_fallback.or(empty_fallback)
+}
+
+/// A parsed distill candidate plus the fact count of its **raw** envelope, taken
+/// before the concept allow-list ([`RecipeEnvelope::into_facts`]) filtered it.
+///
+/// `raw_facts > 0 && output.facts.is_empty()` is the pass-level *yield-loss*
+/// discriminant (issue #2672): the answer parsed but every fact was dropped by
+/// the allow-list — distinct from a parse failure. Carrying the raw count out of
+/// the scan lets [`parse_facts_document`] emit that warn exactly once, keyed off
+/// the finally-selected candidate rather than any shadowed intermediate one.
+struct SelectedCandidate {
+    output: DistillOutput,
+    raw_facts: usize,
+}
+
+impl SelectedCandidate {
+    fn from_envelope(envelope: RecipeEnvelope) -> Self {
+        let raw_facts = envelope.facts.len();
+        Self {
+            output: envelope.into_output(),
+            raw_facts,
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -2245,5 +2321,200 @@ mod issue_2622_file_channel_tests {
         let out = parse_facts_document(fenced).expect("a fenced facts document must still parse");
         assert_eq!(out.facts.len(), 1);
         assert_eq!(out.facts[0].source_episode_id, "epi_7");
+    }
+}
+
+/// Issue #2672: distill trailing-comma parse recovery + zero-facts yield-loss
+/// warn. Pins the two-mode contract — parse-failure stays a deferred `Err`,
+/// while a valid-but-empty yield is `Ok(empty)` plus a distinct warn — so the
+/// overseer never sees a 100% parse-fail signature for a comma the parser can
+/// safely recover, and never conflates "would not parse" with "kept nothing".
+#[cfg(test)]
+mod issue_2672_trailing_comma_recovery_tests {
+    use super::*;
+
+    // ── issue #2672: distill trailing-comma parse recovery + yield-loss warn ──
+    //
+    // The recurring `overseer-obs:anomaly:distill parse-fail rate 100%` signature
+    // traces to the distiller agent emitting a single trailing comma before a
+    // `}`/`]` (`{"facts":[ {...}, ]}`), which strict `serde_json` rejects, so the
+    // whole batch defers forever and the learning loop starves. The parser must
+    // recover the trailing-comma shape (feeding facts back into the loop) WHILE
+    // keeping the two failure modes telemetrically distinct and never conflated:
+    //   * parse-failure   → `Err`  (deferred batch, retried; never a hollow `Ok`)
+    //   * zero-facts-kept  → `Ok(empty)` + exactly ONE yield-loss warn per pass
+    // and never warning on a genuinely successful or a genuinely empty pass.
+
+    use std::sync::{Arc, Mutex};
+    use tracing::Level;
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::Registry;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+
+    /// A minimal in-memory tracing layer that records `(level, target)` for every
+    /// event emitted while it is the thread-local default subscriber. `with_default`
+    /// scopes it to the current thread, so it stays isolated from other tests
+    /// running in parallel (no global-state mutation, no `#[serial]` needed).
+    #[derive(Clone, Default)]
+    struct CapturedEvents(Arc<Mutex<Vec<(Level, String)>>>);
+
+    impl<S> Layer<S> for CapturedEvents
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let meta = event.metadata();
+            self.0
+                .lock()
+                .expect("captured-events mutex poisoned")
+                .push((*meta.level(), meta.target().to_string()));
+        }
+    }
+
+    impl CapturedEvents {
+        /// Number of `WARN`-level events emitted on the `simard::distill` target —
+        /// the dedicated channel the yield-loss warn is contractually emitted on.
+        fn distill_warn_count(&self) -> usize {
+            self.0
+                .lock()
+                .expect("captured-events mutex poisoned")
+                .iter()
+                .filter(|(lvl, target)| *lvl == Level::WARN && target == "simard::distill")
+                .count()
+        }
+    }
+
+    /// Run `f` with a fresh capturing subscriber installed as the thread-local
+    /// default, returning both its result and the captured events.
+    fn capture_distill_events<T>(f: impl FnOnce() -> T) -> (T, CapturedEvents) {
+        let captured = CapturedEvents::default();
+        let subscriber = Registry::default().with(captured.clone());
+        let result = tracing::subscriber::with_default(subscriber, f);
+        (result, captured)
+    }
+
+    #[test]
+    fn t1_recovers_bare_trailing_comma_object() {
+        // T1: a bare `{"facts":[ {...}, ]}` with a single trailing comma before
+        // the array close — the exact shape strict serde rejects — must recover
+        // to at least one grounded fact rather than deferring the whole batch.
+        let raw = r#"{"facts":[{"concept":"bug-pattern","content":"off by one","source_episode_id":"epi_1"},]}"#;
+        let out = parse_facts_document(raw)
+            .expect("a trailing-comma facts object must recover, not defer");
+        assert_eq!(out.facts.len(), 1, "the single grounded fact is recovered");
+        assert_eq!(out.facts[0].concept, "bug-pattern");
+        assert_eq!(out.facts[0].source_episode_id, "epi_1");
+    }
+
+    #[test]
+    fn t2_recovers_enveloped_trailing_comma_payload() {
+        // T2: the same trailing-comma defect wrapped in leading/trailing prose,
+        // so the whole-string fast path misses and the balanced-span slow path
+        // runs. The per-span recovery must still succeed. The trailing comma sits
+        // after the last `facts[]` entry, alongside an empty `procedures` array.
+        let raw = concat!(
+            "Sure — here is the distilled output:\n",
+            r#"{"facts":[{"concept":"lesson-learned","content":"prefer idempotent retries","source_episode_id":"epi_2"},],"procedures":[]}"#,
+            "\nThat's everything.",
+        );
+        let out = parse_facts_document(raw)
+            .expect("an enveloped trailing-comma payload must recover via the span path");
+        assert_eq!(out.facts.len(), 1);
+        assert_eq!(out.facts[0].concept, "lesson-learned");
+        assert_eq!(out.facts[0].content, "prefer idempotent retries");
+    }
+
+    #[test]
+    fn t3_recovery_preserves_comma_close_sequence_inside_string() {
+        // T3: recovery and string-awareness together. The payload BOTH needs a
+        // structural trailing comma removed AND carries a literal `,}` sequence
+        // inside a fact's `content`. The structural comma is stripped while the
+        // in-string bytes survive verbatim, so the recovered fact's content is
+        // byte-identical to what the agent wrote.
+        let raw = r#"{"facts":[{"concept":"bug-pattern","content":"guard drops on trailing ,} in map","source_episode_id":"epi_3"},]}"#;
+        let out = parse_facts_document(raw)
+            .expect("structural trailing comma removed; in-string ,} preserved");
+        assert_eq!(out.facts.len(), 1);
+        assert_eq!(
+            out.facts[0].content, "guard drops on trailing ,} in map",
+            "the comma-brace sequence inside the string value must be preserved"
+        );
+    }
+
+    #[test]
+    fn t4_genuinely_malformed_json_still_errors_deferred() {
+        // T4: the hollow-`Ok` guard. Recovery DOES run (there is a structural
+        // trailing comma to strip, so the stripper owns the buffer) but the text
+        // is ALSO malformed in a way trailing-comma removal cannot fix (a missing
+        // comma between two members). Strict serde remains the sole acceptance
+        // gate, so the batch stays an explicit `Err` — deferred and retried,
+        // never silently promoted to a hollow `Ok`.
+        let raw = r#"{"facts":[{"concept":"bug-pattern" "content":"missing comma between members","source_episode_id":"epi_4"},]}"#;
+        let result = parse_facts_document(raw);
+        assert!(
+            result.is_err(),
+            "malformed-beyond-trailing-comma output must stay Err (deferred), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn t5_zero_kept_concepts_is_ok_empty_and_warns_exactly_once() {
+        // T5: a well-formed, non-empty facts array whose concepts are ALL off-spec
+        // (none canonicalize to the allow-listed labels) is a *yield-loss*, NOT a
+        // parse failure. The pass must return `Ok` with an empty fact list (never
+        // `Err`), and emit exactly ONE yield-loss warn so the overseer can tell
+        // "the agent answered but nothing survived the allow-list" apart from
+        // "the output would not parse".
+        let raw = r#"{"facts":[{"concept":"made-up-label","content":"nope","source_episode_id":"epi_5"}]}"#;
+        let (result, events) = capture_distill_events(|| parse_facts_document(raw));
+        let out = result.expect("a valid parse that keeps zero facts is Ok(empty), not Err");
+        assert!(
+            out.facts.is_empty(),
+            "all concepts are off-spec ⇒ no facts kept"
+        );
+        assert_eq!(
+            events.distill_warn_count(),
+            1,
+            "yield-loss (input facts present, zero kept) must warn exactly once per pass"
+        );
+    }
+
+    #[test]
+    fn t5b_genuinely_empty_facts_is_ok_and_does_not_warn() {
+        // T5 corollary: an explicit `{"facts":[]}` ("nothing worth distilling") is
+        // NOT yield-loss — the agent kept nothing because it produced nothing. It
+        // must return `Ok(empty)` and warn ZERO times, so a quiet pass is never
+        // conflated with a lossy one.
+        let (result, events) = capture_distill_events(|| parse_facts_document(r#"{"facts":[]}"#));
+        let out = result.expect("an explicitly empty facts document is a clean Ok");
+        assert!(out.facts.is_empty());
+        assert_eq!(
+            events.distill_warn_count(),
+            0,
+            "an intentionally empty pass must not emit a yield-loss warn"
+        );
+    }
+
+    #[test]
+    fn t6_grounded_win_after_empty_candidate_does_not_warn() {
+        // T6: the warn is pass-level and keyed off the *finally-selected* output,
+        // not any intermediate candidate. A leading empty `{"facts":[]}` candidate
+        // precedes the real grounded answer; the scan selects the grounded object.
+        // A successful pass that keeps facts must emit ZERO warns — an earlier
+        // empty candidate must never be miscounted as yield-loss.
+        let raw = concat!(
+            r#"{"facts":[]}"#,
+            "\n",
+            r#"{"facts":[{"concept":"pr-pattern","content":"squash fixups before review","source_episode_id":"epi_6"}]}"#,
+        );
+        let (result, events) = capture_distill_events(|| parse_facts_document(raw));
+        let out = result.expect("the grounded object must win");
+        assert_eq!(out.facts.len(), 1);
+        assert_eq!(out.facts[0].concept, "pr-pattern");
+        assert_eq!(
+            events.distill_warn_count(),
+            0,
+            "a successful pass must not emit a yield-loss warn for a shadowed empty candidate"
+        );
     }
 }

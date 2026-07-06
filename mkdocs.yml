@@ -188,6 +188,7 @@ nav:
     - View Agent Terminal Logs: howto/view-agent-terminal-logs.md
     - Run Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
     - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
+    - Recover from Distill Trailing-Comma Parse Failures: howto/recover-from-distill-trailing-comma-parse-failures.md
     - Measure Recall Precision (Hybrid): howto/measure-recall-precision-hybrid.md
     - Read Simard Status: howto/simard-status.md
     - Watch Overseer Activity: howto/watch-overseer-activity.md
@@ -316,6 +317,7 @@ nav:
     - amplihack Pin Bump to Upstream main (#2626): reference/amplihack-pin-bump-2626.md
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md
+    - Distill Trailing-Comma Parse Recovery: reference/distill-trailing-comma-recovery.md
     - Cognitive-Thread Scheduling: reference/cognitive-thread-scheduling.md
     - Creative Ideas Subsystem API: reference/creative-ideas-api.md
   - Operations:

@@ -227,6 +227,105 @@ pub fn strip_recipe_noise(raw: &str) -> Cow<'_, str> {
     Cow::Owned(kept.join("\n"))
 }
 
+/// String-aware, delete-only recovery for the ONE malformed-JSON shape the
+/// distiller agent emits in practice (issue #2672): a **trailing comma** before
+/// a structural close, e.g. `{"facts":[ {…}, ]}` or `{"a":1,}`, which strict
+/// `serde_json` rejects and which — left unrecovered — deferred every batch and
+/// pinned `anomaly:distill parse-fail rate` at 100%.
+///
+/// A comma is removed **only** when, scanning forward over ASCII whitespace, the
+/// next non-whitespace byte is a structural close (`}` or `]`) **and** the comma
+/// is outside a JSON string literal. Commas inside string values are never
+/// touched, so a `,}` / `,]` sequence that is part of a fact's `content` is
+/// preserved verbatim. Escaped quotes (`\"`) do not end a string.
+///
+/// ## Clean-path guarantee
+///
+/// Returns [`Cow::Borrowed`] byte-for-byte unchanged (zero allocation) when the
+/// input has no structural trailing comma — the common case. A [`Cow::Owned`]
+/// result is therefore the "a comma was actually removed" discriminant the
+/// distillation caller recovers on (recover only when the strip owned the
+/// buffer), keeping the primitive a pure superset of strict parsing. The output
+/// is delete-only: it can only ever be shorter than the input, never longer or
+/// rewritten.
+pub fn strip_json_trailing_commas(s: &str) -> Cow<'_, str> {
+    let bytes = s.as_bytes();
+    if !has_structural_trailing_comma(bytes) {
+        // No structural trailing comma anywhere ⇒ pass-through, no allocation.
+        return Cow::Borrowed(s);
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+        } else {
+            match c {
+                b'"' => {
+                    in_string = true;
+                    out.push(c);
+                }
+                b',' if next_nonspace_is_close(bytes, i + 1) => {
+                    // Structural trailing comma — drop this byte only; any
+                    // surrounding whitespace is copied on the next iterations.
+                }
+                _ => out.push(c),
+            }
+        }
+        i += 1;
+    }
+    // Only ASCII `,` bytes were dropped and every other byte copied verbatim,
+    // so a valid-UTF-8 input remains valid UTF-8; the `expect` can never fire.
+    Cow::Owned(String::from_utf8(out).expect("delete-only ASCII comma removal preserves UTF-8"))
+}
+
+/// `true` when `bytes` contains at least one structural trailing comma (a comma,
+/// outside a string literal, whose next non-whitespace byte is `}` or `]`). Used
+/// to keep [`strip_json_trailing_commas`] zero-allocation on clean input.
+fn has_structural_trailing_comma(bytes: &[u8]) -> bool {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+        } else if c == b'"' {
+            in_string = true;
+        } else if c == b',' && next_nonspace_is_close(bytes, i + 1) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// `true` when the first non-ASCII-whitespace byte at or after `from` is a
+/// structural close (`}` or `]`).
+fn next_nonspace_is_close(bytes: &[u8], from: usize) -> bool {
+    let mut j = from;
+    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    j < bytes.len() && (bytes[j] == b'}' || bytes[j] == b']')
+}
+
 /// Scan `bytes` starting at `start` (which must index a `{`) for the matching
 /// closing brace, honouring JSON string literals so braces inside `"…"` do
 /// not affect the depth count. Returns the byte index of the matching `}`.
@@ -850,5 +949,146 @@ mod issue_2570_structural_token_guard_tests {
         );
         serde_json::from_str::<serde_json::Value>(cleaned.as_ref())
             .expect("the cleaned view must still be valid JSON");
+    }
+}
+
+/// Issue #2672: `strip_json_trailing_commas` — the string-aware, delete-only
+/// recovery that turns the distiller agent's one recurring malformed shape (a
+/// trailing comma before `}`/`]`) back into strict-parseable JSON.
+#[cfg(test)]
+mod issue_2672_trailing_comma_tests {
+    use super::*;
+
+    // ---- strip_json_trailing_commas (issue #2672) ------------------------
+    //
+    // A string-aware, delete-only recovery for the ONE malformed-JSON shape the
+    // distiller agent emits in practice: a trailing comma before a `}` or `]`
+    // (e.g. `{"facts":[ {...}, ]}`), which strict `serde_json` rejects. The
+    // primitive removes a comma ONLY when the next non-whitespace byte is a
+    // structural close (`}`/`]`) AND we are outside a string literal. It never
+    // touches bytes inside string values, so a `,}` / `,]` sequence that is part
+    // of a fact's content is preserved verbatim. Clean input is returned
+    // `Cow::Borrowed` (byte-identical, zero-alloc); a `Cow::Owned` result is the
+    // "a comma was actually removed" discriminant the distillation caller
+    // recovers on (recover only when the strip owned the buffer).
+
+    #[test]
+    fn strip_trailing_commas_clean_input_is_borrowed_zero_copy() {
+        // No trailing comma anywhere ⇒ pass-through, no allocation.
+        let s = r#"{"facts":[{"concept":"bug-pattern","content":"x"}]}"#;
+        let out = strip_json_trailing_commas(s);
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "clean path must not allocate"
+        );
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn strip_trailing_commas_removes_comma_before_object_close() {
+        let out = strip_json_trailing_commas(r#"{"a":1,}"#);
+        assert_eq!(out, r#"{"a":1}"#);
+        assert!(
+            matches!(out, Cow::Owned(_)),
+            "a real removal must own the buffer (the recovery discriminant)"
+        );
+    }
+
+    #[test]
+    fn strip_trailing_commas_removes_comma_before_array_close() {
+        let out = strip_json_trailing_commas("[1,2,]");
+        assert_eq!(out, "[1,2]");
+        assert!(matches!(out, Cow::Owned(_)));
+    }
+
+    #[test]
+    fn strip_trailing_commas_removes_comma_across_intervening_whitespace() {
+        // In a pretty-printed payload the structural close is separated from the
+        // comma by whitespace / newlines — still a trailing comma. Only the comma
+        // byte is deleted; surrounding whitespace is left intact.
+        let out = strip_json_trailing_commas("{\"a\":1,\n  }");
+        assert_eq!(out, "{\"a\":1\n  }");
+        assert!(matches!(out, Cow::Owned(_)));
+        serde_json::from_str::<serde_json::Value>(out.as_ref())
+            .expect("recovered text must be valid JSON");
+    }
+
+    #[test]
+    fn strip_trailing_commas_removes_every_nested_trailing_comma() {
+        let out = strip_json_trailing_commas(r#"{"a":[1,2,],"b":{"c":3,},}"#);
+        assert_eq!(out, r#"{"a":[1,2],"b":{"c":3}}"#);
+        serde_json::from_str::<serde_json::Value>(out.as_ref())
+            .expect("recovered text must be valid JSON");
+    }
+
+    #[test]
+    fn strip_trailing_commas_leaves_interior_comma_untouched() {
+        // A comma that separates members (next non-ws byte is not `}`/`]`) is
+        // structural and must be preserved ⇒ clean, borrowed path.
+        let s = r#"{"a":1,"b":2}"#;
+        let out = strip_json_trailing_commas(s);
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "a member-separating comma is not trailing ⇒ zero-copy"
+        );
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn strip_trailing_commas_preserves_comma_close_sequence_inside_string() {
+        // The critical string-awareness guarantee: a `,}` / `,]` sequence that
+        // lives INSIDE a JSON string value is content, not structure, and must
+        // survive byte-for-byte. This input has NO structural trailing comma, so
+        // it is also the clean, borrowed path.
+        let s = r#"{"content":"a,} and b,] stay"}"#;
+        let out = strip_json_trailing_commas(s);
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "an in-string comma is not structural ⇒ no removal, no allocation"
+        );
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn strip_trailing_commas_preserves_in_string_but_strips_structural() {
+        // Both together: an in-string `,}` sequence is preserved WHILE a genuine
+        // structural trailing comma before the array close is removed.
+        let out = strip_json_trailing_commas(r#"{"facts":["keep a,} here",]}"#);
+        assert_eq!(out, r#"{"facts":["keep a,} here"]}"#);
+        assert!(matches!(out, Cow::Owned(_)));
+        serde_json::from_str::<serde_json::Value>(out.as_ref())
+            .expect("recovered text must be valid JSON");
+    }
+
+    #[test]
+    fn strip_trailing_commas_honours_escaped_quote_in_string() {
+        // An escaped quote (`\"`) does not end the string, so a `,}` after it is
+        // still in-string content and preserved; only the genuine trailing comma
+        // before the final object close is removed.
+        let out = strip_json_trailing_commas(r#"{"q":"he said \",}\" ok",}"#);
+        assert_eq!(out, r#"{"q":"he said \",}\" ok"}"#);
+        assert!(matches!(out, Cow::Owned(_)));
+        serde_json::from_str::<serde_json::Value>(out.as_ref())
+            .expect("recovered text must be valid JSON");
+    }
+
+    #[test]
+    fn strip_trailing_commas_output_is_never_longer_than_input() {
+        // Delete-only invariant: recovery can only ever remove bytes, never grow
+        // or rewrite the payload (hardening against smuggling content in).
+        for s in [
+            r#"{"a":1,}"#,
+            "[1,2,3,]",
+            r#"{"a":[1,],"b":2}"#,
+            r#"{"content":"a,] stays","x":1,}"#,
+            "no json here at all",
+            "{\"a\":1, }",
+        ] {
+            let out = strip_json_trailing_commas(s);
+            assert!(
+                out.len() <= s.len(),
+                "delete-only stripper must never grow the input: {s:?} -> {out:?}"
+            );
+        }
     }
 }
