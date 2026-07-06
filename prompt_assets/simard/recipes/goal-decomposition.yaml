@@ -5,14 +5,17 @@
 # (single-brace {var} → double-brace {{var}} for recipe-runner substitution).
 #
 # Context vars (passed via -c):
-#   goal_id, goal_description, plan, max_children
+#   goal_id, goal_description, plan, max_children, sub_goals_output
 #
-# Output: agent stdout — a single JSON object:
+# Output (issue #2708): a dedicated result FILE, not stdout. The agent writes a
+# single JSON object to the absolute path passed in `sub_goals_output`:
 #   {"sub_goals": [{"description": "...", "done_criterion": "...", "depends_on": []}, ...]}
+# Simard reads that file back and strict-parses it; recipe-runner-rs stdout is
+# never scraped for the payload (that stdout brace-scan was the #2708 root cause).
 
 name: "goal-decomposition"
 description: "Break one large Simard goal into 2-6 bounded, verifiable sub-goals"
-version: "1.0.0"
+version: "1.1.0"
 author: "Simard"
 tags: ["simard", "goal", "decomposition"]
 
@@ -79,15 +82,20 @@ steps:
 
       ## Output
 
-      Return a single JSON object, no prose, no markdown fences:
+      Write your result to the file at the absolute path **{{sub_goals_output}}**
+      using your file-writing tool. Write a single JSON object to that file and
+      **nothing else** — no prose, no markdown fences. Do not print the sub-goals
+      to stdout; the file is Simard's result channel and stdout is ignored:
 
       {"sub_goals": [{"description": "<what>", "done_criterion": "<how we know>", "depends_on": []}, {"description": "<...>", "done_criterion": "<...>", "depends_on": [0]}]}
 
       Rules:
+      - Write the JSON object to the file at `{{sub_goals_output}}`; emit nothing
+        as a stdout payload.
       - `sub_goals` MUST contain between 2 and 6 entries.
       - Every entry MUST have a non-empty `description` and `done_criterion`.
       - `depends_on` is OPTIONAL; when present it MUST be a list of integer
         indices into `sub_goals` (each less than the array length, never the
         entry's own index).
-      - Emit nothing but the JSON object.
+      - The file MUST contain nothing but the JSON object.
     output: "decomposition_result"

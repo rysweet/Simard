@@ -56,7 +56,10 @@ into the relevant `done_criterion`s:
 
 ## Output
 
-Return a single JSON object, **no prose, no markdown fences**:
+Write your result to the file at the absolute path **`{{sub_goals_output}}`**
+using your file-writing tool. Write a single JSON object to that file and
+**nothing else** — no prose, no markdown fences — and do **not** print the
+sub-goals to stdout (the file is Simard's result channel; stdout is ignored):
 
 ```
 {"sub_goals": [
@@ -67,10 +70,12 @@ Return a single JSON object, **no prose, no markdown fences**:
 
 Rules:
 
+- Write the JSON object to the file at `{{sub_goals_output}}`; emit nothing as a
+  stdout payload.
 - `sub_goals` MUST contain between 2 and 6 entries.
 - Every entry MUST have a non-empty `description` and a non-empty
   `done_criterion`.
 - `depends_on` is OPTIONAL; when present it MUST be a list of integer indices
   into `sub_goals` (each less than the array length, never the entry's own
   index).
-- Emit nothing but the JSON object.
+- The file MUST contain nothing but the JSON object.
