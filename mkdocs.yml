@@ -315,6 +315,7 @@ nav:
     - Dashboard Thinking Cycle History: reference/dashboard-thinking-cycle-history.md
     - Dashboard Activity Cycle Reports: reference/dashboard-activity-cycle-reports.md
     - Dashboard Background Tab Prefetch: reference/dashboard-background-tab-prefetch.md
+    - Dashboard Overview Health & Live Memory: reference/dashboard-overview-health-and-live-memory.md
     - Azlin Hosts Self-Membership: reference/azlin-hosts-self-membership.md
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     - Supply-Chain Audit & Guardrails: reference/supply-chain-audit.md
