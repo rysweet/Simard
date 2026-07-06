@@ -66,9 +66,14 @@ path = "src/bin/simard_tui/main.rs"
 # of amplihack-memory-lib PR #118 on `main` (issue #117), which layers the
 # deterministic episodic->semantic distillation fact-yield benchmark + extractor
 # on top of PR #111 (via #114/#116), with no lbug/engine change, so the store
-# format stays v41. The pin points at an upstream-`main` commit (not a feature
-# branch), so the build can never be frozen against an unmerged, GC-able ref.
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "5d7db77dd5c3bafb2846c2f50761112588a47563", features = ["persistent"] }
+# format stays v41. Bumped again (issue #2626) to the squash-merge commit of
+# amplihack-memory-lib PR #119 on `main`, which adds a durable recall-quality
+# regression benchmark (precision@k + MRR) plus a tokenizer fix, again with no
+# lbug/engine change, so the store format stays v41. The pin points at an
+# upstream-`main` commit (verified HEAD of `main` via `git ls-remote`, not a
+# feature branch), so the build can never be frozen against an unmerged,
+# GC-able ref.
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "f80037089a735bd0d394e3eec5cea9fcae1895ea", features = ["persistent"] }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
 # De-fork (issue #2323): the gym/eval RUNNER is now the upstream
@@ -77,7 +82,11 @@ rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "d
 # wiring (`src/gym_runner_bridge.rs`) and Simard-specific scoring/history stay
 # in this crate. The crate is a light workspace member (serde/serde_json/
 # thiserror/tracing/chrono only — no heavy workspace deps are transitive).
-amplihack-agent-eval = { git = "https://github.com/rysweet/amplihack-rs.git", rev = "59548a96049ab8d558110bcaf9c82a4316f1bbf0" }
+# Bumped (issue #2626) to the current HEAD of amplihack-rs `main` (verified via
+# `git ls-remote`); the delta is workflow/recipe/CI-tooling fixes only, with the
+# `amplihack-agent-eval` crate surface (GymRunner/GymConfig/GymScenarioResult)
+# and the reverted workspace version 0.11.1 unchanged.
+amplihack-agent-eval = { git = "https://github.com/rysweet/amplihack-rs.git", rev = "2a93441d1837f9f853d5dddc56cc1088353a8872" }
 # De-fork phase 2b (issue #2307): the native cognitive-memory fork is gone, but
 # `lbug` is still a direct dependency of the standalone `simard-tui` binary
 # (`src/bin/simard_tui/goals.rs`), which opens a LadybugDB read-only to render
