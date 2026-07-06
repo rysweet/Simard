@@ -28,11 +28,15 @@ pub struct RawWorkflowRow {
 }
 
 /// One row of `gh run list -R <repo> --branch <b> --json
-/// workflowName,status,conclusion,event,createdAt,databaseId`.
+/// workflowName,workflowDatabaseId,status,conclusion,event,createdAt,databaseId`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct RawRunRow {
     #[serde(rename = "workflowName")]
     pub workflow_name: String,
+    /// The run's parent workflow id. Runs are keyed to workflows by this
+    /// unique id rather than the (non-unique) display name.
+    #[serde(rename = "workflowDatabaseId")]
+    pub workflow_database_id: u64,
     pub status: String,
     /// GitHub emits `""` for runs that have not completed.
     #[serde(default)]
@@ -112,16 +116,17 @@ fn run_from_row(row: &RawRunRow) -> WorkflowRun {
     }
 }
 
-/// Reduce a run list to the newest run per workflow name. ISO-8601 UTC
-/// timestamps sort chronologically as strings, so a lexicographic max picks
-/// the latest run.
-pub fn latest_run_by_workflow(rows: &[RawRunRow]) -> HashMap<String, RawRunRow> {
-    let mut latest: HashMap<String, RawRunRow> = HashMap::new();
+/// Reduce a run list to the newest run per workflow, keyed by the workflow's
+/// unique id (`workflowDatabaseId`) rather than its non-unique display name.
+/// ISO-8601 UTC timestamps sort chronologically as strings, so a lexicographic
+/// max picks the latest run.
+pub fn latest_run_by_workflow(rows: &[RawRunRow]) -> HashMap<u64, RawRunRow> {
+    let mut latest: HashMap<u64, RawRunRow> = HashMap::new();
     for row in rows {
-        match latest.get(&row.workflow_name) {
+        match latest.get(&row.workflow_database_id) {
             Some(existing) if existing.created_at >= row.created_at => {}
             _ => {
-                latest.insert(row.workflow_name.clone(), row.clone());
+                latest.insert(row.workflow_database_id, row.clone());
             }
         }
     }
@@ -129,7 +134,8 @@ pub fn latest_run_by_workflow(rows: &[RawRunRow]) -> HashMap<String, RawRunRow> 
 }
 
 /// Join workflow rows to their latest run into a [`RepoSnapshot`]. Pure — this
-/// is the core of the collector and is unit-tested directly.
+/// is the core of the collector and is unit-tested directly. Runs are matched
+/// to workflows by id, so two workflows sharing a display name never collapse.
 pub fn build_repo_snapshot(
     slug: &str,
     default_branch: &str,
@@ -142,7 +148,7 @@ pub fn build_repo_snapshot(
         .map(|wf| WorkflowSnapshot {
             name: wf.name.clone(),
             state: WorkflowState::parse(&wf.state),
-            latest_run: latest.get(&wf.name).map(run_from_row),
+            latest_run: latest.get(&wf.id).map(run_from_row),
         })
         .collect();
     RepoSnapshot {
@@ -308,7 +314,7 @@ impl GhWorkflowClient for RealGhWorkflowClient {
             "--limit",
             "200",
             "--json",
-            "workflowName,status,conclusion,event,createdAt,databaseId",
+            "workflowName,workflowDatabaseId,status,conclusion,event,createdAt,databaseId",
         ])?;
         parse_run_rows(&out)
     }
@@ -332,7 +338,7 @@ impl GhWorkflowClient for RealGhWorkflowClient {
             "--limit",
             "1",
             "--json",
-            "workflowName,status,conclusion,event,createdAt,databaseId",
+            "workflowName,workflowDatabaseId,status,conclusion,event,createdAt,databaseId",
         ])?;
         Ok(parse_run_rows(&out)?.into_iter().next())
     }

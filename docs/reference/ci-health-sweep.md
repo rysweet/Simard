@@ -89,7 +89,10 @@ simard ci-health [--json] [--from-json <path>]
   slug in [`ci_health::GOVERNED_REPOS`]: the repo's default branch
   (`gh repo view`), workflow states + ids (`gh workflow list --json name,state,id`), and
   the latest default-branch run per workflow
-  (`gh run list --branch <default> --json workflowName,status,conclusion,event,createdAt,databaseId`).
+  (`gh run list --branch <default> --json workflowName,workflowDatabaseId,status,conclusion,event,createdAt,databaseId`).
+  Runs are matched to workflows by the unique `workflowDatabaseId`, not the
+  (non-unique) display name, so two workflow files sharing a `name:` never
+  collapse onto one run.
   Because that branch-wide run list is windowed, any **active** workflow with no
   run inside the window is queried directly (`gh run list --workflow <id> --limit 1`)
   so a stale failing run of an infrequently-triggered workflow can never be

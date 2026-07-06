@@ -285,9 +285,17 @@ fn report_serializes_to_json_with_stable_keys() {
 
 // ── gh join helpers (pure) ──────────────────────────────────────────────────
 
-fn run_row(wfname: &str, created: &str, status: &str, conclusion: &str, id: u64) -> RawRunRow {
+fn run_row(
+    wfname: &str,
+    wf_id: u64,
+    created: &str,
+    status: &str,
+    conclusion: &str,
+    id: u64,
+) -> RawRunRow {
     RawRunRow {
         workflow_name: wfname.to_string(),
+        workflow_database_id: wf_id,
         status: status.to_string(),
         conclusion: conclusion.to_string(),
         event: "push".to_string(),
@@ -299,13 +307,48 @@ fn run_row(wfname: &str, created: &str, status: &str, conclusion: &str, id: u64)
 #[test]
 fn latest_run_by_workflow_picks_newest() {
     let rows = vec![
-        run_row("CI", "2026-06-01T00:00:00Z", "completed", "failure", 1),
-        run_row("CI", "2026-07-01T00:00:00Z", "completed", "success", 2),
-        run_row("Docs", "2026-05-01T00:00:00Z", "completed", "success", 3),
+        run_row("CI", 1, "2026-06-01T00:00:00Z", "completed", "failure", 1),
+        run_row("CI", 1, "2026-07-01T00:00:00Z", "completed", "success", 2),
+        run_row("Docs", 2, "2026-05-01T00:00:00Z", "completed", "success", 3),
     ];
     let latest = latest_run_by_workflow(&rows);
-    assert_eq!(latest.get("CI").unwrap().database_id, 2);
-    assert_eq!(latest.get("Docs").unwrap().database_id, 3);
+    assert_eq!(latest.get(&1).unwrap().database_id, 2);
+    assert_eq!(latest.get(&2).unwrap().database_id, 3);
+}
+
+#[test]
+fn build_repo_snapshot_keys_by_id_so_same_named_workflows_dont_collapse() {
+    // Two DISTINCT workflows share the display name "CI" (allowed by GitHub).
+    let workflows = vec![
+        RawWorkflowRow {
+            name: "CI".to_string(),
+            state: "active".to_string(),
+            id: 100,
+        },
+        RawWorkflowRow {
+            name: "CI".to_string(),
+            state: "active".to_string(),
+            id: 200,
+        },
+    ];
+    // id 100's latest is a newer success; id 200's latest is an older failure.
+    let runs = vec![
+        run_row("CI", 100, "2026-07-06T00:00:00Z", "completed", "success", 1),
+        run_row("CI", 200, "2026-07-05T00:00:00Z", "completed", "failure", 2),
+    ];
+    let snap = build_repo_snapshot("rysweet/foo", "main", &workflows, &runs);
+    // Keying by id must NOT collapse them onto the newer success.
+    assert_eq!(
+        classify_workflow(&snap.workflows[0]),
+        WorkflowVerdict::Green
+    );
+    assert!(matches!(
+        classify_workflow(&snap.workflows[1]),
+        WorkflowVerdict::ActionableFailure { .. }
+    ));
+    let report = build_report(&FleetSnapshot { repos: vec![snap] });
+    assert!(!report.green);
+    assert_eq!(report.actionable_failures.len(), 1);
 }
 
 #[test]
@@ -324,6 +367,7 @@ fn build_repo_snapshot_joins_and_marks_missing_runs() {
     ];
     let runs = vec![run_row(
         "CI",
+        100,
         "2026-07-01T00:00:00Z",
         "completed",
         "success",
@@ -339,7 +383,7 @@ fn build_repo_snapshot_joins_and_marks_missing_runs() {
 
 #[test]
 fn parse_run_rows_maps_empty_conclusion_to_none() {
-    let json = br#"[{"workflowName":"CI","status":"in_progress","conclusion":"","event":"push","createdAt":"2026-07-06T00:00:00Z","databaseId":5}]"#;
+    let json = br#"[{"workflowName":"CI","workflowDatabaseId":100,"status":"in_progress","conclusion":"","event":"push","createdAt":"2026-07-06T00:00:00Z","databaseId":5}]"#;
     let rows = parse_run_rows(json).unwrap();
     let snap = build_repo_snapshot(
         "rysweet/foo",
@@ -384,8 +428,22 @@ impl GhWorkflowClient for FakeGh {
     }
     fn list_runs(&self, _repo: &str, _branch: &str) -> SimardResult<Vec<RawRunRow>> {
         Ok(vec![
-            run_row("CI", "2026-07-01T00:00:00Z", "completed", "success", 10),
-            run_row("Old", "2026-01-01T00:00:00Z", "completed", "failure", 11),
+            run_row(
+                "CI",
+                100,
+                "2026-07-01T00:00:00Z",
+                "completed",
+                "success",
+                10,
+            ),
+            run_row(
+                "Old",
+                200,
+                "2026-01-01T00:00:00Z",
+                "completed",
+                "failure",
+                11,
+            ),
         ])
     }
     fn latest_run(
@@ -445,6 +503,7 @@ impl GhWorkflowClient for WindowGapGh {
         // Only CI appears in the window; Nightly and OldDisabled are absent.
         Ok(vec![run_row(
             "CI",
+            100,
             "2026-07-06T00:00:00Z",
             "completed",
             "success",
@@ -461,6 +520,7 @@ impl GhWorkflowClient for WindowGapGh {
         Ok(if workflow_id == 200 {
             Some(run_row(
                 "Nightly",
+                200,
                 "2026-06-01T00:00:00Z",
                 "completed",
                 "failure",
