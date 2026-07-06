@@ -4,6 +4,7 @@
 //! variants are gated by `guardrails::classify`.
 
 use crate::overseer::capabilities::{AuditScope, GoalBrief, OrchestratorRunBrief, RecipeBrief};
+use crate::overseer::signal::GapItem;
 use crate::overseer::whisper_ops::WhisperUrgency;
 
 /// A single action the Overseer can take. Each variant names the capability it
@@ -58,6 +59,14 @@ pub enum Intervention {
     /// actually reaches a human — closing the silent-failure gap.
     /// Capability: `notify::OperatorNotifier`.
     EscalateBlockedGoal { goal_id: String, reason: String },
+    /// FLAG the backlog-coverage gaps the recurring gap-scan found — important
+    /// work with no active workstream (uncovered high-priority goals, high-signal
+    /// issues with no PR, live anomalies with no fix in flight). Acts through the
+    /// SAME plumbing goal-health / M1 use: notify the operator on BOTH channels
+    /// (email + Signal) with the specifics AND file one deduped issue per gap.
+    /// Deduped per gap signature so a recurring gap notifies/files at most once.
+    /// Capability: `notify::OperatorNotifier` + `IssueFiler::file`.
+    FlagWorkstreamGaps { gaps: Vec<GapItem> },
 }
 
 impl Intervention {
@@ -76,6 +85,7 @@ impl Intervention {
             Self::Whisper { .. } => "whisper",
             Self::UnblockGoal { .. } => "unblock_goal",
             Self::EscalateBlockedGoal { .. } => "escalate_blocked_goal",
+            Self::FlagWorkstreamGaps { .. } => "flag_workstream_gaps",
         }
     }
 }

@@ -63,6 +63,61 @@ pub enum Signal {
     /// their parsed `failure_signature`. Additive: it never removes or replaces
     /// any pre-recall signal.
     RecurringSignature { signature: String, occurrences: u32 },
+    /// The recurring backlog-coverage gap-scan found important work that SHOULD
+    /// have an active workstream but does not — the "WHAT WORKSTREAMS ARE WE
+    /// MISSING?" question the Overseer asks each (or every Nth) tick. ONE
+    /// consolidated signal carries EVERY genuine gap the Observe pass surfaced
+    /// into [`ObservedState::workstream_gaps`] (unlike [`Signal::GoalBlocked`],
+    /// which is one signal per goal). Each [`GapItem`] says what is uncovered and
+    /// why it matters. Orient folds this into a single
+    /// [`ProblemKind::WorkstreamCoverage`] problem.
+    WorkstreamGap { gaps: Vec<GapItem> },
+}
+
+/// Which backlog source a [`GapItem`] came from — so the renderer can label the
+/// gap's provenance from structured data rather than parsing the summary (G3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GapCategory {
+    /// A high-priority goal on Simard's board with no active engineer / PR.
+    GoalUncovered,
+    /// A high-signal open GitHub issue with no open PR and no active workstream.
+    IssueUncovered,
+    /// A live telemetry anomaly with no fix in flight.
+    AnomalyUnaddressed,
+}
+
+impl GapCategory {
+    /// A short, stable provenance label used in the rendered notification / log.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::GoalUncovered => "goal",
+            Self::IssueUncovered => "issue",
+            Self::AnomalyUnaddressed => "anomaly",
+        }
+    }
+}
+
+/// One genuine backlog-coverage gap: a specific piece of important work that is
+/// uncovered (no active workstream, no open PR, no fix in flight), carrying the
+/// structured specifics the Act path renders verbatim. All string fields are
+/// bounded at the detector (`sensor::MAX_GAP_FIELD_LEN`) and the `signature` is a
+/// restricted slug built from trusted identifiers only (never hostile free text),
+/// so a gap can never inflate a notification, an issue body, or a log line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GapItem {
+    /// The backlog source this gap came from.
+    pub category: GapCategory,
+    /// The specific, human-readable reference (goal id, `repo#number`, or the
+    /// anomaly detail) — what is uncovered.
+    pub ref_id: String,
+    /// A short human-readable title for the uncovered work.
+    pub title: String,
+    /// Why this uncovered work matters (the reason it deserves a workstream).
+    pub why_it_matters: String,
+    /// Stable per-gap dedup signature (`goal:<id>` / `issue:<repo>#<n>` /
+    /// `anomaly:<slug>`). Identical inputs yield identical signatures so a
+    /// recurring gap is deduped to at most one notification + issue per signature.
+    pub signature: String,
 }
 
 /// Coarse relative importance. `Ord` sorts ascending so `Critical` comes first,
@@ -94,6 +149,10 @@ pub enum ProblemKind {
     LoopDetected,
     /// Active work drifting from a goal's intent — nudged by an advisory whisper.
     DriftCorrection,
+    /// Important backlog work is uncovered — a high-priority goal, high-signal
+    /// issue, or live anomaly with no active workstream. The recurring gap-scan's
+    /// problem family; driven by the deduped notify + file-issue act path.
+    WorkstreamCoverage,
 }
 
 /// A classified, deduplicated, prioritised problem — the output of Orient and the
@@ -235,6 +294,15 @@ pub fn signals_from(state: &ObservedState) -> Vec<Signal> {
                 });
             }
         }
+    }
+
+    // Backlog-coverage gaps: ONE consolidated signal carrying every genuine gap
+    // the Observe pass surfaced (never one-per-gap, so Act notifies once with the
+    // full list). A clean picture emits no signal — no gap, no noise.
+    if !state.workstream_gaps.is_empty() {
+        out.push(Signal::WorkstreamGap {
+            gaps: state.workstream_gaps.clone(),
+        });
     }
 
     out
@@ -392,6 +460,19 @@ impl Signal {
                 signature,
                 occurrences,
             } => format!("recurring failure signature '{signature}' seen {occurrences} time(s)"),
+            Signal::WorkstreamGap { gaps } => {
+                let refs: Vec<&str> = gaps.iter().take(3).map(|g| g.ref_id.as_str()).collect();
+                let more = if gaps.len() > 3 {
+                    format!(" (+{} more)", gaps.len() - 3)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{} uncovered workstream(s): {}{more}",
+                    gaps.len(),
+                    refs.join(", ")
+                )
+            }
         };
         sanitize_detail(&raw)
     }

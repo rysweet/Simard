@@ -44,8 +44,8 @@ use crate::overseer::capabilities::{
     RecalledProcedure, RecalledProspective, RecordOutcome,
 };
 use crate::overseer::config::{
-    goal_health_enabled, memory_recall_enabled, overseer_author_login, overseer_interval_secs,
-    whisper_enabled,
+    gap_scan_enabled, goal_health_enabled, memory_recall_enabled, overseer_author_login,
+    overseer_interval_secs, whisper_enabled,
 };
 use crate::overseer::deploy::GuardedDeployer;
 use crate::overseer::guardrails::RecursionGuard;
@@ -56,9 +56,10 @@ use crate::overseer::merge_ops::MergePrOps;
 use crate::overseer::notify::DualChannelNotifier;
 use crate::overseer::observer::StewardshipIssueFiler;
 use crate::overseer::sensor::{
-    SnapshotStatusReader, blocked_goals_from_board, in_flight_from_board,
+    SnapshotStatusReader, SurveyedIssue, blocked_goals_from_board, detect_workstream_gaps,
+    in_flight_from_board,
 };
-use crate::overseer::signal::{DETAIL_CAP, Signal, sanitize_detail};
+use crate::overseer::signal::{DETAIL_CAP, GapItem, Signal, sanitize_detail};
 use crate::overseer::{ActOutcome, Capabilities, CycleReport, Overseer};
 
 // ─────────────────────────── cadence scheduler ─────────────────────────────
@@ -146,6 +147,13 @@ pub struct OverseerTickReport {
     /// Goal-board self-heal / escalation actions suppressed by the dedup gate
     /// this tick.
     pub goals_health_suppressed: usize,
+    /// Backlog-coverage gaps FLAGGED this tick by the recurring gap-scan — each
+    /// got the consolidated operator notification + one deduped issue. A
+    /// DEDICATED counter, never folded into `issues_filed` / `escalations`.
+    pub workstream_gaps_detected: usize,
+    /// Backlog-coverage gaps SUPPRESSED this tick (a recurring gap within the
+    /// dedup window — not re-notified/re-filed).
+    pub workstream_gaps_suppressed: usize,
     /// Capability errors encountered while acting (isolated, never fatal).
     pub errors: usize,
     /// Completed whole cognitive-memory recall passes this tick (issue #2628):
@@ -277,6 +285,8 @@ pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
         memory_recalls = report.memory_recalls,
         memory_writes = report.memory_writes,
         memory_errors = report.memory_errors,
+        workstream_gaps_detected = report.workstream_gaps_detected,
+        workstream_gaps_suppressed = report.workstream_gaps_suppressed,
         errors = report.errors,
         duration_ms = report.duration_ms,
         "overseer tick complete"
@@ -320,6 +330,13 @@ fn tally_outcome(report: &mut OverseerTickReport, outcome: &ActOutcome) {
         ActOutcome::GoalUnblocked { .. } => report.goals_unblocked += 1,
         ActOutcome::GoalEscalated { .. } => report.goals_escalated += 1,
         ActOutcome::GoalHealthSuppressed { .. } => report.goals_health_suppressed += 1,
+        ActOutcome::WorkstreamGapsFlagged {
+            flagged,
+            suppressed,
+        } => {
+            report.workstream_gaps_detected += flagged;
+            report.workstream_gaps_suppressed += suppressed;
+        }
         ActOutcome::ConflictResolved
         | ActOutcome::GoalTransferred
         | ActOutcome::Reported
@@ -408,6 +425,9 @@ fn intervention_target(iv: &Intervention) -> String {
         Intervention::EscalateBlockedGoal { goal_id, .. } => {
             format!("escalate blocked goal {goal_id}")
         }
+        Intervention::FlagWorkstreamGaps { gaps } => {
+            format!("flag {} uncovered workstream(s)", gaps.len())
+        }
     }
 }
 
@@ -459,6 +479,18 @@ fn describe_action(iv: &Intervention, outcome: &ActOutcome) -> String {
         }
         ActOutcome::GoalHealthSuppressed { reason } => {
             format!("goal-board action suppressed — {reason}")
+        }
+        ActOutcome::WorkstreamGapsFlagged {
+            flagged,
+            suppressed,
+        } => {
+            if *flagged > 0 {
+                format!(
+                    "flagged {flagged} uncovered workstream(s) — notified operator + filed deduped issue(s) ({suppressed} suppressed)"
+                )
+            } else {
+                format!("workstream gaps suppressed — {suppressed} within the dedup window")
+            }
         }
     };
     sanitize_detail(&format!("did: {body}"))
@@ -602,6 +634,173 @@ impl GoalCurator for BoardGoalCurator {
             detail: e.to_string(),
         })
     }
+
+    fn workstream_gaps(&self, anomalies: &[String]) -> Result<Vec<GapItem>, OverseerError> {
+        // Board survey is the durable, primary source. A board-read failure
+        // degrades to no gaps (logged) — never a panic, never a fabricated gap.
+        let board = match self.load() {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    target: "overseer::gap_scan",
+                    error = %e,
+                    "gap-scan: goal-board read failed; degrading to no gaps"
+                );
+                return Ok(Vec::new());
+            }
+        };
+        // High-signal open issues + open-PR issue coverage are best-effort
+        // external `gh` reads; each degrades to empty (logged) so a network hiccup
+        // never aborts the scan nor invents a gap. Anomalies flow through from the
+        // Observe pass; correlating a specific anomaly to an in-flight fix is left
+        // to the durable per-signature dedup (M1 issue + gap gate) rather than a
+        // brittle text match.
+        let issues = survey_high_signal_open_issues(OVERSEER_SURVEY_REPO);
+        let coverage = issue_coverage_from_open_prs(OVERSEER_SURVEY_REPO);
+        Ok(detect_workstream_gaps(
+            &board, &issues, anomalies, &coverage,
+        ))
+    }
+}
+
+/// The repo the Overseer surveys for high-signal open issues + open PRs — its own
+/// stewarded repo (`rysweet/Simard`), per the gap-scan directive.
+const OVERSEER_SURVEY_REPO: &str = "rysweet/Simard";
+
+/// Upper bound on issues / PRs pulled in one survey, so the `gh` reads stay cheap
+/// and the candidate set bounded regardless of backlog size.
+const OVERSEER_SURVEY_LIMIT: u32 = 100;
+
+/// Best-effort label-aware survey of OPEN issues via `gh issue list --json
+/// number,title,labels`. Any failure (spawn, non-zero exit, JSON parse) degrades
+/// to an empty list (logged via tracing) — no gap is ever fabricated from a failed
+/// read, and there is no stray `print`. The detector filters these to the
+/// high-signal, uncovered ones.
+fn survey_high_signal_open_issues(repo: &str) -> Vec<SurveyedIssue> {
+    let output = match std::process::Command::new("gh")
+        .args([
+            "issue",
+            "list",
+            "-R",
+            repo,
+            "--state",
+            "open",
+            "--json",
+            "number,title,labels",
+            "--limit",
+            &OVERSEER_SURVEY_LIMIT.to_string(),
+        ])
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(
+                target: "overseer::gap_scan", repo, error = %e,
+                "gap-scan: `gh issue list` spawn failed; degrading to no issue gaps"
+            );
+            return Vec::new();
+        }
+    };
+    if !output.status.success() {
+        tracing::warn!(
+            target: "overseer::gap_scan", repo,
+            status = %output.status,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "gap-scan: `gh issue list` failed; degrading to no issue gaps"
+        );
+        return Vec::new();
+    }
+    #[derive(serde::Deserialize)]
+    struct RawLabel {
+        name: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawIssue {
+        number: u64,
+        title: String,
+        labels: Vec<RawLabel>,
+    }
+    match serde_json::from_slice::<Vec<RawIssue>>(&output.stdout) {
+        Ok(raws) => raws
+            .into_iter()
+            .map(|r| SurveyedIssue {
+                repo: repo.to_string(),
+                number: r.number,
+                title: r.title,
+                labels: r.labels.into_iter().map(|l| l.name).collect(),
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(
+                target: "overseer::gap_scan", repo, error = %e,
+                "gap-scan: `gh issue list` JSON parse failed; degrading to no issue gaps"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Build the ISSUE coverage set from the OPEN PRs: an issue with an open PR
+/// referencing it is not a gap. Best-effort — a `gh pr list` failure degrades to
+/// empty coverage (logged), so the worst case is flagging an already-covered issue
+/// (bounded by the per-signature dedup), never a panic. Issue references are read
+/// structurally: `#<n>` tokens in the PR title, and the `issue-<n>` / `issue/<n>`
+/// branch-naming convention.
+fn issue_coverage_from_open_prs(repo: &str) -> Vec<String> {
+    use crate::stewardship::merge_authority::{PrGhClient, RealPrGhClient};
+    let prs = match RealPrGhClient::new().list_open_prs(repo, OVERSEER_SURVEY_LIMIT) {
+        Ok(prs) => prs,
+        Err(e) => {
+            tracing::warn!(
+                target: "overseer::gap_scan", repo, error = %e,
+                "gap-scan: `gh pr list` failed; degrading to no open-PR issue coverage"
+            );
+            return Vec::new();
+        }
+    };
+    let mut coverage = Vec::new();
+    for pr in &prs {
+        for n in issue_refs_from_pr(&pr.title, &pr.head_ref_name) {
+            coverage.push(format!("issue:{repo}#{n}"));
+        }
+    }
+    coverage
+}
+
+/// Extract the issue numbers an open PR references, structurally: every `#<n>`
+/// token in the title, plus the digits after an `issue-` / `issue/` marker in the
+/// branch name (Simard's branch convention).
+fn issue_refs_from_pr(title: &str, branch: &str) -> Vec<u64> {
+    let mut nums = hash_issue_numbers(title);
+    let lower = branch.to_ascii_lowercase();
+    for marker in ["issue-", "issue/"] {
+        if let Some(pos) = lower.find(marker) {
+            let digits: String = lower[pos + marker.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Ok(n) = digits.parse::<u64>() {
+                nums.push(n);
+            }
+        }
+    }
+    nums
+}
+
+/// Collect every `#<digits>` issue reference in `text`.
+fn hash_issue_numbers(text: &str) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(pos) = rest.find('#') {
+        let after = &rest[pos + 1..];
+        let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.parse::<u64>() {
+            out.push(n);
+        }
+        // Advance past this `#` (and any digits) to find the next reference.
+        rest = &after[digits.len()..];
+    }
+    out
 }
 
 /// Lowercase, hyphenate, and bound a title into a stable backlog id fragment.
@@ -870,6 +1069,12 @@ pub fn build_overseer(
         // SAME shared handle assembled above. Enabled by default (opt-out via
         // SIMARD_OVERSEER_MEMORY_RECALL); a disabled Overseer forces it off.
         .with_memory_recall_enabled(memory_recall_enabled())
+        // The recurring backlog-coverage gap-scan: each tick, survey the whole
+        // work picture and flag important work with no active workstream, notify
+        // the operator (email + Signal) + file a deduped issue. Enabled by default
+        // (opt-out via SIMARD_OVERSEER_GAP_SCAN); its every-N cadence is applied
+        // by the daemon tick loop.
+        .with_gap_scan_enabled(gap_scan_enabled())
 }
 
 /// Resolve the acting Overseer's tick cadence (seconds), clamped to the config
