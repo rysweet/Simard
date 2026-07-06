@@ -9,7 +9,8 @@ use std::process::Command;
 use serial_test::serial;
 use tempfile::tempdir;
 
-use super::{inspect_workspace, strip_claim_sentinel};
+use super::types::RepoInspection;
+use super::{inspect_workspace, strip_claim_sentinel, verify_agent_spawn_artifacts};
 use crate::engineer_worktree::ENGINEER_CLAIM_FILE;
 
 fn git(repo: &Path, args: &[&str]) {
@@ -130,5 +131,96 @@ fn strip_claim_sentinel_keeps_subdir_same_basename() {
         strip_claim_sentinel(vec![nested.clone(), ENGINEER_CLAIM_FILE.to_string()]),
         vec![nested],
         "a same-basename file under a subdirectory is a real change and must be kept"
+    );
+}
+
+/// Build a `RepoInspection` pointed at `repo` with an empty (already-filtered)
+/// `changed_files` baseline and `head == "HEAD"` so `HEAD..HEAD` yields zero new
+/// commits — isolating `verify_agent_spawn_artifacts` to its `git status` /
+/// sentinel-filter behavior.
+fn inspection_for(repo: &Path) -> RepoInspection {
+    RepoInspection {
+        workspace_root: repo.to_path_buf(),
+        repo_root: repo.to_path_buf(),
+        branch: "main".to_string(),
+        head: "HEAD".to_string(),
+        worktree_dirty: false,
+        changed_files: vec![],
+        active_goals: vec![],
+        carried_meeting_decisions: vec![],
+        architecture_gap_summary: String::new(),
+    }
+}
+
+/// Issue #2621 (second consumer): `verify_agent_spawn_artifacts` must also strip
+/// the sentinel. This exercises the DEGRADED path — the sentinel is present on
+/// disk with NO `.git/info/exclude` entry (i.e. the allocation-time append
+/// failed), so raw `git status` lists it. Without the filter, the sentinel is a
+/// "new changed file" (`post_status \ inspection.changed_files`) and a genuine
+/// no-op agent session is falsely reported as `"verified"`. A regression that
+/// deleted `strip_claim_sentinel(...)` from the post-status path would compile
+/// and pass every other test in the suite — this is the test that catches it.
+#[test]
+fn verify_agent_spawn_artifacts_ignores_claim_only_no_op_session() {
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+
+    // ONLY the untracked Simard sentinel, no exclude entry (degraded path).
+    std::fs::write(
+        dir.path().join(ENGINEER_CLAIM_FILE),
+        format!("{}\n", std::process::id()),
+    )
+    .unwrap();
+
+    // Objective deliberately references no issue/PR number so the best-effort
+    // `gh` probe is skipped and the test stays hermetic.
+    let report =
+        verify_agent_spawn_artifacts(&inspection_for(dir.path()), "no-op engineer session");
+
+    assert_eq!(
+        report.status, "unverified",
+        "a session whose only side-effect is the claim sentinel must NOT be reported verified; summary={}",
+        report.summary
+    );
+    assert!(
+        !report.summary.contains(ENGINEER_CLAIM_FILE),
+        "the claim sentinel must never surface in the verification summary; got: {}",
+        report.summary
+    );
+}
+
+/// Control for the filter above: a GENUINE agent-created file alongside the
+/// sentinel must still flip the report to `"verified"` (and only the real file
+/// appears in the evidence). Guards against an over-broad filter that would
+/// swallow real work and hide a productive session.
+#[test]
+fn verify_agent_spawn_artifacts_still_verifies_real_change_alongside_claim() {
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+
+    std::fs::write(
+        dir.path().join(ENGINEER_CLAIM_FILE),
+        format!("{}\n", std::process::id()),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("agent_output.txt"), "real work\n").unwrap();
+
+    let report =
+        verify_agent_spawn_artifacts(&inspection_for(dir.path()), "no-op engineer session");
+
+    assert_eq!(
+        report.status, "verified",
+        "a genuine new file must still verify the session; summary={}",
+        report.summary
+    );
+    assert!(
+        report.summary.contains("agent_output.txt"),
+        "the real change must appear in the verification evidence; got: {}",
+        report.summary
+    );
+    assert!(
+        !report.summary.contains(ENGINEER_CLAIM_FILE),
+        "the claim sentinel must be filtered even when a real change is present; got: {}",
+        report.summary
     );
 }
