@@ -264,6 +264,7 @@ nav:
     - Engineer Copilot Permissions: reference/engineer-copilot-permissions.md
     - Engineer Worktree Isolation: reference/engineer-worktree-isolation.md
     - Engineer Worktree Sweep Safety Guards: reference/engineer-worktree-sweep-safety.md
+    - Engineer Claim-Sentinel Exclusion: reference/engineer-claim-sentinel-exclusion.md
     - Subagent Tmux Tracking: reference/subagent-tmux-tracking.md
     - Terminal Session Idle Detection: reference/terminal-session-idle-detection.md
     - Agent-Log WebSocket API: reference/agent-log-websocket.md
