@@ -5,11 +5,14 @@
 //!
 //! When Simard consumes `amplihack-rs` (`amplihack-agent-eval`) and
 //! `amplihack-memory-lib` (`amplihack-memory`) as git-pinned dependencies, a
-//! self-improvement bump means: point *her own* pins at the current upstream
-//! `main` HEAD and run the new code. The two pins had drifted behind:
+//! self-improvement bump means: point *her own* pins at current upstream
+//! `main` and run the new code. The pins are advanced as upstream lands work:
 //!
 //!   * `amplihack-agent-eval`  59548a96… → **2a93441d…** (amplihack-rs main)
-//!   * `amplihack-memory`       5d7db77d… → **f8003708…** (memory-lib main)
+//!   * `amplihack-memory`       f8003708… → **2266cc24…** (memory-lib main —
+//!     the squash-merge of PR #121, which lands the decoupled
+//!     `measurement::precision_at_k` recall-quality primitive that Simard's
+//!     hybrid measurement surface delegates to, on top of the #2626 bump)
 //!
 //! These are the exact 40-char SHAs verified against `git ls-remote … main`
 //! at authoring time.
@@ -39,12 +42,14 @@ use std::path::PathBuf;
 
 /// amplihack-rs `main` HEAD carrying the `amplihack-agent-eval` crate to adopt.
 const AGENT_EVAL_TARGET_REV: &str = "2a93441d1837f9f853d5dddc56cc1088353a8872";
-/// amplihack-memory-lib `main` HEAD carrying the `amplihack-memory` crate.
-const MEMORY_TARGET_REV: &str = "f80037089a735bd0d394e3eec5cea9fcae1895ea";
+/// amplihack-memory-lib `main` commit carrying the `amplihack-memory` crate:
+/// PR #121's squash-merge (the `measurement::precision_at_k` primitive, on top
+/// of the #2626 pin), which Simard's hybrid measurement surface delegates to.
+const MEMORY_TARGET_REV: &str = "2266cc247d66c773c33300546a97502d53497c20";
 
 /// The stale revs the bump must move *off of* (anti-regression sentinels).
 const AGENT_EVAL_STALE_REV: &str = "59548a96049ab8d558110bcaf9c82a4316f1bbf0";
-const MEMORY_STALE_REV: &str = "5d7db77dd5c3bafb2846c2f50761112588a47563";
+const MEMORY_STALE_REV: &str = "f80037089a735bd0d394e3eec5cea9fcae1895ea";
 
 /// The only git remotes these two crates may resolve from. A bump must never
 /// introduce a *new* git source (typosquat / allowlist-bypass guard, R1).

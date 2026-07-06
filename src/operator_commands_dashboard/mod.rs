@@ -50,6 +50,13 @@ mod tests_routes_a;
 #[cfg(test)]
 mod tests_routes_b;
 
+// Issue #2491 / measurement issue #2494 (G1 hybrid measurement, Step 7): the
+// read-only GET /api/cognition/recall-precision correlation endpoint — the
+// hybrid join of the fixed-corpus benchmark score and the live trend, its
+// clamped params, verdict truth table, and fail-closed auth/leak contract.
+#[cfg(test)]
+mod tests_recall_precision_correlation;
+
 use std::net::SocketAddr;
 use std::path::Path;
 

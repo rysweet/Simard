@@ -482,10 +482,11 @@ pub(crate) const PART_05: &str = r#"      try {
     }
 
     /* --- Init --- */
-    fetchStatus(); fetchIssues(); fetchDistributed(); fetchAgentOverview(); fetchMergeReadiness();
+    fetchStatus(); fetchIssues(); fetchDistributed(); fetchAgentOverview(); fetchMergeReadiness(); fetchRecallPrecision();
     setInterval(fetchAgentOverview,30000);
     setInterval(fetchMergeReadiness,30000);
     setInterval(fetchStatus,30000);
+    setInterval(fetchRecallPrecision,30000);
     setInterval(fetchIssues,120000);
 
     /* --- Glossary / Jargon tooltips (#1996) --- */

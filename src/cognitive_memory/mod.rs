@@ -747,6 +747,14 @@ pub trait CognitiveMemoryOps: Send + Sync {
 const EXACT_NAME_RECALL_LIMIT: u32 = 16;
 pub mod metrics;
 
+// Issue #2491 / measurement issue #2494 (G1 hybrid measurement): the
+// fixed-corpus recall-precision BENCHMARK rail. Scores a small, in-repo frozen
+// corpus through the same precision@k primitive the live rail uses and persists
+// one comparable `ScoreRecord{suite:"cognition", scenario:"recall_precision_at_k"}`
+// so a claimed cognition improvement can be validated on a stable benchmark, not
+// only observed live.
+pub mod recall_precision_bench;
+
 // Issue #2419 (design spike): the `CreativeIdea` prospective-memory type + its
 // `IdeaStatus` state machine + `CreativeIdeaStore` round-trip seam. Additive;
 // no schema change to prospective memory. Gated OFF at the subsystem level.
@@ -874,3 +882,18 @@ mod tests_controlled_forgetting;
 // each half in isolation).
 #[cfg(test)]
 mod tests_procedural_loop;
+
+// Issue #2491 / measurement issue #2494 (G1 hybrid measurement, Step 7):
+// the fixed-corpus recall-precision BENCHMARK rail — a deterministic
+// `score_recall_precision_corpus()` and `run_recall_precision_bench()` that
+// persists one comparable `ScoreRecord{suite:"cognition",
+// scenario:"recall_precision_at_k"}` through the existing gym signal machinery.
+#[cfg(test)]
+mod tests_recall_precision_bench;
+
+// Issue #2491 / #2494 (G2 de-fork, Step 7): pins that
+// `metrics::precision_at_k` becomes a thin adapter delegating to the upstream
+// `amplihack_memory::measurement` primitive (no scoring math forked into
+// Simard), and that the move is behaviour-preserving (parity gate).
+#[cfg(test)]
+mod tests_recall_precision_delegation;

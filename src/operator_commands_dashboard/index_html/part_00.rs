@@ -151,6 +151,11 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
         <div id="merge-readiness-panel"><span class="loading">Loading…</span></div>
       </div>
       <div class="card"><h2>System Status</h2><div id="status"><span class="loading">Loading…</span></div></div>
+      <div class="card" data-testid="cognition-recall-precision-card">
+        <h2>Cognition: Recall Precision <button class="btn" onclick="fetchRecallPrecision()" style="font-size:.75rem">Refresh</button></h2>
+        <p class="card-lede" style="margin:0 0 .75rem;color:#8b949e;font-size:.8rem;line-height:1.5">Hybrid measurement (issue #2491 / #2494): recall precision@k is trusted only when it improves on the fixed benchmark <strong>and</strong> trends the same way live. The verdict crosses both rails.</p>
+        <div id="cognition-recall-precision"><span class="loading">Loading…</span></div>
+      </div>
       <div class="card"><h2>Open Issues</h2><ul id="issues-list"><li class="loading">Loading…</li></ul></div>
       <div class="card">
         <h2>Machines &amp; Memory Sharing <button class="btn" onclick="fetchDistributed()">Refresh</button></h2>

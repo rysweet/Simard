@@ -138,7 +138,7 @@ pub fn observe(state: &mut OodaState, bridges: &OodaBridges) -> SimardResult<Obs
 /// will surface the underlying failure).
 fn run_eval_watchdog() -> Option<String> {
     use crate::eval_watchdog::{WatchdogConfig, collect_recent_records, detect_dead_signal};
-    let history_path = std::path::Path::new("gym_history.db");
+    let history_path = crate::gym_history::default_db_path();
     if !history_path.exists() {
         return None;
     }
@@ -217,7 +217,7 @@ pub(super) fn collect_pending_improvements(
     }
 
     // Signal 4: persistent gym score history (regression / promotion signals).
-    let history_path = std::path::Path::new("gym_history.db");
+    let history_path = crate::gym_history::default_db_path();
     if history_path.exists()
         && let Ok(history) = ScoreHistory::open(history_path)
     {

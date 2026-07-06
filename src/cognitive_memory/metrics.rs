@@ -56,10 +56,10 @@ pub fn scoped_reset() {
 // ───────────────────────── recall precision@k ──────────────────────────────
 //
 // A relevance-ranked-recall quality signal for the ranked fact-recall path
-// (`recall_facts_ranked`). `precision_at_k` is the pure, deterministic spine;
-// the aggregate below folds one observation per recall so the per-cycle sweep
-// can emit a single durable sample instead of writing `metrics.jsonl` on the
-// hot recall path.
+// (`recall_facts_ranked`). `precision_at_k` delegates to the upstream
+// measurement primitive (guideline G2); the aggregate below folds one
+// observation per recall so the per-cycle sweep can emit a single durable
+// sample instead of writing `metrics.jsonl` on the hot recall path.
 
 /// Durable self-metric name for ranked-recall precision, emitted to
 /// `metrics.jsonl` once per OODA cycle by [`flush_recall_precision_metric`].
@@ -69,61 +69,29 @@ pub const RECALL_PRECISION_METRIC: &str = "recall_precision_at_k";
 /// path.
 pub const RECALL_PRECISION_SITE: &str = "recall_facts_ranked";
 
-/// Tokenize a recall query the same way the keyword recall gate does:
-/// whitespace-split, lowercased, dropping punctuation-only tokens (e.g. the
-/// wildcard `*`) so a wildcard/empty query yields no tokens and is treated as
-/// "no measurable relevance target".
-fn query_tokens(query: &str) -> Vec<String> {
-    query
-        .split_whitespace()
-        .map(str::to_lowercase)
-        .filter(|t| t.chars().any(char::is_alphanumeric))
-        .collect()
-}
-
-/// Whether a fact is query-relevant under the keyword proxy: its lowercased
-/// `concept` or `content` contains at least one query token (substring match,
-/// mirroring the episodic recall keyword gate).
-fn fact_is_relevant(fact: &CognitiveFact, tokens: &[String]) -> bool {
-    let concept = fact.concept.to_lowercase();
-    let content = fact.content.to_lowercase();
-    tokens
-        .iter()
-        .any(|t| concept.contains(t.as_str()) || content.contains(t.as_str()))
-}
-
 /// Precision\@k for a ranked recall result: of the top-`k` returned `facts`, the
 /// fraction that are **query-relevant**.
 ///
-/// Relevance is a coarse keyword proxy (see `fact_is_relevant`): a fact counts
-/// when its `concept`/`content` contains a query token as a substring — the same
-/// `.contains` keyword gate the episodic recall path uses, NOT the ranker's
-/// exact token/Jaccard `text_relevance` score. It is deliberately broader than
-/// the ranker (e.g. `cat` matches `concatenate`), which is acceptable for a
-/// self-metric baseline: it needs no external ground-truth labels — the query
-/// itself is the relevance oracle — and it moves in the same direction as
-/// ranking quality. This makes the metric a self-contained, deterministic
-/// measure of *ranking precision*: if the ranker floats an off-topic fact into
-/// the top-`k`, precision falls.
+/// This is a thin adapter (guideline G2): it maps Simard's [`CognitiveFact`] onto
+/// the upstream primitive's decoupled `(concept, content)` pairs and delegates
+/// the scoring to [`amplihack_memory::measurement::precision_at_k`]. The scoring
+/// math — the keyword relevance proxy (a query token is a case-insensitive
+/// substring of `concept`/`content`) and the top-`k` window — lives in
+/// amplihack-memory-lib, not forked here, so the benchmark and live rails score
+/// the same quantity with the same code.
 ///
-/// Returns `None` (undefined, **not** `0.0`) when the query has no usable
-/// tokens (empty / wildcard `*`) or the result set is empty, so callers skip
-/// emitting a meaningless sample rather than dragging the mean toward zero.
-/// `k` is clamped to the number of returned facts.
+/// Returns `None` (undefined, **not** `0.0`) when the query has no usable tokens
+/// (empty / wildcard `*`) or the result set is empty, so callers skip emitting a
+/// meaningless sample rather than dragging the mean toward zero. `k` is clamped
+/// to the number of returned facts.
 pub fn precision_at_k(query: &str, facts: &[CognitiveFact], k: usize) -> Option<f64> {
-    let tokens = query_tokens(query);
-    if tokens.is_empty() {
-        return None;
-    }
-    let window = k.min(facts.len());
-    if window == 0 {
-        return None;
-    }
-    let relevant = facts[..window]
+    // The only Simard-side glue is the CognitiveFact -> (concept, content)
+    // mapping; it carries no scoring logic.
+    let pairs: Vec<(&str, &str)> = facts
         .iter()
-        .filter(|f| fact_is_relevant(f, &tokens))
-        .count();
-    Some(relevant as f64 / window as f64)
+        .map(|f| (f.concept.as_str(), f.content.as_str()))
+        .collect();
+    amplihack_memory::measurement::precision_at_k(query, &pairs, k)
 }
 
 /// Running recall-precision aggregate per site: `(samples, sum_of_precision)`.

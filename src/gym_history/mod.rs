@@ -7,7 +7,19 @@ use crate::error::{SimardError, SimardResult};
 use crate::gym::BenchmarkRunReport;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// The one canonical gym score-history database path, shared by the benchmark
+/// writer, the OODA gym step, and the correlation reader. Resolved relative to
+/// the process working directory: `<cwd>/gym_history.db`.
+///
+/// Centralizing the path here guarantees the writer and reader cannot drift onto
+/// different files (design fix R5 / DATA-3): a benchmark score written on one
+/// rail is the exact score the correlation endpoint reads back, as long as both
+/// run from the same working directory (the daemon's repo root).
+pub fn default_db_path() -> PathBuf {
+    PathBuf::from("gym_history.db")
+}
 
 /// A single recorded benchmark score.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -295,3 +307,9 @@ pub fn generate_signals(
 
 #[cfg(test)]
 mod tests;
+
+// Issue #2491 / #2494 (G1 hybrid measurement, Step 7): the single canonical
+// `default_db_path()` shared by the benchmark writer, the OODA gym step, and the
+// correlation reader (design fix R5 / DATA-3 — no writer/reader drift).
+#[cfg(test)]
+mod tests_default_db_path;

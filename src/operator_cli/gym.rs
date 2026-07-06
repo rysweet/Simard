@@ -1,4 +1,6 @@
-use crate::operator_commands::{run_gym_compare, run_gym_list, run_gym_scenario, run_gym_suite};
+use crate::operator_commands::{
+    run_gym_compare, run_gym_list, run_gym_recall_precision, run_gym_scenario, run_gym_suite,
+};
 
 use super::args::{next_required, reject_extra_args};
 
@@ -12,6 +14,9 @@ Commands:
   run <scenario-id>           Run a specific gym scenario.
   compare <scenario-id>       Compare results for a scenario.
   run-suite <suite-id>        Run an entire scenario suite.
+  recall-precision            Run the fixed recall-precision benchmark, append
+                              one score to gym history, and print the score and
+                              gym signal (issue #2491 / #2494 hybrid measurement).
   help, -h, --help            Show this help message and exit.
 ";
 
@@ -42,6 +47,10 @@ pub(super) fn dispatch_gym_command(
             let suite_id = next_required(&mut args, "suite id")?;
             reject_extra_args(args)?;
             run_gym_suite(&suite_id)
+        }
+        "recall-precision" => {
+            reject_extra_args(args)?;
+            run_gym_recall_precision()
         }
         other => Err(format!("unsupported command 'gym {other}'").into()),
     }
