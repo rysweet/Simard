@@ -370,8 +370,26 @@ pub fn balanced_objects(s: &str) -> Vec<&str> {
 ///
 /// Returning the last span means a leading "thinking"/banner object cannot
 /// shadow the real answer object that follows it.
+///
+/// Runs the same string-aware [`scan_balanced`] walk as [`balanced_objects`]
+/// but keeps only the most recent span, so callers that need just the answer
+/// object (e.g. [`extract_json_payload`]) don't heap-allocate a `Vec` of every
+/// candidate merely to discard all but the last.
 pub fn last_balanced_object(s: &str) -> Option<&str> {
-    balanced_objects(s).pop()
+    let bytes = s.as_bytes();
+    let mut last = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{'
+            && let Some(end) = scan_balanced(bytes, i)
+        {
+            last = Some(&s[i..=end]);
+            i = end + 1;
+            continue;
+        }
+        i += 1;
+    }
+    last
 }
 
 /// Extract a JSON object from noisy recipe stdout as an owned `String`.
@@ -385,14 +403,17 @@ pub fn last_balanced_object(s: &str) -> Option<&str> {
 ///    the *same physical line* as a leading timestamp/log prefix (that line
 ///    would otherwise be dropped wholesale by view 1).
 ///
+/// The second (line-preserving) view is built **only if the first misses**: on
+/// the common happy path view 1 yields the object, so the fallback `strip_ansi`
+/// clean — a full pass and allocation that view 1 already performed internally —
+/// is never paid for.
+///
 /// Returns `None` when neither view contains a balanced object.
 pub fn extract_json_payload(raw: &str) -> Option<String> {
-    for cleaned in [strip_recipe_noise(raw), strip_ansi(raw)] {
-        if let Some(obj) = last_balanced_object(cleaned.as_ref()) {
-            return Some(obj.to_string());
-        }
+    if let Some(obj) = last_balanced_object(strip_recipe_noise(raw).as_ref()) {
+        return Some(obj.to_string());
     }
-    None
+    last_balanced_object(strip_ansi(raw).as_ref()).map(str::to_string)
 }
 
 /// A verdict-keyword match against cleaned recipe output.
