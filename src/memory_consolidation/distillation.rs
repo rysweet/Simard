@@ -365,8 +365,11 @@ pub fn distill_recent_episodes_with_runner(
                 // Recorded BEFORE the early return; episodes stay unmarked, so
                 // the retry-safety invariant is unaffected. `attempt` lets the
                 // metric distinguish a first-attempt failure from an exhausted
-                // retry; a failed pass never "recovered".
-                record_distill_success_metric(false, Some(class), pulled, 0, attempt, false);
+                // retry; a failed pass never "recovered". The parse-failure
+                // shape (#2495) refines the ParseFailure bucket so tooling can
+                // isolate the one parser-addressable shape from source-side ones.
+                let shape = classify_parse_failure_shape(&e);
+                record_distill_success_metric(false, Some(class), shape, pulled, 0, attempt, false);
                 // Issue #2528: mirror the distill failure into the unified
                 // telemetry facade alongside the human log lines above, so the
                 // status snapshot's distill-fail rate is a structured signal
@@ -390,6 +393,7 @@ pub fn distill_recent_episodes_with_runner(
                 let raw_for_capture = raw_on_failure.unwrap_or_else(|| e.to_string());
                 let meta = raw_capture::CaptureMeta {
                     failure_class: class.as_str(),
+                    parse_failure_shape: shape.map(|s| s.as_str()),
                     recipe_exited_ok: class.recipe_exited_ok(),
                     attempt,
                     recovered_after_retry: false,
@@ -570,7 +574,15 @@ pub fn distill_recent_episodes_with_runner(
     // out of this recipe-stage metric's scope — see record_distill_success_metric).
     // `attempt` / `recovered_after_retry` (#2468) let the metric distinguish a
     // first-attempt success from one recovered by an in-cycle retry.
-    record_distill_success_metric(true, None, pulled, stored, attempt, recovered_after_retry);
+    record_distill_success_metric(
+        true,
+        None,
+        None,
+        pulled,
+        stored,
+        attempt,
+        recovered_after_retry,
+    );
 
     Ok(DistillReport {
         input_count: pulled,
@@ -815,6 +827,75 @@ pub fn classify_distill_error(err: &SimardError) -> DistillFailureClass {
     }
 }
 
+/// Parser-addressability sub-classification of a [`DistillFailureClass::ParseFailure`]
+/// (issue #2495). A parse failure has three distinct shapes, only one of which
+/// any `strip_json_*` recovery transform can address:
+///
+/// - [`MissingFile`](Self::MissingFile) / [`EmptyDocument`](Self::EmptyDocument)
+///   are **source-side**: the agent wrote no file, or an empty one. No parser
+///   leniency can recover bytes that were never produced — the fix is prompt /
+///   retry, not parsing.
+/// - [`UnparseableObject`](Self::UnparseableObject) is the **parser-addressable**
+///   shape: the agent produced a facts document, but it did not parse (a fence
+///   wrapper, a trailing comma, …). This is the only shape a lenient JSON
+///   recovery view can turn into a success, so it is the one worth parser effort.
+///
+/// The labels are stable wire values (`metrics.jsonl` `parse_failure_shape` field
+/// and raw-capture headers); longitudinal tooling keys off them, so they must not
+/// drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseFailureShape {
+    /// The agent never wrote the dedicated facts file (issues #2622/#2619).
+    MissingFile,
+    /// The facts file existed but was empty; the agent produced no output.
+    EmptyDocument,
+    /// A facts document was produced but did not contain a parseable
+    /// `{ "facts": [...] }` object — the only shape a lenient parse can recover.
+    UnparseableObject,
+}
+
+impl ParseFailureShape {
+    /// Stable snake-case wire label used in the metric context / capture header.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingFile => "missing-file",
+            Self::EmptyDocument => "empty-document",
+            Self::UnparseableObject => "unparseable-object",
+        }
+    }
+
+    /// `true` ONLY for [`UnparseableObject`](Self::UnparseableObject) — the one
+    /// shape a `strip_json_*` recovery transform can turn into a success. The
+    /// source-side shapes (missing / empty) can never be fixed by parsing.
+    pub fn is_parser_addressable(self) -> bool {
+        matches!(self, Self::UnparseableObject)
+    }
+}
+
+/// Sub-classify a [`DistillFailureClass::ParseFailure`] `SimardError` into its
+/// [`ParseFailureShape`], or `None` when `err` is not a parse failure.
+///
+/// A strict refinement of the `ParseFailure` bucket: this returns `Some(_)` for
+/// exactly the messages [`classify_distill_error`] maps to `ParseFailure`, and
+/// `None` for every other class (and every non-`RpcError`). Like its sibling it
+/// anchors on the **stable leading prefix** (never `contains`), so a terminal
+/// failure that embeds an "empty document" phrase from the recipe's stdout tail
+/// is never mislabeled as a parser-addressable shape.
+pub fn classify_parse_failure_shape(err: &SimardError) -> Option<ParseFailureShape> {
+    let SimardError::RpcError(msg) = err else {
+        return None;
+    };
+    if msg.starts_with("distill: facts output file was not written") {
+        Some(ParseFailureShape::MissingFile)
+    } else if msg.starts_with("distill: facts document was empty") {
+        Some(ParseFailureShape::EmptyDocument)
+    } else if msg.starts_with("distill: facts document did not contain a parseable") {
+        Some(ParseFailureShape::UnparseableObject)
+    } else {
+        None
+    }
+}
+
 /// Build the `distill_success_rate` metric context for one pass that ran the
 /// recipe. `class` is `None` on success, `Some(_)` on failure.
 ///
@@ -825,6 +906,7 @@ pub fn classify_distill_error(err: &SimardError) -> DistillFailureClass {
 fn build_distill_success_context(
     success: bool,
     class: Option<DistillFailureClass>,
+    shape: Option<ParseFailureShape>,
     input_count: u32,
     fact_count: u32,
     attempt: u32,
@@ -841,6 +923,7 @@ fn build_distill_success_context(
         "parse_attempted": parse_attempted,
         "parse_success": success,
         "failure_class": class.map(|c| c.as_str()),
+        "parse_failure_shape": shape.map(|s| s.as_str()),
         "input_count": input_count,
         "fact_count": fact_count,
         "attempt": attempt,
@@ -882,6 +965,7 @@ fn build_distill_success_context(
 fn record_distill_success_metric(
     success: bool,
     class: Option<DistillFailureClass>,
+    shape: Option<ParseFailureShape>,
     input_count: u32,
     fact_count: u32,
     attempt: u32,
@@ -894,6 +978,7 @@ fn record_distill_success_metric(
     let context = build_distill_success_context(
         success,
         class,
+        shape,
         input_count,
         fact_count,
         attempt,
@@ -1270,30 +1355,49 @@ pub(crate) fn parse_facts_document(document: &str) -> SimardResult<DistillOutput
     )))
 }
 
-/// Parse a bare `{ "facts": [...] }` object, tolerating a single **trailing
-/// comma** malformation as a last resort (issue #2658).
+/// Parse a bare `{ "facts": [...] }` object, tolerating the common LLM-JSON
+/// malformations — a single **trailing comma** (issue #2658) and a **wrapping
+/// Markdown code fence** (issue #2495) — as a last resort.
 ///
 /// Strict `serde_json` is attempted first, so the clean path is byte-identical
-/// and unchanged. Only when that fails is a retry attempted on the
-/// [`strip_json_trailing_commas`](crate::recipe_output::strip_json_trailing_commas)
-/// view — a provable no-op on valid JSON — so one cosmetic trailing comma
-/// before a `}`/`]` (the single most common LLM-JSON defect) can no longer
-/// reject the whole facts object and silently drop the entire batch (the
-/// residual 100% distill parse-failure shape). A genuinely malformed object
-/// (not just a trailing comma) leaves the stripped view unchanged, so it still
-/// fails and precision is never weakened.
+/// and unchanged. Only when that fails are the recovery views tried, each a
+/// provable no-op on valid JSON
+/// ([`strip_json_trailing_commas`](crate::recipe_output::strip_json_trailing_commas)
+/// then [`strip_json_code_fences`](crate::recipe_output::strip_json_code_fences)),
+/// so a cosmetic trailing comma before a `}`/`]` or a ```` ```json ```` wrapper
+/// (the two most common LLM-JSON defects) can no longer reject the whole facts
+/// object and silently drop the entire batch. The transforms chain, so a fenced
+/// object that *also* carries a trailing comma still recovers. A genuinely
+/// malformed object leaves the transformed view still-malformed, so it still
+/// fails and precision is never weakened. Because this is the single chokepoint
+/// both the fast path and the balanced-object slow path call, the recovery also
+/// benefits the brain/OODA phases that have no slow path.
 fn parse_facts_envelope_lenient(text: &str) -> Option<RecipeEnvelope> {
+    // Strict first — the clean path is byte-identical and zero-leniency.
     if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(text) {
         return Some(parsed);
     }
-    // The stripper borrows the input unchanged when it holds no trailing comma,
-    // so a `Borrowed` result means the strict parse above already saw these
-    // exact bytes and failed — there is nothing new to try. Only an `Owned`
-    // (actually-stripped) view can parse where the strict attempt could not.
-    match crate::recipe_output::strip_json_trailing_commas(text) {
-        std::borrow::Cow::Owned(stripped) => serde_json::from_str::<RecipeEnvelope>(&stripped).ok(),
-        std::borrow::Cow::Borrowed(_) => None,
+    // Last-resort recovery. Each transform borrows the input unchanged when it
+    // holds no defect (a `Borrowed` result means the strict parse above already
+    // saw those exact bytes), so only an `Owned` (actually-transformed) view is
+    // worth re-parsing. The transforms chain — a wrapping code fence is
+    // unwrapped first, then the unwrapped body is trailing-comma-stripped — so a
+    // payload carrying BOTH defects still recovers. Every transform is a
+    // provable no-op on valid JSON, so precision on well-formed output is never
+    // weakened.
+    let unfenced = crate::recipe_output::strip_json_code_fences(text);
+    if matches!(unfenced, std::borrow::Cow::Owned(_))
+        && let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(&unfenced)
+    {
+        return Some(parsed);
     }
+    if let std::borrow::Cow::Owned(stripped) =
+        crate::recipe_output::strip_json_trailing_commas(&unfenced)
+        && let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(&stripped)
+    {
+        return Some(parsed);
+    }
+    None
 }
 
 /// Scan an already noise-stripped `trimmed` string for a `{ "facts": [...] }`
@@ -1948,14 +2052,14 @@ mod unit_tests {
     #[test]
     fn distill_success_context_carries_attempt_and_recovery() {
         // First-attempt success.
-        let first = build_distill_success_context(true, None, 20, 3, 1, false);
+        let first = build_distill_success_context(true, None, None, 20, 3, 1, false);
         let v: serde_json::Value = serde_json::from_str(&first).unwrap();
         assert_eq!(v["attempt"], 1);
         assert_eq!(v["recovered_after_retry"], false);
         assert_eq!(v["parse_success"], true);
 
         // Recovered on the second attempt after a transient miss.
-        let recovered = build_distill_success_context(true, None, 20, 3, 2, true);
+        let recovered = build_distill_success_context(true, None, None, 20, 3, 2, true);
         let v2: serde_json::Value = serde_json::from_str(&recovered).unwrap();
         assert_eq!(v2["attempt"], 2);
         assert_eq!(v2["recovered_after_retry"], true);
@@ -1979,7 +2083,7 @@ mod unit_tests {
 
     #[test]
     fn success_metric_context_marks_parse_attempted_and_parse_success() {
-        let payload = build_distill_success_context(true, None, 25, 3, 1, false);
+        let payload = build_distill_success_context(true, None, None, 25, 3, 1, false);
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["outcome"], "success");
         assert_eq!(v["recipe_exited_ok"], true);
@@ -1995,6 +2099,7 @@ mod unit_tests {
         let payload = build_distill_success_context(
             false,
             Some(DistillFailureClass::ParseFailure),
+            None,
             40,
             0,
             1,
@@ -2013,6 +2118,7 @@ mod unit_tests {
         let payload = build_distill_success_context(
             false,
             Some(DistillFailureClass::CopilotTerminalFailure),
+            None,
             40,
             0,
             1,
@@ -2043,6 +2149,7 @@ mod unit_tests {
         let payload = build_distill_success_context(
             false,
             Some(classify_distill_error(&err)),
+            None,
             40,
             0,
             1,
@@ -2052,6 +2159,210 @@ mod unit_tests {
         assert_eq!(v["parse_attempted"], true);
         assert_eq!(v["parse_success"], false);
         assert_eq!(v["failure_class"], "parse-failure");
+    }
+
+    // ── issue #2495: parse-failure SHAPE sub-classification ──────────────
+    //
+    // TDD (RED). Pins the NEW public API the implementation must add to this
+    // module, beside `classify_distill_error` / `DistillFailureClass`:
+    //
+    //   #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    //   pub enum ParseFailureShape { MissingFile, EmptyDocument, UnparseableObject }
+    //   impl ParseFailureShape {
+    //       pub fn as_str(self) -> &'static str;        // stable snake-case labels
+    //       pub fn is_parser_addressable(self) -> bool; // true ONLY for UnparseableObject
+    //   }
+    //   pub fn classify_parse_failure_shape(err: &SimardError) -> Option<ParseFailureShape>;
+    //
+    // plus the `shape: Option<ParseFailureShape>` enrichment of
+    // `build_distill_success_context` (added as the 3rd arg, right after `class`).
+
+    #[test]
+    fn parse_failure_shape_labels_are_stable_snake_case() {
+        // These labels are wire values in metrics.jsonl / raw-capture headers;
+        // longitudinal tooling keys off them, so they must stay exactly these.
+        assert_eq!(ParseFailureShape::MissingFile.as_str(), "missing-file");
+        assert_eq!(ParseFailureShape::EmptyDocument.as_str(), "empty-document");
+        assert_eq!(
+            ParseFailureShape::UnparseableObject.as_str(),
+            "unparseable-object"
+        );
+    }
+
+    #[test]
+    fn only_unparseable_object_is_parser_addressable() {
+        // The load-bearing gate: MissingFile / EmptyDocument are source-side
+        // (prompt/retry), so no strip_json_* transform can recover them. Only an
+        // unparseable object is worth parser effort.
+        assert!(ParseFailureShape::UnparseableObject.is_parser_addressable());
+        assert!(!ParseFailureShape::MissingFile.is_parser_addressable());
+        assert!(!ParseFailureShape::EmptyDocument.is_parser_addressable());
+    }
+
+    #[test]
+    fn classify_parse_failure_shape_maps_each_parse_failure_prefix() {
+        use ParseFailureShape::*;
+        let cases = [
+            (
+                "distill: facts output file was not written by the agent (/tmp/x/facts.json): No such file or directory (os error 2)",
+                MissingFile,
+            ),
+            (
+                "distill: facts document was empty; the agent produced no output",
+                EmptyDocument,
+            ),
+            (
+                "distill: facts document did not contain a parseable { \"facts\": [...] } object: hi",
+                UnparseableObject,
+            ),
+        ];
+        for (msg, expected) in cases {
+            let err = SimardError::RpcError(msg.to_string());
+            assert_eq!(
+                classify_parse_failure_shape(&err),
+                Some(expected),
+                "msg: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_parse_failure_shape_is_none_for_non_parse_failures() {
+        // spawn / terminal / serialize / unknown / non-RpcError are NOT parse
+        // failures, so they carry no shape (None → null parse_failure_shape),
+        // and can never be mislabeled as the one parser-addressable shape.
+        for msg in [
+            "distill: recipe-runner-rs spawn failed: no such file",
+            "distill: recipe exited with exit status: 1: stderr= stdout=",
+            "distill: failed to serialize episodes payload: oops",
+            "something unexpected",
+        ] {
+            let err = SimardError::RpcError(msg.to_string());
+            assert_eq!(classify_parse_failure_shape(&err), None, "msg: {msg}");
+        }
+        let non_rpc = SimardError::PlanningUnavailable {
+            reason: "backend down".to_string(),
+        };
+        assert_eq!(classify_parse_failure_shape(&non_rpc), None);
+    }
+
+    #[test]
+    fn classify_parse_failure_shape_anchors_on_prefix_not_embedded_text() {
+        // A terminal failure embeds the recipe's stdout, which may itself carry
+        // an EmptyDocument/UnparseableObject phrase. Prefix anchoring (never
+        // `contains`) must keep it None so a non-zero exit is never mislabeled as
+        // a parser-addressable shape and falsely invited into transform work.
+        let terminal = SimardError::RpcError(
+            "distill: recipe exited with exit status: 1: stderr= stdout=facts document was \
+             empty; the agent produced no output"
+                .to_string(),
+        );
+        assert_eq!(classify_parse_failure_shape(&terminal), None);
+    }
+
+    #[test]
+    fn classify_parse_failure_shape_refines_the_parse_failure_bucket_exactly() {
+        // The two classifiers must never disagree: a message is a ParseFailure
+        // (per classify_distill_error) IFF classify_parse_failure_shape returns
+        // Some(_). This keeps the A/B/C split a strict refinement of the
+        // ParseFailure bucket, never a second, drifting rule.
+        for msg in [
+            "distill: facts output file was not written by the agent (/x): boom",
+            "distill: facts document was empty; the agent produced no output",
+            "distill: facts document did not contain a parseable { \"facts\": [...] } object: hi",
+            "distill: recipe exited with exit status: 1: stderr= stdout=",
+            "distill: recipe-runner-rs spawn failed: no such file",
+            "distill: failed to serialize episodes payload: oops",
+            "something unexpected",
+        ] {
+            let err = SimardError::RpcError(msg.to_string());
+            let is_parse_failure =
+                classify_distill_error(&err) == DistillFailureClass::ParseFailure;
+            assert_eq!(
+                classify_parse_failure_shape(&err).is_some(),
+                is_parse_failure,
+                "shape-Some must match ParseFailure exactly; msg: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn distill_success_context_carries_parse_failure_shape() {
+        // Enrichment contract: build_distill_success_context gains a
+        // `shape: Option<ParseFailureShape>` argument (3rd position, after
+        // `class`) that adds exactly one `parse_failure_shape` field via
+        // `as_str`, `null` when `None`. No other field's meaning changes.
+
+        // Success ⇒ null shape; pre-existing fields untouched.
+        let ok = build_distill_success_context(true, None, None, 25, 3, 1, false);
+        let v: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        assert!(
+            v["parse_failure_shape"].is_null(),
+            "success must carry a null parse_failure_shape"
+        );
+        assert_eq!(v["parse_success"], true);
+        assert!(v["failure_class"].is_null());
+        assert_eq!(v["input_count"], 25);
+        assert_eq!(v["fact_count"], 3);
+
+        // Unparseable-object parse failure ⇒ the parser-addressable label.
+        let unparseable = build_distill_success_context(
+            false,
+            Some(DistillFailureClass::ParseFailure),
+            Some(ParseFailureShape::UnparseableObject),
+            40,
+            0,
+            1,
+            false,
+        );
+        let v2: serde_json::Value = serde_json::from_str(&unparseable).unwrap();
+        assert_eq!(v2["failure_class"], "parse-failure");
+        assert_eq!(v2["parse_failure_shape"], "unparseable-object");
+        assert_eq!(
+            v2["parse_attempted"], true,
+            "the denominator gate must be unchanged by the enrichment"
+        );
+
+        // Empty-document parse failure ⇒ the source-side label.
+        let empty = build_distill_success_context(
+            false,
+            Some(DistillFailureClass::ParseFailure),
+            Some(ParseFailureShape::EmptyDocument),
+            40,
+            0,
+            2,
+            false,
+        );
+        let v3: serde_json::Value = serde_json::from_str(&empty).unwrap();
+        assert_eq!(v3["parse_failure_shape"], "empty-document");
+    }
+
+    #[test]
+    fn parse_facts_envelope_lenient_recovers_fenced_object_via_shared_chokepoint() {
+        // parse_facts_envelope_lenient is the single chokepoint the fast path and
+        // the balanced_objects slow path both call. After #2495 it chains
+        // strip_json_code_fences after strict + strip_json_trailing_commas, so a
+        // fenced-but-otherwise-valid facts object parses through the FAST path
+        // (benefiting the brain/OODA phases that have no slow path, too).
+        let fenced = "```json\n{\"facts\":[{\"concept\":\"pr-pattern\",\"content\":\"c\",\"source_episode_id\":\"e1\"}]}\n```";
+        let env = parse_facts_envelope_lenient(fenced)
+            .expect("a fenced facts object must parse through the lenient chokepoint");
+        let out = env.into_output();
+        assert_eq!(out.facts.len(), 1);
+        assert_eq!(out.facts[0].concept, "pr-pattern");
+        assert_eq!(out.facts[0].source_episode_id, "e1");
+    }
+
+    #[test]
+    fn parse_facts_envelope_lenient_still_rejects_genuinely_malformed_fenced_object() {
+        // Precision guard: leniency never widens acceptance. A fenced but
+        // doubly-malformed object must still fail (None), preserving the
+        // Err-never-marks-episodes path.
+        let fenced = "```json\n{\"facts\":[1,,2]}\n```";
+        assert!(
+            parse_facts_envelope_lenient(fenced).is_none(),
+            "a doubly-malformed fenced object must not be recovered"
+        );
     }
 
     #[test]

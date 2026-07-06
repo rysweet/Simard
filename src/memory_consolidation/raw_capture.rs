@@ -148,6 +148,11 @@ fn state_root() -> PathBuf {
 pub struct CaptureMeta<'a> {
     /// Stable failure-class label — capture only fires for `"parse-failure"`.
     pub failure_class: &'a str,
+    /// Stable parse-failure *shape* label (issue #2495): `missing-file`,
+    /// `empty-document`, or `unparseable-object`. Mirrors the metric's
+    /// `parse_failure_shape` so a harvested sample correlates 1:1 with its
+    /// `metrics.jsonl` shape. `None` when the shape is unknown/not applicable.
+    pub parse_failure_shape: Option<&'a str>,
     /// Whether the recipe process exited `0`.
     pub recipe_exited_ok: bool,
     /// 1-based runner invocation count for the pass.
@@ -291,6 +296,9 @@ fn render_sample(cfg: &RawCaptureConfig, meta: &CaptureMeta<'_>, raw: &str) -> S
     s.push_str("# distill parse-failure raw capture\n");
     s.push_str("# See docs/reference/distill-raw-capture-on-parse-failure.md\n");
     s.push_str(&format!("# failure_class: {}\n", meta.failure_class));
+    if let Some(shape) = meta.parse_failure_shape {
+        s.push_str(&format!("# parse_failure_shape: {shape}\n"));
+    }
     s.push_str(&format!("# recipe_exited_ok: {}\n", meta.recipe_exited_ok));
     s.push_str(&format!("# attempt: {}\n", meta.attempt));
     s.push_str(&format!(
@@ -409,6 +417,7 @@ mod tests {
     fn parse_failure_meta() -> CaptureMeta<'static> {
         CaptureMeta {
             failure_class: "parse-failure",
+            parse_failure_shape: None,
             recipe_exited_ok: true,
             attempt: 2,
             recovered_after_retry: false,
@@ -628,6 +637,49 @@ mod tests {
         assert!(
             body.contains(raw),
             "the exact failing bytes must be preserved verbatim; body:\n{body}"
+        );
+    }
+
+    // ── issue #2495: parse-failure SHAPE tag in the capture header ──────
+    //
+    // TDD (RED). The implementation must add a
+    //   pub parse_failure_shape: Option<&'a str>
+    // field to `CaptureMeta` (mirroring the metric's parse_failure_shape) and
+    // emit one `# parse_failure_shape:` header line beside `# failure_class:`,
+    // so a harvested payload correlates 1:1 with its metrics.jsonl shape.
+
+    /// A parse-failure `CaptureMeta` tagged with the parser-addressable shape.
+    fn unparseable_object_meta() -> CaptureMeta<'static> {
+        CaptureMeta {
+            failure_class: "parse-failure",
+            parse_failure_shape: Some("unparseable-object"),
+            recipe_exited_ok: true,
+            attempt: 2,
+            recovered_after_retry: false,
+            input_count: 34,
+            fact_count: 0,
+        }
+    }
+
+    #[test]
+    fn capture_header_carries_parse_failure_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = enabled_cfg(tmp.path().to_path_buf());
+        let raw = "some unparseable bytes {facts: []}";
+
+        let path = capture_parse_failure(&cfg, &unparseable_object_meta(), raw)
+            .expect("best-effort capture never surfaces an error")
+            .expect("an enabled parse-failure capture must write a sample");
+
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains("# parse_failure_shape: unparseable-object"),
+            "the sample header must tag the parse-failure shape; body:\n{body}"
+        );
+        // The pre-existing failure_class line must remain beside it.
+        assert!(
+            body.contains("# failure_class: parse-failure"),
+            "body:\n{body}"
         );
     }
 

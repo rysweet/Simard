@@ -11,7 +11,7 @@ pub mod extract;
 
 pub use extract::{
     VerdictMatch, balanced_objects, extract_json_payload, extract_verdict, last_balanced_object,
-    strip_ansi, strip_json_trailing_commas, strip_recipe_noise,
+    strip_ansi, strip_json_code_fences, strip_json_trailing_commas, strip_recipe_noise,
 };
 
 /// Record the outcome of a recipe-output parse for one phase.
@@ -34,4 +34,24 @@ pub fn record_parse_outcome(phase: &str, success: bool) {
         "recipe_parse_failure_total"
     };
     let _ = crate::self_metrics::record_metric(metric_name, 1.0, phase);
+}
+
+#[cfg(test)]
+mod reexport_tests {
+    //! TDD (RED) — issue #2495: the evidence-gated lenient transforms must be
+    //! re-exported from `recipe_output` alongside the pre-existing shared
+    //! primitives, so every recipe-backed phase reaches them at the one shared
+    //! chokepoint (not just distill). This pins `strip_json_code_fences` into
+    //! the public re-export block beside `strip_json_trailing_commas`.
+
+    #[test]
+    fn strip_json_code_fences_is_reexported_from_recipe_output() {
+        // Resolving this crate path proves the re-export exists; unwrapping a
+        // fenced object proves it is the real transform, not a shadow.
+        let out = crate::recipe_output::strip_json_code_fences("```json\n{\"facts\":[]}\n```");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&out).is_ok(),
+            "re-exported strip_json_code_fences must unwrap a fenced object: {out}"
+        );
+    }
 }

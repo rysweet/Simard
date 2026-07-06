@@ -403,6 +403,53 @@ fn next_nonspace_is_close(bytes: &[u8], mut i: usize) -> bool {
     false
 }
 
+/// Strip a **wrapping Markdown code fence** — a leading ```` ``` ```` (optionally
+/// with a language tag such as ```` ```json ````) and its matching trailing
+/// ```` ``` ```` — as a last-resort recovery view for an LLM facts object an
+/// agent wrapped in a fenced block (issue #2495).
+///
+/// A fenced payload is the second most common real-world LLM-JSON wrapper (after
+/// the trailing comma), and the fence markers are **never valid JSON**, so this
+/// stripper is a *provable no-op on valid input*: it returns [`Cow::Borrowed`]
+/// byte-for-byte unchanged whenever the payload does not *begin* with a fence
+/// (the zero-allocation clean path). A caller therefore retries a strict-parse
+/// failure on this view without any risk of altering behaviour on well-formed
+/// output.
+///
+/// Only a *wrapping* fence is unwrapped: anchoring on the payload **beginning**
+/// with ```` ``` ```` means a ```` ``` ```` sequence that lives inside a JSON
+/// string value (e.g. a fact's `content` quoting a shell command) is content,
+/// not a fence, and is left untouched. The closing fence is located with
+/// `rfind`, so a ```` ``` ```` inside the wrapped object cannot truncate the
+/// payload early.
+///
+/// Leniency never widens acceptance: unwrapping a fence around a still-malformed
+/// object (e.g. `[1,,2]`) leaves it malformed so the caller's strict parse still
+/// rejects it. Only ASCII backtick/whitespace bytes bound the removed regions,
+/// so the recovered slice is always valid UTF-8.
+pub fn strip_json_code_fences(s: &str) -> Cow<'_, str> {
+    // Anchor on a *wrapping* fence: the payload must begin (after leading
+    // insignificant whitespace) with ```` ``` ````. Any other ``` is content.
+    let lead_ws = s.len() - s.trim_start().len();
+    let after_lead = &s[lead_ws..];
+    if !after_lead.starts_with("```") {
+        return Cow::Borrowed(s);
+    }
+    // The opening fence line is ``` plus an optional language tag, terminated by
+    // a newline. Without that newline there is no fenced *block* to unwrap.
+    let after_open_ticks = &after_lead[3..];
+    let Some(nl) = after_open_ticks.find('\n') else {
+        return Cow::Borrowed(s);
+    };
+    let body = &after_open_ticks[nl + 1..];
+    // The closing fence is the LAST ``` — a ``` inside the wrapped object cannot
+    // truncate the payload. Absent a closing fence there is no complete block.
+    let Some(close) = body.rfind("```") else {
+        return Cow::Borrowed(s);
+    };
+    Cow::Owned(body[..close].trim().to_string())
+}
+
 /// Extract a JSON object from noisy recipe stdout as an owned `String`.
 ///
 /// Tries two cleaned views and returns the last balanced `{…}` from the first
@@ -806,6 +853,96 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&fixed).expect("multibyte content must stay valid after strip");
         assert_eq!(v["content"], "café — δοκιμή");
+    }
+
+    // ---- strip_json_code_fences (issue #2495) ----------------------------
+    //
+    // TDD (RED): pins the NEW transform the implementation must add here:
+    //   pub fn strip_json_code_fences(s: &str) -> Cow<'_, str>
+    // Same last-resort recovery-view contract as `strip_json_trailing_commas`:
+    // provable no-op on valid JSON (Borrowed), string-literal aware, single-pass
+    // O(n), and never widens acceptance of genuinely malformed input.
+
+    #[test]
+    fn strip_code_fences_valid_json_is_borrowed_zero_copy() {
+        // Provable no-op on un-fenced, valid JSON: the clean path must not
+        // allocate and must be byte-identical, so a strict-parse retry on this
+        // view can never change behaviour on well-formed output.
+        let s = r#"{"facts":[{"concept":"pr-pattern","content":"a"}],"procedures":[]}"#;
+        let out = strip_json_code_fences(s);
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "un-fenced JSON must borrow unchanged (zero-alloc)"
+        );
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn strip_code_fences_unwraps_language_tagged_fence() {
+        // The most common wrapper an agent emits: a ```json … ``` Markdown fence
+        // around an otherwise-valid object. Unwrapping yields parseable JSON.
+        let fenced = "```json\n{\"facts\":[{\"concept\":\"pr-pattern\",\"content\":\"a\"}]}\n```";
+        let out = strip_json_code_fences(fenced);
+        assert!(
+            matches!(out, Cow::Owned(_)),
+            "an actual change must allocate"
+        );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&out).is_ok(),
+            "unwrapped fence must be valid JSON: {out}"
+        );
+    }
+
+    #[test]
+    fn strip_code_fences_unwraps_bare_fence_without_language_tag() {
+        // A bare ``` fence (no language tag) is unwrapped just the same.
+        let fenced = "```\n{\"facts\":[]}\n```";
+        let out = strip_json_code_fences(fenced);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&out).is_ok(),
+            "bare fence must unwrap to valid JSON: {out}"
+        );
+    }
+
+    #[test]
+    fn strip_code_fences_never_touches_backticks_inside_string_content() {
+        // A ``` sequence INSIDE a JSON string value is content, not a wrapping
+        // fence: with no wrapping fence present the transform must borrow the
+        // input byte-for-byte and never strip the string-internal backticks.
+        let s =
+            r#"{"facts":[{"concept":"lesson-learned","content":"run ```cargo test``` first"}]}"#;
+        let out = strip_json_code_fences(s);
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "string-internal backticks are not a wrapping fence — must borrow"
+        );
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn strip_code_fences_preserves_string_value_when_unwrapping() {
+        // When a real wrapping fence IS unwrapped, a fence-looking substring that
+        // lives inside a string value must survive verbatim.
+        let fenced = "```json\n{\"content\":\"see ```here```\"}\n```";
+        let out = strip_json_code_fences(fenced);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("unwrapped object must parse");
+        assert_eq!(
+            v["content"], "see ```here```",
+            "the inner string value must be preserved byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn strip_code_fences_leaves_genuinely_malformed_still_malformed() {
+        // Leniency never widens acceptance: unwrapping a fence around a
+        // still-broken object leaves it broken so the caller's strict parse
+        // still rejects it (precision proof).
+        let fenced = "```json\n{\"facts\":[1,,2]}\n```";
+        let out = strip_json_code_fences(fenced);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&out).is_err(),
+            "a doubly-malformed array must remain malformed after unwrap: {out}"
+        );
     }
 }
 

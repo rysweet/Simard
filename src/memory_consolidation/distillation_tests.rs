@@ -44,7 +44,8 @@
 use crate::memory_consolidation::distillation::{
     DISTILL_BATCH_SIZE, DISTILL_FACT_CONFIDENCE, DISTILL_MIN_EPISODES, DISTILL_PARSE_RETRY_MAX,
     DISTILL_RELIABILITY_THRESHOLD, DistillRecipeRunner, DistilledFact, KNOWN_DISTILL_CONCEPTS,
-    assess_fact_reliability, distill_recent_episodes_with_runner,
+    ParseFailureShape, assess_fact_reliability, classify_parse_failure_shape,
+    distill_recent_episodes_with_runner,
 };
 // Fixed fact-yield corpus, shared with `distillation_fact_yield_bench` so the
 // full-pass test below measures the identical input the benchmark records.
@@ -1555,6 +1556,116 @@ fn surviving_parse_failure_writes_nothing_when_capture_disabled() {
     assert!(
         !created_any,
         "capture is default-off: no sample may be written when the toggle is falsy"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Issue #2495 (RED): parse-failure SHAPE — public API + end-to-end capture tag
+// ───────────────────────────────────────────────────────────────────────────
+//
+// These pin the shipped shape sub-classification at the crate's public
+// boundary (proving the symbols are `pub` and reachable), and end-to-end at the
+// single distill escalation site (proving the shape is computed from the same
+// SimardError the class is and threaded into the raw-capture header).
+
+/// Public-API integration: the three `ParseFailure` prefixes map to the three
+/// shapes, and only `UnparseableObject` is parser-addressable. Complements the
+/// inline unit tests by exercising the symbols through the crate path (a private
+/// classifier would fail to resolve here).
+#[test]
+fn classify_parse_failure_shape_maps_the_three_shapes_via_public_api() {
+    let missing = SimardError::RpcError(
+        "distill: facts output file was not written by the agent (/x): boom".to_string(),
+    );
+    let empty = SimardError::RpcError(
+        "distill: facts document was empty; the agent produced no output".to_string(),
+    );
+    let unparseable = SimardError::RpcError(
+        "distill: facts document did not contain a parseable { \"facts\": [...] } object: x"
+            .to_string(),
+    );
+
+    assert_eq!(
+        classify_parse_failure_shape(&missing),
+        Some(ParseFailureShape::MissingFile)
+    );
+    assert_eq!(
+        classify_parse_failure_shape(&empty),
+        Some(ParseFailureShape::EmptyDocument)
+    );
+    assert_eq!(
+        classify_parse_failure_shape(&unparseable),
+        Some(ParseFailureShape::UnparseableObject)
+    );
+
+    // The gate that decides whether parser work is even worthwhile.
+    assert!(
+        classify_parse_failure_shape(&unparseable)
+            .unwrap()
+            .is_parser_addressable()
+    );
+    assert!(
+        !classify_parse_failure_shape(&empty)
+            .unwrap()
+            .is_parser_addressable()
+    );
+
+    // A non-`ParseFailure` error carries no shape.
+    let terminal =
+        SimardError::RpcError("distill: recipe exited with exit status: 1: stderr= stdout=".into());
+    assert_eq!(classify_parse_failure_shape(&terminal), None);
+}
+
+/// End-to-end: a surviving `ParseFailure` escalates through
+/// `distill_recent_episodes_with_runner`, and the harvested raw-capture sample
+/// is tagged with the computed shape. `ScriptedRunner`'s `Attempt::Parse` emits
+/// the "did not contain a parseable" error ⇒ `unparseable-object`, so the
+/// header must carry `# parse_failure_shape: unparseable-object` beside the
+/// existing `# failure_class:` line — proving the shape is threaded at the one
+/// escalation site, not just computable in isolation.
+#[test]
+#[serial_test::serial(simard_distill_raw_capture_env, cognitive_memory)]
+fn surviving_parse_failure_capture_is_tagged_with_the_parse_failure_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let capture_dir = tmp.path().join("distill-captures");
+    let _enable = RawCaptureEnvGuard::set("SIMARD_DISTILL_RAW_CAPTURE", "1");
+    let _dir = RawCaptureEnvGuard::set(
+        "SIMARD_DISTILL_RAW_CAPTURE_DIR",
+        capture_dir.to_str().unwrap(),
+    );
+
+    let n = DISTILL_MIN_EPISODES as usize + 3;
+    let mock = EpisodeMock::with_episodes(n_episodes(n));
+    let runner = ScriptedRunner::new(vec![Attempt::Parse]);
+
+    let report = distill_recent_episodes_with_runner(&mock, &runner);
+    assert!(report.is_err(), "a surviving parse failure must return Err");
+
+    let samples: Vec<std::path::PathBuf> = std::fs::read_dir(&capture_dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.file_name().and_then(|s| s.to_str()).is_some_and(|nm| {
+                        nm.starts_with("distill-parsefail-") && nm.ends_with(".txt")
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        samples.len(),
+        1,
+        "an enabled, surviving parse failure must write exactly one sample; found {samples:?}"
+    );
+
+    let body = std::fs::read_to_string(&samples[0]).unwrap();
+    assert!(
+        body.contains("# parse_failure_shape: unparseable-object"),
+        "the escalation site must tag the capture with the parser-addressable shape; body:\n{body}"
+    );
+    assert!(
+        body.contains("# failure_class: parse-failure"),
+        "the pre-existing failure_class header must remain; body:\n{body}"
     );
 }
 
