@@ -1642,3 +1642,82 @@ fn full_pass_promotes_canonicalized_surface_variants_through_dedup() {
         );
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #2689: consolidated rate-verification harness
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A single regression tripwire that drives all THREE historical 74%-era distill
+// parse-failure shapes through the REAL production entry point
+// `parse_facts_document` and asserts each RECOVERS — returns `Ok` AND yields at
+// least one grounded, canonical-concept fact. A pass counts as a "failure" iff
+// it returns `Err` OR yields zero facts (the exact definition the live
+// `distill_parse_success_rate` self-metric is driven from). Because the metric
+// reads this same `parse_facts_document` return value on every real pass, a
+// regression in any shape here is the deterministic analog of the live rate
+// climbing back toward 74% — and fails CI first.
+//
+// This CONSOLIDATES coverage already merged for the three fixes (#2658
+// trailing-comma tolerance, #2622 banner-agnostic file channel / balanced-object
+// scan, #2528 concept canonicalization). It REUSES those merged primitives and
+// re-implements none of them (`strip_json_trailing_commas`, `balanced_objects`,
+// `canonical_distill_concept`). The final assertion is the precision guard: a
+// GENUINELY off-spec label must still be dropped, so recovery never weakens the
+// concept contract.
+
+#[test]
+fn distill_recovers_trailing_comma_banner_and_offspec_shapes() {
+    // (human label, recipe document). Each must parse AND yield >= 1 grounded,
+    // canonical-concept fact.
+    let shapes: &[(&str, &str)] = &[
+        (
+            "trailing-comma before the closing `]`/`}` (#2658)",
+            r#"{"facts":[{"concept":"pr-pattern","content":"warm the cache before pin bumps","source_episode_id":"epi_1"},],}"#,
+        ),
+        (
+            "leading launcher banner / prose before the JSON object (#2622)",
+            "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference)\n\
+             launching copilot binary=/x version=\"GitHub Copilot CLI 1.0.69-2.\"\n\
+             {\"facts\":[{\"concept\":\"bug-pattern\",\"content\":\"missing guard in handler\",\"source_episode_id\":\"epi_2\"}]}",
+        ),
+        (
+            "off-spec surface-form concept variant (case/`_`/whitespace) (#2528)",
+            r#"{"facts":[{"concept":" PR_Pattern ","content":"squash fixups before merge","source_episode_id":"epi_3"}]}"#,
+        ),
+    ];
+
+    for (label, document) in shapes {
+        let out = parse_facts_document(document)
+            .unwrap_or_else(|e| panic!("74%-era shape {label:?} must parse, not Err: {e}"));
+        assert!(
+            !out.facts.is_empty(),
+            "74%-era shape {label:?} parsed but yielded zero facts (still a \
+             parse-failure by the metric's definition)"
+        );
+        for f in &out.facts {
+            assert!(
+                matches!(
+                    f.concept.as_str(),
+                    "pr-pattern" | "bug-pattern" | "lesson-learned"
+                ),
+                "shape {label:?} yielded a non-canonical concept {:?}",
+                f.concept
+            );
+            assert!(
+                !f.source_episode_id.trim().is_empty(),
+                "shape {label:?} yielded an ungrounded fact (empty source_episode_id)"
+            );
+        }
+    }
+
+    // Precision guard: a GENUINELY off-spec label (not a recoverable surface
+    // variant) must still be dropped — recovery must not weaken the contract.
+    let offspec = parse_facts_document(
+        r#"{"facts":[{"concept":"made-up-label","content":"nope","source_episode_id":"epi_9"}]}"#,
+    )
+    .expect("a document with an off-spec label still parses (to zero facts)");
+    assert!(
+        offspec.facts.is_empty(),
+        "a genuinely off-spec concept must remain dropped, never recovered"
+    );
+}

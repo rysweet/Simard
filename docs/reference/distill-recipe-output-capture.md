@@ -7,6 +7,7 @@ doc_type: reference
 related:
   - ../architecture/episode-distillation.md
   - ./automatic-distillation-scheduler.md
+  - ./distill-zero-facts-observability.md
   - ./cognitive-memory-provenance.md
   - ./text-parsing-wire-formats.md
   - ../concepts/copilot-launcher-preamble-stripping.md

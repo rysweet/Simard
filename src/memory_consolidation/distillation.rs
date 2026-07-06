@@ -1491,7 +1491,9 @@ impl RecipeEnvelope {
         // whitespace / `_`↔`-`) of a label it clearly intends. Off-spec
         // concepts (incl. `skip` if it ever lands here) still return `None` and
         // are dropped; recovered facts are stored under the canonical label.
-        self.facts
+        let pre_filter = self.facts.len();
+        let facts: Vec<DistilledFact> = self
+            .facts
             .into_iter()
             .filter_map(|f| {
                 canonical_distill_concept(&f.concept).map(|concept| DistilledFact {
@@ -1500,7 +1502,39 @@ impl RecipeEnvelope {
                     source_episode_id: f.source_episode_id,
                 })
             })
-            .collect()
+            .collect();
+
+        // Issue #2689: zero-facts observability. A document that parsed cleanly
+        // but stored NOTHING was the invisible residual of the 74%-era distill
+        // parse-failure rate — such a pass recorded
+        // `distill_parse_success_rate = 1.0` yet yielded no facts, so no operator
+        // signal existed. Emit a distinct, CONTENT-FREE (integer counts only)
+        // note when the surviving list is empty, distinguishing off-spec-concept
+        // CONTRACT DRIFT (loud) from a legitimately empty envelope (quiet). This
+        // is a pure side effect: the returned Vec is byte-identical to the
+        // pre-#2689 behavior, the message shares no prefix with any distill
+        // `SimardError`/parse-failure string (so it is never miscounted as a
+        // failure), and it never leaks fact content / concept / source_episode_id.
+        // See docs/reference/distill-zero-facts-observability.md.
+        if facts.is_empty() {
+            if pre_filter > 0 {
+                tracing::info!(
+                    target: "simard::distill",
+                    dropped_offspec = pre_filter,
+                    "distill: valid parse yielded zero usable facts: all {pre_filter} fact(s) dropped as off-spec concepts"
+                );
+                eprintln!(
+                    "[simard] distill: valid parse yielded zero usable facts: all {pre_filter} fact(s) dropped as off-spec concepts"
+                );
+            } else {
+                tracing::trace!(
+                    target: "simard::distill",
+                    "distill: valid parse with an empty facts list (nothing worth distilling)"
+                );
+            }
+        }
+
+        facts
     }
 
     fn into_procedures(self) -> Vec<DistilledProcedure> {
@@ -2078,6 +2112,362 @@ mod unit_tests {
         // answer and must parse to zero facts (not an error).
         let facts = parse_facts(r#"{"facts":[]}"#).unwrap();
         assert!(facts.is_empty());
+    }
+
+    // ── issue #2689: zero-facts observability signal ────────────────────────
+    //
+    // TDD (RED) contract for the third, previously-invisible root cause of the
+    // residual ~74% distill parse-failure rate: a document that parses cleanly
+    // but whose facts are ALL dropped as off-spec concept labels by
+    // `RecipeEnvelope::into_facts`. Such a pass records
+    // `distill_parse_success_rate = 1.0` yet stores nothing, so it was silent.
+    //
+    // `into_facts` must measure the concept filter's effect and emit a distinct,
+    // CONTENT-FREE observability signal ONLY when the surviving fact list is
+    // empty (see docs/reference/distill-zero-facts-observability.md):
+    //
+    //   * pre_filter > 0, post_filter == 0  → LOUD  `info!` (+ eprintln),
+    //     target `simard::distill`, message "…zero usable facts… off-spec…"
+    //     — contract drift: every fact dropped as an off-spec concept.
+    //   * pre_filter == 0, post_filter == 0 → QUIET `trace!`, same target,
+    //     "…empty facts list…" — a legitimately empty `{"facts":[]}` answer.
+    //   * post_filter  > 0                  → NO signal (normal success).
+    //
+    // The signal carries integer COUNTS ONLY (never fact content / concept /
+    // source_episode_id), is a NON-ERROR message (`into_facts` never returns
+    // `Err`), and fires EXACTLY ONCE per parsed document. The returned Vec is
+    // byte-identical to the pre-#2689 behavior.
+    //
+    // These tests exercise the PRIVATE `into_facts` / `into_output`, so they
+    // live here (not in `distillation_tests.rs`). The *filtering result*
+    // (surface-form recovery, off-spec drop) is already pinned by
+    // `into_facts_recovers_surface_variant_but_drops_offspec` above and is NOT
+    // re-asserted; these add only the log-emission (side-effect) assertions.
+    // They are RED until the signal is implemented: `into_facts` emits nothing
+    // today, so the presence assertions fail.
+
+    /// One `tracing` event captured on the current thread, reduced to the parts
+    /// the zero-facts contract constrains (target, level, message, fields).
+    #[derive(Clone, Debug)]
+    struct CapturedDistillEvent {
+        target: String,
+        level: tracing::Level,
+        message: String,
+        fields: std::collections::BTreeMap<String, String>,
+    }
+
+    impl CapturedDistillEvent {
+        /// The message plus every field value, for content-leak scanning.
+        fn rendered(&self) -> String {
+            let mut s = self.message.clone();
+            for (k, v) in &self.fields {
+                s.push(' ');
+                s.push_str(k);
+                s.push('=');
+                s.push_str(v);
+            }
+            s
+        }
+    }
+
+    #[derive(Default)]
+    struct DistillEventVisitor {
+        message: String,
+        fields: std::collections::BTreeMap<String, String>,
+    }
+
+    impl tracing::field::Visit for DistillEventVisitor {
+        // Only the two methods with distinct behavior are implemented: the
+        // required `record_debug` (captures the message and the single numeric
+        // `dropped_offspec` count — tracing's default numeric/bool visitors
+        // forward to it) and `record_str` (avoids Debug quote-wrapping of any
+        // string field). The zero-facts signal emits nothing else.
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            let rendered = format!("{value:?}");
+            if field.name() == "message" {
+                self.message = rendered;
+            } else {
+                self.fields.insert(field.name().to_string(), rendered);
+            }
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "message" {
+                self.message = value.to_string();
+            } else {
+                self.fields
+                    .insert(field.name().to_string(), value.to_string());
+            }
+        }
+    }
+
+    /// A `tracing_subscriber` layer that buffers every event it sees, so a log
+    /// SIDE-EFFECT (not a return value) can be asserted without adding any
+    /// production return-struct or callback purely for testability.
+    struct DistillCaptureLayer {
+        events: std::sync::Arc<std::sync::Mutex<Vec<CapturedDistillEvent>>>,
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for DistillCaptureLayer
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        // Advertise TRACE so the quiet legitimately-empty note is captured too.
+        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+            Some(tracing::level_filters::LevelFilter::TRACE)
+        }
+
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = DistillEventVisitor::default();
+            event.record(&mut visitor);
+            let meta = event.metadata();
+            self.events.lock().unwrap().push(CapturedDistillEvent {
+                target: meta.target().to_string(),
+                level: *meta.level(),
+                message: visitor.message,
+                fields: visitor.fields,
+            });
+        }
+    }
+
+    /// Run `f` under a thread-local capturing subscriber and return every event
+    /// it emitted on this thread (all levels). Thread-local scoping via
+    /// `with_default` keeps parallel tests isolated.
+    fn capture_distill_events<F: FnOnce()>(f: F) -> Vec<CapturedDistillEvent> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let layer = DistillCaptureLayer {
+            events: std::sync::Arc::clone(&events),
+        };
+        let subscriber = tracing_subscriber::Registry::default().with(layer);
+        tracing::subscriber::with_default(subscriber, f);
+        let guard = events.lock().unwrap();
+        guard.clone()
+    }
+
+    /// The loud contract-drift events: INFO, on the `simard::distill` target,
+    /// announcing zero usable facts. There must be exactly one per parse.
+    fn loud_zero_facts_events(events: &[CapturedDistillEvent]) -> Vec<&CapturedDistillEvent> {
+        events
+            .iter()
+            .filter(|e| {
+                e.target == "simard::distill"
+                    && e.level == tracing::Level::INFO
+                    && e.message.contains("zero usable facts")
+            })
+            .collect()
+    }
+
+    /// Any zero-facts note (loud info OR quiet trace) on the distill target.
+    fn any_zero_facts_note(events: &[CapturedDistillEvent]) -> bool {
+        events.iter().any(|e| {
+            e.target == "simard::distill"
+                && (e.message.contains("zero usable facts")
+                    || e.message.contains("empty facts list"))
+        })
+    }
+
+    #[test]
+    fn into_facts_logs_when_all_concepts_offspec() {
+        // Three parseable facts, EVERY concept off-spec → into_facts returns an
+        // empty vec AND emits the loud (info-level) contract-drift signal that
+        // makes the residual 74%-era "clean parse, stored nothing" visible.
+        let envelope = RecipeEnvelope {
+            facts: vec![
+                RecipeFact {
+                    concept: "pull-request".into(),
+                    content: "a".into(),
+                    source_episode_id: "epi_1".into(),
+                },
+                RecipeFact {
+                    concept: "pull-request".into(),
+                    content: "b".into(),
+                    source_episode_id: "epi_2".into(),
+                },
+                RecipeFact {
+                    concept: "made-up-label".into(),
+                    content: "c".into(),
+                    source_episode_id: "epi_3".into(),
+                },
+            ],
+            procedures: Vec::new(),
+        };
+
+        let mut facts: Vec<DistilledFact> = Vec::new();
+        let events = capture_distill_events(|| {
+            facts = envelope.into_facts();
+        });
+
+        assert!(
+            facts.is_empty(),
+            "all three off-spec concepts must be dropped"
+        );
+
+        let loud = loud_zero_facts_events(&events);
+        assert_eq!(
+            loud.len(),
+            1,
+            "exactly one loud zero-facts signal must fire when every fact is \
+             off-spec; captured: {events:?}"
+        );
+        let ev = loud[0];
+        assert_eq!(ev.target, "simard::distill");
+        assert_eq!(ev.level, tracing::Level::INFO);
+        assert!(
+            ev.message.contains("off-spec"),
+            "the loud signal must name the contract-drift cause (off-spec \
+             concepts): {:?}",
+            ev.message
+        );
+        assert!(
+            ev.rendered().contains('3'),
+            "the loud signal must carry the count of dropped facts (3): {:?}",
+            ev.rendered()
+        );
+    }
+
+    #[test]
+    fn into_facts_quiet_on_legitimately_empty_envelope() {
+        // `{"facts":[]}` is a legitimate "nothing worth distilling" answer:
+        // into_facts returns empty and must NOT emit the LOUD info signal — only
+        // a QUIET trace-level note (visible at RUST_LOG=simard::distill=trace).
+        let envelope = RecipeEnvelope {
+            facts: Vec::new(),
+            procedures: Vec::new(),
+        };
+        let mut facts: Vec<DistilledFact> = Vec::new();
+        let events = capture_distill_events(|| {
+            facts = envelope.into_facts();
+        });
+
+        assert!(facts.is_empty());
+        assert!(
+            loud_zero_facts_events(&events).is_empty(),
+            "a legitimately empty envelope must NOT emit the loud signal: \
+             {events:?}"
+        );
+        let quiet = events.iter().any(|e| {
+            e.target == "simard::distill"
+                && e.level == tracing::Level::TRACE
+                && e.message.contains("empty facts list")
+        });
+        assert!(
+            quiet,
+            "a legitimately empty envelope must emit the quiet trace-level \
+             empty-facts note: {events:?}"
+        );
+    }
+
+    #[test]
+    fn into_facts_preserves_valid_facts_unchanged() {
+        // Clean-path no-op regression: a valid fact is returned byte-identical
+        // and NO zero-facts signal (loud or quiet) is emitted.
+        let envelope = RecipeEnvelope {
+            facts: vec![RecipeFact {
+                concept: "pr-pattern".into(),
+                content: "squash fixups before merge".into(),
+                source_episode_id: "epi_42".into(),
+            }],
+            procedures: Vec::new(),
+        };
+        let mut facts: Vec<DistilledFact> = Vec::new();
+        let events = capture_distill_events(|| {
+            facts = envelope.into_facts();
+        });
+
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "pr-pattern");
+        assert_eq!(facts[0].content, "squash fixups before merge");
+        assert_eq!(facts[0].source_episode_id, "epi_42");
+
+        assert!(
+            !any_zero_facts_note(&events),
+            "no zero-facts signal may be emitted when facts survive the filter: \
+             {events:?}"
+        );
+    }
+
+    #[test]
+    fn zero_facts_signal_is_content_free() {
+        // Privacy defense-in-depth: the loud signal must carry integer counts
+        // ONLY — never fact content, concept, or source_episode_id. Sentinels
+        // are chosen so any leak is unmistakable.
+        const SECRET_CONTENT: &str = "SENTINEL-CONTENT-must-never-leak";
+        const OFFSPEC_CONCEPT: &str = "SENTINEL-CONCEPT-offspec";
+        const SECRET_SOURCE: &str = "epi-SENTINEL-SOURCE";
+        let envelope = RecipeEnvelope {
+            facts: vec![RecipeFact {
+                concept: OFFSPEC_CONCEPT.into(),
+                content: SECRET_CONTENT.into(),
+                source_episode_id: SECRET_SOURCE.into(),
+            }],
+            procedures: Vec::new(),
+        };
+        let mut facts: Vec<DistilledFact> = Vec::new();
+        let events = capture_distill_events(|| {
+            facts = envelope.into_facts();
+        });
+        assert!(
+            facts.is_empty(),
+            "the sentinel concept is off-spec and must be dropped"
+        );
+
+        let loud = loud_zero_facts_events(&events);
+        assert_eq!(
+            loud.len(),
+            1,
+            "the loud signal must fire for an all-off-spec parse: {events:?}"
+        );
+        let rendered = loud[0].rendered();
+        for secret in [SECRET_CONTENT, OFFSPEC_CONCEPT, SECRET_SOURCE] {
+            assert!(
+                !rendered.contains(secret),
+                "the zero-facts signal leaked {secret:?}: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn into_facts_fires_once_per_document() {
+        // `into_output` routes facts through `into_facts` (and procedures
+        // through `into_procedures`) exactly once, so a document whose facts are
+        // all off-spec emits the loud signal ONCE — never double-counted, even
+        // when procedures are present.
+        let envelope = RecipeEnvelope {
+            facts: vec![
+                RecipeFact {
+                    concept: "pull-request".into(),
+                    content: "x".into(),
+                    source_episode_id: "e1".into(),
+                },
+                RecipeFact {
+                    concept: "pull-request".into(),
+                    content: "y".into(),
+                    source_episode_id: "e2".into(),
+                },
+            ],
+            procedures: vec![RecipeProcedure {
+                name: "ci-fix".into(),
+                steps: vec!["re-run".into()],
+                source_episode_ids: vec!["e1".into()],
+            }],
+        };
+        let mut out = DistillOutput::default();
+        let events = capture_distill_events(|| {
+            out = envelope.into_output();
+        });
+
+        assert!(out.facts.is_empty(), "all off-spec facts must be dropped");
+        assert_eq!(out.procedures.len(), 1, "the valid procedure must survive");
+        assert_eq!(
+            loud_zero_facts_events(&events).len(),
+            1,
+            "the zero-facts signal must fire exactly once per parsed document \
+             (no double-count via the procedures branch): {events:?}"
+        );
     }
 }
 
