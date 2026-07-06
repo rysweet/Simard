@@ -37,9 +37,16 @@ fn main() -> ExitCode {
         }
     };
     // Bound the free-text objective before it rides on argv (issues #2640/#2692):
-    // a generous ceiling defensively closes the E2BIG argv-overflow class, and the
-    // same pass collapses newlines so a multi-line objective can never break the
-    // recipe's YAML interpolation (#2127).
+    // a generous 8000-char ceiling defensively closes the E2BIG argv-overflow
+    // class (8000 chars ≪ ARG_MAX), and the same pass collapses newlines so a
+    // multi-line objective can never break the recipe's YAML interpolation (#2127).
+    //
+    // A `spawn_payload::recipe_context` file channel (`objective_path`) would make
+    // this lossless, but `simard-engineer-loop.yaml` is an EXTERNAL asset
+    // (amplihack bundle, not this repo) that reads `{{objective}}` inline with no
+    // `{{objective_path}}` support — filing a large value would leave the loop
+    // with an empty objective. Bounded-inline stays the safe disposition until
+    // that external asset gains a `_path` read.
     let objective = simard::ooda_brain::sanitize::sanitize_context_var(&objective, 8000);
     let topology = arg(args, "--topology").unwrap_or_else(|| "single-process".to_string());
     let state_root = match arg(args, "--state-root") {

@@ -156,6 +156,12 @@ pub mod session_id;
 #[cfg(feature = "signal")]
 pub mod signal_conversation;
 pub mod skill_builder;
+// Issue #2640: the single large-payload spawn facade. One policy-enforcing
+// chokepoint every agent/recipe launch routes a (possibly large) prompt or
+// context value through, so a payload >= ARGV_PAYLOAD_MAX_BYTES is always
+// delivered out-of-band (copilot prompts on stdin, recipe context on a file)
+// and never touches argv/envp — closing the recurring E2BIG class for good.
+pub mod spawn_payload;
 pub mod state_root;
 pub mod stewardship;
 pub mod subagent_sessions;

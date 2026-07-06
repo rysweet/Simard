@@ -37,9 +37,16 @@ fn main() {
     let weak_threshold = arg(&args, "--weak-threshold").unwrap_or("0.7");
     let target_dim = arg(&args, "--target-dimension").unwrap_or("");
     // Bound the free-text proposal before it rides on argv (issues #2640/#2692):
-    // a generous ceiling defensively closes the E2BIG argv-overflow class, and the
-    // same pass collapses newlines so a multi-line proposal can never break the
-    // recipe's YAML interpolation (#2127).
+    // a generous 8000-char ceiling defensively closes the E2BIG argv-overflow
+    // class (8000 chars ≪ ARG_MAX), and the same pass collapses newlines so a
+    // multi-line proposal can never break the recipe's YAML interpolation (#2127).
+    //
+    // A `spawn_payload::recipe_context` file channel (`proposal_path`) would make
+    // this lossless, but `simard-self-improve-cycle.yaml` is an EXTERNAL asset
+    // (amplihack bundle, not this repo) that reads `{{proposal}}` inline with no
+    // `{{proposal_path}}` support — filing a large value would leave the cycle
+    // with an empty proposal. Bounded-inline stays the safe disposition until
+    // that external asset gains a `_path` read.
     let proposal = simard::ooda_brain::sanitize::sanitize_context_var(proposal, 8000);
     let recipe =
         arg(&args, "--recipe").unwrap_or("amplifier-bundle/recipes/simard-self-improve-cycle.yaml");
