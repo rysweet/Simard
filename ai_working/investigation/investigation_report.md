@@ -5,14 +5,17 @@
 **Repo:** rysweet/Simard @ `92150406`
 **Anomaly signal:** `overseer-obs:anomaly:distill parse-fail rate 100%`
 
-> **⚠️ Read the Round-3 verification addendum first (bottom of this file).**
+> **⚠️ Read the "Consolidated Findings (Final)" section at the very bottom first.**
+> It reconciles all parallel deep dives (Track A parse-fail, Track B parity
+> goals, and the Overseer signal-emission/dedup model) into one self-contained,
+> live-`main`-verified answer. Where it disagrees with anything above, **the
+> Consolidated section wins.**
+>
 > Round 1/2 were written on the investigation branch base `92150406`, which is
 > **92 commits behind `main` (946fe3ca)**. Several Round-1 claims were correct
 > *for that stale base* but are **wrong for the live system (`main`)**. The
-> addendum re-verifies every criterion against `main` with file:line evidence,
-> confirms the Track A root cause still holds, and **corrects** the coupling and
-> branch/telemetry claims. Where the addendum and the body disagree, **the
-> addendum wins.**
+> Round-3 addendum re-verifies every criterion against `main` with file:line
+> evidence; the Consolidated section folds those corrections in.
 
 ---
 
@@ -403,3 +406,319 @@ computed per Observe pass from the `DISTILL_RUNS{result=ok|parse_fail}` counters
 - Issues (verified via `gh`): Simard **#2619 CLOSED**, **#2658 OPEN**, **#2669 OPEN**;
   kgpacks-rs **#12 CLOSED**, **#16 OPEN**, **#17 OPEN**, **#32 OPEN**.
 - Open PRs (docs-only): Simard **#2668**, **#2657**. No code fix for #2658.
+
+---
+
+# Tertiary (Track B) Deep-Dive Addendum — Parity Goal Dependency Graph & Stale-vs-Open Classification
+
+**Investigator:** tertiary (architect) — *kgpacks-rs parity goal dependency graph and
+stale-vs-open block classification with issue-state evidence.*
+**Verification base:** `main` @ `946fe3ca` (the branch the daemon Observes) + live `gh`
+issue/PR state for `rysweet/agent-kgpacks-rs`. Confirms and **mechanistically explains**
+the Round-1/Round-3 Track B classification; adds the completion-gate root mechanism and
+the full workstream landscape.
+
+## 1. The block set is RE-DERIVED every pass (stateless), not a persisted stale list
+
+`sensor::blocked_goals_from_board(board)` is a **pure, stateless projection** re-computed
+each Observe pass: it yields one `BlockedGoal` per `board.active` goal whose status is
+`GoalProgress::Blocked(reason)` (`src/overseer/sensor.rs:188-205`). There is **no
+persisted "blocked list"** — a goal appears in the signature *only while* its live board
+status is `Blocked`. This is the architectural reason the 2× signature is asymmetric: the
+second pass **drops `dbabd65f`/#12** because #12 closed (2026-07-05) and the goal stopped
+projecting as `Blocked`. So "recurrence" of the parity blocks = **honest per-pass
+re-derivation of a still-true board state**, and the #12 drop = **the board reconciling a
+now-resolved node** — not a dedup defect (consistent with the secondary track).
+
+## 2. Two distinct goal-hygiene signals — all four goals emitted `goal:blocked`, none `goal:stale`
+
+The classifier (`src/overseer/mod.rs`) emits **two different** goal-hygiene dedup keys:
+- `Signal::StaleGoal` → `goal:stale:{id}` — "re-litigated / stale-complete" (`:767-771`).
+- `Signal::GoalBlocked` → `goal:blocked:{id}` — GoalHygiene, `High` iff `needs_review`
+  else `Normal` (`:795-815`).
+
+Every goal in the observed signature carries `goal:blocked:{id}`, so at Observe time each
+of the four (incl. #12) was a live `GoalProgress::Blocked` on the active board — **not**
+yet reclassified as `StaleGoal`. The stewardship router `decide_blocked_goal`
+(`src/overseer/mod.rs:955-968`) then routes each block: `perpetual && no_progress_marker`
+→ `UnblockGoal` (self-heal false-park); `needs_review` → `EscalateBlockedGoal`; plain
+dependency/operator block → `Report` (respect it, leave untouched).
+
+## 3. Root mechanism of "stale vs open" — the deploy-aware done-gate needs THREE proofs
+
+`goal_curation::completion_gate` (`src/goal_curation/completion_gate.rs`) certifies a goal
+`Complete` **only** with `pr_merged` **AND** `issue_closed` **AND** `deployed`
+(`:369-393`; `deployed` is auto-true for non-self-affecting goals). Any missing proof →
+`Blocked{ missing:[…] }`, and the goal is **retained** on the active board with the
+missing-evidence annotation (`archive_completed_with_evidence`, `:493-520`). Perpetual/
+standing goals **never archive** (#2580): if driven to a terminal-looking status they
+`roll_to_new_cycle()` in place (`:508-515`). This gate is what mechanically separates a
+*stale* block from a *genuine* one, per the table below.
+
+## 4. Per-goal classification (issue-state + PR-state + gate evidence)
+
+| Goal | Issue | Issue state | Merged PR? | Done-gate verdict | Classification |
+|---|---|---|---|---|---|
+| `f29bb15c` advance-to-full-parity (umbrella) | — | standing umbrella | n/a | never archives; rolls each cycle | **STANDING (by design)** — active until all parity WSs land; not a stuck defect |
+| `dbabd65f` | **#12** parity-decision | **CLOSED** 2026-07-05 | **NONE** (decision-only; no code PR) | `issue_closed=✓`, `pr_merged=✗` → Blocked[PrNotMerged] | **STALE / false-park** — work done, gate can't certify (no merge artifact) |
+| `0c0ada69` | **#16** WS1 CVE eval | **OPEN** | **NONE** | Blocked[PrNotMerged, IssueOpen] | **GENUINELY-OPEN — critical path** |
+| `7f5afcca` | **#17** WS2 int8/PQ | **OPEN** | **NONE** | Blocked[PrNotMerged, IssueOpen] | **GENUINELY-OPEN — hard-gated on #16** |
+
+**Key mechanism for #12/`dbabd65f`:** #12 was closed as a **decision** ("ACCEPT the
+intentional deterministic-hash divergence; opt-in semantic BGE tracked in **#32 OPEN,
+non-default**"). No code PR references #12 (PR audit below). The completion gate's
+`pr_merged` requirement therefore can **never** be satisfied for this decision-only node,
+so a non-perpetual `dbabd65f` would pin as `Blocked[PrNotMerged]` forever — the textbook
+false-park the Overseer's `UnblockGoal` self-heal exists to clear. **Remediation: complete/
+`simard goal unblock dbabd65f`; do NOT re-litigate the embeddings decision (#32 owns it).**
+
+**#17 gate on #16 is explicit, not inferred:** #17's own body — *"Parity gate: run **the
+WS1 eval harness** on a quantized pack; adopt only if `delta_accuracy >= -0.02` AND
+retrieval hit@k parity."* #16 (WS1) *builds* that harness. #17 cannot be validated until
+#16 lands → hard sequence `#16 → #17`.
+
+## 5. Full workstream landscape — #16/#17 are the ONLY stalled parity sub-chain
+
+The umbrella `f29bb15c` spans far more than the three nodes in the signature. Live
+`rysweet/agent-kgpacks-rs` state:
+
+| WS | Issue | State | PR | Note |
+|---|---|---|---|---|
+| WS1 | **#16** | OPEN | **none** | eval harness — **critical path**, zero work in flight |
+| WS2 | **#17** | OPEN | **none** | int8/PQ — gated on #16 |
+| WS3 | #18 | CLOSED | #34 merged | versioned release tags |
+| WS4 | #19 | CLOSED | #35 merged | XDG data dir |
+| WS5 | #20 | CLOSED | #33 merged | CI >2GiB coverage |
+| WS6 | #21 | OPEN | none | resumable pipelined build |
+| WS7 | #22 | OPEN | **#36 open** | sign release index |
+| WS8 | #23 | OPEN | none | ENTITY_RELATION bulk load |
+| — | #25 | OPEN | none | fetch CVE corpus (cvelistV5) |
+| decision follow-up | #32 | OPEN | none | optional semantic embeddings (non-default, non-blocking) |
+
+**Architectural read:** the parity effort is *actively advancing* on WS3/4/5 (merged) and
+WS7 (PR #36), while **WS1/WS2 (#16/#17) — the eval+quant sub-chain — sat untouched with no
+PRs.** So #16 is not merely "next in the queue"; it is a **genuinely stalled critical-path
+node** whose stall also holds #17. The blocked signature surfaced a coherent, correct
+board picture: the stuck sub-chain (#16→#17) + the stale decision node (#12) + the standing
+umbrella. **No spurious blocks; no missing genuine blocks.**
+
+## 6. Re-derived-vs-stale verdict & coupling
+
+- **All four are re-derived each cycle** by the stateless projection (§1) — none is a
+  persisted phantom.
+- Only **`dbabd65f`/#12 is content-stale** (resolved issue + no merge artifact → an
+  ungate-able false-park); **`f29bb15c` persists by design** (standing goal); **#16 and
+  #17 are correctly, genuinely blocked** until real work + merged PRs land.
+- **Coupling to Track A: independent (re-confirmed).** `blocked_goals_from_board` reads
+  only `GoalBoard.active` goal *status*; nothing reads `distill_fail_pct`. Fixing #2658
+  neither unblocks #16/#17 nor un-stales #12. The two tracks share only the single Observe
+  pass that surfaced them together.
+
+## 7. Track-B remediation (ordered; unchanged by the distill fix)
+
+1. **`dbabd65f`/#12 — self-heal the stale block:** complete/unblock the goal (decision
+   recorded, issue CLOSED, opt-in tracked in #32). Do not re-open the embeddings decision.
+2. **`0c0ada69`/#16 (WS1) — critical path:** add the dir-confined `eval_questions.json`
+   loader, commit ≥12 CVE questions (≥6 real 2024/2025 CVEs w/ reference answers), commit
+   `data/packs/cve/eval-results.{md,json}` (or documented hit@k), CI offline via mock.
+3. **`7f5afcca`/#17 (WS2) — after #16:** implement `quantize_int8`/`dequantize_int8`
+   (scale=max|v|/127, bound-checked, all-zero safe, cosine>0.999 on L2-norm), additive
+   format; **gate adoption on the WS1 harness** (`delta_accuracy >= -0.02` + hit@k parity);
+   ship behind a flag only if parity holds, else DISABLED + spike findings.
+4. **`f29bb15c` (umbrella)** rolls to a fresh cycle and only retires once the parity
+   workstreams (#16/#17 and siblings #21/#22/#23/#25; #32 is non-default/non-blocking) land.
+
+## 8. Tertiary evidence index
+- `src/overseer/sensor.rs:188-205` `blocked_goals_from_board` (stateless per-pass projection);
+  `capabilities.rs:132-158` `BlockedGoal` struct (perpetual/needs_review/consecutive_no_action).
+- `src/overseer/mod.rs:767-771` `goal:stale`, `:795-815` `goal:blocked`, `:955-968`
+  `decide_blocked_goal` (UnblockGoal / EscalateBlockedGoal / Report).
+- `src/goal_curation/completion_gate.rs:1-18` gate doc, `:347-393` `evaluate`
+  (pr_merged ∧ issue_closed ∧ deployed), `:475-520` perpetual-never-archive + retain-blocked.
+- `gh` (rysweet/agent-kgpacks-rs): **#12 CLOSED** 2026-07-05 (decision, no PR), **#16 OPEN**
+  (no PR), **#17 OPEN** (no PR, gated on WS1 harness per body), **#32 OPEN** (non-default).
+  Sibling PRs: #33→#20, #34→#18, #35→#19 MERGED; #36→#22 OPEN. **No PR references #16 or #17.**
+
+---
+
+# Consolidated Findings (Final) — All Parallel Deep Dives Reconciled
+
+**Status:** AUTHORITATIVE. Supersedes Round 1/2 body and folds in the Round-3 +
+Tertiary addenda. Every claim below re-verified against **`main` @ `946fe3ca`**
+(the branch the daemon Observes) and live `gh` state on 2026-07-06.
+
+## 0. One-line verdict
+
+The recurring 2× signature is **two coincident-but-independent conditions**
+surfaced together by one Overseer Observe pass and honestly **re-emitted** each
+pass (there is no dedup defect): **(A)** a live 100% distill parse-failure caused
+by an **LLM trailing comma** that makes stock `serde_json` reject the whole facts
+object (**#2658 OPEN, no fix on any branch/PR**), and **(B)** a parity-goal
+dependency cluster that is **correctly blocked** — a stale decision node (#12) +
+a genuinely-stalled critical sub-chain (#16 → #17) under a standing umbrella
+(f29bb15c). **The two tracks are independent**; fixing one does not affect the
+other.
+
+## 1. The signature decoded (each token, verified)
+
+| Signature token | Meaning | Emitter (main) | Verified |
+|---|---|---|---|
+| `anomaly:distill parse-fail rate 100%` | 100% of distill runs return parse `Err` | `status/provider.rs` anomaly assembly → `Signal::Anomaly` → `format!("anomaly:{detail}")` `mod.rs:777` | ✅ live |
+| `process:distill_fail` | `DistillFailureRate` classified (High/ProcessHealth) | `mod.rs:714` | ✅ live |
+| `resource:engineer_spawn` | `EngineerSpawnRate` (`live_engineers ≥ 8`) | `mod.rs:741`; field `provider.rs:177` | ✅ live |
+| `quality:gym_skipped` | `GymSkipped` (Low/QualityRegression) | `mod.rs:753`; driven by **`SIMARD_SKIP_GYM`** env flag `provider.rs:61` + `sensor.rs:125-126` | ✅ live |
+| `goal:blocked:{id}` ×4 (f29bb15c, dbabd65f, 0c0ada69, 7f5afcca) | one per `GoalProgress::Blocked` active goal | `mod.rs:807`; projection `sensor.rs:188-205` | ✅ live |
+| `workstream-gap` | **NOT a code-emitted token** — no emitter in `src/`; originates in the Overseer brief/whisper narrative or #2669 author synthesis | `git grep workstream.gap main -- src/` → **empty** | ✅ refuted as code token |
+
+## 2. Track A — root cause of "distill parse-fail rate 100%"
+
+**Root cause (live on `main`):** an LLM **trailing comma** before `}`/`]` in the
+distiller agent's `{ "facts": [...] }`. A trailing comma keeps braces balanced,
+so `recipe_output::balanced_objects` still finds the span, but **stock
+`serde_json` 1.0.149 rejects the whole object** → every candidate parse fails →
+`recover_distill_output` returns `None` (`distillation.rs:1305-1341`) →
+`scan_for_facts_object` returns `None` (`:1420-1453`) → `parse_recipe_output_full`
+returns Tier-3 `Err` (`:1212-1255`) → batch deferred **every cycle** →
+`distill_parse_success_rate → 0` → Overseer reports **100%**.
+
+- **No lenient-JSON recovery exists on `main`:** `git grep -in
+  'trailing_comma|json5|json_repair|jsonc|relaxed_json|sanitize_json|
+  strip_json_trailing|lenient_json' main -- src/` → **empty** (verified now).
+- **Distinct from #2619 (CLOSED).** The banner/ANSI/pretty-envelope cause was
+  fixed (`recover_distill_output` + ANSI-strip dual views + prefer-last-facts,
+  `distillation.rs:1223-1452`) and closed. Because those fixes landed, the banner
+  cause **cannot** be the live 100%; the residual **trailing comma** is.
+- **Issue triangulation:** `#2658 OPEN` title (maintainer) = *"distill: residual
+  100% parse-failure — agent JSON trailing comma drops the whole batch."*
+- **No fix in flight:** `feat/issue-2658-distill-tolerate-trailing-comma` = `main`
+  tip (empty). `feat/issue-2658-distillation-parse-failure-rate-100` (`db117b98`)
+  diverges but does **retry + JSON-format reinforcement**, *not* comma stripping.
+  Open PRs are **docs-only** (#2668 this investigation, #2657 runbook).
+
+**Secondary, distinct symptom (do not conflate):** a valid parse can yield **zero
+facts** via the `into_facts` concept-label filter — a different mode from
+parse-fail; should log "valid parse yielded zero facts" separately.
+
+## 3. Track B — the four blocked parity goals (dependency + stale/open)
+
+Block set is **re-derived every pass** by the stateless projection
+`blocked_goals_from_board` (`sensor.rs:188-205`) — no persisted "stale list." The
+deploy-aware done-gate `completion_gate` certifies `Complete` only with
+`pr_merged ∧ issue_closed ∧ deployed` (`goal_curation/completion_gate.rs:347-393`).
+
+| Goal | Issue | Live state | Merged PR | Classification |
+|---|---|---|---|---|
+| `f29bb15c` umbrella | — | standing | n/a | **STANDING by design** — rolls each cycle; retires only when parity WSs land |
+| `dbabd65f` | **#12** | **CLOSED** (intentional divergence; opt-in BGE → **#32 OPEN**, non-default) | none | **STALE / false-park** — decision done, gate can't certify (no merge artifact). Self-heal via `UnblockGoal`; do **not** re-litigate |
+| `0c0ada69` | **#16** | **OPEN** | none | **GENUINELY OPEN — critical path** (WS1 CVE eval harness) |
+| `7f5afcca` | **#17** | **OPEN** | none | **GENUINELY OPEN — hard-gated on #16** (WS2 int8/PQ; adopt only if `delta_accuracy ≥ -0.02` + hit@k parity, run on the WS1 harness) |
+
+Full board is *advancing* elsewhere (WS3/#18, WS4/#19, WS5/#20 CLOSED+merged;
+WS7/#22 PR #36 open) — so #16→#17 is a **genuinely stalled sub-chain**, not merely
+"next in queue." No spurious blocks, no missing genuine blocks.
+
+## 4. Overseer signal-emission & dedup model — WHY it recurs 2×
+
+**Emission is stateless/threshold-based.** `signals_from(&ObservedState)`
+(`signal.rs:122`) regenerates every signal fresh each Observe pass from durable
+`ObservedState` fields; there is **no memory of prior passes** in emission.
+
+**Dedup is only two-layered, both narrow:**
+1. **Within-pass merge** in `orient()` (`mod.rs:680-698`): signals sharing a
+   `dedup_key` fold into one `Problem` (`classify_signal`, `mod.rs:709`). This
+   dedups *within a single pass*, never across passes.
+2. **Intervention-level `WhisperGate`** (`guardrails.rs:286`) with **900 s
+   (15-min)** windows (`whisper_gate = WhisperGate::new(900, 5)`,
+   `blocked_goal_gate = WhisperGate::new(900, 20)`, `mod.rs:220/226`) — rate-limits
+   *actions*, not signal emission.
+
+**⇒ There is no inter-pass signal dedup.** A persistent condition (distill 100% +
+blocked goals) is therefore **honestly re-emitted every pass** → the 2×
+recurrence. **This is expected behavior, not a bug.**
+
+**The 2× asymmetry is explained by state evolution, which *proves* re-emission
+and *rules out* an emit-duplicate defect:**
+- Pass 2 **adds** `resource:engineer_spawn` → `live_engineers` crossed its `≥ 8`
+  threshold between passes.
+- Pass 2 **drops** `goal:blocked:dbabd65f` (#12) → **#12 closed 2026-07-05**, so
+  the board stopped projecting it as `Blocked`.
+
+## 5. Coupling verdict — Track A ⟂ Track B (INDEPENDENT)
+
+- **Code layer: correlational only.** `distill_fail_pct`, `live_engineers`,
+  `gym_skipped`, and `blocked_goals` are **independent `ObservedState` fields from
+  independent subsystems**, read in one Observe pass. `blocked_goals_from_board`
+  reads only goal *status*; **nothing reads `distill_fail_pct`.**
+- **The gym link is REFUTED.** `gym_skipped` is the manual **`SIMARD_SKIP_GYM`**
+  env flag (`provider.rs:61`) — zero dependence on distill (`git grep distill
+  main -- src/gym/` → empty).
+- **Distilled facts feed cognitive memory** (`cognitive_memory/*`,
+  `memory_consolidation/mod.rs`), **not** the gym and **not** goal advancement.
+- **Net:** fixing **#2658** is **neither necessary nor sufficient** to unblock
+  #16/#17, and unblocking #16/#17 does not lower the parse-fail rate. The
+  "systemic drag" (stale memory slows brain/engineers) is *plausible but
+  unproven* — must not be stated as causation.
+
+## 6. Corrections that supersede Round 1/2 (consolidated)
+
+1. **Overseer signal taxonomy IS on `main`** (dedup keys `mod.rs:714/741/753/771/
+   777/807`). The old P1 "promote taxonomy to `main`" is **MOOT** — the
+   investigation *checkout* merely lacked `src/overseer/` because it is 92 commits
+   stale.
+2. **gym↔distill causal link:** REFUTED (env-flag driven).
+3. **Coupling:** Track A and Track B are **INDEPENDENT**, not causally chained.
+4. **`workstream-gap`:** **not** a code-emitted signal — narrative/synthesis
+   artifact only.
+5. **#2658 fix:** genuinely **not implemented** on any branch or open PR.
+
+## 7. Prioritized remediation (final, ordered)
+
+- **P0 — Fix residual distill parse (#2658).** In
+  `distillation.rs::scan_for_facts_object`/`recover_distill_output`, after strict
+  parse fails, retry `serde_json::from_str` against a **string-aware
+  trailing-comma-stripped** view (provably a no-op on well-formed JSON → clean
+  path byte-identical, no precision loss). Prefer a shared `recipe_output::extract`
+  helper reusable by OODA/brain. Add regression fixtures (bare + `--output-format
+  json` envelope; assert comma *inside a string* untouched; genuinely malformed
+  still `Err`s). Emit a distinct "valid parse yielded zero facts" log in
+  `into_facts`. **Done when** `cargo test memory_consolidation::distillation`
+  passes and `distill_parse_success_rate` trends 0.0 → ~1.0.
+- **P1 — Track B, strictly ordered by its own gates (unchanged by P0):**
+  1. `dbabd65f`/#12 — **self-heal the stale block** (`simard goal unblock
+     dbabd65f`); decision recorded, issue CLOSED, opt-in tracked in #32. Do **not**
+     re-open the embeddings decision.
+  2. `0c0ada69`/#16 (WS1, **critical path**) — dir-confined `eval_questions.json`
+     loader; ≥12 CVE questions (≥6 real 2024/2025 w/ reference answers); commit
+     `data/packs/cve/eval-results.{md,json}` (or documented hit@k); CI offline via
+     mock transport.
+  3. `7f5afcca`/#17 (WS2, **after #16**) — `quantize_int8`/`dequantize_int8`
+     (scale = max|v|/127, bound-checked, all-zero safe, cosine > 0.999 on L2-norm),
+     additive format; **gate adoption on the WS1 harness**; flag-off/DISABLED
+     unless parity holds.
+  4. `f29bb15c` (umbrella) — rolls each cycle; retires only once #16/#17 (and
+     siblings) land. #32 is non-default/non-blocking.
+- **Signal hygiene (optional):** if the 2× re-emission is noisy, add an
+  *inter-pass* suppression window for unchanged `dedup_key`s (mirroring
+  `WhisperGate`) — but the current re-emission is **correct**, not a defect.
+
+## 8. Consolidated evidence index (all on `main` @ 946fe3ca unless noted)
+
+- **Parse chain:** `distillation.rs` `parse_recipe_output_full` (1212-1255),
+  `recover_distill_output` (1305-1341), `scan_for_facts_object` (1420-1453),
+  `scan_cleaned_for_facts` (strict parses 1473/1494); telemetry
+  `record_distill_success_metric` (888/908/929/369/573).
+- **Signal model:** `signal.rs` `signals_from` (122, stateless per-pass);
+  `mod.rs` `orient` (680-698, within-pass dedup), `classify_signal` (709), dedup
+  keys 714/741/753/771/777/807; `guardrails.rs` `WhisperGate` (286),
+  instantiated `mod.rs:220/226` (900 s windows).
+- **Independence proof:** `sensor.rs` `blocked_goals_from_board` (188-205),
+  `gym_skipped` (125-126); `provider.rs` `SIMARD_SKIP_GYM` (61),
+  `distill_fail_pct` (490-497/540), `live_engineers` (177); `src/gym/` — no
+  distill reference.
+- **Gate:** `goal_curation/completion_gate.rs` evaluate (347-393),
+  perpetual-never-archive + retain-blocked (475-520).
+- **`git grep` (main):** lenient-JSON tolerance → empty; `workstream-gap` → empty.
+  `Cargo.lock`: serde_json **1.0.149** (stock).
+- **Live issues (`gh`):** Simard **#2619 CLOSED**, **#2658 OPEN**; kgpacks-rs
+  **#12 CLOSED**, **#16 OPEN**, **#17 OPEN**, **#32 OPEN**. Open PRs docs-only:
+  Simard #2668, #2657. **No code fix for #2658 anywhere.**
