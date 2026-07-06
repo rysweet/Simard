@@ -56,19 +56,22 @@ pub const KNOWN_CONCEPTS: &[&str] = &["pr-pattern", "bug-pattern", "lesson-learn
 /// of them still returns `None`. The three labels are lexically distinct, so no
 /// genuinely different concept can alias onto another.
 pub fn canonical_concept(raw: &str) -> Option<&'static str> {
-    let trimmed = raw
-        .trim()
-        .trim_matches(|c: char| {
-            c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '.' | ',' | ':' | ';')
-        })
-        .to_ascii_lowercase();
+    let trimmed = raw.trim().trim_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '.' | ',' | ':' | ';')
+    });
 
-    // Unify separators (`_` and interior spaces behave as `-`) and collapse runs
-    // of hyphens, then trim any leading/trailing hyphens the folding produced.
+    // Fold case, unify separators (`_` and interior spaces behave as `-`) and
+    // collapse runs of hyphens in a single pass — folding the lowercase into this
+    // loop avoids a second heap allocation for a separately-lowercased string.
+    // Trim any leading/trailing hyphens the folding produced afterwards.
     let mut canon = String::with_capacity(trimmed.len());
     let mut prev_hyphen = false;
     for ch in trimmed.chars() {
-        let c = if ch == '_' || ch == ' ' { '-' } else { ch };
+        let c = if ch == '_' || ch == ' ' {
+            '-'
+        } else {
+            ch.to_ascii_lowercase()
+        };
         if c == '-' {
             if !prev_hyphen {
                 canon.push('-');
@@ -106,8 +109,9 @@ pub fn canonical_concept(raw: &str) -> Option<&'static str> {
 pub fn score_fact_reliability(concept: &str, content: &str, grounded: bool) -> f64 {
     // (0) Hard gate: empty / whitespace-only content carries no information and
     // is quarantined unconditionally, regardless of how trustworthy its
-    // provenance looks.
-    let words = content.split_whitespace().count();
+    // provenance looks. We only need the 0 / 1–2 / ≥3 word bucket, so stop after
+    // the third word instead of scanning the whole (up to 64 KiB) content.
+    let words = content.split_whitespace().take(3).count();
     if words == 0 {
         return 0.0;
     }

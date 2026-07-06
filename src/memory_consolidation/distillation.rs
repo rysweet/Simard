@@ -143,22 +143,25 @@ pub struct DistillCommit {
 /// reliability gate, so its store/quarantine decision matches the server seam.
 struct InProcessFactSink<'a> {
     memory: &'a dyn CognitiveMemoryOps,
-    batch: &'a [CognitiveEpisode],
+    /// Node ids of the batch's episodes, precomputed once so per-fact grounding
+    /// is an O(1) set lookup rather than an O(batch) scan for every fact.
+    episode_ids: std::collections::HashSet<&'a str>,
 }
 
 impl<'a> InProcessFactSink<'a> {
     fn new(memory: &'a dyn CognitiveMemoryOps, batch: &'a [CognitiveEpisode]) -> Self {
-        Self { memory, batch }
+        let episode_ids = batch.iter().map(|e| e.node_id.as_str()).collect();
+        Self {
+            memory,
+            episode_ids,
+        }
     }
 }
 
 impl DistillFactSink for InProcessFactSink<'_> {
     fn commit_fact(&mut self, fact: &DistilledFact) -> SimardResult<bool> {
-        // Grounding is batch-membership for the in-process seam.
-        let grounded = self
-            .batch
-            .iter()
-            .any(|e| e.node_id == fact.source_episode_id);
+        // Grounding is batch-membership for the in-process seam (O(1) set lookup).
+        let grounded = self.episode_ids.contains(fact.source_episode_id.as_str());
 
         // Score → threshold → dedup → persist through the single shared gate, so
         // this in-process seam and the IPC server's `StoreFactGated` handler

@@ -310,7 +310,14 @@ fn ledger_record_stored(pass_id: &str) {
         return;
     }
     if let Ok(mut guard) = pass_ledger().lock() {
-        *guard.entry(pass_id.to_string()).or_insert(0) += 1;
+        // Avoid allocating a fresh key String on every accepted fact: only the
+        // first fact of a pass needs to insert; later facts bump the count in
+        // place.
+        if let Some(count) = guard.get_mut(pass_id) {
+            *count += 1;
+        } else {
+            guard.insert(pass_id.to_string(), 1);
+        }
     }
 }
 
