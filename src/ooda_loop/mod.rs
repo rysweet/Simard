@@ -6,7 +6,7 @@
 //! (Pillar 11): the observation records `None` for that subsystem.
 
 pub mod adaptive_scaling;
-mod bridge_factory;
+mod client_factory;
 mod curate;
 // Issue #2359 (BUG 2): per-cycle goal coverage allocator.
 pub mod coverage;
@@ -56,7 +56,7 @@ mod tests_phase_recall_episodes;
 mod tests_pr_c_procedures;
 
 // Re-export all public items so `crate::ooda_loop::X` still works.
-pub use bridge_factory::{bridges_from_state_root, connect_memory};
+pub use client_factory::{clients_from_state_root, connect_memory};
 pub use curate::{
     check_meeting_handoffs, drain_overseer_whispers, load_tombstones, promote_from_backlog,
     reap_old_handoffs, tombstone_goals,
@@ -70,7 +70,7 @@ pub use review::review_outcomes;
 pub use summary::summarize_cycle_report;
 pub use types::{
     ActionKind, ActionOutcome, CycleReport, EnvironmentSnapshot, GoalSnapshot, Observation,
-    OodaBridges, OodaConfig, OodaPhase, OodaState, OodaStateSnapshot, OrchestratorSessionFactory,
+    OodaClients, OodaConfig, OodaPhase, OodaState, OodaStateSnapshot, OrchestratorSessionFactory,
     PlannedAction, Priority,
 };
 
@@ -80,13 +80,13 @@ use crate::error::SimardResult;
 ///
 /// Delegates to [`crate::ooda_actions::dispatch_actions_bounded`] which calls
 /// the real subsystems (gym bridge, supervisor, skill builder, etc.).
-/// Takes `&mut OodaBridges` so that the optional session can be used for
+/// Takes `&mut OodaClients` so that the optional session can be used for
 /// `run_turn` calls during `AdvanceGoal` actions. `max_concurrency` is the
 /// AIMD `scaler.current_max()` cap — the hard ceiling on concurrent engineer
 /// starts this round.
 pub fn act(
     actions: &[PlannedAction],
-    bridges: &mut OodaBridges,
+    bridges: &mut OodaClients,
     state: &mut OodaState,
     max_concurrency: usize,
 ) -> SimardResult<Vec<ActionOutcome>> {

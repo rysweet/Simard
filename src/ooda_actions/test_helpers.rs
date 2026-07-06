@@ -1,15 +1,15 @@
 //! Shared test helpers for the ooda_actions module.
 
 use crate::base_types::{BaseTypeDescriptor, BaseTypeOutcome, BaseTypeSession, BaseTypeTurnInput};
-use crate::bridge::BridgeErrorPayload;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardError;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, add_active_goal};
-use crate::gym_bridge::GymBridge;
-use crate::knowledge_bridge::KnowledgeBridge;
-use crate::memory_bridge::CognitiveMemoryBridge;
-use crate::ooda_loop::OodaBridges;
+use crate::gym_client::GymClient;
+use crate::knowledge_client::KnowledgeClient;
+use crate::memory_client::CognitiveMemoryClient;
+use crate::ooda_loop::OodaClients;
+use crate::rpc::RpcErrorPayload;
+use crate::rpc_transport::InMemoryRpcTransport;
 use serde_json::json;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -66,7 +66,7 @@ impl BaseTypeSession for MockSession {
         *self.captured_input.borrow_mut() = Some(input);
         match &self.response {
             Ok(outcome) => Ok(outcome.clone()),
-            Err(msg) => Err(SimardError::BridgeTransportError {
+            Err(msg) => Err(SimardError::RpcTransportError {
                 bridge: "mock-session".to_string(),
                 reason: msg.clone(),
             }),
@@ -79,8 +79,8 @@ impl BaseTypeSession for MockSession {
 }
 
 pub(crate) fn mock_memory() -> Box<dyn CognitiveMemoryOps> {
-    Box::new(CognitiveMemoryBridge::new(Box::new(
-        InMemoryBridgeTransport::new("test-mem", |method, _params| match method {
+    Box::new(CognitiveMemoryClient::new(Box::new(
+        InMemoryRpcTransport::new("test-mem", |method, _params| match method {
             "memory.search_facts" => Ok(json!({"facts": []})),
             "memory.store_fact" => Ok(json!({"id": "sem_1"})),
             "memory.store_episode" => Ok(json!({"id": "epi_1"})),
@@ -95,7 +95,7 @@ pub(crate) fn mock_memory() -> Box<dyn CognitiveMemoryOps> {
                     "usage_count": 5}]
             })),
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
@@ -103,8 +103,8 @@ pub(crate) fn mock_memory() -> Box<dyn CognitiveMemoryOps> {
     )))
 }
 
-pub(crate) fn mock_gym() -> GymBridge {
-    GymBridge::new(Box::new(InMemoryBridgeTransport::new(
+pub(crate) fn mock_gym() -> GymClient {
+    GymClient::new(Box::new(InMemoryRpcTransport::new(
         "test-gym",
         |_method, _params| {
             Ok(json!({
@@ -119,14 +119,14 @@ pub(crate) fn mock_gym() -> GymBridge {
     )))
 }
 
-pub(crate) fn mock_knowledge() -> KnowledgeBridge {
-    KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
+pub(crate) fn mock_knowledge() -> KnowledgeClient {
+    KnowledgeClient::new(Box::new(InMemoryRpcTransport::new(
         "test-knowledge",
         |method, _params| match method {
             "knowledge.list_packs" => Ok(json!({"packs": [{"name": "rust-expert",
                 "description": "Rust knowledge", "article_count": 100,
                 "section_count": 400}]})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
@@ -134,8 +134,8 @@ pub(crate) fn mock_knowledge() -> KnowledgeBridge {
     )))
 }
 
-pub(crate) fn test_bridges() -> OodaBridges {
-    OodaBridges {
+pub(crate) fn test_bridges() -> OodaClients {
+    OodaClients {
         memory: mock_memory(),
         knowledge: mock_knowledge(),
         gym: mock_gym(),
@@ -195,8 +195,8 @@ pub(crate) fn active_goal(id: &str) -> ActiveGoal {
 }
 
 #[allow(dead_code)] // Kept for future integration tests that drive the full dispatch path.
-pub(crate) fn bridges_with_session(session: MockSession) -> OodaBridges {
-    OodaBridges {
+pub(crate) fn bridges_with_session(session: MockSession) -> OodaClients {
+    OodaClients {
         memory: mock_memory(),
         knowledge: mock_knowledge(),
         gym: mock_gym(),

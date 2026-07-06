@@ -112,3 +112,45 @@ fn quiet_day_renders_honestly() {
     // Honest, not fabricated: no invented episode bullet points.
     assert!(!entry.narrative.contains("- "));
 }
+
+// ── Readable deterministic fallback (issues #2640/#2692, A3) ───────────────
+
+/// The deterministic report drafter (the offline fallback) must NOT dump raw
+/// error-log episodes verbatim into "Remembered moments". Historical episodes
+/// that recorded a subprocess failure (e.g. the live journal E2BIG spawn error)
+/// would otherwise fill a degraded journal with raw errno/jargon text — the
+/// exact "journal full of raw error dumps" the operator reported.
+#[test]
+fn deterministic_fallback_strips_raw_error_log_episodes() {
+    use crate::journal::generate::{JournalDrafter, TemplateDrafter};
+
+    let mut ctx = DayContext::new(day());
+    ctx.episodes = vec![
+        episode("reviewed the overnight work from the engineers"),
+        episode(
+            "journal draft recipe failed; using the deterministic report drafter \
+             error=base type 'journal' failed during invocation: recipe-runner-rs \
+             spawn failed: Argument list too long (os error 7)",
+        ),
+    ];
+
+    let draft = TemplateDrafter.draft(&ctx);
+
+    // The healthy, human-readable moment survives.
+    assert!(
+        draft.contains("reviewed the overnight work"),
+        "readable remembered moments must remain: {draft}"
+    );
+    // The raw historical E2BIG error dump must NOT appear anywhere in the report.
+    for leak in [
+        "Argument list too long",
+        "os error 7",
+        "recipe-runner-rs",
+        "spawn failed",
+    ] {
+        assert!(
+            !draft.contains(leak),
+            "the deterministic fallback must strip raw error-log text {leak:?}: {draft}"
+        );
+    }
+}

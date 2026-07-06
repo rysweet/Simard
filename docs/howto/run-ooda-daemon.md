@@ -18,7 +18,7 @@ The OODA daemon lets Simard operate autonomously: she observes her goal board, r
 ## Prerequisites
 
 - Simard binary built (`cargo build --quiet`)
-- Python ecosystem bridges available (cognitive memory, knowledge packs, gym) — the daemon launches these automatically
+- Python ecosystem clients available (cognitive memory, knowledge packs, gym) — the daemon launches these automatically
 - `ANTHROPIC_API_KEY` set if RustyClawd-backed actions are enabled
 - Goal board populated (via `simard goal-curation run` or meeting sessions)
 
@@ -43,7 +43,7 @@ The daemon sleeps 60 seconds between cycles and logs one-line summaries to stder
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SIMARD_STATE_ROOT` | `/tmp/simard-ooda` | State root directory (overridden by the positional `[state-root]` argument) |
-| `SIMARD_AGENT_NAME` | `simard-ooda` | Agent name for bridge registration |
+| `SIMARD_AGENT_NAME` | `simard-ooda` | Agent name for client registration |
 | `SIMARD_WORKTREE_SWEEP_INTERVAL_SECS` | `1800` | Seconds between periodic sweeps of orphaned engineer worktrees ([sweep safety guards](../reference/engineer-worktree-sweep-safety.md)) |
 | `ANTHROPIC_API_KEY` | (none) | Required when RustyClawd-backed actions are enabled |
 
@@ -55,7 +55,7 @@ simard ooda run --cycles=0
 
 ## What happens each cycle
 
-1. **Observe** — load goal statuses, gym health scores, memory statistics. If a bridge is unavailable, the observation records `None` for that source (honest degradation, Pillar 11).
+1. **Observe** — load goal statuses, gym health scores, memory statistics. If a client is unavailable, the observation records `None` for that source (honest degradation, Pillar 11).
 2. **Orient** — rank goals by urgency. Blocked goals sort first, then not-started, then in-progress.
 3. **Decide** — select up to `max_concurrent_actions` (default 3) actions from the ranked priority list.
 4. **Act** — dispatch each action independently. A single failed action does not abort the cycle.
@@ -74,7 +74,7 @@ Inspect state under the state root:
 
 ```bash
 ls target/simard-ooda/
-# cognitive_memory/  (memory bridge database)
+# cognitive_memory/  (memory client database)
 ```
 
 ## Meeting handoff → goals (Issues #157, #158)

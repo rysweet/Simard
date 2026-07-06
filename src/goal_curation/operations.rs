@@ -550,7 +550,7 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
     // NOTE: hermetic guard removed from this call-site. The env-var-based
     // `simard_state_root()` check raced with parallel tests that unset
     // SIMARD_STATE_ROOT (see CI failure on PR #2017). The
-    // launch_writer_bridge guard now covers this path without env-var
+    // launch_writer_client guard now covers this path without env-var
     // dependency.
 
     // Step 1: guard the in-flight board. Persisted snapshot is inductively
@@ -667,7 +667,7 @@ pub fn save_goal_board_with_removals(
     bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     // NOTE: hermetic guard removed — same reasoning as save_goal_board.
-    // The launch_writer_bridge guard covers the hermetic property without
+    // The launch_writer_client guard covers the hermetic property without
     // the racy simard_state_root() call.
 
     if let Some(reason) = board_integrity_suspect(board) {

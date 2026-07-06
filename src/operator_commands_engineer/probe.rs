@@ -1,13 +1,13 @@
 use std::path::{Path, PathBuf};
 
+use crate::engineer_handoff::{
+    ENGINEER_MODE_BOUNDARY, SHARED_DEFAULT_STATE_ROOT_SOURCE, SHARED_EXPLICIT_STATE_ROOT_SOURCE,
+};
 use crate::operator_commands::{
     parse_runtime_topology, print_display, print_terminal_bridge_section, print_text,
     resolved_engineer_read_state_root, resolved_state_root,
 };
 use crate::run_local_engineer_loop;
-use crate::terminal_engineer_bridge::{
-    ENGINEER_MODE_BOUNDARY, SHARED_DEFAULT_STATE_ROOT_SOURCE, SHARED_EXPLICIT_STATE_ROOT_SOURCE,
-};
 
 use super::read_view::EngineerReadView;
 

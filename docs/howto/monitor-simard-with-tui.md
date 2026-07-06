@@ -96,7 +96,7 @@ goals loaded from cognitive memory (`<state-root>/cognitive_memory.ladybug`):
 │ ────────────────────────────────────────────────────────────────│
 │ Implement caching layer      1         in-progress  eng-alpha   │
 │ Fix auth token refresh       0         in-progress  eng-beta    │
-│ Add retry logic to bridge    2         not-started              │
+│ Add retry logic to client    2         not-started              │
 │ Clean up legacy probes       3         paused                   │
 └─────────────────────────────────────────────────────────────────┘
 ```

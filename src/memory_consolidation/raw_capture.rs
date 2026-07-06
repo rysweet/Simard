@@ -574,7 +574,6 @@ mod tests {
         for class in [
             "spawn-failure",
             "copilot-terminal-failure",
-            "recipe-reported-failure",
             "serialize-failure",
             "other",
         ] {

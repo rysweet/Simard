@@ -1,26 +1,26 @@
 //! Integration tests for the OODA loop, scheduler, and skill builder.
 
 use serde_json::json;
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
 use simard::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, add_active_goal};
-use simard::gym_bridge::GymBridge;
-use simard::knowledge_bridge::KnowledgeBridge;
-use simard::memory_bridge::CognitiveMemoryBridge;
+use simard::gym_client::GymClient;
+use simard::knowledge_client::KnowledgeClient;
+use simard::memory_client::CognitiveMemoryClient;
 use simard::ooda_loop::{
-    ActionKind, OodaBridges, OodaConfig, OodaState, act, decide, observe, orient, run_ooda_cycle,
+    ActionKind, OodaClients, OodaConfig, OodaState, act, decide, observe, orient, run_ooda_cycle,
     summarize_cycle_report,
 };
 use simard::ooda_scheduler::{
     Scheduler, SlotStatus, complete_slot, drain_finished, fail_slot, poll_slots, schedule_actions,
     scheduler_summary, start_slot,
 };
+use simard::rpc::RpcErrorPayload;
+use simard::rpc_transport::InMemoryRpcTransport;
 use simard::skill_builder::{
     SkillTemplate, extract_skill_candidates, generate_skill_definition, install_skill,
 };
 
-fn mock_memory_transport() -> InMemoryBridgeTransport {
-    InMemoryBridgeTransport::new("test-memory", |method, _params| match method {
+fn mock_memory_transport() -> InMemoryRpcTransport {
+    InMemoryRpcTransport::new("test-memory", |method, _params| match method {
         "memory.search_facts" => Ok(json!({"facts": []})),
         "memory.store_fact" => Ok(json!({"id": "sem_1"})),
         "memory.store_episode" => Ok(json!({"id": "epi_1"})),
@@ -40,15 +40,15 @@ fn mock_memory_transport() -> InMemoryBridgeTransport {
         "memory.clear_working" => Ok(json!({"count": 0})),
         "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
         "memory.store_procedure" => Ok(json!({"id": "proc_new"})),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(RpcErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     })
 }
 
-fn mock_gym_transport() -> InMemoryBridgeTransport {
-    InMemoryBridgeTransport::new("test-gym", |_method, _params| {
+fn mock_gym_transport() -> InMemoryRpcTransport {
+    InMemoryRpcTransport::new("test-gym", |_method, _params| {
         Ok(json!({
             "suite_id": "progressive", "success": true, "overall_score": 0.75,
             "dimensions": {"factual_accuracy": 0.8, "specificity": 0.7,
@@ -60,24 +60,24 @@ fn mock_gym_transport() -> InMemoryBridgeTransport {
     })
 }
 
-fn mock_knowledge_transport() -> InMemoryBridgeTransport {
-    InMemoryBridgeTransport::new("test-knowledge", |method, _params| match method {
+fn mock_knowledge_transport() -> InMemoryRpcTransport {
+    InMemoryRpcTransport::new("test-knowledge", |method, _params| match method {
         "knowledge.list_packs" => Ok(json!({"packs": [{"name": "rust-expert",
             "description": "Rust knowledge", "article_count": 100, "section_count": 400}]})),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(RpcErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     })
 }
 
-fn test_bridges() -> OodaBridges {
-    OodaBridges {
-        memory: Box::new(CognitiveMemoryBridge::new(
+fn test_bridges() -> OodaClients {
+    OodaClients {
+        memory: Box::new(CognitiveMemoryClient::new(
             Box::new(mock_memory_transport()),
         )),
-        knowledge: KnowledgeBridge::new(Box::new(mock_knowledge_transport())),
-        gym: GymBridge::new(Box::new(mock_gym_transport())),
+        knowledge: KnowledgeClient::new(Box::new(mock_knowledge_transport())),
+        gym: GymClient::new(Box::new(mock_gym_transport())),
         session: None,
         session_factory: None,
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
@@ -238,19 +238,19 @@ fn feral_all_goals_blocked() {
 }
 
 #[test]
-fn feral_gym_bridge_down() {
-    let failing_gym = InMemoryBridgeTransport::new("gym-fail", |_, _| {
-        Err(BridgeErrorPayload {
+fn feral_gym_client_down() {
+    let failing_gym = InMemoryRpcTransport::new("gym-fail", |_, _| {
+        Err(RpcErrorPayload {
             code: -32603,
             message: "crashed".into(),
         })
     });
-    let mut bridges = OodaBridges {
-        memory: Box::new(CognitiveMemoryBridge::new(
+    let mut bridges = OodaClients {
+        memory: Box::new(CognitiveMemoryClient::new(
             Box::new(mock_memory_transport()),
         )),
-        knowledge: KnowledgeBridge::new(Box::new(mock_knowledge_transport())),
-        gym: GymBridge::new(Box::new(failing_gym)),
+        knowledge: KnowledgeClient::new(Box::new(mock_knowledge_transport())),
+        gym: GymClient::new(Box::new(failing_gym)),
         session: None,
         session_factory: None,
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),
@@ -367,7 +367,7 @@ fn start_non_pending_slot_fails() {
 
 #[test]
 fn extract_skill_candidates_filters_by_usage() {
-    let bridge = CognitiveMemoryBridge::new(Box::new(mock_memory_transport()));
+    let bridge = CognitiveMemoryClient::new(Box::new(mock_memory_transport()));
     let candidates = extract_skill_candidates(&bridge, 3).unwrap();
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].name, "cargo-build");
@@ -423,7 +423,7 @@ fn successful_outcome_stores_procedural_memory() {
     let counter = procedure_calls.clone();
 
     let counting_memory =
-        InMemoryBridgeTransport::new("proc-counter-mem", move |method, _params| match method {
+        InMemoryRpcTransport::new("proc-counter-mem", move |method, _params| match method {
             "memory.store_procedure" => {
                 counter.fetch_add(1, Ordering::SeqCst);
                 Ok(json!({"id": "proc_new"}))
@@ -444,7 +444,7 @@ fn successful_outcome_stores_procedural_memory() {
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             "memory.clear_working" => Ok(json!({"count": 0})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
@@ -464,10 +464,10 @@ fn successful_outcome_stores_procedural_memory() {
         }
     }
 
-    let mut bridges = OodaBridges {
-        memory: Box::new(CognitiveMemoryBridge::new(Box::new(counting_memory))),
-        knowledge: KnowledgeBridge::new(Box::new(mock_knowledge_transport())),
-        gym: GymBridge::new(Box::new(mock_gym_transport())),
+    let mut bridges = OodaClients {
+        memory: Box::new(CognitiveMemoryClient::new(Box::new(counting_memory))),
+        knowledge: KnowledgeClient::new(Box::new(mock_knowledge_transport())),
+        gym: GymClient::new(Box::new(mock_gym_transport())),
         session: None,
         session_factory: None,
         brain: std::sync::Arc::new(simard::ooda_brain::DeterministicLifecycleBrain),

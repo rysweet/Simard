@@ -188,28 +188,28 @@ provenance) without carrying `continue_skipping` chatter.
 
 ```rust
 pub fn store_episode_classified(
-    bridge: &dyn CognitiveMemoryOps,
+    client: &dyn CognitiveMemoryOps,
     content: &str,
     source_label: &str,
     ctx: &IntakeContext,
 ) -> SimardResult<Option<String>>;
 ```
 
-The IO seam every intake site calls instead of `bridge.store_episode`.
+The IO seam every intake site calls instead of `client.store_episode`.
 
 1. `classify(content, source_label, ctx)`.
 2. Records the decision into the process-global [`IntakeCounters`]
    (`global_intake_counters()`).
-3. On `Drop`: returns `Ok(None)` — never touches the bridge.
+3. On `Drop`: returns `Ok(None)` — never touches the client.
 4. On `Store(meta)` / `DownScope(meta)`: serializes `meta` via
    `EpisodeMetadata::to_json`, calls
-   `bridge.store_episode(content, source_label, Some(&value))`, and returns
+   `client.store_episode(content, source_label, Some(&value))`, and returns
    `Ok(Some(episode_id))`.
 
 The returned id is the same id used downstream for
 `store_fact_with_provenance` / `store_procedure_with_provenance`.
 
-A companion seam, `store_episode_for_provenance(bridge, content, source_label,
+A companion seam, `store_episode_for_provenance(client, content, source_label,
 ctx) -> SimardResult<String>`, ALWAYS stores and returns an id (a `Drop`
 decision is promoted to a down-scoped store) — used by the reflection site so
 the transcript episode id is available as the provenance anchor for the facts

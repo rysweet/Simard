@@ -21,8 +21,8 @@ use simard::remote_transfer::{
     MemorySnapshot, export_memory_snapshot, import_memory_snapshot, load_snapshot_from_file,
 };
 use simard::{
-    BridgeErrorPayload, CognitiveFact, CognitiveMemoryBridge, CognitiveProcedure,
-    InMemoryBridgeTransport, SimardError,
+    CognitiveFact, CognitiveMemoryClient, CognitiveProcedure, InMemoryRpcTransport,
+    RpcErrorPayload, SimardError,
 };
 
 // ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ fn mock_executor() -> MockAzlinExecutor {
 fn failing_executor(fail_on: &'static str) -> MockAzlinExecutor {
     MockAzlinExecutor::new(move |args| {
         if args.first().copied() == Some(fail_on) {
-            Err(SimardError::BridgeTransportError {
+            Err(SimardError::RpcTransportError {
                 bridge: "azlin".to_string(),
                 reason: format!("simulated failure on {fail_on}"),
             })
@@ -60,93 +60,92 @@ struct MockStore {
     procedures: Vec<CognitiveProcedure>,
 }
 
-fn mock_bridge() -> CognitiveMemoryBridge {
+fn mock_bridge() -> CognitiveMemoryClient {
     let store: &'static Mutex<MockStore> = Box::leak(Box::new(Mutex::new(MockStore {
         facts: vec![],
         procedures: vec![],
     })));
 
-    let transport =
-        InMemoryBridgeTransport::new("test-memory", move |method, params| match method {
-            "memory.search_facts" => {
-                let s = store.lock().unwrap();
-                let facts: Vec<serde_json::Value> = s
-                    .facts
-                    .iter()
-                    .map(|f| {
-                        json!({
-                            "node_id": f.node_id, "concept": f.concept,
-                            "content": f.content, "confidence": f.confidence,
-                            "source_id": f.source_id, "tags": f.tags,
-                        })
+    let transport = InMemoryRpcTransport::new("test-memory", move |method, params| match method {
+        "memory.search_facts" => {
+            let s = store.lock().unwrap();
+            let facts: Vec<serde_json::Value> = s
+                .facts
+                .iter()
+                .map(|f| {
+                    json!({
+                        "node_id": f.node_id, "concept": f.concept,
+                        "content": f.content, "confidence": f.confidence,
+                        "source_id": f.source_id, "tags": f.tags,
                     })
-                    .collect();
-                Ok(json!({"facts": facts}))
-            }
-            "memory.recall_procedure" => {
-                let s = store.lock().unwrap();
-                let procs: Vec<serde_json::Value> = s
-                    .procedures
-                    .iter()
-                    .map(|p| {
-                        json!({
-                            "node_id": p.node_id, "name": p.name,
-                            "steps": p.steps, "prerequisites": p.prerequisites,
-                            "usage_count": p.usage_count,
-                        })
+                })
+                .collect();
+            Ok(json!({"facts": facts}))
+        }
+        "memory.recall_procedure" => {
+            let s = store.lock().unwrap();
+            let procs: Vec<serde_json::Value> = s
+                .procedures
+                .iter()
+                .map(|p| {
+                    json!({
+                        "node_id": p.node_id, "name": p.name,
+                        "steps": p.steps, "prerequisites": p.prerequisites,
+                        "usage_count": p.usage_count,
                     })
-                    .collect();
-                Ok(json!({"procedures": procs}))
-            }
-            "memory.store_fact" => {
-                let mut s = store.lock().unwrap();
-                let id = format!("fact-{}", s.facts.len() + 1);
-                s.facts.push(CognitiveFact {
-                    node_id: id.clone(),
-                    concept: params["concept"].as_str().unwrap_or("").to_string(),
-                    content: params["content"].as_str().unwrap_or("").to_string(),
-                    confidence: params["confidence"].as_f64().unwrap_or(0.0),
-                    source_id: params["source_id"].as_str().unwrap_or("").to_string(),
-                    tags: params["tags"]
-                        .as_array()
-                        .unwrap_or(&vec![])
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect(),
-                    usage_count: 0,
-                    last_accessed_at: None,
-                });
-                Ok(json!({"id": id}))
-            }
-            "memory.store_procedure" => {
-                let mut s = store.lock().unwrap();
-                let id = format!("proc-{}", s.procedures.len() + 1);
-                s.procedures.push(CognitiveProcedure {
-                    node_id: id.clone(),
-                    name: params["name"].as_str().unwrap_or("").to_string(),
-                    steps: params["steps"]
-                        .as_array()
-                        .unwrap_or(&vec![])
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect(),
-                    prerequisites: params["prerequisites"]
-                        .as_array()
-                        .unwrap_or(&vec![])
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect(),
-                    usage_count: 0,
-                });
-                Ok(json!({"id": id}))
-            }
-            "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-            _ => Err(BridgeErrorPayload {
-                code: -32601,
-                message: format!("method not found: {method}"),
-            }),
-        });
-    CognitiveMemoryBridge::new(Box::new(transport))
+                })
+                .collect();
+            Ok(json!({"procedures": procs}))
+        }
+        "memory.store_fact" => {
+            let mut s = store.lock().unwrap();
+            let id = format!("fact-{}", s.facts.len() + 1);
+            s.facts.push(CognitiveFact {
+                node_id: id.clone(),
+                concept: params["concept"].as_str().unwrap_or("").to_string(),
+                content: params["content"].as_str().unwrap_or("").to_string(),
+                confidence: params["confidence"].as_f64().unwrap_or(0.0),
+                source_id: params["source_id"].as_str().unwrap_or("").to_string(),
+                tags: params["tags"]
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+                usage_count: 0,
+                last_accessed_at: None,
+            });
+            Ok(json!({"id": id}))
+        }
+        "memory.store_procedure" => {
+            let mut s = store.lock().unwrap();
+            let id = format!("proc-{}", s.procedures.len() + 1);
+            s.procedures.push(CognitiveProcedure {
+                node_id: id.clone(),
+                name: params["name"].as_str().unwrap_or("").to_string(),
+                steps: params["steps"]
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+                prerequisites: params["prerequisites"]
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+                usage_count: 0,
+            });
+            Ok(json!({"id": id}))
+        }
+        "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
+        _ => Err(RpcErrorPayload {
+            code: -32601,
+            message: format!("method not found: {method}"),
+        }),
+    });
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 // ---------------------------------------------------------------------------
@@ -174,14 +173,14 @@ fn azlin_ssh_requires_running_status() {
         status: "stopped".to_string(),
     };
     let err = azlin_ssh(&vm, &executor).unwrap_err();
-    assert!(matches!(err, SimardError::BridgeTransportError { .. }));
+    assert!(matches!(err, SimardError::RpcTransportError { .. }));
 }
 
 #[test]
 fn azlin_create_failure_propagates() {
     let executor = failing_executor("create");
     let err = azlin_create("fail-vm", &AzlinConfig::default(), &executor).unwrap_err();
-    assert!(matches!(err, SimardError::BridgeTransportError { .. }));
+    assert!(matches!(err, SimardError::RpcTransportError { .. }));
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +248,7 @@ fn session_establish_pty_rejects_non_running() {
     let mut session = create_remote_session(&config, &executor).unwrap();
     destroy_session(&mut session, &executor).unwrap();
     let err = establish_pty(&session, &executor).unwrap_err();
-    assert!(matches!(err, SimardError::BridgeTransportError { .. }));
+    assert!(matches!(err, SimardError::RpcTransportError { .. }));
 }
 
 #[test]

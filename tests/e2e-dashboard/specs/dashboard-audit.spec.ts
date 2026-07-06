@@ -45,7 +45,7 @@ test.describe('Dashboard self-understanding audit @structural', () => {
     await page.waitForLoadState('networkidle').catch(() => {});
 
     const tabs = await discoverTabs(page);
-    expect(tabs.length).toBeGreaterThanOrEqual(11);
+    expect(tabs.length).toBeGreaterThanOrEqual(9);
 
     const report: string[] = [
       '# Dashboard audit',

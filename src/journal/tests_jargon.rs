@@ -18,20 +18,21 @@ fn scrub_removes_insider_acronyms() {
 }
 
 #[test]
-fn scrub_explains_pull_requests() {
+fn scrub_expands_pull_request_acronym() {
     let out = scrub_jargon("Opened PR 12 today.");
     assert!(
-        out.contains("code-change proposal (PR)"),
-        "PR is explained on use: {out}"
+        out.contains("pull request"),
+        "PR is expanded to plain words: {out}"
     );
+    assert!(!out.contains("PR "), "no bare 'PR' acronym remains: {out}");
 }
 
 #[test]
 fn scrub_handles_plurals_and_merge() {
     let out = scrub_jargon("We merged 3 PRs.");
     assert!(
-        out.contains("code-change proposals"),
-        "plural expanded: {out}"
+        out.contains("pull requests"),
+        "plural acronym expanded: {out}"
     );
     assert!(
         out.contains("combined into the main code"),

@@ -129,6 +129,7 @@ pub fn decide_read_only(problem: &Problem) -> Intervention {
         ProblemKind::ProcessHealth
         | ProblemKind::QualityRegression
         | ProblemKind::GoalHygiene
+        | ProblemKind::StepFailure
         | ProblemKind::CrossCutting => Intervention::FileIssue {
             run: problem_to_run_brief(problem),
         },
@@ -140,7 +141,11 @@ pub fn decide_read_only(problem: &Problem) -> Intervention {
         ProblemKind::ResourcePressure
         | ProblemKind::DeliveryReady
         | ProblemKind::LoopDetected
-        | ProblemKind::DriftCorrection => Intervention::Report,
+        | ProblemKind::DriftCorrection
+        // Backlog-coverage gaps are acted on by the acting Overseer (notify +
+        // deduped file). The read-only M1 sensor never surveys gaps, so this is
+        // unreachable in M1 — surface it in the Report if it ever appears.
+        | ProblemKind::WorkstreamCoverage => Intervention::Report,
     }
 }
 
@@ -185,6 +190,8 @@ fn kind_step_label(kind: ProblemKind) -> &'static str {
         ProblemKind::CrossCutting => "cross_cutting",
         ProblemKind::LoopDetected => "loop_detected",
         ProblemKind::DriftCorrection => "drift_correction",
+        ProblemKind::WorkstreamCoverage => "workstream_coverage",
+        ProblemKind::StepFailure => "step_failure",
     }
 }
 
@@ -234,6 +241,9 @@ fn signal_kind_label(s: &Signal) -> &'static str {
         Signal::LoopDetected { .. } => "LoopDetected",
         Signal::DriftCorrection { .. } => "DriftCorrection",
         Signal::GoalBlocked { .. } => "GoalBlocked",
+        Signal::RecurringSignature { .. } => "RecurringSignature",
+        Signal::WorkstreamGap { .. } => "WorkstreamGap",
+        Signal::StepFailureDiagnosed { .. } => "StepFailureDiagnosed",
     }
 }
 
@@ -449,6 +459,7 @@ mod tests {
             dedup_key: "k".to_string(),
             summary: "s".to_string(),
             evidence,
+            why: None,
         }
     }
 

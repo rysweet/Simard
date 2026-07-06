@@ -258,6 +258,18 @@ pub(crate) fn episode(content: &str) -> CognitiveEpisode {
     }
 }
 
+/// Build a [`CognitiveEpisode`] with `content` and an explicit `temporal_index`
+/// (issue #2606: episodes carry timestamps and render chronologically).
+pub(crate) fn episode_at(content: &str, temporal_index: i64) -> CognitiveEpisode {
+    CognitiveEpisode {
+        node_id: format!("ep-{temporal_index}"),
+        content: content.to_string(),
+        source_label: "test".to_string(),
+        temporal_index,
+        compressed: false,
+    }
+}
+
 /// Build a [`PrSummary`] for a test.
 pub(crate) fn pr(number: u64, plain_summary: &str, outcome: &str) -> PrSummary {
     PrSummary {

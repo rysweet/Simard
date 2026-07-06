@@ -36,14 +36,14 @@ impl IpcMessage {
 }
 
 fn ipc_err(action: &str, err: &dyn std::fmt::Display) -> SimardError {
-    SimardError::BridgeTransportError {
+    SimardError::RpcTransportError {
         bridge: "ipc".to_string(),
         reason: format!("{action}: {err}"),
     }
 }
 
 fn io_err(bridge: &str, action: &str, err: &std::io::Error) -> SimardError {
-    SimardError::BridgeTransportError {
+    SimardError::RpcTransportError {
         bridge: bridge.to_string(),
         reason: format!("{action}: {err}"),
     }
@@ -84,7 +84,7 @@ impl IpcTransport for StdioTransport {
             .read_line(&mut line)
             .map_err(|e| io_err("stdio", "read", &e))?;
         if n == 0 {
-            return Err(SimardError::BridgeTransportError {
+            return Err(SimardError::RpcTransportError {
                 bridge: "stdio".to_string(),
                 reason: "EOF".to_string(),
             });
@@ -115,7 +115,7 @@ impl UnixSocketTransport {
 #[cfg(unix)]
 impl IpcTransport for UnixSocketTransport {
     fn send(&mut self, msg: &[u8]) -> SimardResult<()> {
-        let len = u32::try_from(msg.len()).map_err(|_| SimardError::BridgeTransportError {
+        let len = u32::try_from(msg.len()).map_err(|_| SimardError::RpcTransportError {
             bridge: "unix-socket".to_string(),
             reason: format!("message too large: {} bytes", msg.len()),
         })?;
@@ -182,7 +182,7 @@ pub fn spawn_subprocess(
     use std::process::{Command, Stdio};
 
     let listener = std::os::unix::net::UnixListener::bind(socket_path).map_err(|e| {
-        SimardError::BridgeSpawnFailed {
+        SimardError::RpcSpawnFailed {
             bridge: "ipc".to_string(),
             reason: format!("bind {}: {e}", socket_path.display()),
         }
@@ -195,23 +195,21 @@ pub fn spawn_subprocess(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| SimardError::BridgeSpawnFailed {
+        .map_err(|e| SimardError::RpcSpawnFailed {
             bridge: "ipc".to_string(),
             reason: format!("spawn {}: {e}", binary_path.display()),
         })?;
 
-    let (stream, _) = listener
-        .accept()
-        .map_err(|e| SimardError::BridgeSpawnFailed {
-            bridge: "ipc".to_string(),
-            reason: format!("accept: {e}"),
-        })?;
+    let (stream, _) = listener.accept().map_err(|e| SimardError::RpcSpawnFailed {
+        bridge: "ipc".to_string(),
+        reason: format!("accept: {e}"),
+    })?;
 
     let mut transport = UnixSocketTransport::from_stream(stream);
     transport.send(&IpcMessage::Ping.to_bytes()?)?;
     let response = IpcMessage::from_bytes(&transport.recv()?)?;
     if response != IpcMessage::Pong {
-        return Err(SimardError::BridgeSpawnFailed {
+        return Err(SimardError::RpcSpawnFailed {
             bridge: "ipc".to_string(),
             reason: format!("health check: expected Pong, got {response:?}"),
         });

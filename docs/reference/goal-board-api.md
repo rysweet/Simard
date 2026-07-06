@@ -9,7 +9,7 @@ related:
   - ../concepts/goal-board-persistence.md
   - ../howto/recover-goal-board.md
   - ../howto/inspect-durable-goal-register.md
-  - ./cognitive-memory-bridge-helpers.md
+  - ./cognitive-memory-client-helpers.md
   - ./goal-target-repo-routing.md
 ---
 
@@ -41,10 +41,10 @@ related:
 > design that the engineer-loop and meeting-curation consumers will use to
 > obtain `Vec<GoalRecord>` from a `GoalBoard`.
 >
-> The bridge-acquisition helpers used in the examples
-> (`launch_writer_bridge`, `open_reader_bridge`) are also part of the
+> The client-acquisition helpers used in the examples
+> (`launch_writer_client`, `open_reader_client`) are also part of the
 > migration spec — see
-> [Cognitive memory bridge helpers](./cognitive-memory-bridge-helpers.md).
+> [Cognitive memory client helpers](./cognitive-memory-client-helpers.md).
 
 This document covers the public functions in
 `src/goal_curation/operations.rs` that load, save, mutate, and adapt the goal
@@ -65,7 +65,7 @@ and the engineer loop.
 ### `load_goal_board`
 
 ```rust
-pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoard>
+pub fn load_goal_board(client: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoard>
 ```
 
 Loads the goal board from cognitive memory. The function is intentionally
@@ -76,7 +76,7 @@ fresh snapshot.
 
 **Resolution order (in this order, each step optional):**
 
-1. **Legacy bootstrap.** Calls `migrate_legacy_disk_file_if_present(bridge)`.
+1. **Legacy bootstrap.** Calls `migrate_legacy_disk_file_if_present(client)`.
    If `$SIMARD_STATE_ROOT/goal_records.json` exists, the file is read,
    converted to a `GoalBoard`, written to cognitive memory via `store_fact`,
    and the file is deleted. Failures here are logged and non-fatal — the
@@ -84,7 +84,7 @@ fresh snapshot.
    step costs only a single `metadata` syscall.
 2. **Read snapshot.** Delegates to the private `read_latest_snapshot` helper
    (see [below](#read_latest_snapshot-private-helper)). That helper calls
-   `bridge.search_facts("goal-board:snapshot", 64, 0.0)`, filters by
+   `client.search_facts("goal-board:snapshot", 64, 0.0)`, filters by
    `concept == "goal-board:snapshot"`, picks `max_by(node_id)`, and parses
    the payload as `GoalBoard`. The 64-fact window protects against ordering
    surprises in `search_facts` and matches the read path now shared with
@@ -96,7 +96,7 @@ fresh snapshot.
 
 | Name | Type | Description |
 |------|------|-------------|
-| `bridge` | `&dyn CognitiveMemoryOps` | Cognitive memory adapter — typically obtained via `open_reader_bridge` for read-only consumers (see [bridge helpers](./cognitive-memory-bridge-helpers.md)) or via the daemon's own in-process bridge for the OODA cycle |
+| `client` | `&dyn CognitiveMemoryOps` | Cognitive memory adapter — typically obtained via `open_reader_client` for read-only consumers (see [client helpers](./cognitive-memory-client-helpers.md)) or via the daemon's own in-process client for the OODA cycle |
 
 **Return contract**
 
@@ -105,7 +105,7 @@ fresh snapshot.
 | Snapshot fact found and parses | `Ok(GoalBoard)` with the deserialized board |
 | `search_facts` returns 0 results | `Ok(GoalBoard::new())` — empty board |
 | `search_facts` returns a fact whose payload fails to parse | `Ok(GoalBoard::new())` + stderr warning `cognitive memory snapshot parse error (…) — returning empty board` |
-| `bridge.search_facts` itself fails (IPC error, lock contention, …) | `Ok(GoalBoard::new())` + stderr warning `cognitive memory search_facts failed (…) — returning empty board` |
+| `client.search_facts` itself fails (IPC error, lock contention, …) | `Ok(GoalBoard::new())` + stderr warning `cognitive memory search_facts failed (…) — returning empty board` |
 | Legacy migration encounters a corrupt or unreadable file | Logged, non-fatal; the function continues to step 2 |
 
 The function returns `Err` **only** for unrecoverable internal panics
@@ -123,10 +123,10 @@ returned board themselves.
 
 ```rust
 use simard::goal_curation::load_goal_board;
-use simard::memory_ipc::open_reader_bridge;
+use simard::memory_ipc::open_reader_client;
 
-let bridge = open_reader_bridge(&state_root)?;       // ReaderBridge
-let board = load_goal_board(bridge.ops())?;          // .ops() → &dyn CognitiveMemoryOps
+let client = open_reader_client(&state_root)?;       // ReaderClient
+let board = load_goal_board(client.ops())?;          // .ops() → &dyn CognitiveMemoryOps
 eprintln!("Loaded {} active goal(s)", board.active.len());
 ```
 
@@ -137,7 +137,7 @@ eprintln!("Loaded {} active goal(s)", board.active.len());
 ```rust
 pub fn save_goal_board(
     board: &GoalBoard,
-    bridge: &dyn CognitiveMemoryOps,
+    client: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()>
 ```
 
@@ -147,7 +147,7 @@ board, (2) read-latest-snapshot + merge against the freshly persisted state,
 (3) `store_fact` of the merged board. The merged payload is encoded as:
 
 ```rust
-bridge.store_fact(
+client.store_fact(
     "goal-board:snapshot",   // concept
     &serde_json::to_string(&merged)?,  // content (merged, not in-flight)
     1.0,                     // confidence
@@ -170,8 +170,8 @@ cross-session recall.
 
 #### Merge-on-write semantics (issue [#1915](https://github.com/rysweet/Simard/issues/1915))
 
-Two `CognitiveMemoryOps` clients (the daemon's own bridge, the dashboard's
-writer bridge, a meeting REPL flow, …) can race on `save_goal_board`. Before
+Two `CognitiveMemoryOps` clients (the daemon's own client, the dashboard's
+writer client, a meeting REPL flow, …) can race on `save_goal_board`. Before
 issue #1915, each call wrote a fresh `goal-board:snapshot` fact derived from
 the caller's stale local copy, so the second writer's snapshot silently
 overwrote the first writer's goals — a production cycle observed goals
@@ -184,7 +184,7 @@ board into it:
 
 1. **Read latest persisted snapshot.** Delegates to the same private
    `read_latest_snapshot` helper used by `load_goal_board`:
-   `bridge.search_facts("goal-board:snapshot", 64, 0.0)`, filtered by
+   `client.search_facts("goal-board:snapshot", 64, 0.0)`, filtered by
    `concept == "goal-board:snapshot"`, `max_by(node_id)`,
    `serde_json::from_str` into a `GoalBoard`. Returns `Option<GoalBoard>`.
 2. **Merge** in-flight ⨁ persisted via the pure `merge_boards` helper
@@ -226,10 +226,10 @@ prior write went through the same guard), and re-guarding the merged board
 would risk erroneously rejecting valid persisted goals that an LLM later
 contaminated locally.
 
-**Read-failure fallback.** If `bridge.search_facts` returns an error, or
+**Read-failure fallback.** If `client.search_facts` returns an error, or
 if the latest fact's payload fails to deserialize, the merge step is
 skipped and the in-flight board is persisted unchanged. A `warn!` line is
-emitted with the concept name, the bridge operation that failed, and the
+emitted with the concept name, the client operation that failed, and the
 error kind — never the payload, never goal descriptions. This preserves
 write availability when the cognitive memory read path is temporarily
 unhealthy.
@@ -276,7 +276,7 @@ already serialized by the in-process mutex).
 
 Callers on non-Unix platforms, or that need strict serializability beyond this
 advisory lock, should still funnel writes through the daemon IPC socket (see
-[Cognitive memory bridge helpers](./cognitive-memory-bridge-helpers.md)).
+[Cognitive memory client helpers](./cognitive-memory-client-helpers.md)).
 
 #### Deletion semantics (RR-5)
 
@@ -305,7 +305,7 @@ Practical consequences:
   observe the post-archive snapshot performs a merge against it.
 - **Callers that need immediate, cross-client deletion must serialize
   through the daemon IPC socket** so all writes are funnelled through a
-  single in-process bridge with no concurrent observers.
+  single in-process client with no concurrent observers.
 
 This caveat applies symmetrically to `active` and `backlog`. It does
 **not** affect mutation of fields on an existing goal (status, priority,
@@ -318,7 +318,7 @@ last-writer-wins rule above.
 pub fn save_goal_board_with_removals(
     board: &GoalBoard,
     force_remove_ids: &[String],
-    bridge: &dyn CognitiveMemoryOps,
+    client: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()>
 ```
 
@@ -364,7 +364,7 @@ this variant.
 
 | Case | Behaviour |
 |------|-----------|
-| Empty slice (`&[]`) | Exactly equivalent to `save_goal_board(board, bridge)`. |
+| Empty slice (`&[]`) | Exactly equivalent to `save_goal_board(board, client)`. |
 | Id present on merged active or backlog | Removed from the persisted output. |
 | Id absent from merged active and backlog | Silently no-op. **Not** an error — preserves the idempotency contract advertised by the CLI subcommands. |
 | Same id repeated in the slice | Treated as a single removal. Implementation deduplicates internally. |
@@ -388,7 +388,7 @@ with `removed=0` so structured-log consumers always see the field.
 persisted-snapshot read fails or deserialization fails, the merge step
 is skipped, the filter is applied to the in-flight board alone, and the
 filtered board is persisted unchanged. A `warn!` line is emitted naming
-the bridge operation and the error kind. The filter is still applied on
+the client operation and the error kind. The filter is still applied on
 the fallback path — an operator who explicitly asked to remove an id
 should never see that id survive a degraded save.
 
@@ -407,7 +407,7 @@ second `simard goal remove` call is safe to issue. Callers that need
 strict serial removal beyond the advisory lock (or on non-Unix platforms)
 must funnel through the daemon IPC writer (which is what the CLI
 subcommands do — see
-[bridge helpers](./cognitive-memory-bridge-helpers.md)).
+[client helpers](./cognitive-memory-client-helpers.md)).
 
 #### `merge_boards` (private helper, testable in isolation)
 
@@ -450,7 +450,7 @@ classification wins, goal appears exactly once in the in-flight set.
 #### `read_latest_snapshot` (private helper)
 
 ```rust
-fn read_latest_snapshot(bridge: &dyn CognitiveMemoryOps) -> Option<GoalBoard>
+fn read_latest_snapshot(client: &dyn CognitiveMemoryOps) -> Option<GoalBoard>
 ```
 
 Extracted from `load_goal_board`'s body and now shared with
@@ -464,7 +464,7 @@ through to `Ok(GoalBoard::new())` on `None`.
 `save_goal_board` calls `board_integrity_suspect(board)` first. If that
 returns `Some(reason)`, the function returns
 `Err(SimardError::InvalidGoalRecord)` **without** invoking
-`read_latest_snapshot` or `bridge.store_fact`. This blocks two classes of
+`read_latest_snapshot` or `client.store_fact`. This blocks two classes of
 corruption:
 
 - Active goals whose `id` is shorter than 5 characters (catches `g1`,
@@ -483,7 +483,7 @@ snapshot remains the authoritative state.
 | `board_integrity_suspect` returns `Some(_)` | `Err(SimardError::InvalidGoalRecord { field: "board", reason: format!("refusing to persist suspect board: {reason}") })` — merge read and `store_fact` are not called |
 | `read_latest_snapshot` returns `None` (read error / parse error / no prior fact) | Merge skipped; **in-flight board is persisted as-written**. `warn!` logged. **Not** an `Err` to the caller |
 | `serde_json::to_string(&merged)` fails | `Err(SimardError::InvalidGoalRecord { field: "board", reason: format!("failed to serialize goal board: {e}") })` |
-| `bridge.store_fact` fails | The underlying `SimardError` is propagated via `?` |
+| `client.store_fact` fails | The underlying `SimardError` is propagated via `?` |
 
 The error is fatal for the caller: the in-memory mutation is not retained
 anywhere else.
@@ -493,15 +493,15 @@ anywhere else.
 ```rust
 use simard::goal_curation::{load_goal_board, save_goal_board, update_goal_progress};
 use simard::goals::GoalProgress;
-use simard::memory_ipc::launch_writer_bridge;
+use simard::memory_ipc::launch_writer_client;
 
-let bridge = launch_writer_bridge(&state_root)?;     // WriterBridge or Err
-let mut board = load_goal_board(bridge.ops())?;
+let client = launch_writer_client(&state_root)?;     // WriterClient or Err
+let mut board = load_goal_board(client.ops())?;
 update_goal_progress(&mut board, &goal_id, GoalProgress::InProgress { percent: 75 })?;
 // save_goal_board now re-reads the latest snapshot and merges before storing,
 // so a concurrent daemon write that added a new goal will not be clobbered.
 // Same-id mutations (this 75% update) win against the persisted snapshot.
-save_goal_board(&board, bridge.ops())?;
+save_goal_board(&board, client.ops())?;
 ```
 
 > ⚠ **Deletion via mutate-then-save is not propagated in a single call.**
@@ -541,7 +541,7 @@ behaviour (RR-4).
 ### `persist_board`
 
 ```rust
-pub fn persist_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()>
+pub fn persist_board(board: &GoalBoard, client: &dyn CognitiveMemoryOps) -> SimardResult<()>
 ```
 
 Calls `save_goal_board` and then `store_episode` with a human-readable
@@ -721,10 +721,10 @@ callers that need backlog data must read `board.backlog` directly.
 
 ```rust
 use simard::goal_curation::{active_goals_as_records, load_goal_board};
-use simard::memory_ipc::open_reader_bridge;
+use simard::memory_ipc::open_reader_client;
 
-let bridge = open_reader_bridge(&state_root)?;
-let board = load_goal_board(bridge.ops())?;
+let client = open_reader_client(&state_root)?;
+let board = load_goal_board(client.ops())?;
 let next_five: Vec<GoalRecord> =
     active_goals_as_records(&board).into_iter().take(5).collect();
 ```
@@ -736,8 +736,8 @@ at `src/engineer_loop/mod.rs:276`.
 **Example — meeting REPL goal curation (target call site)**
 
 ```rust
-let bridge = open_reader_bridge(&state_root)?;
-let board = load_goal_board(bridge.ops())?;
+let client = open_reader_client(&state_root)?;
+let board = load_goal_board(client.ops())?;
 let records = active_goals_as_records(&board);
 present_records_to_curator(&records);
 ```
@@ -753,10 +753,12 @@ at `src/operator_commands_meeting/improvement_curation.rs:123`.
 
 | Variant | Fields | Meaning |
 |---------|--------|---------|
+| `Proposed` | — | Proposed but not yet accepted onto the active board |
 | `NotStarted` | — | Goal is queued; no engineer spawned yet |
 | `InProgress` | `percent: u32` | Engineer session is active; 0–100 |
-| `Completed` | — | Goal is done; will be archived at end of cycle |
 | `Blocked` | `reason: String` | Cannot proceed; requires operator attention |
+| `Paused` | — | Temporarily on hold — deliberately paused, not blocked |
+| `Completed` | — | Goal is done; will be archived at end of cycle |
 
 ---
 
@@ -765,7 +767,7 @@ at `src/operator_commands_meeting/improvement_curation.rs:123`.
 | `SimardError` variant | When raised |
 |-----------------------|-------------|
 | `InvalidGoalRecord { field, reason }` | Validation failure (empty field, priority 0, percent > 100, capacity exceeded, duplicate id, item not found), serialization failure, or integrity-guard rejection of a suspect board in `save_goal_board` |
-| `BridgeTransportError { bridge, reason }` | A `bridge.store_fact` or `bridge.store_episode` call failed (propagated via `?` from `save_goal_board`/`persist_board`). `load_goal_board` does **not** raise this — it logs and degrades to an empty board instead |
+| `RpcTransportError { client, reason }` | A `client.store_fact` or `client.store_episode` call failed (propagated via `?` from `save_goal_board`/`persist_board`). `load_goal_board` does **not** raise this — it logs and degrades to an empty board instead |
 
 There is no silent disk fallback for writes — when cognitive memory is
 unavailable, `save_goal_board` fails and the in-memory mutation is lost.

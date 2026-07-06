@@ -1,71 +1,22 @@
-pub(crate) const PART_01: &str = r#"      </div>
-    </div>
-
-    <div class="card" style="margin-bottom:1.25rem">
-      <h2 style="cursor:pointer" onclick="document.getElementById('wb-facts-body').style.display=document.getElementById('wb-facts-body').style.display==='none'?'block':'none'">Task Memory <span style="font-weight:normal;color:#8b949e;font-size:.8rem" id="wb-facts-count">0 facts</span> <span style="font-size:.75rem;color:#8b949e">▾</span></h2>
-      <div id="wb-facts-body">
-        <div id="wb-facts-list" style="font-size:.85rem;color:#8b949e">No facts loaded</div>
-      </div>
-    </div>
-
+pub(crate) const PART_01: &str = r#"
+  <div class="tab-content" id="tab-workers">
+    <h1 class="page-h1">Workers</h1>
+    <p class="page-lede">The background processes and engineer subprocesses Simard is running on this host, with a tree view for spotting stuck workers and a live attach to any agent's terminal.</p>
+    <span class="section-anchor" id="section-processes"></span>
+    <h2 class="subsection">Processes</h2>
     <div class="card">
-      <h2>Cognitive Statistics</h2>
-      <div id="wb-cog-stats" style="font-size:.85rem;color:#8b949e">Loading…</div>
+      <h2>Active Simard Processes <button class="btn" onclick="fetchProcesses()">Refresh</button> <span id="proc-auto-refresh" style="font-size:.75rem;color:#8b949e;font-weight:normal;margin-left:.5rem">⟳ auto-refreshing</span></h2>
+      <div id="proc-count" style="margin-bottom:.5rem;color:#8b949e;font-size:.85rem"></div>
+      <div id="proc-table"><span class="loading">Loading…</span></div>
     </div>
-  </div>
-
-  <div class="tab-content" id="tab-merge-decisions">
-    <h1 class="page-h1">Merge Decisions</h1>
-    <p class="page-lede">A record of every pull request the merge judge has evaluated — which PRs were approved, rejected, or deferred, along with the reasoning and timestamp for each decision.</p>
-    <div class="card" style="max-width:980px;margin-bottom:1rem">
-      <h2>Decision Trend</h2>
-      <div id="merge-judge-trend"><span style="color:#8b949e;font-size:.85rem">Trend chart will appear once decision data is available.</span></div>
+    <h2 class="subsection">Engineers</h2>
+    <div class="card" style="margin-top:1rem">
+      <h2>Process Tree <button class="btn" onclick="fetchProcessTree()">Refresh</button></h2>
+      <div id="proc-tree-summary" style="margin-bottom:.5rem;color:#8b949e;font-size:.85rem"></div>
+      <div id="proc-tree-container"><span class="loading">Loading…</span></div>
     </div>
-    <div class="card" style="max-width:980px">
-      <h2>Decision History <button class="btn" onclick="fetchMergeJudge()" style="font-size:.75rem">Refresh</button></h2>
-      <div id="merge-judge-panel"><span class="loading">Loading…</span></div>
-    </div>
-  </div>
-
-  <div class="tab-content" id="tab-pr-readiness">
-    <h1 class="page-h1">PR Readiness</h1>
-    <p class="page-lede">Every open pull request under management with its CI status, review state, and remaining blockers — so you can see what is ready to merge without leaving the dashboard.</p>
-    <div class="card" style="max-width:1100px">
-      <h2>Open Pull Requests <button class="btn" onclick="fetchPrReadiness()" style="font-size:.75rem">Refresh</button></h2>
-      <div id="pr-readiness-summary" style="margin-bottom:.75rem"><span class="loading">Loading…</span></div>
-      <div id="pr-readiness-panel"><span class="loading">Loading…</span></div>
-    </div>
-  </div>
-
-  <div class="tab-content" id="tab-overseer">
-    <h1 class="page-h1">Overseer</h1>
-    <p class="page-lede">What Simard's steward has been doing on its own — what it noticed across the system, what it changed, and, when it chose to wait, why it held back. Refreshes automatically.</p>
-    <div class="card" style="max-width:1100px;margin-bottom:1rem">
-      <h2>Steward Status <button class="btn" onclick="fetchOverseer()" style="font-size:.75rem">Refresh</button></h2>
-      <div id="overseer-status"><span class="loading">Loading…</span></div>
-    </div>
-    <div class="card" style="max-width:1100px;margin-bottom:1rem">
-      <h2>Operator Threads</h2>
-      <div id="overseer-threads"><span class="loading">Loading…</span></div>
-    </div>
-    <div class="card" style="max-width:1100px">
-      <h2>Recent Activity</h2>
-      <div id="overseer-recent"><span class="loading">Loading…</span></div>
-    </div>
-  </div>
-
-  <div class="tab-content" id="tab-status">
-    <h1 class="page-h1">Status</h1>
-    <p class="page-lede">One consolidated operational report — the daemon, system resources, model spending, memory and brain health, gym, goals, active work, merged pull requests, and unexpected telemetry signals, all on a single page.</p>
-    <div class="card" style="max-width:1100px">
-      <h2>Operational Status <button class="btn" onclick="fetchStatusSnapshot()" style="font-size:.75rem">Refresh</button></h2>
-      <div id="status-snapshot-panel"><span class="loading">Loading…</span></div>
-    </div>
-  </div>
-
-  <div class="tab-content" id="tab-terminal">
-    <h1 class="page-h1">Terminal</h1>
-    <p class="page-lede">Attach to the live terminal of a running Simard sub-agent and watch its standard output and standard error stream in real time.</p>
+    <span class="section-anchor" id="section-terminal"></span>
+    <h2 class="subsection">Terminal</h2>
     <div class="card" style="max-width:980px">
       <h2>Agent Terminal</h2>
       <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.6rem;margin-bottom:.75rem;font-size:.8rem;color:#8b949e">
@@ -114,6 +65,69 @@ pub(crate) const PART_01: &str = r#"      </div>
         <div style="color:#8b949e;font-size:.85rem">Loading…</div>
       </div>
     </section>
+  </div>
+
+  <div class="tab-content" id="tab-pull-requests">
+    <h1 class="page-h1">Pull Requests</h1>
+    <p class="page-lede">Every pull request Simard is managing — the merge judge's approve, reject, and defer decisions plus the CI, review, and blocker status that shows what is ready to merge.</p>
+    <span class="section-anchor" id="section-merge-decisions"></span>
+    <h2 class="subsection">Merge Decisions</h2>
+    <div class="card" style="max-width:980px;margin-bottom:1rem">
+      <h2>Decision Trend</h2>
+      <div id="merge-judge-trend"><span style="color:#8b949e;font-size:.85rem">Trend chart will appear once decision data is available.</span></div>
+    </div>
+    <div class="card" style="max-width:980px">
+      <h2>Decision History <button class="btn" onclick="fetchMergeJudge()" style="font-size:.75rem">Refresh</button></h2>
+      <div id="merge-judge-panel"><span class="loading">Loading…</span></div>
+    </div>
+    <span class="section-anchor" id="section-pr-readiness"></span>
+    <h2 class="subsection">Readiness</h2>
+    <div class="card" style="max-width:1100px">
+      <h2>Open Pull Requests <button class="btn" onclick="fetchPrReadiness()" style="font-size:.75rem">Refresh</button></h2>
+      <div id="pr-readiness-summary" style="margin-bottom:.75rem"><span class="loading">Loading…</span></div>
+      <div id="pr-readiness-panel"><span class="loading">Loading…</span></div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-chat">
+    <h1 class="page-h1">Chat</h1>
+    <p class="page-lede">Talk to the running Simard agent in real time — anything you say here can become a new goal, and slash-commands like /close, /goals, and /status are available.</p>
+    <div class="chat-layout">
+      <div id="chat-sidebar">
+        <button id="chat-new" onclick="newChat()">+ New chat</button>
+        <div id="chat-sessions"></div>
+      </div>
+      <div class="card" id="chat-panel">
+        <h2>Chat</h2>
+        <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.5rem .75rem;margin-bottom:.5rem;font-size:.8rem;color:#8b949e">
+          <strong style="color:var(--accent)">💡</strong>
+          Talk directly with Simard — ask about your goals, check system status, or start a conversation. Commands: <code>/close</code> end session, <code>/goals</code> review goals, <code>/status</code> system status.
+        </div>
+        <div class="ws-status disconnected" id="ws-status">● Disconnected <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button></div>
+        <div id="chat-messages"></div>
+        <div id="chat-input-row">
+          <textarea id="chat-input" placeholder="Type a message… (/close to end session)"></textarea>
+          <button id="chat-send" onclick="sendChat()">Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-overseer">
+    <h1 class="page-h1">Overseer</h1>
+    <p class="page-lede">What Simard's steward has been doing on its own — what it noticed across the system, what it changed, and, when it chose to wait, why it held back. Refreshes automatically.</p>
+    <div class="card" style="max-width:1100px;margin-bottom:1rem">
+      <h2>Steward Status <button class="btn" onclick="fetchOverseer()" style="font-size:.75rem">Refresh</button></h2>
+      <div id="overseer-status"><span class="loading">Loading…</span></div>
+    </div>
+    <div class="card" style="max-width:1100px;margin-bottom:1rem">
+      <h2>Operator Threads</h2>
+      <div id="overseer-threads"><span class="loading">Loading…</span></div>
+    </div>
+    <div class="card" style="max-width:1100px">
+      <h2>Recent Activity</h2>
+      <div id="overseer-recent"><span class="loading">Loading…</span></div>
+    </div>
   </div>
 
   <div class="tab-content" id="tab-journal">
@@ -206,6 +220,96 @@ pub(crate) const PART_01: &str = r#"      </div>
     })();
   </script>
 
+  <div class="tab-content" id="tab-creative-ideas">
+    <h1 class="page-h1">Creative Ideas</h1>
+    <p class="page-lede">A pool of candidate improvements Simard dreams up for herself, each reviewed for feasibility, worth, and how to measure success. Browse and search by their review status, from brand-new to accepted or parked.</p>
+    <div class="card" style="max-width:1100px">
+      <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.75rem;flex-wrap:wrap">
+        <input id="ci-search-input" placeholder="Search ideas…" style="flex:1;min-width:200px;padding:6px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px">
+        <select id="ci-status-filter" style="padding:6px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px">
+          <option value="">All statuses</option>
+          <option value="New">New</option>
+          <option value="NeedsRevision">Needs revision</option>
+          <option value="NeedsHumanReview">Needs human review</option>
+          <option value="AcceptedForImplementation">Accepted</option>
+          <option value="ImplementationStarted">Implementation started</option>
+          <option value="ImplementationCompleted">Completed</option>
+          <option value="Deferred">Deferred</option>
+          <option value="Rejected">Rejected</option>
+        </select>
+        <button class="btn" onclick="searchCreativeIdeas()">Search</button>
+        <button class="btn" onclick="loadCreativeIdeas()">Refresh</button>
+      </div>
+      <div id="ci-counts" data-testid="ci-counts" style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.75rem"></div>
+      <div id="ci-list" data-testid="ci-list" style="min-height:220px"><span class="loading">Loading…</span></div>
+    </div>
+  </div>
+  <script>
+    /* --- Creative Ideas tab --- */
+    (function(){
+      let ciLoaded=false;
+      function statusColor(s){
+        return ({
+          New:'#58a6ff', NeedsRevision:'#d29922', NeedsHumanReview:'#f0883e',
+          AcceptedForImplementation:'#3fb950', ImplementationStarted:'#2ea043',
+          ImplementationCompleted:'#238636', Deferred:'#8b949e', Rejected:'#f85149'
+        })[s]||'#8b949e';
+      }
+      function renderCounts(counts){
+        const box=document.getElementById('ci-counts');
+        if(!counts){box.innerHTML='';return;}
+        box.innerHTML=Object.keys(counts).map(k=>
+          '<span style="font-size:.72rem;padding:.15rem .45rem;border-radius:10px;border:1px solid '+statusColor(k)+';color:'+statusColor(k)+'">'+esc(k)+': '+esc(String(counts[k]))+'</span>'
+        ).join('');
+      }
+      function renderIdeas(items){
+        const box=document.getElementById('ci-list');
+        if(!items||!items.length){box.innerHTML='<span style="color:#8b949e">No ideas match. Simard fills this pool as the Creative Ideas thread runs.</span>';return;}
+        box.innerHTML=items.map(it=>{
+          const c=statusColor(it.status);
+          const metric=it.has_metric?'<span style="color:#3fb950;font-size:.7rem"> · metric: '+esc(it.metric||'yes')+'</span>':'';
+          return '<div style="padding:.5rem .6rem;border:1px solid #21262d;border-radius:6px;margin-bottom:.5rem">'
+            +'<div style="display:flex;justify-content:space-between;gap:.5rem;align-items:center">'
+            +'<strong>'+esc(it.idea)+'</strong>'
+            +'<span style="font-size:.7rem;padding:.1rem .4rem;border-radius:10px;background:'+c+'22;color:'+c+';border:1px solid '+c+'">'+esc(it.status)+'</span>'
+            +'</div>'
+            +'<div style="color:#8b949e;font-size:.78rem;margin-top:.25rem">'+esc(it.rationale||'')+'</div>'
+            +'<div style="color:#6e7681;font-size:.7rem;margin-top:.25rem">'+esc(String(it.reviews))+' review(s) · '+esc(String(it.links))+' link(s)'+metric+'</div>'
+            +'</div>';
+        }).join('');
+      }
+      async function loadCreativeIdeas(){
+        const box=document.getElementById('ci-list');
+        box.innerHTML='<span class="loading">Loading…</span>';
+        try{
+          const d=await apiFetch('/api/creative-ideas');
+          renderCounts(d.counts);
+          renderIdeas(d.ideas||[]);
+          ciLoaded=true;
+        }catch(e){box.innerHTML='<span class="err">Could not load ideas — check /api/creative-ideas</span>';}
+      }
+      async function searchCreativeIdeas(){
+        const q=(document.getElementById('ci-search-input').value||'').trim();
+        const status=document.getElementById('ci-status-filter').value||'';
+        const box=document.getElementById('ci-list');
+        box.innerHTML='<span class="loading">Searching…</span>';
+        try{
+          const d=await apiFetch('/api/creative-ideas/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,status:status})});
+          if(d.error){box.innerHTML='<span class="err">'+esc(d.error)+'</span>';return;}
+          renderIdeas(d.results||[]);
+        }catch(e){box.innerHTML='<span class="err">Search failed — check /api/creative-ideas/search</span>';}
+      }
+      window.loadCreativeIdeas=loadCreativeIdeas;
+      window.searchCreativeIdeas=searchCreativeIdeas;
+      const ct=document.querySelector('.tab[data-tab="creative-ideas"]');
+      if(ct) ct.addEventListener('click',()=>{ if(!ciLoaded) loadCreativeIdeas(); });
+      const cs=document.getElementById('ci-search-input');
+      if(cs) cs.addEventListener('keypress',e=>{if(e.key==='Enter')searchCreativeIdeas();});
+      const cf=document.getElementById('ci-status-filter');
+      if(cf) cf.addEventListener('change',()=>searchCreativeIdeas());
+    })();
+  </script>
+
   {{TAB_META_JS}}
   <script>
     /* --- Helpers --- */
@@ -216,14 +320,42 @@ pub(crate) const PART_01: &str = r#"      </div>
        value. Use this for any interpolated title="…" / other quoted attribute
        sink so a future dynamic/peer-supplied value cannot inject attributes. */
     function escAttr(s){return esc(s).replace(/"/g,'&quot;');}
-    async function apiFetch(url,opts){
+    /* apiFetch de-dupes concurrent duplicate GETs (a manual Refresh and a
+       background tick for the same endpoint share one in-flight request) and
+       records a client-clock freshness stamp per endpoint. Both stores live in
+       browser memory for the page's lifetime — nothing is persisted, and the
+       de-dupe key never contains a body, token, or PII (#2649). */
+    const inFlightFetches=new Map();
+    const lastOk={};
+    function fetchDedupeKey(url,method){
+      let pathname=url,search='';
+      try{const u=new URL(url,window.location.origin);pathname=u.pathname;search=u.search;}catch(_){}
+      return method+' '+pathname+search;
+    }
+    async function apiFetchRaw(url,opts){
       const r=await fetch(url,opts);
       if(r.status===401){window.location.href='/login';throw new Error('Session expired — redirecting to login');}
       if(!r.ok){const t=await r.text();throw new Error(t||('HTTP '+r.status));}
+      try{const u=new URL(url,window.location.origin);lastOk[u.pathname]=Date.now();}catch(_){lastOk[url]=Date.now();}
       const text=await r.text();
       if(!text)return {};
       return JSON.parse(text);
     }
+    async function apiFetch(url,opts){
+      const method=((opts&&opts.method)||'GET').toUpperCase();
+      /* GET only: mutations and search POSTs are never collapsed. */
+      if(method!=='GET')return apiFetchRaw(url,opts);
+      const key=fetchDedupeKey(url,method);
+      const inflight=inFlightFetches.get(key);
+      if(inflight)return inflight;
+      const p=apiFetchRaw(url,opts);
+      inFlightFetches.set(key,p);
+      /* Clear on settle (success AND failure) so a rejected fetch cannot poison
+         the key and lock out future requests to that endpoint. */
+      p.then(function(){inFlightFetches.delete(key);},function(){inFlightFetches.delete(key);});
+      return p;
+    }
+    window.apiFetch=apiFetch;
     function timeAgo(ts){
       if(!ts)return'—';
       const d=parseTs(ts);if(!d||isNaN(d))return String(ts);
@@ -427,6 +559,30 @@ pub(crate) const PART_01: &str = r#"      </div>
       }
       return'';
     }
+    /* Issue #20: classify a serialized `GoalProgress` enum to a canonical
+       lifecycle KEY by VARIANT — never by parsing the free-form Display/reason
+       string (G3, agentic-over-brittle). The key indexes the GOAL_STATUS_COLORS
+       allowlist below so goal-supplied text is never interpolated into a style=
+       attribute. Accepts both the string variants ("NotStarted", "Completed",
+       …) and the struct/tuple variants ({"InProgress":{…}}, {"Blocked":"…"}). */
+    function goalLifecycleKey(status){
+      const M={Proposed:'proposed',NotStarted:'not-started',InProgress:'in-progress',Blocked:'blocked',Paused:'paused',Completed:'completed',Done:'completed'};
+      if(status==null)return'not-started';
+      if(typeof status==='string')return M[status]||'not-started';
+      if(typeof status==='object'){
+        if(Object.prototype.hasOwnProperty.call(status,'Blocked'))return'blocked';
+        if(Object.prototype.hasOwnProperty.call(status,'InProgress'))return'in-progress';
+        const k=Object.keys(status)[0];
+        if(k)return M[k]||'not-started';
+      }
+      return'not-started';
+    }
+    /* Hardcoded allowlist: one colour per lifecycle key. Blocked uses amber
+       (#d29922), DELIBERATELY different from the activity-Failed red (#f85149)
+       so a lifecycle-blocked goal is never mistaken for an activity failure
+       (issue #20). Completed=green, in-progress=accent, not-started/proposed=
+       grey, paused=muted. */
+    const GOAL_STATUS_COLORS={'not-started':'#8b949e','proposed':'#8b949e','in-progress':'var(--accent)','blocked':'#d29922','paused':'#6e7681','completed':'#2ea043'};
     function humanizeTaskMemory(content){
       const raw=(content==null)?'':String(content);
       const trimmed=raw.trim();
@@ -525,44 +681,78 @@ pub(crate) const PART_01: &str = r#"      </div>
       return safe.replace(m[0], m[0]+btn);
     }
 
-    /* --- Active tab tracking for auto-refresh --- */
+    /* --- Active tab tracking (#2649: background scheduler owns refresh) --- */
+    /* activeTab is read by the background scheduler (part_05.rs) so a
+       return-to-visible can immediately refresh whatever tab the operator is
+       looking at. Per-tab refresh timers are no longer armed or wiped on tab
+       activation — the scheduler owns one persistent, visibility-gated timer
+       per fetcher for the page's lifetime. */
     let activeTab='overview';
-    let tabRefreshTimers={};
-
-    function clearTabTimers(){Object.values(tabRefreshTimers).forEach(clearInterval);tabRefreshTimers={};}
+    /* The Workers live PTY cannot be prefetched, so it is initialised lazily on
+       the first Workers activation, never by the background scheduler. */
+    let workersTerminalInit=false;
 
     /* --- Tabs --- */
     function updateDocumentTitleForTab(slug){
       var meta=(window.__TAB_META||{})[slug];
       if(meta && meta.title) document.title=meta.title;
     }
-    document.querySelectorAll('.tab').forEach(tab=>{
-      tab.addEventListener('click',()=>{
-        document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-        document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
-        tab.classList.add('active');
-        document.getElementById('tab-'+tab.dataset.tab).classList.add('active');
-        activeTab=tab.dataset.tab;
-        updateDocumentTitleForTab(activeTab);
-        clearTabTimers();
-        if(tab.dataset.tab==='logs') {fetchLogs();tabRefreshTimers.logs=setInterval(fetchLogs,15000);}
-        if(tab.dataset.tab==='processes') {fetchProcessTree();tabRefreshTimers.proc=setInterval(fetchProcessTree,15000);}
-        if(tab.dataset.tab==='memory') {fetchRecentMemories();fetchMemoryHistory();fetchMemoryGraph();fetchMemory();}
 
-        if(tab.dataset.tab==='goals') fetchGoals();
-        if(tab.dataset.tab==='costs') fetchCosts();
-        if(tab.dataset.tab==='traces') fetchTraces();
-        if(tab.dataset.tab==='chat') loadChatSessions();
-        if(tab.dataset.tab==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
-        if(tab.dataset.tab==='thinking') {fetchThinking();fetchOodaCycles();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);tabRefreshTimers.oodaCycles=setInterval(fetchOodaCycles,30000);}
-        if(tab.dataset.tab==='brain-failures') {fetchBrainFailures();tabRefreshTimers.brainFailures=setInterval(fetchBrainFailures,30000);}
-        if(tab.dataset.tab==='merge-decisions') {fetchMergeJudge();tabRefreshTimers.mergeJudge=setInterval(fetchMergeJudge,30000);}
-        if(tab.dataset.tab==='pr-readiness') {fetchPrReadiness();tabRefreshTimers.prReadiness=setInterval(fetchPrReadiness,30000);}
-        if(tab.dataset.tab==='overseer') {fetchOverseer();tabRefreshTimers.overseer=setInterval(fetchOverseer,30000);}
-        if(tab.dataset.tab==='status') {fetchStatusSnapshot();tabRefreshTimers.status=setInterval(fetchStatusSnapshot,30000);}
-        if(tab.dataset.tab==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
-      });
+    /* #2627 consolidation: the canonical tabs (nine consolidated tabs plus the
+       standalone Creative Ideas tab), plus TAB_ALIASES mapping every retired
+       17-tab slug to the parent tab that now hosts it as a sub-section. TAB_ALIASES is a fixed allowlist; a #hash deep link is
+       validated against ^[a-z-]+$, matched against the allowlist, and falls
+       back to 'overview' on any miss. The hash is never concatenated into a
+       DOM selector, so a crafted hash cannot inject markup. */
+    const CANONICAL_TABS=['overview','goals','activity','workers','pull-requests','resources','chat','overseer','journal','creative-ideas'];
+    const TAB_ALIASES={"status":"overview","workboard":"goals","logs":"activity","traces":"activity","thinking":"activity","brain-failures":"activity","processes":"workers","terminal":"workers","merge-decisions":"pull-requests","pr-readiness":"pull-requests","memory":"resources","costs":"resources"};
+
+    /* #2649: the per-tab fetch/refresh chain that used to live here
+       (runTabFetches / clearTabTimers) is retired. Background prefetch and
+       persistent per-tab refresh are now owned by the TAB_LOADERS registry and
+       startBackgroundScheduler() in part_05.rs, so every tab loads on page open
+       and stays fresh regardless of which tab is currently visible. */
+
+    /* Activate a canonical tab by slug. `slug` is always one of CANONICAL_TABS
+       (callers pass a validated value); `section`, when given, is a retired
+       slug whose scroll anchor we jump to inside the parent tab. */
+    function activateTab(slug,section){
+      if(CANONICAL_TABS.indexOf(slug)<0) slug='overview';
+      const panel=document.getElementById('tab-'+slug);
+      if(!panel) return;
+      document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+      const navBtn=document.querySelector('.tab[data-tab="'+slug+'"]');
+      if(navBtn) navBtn.classList.add('active');
+      panel.classList.add('active');
+      activeTab=slug;
+      updateDocumentTitleForTab(slug);
+      /* #2649: render from the already-prefetched cache — never block on a
+         fetch and never wipe a background timer. Attach the Workers live
+         terminal lazily on first activation (it is excluded from background
+         prefetch), then kick a non-blocking refresh so the panel the operator
+         just opened is current. */
+      if(slug==='workers'&&!workersTerminalInit){workersTerminalInit=true;try{initAgentLogTerminal();}catch(_){}}
+      if(typeof refreshTab==='function'){refreshTab(slug);}
+      if(section){const el=document.getElementById('section-'+section);if(el&&el.scrollIntoView)el.scrollIntoView({block:'start'});}
+    }
+
+    /* Resolve an untrusted location.hash to a {tab,section}. Unknown or
+       malformed hashes fall back to Overview; the raw value is validated
+       before use and never becomes part of a selector. */
+    function resolveHashTab(){
+      const raw=(location.hash||'').replace(/^#/,'');
+      if(!/^[a-z-]+$/.test(raw)) return {tab:'overview',section:null};
+      if(CANONICAL_TABS.indexOf(raw)>=0) return {tab:raw,section:null};
+      if(Object.prototype.hasOwnProperty.call(TAB_ALIASES,raw)) return {tab:TAB_ALIASES[raw],section:raw};
+      return {tab:'overview',section:null};
+    }
+
+    document.querySelectorAll('.tab').forEach(tab=>{
+      tab.addEventListener('click',()=>{activateTab(tab.dataset.tab);});
     });
+    window.addEventListener('hashchange',()=>{const r=resolveHashTab();activateTab(r.tab,r.section);});
+    if(location.hash){const r=resolveHashTab();activateTab(r.tab,r.section);}
     setInterval(()=>{document.getElementById('clock').textContent=formatTime(Date.now())},1000);
 
     /* --- Status --- */
@@ -588,6 +778,39 @@ pub(crate) const PART_01: &str = r#"      </div>
           <div class="stat"><span class="label">Updated</span><span class="value">${timeAgo(d.timestamp)}</span></div>`;
         document.getElementById('header-version').textContent='v'+d.version+' ('+shortHash+')';
       }catch(e){document.getElementById('status').innerHTML='<span class="err">Failed to reach /api/status — is the dashboard server running?</span>';}
+    }
+
+    /* --- Cognition: hybrid recall precision (#2491 / #2494) --- */
+    function recallVerdictClass(v){
+      if(v==='confirmed') return 'ok';
+      if(v==='diverging'||v==='regressed') return 'err';
+      if(v==='benchmark-only'||v==='live-only') return 'warn';
+      return '';
+    }
+    async function fetchRecallPrecision(){
+      const el=document.getElementById('cognition-recall-precision');
+      if(!el) return;
+      try{
+        const d=await apiFetch('/api/cognition/recall-precision');
+        const c=d.correlation||{};
+        const verdict=c.verdict||'insufficient';
+        const bench=d.benchmark;
+        const live=d.live;
+        const benchLine=bench
+          ? `${bench.score.toFixed(4)} <span class="value ${bench.previous_score!=null&&bench.score>bench.previous_score?'ok':''}">(${esc(bench.signal||'n/a')})</span>`
+          : '<span class="warn">no benchmark runs yet</span>';
+        const liveLine=live
+          ? `${live.first.toFixed(4)} → ${live.latest.toFixed(4)} <span class="value">(${live.samples} sample${live.samples===1?'':'s'}, ${live.window_hours}h)</span>`
+          : '<span class="warn">no live samples yet</span>';
+        let html=`
+          <div class="stat"><span class="label">Verdict</span><span class="value ${recallVerdictClass(verdict)}">${esc(verdict)}</span></div>
+          <div class="stat"><span class="label">Benchmark</span><span class="value">${benchLine}</span></div>
+          <div class="stat"><span class="label">Live trend</span><span class="value">${liveLine}</span></div>
+          <div class="stat"><span class="label">Updated</span><span class="value">${timeAgo(d.generated_at)}</span></div>`;
+        if(c.explanation) html+=`<p style="margin:.5rem 0 0;color:#8b949e;font-size:.8rem">${esc(c.explanation)}</p>`;
+        if(d.error) html+=`<p class="err" style="margin:.5rem 0 0;font-size:.8rem">${esc(d.error)}</p>`;
+        el.innerHTML=html;
+      }catch(e){el.innerHTML='<span class="err">Failed to reach /api/cognition/recall-precision</span>';}
     }
 
     async function fetchAgentOverview(){

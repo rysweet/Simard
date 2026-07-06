@@ -1,0 +1,94 @@
+# journal-narrative.yaml — Recipe for Simard's daily journal report DRAFT (issue #2606).
+#
+# Turns one day's structured activity into a professional, third-person
+# NARRATIVE ENGINEERING & RESEARCH REPORT draft. This is the first of the two
+# journal passes; the draft it produces is then rewritten for a layperson by
+# `journal-plain-language.yaml`. A deterministic Rust report assembler is the
+# offline fallback for both passes (see src/journal/generate.rs), so this recipe
+# never has to worry about being the only path — but when it runs it is the
+# preferred, prompt-first path (guideline G3).
+#
+# Context vars (passed via -c):
+#   day_context_path — ABSOLUTE path to a file containing the JSON object
+#     describing the day (issues #2640/#2692). The value is delivered via a file,
+#     never inlined into argv, so a full 24 h of context can never overflow
+#     ARG_MAX and fail the spawn with E2BIG. The agent READS this file. Shape:
+#     {
+#       "date": "YYYY-MM-DD",
+#       "episodes":  [ { "time": "<label>", "content": "<what happened>" }, ... ],
+#       "prs":       [ { "number": <n>, "summary": "<plain>", "outcome": "<disposition>" }, ... ],
+#       "goals":     ["..."],
+#       "deploys":   ["..."],
+#       "overseer_events": ["..."],
+#       "facts":     ["..."],   # substance of the prepared-context facts
+#       "triggers":  ["..."],   # substance of the prepared-context triggers
+#       "procedures":["..."],   # substance of the prepared-context procedures
+#       "notable":   ["..."],
+#       "memory_growth": { "facts_added": <n>, "episodes_added": <n> } | null
+#     }
+#
+# Output: the report draft as Markdown text (NOT JSON). The runner returns the
+# final step's output verbatim; the Rust caller takes it as the draft and hands
+# it to the de-jargon pass.
+
+name: "journal-narrative"
+description: "Draft Simard's daily engineering & research report from the day's structured context"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "journal", "report"]
+
+context:
+  # Declared so the substitution always resolves even if the caller omits it.
+  day_context_path: ""
+
+steps:
+  - id: "draft"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are Simard's **daily report writer**. You are given one day of
+      Simard's activity as a JSON object and you write that day's journal as a
+      clear, well-structured NARRATIVE ENGINEERING & RESEARCH REPORT.
+
+      This is a REPORT, not a personal diary. Write in professional, factual,
+      third-person prose. NEVER use a diary voice: no "Dear diary", no "I,
+      Simard", no confessional first-person ("stayed with me", "I felt", ...).
+      Refer to the system as "Simard" and to its steward as "the Overseer".
+
+      ## Input (the day's context)
+
+      The day's context is a JSON object saved to a file (it is too large to
+      pass inline). **Read the file at this absolute path** with your
+      file-reading tool and use its FULL contents as the input:
+
+      ```
+      {{day_context_path}}
+      ```
+
+      Use ONLY what the input contains. Do not invent events, numbers, PRs, or
+      outcomes. If a field is empty, simply omit that material — never fabricate.
+      Episodic memories are the PRIMARY source; the other fields are supporting
+      augmentations.
+
+      ## Required structure (Markdown)
+
+      1. A section titled exactly `## Overview` followed by ONE short paragraph
+         that summarises the day at a glance (what was worked on, built, or
+         investigated, and the headline outcome).
+      2. `## Engineering work` — what was built, shipped to the live system,
+         and the goals advanced. If there were code-change proposals (pull
+         requests), introduce the table with one plain sentence (the caller
+         renders the actual table separately from the structured PR data).
+      3. `## Research and findings` — studies started or advanced, and the
+         SUBSTANCE of the facts Simard learned (summarise WHAT each fact was,
+         not just how many).
+      4. `## Key observations` — the substance of the reminders (triggers) that
+         came due, the know-how (procedures) applied, how memory grew, and
+         notable Overseer activity.
+      5. `## Remembered moments` — the day's episodic memories as a bullet list,
+         in the order they occurred, each led by its time label in brackets,
+         e.g. `- [2026-07-05 14:03 UTC] reviewed the overnight work`.
+
+      Omit any section that has no material. Keep sections readable: short
+      paragraphs and `-` bullet lists. Do NOT output a code fence around the
+      report — emit the Markdown report directly and nothing else.

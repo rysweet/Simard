@@ -52,7 +52,7 @@ pub fn llm_provider_unavailable(rendered: &str) -> bool {
 /// The OODA daemon opens this bridge at startup; CI hosts that lack the native
 /// library surface the "Cannot find amplihack-memory-lib"/"bridge unhealthy"
 /// errors instead of seeding goals.
-pub fn memory_bridge_unavailable(rendered: &str) -> bool {
+pub fn memory_client_unavailable(rendered: &str) -> bool {
     rendered.contains("Cannot find amplihack-memory-lib") || rendered.contains("bridge unhealthy")
 }
 
@@ -61,8 +61,8 @@ pub fn memory_bridge_unavailable(rendered: &str) -> bool {
 /// force-run (`cargo test -- --include-ignored`) but the bridge is unavailable,
 /// this panics with an actionable message so the run fails loudly instead of
 /// silently passing by an early `return`.
-pub fn require_memory_bridge(test_name: &str, rendered: &str) {
-    if memory_bridge_unavailable(rendered) {
+pub fn require_memory_client(test_name: &str, rendered: &str) {
+    if memory_client_unavailable(rendered) {
         panic!(
             "{test_name}: requires the amplihack memory bridge (amplihack-memory-lib), \
              but it is unavailable or unhealthy.\n\

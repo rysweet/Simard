@@ -14,7 +14,7 @@ use std::process::Command;
 use tempfile::NamedTempFile;
 
 use crate::base_type_turn::{
-    EnrichmentBridges, EnrichmentSource, TurnContext, format_turn_input, parse_turn_output,
+    EnrichmentClients, EnrichmentSource, TurnContext, format_turn_input, parse_turn_output,
 };
 use crate::base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
@@ -26,8 +26,9 @@ use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
 #[cfg(test)]
-use crate::knowledge_bridge::KnowledgeBridge;
+use crate::knowledge_client::KnowledgeClient;
 use crate::metadata::{BackendDescriptor, Freshness};
+use crate::prompt_delivery::{PromptDelivery, apply_std};
 use crate::runtime::RuntimeTopology;
 use crate::sanitization::objective_metadata;
 use crate::terminal_session::execute_terminal_turn;
@@ -124,7 +125,7 @@ impl CopilotSdkAdapter {
     /// hardcoded-`None` regression of issue #1664 that silently dropped all
     /// memory and knowledge enrichment in the primary production adapter.
     ///
-    /// Bridges are launched lazily in [`BaseTypeFactory::open_session`]; a
+    /// Clients are launched lazily in [`BaseTypeFactory::open_session`]; a
     /// launch failure logs and degrades to `None` so a missing knowledge pack
     /// or an unavailable memory store never breaks turn dispatch (see
     /// [`crate::base_type_turn::launch_enrichment_bridges`]).
@@ -150,7 +151,7 @@ impl CopilotSdkAdapter {
         // previously-hardcoded `None`/`None`. When enrichment is configured
         // the bridges are launched here (with graceful degradation) via the
         // shared [`EnrichmentSource::resolve`] and stored in the normalized
-        // `EnrichmentBridges` bundle (issue #1665) so that the shared
+        // `EnrichmentClients` bundle (issue #1665) so that the shared
         // `enrich_input` entry point actually injects memory facts, procedures,
         // and domain knowledge into every turn.
         let enrichment = self.enrichment.resolve();
@@ -188,7 +189,7 @@ struct CopilotSdkSession {
     descriptor: BaseTypeDescriptor,
     config: CopilotAdapterConfig,
     request: BaseTypeSessionRequest,
-    enrichment: EnrichmentBridges,
+    enrichment: EnrichmentClients,
     is_open: bool,
     is_closed: bool,
     turn_count: u32,
@@ -241,7 +242,7 @@ impl CopilotSdkSession {
             },
             config: CopilotAdapterConfig::default(),
             request,
-            enrichment: EnrichmentBridges::new(),
+            enrichment: EnrichmentClients::new(),
             is_open: false,
             is_closed: false,
             turn_count: 0,
@@ -254,12 +255,12 @@ impl CopilotSdkSession {
     #[cfg(test)]
     fn with_test_bridges(
         mut self,
-        memory_bridge: Option<Box<dyn CognitiveMemoryOps>>,
-        knowledge_bridge: Option<KnowledgeBridge>,
+        memory_client: Option<Box<dyn CognitiveMemoryOps>>,
+        knowledge_client: Option<KnowledgeClient>,
     ) -> Self {
-        self.enrichment = EnrichmentBridges {
-            memory: memory_bridge,
-            knowledge: knowledge_bridge,
+        self.enrichment = EnrichmentClients {
+            memory: memory_client,
+            knowledge: knowledge_client,
         };
         self
     }
@@ -339,8 +340,11 @@ impl CopilotSdkSession {
     ///
     /// Similar to `build_enriched_objective` but writes only the formatted
     /// prompt content to a temp file — without the shell `command:` / PTY
-    /// preamble — since meeting mode invokes `copilot` directly via
-    /// `std::process::Command`.
+    /// preamble. Test-only since #2640: production meeting turns stream the
+    /// rendered prompt to copilot on stdin (see [`build_meeting_command`] +
+    /// [`run_meeting_turn`]) rather than via a temp file, but the enrichment
+    /// rendering it exercises is still worth pinning.
+    #[cfg(test)]
     fn build_meeting_prompt(&self, input: &BaseTypeTurnInput) -> SimardResult<NamedTempFile> {
         let formatted = self.render_enriched_prompt(input)?;
         write_prompt_to_tempfile(&formatted)
@@ -352,29 +356,77 @@ impl CopilotSdkSession {
     /// This avoids the PTY/`script` wrapper and `amplihack copilot` custom
     /// instruction injection that caused meeting prompts to be misinterpreted
     /// as engineering tasks (issue #2170).
+    ///
+    /// The (possibly large) prompt is delivered to copilot on STDIN via
+    /// [`prompt_delivery::apply_std`], never as an argv token: passing it as
+    /// `-p "$(cat …)"` inlined the whole prompt into `argv`, which for
+    /// large-context turns exceeded `ARG_MAX` and made `exec` fail with `E2BIG`
+    /// ("Argument list too long", exit 126) — the live defect fixed by #2640.
     fn run_meeting_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
         let session_id = self
             .session_uuid
             .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
             .clone();
 
-        let prompt_file = self.build_meeting_prompt(&input)?;
-        let prompt_path = prompt_file.path().to_string_lossy().to_string();
+        // Render the enriched prompt once; it is streamed on stdin below.
+        let formatted = self.render_enriched_prompt(&input)?;
 
-        // Use shell to expand $(cat ...) for reading the prompt file.
-        let shell_cmd = format!(
-            "{} --no-custom-instructions --silent --allow-all-tools --session-id '{}' -p \"$(cat '{}')\"",
-            MEETING_COPILOT_BINARY, session_id, prompt_path
+        // Direct exec of the copilot binary with only bounded flags — the prompt
+        // is NOT on the command line (issue #2640).
+        let mut command = build_meeting_command(
+            MEETING_COPILOT_BINARY,
+            &session_id,
+            self.config.working_directory.as_deref(),
         );
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(&shell_cmd)
-            .current_dir(self.config.working_directory.as_deref().unwrap_or("."))
-            .output()
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        // Force stdin delivery: copilot reads the prompt from stdin when no `-p`
+        // is given, so the prompt never contributes to `argv` regardless of size.
+        let applied = apply_std(&mut command, formatted.as_bytes(), PromptDelivery::Stdin)
+            .map_err(|err| SimardError::AdapterInvocationFailed {
+                base_type: self.descriptor.id.to_string(),
+                reason: format!("failed to prepare copilot meeting prompt delivery: {err}"),
+            })?;
+
+        let mut child = command
+            .spawn()
             .map_err(|err| SimardError::AdapterInvocationFailed {
                 base_type: self.descriptor.id.to_string(),
                 reason: format!("failed to spawn copilot meeting subprocess: {err}"),
             })?;
+
+        // Feed the prompt on a separate thread so a large prompt cannot deadlock
+        // against the child filling its stdout pipe while we are still writing
+        // stdin. The feeder closes stdin on completion so copilot reads EOF.
+        let stdin = child.stdin.take();
+        let feeder = std::thread::spawn(move || applied.feed(stdin));
+
+        let output =
+            child
+                .wait_with_output()
+                .map_err(|err| SimardError::AdapterInvocationFailed {
+                    base_type: self.descriptor.id.to_string(),
+                    reason: format!("failed to wait on copilot meeting subprocess: {err}"),
+                })?;
+
+        // Surface a stdin-feed failure loudly — no silent fallback (issue #2640).
+        match feeder.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: self.descriptor.id.to_string(),
+                    reason: format!("failed to stream copilot meeting prompt on stdin: {err}"),
+                });
+            }
+            Err(_) => {
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: self.descriptor.id.to_string(),
+                    reason: "copilot meeting prompt feeder thread panicked".to_string(),
+                });
+            }
+        }
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -519,11 +571,11 @@ impl BaseTypeSession for CopilotSdkSession {
         &self.descriptor
     }
 
-    fn enrichment(&self) -> Option<&EnrichmentBridges> {
+    fn enrichment(&self) -> Option<&EnrichmentClients> {
         Some(&self.enrichment)
     }
 
-    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentBridges> {
+    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentClients> {
         Some(&mut self.enrichment)
     }
 
@@ -561,6 +613,34 @@ impl BaseTypeSession for CopilotSdkSession {
     }
 }
 
+/// Build the meeting-mode copilot invocation as a direct [`Command`] — the
+/// binary is exec'd itself (no `sh -c` wrapper) with only bounded flags, and the
+/// prompt is delivered separately on STDIN by the caller. Keeping the prompt out
+/// of `argv` is what makes the invocation immune to the E2BIG / "Argument list
+/// too long" (exit 126) failure that broke Simard's meeting + OODA loop when the
+/// prompt was passed via `-p "$(cat …)"` (issue #2640).
+///
+/// `program` is the copilot binary (e.g. `copilot`); `session_id` threads
+/// conversation context across turns; `working_dir` sets the child's working
+/// directory when provided.
+pub fn build_meeting_command(
+    program: &str,
+    session_id: &str,
+    working_dir: Option<&str>,
+) -> Command {
+    let mut command = Command::new(program);
+    command
+        .arg("--no-custom-instructions")
+        .arg("--silent")
+        .arg("--allow-all-tools")
+        .arg("--session-id")
+        .arg(session_id);
+    if let Some(dir) = working_dir {
+        command.current_dir(dir);
+    }
+    command
+}
+
 /// Build a terminal-session-compatible objective string that launches the
 /// copilot command and reads the prompt from a pre-written file on disk.
 ///
@@ -585,6 +665,17 @@ impl BaseTypeSession for CopilotSdkSession {
 /// (`/tmp/.tmpXXXXXX`), so single-quoting them is unconditional and the
 /// command line stays well under a hundred bytes regardless of prompt size.
 ///
+/// **Why the prompt is piped on STDIN, never passed via `-p` (issue #2640)**:
+/// the interim form `-p "$(cat 'PATH')"` still inlined the prompt into `argv`
+/// — the `$(cat …)` command substitution expands the whole file into a single
+/// argument. For decision-cycle / engineer goals with large accumulated context
+/// (>256 KB), that argument blew past the kernel's `ARG_MAX` and `exec` failed
+/// with `E2BIG` ("Argument list too long", surfaced as exit 126), repeatedly
+/// breaking Simard's live OODA loop. The prompt is now delivered by piping the
+/// file into copilot's STDIN (`cat 'PATH' | <cmd> …`): copilot reads the prompt
+/// from stdin when no `-p` is given, so the prompt no longer contributes to
+/// `argv` and the invocation is immune to prompt size.
+///
 /// Cleanup is owned by Rust: the [`NamedTempFile`] guard in `run_turn`
 /// unlinks the file on Drop. We deliberately do NOT chain `rm -f` in the
 /// shell command — that would race with the Rust guard and could mask
@@ -608,13 +699,15 @@ pub(super) fn build_copilot_terminal_objective(
         "tempfile path unexpectedly contains a single quote: {path_str}"
     );
 
-    // `-p "$(cat 'PATH')"` runs the copilot CLI in non-interactive mode with
-    // the full prompt body. `--subprocess-safe` skips interactive staging.
-    // `--allow-all-tools` is required by copilot for non-interactive runs.
-    // Chain with `exit` so the shell returns after the copilot finishes.
+    // Pipe the prompt file into the copilot on STDIN (`cat 'PATH' | <cmd>`) so
+    // the prompt never touches `argv` — the E2BIG-safe transport (issue #2640).
+    // `--subprocess-safe` skips interactive staging; `--allow-all-tools` is
+    // required by copilot for non-interactive runs; copilot reads the prompt
+    // from stdin because no `-p` is passed. Chain `; exit` so the PTY shell
+    // returns after the copilot finishes.
     objective.push_str(&format!(
-        "command: {} --subprocess-safe -p \"$(cat '{}')\" --allow-all-tools ; exit\n",
-        config.command, path_str,
+        "command: cat '{}' | {} --subprocess-safe --allow-all-tools ; exit\n",
+        path_str, config.command,
     ));
 
     objective

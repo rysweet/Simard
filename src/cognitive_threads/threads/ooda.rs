@@ -10,7 +10,7 @@
 
 use std::time::Instant;
 
-use crate::ooda_loop::{OodaBridges, OodaConfig, OodaPhase, OodaState};
+use crate::ooda_loop::{OodaClients, OodaConfig, OodaPhase, OodaState};
 use crate::operator_commands_ooda::persistence::{persist_cycle_report, persist_cycle_to_memory};
 
 use super::super::thread::{
@@ -25,7 +25,7 @@ const OODA_ID: &str = "ooda";
 /// `run_ooda_cycle` per tick.
 pub struct OodaThread {
     state: OodaState,
-    bridges: OodaBridges,
+    bridges: OodaClients,
     config: OodaConfig,
     interval_secs: u64,
     cycles: u64,
@@ -39,7 +39,7 @@ impl OodaThread {
     /// and the configured cadence (`SIMARD_OODA_INTERVAL_SECS`).
     pub fn new(
         state: OodaState,
-        bridges: OodaBridges,
+        bridges: OodaClients,
         config: OodaConfig,
         interval_secs: u64,
     ) -> Self {
@@ -58,7 +58,7 @@ impl OodaThread {
     /// Reclaim the owned OODA resources (for the daemon's post-loop graceful
     /// shutdown, which flushes the board and closes the session). Supports the
     /// full cutover where the daemon drives OODA solely through this thread.
-    pub fn into_parts(self) -> (OodaState, OodaBridges) {
+    pub fn into_parts(self) -> (OodaState, OodaClients) {
         (self.state, self.bridges)
     }
 }

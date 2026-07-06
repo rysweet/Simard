@@ -207,8 +207,9 @@ mod tests {
         assert!(INDEX_HTML.contains("Simard Dashboard"));
         assert!(INDEX_HTML.contains("/api/status"));
         assert!(INDEX_HTML.contains("/api/workboard"));
-        // #1995: visible label was renamed Whiteboard → Workboard.
-        assert!(INDEX_HTML.contains("Workboard"));
+        // #1995 → #2627: the visible label lineage ended at "Work Board", now a
+        // sub-section of the Goals tab (the API route path is unchanged).
+        assert!(INDEX_HTML.contains("Work Board"));
         assert!(INDEX_HTML.contains("/api/issues"));
         assert!(INDEX_HTML.contains("fetchStatus"));
         assert!(INDEX_HTML.contains("mem-graph-canvas"));
@@ -217,8 +218,8 @@ mod tests {
 
     #[test]
     fn index_html_has_per_tab_intros_and_tooltips() {
-        // Issue #1662 pass-1 + #1993/#1994: every tab gets a hover-tooltip,
-        // a per-tab <h1 class="page-h1">, and a one-sentence
+        // Issue #1662 pass-1 + #1993/#1994 + #2627: every tab gets a
+        // hover-tooltip, a per-tab <h1 class="page-h1">, and a one-sentence
         // <p class="page-lede"> immediately under the H1.
         assert!(
             INDEX_HTML.contains(r#"class="page-lede""#),
@@ -231,17 +232,18 @@ mod tests {
         // Spot-check a few tab tooltips so future refactors keep them in sync.
         assert!(INDEX_HTML.contains(r#"data-tab="overview" title="System health"#));
         assert!(INDEX_HTML.contains(r#"data-tab="goals" title="Active goals"#));
-        assert!(INDEX_HTML.contains(r#"data-tab="terminal" title="Attach to the agent"#));
-        // All 12 tab-content containers should now carry a page-lede paragraph.
+        assert!(INDEX_HTML.contains(r#"data-tab="workers" title="Processes"#));
+        // Each of the nine consolidated tab-content containers carries a
+        // page-lede paragraph and a page-h1 heading.
         let lede_count = INDEX_HTML.matches(r#"class="page-lede""#).count();
         assert!(
-            lede_count >= 12,
-            "expected at least 12 .page-lede paragraphs (one per tab), found {lede_count}"
+            lede_count >= 9,
+            "expected at least 9 .page-lede paragraphs (one per tab), found {lede_count}"
         );
         let h1_count = INDEX_HTML.matches(r#"class="page-h1""#).count();
         assert!(
-            h1_count >= 12,
-            "expected at least 12 .page-h1 headings (one per tab), found {h1_count}"
+            h1_count >= 9,
+            "expected at least 9 .page-h1 headings (one per tab), found {h1_count}"
         );
     }
 
@@ -276,31 +278,26 @@ mod tests {
     // shared formatter.
     // -------------------------------------------------------------------
 
-    /// Every one of the twelve top-level SPA tabs must carry a non-empty
-    /// `title="…"` hover-tooltip. Iterates the canonical tab list so that
-    /// adding/removing a tab in `part_00.rs` immediately surfaces a missing
-    /// tooltip via this test rather than a silent UX regression.
+    /// Every one of the nine consolidated SPA tabs (#2627) must carry a
+    /// non-empty `title="…"` hover-tooltip. Iterates the canonical tab list so
+    /// that adding/removing a tab immediately surfaces a missing tooltip via
+    /// this test rather than a silent UX regression.
     #[test]
     fn index_html_all_eleven_tabs_have_tooltips() {
-        // Canonical SPA tab set (see part_00.rs:99-109). This list is the
+        // Canonical consolidated SPA tab set (#2627). This list is the
         // contract — keep in sync if tabs are added or removed.
         let tabs = [
             "overview",
             "goals",
-            "traces",
-            "logs",
-            "processes",
-            "memory",
-            "costs",
+            "activity",
+            "workers",
+            "pull-requests",
+            "resources",
             "chat",
-            "workboard",
-            "thinking",
-            "brain-failures",
-            "merge-decisions",
-            "terminal",
-            "status",
+            "overseer",
+            "journal",
         ];
-        assert_eq!(tabs.len(), 14, "expected exactly 14 top-level tabs");
+        assert_eq!(tabs.len(), 9, "expected exactly 9 top-level tabs");
 
         for tab in &tabs {
             let needle = format!(r#"data-tab="{tab}" title=""#);
@@ -323,17 +320,13 @@ mod tests {
         let tabs = [
             "overview",
             "goals",
-            "traces",
-            "logs",
-            "processes",
-            "memory",
-            "costs",
+            "activity",
+            "workers",
+            "pull-requests",
+            "resources",
             "chat",
-            "workboard",
-            "thinking",
-            "brain-failures",
-            "merge-decisions",
-            "terminal",
+            "overseer",
+            "journal",
         ];
         for tab in &tabs {
             let prefix = format!(r#"data-tab="{tab}" title=""#);
@@ -354,7 +347,7 @@ mod tests {
         }
     }
 
-    /// Each of the twelve `tab-content` containers (`id="tab-<name>"`)
+    /// Each of the nine `tab-content` containers (`id="tab-<name>"`)
     /// must contain at least one `<p class="page-lede">…</p>` inside
     /// its body — i.e. between the opening `id="tab-<name>"` and the next
     /// `id="tab-` of any kind (the next sibling tab-content). Guarantees
@@ -365,17 +358,13 @@ mod tests {
         let tabs = [
             "overview",
             "goals",
-            "traces",
-            "logs",
-            "processes",
-            "memory",
-            "costs",
+            "activity",
+            "workers",
+            "pull-requests",
+            "resources",
             "chat",
-            "workboard",
-            "thinking",
-            "brain-failures",
-            "merge-decisions",
-            "terminal",
+            "overseer",
+            "journal",
         ];
         for tab in &tabs {
             let open = format!(r#"id="tab-{tab}""#);
@@ -731,28 +720,29 @@ mod tests {
         );
     }
 
-    /// Sanity-check on the page-lede count: there must be exactly 17
-    /// (one per tab) — a stricter bound than the existing `>= 13`
-    /// assertion. If a refactor accidentally adds an 18th, we want to
-    /// know immediately so we can decide whether the new container is
-    /// actually a new tab or a misuse of the class.
+    /// Sanity-check on the page-lede count: after the #2627 consolidation
+    /// there must be exactly 9 (one per top-level tab). If a refactor
+    /// accidentally adds a 10th, we want to know immediately so we can decide
+    /// whether the new container is actually a new tab or a misuse of the
+    /// class (an absorbed panel should be an `<h2 class="subsection">`).
     #[test]
     fn index_html_has_exactly_eleven_page_intros() {
         let count = INDEX_HTML.matches(r#"class="page-lede""#).count();
         assert_eq!(
-            count, 17,
-            "expected exactly 17 page-lede paragraphs (one per top-level tab), got {count}"
+            count, 10,
+            "expected exactly 10 page-lede paragraphs (one per top-level tab), got {count}"
         );
         let h1_count = INDEX_HTML.matches(r#"class="page-h1""#).count();
         assert_eq!(
-            h1_count, 17,
-            "expected exactly 17 page-h1 headings (one per top-level tab), got {h1_count}"
+            h1_count, 10,
+            "expected exactly 10 page-h1 headings (one per top-level tab), got {h1_count}"
         );
     }
 
-    /// #2419 — the Overseer tab must be wired end-to-end in the SPA: a
+    /// #2419 / #2649 — the Overseer tab must be wired end-to-end in the SPA: a
     /// nav entry, a content panel, a fetch function that hits the auth-gated
-    /// `/api/overseer` endpoint, and an auto-refresh dispatch on activation.
+    /// `/api/overseer` endpoint, and a background loader registered in the
+    /// `TAB_LOADERS` registry so it is prefetched and refreshed automatically.
     #[test]
     fn index_html_wires_overseer_tab() {
         assert!(
@@ -771,9 +761,14 @@ mod tests {
             INDEX_HTML.contains("function fetchOverseer()"),
             "fetchOverseer() must be defined"
         );
+        // #2649: the on-activate `runTabFetches` slug-branch chain was retired in
+        // favour of the TAB_LOADERS background-prefetch registry, so the Overseer
+        // tab is now wired by a registered loader entry rather than a
+        // `slug==='overseer'` activation branch.
         assert!(
-            INDEX_HTML.contains("tab.dataset.tab==='overseer'"),
-            "Overseer tab must be wired into the activation dispatch"
+            INDEX_HTML.contains("'overseer':[{fn:fetchOverseer"),
+            "Overseer tab must register fetchOverseer in the TAB_LOADERS \
+             background-prefetch registry"
         );
     }
 
@@ -804,6 +799,54 @@ mod tests {
             !body.contains("+data.author_login+"),
             "author_login must not be concatenated unescaped into innerHTML"
         );
+    }
+
+    /// #21 — the Overseer tab must render the informative per-tick DETAILS
+    /// (what it observed + what it did), not only the summary one-liner. A
+    /// dedicated `overseerTickDetails(r)` helper reads the two structured
+    /// arrays the report now carries.
+    #[test]
+    fn overseer_tab_defines_and_wires_a_detail_renderer() {
+        assert!(
+            INDEX_HTML.contains("function overseerTickDetails("),
+            "the SPA must define overseerTickDetails() to render observed/action details"
+        );
+        let details = js_fn_body("function overseerTickDetails(");
+        assert!(
+            details.contains("observed_details"),
+            "overseerTickDetails must read the observed_details array:\n{details}"
+        );
+        assert!(
+            details.contains("action_details"),
+            "overseerTickDetails must read the action_details array:\n{details}"
+        );
+        // The recent-activity loop must actually call the detail renderer.
+        let recent = js_fn_body("function fetchOverseer()");
+        assert!(
+            recent.contains("overseerTickDetails("),
+            "fetchOverseer must invoke overseerTickDetails for each recent tick:\n{recent}"
+        );
+    }
+
+    /// #21 — every detail string is attacker-influenceable feed content (repo
+    /// slugs, issue URLs, blocked-goal reasons, anomaly text). Each must pass
+    /// through `esc(...)`; a `</div><script>`-style payload must render inert.
+    #[test]
+    fn overseer_detail_renderer_escapes_every_string() {
+        let details = js_fn_body("function overseerTickDetails(");
+        assert!(
+            details.contains("esc("),
+            "overseerTickDetails must escape every interpolated detail string \
+             via esc(...); an unescaped feed value is an XSS vector:\n{details}"
+        );
+        // No detail array element may be concatenated raw into innerHTML.
+        for raw in ["+d+", "+line+", "+s+", "+detail+"] {
+            assert!(
+                !details.contains(raw),
+                "a detail string must never be concatenated unescaped ('{raw}') \
+                 into innerHTML:\n{details}"
+            );
+        }
     }
 
     // -------------------------------------------------------------------

@@ -1,27 +1,27 @@
-use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_client::CognitiveMemoryClient;
+use crate::rpc_transport::InMemoryRpcTransport;
 
-/// Create a `CognitiveMemoryBridge` backed by an in-memory stub that
+/// Create a `CognitiveMemoryClient` backed by an in-memory stub that
 /// returns empty results for all `search_facts` queries.
-pub fn empty_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("test-empty", |method, _params| match method {
+pub fn empty_bridge() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("test-empty", |method, _params| match method {
         "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
         "memory.get_statistics" => Ok(serde_json::json!({
             "sensory_count": 0, "working_count": 0, "episodic_count": 0,
             "semantic_count": 0, "procedural_count": 0, "prospective_count": 0
         })),
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::rpc::RpcErrorPayload {
             code: -32601,
             message: format!("unknown method: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 /// Create a bridge that returns a single meeting fact for `"meeting:"`
 /// queries and empty results for everything else.
-pub fn bridge_with_meeting_facts() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("test-facts", |method, params| match method {
+pub fn bridge_with_meeting_facts() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("test-facts", |method, params| match method {
         "memory.search_facts" => {
             let query = params["query"].as_str().unwrap_or("");
             if query.starts_with("meeting:") {
@@ -39,12 +39,12 @@ pub fn bridge_with_meeting_facts() -> CognitiveMemoryBridge {
                 Ok(serde_json::json!({"facts": []}))
             }
         }
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::rpc::RpcErrorPayload {
             code: -32601,
             message: format!("unknown method: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 /// Create a bridge that returns facts for a specific query prefix.
@@ -52,9 +52,9 @@ pub fn bridge_with_specific_facts(
     prefix: &'static str,
     concept: &'static str,
     content: &'static str,
-) -> CognitiveMemoryBridge {
+) -> CognitiveMemoryClient {
     let transport =
-        InMemoryBridgeTransport::new("test-specific", move |method, params| match method {
+        InMemoryRpcTransport::new("test-specific", move |method, params| match method {
             "memory.search_facts" => {
                 let query = params["query"].as_str().unwrap_or("");
                 if query.starts_with(prefix) {
@@ -72,18 +72,18 @@ pub fn bridge_with_specific_facts(
                     Ok(serde_json::json!({"facts": []}))
                 }
             }
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::rpc::RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown method: {method}"),
             }),
         });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 /// Create a bridge that returns facts for all query prefixes used by
 /// `build_live_meeting_context`.
-pub fn bridge_with_all_fact_types() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("test-all", |method, params| match method {
+pub fn bridge_with_all_fact_types() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("test-all", |method, params| match method {
         "memory.search_facts" => {
             let query = params["query"].as_str().unwrap_or("");
             let facts = if query.starts_with("meeting:") {
@@ -133,10 +133,10 @@ pub fn bridge_with_all_fact_types() -> CognitiveMemoryBridge {
             };
             Ok(serde_json::json!({"facts": facts}))
         }
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::rpc::RpcErrorPayload {
             code: -32601,
             message: format!("unknown method: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }

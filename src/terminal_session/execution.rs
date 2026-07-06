@@ -100,6 +100,7 @@ fn run_terminal_script(
                     TerminalWaitStatus::Satisfied => {}
                     TerminalWaitStatus::ExitedEarly(status) => {
                         let transcript = session.read_transcript().unwrap_or_default();
+                        diagnose_and_record(base_type, &status, &transcript);
                         return Err(SimardError::AdapterInvocationFailed {
                             base_type: base_type.to_string(),
                             reason: format!(
@@ -127,6 +128,7 @@ fn run_terminal_script(
 
     let capture = session.finish()?;
     if !capture.exit_status.success() {
+        diagnose_and_record(base_type, &capture.exit_status, &capture.transcript);
         return Err(SimardError::AdapterInvocationFailed {
             base_type: base_type.to_string(),
             reason: describe_terminal_failure(
@@ -138,6 +140,25 @@ fn run_terminal_script(
     }
 
     Ok(capture.transcript)
+}
+
+/// Diagnose a failed terminal-shell step and record the structured root cause
+/// into the Overseer failure sink so the OODA/Overseer loop drives a CORRECTIVE
+/// action — the "inspect and diagnose the WHY, don't just log it" seam the
+/// operator asked for (issue #2640, PART 2). Classification is transcript-first
+/// so exit 126 + "Argument list too long" is diagnosed as the E2BIG defect, not
+/// a bare "not executable". This complements (never replaces) the existing
+/// human-readable failure message returned to the caller.
+fn diagnose_and_record(base_type: &str, status: &ExitStatus, transcript: &str) {
+    let diagnosis = crate::overseer::classify_terminal_failure(status, transcript);
+    tracing::warn!(
+        target: "overseer::diagnosis",
+        base_type,
+        cause = diagnosis.cause.as_str(),
+        exit_code = ?diagnosis.exit_code,
+        "terminal-shell step failed — diagnosed root cause, recorded for corrective action"
+    );
+    crate::overseer::failure_sink::record_step_failure(diagnosis);
 }
 
 /// Build an actionable failure message for a non-zero terminal-shell exit.

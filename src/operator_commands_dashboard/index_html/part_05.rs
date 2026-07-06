@@ -341,6 +341,20 @@ pub(crate) const PART_05: &str = r#"      try {
       else action='observing, no action needed';
       return saw+' · '+action;
     }
+    function overseerTickDetails(r){
+      r=r||{};
+      const obs=Array.isArray(r.observed_details)?r.observed_details:[];
+      const act=Array.isArray(r.action_details)?r.action_details:[];
+      const rows=[];
+      for(const o of obs) rows.push('observed: '+esc(o));
+      for(const a of act) rows.push(esc(a));
+      if(!rows.length) return '';
+      let html='';
+      for(const row of rows){
+        html+='<div style="color:#8b949e;font-size:.8rem;padding-left:1.2rem;white-space:pre-wrap">'+row+'</div>';
+      }
+      return html;
+    }
     async function fetchOverseer(){
       const statusEl=document.getElementById('overseer-status');
       const threadsEl=document.getElementById('overseer-threads');
@@ -400,6 +414,7 @@ pub(crate) const PART_05: &str = r#"      try {
             items+='<div style="padding:.35rem .1rem;border-bottom:1px solid #21262d;font-size:.85rem">'
               +'<span style="color:#8b949e">'+esc(rec.timestamp||'')+'</span> — '
               +'<span style="color:#c9d1d9">'+esc(overseerTickHuman(rec.report))+'</span>'
+              +overseerTickDetails(rec.report)
               +'</div>';
           }
           recentEl.innerHTML='<div data-testid="overseer-recent-list">'+items+'</div>';
@@ -481,12 +496,207 @@ pub(crate) const PART_05: &str = r#"      try {
       }
     }
 
+    /* --- Background tab prefetch / refresh scheduler (#2649) ----------------
+       Every canonical tab loads on page open and stays on its own persistent,
+       visibility-gated background refresh, so switching tabs renders already-
+       fetched data instead of a slow on-activate fetch. This replaces the
+       retired runTabFetches slug-branch chain. Full design:
+       docs/reference/dashboard-background-tab-prefetch.md */
+
+    /* Rate-safety controls — they protect the local daemon from a self-
+       inflicted request storm, so treat them as a safety limit, not a tweak. */
+    const MAX_CONCURRENCY=3;   /* at most 3 background loaders in flight at once */
+    const STAGGER_MS=150;      /* minimum delay between dispatching queued loaders */
+
+    /* Single source of truth: slug -> [{fn, intervalMs, paths}]. Only list /
+       summary loaders are registered; interactive surfaces (the Workers live
+       PTY, the Chat live attach) are deliberately excluded so the scheduler
+       never auto-opens a stream nobody is watching. A slug with no entry is
+       silently skipped, so this survives tab-set churn without hardcoding. */
+    const TAB_LOADERS={
+      'overview':[{fn:fetchStatusSnapshot,intervalMs:30000,paths:['/api/status/snapshot']}],
+      'goals':[{fn:fetchGoals,intervalMs:30000,paths:['/api/goals']},{fn:fetchWorkboard,intervalMs:30000,paths:['/api/workboard']}],
+      'activity':[{fn:fetchLogs,intervalMs:15000,paths:['/api/logs']},{fn:fetchTraces,intervalMs:30000,paths:['/api/traces']},{fn:fetchThinking,intervalMs:30000,paths:['/api/ooda-thinking']},{fn:fetchOodaCycles,intervalMs:30000,paths:['/api/ooda-cycles']},{fn:fetchBrainFailures,intervalMs:30000,paths:['/api/brain-failures']}],
+      'workers':[{fn:fetchSubagentSessions,intervalMs:5000,paths:['/api/subagent-sessions']},{fn:fetchTmuxSessions,intervalMs:10000,paths:['/api/azlin/tmux-sessions']},{fn:fetchProcessTree,intervalMs:15000,paths:['/api/processes']}],
+      'pull-requests':[{fn:fetchMergeJudge,intervalMs:30000,paths:['/api/merge-judge']},{fn:fetchPrReadiness,intervalMs:30000,paths:['/api/prs']}],
+      'resources':[{fn:fetchRecentMemories,intervalMs:120000,paths:['/api/memory/recent']},{fn:fetchMemoryHistory,intervalMs:120000,paths:['/api/memory/history']},{fn:fetchMemoryGraph,intervalMs:120000,paths:['/api/memory/graph']},{fn:fetchMemory,intervalMs:120000,paths:['/api/memory']},{fn:fetchCosts,intervalMs:120000,paths:['/api/costs']}],
+      'chat':[{fn:loadChatSessions,intervalMs:120000,paths:['/api/chat/sessions']}],
+      'overseer':[{fn:fetchOverseer,intervalMs:30000,paths:['/api/overseer']}],
+      'journal':[{fn:loadJournal,intervalMs:120000,paths:['/api/journal/dates']}],
+      'creative-ideas':[{fn:loadCreativeIdeas,intervalMs:120000,paths:['/api/creative-ideas']}]
+    };
+    window.TAB_LOADERS=TAB_LOADERS;
+
+    let backgroundFetchers=[];   /* flattened {slug, fn, intervalMs, paths} list */
+    let backgroundTimers={};     /* timer key -> setTimeout/setInterval id */
+    let backgroundActive=false;  /* false while the browser tab is hidden */
+    const tabInflight={};        /* slug -> count of in-flight loaders */
+
+    /* Flatten TAB_LOADERS over CANONICAL_TABS; a slug absent from the registry
+       (a not-yet-wired tab) is skipped, not an error. */
+    function collectBackgroundFetchers(){
+      const out=[];
+      for(let i=0;i<CANONICAL_TABS.length;i++){
+        const slug=CANONICAL_TABS[i];
+        const loaders=TAB_LOADERS[slug];
+        if(!loaders)continue;
+        for(let j=0;j<loaders.length;j++){
+          const l=loaders[j];
+          if(typeof l.fn!=='function')continue;
+          out.push({slug:slug,fn:l.fn,intervalMs:l.intervalMs,paths:l.paths||[]});
+        }
+      }
+      return out;
+    }
+
+    /* Inject (once) a subtle per-tab "Updated <relative>" element so the
+       operator can always see how fresh each panel is — no silent staleness.
+       textContent only, never innerHTML, so it can never become a markup sink. */
+    function ensureFreshnessEl(slug){
+      const panel=document.getElementById('tab-'+slug);
+      if(!panel)return null;
+      let el=panel.querySelector('[data-testid="'+slug+'-updated"]');
+      if(!el){
+        el=document.createElement('span');
+        el.setAttribute('data-testid',slug+'-updated');
+        el.className='tab-freshness';
+        el.style.cssText='display:block;color:#8b949e;font-size:.75rem;margin:.1rem 0 .5rem';
+        const h1=panel.querySelector('h1');
+        if(h1&&h1.parentNode)h1.parentNode.insertBefore(el,h1.nextSibling);
+        else panel.insertBefore(el,panel.firstChild);
+      }
+      return el;
+    }
+    function tabMinLastOk(slug){
+      const loaders=TAB_LOADERS[slug];
+      if(!loaders)return 0;
+      let min=0;
+      for(let i=0;i<loaders.length;i++){
+        const paths=loaders[i].paths||[];
+        for(let j=0;j<paths.length;j++){
+          const t=lastOk[paths[j]];
+          if(t&&(min===0||t<min))min=t;
+        }
+      }
+      return min;
+    }
+    function updateFreshness(slug){
+      const el=ensureFreshnessEl(slug);
+      if(!el)return;
+      if(tabInflight[slug]>0){el.textContent='refreshing…';return;}
+      const t=tabMinLastOk(slug);
+      el.textContent=t?('Updated '+timeAgo(t)):'Updated —';
+    }
+
+    /* Run one loader, tracking its tab's in-flight state for the freshness
+       badge. Loaders render their own in-panel error state, so a rejection here
+       is a safety net: it is logged (slug only, no bodies) and swallowed so a
+       single failing loader cannot stall the initial-wave queue drain. */
+    function runFetcher(f){
+      tabInflight[f.slug]=(tabInflight[f.slug]||0)+1;
+      updateFreshness(f.slug);
+      let p;
+      try{p=Promise.resolve(f.fn());}catch(e){p=Promise.reject(e);}
+      return p.catch(function(e){
+        if(window.console&&console.warn)console.warn('background loader for "'+f.slug+'" failed');
+      }).then(function(){
+        tabInflight[f.slug]=Math.max(0,(tabInflight[f.slug]||1)-1);
+        updateFreshness(f.slug);
+      });
+    }
+
+    /* Drain the initial prefetch wave: at most MAX_CONCURRENCY loaders in
+       flight, dispatched no faster than one per STAGGER_MS, in nav order, so
+       the daemon never sees every endpoint fire at once. */
+    function drainInitialWave(fetchers){
+      let idx=0,active=0;
+      function pump(){
+        while(active<MAX_CONCURRENCY&&idx<fetchers.length){
+          const f=fetchers[idx++];
+          active++;
+          runFetcher(f).then(function(){active--;pump();});
+          if(idx<fetchers.length){setTimeout(pump,STAGGER_MS);break;}
+        }
+      }
+      pump();
+    }
+
+    /* Arm one persistent, phase-jittered interval per fetcher. Jitter spreads
+       the ticks so intervals do not realign into a thundering herd. Idempotent:
+       clears any existing timers first so re-arming cannot leak. */
+    function armBackgroundIntervals(){
+      suspendBackgroundIntervals();
+      backgroundActive=true;
+      for(let i=0;i<backgroundFetchers.length;i++){
+        armOneFetcher(backgroundFetchers[i],'bg'+i);
+      }
+    }
+    function armOneFetcher(f,key){
+      const jitter=Math.floor(Math.random()*Math.min(750,Math.max(1,f.intervalMs/6)));
+      backgroundTimers[key]=setTimeout(function(){
+        if(!backgroundActive)return;
+        backgroundTimers[key]=setInterval(function(){
+          if(backgroundActive)runFetcher(f);
+        },f.intervalMs);
+      },jitter);
+    }
+    function suspendBackgroundIntervals(){
+      backgroundActive=false;
+      for(const k in backgroundTimers){
+        clearTimeout(backgroundTimers[k]);
+        clearInterval(backgroundTimers[k]);
+      }
+      backgroundTimers={};
+    }
+
+    /* Immediate, non-blocking refresh of one tab's loaders (used on activate
+       and on return-to-visible). Shares apiFetch's in-flight de-dupe, so it
+       never double-hits an endpoint a background tick is already fetching. */
+    function refreshTab(slug){
+      const loaders=TAB_LOADERS[slug];
+      if(!loaders)return;
+      for(let i=0;i<loaders.length;i++){
+        const l=loaders[i];
+        if(typeof l.fn==='function')runFetcher({slug:slug,fn:l.fn,paths:l.paths||[]});
+      }
+    }
+
+    /* Single global visibility gate (one gate, not per-tab): a hidden browser
+       tab does no background refresh; on return to visible, re-arm every
+       interval and immediately refresh whatever tab the operator is viewing. */
+    function handleVisibilityChange(){
+      if(document.visibilityState==='hidden'){
+        suspendBackgroundIntervals();
+      }else{
+        armBackgroundIntervals();
+        refreshTab(activeTab);
+      }
+    }
+
+    function startBackgroundScheduler(){
+      backgroundFetchers=collectBackgroundFetchers();
+      document.addEventListener('visibilitychange',handleVisibilityChange);
+      if(document.visibilityState==='hidden'){
+        /* Opened in a hidden browser tab: do not prefetch or arm timers yet;
+           the visibility gate will start everything when it becomes visible. */
+        backgroundActive=false;
+        return;
+      }
+      drainInitialWave(backgroundFetchers);
+      armBackgroundIntervals();
+    }
+
     /* --- Init --- */
-    fetchStatus(); fetchIssues(); fetchDistributed(); fetchAgentOverview(); fetchMergeReadiness();
+    fetchStatus(); fetchIssues(); fetchDistributed(); fetchAgentOverview(); fetchMergeReadiness(); fetchRecallPrecision();
     setInterval(fetchAgentOverview,30000);
     setInterval(fetchMergeReadiness,30000);
     setInterval(fetchStatus,30000);
+    setInterval(fetchRecallPrecision,30000);
     setInterval(fetchIssues,120000);
+    /* #2649: overview's status snapshot is now owned by the background scheduler
+       (TAB_LOADERS['overview']) — it is prefetched on page load and kept on a
+       persistent, visibility-gated 30s refresh, so it is no longer armed here. */
+    startBackgroundScheduler();
 
     /* --- Glossary / Jargon tooltips (#1996) --- */
     const GLOSSARY={

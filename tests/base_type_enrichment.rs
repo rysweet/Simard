@@ -13,10 +13,10 @@ use serde_json::json;
 use simard::base_types::{
     BaseTypeFactory, BaseTypeSession, BaseTypeSessionRequest, BaseTypeTurnInput,
 };
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
 use simard::identity::OperatingMode;
-use simard::memory_bridge::CognitiveMemoryBridge;
+use simard::memory_client::CognitiveMemoryClient;
+use simard::rpc::RpcErrorPayload;
+use simard::rpc_transport::InMemoryRpcTransport;
 use simard::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
 use simard::session::SessionId;
 use simard::{
@@ -40,8 +40,8 @@ fn test_request() -> BaseTypeSessionRequest {
 /// Mock memory bridge mirroring `tests/base_type_live.rs`: returns a single
 /// fact and a single procedure for any query so the rendered prompt is
 /// deterministic across adapters.
-fn mock_memory_bridge() -> Box<dyn CognitiveMemoryOps> {
-    let transport = InMemoryBridgeTransport::new("test-memory", |method, params| match method {
+fn mock_memory_client() -> Box<dyn CognitiveMemoryOps> {
+    let transport = InMemoryRpcTransport::new("test-memory", |method, params| match method {
         "memory.search_facts" => {
             let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
             Ok(
@@ -54,12 +54,12 @@ fn mock_memory_bridge() -> Box<dyn CognitiveMemoryOps> {
             "name": "build-and-test", "steps": ["cargo build", "cargo test"],
             "prerequisites": ["rust toolchain"], "usage_count": 5}]})),
         "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(RpcErrorPayload {
             code: -32601,
             message: format!("unknown method: {method}"),
         }),
     });
-    Box::new(CognitiveMemoryBridge::new(Box::new(transport)))
+    Box::new(CognitiveMemoryClient::new(Box::new(transport)))
 }
 
 /// Construct every shipped base-type adapter session, named for diagnostics.
@@ -112,7 +112,7 @@ fn every_shipped_adapter_renders_memory_facts_with_bridge() {
         session
             .enrichment_mut()
             .unwrap_or_else(|| panic!("adapter '{name}' must support enrichment injection"))
-            .memory = Some(mock_memory_bridge());
+            .memory = Some(mock_memory_client());
 
         let enriched = session
             .enrich_input(&input)
@@ -151,7 +151,7 @@ fn all_shipped_adapters_render_identical_enriched_prompt() {
 
     let mut rendered: Vec<(String, String)> = Vec::new();
     for (name, mut session) in all_shipped_sessions() {
-        session.enrichment_mut().unwrap().memory = Some(mock_memory_bridge());
+        session.enrichment_mut().unwrap().memory = Some(mock_memory_client());
         let enriched = session.enrich_input(&input).unwrap();
         rendered.push((name.to_string(), enriched.prompt_preamble));
     }

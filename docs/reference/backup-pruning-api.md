@@ -83,7 +83,7 @@ look for them.
 pruner only after the new backup verifies:
 
 ```rust
-let manifest = backup_memory_verified(bridge, &file_store, BACKUP_AGENT, &config)?;
+let manifest = backup_memory_verified(client, &file_store, BACKUP_AGENT, &config)?;
 prune_old_backups(&config)?;
 Ok(manifest)
 ```

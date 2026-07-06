@@ -39,19 +39,20 @@ brain. For the motivation, decision log, safety model, and roadmap, see
 To turn it on and operate it, see
 [Configure and operate the Creative Ideas thread](../howto/configure-creative-ideas-thread.md).
 
-!!! note "Status — typed foundation + tests, gated OFF (#2419)"
+!!! note "Status — implemented; default-ON, opt-out (#2419)"
     The types, the `IdeaStatus` state machine, the `CreativeIdeaStore`
-    prospective round-trip, the generator-thread skeleton, the reviewer /
-    synthesis / routing traits, and the dedup/portfolio/budget helpers **exist
-    and are unit-tested**. The subsystem is **OFF by default** behind
-    `SIMARD_CREATIVE_IDEAS_ENABLED`, is **not registered** with the `Mind`
-    scheduler, and its reviewer + `gh` adapters run through **fakes** in tests.
-    The production `LlmIdeaSource`, real skill/agent reviewer execution, and the
-    real `IdeaGhClient` `gh` subprocess impl are marked `// FUTURE:` seams. This
-    reference describes the surface exactly as it is built; the
-    [design roadmap](../design/creative-ideas-thread.md#phased-roadmap-future-milestones)
-    tracks the wiring milestones (M2–M6). No type or module contains the word
-    `Bridge` (operator preference).
+    prospective round-trip, the generator thread, the reviewer / synthesis /
+    routing surface, and the dedup/portfolio/budget helpers **are implemented and
+    tested**. The subsystem is **default-ON, opt-out** behind
+    `SIMARD_CREATIVE_IDEAS_ENABLED`, is **registered** with the `Mind` scheduler,
+    and its idea source, reviewers, and `gh` routing run for real (tests drive
+    them through deterministic fakes). The creative-idea memory type (status
+    lifecycle + typed links) is owned upstream in `amplihack-memory-lib`
+    (guideline G2) and re-exported here. This reference describes the surface as
+    built; the
+    [design roadmap](../design/creative-ideas-thread.md#phased-roadmap)
+    records the delivered milestones (M1–M5) and future tuning (M6). No type or
+    module contains the word `Bridge` (operator preference).
 
 ## Module layout
 

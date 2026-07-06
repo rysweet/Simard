@@ -9,6 +9,15 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
               const chipHtml='<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:'+chipColor+';color:#fff;font-size:.7rem;font-weight:600;white-space:nowrap">'+esc(chip)+'</span>';
               const detailText=g.detail||'';
               const detailHtml=detailText?'<span style="font-size:.8rem;margin-left:6px">'+esc(detailText)+'</span>':'';
+              // Issue #20: render each goal's LIVE lifecycle status as a
+              // distinctly-colored badge driven by the additive serialized-enum
+              // g.status_progress (falling back to the legacy g.status string
+              // only if the field is absent). This replaces the old raw
+              // status-string cell that — paired with the red activity chip —
+              // made every goal read as failed/blocked.
+              const lifeColor=GOAL_STATUS_COLORS[goalLifecycleKey(g.status_progress)];
+              const lifeLabel=(g.status_progress!=null)?humanizeGoalProgress(g.status_progress):(g.status||'—');
+              const statusBadge='<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:'+lifeColor+';color:#fff;font-size:.72rem;font-weight:600">'+esc(lifeLabel)+'</span>';
               const full=g.detail_full||'';
               const isFailed=(chip==='Failed');
               const expandHtml=(full&&full!==detailText)?'<details style="display:inline;margin-left:6px"'+(isFailed?' open':'')+' ><summary style="display:inline;cursor:pointer;color:'+(isFailed?'#f85149':'#8b949e')+';font-size:.7rem">'+(isFailed?'error details':'show full log')+'</summary><pre style="margin:.3rem 0 0;white-space:pre-wrap;font-size:.75rem;color:'+(isFailed?'#f85149':'#8b949e')+'">'+esc(full)+'</pre></details>':'';
@@ -26,7 +35,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
               <td style="text-align:center">${g.priority??'—'}</td>
               <td><code>${esc(g.id)}</code></td>
               <td>${esc(g.description)}</td>
-              <td>${esc(g.status)}</td>
+              <td>${statusBadge}</td>
               <td>${wipHtml}</td>
               <td>
                 <button class="btn" style="font-size:.7rem;padding:2px 6px" onclick="demoteGoal('${esc(g.id)}')">▼ Backlog</button>

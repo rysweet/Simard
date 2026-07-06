@@ -67,7 +67,7 @@ nav:
   - Architecture:
     - Overview: architecture/overview.md
     - Simard System Architecture: architecture/system-architecture.md
-    - Bridge Pattern: architecture/bridge-pattern.md
+    - RPC Transport Pattern: architecture/rpc-pattern.md
     - Agent Composition: architecture/agent-composition.md
     - Engineer-Loop Agent Orchestration: architecture/engineer-agent-orchestration.md
     - Cognitive Memory: architecture/cognitive-memory.md
@@ -103,12 +103,16 @@ nav:
     - Reconcile-and-Self-Deploy: concepts/reconcile-and-self-deploy.md
     - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
     - Rust Domain-Expertise Gym (first experiment): concepts/rust-expertise-gym.md
+    - Hybrid Cognition Measurement (benchmark + live): concepts/hybrid-cognition-measurement.md
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
+    - Self-Diagnose on Step Error (ask WHY): concepts/self-diagnose-on-step-error.md
+    - Journal E2BIG Recipe-Spawn (file the context): concepts/journal-recipe-spawn-e2big.md
     - Unified Telemetry and Status: concepts/unified-telemetry-and-status.md
     - Goal-Board Persistence: concepts/goal-board-persistence.md
     - Keeping the OODA Daemon Steerable: concepts/steerable-ooda-daemon.md
     - Perpetual Goals Exempt from No-Progress Hard-Block: concepts/perpetual-goal-no-progress-exemption.md
     - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
+    - Overseer Root-Cause (WHY) Principle: concepts/overseer-root-cause-why.md
     - Authoritative Goal-Board Store: concepts/authoritative-goal-board-store.md
     - Goal-Board Corruption Guards: concepts/goal-board-corruption-guards.md
     - File-Backed Goal-Store Simplification: concepts/file-backed-goal-store-simplification.md
@@ -139,9 +143,12 @@ nav:
     - Edit the OODA Brain Prompt: howto/edit-the-ooda-brain-prompt.md
     - Diagnose Brain Decision Parse Failures: howto/diagnose-brain-decision-parse-failures.md
     - Diagnose Decide/Orient Parse Failures: howto/diagnose-decide-orient-parse-failures.md
+    - Diagnose and Recover OODA Step Failures: howto/diagnose-and-recover-ooda-step-failures.md
+    - Diagnose Journal E2BIG Spawn Failures: howto/diagnose-journal-e2big-spawn-failures.md
     - Interpret Brain Confidence and Verify Completion: howto/interpret-brain-confidence-and-verify-completion.md
     - Configure Brain Introspection: howto/configure-brain-introspection.md
     - Start a Meeting: howto/start-a-meeting.md
+    - Report a Bug or Request a Feature: howto/report-a-bug-or-request-a-feature.md
     - Resume an Interrupted Meeting: howto/resume-an-interrupted-meeting.md
     - Recover from Meeting-Close Timeout: howto/recover-from-meeting-close-timeout.md
     - Use Meeting Templates: howto/use-meeting-templates.md
@@ -183,19 +190,30 @@ nav:
     - View Agent Terminal Logs: howto/view-agent-terminal-logs.md
     - Run Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
     - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
+    - Measure Recall Precision (Hybrid): howto/measure-recall-precision-hybrid.md
     - Read Simard Status: howto/simard-status.md
     - Watch Overseer Activity: howto/watch-overseer-activity.md
     - Configure Overseer Goal-Board Health: howto/configure-overseer-goal-board-health.md
+    - Configure Overseer Memory Recall: howto/configure-overseer-memory-recall.md
+    - Configure Overseer Email Notifications: howto/configure-overseer-email-notifications.md
+    - Review Overseer Workstream Gaps: howto/review-overseer-workstream-gaps.md
+    - Configure Overseer Root-Cause Principle: howto/configure-overseer-root-cause-why.md
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
     - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Telemetry Metrics: reference/telemetry-metrics.md
+    - Recall-Precision Hybrid Measurement: reference/recall-precision-hybrid-api.md
     - StatusSnapshot API: reference/status-snapshot-api.md
     - Daily-Budget Display Guard: reference/daily-budget-display-guard.md
     - Overseer Activity Feed: reference/overseer-activity-feed.md
+    - Overseer Tick Details: reference/overseer-tick-details.md
     - Overseer Goal-Board Health API: reference/overseer-goal-board-health-api.md
+    - Overseer Memory-Recall API: reference/overseer-memory-recall-api.md
+    - Overseer Operator Notifications: reference/overseer-operator-notifications.md
+    - Overseer Workstream Gap-Scan: reference/overseer-workstream-gap-scan.md
+    - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
     - Journal API: reference/journal-api.md
@@ -209,7 +227,10 @@ nav:
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Runtime Contracts: reference/runtime-contracts.md
     - Subprocess Prompt Delivery: prompt-delivery.md
-    - Bridge Wire Protocol: reference/bridge-wire-protocol.md
+    - RPC Wire Protocol: reference/rpc-wire-protocol.md
+    - Argv-Free Copilot/OODA Invocation: reference/argv-free-copilot-invocation.md
+    - Terminal Failure Diagnosis API: reference/terminal-failure-diagnosis-api.md
+    - Recipe Context-File Transport: reference/recipe-context-file-transport.md
     - Text-Parsing Wire Formats: reference/text-parsing-wire-formats.md
     - Recipe Context-Var Sanitization: reference/recipe-context-var-sanitization.md
     - Engineer-Loop argv Sanitization: reference/engineer-loop-argv-sanitization.md
@@ -231,7 +252,7 @@ nav:
     - Memory Introspection CLI: reference/simard-memory-cli.md
     - Cognitive-Memory Provenance (DERIVES_FROM): reference/cognitive-memory-provenance.md
     - Cognitive-Memory Bootstrap Procedures: reference/cognitive-memory-bootstrap-procedures.md
-    - Cognitive-Memory Bridge Helpers: reference/cognitive-memory-bridge-helpers.md
+    - Cognitive-Memory Client Helpers: reference/cognitive-memory-client-helpers.md
     - Cognitive-Memory Preparation Filters: reference/cognitive-memory-preparation-filters.md
     - Cognitive-Memory Fact Recall: reference/cognitive-memory-fact-recall.md
     - Cognitive-Memory Ranked Recall: reference/cognitive-memory-ranked-recall.md
@@ -260,8 +281,10 @@ nav:
     - Engineer Copilot Permissions: reference/engineer-copilot-permissions.md
     - Engineer Worktree Isolation: reference/engineer-worktree-isolation.md
     - Engineer Worktree Sweep Safety Guards: reference/engineer-worktree-sweep-safety.md
+    - Engineer Claim-Sentinel Exclusion: reference/engineer-claim-sentinel-exclusion.md
     - Subagent Tmux Tracking: reference/subagent-tmux-tracking.md
     - Terminal Session Idle Detection: reference/terminal-session-idle-detection.md
+    - RustyClawd Bash-Tool Idle-Liveness: reference/rustyclawd-bash-tool-idle-liveness.md
     - Agent-Log WebSocket API: reference/agent-log-websocket.md
     - PR-Finalization Review Pipeline: reference/pr-finalization-pipeline.md
     - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md
@@ -276,6 +299,7 @@ nav:
     - Signal Continuous Conversation: reference/signal-continuous-conversation.md
     - LightweightChatSession: reference/lightweight-chat-session.md
     - Dashboard Chat: reference/dashboard-chat.md
+    - Dashboard Feedback Widget: reference/dashboard-feedback-widget.md
     - Copilot Meeting Mode: reference/copilot-meeting-mode.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
     - Meeting Handoff Schema: reference/meeting-handoff-schema.md
@@ -287,10 +311,15 @@ nav:
     - Disk-Health API: reference/disk-health-api.md
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
     - Dashboard Action-Detail Humanization: reference/dashboard-action-detail-humanization.md
+    - Dashboard Goal Lifecycle-Status Badges: reference/dashboard-goal-lifecycle-status.md
+    - Dashboard Thinking Cycle History: reference/dashboard-thinking-cycle-history.md
+    - Dashboard Activity Cycle Reports: reference/dashboard-activity-cycle-reports.md
+    - Dashboard Background Tab Prefetch: reference/dashboard-background-tab-prefetch.md
     - Azlin Hosts Self-Membership: reference/azlin-hosts-self-membership.md
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     - Supply-Chain Audit & Guardrails: reference/supply-chain-audit.md
     - Dependency Trust Policy: reference/dependency-trust-policy.md
+    - amplihack Pin Bump to Upstream main (#2626): reference/amplihack-pin-bump-2626.md
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md
     - Cognitive-Thread Scheduling: reference/cognitive-thread-scheduling.md

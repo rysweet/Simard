@@ -1,24 +1,24 @@
 use super::*;
-use crate::bridge::BridgeErrorPayload;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_client::CognitiveMemoryClient;
+use crate::rpc::RpcErrorPayload;
+use crate::rpc_transport::InMemoryRpcTransport;
 
 // ── helper: mock bridges ────────────────────────────────────────────
 
-fn empty_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("test-empty", |method, _params| match method {
+fn empty_bridge() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("test-empty", |method, _params| match method {
         "memory.store_fact" => Ok(serde_json::json!({"id": "fact_1"})),
         "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(RpcErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
-fn bridge_with_goal_fact() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("test-goals", |method, _params| match method {
+fn bridge_with_goal_fact() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("test-goals", |method, _params| match method {
         "memory.store_fact" => Ok(serde_json::json!({"id": "fact_1"})),
         "memory.search_facts" => Ok(serde_json::json!({
             "facts": [{
@@ -30,15 +30,15 @@ fn bridge_with_goal_fact() -> CognitiveMemoryBridge {
                 "tags": ["sub:agent-1"]
             }]
         })),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(RpcErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
-fn bridge_with_progress_fact() -> CognitiveMemoryBridge {
+fn bridge_with_progress_fact() -> CognitiveMemoryClient {
     let progress = SubordinateProgress {
         sub_id: "agent-1".to_string(),
         phase: "execution".to_string(),
@@ -53,7 +53,7 @@ fn bridge_with_progress_fact() -> CognitiveMemoryBridge {
     };
     let content = serde_json::to_string(&progress).unwrap();
     let transport =
-        InMemoryBridgeTransport::new("test-progress", move |method, _params| match method {
+        InMemoryRpcTransport::new("test-progress", move |method, _params| match method {
             "memory.search_facts" => Ok(serde_json::json!({
                 "facts": [{
                     "node_id": "p1",
@@ -64,16 +64,16 @@ fn bridge_with_progress_fact() -> CognitiveMemoryBridge {
                     "tags": ["sub:agent-1"]
                 }]
             })),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
-fn bridge_with_bad_progress() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("test-bad", |method, _params| match method {
+fn bridge_with_bad_progress() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("test-bad", |method, _params| match method {
         "memory.search_facts" => Ok(serde_json::json!({
             "facts": [{
                 "node_id": "p1",
@@ -84,12 +84,12 @@ fn bridge_with_bad_progress() -> CognitiveMemoryBridge {
                 "tags": ["sub:agent-1"]
             }]
         })),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(RpcErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 // ── sub_tag / source_id helpers ─────────────────────────────────────

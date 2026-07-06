@@ -7,7 +7,6 @@
 //! the safety gates, and the OFF-by-default contract.
 
 use std::cell::RefCell;
-use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 
 use serde_json::Value;
@@ -600,31 +599,38 @@ fn dedup_rejects_near_duplicate_of_prior_idea() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. Off by default
+// 8. Default-ON, opt-out
 // ---------------------------------------------------------------------------
 
 #[test]
-fn subsystem_is_off_by_default() {
-    assert!(!CreativeIdeasConfig::default().enabled());
-    // An empty environment leaves it OFF.
-    assert!(!CreativeIdeasConfig::from_lookup(|_| None).enabled());
-    // A falsey value leaves it OFF.
+fn subsystem_is_on_by_default_opt_out() {
+    // Default-ON, consistent with the Overseer/Journal cognitive threads.
+    assert!(CreativeIdeasConfig::default().enabled());
+    // An empty environment leaves it ON.
+    assert!(CreativeIdeasConfig::from_lookup(|_| None).enabled());
+    // Only an explicit falsey value opts out.
     assert!(
         !CreativeIdeasConfig::from_lookup(|k| (k == super::ENABLED_ENV).then(|| "0".to_string()))
             .enabled()
     );
-    // Only an explicit truthy value enables it.
+    assert!(
+        !CreativeIdeasConfig::from_lookup(
+            |k| (k == super::ENABLED_ENV).then(|| "false".to_string())
+        )
+        .enabled()
+    );
+    // A truthy value keeps it ON.
     assert!(
         CreativeIdeasConfig::from_lookup(|k| (k == super::ENABLED_ENV).then(|| "true".to_string()))
             .enabled()
     );
 
-    // The thread reports disabled by default and never ticks.
+    // The thread reports enabled by default and reuses the BackgroundThought kind.
     let thread = CreativeIdeasThread::new(
         CreativeIdeasConfig::default(),
         Box::new(FakeIdeaSource::default()),
     );
-    assert!(!thread.enabled());
+    assert!(thread.enabled());
     assert_eq!(thread.kind(), ThreadKind::BackgroundThought);
 }
 
@@ -648,11 +654,12 @@ fn illegal_transition_returns_invalid_idea_transition() {
 
 #[test]
 fn unknown_status_string_is_rejected_not_defaulted() {
-    let err = IdeaStatus::from_str("Bogus").unwrap_err();
+    use crate::cognitive_memory::creative_idea::parse_idea_status;
+    let err = parse_idea_status("Bogus").unwrap_err();
     assert!(matches!(err, SimardError::InvalidCreativeIdeaRecord { .. }));
     // A known one round-trips.
     assert_eq!(
-        IdeaStatus::from_str("NeedsHumanReview").expect("known"),
+        parse_idea_status("NeedsHumanReview").expect("known"),
         IdeaStatus::NeedsHumanReview
     );
 }
@@ -745,13 +752,14 @@ fn tick_is_total_when_idea_source_errors() {
 #[test]
 fn disabled_tick_is_skipped() {
     let env = TickEnv::new();
-    let mut thread = CreativeIdeasThread::new(
-        CreativeIdeasConfig::default(),
-        Box::new(FakeIdeaSource::failing()),
-    );
+    let disabled = CreativeIdeasConfig {
+        enabled: false,
+        ..CreativeIdeasConfig::default()
+    };
+    let mut thread = CreativeIdeasThread::new(disabled, Box::new(FakeIdeaSource::failing()));
     let mut ctx = env.ctx(1_000, true);
     let outcome = thread.tick(&mut ctx);
-    assert!(!outcome.ran, "a disabled thread does no work");
+    assert!(!outcome.ran, "an explicitly-disabled thread does no work");
     assert!(outcome.success);
 }
 
@@ -783,4 +791,394 @@ fn mark_completed_requires_started_and_metric_met() {
         mark_completed(&mut idea3, true),
         Err(SimardError::InvalidIdeaTransition { .. })
     ));
+}
+
+// ---------------------------------------------------------------------------
+// 12. Wired generation + review/route pipeline (hermetic, all fakes)
+// ---------------------------------------------------------------------------
+
+use super::pipeline::{AgenticIdeaPipeline, GoalStoreFactory, IdeaPipeline, RouteOutcome};
+use super::reviewers::AgentInvoker;
+use crate::goals::GoalRecord;
+
+/// A review/route pipeline that leaves ideas untouched — isolates the
+/// generation step for the "ten new ideas" assertion.
+struct NoopPipeline;
+
+impl IdeaPipeline for NoopPipeline {
+    fn review_and_route(
+        &self,
+        _idea: &mut CreativeIdea,
+        _inputs: &GenerationInputs,
+        _ctx: &ThreadContext<'_>,
+    ) -> SimardResult<RouteOutcome> {
+        Ok(RouteOutcome::Parked)
+    }
+}
+
+/// An [`AgentInvoker`] returning a fixed JSON envelope for every prompt.
+struct CannedInvoker {
+    response: String,
+}
+
+impl AgentInvoker for CannedInvoker {
+    fn invoke(&self, _prompt: &str) -> SimardResult<String> {
+        Ok(self.response.clone())
+    }
+}
+
+/// A `gh` fake that records into shared `Arc<Mutex<..>>` handles so the test can
+/// inspect it after the pipeline (which owns the boxed client) has run.
+#[derive(Clone, Default)]
+struct SharedGh {
+    issues: std::sync::Arc<std::sync::Mutex<Vec<RecordedIssue>>>,
+    pr_ops: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl IdeaGhClient for SharedGh {
+    fn create_labeled_issue(
+        &self,
+        _repo: &str,
+        title: &str,
+        body: &str,
+        labels: &[&str],
+        assignees: &[&str],
+    ) -> SimardResult<GhIssue> {
+        self.issues.lock().unwrap().push(RecordedIssue {
+            labels: labels.iter().map(|s| (*s).to_string()).collect(),
+            assignees: assignees.iter().map(|s| (*s).to_string()).collect(),
+            body: body.to_string(),
+        });
+        Ok(GhIssue {
+            number: 999,
+            url: "https://example.test/issues/999".to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+        })
+    }
+    fn set_pr_draft(&self, _repo: &str, pr: u64, draft: bool) -> SimardResult<()> {
+        self.pr_ops
+            .lock()
+            .unwrap()
+            .push(format!("set_pr_draft:{pr}:{draft}"));
+        Ok(())
+    }
+    fn add_pr_label(&self, _repo: &str, pr: u64, label: &str) -> SimardResult<()> {
+        self.pr_ops
+            .lock()
+            .unwrap()
+            .push(format!("add_pr_label:{pr}:{label}"));
+        Ok(())
+    }
+    fn request_pr_review(&self, _repo: &str, pr: u64, reviewer: &str) -> SimardResult<()> {
+        self.pr_ops
+            .lock()
+            .unwrap()
+            .push(format!("request_pr_review:{pr}:{reviewer}"));
+        Ok(())
+    }
+}
+
+/// A shared in-memory goal store exposed as a [`GoalStore`] and a factory.
+struct SharedGoalStore(std::sync::Arc<InMemoryGoalStore>);
+
+impl GoalStore for SharedGoalStore {
+    fn descriptor(&self) -> crate::metadata::BackendDescriptor {
+        self.0.descriptor()
+    }
+    fn put(&self, record: GoalRecord) -> SimardResult<()> {
+        self.0.put(record)
+    }
+    fn list(&self) -> SimardResult<Vec<GoalRecord>> {
+        self.0.list()
+    }
+    fn top_goals_by_status(
+        &self,
+        status: GoalStatus,
+        limit: usize,
+    ) -> SimardResult<Vec<GoalRecord>> {
+        self.0.top_goals_by_status(status, limit)
+    }
+    fn active_top_goals(&self, limit: usize) -> SimardResult<Vec<GoalRecord>> {
+        self.0.active_top_goals(limit)
+    }
+}
+
+struct SharedGoalStoreFactory(std::sync::Arc<InMemoryGoalStore>);
+
+impl GoalStoreFactory for SharedGoalStoreFactory {
+    fn open(&self, _state_root: &std::path::Path) -> SimardResult<Box<dyn GoalStore>> {
+        Ok(Box::new(SharedGoalStore(std::sync::Arc::clone(&self.0))))
+    }
+}
+
+fn support_metric_response() -> String {
+    r#"```json
+{"verdict": "Support", "notes": "ok", "metric": {"name": "recall_precision_at_k", "baseline": 0.71, "target": ">= +0.05 over 7-day baseline and a live trend", "how_measured": "nightly recall eval + production self-metric"}}
+```"#
+    .to_string()
+}
+
+#[test]
+fn generation_run_produces_ten_new_ideas_with_links() {
+    let env = TickEnv::new();
+    let mut raws = Vec::new();
+    for i in 0..10 {
+        raws.push(RawIdea {
+            idea: format!("distinct self-improvement idea number {i}"),
+            links: vec![MemoryLink {
+                kind: MemoryLinkKind::Goal,
+                node_id: format!("g{i}"),
+            }],
+            rationale: format!("grounded rationale {i}"),
+        });
+    }
+    let cfg = CreativeIdeasConfig {
+        enabled: true,
+        batch: 10,
+        ..CreativeIdeasConfig::default()
+    };
+    let mut thread = CreativeIdeasThread::with_pipeline(
+        cfg,
+        Box::new(FakeIdeaSource::with_ideas(raws)),
+        Box::new(NoopPipeline),
+    );
+    let mut ctx = env.ctx(1_000, /* dry_run */ false);
+    let outcome = thread.tick(&mut ctx);
+    assert!(outcome.ran && outcome.success, "{}", outcome.summary);
+
+    let store = ProspectiveCreativeIdeaStore::new(&env.mem);
+    let ideas = store.list(u32::MAX).expect("list ideas");
+    assert_eq!(ideas.len(), 10, "exactly ten idea prospective-memories");
+    for idea in &ideas {
+        assert_eq!(idea.status, IdeaStatus::New, "each generated idea is New");
+        assert!(!idea.links.is_empty(), "each idea has populated links");
+    }
+}
+
+#[test]
+fn wired_pipeline_accepts_idea_creates_goal_and_persists_reviews() {
+    let env = TickEnv::new();
+    let goal_store = std::sync::Arc::new(InMemoryGoalStore::try_default().expect("goals"));
+    let gh = SharedGh::default();
+
+    let pipeline = AgenticIdeaPipeline::new(
+        Box::new(CannedInvoker {
+            response: support_metric_response(),
+        }),
+        Box::new(gh.clone()),
+        Box::new(SharedGoalStoreFactory(std::sync::Arc::clone(&goal_store))),
+        "rysweet/Simard".to_string(),
+    );
+
+    let mut idea = CreativeIdea::new("cache distilled facts by concept", sample_context(), 42);
+    let store = ProspectiveCreativeIdeaStore::new(&env.mem);
+    idea.node_id = store.store(&idea).expect("persist New");
+
+    let ctx = env.ctx(1234, /* dry_run */ false);
+    let outcome = pipeline
+        .review_and_route(&mut idea, &GenerationInputs::default(), &ctx)
+        .expect("pipeline");
+
+    assert_eq!(outcome, RouteOutcome::Goal);
+    assert_eq!(idea.reviews.len(), 3, "all three reviewers contributed");
+    assert_eq!(idea.status, IdeaStatus::ImplementationStarted);
+
+    let goals = goal_store.list().expect("goals list");
+    assert!(
+        goals
+            .iter()
+            .any(|g| g.status == GoalStatus::Proposed && g.title == idea.idea),
+        "an accepted idea creates a Proposed goal on the board"
+    );
+
+    let current = store
+        .list(u32::MAX)
+        .expect("list")
+        .into_iter()
+        .find(|i| i.idea_id == idea.idea_id)
+        .expect("reviewed idea present");
+    assert_eq!(current.status, IdeaStatus::ImplementationStarted);
+    assert_eq!(current.reviews.len(), 3, "reviews persisted on the idea");
+    assert!(
+        gh.issues.lock().unwrap().is_empty(),
+        "accepted idea files no issue"
+    );
+}
+
+#[test]
+fn wired_pipeline_human_review_files_issue_with_label_and_owner() {
+    let env = TickEnv::new();
+    let goal_store = std::sync::Arc::new(InMemoryGoalStore::try_default().expect("goals"));
+    let gh = SharedGh::default();
+
+    let human_response = "```json\n{\"verdict\": \"NeedsHuman\", \"notes\": \"risky\", \"needs_human\": true, \"high_risk\": true}\n```".to_string();
+    let pipeline = AgenticIdeaPipeline::new(
+        Box::new(CannedInvoker {
+            response: human_response,
+        }),
+        Box::new(gh.clone()),
+        Box::new(SharedGoalStoreFactory(std::sync::Arc::clone(&goal_store))),
+        "rysweet/Simard".to_string(),
+    );
+
+    let mut idea = CreativeIdea::new(
+        "auto-delete stale worktrees on a schedule",
+        sample_context(),
+        7,
+    );
+    let store = ProspectiveCreativeIdeaStore::new(&env.mem);
+    idea.node_id = store.store(&idea).expect("persist New");
+
+    let ctx = env.ctx(555, /* dry_run */ false);
+    let outcome = pipeline
+        .review_and_route(&mut idea, &GenerationInputs::default(), &ctx)
+        .expect("pipeline");
+
+    assert_eq!(outcome, RouteOutcome::Issue);
+    assert_eq!(idea.status, IdeaStatus::NeedsHumanReview);
+
+    let issues = gh.issues.lock().unwrap();
+    assert_eq!(
+        issues.len(),
+        1,
+        "a human-review idea files exactly one issue"
+    );
+    assert!(
+        issues[0]
+            .labels
+            .iter()
+            .any(|l| l == CREATIVE_IDEA_ISSUE_LABEL),
+        "issue carries the creative-idea label"
+    );
+    assert!(
+        issues[0].assignees.iter().any(|a| a == CREATIVE_IDEA_OWNER),
+        "issue tags the repo owner"
+    );
+    assert!(
+        goal_store.list().expect("goals").is_empty(),
+        "a human-review idea does not auto-create a goal"
+    );
+}
+
+#[test]
+fn dry_run_reviews_but_writes_and_routes_nothing() {
+    let env = TickEnv::new();
+    let goal_store = std::sync::Arc::new(InMemoryGoalStore::try_default().expect("goals"));
+    let gh = SharedGh::default();
+    let pipeline = AgenticIdeaPipeline::new(
+        Box::new(CannedInvoker {
+            response: support_metric_response(),
+        }),
+        Box::new(gh.clone()),
+        Box::new(SharedGoalStoreFactory(std::sync::Arc::clone(&goal_store))),
+        "rysweet/Simard".to_string(),
+    );
+    let mut idea = CreativeIdea::new("a dry-run idea", sample_context(), 1);
+    let ctx = env.ctx(1, /* dry_run */ true);
+    let outcome = pipeline
+        .review_and_route(&mut idea, &GenerationInputs::default(), &ctx)
+        .expect("pipeline");
+    assert_eq!(outcome, RouteOutcome::DryRun);
+    assert_eq!(idea.reviews.len(), 3, "dry-run still reviews");
+    assert!(
+        goal_store.list().expect("goals").is_empty(),
+        "dry-run writes no goal"
+    );
+    let store = ProspectiveCreativeIdeaStore::new(&env.mem);
+    assert!(
+        store.list(u32::MAX).expect("list").is_empty(),
+        "dry-run persists nothing"
+    );
+}
+
+#[test]
+fn ideas_are_enumerable_and_searchable_by_status() {
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory store");
+    let store = ProspectiveCreativeIdeaStore::new(&mem);
+
+    // One idea in each of several statuses (all legal transitions from New).
+    let targets = [
+        IdeaStatus::New,
+        IdeaStatus::Rejected,
+        IdeaStatus::Deferred,
+        IdeaStatus::NeedsHumanReview,
+    ];
+    for (i, &status) in targets.iter().enumerate() {
+        let mut idea =
+            CreativeIdea::new(format!("idea for status {i}"), sample_context(), i as u64);
+        idea.node_id = store.store(&idea).expect("store New");
+        if status != IdeaStatus::New {
+            idea.try_transition(status).expect("transition");
+            store.update(&idea).expect("update");
+        }
+    }
+
+    for &status in &targets {
+        let hits = store.list_by_status(status, u32::MAX).expect("by status");
+        assert_eq!(hits.len(), 1, "exactly one idea in status {status}");
+        assert_eq!(hits[0].status, status);
+    }
+    // No duplicate rows leak through despite the append-only updates.
+    assert_eq!(store.list(u32::MAX).expect("list").len(), targets.len());
+}
+
+#[test]
+fn wired_thread_tick_generates_reviews_and_routes() {
+    let env = TickEnv::new();
+    let goal_store = std::sync::Arc::new(InMemoryGoalStore::try_default().expect("goals"));
+    let gh = SharedGh::default();
+
+    let raws: Vec<RawIdea> = (0..10)
+        .map(|i| RawIdea {
+            idea: format!("wired idea {i}"),
+            links: vec![MemoryLink {
+                kind: MemoryLinkKind::Semantic,
+                node_id: format!("s{i}"),
+            }],
+            rationale: format!("rationale {i}"),
+        })
+        .collect();
+
+    let pipeline = AgenticIdeaPipeline::new(
+        Box::new(CannedInvoker {
+            response: support_metric_response(),
+        }),
+        Box::new(gh.clone()),
+        Box::new(SharedGoalStoreFactory(std::sync::Arc::clone(&goal_store))),
+        "rysweet/Simard".to_string(),
+    );
+    let cfg = CreativeIdeasConfig {
+        enabled: true,
+        batch: 10,
+        ..CreativeIdeasConfig::default()
+    };
+    let mut thread = CreativeIdeasThread::with_pipeline(
+        cfg,
+        Box::new(FakeIdeaSource::with_ideas(raws)),
+        Box::new(pipeline),
+    );
+
+    let mut ctx = env.ctx(2_000, /* dry_run */ false);
+    let outcome = thread.tick(&mut ctx);
+    assert!(outcome.ran && outcome.success, "{}", outcome.summary);
+
+    // All ten accepted ideas became Proposed goals on the board.
+    let goals = goal_store.list().expect("goals");
+    assert_eq!(goals.len(), 10, "each accepted idea created a goal");
+    assert!(goals.iter().all(|g| g.status == GoalStatus::Proposed));
+
+    // The ideas are now searchable at their post-review status.
+    let store = ProspectiveCreativeIdeaStore::new(&env.mem);
+    let started = store
+        .list_by_status(IdeaStatus::ImplementationStarted, u32::MAX)
+        .expect("by status");
+    assert_eq!(
+        started.len(),
+        10,
+        "all ten routed to a goal and moved in-flight"
+    );
+    for idea in &started {
+        assert_eq!(idea.reviews.len(), 3);
+    }
 }

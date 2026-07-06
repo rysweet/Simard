@@ -66,6 +66,7 @@ mod tests {
                 duration_ms: 843,
                 ..OverseerTickReport::default()
             },
+            problem_entries: Vec::new(),
         }
     }
 
@@ -166,5 +167,45 @@ mod tests {
         assert_eq!(body["section"]["freshness"], "absent");
         assert_eq!(body["section"]["note"], "Overseer: no ticks recorded yet");
         assert!(body["section"]["data"].is_null());
+    }
+
+    /// #21 — the `/api/overseer` payload must carry the structured, human-readable
+    /// detail arrays so the SPA can render WHAT the Overseer observed and did,
+    /// not just counts.
+    #[test]
+    fn response_carries_observed_and_action_details() {
+        let mut feed = OverseerActivity {
+            enabled: true,
+            cadence_secs: 900,
+            threads: vec![overseer_thread()],
+            ..OverseerActivity::default()
+        };
+        feed.push_record(OverseerActivityRecord {
+            timestamp: "2026-07-05T15:30:00Z".to_string(),
+            enabled: true,
+            report: OverseerTickReport {
+                problems: 2,
+                prs_merged: 1,
+                observed_details: vec!["PR rysweet/Simard#42 is green and merge-ready".to_string()],
+                action_details: vec!["did: merged PR rysweet/Simard#42".to_string()],
+                ..OverseerTickReport::default()
+            },
+            problem_entries: Vec::new(),
+        });
+
+        let body = overseer_response(&snapshot_with(SectionEnvelope::live(
+            feed,
+            Some("2026-07-05T15:30:00Z".to_string()),
+        )));
+
+        let rep = &body["section"]["data"]["recent"][0]["report"];
+        assert_eq!(
+            rep["observed_details"][0], "PR rysweet/Simard#42 is green and merge-ready",
+            "the response must surface the concrete observed detail:\n{body}"
+        );
+        assert_eq!(
+            rep["action_details"][0], "did: merged PR rysweet/Simard#42",
+            "the response must surface the concrete action detail:\n{body}"
+        );
     }
 }

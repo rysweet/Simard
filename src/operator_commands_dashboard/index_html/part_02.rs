@@ -10,14 +10,12 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
         const crEl=document.getElementById('cycle-reports');
         if(crEl){
           if(d.cycle_reports?.length){
-            crEl.innerHTML=d.cycle_reports.map(c=>{
-              const num=c.cycle_number;
-              const text=c.summary?humanizeCycleSummary(c.summary):JSON.stringify(c.report||{});
-              return`<div class="transcript-item">
-                <h3>Cycle #${num}</h3>
-                <div class="log-box" style="max-height:100px">${esc(text)}</div>
-              </div>`;
-            }).join('');
+            /* Issue #26: render each cycle report with the SHARED renderer the
+               Thinking tab uses, so the Activity card shows real per-cycle OODA
+               detail (observe/orient/decide/act), the live cycle number, honest
+               tree status, and collapsed no-progress runs — never a stale,
+               repeated, detail-less "Cycle #1". */
+            crEl.innerHTML=d.cycle_reports.map(renderCycleEntry).join('');
           }else{crEl.innerHTML='<span style="color:#8b949e">No cycle reports found. Run the agent daemon to generate cycle data.</span>';}
         }
         const ttEl=document.getElementById('terminal-transcripts');

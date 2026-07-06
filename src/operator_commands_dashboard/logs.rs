@@ -92,21 +92,12 @@ pub(crate) async fn logs() -> Json<Value> {
         }
     }
 
-    // Collect cycle reports for the logs tab
-    let mut cycle_reports: Vec<Value> = Vec::new();
-    let cycle_dir = state_root.join("cycle_reports");
-    if let Ok(entries) = std::fs::read_dir(&cycle_dir) {
-        let mut files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        files.sort_by_key(|e| e.path());
-        for entry in files.into_iter() {
-            let path = entry.path();
-            if let Ok(content) = std::fs::read_to_string(&path)
-                && let Ok(report) = serde_json::from_str::<Value>(&content)
-            {
-                cycle_reports.push(report);
-            }
-        }
-    }
+    // Collect cycle reports for the Activity tab's "Cycle Reports" card via the
+    // single reader shared with the Thinking tab (#26). This unions both
+    // persisted dirs, orders newest-first, stamps each report with its
+    // authoritative filename cycle number, and collapses no-progress runs — so
+    // the card no longer repeats a stale, detail-less "Cycle #1" forever.
+    let cycle_reports = super::cycle_source::read_cycle_reports_collapsed(&state_root);
 
     // Attach a machine-readable severity to every daemon log line so the
     // Logs tab level filter has something to match on. The daemon emits

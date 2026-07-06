@@ -201,7 +201,7 @@ pub fn dimension_value(score: &GymSuiteScore, name: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gym_bridge::ScoreDimensions;
+    use crate::gym_client::ScoreDimensions;
 
     fn make_score(v: f64) -> GymSuiteScore {
         GymSuiteScore {

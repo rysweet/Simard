@@ -54,8 +54,8 @@ fork. They are free functions in the `memory_backup` module — see
 Reconciled pages: [Cognitive Memory](architecture/cognitive-memory.md),
 [Cognitive Memory — Library Adapter](architecture/cognitive-memory-library-adapter.md),
 the `reference/cognitive-memory-*` recall/idempotency/bootstrap pages, and
-[Bridge Pattern](architecture/bridge-pattern.md) — whose *Data Loss Prevention*
-section no longer attributes memory-write durability to a Python bridge. Writes
+[RPC Transport Pattern](architecture/rpc-pattern.md) — whose *Data Loss Prevention*
+section no longer attributes memory-write durability to a Python client. Writes
 now go directly through the in-process `LibraryCognitiveMemory` adapter
 (idempotent by `node_id`), and durability is provided by the `memory_backup`
 verified-backup APIs.
@@ -132,6 +132,24 @@ proceeds on the last-known-good install, or — under
 See [The amplihack freshness gate](concepts/amplihack-freshness-gate.md), the
 [freshness-gate reference](reference/amplihack-freshness-gate.md), and
 [Configure the amplihack freshness gate](howto/configure-amplihack-freshness-gate.md).
+
+### 8. amplihack pins bumped to upstream main (#2626)
+
+Two behind-`main` git-rev pins were reconciled to their current upstream `main`
+HEADs so the fixes those repos already merged run in Simard's own build:
+`amplihack-agent-eval` (`rysweet/amplihack-rs`) `59548a9 → 2a93441`, and
+`amplihack-memory` (`rysweet/amplihack-memory-lib`) `5d7db77 → f800370`. The bump
+touches **only** `Cargo.toml` and `Cargo.lock` — both upstream deltas are
+API-compatible, so `gym_runner_client`, `LibraryCognitiveMemory`, and their
+mirror/conversion consumers compile with **zero call-site edits**. The
+`amplihack-memory` HEAD carries no engine change, so `lbug` stays `0.17.1`
+(store format v41) and `cargo tree -i lbug` resolves to exactly one version; the
+direct `lbug = "=0.17.1"` pin is unchanged. The bump adds no new git source or
+crate, so `cargo deny` / `cargo audit` / `cargo vet` stay green. This is a
+worked instance of the proactive reconcile in
+[Keep Simard's dependency pins up to date](howto/self-maintain-dependency-pins.md);
+the full change record is
+[amplihack pin bump to upstream main (#2626)](reference/amplihack-pin-bump-2626.md).
 
 ## Relationship to the PRD
 

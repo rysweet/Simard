@@ -402,6 +402,7 @@ mod tests {
             review_decision: "APPROVED".into(),
             checks: vec![],
             base_ref_name: "main".into(),
+            labels: vec![],
         }
     }
 

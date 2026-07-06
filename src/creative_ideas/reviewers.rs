@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cognitive_memory::creative_idea::CreativeIdea;
 use crate::cognitive_threads::threads::creative_ideas::GenerationInputs;
+use crate::creative_ideas::prompt::{extract_json_value, render_review_context};
 use crate::creative_ideas::synthesis::{FeedbackSynthesizer, SuccessMetric, SynthesisOutcome};
 use crate::error::{SimardError, SimardResult};
 
@@ -100,23 +101,127 @@ pub trait Reviewer {
     fn review(&self, ctx: &ReviewContext<'_>) -> SimardResult<Review>;
 }
 
-/// The amplihack skill/agent invocation seam.
+/// The amplihack agent/skill invocation seam.
 ///
-/// FUTURE (M3): the real implementation shells out to the amplihack binary
-/// (`SIMARD_AMPLIHACK_BIN`) to run the `crusty-old-engineer` skill /
-/// `philosophy-guardian` agent / measurability agent. During the spike the
-/// production adapters below build the prompt and call this seam, but do not
-/// interpret the response; all tests inject fakes.
+/// The production adapter ([`SessionAgentInvoker`]) runs a real agentic turn via
+/// the same session path the OODA brain uses (idle-liveness only — **no
+/// wall-clock timeout** on the turn). Tests inject a deterministic fake.
 pub trait AgentInvoker {
     /// Invoke an agent/skill with `prompt` and return its raw text response.
     fn invoke(&self, prompt: &str) -> SimardResult<String>;
 }
 
-/// Production adapter for the `crusty-old-engineer` skill.
+impl<T: AgentInvoker + ?Sized> AgentInvoker for &T {
+    fn invoke(&self, prompt: &str) -> SimardResult<String> {
+        (**self).invoke(prompt)
+    }
+}
+
+/// Production [`AgentInvoker`] backed by the shared session submitter (the same
+/// blessed agentic path the OODA brain uses, so it inherits idle-liveness and
+/// carries **no wall-clock turn cap**).
 ///
-/// FUTURE (M3): parse the skill response into a [`Review`]. Until then
-/// `review` returns [`SimardError::ReviewUnavailable`]; the spike drives the
-/// pipeline through fakes.
+/// The LLM provider is resolved lazily on each [`Self::invoke`] so a
+/// misconfigured provider surfaces as an explicit per-tick error (folded into
+/// telemetry / `ThreadOutcome::failed`) rather than a construction-time panic
+/// or a silent no-op.
+#[derive(Default)]
+pub struct SessionAgentInvoker;
+
+impl SessionAgentInvoker {
+    /// Construct the production invoker.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl AgentInvoker for SessionAgentInvoker {
+    fn invoke(&self, prompt: &str) -> SimardResult<String> {
+        use crate::ooda_brain::LlmSubmitter;
+        let provider = crate::session_builder::LlmProvider::resolve()?;
+        let submitter = crate::ooda_brain::SessionLlmSubmitter::new(provider);
+        submitter.submit(prompt)
+    }
+}
+
+/// The `crusty-old-engineer` skill prompt (scope/feasibility/necessity/utility/
+/// inventiveness/RISK/need-for-human-review/practicality).
+const CRUSTY_PROMPT: &str =
+    include_str!("../../prompt_assets/simard/creative_ideas_review_crusty.md");
+/// The `philosophy-guardian` agent prompt ("do we need this?"; no user signal required).
+const PHILOSOPHY_PROMPT: &str =
+    include_str!("../../prompt_assets/simard/creative_ideas_review_philosophy.md");
+/// The `measurability` agent prompt (emit a concrete success metric; G1).
+const MEASURABILITY_PROMPT: &str =
+    include_str!("../../prompt_assets/simard/creative_ideas_review_measurability.md");
+
+/// Render a review prompt from a template + the idea/context (simple, explicit
+/// placeholder substitution — no templating engine).
+fn render_review_prompt(template: &str, ctx: &ReviewContext<'_>) -> String {
+    template
+        .replace("{{IDEA}}", &ctx.idea.idea)
+        .replace("{{RATIONALE}}", &ctx.idea.context.rationale)
+        .replace("{{CONTEXT}}", &render_review_context(ctx.inputs))
+}
+
+/// The wire shape a reviewer agent returns (parsed tolerantly from its JSON
+/// envelope). Verdict is validated fail-closed; unknown flags default to false.
+#[derive(Debug, Deserialize)]
+struct ReviewJson {
+    verdict: String,
+    #[serde(default)]
+    notes: String,
+    #[serde(default)]
+    high_risk: bool,
+    #[serde(default)]
+    irreversible: bool,
+    #[serde(default)]
+    needs_human: bool,
+    #[serde(default)]
+    metric: Option<SuccessMetric>,
+}
+
+/// Parse a reviewer's raw response into a [`Review`], fail-closed.
+///
+/// An unparseable envelope or an unknown verdict is a hard
+/// [`SimardError::ReviewUnavailable`] — never a silent default review.
+fn parse_review(reviewer: &'static str, raw: &str) -> SimardResult<Review> {
+    let value = extract_json_value(raw).ok_or_else(|| SimardError::ReviewUnavailable {
+        reason: format!("{reviewer}: response contained no JSON envelope"),
+    })?;
+    let parsed: ReviewJson =
+        serde_json::from_value(value).map_err(|e| SimardError::ReviewUnavailable {
+            reason: format!("{reviewer}: could not parse review JSON: {e}"),
+        })?;
+    let verdict = parse_verdict(reviewer, &parsed.verdict)?;
+    Ok(Review {
+        reviewer,
+        verdict,
+        notes: parsed.notes,
+        flags: ReviewFlags {
+            high_risk: parsed.high_risk,
+            irreversible: parsed.irreversible,
+            needs_human: parsed.needs_human,
+        },
+        proposed_metric: parsed.metric,
+    })
+}
+
+/// Fail-closed verdict parse.
+fn parse_verdict(reviewer: &'static str, s: &str) -> SimardResult<ReviewVerdict> {
+    match s.trim() {
+        "Support" => Ok(ReviewVerdict::Support),
+        "Concern" => Ok(ReviewVerdict::Concern),
+        "Block" => Ok(ReviewVerdict::Block),
+        "NeedsHuman" => Ok(ReviewVerdict::NeedsHuman),
+        other => Err(SimardError::ReviewUnavailable {
+            reason: format!("{reviewer}: unknown verdict '{other}'"),
+        }),
+    }
+}
+
+/// Production adapter for the `crusty-old-engineer` skill.
 pub struct CrustyOldEngineerReviewer<I: AgentInvoker> {
     invoker: I,
 }
@@ -126,13 +231,6 @@ impl<I: AgentInvoker> CrustyOldEngineerReviewer<I> {
     pub fn new(invoker: I) -> Self {
         Self { invoker }
     }
-
-    fn build_prompt(_ctx: &ReviewContext<'_>) -> String {
-        // FUTURE (M3): render the real crusty-old-engineer skill prompt from
-        // the idea + observation window (scope/feasibility/necessity/utility/
-        // inventiveness/RISK/need-for-human-review/practicality).
-        String::from("FUTURE: crusty-old-engineer review prompt")
-    }
 }
 
 impl<I: AgentInvoker> Reviewer for CrustyOldEngineerReviewer<I> {
@@ -140,18 +238,16 @@ impl<I: AgentInvoker> Reviewer for CrustyOldEngineerReviewer<I> {
         CRUSTY_OLD_ENGINEER_ID
     }
     fn review(&self, ctx: &ReviewContext<'_>) -> SimardResult<Review> {
-        let prompt = Self::build_prompt(ctx);
-        let _raw = self.invoker.invoke(&prompt)?;
-        Err(SimardError::ReviewUnavailable {
-            reason: "crusty-old-engineer reviewer is not wired during the spike (M3)".to_string(),
-        })
+        let prompt = render_review_prompt(CRUSTY_PROMPT, ctx);
+        let raw = self.invoker.invoke(&prompt)?;
+        parse_review(CRUSTY_OLD_ENGINEER_ID, &raw)
     }
 }
 
 /// Production adapter for the `philosophy-guardian` agent.
 ///
-/// Explicitly, **a user signal is NOT required** to justify an idea; absence of
-/// one is neutral, never a `Block`. FUTURE (M3): parse the agent response.
+/// Explicitly, **a user signal is NOT required** to justify an idea; the prompt
+/// treats absence of one as neutral, never a `Block`.
 pub struct PhilosophyGuardianReviewer<I: AgentInvoker> {
     invoker: I,
 }
@@ -161,12 +257,6 @@ impl<I: AgentInvoker> PhilosophyGuardianReviewer<I> {
     pub fn new(invoker: I) -> Self {
         Self { invoker }
     }
-
-    fn build_prompt(_ctx: &ReviewContext<'_>) -> String {
-        // FUTURE (M3): "do we need this? will it be an interesting
-        // enhancement?" — treat missing user signal as neutral.
-        String::from("FUTURE: philosophy-guardian review prompt")
-    }
 }
 
 impl<I: AgentInvoker> Reviewer for PhilosophyGuardianReviewer<I> {
@@ -174,18 +264,16 @@ impl<I: AgentInvoker> Reviewer for PhilosophyGuardianReviewer<I> {
         PHILOSOPHY_GUARDIAN_ID
     }
     fn review(&self, ctx: &ReviewContext<'_>) -> SimardResult<Review> {
-        let prompt = Self::build_prompt(ctx);
-        let _raw = self.invoker.invoke(&prompt)?;
-        Err(SimardError::ReviewUnavailable {
-            reason: "philosophy-guardian reviewer is not wired during the spike (M3)".to_string(),
-        })
+        let prompt = render_review_prompt(PHILOSOPHY_PROMPT, ctx);
+        let raw = self.invoker.invoke(&prompt)?;
+        parse_review(PHILOSOPHY_GUARDIAN_ID, &raw)
     }
 }
 
 /// Production adapter for the new `measurability` reviewer agent.
 ///
-/// FUTURE (M3): parse the agent response into a concrete [`SuccessMetric`]
-/// tied where relevant to existing self-metrics.
+/// Emits a concrete [`SuccessMetric`] tied where relevant to existing
+/// self-metrics (guideline G1: benchmark + live self-measurement).
 pub struct MeasurabilityReviewer<I: AgentInvoker> {
     invoker: I,
 }
@@ -195,13 +283,6 @@ impl<I: AgentInvoker> MeasurabilityReviewer<I> {
     pub fn new(invoker: I) -> Self {
         Self { invoker }
     }
-
-    fn build_prompt(_ctx: &ReviewContext<'_>) -> String {
-        // FUTURE (M3): ask for a concrete metric (name/baseline/target/
-        // how_measured), preferring recall_precision_at_k / distill fact-yield
-        // / reasoner-reliability where relevant.
-        String::from("FUTURE: measurability review prompt")
-    }
 }
 
 impl<I: AgentInvoker> Reviewer for MeasurabilityReviewer<I> {
@@ -209,11 +290,9 @@ impl<I: AgentInvoker> Reviewer for MeasurabilityReviewer<I> {
         MEASURABILITY_ID
     }
     fn review(&self, ctx: &ReviewContext<'_>) -> SimardResult<Review> {
-        let prompt = Self::build_prompt(ctx);
-        let _raw = self.invoker.invoke(&prompt)?;
-        Err(SimardError::ReviewUnavailable {
-            reason: "measurability reviewer is not wired during the spike (M3)".to_string(),
-        })
+        let prompt = render_review_prompt(MEASURABILITY_PROMPT, ctx);
+        let raw = self.invoker.invoke(&prompt)?;
+        parse_review(MEASURABILITY_ID, &raw)
     }
 }
 

@@ -2,9 +2,28 @@
 ///
 /// Writes a structured JSON report so the dashboard can display
 /// the full OODA internal reasoning for each cycle.
+///
+/// Back-compat wrapper for callers that do not measure per-cycle elapsed time.
+/// The persisted record still carries a `timestamp`, with a `null`
+/// `duration_secs` (the Cycle History duration chart hides itself until enough
+/// timed cycles exist — see issue #21).
 pub(crate) fn persist_cycle_report(
     state_root: &std::path::Path,
     report: &crate::ooda_loop::CycleReport,
+) {
+    persist_cycle_report_timed(state_root, report, None);
+}
+
+/// Persist a cycle report together with per-cycle telemetry: a top-level
+/// RFC3339 `timestamp` (when the cycle finished) and an `f64` `duration_secs`
+/// (wall-clock elapsed for the cycle, or `null` when the caller did not measure
+/// it). These fields live in the persisted JSON only — the `CycleReport`
+/// decision struct is intentionally unchanged, so serialization/decision
+/// contracts are untouched (issue #21).
+pub(crate) fn persist_cycle_report_timed(
+    state_root: &std::path::Path,
+    report: &crate::ooda_loop::CycleReport,
+    elapsed: Option<std::time::Duration>,
 ) {
     use serde_json::json;
 
@@ -14,8 +33,17 @@ pub(crate) fn persist_cycle_report(
     }
     let path = dir.join(format!("cycle_{}.json", report.cycle_number));
 
+    // Sub-second cycles must keep their fractional value (`as_secs_f64`), and
+    // an unmeasured cycle records an explicit `null` rather than a fake `0`.
+    let duration_secs = match elapsed {
+        Some(d) => json!(d.as_secs_f64()),
+        None => serde_json::Value::Null,
+    };
+
     let structured = json!({
         "cycle_number": report.cycle_number,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "duration_secs": duration_secs,
         "summary": crate::ooda_loop::summarize_cycle_report(report),
         "observation": {
             "goal_count": report.observation.goal_statuses.len(),
@@ -172,7 +200,7 @@ fn extract_quoted_after(text: &str, prefix: &str) -> Option<String> {
 /// and goal curation sessions can recall what happened. Best-effort: failures
 /// are logged but do not abort the daemon.
 pub(crate) fn persist_cycle_to_memory(
-    bridges: &crate::ooda_loop::OodaBridges,
+    bridges: &crate::ooda_loop::OodaClients,
     report: &crate::ooda_loop::CycleReport,
 ) {
     use serde_json::json;
@@ -288,7 +316,17 @@ mod tests {
         persist_cycle_report(dir.path(), &minimal_report(1));
         let second =
             std::fs::read_to_string(dir.path().join("cycle_reports/cycle_1.json")).unwrap();
-        assert_eq!(first, second);
+        // Overwriting the same cycle must leave a single file whose structured
+        // content is identical EXCEPT for the intentionally time-varying
+        // `timestamp` (issue #21). Compare after dropping that volatile field.
+        let mut a: serde_json::Value = serde_json::from_str(&first).unwrap();
+        let mut b: serde_json::Value = serde_json::from_str(&second).unwrap();
+        for v in [&mut a, &mut b] {
+            if let Some(map) = v.as_object_mut() {
+                map.remove("timestamp");
+            }
+        }
+        assert_eq!(a, b);
     }
 
     #[test]
@@ -547,6 +585,90 @@ mod tests {
         assert!(
             arr[0].get("parse_failure").is_none(),
             "healthy record MUST NOT emit parse_failure (byte-for-byte back-compat): {arr:?}",
+        );
+    }
+
+    // ========================================================================
+    // Issue #21 — Producer telemetry: per-cycle `timestamp` + `duration_secs`.
+    //
+    // The persisted `cycle_<N>.json` must carry a top-level RFC3339 `timestamp`
+    // and an `f64` (or null) `duration_secs`, so the Cycle History tab can show
+    // real times and a duration-trend chart. These fields live in the persisted
+    // JSON only — the `CycleReport` decision struct is unchanged.
+    // ========================================================================
+
+    #[test]
+    fn persist_cycle_report_timed_writes_timestamp_and_duration() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = minimal_report(7);
+        persist_cycle_report_timed(
+            dir.path(),
+            &report,
+            Some(std::time::Duration::from_millis(1500)),
+        );
+        let content =
+            std::fs::read_to_string(dir.path().join("cycle_reports/cycle_7.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        let ts = parsed["timestamp"]
+            .as_str()
+            .expect("timestamp must be a top-level string");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(ts).is_ok(),
+            "timestamp must be RFC3339, got: {ts}"
+        );
+
+        let dur = parsed["duration_secs"]
+            .as_f64()
+            .expect("duration_secs must be a top-level f64");
+        assert!(
+            (dur - 1.5).abs() < 1e-6,
+            "duration_secs must equal the supplied elapsed time (1.5s), got: {dur}"
+        );
+    }
+
+    #[test]
+    fn persist_cycle_report_timed_preserves_subsecond_duration() {
+        // Sub-second cycles must keep their fractional value (as_secs_f64),
+        // not truncate to 0.
+        let dir = tempfile::tempdir().unwrap();
+        let report = minimal_report(8);
+        persist_cycle_report_timed(
+            dir.path(),
+            &report,
+            Some(std::time::Duration::from_millis(250)),
+        );
+        let content =
+            std::fs::read_to_string(dir.path().join("cycle_reports/cycle_8.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let dur = parsed["duration_secs"].as_f64().expect("duration_secs f64");
+        assert!(
+            (dur - 0.25).abs() < 1e-6,
+            "sub-second duration must be preserved as 0.25, got: {dur}"
+        );
+    }
+
+    #[test]
+    fn persist_cycle_report_wrapper_writes_timestamp_and_null_duration() {
+        // The back-compat wrapper (callers that do not measure elapsed time)
+        // must still emit a timestamp, and an explicit null duration.
+        let dir = tempfile::tempdir().unwrap();
+        let report = minimal_report(9);
+        persist_cycle_report(dir.path(), &report);
+        let content =
+            std::fs::read_to_string(dir.path().join("cycle_reports/cycle_9.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        let ts = parsed["timestamp"].as_str().expect("timestamp string");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(ts).is_ok(),
+            "wrapper must still write an RFC3339 timestamp, got: {ts}"
+        );
+        assert!(
+            parsed
+                .get("duration_secs")
+                .is_some_and(serde_json::Value::is_null),
+            "wrapper must write duration_secs as null when no elapsed time is supplied: {parsed}"
         );
     }
 }

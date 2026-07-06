@@ -42,7 +42,7 @@ use crate::goal_curation::{
     ActiveGoal, BacklogItem, GoalBoard, GoalProgress, add_active_goal, add_backlog_item,
     load_goal_board, save_goal_board,
 };
-use crate::memory_ipc::launch_writer_bridge;
+use crate::memory_ipc::launch_writer_client;
 use crate::operator_cli::dispatch_operator_cli;
 use crate::state_root::STATE_ROOT_ENV;
 
@@ -89,12 +89,12 @@ fn seed(root: &Path, active: Vec<ActiveGoal>, backlog: Vec<BacklogItem>) {
     for b in backlog {
         add_backlog_item(&mut board, b).expect("add backlog");
     }
-    let bridge = launch_writer_bridge(root).expect("writer bridge");
+    let bridge = launch_writer_client(root).expect("writer bridge");
     save_goal_board(&board, bridge.ops()).expect("save");
 }
 
 fn reload(root: &Path) -> GoalBoard {
-    let bridge = launch_writer_bridge(root).expect("reader bridge");
+    let bridge = launch_writer_client(root).expect("reader bridge");
     load_goal_board(bridge.ops()).expect("load_goal_board")
 }
 

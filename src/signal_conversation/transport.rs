@@ -13,8 +13,8 @@
 //!
 //! # Naming
 //!
-//! Nothing here is named `bridge`/`Bridge`. This is the Signal conversation
-//! channel's transport; it is unrelated to the cognitive-memory `BridgeTransport`.
+//! Nothing here is an RPC transport or client. This is the Signal conversation
+//! channel's transport; it is unrelated to the cognitive-memory `RpcTransport`.
 
 use std::collections::VecDeque;
 use std::future::Future;

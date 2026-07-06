@@ -21,7 +21,7 @@ fn tab_meta_slugs_unique() {
             t.slug
         );
     }
-    assert_eq!(TAB_METADATA.len(), 17, "expected 17 tabs");
+    assert_eq!(TAB_METADATA.len(), 10, "expected 10 tabs");
 }
 
 #[test]
@@ -310,26 +310,25 @@ fn rendered_html_demotes_brand_h1_to_div() {
 
 #[test]
 fn rendered_html_workboard_label_replaces_whiteboard() {
-    // #1995: the visible label must match the slug. There should be no
-    // remaining "Whiteboard" in user-facing nav text.
-    let nav_slice = {
-        let start = INDEX_HTML
-            .find(r#"data-tab="workboard""#)
-            .expect("workboard nav entry should be present");
-        // Take a small window around the nav entry.
-        let end = INDEX_HTML[start..]
-            .find("</div>")
-            .map(|e| start + e)
-            .unwrap_or(INDEX_HTML.len());
-        &INDEX_HTML[start..end]
-    };
+    // #1995 + #2627 consolidation: the former standalone `workboard` tab is
+    // now the **Work Board** sub-section of the **Goals** tab, so it must no
+    // longer appear as a top-level nav button — but the label lineage
+    // (`Whiteboard → Workboard → Work Board`) must have shed "Whiteboard"
+    // entirely from user-facing text.
     assert!(
-        nav_slice.contains("Workboard"),
-        "workboard nav entry should render the label `Workboard`; got: {nav_slice}"
+        !INDEX_HTML.contains(r#"data-tab="workboard""#),
+        "workboard must no longer be a top-level nav tab after consolidation; \
+         it lives as the `Work Board` sub-section of the Goals tab"
     );
     assert!(
-        !nav_slice.contains("Whiteboard"),
-        "workboard nav entry must not still say `Whiteboard`: {nav_slice}"
+        INDEX_HTML.contains(r#"<h2 class="subsection">Work Board</h2>"#),
+        "the retired workboard view must render as a `Work Board` sub-section \
+         header inside the Goals tab"
+    );
+    assert!(
+        !INDEX_HTML.contains("Whiteboard"),
+        "no user-facing text may still say `Whiteboard` (label lineage ends at \
+         `Work Board`)"
     );
 }
 
@@ -672,5 +671,394 @@ fn rendered_html_workboard_recent_actions_humanized_with_raw_tooltip() {
     assert!(
         !INDEX_HTML.contains("renderActionDetail(esc("),
         "Workboard must not pre-escape before renderActionDetail() (double-escape)"
+    );
+}
+
+// ─────────────────────────── Feedback widget (#2629) ────────────────────────
+//
+// The "Report bug / Request feature" widget must be a SINGLE control anchored
+// in the shared <header> so it appears on every dashboard tab with consistent
+// placement, and its client JS must POST the report + captured page context to
+// the auth-gated `/api/feedback` endpoint, rendering results safely.
+
+#[test]
+fn feedback_widget_button_lives_in_shared_header() {
+    let html = INDEX_HTML.as_str();
+    let header_start = html
+        .find("<header>")
+        .expect("dashboard must have a <header>");
+    let header_end = html
+        .find("</header>")
+        .expect("dashboard must close its <header>");
+    let button = html
+        .find("id=\"feedback-widget-button\"")
+        .expect("a #feedback-widget-button control must exist");
+
+    assert!(
+        header_start < button && button < header_end,
+        "the feedback button must live inside <header> so it renders on every tab"
+    );
+    assert_eq!(
+        html.matches("id=\"feedback-widget-button\"").count(),
+        1,
+        "there must be exactly ONE shared feedback widget, not one per tab"
+    );
+}
+
+#[test]
+fn feedback_widget_control_is_labeled_for_bug_and_feature() {
+    let html = INDEX_HTML.as_str();
+    assert!(
+        html.contains("Report bug") && html.contains("Request feature"),
+        "the widget must offer both 'Report bug' and 'Request feature'"
+    );
+}
+
+#[test]
+fn feedback_widget_modal_and_form_fields_present() {
+    let html = INDEX_HTML.as_str();
+    for hook in [
+        "id=\"feedback-modal\"",
+        "id=\"feedback-form\"",
+        "id=\"feedback-type\"",
+        "id=\"feedback-title\"",
+        "id=\"feedback-description\"",
+    ] {
+        assert!(html.contains(hook), "feedback widget markup missing {hook}");
+    }
+    // The type selector must offer exactly bug|feature.
+    assert!(
+        html.contains("value=\"bug\"") && html.contains("value=\"feature\""),
+        "feedback type selector must offer value=\"bug\" and value=\"feature\""
+    );
+}
+
+#[test]
+fn feedback_widget_posts_report_and_context_to_authed_endpoint() {
+    let html = INDEX_HTML.as_str();
+    assert!(
+        html.contains("/api/feedback"),
+        "widget JS must POST to /api/feedback"
+    );
+    assert!(
+        html.contains("/api/feedback/status/"),
+        "widget JS must poll /api/feedback/status/<id> for the workstream result"
+    );
+    // Cookie-based auth: the fetch must send the session cookie.
+    assert!(
+        html.contains("same-origin"),
+        "widget fetch must use credentials:'same-origin' so the auth cookie is sent"
+    );
+    // The captured page context fields must be gathered client-side.
+    for key in ["page", "state", "timestamp", "identifiers"] {
+        assert!(
+            html.contains(key),
+            "widget JS must capture the '{key}' context field"
+        );
+    }
+}
+// ----- #2627: tab consolidation (17 → 9 canonical tabs) -----
+//
+// The dashboard nav is consolidated from 17 adjacent/overlapping tabs to a
+// single coherent 9-tab taxonomy. Views that answer the same operator
+// question are grouped into labelled **sub-sections** (rendered as `<h2>`,
+// never a second `page-h1`) inside one parent tab, and every retired
+// top-level slug keeps working as a deep-link alias. The durable definition
+// of this taxonomy lives in `docs/dashboard.md#canonical-tab-taxonomy`; these
+// tests pin the source-of-truth table and the rendered HTML to it.
+
+/// The nine canonical dashboard tabs, in nav-render order, paired with the
+/// label each must expose. This is the single in-test statement of the
+/// consolidated taxonomy that `docs/dashboard.md` documents.
+const CANONICAL_TABS: &[(&str, &str)] = &[
+    ("overview", "Overview"),
+    ("goals", "Goals"),
+    ("activity", "Activity"),
+    ("workers", "Workers"),
+    ("pull-requests", "Pull Requests"),
+    ("resources", "Resources"),
+    ("chat", "Chat"),
+    ("overseer", "Overseer"),
+    ("journal", "Journal"),
+    ("creative-ideas", "Creative Ideas"),
+];
+
+/// Slugs that were real top-level tabs in the 17-tab set and must NOT survive
+/// as nav tabs after consolidation — each is now a sub-section reachable via
+/// its deep-link alias.
+const RETIRED_SLUGS: &[&str] = &[
+    "traces",
+    "logs",
+    "processes",
+    "memory",
+    "costs",
+    "workboard",
+    "thinking",
+    "brain-failures",
+    "merge-decisions",
+    "pr-readiness",
+    "terminal",
+    "status",
+];
+
+#[test]
+fn tab_meta_matches_canonical_taxonomy() {
+    // Exact slug + label + order. Anchors the whole consolidation: if a tab is
+    // added, removed, renamed, or reordered, this fails until the taxonomy and
+    // docs/dashboard.md agree again.
+    assert_eq!(
+        TAB_METADATA.len(),
+        CANONICAL_TABS.len(),
+        "expected exactly {} canonical tabs, found {}",
+        CANONICAL_TABS.len(),
+        TAB_METADATA.len()
+    );
+    for (i, (slug, label)) in CANONICAL_TABS.iter().enumerate() {
+        assert_eq!(
+            TAB_METADATA[i].slug, *slug,
+            "tab #{i} slug should be {slug:?}, got {:?}",
+            TAB_METADATA[i].slug
+        );
+        assert_eq!(
+            TAB_METADATA[i].label, *label,
+            "tab #{i} ({slug}) label should be {label:?}, got {:?}",
+            TAB_METADATA[i].label
+        );
+    }
+}
+
+#[test]
+fn tab_meta_has_no_retired_top_level_slugs() {
+    let live: HashSet<&str> = TAB_METADATA.iter().map(|t| t.slug).collect();
+    for retired in RETIRED_SLUGS {
+        assert!(
+            !live.contains(retired),
+            "retired slug {retired:?} must not remain a top-level tab; it should \
+             be a sub-section reachable via its deep-link alias"
+        );
+    }
+}
+
+#[test]
+fn tab_meta_uses_no_bridge_names() {
+    // Binding constraint: no consolidated tab may be named "Bridge".
+    for t in TAB_METADATA {
+        assert!(
+            !t.label.contains("Bridge") && !t.h1.contains("Bridge") && !t.slug.contains("bridge"),
+            "tab {:?} must not use a `Bridge` name",
+            t.slug
+        );
+    }
+}
+
+#[test]
+fn js_canonical_tabs_allowlist_includes_every_tab() {
+    // Regression guard: the client-side `activateTab`/`resolveHashTab` allowlist
+    // (`const CANONICAL_TABS=[...]` in the rendered JS) MUST list every top-level
+    // tab. A slug present in `TAB_METADATA` but missing from the JS allowlist
+    // renders a nav button whose panel never becomes visible (activateTab falls
+    // back to Overview) — exactly the e2e tab-identity failure this catches at
+    // the unit level.
+    let start = INDEX_HTML
+        .find("const CANONICAL_TABS=[")
+        .expect("rendered HTML has the CANONICAL_TABS JS allowlist");
+    let tail = &INDEX_HTML[start..];
+    let end = tail.find("];").expect("CANONICAL_TABS array is closed");
+    let array = &tail[..end];
+    for t in TAB_METADATA {
+        let needle = format!("'{}'", t.slug);
+        assert!(
+            array.contains(&needle),
+            "JS CANONICAL_TABS allowlist is missing tab slug {:?}; its panel would \
+             never activate. Array was: {array}",
+            t.slug
+        );
+    }
+}
+
+#[test]
+fn rendered_html_has_exactly_ten_page_h1s() {
+    // Invariant 2 across the consolidated set plus the Creative Ideas tab: each
+    // tab panel owns exactly one `<h1 class="page-h1">`, so the rendered HTML has
+    // exactly ten of them. Sub-sections must use `<h2>`, never a second page-h1.
+    let count = INDEX_HTML.matches(r#"<h1 class="page-h1">"#).count();
+    assert_eq!(
+        count, 10,
+        "expected exactly 10 page-h1 headings (one per tab), found {count}; \
+         a stray page-h1 usually means an absorbed panel kept its old <h1> instead of \
+         being demoted to an <h2 class=\"subsection\">"
+    );
+}
+
+#[test]
+fn rendered_html_contains_consolidated_sub_section_headers() {
+    // Data-preservation contract (invariant 5): every former standalone view
+    // survives as a labelled sub-section header inside its parent tab. Sub-
+    // section headers render as `<h2 class="subsection">…</h2>` so invariant 2
+    // (one page-h1 per tab) still holds.
+    let required_subsections = [
+        // Overview absorbs the old `overview` + `status` tabs, plus a Stats panel.
+        "Summary",
+        "Health",
+        "Stats",
+        // Goals absorbs the old `workboard` tab.
+        "Work Board",
+        // Activity absorbs logs/traces/thinking/brain-failures.
+        "Logs",
+        "Traces",
+        "Thinking",
+        "Failures",
+        // Workers absorbs processes/terminal (+ the engineers process-tree view).
+        "Processes",
+        "Engineers",
+        "Terminal",
+        // Pull Requests absorbs merge-decisions/pr-readiness.
+        "Merge Decisions",
+        "Readiness",
+        // Resources absorbs memory/costs.
+        "Memory",
+        "Costs",
+    ];
+    for name in required_subsections {
+        let needle = format!(r#"<h2 class="subsection">{name}</h2>"#);
+        assert!(
+            INDEX_HTML.contains(&needle),
+            "consolidated dashboard is missing the {name:?} sub-section header; \
+             expected to find: {needle} — a merged view must survive as a labelled \
+             `<h2 class=\"subsection\">` inside its parent tab so no data is lost"
+        );
+    }
+}
+
+#[test]
+fn rendered_html_wires_tab_alias_allowlist() {
+    // Deep-link continuity: every retired top-level slug resolves to its new
+    // parent tab through a client-side allowlist. The resolver treats
+    // `location.hash` as untrusted — it validates against `^[a-z-]+$` and falls
+    // back to `overview` — and never concatenates the hash into a selector.
+    assert!(
+        INDEX_HTML.contains("TAB_ALIASES"),
+        "rendered HTML must define the client-side TAB_ALIASES deep-link allowlist"
+    );
+    // Every retired slug maps to its documented parent tab (compact JSON form).
+    let alias_pairs = [
+        ("status", "overview"),
+        ("workboard", "goals"),
+        ("logs", "activity"),
+        ("traces", "activity"),
+        ("thinking", "activity"),
+        ("brain-failures", "activity"),
+        ("processes", "workers"),
+        ("terminal", "workers"),
+        ("merge-decisions", "pull-requests"),
+        ("pr-readiness", "pull-requests"),
+        ("memory", "resources"),
+        ("costs", "resources"),
+    ];
+    for (retired, parent) in alias_pairs {
+        let needle = format!(r#""{retired}":"{parent}""#);
+        assert!(
+            INDEX_HTML.contains(&needle),
+            "TAB_ALIASES must map retired slug {retired:?} to parent tab {parent:?}; \
+             expected to find: {needle}"
+        );
+    }
+    // The untrusted-hash validator must be present so a crafted hash can never
+    // reach a DOM selector.
+    assert!(
+        INDEX_HTML.contains("^[a-z-]+$"),
+        "the deep-link resolver must validate location.hash against ^[a-z-]+$ \
+         before using it"
+    );
+    // Sub-sections introduced by consolidation (never standalone tabs) must NOT
+    // gain a bogus alias — there are no old bookmarks to preserve.
+    assert!(
+        !INDEX_HTML.contains(r#""stats":"overview""#),
+        "the Stats sub-section was never a standalone tab and must not have an alias"
+    );
+    assert!(
+        !INDEX_HTML.contains(r#""engineers":"workers""#),
+        "the Engineers sub-section was never a standalone tab and must not have an alias"
+    );
+}
+
+// ----- issue #20: Goals tab renders each goal's LIVE lifecycle status -----
+//
+// BUG: the active-goals Status column dumped the raw free-form `g.status`
+// string (`<td>${esc(g.status)}</td>`). Paired with the prominent red activity
+// chip in the Current Activity column, this made EVERY goal read as
+// "failed/blocked" even though the goals were in mixed states (not-started /
+// in-progress / blocked+reason / completed).
+//
+// FIX (frontend half): the Status cell renders a distinctly-colored lifecycle
+// badge driven by the additive serialized-enum `g.status_progress` field via
+// the existing `humanizeGoalProgress` (escape-last). A `goalLifecycleKey`
+// classifier maps the enum VARIANT (never the free-form reason text — G3,
+// agentic-over-brittle) to a canonical key that indexes a hardcoded
+// `GOAL_STATUS_COLORS` allowlist. Blocked uses amber (#d29922), DELIBERATELY
+// distinct from the activity-Failed red (#f85149), so a lifecycle-blocked goal
+// is never mistaken for an activity failure.
+//
+// This is the Rust half of the contract; the behavioral half is
+// tests/gadugi/dashboard-goals-lifecycle.sh.
+
+#[test]
+fn rendered_html_goals_status_column_uses_lifecycle_badge() {
+    // The Status cell must render the humanized lifecycle status from the
+    // additive serialized-enum field.
+    assert!(
+        INDEX_HTML.contains("humanizeGoalProgress(g.status_progress)"),
+        "the active-goals Status column must render humanizeGoalProgress(g.status_progress) \
+         so each goal shows its real lifecycle status, not a uniform failed/blocked dump"
+    );
+    // escape-last invariant: humanize the RAW enum, then esc() the result;
+    // never humanize already-escaped text.
+    assert!(
+        !INDEX_HTML.contains("humanizeGoalProgress(esc("),
+        "humanizeGoalProgress must run on the raw g.status_progress enum, never on \
+         already-escaped text (escape-last invariant)"
+    );
+    // The old uniform raw-status dump — the exact cell that made every goal
+    // look failed/blocked — must be gone.
+    assert!(
+        !INDEX_HTML.contains("<td>${esc(g.status)}</td>"),
+        "the Status column must no longer dump the raw free-form g.status string \
+         uniformly; it must render a per-status lifecycle badge"
+    );
+    // A genuinely-blocked goal must surface its reason via the humanizer's
+    // Blocked-object branch ('Blocked — <reason>').
+    assert!(
+        INDEX_HTML.contains("'Blocked — '+r"),
+        "humanizeGoalProgress must render a blocked goal's REASON ('Blocked — <reason>') \
+         so the Status column shows why a goal is blocked, not a bare 'failed'"
+    );
+}
+
+#[test]
+fn rendered_html_goals_status_classifier_and_color_allowlist() {
+    // A classifier keys the color allowlist off the enum VARIANT, not by
+    // parsing the free-form Display/reason string (G3: agentic-over-brittle).
+    assert!(
+        INDEX_HTML.contains("function goalLifecycleKey("),
+        "a goalLifecycleKey() classifier must map the serialized GoalProgress enum to a \
+         canonical lifecycle key by variant, not by parsing the Display string"
+    );
+    // A hardcoded color allowlist drives the badge color so goal data is never
+    // interpolated into a style= attribute.
+    assert!(
+        INDEX_HTML.contains("GOAL_STATUS_COLORS"),
+        "a hardcoded GOAL_STATUS_COLORS allowlist must drive the lifecycle badge color \
+         (goal data must never be interpolated into a style= attribute)"
+    );
+    // Blocked's amber must be present and DISTINCT from the activity-Failed red,
+    // so a lifecycle-blocked goal is not mistaken for an activity failure.
+    assert!(
+        INDEX_HTML.contains("#d29922"),
+        "the blocked lifecycle badge must use amber #d29922"
+    );
+    assert!(
+        !INDEX_HTML.contains("blocked:'#f85149'") && !INDEX_HTML.contains("Blocked:'#f85149'"),
+        "the blocked lifecycle badge must NOT reuse the activity-Failed red #f85149; \
+         it must be a distinct amber so blocked != failed"
     );
 }

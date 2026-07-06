@@ -1,19 +1,19 @@
 use super::*;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_client::CognitiveMemoryClient;
+use crate::rpc_transport::InMemoryRpcTransport;
 use serde_json::json;
 
-fn mock_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("test-goals", |method, _params| match method {
+fn mock_bridge() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("test-goals", |method, _params| match method {
         "memory.search_facts" => Ok(json!({"facts": []})),
         "memory.store_fact" => Ok(json!({"id": "sem_g1"})),
         "memory.store_episode" => Ok(json!({"id": "epi_g1"})),
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::rpc::RpcErrorPayload {
             code: -32601,
             message: format!("unknown method: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 fn sample_goal(id: &str, priority: u32) -> ActiveGoal {

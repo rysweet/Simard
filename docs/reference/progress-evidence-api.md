@@ -70,7 +70,7 @@ pub trait ProgressEvidenceChecker: Send + Sync {
 ```
 
 The trait is `Send + Sync` so a single `Arc<dyn ProgressEvidenceChecker>`
-can be installed on `OodaBridges` and shared across all OODA actions.
+can be installed on `OodaClients` and shared across all OODA actions.
 
 ### Contract
 
@@ -179,7 +179,7 @@ impl ProgressEvidenceChecker for NoopProgressEvidenceChecker {
 Always returns `Accept { reason: "noop checker (no evidence enforced)" }`.
 Used in two places:
 
-1. **Tests.** Default test-helper `OodaBridges::for_tests()` installs this
+1. **Tests.** Default test-helper `OodaClients::for_tests()` installs this
    so existing tests do not need to provide an `LlmSubmitter` implementation.
 2. **Operator escape hatch.** Selected at daemon boot when
    `SIMARD_PROGRESS_EVIDENCE=off`. See
@@ -275,7 +275,7 @@ Both `Accept` and `Reject` are returned as `Ok(...)`. Callers in
 ```rust
 match update_goal_progress_with_evidence(
     board, goal_id, new_progress,
-    &*bridges.progress_evidence, &*bridges.memory, Utc::now(),
+    &*clients.progress_evidence, &*clients.memory, Utc::now(),
 )? {
     EvidenceDecision::Accept { .. } => { /* happy path */ }
     EvidenceDecision::Reject { reason } => {
@@ -294,12 +294,12 @@ where it was.
 
 ---
 
-## `OodaBridges` extension
+## `OodaClients` extension
 
 `src/ooda_loop/types.rs` adds two fields:
 
 ```rust
-pub struct OodaBridges {
+pub struct OodaClients {
     // ... existing fields ...
     pub repo_root: std::path::PathBuf,
     pub progress_evidence: std::sync::Arc<
@@ -312,7 +312,7 @@ pub struct OodaBridges {
 |---|---|---|
 | `progress_evidence` | `Arc::new(RecipeProgressChecker::new(repo_root))`, or `Arc::new(NoopProgressEvidenceChecker)` when `SIMARD_PROGRESS_EVIDENCE=off` | `Arc::new(NoopProgressEvidenceChecker)` |
 
-A new `OodaBridges::for_tests()` constructor wires the test defaults so
+A new `OodaClients::for_tests()` constructor wires the test defaults so
 that existing OODA-loop tests need only a single-line change to adopt the
 new fields.
 
@@ -365,4 +365,4 @@ No data migration is required.
 - [`SIMARD_PROGRESS_EVIDENCE` kill switch (operations)](../operations/progress-evidence-kill-switch.md)
 - [Goal board API](goal-board-api.md)
 - [Goal board corruption guard API](goal-board-corruption-guard-api.md)
-- [Cognitive memory bridge helpers](cognitive-memory-bridge-helpers.md)
+- [Cognitive memory client helpers](cognitive-memory-client-helpers.md)

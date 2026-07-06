@@ -16,9 +16,9 @@
 //!
 //! # Naming
 //!
-//! Nothing here is named `bridge`/`Bridge`. This dispatches the first-class
+//! Nothing here is an RPC transport or client. This dispatches the first-class
 //! Signal conversation channel and is unrelated to the cognitive-memory
-//! `BridgeTransport`.
+//! `RpcTransport`.
 
 use super::args::{next_required, reject_extra_args};
 

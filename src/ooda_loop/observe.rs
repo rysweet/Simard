@@ -2,14 +2,14 @@
 //! memory stats, and pending improvement signals.
 
 use crate::error::SimardResult;
-use crate::gym_bridge::ScoreDimensions;
+use crate::gym_client::ScoreDimensions;
 use crate::gym_history::{GymSignal, ScoreHistory, generate_signals};
 use crate::gym_scoring::{GymSuiteScore, detect_regression};
 use crate::meeting_facilitator::load_meeting_handoff;
 use crate::memory_cognitive::CognitiveStatistics;
 use crate::self_improve::{ImprovementCycle, ImprovementPhase};
 
-use super::{EnvironmentSnapshot, GoalSnapshot, Observation, OodaBridges, OodaState};
+use super::{EnvironmentSnapshot, GoalSnapshot, Observation, OodaClients, OodaState};
 
 /// Gather a snapshot of the local environment (git status, issues, commits).
 ///
@@ -73,7 +73,7 @@ pub fn gather_environment() -> EnvironmentSnapshot {
 /// Observe: gather goal statuses, environment state, gym health, memory stats,
 /// and pending improvement signals from gym regressions and unprocessed handoffs.
 /// Sub-system failures produce degraded fields rather than aborting (Pillar 11).
-pub fn observe(state: &mut OodaState, bridges: &OodaBridges) -> SimardResult<Observation> {
+pub fn observe(state: &mut OodaState, bridges: &OodaClients) -> SimardResult<Observation> {
     let goal_statuses: Vec<GoalSnapshot> = state
         .active_goals
         .active
@@ -138,7 +138,7 @@ pub fn observe(state: &mut OodaState, bridges: &OodaBridges) -> SimardResult<Obs
 /// will surface the underlying failure).
 fn run_eval_watchdog() -> Option<String> {
     use crate::eval_watchdog::{WatchdogConfig, collect_recent_records, detect_dead_signal};
-    let history_path = std::path::Path::new("gym_history.db");
+    let history_path = crate::gym_history::default_db_path();
     if !history_path.exists() {
         return None;
     }
@@ -217,7 +217,7 @@ pub(super) fn collect_pending_improvements(
     }
 
     // Signal 4: persistent gym score history (regression / promotion signals).
-    let history_path = std::path::Path::new("gym_history.db");
+    let history_path = crate::gym_history::default_db_path();
     if history_path.exists()
         && let Ok(history) = ScoreHistory::open(history_path)
     {

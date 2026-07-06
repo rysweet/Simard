@@ -9,7 +9,9 @@
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use simard::overseer::activity::{OverseerActivity, human_cadence, humanize_tick};
+use simard::overseer::activity::{
+    OverseerActivity, human_cadence, humanize_tick, humanize_tick_details,
+};
 use simard::status::{Availability, Freshness, SectionEnvelope};
 
 /// Render the Overseer tab content within the given area.
@@ -94,6 +96,15 @@ fn render_lines(env: &SectionEnvelope<OverseerActivity>) -> Vec<String> {
     } else {
         for r in a.recent.iter().take(RECENT_ROWS) {
             out.push(format!("  {}  {}", r.timestamp, humanize_tick(&r.report)));
+            // WHAT it observed + WHAT it did, beneath the summary (issue #21).
+            let details = humanize_tick_details(&r.report);
+            let shown = details.len().min(DETAIL_ROWS);
+            for d in details.iter().take(DETAIL_ROWS) {
+                out.push(format!("      {d}"));
+            }
+            if details.len() > shown {
+                out.push(format!("      … {} more", details.len() - shown));
+            }
         }
         if a.recent.len() > RECENT_ROWS {
             out.push(format!(
@@ -108,6 +119,9 @@ fn render_lines(env: &SectionEnvelope<OverseerActivity>) -> Vec<String> {
 
 /// How many recent-activity rows the pane shows before summarizing the rest.
 const RECENT_ROWS: usize = 30;
+
+/// How many per-tick detail lines the pane shows before summarizing the rest.
+const DETAIL_ROWS: usize = 12;
 
 #[cfg(test)]
 mod tests {
@@ -142,6 +156,7 @@ mod tests {
                 held,
                 ..OverseerTickReport::default()
             },
+            problem_entries: Vec::new(),
         }
     }
 
@@ -223,6 +238,84 @@ mod tests {
         assert!(
             text.contains("no ticks recorded yet"),
             "absent must render an honest one-liner, not a blank pane:\n{text}"
+        );
+    }
+
+    // ── issue #21: informative detail lines under each tick summary ────────
+
+    fn record_with_details(
+        observed_details: Vec<String>,
+        action_details: Vec<String>,
+    ) -> OverseerActivityRecord {
+        OverseerActivityRecord {
+            timestamp: "2026-07-05T15:30:00Z".to_string(),
+            enabled: true,
+            report: OverseerTickReport {
+                problems: 2,
+                observed_details,
+                action_details,
+                ..OverseerTickReport::default()
+            },
+            problem_entries: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn renders_observed_and_action_detail_lines_beneath_the_summary() {
+        let mut feed = OverseerActivity {
+            enabled: true,
+            cadence_secs: 900,
+            threads: vec![overseer_thread()],
+            ..OverseerActivity::default()
+        };
+        feed.push_record(record_with_details(
+            vec!["distillation parse-failure rate 34%".to_string()],
+            vec!["did: merged PR rysweet/Simard#42".to_string()],
+        ));
+        let text = joined(&SectionEnvelope::live(
+            feed,
+            Some("2026-07-05T15:30:00Z".to_string()),
+        ));
+
+        // The existing summary one-liner is preserved …
+        assert!(
+            text.contains("saw 2 problems"),
+            "the summary count line must remain:\n{text}"
+        );
+        // … and the SPECIFIC observed value now appears beneath it …
+        assert!(
+            text.contains("34%"),
+            "the Overseer pane must show WHAT was observed (concrete value):\n{text}"
+        );
+        // … along with the concrete action taken.
+        assert!(
+            text.contains("rysweet/Simard#42"),
+            "the Overseer pane must show WHAT it did (concrete PR):\n{text}"
+        );
+    }
+
+    #[test]
+    fn caps_detail_lines_per_tick_and_summarises_the_overflow() {
+        let many: Vec<String> = (0..30).map(|i| format!("did: action-marker-{i}")).collect();
+        let mut feed = OverseerActivity {
+            enabled: true,
+            cadence_secs: 900,
+            ..OverseerActivity::default()
+        };
+        feed.push_record(record_with_details(vec![], many));
+        let text = joined(&SectionEnvelope::live(
+            feed,
+            Some("2026-07-05T15:30:00Z".to_string()),
+        ));
+
+        assert!(
+            text.contains("action-marker-0"),
+            "the first detail line must be shown:\n{text}"
+        );
+        assert!(
+            text.to_lowercase().contains("more"),
+            "when a tick has more detail lines than the pane shows, the overflow \
+             must be summarised (e.g. '… N more'):\n{text}"
         );
     }
 }

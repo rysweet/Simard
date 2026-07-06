@@ -8,7 +8,7 @@ doc_type: howto
 related:
   - ../reference/simard-cli.md
   - ../reference/goal-board-api.md
-  - ../reference/cognitive-memory-bridge-helpers.md
+  - ../reference/cognitive-memory-client-helpers.md
   - ../testing/hermetic-tests.md
   - ./unblock-stuck-ooda-goals.md
   - ./recover-goal-board.md
@@ -84,7 +84,7 @@ simard goal cleanup --placeholders
 ```
 
 This routes through the daemon's IPC writer
-([tier 1 of `launch_writer_bridge`](../reference/cognitive-memory-bridge-helpers.md#launch_writer_bridge)),
+([tier 1 of `launch_writer_client`](../reference/cognitive-memory-client-helpers.md#launch_writer_client)),
 computes the id list from the freshly-read board, and persists via
 [`save_goal_board_with_removals`](../reference/goal-board-api.md#save_goal_board_with_removals).
 That filter runs *after* the merge-on-write step, so the removed ids

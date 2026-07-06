@@ -150,6 +150,41 @@ pub fn run_gym_suite(suite_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     evaluate_suite_result(&report)
 }
 
+/// Run the fixed recall-precision benchmark, append one comparable score to the
+/// shared gym history, and print the score plus the gym signal.
+///
+/// Issue #2491 / #2494 (G1 hybrid measurement): the operator on-ramp to the
+/// benchmark rail. Reuses the same [`crate::gym_history::default_db_path`] the
+/// OODA gym step and the correlation endpoint use, so all three share one score
+/// history and a benchmark score written here is the exact score the dashboard
+/// correlation reads back.
+pub fn run_gym_recall_precision() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::cognitive_memory::recall_precision_bench::{
+        recall_precision_corpus_size, run_recall_precision_bench,
+    };
+    use crate::gym_history::{ScoreHistory, default_db_path, generate_signals};
+
+    let history = ScoreHistory::open(default_db_path())?;
+    let commit = Some(env!("SIMARD_GIT_HASH").to_string());
+    let record = run_recall_precision_bench(&history, commit)?;
+    // The gym signal needs a prior run to compare against; on the first run the
+    // scenario has a single record and `generate_signals` yields nothing for it.
+    let signal = generate_signals(&history, &record.suite_id)?
+        .into_iter()
+        .find(|s| s.scenario_id == record.scenario_id)
+        .map(|s| s.signal.to_string())
+        .unwrap_or_else(|| "stable".to_string());
+    println!(
+        "{}/{}: score={:.4} signal={} samples={}",
+        record.suite_id,
+        record.scenario_id,
+        record.score,
+        signal,
+        recall_precision_corpus_size(),
+    );
+    Ok(())
+}
+
 /// Convert a completed suite report into a process-level result.
 ///
 /// Returns `Ok(())` for a passing suite and an `Err` (which the CLI turns into a

@@ -3,18 +3,20 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::bridge_launcher::{launch_gym_bridge_native, launch_knowledge_bridge_native};
 use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use crate::goal_curation::persist_board;
 use crate::identity::OperatingMode;
 use crate::memory_ipc;
 use crate::ooda_loop::{
-    OodaBridges, OodaConfig, OodaPhase, OodaState, run_ooda_cycle, summarize_cycle_report,
+    OodaClients, OodaConfig, OodaPhase, OodaState, run_ooda_cycle, summarize_cycle_report,
 };
+use crate::rpc_subprocess_launcher::{launch_gym_client_native, launch_knowledge_client_native};
 use crate::runtime_config::RuntimeConfig;
 use crate::session_builder::{LlmProvider, SessionBuilder};
 
-use crate::operator_commands_ooda::persistence::{persist_cycle_report, persist_cycle_to_memory};
+use crate::operator_commands_ooda::persistence::{
+    persist_cycle_report_timed, persist_cycle_to_memory,
+};
 
 mod helpers;
 pub use helpers::*;
@@ -125,7 +127,7 @@ pub fn run_ooda_daemon(
     // Register the live writer for in-process callers (dashboard, OODA
     // loop, reflection, etc.) so they bypass IPC and disk re-open and
     // share this exact handle. This eliminates the dashboard's
-    // hollow-success failure mode where launch_writer_bridge previously
+    // hollow-success failure mode where launch_writer_client previously
     // fell through to a read-only handle when both IPC and direct open
     // failed (issue #1590 follow-up).
     memory_ipc::register_in_process_writer(state_root.clone(), Arc::clone(&shared_mem));
@@ -164,8 +166,8 @@ pub fn run_ooda_daemon(
 
     let memory: Box<dyn CognitiveMemoryOps> =
         Box::new(memory_ipc::SharedMemory(Arc::clone(&shared_mem)));
-    let knowledge = launch_knowledge_bridge_native()?;
-    let gym = launch_gym_bridge_native()?;
+    let knowledge = launch_knowledge_client_native()?;
+    let gym = launch_gym_client_native()?;
 
     // One-time bootstrap: snapshot SIMARD_LLM_PROVIDER (if set in env)
     // to <state_root>/config.toml so child processes (engineer subprocesses
@@ -332,7 +334,7 @@ pub fn run_ooda_daemon(
         None
     };
 
-    let mut bridges = OodaBridges {
+    let mut bridges = OodaClients {
         memory,
         knowledge,
         gym,
@@ -612,6 +614,14 @@ pub fn run_ooda_daemon(
         mind.register(Box::new(
             crate::cognitive_threads::EngineerLogAnalysisThread::from_env(),
         ));
+        // Creative Ideas generator thread (issue #2606-adjacent): a divergent
+        // idea-generation background thread, default-ON opt-out via
+        // `SIMARD_CREATIVE_IDEAS_ENABLED` (its `enabled()` gate keeps an
+        // opted-out thread inert). Reuses `ThreadKind::BackgroundThought`.
+        crate::cognitive_threads::threads::creative_ideas::register(
+            &mut mind,
+            crate::creative_ideas::CreativeIdeasConfig::from_env(),
+        );
         // NOTE: the Overseer M1 read-only observer sensor that previously
         // registered here (default-OFF, `SIMARD_OVERSEER_ENABLED` truthy) is
         // SUPERSEDED by the acting Overseer periodic task driven below in the
@@ -642,6 +652,12 @@ pub fn run_ooda_daemon(
     // Monotonic origin for the cadence; virtual seconds since daemon start.
     let overseer_epoch = Instant::now();
     let mut overseer_cadence = crate::overseer::OverseerCadence::new(overseer_interval_secs, 0);
+    // Gap-scan cadence: run the backlog-coverage survey/act once every N Overseer
+    // ticks (default every tick; clamped floor 1). Resolved once at startup; the
+    // per-tick index throttles which ticks actually run the gap-scan.
+    let overseer_gap_scan_enabled = crate::overseer::gap_scan_enabled();
+    let overseer_gap_scan_every_n = crate::overseer::gap_scan_every_n();
+    let mut overseer_gap_scan_tick_idx: u64 = 0;
     // Prevents overlapping ticks from stacking up if one runs long.
     let overseer_tick_running = Arc::new(AtomicBool::new(false));
     let overseer_repo_root = bridges.repo_root.clone();
@@ -660,14 +676,15 @@ pub fn run_ooda_daemon(
 
     // ── Daily journal thread (issue #2606) ─────────────────────────────
     // DEFAULT-ON, opt-out via SIMARD_JOURNAL_ENABLED=0. On its own slow cadence
-    // (default hourly) the daemon regenerates *today's* diary-like, layperson
-    // journal entry from episodic memory and the day's activity — including the
-    // day's real code-change proposals pulled from the `gh pr list` PR-readiness
-    // service — persisting it in cognitive memory (a `journal:YYYY-MM-DD` fact).
-    // Because it touches the network it runs on a background thread (never
-    // inline) AFTER the authoritative OODA cycle, panic-isolated and
-    // overlap-guarded, so it can never stall or crash the loop. The dashboard
-    // Journal tab and the TUI Journal pane read these entries back.
+    // (default hourly) the daemon regenerates *today's* narrative engineering &
+    // research report from episodic memory and the day's activity — including
+    // the day's real code-change proposals pulled from the `gh pr list`
+    // PR-readiness service — persisting it in cognitive memory (a
+    // `journal:YYYY-MM-DD` fact). Because it touches the network it runs on a
+    // background thread (never inline) AFTER the authoritative OODA cycle,
+    // panic-isolated and overlap-guarded, so it can never stall or crash the
+    // loop. The dashboard Journal tab and the TUI Journal pane read these
+    // entries back.
     let journal_thread_enabled = crate::journal::journal_enabled();
     let journal_interval_secs = crate::journal::journal_interval_secs();
     let mut last_journal: Option<Instant> = None;
@@ -1097,7 +1114,9 @@ pub fn run_ooda_daemon(
                 }
 
                 // Persist the cycle report to filesystem for auditability.
-                persist_cycle_report(&state_root, &report);
+                // Record the wall-clock cycle duration so the Cycle History
+                // duration-trend chart has real data to render (issue #21).
+                persist_cycle_report_timed(&state_root, &report, Some(cycle_elapsed));
                 // Persist the cycle summary to cognitive memory as an episode.
                 persist_cycle_to_memory(&bridges, &report);
                 // Write daemon health file for dashboard
@@ -1265,6 +1284,13 @@ pub fn run_ooda_daemon(
                 let mem_for_tick = Arc::clone(&shared_mem);
                 let repo_root_for_tick = overseer_repo_root.clone();
                 let state_root_for_tick = state_root.clone();
+                // Gap-scan every-N cadence: the first tick (idx 0) always runs the
+                // scan, then it runs once every N ticks. Disabled entirely when the
+                // gap-scan is off. Computed on the main loop thread so the index
+                // persists across ticks (each tick rebuilds the Overseer).
+                let gap_scan_due = overseer_gap_scan_enabled
+                    && overseer_gap_scan_tick_idx.is_multiple_of(overseer_gap_scan_every_n);
+                overseer_gap_scan_tick_idx = overseer_gap_scan_tick_idx.wrapping_add(1);
                 // Capture the cognitive-thread heartbeats + feed context on the
                 // main loop thread (before the tick spawns) so the Overseer
                 // activity feed (#2419) lists every operator/steward thread, not
@@ -1284,19 +1310,25 @@ pub fn run_ooda_daemon(
                         }
                         let _clear = ClearOnDrop(running);
 
-                        let mut overseer = crate::overseer::build_overseer(
+                        // Apply the gap-scan cadence for THIS tick on top of the
+                        // config default build_overseer sets.
+                        let overseer = crate::overseer::build_overseer(
                             mem_for_tick,
                             repo_root_for_tick,
                             state_root_for_tick.clone(),
                         );
-                        let report = crate::overseer::run_overseer_tick_isolated(&mut overseer);
+                        let mut overseer = overseer.with_gap_scan_enabled(gap_scan_due);
+                        let (report, problem_entries) =
+                            crate::overseer::run_overseer_tick_isolated_detailed(&mut overseer);
                         daemon_log(
                             &state_root_for_tick,
                             &format!(
                                 "[simard] overseer tick: problems={} issues_filed={} \
                                  recipes_launched={} prs_merged={} deploys={} escalations={} \
-                                 held={} goals_unblocked={} goals_escalated={} errors={} \
-                                 panicked={} ({}ms)",
+                                 held={} goals_unblocked={} goals_escalated={} \
+                                 memory_recalls={} memory_writes={} memory_errors={} \
+                                 workstream_gaps_detected={} workstream_gaps_suppressed={} \
+                                 errors={} panicked={} ({}ms)",
                                 report.problems,
                                 report.issues_filed,
                                 report.recipes_launched,
@@ -1306,6 +1338,11 @@ pub fn run_ooda_daemon(
                                 report.held,
                                 report.goals_unblocked,
                                 report.goals_escalated,
+                                report.memory_recalls,
+                                report.memory_writes,
+                                report.memory_errors,
+                                report.workstream_gaps_detected,
+                                report.workstream_gaps_suppressed,
                                 report.errors,
                                 report.panicked,
                                 report.duration_ms,
@@ -1338,6 +1375,7 @@ pub fn run_ooda_daemon(
                             timestamp: crate::telemetry::snapshot::now_rfc3339(),
                             enabled: true,
                             report,
+                            problem_entries,
                         };
                         if let Err(e) = crate::overseer::activity::record_tick(
                             &state_root_for_tick,
@@ -1386,6 +1424,7 @@ pub fn run_ooda_daemon(
                 let running = Arc::clone(&journal_tick_running);
                 let mem_for_journal = Arc::clone(&shared_mem);
                 let state_root_for_journal = state_root.clone();
+                let repo_root_for_journal = bridges.repo_root.clone();
                 let spawn = std::thread::Builder::new()
                     .name("journal-tick".to_string())
                     .spawn(move || {
@@ -1407,10 +1446,11 @@ pub fn run_ooda_daemon(
                         let prs = crate::journal::GhPrListSource::new(&gh, repo, base_allowlist);
 
                         let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            crate::journal::run_journal_tick_with_prs(
+                            crate::journal::run_journal_tick_with_prs_in_repo(
                                 mem_for_journal.as_ref(),
                                 &crate::journal::SystemClock,
                                 &prs,
+                                &repo_root_for_journal,
                             )
                         }));
                         match tick {
@@ -1501,7 +1541,7 @@ fn shutdown_daemon(
     state_root: &std::path::Path,
     shared_mem: &Arc<dyn CognitiveMemoryOps>,
     state: &mut OodaState,
-    bridges: &mut OodaBridges,
+    bridges: &mut OodaClients,
     signal_driven: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     daemon_log(state_root, "[simard] OODA daemon: shutdown sequence start");
@@ -1553,7 +1593,7 @@ fn shutdown_daemon(
     // 4. Clear in-process writer registration so the Weak ref drops.
     memory_ipc::clear_in_process_writer();
 
-    // 5. Bridges (and the daemon-owned strong Arc to LibraryCognitiveMemory)
+    // 5. Clients (and the daemon-owned strong Arc to LibraryCognitiveMemory)
     //    drop on function return — the inherent Database::drop runs
     //    force_checkpoint_on_close as a backstop.
     daemon_log(
@@ -1566,19 +1606,19 @@ fn shutdown_daemon(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::BridgeErrorPayload;
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
     use crate::cognitive_memory::CognitiveMemoryOps;
     use crate::goal_curation::GoalBoard;
-    use crate::gym_bridge::GymBridge;
-    use crate::knowledge_bridge::KnowledgeBridge;
-    use crate::memory_bridge::CognitiveMemoryBridge;
-    use crate::ooda_loop::{OodaBridges, OodaState};
+    use crate::gym_client::GymClient;
+    use crate::knowledge_client::KnowledgeClient;
+    use crate::memory_client::CognitiveMemoryClient;
+    use crate::ooda_loop::{OodaClients, OodaState};
+    use crate::rpc::RpcErrorPayload;
+    use crate::rpc_transport::InMemoryRpcTransport;
     use serde_json::json;
 
     fn mock_memory() -> Box<dyn CognitiveMemoryOps> {
-        Box::new(CognitiveMemoryBridge::new(Box::new(
-            InMemoryBridgeTransport::new("test-daemon-shutdown", |method, _params| match method {
+        Box::new(CognitiveMemoryClient::new(Box::new(
+            InMemoryRpcTransport::new("test-daemon-shutdown", |method, _params| match method {
                 "memory.search_facts" => Ok(json!({"facts": []})),
                 "memory.store_fact" => Ok(json!({"id": "sem_1"})),
                 "memory.store_episode" => Ok(json!({"id": "epi_1"})),
@@ -1586,7 +1626,7 @@ mod tests {
                     "sensory_count": 0, "working_count": 0, "episodic_count": 0,
                     "semantic_count": 0, "procedural_count": 0, "prospective_count": 0
                 })),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(RpcErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
@@ -1595,8 +1635,8 @@ mod tests {
     }
 
     fn mock_shared_mem() -> Arc<dyn CognitiveMemoryOps> {
-        Arc::new(CognitiveMemoryBridge::new(Box::new(
-            InMemoryBridgeTransport::new("test-daemon-shared", |method, _params| match method {
+        Arc::new(CognitiveMemoryClient::new(Box::new(
+            InMemoryRpcTransport::new("test-daemon-shared", |method, _params| match method {
                 "memory.search_facts" => Ok(json!({"facts": []})),
                 "memory.store_fact" => Ok(json!({"id": "sem_1"})),
                 "memory.store_episode" => Ok(json!({"id": "epi_1"})),
@@ -1604,7 +1644,7 @@ mod tests {
                     "sensory_count": 0, "working_count": 0, "episodic_count": 0,
                     "semantic_count": 0, "procedural_count": 0, "prospective_count": 0
                 })),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(RpcErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
@@ -1612,12 +1652,12 @@ mod tests {
         )))
     }
 
-    fn mock_knowledge() -> KnowledgeBridge {
-        KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
+    fn mock_knowledge() -> KnowledgeClient {
+        KnowledgeClient::new(Box::new(InMemoryRpcTransport::new(
             "test-knowledge",
             |method, _params| match method {
                 "knowledge.list_packs" => Ok(json!({"packs": []})),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(RpcErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
@@ -1625,15 +1665,15 @@ mod tests {
         )))
     }
 
-    fn mock_gym() -> GymBridge {
-        GymBridge::new(Box::new(InMemoryBridgeTransport::new(
+    fn mock_gym() -> GymClient {
+        GymClient::new(Box::new(InMemoryRpcTransport::new(
             "test-gym",
             |_method, _params| Ok(json!({"suite_id": "test", "success": true})),
         )))
     }
 
-    fn test_bridges() -> OodaBridges {
-        OodaBridges {
+    fn test_bridges() -> OodaClients {
+        OodaClients {
             memory: mock_memory(),
             knowledge: mock_knowledge(),
             gym: mock_gym(),

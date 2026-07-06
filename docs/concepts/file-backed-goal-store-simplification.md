@@ -22,23 +22,23 @@ the production `GoalStore` implementation in `bootstrap::assembly`.
 `CognitiveMemoryGoalStore` was designed to close the gap between
 `FileBackedGoalStore` (which persisted to `goal_records.json`) and the
 cognitive-memory graph (the `goal-board:snapshot` fact). The adapter would
-route every `GoalStore` trait call through the cognitive-memory bridge
-helpers, opening per-call reader or writer bridges.
+route every `GoalStore` trait call through the cognitive-memory client
+helpers, opening per-call reader or writer clients.
 
 In practice, this introduced three problems:
 
 1. **IPC complexity for a simple data need.** The `GoalStore` trait
    serves consumers that need a flat list of goal records — meeting
    backend, engineer loop, bootstrap-assembled sessions. These consumers
-   do not need the full cognitive-memory graph, the bridge resolution
+   do not need the full cognitive-memory graph, the client resolution
    ladder, or the daemon IPC socket. Routing a `list()` call through
-   `open_reader_bridge → search_facts → filter → parse` is
+   `open_reader_client → search_facts → filter → parse` is
    disproportionate to reading a JSON file.
 
-2. **Failure modes inherited from the bridge stack.** When the daemon is
+2. **Failure modes inherited from the client stack.** When the daemon is
    not running and the local writer lock is contended, `GoalStore` write
-   calls fail with opaque bridge errors that callers cannot distinguish
-   from genuine goal-store problems. The bridge's stale-lock reaper,
+   calls fail with opaque client errors that callers cannot distinguish
+   from genuine goal-store problems. The client's stale-lock reaper,
    read-only fallback removal, and socket-connect timeout all become
    failure surfaces for simple goal queries.
 
@@ -79,7 +79,7 @@ divergence is expected and bounded (resolved on the next OODA cycle).
 - **The `GoalBoard` type** (`active: Vec<ActiveGoal>`,
   `backlog: Vec<BacklogItem>`) is unchanged.
 - **Dashboard, OODA curate, and engineer-loop code** that reads through
-  the cognitive-memory bridge is unchanged.
+  the cognitive-memory client is unchanged.
 
 ## What this removes
 

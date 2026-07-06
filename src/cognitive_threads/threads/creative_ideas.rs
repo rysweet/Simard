@@ -29,10 +29,19 @@ use crate::cognitive_memory::creative_idea::{
 };
 use crate::creative_ideas::CreativeIdeasConfig;
 use crate::creative_ideas::dedup;
+use crate::creative_ideas::pipeline::{AgenticIdeaPipeline, IdeaPipeline, RouteOutcome};
+use crate::creative_ideas::source::AgenticIdeaSource;
 use crate::error::{SimardError, SimardResult};
 
 /// Stable telemetry id.
 pub const CREATIVE_IDEAS_ID: &str = "creative_ideas";
+
+/// How many recent episodes/entries to fold into the observation window.
+const OBSERVATION_LIMIT: usize = 20;
+/// How many stored episodes to scan for the observation window.
+const EPISODE_SCAN_LIMIT: u32 = 200;
+/// How many previously-generated ideas to load for dedup/novelty.
+const PREVIOUS_IDEAS_LIMIT: u32 = 256;
 
 /// A >= 24h window of recent progress & behavior (from the Journal / OODA).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -115,26 +124,11 @@ impl IdeaSource for FakeIdeaSource {
     }
 }
 
-/// Production idea source — a marked `// FUTURE:` stub for the spike.
-///
-/// FUTURE (M2): the real LLM-backed generator producing diverse ideas from the
-/// observation window. Until then `generate` returns
-/// [`SimardError::ReviewUnavailable`]; the thread is gated OFF so it never runs.
-#[derive(Clone, Debug, Default)]
-pub struct LlmIdeaSource;
-
-impl IdeaSource for LlmIdeaSource {
-    fn generate(&self, _inputs: &GenerationInputs, _n: usize) -> SimardResult<Vec<RawIdea>> {
-        Err(SimardError::ReviewUnavailable {
-            reason: "LlmIdeaSource is not wired during the spike (M2)".to_string(),
-        })
-    }
-}
-
 /// The Creative Ideas generator cognitive thread.
 pub struct CreativeIdeasThread {
     cfg: CreativeIdeasConfig,
     source: Box<dyn IdeaSource>,
+    pipeline: Box<dyn IdeaPipeline>,
     last_run_epoch: Option<u64>,
     next_run_epoch: Option<u64>,
     last_success: Option<bool>,
@@ -142,12 +136,25 @@ pub struct CreativeIdeasThread {
 }
 
 impl CreativeIdeasThread {
-    /// Build the thread from an explicit config + idea source (test seam).
+    /// Build the thread from an explicit config + idea source, defaulting to the
+    /// production review/route pipeline (test seam).
     #[must_use]
     pub fn new(cfg: CreativeIdeasConfig, source: Box<dyn IdeaSource>) -> Self {
+        Self::with_pipeline(cfg, source, Box::new(AgenticIdeaPipeline::from_env()))
+    }
+
+    /// Build with an explicit config, idea source, and review/route pipeline
+    /// (the fully-injectable test seam).
+    #[must_use]
+    pub fn with_pipeline(
+        cfg: CreativeIdeasConfig,
+        source: Box<dyn IdeaSource>,
+        pipeline: Box<dyn IdeaPipeline>,
+    ) -> Self {
         Self {
             cfg,
             source,
+            pipeline,
             last_run_epoch: None,
             next_run_epoch: None,
             last_success: None,
@@ -155,10 +162,14 @@ impl CreativeIdeasThread {
         }
     }
 
-    /// Build from the environment with the production (FUTURE) idea source.
+    /// Build from the environment with the production idea source + pipeline.
     #[must_use]
     pub fn from_env() -> Self {
-        Self::new(CreativeIdeasConfig::from_env(), Box::new(LlmIdeaSource))
+        Self::with_pipeline(
+            CreativeIdeasConfig::from_env(),
+            Box::new(AgenticIdeaSource::from_env()),
+            Box::new(AgenticIdeaPipeline::from_env()),
+        )
     }
 
     /// The core, fallible tick body. `tick` wraps this and folds any `Err` into
@@ -174,34 +185,180 @@ impl CreativeIdeasThread {
         let selected = dedup::select_balanced(deduped, self.cfg.batch);
         let surviving = selected.len();
 
-        let mut persisted = 0usize;
-        if !ctx.dry_run {
-            let store = ProspectiveCreativeIdeaStore::new(ctx.memory);
-            for raw_idea in &selected {
-                if ctx.shutdown.load(Ordering::Relaxed) {
-                    break;
+        let mut report = GenerationReport {
+            generated,
+            surviving,
+            persisted: 0,
+            reviewed: 0,
+            routed_goal: 0,
+            routed_issue: 0,
+            review_errors: 0,
+            dry_run: ctx.dry_run,
+        };
+
+        for raw_idea in &selected {
+            if ctx.shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+            let mut idea = raw_to_creative_idea(raw_idea, &inputs, ctx.now_epoch);
+
+            // Persist the freshly-generated `New` idea (skipped under dry-run).
+            if !ctx.dry_run {
+                let store = ProspectiveCreativeIdeaStore::new(ctx.memory);
+                idea.node_id = store.store(&idea)?;
+                report.persisted += 1;
+            }
+
+            // Review + route. A single idea's failure is logged (explicit
+            // telemetry — no silent fallback) and never aborts the batch.
+            match self.pipeline.review_and_route(&mut idea, &inputs, ctx) {
+                Ok(RouteOutcome::Goal) => {
+                    report.reviewed += 1;
+                    report.routed_goal += 1;
                 }
-                let idea = raw_to_creative_idea(raw_idea, &inputs, ctx.now_epoch);
-                store.store(&idea)?;
-                persisted += 1;
+                Ok(RouteOutcome::Issue) => {
+                    report.reviewed += 1;
+                    report.routed_issue += 1;
+                }
+                Ok(RouteOutcome::Parked | RouteOutcome::DryRun) => {
+                    report.reviewed += 1;
+                }
+                Err(error) => {
+                    report.review_errors += 1;
+                    tracing::warn!(
+                        target: "creative_ideas",
+                        error = %error,
+                        idea_id = %idea.idea_id,
+                        "[simard] creative-ideas review/route failed for one idea"
+                    );
+                }
             }
         }
 
-        Ok(GenerationReport {
-            generated,
-            surviving,
-            persisted,
-            dry_run: ctx.dry_run,
-        })
+        Ok(report)
     }
 
-    /// Assemble the (read-only) observation window.
+    /// Assemble the (read-only) observation window from the goal board, recent
+    /// journal/OODA activity, episodic memory, the Overseer's observations,
+    /// conversation insights, and previously-generated ideas.
     ///
-    /// FUTURE (M2): populate from the goal store / Journal / OODA / Overseer /
-    /// conversation insights / previous ideas. During the spike this is empty
-    /// so the gated-OFF thread has no external reads.
-    fn assemble_inputs(&self, _ctx: &ThreadContext<'_>) -> GenerationInputs {
-        GenerationInputs::default()
+    /// Best-effort: each source that fails to read emits explicit `tracing`
+    /// telemetry (never a silent fallback) and generation proceeds on whatever
+    /// context is available — the generator reasons about partial context.
+    fn assemble_inputs(&self, ctx: &ThreadContext<'_>) -> GenerationInputs {
+        let mut inputs = GenerationInputs::default();
+
+        match crate::goal_curation::load_goal_board(ctx.memory) {
+            Ok(board) => {
+                inputs.current_goals = board
+                    .active
+                    .iter()
+                    .map(|g| g.description.clone())
+                    .chain(board.backlog.iter().map(|b| b.description.clone()))
+                    .filter(|d| !d.trim().is_empty())
+                    .collect();
+                inputs.works_in_progress = board
+                    .active
+                    .iter()
+                    .filter_map(|g| {
+                        let assignee = g.assigned_to.as_deref()?;
+                        let activity = g.current_activity.as_deref().unwrap_or("in progress");
+                        Some(format!("{} — {assignee}: {activity}", g.description))
+                    })
+                    .collect();
+            }
+            Err(error) => tracing::warn!(
+                target: "creative_ideas",
+                error = %error,
+                "[simard] creative-ideas could not load the goal board for inputs"
+            ),
+        }
+
+        match ctx.memory.list_all_episodes(EPISODE_SCAN_LIMIT) {
+            Ok(episodes) => {
+                inputs.episodic_summaries = episodes
+                    .iter()
+                    .take(OBSERVATION_LIMIT)
+                    .map(|e| e.content.clone())
+                    .filter(|c| !c.trim().is_empty())
+                    .collect();
+            }
+            Err(error) => tracing::warn!(
+                target: "creative_ideas",
+                error = %error,
+                "[simard] creative-ideas could not read episodic memory for inputs"
+            ),
+        }
+
+        match crate::journal::store::all_entries(ctx.memory) {
+            Ok(entries) => {
+                let mut window = ActivityWindow {
+                    window_secs: self.cfg.interval_secs,
+                    entries: Vec::new(),
+                };
+                window.entries = entries
+                    .iter()
+                    .rev()
+                    .take(OBSERVATION_LIMIT)
+                    .filter(|e| !e.quiet_day && !e.narrative.trim().is_empty())
+                    .map(|e| format!("{}: {}", e.date, e.narrative))
+                    .collect();
+                inputs.recent_activity = window;
+            }
+            Err(error) => tracing::warn!(
+                target: "creative_ideas",
+                error = %error,
+                "[simard] creative-ideas could not read the journal for inputs"
+            ),
+        }
+
+        let activity_path = ctx.state_root.join("overseer").join("activity.json");
+        if let Some(activity) = crate::overseer::activity::read(&activity_path) {
+            inputs.overseer_observations = activity
+                .recent
+                .iter()
+                .take(OBSERVATION_LIMIT)
+                .filter_map(|record| {
+                    serde_json::to_string(&record.report)
+                        .ok()
+                        .map(|report| format!("{}: {report}", record.timestamp))
+                })
+                .collect();
+        }
+
+        match ctx.memory.search_episodes_by_keywords(
+            &[
+                "meeting".to_string(),
+                "conversation".to_string(),
+                "decision".to_string(),
+            ],
+            OBSERVATION_LIMIT as u32,
+        ) {
+            Ok(episodes) => {
+                inputs.conversation_insights = episodes
+                    .iter()
+                    .map(|e| e.content.clone())
+                    .filter(|c| !c.trim().is_empty())
+                    .collect();
+            }
+            Err(error) => tracing::warn!(
+                target: "creative_ideas",
+                error = %error,
+                "[simard] creative-ideas could not read conversation insights for inputs"
+            ),
+        }
+
+        let store = ProspectiveCreativeIdeaStore::new(ctx.memory);
+        match store.list(PREVIOUS_IDEAS_LIMIT) {
+            Ok(previous) => inputs.previous_ideas = previous,
+            Err(error) => tracing::warn!(
+                target: "creative_ideas",
+                error = %error,
+                "[simard] creative-ideas could not load previous ideas for dedup"
+            ),
+        }
+
+        inputs
     }
 
     fn record_success(&mut self, now_epoch: u64) {
@@ -224,6 +381,10 @@ struct GenerationReport {
     generated: usize,
     surviving: usize,
     persisted: usize,
+    reviewed: usize,
+    routed_goal: usize,
+    routed_issue: usize,
+    review_errors: usize,
     dry_run: bool,
 }
 
@@ -269,13 +430,24 @@ impl CognitiveThread for CreativeIdeasThread {
                     "generated"
                 };
                 let summary = format!(
-                    "creative_ideas: {verb} {} idea(s), {} survived dedup, {} persisted",
-                    report.generated, report.surviving, report.persisted,
+                    "creative_ideas: {verb} {} idea(s), {} survived dedup, {} persisted, \
+                     {} reviewed ({} → goal, {} → issue), {} review error(s)",
+                    report.generated,
+                    report.surviving,
+                    report.persisted,
+                    report.reviewed,
+                    report.routed_goal,
+                    report.routed_issue,
+                    report.review_errors,
                 );
                 let detail = json!({
                     "generated": report.generated,
                     "surviving": report.surviving,
                     "persisted": report.persisted,
+                    "reviewed": report.reviewed,
+                    "routed_goal": report.routed_goal,
+                    "routed_issue": report.routed_issue,
+                    "review_errors": report.review_errors,
                     "dry_run": report.dry_run,
                 });
                 ThreadOutcome::ok(summary, start.elapsed()).with_detail(detail)
@@ -321,13 +493,16 @@ fn raw_to_creative_idea(raw: &RawIdea, inputs: &GenerationInputs, now_epoch: u64
     idea
 }
 
-/// Register the thread with the `Mind` scheduler.
+/// Register the Creative Ideas thread with the `Mind` scheduler.
 ///
-/// FUTURE (M2): call site in the daemon `main`, still behind
-/// `SIMARD_CREATIVE_IDEAS_ENABLED`. **NOT** called during the spike; the
-/// production idea source ([`LlmIdeaSource`]) is itself a not-wired stub, so a
-/// registered-but-enabled thread would only ever emit `ThreadOutcome::failed`.
+/// Called from the daemon startup path behind `SIMARD_CREATIVE_IDEAS_ENABLED`
+/// (default-ON, opt-out). Builds the production idea source + review/route
+/// pipeline; the thread's `enabled()` gate still makes an opted-out thread inert.
 pub fn register(mind: &mut Mind, config: CreativeIdeasConfig) {
-    let thread = CreativeIdeasThread::new(config, Box::new(LlmIdeaSource));
+    let thread = CreativeIdeasThread::with_pipeline(
+        config,
+        Box::new(AgenticIdeaSource::from_env()),
+        Box::new(AgenticIdeaPipeline::from_env()),
+    );
     mind.register(Box::new(thread));
 }

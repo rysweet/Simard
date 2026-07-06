@@ -58,7 +58,7 @@ $ simard goal decompose goal-7a1c --dry-run
   1. Add parent_goal_id + GoalNode data model (done: serde back-compat test green)
   2. Implement typed-edge relationship facts (done: edge round-trips via search_facts)
   3. Add decompose_goal driver + prompt asset (done: 2-6 children, content-pin test green)
-  4. Wire simard goal decompose CLI verb (done: verb routes through writer bridge)
+  4. Wire simard goal decompose CLI verb (done: verb routes through writer client)
 ```
 
 If the slices look wrong, the wording lives in
@@ -79,7 +79,7 @@ $ simard goal decompose goal-7a1c --max-children 4
 Child ids are minted deterministically as `<parent_id>-c<n>`, so re-running
 the command dedups its edges instead of forking new ones.
 
-The write routes through the same cognitive-memory **writer bridge** as
+The write routes through the same cognitive-memory **writer client** as
 `goal add` / `goal remove`, so it is serialized through the daemon IPC socket
 when the daemon is running, or takes the local writer lock directly when it is
 not. A failure to acquire a writer exits non-zero — it never silently degrades

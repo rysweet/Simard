@@ -71,6 +71,7 @@ impl PrGhClient for Arc<GreenGh> {
                 state: "SUCCESS".to_string(),
             }],
             base_ref_name: "main".to_string(),
+            labels: Vec::new(),
         })
     }
     fn squash_merge(&self, _repo: &str, _pr: u32) -> crate::error::SimardResult<()> {

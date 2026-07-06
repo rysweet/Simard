@@ -30,7 +30,7 @@ use crate::goal_curation::{
     ActiveGoal, BacklogItem, GoalBoard, GoalProgress, add_active_goal, add_backlog_item,
     load_goal_board, save_goal_board, save_goal_board_with_removals,
 };
-use crate::memory_ipc::launch_writer_bridge;
+use crate::memory_ipc::launch_writer_client;
 use crate::state_root::STATE_ROOT_ENV;
 
 /// Allocate a TempDir state root and set `SIMARD_STATE_ROOT` for the
@@ -73,12 +73,12 @@ fn backlog_item(id: &str, score: f64) -> BacklogItem {
 /// opened bridge so each step exercises the same persistence layer as
 /// production callers.
 fn persist(board: &GoalBoard, root: &std::path::Path) {
-    let bridge = launch_writer_bridge(root).expect("writer bridge");
+    let bridge = launch_writer_client(root).expect("writer bridge");
     save_goal_board(board, bridge.ops()).expect("save_goal_board");
 }
 
 fn reload(root: &std::path::Path) -> GoalBoard {
-    let bridge = launch_writer_bridge(root).expect("reader bridge");
+    let bridge = launch_writer_client(root).expect("reader bridge");
     load_goal_board(bridge.ops()).expect("load_goal_board")
 }
 
@@ -94,7 +94,7 @@ fn empty_removals_is_equivalent_to_save_goal_board() {
     add_active_goal(&mut board, active_goal("beta", 2)).unwrap();
     add_backlog_item(&mut board, backlog_item("zeta", 0.7)).unwrap();
 
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let bridge = launch_writer_client(&root).expect("writer bridge");
     save_goal_board_with_removals(&board, &[], bridge.ops())
         .expect("save_goal_board_with_removals(&[]) must succeed");
 
@@ -117,7 +117,7 @@ fn removes_active_goal_present_on_in_flight_board() {
     add_active_goal(&mut board, active_goal("keeper", 1)).unwrap();
     add_active_goal(&mut board, active_goal("doomed", 2)).unwrap();
 
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let bridge = launch_writer_client(&root).expect("writer bridge");
     save_goal_board_with_removals(&board, &["doomed".to_string()], bridge.ops())
         .expect("save_goal_board_with_removals");
 
@@ -145,7 +145,7 @@ fn removes_backlog_item_in_addition_to_active() {
     add_active_goal(&mut board, active_goal("active-keeper", 2)).unwrap();
 
     let removals = vec!["active-doomed".to_string(), "backlog-doomed".to_string()];
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let bridge = launch_writer_client(&root).expect("writer bridge");
     save_goal_board_with_removals(&board, &removals, bridge.ops())
         .expect("save_goal_board_with_removals");
 
@@ -190,7 +190,7 @@ fn removal_defeats_pr_1926_resurrection_from_persisted_snapshot() {
     let mut in_flight = GoalBoard::new();
     add_active_goal(&mut in_flight, active_goal("keeper", 1)).unwrap();
     {
-        let bridge = launch_writer_bridge(&root).expect("writer bridge");
+        let bridge = launch_writer_client(&root).expect("writer bridge");
         // Plain save: this is what PR #1926 tried and lost to merge.
         save_goal_board(&in_flight, bridge.ops()).expect("plain save");
     }
@@ -204,7 +204,7 @@ fn removal_defeats_pr_1926_resurrection_from_persisted_snapshot() {
     );
 
     // Now the new variant: ask explicitly for removal.
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let bridge = launch_writer_client(&root).expect("writer bridge");
     save_goal_board_with_removals(&in_flight, &["doomed".to_string()], bridge.ops())
         .expect("save_goal_board_with_removals");
 
@@ -237,7 +237,7 @@ fn unknown_removal_ids_are_silent_no_ops() {
     add_active_goal(&mut board, active_goal("beta", 2)).unwrap();
 
     let removals = vec!["never-existed".to_string(), "alpha".to_string()];
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let bridge = launch_writer_client(&root).expect("writer bridge");
     let result = save_goal_board_with_removals(&board, &removals, bridge.ops());
     assert!(
         result.is_ok(),
@@ -263,7 +263,7 @@ fn empty_board_with_removals_is_idempotent() {
     let board = GoalBoard::new();
     let removals = vec!["does-not-exist".to_string()];
 
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let bridge = launch_writer_client(&root).expect("writer bridge");
     let r1 = save_goal_board_with_removals(&board, &removals, bridge.ops());
     let r2 = save_goal_board_with_removals(&board, &removals, bridge.ops());
     assert!(r1.is_ok() && r2.is_ok(), "both calls must succeed");
@@ -284,7 +284,7 @@ fn duplicate_ids_in_slice_are_treated_as_one_removal() {
     add_active_goal(&mut board, active_goal("other", 2)).unwrap();
 
     let removals = vec!["dup".to_string(), "dup".to_string(), "dup".to_string()];
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let bridge = launch_writer_client(&root).expect("writer bridge");
     let result = save_goal_board_with_removals(&board, &removals, bridge.ops());
     assert!(
         result.is_ok(),
@@ -313,7 +313,7 @@ fn concurrent_unrelated_persisted_goal_survives_removal_of_other_id() {
     persist(&writer_x, &root);
 
     let operator_in_flight = GoalBoard::new();
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let bridge = launch_writer_client(&root).expect("writer bridge");
     save_goal_board_with_removals(&operator_in_flight, &["doomed".to_string()], bridge.ops())
         .expect("save_goal_board_with_removals");
 

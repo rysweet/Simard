@@ -221,7 +221,7 @@ fn no_defaults_when_operator_present() {
 fn no_defaults_when_project_present() {
     let bridge = bridge_with_specific_facts("project:", "proj", "My Custom Project");
     let ctx = build_live_meeting_context(&bridge).unwrap();
-    // When project facts present, should use bridge data not defaults
+    // When project facts present, should use client data not defaults
     assert!(ctx.contains("My Custom Project"));
 }
 

@@ -33,6 +33,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::cognitive_threads::ThreadHealth;
 use crate::overseer::OverseerTickReport;
+use crate::overseer::intervention::Remediation;
+use crate::overseer::signal::RootCause;
 
 /// Bumped only on an INCOMPATIBLE shape change. Additive fields do not bump it.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -59,6 +61,19 @@ pub struct OverseerTotals {
     pub goals_unblocked: u64,
     /// Genuinely-blocked "needs human review" goals escalated to the operator.
     pub goals_escalated: u64,
+    /// Backlog-coverage gaps flagged by the recurring gap-scan (operator
+    /// notified + deduped issue filed).
+    pub workstream_gaps_detected: u64,
+    /// Backlog-coverage gaps suppressed as recurring (within the dedup window).
+    pub workstream_gaps_suppressed: u64,
+    /// Problems for which a structured root-cause WHY was produced (issue #2635).
+    pub root_cause_analyses: u64,
+    /// Actions labelled symptom-mitigation (root cause left unaddressed). A
+    /// deliberate block (`Acknowledged`) is NOT counted here.
+    pub symptom_mitigations: u64,
+    /// Actions that addressed the root cause — class `RootCause` or `Acknowledged`
+    /// (`remediation.root_cause_addressed == true`).
+    pub root_causes_addressed: u64,
     pub held: u64,
     pub errors: u64,
 }
@@ -73,6 +88,12 @@ pub struct OverseerActivityRecord {
     pub enabled: bool,
     /// The verbatim outcome tally (never interpreted).
     pub report: OverseerTickReport,
+    /// Per-problem rows for this tick (issue #2635): problem + WHY + action +
+    /// root-cause/symptom. Additive (`#[serde(default)]`), so a feed written
+    /// before this field existed deserializes to an empty vector. If a
+    /// concurrent overseer-log-detail change adds its own per-problem type,
+    /// `ProblemEntry` merges into it (keep both sides).
+    pub problem_entries: Vec<ProblemEntry>,
 }
 
 /// Per cognitive thread, derived from [`ThreadHealth`] (epochs → RFC3339).
@@ -222,6 +243,11 @@ impl OverseerActivity {
             t.escalations += rep.escalations as u64;
             t.goals_unblocked += rep.goals_unblocked as u64;
             t.goals_escalated += rep.goals_escalated as u64;
+            t.workstream_gaps_detected += rep.workstream_gaps_detected as u64;
+            t.workstream_gaps_suppressed += rep.workstream_gaps_suppressed as u64;
+            t.root_cause_analyses += rep.root_cause_analyses as u64;
+            t.symptom_mitigations += rep.symptom_mitigations as u64;
+            t.root_causes_addressed += rep.root_causes_addressed as u64;
             t.held += rep.held as u64;
             t.errors += rep.errors as u64;
         }
@@ -230,8 +256,8 @@ impl OverseerActivity {
 
     /// Count of *actions taken* over the retained window (issues filed, fix
     /// workstreams launched, PRs merged, deploys, escalations, goal-board
-    /// self-heals + escalations). `held` is deliberately excluded: holding is
-    /// observing-and-waiting, not an action.
+    /// self-heals + escalations, backlog-coverage gaps flagged). `held` is
+    /// deliberately excluded: holding is observing-and-waiting, not an action.
     pub fn interventions(&self) -> u64 {
         let t = &self.totals;
         t.issues_filed
@@ -241,6 +267,7 @@ impl OverseerActivity {
             + t.escalations
             + t.goals_unblocked
             + t.goals_escalated
+            + t.workstream_gaps_detected
     }
 
     /// The honest one-line status summary rendered on every surface.
@@ -375,6 +402,45 @@ fn epoch_to_rfc3339(epoch_secs: u64) -> String {
     rfc3339(dt)
 }
 
+/// A single per-problem feed entry for one Overseer tick (issue #2635): the
+/// problem, its root-cause **WHY**, the action taken, and whether that action
+/// addressed the root cause or only mitigated the symptom. Rendered so an
+/// operator sees, for every tick entry, *problem + WHY + action + root/symptom*.
+///
+/// This is the self-contained per-problem surface the root-cause work owns; it
+/// composes with (does not depend on) the concurrent overseer-log-detail feed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProblemEntry {
+    /// The problem's stable dedup key.
+    pub key: String,
+    /// The problem's one-line summary.
+    pub summary: String,
+    /// The structured root-cause analysis (the WHY).
+    pub why: RootCause,
+    /// The chosen action's short label (e.g. `"unblock_goal"`, `"escalate"`).
+    pub action: String,
+    /// Whether the action targeted the root cause or only the symptom.
+    pub remediation: Remediation,
+}
+
+impl ProblemEntry {
+    /// A compact one-line render: `{summary} — WHY: {why} — {action} [class]`,
+    /// with the surfaced unaddressed-cause note appended for a symptom mitigation.
+    pub fn humanize(&self) -> String {
+        let mut line = format!(
+            "{} — WHY: {} — {} [{}]",
+            self.summary,
+            self.why,
+            self.action,
+            self.remediation.class_label(),
+        );
+        if let Some(note) = &self.remediation.unaddressed_note {
+            line.push_str(&format!(" — {note}"));
+        }
+        line
+    }
+}
+
 /// A plain-language one-liner for one Overseer tick: what it **saw** and what it
 /// **did** — or, when nothing needed doing, that it held or simply observed.
 /// Shared by the `simard status` terminal render and the TUI Overseer pane so
@@ -425,6 +491,20 @@ pub fn humanize_tick(r: &OverseerTickReport) -> String {
             plural(r.goals_escalated)
         ));
     }
+    if r.memory_writes > 0 {
+        did.push(format!(
+            "recorded {} memory note{}",
+            r.memory_writes,
+            plural(r.memory_writes)
+        ));
+    }
+    if r.workstream_gaps_detected > 0 {
+        did.push(format!(
+            "flagged {} workstream gap{}",
+            r.workstream_gaps_detected,
+            plural(r.workstream_gaps_detected)
+        ));
+    }
 
     let saw = format!("saw {} problem{}", r.problems, plural(r.problems));
     let action = if !did.is_empty() {
@@ -436,7 +516,40 @@ pub fn humanize_tick(r: &OverseerTickReport) -> String {
     } else {
         "observing, no action needed".to_string()
     };
-    format!("{saw}  ·  {action}")
+    let mut line = format!("{saw}  ·  {action}");
+    // Root-cause honesty (issue #2635): when the Overseer could only mitigate a
+    // symptom, surface that the underlying cause was left live — never a silent
+    // patch. Absent when no symptom mitigation occurred.
+    if r.symptom_mitigations > 0 {
+        line.push_str(&format!(
+            "  ·  ({} symptom-mitigation{}, root cause unaddressed)",
+            r.symptom_mitigations,
+            plural(r.symptom_mitigations)
+        ));
+    }
+    line
+}
+
+/// The per-tick DETAIL lines (issue #21) rendered beneath the [`humanize_tick`]
+/// one-liner: WHAT the Overseer observed (concrete problem + evidence values)
+/// and WHAT it did (each action/hold and its outcome). Observed lines are
+/// prefixed `observed:`; action lines already self-prefix (`did:` / `held:`).
+///
+/// Additive companion to [`humanize_tick`], which stays a byte-identical
+/// summary. Returns empty when the report carries no structured details (older
+/// records, or a tick that observed nothing), so the summary one-liner stands
+/// alone. Shared by the terminal `simard status` render, the TUI Overseer pane,
+/// and mirrored in the dashboard SPA.
+pub fn humanize_tick_details(r: &OverseerTickReport) -> Vec<String> {
+    let mut out: Vec<String> =
+        Vec::with_capacity(r.observed_details.len() + r.action_details.len());
+    for o in &r.observed_details {
+        out.push(format!("observed: {o}"));
+    }
+    for a in &r.action_details {
+        out.push(a.clone());
+    }
+    out
 }
 
 /// Humanize a cadence in seconds to "15 min" / "2 h" / "45 s". Shared across the
@@ -471,6 +584,7 @@ mod tests {
             timestamp: ts.to_string(),
             enabled: true,
             report: r,
+            problem_entries: Vec::new(),
         }
     }
 
@@ -539,5 +653,129 @@ mod tests {
         let bad = OverseerThreadStatus::overseer_meta(900, false);
         assert_eq!(bad.health, "erroring");
         assert_eq!(bad.consecutive_errors, 1);
+    }
+}
+
+#[cfg(test)]
+mod detail_tests {
+    //! Contract for the issue-#21 informative detail lines: the durable feed
+    //! must carry structured, human-readable `observed_details` / `action_details`
+    //! and expose them via `humanize_tick_details`, while the one-liner
+    //! `humanize_tick` stays byte-identical (so existing needle tests hold) and
+    //! the on-disk schema stays backward-compatible.
+    use super::*;
+
+    fn report_with_details() -> OverseerTickReport {
+        OverseerTickReport {
+            problems: 2,
+            issues_filed: 1,
+            observed_details: vec![
+                "distillation parse-failure rate 34%".to_string(),
+                "PR rysweet/Simard#42 is green and merge-ready".to_string(),
+            ],
+            action_details: vec![
+                "did: filed issue https://github.com/rysweet/Simard/issues/9".to_string(),
+                "held: verify-and-merge rysweet/Simard#42 — opt-in".to_string(),
+            ],
+            ..OverseerTickReport::default()
+        }
+    }
+
+    #[test]
+    fn humanize_tick_details_surfaces_observed_and_action_lines() {
+        let lines = humanize_tick_details(&report_with_details());
+        let joined = lines.join("\n");
+        // Observed lines are prefixed with an "observed:" marker.
+        assert!(
+            joined.contains("observed:"),
+            "observed detail lines must be marked 'observed:': {joined:?}"
+        );
+        assert!(
+            joined.contains("34%"),
+            "observed details must carry concrete values: {joined:?}"
+        );
+        // Action lines are already self-prefixed ("did:" / "held:").
+        assert!(
+            joined.contains("did: filed issue https://github.com/rysweet/Simard/issues/9"),
+            "action details must surface the concrete action + outcome: {joined:?}"
+        );
+        assert!(
+            joined.contains("held: verify-and-merge rysweet/Simard#42 — opt-in"),
+            "a held action must explain itself in the details: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn humanize_tick_details_is_empty_when_there_are_no_details() {
+        let bare = OverseerTickReport {
+            problems: 1,
+            ..OverseerTickReport::default()
+        };
+        assert!(
+            humanize_tick_details(&bare).is_empty(),
+            "no structured details → no detail lines (the summary one-liner stands alone)"
+        );
+    }
+
+    #[test]
+    fn humanize_tick_one_liner_stays_byte_identical() {
+        // The detail work is strictly ADDITIVE: the existing summary one-liner
+        // (asserted by dashboard/status/TUI needle tests) must not drift.
+        let r = OverseerTickReport {
+            problems: 3,
+            ..OverseerTickReport::default()
+        };
+        assert_eq!(
+            humanize_tick(&r),
+            "saw 3 problems  ·  observing, no action needed"
+        );
+    }
+
+    #[test]
+    fn report_details_round_trip_through_serde() {
+        let r = report_with_details();
+        let json = serde_json::to_string(&r).expect("serialize report");
+        let back: OverseerTickReport = serde_json::from_str(&json).expect("deserialize report");
+        assert_eq!(
+            back, r,
+            "the detail vecs must survive a serde round-trip verbatim"
+        );
+        // And the concrete strings are actually present in the wire form.
+        assert!(json.contains("observed_details"));
+        assert!(json.contains("action_details"));
+        assert!(json.contains("34%"));
+    }
+
+    #[test]
+    fn legacy_report_json_without_detail_fields_deserializes_to_empty_vecs() {
+        // A record written by the CURRENT production build (deploy #21) has no
+        // observed_details / action_details keys. It must still parse, with the
+        // new fields defaulting to empty — never a hard reject on rolling deploy.
+        let legacy = r#"{
+            "problems": 3, "issues_filed": 1, "recipes_launched": 0,
+            "prs_merged": 0, "deploys": 0, "escalations": 0, "held": 1,
+            "whispers": 0, "whispers_suppressed": 0, "goals_unblocked": 0,
+            "goals_escalated": 0, "goals_health_suppressed": 0, "errors": 0,
+            "panicked": false, "duration_ms": 42
+        }"#;
+        let r: OverseerTickReport =
+            serde_json::from_str(legacy).expect("legacy report must remain parseable");
+        assert_eq!(r.problems, 3);
+        assert_eq!(r.held, 1);
+        assert!(
+            r.observed_details.is_empty(),
+            "missing observed_details must default to empty"
+        );
+        assert!(
+            r.action_details.is_empty(),
+            "missing action_details must default to empty"
+        );
+    }
+
+    #[test]
+    fn schema_version_stays_one_for_a_backward_compatible_additive_change() {
+        // Additive `#[serde(default)]` fields do NOT bump the schema version —
+        // bumping it would make older readers reject the newer feed.
+        assert_eq!(SCHEMA_VERSION, 1);
     }
 }

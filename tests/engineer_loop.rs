@@ -68,8 +68,8 @@ fn rendered_output(output: &Output) -> String {
 #[cfg(test)]
 mod llm_provider_guard_tests {
     use crate::common::{
-        llm_provider_unavailable, memory_bridge_unavailable, require_llm_provider,
-        require_memory_bridge,
+        llm_provider_unavailable, memory_client_unavailable, require_llm_provider,
+        require_memory_client,
     };
 
     #[test]
@@ -136,39 +136,39 @@ mod llm_provider_guard_tests {
     }
 
     #[test]
-    fn detects_missing_memory_bridge() {
+    fn detects_missing_memory_client() {
         // The OODA daemon surfaces these when the amplihack memory bridge is
         // unavailable; an `#[ignore]`d test that needs it must not pass by
         // skipping when force-run (issue #2047).
-        assert!(memory_bridge_unavailable(
+        assert!(memory_client_unavailable(
             "Error: Cannot find amplihack-memory-lib"
         ));
-        assert!(memory_bridge_unavailable(
+        assert!(memory_client_unavailable(
             "memory bridge unhealthy: connection refused"
         ));
     }
 
     #[test]
-    fn does_not_flag_memory_bridge_on_unrelated_output() {
+    fn does_not_flag_memory_client_on_unrelated_output() {
         assert!(
-            !memory_bridge_unavailable("ooda daemon: seeded 5 default goals"),
+            !memory_client_unavailable("ooda daemon: seeded 5 default goals"),
             "must not false-positive on benign output"
         );
     }
 
     #[test]
     #[should_panic(expected = "requires the amplihack memory bridge")]
-    fn require_memory_bridge_panics_when_unavailable() {
+    fn require_memory_client_panics_when_unavailable() {
         // Force-running an ignored bridge-dependent test without the bridge must
         // fail loudly (issue #2047), never silently pass by an early `return`.
-        require_memory_bridge("example_test", "Error: Cannot find amplihack-memory-lib");
+        require_memory_client("example_test", "Error: Cannot find amplihack-memory-lib");
     }
 
     #[test]
-    fn require_memory_bridge_is_noop_when_available() {
+    fn require_memory_client_is_noop_when_available() {
         // When the bridge is available the guard returns without panicking,
         // letting the real assertions run.
-        require_memory_bridge("example_test", "ooda daemon: seeded 5 default goals");
+        require_memory_client("example_test", "ooda daemon: seeded 5 default goals");
     }
 }
 

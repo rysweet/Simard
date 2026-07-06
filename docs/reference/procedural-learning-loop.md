@@ -398,7 +398,7 @@ The loop has four production seams, all wired on honest external signals.
 let (archived, blocked) = goal_curation::archive_completed_evidence_aware(board, source);
 // Only goals an external postcondition *refuted* drive learning (never
 // self-judged ActionOutcome.success). Recurring refutations distil a lesson.
-learn_from_refuted_goals(&blocked, &*bridges.memory, config.lesson_recurrence_threshold);
+learn_from_refuted_goals(&blocked, &*clients.memory, config.lesson_recurrence_threshold);
 
 // learn_from_refuted_goals filters to VerificationOutcome::Refuted, derives the
 // error_class from the missing evidence, then for each observation:

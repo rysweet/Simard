@@ -1,0 +1,89 @@
+name: distill-trailing-comma-parse
+app_type: cli
+description: |
+  Verify episode→fact distillation tolerates a trailing comma in the distiller
+  agent's `{ "facts": [...] }` JSON (issue #2658 — the residual "100%
+  parse-failure" shape after the launcher-banner / ANSI fixes). A trailing comma
+  before a `}` or `]` is the single most common real-world LLM JSON defect; the
+  balanced-brace scan still finds the span, but strict `serde_json` rejected the
+  WHOLE object, so the batch was silently deferred every cycle and
+  `distill_parse_success_rate` collapsed toward 0. A new string-aware,
+  last-resort `strip_json_trailing_commas` recovery view (a provable no-op on
+  valid JSON) is retried only after the strict parse fails, so one cosmetic comma
+  no longer drops the batch — WITHOUT weakening precision (a comma inside a
+  fact's string content is preserved, and a genuinely malformed object still
+  fails). Proven by the hermetic in-process unit tests + the deterministic
+  before/after parse-recovery benchmark this scenario drives (no network, no live
+  host mutation). The CLI runner rejects any non-zero exit, so a failing test
+  fails the scenario.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # Stripper primitive: a trailing comma before `}`/`]` (incl. pretty-printed
+  # whitespace) is removed to valid JSON, while a comma inside string content and
+  # a genuinely-malformed (elided-element) object are left untouched. Zero-alloc
+  # borrow on valid JSON proves the clean path is byte-identical. First
+  # invocation may compile the test binary.
+  - action: run
+    params:
+      command: "cargo test --locked --lib recipe_output::extract::tests::strip_trailing_commas"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Production path: a bare trailing-comma facts object recovers >= 1 fact
+  # instead of dropping the whole batch (the headline #2658 acceptance).
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::distillation::unit_tests::parse_recovers_bare_trailing_comma_facts_object"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Precision guard: a comma inside a fact's `content` string is never corrupted,
+  # and a genuinely malformed (elided `,,`) object still fails — leniency never
+  # widens to accept broken JSON.
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- memory_consolidation::distillation::unit_tests::parse_trailing_comma_recovery_never_corrupts_string_content memory_consolidation::distillation::unit_tests::parse_still_fails_on_genuinely_malformed_non_trailing_comma"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Deterministic before/after parse-recovery benchmark: over a batch that
+  # reproduces the residual 100% shape, the strict baseline fails EVERY one
+  # (failure-rate 1.000) and the shipped tolerant parser recovers EVERY one
+  # (failure-rate 0.000) — the in-process analog of the live
+  # `distill_parse_success_rate` self-metric moving off the floor.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::distillation_fact_yield_bench::distill_parse_failure_rate_benchmark_before_1000_after_0000 -- --nocapture"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "before_failure_rate=1.000 after_failure_rate=0.000"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

@@ -19,7 +19,7 @@ gantt
     axisFormat %b %d
 
     section Foundation
-    Phase 0 - Bridge Infrastructure       :done, p0, 2026-03-20, 3d
+    Phase 0 - RPC Transport Infrastructure       :done, p0, 2026-03-20, 3d
 
     section Memory & Knowledge
     Phase 1 - Cognitive Memory            :done, p1, after p0, 3d
@@ -48,11 +48,11 @@ gantt
 
 | Phase | Deliverable | Key Modules | Status |
 |-------|------------|-------------|--------|
-| 0 | Bridge infrastructure | `bridge`, `bridge_circuit`, `bridge_subprocess`, `bridge_launcher` | Merged |
-| 1 | Cognitive memory via amplihack-memory-lib | `memory_bridge`, `memory_bridge_adapter`, `memory_cognitive`, `memory_consolidation`, `memory_hive` | Merged |
-| 2 | Knowledge packs via agent-kgpacks | `knowledge_bridge`, `knowledge_context` | Merged |
+| 0 | RPC transport infrastructure | `rpc`, `rpc_circuit_breaker`, `rpc_transport`, `rpc_subprocess_launcher` | Merged |
+| 1 | Cognitive memory via amplihack-memory-lib | `memory_client`, `memory_store_adapter`, `memory_cognitive`, `memory_consolidation`, `memory_hive` | Merged |
+| 2 | Knowledge packs via agent-kgpacks | `knowledge_client`, `knowledge_context` | Merged |
 | 3 | Real base type adapters (PTY-backed) | `base_type_copilot`, `base_type_harness`, `base_type_turn`, `terminal_session` | Merged |
-| 4 | Gym/eval via amplihack-agent-eval | `gym`, `gym_bridge`, `gym_scoring` | Merged |
+| 4 | Gym/eval via amplihack-agent-eval | `gym`, `gym_client`, `gym_scoring` | Merged |
 | 5 | Agent composition & subordinates | `identity_composition`, `agent_supervisor`, `agent_goal_assignment`, `agent_roles`, `agent_program` | Merged |
 | 6 | Self-improvement & relaunch | `self_improve`, `self_relaunch`, `review`, `improvements` | Merged |
 | 7 | Remote orchestration via azlin | `remote_azlin`, `remote_session`, `remote_transfer` | Merged |

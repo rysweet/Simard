@@ -26,9 +26,9 @@
 //! then compile but fail at assertions until the recall logic lands.
 
 use super::*;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_client::CognitiveMemoryClient;
 use crate::memory_cognitive::CognitiveEpisode;
+use crate::rpc_transport::InMemoryRpcTransport;
 use crate::session::SessionId;
 use serde_json::json;
 
@@ -55,17 +55,17 @@ fn prep_returning_recall(
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Bridge fixtures
+// Client fixtures
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Bridge that returns three episodes via the (future)
+/// Client that returns three episodes via the (future)
 /// `memory.search_episodes_by_keywords` method:
 ///
 /// * `epi_a` (label `goal-curator`, contains "merge")
 /// * `epi_b` (label `distill:epi_xx`, contains "merge")
 /// * `epi_c` (label `session-12345`, contains "merge")  ← must be filtered
-fn keyword_recall_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("kw-recall", |method, _params| match method {
+fn keyword_recall_bridge() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("kw-recall", |method, _params| match method {
         "memory.search_facts" => Ok(json!({"facts": []})),
         "memory.check_triggers" => Ok(json!({"prospectives": []})),
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
@@ -95,19 +95,19 @@ fn keyword_recall_bridge() -> CognitiveMemoryBridge {
                 },
             ]
         })),
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::rpc::RpcErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
-/// Bridge whose `search_episodes_by_keywords` MUST NOT be called.
+/// Client whose `search_episodes_by_keywords` MUST NOT be called.
 /// Used by the "no tokens" edge case: a short or stopword-only
 /// objective must short-circuit before issuing the trait call.
-fn no_recall_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("no-recall", |method, _params| match method {
+fn no_recall_bridge() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("no-recall", |method, _params| match method {
         "memory.search_facts" => Ok(json!({"facts": []})),
         "memory.check_triggers" => Ok(json!({"prospectives": []})),
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
@@ -115,24 +115,24 @@ fn no_recall_bridge() -> CognitiveMemoryBridge {
         "memory.search_episodes_by_keywords" => {
             panic!("search_episodes_by_keywords must not be called when no tokens are derived")
         }
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::rpc::RpcErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
-/// Bridge that captures the keyword list it receives via
+/// Client that captures the keyword list it receives via
 /// `search_episodes_by_keywords` for tokenizer assertions.
 fn capturing_recall_bridge() -> (
-    CognitiveMemoryBridge,
+    CognitiveMemoryClient,
     std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 ) {
     let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let cap = captured.clone();
     let transport =
-        InMemoryBridgeTransport::new("capture-recall", move |method, params| match method {
+        InMemoryRpcTransport::new("capture-recall", move |method, params| match method {
             "memory.search_facts" => Ok(json!({"facts": []})),
             "memory.check_triggers" => Ok(json!({"prospectives": []})),
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
@@ -148,12 +148,12 @@ fn capturing_recall_bridge() -> (
                 }
                 Ok(json!({"episodes": []}))
             }
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::rpc::RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         });
-    (CognitiveMemoryBridge::new(Box::new(transport)), captured)
+    (CognitiveMemoryClient::new(Box::new(transport)), captured)
 }
 
 // ───────────────────────────────────────────────────────────────────────────

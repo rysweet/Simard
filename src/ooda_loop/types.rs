@@ -6,9 +6,9 @@ use std::fmt::{self, Display, Formatter};
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::engineer_worktree::EngineerWorktree;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
-use crate::gym_bridge::GymBridge;
+use crate::gym_client::GymClient;
 use crate::gym_scoring::GymSuiteScore;
-use crate::knowledge_bridge::KnowledgeBridge;
+use crate::knowledge_client::KnowledgeClient;
 use crate::memory_cognitive::CognitiveStatistics;
 use crate::memory_consolidation::PreparedContext;
 use crate::self_improve::ImprovementCycle;
@@ -340,7 +340,7 @@ fn env_u32(key: &str, default: u32) -> u32 {
 /// recipe steps via JSON. Excludes:
 /// - `engineer_worktrees` — OS handles owning git worktrees; recipe steps
 ///   re-key these by `goal_id` from the parent process state.
-/// - The `OodaBridges` (memory store, gym, knowledge) — instantiated per
+/// - The `OodaClients` (memory store, gym, knowledge) — instantiated per
 ///   helper-bin invocation from the configured `state_root`.
 ///
 /// Use `OodaStateSnapshot::from(&state)` to capture, and
@@ -412,7 +412,7 @@ impl OodaStateSnapshot {
 /// dispatch.
 ///
 /// The slow goal-action `run_turn` call (~30-90s) used to serialize on the
-/// single shared [`OodaBridges::session`], so only ~1 engineer started per
+/// single shared [`OodaClients::session`], so only ~1 engineer started per
 /// OODA round even when coverage planned many. A factory lets the Act phase
 /// mint one session per spawn-candidate goal so those `run_turn` calls run
 /// concurrently. `Send + Sync` so it can be shared across the dispatch
@@ -429,10 +429,10 @@ pub trait OrchestratorSessionFactory: Send + Sync {
 }
 
 /// All bridges needed by the OODA loop.
-pub struct OodaBridges {
+pub struct OodaClients {
     pub memory: Box<dyn CognitiveMemoryOps>,
-    pub knowledge: KnowledgeBridge,
-    pub gym: GymBridge,
+    pub knowledge: KnowledgeClient,
+    pub gym: GymClient,
     /// Optional base-type session for real autonomous work (e.g. RustyClawd).
     /// When present, `AdvanceGoal` actions use `run_turn` to delegate work
     /// to an LLM agent instead of just bumping a progress percentage.

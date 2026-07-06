@@ -1,5 +1,5 @@
 use super::types::*;
-use crate::gym_bridge::ScoreDimensions;
+use crate::gym_client::ScoreDimensions;
 use crate::gym_scoring::EvidenceQualityAssessment;
 use crate::runtime::RuntimeTopology;
 #[test]

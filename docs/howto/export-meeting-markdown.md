@@ -107,7 +107,7 @@ ls ~/.simard/meetings/
 | Location | `~/.simard/meetings/*.md` | `~/.simard/meetings/*.json` |
 | Ends session | No | Yes |
 | Includes summary | No (raw conversation) | Yes (LLM-generated summary) |
-| Includes memories | No | Yes (stored via bridge) |
+| Includes memories | No | Yes (stored via client) |
 | Includes handoff | No | Yes (written for OODA loop) |
 
 Both are complementary. Use `/export` for a human-readable record during or after the meeting. Use `/close` to end the session and trigger the full persistence pipeline.

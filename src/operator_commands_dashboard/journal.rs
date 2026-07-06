@@ -2,7 +2,7 @@
 //!
 //! Three read-only endpoints back the Journal tab, all reading the durable
 //! `journal:YYYY-MM-DD` entries out of the *same* cognitive-memory store the
-//! rest of the dashboard reads (via [`open_reader_bridge`]) — there is no
+//! rest of the dashboard reads (via [`open_reader_client`]) — there is no
 //! parallel datastore:
 //!
 //! * `GET  /api/journal/dates`         — the days that have an entry, newest
@@ -31,7 +31,7 @@ use crate::journal::{
     JournalEntry, all_entries as journal_all_entries, get_entry_by_date, html_escape,
     query_entries, render_entry_html,
 };
-use crate::memory_ipc::open_reader_bridge;
+use crate::memory_ipc::open_reader_client;
 
 /// Length of the plain-text snippet returned with each search result.
 const SNIPPET_CHARS: usize = 220;
@@ -110,7 +110,7 @@ pub(crate) async fn journal_entry(AxumPath(date): AxumPath<String>) -> Json<Valu
 
 /// Load every stored entry (newest first) from the store at `state_root`.
 fn load_all_entries(state_root: &Path) -> SimardResult<Vec<JournalEntry>> {
-    let reader = open_reader_bridge(state_root)?;
+    let reader = open_reader_client(state_root)?;
     journal_all_entries(reader.ops())
 }
 
@@ -120,13 +120,13 @@ fn search_entries(
     range: Option<(NaiveDate, NaiveDate)>,
     text: Option<&str>,
 ) -> SimardResult<Vec<JournalEntry>> {
-    let reader = open_reader_bridge(state_root)?;
+    let reader = open_reader_client(state_root)?;
     query_entries(reader.ops(), range, text)
 }
 
 /// Fetch a single day's entry from the store at `state_root`.
 fn get_entry(state_root: &Path, date: NaiveDate) -> SimardResult<Option<JournalEntry>> {
-    let reader = open_reader_bridge(state_root)?;
+    let reader = open_reader_client(state_root)?;
     get_entry_by_date(reader.ops(), date)
 }
 
@@ -139,7 +139,7 @@ fn render_journal_html(state_root: &Path, date_str: &str) -> String {
             return empty_fragment(None, "Choose a valid day (YYYY-MM-DD) to read its journal.");
         }
     };
-    let reader = match open_reader_bridge(state_root) {
+    let reader = match open_reader_client(state_root) {
         Ok(r) => r,
         Err(e) => {
             return empty_fragment(

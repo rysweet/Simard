@@ -16,7 +16,7 @@ mod tests_dispatch_extra;
 // Re-export all public functions from sibling operator_commands_* modules.
 pub use crate::operator_commands_engineer::{run_engineer_loop_probe, run_engineer_read_probe};
 pub use crate::operator_commands_gym::{
-    run_gym_compare, run_gym_list, run_gym_scenario, run_gym_suite,
+    run_gym_compare, run_gym_list, run_gym_recall_precision, run_gym_scenario, run_gym_suite,
 };
 pub use crate::operator_commands_meeting::{
     run_goal_curation_probe, run_goal_curation_read_probe, run_improvement_curation_probe,

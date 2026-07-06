@@ -30,7 +30,7 @@ use std::time::Duration;
 use simard::ooda_actions;
 use simard::ooda_loop::{
     ActionOutcome, Observation, OodaConfig, OodaStateSnapshot, PlannedAction, Priority,
-    bridges_from_state_root, decide, observe, orient, promote_from_backlog, review_outcomes,
+    clients_from_state_root, decide, observe, orient, promote_from_backlog, review_outcomes,
 };
 
 fn main() -> ExitCode {
@@ -155,7 +155,7 @@ fn cmd_observe(flags: HashMap<String, String>) -> Result<String, String> {
     let snapshot: OodaStateSnapshot = read_json(state_path)?;
     let mut state = snapshot.into_state();
     let bridges =
-        bridges_from_state_root(&state_root).map_err(|e| format!("bridge_factory failed: {e}"))?;
+        clients_from_state_root(&state_root).map_err(|e| format!("client_factory failed: {e}"))?;
     let observation =
         observe(&mut state, &bridges).map_err(|e| format!("observe phase failed: {e}"))?;
     let result = serde_json::json!({
@@ -177,7 +177,7 @@ fn cmd_act(flags: HashMap<String, String>) -> Result<String, String> {
     let actions: Vec<PlannedAction> = read_json(actions_path)?;
     let mut state = snapshot.into_state();
     let mut bridges =
-        bridges_from_state_root(&state_root).map_err(|e| format!("bridge_factory failed: {e}"))?;
+        clients_from_state_root(&state_root).map_err(|e| format!("client_factory failed: {e}"))?;
     let outcomes = ooda_actions::dispatch_actions(&actions, &mut bridges, &mut state)
         .map_err(|e| format!("act phase failed: {e}"))?;
     let result = serde_json::json!({

@@ -18,6 +18,10 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     .tab-content{display:none;padding:1.5rem 2rem} .tab-content.active{display:block}
     .page-h1{color:var(--accent);font-size:1.4rem;margin:0 0 .35rem 0;line-height:1.2}
     .page-lede{padding:.5rem .75rem;margin:0 0 1rem;background:#1a2332;border-left:3px solid var(--accent);border-radius:4px;color:#9bb1c4;font-size:.85rem;line-height:1.5}
+    .subsection{color:var(--accent);font-size:1.1rem;margin:1.75rem 0 .75rem;padding-bottom:.35rem;border-bottom:1px solid var(--border);font-weight:600}
+    .subsection:first-of-type{margin-top:.5rem}
+    .subsection-lede{color:#9bb1c4;font-size:.82rem;line-height:1.5;margin:0 0 .75rem}
+    .section-anchor{display:block;height:0;overflow:hidden;scroll-margin-top:80px}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:1rem}
     .card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1.25rem}
     .card h2{color:var(--accent);font-size:1rem;margin-bottom:.75rem;border-bottom:1px solid var(--border);padding-bottom:.5rem}
@@ -124,14 +128,17 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <a href="https://github.com/rysweet/Simard" target="_blank" style="color:#8b949e;text-decoration:none;font-size:.85rem;padding:.2rem .4rem" title="Source on GitHub">⟨/⟩ Source</a>
       <a href="https://github.com/rysweet/Simard/releases/latest" target="_blank" style="color:#3fb950;text-decoration:none;font-size:.85rem;border:1px solid #3fb950;padding:.2rem .6rem;border-radius:4px">📦 Releases</a>
       <button class="glossary-toggle" onclick="toggleGlossary()" title="Show glossary of Simard terms">📖 Glossary</button>
+      {{FEEDBACK_WIDGET_BUTTON}}
       <span id="clock" style="color:#8b949e;font-size:.85rem"></span>
     </div>
   </header>
   {{TAB_NAV}}
 
+
   <div class="tab-content active" id="tab-overview">
     <h1 class="page-h1">Overview</h1>
-    <p class="page-lede">A live look at what the Simard daemon is doing right now, plus quick stats on system health, open work items, and any other Simard hosts in your cluster.</p>
+    <p class="page-lede">A live look at what the Simard daemon is doing right now, plus system health, open work items, aggregate run counters, and any other Simard hosts in your cluster.</p>
+    <h2 class="subsection">Summary</h2>
     <div class="card" style="margin-bottom:1rem;border:1px solid #238636;background:linear-gradient(135deg,#0d1117,#0f1a12)">
       <h2 style="color:#3fb950;margin-bottom:.75rem">🤖 Simard — Autonomous Agent</h2>
       <div id="agent-live-status"><span class="loading">Loading agent status…</span></div>
@@ -141,6 +148,9 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
         <h2>Recent Actions <button class="btn" onclick="fetchStatus()" style="font-size:.75rem">Refresh</button></h2>
         <div id="recent-actions-list"><span class="loading">Loading…</span></div>
       </div>
+    </div>
+    <h2 class="subsection">Health</h2>
+    <div class="grid">
       <div class="card">
         <h2>Open PRs</h2>
         <div id="open-prs-list"><span class="loading">Loading…</span></div>
@@ -150,6 +160,11 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
         <div id="merge-readiness-panel"><span class="loading">Loading…</span></div>
       </div>
       <div class="card"><h2>System Status</h2><div id="status"><span class="loading">Loading…</span></div></div>
+      <div class="card" data-testid="cognition-recall-precision-card">
+        <h2>Cognition: Recall Precision <button class="btn" onclick="fetchRecallPrecision()" style="font-size:.75rem">Refresh</button></h2>
+        <p class="card-lede" style="margin:0 0 .75rem;color:#8b949e;font-size:.8rem;line-height:1.5">Hybrid measurement (issue #2491 / #2494): recall precision@k is trusted only when it improves on the fixed benchmark <strong>and</strong> trends the same way live. The verdict crosses both rails.</p>
+        <div id="cognition-recall-precision"><span class="loading">Loading…</span></div>
+      </div>
       <div class="card"><h2>Open Issues</h2><ul id="issues-list"><li class="loading">Loading…</li></ul></div>
       <div class="card">
         <h2>Machines &amp; Memory Sharing <button class="btn" onclick="fetchDistributed()">Refresh</button></h2>
@@ -171,11 +186,18 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
         </div>
       </div>
     </div>
+    <span class="section-anchor" id="section-status"></span>
+    <h2 class="subsection">Stats</h2>
+    <div class="card" style="max-width:1100px">
+      <h2>Operational Status <button class="btn" onclick="fetchStatusSnapshot()" style="font-size:.75rem">Refresh</button></h2>
+      <div id="status-snapshot-panel"><span class="loading">Loading…</span></div>
+    </div>
   </div>
 
   <div class="tab-content" id="tab-goals">
     <h1 class="page-h1">Goals</h1>
-    <p class="page-lede">The list of things you have asked Simard to accomplish — active goals are being worked on now and backlog goals are queued for later.</p>
+    <p class="page-lede">The things you have asked Simard to accomplish — active goals in progress now, the queued backlog, and a work board of the tasks it is moving through.</p>
+    <h2 class="subsection">Goals</h2>
     <div class="card" style="margin-bottom:1rem">
       <h2>Active Goals
         <button class="btn" onclick="fetchGoals()">Refresh</button>
@@ -202,26 +224,63 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <h2>Backlog</h2>
       <div id="goals-backlog"><span class="loading">Loading…</span></div>
     </div>
-  </div>
-
-  <div class="tab-content" id="tab-traces">
-    <h1 class="page-h1">Traces</h1>
-    <p class="page-lede">Step-by-step OpenTelemetry traces of how the daemon made each recent decision, useful for debugging slow or surprising agent behaviour.</p>
-    <div class="card" style="margin-bottom:1rem">
-      <h2>OTEL Traces <button class="btn" onclick="fetchTraces()">Refresh</button></h2>
-      <div id="otel-status" style="margin-bottom:.75rem"><span class="loading">Loading…</span></div>
-      <div id="trace-list" class="log-box" style="max-height:600px;overflow-y:auto"><span class="loading">Loading…</span></div>
+    <span class="section-anchor" id="section-workboard"></span>
+    <h2 class="subsection">Work Board</h2>
+    <div id="wb-header" style="display:flex;align-items:center;gap:1.5rem;margin-bottom:1rem;flex-wrap:wrap">
+      <div id="wb-cycle-indicator" style="display:flex;align-items:center;gap:.5rem">
+        <span id="wb-phase-dot" style="width:12px;height:12px;border-radius:50%;display:inline-block;background:#8b949e"></span>
+        <span id="wb-cycle-label" style="font-weight:700;color:var(--accent)">Cycle —</span>
+        <span id="wb-phase-label" style="color:#8b949e;font-size:.85rem"></span>
+      </div>
+      <div style="color:#8b949e;font-size:.85rem"><span id="wb-uptime">—</span> uptime</div>
+      <div style="color:#8b949e;font-size:.85rem">Next cycle: <span id="wb-eta" style="color:var(--fg);font-weight:600">—</span></div>
+      <button class="btn" onclick="fetchWorkboard()">Refresh</button>
     </div>
+
+    <h3 style="color:var(--accent);margin-bottom:.5rem;font-size:.95rem">Goals</h3>
+    <div id="wb-kanban" style="display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1.25rem">
+      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Queued</h2><div id="wb-col-queued"></div></div>
+      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">In Progress</h2><div id="wb-col-inprogress"></div></div>
+      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Blocked</h2><div id="wb-col-blocked"></div></div>
+      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Done</h2><div id="wb-col-done"></div></div>
+    </div>
+
+    <div class="grid" style="margin-bottom:1.25rem">
+      <div class="card">
+        <h2>Active Engineers</h2>
+        <div id="wb-engineers"><span style="color:#8b949e">No spawned engineers</span></div>
+      </div>
+      <div class="card">
+        <h2>Recent Actions</h2>
+        <div id="wb-actions" style="max-height:300px;overflow-y:auto"><span style="color:#8b949e">No recent actions</span></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:1.25rem">
+      <h2 style="cursor:pointer" onclick="document.getElementById('wb-wm-body').style.display=document.getElementById('wb-wm-body').style.display==='none'?'block':'none'">Working Memory <span style="font-weight:normal;color:#8b949e;font-size:.8rem" id="wb-wm-count">0 slots</span> <span style="font-size:.75rem;color:#8b949e">▾</span></h2>
+      <div id="wb-wm-body">
+        <div id="wb-wm-list" style="font-size:.85rem;color:#8b949e">No active working memory</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:1.25rem">
+      <h2 style="cursor:pointer" onclick="document.getElementById('wb-facts-body').style.display=document.getElementById('wb-facts-body').style.display==='none'?'block':'none'">Task Memory <span style="font-weight:normal;color:#8b949e;font-size:.8rem" id="wb-facts-count">0 facts</span> <span style="font-size:.75rem;color:#8b949e">▾</span></h2>
+      <div id="wb-facts-body">
+        <div id="wb-facts-list" style="font-size:.85rem;color:#8b949e">No facts loaded</div>
+      </div>
+    </div>
+
     <div class="card">
-      <h2>Setup</h2>
-      <p style="color:#8b949e;font-size:.85rem">To enable full OTEL tracing, set <code>OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317</code> and run an OTEL collector (e.g. Jaeger, Grafana Tempo).</p>
-      <p style="color:#8b949e;font-size:.85rem;margin-top:.5rem">For systemd: <code>systemctl --user edit simard-ooda</code> and add the env var in an [Service] override.</p>
+      <h2>Cognitive Statistics</h2>
+      <div id="wb-cog-stats" style="font-size:.85rem;color:#8b949e">Loading…</div>
     </div>
   </div>
 
-  <div class="tab-content" id="tab-logs">
-    <h1 class="page-h1">Logs</h1>
-    <p class="page-lede">Detailed activity from the always-on background service that runs Simard, plus the spending log and per-cycle reports — the most granular view for understanding exactly what Simard did and why.</p>
+  <div class="tab-content" id="tab-activity">
+    <h1 class="page-h1">Activity</h1>
+    <p class="page-lede">Everything Simard has been doing recently in one place — the background service log, step-by-step decision traces, the live thinking stream, and where its brain failed to parse a response.</p>
+    <span class="section-anchor" id="section-logs"></span>
+    <h2 class="subsection">Logs</h2>
     <div class="card" style="margin-bottom:1rem">
       <h2>Background Service Log <button class="btn" onclick="fetchLogs()">Refresh</button> <button class="btn" onclick="copyLogContent('daemon-log')" style="margin-left:.3rem">📋 Copy</button></h2>
       <p style="color:#8b949e;font-size:.82rem;margin:.15rem 0 .5rem">Live activity from the always-on background process that runs Simard. Use the level menu to show only problems — pick <strong>Errors</strong> to surface failures, or <strong>All levels</strong> to see everything.</p>
@@ -249,27 +308,46 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     <div id="ooda-transcripts"><span class="loading">Loading…</span></div>
     <h2 style="color:var(--accent);font-size:1rem;margin:.75rem 0 .5rem">Terminal Session Transcripts</h2>
     <div id="terminal-transcripts"><span class="loading">Loading…</span></div>
-  </div>
-
-  <div class="tab-content" id="tab-processes">
-    <h1 class="page-h1">Processes</h1>
-    <p class="page-lede">Background OS processes and tmux sessions Simard is running on this host, with a tree view for spotting stuck or zombie workers.</p>
+    <span class="section-anchor" id="section-traces"></span>
+    <h2 class="subsection">Traces</h2>
+    <div class="card" style="margin-bottom:1rem">
+      <h2>OTEL Traces <button class="btn" onclick="fetchTraces()">Refresh</button></h2>
+      <div id="otel-status" style="margin-bottom:.75rem"><span class="loading">Loading…</span></div>
+      <div id="trace-list" class="log-box" style="max-height:600px;overflow-y:auto"><span class="loading">Loading…</span></div>
+    </div>
     <div class="card">
-      <h2>Active Simard Processes <button class="btn" onclick="fetchProcesses()">Refresh</button> <span id="proc-auto-refresh" style="font-size:.75rem;color:#8b949e;font-weight:normal;margin-left:.5rem">⟳ auto-refreshing</span></h2>
-      <div id="proc-count" style="margin-bottom:.5rem;color:#8b949e;font-size:.85rem"></div>
-      <div id="proc-table"><span class="loading">Loading…</span></div>
+      <h2>Setup</h2>
+      <p style="color:#8b949e;font-size:.85rem">To enable full OTEL tracing, set <code>OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317</code> and run an OTEL collector (e.g. Jaeger, Grafana Tempo).</p>
+      <p style="color:#8b949e;font-size:.85rem;margin-top:.5rem">For systemd: <code>systemctl --user edit simard-ooda</code> and add the env var in an [Service] override.</p>
     </div>
-    <div class="card" style="margin-top:1rem">
-      <h2>Process Tree <button class="btn" onclick="fetchProcessTree()">Refresh</button></h2>
-      <div id="proc-tree-summary" style="margin-bottom:.5rem;color:#8b949e;font-size:.85rem"></div>
-      <div id="proc-tree-container"><span class="loading">Loading…</span></div>
+    <span class="section-anchor" id="section-thinking"></span>
+    <h2 class="subsection">Thinking</h2>
+    <div class="card" style="margin-bottom:1rem">
+      <h2>Cycle History <button class="btn" onclick="fetchOodaCycles()">Refresh</button></h2>
+      <div id="ooda-cycle-trend" style="margin-bottom:.75rem"><span class="loading">Loading…</span></div>
+      <div id="ooda-cycle-history"><span class="loading">Loading…</span></div>
+    </div>
+    <div class="card">
+      <h2>Agent Internal Reasoning <button class="btn" onclick="fetchThinking()">Refresh</button></h2>
+      <div id="thinking-timeline"><span class="loading">Loading…</span></div>
+    </div>
+    <span class="section-anchor" id="section-brain-failures"></span>
+    <h2 class="subsection">Failures</h2>
+    <div class="card" style="margin-bottom:1rem">
+      <h2>Summary <button class="btn" onclick="fetchBrainFailures()">Refresh</button></h2>
+      <div id="brain-failures-summary"><span class="loading">Loading…</span></div>
+    </div>
+    <div class="card">
+      <h2>Recent Brain Failures</h2>
+      <div id="brain-failures-list"><span class="loading">Loading…</span></div>
     </div>
   </div>
 
-  <div class="tab-content" id="tab-memory">
-    <h1 class="page-h1">Memory</h1>
-    <p class="page-lede">Everything Simard has learned and remembered — what it's thinking about, facts learned, events remembered, known procedures, planned actions, and recent observations — with full-text search.</p>
-
+  <div class="tab-content" id="tab-resources">
+    <h1 class="page-h1">Resources</h1>
+    <p class="page-lede">What Simard has learned and remembered alongside what it costs to run — searchable memory of facts, events, and plans, plus token and dollar spending by model and provider.</p>
+    <span class="section-anchor" id="section-memory"></span>
+    <h2 class="subsection">Memory</h2>
     <div class="card" style="margin-bottom:1rem;border:1px solid #238636;background:linear-gradient(135deg,#0d1117,#0f1a12)">
       <div style="display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap">
         <div style="text-align:center;min-width:120px">
@@ -353,11 +431,8 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <div class="card" style="flex:1"><h2>Memory Files</h2><div id="mem-files"><span class="loading">Loading…</span></div></div>
     </div>
     </details>
-  </div>
-
-  <div class="tab-content" id="tab-costs">
-    <h1 class="page-h1">Costs</h1>
-    <p class="page-lede">Token and dollar spending by model and provider, plus your daily and weekly budget caps — the dollar figures are estimates based on each model's published token prices, not a provider invoice.</p>
+    <span class="section-anchor" id="section-costs"></span>
+    <h2 class="subsection">Costs</h2>
     <div class="grid">
       <div class="card"><h2>Daily Costs <button class="btn" onclick="fetchCosts()">Refresh</button></h2><div id="costs-daily"><span class="loading">Loading…</span></div></div>
       <div class="card"><h2>Weekly Costs</h2><div id="costs-weekly"><span class="loading">Loading…</span></div></div>
@@ -371,92 +446,4 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       </div>
     </div>
   </div>
-
-  <div class="tab-content" id="tab-thinking">
-    <h1 class="page-h1">Thinking</h1>
-    <p class="page-lede">A live view of what the daemon decided each cycle - repeated deferring-to-an-active-engineer notes are collapsed with a count so genuine forward progress stands out from a stuck loop.</p>
-    <div class="card" style="margin-bottom:1rem">
-      <h2>Cycle History <button class="btn" onclick="fetchOodaCycles()">Refresh</button></h2>
-      <div id="ooda-cycle-trend" style="margin-bottom:.75rem"><span class="loading">Loading…</span></div>
-      <div id="ooda-cycle-history"><span class="loading">Loading…</span></div>
-    </div>
-    <div class="card">
-      <h2>Agent Internal Reasoning <button class="btn" onclick="fetchThinking()">Refresh</button></h2>
-      <div id="thinking-timeline"><span class="loading">Loading…</span></div>
-    </div>
-  </div>
-
-  <div class="tab-content" id="tab-brain-failures">
-    <h1 class="page-h1">Brain Failures</h1>
-    <p class="page-lede">How often the daemon's brain failed to parse a model response right now - the current rate and a bounded recent window, kept separate from the all-time total so a stale number never looks like a live problem.</p>
-    <div class="card" style="margin-bottom:1rem">
-      <h2>Summary <button class="btn" onclick="fetchBrainFailures()">Refresh</button></h2>
-      <div id="brain-failures-summary"><span class="loading">Loading…</span></div>
-    </div>
-    <div class="card">
-      <h2>Recent Brain Failures</h2>
-      <div id="brain-failures-list"><span class="loading">Loading…</span></div>
-    </div>
-  </div>
-
-  <div class="tab-content" id="tab-chat">
-    <h1 class="page-h1">Chat</h1>
-    <p class="page-lede">Talk to the running Simard agent in real time — anything you say here can become a new goal, and slash-commands like /close, /goals, and /status are available.</p>
-    <div class="chat-layout">
-      <div id="chat-sidebar">
-        <button id="chat-new" onclick="newChat()">+ New chat</button>
-        <div id="chat-sessions"></div>
-      </div>
-      <div class="card" id="chat-panel">
-        <h2>Chat</h2>
-        <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.5rem .75rem;margin-bottom:.5rem;font-size:.8rem;color:#8b949e">
-          <strong style="color:var(--accent)">💡</strong>
-          Talk directly with Simard — ask about your goals, check system status, or start a conversation. Commands: <code>/close</code> end session, <code>/goals</code> review goals, <code>/status</code> system status.
-        </div>
-        <div class="ws-status disconnected" id="ws-status">● Disconnected <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button></div>
-        <div id="chat-messages"></div>
-        <div id="chat-input-row">
-          <textarea id="chat-input" placeholder="Type a message… (/close to end session)"></textarea>
-          <button id="chat-send" onclick="sendChat()">Send</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="tab-content" id="tab-workboard">
-    <h1 class="page-h1">Workboard</h1>
-    <p class="page-lede">A kanban-style view of Simard's current work — queued, in-progress, blocked, and done items alongside the agent's working memory and recent actions.</p>
-    <div id="wb-header" style="display:flex;align-items:center;gap:1.5rem;margin-bottom:1rem;flex-wrap:wrap">
-      <div id="wb-cycle-indicator" style="display:flex;align-items:center;gap:.5rem">
-        <span id="wb-phase-dot" style="width:12px;height:12px;border-radius:50%;display:inline-block;background:#8b949e"></span>
-        <span id="wb-cycle-label" style="font-weight:700;color:var(--accent)">Cycle —</span>
-        <span id="wb-phase-label" style="color:#8b949e;font-size:.85rem"></span>
-      </div>
-      <div style="color:#8b949e;font-size:.85rem"><span id="wb-uptime">—</span> uptime</div>
-      <div style="color:#8b949e;font-size:.85rem">Next cycle: <span id="wb-eta" style="color:var(--fg);font-weight:600">—</span></div>
-      <button class="btn" onclick="fetchWorkboard()">Refresh</button>
-    </div>
-
-    <h3 style="color:var(--accent);margin-bottom:.5rem;font-size:.95rem">Goals</h3>
-    <div id="wb-kanban" style="display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1.25rem">
-      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Queued</h2><div id="wb-col-queued"></div></div>
-      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">In Progress</h2><div id="wb-col-inprogress"></div></div>
-      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Blocked</h2><div id="wb-col-blocked"></div></div>
-      <div class="card" style="min-height:80px"><h2 style="font-size:.85rem">Done</h2><div id="wb-col-done"></div></div>
-    </div>
-
-    <div class="grid" style="margin-bottom:1.25rem">
-      <div class="card">
-        <h2>Active Engineers</h2>
-        <div id="wb-engineers"><span style="color:#8b949e">No spawned engineers</span></div>
-      </div>
-      <div class="card">
-        <h2>Recent Actions</h2>
-        <div id="wb-actions" style="max-height:300px;overflow-y:auto"><span style="color:#8b949e">No recent actions</span></div>
-      </div>
-    </div>
-
-    <div class="card" style="margin-bottom:1.25rem">
-      <h2 style="cursor:pointer" onclick="document.getElementById('wb-wm-body').style.display=document.getElementById('wb-wm-body').style.display==='none'?'block':'none'">Working Memory <span style="font-weight:normal;color:#8b949e;font-size:.8rem" id="wb-wm-count">0 slots</span> <span style="font-size:.75rem;color:#8b949e">▾</span></h2>
-      <div id="wb-wm-body">
-        <div id="wb-wm-list" style="font-size:.85rem;color:#8b949e">No active working memory</div>"#;
+"#;

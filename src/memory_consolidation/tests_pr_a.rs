@@ -31,8 +31,8 @@
 //! tests themselves do not change.
 
 use super::*;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_client::CognitiveMemoryClient;
+use crate::rpc_transport::InMemoryRpcTransport;
 use crate::session::SessionId;
 use serde_json::json;
 use std::collections::HashSet;
@@ -61,15 +61,15 @@ fn prep_with_active_slugs(
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Bridge fixtures
+// Client fixtures
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Bridge that returns five `goal-board:snapshot` revisions plus one
+/// Client that returns five `goal-board:snapshot` revisions plus one
 /// unrelated `bug-pattern` fact when queried by the objective text or
 /// by the goal-store concept. PR-A filter 1 should drop all five
 /// snapshots.
-fn snapshot_revisions_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("snapshot-revs", |method, params| match method {
+fn snapshot_revisions_bridge() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("snapshot-revs", |method, params| match method {
         "memory.search_facts" => {
             let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
             // Both the per-fragment objective search AND the
@@ -106,18 +106,18 @@ fn snapshot_revisions_bridge() -> CognitiveMemoryBridge {
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
         "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
         "memory.push_working" => Ok(json!({"id": "wrk_1"})),
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::rpc::RpcErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
-/// Bridge that returns three `goal-store:record` facts: two with slugs
+/// Client that returns three `goal-store:record` facts: two with slugs
 /// the caller will pass in `active_slugs` ("alpha", "beta") and one
 /// with a stale slug ("ghost-of-tdd") that should be filtered out.
-fn mixed_goal_store_bridge() -> CognitiveMemoryBridge {
+fn mixed_goal_store_bridge() -> CognitiveMemoryClient {
     use crate::goals::{GoalRecord, GoalStatus};
     use crate::session::SessionPhase;
 
@@ -139,7 +139,7 @@ fn mixed_goal_store_bridge() -> CognitiveMemoryBridge {
     let stale = make_record("ghost-of-tdd", "Ghost-of-TDD (stale)");
 
     let transport =
-        InMemoryBridgeTransport::new("mixed-goal-store", move |method, params| match method {
+        InMemoryRpcTransport::new("mixed-goal-store", move |method, params| match method {
             "memory.search_facts" => {
                 let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
                 if query == "goal-store:record" {
@@ -179,19 +179,19 @@ fn mixed_goal_store_bridge() -> CognitiveMemoryBridge {
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::rpc::RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
-/// Bridge that returns a `lesson-learned` and a `pr-pattern` fact —
+/// Client that returns a `lesson-learned` and a `pr-pattern` fact —
 /// neither of which is a `goal-store:record` or `goal-board:snapshot`.
 /// Both filters should leave these untouched.
-fn diverse_concepts_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("diverse", |method, _params| match method {
+fn diverse_concepts_bridge() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("diverse", |method, _params| match method {
         "memory.search_facts" => Ok(json!({
             "facts": [
                 {
@@ -216,12 +216,12 @@ fn diverse_concepts_bridge() -> CognitiveMemoryBridge {
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
         "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
         "memory.push_working" => Ok(json!({"id": "wrk_1"})),
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::rpc::RpcErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 // ───────────────────────────────────────────────────────────────────────────

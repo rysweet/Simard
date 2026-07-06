@@ -197,27 +197,27 @@ pub enum SimardError {
     ClockBeforeUnixEpoch {
         reason: String,
     },
-    BridgeSpawnFailed {
+    RpcSpawnFailed {
         bridge: String,
         reason: String,
     },
-    BridgeTransportError {
+    RpcTransportError {
         bridge: String,
         reason: String,
     },
-    BridgeProtocolError {
+    RpcProtocolError {
         bridge: String,
         reason: String,
     },
-    BridgeCallFailed {
+    RpcCallFailed {
         bridge: String,
         method: String,
         reason: String,
     },
-    BridgeCircuitOpen {
+    RpcCircuitOpen {
         bridge: String,
     },
-    BridgeError(String),
+    RpcError(String),
     PlanningUnavailable {
         reason: String,
     },

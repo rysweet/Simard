@@ -15,6 +15,8 @@ doc_type: design
 status: draft
 related:
   - ../concepts/operational-autonomy-model.md
+  - ../reference/overseer-operator-notifications.md
+  - ../howto/configure-overseer-email-notifications.md
   - ../concepts/simard-whisperer.md
   - ../reference/simard-whisperer-api.md
   - ../howto/configure-the-simard-whisperer.md
@@ -22,6 +24,8 @@ related:
   - ../howto/add-a-new-cognitive-thread.md
   - ../reference/overseer-activity-feed.md
   - ../howto/watch-overseer-activity.md
+  - ../reference/overseer-memory-recall-api.md
+  - ../howto/configure-overseer-memory-recall.md
   - ../reference/status-snapshot-api.md
   - ../concepts/unified-telemetry-and-status.md
   - ../reference/stewardship-api.md
@@ -414,7 +418,7 @@ telemetry surface `simard status` uses, with **no Cargo-feature dependency**:
 The daemon-side host type is still `Mind` (the `*Brain` → reasoner rename has
 not landed at HEAD), so this document uses `Mind` deliberately. The pr-verify
 "no `Bridge` naming" scan (check #3) is therefore scoped to **added lines only**
-— pre-existing `terminal_engineer_bridge` code is untouched by the Overseer.
+— pre-existing `engineer_handoff` code is untouched by the Overseer.
 
 ## Phased roadmap
 
@@ -513,3 +517,7 @@ built, these must be resolved — they are hard gates, not advice.
 - [Self-Deploy API](../reference/self-deploy-api.md) and
   [Cross-repo merge authority](../reference/cross-repo-merge-authority.md) — the
   guarded deploy and merge actions.
+- [Overseer operator-notification reliability](../reference/overseer-operator-notifications.md)
+  and [Configure Overseer email notifications](../howto/configure-overseer-email-notifications.md)
+  — the reliable, safe two-channel (Signal + email) operator-notification path, including
+  the anti-self-ingest Signal marker and the authenticated SMTP relay.

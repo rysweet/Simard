@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use crate::engineer_handoff::EngineerHandoffContext;
 use crate::goals::GoalRecord;
 use crate::session::{SessionPhase, SessionRecord};
-use crate::terminal_engineer_bridge::TerminalBridgeContext;
 
 use std::path::PathBuf;
 
@@ -197,7 +197,7 @@ pub struct EngineerLoopRun {
     /// `None` for runs deserialized from older formats that predate summary tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<SessionSummary>,
-    pub terminal_bridge_context: Option<TerminalBridgeContext>,
+    pub terminal_bridge_context: Option<EngineerHandoffContext>,
     #[serde(with = "duration_millis")]
     pub elapsed_duration: Duration,
     pub phase_traces: Vec<PhaseTrace>,
@@ -312,7 +312,7 @@ pub struct SessionCheckpoint {
     pub inspection: Option<RepoInspection>,
     /// Terminal bridge context loaded during Preparation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_bridge_context: Option<TerminalBridgeContext>,
+    pub terminal_bridge_context: Option<EngineerHandoffContext>,
     /// Execution plan formed during Planning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_plan: Option<ExecutionPlan>,

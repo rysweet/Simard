@@ -87,6 +87,32 @@ fn tick_on_empty_store_is_an_honest_quiet_day() {
 }
 
 #[test]
+fn tick_drops_bare_prepared_context_summary_episodes() {
+    // The consolidation path pushes a bare "Prepared context: N facts, ..."
+    // summary into memory; it must NOT surface among the journal's remembered
+    // moments (issue #2606) — the report presents the substance instead.
+    let mem = FakeMemory::new();
+    mem.add_episode(episode(
+        "Prepared context: 10 facts, 2 triggers, 5 procedures, 5 episodes",
+    ));
+    mem.add_episode(episode("reviewed the login page fix"));
+    let clock = FixedClock(day());
+
+    let entry = run_journal_tick(&mem, &clock).expect("tick");
+
+    assert!(
+        !entry.narrative.contains("Prepared context"),
+        "the bare prepared-context count line is dropped: {}",
+        entry.narrative
+    );
+    assert!(
+        entry.narrative.contains("login page"),
+        "real remembered moments are still narrated: {}",
+        entry.narrative
+    );
+}
+
+#[test]
 fn enabled_by_default_and_interval_has_a_floor() {
     // Guard the env-independent contract without mutating process env (which
     // would race other tests): defaults hold when the vars are unset.

@@ -10,7 +10,7 @@ use super::{
 };
 use crate::goal_curation::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
 use crate::goals::goal_slug;
-use crate::memory_ipc::open_reader_bridge;
+use crate::memory_ipc::open_reader_client;
 
 /// Load the dashboard's view of the goal board from the EXPLICIT `state_root`
 /// instead of resolving `SIMARD_STATE_ROOT` ambiently. Returns an empty
@@ -106,6 +106,15 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
                 "description": g.description,
                 "priority": g.priority,
                 "status": g.status.to_string(),
+                // Issue #20: additively expose the SERIALIZED `GoalProgress`
+                // enum so the Goals tab can render a distinct, correctly-labeled
+                // lifecycle badge (and surface a block reason) per goal instead
+                // of dumping the free-form `status` string — which, paired with
+                // the red activity chip, made every goal read as "failed". The
+                // legacy `status` Display string above is left untouched
+                // (additive-only); consumers parse the enum by variant (G3),
+                // never the Display string.
+                "status_progress": &g.status,
                 "assigned_to": g.assigned_to,
                 "repo": g.repo,
                 "current_activity": g.current_activity,
@@ -132,7 +141,7 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
 
     // Pull meeting-captured actions and decisions from cognitive memory (#415)
     // (#1686: filter out raw memory IDs and debug strings, provide clean labels)
-    if let Ok(reader) = open_reader_bridge(state_root) {
+    if let Ok(reader) = open_reader_client(state_root) {
         let mem = reader.ops();
         for tag in &["goal", "action", "decision"] {
             if let Ok(facts) = mem.search_facts(tag, 20, 0.0) {

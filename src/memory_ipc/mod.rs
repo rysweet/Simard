@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(test)]
-mod tests_bridge_isolation;
+mod tests_client_isolation;
 #[cfg(test)]
 mod tests_default_state_root_1967;
 #[cfg(test)]
@@ -73,7 +73,7 @@ pub fn default_socket_path() -> PathBuf {
 /// See issues [#1923](https://github.com/rysweet/Simard/issues/1923) /
 /// [#1925](https://github.com/rysweet/Simard/issues/1925) for the
 /// fixture-leak failure mode this resolution prevents, and
-/// `docs/reference/cognitive-memory-bridge-helpers.md` for the bridge-
+/// `docs/reference/cognitive-memory-client-helpers.md` for the client-
 /// helper integration.
 ///
 /// Implementation: env-var override (when non-empty) → `state_root.join("memory.sock")`.
@@ -100,7 +100,7 @@ pub const MEMORY_SOCKET_ENV: &str = "SIMARD_MEMORY_SOCKET";
 /// Environment variable that opts a test out of the hermetic-state-root
 /// guard. Read by the cfg(test)-only assertion sites
 /// (`save_goal_board` / `save_goal_board_with_removals`, the cognitive-memory
-/// writer, `launch_writer_bridge`). The
+/// writer, `launch_writer_client`). The
 /// only legitimate consumer is the npm install-real / install-fake
 /// harness; new uses require code-review acknowledgement.
 pub const TEST_ALLOW_LIVE_STATE_ENV: &str = "SIMARD_TEST_ALLOW_LIVE_STATE";
@@ -220,14 +220,14 @@ pub enum MemoryResponse {
 }
 
 pub(crate) fn ipc_err(ctx: &str, e: impl std::fmt::Display) -> SimardError {
-    SimardError::BridgeTransportError {
+    SimardError::RpcTransportError {
         bridge: "memory-ipc".to_string(),
         reason: format!("{ctx}: {e}"),
     }
 }
 
 pub(crate) fn write_frame<W: Write>(w: &mut W, payload: &[u8]) -> SimardResult<()> {
-    let len = u32::try_from(payload.len()).map_err(|_| SimardError::BridgeTransportError {
+    let len = u32::try_from(payload.len()).map_err(|_| SimardError::RpcTransportError {
         bridge: "memory-ipc".into(),
         reason: format!("message too large: {} bytes", payload.len()),
     })?;
@@ -255,7 +255,7 @@ pub use client::RemoteCognitiveMemory;
 pub use launcher::clear_in_process_writer;
 pub use launcher::clear_tier2_store_cache;
 pub use launcher::{
-    ReaderBridge, WriterBridge, launch_writer_bridge, open_reader_bridge,
+    ReaderClient, WriterClient, launch_writer_client, open_reader_client,
     register_in_process_writer,
 };
 pub use server::{ServerHandle, spawn_server};
@@ -349,6 +349,12 @@ impl CognitiveMemoryOps for SharedMemory {
     fn resolve_prospective(&self, node_id: &str) -> SimardResult<()> {
         self.0.resolve_prospective(node_id)
     }
+    fn list_all_prospective(&self, limit: u32) -> SimardResult<Vec<CognitiveProspective>> {
+        self.0.list_all_prospective(limit)
+    }
+    fn list_all_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+        self.0.list_all_episodes(limit)
+    }
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
         self.0.get_statistics()
     }
@@ -441,7 +447,7 @@ impl CognitiveMemoryOps for SharedMemory {
     }
     fn graph_stats(&self) -> SimardResult<GraphStats> {
         // Issue #2331: forward to the wrapped in-process store so a tier-0
-        // `open_reader_bridge` reader (same-process daemon writer) reports the
+        // `open_reader_client` reader (same-process daemon writer) reports the
         // real edge / dedup counts instead of the all-zero trait default.
         self.0.graph_stats()
     }

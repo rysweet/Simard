@@ -30,13 +30,21 @@ pub const SMART_ORCHESTRATOR_RECIPE: &str = "amplifier-bundle/recipes/smart-orch
 
 /// Build the `amplihack recipe run …` argument vector for a brief. Pure and
 /// unit-tested so the invocation contract is pinned without spawning anything.
+///
+/// The free-text `task_description` is bounded with the shared context-var
+/// sanitizer before it rides on argv (issues #2640/#2692): a generous 8000-char
+/// ceiling defensively closes the E2BIG argv-overflow class, and the same pass
+/// collapses newlines so a multi-line brief can never break the recipe's YAML
+/// interpolation (#2127). `target_repo` is a short slug and stays verbatim.
 pub fn smart_orchestrator_args(brief: &RecipeBrief) -> Vec<String> {
+    let task_description =
+        crate::ooda_brain::sanitize::sanitize_context_var(&brief.task_description, 8000);
     vec![
         "recipe".to_string(),
         "run".to_string(),
         SMART_ORCHESTRATOR_RECIPE.to_string(),
         "-c".to_string(),
-        format!("task_description={}", brief.task_description),
+        format!("task_description={task_description}"),
         "-c".to_string(),
         format!("target_repo={}", brief.target_repo),
     ]
@@ -79,7 +87,12 @@ pub fn extract_pr_ref(output: &str) -> Option<(String, u32)> {
 
 /// Spawns and probes a recipe workstream. Injectable so the launch→PR flow is
 /// testable with a fake; production uses [`AmplihackRecipeRunner`].
-pub trait RecipeRunner {
+///
+/// `Send + Sync` so a [`SmartOrchestratorLauncher`] can be held in a shared,
+/// process-wide handle across an async server's worker threads (e.g. the
+/// dashboard feedback endpoint's `OnceLock<SmartOrchestratorLauncher>`). Every
+/// implementation is already thread-safe (its state lives behind a `Mutex`).
+pub trait RecipeRunner: Send + Sync {
     fn spawn(&self, brief: &RecipeBrief) -> Result<WorkstreamHandle, OverseerError>;
     fn probe(&self, handle: &WorkstreamHandle) -> Result<WorkstreamStatus, OverseerError>;
 }

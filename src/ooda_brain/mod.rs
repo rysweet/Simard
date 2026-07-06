@@ -25,7 +25,10 @@ pub mod parse_failure;
 pub mod prompt_store;
 mod recipe_brain;
 mod rustyclawd;
-mod sanitize;
+// Crate-visible so other recipe-runner spawn sites (goal decomposition, progress
+// checking) can bound their free-text `-c` context vars with the same helper —
+// closing the E2BIG argv-overflow class and the #2127 newline/YAML class at once.
+pub mod sanitize;
 
 #[cfg(test)]
 mod decide_tests;

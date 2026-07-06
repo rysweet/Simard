@@ -6,7 +6,7 @@ owner: simard
 doc_type: concept
 related:
   - ./goal-fact-dedup-in-preparation.md
-  - ../reference/cognitive-memory-bridge-helpers.md
+  - ../reference/cognitive-memory-client-helpers.md
   - ../architecture/cognitive-memory.md
   - ../memory.md
   - ../howto/diagnose-search-facts-issues.md
@@ -29,7 +29,7 @@ querying cognitive memory for facts relevant to the session's objective.
 
 Prior to issue [#2270](https://github.com/rysweet/Simard/issues/2270),
 the function passed the **full joined objective string** to
-`bridge.search_facts()`, which uses a Cypher `CONTAINS` predicate
+`client.search_facts()`, which uses a Cypher `CONTAINS` predicate
 internally. This caused a silent data-loss bug: no stored fact's content
 matches a giant concatenated string like
 `"Implement auth module; Fix CSS layout; Update README"`, so the query
@@ -46,7 +46,7 @@ all goal descriptions with `"; "` into a single `objective` string:
 "Implement auth module; Fix CSS layout; Update README"
 ```
 
-The `search_facts(query, limit, threshold)` bridge method translates
+The `search_facts(query, limit, threshold)` client method translates
 `query` into a Cypher `CONTAINS` predicate that searches **both** the
 `concept` and `content` fields:
 
@@ -194,7 +194,7 @@ entry.
 
 - [Goal fact dedup in preparation](./goal-fact-dedup-in-preparation.md)
   — the per-slug dedup that runs after the objective search.
-- [Cognitive memory bridge helpers](../reference/cognitive-memory-bridge-helpers.md)
+- [Cognitive memory client helpers](../reference/cognitive-memory-client-helpers.md)
   — how `search_facts` reaches the graph store.
 - [Memory architecture](../memory.md) — overview of the six memory
   types.

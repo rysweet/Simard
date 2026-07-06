@@ -3,18 +3,13 @@ import { test, expect } from '../fixtures/simard-dashboard';
 const ALL_TABS = [
   'overview',
   'goals',
-  'traces',
-  'logs',
-  'processes',
-  'memory',
-  'costs',
-  'thinking',
-  'workboard',
+  'activity',
+  'workers',
+  'pull-requests',
+  'resources',
   'chat',
-  'brain-failures',
-  'merge-decisions',
-  'pr-readiness',
-  'status',
+  'overseer',
+  'journal',
 ] as const;
 
 // Mock all API endpoints so tabs render without a live backend
@@ -232,9 +227,9 @@ test.describe('Tab Navigation @structural', () => {
     await authenticatedPage.locator('.tab[data-tab="goals"]').click();
     await expect(authenticatedPage.locator('#tab-goals')).toBeVisible();
 
-    // Go to Logs tab
-    await authenticatedPage.locator('.tab[data-tab="logs"]').click();
-    await expect(authenticatedPage.locator('#tab-logs')).toBeVisible();
+    // Go to Activity tab (the Logs view now lives here as a sub-section)
+    await authenticatedPage.locator('.tab[data-tab="activity"]').click();
+    await expect(authenticatedPage.locator('#tab-activity')).toBeVisible();
     await expect(authenticatedPage.locator('#tab-goals')).not.toBeVisible();
 
     // Return to Overview

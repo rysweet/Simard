@@ -1,7 +1,7 @@
 use super::observe::*;
 use super::types::{EnvironmentSnapshot, Observation};
 use crate::goal_curation::GoalBoard;
-use crate::gym_bridge::ScoreDimensions;
+use crate::gym_client::ScoreDimensions;
 use crate::gym_scoring::GymSuiteScore;
 use crate::meeting_facilitator::{MeetingDecision, MeetingHandoff, write_meeting_handoff};
 use crate::memory_cognitive::CognitiveStatistics;

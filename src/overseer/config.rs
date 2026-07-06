@@ -41,6 +41,26 @@ pub const SIMARD_OVERSEER_WHISPER_ENV: &str = "SIMARD_OVERSEER_WHISPER";
 /// sense while the Overseer runs, so a disabled Overseer forces it off.
 pub const SIMARD_OVERSEER_GOAL_HEALTH_ENV: &str = "SIMARD_OVERSEER_GOAL_HEALTH";
 
+/// Opt-out flag for the Overseer's **cognitive-memory recall** (issue #2628):
+/// bounded read access to Simard's memory graph in Observe/Orient plus one
+/// deliberate, de-duplicated episodic write-back. ON by default whenever the
+/// acting Overseer runs; an explicit falsey value (`0`/`false`/`no`/`off`)
+/// disables it. Recall only makes sense while the Overseer runs, so a disabled
+/// Overseer forces it off regardless of this flag.
+pub const SIMARD_OVERSEER_MEMORY_RECALL_ENV: &str = "SIMARD_OVERSEER_MEMORY_RECALL";
+
+/// Opt-out flag for the recurring **backlog-coverage gap-scan** (the "WHAT
+/// WORKSTREAMS ARE WE MISSING?" survey). ON by default whenever the acting
+/// Overseer runs; an explicit falsey value (`0`/`false`/`no`/`off`) disables it.
+/// The gap-scan only makes sense while the Overseer runs, so a disabled Overseer
+/// forces it off regardless of this flag.
+pub const SIMARD_OVERSEER_GAP_SCAN_ENV: &str = "SIMARD_OVERSEER_GAP_SCAN";
+
+/// Cadence divisor for the gap-scan: run the survey once every N Overseer ticks.
+/// Default `1` (every tick); clamped to a floor of `1` so a bad value never
+/// disables the scan by stealth nor divides by zero.
+pub const SIMARD_OVERSEER_GAP_SCAN_EVERY_N_ENV: &str = "SIMARD_OVERSEER_GAP_SCAN_EVERY_N";
+
 /// GitHub login the acting Overseer authors its own workstreams under. Sourced
 /// here so the daemon and the merge/recursion path agree on ONE stable, DISTINCT
 /// identity (never the human operator's login). Defaults to
@@ -144,6 +164,69 @@ pub fn goal_health_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool
 /// Production entry point: read the real process environment.
 pub fn goal_health_enabled() -> bool {
     goal_health_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve whether the Overseer's **cognitive-memory recall** (issue #2628) is
+/// enabled, with **default ON** opt-out semantics consistent with the acting
+/// Overseer. Enabled UNLESS [`SIMARD_OVERSEER_MEMORY_RECALL_ENV`] is an explicit
+/// falsey value — AND only while the acting Overseer itself is enabled (an
+/// explicitly-disabled Overseer forces recall off, since recall only makes
+/// sense while the Overseer runs). Never panics on a malformed value.
+pub fn memory_recall_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    // No Overseer ⇒ no memory recall.
+    if !overseer_acting_enabled_from(&lookup) {
+        return false;
+    }
+    // Opt-out: enabled unless an explicit falsey value is set.
+    !matches!(
+        lookup(SIMARD_OVERSEER_MEMORY_RECALL_ENV).as_deref().map(str::trim),
+        Some(v) if is_falsey(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn memory_recall_enabled() -> bool {
+    memory_recall_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve whether the recurring **backlog-coverage gap-scan** is enabled, with
+/// **default ON** opt-out semantics consistent with the acting Overseer. Enabled
+/// UNLESS [`SIMARD_OVERSEER_GAP_SCAN_ENV`] is an explicit falsey value — AND only
+/// while the acting Overseer itself is enabled (an explicitly-disabled Overseer
+/// forces the gap-scan off).
+pub fn gap_scan_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    // No Overseer ⇒ no gap-scan.
+    if !overseer_acting_enabled_from(&lookup) {
+        return false;
+    }
+    // Opt-out: enabled unless an explicit falsey value is set.
+    !matches!(
+        lookup(SIMARD_OVERSEER_GAP_SCAN_ENV).as_deref().map(str::trim),
+        Some(v) if is_falsey(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn gap_scan_enabled() -> bool {
+    gap_scan_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the gap-scan cadence divisor (run once every N ticks) from an env
+/// resolver. Unset/empty/unparseable/zero/negative all clamp to the floor of `1`
+/// (every tick) — the scan is never disabled by stealth via a bad divisor.
+pub fn gap_scan_every_n_from(lookup: impl Fn(&str) -> Option<String>) -> u64 {
+    match lookup(SIMARD_OVERSEER_GAP_SCAN_EVERY_N_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s.parse::<u64>().unwrap_or(1).max(1),
+        _ => 1,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn gap_scan_every_n() -> u64 {
+    gap_scan_every_n_from(|k| std::env::var(k).ok())
 }
 
 /// Resolve the Overseer's DISTINCT author login. Falls back to

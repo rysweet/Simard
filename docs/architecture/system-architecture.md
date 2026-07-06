@@ -95,7 +95,7 @@ flowchart TD
     Block --> Sweep
     Sweep[Sweep stale worktrees] --> Load[Load goal board +<br/>ingest meeting handoffs]
     Load --> Mem[Memory consolidation]
-    Mem --> OBS[OBSERVE<br/><i>context from goals +<br/>memory + bridges</i>]
+    Mem --> OBS[OBSERVE<br/><i>context from goals +<br/>memory + clients</i>]
     OBS --> ORI[ORIENT<br/><i>brain enriches context</i>]
     ORI --> DEC[DECIDE<br/><i>brain selects actions</i>]
     DEC --> ACT{Actions}
@@ -167,7 +167,7 @@ Each shim: `Command::new("recipe-runner-rs").arg(recipe_path).arg("-c").arg("key
 
 | Area | Path | What it does |
 |------|------|-------------|
-| Daemon bootstrap | `src/operator_commands_ooda/daemon/mod.rs` | Wires bridges, brains, recipes; runs cycle loop |
+| Daemon bootstrap | `src/operator_commands_ooda/daemon/mod.rs` | Wires clients, brains, recipes; runs cycle loop |
 | OODA cycle body | `src/ooda_loop/cycle.rs` | Observe → orient → decide → act → reflect |
 | Brains | `src/ooda_brain/{rustyclawd,decide,orient,fallback}.rs` | LLM-backed + deterministic fallback |
 | Prompt store | `src/ooda_brain/prompt_store.rs` | Disk load (mtime-cached) with embedded fallback |

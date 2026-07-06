@@ -81,13 +81,13 @@ edits. Only the live on-disk backend,
 [`LibraryCognitiveMemory`](../architecture/cognitive-memory-library-adapter.md),
 overrides them; the other six inherit the no-provenance defaults:
 
-- `CognitiveMemoryBridge` (`src/memory_bridge/mod.rs`) — in-process bridge,
+- `CognitiveMemoryClient` (`src/memory_client/mod.rs`) — in-process client,
 - `RemoteCognitiveMemory` (`src/memory_ipc/client.rs`) — IPC client,
 - `SharedMemory` (`src/memory_ipc/mod.rs`) — IPC server-side shared memory,
-- and the three test stubs `ProcMock`, `MockBridge`, `EpisodeMock`.
+- and the three test stubs `ProcMock`, `MockClient`, `EpisodeMock`.
 
 These are all native Rust implementors — the de-fork removed the Python
-bridge, so there is no out-of-process bridge client to update.
+client, so there is no out-of-process RPC client to update.
 
 ### `store_fact_with_provenance`
 
@@ -129,9 +129,9 @@ Returns the new fact's `node_id`.
 
 **Default (non-library) impl.** Delegates to `store_fact`, dropping the
 provenance edges and the extra metadata. Because `store_fact` takes
-`tags: &[String]` (not an `Option`), the default bridges the optional
+`tags: &[String]` (not an `Option`), the default clients the optional
 tags slot with `tags.unwrap_or(&[])`. This keeps the six non-graph
-backends (bridge / IPC / stubs) compiling and functionally correct — they
+backends (client / IPC / stubs) compiling and functionally correct — they
 store the fact, just without edges.
 
 ### `store_procedure_with_provenance`
@@ -294,14 +294,14 @@ semantic memory. The transcript episode id returned by `store_episode` is
 now captured and threaded as provenance into each derived fact:
 
 ```rust
-let episode_id = bridge.store_episode(
+let episode_id = client.store_episode(
     &format!("Session {session_id} transcript: {transcript}"),
     "session-reflection",
     None,
 )?;
 
 // … for each extracted, deduplicated fact …
-bridge.store_fact_with_provenance(
+client.store_fact_with_provenance(
     &fact.concept,
     &fact.content,
     fact.confidence,

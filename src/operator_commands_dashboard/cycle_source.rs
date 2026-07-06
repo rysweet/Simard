@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// Scan the persisted cycle-report directories for the highest cycle number.
 ///
@@ -70,6 +70,71 @@ pub(crate) fn health_cycle_number(daemon_health: Option<&Value>) -> u64 {
 /// (issue #1680).
 pub(crate) fn authoritative_cycle_number(state_root: &Path, daemon_health: Option<&Value>) -> u64 {
     health_cycle_number(daemon_health).max(latest_persisted_cycle_number(state_root))
+}
+
+/// How many of the newest persisted cycle reports the shared cycle-report reader
+/// loads before collapsing. Bounded so the unbounded `cycle_reports/` directory
+/// (one file per cycle, never pruned) can never flood a hot, repeatedly-polled
+/// dashboard endpoint — mirrors the `/api/ooda-cycles` limit (#21).
+const MAX_CYCLE_REPORTS: usize = 50;
+
+/// Read the newest persisted cycle reports as RAW report objects (the shape the
+/// Thinking tab renders), newest cycle first.
+///
+/// Reuses [`read_recent_cycle_reports`], which already unions both the top-level
+/// `<state_root>/cycle_reports/` and the live `<state_root>/state/cycle_reports/`
+/// directories, orders newest-first, and keeps only the newest `n` cycles. Here
+/// we unwrap its `{cycle_number, report}` wrapper into the raw report and stamp
+/// the report's `cycle_number` with the AUTHORITATIVE FILENAME index — the
+/// persisted cumulative number — over the in-body counter, which resets to `1`
+/// on every daemon restart (#1680) and is the frozen "#1" the operator saw.
+fn read_raw_cycle_reports(state_root: &Path, n: usize) -> Vec<Value> {
+    super::current_work::read_recent_cycle_reports(state_root, n)
+        .into_iter()
+        .map(|entry| {
+            let filename_cycle = entry
+                .get("cycle_number")
+                .cloned()
+                .unwrap_or_else(|| json!(0));
+            match entry.get("report") {
+                // Parsed JSON report: promote it to the top level and overwrite
+                // the in-body cycle number with the authoritative filename index.
+                Some(report) => {
+                    let mut raw = report.clone();
+                    if let Value::Object(map) = &mut raw {
+                        map.insert("cycle_number".to_string(), filename_cycle);
+                    }
+                    raw
+                }
+                // Legacy one-line plain-text summary (`{cycle_number, summary}`).
+                // A documented shape branch, not a silent fallback: flag it so the
+                // shared renderer shows the "legacy" badge instead of OODA phases.
+                None => {
+                    let mut legacy = entry;
+                    if let Value::Object(map) = &mut legacy {
+                        map.insert("legacy".to_string(), json!(true));
+                    }
+                    legacy
+                }
+            }
+        })
+        .collect()
+}
+
+/// The single shared reader behind BOTH the Activity tab's "Cycle Reports" card
+/// (`/api/logs` → `cycle_reports`) and the Thinking tab's "Agent Internal
+/// Reasoning" view (`/api/ooda-thinking` → `reports`).
+///
+/// Reads the newest cycle reports from the union of both persisted directories,
+/// newest-first, with each report carrying its authoritative filename cycle
+/// number, then collapses runs of equivalent cycles via
+/// [`super::thinking_collapse::collapse_reports`]. Because both endpoints call
+/// this one function they can no longer diverge on a stale copy (#26): the
+/// Activity card is now the same correct, deduplicated, detail-carrying view the
+/// Thinking tab already renders.
+pub(crate) fn read_cycle_reports_collapsed(state_root: &Path) -> Vec<Value> {
+    let raw = read_raw_cycle_reports(state_root, MAX_CYCLE_REPORTS);
+    super::thinking_collapse::collapse_reports(raw)
 }
 
 #[cfg(test)]

@@ -156,13 +156,13 @@ mod tests {
     };
     use std::sync::Mutex;
 
-    struct MockBridge {
+    struct MockClient {
         episodes: Mutex<Vec<String>>,
         facts: Mutex<Vec<String>>,
         should_fail: bool,
     }
 
-    impl MockBridge {
+    impl MockClient {
         fn new() -> Self {
             Self {
                 episodes: Mutex::new(Vec::new()),
@@ -180,7 +180,7 @@ mod tests {
         }
     }
 
-    impl CognitiveMemoryOps for MockBridge {
+    impl CognitiveMemoryOps for MockClient {
         fn record_sensory(&self, _: &str, _: &str, _: u64) -> SimardResult<String> {
             Ok("ok".into())
         }
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn store_cognitive_memory_stores_episode_and_fact() {
-        let bridge = MockBridge::new();
+        let bridge = MockClient::new();
         store_cognitive_memory(&bridge, "Sprint", "We decided on TDD", &sample_messages());
         let episodes = bridge.episodes.lock().unwrap();
         assert_eq!(episodes.len(), 1);
@@ -290,27 +290,27 @@ mod tests {
 
     #[test]
     fn store_cognitive_memory_empty_messages_skips_episode() {
-        let bridge = MockBridge::new();
+        let bridge = MockClient::new();
         store_cognitive_memory(&bridge, "empty", "Summary only", &[]);
         assert!(bridge.episodes.lock().unwrap().is_empty());
     }
 
     #[test]
     fn store_cognitive_memory_empty_summary_skips_fact() {
-        let bridge = MockBridge::new();
+        let bridge = MockClient::new();
         store_cognitive_memory(&bridge, "topic", "", &sample_messages());
         assert!(bridge.facts.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn store_cognitive_memory_bridge_error_does_not_panic() {
-        let bridge = MockBridge::failing();
+    fn store_cognitive_memory_client_error_does_not_panic() {
+        let bridge = MockClient::failing();
         store_cognitive_memory(&bridge, "topic", "summary", &sample_messages());
     }
 
     #[test]
     fn store_enriched_stores_action_items_episode() {
-        let bridge = MockBridge::new();
+        let bridge = MockClient::new();
         let items = vec![HandoffActionItem {
             description: "Deploy to staging".into(),
             assignee: Some("Bob".into()),
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn store_enriched_stores_decisions_episode() {
-        let bridge = MockBridge::new();
+        let bridge = MockClient::new();
         let decisions = vec!["Adopt TDD".to_string(), "Use Rust".to_string()];
         store_enriched_cognitive_memory(
             &bridge,
@@ -351,14 +351,14 @@ mod tests {
 
     #[test]
     fn store_enriched_empty_extras_only_stores_base() {
-        let bridge = MockBridge::new();
+        let bridge = MockClient::new();
         store_enriched_cognitive_memory(&bridge, "topic", "summary", &sample_messages(), &[], &[]);
         assert_eq!(bridge.episodes.lock().unwrap().len(), 1);
     }
 
     #[test]
     fn store_enriched_action_fields_all_present() {
-        let bridge = MockBridge::new();
+        let bridge = MockClient::new();
         let items = vec![HandoffActionItem {
             description: "Write docs".into(),
             assignee: Some("Charlie".into()),
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn store_enriched_bridge_error_does_not_panic() {
-        let bridge = MockBridge::failing();
+        let bridge = MockClient::failing();
         store_enriched_cognitive_memory(
             &bridge,
             "t",

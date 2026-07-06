@@ -5,7 +5,12 @@
 # {var} → double-brace {{var}} for recipe-runner substitution).
 #
 # Context vars (passed via -c):
-#   pr_number, repo, pr_body, escalation_note
+#   pr_number, repo, pr_body_path, escalation_note
+#
+# `pr_body_path` (issues #2640/#2692) is the ABSOLUTE path to a file containing
+# the PR body. A PR body is arbitrary-size, so it is delivered via a file and
+# never inlined into argv — it can never overflow ARG_MAX / fail the spawn with
+# E2BIG. The agent READS this file.
 #
 # `escalation_note` (issue #2432 / #2428) is empty on the base attempt and
 # carries a schema-repair / higher-effort instruction on escalation-ladder
@@ -20,7 +25,10 @@ version: "1.0.0"
 author: "Simard"
 tags: ["simard", "merge", "judge"]
 
-context: {}
+context:
+  # Declared so the `{{pr_body_path}}` substitution always resolves even if a
+  # caller omits it.
+  pr_body_path: ""
 
 steps:
   - id: "judge-merge-readiness"
@@ -78,8 +86,11 @@ steps:
 
       PR_NUMBER: {{pr_number}}
       REPO: {{repo}}
-      PR_BODY:
-      {{pr_body}}
+      PR_BODY: the PR body is saved to a file (it is arbitrary-size, so it is
+      not passed inline). **Read the file at this absolute path** with your
+      file-reading tool and judge its FULL contents as the PR body:
+
+      {{pr_body_path}}
 
       ## Output
 

@@ -45,7 +45,7 @@ PTY overhead, no 50-second startup delay per turn. Simard greets you and the con
 begins:
 
 ```text
-  Memory: cognitive bridge active (LadybugDB backend)
+  Memory: cognitive client active (LadybugDB backend)
   Agent: ready
 
 Simard: Hello! Ready to discuss the next Simard milestone.

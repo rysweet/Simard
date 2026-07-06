@@ -33,7 +33,14 @@ pub(crate) const PART_04: &str = r#"            let fmt;
     fetchBudget();
 
     /* --- Chat --- */
-    let ws=null, currentSessionId=null, streamSpan=null, streamText='';
+    // Persist the active chat session id across page reloads so the
+    // conversation stays continuous (issue #2581). Without this the id lived
+    // only in memory, so any reload reset it to null and silently started a
+    // fresh, empty session — the agent "forgot" the whole conversation.
+    const CHAT_SESSION_KEY='simardChatSession';
+    function loadStoredChatSession(){ try{ return localStorage.getItem(CHAT_SESSION_KEY)||null; }catch(e){ return null; } }
+    function storeChatSession(id){ try{ if(id) localStorage.setItem(CHAT_SESSION_KEY,id); else localStorage.removeItem(CHAT_SESSION_KEY); }catch(e){} }
+    let ws=null, currentSessionId=loadStoredChatSession(), streamSpan=null, streamText='';
 
     async function loadChatSessions(){
       const box=document.getElementById('chat-sessions');
@@ -64,6 +71,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
           item.addEventListener('click',()=>openSession(s.id));
           box.appendChild(item);
         });
+        maybeResumeChat();
       }catch(e){
         box.textContent='';
         const err=document.createElement('div');
@@ -73,8 +81,27 @@ pub(crate) const PART_04: &str = r#"            let fmt;
       }
     }
 
+    // After a page reload, transparently reconnect to the last conversation
+    // (persisted in localStorage) so the chat stays continuous instead of
+    // starting a fresh, empty session (issue #2581). Only connects when there
+    // is no live socket, and only for a session that still exists on disk
+    // (verified against the freshly-rendered session list).
+    function maybeResumeChat(){
+      if(ws && (ws.readyState===WebSocket.OPEN || ws.readyState===WebSocket.CONNECTING)) return;
+      if(!currentSessionId) return;
+      let found=false;
+      document.querySelectorAll('.chat-session-item').forEach(el=>{
+        const match=el.dataset.id===currentSessionId;
+        el.classList.toggle('active', match);
+        if(match) found=true;
+      });
+      if(!found){ storeChatSession(null); currentSessionId=null; return; }
+      initChat(currentSessionId);
+    }
+
     async function openSession(id){
       currentSessionId=id;
+      storeChatSession(id);
       document.querySelectorAll('.chat-session-item').forEach(el=>{
         el.classList.toggle('active', el.dataset.id===id);
       });
@@ -88,6 +115,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
 
     function newChat(){
       currentSessionId=null;
+      storeChatSession(null);
       document.querySelectorAll('.chat-session-item.active').forEach(el=>el.classList.remove('active'));
       clearMessages();
       initChat(null);
@@ -119,7 +147,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
       try{ m=JSON.parse(ev.data); }
       catch(ex){ removeTypingIndicator();setChatBusy(false);appendMsg('system',ev.data); return; }
       // Handshake: bind the session id + streaming capability.
-      if(m && m.type==='ready'){ if(m.session_id) currentSessionId=m.session_id; return; }
+      if(m && m.type==='ready'){ if(m.session_id){ currentSessionId=m.session_id; storeChatSession(currentSessionId); } return; }
       // Resume: replay persisted history into the panel.
       if(m && m.type==='restore'){
         clearMessages();
@@ -329,7 +357,16 @@ pub(crate) const PART_04: &str = r#"            let fmt;
         const d=await apiFetch('/api/ooda-thinking');
         const el=document.getElementById('thinking-timeline');
         if(!d.reports?.length){el.innerHTML='<span style="color:#8b949e">No cycle reports yet. The agent daemon generates these during autonomous work.</span>';return;}
-        el.innerHTML=d.reports.map(rpt=>{
+        el.innerHTML=d.reports.map(renderCycleEntry).join('');
+      }catch(e){document.getElementById('thinking-timeline').innerHTML='<span class="err">Failed to load: '+esc(e.toString())+'</span>';}
+    }
+
+    /* Shared per-cycle renderer (#26): renders ONE collapsed cycle report — the
+       same object shape `/api/ooda-thinking` (→ reports) and `/api/logs`
+       (→ cycle_reports) now BOTH return from the single server-side reader. Used
+       by both the Thinking tab timeline and the Activity tab's "Cycle Reports"
+       card so the two views can never diverge into a stale, detail-less copy. */
+    function renderCycleEntry(rpt){
           if(rpt.legacy){
             return `<div class="thinking-cycle legacy">
               <div class="cycle-header"><span class="cycle-num">Cycle #${rpt.cycle_number}</span><span class="cycle-badge">legacy</span></div>
@@ -428,8 +465,6 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             </div>
             <div class="cycle-phases">${phases.join('')}</div>
           </div>`;
-        }).join('');
-      }catch(e){document.getElementById('thinking-timeline').innerHTML='<span class="err">Failed to load: '+esc(e.toString())+'</span>';}
     }
 
     /* --- OODA Cycle History (issue #2135) --- */
@@ -440,24 +475,31 @@ pub(crate) const PART_04: &str = r#"            let fmt;
         const histEl=document.getElementById('ooda-cycle-history');
         const cycles=d.cycles||[];
         const trend=d.duration_trend||{};
-        // Render trend summary
-        const trendColors={improving:'var(--green)',degrading:'var(--red)',stable:'var(--yellow)',insufficient_data:'#8b949e'};
-        const trendLabels={improving:'↓ Improving',degrading:'↑ Degrading',stable:'→ Stable',insufficient_data:'— Not enough data'};
         const dir=trend.direction||'insufficient_data';
-        const trendColor=trendColors[dir]||'#8b949e';
-        let trendHtml=`<div style="display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap">
-          <div><strong style="color:${trendColor}">${trendLabels[dir]||dir}</strong></div>
-          <div style="color:#8b949e;font-size:.85rem">${d.total_cycles||0} cycles recorded</div>`;
-        if(trend.recent_avg_secs!=null){
-          trendHtml+=`<div style="font-size:.85rem">Recent avg: <strong>${trend.recent_avg_secs}s</strong></div>
-            <div style="font-size:.85rem">Older avg: <strong>${trend.older_avg_secs}s</strong></div>
-            <div style="font-size:.85rem">Change: <strong style="color:${trendColor}">${trend.change_pct>0?'+':''}${trend.change_pct}%</strong></div>`;
+        // Issue #21: when there is not enough per-cycle duration data to compute
+        // a trend, render only an honest cycle count — never a permanently
+        // broken "not enough data" chart/placeholder.
+        if(dir==='insufficient_data'){
+          trendEl.innerHTML=`<div style="color:#8b949e;font-size:.85rem">${d.total_cycles||0} cycles recorded</div>`;
+        }else{
+          const trendColors={improving:'var(--green)',degrading:'var(--red)',stable:'var(--yellow)'};
+          const trendLabels={improving:'↓ Improving',degrading:'↑ Degrading',stable:'→ Stable'};
+          const trendColor=trendColors[dir]||'#8b949e';
+          let trendHtml=`<div style="display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap">
+            <div><strong style="color:${trendColor}">${trendLabels[dir]||dir}</strong></div>
+            <div style="color:#8b949e;font-size:.85rem">${d.total_cycles||0} cycles recorded</div>`;
+          if(trend.recent_avg_secs!=null){
+            trendHtml+=`<div style="font-size:.85rem">Recent avg: <strong>${trend.recent_avg_secs}s</strong></div>
+              <div style="font-size:.85rem">Older avg: <strong>${trend.older_avg_secs}s</strong></div>
+              <div style="font-size:.85rem">Change: <strong style="color:${trendColor}">${trend.change_pct>0?'+':''}${trend.change_pct}%</strong></div>`;
+          }
+          trendHtml+='</div>';
+          trendEl.innerHTML=trendHtml;
         }
-        if(trend.detail){trendHtml+=`<div style="color:#8b949e;font-size:.8rem">${esc(trend.detail)}</div>`;}
-        trendHtml+='</div>';
-        trendEl.innerHTML=trendHtml;
-        // Duration trend line chart (inline SVG) — #2223
-        if(cycles.length){
+        // Duration trend line chart (inline SVG) — #2223. Hidden entirely while
+        // there is not enough duration data (issue #21), so the tab never shows
+        // a permanently-flat "not enough data" chart.
+        if(dir!=='insufficient_data' && cycles.length){
           const durations=cycles.map(c=>c.duration_secs||0).reverse();
           const nums=cycles.map(c=>c.cycle_number).reverse();
           const maxD=Math.max(...durations,1);
@@ -497,10 +539,20 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             const phaseColors={act:'var(--green)',decide:'#a371f7',orient:'var(--yellow)',observe:'var(--accent)',unknown:'#8b949e'};
             const pColor=phaseColors[c.phase]||'#8b949e';
             const dur=c.duration_secs!=null?c.duration_secs+'s':'—';
-            const summary=humanizeCycleSummary(c.summary||'');
+            /* Issue #21: prefer the server's difference-carrying collapsed_summary
+               (the decided action / deferral / decision text) over the raw
+               count-boilerplate, so forward progress stands out from a stuck loop. */
+            const summary=c.collapsed_summary||humanizeCycleSummary(c.summary||'');
             const shortSummary=summary.length>120?summary.substring(0,120)+'…':summary;
+            /* A collapsed run renders as one row labelled with a repeat count
+               and cycle range (A=oldest, B=newest); a single cycle keeps its
+               plain number. */
+            const rc=c.repeat_count||1;
+            const cFirst=c.cycle_number_first||c.cycle_number;
+            const cLast=c.cycle_number_last||c.cycle_number;
+            const cycleLabel=(rc>1)?('×'+rc+' (cycles #'+cLast+'–#'+cFirst+')'):('#'+c.cycle_number);
             return `<tr>
-              <td style="font-weight:600;color:var(--accent)">${c.cycle_number}</td>
+              <td style="font-weight:600;color:var(--accent);white-space:nowrap">${esc(cycleLabel)}</td>
               <td><span style="color:${pColor}">${esc(c.phase)}</span></td>
               <td>${dur}</td>
               <td>${c.action_count||0}</td>
@@ -584,15 +636,15 @@ pub(crate) const PART_04: &str = r#"            let fmt;
     /* --- Agent log terminal (issue #947) --- */
     let agentLogTerm = null;
     let agentLogWS = null;
-    /* Issue #946: jump from a Thinking-tab spawn_engineer outcome straight to
-       the agent terminal viewer. Switches tabs, populates the agent-name
-       input, and clicks Connect. */
+    /* Issue #946 / #2627: jump from an engineer-spawn outcome straight to the
+       agent terminal viewer. The Terminal view is now the Terminal sub-section
+       of the consolidated Workers tab, so activate Workers and scroll to it. */
     function openAgentLog(name){
-      const tab = document.querySelector('.tab[data-tab="terminal"]');
-      if(tab) tab.click();
+      if(typeof activateTab==='function'){ activateTab('workers','terminal'); }
+      else { const tab=document.querySelector('.tab[data-tab="workers"]'); if(tab) tab.click(); }
       const input = document.getElementById('agent-log-name');
       if(input) input.value = name || '';
-      // initAgentLogTerminal is invoked by the tab click handler; defer
+      // initAgentLogTerminal is invoked by the tab activation; defer
       // connect a tick so xterm has been mounted.
       setTimeout(()=>{ try{ connectAgentLog(); }catch(e){} }, 50);
     }

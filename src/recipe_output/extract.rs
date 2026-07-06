@@ -298,6 +298,111 @@ pub fn last_balanced_object(s: &str) -> Option<&str> {
     balanced_objects(s).pop()
 }
 
+/// Strip JSON **trailing commas** — a `,` immediately preceding a closing `}`
+/// or `]` (ignoring intervening ASCII whitespace) — as a last-resort recovery
+/// view for otherwise-well-formed LLM JSON (issue #2658).
+///
+/// A trailing comma before `}`/`]` is the single most common real-world LLM
+/// JSON defect and is **never valid JSON**, so this stripper is a *provable
+/// no-op on valid input*: it returns [`Cow::Borrowed`] byte-for-byte unchanged
+/// whenever no trailing comma is present (the zero-allocation clean path).
+/// A caller therefore retries a strict-parse failure on this view without any
+/// risk of altering behaviour on well-formed output.
+///
+/// String-literal aware: a comma inside a JSON string (respecting `\"`
+/// escapes) is never touched, so a comma in a fact's `content` is preserved
+/// verbatim. Only the offending comma bytes are removed and every removed byte
+/// is ASCII, so the result is always valid UTF-8.
+///
+/// Note this targets *only* the single-trailing-comma shape. A genuinely
+/// malformed object (e.g. an elided element `[1,,2]`, an unquoted key, a
+/// missing value) is left still-malformed so the caller's strict parse still
+/// rejects it — leniency never widens to accept broken JSON.
+pub fn strip_json_trailing_commas(s: &str) -> Cow<'_, str> {
+    let bytes = s.as_bytes();
+    // Cheap detection pass first so clean JSON borrows unchanged (zero-alloc).
+    if !has_trailing_comma(bytes) {
+        return Cow::Borrowed(s);
+    }
+    // Rebuild, dropping only the trailing commas. Only ASCII comma bytes are
+    // ever skipped, so the surviving bytes remain valid UTF-8.
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+        } else if c == b'"' {
+            in_string = true;
+            out.push(c);
+        } else if c == b',' && next_nonspace_is_close(bytes, i + 1) {
+            // Trailing comma — drop it (do not copy).
+        } else {
+            out.push(c);
+        }
+        i += 1;
+    }
+    match String::from_utf8(out) {
+        Ok(stripped) => Cow::Owned(stripped),
+        // Unreachable in practice (only ASCII commas are dropped), but never
+        // panic on recovery input — fall back to the original text.
+        Err(_) => Cow::Borrowed(s),
+    }
+}
+
+/// Does `bytes` contain at least one string-aware trailing comma?
+///
+/// Mirrors the scan in [`strip_json_trailing_commas`] but only detects, so the
+/// common clean case can borrow the input without allocating.
+fn has_trailing_comma(bytes: &[u8]) -> bool {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+        } else if c == b'"' {
+            in_string = true;
+        } else if c == b',' && next_nonspace_is_close(bytes, i + 1) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Is the first non-ASCII-whitespace byte at or after `i` a closing `}`/`]`?
+///
+/// Only JSON insignificant whitespace (space, tab, LF, CR, form-feed) is
+/// skipped; any other byte (including `"` opening the next key/element) means
+/// the comma is a legitimate separator and must be kept.
+fn next_nonspace_is_close(bytes: &[u8], mut i: usize) -> bool {
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' | b'\n' | b'\r' | 0x0c => i += 1,
+            b'}' | b']' => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// Extract a JSON object from noisy recipe stdout as an owned `String`.
 ///
 /// Tries two cleaned views and returns the last balanced `{…}` from the first
@@ -606,6 +711,101 @@ mod tests {
         let m = extract_verdict(raw, &["reject", "accept"]).unwrap();
         assert_eq!(m.keyword, "accept");
         assert_eq!(m.rationale, "After review I accept the claim.");
+    }
+
+    // ---- strip_json_trailing_commas (issue #2658) ------------------------
+
+    #[test]
+    fn strip_trailing_commas_valid_json_is_borrowed_zero_copy() {
+        // The clean path must not allocate and must be byte-identical: a
+        // provable no-op on valid JSON, so a strict-parse retry on this view
+        // can never change behaviour on well-formed output.
+        let s = r#"{"facts":[{"concept":"pr-pattern","content":"a"}],"procedures":[]}"#;
+        let out = strip_json_trailing_commas(s);
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "valid JSON must borrow unchanged (zero-alloc)"
+        );
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn strip_trailing_commas_before_brace_and_bracket() {
+        // Trailing comma before `}` and before `]` are both removed, yielding
+        // parseable JSON.
+        let malformed = r#"{"facts":[{"concept":"pr-pattern","content":"a",},],}"#;
+        let fixed = strip_json_trailing_commas(malformed);
+        assert!(matches!(fixed, Cow::Owned(_)), "a change must allocate");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&fixed).is_ok(),
+            "stripped output must be valid JSON: {fixed}"
+        );
+        assert_eq!(
+            fixed,
+            r#"{"facts":[{"concept":"pr-pattern","content":"a"}]}"#
+        );
+    }
+
+    #[test]
+    fn strip_trailing_commas_tolerates_whitespace_before_close() {
+        // Whitespace (incl. newlines) between the comma and the closer is
+        // skipped — the pretty-printed shape an LLM actually emits.
+        let malformed = "{\n  \"facts\": [\n    {\"concept\": \"a\"},\n  ],\n}";
+        let fixed = strip_json_trailing_commas(malformed);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&fixed).is_ok(),
+            "pretty-printed trailing commas must be recovered: {fixed}"
+        );
+    }
+
+    #[test]
+    fn strip_trailing_commas_never_corrupts_comma_in_string_content() {
+        // A `,}` or `,]` sequence INSIDE a JSON string is content, not a
+        // trailing comma, and must survive verbatim (including when the string
+        // ends immediately after it).
+        let s = r#"{"content":"first, second,","tag":"x"}"#;
+        let out = strip_json_trailing_commas(s);
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "string-internal commas are not trailing commas — must borrow"
+        );
+        assert_eq!(out, s);
+
+        // Even a literal `, ]` inside string content is preserved.
+        let s2 = r#"{"content":"a, ] b, } c"}"#;
+        assert_eq!(strip_json_trailing_commas(s2), s2);
+    }
+
+    #[test]
+    fn strip_trailing_commas_respects_escaped_quote_in_string() {
+        // An escaped quote must not prematurely end the string, so a `,]`
+        // after it (still inside the string) is not stripped.
+        let s = r#"{"content":"he said \"go,\" then left,","k":1}"#;
+        let out = strip_json_trailing_commas(s);
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn strip_trailing_commas_leaves_genuinely_malformed_still_malformed() {
+        // An elided element `,,` is NOT a single trailing comma: leniency must
+        // not repair it into valid JSON.
+        let malformed = r#"{"facts":[1,,2]}"#;
+        let out = strip_json_trailing_commas(malformed);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&out).is_err(),
+            "a doubly-malformed array must remain malformed: {out}"
+        );
+    }
+
+    #[test]
+    fn strip_trailing_commas_preserves_multibyte_utf8() {
+        // Non-ASCII content around a stripped comma must round-trip intact.
+        let malformed = r#"{"content":"café — δοκιμή","k":1,}"#;
+        let fixed = strip_json_trailing_commas(malformed);
+        let v: serde_json::Value =
+            serde_json::from_str(&fixed).expect("multibyte content must stay valid after strip");
+        assert_eq!(v["content"], "café — δοκιμή");
     }
 }
 

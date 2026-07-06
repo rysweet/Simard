@@ -1,6 +1,6 @@
 use super::orient::*;
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
-use crate::gym_bridge::ScoreDimensions;
+use crate::gym_client::ScoreDimensions;
 use crate::gym_scoring::GymSuiteScore;
 use crate::memory_cognitive::CognitiveStatistics;
 use crate::ooda_loop::{EnvironmentSnapshot, Observation};

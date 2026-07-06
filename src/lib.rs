@@ -14,10 +14,6 @@ pub mod base_type_rustyclawd;
 pub mod base_type_turn;
 pub mod base_types;
 pub mod bootstrap;
-pub mod bridge;
-pub mod bridge_circuit;
-pub mod bridge_launcher;
-pub mod bridge_subprocess;
 pub mod build_lock;
 pub mod cargo_jobs;
 pub mod cmd_cleanup;
@@ -25,6 +21,10 @@ pub mod cmd_ensure_deps;
 pub mod cmd_install;
 pub mod cmd_self_update;
 pub mod cognitive_memory;
+pub mod rpc;
+pub mod rpc_circuit_breaker;
+pub mod rpc_subprocess_launcher;
+pub mod rpc_transport;
 // Issue #2419: cognitive-thread scheduling — a `Mind` runs many
 // `CognitiveThread`s (the primary OODA loop + maintenance + engineer-log
 // analysis) on their own cadence/trigger. Sibling of `ooda_scheduler` (the
@@ -64,9 +64,9 @@ pub mod goal_curation;
 pub mod goals;
 pub mod greeting_banner;
 pub mod gym;
-pub mod gym_bridge;
+pub mod gym_client;
 pub mod gym_history;
-pub mod gym_runner_bridge;
+pub mod gym_runner_client;
 pub mod gym_scoring;
 pub mod handoff;
 pub mod hive_event_bus;
@@ -76,7 +76,7 @@ pub mod identity_composition;
 pub mod identity_precedence;
 pub mod improvements;
 pub mod journal;
-pub mod knowledge_bridge;
+pub mod knowledge_client;
 pub mod knowledge_context;
 pub mod meeting_backend;
 pub mod meeting_facilitator;
@@ -84,14 +84,14 @@ pub mod meeting_repl;
 pub mod meetings;
 pub mod memory;
 pub mod memory_backup;
-pub mod memory_bridge;
-pub mod memory_bridge_adapter;
+pub mod memory_client;
 pub mod memory_cognitive;
 pub mod memory_consolidation;
 pub mod memory_health;
 pub mod memory_hive;
 pub mod memory_ipc;
 pub mod memory_snapshot;
+pub mod memory_store_adapter;
 pub mod metadata;
 pub mod native_knowledge;
 pub mod ooda_actions;
@@ -114,6 +114,10 @@ pub mod overseer;
 mod persistence;
 pub mod prompt_assets;
 pub mod prompt_delivery;
+// Issues #2640/#2692: shared "path-in-argv, content-in-file" transport for
+// unbounded recipe context values, so a large payload never overflows ARG_MAX
+// (the live journal E2BIG recipe-spawn failure).
+pub mod recipe_context_file;
 pub mod recipe_output;
 pub mod reflection;
 pub mod remote_azlin;
@@ -157,9 +161,9 @@ pub mod subagent_sessions;
 // `telemetry` module is the OpenTelemetry-backed metric facade + in-process
 // registry; `status` is the single typed StatusSnapshot the CLI, dashboard, and
 // TUI all render.
+pub mod engineer_handoff;
 pub mod status;
 pub mod telemetry;
-pub mod terminal_engineer_bridge;
 mod terminal_session;
 #[doc(hidden)]
 pub mod test_support;
@@ -197,7 +201,7 @@ pub use base_type_ms_agent::ms_agent_framework_adapter;
 pub use base_type_pending_sdk::PendingSdkAdapter;
 pub use base_type_rustyclawd::RustyClawdAdapter;
 pub use base_type_turn::{
-    EnrichmentBridges, ProposedAction, TurnContext, TurnOutput, enrich_turn_input,
+    EnrichmentClients, ProposedAction, TurnContext, TurnOutput, enrich_turn_input,
     format_turn_input, parse_turn_output, prepare_turn_context,
 };
 pub use base_types::{
@@ -212,12 +216,6 @@ pub use bootstrap::{
     bootstrap_entrypoint, builtin_base_type_registry_for_manifest, latest_local_handoff,
     run_local_session,
 };
-pub use bridge::{
-    BridgeErrorPayload, BridgeHealth, BridgeId, BridgeRequest, BridgeResponse, BridgeTransport,
-    new_request_id, unpack_bridge_response,
-};
-pub use bridge_circuit::{CircuitBreakerConfig, CircuitBreakerTransport, CircuitState};
-pub use bridge_subprocess::{InMemoryBridgeTransport, SubprocessBridgeTransport};
 pub use build_lock::{BuildLock, BuildLockGuard};
 pub use cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 pub use cost_tracking::{
@@ -250,7 +248,7 @@ pub use gym::{
     BenchmarkSuiteScenarioSummary, benchmark_scenarios, compare_latest_benchmark_runs,
     default_output_root, run_benchmark_scenario, run_benchmark_suite,
 };
-pub use gym_bridge::{GymBridge, GymScenario, GymScenarioResult, GymSuiteResult, ScoreDimensions};
+pub use gym_client::{GymClient, GymScenario, GymScenarioResult, GymSuiteResult, ScoreDimensions};
 pub use gym_history::{
     GymSignal, ScenarioSignal, ScoreHistory, ScoreRecord, check_promotion, generate_signals,
     record_benchmark_run, score_from_benchmark_report,
@@ -280,8 +278,8 @@ pub use improvements::{
     EvidenceRef, ImprovementPromotionPlan, PersistedImprovementApproval,
     PersistedImprovementRecord, render_review_context_directives,
 };
-pub use knowledge_bridge::{
-    KnowledgeBridge, KnowledgePackInfo, KnowledgeQueryResult, KnowledgeSource,
+pub use knowledge_client::{
+    KnowledgeClient, KnowledgePackInfo, KnowledgeQueryResult, KnowledgeSource,
 };
 pub use knowledge_context::{PlanningContext, enrich_planning_context};
 pub use meeting_backend::{
@@ -304,8 +302,7 @@ pub use meetings::{
 pub use memory::{
     FileBackedMemoryStore, InMemoryMemoryStore, MemoryRecord, MemoryScope, MemoryStore,
 };
-pub use memory_bridge::CognitiveMemoryBridge;
-pub use memory_bridge_adapter::CognitiveBridgeMemoryStore;
+pub use memory_client::CognitiveMemoryClient;
 pub use memory_cognitive::{
     CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective,
     CognitiveSensoryItem, CognitiveStatistics, CognitiveWorkingSlot,
@@ -316,10 +313,11 @@ pub use memory_consolidation::{
     preparation_memory_operations, preparation_memory_operations_with_active_slugs,
     recall_procedures_for_objective, reflection_memory_operations,
 };
+pub use memory_store_adapter::CognitiveClientMemoryStore;
 pub use ooda_actions::dispatch_actions;
 pub use ooda_loop::{
     ActionKind, ActionOutcome, CycleReport, EnvironmentSnapshot, GoalSnapshot, Observation,
-    OodaBridges, OodaConfig, OodaPhase, OodaState, PlannedAction, Priority, act,
+    OodaClients, OodaConfig, OodaPhase, OodaState, PlannedAction, Priority, act,
     check_meeting_handoffs, decide, gather_environment, observe, orient, run_ooda_cycle,
     summarize_cycle_report,
 };
@@ -327,8 +325,19 @@ pub use ooda_scheduler::{
     CompletedSlot, ScheduledAction, Scheduler, SchedulerSlot, SlotStatus, complete_slot,
     drain_finished, fail_slot, poll_slots, schedule_actions, scheduler_summary, start_slot,
 };
+pub use rpc::{
+    RpcErrorPayload, RpcHealth, RpcId, RpcRequest, RpcResponse, RpcTransport, new_request_id,
+    unpack_rpc_response,
+};
+pub use rpc_circuit_breaker::{CircuitBreakerConfig, CircuitBreakerTransport, CircuitState};
+pub use rpc_transport::{InMemoryRpcTransport, SubprocessRpcTransport};
 pub use test_support::TestAdapter;
 
+pub use engineer_handoff::{
+    ENGINEER_HANDOFF_FILE_NAME, ENGINEER_MODE_BOUNDARY, EngineerHandoffContext,
+    SHARED_DEFAULT_STATE_ROOT_SOURCE, SHARED_EXPLICIT_STATE_ROOT_SOURCE,
+    TERMINAL_HANDOFF_FILE_NAME, TERMINAL_MODE_BOUNDARY,
+};
 pub use metadata::{BackendDescriptor, Freshness, FreshnessState, Provenance};
 pub use operator_cli::{dispatch_operator_cli, operator_cli_help, operator_cli_usage};
 pub use operator_commands::{
@@ -404,9 +413,4 @@ pub use session::{
 pub use skill_builder::{
     SkillTemplate, extract_skill_candidates, generate_skill_definition, install_skill,
     list_installed_skills,
-};
-pub use terminal_engineer_bridge::{
-    ENGINEER_HANDOFF_FILE_NAME, ENGINEER_MODE_BOUNDARY, SHARED_DEFAULT_STATE_ROOT_SOURCE,
-    SHARED_EXPLICIT_STATE_ROOT_SOURCE, TERMINAL_HANDOFF_FILE_NAME, TERMINAL_MODE_BOUNDARY,
-    TerminalBridgeContext,
 };

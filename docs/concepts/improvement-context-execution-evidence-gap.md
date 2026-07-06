@@ -37,7 +37,7 @@ should travel between sessions and modes:
   so they can be inspected, versioned, composed, replaced, and benchmarked
   independently of runtime logic
   (`Specs/ProductArchitecture.md`, the prompt-assets discipline section).
-- Persisted state used to bridge bounded terminal sessions into engineer
+- Persisted state used to client bounded terminal sessions into engineer
   mode must be operator-visible local artifacts under the same explicit
   `state-root`, with mode-scoped handoff records and readback that shows
   what was reused

@@ -74,6 +74,7 @@ fn record_now(rep: OverseerTickReport) -> OverseerActivityRecord {
         timestamp: simard::telemetry::snapshot::now_rfc3339(),
         enabled: true,
         report: rep,
+        problem_entries: Vec::new(),
     }
 }
 
@@ -83,6 +84,7 @@ fn record_at(ts: &str, enabled: bool, rep: OverseerTickReport) -> OverseerActivi
         timestamp: ts.to_string(),
         enabled,
         report: rep,
+        problem_entries: Vec::new(),
     }
 }
 

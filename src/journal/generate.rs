@@ -3,23 +3,28 @@
 //! Generation is deliberately two-pass so the jargon-free guarantee is
 //! structural, not incidental:
 //!
-//! 1. A [`JournalDrafter`] assembles a first-person-steward draft **largely
-//!    from episodic memories**, augmented by the day's code-change proposals,
-//!    goals, live-system updates, Overseer activity, memory growth, and notable
-//!    events.
+//! 1. A [`JournalDrafter`] assembles a professional, third-person engineering
+//!    **report** draft **largely from episodic memories**, augmented by the
+//!    day's code-change proposals, goals, live-system updates, Overseer
+//!    activity, memory growth, prepared-context substance, and notable events.
 //! 2. A [`JournalReviewer`] **always** runs over that draft to remove or
 //!    explain jargon and rewrite it for a layperson.
 //!
-//! [`JournalGenerator::generate`] wires the two together so the review pass can
-//! never be skipped. Both passes are pluggable: the default drafter is
-//! deterministic (offline-testable) and the default reviewer is the
-//! glossary scrubber, but an LLM reasoner can be swapped in behind either trait.
+//! [`JournalGenerator::generate`] wires the two together (plus an unconditional
+//! secret-redaction post-pass) so neither the review nor the redaction can be
+//! skipped. Both passes are pluggable: the default drafter is a deterministic
+//! report assembler (offline-testable) and the default reviewer is the glossary
+//! scrubber, while [`JournalGenerator::for_repo`] prefers a language-model
+//! (recipe-runner) drafter and reviewer when available (guideline G3).
 
 use std::fmt::Write as _;
+use std::path::Path;
 
 use chrono::Utc;
 
-use crate::journal::jargon::scrub_jargon;
+use crate::journal::jargon::{scrub_jargon, scrub_secrets};
+use crate::journal::providers::episode_time_label;
+use crate::journal::recipe::{RecipeDrafter, RecipeReviewer};
 use crate::journal::types::{DayContext, JournalEntry};
 
 /// First pass: assemble a raw narrative draft from a [`DayContext`].
@@ -51,107 +56,268 @@ impl JournalReviewer for GlossaryReviewer {
     }
 }
 
-/// The default drafter: a deterministic, template-based assembler.
+/// The default drafter: a deterministic, template-based **report** assembler.
 ///
-/// It leads with the day's episodic memories (the primary source), then folds
-/// in goals, live-system updates, Overseer activity, memory growth, notable
-/// events, and a one-line lead-in to the code-change-proposal table. A quiet
-/// day yields an honest "quiet day" paragraph rather than an empty or invented
-/// narrative.
+/// It writes a professional, third-person engineering-and-research report — an
+/// `## Overview` paragraph followed by clearly delineated `##` sections
+/// (engineering work, research and findings, key observations) and a
+/// chronological, timestamped list of the day's remembered moments (episodic
+/// memories, the primary source). The prepared-context substance (the facts,
+/// triggers, and procedures) is summarised in full rather than as a bare count.
+/// A quiet day yields an honest "quiet day" report rather than an empty or
+/// invented narrative. It is **not** a first-person "Dear diary".
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TemplateDrafter;
 
 impl JournalDrafter for TemplateDrafter {
     fn draft(&self, day: &DayContext) -> String {
         if day.is_quiet() {
-            return quiet_day_draft(day);
+            return quiet_day_report(day);
         }
 
-        let mut s = String::with_capacity(512);
-        let _ = writeln!(
-            s,
-            "Dear diary — here is what I, Simard, got up to on {}.",
-            day.date.format("%Y-%m-%d")
-        );
-        s.push('\n');
+        let mut blocks: Vec<String> = Vec::new();
 
-        if !day.episodes.is_empty() {
-            s.push_str("Through the day these moments stayed with me (my episodic memories):\n");
-            for ep in &day.episodes {
-                let _ = writeln!(s, "- {}", ep.content.trim());
-            }
-            s.push('\n');
-        }
+        // ── Overview ────────────────────────────────────────────────────
+        blocks.push("## Overview".to_string());
+        blocks.push(overview_paragraph(day));
 
-        if !day.goals.is_empty() {
-            s.push_str("I kept working toward these goals:\n");
-            for g in &day.goals {
-                let _ = writeln!(s, "- {}", g.trim());
-            }
-            s.push('\n');
-        }
-
+        // ── Engineering work ────────────────────────────────────────────
+        blocks.push("## Engineering work".to_string());
         if !day.deploys.is_empty() {
-            s.push_str("I deployed these updates to the live system:\n");
-            for d in &day.deploys {
-                let _ = writeln!(s, "- {}", d.trim());
+            blocks.push(lead_and_bullets(
+                "Simard shipped the following updates to the live system:",
+                &day.deploys,
+            ));
+        }
+        if !day.goals.is_empty() {
+            blocks.push(lead_and_bullets(
+                "Work advanced toward these goals:",
+                &day.goals,
+            ));
+        }
+        blocks.push(pr_paragraph(day));
+
+        // ── Research and findings ───────────────────────────────────────
+        if !day.facts.is_empty() || !day.notable.is_empty() {
+            blocks.push("## Research and findings".to_string());
+            if !day.facts.is_empty() {
+                blocks.push(lead_and_bullets(
+                    "Simard recorded these new findings (the facts it learned):",
+                    &day.facts,
+                ));
             }
-            s.push('\n');
-        }
-
-        if !day.overseer_events.is_empty() {
-            s.push_str("My steward, the Overseer, was busy too:\n");
-            for e in &day.overseer_events {
-                let _ = writeln!(s, "- {}", e.trim());
+            if !day.notable.is_empty() {
+                blocks.push(lead_and_bullets(
+                    "Other noteworthy observations from the day:",
+                    &day.notable,
+                ));
             }
-            s.push('\n');
         }
 
-        if let Some(mg) = day.memory_growth {
-            let _ = writeln!(
-                s,
-                "My memory grew by {} new facts and {} new episodes.",
-                mg.facts_added, mg.episodes_added
-            );
-            s.push('\n');
-        }
-
-        if !day.notable.is_empty() {
-            s.push_str("A few other things stood out:\n");
-            for note in &day.notable {
-                let _ = writeln!(s, "- {}", note.trim());
+        // ── Key observations ────────────────────────────────────────────
+        if !day.triggers.is_empty()
+            || !day.procedures.is_empty()
+            || day.memory_growth.is_some()
+            || !day.overseer_events.is_empty()
+        {
+            blocks.push("## Key observations".to_string());
+            if !day.triggers.is_empty() {
+                blocks.push(lead_and_bullets(
+                    "Reminders that came due during the day:",
+                    &day.triggers,
+                ));
             }
-            s.push('\n');
+            if !day.procedures.is_empty() {
+                blocks.push(lead_and_bullets(
+                    "Know-how (step-by-step procedures) that was applied or refined:",
+                    &day.procedures,
+                ));
+            }
+            if let Some(mg) = day.memory_growth {
+                blocks.push(format!(
+                    "Simard's memory grew by {} new facts and {} new episodes.",
+                    mg.facts_added, mg.episodes_added
+                ));
+            }
+            if !day.overseer_events.is_empty() {
+                blocks.push(lead_and_bullets(
+                    "The steward, the Overseer, was active as well:",
+                    &day.overseer_events,
+                ));
+            }
         }
 
-        if day.prs.is_empty() {
-            s.push_str("No PRs were opened today.\n");
-        } else {
-            let merged = day
-                .prs
+        // ── Remembered moments (episodic memories, chronological) ───────
+        if !day.episodes.is_empty() {
+            // Oldest-to-newest so the report reads as a timeline, and each moment
+            // shows when it occurred (issue #2606). Raw error-log episodes (e.g.
+            // a historical `recipe-runner-rs spawn failed: Argument list too long`
+            // dump) are dropped here so a degraded, deterministic journal can
+            // never again be a wall of raw error text (issues #2640/#2692, A3).
+            let mut moments: Vec<_> = day
+                .episodes
                 .iter()
-                .filter(|p| p.outcome.eq_ignore_ascii_case("merged"))
-                .count();
-            let _ = writeln!(
-                s,
-                "Engineers opened {} PRs today; {} were merged. The table below explains each one in plain language.",
-                day.prs.len(),
-                merged
-            );
+                .filter(|e| !is_raw_error_log_episode(&e.content))
+                .collect();
+            moments.sort_by_key(|e| e.temporal_index);
+            if !moments.is_empty() {
+                blocks.push("## Remembered moments".to_string());
+                let mut body = String::from(
+                    "These are the day's episodic memories, listed in the order they occurred:",
+                );
+                for ep in moments {
+                    let _ = write!(
+                        body,
+                        "\n- [{}] {}",
+                        episode_time_label(ep.temporal_index),
+                        ep.content.trim()
+                    );
+                }
+                blocks.push(body);
+            }
         }
 
-        s
+        blocks.join("\n\n")
     }
 }
 
-/// Honest narrative for a day on which nothing notable happened.
-fn quiet_day_draft(day: &DayContext) -> String {
+/// True when an episode's content is a raw machine error / log-line dump rather
+/// than a human-readable remembered moment. Such episodes (recorded when a
+/// subprocess step failed) are unfit for the reader-facing journal: they carry
+/// errno text, stack traces, and log-level prefixes. Dropping them from the
+/// deterministic-fallback "Remembered moments" section keeps a degraded journal
+/// readable and jargon-free (issues #2640/#2692). This filter is deliberately
+/// conservative — it only excludes clear error/log signatures — because it runs
+/// solely on the offline fallback path, never on the preferred agentic path.
+fn is_raw_error_log_episode(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    const ERROR_SIGNATURES: &[&str] = &[
+        "argument list too long",
+        "os error ",
+        "spawn failed",
+        "recipe failed",
+        "recipe-runner-rs",
+        "panicked at",
+        "stack backtrace",
+        " error=",
+        "error: ",
+        "traceback (most recent call last)",
+    ];
+    if ERROR_SIGNATURES.iter().any(|sig| lower.contains(sig)) {
+        return true;
+    }
+    // A leading log-level token (`WARN …`, `ERROR …`, `DEBUG …`) marks a raw log
+    // line rather than a remembered moment.
+    let head = lower.trim_start();
+    ["warn ", "error ", "debug ", "trace "]
+        .iter()
+        .any(|level| head.starts_with(level))
+}
+
+/// A professional, third-person one-paragraph summary of the day's activity.
+fn overview_paragraph(day: &DayContext) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !day.episodes.is_empty() {
+        parts.push(format!(
+            "recorded {} remembered {}",
+            day.episodes.len(),
+            plural(day.episodes.len(), "moment", "moments")
+        ));
+    }
+    if !day.goals.is_empty() {
+        parts.push(format!(
+            "pursued {} {}",
+            day.goals.len(),
+            plural(day.goals.len(), "goal", "goals")
+        ));
+    }
+    if !day.deploys.is_empty() {
+        parts.push(format!(
+            "shipped {} {} to the live system",
+            day.deploys.len(),
+            plural(day.deploys.len(), "update", "updates")
+        ));
+    }
+    if !day.prs.is_empty() {
+        parts.push(format!(
+            "reviewed {} code-change {}",
+            day.prs.len(),
+            plural(day.prs.len(), "proposal", "proposals")
+        ));
+    }
+    if !day.facts.is_empty() {
+        parts.push(format!(
+            "captured {} new {}",
+            day.facts.len(),
+            plural(day.facts.len(), "finding", "findings")
+        ));
+    }
+    let activity = if parts.is_empty() {
+        "kept watch over the system".to_string()
+    } else {
+        join_with_and(&parts)
+    };
     format!(
-        "Dear diary — {} was a quiet day. I, Simard, kept watch alongside my steward, \
-         the Overseer, but there was little of note: no goals advanced, no PRs were \
-         opened, and nothing remarkable happened. A calm, quiet day.",
+        "On {}, Simard — an autonomous software-engineering and research system — and its steward, \
+         the Overseer, {}.",
+        day.date.format("%Y-%m-%d"),
+        activity
+    )
+}
+
+/// The code-change-proposal lead-in for the Engineering work section (or an
+/// honest "none opened" note). Always plain-language and never a bare acronym.
+fn pr_paragraph(day: &DayContext) -> String {
+    if day.prs.is_empty() {
+        return "No code-change proposals (pull requests) were opened during the day.".to_string();
+    }
+    let merged = day
+        .prs
+        .iter()
+        .filter(|p| p.outcome.eq_ignore_ascii_case("merged"))
+        .count();
+    format!(
+        "The day's code-change proposals (pull requests) are summarised in the table below: \
+         {} in total, of which {} {} combined into the main code.",
+        day.prs.len(),
+        merged,
+        if merged == 1 { "was" } else { "were" }
+    )
+}
+
+/// An honest, report-style narrative for a day on which nothing notable
+/// happened. Third-person and free of bullet points (there is nothing to list).
+fn quiet_day_report(day: &DayContext) -> String {
+    format!(
+        "## Overview\n\nOn {}, Simard and its steward, the Overseer, kept watch over a quiet day. \
+         No goals advanced, no code-change proposals were opened, and nothing notable occurred \
+         — a calm, quiet day.",
         day.date.format("%Y-%m-%d")
     )
+}
+
+/// Build a "lead-in line + bullet list" block from `items`.
+fn lead_and_bullets(lead: &str, items: &[String]) -> String {
+    let mut b = String::from(lead);
+    for item in items {
+        let _ = write!(b, "\n- {}", item.trim());
+    }
+    b
+}
+
+/// `singular` when `n == 1`, else `plural_form`.
+fn plural<'a>(n: usize, singular: &'a str, plural_form: &'a str) -> &'a str {
+    if n == 1 { singular } else { plural_form }
+}
+
+/// Join `parts` into an English list: `"a"`, `"a and b"`, `"a, b, and c"`.
+fn join_with_and(parts: &[String]) -> String {
+    match parts {
+        [] => String::new(),
+        [only] => only.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [rest @ .., last] => format!("{}, and {}", rest.join(", "), last),
+    }
 }
 
 /// The two-pass generator: draft then mandatory review.
@@ -173,18 +339,53 @@ impl JournalGenerator {
     }
 
     /// The default pipeline: [`TemplateDrafter`] + [`GlossaryReviewer`].
+    ///
+    /// This is the deterministic, offline path — the honest fallback whenever
+    /// the prompt-first recipe path (see [`for_repo`](Self::for_repo)) is
+    /// unavailable.
     pub fn default_pipeline() -> Self {
         Self::new(Box::new(TemplateDrafter), Box::new(GlossaryReviewer))
     }
 
+    /// Build the **prompt-first** generator for `repo_root` (issue #2606,
+    /// guideline G3: agentic over brittle parsing).
+    ///
+    /// When the journal recipe assets and the recipe runner are available for a
+    /// real repository, both passes are language-model-backed (a report drafter
+    /// and a plain-language de-jargon reviewer) — the preferred production path.
+    /// Each recipe pass degrades per-call to its deterministic equivalent on any
+    /// failure, and the whole constructor falls back to
+    /// [`default_pipeline`](Self::default_pipeline) when the assets/runner are
+    /// absent (offline, tests, or a non-repo path), so generation is always
+    /// available and never blocks.
+    pub fn for_repo(repo_root: &Path) -> Self {
+        let recipe_pair = if repo_root.is_dir() {
+            Option::zip(
+                RecipeDrafter::for_repo(repo_root),
+                RecipeReviewer::for_repo(repo_root),
+            )
+        } else {
+            None
+        };
+        match recipe_pair {
+            Some((drafter, reviewer)) => Self::new(Box::new(drafter), Box::new(reviewer)),
+            None => Self::default_pipeline(),
+        }
+    }
+
     /// Generate the reviewed [`JournalEntry`] for `day`.
     ///
-    /// Runs the drafter, then **always** runs the reviewer over the draft, and
-    /// stores both the draft (for provenance) and the reviewed narrative.
+    /// Runs the drafter, then **always** runs the reviewer over the draft, then
+    /// applies an **unconditional** [`scrub_secrets`] redaction post-pass over
+    /// the reviewed text — so a credential never reaches the durable narrative
+    /// even if a language-model reviewer failed to strip it. Stores both the raw
+    /// draft (for provenance) and the reviewed, secret-free narrative.
     pub fn generate(&self, day: &DayContext) -> JournalEntry {
         let draft = self.drafter.draft(day);
         // Mandatory review pass — the jargon-free guarantee lives here.
-        let narrative = self.reviewer.review(&draft);
+        let reviewed = self.reviewer.review(&draft);
+        // Unconditional secret-redaction post-pass over the stored narrative.
+        let narrative = scrub_secrets(&reviewed);
         JournalEntry {
             date: day.date,
             generated_at: Utc::now(),

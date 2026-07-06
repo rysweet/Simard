@@ -37,8 +37,8 @@ pub trait BaseTypeSession: Send {
     // Normalized memory + knowledge enrichment (issue #1665).
     // Provided methods — default to "no enrichment configured"; adapters that
     // support enrichment override `enrichment`/`enrichment_mut`.
-    fn enrichment(&self) -> Option<&EnrichmentBridges> { None }
-    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentBridges> { None }
+    fn enrichment(&self) -> Option<&EnrichmentClients> { None }
+    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentClients> { None }
     fn enrich_input(&self, input: &BaseTypeTurnInput) -> SimardResult<BaseTypeTurnInput> { /* shared */ }
 }
 ```
@@ -101,7 +101,7 @@ A PTY-backed shell adapter that runs a configurable local command through the te
 - `working_directory` — working directory for command execution
 
 > **Enrichment note (#1665):** The harness exposes the normalized
-> `BaseTypeSession::enrich_input` entry point and stores `EnrichmentBridges`,
+> `BaseTypeSession::enrich_input` entry point and stores `EnrichmentClients`,
 > so it participates in the shared enrichment contract. Because it executes
 > *literal shell commands* rather than natural-language LLM prompts, it does
 > not fold memory/knowledge markdown into its command stream.
@@ -127,12 +127,20 @@ The RustyClawd session backend. Supports both single-process and multi-process t
 > knowledge are injected into the turn's system prompt (the objective stays the
 > bare user message, keeping the conversation history clean). Prior to #1665
 > only the Copilot adapter enriched its turns. The entry point alone is not
-> enough, though: the session's `EnrichmentBridges` must also be **populated**.
+> enough, though: the session's `EnrichmentClients` must also be **populated**.
 > Until #2383, `SessionBuilder`'s RustyClawd arm built sessions with empty
-> bridges, so production enrichment was a permanent no-op. The production path
+> clients, so production enrichment was a permanent no-op. The production path
 > now opts in via `RustyClawdAdapter::with_enrichment(default_state_root())`
 > (mirroring the Copilot wiring from #1664), so live RustyClawd turns recall
 > real memory + knowledge. See [Production wiring](#production-wiring-1664-2383).
+
+**Bash-tool idle-liveness (#2607):** The RustyClawd Bash tool has no wall-clock
+cap — a long-but-productive command runs unbounded as long as it keeps producing
+output. Only a command silent for the whole idle window (default 120 s,
+configurable via `SIMARD_RUSTYCLAWD_IDLE_LIVENESS_SECS`; `0` = fully unbounded)
+is reaped, killing the whole process group so no orphan survives. See the
+reference:
+[RustyClawd Bash-tool idle-liveness](./rustyclawd-bash-tool-idle-liveness.md).
 
 ### `copilot-sdk` — `CopilotSdkAdapter`
 
@@ -140,8 +148,8 @@ The RustyClawd session backend. Supports both single-process and multi-process t
 
 Drives `amplihack copilot` through the PTY infrastructure with memory and knowledge context injection. Each turn:
 
-1. Routes the input through the shared `BaseTypeSession::enrich_input` entry point, which gathers relevant memory facts (up to 10, confidence ≥ 0.3) and procedures (up to 5) from `CognitiveMemoryBridge`
-2. Queries `KnowledgeBridge` for domain knowledge relevant to the objective
+1. Routes the input through the shared `BaseTypeSession::enrich_input` entry point, which gathers relevant memory facts (up to 10, confidence ≥ 0.3) and procedures (up to 5) from `CognitiveMemoryClient`
+2. Queries `KnowledgeClient` for domain knowledge relevant to the objective
 3. Formats the enriched context via `base_type_turn::format_turn_input`
 4. Executes through `terminal_session::execute_terminal_turn`
 5. Parses structured output via `base_type_turn::parse_turn_output`
@@ -182,12 +190,12 @@ parse_turn_output() → TurnOutput { actions, explanation, confidence }
 ### Normalized enrichment entry point (issue #1665)
 
 Before #1665, only `CopilotSdkAdapter` called `prepare_turn_context`, so every
-other shipped adapter ran with empty memory/knowledge context even when bridges
+other shipped adapter ran with empty memory/knowledge context even when clients
 were configured. Enrichment is now centralized on **one shared call site** so it
 cannot silently diverge again:
 
-- `EnrichmentBridges` — a bundle of the optional `memory` (`CognitiveMemoryOps`)
-  and `knowledge` (`KnowledgeBridge`) bridges. Each session that supports
+- `EnrichmentClients` — a bundle of the optional `memory` (`CognitiveMemoryOps`)
+  and `knowledge` (`KnowledgeClient`) clients. Each session that supports
   enrichment stores one and exposes it through `BaseTypeSession::enrichment()` /
   `enrichment_mut()`.
 - `enrich_turn_input(input, memory, knowledge)` — recalls memory facts/
@@ -198,34 +206,34 @@ cannot silently diverge again:
   unchanged, so stateful adapters keep a clean conversation history).
 - `BaseTypeSession::enrich_input(&self, input)` — the provided trait method
   every adapter inherits. It delegates to the session's configured
-  `EnrichmentBridges` (or to a no-op enrichment when none are configured).
+  `EnrichmentClients` (or to a no-op enrichment when none are configured).
 
 | Adapter | `enrich_input` exposed | Applied in `run_turn` |
 |---------|------------------------|-----------------------|
 | `copilot-sdk` | Yes | Yes (PTY and meeting paths) |
-| `rusty-clawd` | Yes | Yes (injected into the system prompt; production bridges wired by #2383) |
+| `rusty-clawd` | Yes | Yes (injected into the system prompt; production clients wired by #2383) |
 | `terminal-shell` (harness) | Yes | No — runs literal shell commands |
 | `claude-agent-sdk` / `ms-agent-framework` | Yes | No — `run_turn` is unimplemented |
 
-**Honest degradation:** If a configured bridge call fails during enrichment, the
-error propagates rather than silently degrading (PHILOSOPHY.md). A `None` bridge
+**Honest degradation:** If a configured client call fails during enrichment, the
+error propagates rather than silently degrading (PHILOSOPHY.md). A `None` client
 is not a failure — it simply yields an unenriched, objective-only prompt.
 
 ### Production wiring (#1664, #2383)
 
 Exposing `enrich_input` (above) is necessary but **not sufficient** for
 production enrichment: a session only recalls memory + knowledge when its
-`EnrichmentBridges` are actually populated. Adapters that support production
+`EnrichmentClients` are actually populated. Adapters that support production
 enrichment provide a `with_enrichment(state_root)` builder that, on
-`open_session`, launches the native cognitive-memory + knowledge bridges (with
+`open_session`, launches the native cognitive-memory + knowledge clients (with
 graceful degradation) via the shared `EnrichmentSource` policy in
 `base_type_turn`:
 
-- `EnrichmentSource::Disabled` (default) — empty bridges, no filesystem side
+- `EnrichmentSource::Disabled` (default) — empty clients, no filesystem side
   effects. This keeps lightweight callers and unit tests cheap.
-- `EnrichmentSource::Native { state_root }` — launches real bridges through the
-  single shared `launch_enrichment_bridges` helper (one launcher, no per-adapter
-  duplication). A launch failure logs and degrades that bridge to `None`.
+- `EnrichmentSource::Native { state_root }` — launches real clients through the
+  single shared `launch_enrichment_clients` helper (one launcher, no per-adapter
+  duplication). A launch failure logs and degrades that client to `None`.
 
 `SessionBuilder` opts both production adapters in by reading the default state
 root (shared with the OODA daemon when running):
@@ -236,7 +244,7 @@ root (shared with the OODA daemon when running):
 | `rusty-clawd` | `RustyClawdAdapter::with_enrichment` | Yes — `with_enrichment(default_state_root())` (#2383) |
 
 Before #2383, RustyClawd had no `with_enrichment` builder and its
-`SessionBuilder` arm injected no bridges, so every production RustyClawd turn
+`SessionBuilder` arm injected no clients, so every production RustyClawd turn
 recalled nothing despite the #1665 entry point being wired through `run_turn`.
 
 ## Bootstrap Wiring

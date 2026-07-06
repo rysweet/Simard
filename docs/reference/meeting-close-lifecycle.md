@@ -22,7 +22,7 @@ close.
 
 > Before this contract existed, `/close` could block indefinitely
 > (issue #1908) — typically because an agent stream never received
-> EOF, or the cognitive-memory bridge subprocess died mid-flush. The
+> EOF, or the cognitive-memory client subprocess died mid-flush. The
 > bundle was silently dropped and the operator lost every decision and
 > action item from the session. The new contract guarantees a
 > deserialize-valid bundle on disk **even when timeouts fire**.
@@ -63,7 +63,7 @@ unusual deployments.
 |---|---|---|---|
 | **Master close timeout** | 60s | `SIMARD_MEETING_CLOSE_TIMEOUT_SECS` | The entire `MeetingBackend::close()` call, end-to-end |
 | **Agent close timeout** | 45s | `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS` | The inner `agent.close()` call (LLM/subprocess shutdown) |
-| **Subprocess grace** | 2s | (not configurable) | SIGTERM → SIGKILL grace for any spawned bridge child |
+| **Subprocess grace** | 2s | (not configurable) | SIGTERM → SIGKILL grace for any spawned client child |
 
 ### Clamping and validation
 
@@ -339,7 +339,7 @@ to prevent LLM/subprocess output from leaking into log lines.
 |---|---|
 | `close_timeout` | The master 60s budget expired |
 | `agent_close_timeout` | The inner `agent.close()` exceeded 45s |
-| `bridge_timeout` | The cognitive-memory bridge `store_enriched_*` exceeded its inner budget |
+| `bridge_timeout` | The cognitive-memory client `store_enriched_*` exceeded its inner budget |
 | `summary_empty` | The summarizer returned but produced no decisions/actions/questions |
 | `persistence_error` | An IO error occurred while persisting (e.g. `EACCES`, `ENOSPC`, parent `state_root` unwritable). The full-fidelity handoff is unavailable; the partial-handoff branch retried with the legacy `meeting_handoffs/handoff-<ts>.json` writer when possible |
 
@@ -348,6 +348,15 @@ to prevent LLM/subprocess output from leaking into log lines.
 > snake_case, which is the value operators see in tracing fields,
 > the REPL banner, and any log-scraping tooling. Parse against the
 > snake_case wire values above, not the Rust enum names.
+>
+> **Frozen exception — `bridge_timeout`.** The `bridge_timeout` wire value
+> is emitted by the `PartialReason::RpcTimeout` variant (renamed from the
+> former `BridgeTimeout` in the Bridge→RPC identifier cleanup). Unlike every
+> other variant, its wire string is **not** the snake_case of the variant
+> name: `RpcTimeout` deliberately keeps emitting the literal `bridge_timeout`
+> so existing log-scrapers, dashboards, and the documented handoff schema
+> keep matching. This identifier/wire divergence is intentional and frozen —
+> do not "fix" the string to `rpc_timeout`.
 
 ### Event shapes
 

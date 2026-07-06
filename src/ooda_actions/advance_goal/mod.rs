@@ -1,7 +1,7 @@
 //! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
 use crate::goal_curation::GoalProgress;
-use crate::ooda_loop::{ActionOutcome, OodaBridges, OodaState, PlannedAction};
+use crate::ooda_loop::{ActionOutcome, OodaClients, OodaState, PlannedAction};
 
 use super::goal_session::GoalAction;
 use super::make_outcome;
@@ -38,7 +38,7 @@ pub use subordinate::validate_subordinate_completion;
 /// progress percentage.
 pub(super) fn dispatch_advance_goal(
     action: &PlannedAction,
-    bridges: &mut OodaBridges,
+    bridges: &mut OodaClients,
     state: &mut OodaState,
 ) -> ActionOutcome {
     let goal_id = match &action.goal_id {
@@ -151,7 +151,7 @@ pub(super) fn dispatch_advance_goal(
     // Split-borrow disjoint fields of `bridges` so we can hold `&mut
     // session` and `&dyn memory` simultaneously. `&mut *bridges` flattens
     // the deref so Rust tracks the per-field borrows.
-    let OodaBridges {
+    let OodaClients {
         ref mut session,
         ref memory,
         ..

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use crate::base_types::BaseTypeTurnInput;
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
-use crate::knowledge_bridge::{KnowledgeBridge, KnowledgeQueryResult};
+use crate::knowledge_client::{KnowledgeClient, KnowledgeQueryResult};
 use crate::knowledge_context::enrich_planning_context;
 use crate::memory_cognitive::{CognitiveFact, CognitiveProcedure};
 
@@ -60,15 +60,15 @@ pub struct TurnOutput {
 /// silent degradation per PHILOSOPHY.md.
 pub fn prepare_turn_context(
     objective: &str,
-    memory_bridge: Option<&dyn CognitiveMemoryOps>,
-    knowledge_bridge: Option<&KnowledgeBridge>,
+    memory_client: Option<&dyn CognitiveMemoryOps>,
+    knowledge_client: Option<&KnowledgeClient>,
 ) -> SimardResult<TurnContext> {
-    let memory_facts = match memory_bridge {
+    let memory_facts = match memory_client {
         Some(bridge) => bridge.search_facts(objective, MAX_MEMORY_FACTS, MIN_FACT_CONFIDENCE)?,
         None => Vec::new(),
     };
 
-    let procedures = match memory_bridge {
+    let procedures = match memory_client {
         // ws2 #2295: route base-type adapter recall through the same
         // tokenized helper the OODA preparation phase uses. The
         // previous direct `recall_procedure(objective, MAX_PROCEDURES)`
@@ -86,7 +86,7 @@ pub fn prepare_turn_context(
         None => Vec::new(),
     };
 
-    let knowledge = match knowledge_bridge {
+    let knowledge = match knowledge_client {
         Some(bridge) => enrich_planning_context(objective, bridge)?.relevant_knowledge,
         None => Vec::new(),
     };
@@ -191,7 +191,7 @@ pub fn render_enrichment_block(context: &TurnContext) -> String {
 ///
 /// This is the single, normalized home for the enrichment bridges. Every
 /// base-type adapter routes its turn through the same call site
-/// ([`EnrichmentBridges::enrich`] / [`enrich_turn_input`]), eliminating the
+/// ([`EnrichmentClients::enrich`] / [`enrich_turn_input`]), eliminating the
 /// divergence flagged in issue #1665 where only the Copilot adapter queried
 /// memory and knowledge.
 ///
@@ -200,12 +200,12 @@ pub fn render_enrichment_block(context: &TurnContext) -> String {
 /// but its call fails, the error propagates — no silent degradation, per
 /// PHILOSOPHY.md.
 #[derive(Default)]
-pub struct EnrichmentBridges {
+pub struct EnrichmentClients {
     pub memory: Option<Box<dyn CognitiveMemoryOps>>,
-    pub knowledge: Option<KnowledgeBridge>,
+    pub knowledge: Option<KnowledgeClient>,
 }
 
-impl EnrichmentBridges {
+impl EnrichmentClients {
     /// Create an empty bundle (no bridges configured).
     pub fn new() -> Self {
         Self::default()
@@ -223,10 +223,10 @@ impl EnrichmentBridges {
     }
 }
 
-impl std::fmt::Debug for EnrichmentBridges {
+impl std::fmt::Debug for EnrichmentClients {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The bridges are not `Debug`; surface only whether each is configured.
-        f.debug_struct("EnrichmentBridges")
+        f.debug_struct("EnrichmentClients")
             .field("memory", &self.memory.is_some())
             .field("knowledge", &self.knowledge.is_some())
             .finish()
@@ -250,7 +250,7 @@ impl std::fmt::Debug for EnrichmentBridges {
 #[derive(Clone, Debug, Default)]
 pub enum EnrichmentSource {
     /// No enrichment bridges. [`EnrichmentSource::resolve`] yields an empty
-    /// [`EnrichmentBridges`], so `enrich_input` returns the input unchanged and
+    /// [`EnrichmentClients`], so `enrich_input` returns the input unchanged and
     /// only the `## Objective` section is emitted.
     #[default]
     Disabled,
@@ -261,18 +261,18 @@ pub enum EnrichmentSource {
 }
 
 impl EnrichmentSource {
-    /// Resolve this source into concrete [`EnrichmentBridges`].
+    /// Resolve this source into concrete [`EnrichmentClients`].
     ///
     /// [`EnrichmentSource::Disabled`] yields an empty bundle (no side effects).
     /// [`EnrichmentSource::Native`] launches the native cognitive-memory +
     /// knowledge bridges via [`launch_enrichment_bridges`], degrading any
     /// unavailable bridge to `None` without panicking.
-    pub fn resolve(&self) -> EnrichmentBridges {
+    pub fn resolve(&self) -> EnrichmentClients {
         match self {
-            EnrichmentSource::Disabled => EnrichmentBridges::new(),
+            EnrichmentSource::Disabled => EnrichmentClients::new(),
             EnrichmentSource::Native { state_root } => {
                 let (memory, knowledge) = launch_enrichment_bridges(state_root);
-                EnrichmentBridges { memory, knowledge }
+                EnrichmentClients { memory, knowledge }
             }
         }
     }
@@ -285,10 +285,10 @@ impl EnrichmentSource {
 /// IPC-aware connector recipe steps use, sharing the daemon's live store when
 /// one is running and otherwise opening the library-backed store directly).
 /// Knowledge uses the in-process native transport from
-/// [`crate::bridge_launcher::launch_knowledge_bridge_native`].
+/// [`crate::rpc_subprocess_launcher::launch_knowledge_client_native`].
 ///
 /// Mirrors the honest-degradation contract of
-/// [`crate::bridge_launcher::launch_all_bridges`]: a launch failure is logged
+/// [`crate::rpc_subprocess_launcher::launch_all_bridges`]: a launch failure is logged
 /// and yields `None` for that bridge so turn dispatch proceeds without that
 /// enrichment rather than aborting. Neither failure path panics.
 ///
@@ -296,7 +296,7 @@ impl EnrichmentSource {
 /// issue #1664; RustyClawd — issue #2383) so the launcher exists exactly once.
 pub fn launch_enrichment_bridges(
     state_root: &Path,
-) -> (Option<Box<dyn CognitiveMemoryOps>>, Option<KnowledgeBridge>) {
+) -> (Option<Box<dyn CognitiveMemoryOps>>, Option<KnowledgeClient>) {
     let memory = match crate::ooda_loop::connect_memory(state_root) {
         Ok(memory) => Some(memory),
         Err(error) => {
@@ -308,7 +308,7 @@ pub fn launch_enrichment_bridges(
         }
     };
 
-    let knowledge = match crate::bridge_launcher::launch_knowledge_bridge_native() {
+    let knowledge = match crate::rpc_subprocess_launcher::launch_knowledge_client_native() {
         Ok(knowledge) => Some(knowledge),
         Err(error) => {
             eprintln!(
@@ -345,10 +345,10 @@ pub fn launch_enrichment_bridges(
 /// reachable from every adapter.
 pub fn enrich_turn_input(
     input: &BaseTypeTurnInput,
-    memory_bridge: Option<&dyn CognitiveMemoryOps>,
-    knowledge_bridge: Option<&KnowledgeBridge>,
+    memory_client: Option<&dyn CognitiveMemoryOps>,
+    knowledge_client: Option<&KnowledgeClient>,
 ) -> SimardResult<BaseTypeTurnInput> {
-    let context = prepare_turn_context(&input.objective, memory_bridge, knowledge_bridge)?;
+    let context = prepare_turn_context(&input.objective, memory_client, knowledge_client)?;
     let block = render_enrichment_block(&context);
 
     let prompt_preamble = if block.is_empty() {
@@ -539,7 +539,7 @@ CONFIDENCE: 0.85";
         assert!((output.confidence.unwrap() - 1.0).abs() < f64::EPSILON);
     }
 
-    // ── enrich_turn_input / EnrichmentBridges ───────────────────────
+    // ── enrich_turn_input / EnrichmentClients ───────────────────────
 
     #[test]
     fn enrich_turn_input_without_bridges_returns_input_unchanged() {
@@ -608,7 +608,7 @@ CONFIDENCE: 0.85";
 
     #[test]
     fn enrichment_bridges_default_is_unconfigured() {
-        let bridges = EnrichmentBridges::new();
+        let bridges = EnrichmentClients::new();
         assert!(!bridges.is_configured());
         // enrich() with no bridges returns the input unchanged.
         let input = BaseTypeTurnInput::objective_only("hello");
@@ -623,9 +623,9 @@ CONFIDENCE: 0.85";
 
     #[test]
     fn enrichment_bridges_debug_hides_bridge_internals() {
-        let bridges = EnrichmentBridges::new();
+        let bridges = EnrichmentClients::new();
         let debug = format!("{bridges:?}");
-        assert!(debug.contains("EnrichmentBridges"));
+        assert!(debug.contains("EnrichmentClients"));
         assert!(debug.contains("memory: false"));
         assert!(debug.contains("knowledge: false"));
     }

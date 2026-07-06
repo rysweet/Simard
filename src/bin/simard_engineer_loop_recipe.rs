@@ -36,6 +36,11 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Bound the free-text objective before it rides on argv (issues #2640/#2692):
+    // a generous ceiling defensively closes the E2BIG argv-overflow class, and the
+    // same pass collapses newlines so a multi-line objective can never break the
+    // recipe's YAML interpolation (#2127).
+    let objective = simard::ooda_brain::sanitize::sanitize_context_var(&objective, 8000);
     let topology = arg(args, "--topology").unwrap_or_else(|| "single-process".to_string());
     let state_root = match arg(args, "--state-root") {
         Some(s) => s,
