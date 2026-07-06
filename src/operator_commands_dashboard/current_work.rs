@@ -266,7 +266,13 @@ pub(crate) fn read_recent_cycle_reports(state_root: &std::path::Path, n: usize) 
         state_root.join("state").join("cycle_reports"),
     ];
 
-    let mut entries: Vec<(u32, String)> = Vec::new();
+    // Collect only (cycle_number, path) refs first — no file contents yet. The
+    // `cycle_reports/` directory grows unbounded (one file per cycle, never
+    // pruned), so reading every file just to keep the newest `n` wastes disk
+    // I/O and memory on hot, repeatedly-polled dashboard endpoints. Deferring
+    // the reads until we know which cycles survive turns O(total files) reads
+    // into O(n).
+    let mut refs: Vec<(u32, std::path::PathBuf)> = Vec::new();
 
     for dir in &candidates {
         if let Ok(listing) = std::fs::read_dir(dir) {
@@ -277,18 +283,36 @@ pub(crate) fn read_recent_cycle_reports(state_root: &std::path::Path, n: usize) 
                     .strip_prefix("cycle_")
                     .and_then(|s| s.strip_suffix(".json"))
                     && let Ok(num) = num_str.parse::<u32>()
-                    && let Ok(contents) = std::fs::read_to_string(entry.path())
                 {
-                    entries.push((num, contents));
+                    refs.push((num, entry.path()));
                 }
             }
         }
     }
 
-    // Deduplicate by cycle number (prefer higher-numbered path if duplicates exist)
-    entries.sort_by_key(|b| std::cmp::Reverse(b.0));
-    entries.dedup_by_key(|e| e.0);
-    entries.truncate(n);
+    // Newest cycle first. The sort is stable, so for a duplicate cycle number
+    // the first candidate directory keeps priority (same as before).
+    refs.sort_by_key(|(num, _)| std::cmp::Reverse(*num));
+
+    // Read contents only for the newest `n` distinct cycles, in order. For a
+    // duplicated cycle number the first readable candidate wins; a number whose
+    // only copies fail to read is skipped entirely (mirrors the previous
+    // read-error handling, which never added unreadable files).
+    let mut entries: Vec<(u32, String)> = Vec::with_capacity(n.min(refs.len()));
+    let mut last_taken: Option<u32> = None;
+    for (num, path) in refs {
+        if entries.len() >= n {
+            break;
+        }
+        // Already read this cycle number — skip the remaining duplicate copies.
+        if last_taken == Some(num) {
+            continue;
+        }
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            entries.push((num, contents));
+            last_taken = Some(num);
+        }
+    }
 
     entries
         .into_iter()
@@ -458,5 +482,41 @@ mod tests {
         let reports = read_recent_cycle_reports(dir.path(), 10);
         assert_eq!(reports.len(), 1);
         assert!(reports[0].get("summary").is_some());
+    }
+
+    // Locks in the semantics the lazy-read optimization must preserve: when the
+    // directory holds far more files than `n` AND a cycle number is duplicated
+    // across both candidate directories, only the newest `n` distinct cycles
+    // are returned, and the first candidate directory wins the duplicate.
+    #[test]
+    fn reads_newest_n_and_first_dir_wins_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_a = dir.path().join("cycle_reports");
+        let dir_b = dir.path().join("state").join("cycle_reports");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        // 20 cycles in dir_a, far more than the requested 3.
+        for i in 1..=20 {
+            std::fs::write(
+                dir_a.join(format!("cycle_{i}.json")),
+                format!(r#"{{"cycle_number":{i},"src":"a"}}"#),
+            )
+            .unwrap();
+        }
+        // Duplicate the newest cycle in dir_b with different content.
+        std::fs::write(
+            dir_b.join("cycle_20.json"),
+            r#"{"cycle_number":20,"src":"b"}"#,
+        )
+        .unwrap();
+
+        let reports = read_recent_cycle_reports(dir.path(), 3);
+        assert_eq!(reports.len(), 3);
+        assert_eq!(reports[0]["cycle_number"], 20);
+        assert_eq!(reports[1]["cycle_number"], 19);
+        assert_eq!(reports[2]["cycle_number"], 18);
+        // First candidate directory (dir_a) wins the duplicate cycle 20.
+        assert_eq!(reports[0]["report"]["src"], "a");
     }
 }
