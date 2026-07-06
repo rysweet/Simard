@@ -1440,15 +1440,15 @@ fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
 #[derive(serde::Deserialize)]
 struct RecipeEnvelope {
     facts: Vec<RecipeFact>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_tolerant_vec")]
     procedures: Vec<RecipeProcedure>,
 }
 
-/// Deserialize a fact/procedure field that the distiller agent is *supposed* to
-/// emit as a JSON string but, in practice, intermittently omits, nulls, or
-/// emits as a bare scalar (the Copilot CLI agent does this for individual
-/// `facts[]` entries — observed live in production, e.g. episode t=9664; see
-/// issue #2506).
+/// Deserialize an **id-like** field (`source_episode_id`, procedure `name`) that
+/// the distiller agent is *supposed* to emit as a JSON string but, in practice,
+/// intermittently omits, nulls, or emits as a bare scalar (the Copilot CLI agent
+/// does this for individual `facts[]` entries — observed live in production, e.g.
+/// the numeric `source_episode_id` at episode t=9664; see issue #2506).
 ///
 /// Without this, a single fact missing `source_episode_id` (or carrying a
 /// `null`/numeric value) made `serde` reject the **entire** `{ "facts": [...] }`
@@ -1461,13 +1461,17 @@ struct RecipeEnvelope {
 /// recovered instead of one malformed sibling sinking all of them. Quality is
 /// not weakened: a recovered fact with an empty/unknown `source_episode_id` is
 /// ungrounded and the existing reliability gate ([`assess_fact_reliability`])
-/// quarantines it; an empty `concept` is dropped by [`RecipeEnvelope::into_facts`];
-/// empty `content` is quarantined by the reliability hard gate. Coercion is
-/// limited to **scalars** (string / number / bool); a `null` or a non-scalar
-/// (array / object) — both of which are malformed for a field the recipe
-/// promises as a plain string — collapses to the empty string so the existing
+/// quarantines it. Coercion is limited to **scalars** (string / number / bool)
+/// because an episode id is legitimately numeric in the wild; a `null` or a
+/// non-scalar (array / object) collapses to the empty string so the existing
 /// gates drop/quarantine it rather than letting structured JSON text smuggle a
-/// fact past them.
+/// value past them.
+///
+/// **Scope:** this scalar coercion is applied ONLY to id-like fields. The human
+/// text fields (`concept`, `content`) use the stricter [`de_string_only`]: a
+/// number/bool there is meaningless (a `content: 42` would be stored as the
+/// garbage fact `"42"`), so those must be a real JSON string or collapse to
+/// empty.
 fn de_lenient_string<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1478,19 +1482,70 @@ where
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         // Null and any non-scalar (array/object) → empty: a malformed value for
-        // a promised-string field must not become non-empty `content`/`concept`
-        // that could clear the empty-content/known-concept gates.
+        // a promised-string field must not become a non-empty id/name that could
+        // clear a downstream gate.
         serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
             String::new()
         }
     })
 }
 
+/// Deserialize a **human-text** field (`concept`, `content`) that must be a real
+/// JSON string. Unlike [`de_lenient_string`], a bare scalar is NOT coerced: a
+/// `content: 42` or `content: true` is meaningless as fact text, and stringifying
+/// it (`"42"` / `"true"`) would smuggle a garbage fact past the reliability gate
+/// (a grounded `"42"` scores 0.75 ≥ threshold and would be *stored*) — violating
+/// the "leniency never widens to accept broken JSON, precision is never weakened"
+/// invariant this branch upholds (issue #2431).
+///
+/// Only a JSON string is kept verbatim; a number, bool, null, array, or object
+/// collapses to the empty string so the existing gates drop/quarantine the fact
+/// (empty `concept` is dropped by [`RecipeEnvelope::into_facts`]; empty `content`
+/// is quarantined by the reliability hard gate) instead of promoting noise. This
+/// is strictly MORE tolerant than the pre-#2431 schema (a scalar no longer sinks
+/// the whole envelope) while being strictly LESS lenient than coercion (a scalar
+/// no longer becomes a fact).
+fn de_string_only<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(s) => s,
+        // Anything that is not a JSON string is malformed for a promised-text
+        // field → empty, so the empty-content/known-concept gates drop it.
+        _ => String::new(),
+    })
+}
+
+/// Deserialize a JSON array field, tolerating an explicit `null` (which the
+/// distiller agent intermittently emits for an *empty* optional list) as an empty
+/// `Vec` instead of a hard parse error (issue #2431).
+///
+/// `#[serde(default)]` alone only covers a **missing** key; an explicit
+/// `"procedures": null` (or a procedure's `"steps": null`) is still handed to the
+/// `Vec` deserializer, which rejects `null` and fails the **whole** envelope —
+/// silently dropping otherwise-valid `facts` on the same document. That is the
+/// exact "one bad token sinks the batch" shape this branch removes: a realistic
+/// `{"facts":[<valid fact>],"procedures":null}` must recover its facts. Mapping
+/// `null → []` (and, per-entry, filtering empty procedures downstream in
+/// [`RecipeEnvelope::into_procedures`]) keeps that recovery without accepting
+/// anything malformed — a non-null, non-array scalar (e.g. `"steps": 42`) still
+/// fails, so leniency does not widen to broken JSON.
+fn de_null_tolerant_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    use serde::Deserialize;
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(serde::Deserialize)]
 struct RecipeFact {
-    #[serde(default, deserialize_with = "de_lenient_string")]
+    #[serde(default, deserialize_with = "de_string_only")]
     concept: String,
-    #[serde(default, deserialize_with = "de_lenient_string")]
+    #[serde(default, deserialize_with = "de_string_only")]
     content: String,
     #[serde(default, deserialize_with = "de_lenient_string")]
     source_episode_id: String,
@@ -1500,9 +1555,9 @@ struct RecipeFact {
 struct RecipeProcedure {
     #[serde(default, deserialize_with = "de_lenient_string")]
     name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_tolerant_vec")]
     steps: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_tolerant_vec")]
     source_episode_ids: Vec<String>,
 }
 
@@ -2428,6 +2483,105 @@ mod issue_t9664_field_tolerance_tests {
         // Empty content → reliability hard gate quarantines it (score 0.0).
         let score = assess_fact_reliability(&facts[0], &[], &facts);
         assert_eq!(score, 0.0, "empty-content fact must score 0.0");
+    }
+
+    /// Precision guard (issue #2431): a **scalar** `content` must NOT be coerced
+    /// to a string. Before this, `de_lenient_string` turned `content: 42` into the
+    /// fact text `"42"`; grounded and with a valid concept that scores 0.75 (≥ the
+    /// 0.5 threshold) and would be **stored** as a garbage fact. `content` now uses
+    /// `de_string_only`, so a number collapses to empty and the empty-content hard
+    /// gate quarantines it — the envelope still parses (the batch is not dropped).
+    #[test]
+    fn numeric_content_collapses_to_empty_not_stringified() {
+        let raw =
+            r#"{"facts":[{"concept":"bug-pattern","content":42,"source_episode_id":"epi_1"}]}"#;
+        let facts = parse_facts(raw).expect("a numeric content must not sink the envelope");
+        assert_eq!(facts.len(), 1);
+        assert!(
+            facts[0].content.is_empty(),
+            "numeric content must collapse to empty, not the garbage string \"42\", got {:?}",
+            facts[0].content
+        );
+        // Empty content is hard-gated to 0.0 (quarantined) — it can never be
+        // promoted, even though its `source_episode_id` looks grounded.
+        let score = assess_fact_reliability(&facts[0], &[], &facts);
+        assert_eq!(
+            score, 0.0,
+            "a scalar-content fact must be quarantined, never stored as \"42\""
+        );
+    }
+
+    /// A boolean `content` (another observed scalar deviation) collapses to empty
+    /// rather than the garbage fact text `"true"`.
+    #[test]
+    fn bool_content_collapses_to_empty() {
+        let raw =
+            r#"{"facts":[{"concept":"pr-pattern","content":true,"source_episode_id":"epi_1"}]}"#;
+        let facts = parse_facts(raw).expect("a boolean content must not sink the envelope");
+        assert_eq!(facts.len(), 1);
+        assert!(
+            facts[0].content.is_empty(),
+            "boolean content must collapse to empty, not \"true\", got {:?}",
+            facts[0].content
+        );
+    }
+
+    /// A scalar `concept` collapses to empty and the fact is dropped by
+    /// [`RecipeEnvelope::into_facts`] (empty never canonicalizes to a known label)
+    /// — a number is not a concept label. The envelope still parses.
+    #[test]
+    fn numeric_concept_collapses_to_empty_and_fact_is_dropped() {
+        let raw = r#"{"facts":[{"concept":404,"content":"real content here","source_episode_id":"epi_1"}]}"#;
+        let facts = parse_facts(raw).expect("a numeric concept must not sink the envelope");
+        assert!(
+            facts.is_empty(),
+            "a fact with a non-string concept must be dropped, got {facts:?}"
+        );
+    }
+
+    /// Null-tolerant optional arrays (issue #2431): an explicit `"procedures":null`
+    /// (the agent's way of saying "no procedures") must NOT fail the whole envelope
+    /// and drop the valid `facts` alongside it. `#[serde(default)]` alone only
+    /// covers a *missing* key; an explicit `null` reaches the `Vec` deserializer
+    /// and, before `de_null_tolerant_vec`, rejected the entire document.
+    #[test]
+    fn explicit_null_procedures_does_not_sink_valid_facts() {
+        let document = r#"{"facts":[{"concept":"bug-pattern","content":"a valid grounded fact","source_episode_id":"epi_1"}],"procedures":null}"#;
+        let out = parse_facts_document(document)
+            .expect("an explicit null procedures must not sink the valid facts");
+        assert_eq!(
+            out.facts.len(),
+            1,
+            "the valid fact must survive a null procedures field: {:?}",
+            out.facts
+        );
+        assert_eq!(out.facts[0].source_episode_id, "epi_1");
+        assert!(
+            out.procedures.is_empty(),
+            "null procedures must parse as an empty list"
+        );
+    }
+
+    /// A procedure with a `null` `steps` array must not sink the sibling facts:
+    /// the null-tolerant vec parses it as empty and the empty-step procedure is
+    /// then dropped by [`RecipeEnvelope::into_procedures`], while the valid facts
+    /// on the same document are recovered.
+    #[test]
+    fn procedure_with_null_steps_does_not_sink_facts() {
+        let document = r#"{"facts":[{"concept":"lesson-learned","content":"survives a malformed procedure","source_episode_id":"epi_1"}],"procedures":[{"name":"p","steps":null,"source_episode_ids":null}]}"#;
+        let out = parse_facts_document(document)
+            .expect("a procedure with null steps must not sink the valid facts");
+        assert_eq!(
+            out.facts.len(),
+            1,
+            "the valid fact must survive a malformed procedure: {:?}",
+            out.facts
+        );
+        assert!(
+            out.procedures.is_empty(),
+            "the empty-step procedure must be dropped, not promoted: {:?}",
+            out.procedures
+        );
     }
 }
 
