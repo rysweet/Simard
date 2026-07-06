@@ -3,6 +3,8 @@
 //! Interventions are proposed by Decide and (in M2+) executed by Act; HIGH-RISK
 //! variants are gated by `guardrails::classify`.
 
+use serde::{Deserialize, Serialize};
+
 use crate::overseer::capabilities::{AuditScope, GoalBrief, OrchestratorRunBrief, RecipeBrief};
 use crate::overseer::signal::GapItem;
 use crate::overseer::whisper_ops::WhisperUrgency;
@@ -55,10 +57,17 @@ pub enum Intervention {
     /// Capability: `GoalCurator::unblock` (+ optional `whisper_ops::WhisperSink`).
     UnblockGoal { goal_id: String, reason: String },
     /// ESCALATE a genuinely-blocked goal carrying a "needs human review" marker to
-    /// the operator (email + Signal) with the goal id + reason, so the marker
-    /// actually reaches a human — closing the silent-failure gap.
+    /// the operator (email + Signal) with the goal id + reason + the root-cause
+    /// **WHY**, so the marker AND its analysis actually reach a human — closing the
+    /// silent-failure gap.
     /// Capability: `notify::OperatorNotifier`.
-    EscalateBlockedGoal { goal_id: String, reason: String },
+    EscalateBlockedGoal {
+        goal_id: String,
+        reason: String,
+        /// The root-cause analysis (one-line WHY) carried into the operator
+        /// notification so the human sees *why*, not just the bare symptom.
+        why: String,
+    },
     /// FLAG the backlog-coverage gaps the recurring gap-scan found — important
     /// work with no active workstream (uncovered high-priority goals, high-signal
     /// issues with no PR, live anomalies with no fix in flight). Acts through the
@@ -90,6 +99,80 @@ impl Intervention {
     }
 }
 
+/// How a chosen action relates to the problem's ROOT CAUSE (issue #2635). Every
+/// planned intervention is classified so a symptom-only patch can NEVER be
+/// applied silently: it is explicitly labelled and its unaddressed cause is
+/// surfaced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemediationClass {
+    /// The action targets the root cause (self-heal, launch a fix, escalate the
+    /// systemic defect for a fix, deliver/merge, steer). The cause is addressed.
+    RootCause,
+    /// The action only mitigates the SYMPTOM (e.g. hand budget pressure to the
+    /// operator) — the underlying cause stays live and MUST be surfaced.
+    SymptomMitigation,
+    /// The "problem" is a deliberate/intentional state (an operator or dependency
+    /// block) — acknowledged and surfaced, with nothing to fix. Counts as
+    /// addressed (it never cries wolf).
+    Acknowledged,
+}
+
+/// The root-cause classification attached to a [`PlannedIntervention`]: whether
+/// the action addressed the ROOT CAUSE, and — when it did not — the surfaced note
+/// recording that the cause remains unaddressed. Enforces the invariant that a
+/// [`RemediationClass::SymptomMitigation`] always records the cause as
+/// unaddressed AND carries a note (never a silent patch).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Remediation {
+    pub class: RemediationClass,
+    /// True when the root cause was addressed (root-cause action or acknowledged
+    /// deliberate block); false for a symptom-only mitigation.
+    pub root_cause_addressed: bool,
+    /// The surfaced "root cause remains unaddressed" note. `Some` iff `class` is
+    /// [`RemediationClass::SymptomMitigation`].
+    pub unaddressed_note: Option<String>,
+}
+
+impl Remediation {
+    /// A root-cause-addressing remediation (self-heal, fix launch, escalate the
+    /// systemic defect, deliver/merge, steer).
+    pub fn root_cause() -> Self {
+        Self {
+            class: RemediationClass::RootCause,
+            root_cause_addressed: true,
+            unaddressed_note: None,
+        }
+    }
+
+    /// An acknowledged deliberate/intentional block — addressed, nothing to fix.
+    pub fn acknowledged() -> Self {
+        Self {
+            class: RemediationClass::Acknowledged,
+            root_cause_addressed: true,
+            unaddressed_note: None,
+        }
+    }
+
+    /// A symptom-only mitigation: the root cause stays live and is surfaced via
+    /// `note` (never silently patched).
+    pub fn symptom(note: impl Into<String>) -> Self {
+        Self {
+            class: RemediationClass::SymptomMitigation,
+            root_cause_addressed: false,
+            unaddressed_note: Some(note.into()),
+        }
+    }
+
+    /// Short, stable label for logs/feeds.
+    pub fn class_label(&self) -> &'static str {
+        match self.class {
+            RemediationClass::RootCause => "root-cause",
+            RemediationClass::SymptomMitigation => "symptom-mitigation",
+            RemediationClass::Acknowledged => "acknowledged",
+        }
+    }
+}
+
 /// A planned intervention after gating: the chosen action plus whether the gates
 /// admitted it for autonomous execution and, if not, why. `run_cycle` returns
 /// these; Act (M2+) executes only the admitted ones.
@@ -100,4 +183,7 @@ pub struct PlannedIntervention {
     /// Human-readable gate note (e.g. "HIGH-RISK: escalated", "budget exceeded",
     /// "own PR skipped", "deferred: overlaps sweep group ooda-core").
     pub note: String,
+    /// The root-cause classification of this action (issue #2635): whether it
+    /// targets the root cause or only mitigates the symptom.
+    pub remediation: Remediation,
 }

@@ -350,6 +350,7 @@ fn loop_problem(n: u32) -> Problem {
             goal_id: "g1".to_string(),
             consecutive_no_action: n,
         }],
+        why: None,
     }
 }
 
@@ -380,6 +381,7 @@ fn decide_routes_drift_to_a_lightweight_whisper() {
             goal_id: "g1".to_string(),
             detail: "editing unrelated module Y".to_string(),
         }],
+        why: None,
     };
     assert!(
         matches!(decide(&drift), Intervention::Whisper { .. }),

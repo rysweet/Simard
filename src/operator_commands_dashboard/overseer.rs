@@ -66,6 +66,7 @@ mod tests {
                 duration_ms: 843,
                 ..OverseerTickReport::default()
             },
+            problem_entries: Vec::new(),
         }
     }
 
@@ -189,6 +190,7 @@ mod tests {
                 action_details: vec!["did: merged PR rysweet/Simard#42".to_string()],
                 ..OverseerTickReport::default()
             },
+            problem_entries: Vec::new(),
         });
 
         let body = overseer_response(&snapshot_with(SectionEnvelope::live(

@@ -456,6 +456,7 @@ mod tests {
             dedup_key: "k".to_string(),
             summary: "s".to_string(),
             evidence,
+            why: None,
         }
     }
 

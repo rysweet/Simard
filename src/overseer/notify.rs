@@ -209,6 +209,24 @@ impl OperatorNotification {
             autonomous: true,
         }
     }
+
+    /// Build a blocked-goal escalation that carries the root-cause **WHY**
+    /// (issue #2635): the same "needs human review" escalation as
+    /// [`goal_blocked`](Self::goal_blocked), but the body leads with the WHY so
+    /// the operator receives the root-cause analysis, not just the bare symptom.
+    pub fn goal_blocked_with_why(goal_id: &str, reason: &str, why: &str) -> Self {
+        Self {
+            kind: "goal-blocked",
+            headline: format!("goal {goal_id} needs human review"),
+            problem: format!(
+                "Goal `{goal_id}` is blocked and needs human review.\n  WHY (root cause): {why}\n  \
+                 Reason: {reason}"
+            ),
+            link: None,
+            repo: "rysweet/Simard".to_string(),
+            autonomous: true,
+        }
+    }
 }
 
 /// Cap on how many gaps a single notification body lists, so even a maxed-out

@@ -840,6 +840,7 @@ fn decide_routes_workstream_coverage_to_flag_gaps() {
         evidence: vec![Signal::WorkstreamGap {
             gaps: vec![sample_goal_gap(), sample_anomaly_gap()],
         }],
+        why: None,
     };
     match decide(&problem) {
         Intervention::FlagWorkstreamGaps { gaps } => {

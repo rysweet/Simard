@@ -1305,7 +1305,8 @@ pub fn run_ooda_daemon(
                             state_root_for_tick.clone(),
                         );
                         let mut overseer = overseer.with_gap_scan_enabled(gap_scan_due);
-                        let report = crate::overseer::run_overseer_tick_isolated(&mut overseer);
+                        let (report, problem_entries) =
+                            crate::overseer::run_overseer_tick_isolated_detailed(&mut overseer);
                         daemon_log(
                             &state_root_for_tick,
                             &format!(
@@ -1361,6 +1362,7 @@ pub fn run_ooda_daemon(
                             timestamp: crate::telemetry::snapshot::now_rfc3339(),
                             enabled: true,
                             report,
+                            problem_entries,
                         };
                         if let Err(e) = crate::overseer::activity::record_tick(
                             &state_root_for_tick,

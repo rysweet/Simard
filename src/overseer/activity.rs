@@ -33,6 +33,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::cognitive_threads::ThreadHealth;
 use crate::overseer::OverseerTickReport;
+use crate::overseer::intervention::Remediation;
+use crate::overseer::signal::RootCause;
 
 /// Bumped only on an INCOMPATIBLE shape change. Additive fields do not bump it.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -64,6 +66,14 @@ pub struct OverseerTotals {
     pub workstream_gaps_detected: u64,
     /// Backlog-coverage gaps suppressed as recurring (within the dedup window).
     pub workstream_gaps_suppressed: u64,
+    /// Problems for which a structured root-cause WHY was produced (issue #2635).
+    pub root_cause_analyses: u64,
+    /// Actions labelled symptom-mitigation (root cause left unaddressed). A
+    /// deliberate block (`Acknowledged`) is NOT counted here.
+    pub symptom_mitigations: u64,
+    /// Actions that addressed the root cause — class `RootCause` or `Acknowledged`
+    /// (`remediation.root_cause_addressed == true`).
+    pub root_causes_addressed: u64,
     pub held: u64,
     pub errors: u64,
 }
@@ -78,6 +88,12 @@ pub struct OverseerActivityRecord {
     pub enabled: bool,
     /// The verbatim outcome tally (never interpreted).
     pub report: OverseerTickReport,
+    /// Per-problem rows for this tick (issue #2635): problem + WHY + action +
+    /// root-cause/symptom. Additive (`#[serde(default)]`), so a feed written
+    /// before this field existed deserializes to an empty vector. If a
+    /// concurrent overseer-log-detail change adds its own per-problem type,
+    /// `ProblemEntry` merges into it (keep both sides).
+    pub problem_entries: Vec<ProblemEntry>,
 }
 
 /// Per cognitive thread, derived from [`ThreadHealth`] (epochs → RFC3339).
@@ -229,6 +245,9 @@ impl OverseerActivity {
             t.goals_escalated += rep.goals_escalated as u64;
             t.workstream_gaps_detected += rep.workstream_gaps_detected as u64;
             t.workstream_gaps_suppressed += rep.workstream_gaps_suppressed as u64;
+            t.root_cause_analyses += rep.root_cause_analyses as u64;
+            t.symptom_mitigations += rep.symptom_mitigations as u64;
+            t.root_causes_addressed += rep.root_causes_addressed as u64;
             t.held += rep.held as u64;
             t.errors += rep.errors as u64;
         }
@@ -383,6 +402,45 @@ fn epoch_to_rfc3339(epoch_secs: u64) -> String {
     rfc3339(dt)
 }
 
+/// A single per-problem feed entry for one Overseer tick (issue #2635): the
+/// problem, its root-cause **WHY**, the action taken, and whether that action
+/// addressed the root cause or only mitigated the symptom. Rendered so an
+/// operator sees, for every tick entry, *problem + WHY + action + root/symptom*.
+///
+/// This is the self-contained per-problem surface the root-cause work owns; it
+/// composes with (does not depend on) the concurrent overseer-log-detail feed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProblemEntry {
+    /// The problem's stable dedup key.
+    pub key: String,
+    /// The problem's one-line summary.
+    pub summary: String,
+    /// The structured root-cause analysis (the WHY).
+    pub why: RootCause,
+    /// The chosen action's short label (e.g. `"unblock_goal"`, `"escalate"`).
+    pub action: String,
+    /// Whether the action targeted the root cause or only the symptom.
+    pub remediation: Remediation,
+}
+
+impl ProblemEntry {
+    /// A compact one-line render: `{summary} — WHY: {why} — {action} [class]`,
+    /// with the surfaced unaddressed-cause note appended for a symptom mitigation.
+    pub fn humanize(&self) -> String {
+        let mut line = format!(
+            "{} — WHY: {} — {} [{}]",
+            self.summary,
+            self.why,
+            self.action,
+            self.remediation.class_label(),
+        );
+        if let Some(note) = &self.remediation.unaddressed_note {
+            line.push_str(&format!(" — {note}"));
+        }
+        line
+    }
+}
+
 /// A plain-language one-liner for one Overseer tick: what it **saw** and what it
 /// **did** — or, when nothing needed doing, that it held or simply observed.
 /// Shared by the `simard status` terminal render and the TUI Overseer pane so
@@ -458,7 +516,18 @@ pub fn humanize_tick(r: &OverseerTickReport) -> String {
     } else {
         "observing, no action needed".to_string()
     };
-    format!("{saw}  ·  {action}")
+    let mut line = format!("{saw}  ·  {action}");
+    // Root-cause honesty (issue #2635): when the Overseer could only mitigate a
+    // symptom, surface that the underlying cause was left live — never a silent
+    // patch. Absent when no symptom mitigation occurred.
+    if r.symptom_mitigations > 0 {
+        line.push_str(&format!(
+            "  ·  ({} symptom-mitigation{}, root cause unaddressed)",
+            r.symptom_mitigations,
+            plural(r.symptom_mitigations)
+        ));
+    }
+    line
 }
 
 /// The per-tick DETAIL lines (issue #21) rendered beneath the [`humanize_tick`]
@@ -515,6 +584,7 @@ mod tests {
             timestamp: ts.to_string(),
             enabled: true,
             report: r,
+            problem_entries: Vec::new(),
         }
     }
 

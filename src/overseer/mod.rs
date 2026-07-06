@@ -59,6 +59,7 @@ pub mod merge_ops;
 pub mod notify;
 pub mod observer;
 pub mod pr_verify;
+pub mod root_cause;
 pub mod sensor;
 pub mod signal;
 pub mod tuning;
@@ -75,6 +76,8 @@ mod tests_m1;
 mod tests_m2;
 #[cfg(test)]
 mod tests_memory_recall;
+#[cfg(test)]
+mod tests_root_cause;
 #[cfg(test)]
 mod tests_whisper;
 
@@ -93,13 +96,16 @@ pub use guardrails::{
     AutonomyGate, BudgetGate, ConflictSequencer, RecursionGuard, RiskClass, Subject,
     WhisperDecision, WhisperGate, classify,
 };
-pub use intervention::{Intervention, PlannedIntervention};
+pub use intervention::{Intervention, PlannedIntervention, Remediation, RemediationClass};
 pub use observer::{StewardshipIssueFiler, decide_read_only, is_m1_permitted};
 pub use sensor::{
     ObserverReport, OverseerSensorThread, SnapshotSource, SnapshotStatusReader,
     blocked_goals_from_board, in_flight_from_board, observed_from_snapshot, run_observer_cycle,
 };
-pub use signal::{GapCategory, GapItem, Priority, Problem, ProblemKind, Signal, signals_from};
+pub use signal::{
+    CauseCandidate, CauseSource, Confidence, GapCategory, GapItem, Likelihood, Priority, Problem,
+    ProblemKind, RootCause, Signal, signals_from,
+};
 pub use whisper_ops::{
     MeetingHandoffWhisperSink, WhisperRecord, WhisperSink, WhisperUrgency, compose_whisper_note,
     note_signature, whisper_signature,
@@ -107,15 +113,21 @@ pub use whisper_ops::{
 pub use wiring::{
     BoardGoalCurator, MemoryRecallOps, OverseerCadence, OverseerTickReport, RefuseDeployer,
     assemble_capabilities, build_overseer, overseer_identity, overseer_tick,
-    overseer_tick_interval_secs, run_overseer_tick_isolated,
+    overseer_tick_detailed, overseer_tick_interval_secs, run_overseer_tick_isolated,
+    run_overseer_tick_isolated_detailed,
 };
 
+pub use activity::ProblemEntry;
+pub use root_cause::{PriorOccurrence, RECURRENCE_ESCALATION_THRESHOLD, root_cause_signature};
+
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::goal_curation::no_progress_breaker::{
     NO_PROGRESS_BREAKER_THRESHOLD, is_no_progress_marker,
 };
 use crate::overseer::notify::{OperatorNotification, OperatorNotifier};
 use capabilities::{DeployReport, GoalBrief, InFlightItem, IssueOutcome, WorkstreamHandle};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// The capability handles the Overseer acts through — one per reused Simard
 /// subsystem. Grouping them keeps the `Overseer` constructor to a single
@@ -182,6 +194,14 @@ pub struct Overseer {
     /// distinct from `blocked_goal_gate` so goal-health and gap-scan dedup never
     /// interfere.
     gap_gate: WhisperGate,
+    /// The cognitive-memory handle (amplihack-memory-lib, G2) the root-cause
+    /// analysis recalls prior occurrences from and records new ones into. `None`
+    /// until wired: the analysis then degrades gracefully to telemetry-only WHYs
+    /// with zero recurrence (never a silent failure — the WHY is still produced
+    /// and honestly labelled `source = Telemetry`). Distinct from the observe-loop
+    /// memory-recall capability (`caps.memory`): this is the occurrence-signature
+    /// recall/store seam that drives recurrence-based root-cause escalation.
+    memory: Option<Arc<dyn CognitiveMemoryOps>>,
 }
 
 /// The result of one meta-OODA turn. Side-effect free: it reports what was
@@ -192,6 +212,9 @@ pub struct CycleReport {
     pub signals: Vec<Signal>,
     pub problems: Vec<Problem>,
     pub plan: Vec<PlannedIntervention>,
+    /// Per-problem feed entries (issue #2635): problem + WHY + action +
+    /// root/symptom, one per problem, index-aligned with `problems`/`plan`.
+    pub entries: Vec<ProblemEntry>,
 }
 
 /// Outcome of dispatching one intervention through its capability. Returned by
@@ -274,6 +297,7 @@ impl Overseer {
             // window; a generous per-hour cap covers a maxed-out tick's distinct
             // gaps (bounded by `sensor::MAX_GAPS_PER_TICK`) without flooding.
             gap_gate: WhisperGate::new(900, 200),
+            memory: None,
         }
     }
 
@@ -341,6 +365,15 @@ impl Overseer {
         self
     }
 
+    /// Wire the cognitive-memory handle (amplihack-memory-lib, G2) used by the
+    /// root-cause analysis to recall prior occurrences of a problem's root cause
+    /// and record new ones. `None` until wired: the analysis degrades gracefully
+    /// to telemetry-only WHYs (never a silent failure).
+    pub fn with_memory(mut self, memory: Arc<dyn CognitiveMemoryOps>) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
     /// Run one meta-OODA turn. Observe → Orient → Decide → plan+gate. Does NOT
     /// execute side effects; returns the plan for M2+ Act to run.
     pub fn run_cycle(&mut self) -> Result<CycleReport, OverseerError> {
@@ -395,15 +428,40 @@ impl Overseer {
 
         // Orient (dedup against Simard's in-flight work; a board read failure
         // above already degraded `in_flight` to empty, i.e. "no dedup", never
-        // aborting the cycle).
-        let problems = orient(&signals, &in_flight);
+        // aborting the cycle). Orient stays PURE — every problem it emits has
+        // `why = None`.
+        let mut problems = orient(&signals, &in_flight);
 
-        // Decide + gate.
-        let mut plan = Vec::new();
+        // MANDATORY ROOT-CAUSE enrichment (issue #2635): for EVERY problem,
+        // determine WHY before deciding. Best-effort read-only recall of prior
+        // same-signature occurrences (amplihack-memory-lib, G2) feeds the
+        // structured analyzer; when memory is unavailable the WHY degrades to a
+        // telemetry-only analysis (never a silent failure — a WHY is always
+        // produced and honestly labelled).
+        for problem in &mut problems {
+            let recall = self.recall_occurrences(&problem.dedup_key);
+            let why = root_cause::analyze(problem, &observed, &recall);
+            problem.why = Some(why);
+        }
+
+        // Decide + gate + classify each action's remediation, and build the
+        // per-problem feed entries (problem + WHY + action + root/symptom).
+        let mut plan = Vec::with_capacity(problems.len());
+        let mut entries = Vec::with_capacity(problems.len());
         let mut launches = 0usize;
         for problem in &problems {
             let iv = decide(problem);
-            let planned = self.gate(&iv, &observed, &mut launches);
+            let mut planned = self.gate(&iv, &observed, &mut launches);
+            let why = problem.why.clone().unwrap_or_else(RootCause::unknown);
+            let remediation = remediation_for(&iv, &why);
+            planned.remediation = remediation.clone();
+            entries.push(ProblemEntry {
+                key: problem.dedup_key.clone(),
+                summary: problem.summary.clone(),
+                why,
+                action: iv.label().to_string(),
+                remediation,
+            });
             plan.push(planned);
         }
 
@@ -412,6 +470,7 @@ impl Overseer {
             signals,
             problems,
             plan,
+            entries,
         })
     }
 
@@ -490,7 +549,9 @@ impl Overseer {
     }
 
     /// Apply autonomy, budget, and conflict gates to one intervention, producing
-    /// a `PlannedIntervention` (admitted or held-with-reason).
+    /// a `PlannedIntervention` (admitted or held-with-reason). The attached
+    /// `remediation` is a from-intervention default; `run_cycle` overrides it with
+    /// the WHY-aware classification once the problem's root cause is known.
     fn gate(
         &mut self,
         iv: &Intervention,
@@ -500,11 +561,7 @@ impl Overseer {
         // Whisper opt-out: when the whisperer is disabled, hold the whisper (it
         // is never delivered) even though the observed condition holds.
         if matches!(iv, Intervention::Whisper { .. }) && !self.whisper_enabled {
-            return PlannedIntervention {
-                intervention: iv.clone(),
-                admitted: false,
-                note: "held: whisper disabled (SIMARD_OVERSEER_WHISPER)".to_string(),
-            };
+            return held_plan(iv, "held: whisper disabled (SIMARD_OVERSEER_WHISPER)");
         }
 
         // Goal-board health opt-out: when disabled, hold the self-heal /
@@ -514,68 +571,43 @@ impl Overseer {
             Intervention::UnblockGoal { .. } | Intervention::EscalateBlockedGoal { .. }
         ) && !self.goal_health_enabled
         {
-            return PlannedIntervention {
-                intervention: iv.clone(),
-                admitted: false,
-                note: "held: goal-board health disabled (SIMARD_OVERSEER_GOAL_HEALTH)".to_string(),
-            };
+            return held_plan(
+                iv,
+                "held: goal-board health disabled (SIMARD_OVERSEER_GOAL_HEALTH)",
+            );
         }
 
         // Gap-scan opt-out: when disabled, hold the whole flag-gaps action (no
         // notification, no issue) even though gaps were observed.
         if matches!(iv, Intervention::FlagWorkstreamGaps { .. }) && !self.gap_scan_enabled {
-            return PlannedIntervention {
-                intervention: iv.clone(),
-                admitted: false,
-                note: "held: gap-scan disabled (SIMARD_OVERSEER_GAP_SCAN)".to_string(),
-            };
+            return held_plan(iv, "held: gap-scan disabled (SIMARD_OVERSEER_GAP_SCAN)");
         }
 
         // Autonomy: HIGH-RISK requires opt-in, else it is escalated (held).
         if let Err(e) = self.autonomy.admit(iv) {
-            return PlannedIntervention {
-                intervention: iv.clone(),
-                admitted: false,
-                note: e.to_string(),
-            };
+            return held_plan(iv, e.to_string());
         }
 
         // Budget + concurrency: only for cost-bearing launches/audits.
         if is_cost_bearing(iv) {
             if *launches >= self.max_launches_per_cycle {
-                return PlannedIntervention {
-                    intervention: iv.clone(),
-                    admitted: false,
-                    note: "held: per-cycle launch cap reached".to_string(),
-                };
+                return held_plan(iv, "held: per-cycle launch cap reached");
             }
             if let Some(spent) = observed.spent_today_usd
                 && let Err(e) = self.budget.admit(spent)
             {
-                return PlannedIntervention {
-                    intervention: iv.clone(),
-                    admitted: false,
-                    note: e.to_string(),
-                };
+                return held_plan(iv, e.to_string());
             }
             // Conflict-avoidance: serialise sweeps sharing a sequence group.
             if let Intervention::LaunchRecipe { brief } = iv
                 && let Err(e) = self.sequencer.admit(brief.sequence_group.as_deref())
             {
-                return PlannedIntervention {
-                    intervention: iv.clone(),
-                    admitted: false,
-                    note: e.to_string(),
-                };
+                return held_plan(iv, e.to_string());
             }
             *launches += 1;
         }
 
-        PlannedIntervention {
-            intervention: iv.clone(),
-            admitted: true,
-            note: "admitted".to_string(),
-        }
+        admitted_plan(iv)
     }
 
     /// Execute one admitted intervention by dispatching to its reused capability.
@@ -617,9 +649,11 @@ impl Overseer {
             Intervention::Escalate { .. } => Ok(ActOutcome::Escalated),
             Intervention::Whisper { note, urgency } => self.act_whisper(note, *urgency),
             Intervention::UnblockGoal { goal_id, reason } => self.act_unblock_goal(goal_id, reason),
-            Intervention::EscalateBlockedGoal { goal_id, reason } => {
-                self.act_escalate_blocked_goal(goal_id, reason)
-            }
+            Intervention::EscalateBlockedGoal {
+                goal_id,
+                reason,
+                why,
+            } => self.act_escalate_blocked_goal(goal_id, reason, why),
             Intervention::FlagWorkstreamGaps { gaps } => self.act_flag_workstream_gaps(gaps),
         }
     }
@@ -763,6 +797,7 @@ impl Overseer {
         &mut self,
         goal_id: &str,
         reason: &str,
+        why: &str,
     ) -> Result<ActOutcome, OverseerError> {
         if !self.recursion.is_configured() {
             return Err(OverseerError::Recursion {
@@ -779,7 +814,10 @@ impl Overseer {
                     what: "notify.operator",
                     detail: "no operator notifier configured".to_string(),
                 })?;
-                let notification = OperatorNotification::goal_blocked(goal_id, reason);
+                // Carry the root-cause WHY into the operator notification so a
+                // human receives the analysis, not just the bare symptom.
+                let notification =
+                    OperatorNotification::goal_blocked_with_why(goal_id, reason, why);
                 let report = notifier.notify(&notification);
                 // Consume the dedup slot only after a dispatch attempt (the
                 // notifier itself never drops — it queues/logs on failure).
@@ -925,6 +963,85 @@ impl Overseer {
         );
         let _ = self.act_whisper(&note, WhisperUrgency::Normal);
     }
+
+    /// Recall prior occurrences of a problem's root cause from cognitive memory
+    /// (amplihack-memory-lib, G2), keyed on the problem's dedup signature.
+    /// Read-only and best-effort: no memory wired ⇒ empty; a recall error ⇒
+    /// empty + a `tracing` log (never a silent failure, never a panic). The
+    /// caller folds the result into the structured analysis so recall raises
+    /// `recurrence` for a repeatedly-seen cause.
+    fn recall_occurrences(&self, dedup_key: &str) -> Vec<PriorOccurrence> {
+        let Some(mem) = self.memory.as_ref() else {
+            return Vec::new();
+        };
+        let concept = occurrence_concept(dedup_key);
+        match mem.search_facts(&concept, OCCURRENCE_RECALL_LIMIT, 0.0) {
+            Ok(facts) => facts
+                .into_iter()
+                .filter_map(|f| {
+                    serde_json::from_str::<StoredOccurrence>(&f.content)
+                        .ok()
+                        .filter(|o| o.signature == dedup_key)
+                        .map(StoredOccurrence::into_prior)
+                })
+                .collect(),
+            Err(e) => {
+                tracing::debug!(
+                    target: "overseer::root_cause",
+                    dedup_key,
+                    error = %e,
+                    "root-cause occurrence recall failed — degraded to telemetry-only WHY"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    /// Record this occurrence's root-cause signature + primary cause + action +
+    /// outcome into cognitive memory (amplihack-memory-lib, G2) so a later cycle
+    /// recalls it and raises `recurrence`. Best-effort: no memory wired ⇒ no-op;
+    /// a store error is `tracing`-logged and swallowed (never fatal to the tick,
+    /// never silent).
+    fn record_occurrence(&self, entry: &ProblemEntry, outcome: &ActOutcome) {
+        let Some(mem) = self.memory.as_ref() else {
+            return;
+        };
+        let Some(primary) = entry.why.primary() else {
+            return;
+        };
+        let record = StoredOccurrence {
+            signature: entry.key.clone(),
+            cause_label: primary.label.clone(),
+            action: entry.action.clone(),
+            outcome: describe_outcome(outcome),
+        };
+        let content = match serde_json::to_string(&record) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(
+                    target: "overseer::root_cause",
+                    error = %e,
+                    "root-cause occurrence serialize failed — occurrence not recorded"
+                );
+                return;
+            }
+        };
+        let concept = occurrence_concept(&entry.key);
+        let tags = vec![
+            entry.key.clone(),
+            primary.label.clone(),
+            "overseer-root-cause".to_string(),
+        ];
+        if let Err(e) = mem.store_fact(&concept, &content, 0.9, &tags, "overseer:root-cause") {
+            tracing::debug!(
+                target: "overseer::root_cause",
+                signature = %entry.key,
+                cause = %primary.label,
+                error = %e,
+                "root-cause occurrence store failed (best-effort) — recurrence tracking degraded"
+            );
+        }
+    }
 }
 
 /// Current wall-clock time in whole seconds since the Unix epoch, for the
@@ -972,6 +1089,112 @@ fn observation_content(problems: &[Problem]) -> String {
     ))
 }
 
+/// Build a held (not-admitted) `PlannedIntervention` with a gate note and the
+/// from-intervention remediation default (`run_cycle` refines it with the WHY).
+fn held_plan(iv: &Intervention, note: impl Into<String>) -> PlannedIntervention {
+    PlannedIntervention {
+        intervention: iv.clone(),
+        admitted: false,
+        note: note.into(),
+        remediation: remediation_for(iv, &RootCause::unknown()),
+    }
+}
+
+/// Build an admitted `PlannedIntervention` with the from-intervention remediation
+/// default (`run_cycle` refines it with the WHY).
+fn admitted_plan(iv: &Intervention) -> PlannedIntervention {
+    PlannedIntervention {
+        intervention: iv.clone(),
+        admitted: true,
+        note: "admitted".to_string(),
+        remediation: remediation_for(iv, &RootCause::unknown()),
+    }
+}
+
+/// Classify how an intervention relates to a problem's ROOT CAUSE (issue #2635).
+///
+/// Root-cause-addressing actions (self-heal a false park, launch a fix, escalate
+/// a recurring systemic defect for a fix, deliver/merge, steer with a whisper) are
+/// `RootCause`. A plain `Report` of a deliberate/intentional block is
+/// `Acknowledged` (nothing to fix; it never cries wolf). Handing resource/process
+/// pressure to the operator via `Escalate` only mitigates the SYMPTOM — the
+/// underlying cause (spend spike, runaway retries, mis-set budget) stays live, so
+/// it is a `SymptomMitigation` whose unaddressed cause is surfaced from the WHY.
+fn remediation_for(iv: &Intervention, why: &RootCause) -> Remediation {
+    match iv {
+        Intervention::Escalate { reason } => Remediation::symptom(format!(
+            "root cause unaddressed: {} — escalated to the operator ({reason}); the underlying \
+             cause is not fixed by the hand-off",
+            why.primary_rationale
+        )),
+        Intervention::Report => Remediation::acknowledged(),
+        _ => Remediation::root_cause(),
+    }
+}
+
+/// A ceiling on how many stored occurrence facts one recall reads back — bounds
+/// the read while comfortably covering the recurrence counts that drive the
+/// escalate-the-root-cause decision.
+const OCCURRENCE_RECALL_LIMIT: u32 = 256;
+
+/// The stable cognitive-memory `concept` token for a problem's occurrence facts:
+/// a single alphanumeric token derived deterministically from the dedup key, so
+/// recall matches only this problem's occurrences (the content-side `signature`
+/// filter guards against any incidental keyword collision).
+///
+/// Uses SHA-256 (not `DefaultHasher`) so the token is stable across Rust/std
+/// versions and platforms — a stored occurrence stays recallable after a
+/// toolchain upgrade, preserving recurrence tracking.
+fn occurrence_concept(dedup_key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(dedup_key.as_bytes());
+    let mut token = String::with_capacity(27);
+    token.push_str("overseerocc");
+    for b in &digest[..8] {
+        token.push_str(&format!("{b:02x}"));
+    }
+    token
+}
+
+/// A best-effort human summary of an act outcome, recorded on a stored
+/// occurrence so recall can show what happened last time.
+fn describe_outcome(outcome: &ActOutcome) -> String {
+    match outcome {
+        ActOutcome::GoalUnblocked { .. } => "goal auto-unblocked (self-heal)".to_string(),
+        ActOutcome::GoalEscalated { .. } => "escalated to operator".to_string(),
+        ActOutcome::IssueFiled(_) => "root-cause issue filed".to_string(),
+        ActOutcome::Escalated => "escalated to operator (symptom mitigation)".to_string(),
+        ActOutcome::Launched(_) => "fix workstream launched".to_string(),
+        ActOutcome::Merged => "PR merged".to_string(),
+        ActOutcome::Deployed(_) => "deployed".to_string(),
+        ActOutcome::ConflictResolved => "conflict resolved".to_string(),
+        ActOutcome::GoalTransferred => "goal transferred to Simard".to_string(),
+        ActOutcome::Whispered { .. } => "advisory whisper delivered".to_string(),
+        ActOutcome::Audited => "quality audit run".to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// The durable form of a [`PriorOccurrence`], stored in cognitive memory with the
+/// problem `signature` so recall can filter to this problem's occurrences.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredOccurrence {
+    signature: String,
+    cause_label: String,
+    action: String,
+    outcome: String,
+}
+
+impl StoredOccurrence {
+    fn into_prior(self) -> PriorOccurrence {
+        PriorOccurrence {
+            cause_label: self.cause_label,
+            action: self.action,
+            outcome: self.outcome,
+        }
+    }
+}
+
 /// Orient: fold `Signal`s into ranked, deduplicated `Problem`s. Dedups against
 /// Simard's in-flight work (so the Overseer never fights an engineer already on
 /// the case) and against problems already collected this cycle.
@@ -1003,6 +1226,8 @@ pub fn orient(signals: &[Signal], in_flight: &[InFlightItem]) -> Vec<Problem> {
             dedup_key: key,
             summary,
             evidence: vec![s.clone()],
+            // Orient stays PURE: the WHY is enriched later in `run_cycle`.
+            why: None,
         });
     }
 
@@ -1217,7 +1442,33 @@ pub fn decide(problem: &Problem) -> Intervention {
                     _ => None,
                 })
             {
-                return decide_blocked_goal(goal_id, reason, perpetual, needs_review);
+                // Root-cause context (issue #2635): the recurrence of this
+                // blocked-goal cause (from memory recall, folded into the WHY),
+                // the one-line WHY string (for the operator escalation), and the
+                // STABLE primary cause label (for a deduped root-cause issue), so
+                // a repeatedly re-parked goal escalates its ROOT CAUSE instead of
+                // being blindly re-unblocked.
+                let recurrence = problem.why.as_ref().map(|w| w.recurrence).unwrap_or(0);
+                let why = problem
+                    .why
+                    .as_ref()
+                    .map(|w| w.to_string())
+                    .unwrap_or_default();
+                let cause_label = problem
+                    .why
+                    .as_ref()
+                    .and_then(|w| w.primary())
+                    .map(|c| c.label.clone())
+                    .unwrap_or_else(|| "unknown-cause".to_string());
+                return decide_blocked_goal(
+                    goal_id,
+                    reason,
+                    perpetual,
+                    needs_review,
+                    recurrence,
+                    why,
+                    cause_label,
+                );
             }
             Intervention::TransferGoal {
                 goal: GoalBrief {
@@ -1284,14 +1535,18 @@ pub fn decide(problem: &Problem) -> Intervention {
 }
 
 /// Route a blocked goal to the right stewardship action (defense-in-depth for
-/// #2609):
+/// #2609 + the MANDATORY ROOT-CAUSE principle #2635):
 ///
-/// - a PERPETUAL/standing goal false-parked by the **no-progress** safeguard is
-///   SELF-HEALED — auto-unblocked + reactivated (never escalated: it is a false
-///   park, not a genuine block);
-/// - ANY OTHER goal carrying a "needs human review" marker (a normal no-progress
-///   block, or any brain-failure block) is ESCALATED to the operator so the
-///   marker reaches a human;
+/// - a RECURRING re-park (memory recall shows the SAME cause re-occurring at or
+///   above [`RECURRENCE_ESCALATION_THRESHOLD`]) is NOT blindly re-unblocked every
+///   cycle (the operator's rejected antipattern). Instead the ROOT CAUSE is
+///   ESCALATED — a deduplicated issue describing *why it keeps getting re-parked*
+///   — so the systemic defect is fixed rather than the symptom re-patched;
+/// - a first-time / infrequent PERPETUAL goal false-parked by the **no-progress**
+///   safeguard is SELF-HEALED — auto-unblocked + reactivated (a root-cause fix
+///   for a false park, not a symptom patch);
+/// - ANY OTHER goal carrying a "needs human review" marker is ESCALATED to the
+///   operator WITH its root-cause WHY so the marker AND its analysis reach a human;
 /// - a plain operator-set / dependency block is surfaced in the periodic Report
 ///   and left untouched (respect the deliberate block).
 ///
@@ -1303,12 +1558,41 @@ fn decide_blocked_goal(
     reason: String,
     perpetual: bool,
     needs_review: bool,
+    recurrence: u32,
+    why: String,
+    cause_label: String,
 ) -> Intervention {
+    // Recurring re-park: escalate the ROOT CAUSE (deduped issue), never re-patch.
+    // The issue's routing + dedup fields are STABLE across recurrences: the
+    // `source_module` routes to Simard (the goal-board/OODA subsystem that
+    // re-parks the goal), and neither `failure_kind` nor `error_text` embeds the
+    // (ever-changing) recurrence count or the rendered WHY — only the stable
+    // `goal_id` + primary `cause_label` — so the same systemic defect is filed
+    // ONCE and deduped by `stewardship::failure_signature`, not once per cycle.
+    if recurrence >= RECURRENCE_ESCALATION_THRESHOLD {
+        return Intervention::FileIssue {
+            run: OrchestratorRunBrief {
+                recipe_name: "overseer-root-cause".to_string(),
+                failed_step: format!("goal-unblock:{goal_id}"),
+                source_module: "simard::overseer".to_string(),
+                failure_kind: "recurring_goal_reblock".to_string(),
+                error_text: format!(
+                    "goal `{goal_id}` is repeatedly re-parked despite symptom-level unblocks; \
+                     the systemic root cause is `{cause_label}`. The Overseer escalates the root \
+                     cause instead of re-patching the symptom every cycle."
+                ),
+            },
+        };
+    }
     if perpetual && is_no_progress_marker(&reason) {
         return Intervention::UnblockGoal { goal_id, reason };
     }
     if needs_review {
-        return Intervention::EscalateBlockedGoal { goal_id, reason };
+        return Intervention::EscalateBlockedGoal {
+            goal_id,
+            reason,
+            why,
+        };
     }
     Intervention::Report
 }

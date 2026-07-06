@@ -110,6 +110,7 @@ nav:
     - Keeping the OODA Daemon Steerable: concepts/steerable-ooda-daemon.md
     - Perpetual Goals Exempt from No-Progress Hard-Block: concepts/perpetual-goal-no-progress-exemption.md
     - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
+    - Overseer Root-Cause (WHY) Principle: concepts/overseer-root-cause-why.md
     - Authoritative Goal-Board Store: concepts/authoritative-goal-board-store.md
     - Goal-Board Corruption Guards: concepts/goal-board-corruption-guards.md
     - File-Backed Goal-Store Simplification: concepts/file-backed-goal-store-simplification.md
@@ -192,6 +193,7 @@ nav:
     - Configure Overseer Memory Recall: howto/configure-overseer-memory-recall.md
     - Configure Overseer Email Notifications: howto/configure-overseer-email-notifications.md
     - Review Overseer Workstream Gaps: howto/review-overseer-workstream-gaps.md
+    - Configure Overseer Root-Cause Principle: howto/configure-overseer-root-cause-why.md
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
     - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
@@ -207,6 +209,7 @@ nav:
     - Overseer Memory-Recall API: reference/overseer-memory-recall-api.md
     - Overseer Operator Notifications: reference/overseer-operator-notifications.md
     - Overseer Workstream Gap-Scan: reference/overseer-workstream-gap-scan.md
+    - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
     - Journal API: reference/journal-api.md
