@@ -140,8 +140,16 @@ pub(crate) fn format_deployed_pt(dt: chrono::DateTime<chrono::Utc>) -> String {
 /// compile-time build timestamp rendered in US Pacific time. `None` when no
 /// build timestamp is baked in, so callers omit the field. This is the exact
 /// value surfaced as the additive `/api/status` `deployed` field.
-pub(crate) fn deployed_pt() -> Option<String> {
-    deployed_timestamp_utc().map(format_deployed_pt)
+///
+/// Cached via `LazyLock`: the build timestamp is a compile-time constant, so
+/// the RFC3339 parse + timezone/DST conversion + string render run once for
+/// the process lifetime instead of on every `/api/status` request. Returning
+/// the cached `&'static str` also avoids a per-request heap allocation. This
+/// mirrors the parse-once `SENTINEL_SESSION_ID` pattern in `goal_curation`.
+pub(crate) fn deployed_pt() -> Option<&'static str> {
+    static DEPLOYED_PT: std::sync::LazyLock<Option<String>> =
+        std::sync::LazyLock::new(|| deployed_timestamp_utc().map(format_deployed_pt));
+    DEPLOYED_PT.as_deref()
 }
 
 async fn status() -> Json<Value> {
