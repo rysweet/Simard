@@ -349,6 +349,20 @@ pub trait GoalCurator {
         Ok(Vec::new())
     }
 
+    /// Project BOTH the goal-board *health* (blocked goals) and the in-flight
+    /// dedup set from ONE board read, so the acting Observe pass reads the board
+    /// once per cycle instead of twice. This halves the per-tick board load
+    /// (`search_facts` + snapshot deserialize) AND guarantees both projections
+    /// come from the SAME snapshot — no intra-cycle drift where the board mutates
+    /// between the two reads.
+    ///
+    /// The default composes the two existing methods (two loads), preserving
+    /// fakes that model neither or only one; the real board-backed adapter
+    /// overrides this to load once.
+    fn observe_board(&self) -> Result<(Vec<BlockedGoal>, Vec<InFlightItem>), OverseerError> {
+        Ok((self.blocked_goals()?, self.in_flight()?))
+    }
+
     /// Auto-unblock + reactivate a false-parked goal — the exact operation
     /// `simard goal unblock` performs: restore a `Blocked` goal to `NotStarted`
     /// so the next OODA cycle re-enters the spawn path.

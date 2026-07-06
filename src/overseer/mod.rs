@@ -281,15 +281,17 @@ impl Overseer {
     pub fn run_cycle(&mut self) -> Result<CycleReport, OverseerError> {
         // Observe.
         let mut observed = self.caps.status.snapshot()?;
-        // Enrich with goal-board health: the goals currently BLOCKED on Simard's
-        // board (false-parks + genuine "needs human review" blocks). Read-only;
-        // a board-read failure degrades to "no blocked goals", never aborts.
-        observed.blocked_goals = self.caps.goals.blocked_goals().unwrap_or_default();
+        // Enrich with goal-board health + in-flight dedup from ONE board read:
+        // the goals currently BLOCKED on Simard's board (false-parks + genuine
+        // "needs human review" blocks) plus Simard's in-flight work, both
+        // projected from the SAME snapshot. Read-only; a board-read failure
+        // degrades both to empty ("no blocked goals" + "no dedup"), never aborts.
+        let (blocked_goals, in_flight) = self.caps.goals.observe_board().unwrap_or_default();
+        observed.blocked_goals = blocked_goals;
         let signals = signals_from(&observed);
 
-        // Orient (dedup against Simard's in-flight work; failure to read the
-        // board degrades to "no dedup", never aborts the cycle).
-        let in_flight = self.caps.goals.in_flight().unwrap_or_default();
+        // Orient (dedup against Simard's in-flight work, read above from the same
+        // board snapshot as the goal-board health above).
         let problems = orient(&signals, &in_flight);
 
         // Decide + gate.
