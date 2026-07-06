@@ -671,6 +671,10 @@ pub(crate) const PART_01: &str = r#"
         setTimeout(()=>{btn.textContent=prev;},900);
       },()=>{});
     }
+    /* Memoized fingerprint of the last-rendered live roster so
+       populateAgentSelect() can no-op when the attachable set is unchanged
+       (avoids per-poll DOM churn and never disrupts an open dropdown). */
+    let agentSelectSig=null;
     /* --- Agent Terminal available-agents picker (issue #2717) ---
        populateAgentSelect() is a pure reader of the shared live registry
        (subagentSessionsCache.live[]) — the SAME source the Workers tab uses to
@@ -682,8 +686,14 @@ pub(crate) const PART_01: &str = r#"
       const sel=document.getElementById('agent-terminal-select');
       if(!sel) return;
       const live=subagentSessionsCache.live||[];
+      // Fingerprint the attach-relevant fields; when the live roster is
+      // unchanged, skip the full option rebuild so a stable set costs nothing
+      // each 5s poll and an open dropdown is never disrupted.
+      const sig=live.map(s=>[s.agent_id,s.host,s.session_name,s.goal_id].join('\x1f')).join('\x1e');
+      if(sig===agentSelectSig) return;
+      agentSelectSig=sig;
       const prev=sel.value;
-      while(sel.firstChild) sel.removeChild(sel.firstChild);
+      sel.replaceChildren();
       if(!live.length){
         const opt=document.createElement('option');
         opt.value='';opt.disabled=true;opt.selected=true;
@@ -707,7 +717,7 @@ pub(crate) const PART_01: &str = r#"
       /* Preserve the operator's prior pick across the 5s rebuild without firing
          an attach (a programmatic .value assignment never dispatches 'change').
          Only fall back to the first agent when the prior pick has left live[]. */
-      const stillPresent=Array.prototype.some.call(sel.options,o=>o.value===prev&&prev!=='');
+      const stillPresent=prev!==''&&Array.prototype.some.call(sel.options,o=>o.value===prev);
       sel.value=stillPresent?prev:sel.options[0].value;
     }
     /* Fires only on a genuine user change (never the programmatic rebuild
