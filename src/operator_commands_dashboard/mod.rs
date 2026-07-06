@@ -48,6 +48,13 @@ mod tests_goal_records_migration;
 mod tests_goals_crud;
 #[cfg(test)]
 mod tests_ooda_cycles_history;
+// Issue #26: the Logs tab's "Cycle Reports" card (#cycle-reports) must show the
+// live cycle index (unioned across both persisted dirs, newest-first), the real
+// per-cycle tree status, full OODA detail in the shared Thinking-tab shape, and
+// collapse identical no-progress cycles — agreeing with the Thinking view via
+// one shared reader.
+#[cfg(test)]
+mod tests_cycle_reports_activity;
 #[cfg(test)]
 mod tests_routes_a;
 #[cfg(test)]
