@@ -29,7 +29,8 @@
 use serial_test::serial;
 
 use super::{
-    RememberFactArgs, dispatch_memory_command, parse_remember_fact_args, run_remember_fact,
+    RememberFactArgs, dispatch_memory_command, parse_remember_fact_args, resolve_pass_id,
+    run_remember_fact,
 };
 
 /// RAII env guard so the daemon-down test cannot be perturbed by a
@@ -43,6 +44,17 @@ impl EnvGuard {
         let prev = std::env::var_os(key);
         unsafe {
             std::env::remove_var(key);
+        }
+        Self { key, prev }
+    }
+
+    /// Set `key` to `value` for the guard's lifetime, restoring the prior value
+    /// (or unset state) on drop. Used to inject `SIMARD_DISTILL_PASS_ID` /
+    /// `SIMARD_MEMORY_SOCKET` for the real-distill-path regression test.
+    fn set(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
         }
         Self { key, prev }
     }
@@ -246,4 +258,101 @@ fn dispatch_still_rejects_unknown_subcommand() {
         .expect_err("unknown subcommand must error")
         .to_string();
     assert!(err.contains("frobnicate"), "{err}");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Pass-id resolution — the distill runner tags the ledger via env, not a flag
+// (issue #2679 silent-metrics regression)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Precedence contract for [`resolve_pass_id`]: a non-empty explicit `--pass-id`
+/// wins; otherwise the `SIMARD_DISTILL_PASS_ID` env var (exported by the distill
+/// runner) is the fallback; empty/absent in both yields "" (no ledger tagging).
+#[test]
+#[serial(cognitive_memory)]
+fn resolve_pass_id_prefers_flag_then_env() {
+    let _guard = EnvGuard::unset("SIMARD_DISTILL_PASS_ID");
+
+    // Neither source set → empty (no ledger participation).
+    assert_eq!(resolve_pass_id(None), "");
+    assert_eq!(resolve_pass_id(Some("")), "");
+
+    // Explicit flag wins even when the env var is also set.
+    let _env = EnvGuard::set("SIMARD_DISTILL_PASS_ID", "from-env");
+    assert_eq!(resolve_pass_id(Some("from-flag")), "from-flag");
+
+    // No (usable) flag → fall back to the env var the runner exports.
+    assert_eq!(resolve_pass_id(None), "from-env");
+    assert_eq!(resolve_pass_id(Some("")), "from-env");
+}
+
+/// Real distill-path regression (issue #2679): the distiller agent runs
+/// `simard memory remember` with ONLY the content flags — the pass id reaches
+/// the CLI solely through the `SIMARD_DISTILL_PASS_ID` env var the runner
+/// exports. This drives the actual [`run_remember_fact`] entry point against a
+/// live gate and proves the env-var fallback tags the server's per-pass ledger,
+/// so `drain_pass_ledger` returns the real accepted-fact count on production.
+///
+/// Before the fallback, `run_remember_fact` resolved an EMPTY pass id here, the
+/// server's `ledger_record_stored` no-op'd it, and the drain returned 0 — the
+/// silent-degradation bug that made every distill pass report `fact_count = 0` /
+/// `reduction_pct = 100%` while facts were actually stored. Every prior test
+/// passed `--pass-id` explicitly, so none exercised this production path.
+#[test]
+#[serial(cognitive_memory)]
+fn remember_without_flag_tags_ledger_from_env_pass_id() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::memory_ipc::{RemoteCognitiveMemory, spawn_server};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = dir.path().join("memory.sock");
+    let mem: Arc<dyn CognitiveMemoryOps> =
+        Arc::new(LibraryCognitiveMemory::in_memory().expect("in-memory db"));
+
+    // Seed a real episode so the cited fact is grounded and the gate accepts it.
+    let episode_id = mem
+        .store_episode(
+            "empty outcome list panicked the cycle",
+            "engineer-cycle",
+            None,
+        )
+        .expect("store_episode");
+
+    let _handle = spawn_server(sock.clone(), Arc::clone(&mem)).expect("spawn server");
+    for _ in 0..50 {
+        if sock.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(sock.exists(), "server socket must come up");
+
+    // Point the CLI at THIS server and supply the pass id ONLY via the env var
+    // the distill runner exports — exactly the production invocation shape.
+    let pass_id = format!("env-path-{}", std::process::id());
+    let _sock_env = EnvGuard::set("SIMARD_MEMORY_SOCKET", sock.to_str().unwrap());
+    let _pass_env = EnvGuard::set("SIMARD_DISTILL_PASS_ID", &pass_id);
+
+    // NOTE: no `--pass-id` flag — the recipe never tells the agent to pass one.
+    let code = run_remember_fact(argv(&[
+        "--concept=bug-pattern",
+        "--content=empty outcome list panics cycle",
+        &format!("--source-episode-id={episode_id}"),
+    ]));
+    assert_eq!(
+        code, 0,
+        "a grounded fact against a reachable daemon must store (exit 0), got {code}"
+    );
+
+    // The env-var pass id must have tagged the ledger; a 0 here is the #2679
+    // silent-metrics regression (facts stored but the pass reports none).
+    let client = RemoteCognitiveMemory::connect(&sock).expect("connect");
+    assert_eq!(
+        client.drain_pass_ledger(&pass_id).expect("drain"),
+        1,
+        "the env-var pass id must tag the write ledger even with no --pass-id flag"
+    );
 }

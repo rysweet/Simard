@@ -30,6 +30,15 @@
 #     `simard memory remember ...` reaches the right daemon. This var is provided
 #     for reference / explicit `--` state-root use.
 #
+# Pass-id ledger (issue #2679): the distill subprocess also exports a
+# SIMARD_DISTILL_PASS_ID environment variable that tags every fact this pass
+# commits, so the daemon can count accepted facts on a path with no return
+# document. The `simard memory remember` tool reads that env var itself — the
+# agent MUST NOT pass a `--pass-id` flag (it is intentionally absent from the
+# flag list below). Inheriting the pass id via the environment, rather than
+# relying on the agent to echo a flag, is what keeps the fact count correct
+# without reintroducing an LLM-formatting failure surface.
+#
 # Output: NONE on stdout. The agent's fact/procedure WRITES (via the tool) are
 # the entire output. Whatever the agent prints to the terminal is ignored —
 # Simard interprets this recipe by its EXIT STATUS alone.

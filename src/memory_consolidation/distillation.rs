@@ -763,14 +763,16 @@ impl RecipeRunnerSubprocess {
             // fallback (issue #2679).
             .env("SIMARD_MEMORY_SOCKET", &self.memory_socket)
             // Tag this pass so the daemon's write ledger can report accepted-fact
-            // counts back to this runner.
-            .env("SIMARD_DISTILL_PASS_ID", pass_id)
+            // counts back to this runner. The agent invokes `simard memory
+            // remember` with only the content flags (no `--pass-id`), so the CLI
+            // reads this env var as its pass-id source (issue #2679). This env
+            // var is the ONLY channel — it is inherited by every remember
+            // subprocess the agent spawns.
+            .env(crate::memory_ipc::DISTILL_PASS_ID_ENV, pass_id)
             .arg("-c")
             .arg(episodes_cf.arg_value())
             .arg("-c")
             .arg(format!("memory_socket={socket_arg}"))
-            .arg("-c")
-            .arg(format!("pass_id={pass_id}"))
             .output()
             .map_err(|e| {
                 SimardError::RpcError(format!("distill: recipe-runner-rs spawn failed: {e}"))

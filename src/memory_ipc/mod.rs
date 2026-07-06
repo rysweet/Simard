@@ -103,6 +103,22 @@ pub fn socket_path_for(state_root: &Path) -> PathBuf {
 /// daemon at a known path.
 pub const MEMORY_SOCKET_ENV: &str = "SIMARD_MEMORY_SOCKET";
 
+/// Environment variable that carries the distillation pass id to every
+/// `simard memory remember` subprocess the distiller agent spawns (issue
+/// #2679).
+///
+/// The distill runner exports this so a fact write tags the daemon's per-pass
+/// write ledger even though the agent invokes the CLI with only the scalar
+/// content flags (`--concept` / `--content` / `--source-episode-id`) and NO
+/// explicit `--pass-id`. The `remember` CLI reads it as a fallback when
+/// `--pass-id` is absent; that fallback is what lets `drain_pass_ledger`
+/// report a real accepted-fact count on the production
+/// distill path. Without it the pass id resolved empty, the server's ledger
+/// no-op'd the write, and every pass reported `fact_count = 0` /
+/// `reduction_pct = 100%` while facts were in fact stored (the silent
+/// metrics-degradation regression fixed in the #2679 follow-up).
+pub const DISTILL_PASS_ID_ENV: &str = "SIMARD_DISTILL_PASS_ID";
+
 /// Environment variable that opts a test out of the hermetic-state-root
 /// guard. Read by the cfg(test)-only assertion sites
 /// (`save_goal_board` / `save_goal_board_with_removals`, the cognitive-memory

@@ -363,7 +363,7 @@ pub(crate) fn run_remember_fact(args: Vec<String>) -> i32 {
         Some(id) => format!("distill:{id}"),
         None => "distill".to_string(),
     };
-    let pass_id = parsed.pass_id.clone().unwrap_or_default();
+    let pass_id = resolve_pass_id(parsed.pass_id.as_deref());
     // The confidence is a hint the server ignores; pass 0.0 when unset.
     let confidence_hint = parsed.confidence.unwrap_or(0.0);
 
@@ -467,7 +467,7 @@ pub(crate) fn run_remember_procedure(args: Vec<String>) -> i32 {
             return 3;
         }
     };
-    let pass_id = pass_id.unwrap_or_default();
+    let pass_id = resolve_pass_id(pass_id.as_deref());
     match client.remember_procedure_provenance(
         &name,
         &steps,
@@ -490,6 +490,34 @@ pub(crate) fn run_remember_procedure(args: Vec<String>) -> i32 {
 /// the daemon uses (`$SIMARD_STATE_ROOT`, then `$HOME/.simard`).
 fn resolve_state_root(explicit: Option<PathBuf>) -> PathBuf {
     explicit.unwrap_or_else(crate::state_root::simard_state_root)
+}
+
+/// Resolve the distillation pass id for a `remember` / `remember-procedure`
+/// write (issue #2679).
+///
+/// Precedence: a non-empty explicit `--pass-id` flag wins; otherwise fall back
+/// to the [`DISTILL_PASS_ID_ENV`] environment variable the distill runner
+/// exports to every remember subprocess. An empty result (neither source set)
+/// means "no ledger participation" — the server's ledger deliberately no-ops.
+///
+/// The env fallback is the fix for the silent metrics-degradation regression:
+/// the distiller agent runs `simard memory remember` with only the content
+/// flags and no `--pass-id`, so without this fallback the pass id resolved
+/// empty, the server ledger dropped the write, and `drain_pass_ledger` returned
+/// 0 — making every distill pass report `fact_count = 0` / `reduction_pct =
+/// 100%` even though facts were stored. Only tests (which pass `--pass-id`
+/// explicitly) exercised the ledger, hiding the production breakage.
+fn resolve_pass_id(explicit: Option<&str>) -> String {
+    if let Some(p) = explicit
+        && !p.is_empty()
+    {
+        return p.to_string();
+    }
+    std::env::var(crate::memory_ipc::DISTILL_PASS_ID_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_default()
 }
 
 /// Best-effort access-tier label for the banner. The daemon socket is
