@@ -151,6 +151,11 @@ pub fn observed_from_snapshot(snap: &StatusSnapshot) -> ObservedState {
         // read-only status snapshot; left empty here so this projection stays
         // additive and side-effect free.
         workstream_gaps: Vec::new(),
+        // Step-failure diagnoses (#2640) are drained from the process-global
+        // failure sink by the ACTING Overseer's Observe pass, not from the
+        // read-only status snapshot; left empty here so this projection stays
+        // additive and side-effect free.
+        recent_step_failures: Vec::new(),
     }
 }
 

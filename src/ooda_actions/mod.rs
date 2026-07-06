@@ -14,6 +14,10 @@ mod goal_session;
 mod session;
 mod simple_actions;
 
+/// Public builder for the OODA launch-session shell command — pins the
+/// argv-free stdin transport contract (issue #2640) for integration tests.
+pub use session::build_ooda_launch_command;
+
 // Fix 3 (no-progress breaker): the OODA cycle's curate phase reads this
 // classifier to detect a no-shippable-progress cycle. Co-located with its
 // detail author `goal_session::advance::assess_only_outcome`.

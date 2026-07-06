@@ -51,6 +51,8 @@ pub mod capabilities;
 pub mod config;
 pub mod conflict;
 pub mod deploy;
+pub mod diagnosis;
+pub mod failure_sink;
 pub mod guardrails;
 pub mod intervention;
 pub mod launch;
@@ -92,6 +94,7 @@ pub use config::{
     daily_budget_usd, gap_scan_enabled, gap_scan_every_n, goal_health_enabled,
     memory_recall_enabled, overseer_acting_enabled, overseer_author_login, overseer_enabled,
 };
+pub use diagnosis::{FailureCause, FailureDiagnosis, classify_terminal_failure};
 pub use guardrails::{
     AutonomyGate, BudgetGate, ConflictSequencer, RecursionGuard, RiskClass, Subject,
     WhisperDecision, WhisperGate, classify,
@@ -398,6 +401,15 @@ impl Overseer {
             .goals
             .workstream_gaps(&observed.anomalies)
             .unwrap_or_default();
+
+        // Drain diagnosed step failures (#2640, PART 2) from the process-global
+        // failure sink into this Observe pass, so a caught decision-cycle /
+        // engineer / terminal-shell failure surfaces as a corrective
+        // `Signal::StepFailureDiagnosed` the Orient/Decide loop acts on — a fix,
+        // not a silent log line. Draining here (not in the pure
+        // `observed_from_snapshot` projection) keeps that projection side-effect
+        // free; the sink is bounded so this is O(capacity).
+        observed.recent_step_failures = failure_sink::drain_recent();
 
         // Cognitive-memory recall (#2628) — the USE step. Key off the pre-recall
         // signals/problems (never a full-graph scan), then run ONE whole-pass,
@@ -1372,6 +1384,26 @@ fn classify_signal(s: &Signal) -> (ProblemKind, Priority, String, String) {
             "workstream-gap".to_string(),
             format!("{} uncovered workstream(s)", gaps.len()),
         ),
+        // A diagnosed step failure (#2640): a broken OODA step is HIGH priority.
+        // The dedup key is the root cause so repeat failures of the SAME cause
+        // collapse into one corrective problem (Orient merges same-key signals)
+        // rather than spawning a workstream per occurrence.
+        Signal::StepFailureDiagnosed {
+            cause, exit_code, ..
+        } => (
+            ProblemKind::StepFailure,
+            Priority::High,
+            format!("step-failure:{}", cause.as_str()),
+            match exit_code {
+                Some(code) => {
+                    format!(
+                        "OODA step failed — root cause {} (exit {code})",
+                        cause.as_str()
+                    )
+                }
+                None => format!("OODA step failed — root cause {}", cause.as_str()),
+            },
+        ),
     }
 }
 
@@ -1530,6 +1562,42 @@ pub fn decide(problem: &Problem) -> Intervention {
                 })
                 .unwrap_or_default();
             Intervention::FlagWorkstreamGaps { gaps }
+        }
+        // A diagnosed step failure drives a CORRECTIVE workstream (#2640, PART 2):
+        // launch a recipe that diagnoses the WHY and applies the remedy, keyed to
+        // the real root cause and pointed at the self-diagnosis prompt asset (G3).
+        // NEVER a passive Report / silent log.
+        ProblemKind::StepFailure => {
+            let (cause, exit_code, evidence) = problem
+                .evidence
+                .iter()
+                .find_map(|s| match s {
+                    Signal::StepFailureDiagnosed {
+                        cause,
+                        exit_code,
+                        evidence,
+                    } => Some((*cause, *exit_code, evidence.clone())),
+                    _ => None,
+                })
+                .unwrap_or((FailureCause::Unknown, None, String::new()));
+            let code = exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string());
+            Intervention::LaunchRecipe {
+                brief: RecipeBrief {
+                    task_description: format!(
+                        "Self-diagnose and fix a failed OODA step (decision-cycle / engineer / \
+                         terminal-shell). Diagnosed root cause: {cause} (exit {code}). Follow \
+                         prompt_assets/simard/overseer/self_diagnose.md — determine WHY it \
+                         happened from the error and last terminal output, then apply the \
+                         corrective remedy so the step succeeds (do not merely log it). \
+                         Evidence: {evidence}",
+                        cause = cause.as_str(),
+                    ),
+                    target_repo: "rysweet/Simard".to_string(),
+                    sequence_group: None,
+                },
+            }
         }
     }
 }

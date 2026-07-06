@@ -127,6 +127,7 @@ fn candidates_for(problem: &Problem, observed: &ObservedState) -> Vec<CauseCandi
         ProblemKind::DriftCorrection => drift_candidates(problem),
         ProblemKind::CrossCutting => cross_cutting_candidates(),
         ProblemKind::WorkstreamCoverage => workstream_coverage_candidates(problem),
+        ProblemKind::StepFailure => step_failure_candidates(problem),
     }
 }
 
@@ -451,6 +452,38 @@ fn workstream_coverage_candidates(problem: &Problem) -> Vec<CauseCandidate> {
             "{n} high-value item(s) (goal/issue/anomaly) have no active workstream, PR, or fix in \
              flight — a backlog-coverage gap"
         )],
+    )]
+}
+
+/// A diagnosed step failure (#2640) already carries its structured root cause in
+/// the evidence signal — the classifier answered WHY at the catch site — so the
+/// candidate is that cause verbatim, at high likelihood.
+fn step_failure_candidates(problem: &Problem) -> Vec<CauseCandidate> {
+    for s in &problem.evidence {
+        if let Signal::StepFailureDiagnosed {
+            cause,
+            exit_code,
+            evidence,
+        } = s
+        {
+            let code = exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string());
+            return vec![cand(
+                cause.as_str(),
+                Likelihood::High,
+                [format!(
+                    "a decision-cycle / engineer / terminal-shell step failed with diagnosed root \
+                     cause {} (exit {code}): {evidence}",
+                    cause.as_str()
+                )],
+            )];
+        }
+    }
+    vec![cand(
+        "step-failure-undiagnosed",
+        Likelihood::Medium,
+        ["a step failed but no structured diagnosis was attached to the problem"],
     )]
 }
 
