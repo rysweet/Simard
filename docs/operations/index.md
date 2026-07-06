@@ -11,6 +11,7 @@ Simard deployment.
 | [Cognitive-Memory WAL Recovery Runbook](cognitive-memory-wal-recovery-runbook.md) | Corrupt-WAL recovery, `memory import`, startup auto-restore, asset preservation (#2550) |
 | [Meeting REPL & Handoff Ingestion](meeting-handoffs.md) | Routing operator intent into the OODA loop |
 | [Progress-Evidence Kill Switch](progress-evidence-kill-switch.md) | `SIMARD_PROGRESS_EVIDENCE=off` and when to use it |
+| [Stale-Deploy Incident Runbook](stale-deploy-distill-and-blocked-goals-runbook.md) | 100% distill parse-fail + blocked kgpacks-rs goals + `gym_skipped` — diagnose & recover |
 
 Related how-to guides:
 
