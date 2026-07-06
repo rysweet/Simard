@@ -106,7 +106,7 @@ pub(crate) const PART_01: &str = r#"
         <div class="ws-status disconnected" id="ws-status">● Disconnected <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button></div>
         <div id="chat-messages"></div>
         <div id="chat-input-row">
-          <textarea id="chat-input" placeholder="Type a message… (/close to end session)"></textarea>
+          <textarea id="chat-input" rows="1" placeholder="Type a message… (/close to end session)"></textarea>
           <button id="chat-send" onclick="sendChat()">Send</button>
         </div>
       </div>
