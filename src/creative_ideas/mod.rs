@@ -1,16 +1,16 @@
-//! Creative Ideas subsystem (design spike #2419) — an idea-generation subsystem
+//! Creative Ideas subsystem (issue #2647) — an idea-generation subsystem
 //! that primes a pool of candidate self-improvement ideas inside the single
 //! Simard brain.
 //!
-//! **Status: design + typed foundation + tests, gated OFF.** This module owns
-//! the reviewer-pipeline trait and adapters ([`reviewers`]), the synthesis step
-//! ([`synthesis`]), the routing functions ([`routing`]), the dedup/portfolio/
-//! budget helpers ([`dedup`]), and the config flag ([`CreativeIdeasConfig`]).
-//! The `CreativeIdea` prospective type lives in
-//! [`crate::cognitive_memory::creative_idea`] and the generator thread in
-//! [`crate::cognitive_threads::threads::creative_ideas`]. Nothing here is wired
-//! into the daemon; the generator is OFF by default behind
-//! `SIMARD_CREATIVE_IDEAS_ENABLED`. The operator redeploys after merge.
+//! **Status: live, default-ON opt-out.** This module owns the reviewer-pipeline
+//! trait and adapters ([`reviewers`]), the synthesis step ([`synthesis`]), the
+//! routing functions ([`routing`]), the dedup/portfolio/budget helpers
+//! ([`dedup`]), and the config flag ([`CreativeIdeasConfig`]). The `CreativeIdea`
+//! prospective type lives in [`crate::cognitive_memory::creative_idea`] and the
+//! generator thread in [`crate::cognitive_threads::threads::creative_ideas`],
+//! which the OODA daemon registers on startup — default-ON, opt-out via
+//! `SIMARD_CREATIVE_IDEAS_ENABLED`, consistent with the Overseer/Journal threads
+//! and independent of the generic `SIMARD_COGNITIVE_THREADS_ENABLED` switch.
 //!
 //! No type or module is a transport shim — this is one brain with
 //! cognitive threads and reviewers, not a separate service.

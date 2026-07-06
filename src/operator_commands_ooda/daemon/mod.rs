@@ -575,20 +575,29 @@ pub fn run_ooda_daemon(
     );
     // -------------------------------------------------------------------
 
-    // ── Cognitive-thread scheduler (issue #2419) ───────────────────────
-    // ADDITIVE and OFF by default. When SIMARD_COGNITIVE_THREADS_ENABLED is
-    // truthy, a `Mind` hosts NEW background cognitive threads (safe
-    // maintenance/cleanup + engineer-log analysis) on their own cadence,
-    // subsuming the ad-hoc periodic-task pattern for these threads. OODA
-    // itself stays driven by this loop's authoritative inline cycle below so
-    // its external cadence and side-effects are byte-for-byte preserved; the
-    // scheduler is invoked only AFTER the inline cycle and never gates it.
+    // ── Cognitive-thread scheduler (issue #2419 + #2647) ───────────────
+    // ADDITIVE. A `Mind` hosts background cognitive threads on their own
+    // cadence, subsuming the ad-hoc periodic-task pattern. OODA itself stays
+    // driven by this loop's authoritative inline cycle below so its external
+    // cadence and side-effects are byte-for-byte preserved; the scheduler is
+    // invoked only AFTER the inline cycle and never gates it.
+    //
+    // Two INDEPENDENT gates share the one runtime:
+    //   * SIMARD_COGNITIVE_THREADS_ENABLED (default-OFF) owns the maintenance +
+    //     engineer-log threads — their gating and timing stay unchanged.
+    //   * SIMARD_CREATIVE_IDEAS_ENABLED (default-ON, opt-out) owns the Creative
+    //     Ideas generator (issue #2647), consistent with the default-ON
+    //     Overseer/Journal threads — so it runs on a stock deployment WITHOUT
+    //     the generic master switch.
     let cognitive_threads_enabled = std::env::var("SIMARD_COGNITIVE_THREADS_ENABLED")
         .ok()
         .map(|s| matches!(s.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
         .unwrap_or(false);
+    let creative_ideas_cfg = crate::creative_ideas::CreativeIdeasConfig::from_env();
+    let creative_ideas_enabled = creative_ideas_cfg.enabled();
     let cognitive_repo_root = bridges.repo_root.clone();
-    let cognitive_runtime = if cognitive_threads_enabled {
+    // Build the shared runtime when EITHER gate wants a thread to run.
+    let cognitive_runtime = if cognitive_threads_enabled || creative_ideas_enabled {
         match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -608,19 +617,23 @@ pub fn run_ooda_daemon(
     };
     let mut mind = crate::cognitive_threads::Mind::new();
     if cognitive_runtime.is_some() {
-        mind.register(Box::new(
-            crate::cognitive_threads::MaintenanceThread::from_env(),
-        ));
-        mind.register(Box::new(
-            crate::cognitive_threads::EngineerLogAnalysisThread::from_env(),
-        ));
-        // Creative Ideas generator thread (issue #2606-adjacent): a divergent
+        // Maintenance + engineer-log stay behind the generic master switch so
+        // their default-OFF gating and timing are unchanged.
+        if cognitive_threads_enabled {
+            mind.register(Box::new(
+                crate::cognitive_threads::MaintenanceThread::from_env(),
+            ));
+            mind.register(Box::new(
+                crate::cognitive_threads::EngineerLogAnalysisThread::from_env(),
+            ));
+        }
+        // Creative Ideas generator thread (issue #2647): a divergent
         // idea-generation background thread, default-ON opt-out via
-        // `SIMARD_CREATIVE_IDEAS_ENABLED` (its `enabled()` gate keeps an
-        // opted-out thread inert). Reuses `ThreadKind::BackgroundThought`.
-        crate::cognitive_threads::threads::creative_ideas::register(
+        // `SIMARD_CREATIVE_IDEAS_ENABLED`, INDEPENDENT of the generic master
+        // switch above. The gate seam registers nothing when opted out.
+        crate::cognitive_threads::threads::creative_ideas::register_creative_ideas_if_enabled(
             &mut mind,
-            crate::creative_ideas::CreativeIdeasConfig::from_env(),
+            &creative_ideas_cfg,
         );
         // NOTE: the Overseer M1 read-only observer sensor that previously
         // registered here (default-OFF, `SIMARD_OVERSEER_ENABLED` truthy) is
@@ -637,6 +650,20 @@ pub fn run_ooda_daemon(
             ),
         );
     }
+    // Creative-ideas startup line (mirrors the Journal thread) — logged
+    // unconditionally so the operator can confirm the gate from journalctl.
+    let creative_ideas_startup_line = if creative_ideas_enabled {
+        format!(
+            "[simard] OODA daemon: creative-ideas thread ENABLED (default) \
+             (interval = {}s; SIMARD_CREATIVE_IDEAS_ENABLED opt-out)",
+            creative_ideas_cfg.interval_secs
+        )
+    } else {
+        "[simard] OODA daemon: creative-ideas thread DISABLED \
+         (SIMARD_CREATIVE_IDEAS_ENABLED opt-out)"
+            .to_string()
+    };
+    daemon_log(&state_root, &creative_ideas_startup_line);
 
     // ── Acting Overseer co-process (issue #2539 wiring) ─────────────────
     // ADDITIVE and DEFAULT-ON: the daemon drives the Overseer's meta-OODA loop

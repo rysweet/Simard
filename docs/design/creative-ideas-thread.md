@@ -9,9 +9,9 @@ description: >
   and existing agent/skill invocation. Covers the CreativeIdea prospective-memory
   data model, the status state-machine, the generator thread inputs, the four-reviewer
   pipeline, the routing (idea→goal, idea→issue, idea-PR human-review gate), the safety
-  model, and a phased roadmap. Design + typed foundation + tests only — gated OFF by
-  default; no autonomous behavior; the operator redeploys after merge.
-last_updated: 2026-07-05
+  model, and a phased roadmap. Implemented and wired into the running daemon —
+  default-ON, opt-out via SIMARD_CREATIVE_IDEAS_ENABLED; the operator redeploys after merge.
+last_updated: 2026-07-06
 review_schedule: as-needed
 owner: simard
 doc_type: design
@@ -61,42 +61,41 @@ The design must satisfy three constraints that shaped every decision below:
 1. **One brain.** This is not a new service or a "Bridge." It is a **cognitive thread**
    plus a set of **reviewers** inside the single Simard brain, reusing the Mind
    scheduler and existing memory/goal/gh subsystems.
-2. **Safe by construction.** The subsystem is OFF by default; high-risk or
-   irreversible ideas *always* route to human review; PRs born from creative ideas are
-   **blocked from merge** (draft + label + owner review-required) until a human
-   approves — enforced **without** `--admin` or `--no-verify`.
+2. **Safe by construction.** The subsystem is **default-ON, opt-out** (consistent
+   with the Overseer and Journal threads), but safe regardless of the switch:
+   high-risk or irreversible ideas *always* route to human review; PRs born from
+   creative ideas are **blocked from merge** (draft + label + owner review-required)
+   until a human approves — enforced **without** `--admin` or `--no-verify`.
 3. **Measured, not vibes.** Every accepted idea carries a concrete **success metric**
    (tied where possible to existing self-metrics) and only reaches
    `ImplementationCompleted` when that metric is met.
 
 ## Goals and non-goals
 
-**Goals (this spike):**
+**Delivered:**
 
 - A durable design (this document): data model, status state-machine, thread inputs,
   reviewer pipeline, routing, safety, and future milestones.
-- Typed, tested Rust scaffolding for: the `CreativeIdea` prospective-memory type +
-  status state-machine + store/retrieve; the generator-thread skeleton (typed inputs,
-  pluggable idea-source, gated OFF); the reviewer-pipeline trait + four adapters +
-  synthesis (interfaces + fakes); the routing interfaces (idea→goal, idea→issue+owner,
-  idea-PR draft+label+owner-review gate) as typed functions with fakes.
+- Typed, tested Rust for: the `CreativeIdea` prospective-memory type + status
+  state-machine + store/retrieve; the generator thread (typed inputs, pluggable
+  idea-source, **registered with the Mind scheduler**, default-ON opt-out); the
+  reviewer-pipeline trait + four adapters + synthesis; the routing (idea→goal,
+  idea→issue+owner, idea-PR draft+label+owner-review gate) as typed functions.
+- **Daemon wiring:** the thread is registered from the OODA daemon's
+  cognitive-thread setup and ticks on its cadence, with a dedicated startup log
+  line and a per-tick summary (see [Daemon wiring](#daemon-wiring)).
+- A production agent-backed idea source, real skill/agent reviewer adapters, and
+  a real `gh` routing seam — all driven by the wired thread.
 - Tests with **no network** (fakes for reviewers / goal-store / issue-filer / gh /
-  clock).
+  clock), including that an enabled tick generates + reviews + routes, that the
+  daemon registers the thread when enabled, and that it is not registered when
+  opted out.
 
 **Non-goals (explicitly future work):**
 
-- Wiring the thread into the Mind scheduler / daemon `main` (no runtime behavior
-  change).
-- A production LLM idea-source (the spike ships a pluggable trait + a deterministic
-  fake).
-- Real reviewer execution against the `crusty-old-engineer` skill / `philosophy-guardian`
-  agent (the spike ships adapters that shape the invocation but run through fakes in
-  tests).
-- Extending `GhClient` with real label/assignee/draft/review-request subprocess calls
-  (the spike defines the seam and tests it with a fake; the real `gh` calls are a
-  marked `// FUTURE:` stub).
-- A native "links" edge type in prospective memory (see Decision 1 — links are carried
-  in the payload for now).
+- Adaptive cadence / richer portfolio + novelty scoring (M6 tuning).
+- A native "links" edge type in prospective memory (see Decision 1 — links are
+  carried in the payload for now; a `payload_version` 2 migration is future work).
 
 ## Key decisions (resolved ambiguities)
 
@@ -105,7 +104,7 @@ The design must satisfy three constraints that shaped every decision below:
 | 1 | Model `CreativeIdea` as a typed struct that **round-trips to/from** a `CognitiveProspective` node. Store `status`, `context`, and typed `links` as a JSON payload in `action_on_trigger`; `description` = the idea text; `status` mirrored into the prospective `status: String`. A thin `CreativeIdeaStore` seam wraps `store_prospective` / `list_all_prospective`. | Zero schema change to prospective memory; fully round-trippable; marks a native links field as future work. |
 | 2 | Reuse **`ThreadKind::BackgroundThought`** for the generator thread; do not add an enum variant. | The variant is already reserved for "idle associative background thought"; avoids touching the enum and its exhaustive matches. |
 | 3 | New top-level **`src/creative_ideas/`** owns the reviewer-pipeline trait, the four adapters, synthesis, routing, dedup/portfolio, and the config flag. The prospective type lives in `src/cognitive_memory/creative_idea.rs`; the generator thread in `src/cognitive_threads/threads/creative_ideas.rs`. | Respects "prospective type in `cognitive_memory`, thread in `cognitive_threads`" while keeping pipeline/routing cohesive and independently testable. |
-| 4 | Do **not** mutate the live `gh` tooling. Define an `IdeaGhClient` **extension seam** (labeled+assigned issue creation; PR draft/label/owner-review-request) with a fake for tests; the real subprocess wiring is a marked `// FUTURE:` stub. Reuse the existing `GhClient` (`src/stewardship/gh_client.rs`) pattern; never `--admin` / `--no-verify`. | The existing `GhClient` has only `search_issues` / `create_issue`; the gate needs labels/assignees/draft/review. Extending it live would touch the daemon; the seam keeps the spike additive and testable. |
+| 4 | Do **not** mutate the live `gh` tooling. Define an `IdeaGhClient` **extension seam** (labeled+assigned issue creation; PR draft/label/owner-review-request), faked in tests and backed in production by `RealIdeaGhClient` (a `gh` subprocess impl using pure argv builders). Reuse the existing `GhClient` (`src/stewardship/gh_client.rs`) pattern; never `--admin` / `--no-verify`. | The existing `GhClient` has only `search_issues` / `create_issue`; the gate needs labels/assignees/draft/review. A separate seam adds these without touching the daemon's `gh` tooling and keeps every side effect independently testable with a fake. |
 
 ## Reuse map (what this design builds on — no duplication)
 
@@ -298,11 +297,14 @@ pub trait IdeaSource {
 }
 ```
 
-- **Spike:** a deterministic `FakeIdeaSource` (used by tests) + a marked `// FUTURE:`
-  `LlmIdeaSource` stub. The thread targets **ten** ideas per run (the design's fixed
-  batch), then applies dedup/portfolio filtering (below).
+- **Production:** `AgenticIdeaSource` renders the generation prompt asset and runs
+  one agentic turn through the shared `AgentInvoker` seam (idle-liveness, no
+  wall-clock cap), fail-closed on a missing JSON envelope. **Tests:** a
+  deterministic `FakeIdeaSource`. The thread targets **ten** ideas per run (the
+  design's fixed batch), then applies dedup/portfolio filtering (below).
 - Each surviving `RawIdea` becomes a `CreativeIdea { status: New, links, context }`,
-  is persisted via `CreativeIdeaStore`, and (in the wired future) enqueued for review.
+  is persisted via `CreativeIdeaStore`, and is driven through the review-and-route
+  pipeline by the same tick.
 
 ## Reviewer pipeline
 
@@ -455,10 +457,11 @@ pub trait IdeaGhClient {
 }
 ```
 
-- **Spike:** `FakeIdeaGhClient` records calls for assertions; the real subprocess impl
-  (`gh issue create --label ... --assignee ...`, `gh pr ready --undo`, `gh pr edit
-  --add-label`, `gh pr edit --add-reviewer`) is a marked `// FUTURE:` stub that reuses
-  the `RealGhClient` subprocess pattern from `src/stewardship/gh_client.rs`.
+- **Production:** `RealIdeaGhClient` shells out via pure argv builders
+  (`gh issue create --label … --assignee …`, `gh pr ready --undo`, `gh pr edit
+  --add-label`, `gh pr edit --add-reviewer`), reusing the `RealGhClient`
+  subprocess pattern from `src/stewardship/gh_client.rs`. **Tests:**
+  `FakeIdeaGhClient` records calls for assertions.
 - **Never** emits `--admin` or `--no-verify`; a unit test asserts the constructed
   argument vectors contain neither flag.
 
@@ -561,8 +564,8 @@ remain stable are three; each has an explicit version discipline:
 | **Node-type sentinel** (`trigger_condition = "creative-idea"`) | Never renamed — it is the retrieval key for already-stored rows | Literal `const CREATIVE_IDEA_TRIGGER`; a rename is a breaking migration, not an edit |
 | **Operator / automation surface** (`SIMARD_CREATIVE_IDEAS_*` env vars; labels `creative-idea`, `creative-idea-needs-human-review`; assignee `rysweet`) | Names are the operator + GitHub-automation contract; treated as stable identifiers | Centralized as `const`s in `CreativeIdeasConfig`; changes are documented, breaking changes |
 
-- **Trait/type API** — during the spike the Rust surface is `#![allow(dead_code)]`
-  and carries **no** semver promise yet. The `Reviewer`, `FeedbackSynthesizer`,
+- **Trait/type API** — the Rust surface carries `#![allow(dead_code)]`
+  and **no** semver promise yet. The `Reviewer`, `FeedbackSynthesizer`,
   `IdeaSource`, and `IdeaGhClient` traits are the intended long-term extension
   seams, so future capability is added via **new adapter impls** or **new
   trait methods with defaults**, never by changing an existing method signature.
@@ -591,6 +594,56 @@ remain stable are three; each has an explicit version discipline:
 | **Dry-run honored** | The global `ThreadContext.dry_run` switch suppresses every destructive side-effect (goal/issue/PR writes); a dry-run tick still generates, reviews, and logs but writes nothing external. | `tick` checks `ctx.dry_run` before routing; routing seams are skipped. |
 | **Cooperative shutdown** | The thread observes `ThreadContext.shutdown` (the scheduler's cancellation flag) and returns promptly between pipeline stages instead of blocking a daemon stop. | `tick` polls `ctx.shutdown` between generate → review → route. |
 
+## Daemon wiring
+
+The generator is registered from the OODA daemon's cognitive-thread setup
+(`src/operator_commands_ooda/daemon/mod.rs`), alongside the Overseer and Journal
+threads, and ticks on its configured cadence — it is not a separate process or a
+"Bridge."
+
+**Runtime gate.** The generic cognitive-thread scheduler master switch
+(`SIMARD_COGNITIVE_THREADS_ENABLED`) is default-OFF and owns only the
+maintenance / engineer-log threads. Creative Ideas is **not** behind it: the
+daemon builds the `Mind` runtime when *either* that switch is truthy **or**
+`CreativeIdeasConfig::from_env().enabled()` is true (default). This keeps the
+existing threads' gating and timing byte-for-byte unchanged while letting the
+default-ON Creative Ideas thread run on a stock deployment.
+
+**Registration seam.** The daemon registers via
+`register_creative_ideas_if_enabled(&mut mind, &cfg) -> bool`, which registers
+only when `cfg.enabled()` and returns whether it did — so "opted out ⇒ not
+registered" is a direct unit assertion (via `mind.health()` / `mind.len()`).
+
+**Startup log line** (mirrors the Journal thread):
+
+```text
+[simard] OODA daemon: creative-ideas thread ENABLED (default) (interval = 86400s; SIMARD_CREATIVE_IDEAS_ENABLED opt-out)
+```
+
+or, when opted out:
+
+```text
+[simard] OODA daemon: creative-ideas thread DISABLED (SIMARD_CREATIVE_IDEAS_ENABLED opt-out)
+```
+
+**Per-tick log line** (through the shared scheduler prefix, whenever the thread
+actually runs — due on the first cycle after startup, then every interval):
+
+```text
+[simard] cognitive-thread: creative_ideas: generated 10 idea(s), 8 survived dedup, 8 persisted, 8 reviewed (2 → goal, 1 → issue), 0 review error(s)
+```
+
+**Isolation.** Because generation + review touch the network with no wall-clock
+cap, the tick runs on a background thread with an overlap guard (a slow tick is
+dropped rather than stacked) and panic isolation, so it can never stall or crash
+the authoritative OODA loop. Per-idea failures are logged and never abort the
+batch; the tick is total (`ThreadOutcome::failed`, never `Err`/panic).
+
+**Deployment.** The `simard-ooda` systemd unit (`scripts/simard-ooda.service`)
+runs the subsystem on by default; the operator opts out with a drop-in setting
+`SIMARD_CREATIVE_IDEAS_ENABLED=0`. See
+[Configure and operate the Creative Ideas thread](../howto/configure-creative-ideas-thread.md#daemon-wiring-startup-how-the-operator-sees-it-run).
+
 ## Configuration & gating
 
 | Env var | Default | Effect |
@@ -611,14 +664,19 @@ convention). Spans/metrics keyed on the stable thread id `creative_ideas` and re
 ids (`crusty_old_engineer`, `philosophy_guardian`, `measurability`,
 `idea_feedback_synthesis`): ideas generated, deduped, per-verdict counts, routed→goal /
 routed→issue / pr-gated, and status-transition events. These reuse the existing
-cognitive-thread telemetry surface (`src/cognitive_threads/telemetry.rs`).
+cognitive-thread telemetry surface (`src/cognitive_threads/telemetry.rs`). The daemon
+also emits a dedicated startup line (`… creative-ideas thread ENABLED (default) …`) and
+a per-tick summary (`[simard] cognitive-thread: creative_ideas: generated N idea(s) …`),
+which surface in `journalctl`, the Overseer activity feed, and the dashboard/journal —
+see [Daemon wiring](#daemon-wiring).
 
 ## Module layout & scaffold-vs-future
 
 ```
 src/cognitive_memory/creative_idea.rs      # CreativeIdea, IdeaStatus (+ try_transition),
                                            # MemoryLink, CreativeIdeaStore + Prospective adapter
-src/cognitive_threads/threads/creative_ideas.rs  # CreativeIdeasThread (CognitiveThread, gated OFF),
+src/cognitive_threads/threads/creative_ideas.rs  # CreativeIdeasThread (CognitiveThread, default-ON),
+                                           # register + register_creative_ideas_if_enabled,
                                            # GenerationInputs, IdeaSource trait + FakeIdeaSource
 src/creative_ideas/
   mod.rs        # CreativeIdeasConfig::from_env (gating)
@@ -673,14 +731,26 @@ portfolio/novelty scoring).
    `creative-idea-needs-human-review`, and requests review from `rysweet`; a test
    asserts the constructed gh args contain **no** `--admin` / `--no-verify`.
 7. **Dedup** — a near-duplicate of a prior idea is rejected.
-8. **Off-by-default** — a default `CreativeIdeasConfig` is disabled and the thread's
-   `enabled()` returns `false`.
+8. **Default-ON, opt-out** — a default `CreativeIdeasConfig` is **enabled**
+   (`enabled()` returns `true`), and only an explicit falsey value
+   (`0`/`false`/`no`/`off`) via the env resolver opts out.
 9. **Error contracts** — an illegal `try_transition` returns
    `InvalidIdeaTransition { from, to }`; a payload that fails to parse (bad JSON, or a
    `payload_version` newer than the reader) returns `InvalidCreativeIdeaRecord`, and an
    unknown `IdeaStatus`/`ReviewVerdict` string is rejected (fail-closed), never defaulted.
 10. **Tick is total** — a `tick` whose idea source/reviewer returns `Err` yields
    `ThreadOutcome::failed` (not a panic, not `Err`), leaving the daemon unaffected.
+11. **Wired tick — end to end** — with the thread enabled and injected fakes
+    (`FakeIdeaSource`, stub reviewers, `DefaultSynthesizer`, in-memory `GoalStore`,
+    `FakeIdeaGhClient`), one `tick` persists ideas into prospective memory, runs the
+    four-reviewer pipeline, and produces routing outcomes — an accepted idea lands a
+    goal in the store, a human-review idea lands an issue in the fake `gh` client.
+12. **Daemon registration — enabled** — `register_creative_ideas_if_enabled` registers
+    the `creative_ideas` thread with the `Mind` when the config is enabled (asserted via
+    `mind.health()` / `mind.len()`) and returns `true`.
+13. **Daemon registration — disabled** — with `SIMARD_CREATIVE_IDEAS_ENABLED=0` (via the
+    env resolver), `register_creative_ideas_if_enabled` does **not** register the thread
+    and returns `false`.
 
 ## Phased roadmap
 

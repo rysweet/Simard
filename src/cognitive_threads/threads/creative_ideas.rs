@@ -1,11 +1,13 @@
 //! The Creative Ideas generator thread (design spike #2419).
 //!
 //! `CreativeIdeasThread` implements [`CognitiveThread`] and reuses
-//! [`ThreadKind::BackgroundThought`] (Decision 2). It is **gated OFF by
-//! default** (`enabled()` reads [`CreativeIdeasConfig::enabled`], default
-//! `false`), so the scheduler never ticks it unless explicitly turned on. It is
-//! **not registered** with the `Mind` during the spike — [`register`] is a
-//! marked `// FUTURE:` seam.
+//! [`ThreadKind::BackgroundThought`] (Decision 2). It is **default-ON, opt-out**
+//! (`enabled()` reads [`CreativeIdeasConfig::enabled`], default `true`), so the
+//! scheduler ticks it on a stock deployment unless `SIMARD_CREATIVE_IDEAS_ENABLED`
+//! is set to a falsey value. The OODA daemon registers it via
+//! [`register_creative_ideas_if_enabled`], independent of the generic
+//! `SIMARD_COGNITIVE_THREADS_ENABLED` master switch — consistent with the
+//! default-ON Overseer/Journal threads.
 //!
 //! `tick` is **total by contract**: every internal `Err` is caught,
 //! `tracing::warn!`-logged with the stable `creative_ideas` id, and returned as
@@ -412,7 +414,7 @@ impl CognitiveThread for CreativeIdeasThread {
     fn tick(&mut self, ctx: &mut ThreadContext<'_>) -> ThreadOutcome {
         let start = Instant::now();
 
-        // Gated OFF: never do work unless explicitly enabled.
+        // Opt-out gate (default-ON): do no work when explicitly disabled.
         if !self.cfg.enabled() {
             return ThreadOutcome::skipped();
         }
@@ -495,9 +497,10 @@ fn raw_to_creative_idea(raw: &RawIdea, inputs: &GenerationInputs, now_epoch: u64
 
 /// Register the Creative Ideas thread with the `Mind` scheduler.
 ///
-/// Called from the daemon startup path behind `SIMARD_CREATIVE_IDEAS_ENABLED`
-/// (default-ON, opt-out). Builds the production idea source + review/route
-/// pipeline; the thread's `enabled()` gate still makes an opted-out thread inert.
+/// The daemon reaches this through [`register_creative_ideas_if_enabled`], which
+/// owns the default-ON/opt-out gate. Builds the production idea source +
+/// review/route pipeline; the thread's `enabled()` gate is defence-in-depth that
+/// still makes an opted-out thread inert even if it were registered directly.
 pub fn register(mind: &mut Mind, config: CreativeIdeasConfig) {
     let thread = CreativeIdeasThread::with_pipeline(
         config,
@@ -505,4 +508,76 @@ pub fn register(mind: &mut Mind, config: CreativeIdeasConfig) {
         Box::new(AgenticIdeaPipeline::from_env()),
     );
     mind.register(Box::new(thread));
+}
+
+/// Register the Creative Ideas thread **only when its config gate is ON**,
+/// returning whether it was registered.
+///
+/// This is the daemon's startup seam (issue #2647). It mirrors the
+/// Overseer/Journal default-ON opt-out pattern: an opted-out subsystem registers
+/// nothing, so "opted out ⇒ not registered" is a direct `mind.len()` /
+/// `mind.health()` assertion rather than relying on a registered-but-inert
+/// thread. The gate is independent of the generic `SIMARD_COGNITIVE_THREADS_ENABLED`
+/// master switch.
+pub fn register_creative_ideas_if_enabled(mind: &mut Mind, cfg: &CreativeIdeasConfig) -> bool {
+    if cfg.enabled() {
+        register(mind, cfg.clone());
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_if_enabled_registers_when_default_on() {
+        let mut mind = Mind::new();
+        let registered =
+            register_creative_ideas_if_enabled(&mut mind, &CreativeIdeasConfig::default());
+        assert!(registered, "default-ON config must register the thread");
+        assert_eq!(mind.len(), 1);
+    }
+
+    #[test]
+    fn register_if_enabled_skips_when_opted_out() {
+        let mut mind = Mind::new();
+        let cfg = CreativeIdeasConfig {
+            enabled: false,
+            ..CreativeIdeasConfig::default()
+        };
+        let registered = register_creative_ideas_if_enabled(&mut mind, &cfg);
+        assert!(!registered, "opted-out config must register nothing");
+        assert!(mind.is_empty());
+    }
+
+    #[test]
+    fn register_if_enabled_registers_when_env_unset() {
+        // Env seam (hermetic — no real process env): an unset
+        // `SIMARD_CREATIVE_IDEAS_ENABLED` is default-ON, so the daemon's startup
+        // seam registers the thread. Drives the full env → gate → register path.
+        let cfg = CreativeIdeasConfig::from_lookup(|_| None);
+        let mut mind = Mind::new();
+        let registered = register_creative_ideas_if_enabled(&mut mind, &cfg);
+        assert!(registered, "unset env is default-ON ⇒ thread registered");
+        assert_eq!(mind.len(), 1);
+    }
+
+    #[test]
+    fn register_if_enabled_skips_when_disabled_via_env() {
+        // Env seam (hermetic): `SIMARD_CREATIVE_IDEAS_ENABLED=0` opts out, so the
+        // startup seam registers nothing — "disabled via env ⇒ not registered".
+        let cfg = CreativeIdeasConfig::from_lookup(|k| {
+            (k == crate::creative_ideas::ENABLED_ENV).then(|| "0".to_string())
+        });
+        let mut mind = Mind::new();
+        let registered = register_creative_ideas_if_enabled(&mut mind, &cfg);
+        assert!(
+            !registered,
+            "SIMARD_CREATIVE_IDEAS_ENABLED=0 ⇒ nothing registered"
+        );
+        assert!(mind.is_empty());
+    }
 }
