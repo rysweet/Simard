@@ -106,6 +106,15 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
                 "description": g.description,
                 "priority": g.priority,
                 "status": g.status.to_string(),
+                // Issue #20: additively expose the SERIALIZED `GoalProgress`
+                // enum so the Goals tab can render a distinct, correctly-labeled
+                // lifecycle badge (and surface a block reason) per goal instead
+                // of dumping the free-form `status` string — which, paired with
+                // the red activity chip, made every goal read as "failed". The
+                // legacy `status` Display string above is left untouched
+                // (additive-only); consumers parse the enum by variant (G3),
+                // never the Display string.
+                "status_progress": &g.status,
                 "assigned_to": g.assigned_to,
                 "repo": g.repo,
                 "current_activity": g.current_activity,

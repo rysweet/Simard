@@ -981,3 +981,84 @@ fn rendered_html_wires_tab_alias_allowlist() {
         "the Engineers sub-section was never a standalone tab and must not have an alias"
     );
 }
+
+// ----- issue #20: Goals tab renders each goal's LIVE lifecycle status -----
+//
+// BUG: the active-goals Status column dumped the raw free-form `g.status`
+// string (`<td>${esc(g.status)}</td>`). Paired with the prominent red activity
+// chip in the Current Activity column, this made EVERY goal read as
+// "failed/blocked" even though the goals were in mixed states (not-started /
+// in-progress / blocked+reason / completed).
+//
+// FIX (frontend half): the Status cell renders a distinctly-colored lifecycle
+// badge driven by the additive serialized-enum `g.status_progress` field via
+// the existing `humanizeGoalProgress` (escape-last). A `goalLifecycleKey`
+// classifier maps the enum VARIANT (never the free-form reason text — G3,
+// agentic-over-brittle) to a canonical key that indexes a hardcoded
+// `GOAL_STATUS_COLORS` allowlist. Blocked uses amber (#d29922), DELIBERATELY
+// distinct from the activity-Failed red (#f85149), so a lifecycle-blocked goal
+// is never mistaken for an activity failure.
+//
+// This is the Rust half of the contract; the behavioral half is
+// tests/gadugi/dashboard-goals-lifecycle.sh.
+
+#[test]
+fn rendered_html_goals_status_column_uses_lifecycle_badge() {
+    // The Status cell must render the humanized lifecycle status from the
+    // additive serialized-enum field.
+    assert!(
+        INDEX_HTML.contains("humanizeGoalProgress(g.status_progress)"),
+        "the active-goals Status column must render humanizeGoalProgress(g.status_progress) \
+         so each goal shows its real lifecycle status, not a uniform failed/blocked dump"
+    );
+    // escape-last invariant: humanize the RAW enum, then esc() the result;
+    // never humanize already-escaped text.
+    assert!(
+        !INDEX_HTML.contains("humanizeGoalProgress(esc("),
+        "humanizeGoalProgress must run on the raw g.status_progress enum, never on \
+         already-escaped text (escape-last invariant)"
+    );
+    // The old uniform raw-status dump — the exact cell that made every goal
+    // look failed/blocked — must be gone.
+    assert!(
+        !INDEX_HTML.contains("<td>${esc(g.status)}</td>"),
+        "the Status column must no longer dump the raw free-form g.status string \
+         uniformly; it must render a per-status lifecycle badge"
+    );
+    // A genuinely-blocked goal must surface its reason via the humanizer's
+    // Blocked-object branch ('Blocked — <reason>').
+    assert!(
+        INDEX_HTML.contains("'Blocked — '+r"),
+        "humanizeGoalProgress must render a blocked goal's REASON ('Blocked — <reason>') \
+         so the Status column shows why a goal is blocked, not a bare 'failed'"
+    );
+}
+
+#[test]
+fn rendered_html_goals_status_classifier_and_color_allowlist() {
+    // A classifier keys the color allowlist off the enum VARIANT, not by
+    // parsing the free-form Display/reason string (G3: agentic-over-brittle).
+    assert!(
+        INDEX_HTML.contains("function goalLifecycleKey("),
+        "a goalLifecycleKey() classifier must map the serialized GoalProgress enum to a \
+         canonical lifecycle key by variant, not by parsing the Display string"
+    );
+    // A hardcoded color allowlist drives the badge color so goal data is never
+    // interpolated into a style= attribute.
+    assert!(
+        INDEX_HTML.contains("GOAL_STATUS_COLORS"),
+        "a hardcoded GOAL_STATUS_COLORS allowlist must drive the lifecycle badge color \
+         (goal data must never be interpolated into a style= attribute)"
+    );
+    // Blocked's amber must be present and DISTINCT from the activity-Failed red,
+    // so a lifecycle-blocked goal is not mistaken for an activity failure.
+    assert!(
+        INDEX_HTML.contains("#d29922"),
+        "the blocked lifecycle badge must use amber #d29922"
+    );
+    assert!(
+        !INDEX_HTML.contains("blocked:'#f85149'") && !INDEX_HTML.contains("Blocked:'#f85149'"),
+        "the blocked lifecycle badge must NOT reuse the activity-Failed red #f85149; \
+         it must be a distinct amber so blocked != failed"
+    );
+}
