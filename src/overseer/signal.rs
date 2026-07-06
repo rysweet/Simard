@@ -56,6 +56,13 @@ pub enum Signal {
         needs_review: bool,
         consecutive_no_action: u32,
     },
+    /// ≥2 recalled episodes share a failure signature: this problem has happened
+    /// before (issue #2628). Promotes problem detection from in-process counters
+    /// to the cognitive-memory graph — raising priority and surfacing the prior
+    /// procedure. Derived from [`ObservedState::recall`]'s episodes, keyed on
+    /// their parsed `failure_signature`. Additive: it never removes or replaces
+    /// any pre-recall signal.
+    RecurringSignature { signature: String, occurrences: u32 },
 }
 
 /// Coarse relative importance. `Ord` sorts ascending so `Critical` comes first,
@@ -116,6 +123,11 @@ const ENGINEER_SPAWN_THRESHOLD: u32 = 8;
 /// [`crate::goal_curation::no_progress_breaker::NO_PROGRESS_BREAKER_THRESHOLD`]
 /// so the lightweight whisper nudges Simard before the hard breaker escalates.
 pub const WHISPER_LOOP_THRESHOLD: u32 = 2;
+
+/// Minimum number of recalled episodes that must share a `failure_signature`
+/// before the Overseer raises a [`Signal::RecurringSignature`] (issue #2628). A
+/// single prior occurrence is not "recurring"; two or more is the floor.
+pub const RECURRING_SIGNATURE_THRESHOLD: u32 = 2;
 
 /// Pure Observe→Signal derivation. No I/O; unit-testable with a hand-built
 /// `ObservedState`. Real thresholds would be env-tunable.
@@ -201,6 +213,28 @@ pub fn signals_from(state: &ObservedState) -> Vec<Signal> {
             needs_review: bg.needs_review,
             consecutive_no_action: bg.consecutive_no_action,
         });
+    }
+
+    // Cognitive-memory recall (#2628): when ≥2 recalled episodes share a failure
+    // signature, this problem has recurred — raise a structural signal so Orient
+    // can promote it (and surface the prior procedure) rather than relying only
+    // on in-process counters. Additive: only appends; a `None`/empty recall or a
+    // recall error leaves the signal set exactly as it was before recall.
+    if let Some(snapshot) = &state.recall {
+        let mut counts: std::collections::BTreeMap<&str, u32> = std::collections::BTreeMap::new();
+        for ep in &snapshot.episodes {
+            if let Some(sig) = &ep.failure_signature {
+                *counts.entry(sig.as_str()).or_insert(0) += 1;
+            }
+        }
+        for (signature, occurrences) in counts {
+            if occurrences >= RECURRING_SIGNATURE_THRESHOLD {
+                out.push(Signal::RecurringSignature {
+                    signature: signature.to_string(),
+                    occurrences,
+                });
+            }
+        }
     }
 
     out

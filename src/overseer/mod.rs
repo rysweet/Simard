@@ -72,15 +72,20 @@ mod tests_m1;
 #[cfg(test)]
 mod tests_m2;
 #[cfg(test)]
+mod tests_memory_recall;
+#[cfg(test)]
 mod tests_whisper;
 
 pub use capabilities::{
-    Auditor, BlockedGoal, Deployer, GoalCurator, IssueFiler, MeetingHost, ObservedState,
-    OrchestratorRunBrief, OverseerError, PrOps, RecipeBrief, RecipeLauncher, StatusReader,
+    Auditor, BlockedGoal, Deployer, GoalCurator, IssueFiler, MeetingHost, MemoryRecall,
+    MemorySnapshot, ObservationEpisode, ObservedState, OrchestratorRunBrief, OverseerError, PrOps,
+    RecallBudget, RecallKeys, RecalledEpisode, RecalledFact, RecalledProcedure,
+    RecalledProspective, RecipeBrief, RecipeLauncher, RecordOutcome, StatusReader,
+    sanitize_recalled,
 };
 pub use config::{
-    daily_budget_usd, goal_health_enabled, overseer_acting_enabled, overseer_author_login,
-    overseer_enabled,
+    daily_budget_usd, goal_health_enabled, memory_recall_enabled, overseer_acting_enabled,
+    overseer_author_login, overseer_enabled,
 };
 pub use guardrails::{
     AutonomyGate, BudgetGate, ConflictSequencer, RecursionGuard, RiskClass, Subject,
@@ -98,9 +103,9 @@ pub use whisper_ops::{
     note_signature, whisper_signature,
 };
 pub use wiring::{
-    BoardGoalCurator, OverseerCadence, OverseerTickReport, RefuseDeployer, assemble_capabilities,
-    build_overseer, overseer_identity, overseer_tick, overseer_tick_interval_secs,
-    run_overseer_tick_isolated,
+    BoardGoalCurator, MemoryRecallOps, OverseerCadence, OverseerTickReport, RefuseDeployer,
+    assemble_capabilities, build_overseer, overseer_identity, overseer_tick,
+    overseer_tick_interval_secs, run_overseer_tick_isolated,
 };
 
 use crate::goal_curation::no_progress_breaker::{
@@ -123,6 +128,11 @@ pub struct Capabilities {
     pub issues: Box<dyn IssueFiler>,
     pub goals: Box<dyn GoalCurator>,
     pub auditor: Box<dyn Auditor>,
+    /// Bounded read/write access to Simard's cognitive-memory graph (issue
+    /// #2628). A thin adapter over the daemon's single shared
+    /// [`CognitiveMemoryOps`](crate::cognitive_memory::CognitiveMemoryOps)
+    /// handle — the Overseer never opens a second store.
+    pub memory: Box<dyn MemoryRecall>,
 }
 
 /// The Overseer co-process. Holds its capability handles plus its guardrails.
@@ -153,6 +163,14 @@ pub struct Overseer {
     /// Whether goal-board health handling (self-heal + escalate) is enabled
     /// (config opt-out). When off, both actions are held (never taken).
     goal_health_enabled: bool,
+    /// Whether cognitive-memory recall (issue #2628) is enabled (config opt-out).
+    /// When off, the graph is never queried, `ObservedState.recall` stays `None`,
+    /// no observation is written back, and the memory counters stay `0`.
+    memory_recall_enabled: bool,
+    /// Dedup + rate-limit gate for the deliberate episodic write-back, so the
+    /// same observation signature is not re-recorded every tick. Reuses the
+    /// [`WhisperGate`] primitive (900 s window) keyed by observation signature.
+    write_back_gate: WhisperGate,
 }
 
 /// The result of one meta-OODA turn. Side-effect free: it reports what was
@@ -225,6 +243,12 @@ impl Overseer {
             // per-hour cap covers many distinct goals without flooding.
             blocked_goal_gate: WhisperGate::new(900, 20),
             goal_health_enabled: false,
+            // Off by default in the bare constructor; the daemon enables it from
+            // `config::memory_recall_enabled`. 15-minute dedup window so a
+            // persistent observation signature is written back at most once per
+            // window (never per-tick), with a generous per-hour cap.
+            memory_recall_enabled: false,
+            write_back_gate: WhisperGate::new(900, 5),
         }
     }
 
@@ -245,6 +269,14 @@ impl Overseer {
     /// default; the daemon sets this from [`config::goal_health_enabled`].
     pub fn with_goal_health_enabled(mut self, enabled: bool) -> Self {
         self.goal_health_enabled = enabled;
+        self
+    }
+
+    /// Enable/disable cognitive-memory recall (issue #2628). Off by default; the
+    /// daemon sets this from [`config::memory_recall_enabled`]. When off the
+    /// Overseer behaves exactly as before — no read, no write-back, counters `0`.
+    pub fn with_memory_recall_enabled(mut self, enabled: bool) -> Self {
+        self.memory_recall_enabled = enabled;
         self
     }
 
@@ -289,6 +321,32 @@ impl Overseer {
         // deserializing the same snapshot twice this tick.
         let (blocked_goals, in_flight) = self.caps.goals.observe_board().unwrap_or_default();
         observed.blocked_goals = blocked_goals;
+
+        // Cognitive-memory recall (#2628) — the USE step. Key off the pre-recall
+        // signals/problems (never a full-graph scan), then run ONE whole-pass,
+        // fail-closed recall on the shared handle. Best-effort: the calls are
+        // count-bounded and run on this panic-isolated tick thread, so recall can
+        // never stall or crash the loop. A memory error is SURFACED on
+        // `recall_error` (recall stays `None` — no silent fallback), never
+        // swallowed into an empty snapshot.
+        if self.memory_recall_enabled {
+            let pre_signals = signals_from(&observed);
+            let pre_problems = orient(&pre_signals, &in_flight);
+            let keys = RecallKeys::from_signals(&pre_signals, &pre_problems);
+            match self.recall_pass(&keys) {
+                Ok(snapshot) => observed.recall = Some(snapshot),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "overseer::memory",
+                        error = %e,
+                        "overseer memory recall failed — surfaced, loop continues (no silent fallback)"
+                    );
+                    observed.recall_error = Some(e.to_string());
+                }
+            }
+        }
+
+        // Signals (now including any recall-derived RecurringSignature) + Orient.
         let signals = signals_from(&observed);
 
         // Orient (dedup against Simard's in-flight work; a board read failure
@@ -311,6 +369,80 @@ impl Overseer {
             problems,
             plan,
         })
+    }
+
+    /// Run ONE whole-pass, fail-closed cognitive-memory recall (issue #2628):
+    /// bounded semantic + episodic + procedural + prospective reads keyed off the
+    /// cycle's `keys`. The `?` on each sub-read makes the pass **atomic**: if any
+    /// one read errors, the whole pass returns `Err` and the successful reads are
+    /// discarded — the Overseer never orients on a partially-recalled view of
+    /// memory. Every result is size-bounded by [`RecallBudget`] so a slow or huge
+    /// graph degrades to "bounded read", never a stall.
+    fn recall_pass(&self, keys: &RecallKeys) -> Result<MemorySnapshot, OverseerError> {
+        let budget = RecallBudget::default();
+        let facts = self.caps.memory.recall_semantic(keys, budget.semantic)?;
+        let episodes = self.caps.memory.recall_episodic(keys, budget.episodic)?;
+        let procedures = self
+            .caps
+            .memory
+            .recall_procedural(keys, budget.procedural)?;
+        let prospectives = self
+            .caps
+            .memory
+            .recall_prospective(keys, budget.prospective)?;
+        Ok(MemorySnapshot {
+            facts,
+            episodes,
+            procedures,
+            prospectives,
+        })
+    }
+
+    /// Deliberately write the Overseer's own observation back into cognitive
+    /// memory as ONE episodic memory (issue #2628), so its stewardship activity
+    /// becomes part of the graph the rest of Simard can recall. De-duplicated via
+    /// the reused [`WhisperGate`] primitive keyed by the observation signature, so
+    /// a persistent condition is recorded at most once per window (never every
+    /// tick). Provenance is fixed by the adapter (`source_label = "overseer"`).
+    ///
+    /// Returns:
+    /// - `Ok(Some(RecordOutcome::Stored { .. }))` — a new episode was persisted,
+    /// - `Ok(None)` — nothing to record (recall disabled, no problems) or the
+    ///   write-back was de-duplicated within the window,
+    /// - `Err(..)` — the backing store errored; the caller surfaces it (no silent
+    ///   fallback) and the tick still completes.
+    ///
+    /// Only ever called when recall is enabled; the dedup slot is consumed only
+    /// after a successful store so a failed write never suppresses a later one.
+    pub fn write_back_observation(
+        &mut self,
+        problems: &[Problem],
+    ) -> Result<Option<RecordOutcome>, OverseerError> {
+        if !self.memory_recall_enabled {
+            return Ok(None);
+        }
+        // Deliberate, not chatty: only record a tick that actually observed a
+        // problem. A clean tick writes nothing (nothing worth recalling later).
+        if problems.is_empty() {
+            return Ok(None);
+        }
+        let signature = observation_signature(problems);
+        let now = now_secs();
+        match self.write_back_gate.peek(&signature, now) {
+            WhisperDecision::Deliver => {
+                let episode = ObservationEpisode {
+                    content: observation_content(problems),
+                    signature: signature.clone(),
+                };
+                let outcome = self.caps.memory.record_observation(&episode)?;
+                // Consume the dedup slot only after a successful store.
+                self.write_back_gate.commit(&signature, now);
+                Ok(Some(outcome))
+            }
+            // Duplicate within the window / per-hour cap reached: never reaches
+            // the backend, nothing persisted this tick.
+            _ => Ok(None),
+        }
     }
 
     /// Apply autonomy, budget, and conflict gates to one intervention, producing
@@ -674,6 +806,33 @@ fn is_cost_bearing(iv: &Intervention) -> bool {
     )
 }
 
+/// Stable, deterministic signature for the Overseer's own observation write-back
+/// (issue #2628): the sorted, deduped problem `dedup_key`s joined. Two identical
+/// observations produce the same signature (so the write-back gate de-dups them);
+/// two different observations produce distinct signatures (so both are recorded).
+fn observation_signature(problems: &[Problem]) -> String {
+    let mut keys: Vec<&str> = problems.iter().map(|p| p.dedup_key.as_str()).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    format!("overseer-obs:{}", keys.join("|"))
+}
+
+/// The human-readable one-line body of the Overseer's observation write-back.
+/// Every problem summary is `sanitize_recalled`-cleaned (defence in depth: the
+/// summaries may themselves already carry recalled text) before it enters the
+/// episode content that is persisted into the multi-writer memory graph.
+fn observation_content(problems: &[Problem]) -> String {
+    let parts: Vec<String> = problems
+        .iter()
+        .map(|p| sanitize_recalled(&p.summary))
+        .collect();
+    sanitize_recalled(&format!(
+        "overseer observed {} problem(s): {}",
+        problems.len(),
+        parts.join("; ")
+    ))
+}
+
 /// Orient: fold `Signal`s into ranked, deduplicated `Problem`s. Dedups against
 /// Simard's in-flight work (so the Overseer never fights an engineer already on
 /// the case) and against problems already collected this cycle.
@@ -690,6 +849,13 @@ pub fn orient(signals: &[Signal], in_flight: &[InFlightItem]) -> Vec<Problem> {
         // Merge into an existing same-key problem rather than duplicating.
         if let Some(existing) = problems.iter_mut().find(|p| p.dedup_key == key) {
             existing.evidence.push(s.clone());
+            // A recurring-signature co-signal (recalled from memory) RAISES the
+            // matching problem's priority — this problem has happened before, so
+            // it deserves more attention than the in-process counters alone gave
+            // it. `min` picks the more-important level (Ord sorts Critical first).
+            if matches!(s, Signal::RecurringSignature { .. }) {
+                existing.priority = existing.priority.min(priority);
+            }
             continue;
         }
         problems.push(Problem {
@@ -813,6 +979,24 @@ fn classify_signal(s: &Signal) -> (ProblemKind, Priority, String, String) {
                     ""
                 }
             ),
+        ),
+        // Recall-driven (#2628): a signature seen before in memory. The dedup_key
+        // is the (sanitized) signature so this MERGES into the matching in-cycle
+        // problem (raising its priority in `orient`) rather than spawning a
+        // duplicate; standalone it yields a High-priority advisory problem. The
+        // signature is UNTRUSTED (multi-writer graph), so the summary is
+        // `sanitize_recalled`-cleaned at this admission boundary before it can
+        // ever reach an operator notification.
+        Signal::RecurringSignature {
+            signature,
+            occurrences,
+        } => (
+            ProblemKind::ProcessHealth,
+            Priority::High,
+            sanitize_recalled(signature),
+            sanitize_recalled(&format!(
+                "recurring signature seen {occurrences}× in cognitive memory ({signature})"
+            )),
         ),
     }
 }
@@ -1070,6 +1254,7 @@ mod tests {
             issues: Box::new(FakeIssues),
             goals: Box::new(FakeGoals(in_flight)),
             auditor: Box::new(FakeAuditor),
+            memory: Box::new(capabilities::InertMemoryRecall),
         }
     }
 

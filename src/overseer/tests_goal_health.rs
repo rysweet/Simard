@@ -221,6 +221,7 @@ fn caps_with_goals(goals: Box<dyn GoalCurator>) -> Capabilities {
         issues: Box::new(FakeIssues),
         goals,
         auditor: Box::new(FakeAuditor),
+        memory: Box::new(crate::overseer::capabilities::InertMemoryRecall),
     }
 }
 

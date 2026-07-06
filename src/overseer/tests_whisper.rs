@@ -243,6 +243,7 @@ fn caps(observed: ObservedState, meetings: Box<dyn MeetingHost>) -> Capabilities
         issues: Box::new(FakeIssues),
         goals: Box::new(FakeGoals(vec![])),
         auditor: Box::new(FakeAuditor),
+        memory: Box::new(crate::overseer::capabilities::InertMemoryRecall),
     }
 }
 
