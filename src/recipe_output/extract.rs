@@ -320,20 +320,22 @@ pub fn last_balanced_object(s: &str) -> Option<&str> {
 /// rejects it — leniency never widens to accept broken JSON.
 pub fn strip_json_trailing_commas(s: &str) -> Cow<'_, str> {
     let bytes = s.as_bytes();
-    // Cheap detection pass first so clean JSON borrows unchanged (zero-alloc).
-    if !has_trailing_comma(bytes) {
-        return Cow::Borrowed(s);
-    }
-    // Rebuild, dropping only the trailing commas. Only ASCII comma bytes are
-    // ever skipped, so the surviving bytes remain valid UTF-8.
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    // A single string-aware pass. Stay zero-alloc (`Borrowed`) until the first
+    // trailing comma is seen; only then materialise an owned buffer seeded with
+    // the already-scanned clean prefix. Clean JSON therefore never allocates,
+    // and a document that *does* need repair is scanned exactly once rather than
+    // detected and then rebuilt. Only ASCII comma bytes are ever dropped, so the
+    // surviving bytes remain valid UTF-8.
+    let mut out: Option<Vec<u8>> = None;
     let mut in_string = false;
     let mut escaped = false;
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i];
         if in_string {
-            out.push(c);
+            if let Some(v) = out.as_mut() {
+                v.push(c);
+            }
             if escaped {
                 escaped = false;
             } else if c == b'\\' {
@@ -343,48 +345,31 @@ pub fn strip_json_trailing_commas(s: &str) -> Cow<'_, str> {
             }
         } else if c == b'"' {
             in_string = true;
-            out.push(c);
+            if let Some(v) = out.as_mut() {
+                v.push(c);
+            }
         } else if c == b',' && next_nonspace_is_close(bytes, i + 1) {
-            // Trailing comma — drop it (do not copy).
-        } else {
-            out.push(c);
+            // First trailing comma: seed the owned buffer with the clean prefix
+            // `[0, i)`, then skip the comma itself (never copy it). A later
+            // trailing comma finds the buffer already present and is skipped too.
+            out.get_or_insert_with(|| {
+                let mut v = Vec::with_capacity(bytes.len());
+                v.extend_from_slice(&bytes[..i]);
+                v
+            });
+        } else if let Some(v) = out.as_mut() {
+            v.push(c);
         }
         i += 1;
     }
-    match String::from_utf8(out) {
-        Ok(stripped) => Cow::Owned(stripped),
+    match out {
+        None => Cow::Borrowed(s),
         // Unreachable in practice (only ASCII commas are dropped), but never
         // panic on recovery input — fall back to the original text.
-        Err(_) => Cow::Borrowed(s),
+        Some(v) => String::from_utf8(v)
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(s)),
     }
-}
-
-/// Does `bytes` contain at least one string-aware trailing comma?
-///
-/// Mirrors the scan in [`strip_json_trailing_commas`] but only detects, so the
-/// common clean case can borrow the input without allocating.
-fn has_trailing_comma(bytes: &[u8]) -> bool {
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if c == b'\\' {
-                escaped = true;
-            } else if c == b'"' {
-                in_string = false;
-            }
-        } else if c == b'"' {
-            in_string = true;
-        } else if c == b',' && next_nonspace_is_close(bytes, i + 1) {
-            return true;
-        }
-        i += 1;
-    }
-    false
 }
 
 /// Is the first non-ASCII-whitespace byte at or after `i` a closing `}`/`]`?
