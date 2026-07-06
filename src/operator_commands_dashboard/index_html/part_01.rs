@@ -886,7 +886,7 @@ pub(crate) const PART_01: &str = r#"
           <div class="stat"><span class="label">Active Processes</span><span class="value">${d.active_processes??0}</span></div>
           <div class="stat"><span class="label">Disk Usage</span><span class="value ${dc}">${d.disk_usage_pct??'?'}%</span></div>
           <div class="stat"><span class="label">Updated</span><span class="value">${timeAgo(d.timestamp)}</span></div>`;
-        document.getElementById('header-version').textContent='v'+d.version+' ('+shortHash+')';
+        document.getElementById('header-version').textContent='v'+d.version+' ('+shortHash+')'+(d.deployed?' · deployed '+d.deployed:'');
       }catch(e){document.getElementById('status').innerHTML='<span class="err">Failed to reach /api/status — is the dashboard server running?</span>';}
     }
 

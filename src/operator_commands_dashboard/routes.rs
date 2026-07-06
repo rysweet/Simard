@@ -113,6 +113,37 @@ pub fn build_router() -> Router {
         .layer(middleware::from_fn(require_auth))
 }
 
+/// The UTC build/deploy instant baked into the binary at compile time by
+/// `build.rs` (issue #2727), parsed from the `SIMARD_BUILD_TIMESTAMP` env.
+/// Returns `None` on unusual toolchains where the env was not emitted, so the
+/// `deployed` field degrades to being omitted (back-compatible).
+pub(crate) fn deployed_timestamp_utc() -> Option<chrono::DateTime<chrono::Utc>> {
+    let raw = option_env!("SIMARD_BUILD_TIMESTAMP")?;
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+/// Format a UTC instant as the header-ready deployment datetime in US Pacific
+/// time (`America/Los_Angeles`), e.g. `2026-07-06 11:03 PDT`. Owns ALL timezone
+/// and daylight-saving logic: the `%Z` token renders whatever the tz database
+/// selects for that instant — `PST` (UTC-8) in standard time, `PDT` (UTC-7) in
+/// daylight time — so the correct abbreviation and offset are chosen
+/// automatically. Nothing is hardcoded to a fixed offset or literal `PST`/`PDT`.
+pub(crate) fn format_deployed_pt(dt: chrono::DateTime<chrono::Utc>) -> String {
+    dt.with_timezone(&chrono_tz::America::Los_Angeles)
+        .format("%Y-%m-%d %H:%M %Z")
+        .to_string()
+}
+
+/// The composed, header-ready deployment datetime string (issue #2727): the
+/// compile-time build timestamp rendered in US Pacific time. `None` when no
+/// build timestamp is baked in, so callers omit the field. This is the exact
+/// value surfaced as the additive `/api/status` `deployed` field.
+pub(crate) fn deployed_pt() -> Option<String> {
+    deployed_timestamp_utc().map(format_deployed_pt)
+}
+
 async fn status() -> Json<Value> {
     let version = format!(
         "{}.{}",
@@ -183,6 +214,13 @@ async fn status() -> Json<Value> {
             obj.insert("cycle_number".to_string(), json!(authoritative));
         }
         status_json["daemon_health"] = h;
+    }
+
+    // Issue #2727: additive `deployed` field — the deployment datetime in US
+    // Pacific time (PST/PDT), sourced from the compile-time build timestamp.
+    // Omitted (not faked/empty) when no build timestamp is baked in.
+    if let Some(deployed) = deployed_pt() {
+        status_json["deployed"] = json!(deployed);
     }
 
     Json(status_json)
