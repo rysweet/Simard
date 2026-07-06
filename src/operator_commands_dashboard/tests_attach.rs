@@ -188,3 +188,21 @@ fn agent_terminal_select_has_no_agents_available_empty_state() {
          empty state when subagentSessionsCache.live[] is empty (not a broken control)"
     );
 }
+
+#[test]
+fn agent_select_falls_back_to_neutral_prompt_for_stale_pick() {
+    // #2717 review (Finding A): when the operator's previously-selected agent
+    // leaves the live roster, the dropdown must fall back to a neutral, disabled
+    // prompt rather than silently repointing the label at the first live agent —
+    // which would name a different agent than the terminal stays attached to.
+    assert!(
+        INDEX_HTML.contains("select an agent"),
+        "populateAgentSelect() must keep a neutral 'select an agent' prompt option so a \
+         stale prior pick falls back to it instead of an unrelated live agent"
+    );
+    assert!(
+        INDEX_HTML.contains("prompt.selected=true"),
+        "populateAgentSelect() must select the neutral prompt when the prior pick is no \
+         longer live (design intent: never jump the label to a different agent)"
+    );
+}

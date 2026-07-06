@@ -703,6 +703,13 @@ pub(crate) const PART_01: &str = r#"
         return;
       }
       sel.disabled=false;
+      /* Neutral prompt kept as options[0] so a stale (or not-yet-made) pick never
+         silently repoints the dropdown at an unrelated live agent — which would
+         leave the label naming a different agent than the terminal is attached to.
+         It is disabled, so onAgentTerminalSelect() never treats it as a target. */
+      const prompt=document.createElement('option');
+      prompt.value='';prompt.disabled=true;prompt.textContent='select an agent';
+      sel.appendChild(prompt);
       for(const s of live){
         const opt=document.createElement('option');
         opt.value=s.agent_id||'';
@@ -714,11 +721,13 @@ pub(crate) const PART_01: &str = r#"
         opt.textContent=label;
         sel.appendChild(opt);
       }
-      /* Preserve the operator's prior pick across the 5s rebuild without firing
-         an attach (a programmatic .value assignment never dispatches 'change').
-         Only fall back to the first agent when the prior pick has left live[]. */
+      /* Restore the operator's prior pick across the 5s rebuild only when it is
+         still live (a programmatic .value assignment never dispatches 'change',
+         so this never fires an attach). When the prior pick has left live[], keep
+         the neutral prompt selected rather than jumping the label to a different
+         agent than the terminal is attached to (matches the empty-state intent). */
       const stillPresent=prev!==''&&Array.prototype.some.call(sel.options,o=>o.value===prev);
-      sel.value=stillPresent?prev:sel.options[0].value;
+      if(stillPresent) sel.value=prev; else prompt.selected=true;
     }
     /* Fires only on a genuine user change (never the programmatic rebuild
        above). Reads the chosen option's data-host/data-session and switches the
