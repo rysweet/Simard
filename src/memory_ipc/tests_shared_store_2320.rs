@@ -12,7 +12,7 @@
 //! collapsing the "max node_id == newest snapshot" invariant the goal-board
 //! read depends on — surfacing as an empty / stale board.
 //!
-//! Fix: [`launch_writer_bridge`] and [`open_reader_bridge`] now share one
+//! Fix: [`launch_writer_client`] and [`open_reader_client`] now share one
 //! cached store handle per canonical `state_root`, so a write is immediately
 //! visible to the next read with no reopen. These tests drive the exact
 //! open→write→reopen→read pattern in a tight loop; before the fix they failed
@@ -20,7 +20,7 @@
 
 use std::path::Path;
 
-use super::{clear_tier2_store_cache, launch_writer_bridge, open_reader_bridge};
+use super::{clear_tier2_store_cache, launch_writer_client, open_reader_client};
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, load_goal_board, save_goal_board};
 
 /// Three seeded goals with non-placeholder descriptions (so the board-integrity
@@ -52,14 +52,14 @@ fn seeded_board() -> GoalBoard {
 /// Read the goal board through a freshly-opened reader bridge — the exact path
 /// `dashboard_goal_board_snapshot` takes.
 fn read_board(root: &Path) -> GoalBoard {
-    let reader = open_reader_bridge(root).expect("reader bridge");
+    let reader = open_reader_client(root).expect("reader bridge");
     load_goal_board(reader.ops()).expect("load_goal_board")
 }
 
 /// Write the goal board through a freshly-opened writer bridge — the exact path
 /// `dashboard_save_goal_board` takes.
 fn write_board(root: &Path, board: &GoalBoard) {
-    let writer = launch_writer_bridge(root).expect("writer bridge");
+    let writer = launch_writer_client(root).expect("writer bridge");
     save_goal_board(board, writer.ops()).expect("save_goal_board");
 }
 
@@ -109,7 +109,7 @@ fn tier2_writer_and_reader_share_one_store() {
     // Open a reader and hold it, then perform a *separate* writer-bridge
     // mutation, then read again through the still-open reader. The mutation
     // must be visible without reopening the reader — proving the shared handle.
-    let reader = open_reader_bridge(root).expect("reader bridge");
+    let reader = open_reader_client(root).expect("reader bridge");
     assert_eq!(load_goal_board(reader.ops()).expect("load").active.len(), 3);
 
     // Add a fourth active goal through a fresh writer bridge.
@@ -150,7 +150,7 @@ fn tier2_bridge_forwards_episodic_recall_through_sharedmemory() {
     let root = temp.path();
 
     // Store an episode through a writer bridge.
-    let writer = launch_writer_bridge(root).expect("writer bridge");
+    let writer = launch_writer_client(root).expect("writer bridge");
     let node_id = writer
         .ops()
         .store_episode("engineer fixed the durable-recall race", "test", None)
@@ -160,7 +160,7 @@ fn tier2_bridge_forwards_episodic_recall_through_sharedmemory() {
     // A fresh reader bridge must recall it via the keyword search and list it as
     // undistilled — both of which return `vec![]` if `SharedMemory` falls back
     // to the trait defaults instead of forwarding to the library backend.
-    let reader = open_reader_bridge(root).expect("reader bridge");
+    let reader = open_reader_client(root).expect("reader bridge");
     let by_kw = reader
         .ops()
         .search_episodes_by_keywords(&["durable-recall".to_string()], 10)
@@ -187,7 +187,7 @@ fn tier2_bridge_forwards_episodic_recall_through_sharedmemory() {
         .ops()
         .mark_episode_distilled(&node_id)
         .expect("mark_episode_distilled");
-    let after = open_reader_bridge(root)
+    let after = open_reader_client(root)
         .expect("reader bridge")
         .ops()
         .list_undistilled_episodes(10)
@@ -210,7 +210,7 @@ fn tier2_bridge_forwards_graph_stats_through_sharedmemory() {
     let root = temp.path();
 
     // Seed a DERIVES_FROM edge: a fact distilled from an episode.
-    let writer = launch_writer_bridge(root).expect("writer bridge");
+    let writer = launch_writer_client(root).expect("writer bridge");
     let episode = writer
         .ops()
         .store_episode("ran cargo test; 0 failures", "test", None)
@@ -230,7 +230,7 @@ fn tier2_bridge_forwards_graph_stats_through_sharedmemory() {
 
     // A reader resolving through the shared store wraps it in `SharedMemory`;
     // `graph_stats` must reach the library backend, not the zeroed default.
-    let reader = open_reader_bridge(root).expect("reader bridge");
+    let reader = open_reader_client(root).expect("reader bridge");
     let stats = reader
         .ops()
         .graph_stats()

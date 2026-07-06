@@ -1,4 +1,4 @@
-//! Bridge operations for assigning goals and reporting progress.
+//! Client operations for assigning goals and reporting progress.
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
@@ -51,13 +51,12 @@ pub fn report_progress(
     progress: &SubordinateProgress,
     bridge: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
-    let content = serde_json::to_string(progress).map_err(|e| {
-        crate::error::SimardError::BridgeCallFailed {
+    let content =
+        serde_json::to_string(progress).map_err(|e| crate::error::SimardError::RpcCallFailed {
             bridge: "cognitive-memory".to_string(),
             method: "store_fact".to_string(),
             reason: format!("failed to serialize progress: {e}"),
-        }
-    })?;
+        })?;
 
     bridge.store_fact(
         PROGRESS_CONCEPT,
@@ -101,30 +100,30 @@ pub fn poll_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::BridgeErrorPayload;
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
-    use crate::memory_bridge::CognitiveMemoryBridge;
+    use crate::memory_client::CognitiveMemoryClient;
+    use crate::rpc::RpcErrorPayload;
+    use crate::rpc_transport::InMemoryRpcTransport;
 
-    fn mock_bridge_store_ok() -> CognitiveMemoryBridge {
-        let transport = InMemoryBridgeTransport::new("test-ops", |method, _params| match method {
+    fn mock_bridge_store_ok() -> CognitiveMemoryClient {
+        let transport = InMemoryRpcTransport::new("test-ops", |method, _params| match method {
             "memory.store_fact" => Ok(serde_json::json!({"id": "fact_1"})),
             "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         });
-        CognitiveMemoryBridge::new(Box::new(transport))
+        CognitiveMemoryClient::new(Box::new(transport))
     }
 
-    fn mock_bridge_store_fail() -> CognitiveMemoryBridge {
-        let transport = InMemoryBridgeTransport::new("test-fail", |_method, _params| {
-            Err(BridgeErrorPayload {
+    fn mock_bridge_store_fail() -> CognitiveMemoryClient {
+        let transport = InMemoryRpcTransport::new("test-fail", |_method, _params| {
+            Err(RpcErrorPayload {
                 code: -1,
                 message: "store failed".to_string(),
             })
         });
-        CognitiveMemoryBridge::new(Box::new(transport))
+        CognitiveMemoryClient::new(Box::new(transport))
     }
 
     // ── assign_goal ─────────────────────────────────────────────────

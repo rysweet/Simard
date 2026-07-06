@@ -14,7 +14,7 @@ use crate::goal_curation::{
     board_snapshot_hash, load_goal_board, read_latest_carryover, save_goal_board,
     verify_goal_carryover, write_goal_carryover,
 };
-use crate::memory_ipc::launch_writer_bridge;
+use crate::memory_ipc::launch_writer_client;
 use crate::state_root::STATE_ROOT_ENV;
 
 fn isolated_state_root() -> (TempDir, std::path::PathBuf) {
@@ -75,7 +75,7 @@ fn board_snapshot_hash_empty_board() {
 #[serial(cognitive_memory)]
 fn carryover_round_trip_succeeds() {
     let (_tmp, root) = isolated_state_root();
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let bridge = launch_writer_client(&root).expect("writer bridge");
 
     let mut board = GoalBoard::new();
     add_active_goal(&mut board, active_goal("goal-alpha", 1)).unwrap();
@@ -101,7 +101,7 @@ fn carryover_round_trip_succeeds() {
 #[serial(cognitive_memory)]
 fn verify_no_record_on_fresh_state() {
     let (_tmp, root) = isolated_state_root();
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let bridge = launch_writer_client(&root).expect("writer bridge");
 
     let board = GoalBoard::new();
     let result = verify_goal_carryover(&board, bridge.ops()).expect("verify");
@@ -112,7 +112,7 @@ fn verify_no_record_on_fresh_state() {
 #[serial(cognitive_memory)]
 fn verify_succeeds_when_board_matches() {
     let (_tmp, root) = isolated_state_root();
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let bridge = launch_writer_client(&root).expect("writer bridge");
 
     let mut board = GoalBoard::new();
     add_active_goal(&mut board, active_goal("g1", 1)).unwrap();
@@ -138,7 +138,7 @@ fn verify_succeeds_when_board_matches() {
 #[serial(cognitive_memory)]
 fn verify_detects_drift_when_goals_missing() {
     let (_tmp, root) = isolated_state_root();
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let bridge = launch_writer_client(&root).expect("writer bridge");
 
     // Meeting produces board with 3 goals.
     let mut meeting_board = GoalBoard::new();
@@ -182,7 +182,7 @@ fn goals_survive_same_state_root() {
     let (_tmp, root) = isolated_state_root();
 
     // Meeting writes goals + carryover.
-    let meeting_bridge = launch_writer_bridge(&root).expect("meeting bridge");
+    let meeting_bridge = launch_writer_client(&root).expect("meeting bridge");
     let mut board = GoalBoard::new();
     add_active_goal(&mut board, active_goal("survive-1", 1)).unwrap();
     add_active_goal(&mut board, active_goal("survive-2", 2)).unwrap();
@@ -191,7 +191,7 @@ fn goals_survive_same_state_root() {
     drop(meeting_bridge);
 
     // Engineer reads from same state root — should verify clean.
-    let eng_bridge = launch_writer_bridge(&root).expect("eng bridge");
+    let eng_bridge = launch_writer_client(&root).expect("eng bridge");
     let loaded = load_goal_board(eng_bridge.ops()).expect("load");
     assert_eq!(loaded.active.len(), 2, "both goals must survive");
 
@@ -213,7 +213,7 @@ fn diverged_state_root_produces_no_record() {
     let (_tmp1, root1) = isolated_state_root();
 
     // Meeting writes to root1.
-    let bridge1 = launch_writer_bridge(&root1).expect("bridge1");
+    let bridge1 = launch_writer_client(&root1).expect("bridge1");
     let mut board = GoalBoard::new();
     add_active_goal(&mut board, active_goal("lost-goal", 1)).unwrap();
     save_goal_board(&board, bridge1.ops()).expect("save");
@@ -226,7 +226,7 @@ fn diverged_state_root_produces_no_record() {
     unsafe {
         std::env::set_var(STATE_ROOT_ENV, &root2);
     }
-    let bridge2 = launch_writer_bridge(&root2).expect("bridge2");
+    let bridge2 = launch_writer_client(&root2).expect("bridge2");
     let loaded = load_goal_board(bridge2.ops()).expect("load from new root");
 
     // Board is empty because the new state root has no data.
@@ -246,7 +246,7 @@ fn diverged_state_root_produces_no_record() {
 #[serial(cognitive_memory)]
 fn latest_carryover_record_wins() {
     let (_tmp, root) = isolated_state_root();
-    let bridge = launch_writer_bridge(&root).expect("bridge");
+    let bridge = launch_writer_client(&root).expect("bridge");
 
     // First meeting writes 1 goal.
     let mut board1 = GoalBoard::new();

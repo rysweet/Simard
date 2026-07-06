@@ -173,7 +173,7 @@ Procedure {
   memory via the existing `execution_memory_operations` and
   `reflection_memory_operations` calls.
 
-- **Bridge/memory errors**: if `store_procedure` fails, the error is
+- **Client/memory errors**: if `store_procedure` fails, the error is
   logged to stderr and the cycle continues. Memory failures never crash
   the OODA loop. This matches the best-effort pattern used by every
   other memory call in `cycle.rs`:

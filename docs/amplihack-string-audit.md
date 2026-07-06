@@ -42,10 +42,10 @@ The 128 legitimate hits cluster into seven well-bounded usages:
    mirror the Python `amplihack_memory.memory_types` dataclasses across the
    FFI boundary. Names exist for cross-language readability, not parity.
 4. **Recipe-runner integration** (`src/bin/simard_self_improve_recipe.rs`,
-   `src/ooda_loop/bridge_factory.rs`, `src/cmd_ensure_deps.rs`) — Simard
+   `src/ooda_loop/client_factory.rs`, `src/cmd_ensure_deps.rs`) — Simard
    shells out to `amplihack recipe run` for the recipes-first rebuild
    (Phases 1-4, see #1268/#1270/#1273). The doc strings name the binary.
-5. **Gym evaluation bridge** (`src/gym_bridge.rs`) — connects to the
+5. **Gym evaluation client** (`src/gym_client.rs`) — connects to the
    `amplihack-agent-eval` benchmark suite (an upstream package). Five
    scoring dimensions are explicitly the eval suite's, not Simard's.
 6. **Engineer-loop dispatch** (`src/engineer_plan.rs`,
@@ -83,5 +83,5 @@ references to a real dependency.
 
 - Issue #1163 (this audit)
 - Issue #1162 — replace hard-coded `amplihack copilot` with base-type dispatch
-- Issue #1161 — remove Python bridge subsystem (Rust-only PRD constraint)
+- Issue #1161 — remove Python client subsystem (Rust-only PRD constraint)
 - Issue #1151 — PRD reconciliation that triggered this audit

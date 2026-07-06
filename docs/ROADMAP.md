@@ -17,7 +17,7 @@
 
 | Feature | Description | Key Files |
 |---------|-------------|-----------|
-| Cognitive Memory Bridge | 6-type memory (episodic, semantic, procedural, metacognitive, sensory, working) | `src/cognitive_memory_bridge/` |
+| Cognitive Memory Client | 6-type memory (episodic, semantic, procedural, metacognitive, sensory, working) | `src/cognitive_memory_client/` |
 | Base Types & PTY | ooda-copilot, pty-spawn, tool-call; composable agent primitives | `src/base_types/` |
 | Engineer Session Loop | Multi-turn engineer sessions with handoff and review | `src/engineer_session/` |
 | Gym & Evaluation | 40+ scenario suite across 8 categories with scoring | `src/gym/` |
@@ -49,7 +49,7 @@
 | Full Dashboard Telemetry | Gym score trends over time, benchmark regression alerts | Gym data persistence | P2 |
 | Runtime Repo Split | Separate `simard-core` crate from plugins/extensions | Module boundary cleanup | P3 |
 | Autonomous Self-Improvement | Auto-apply improvement proposals with rollback | Safety verification, test-gating | P2 |
-| Graph Memory Queries | LadybugDB/Kuzu graph traversal for relationship discovery | Memory bridge refactor | P3 |
+| Graph Memory Queries | LadybugDB/Kuzu graph traversal for relationship discovery | Memory client refactor | P3 |
 | Agent Registry | Track all Simard processes (local + remote) with health | Issue #296 | P2 |
 | Memory Backup | Automated daily backup with verification | Issue #298 | P3 |
 

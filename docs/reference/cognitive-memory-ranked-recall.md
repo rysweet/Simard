@@ -296,7 +296,7 @@ fn prune_superseded(&self) -> SimardResult<usize>;
 Notes:
 
 - The trait stays `&self`. The library's `recall_facts_ranked` is
-  `&mut self` (it *can* record access); the adapter bridges that through its
+  `&mut self` (it *can* record access); the adapter clients that through its
   existing `Mutex` write-lock pattern.
 - The trait takes the Simard-owned `RecallWeightSet`, **not** the library's
   `RecallWeights`, so the trait — and every mock/implementor — stays
@@ -365,7 +365,7 @@ weights.
 pub fn preparation_memory_operations_with_active_slugs_phased(
     objective: &str,
     session_id: &SessionId,
-    bridge: &dyn CognitiveMemoryOps,
+    client: &dyn CognitiveMemoryOps,
     active_slugs: Option<&HashSet<&str>>,
     weights: RecallWeightSet,
 ) -> SimardResult<PreparedContext>;
@@ -384,7 +384,7 @@ The OODA observe path calls this variant with
 use crate::ooda_loop::phase_weights::weights_for_phase;
 
 // During OODA Observe — recency-biased: freshest facts first.
-let observed = bridge.recall_facts_ranked(
+let observed = client.recall_facts_ranked(
     objective,
     10,                                  // limit
     0.0,                                 // min_confidence
@@ -392,7 +392,7 @@ let observed = bridge.recall_facts_ranked(
 )?;
 
 // During OODA Decide — confidence-biased: trusted facts first.
-let decided = bridge.recall_facts_ranked(
+let decided = client.recall_facts_ranked(
     objective,
     10,
     0.0,
@@ -413,7 +413,7 @@ same — the key drives dedup, the concept is the stored fact's concept.
 
 ```rust
 // First save: inserts one live snapshot fact.
-bridge.store_fact_with_caller_key(
+client.store_fact_with_caller_key(
     "goal-board:snapshot",   // caller_key (stable across saves)
     "goal-board:snapshot",   // concept
     &board_json_v1,          // content
@@ -423,7 +423,7 @@ bridge.store_fact_with_caller_key(
 )?;
 
 // Identical save: reused — still exactly one live fact, no duplicate.
-bridge.store_fact_with_caller_key(
+client.store_fact_with_caller_key(
     "goal-board:snapshot",
     "goal-board:snapshot",
     &board_json_v1,
@@ -434,7 +434,7 @@ bridge.store_fact_with_caller_key(
 
 // Changed save: supersedes — v1 archived + `superseded_by` set + a
 // `SUPERSEDES` edge v2 -> v1; still exactly one live fact.
-bridge.store_fact_with_caller_key(
+client.store_fact_with_caller_key(
     "goal-board:snapshot",
     "goal-board:snapshot",
     &board_json_v2,
@@ -448,7 +448,7 @@ bridge.store_fact_with_caller_key(
 
 ```rust
 // Runs in the consolidation persistence path, non-fatally.
-let reclaimed = bridge.prune_superseded()?;
+let reclaimed = client.prune_superseded()?;
 tracing::debug!("pruned {reclaimed} superseded facts");
 ```
 

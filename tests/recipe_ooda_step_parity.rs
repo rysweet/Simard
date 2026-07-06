@@ -6,8 +6,8 @@
 //! shelling to the helper bin via JSON IPC. This proves the recipe path
 //! and the in-process path are interchangeable.
 //!
-//! Bridge-dependent phases (observe, act, budget-check, memory-intake,
-//! prepare-context) are NOT covered here — they require live bridges
+//! RPC-client-dependent phases (observe, act, budget-check, memory-intake,
+//! prepare-context) are NOT covered here — they require live clients
 //! and are exercised via integration tests against `run_ooda_cycle`.
 
 use std::path::Path;

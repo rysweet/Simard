@@ -12,7 +12,7 @@
 //! into the daemon; the generator is OFF by default behind
 //! `SIMARD_CREATIVE_IDEAS_ENABLED`. The operator redeploys after merge.
 //!
-//! No type or module contains the word "Bridge" — this is one brain with
+//! No type or module is a transport shim — this is one brain with
 //! cognitive threads and reviewers, not a separate service.
 #![allow(dead_code)]
 

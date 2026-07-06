@@ -67,7 +67,7 @@ nav:
   - Architecture:
     - Overview: architecture/overview.md
     - Simard System Architecture: architecture/system-architecture.md
-    - Bridge Pattern: architecture/bridge-pattern.md
+    - RPC Transport Pattern: architecture/rpc-pattern.md
     - Agent Composition: architecture/agent-composition.md
     - Engineer-Loop Agent Orchestration: architecture/engineer-agent-orchestration.md
     - Cognitive Memory: architecture/cognitive-memory.md
@@ -220,7 +220,7 @@ nav:
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Runtime Contracts: reference/runtime-contracts.md
     - Subprocess Prompt Delivery: prompt-delivery.md
-    - Bridge Wire Protocol: reference/bridge-wire-protocol.md
+    - RPC Wire Protocol: reference/rpc-wire-protocol.md
     - Text-Parsing Wire Formats: reference/text-parsing-wire-formats.md
     - Recipe Context-Var Sanitization: reference/recipe-context-var-sanitization.md
     - Engineer-Loop argv Sanitization: reference/engineer-loop-argv-sanitization.md
@@ -242,7 +242,7 @@ nav:
     - Memory Introspection CLI: reference/simard-memory-cli.md
     - Cognitive-Memory Provenance (DERIVES_FROM): reference/cognitive-memory-provenance.md
     - Cognitive-Memory Bootstrap Procedures: reference/cognitive-memory-bootstrap-procedures.md
-    - Cognitive-Memory Bridge Helpers: reference/cognitive-memory-bridge-helpers.md
+    - Cognitive-Memory Client Helpers: reference/cognitive-memory-client-helpers.md
     - Cognitive-Memory Preparation Filters: reference/cognitive-memory-preparation-filters.md
     - Cognitive-Memory Fact Recall: reference/cognitive-memory-fact-recall.md
     - Cognitive-Memory Ranked Recall: reference/cognitive-memory-ranked-recall.md

@@ -36,7 +36,7 @@ The structured line parsing (`agenda:`, `update:`, `decision:`, `risk:`, `next-s
 │  (stdin/out)│     │                  │     │  (WebSocket)    │
 └─────────────┘     │  - history       │     └─────────────────┘
                     │  - persistence   │
-                    │  - memory bridge │
+                    │  - memory client │
                     │  - system prompt │
                     └────────┬─────────┘
                              │
@@ -51,7 +51,7 @@ The structured line parsing (`agenda:`, `update:`, `decision:`, `risk:`, `next-s
 - **Conversation history** — a `Vec<ConversationMessage>` maintained across all turns.
 - **System prompt construction** — Simard's personality, current goals/mission, and relevant memories injected at session start.
 - **LLM delegation** — calls `BaseTypeSession::run_turn()` with the full conversation context.
-- **Persistence** — JSON transcripts to `~/.simard/meetings/`, MeetingHandoff artifacts for OODA integration, and cognitive memory storage via the bridge.
+- **Persistence** — JSON transcripts to `~/.simard/meetings/`, MeetingHandoff artifacts for OODA integration, and cognitive memory storage via the client.
 
 The CLI REPL becomes a ~80-line stdin/stdout loop. The dashboard WebSocket handler becomes a ~50-line async adapter. Neither contains meeting logic.
 
@@ -81,7 +81,7 @@ At session creation, `MeetingBackend` builds the system prompt from three source
 
 1. **Base personality**: `prompt_assets/simard/meeting_system.md` — Simard's conversational style, role, operator context, and ecosystem awareness.
 2. **Live context**: `build_live_meeting_context()` output — current top-5 goals, active projects, recent session outcomes, and research tracker updates.
-3. **Relevant memories**: Loaded from `CognitiveMemoryBridge` — episodic memories from recent meetings, semantic knowledge relevant to the topic, and prospective plans.
+3. **Relevant memories**: Loaded from `CognitiveMemoryClient` — episodic memories from recent meetings, semantic knowledge relevant to the topic, and prospective plans.
 
 These are concatenated and injected via the `identity_context` field of `BaseTypeTurnInput`.
 
@@ -92,7 +92,7 @@ When the operator sends `/close`, `MeetingBackend` performs four operations:
 1. **LLM summarization call** — Sends a final LLM turn asking Simard to summarize the conversation. This internal prompt is not visible to the operator but consumes one additional LLM call (adds latency and token cost). The resulting summary text is used in the handoff artifact and transcript.
 2. **JSON transcript** → `~/.simard/meetings/{timestamp}_{sanitized_topic}.json` with `0o600` permissions. Contains all messages, timestamps, topic, and duration.
 3. **MeetingHandoff artifact** → `target/meeting_handoffs/meeting_handoff.json` for OODA integration. Uses empty `decisions` and `action_items` vectors (downstream consumers handle empty collections). The conversation summary is placed in the `transcript` field.
-4. **Cognitive memory** → Via `CognitiveMemoryBridge`: episodic memory of the meeting event, semantic extraction of key decisions/learnings, and prospective memory for agreed next steps.
+4. **Cognitive memory** → Via `CognitiveMemoryClient`: episodic memory of the meeting event, semantic extraction of key decisions/learnings, and prospective memory for agreed next steps.
 
 ### Compatibility with existing systems
 
@@ -139,7 +139,7 @@ src/meeting_backend/
 ```rust
 impl MeetingBackend {
     pub fn new_session(topic: &str, agent: Box<dyn BaseTypeSession>,
-                       bridge: Option<Arc<dyn BridgeTransport>>,
+                       client: Option<Arc<dyn RpcTransport>>,
                        system_prompt: String) -> Self;
     pub fn send_message(&mut self, input: &str) -> SimardResult<MeetingResponse>;
     pub fn close(&mut self) -> SimardResult<MeetingSummary>;

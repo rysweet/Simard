@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use simard::bridge_subprocess::InMemoryBridgeTransport;
-use simard::gym_bridge::GymBridge;
+use simard::gym_client::GymClient;
+use simard::rpc_transport::InMemoryRpcTransport;
 use simard::self_improve::{
     ImprovementConfig, ImprovementDecision, ImprovementPhase, ProposedChange,
     run_improvement_cycle, summarize_cycle,
@@ -31,17 +31,17 @@ fn suite_json(suite_id: &str, overall: f64) -> serde_json::Value {
     })
 }
 
-fn fixed_score_bridge(score: f64) -> GymBridge {
-    let t = InMemoryBridgeTransport::new("gym", move |method, _| match method {
+fn fixed_score_bridge(score: f64) -> GymClient {
+    let t = InMemoryRpcTransport::new("gym", move |method, _| match method {
         "gym.run_suite" => Ok(suite_json("progressive", score)),
         _ => Ok(serde_json::json!([])),
     });
-    GymBridge::new(Box::new(t))
+    GymClient::new(Box::new(t))
 }
 
-fn improving_bridge(base: f64, post: f64) -> GymBridge {
+fn improving_bridge(base: f64, post: f64) -> GymClient {
     let n = AtomicUsize::new(0);
-    let t = InMemoryBridgeTransport::new("gym", move |method, _| match method {
+    let t = InMemoryRpcTransport::new("gym", move |method, _| match method {
         "gym.run_suite" => {
             let s = if n.fetch_add(1, Ordering::SeqCst) == 0 {
                 base
@@ -52,12 +52,12 @@ fn improving_bridge(base: f64, post: f64) -> GymBridge {
         }
         _ => Ok(serde_json::json!([])),
     });
-    GymBridge::new(Box::new(t))
+    GymClient::new(Box::new(t))
 }
 
-fn regressing_bridge(base: f64, post_overall: f64, post_spec: f64) -> GymBridge {
+fn regressing_bridge(base: f64, post_overall: f64, post_spec: f64) -> GymClient {
     let n = AtomicUsize::new(0);
-    let t = InMemoryBridgeTransport::new("gym", move |method, _| match method {
+    let t = InMemoryRpcTransport::new("gym", move |method, _| match method {
         "gym.run_suite" => {
             if n.fetch_add(1, Ordering::SeqCst) == 0 {
                 Ok(suite_json("progressive", base))
@@ -78,7 +78,7 @@ fn regressing_bridge(base: f64, post_overall: f64, post_spec: f64) -> GymBridge 
         }
         _ => Ok(serde_json::json!([])),
     });
-    GymBridge::new(Box::new(t))
+    GymClient::new(Box::new(t))
 }
 
 fn sample_changes() -> Vec<ProposedChange> {
@@ -214,13 +214,13 @@ fn summarize_cycle_includes_key_info() {
 
 #[test]
 fn bridge_error_propagates_from_cycle() {
-    let transport = InMemoryBridgeTransport::new("gym-fail", |_method, _params| {
-        Err(simard::bridge::BridgeErrorPayload {
+    let transport = InMemoryRpcTransport::new("gym-fail", |_method, _params| {
+        Err(simard::rpc::RpcErrorPayload {
             code: -32603,
             message: "gym server crashed".to_string(),
         })
     });
-    let gym = GymBridge::new(Box::new(transport));
+    let gym = GymClient::new(Box::new(transport));
     let config = cfg(sample_changes());
 
     let err = run_improvement_cycle(&gym, &config).expect_err("should propagate bridge error");
@@ -241,7 +241,7 @@ fn default_gates_is_ordered() {
     assert_eq!(gates[0], RelaunchGate::Smoke);
     assert_eq!(gates[1], RelaunchGate::UnitTest);
     assert_eq!(gates[2], RelaunchGate::GymBaseline);
-    assert_eq!(gates[3], RelaunchGate::BridgeHealth);
+    assert_eq!(gates[3], RelaunchGate::RpcHealth);
 }
 
 #[test]

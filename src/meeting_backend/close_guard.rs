@@ -106,7 +106,7 @@ pub enum PartialReason {
     /// its inner budget. Currently a no-op in production (no caller
     /// wires a bridge into `MeetingBackend::new_session`) but reserved
     /// for the future bridge-aware close pipeline.
-    BridgeTimeout,
+    RpcTimeout,
 
     /// A non-recoverable I/O error occurred while persisting the
     /// handoff bundle (after the atomic tmp-rename retry). The bundle
@@ -125,7 +125,7 @@ impl PartialReason {
             PartialReason::AgentCloseTimeout => "agent_close_timeout",
             PartialReason::SummaryTimeout => "summary_timeout",
             PartialReason::SummaryEmpty => "summary_empty",
-            PartialReason::BridgeTimeout => "bridge_timeout",
+            PartialReason::RpcTimeout => "bridge_timeout",
             PartialReason::PersistenceError => "persistence_error",
         }
     }
@@ -196,7 +196,7 @@ mod tests {
             "summary_timeout"
         );
         assert_eq!(PartialReason::SummaryEmpty.as_wire_str(), "summary_empty");
-        assert_eq!(PartialReason::BridgeTimeout.as_wire_str(), "bridge_timeout");
+        assert_eq!(PartialReason::RpcTimeout.as_wire_str(), "bridge_timeout");
         assert_eq!(
             PartialReason::PersistenceError.as_wire_str(),
             "persistence_error"

@@ -163,7 +163,7 @@ All methods are **synchronous**. Dashboard callers wrap them in `tokio::task::sp
 pub fn new_session(
     topic: &str,
     agent: Box<dyn BaseTypeSession>,
-    bridge: Option<Arc<dyn BridgeTransport>>,
+    client: Option<Arc<dyn RpcTransport>>,
     system_prompt: String,
 ) -> Self
 ```
@@ -174,12 +174,12 @@ Creates a new meeting session.
 
 - `topic` — Meeting topic, used for display and transcript filename.
 - `agent` — The LLM execution backend. Constructed by the caller via `SessionBuilder`.
-- `bridge` — Optional cognitive memory bridge for loading memories at start and storing them on close. When `None`, memory features are skipped gracefully.
-- `system_prompt` — The base system prompt including Simard's personality and live context. Callers build this using `build_live_meeting_context()` and the base prompt from `prompt_assets/simard/meeting_system.md`. Does **not** need to include memories — `new_session` loads those from the bridge.
+- `client` — Optional cognitive memory client for loading memories at start and storing them on close. When `None`, memory features are skipped gracefully.
+- `system_prompt` — The base system prompt including Simard's personality and live context. Callers build this using `build_live_meeting_context()` and the base prompt from `prompt_assets/simard/meeting_system.md`. Does **not** need to include memories — `new_session` loads those from the client.
 
 **Returns:** A `MeetingBackend` instance ready for conversation.
 
-**Side effects:** Loads relevant memories from the bridge (if provided) and appends them to the system prompt context. Logs session start at `INFO` level.
+**Side effects:** Loads relevant memories from the client (if provided) and appends them to the system prompt context. Logs session start at `INFO` level.
 
 ### `send_message`
 
@@ -242,8 +242,8 @@ Ends the meeting, persists all artifacts, and returns a summary.
    so `SIMARD_STATE_ROOT`, `SIMARD_HANDOFF_DIR`, and `SIMARD_MEETINGS_DIR`
    are all honored. `CARGO_MANIFEST_DIR` is **no longer** consulted at
    runtime.
-4. Stores cognitive memories via the bridge (if available) within the
-   bridge inner budget. Bridge failures / timeouts emit
+4. Stores cognitive memories via the client (if available) within the
+   client inner budget. Client failures / timeouts emit
    `WARN reason=bridge_timeout` and flow into the partial envelope
    without blocking the close.
 5. Marks the session as closed. Further `send_message()` calls return
@@ -458,7 +458,7 @@ The markdown file is a point-in-time snapshot — it captures the conversation a
 
 ```rust
 // Simplified — actual code is in src/meeting_repl/repl.rs
-let backend = MeetingBackend::new_session(topic, agent, bridge, system_prompt);
+let backend = MeetingBackend::new_session(topic, agent, client, system_prompt);
 loop {
     let input = read_line(stdin)?;
     match parse_command(&input) {
@@ -493,7 +493,7 @@ loop {
 ```rust
 // Simplified — actual code is in src/operator_commands_dashboard/routes.rs
 let backend = Arc::new(Mutex::new(
-    MeetingBackend::new_session(topic, agent, bridge, system_prompt)
+    MeetingBackend::new_session(topic, agent, client, system_prompt)
 ));
 
 while let Some(msg) = ws_stream.next().await {

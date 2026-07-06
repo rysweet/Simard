@@ -248,7 +248,7 @@ as they are.
 current per-cycle work, in the same order:
 
 1. cycle-start heartbeat file write,
-2. `run_ooda_cycle(&mut state, &mut bridges, &config)`,
+2. `run_ooda_cycle(&mut state, &mut clients, &config)`,
 3. on `Ok`: summarize, persist cycle report, persist episode to memory, write
    health file, `self_metrics::collect_and_record_all(elapsed)`,
 4. on `Err`: `daemon_log` the error, continue (identical to today).
@@ -260,7 +260,7 @@ Parity is asserted by tests that drive N iterations through the `Mind` and
 compare cycle count, ordering, and emitted side-effects against the legacy
 path.
 
-State that the OODA cycle mutates (`OodaState`, `OodaBridges`, `config`) is
+State that the OODA cycle mutates (`OodaState`, `OodaClients`, `config`) is
 owned by `OodaThread` (moved into it at daemon start), not the generic
 `ThreadContext` — only OODA needs it, and this keeps the trait clean.
 
@@ -274,7 +274,7 @@ owned by `OodaThread` (moved into it at daemon start), not the generic
     byte-for-byte parity **without** an untestable live-loop rewrite, the daemon
     keeps its inline OODA cycle authoritative for now and does **not** register
     `OodaThread` in the live `Mind`. Cutting the live loop over to
-    `OodaThread` (using `OodaThread::into_parts()` to hand `state`/`bridges`
+    `OodaThread` (using `OodaThread::into_parts()` to hand `state`/`clients`
     back to the graceful-shutdown drain) is a **follow-up**, gated on adding a
     daemon-loop parity harness.
 
@@ -760,11 +760,11 @@ duration_seconds, next_run_epoch, active}`.
 
 ```rust
 // ooda.rs — owns the mutable OODA state (moved in at daemon start).
-pub struct OodaThread { /* state, bridges, config, interval_secs, health (private) */ }
+pub struct OodaThread { /* state, clients, config, interval_secs, health (private) */ }
 impl OodaThread {
     pub fn new(
         state: crate::ooda_loop::OodaState,
-        bridges: crate::ooda_loop::OodaBridges,
+        clients: crate::ooda_loop::OodaClients,
         config: crate::ooda_loop::OodaConfig,
         interval_secs: u64,
     ) -> Self;
@@ -857,7 +857,7 @@ gate-blocks + the `run_ooda_cycle(...)` call collapse to one `mind.run_due`.
 
 ```rust
 let mut mind = Mind::new();
-mind.register(Box::new(OodaThread::new(state, bridges, config, interval_secs)))
+mind.register(Box::new(OodaThread::new(state, clients, config, interval_secs)))
     .register(Box::new(MaintenanceThread::from_env()))
     .register(Box::new(EngineerLogAnalysisThread::from_env()));
 // (behaviour-preserving wrappers for backup / disk-health / RSS / worktree-sweep
@@ -881,7 +881,7 @@ let _outcomes = mind.run_due(&mut ctx);
 ```
 
 The trailing `interruptible_sleep(interval_secs, &shutdown)` and
-`shutdown_daemon(...)` drain are **unchanged**. `OodaState`/`OodaBridges`/
+`shutdown_daemon(...)` drain are **unchanged**. `OodaState`/`OodaClients`/
 `OodaConfig` move **into** `OodaThread` (only OODA needs them), keeping
 `ThreadContext` generic. Parity tests (§6, §12) assert identical cycle
 count/order/side-effects vs. the legacy path.
@@ -893,7 +893,7 @@ count/order/side-effects vs. the legacy path.
     `EngineerLogAnalysisThread::from_env()`, and calls `mind.run_due(&mut ctx)`
     **after** the existing `run_ooda_cycle(...)` match — not in place of it. The
     context is built with `memory: shared_mem.as_ref()`, a dedicated
-    single-worker runtime handle, `repo_root` cloned from `bridges.repo_root`,
+    single-worker runtime handle, `repo_root` cloned from `clients.repo_root`,
     and `dry_run: false` (each exemplar carries its own dry-run default). This
     keeps edits to the OODA emission sites nil (parity) while the two new
     threads run under the `Mind`'s budget + failure isolation. Registering

@@ -8,7 +8,7 @@ doc_type: concept
 
 # Memory architecture
 
-Simard's memory is not a flat key-value store. She uses **six distinct memory types** modeled after cognitive psychology. They are provided by the upstream [`amplihack-memory-lib`](https://github.com/rysweet/amplihack-memory-lib) crate (persistent, LadybugDB/`lbug`-backed) and reached through the `LibraryCognitiveMemory` adapter, which implements the `CognitiveMemoryOps` trait. This library backend is the sole on-disk cognitive-memory backend — there is no Python bridge and no native fork.
+Simard's memory is not a flat key-value store. She uses **six distinct memory types** modeled after cognitive psychology. They are provided by the upstream [`amplihack-memory-lib`](https://github.com/rysweet/amplihack-memory-lib) crate (persistent, LadybugDB/`lbug`-backed) and reached through the `LibraryCognitiveMemory` adapter, which implements the `CognitiveMemoryOps` trait. This library backend is the sole on-disk cognitive-memory backend — there is no Python client and no native fork.
 
 For the full canonical specification (schema, consolidation rules, hive event bus contract) see [Cognitive Memory Architecture](architecture/cognitive-memory.md). This page is the operator-level summary.
 

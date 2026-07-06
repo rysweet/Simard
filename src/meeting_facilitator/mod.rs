@@ -37,23 +37,23 @@ pub use types::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
-    use crate::memory_bridge::CognitiveMemoryBridge;
+    use crate::memory_client::CognitiveMemoryClient;
+    use crate::rpc_transport::InMemoryRpcTransport;
     use serde_json::json;
 
-    fn mock_bridge() -> CognitiveMemoryBridge {
+    fn mock_bridge() -> CognitiveMemoryClient {
         let transport =
-            InMemoryBridgeTransport::new("test-meeting-mod", |method, _params| match method {
+            InMemoryRpcTransport::new("test-meeting-mod", |method, _params| match method {
                 "memory.record_sensory" => Ok(json!({"id": "sen_m1"})),
                 "memory.store_episode" => Ok(json!({"id": "epi_m1"})),
                 "memory.store_fact" => Ok(json!({"id": "sem_m1"})),
                 "memory.store_prospective" => Ok(json!({"id": "pro_m1"})),
-                _ => Err(crate::bridge::BridgeErrorPayload {
+                _ => Err(crate::rpc::RpcErrorPayload {
                     code: -32601,
                     message: format!("unknown method: {method}"),
                 }),
             });
-        CognitiveMemoryBridge::new(Box::new(transport))
+        CognitiveMemoryClient::new(Box::new(transport))
     }
 
     #[test]

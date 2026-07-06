@@ -7,7 +7,7 @@ doc_type: howto
 related:
   - ../concepts/preparation-compound-objective-search.md
   - ../concepts/goal-fact-dedup-in-preparation.md
-  - ../reference/cognitive-memory-bridge-helpers.md
+  - ../reference/cognitive-memory-client-helpers.md
   - ../architecture/cognitive-memory.md
 ---
 
@@ -151,7 +151,7 @@ content into debug logs.
   — the design that these diagnostics support.
 - [Goal fact dedup in preparation](../concepts/goal-fact-dedup-in-preparation.md)
   — the dedup layer that runs after the objective search.
-- [Cognitive memory bridge helpers](../reference/cognitive-memory-bridge-helpers.md)
+- [Cognitive memory client helpers](../reference/cognitive-memory-client-helpers.md)
   — how `search_facts` reaches the graph store.
 - [Cognitive Memory Architecture](../architecture/cognitive-memory.md)
   — full schema and query model.

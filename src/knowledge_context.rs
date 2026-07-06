@@ -6,7 +6,7 @@
 //! injected into the planning prompt.
 
 use crate::error::SimardResult;
-use crate::knowledge_bridge::{KnowledgeBridge, KnowledgePackInfo, KnowledgeQueryResult};
+use crate::knowledge_client::{KnowledgeClient, KnowledgePackInfo, KnowledgeQueryResult};
 
 /// Maximum number of packs to query per objective.
 const MAX_PACKS_PER_OBJECTIVE: usize = 3;
@@ -42,7 +42,7 @@ impl PlanningContext {
 /// rather than hiding errors — knowledge enrichment failures propagate per PHILOSOPHY.md.
 pub fn enrich_planning_context(
     objective: &str,
-    bridge: &KnowledgeBridge,
+    bridge: &KnowledgeClient,
 ) -> SimardResult<PlanningContext> {
     let packs = bridge.list_packs()?;
 
@@ -109,11 +109,11 @@ fn relevance_score(objective: &str, pack: &KnowledgePackInfo) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::{BRIDGE_ERROR_METHOD_NOT_FOUND, BridgeErrorPayload};
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
+    use crate::rpc::{RPC_ERROR_METHOD_NOT_FOUND, RpcErrorPayload};
+    use crate::rpc_transport::InMemoryRpcTransport;
 
-    fn mock_transport() -> InMemoryBridgeTransport {
-        InMemoryBridgeTransport::new("knowledge-ctx-test", |method, params| match method {
+    fn mock_transport() -> InMemoryRpcTransport {
+        InMemoryRpcTransport::new("knowledge-ctx-test", |method, params| match method {
             "bridge.health" => Ok(serde_json::json!({
                 "server_name": "simard-knowledge",
                 "healthy": true,
@@ -154,16 +154,16 @@ mod tests {
                     "confidence": 0.8,
                 }))
             }
-            _ => Err(BridgeErrorPayload {
-                code: BRIDGE_ERROR_METHOD_NOT_FOUND,
+            _ => Err(RpcErrorPayload {
+                code: RPC_ERROR_METHOD_NOT_FOUND,
                 message: format!("unknown method: {method}"),
             }),
         })
     }
 
-    fn failing_transport() -> InMemoryBridgeTransport {
-        InMemoryBridgeTransport::new("knowledge-fail", |method, _params| {
-            Err(BridgeErrorPayload {
+    fn failing_transport() -> InMemoryRpcTransport {
+        InMemoryRpcTransport::new("knowledge-fail", |method, _params| {
+            Err(RpcErrorPayload {
                 code: -32603,
                 message: format!("bridge down: {method}"),
             })
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn enrich_picks_relevant_packs() {
-        let bridge = KnowledgeBridge::new(Box::new(mock_transport()));
+        let bridge = KnowledgeClient::new(Box::new(mock_transport()));
         let ctx = enrich_planning_context("Fix Rust ownership bug", &bridge).unwrap();
         assert!(ctx.pack_sources.contains(&"rust-expert".to_string()));
         assert!(!ctx.relevant_knowledge.is_empty());
@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn enrich_returns_error_when_bridge_unavailable() {
-        let bridge = KnowledgeBridge::new(Box::new(failing_transport()));
+        let bridge = KnowledgeClient::new(Box::new(failing_transport()));
         let result = enrich_planning_context("anything", &bridge);
         assert!(
             result.is_err(),
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn enrich_returns_empty_for_unrelated_objective() {
-        let bridge = KnowledgeBridge::new(Box::new(mock_transport()));
+        let bridge = KnowledgeClient::new(Box::new(mock_transport()));
         let ctx = enrich_planning_context("xyzzy plugh", &bridge).unwrap();
         assert!(ctx.is_empty());
     }
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn max_packs_capped() {
         // Even with many matching packs, we cap at MAX_PACKS_PER_OBJECTIVE.
-        let bridge = KnowledgeBridge::new(Box::new(mock_transport()));
+        let bridge = KnowledgeClient::new(Box::new(mock_transport()));
         let ctx = enrich_planning_context(
             "Rust Python Docker containers programming language",
             &bridge,

@@ -9,7 +9,7 @@ related:
   - ./cognitive-memory-serial-isolation.md
   - ../reference/simard-cli.md
   - ../reference/goal-board-api.md
-  - ../reference/cognitive-memory-bridge-helpers.md
+  - ../reference/cognitive-memory-client-helpers.md
   - ../howto/clean-fixture-leaks.md
   - ./COVERAGE_BASELINE.md
 ---
@@ -24,7 +24,7 @@ memory. The contract exists because, before issues
 *looked* hermetic (constructed a `TempDir`, set `SIMARD_STATE_ROOT`)
 silently wrote into the operator's live `~/.simard/cognitive_memory.ladybug`
 because the IPC socket path was hard-coded to `~/.simard/memory.sock`
-and the test's bridge-launch picked up the running daemon's socket
+and the test's client-launch picked up the running daemon's socket
 instead of opening its own DB.
 
 The fix has two parts that test authors must understand:
@@ -32,7 +32,7 @@ The fix has two parts that test authors must understand:
 1. **Socket path follows the state root.** `memory_ipc::socket_path_for(state_root)`
    resolves to `<state_root>/memory.sock` unless `$SIMARD_MEMORY_SOCKET`
    is set. Pointing `SIMARD_STATE_ROOT` at a `TempDir` is now sufficient
-   to isolate from the live daemon — the test's writer bridge cannot
+   to isolate from the live daemon — the test's writer client cannot
    even *find* the operator's socket.
 2. **A hermetic-state-root guard runs in tests.** Every code path that
    reaches `save_goal_board` / `save_goal_board_with_removals` /
@@ -58,8 +58,8 @@ moment of the write:
 - (H3) `memory_ipc::socket_path_for(default_state_root())` is under the
   same `TempDir`. (This holds automatically from (H1) when
   `SIMARD_MEMORY_SOCKET` is unset — which it must be in tests.)
-- (H4) The `TempDir` outlives every bridge handle the test opens.
-  Dropping the `TempDir` while a bridge is alive triggers WAL-write
+- (H4) The `TempDir` outlives every client handle the test opens.
+  Dropping the `TempDir` while a client is alive triggers WAL-write
   errors on Linux, which are easy to misread as schema bugs.
 
 A test that needs to talk to the operator's daemon by design (the only
@@ -117,7 +117,7 @@ ignoring it is correct.
 > with the native fork (the `ops.rs` it lived in no longer exists). Current
 > hermetic enforcement is backend-agnostic: tests allocate isolated state through
 > `HermeticState`, serialize process-global env access with the
-> `cognitive_memory` key, the bridge launcher checks explicit state roots, and
+> `cognitive_memory` key, the client launcher checks explicit state roots, and
 > `LibraryCognitiveMemory` runs a `cfg(test)` lock-write guard for persistent
 > test stores. The table below is archival history for the removed native symbol.
 
@@ -142,11 +142,11 @@ Additional enforcement points outside cognitive memory:
 - `goals::persistence::save_goal_board` and
   `goals::persistence::save_goal_board_with_removals` (immediately
   before the first `store_fact` call).
-- `memory_ipc::launcher::launch_writer_bridge` (immediately before
-  returning a writer bridge, regardless of which tier was selected).
+- `memory_ipc::launcher::launch_writer_client` (immediately before
+  returning a writer client, regardless of which tier was selected).
 
 Current enforcement remains multi-site: `HermeticState`/serial isolation cover
-test setup, the launcher covers bridge acquisition, and the library adapter's
+test setup, the launcher covers client acquisition, and the library adapter's
 `cfg(test)` lock-write guard covers persistent library-backed writes.
 
 ## Helpers that satisfy the contract
@@ -171,9 +171,9 @@ fn my_persistence_test() {
     // SIMARD_MEMORY_SOCKET is unset for the duration of `state`
     // (so socket_path_for follows the state root automatically)
 
-    let bridge = launch_writer_bridge(state.state_root()).expect("bridge");
-    save_goal_board(&board, bridge.ops()).expect("save");
-    // bridge dropped, then state dropped — TempDir reaped last
+    let client = launch_writer_client(state.state_root()).expect("client");
+    save_goal_board(&board, client.ops()).expect("save");
+    // client dropped, then state dropped — TempDir reaped last
 }
 ```
 
@@ -185,7 +185,7 @@ cross-contaminate.
 For tests that exercise multi-process daemon/client interactions in the
 same temp root, use `HermeticState::shared_for_subprocess()` — same
 contract, plus it exposes the socket path as an env var to spawned
-children so the child's bridge picks up the same socket.
+children so the child's client picks up the same socket.
 
 ### `#[serial_test::serial(cognitive_memory)]`
 
@@ -260,7 +260,7 @@ The cheapest correct migration:
 A grep that finds candidate tests:
 
 ```bash
-rg --type rust -l 'save_goal_board|store_fact|launch_writer_bridge' \
+rg --type rust -l 'save_goal_board|store_fact|launch_writer_client' \
    src/ tests/ | xargs rg -L 'HermeticState'
 ```
 
@@ -284,6 +284,6 @@ list.
 - [Goal board API — save_goal_board_with_removals](../reference/goal-board-api.md#save_goal_board_with_removals)
   — the removal API exercised by the cleanup commands; tests of it
   must use `HermeticState`.
-- [Cognitive memory bridge helpers](../reference/cognitive-memory-bridge-helpers.md)
-  — the `launch_writer_bridge` tier table now reflects the
+- [Cognitive memory client helpers](../reference/cognitive-memory-client-helpers.md)
+  — the `launch_writer_client` tier table now reflects the
   per-state-root socket path.

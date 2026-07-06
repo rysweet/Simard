@@ -29,7 +29,7 @@ The verified-backup pipeline guarantees four properties that together make a
 silent backup-rot regression impossible:
 
 1. **Backup source == live store.** The backup reads the live store through the
-   bridge, resolved through one migration-aware function
+   client, resolved through one migration-aware function
    ([`live_store_path`](#live-store-path-resolution)). A regression test asserts
    the backup source equals the path the daemon opens, so they cannot silently
    diverge again.
@@ -61,7 +61,7 @@ The daemon's store-open path (`LibraryCognitiveMemory::open`) and the
 `live_store_path` resolver are anchored to the same `LIVE_STORE_SUBDIR`
 constant, so "what the daemon opens" and "what the resolver reports" are
 guaranteed equal. The verified backup then reads that live store *through the
-bridge* (a logical snapshot), so it inherently captures exactly the store the
+client* (a logical snapshot), so it inherently captures exactly the store the
 daemon opened — never a stale file path. The resolver is exported from
 `cognitive_memory`.
 
@@ -75,14 +75,14 @@ let store_path = live_store_path(&state_root);
 
 ### Logical, not file-copy, backups
 
-A backup is a **logical snapshot** taken through the live bridge, not a raw copy
+A backup is a **logical snapshot** taken through the live client, not a raw copy
 of the open LadybugDB store. Copying an open store file is unsafe; reading
 through `CognitiveMemoryOps` is consistent and inherently targets the migrated
 path. Each backup is a timestamped directory under `state_root/backups/`:
 
 ```text
 ~/.simard/backups/20260627_231000/
-  cognitive_snapshot.json   # facts + procedures exported via the bridge
+  cognitive_snapshot.json   # facts + procedures exported via the client
   memory_records.json       # file-backed memory records
   manifest.json             # counts + SHA-256 checksum over the two files above
 ```
@@ -201,7 +201,7 @@ Running at the quiescent top of the loop keeps the snapshot consistent.
 Per tick (when due):
 
 1. Open the file-backed store at `state_root/memory_records.json`.
-2. `backup_memory_verified(bridge, store, "simard", &config)` — full snapshot +
+2. `backup_memory_verified(client, store, "simard", &config)` — full snapshot +
    verify.
 3. On `Ok`: log `verified backup OK` with counts, then `prune_old_backups`.
 4. On `Err`: log `WARN: verified backup FAILED, prune skipped` and continue the
@@ -268,7 +268,7 @@ same `LIVE_STORE_SUBDIR` constant as the daemon store-open
 
 ```rust
 pub fn export_full_memory_snapshot(
-    bridge: &dyn CognitiveMemoryOps,
+    client: &dyn CognitiveMemoryOps,
     agent_name: &str,
 ) -> SimardResult<MemorySnapshot>
 ```
@@ -281,7 +281,7 @@ bounded replication payloads.
 
 ```rust
 pub fn backup_memory_verified(
-    bridge: &dyn CognitiveMemoryOps,
+    client: &dyn CognitiveMemoryOps,
     store: &dyn MemoryStore,
     agent_name: &str,
     config: &BackupConfig,
@@ -316,7 +316,7 @@ Returns the manifest only if `verify_backup` reports `Valid`; otherwise a loud
 
 ```rust
 pub fn backup_memory(
-    bridge: &dyn CognitiveMemoryOps,
+    client: &dyn CognitiveMemoryOps,
     store: &dyn MemoryStore,
     agent_name: &str,
     config: &BackupConfig,
@@ -341,7 +341,7 @@ counts, SHA-256 checksum). Returns a `BackupVerification` whose `status` is
 
 ```rust
 pub fn restore_from_backup(
-    bridge: &dyn CognitiveMemoryOps,
+    client: &dyn CognitiveMemoryOps,
     store: &dyn MemoryStore,
     backup_dir: &Path,
 ) -> SimardResult<usize>
@@ -405,7 +405,7 @@ use simard::memory_backup::{backup_memory_verified, BackupConfig};
 
 let config = BackupConfig { backup_dir: state_root.join("backups"), ..BackupConfig::default() };
 let manifest = backup_memory_verified(
-    &*bridges.memory,          // live cognitive bridge
+    &*clients.memory,          // live cognitive client
     &file_backed_store,        // <state_root>/memory_records.json
     "simard",
     &config,
@@ -419,11 +419,11 @@ println!("verified backup: {} facts -> {}", manifest.cognitive_facts_count, mani
 use simard::memory_backup::{backup_memory_verified, restore_from_backup};
 
 // 1. Back up the live store (full + verified).
-let manifest = backup_memory_verified(&*bridges.memory, &file_backed_store, "simard", &config)?;
+let manifest = backup_memory_verified(&*clients.memory, &file_backed_store, "simard", &config)?;
 
 // 2. Restore into a fresh (empty) store and confirm the count round-trips.
 //    A fresh target is required for exact equality: restore is additive.
-let restored = restore_from_backup(&*fresh_bridge, &fresh_store, &manifest.backup_dir)?;
+let restored = restore_from_backup(&*fresh_client, &fresh_store, &manifest.backup_dir)?;
 let expected = manifest.cognitive_facts_count
     + manifest.cognitive_procedures_count
     + manifest.memory_records_count;
@@ -501,7 +501,7 @@ ls -1dt ~/.simard/backups/*/ | head -1
 # Move the corrupt/partial live store aside so restore lands on a clean target:
 mv ~/.simard/cognitive ~/.simard/cognitive.prerestore-$(date +%Y%m%d_%H%M%S)
 # Run restore via operator tooling / a one-shot harness that calls
-# memory_backup::restore_from_backup(bridge, store, backup_dir) against a fresh
+# memory_backup::restore_from_backup(client, store, backup_dir) against a fresh
 # ~/.simard/cognitive, then:
 sudo systemctl start simard-ooda
 journalctl -u simard-ooda -n 50

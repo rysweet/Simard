@@ -81,7 +81,7 @@ fn migration_skips_slugs_already_in_cognitive_memory() {
 
     // Register an in-process writer so that put(), migration, and list()
     // share a single LibraryCognitiveMemory handle.  Without this, each
-    // launch_writer_bridge / open_reader_bridge opens a separate DB
+    // launch_writer_client / open_reader_client opens a separate DB
     // instance, and LadybugDB's WAL may not be visible across sequential
     // open/close cycles under CI (coverage instrumentation, GitHub Actions
     // runners).

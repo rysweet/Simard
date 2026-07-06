@@ -173,7 +173,7 @@ let vanished: Vec<&str> = pre_cycle_active_ids.iter()
     .collect();
 
 if vanished.is_empty() {
-    persist_board(&state.active_goals, &*bridges.memory)?;
+    persist_board(&state.active_goals, &*clients.memory)?;
 } else {
     eprintln!("[simard] OODA curate: CORRUPTION DETECTED — {} goal(s) vanished without \
                archival: {}; skipping persist to protect board",

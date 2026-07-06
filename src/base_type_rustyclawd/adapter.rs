@@ -51,7 +51,7 @@ impl RustyClawdAdapter {
     ///
     /// Without this, sessions are created with both bridges set to `None` and
     /// every turn runs through `enrich_input` with an empty
-    /// [`crate::base_type_turn::EnrichmentBridges`] — the no-op of issue #2383
+    /// [`crate::base_type_turn::EnrichmentClients`] — the no-op of issue #2383
     /// that left RustyClawd recalling no memory facts/procedures or domain
     /// knowledge in production even though the #1665 `enrich_input` entry point
     /// was already wired through `run_turn`.
@@ -88,7 +88,7 @@ impl BaseTypeFactory for RustyClawdAdapter {
         // configured source (graceful degradation inside `resolve`) so the
         // shared `enrich_input` entry point actually injects memory facts,
         // procedures, and domain knowledge into every production turn — instead
-        // of the empty `EnrichmentBridges::new()` that made enrichment inert.
+        // of the empty `EnrichmentClients::new()` that made enrichment inert.
         Ok(Box::new(RustyClawdSession {
             descriptor: self.descriptor.clone(),
             request,
@@ -366,14 +366,14 @@ mod tests {
     /// Mock memory bridge mirroring `tests/base_type_enrichment.rs`: returns a
     /// single fact and procedure for any query so the rendered prompt is
     /// deterministic.
-    fn mock_memory_bridge() -> Box<dyn crate::cognitive_memory::CognitiveMemoryOps> {
-        use crate::bridge::BridgeErrorPayload;
-        use crate::bridge_subprocess::InMemoryBridgeTransport;
-        use crate::memory_bridge::CognitiveMemoryBridge;
+    fn mock_memory_client() -> Box<dyn crate::cognitive_memory::CognitiveMemoryOps> {
+        use crate::memory_client::CognitiveMemoryClient;
+        use crate::rpc::RpcErrorPayload;
+        use crate::rpc_transport::InMemoryRpcTransport;
         use serde_json::json;
 
         let transport =
-            InMemoryBridgeTransport::new("rc-test-memory", |method, params| match method {
+            InMemoryRpcTransport::new("rc-test-memory", |method, params| match method {
                 "memory.search_facts" => {
                     let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
                     Ok(
@@ -386,18 +386,18 @@ mod tests {
                     "name": "build-and-test", "steps": ["cargo build", "cargo test"],
                     "prerequisites": ["rust toolchain"], "usage_count": 5}]})),
                 "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(RpcErrorPayload {
                     code: -32601,
                     message: format!("unknown method: {method}"),
                 }),
             });
-        Box::new(CognitiveMemoryBridge::new(Box::new(transport)))
+        Box::new(CognitiveMemoryClient::new(Box::new(transport)))
     }
 
     /// The production-wiring regression guard for issue #2383: a RustyClawd
     /// session built through `with_enrichment` (the same seam `SessionBuilder`
     /// uses) must have non-empty bridges, instead of the empty
-    /// `EnrichmentBridges::new()` that made enrichment a permanent no-op.
+    /// `EnrichmentClients::new()` that made enrichment a permanent no-op.
     #[test]
     #[serial_test::serial(cognitive_memory)]
     fn production_session_with_enrichment_has_nonempty_bridges() {
@@ -465,7 +465,7 @@ mod tests {
         session
             .enrichment_mut()
             .expect("RustyClawd must support enrichment injection")
-            .memory = Some(mock_memory_bridge());
+            .memory = Some(mock_memory_client());
 
         let input = BaseTypeTurnInput::objective_only("implement error handling");
         let enriched = session.enrich_input(&input).expect("enrich_input");

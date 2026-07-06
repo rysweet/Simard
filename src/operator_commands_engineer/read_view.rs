@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
+use crate::engineer_handoff::{
+    ENGINEER_HANDOFF_FILE_NAME, ENGINEER_MODE_BOUNDARY, EngineerHandoffContext,
+    SHARED_DEFAULT_STATE_ROOT_SOURCE, TERMINAL_MODE_BOUNDARY, load_runtime_handoff_snapshot,
+};
 use crate::operator_commands::{
     render_redacted_objective_metadata, validated_engineer_read_artifacts,
-};
-use crate::terminal_engineer_bridge::{
-    ENGINEER_HANDOFF_FILE_NAME, ENGINEER_MODE_BOUNDARY, SHARED_DEFAULT_STATE_ROOT_SOURCE,
-    TERMINAL_MODE_BOUNDARY, TerminalBridgeContext, load_runtime_handoff_snapshot,
 };
 use crate::{FileBackedEvidenceStore, FileBackedMemoryStore};
 
@@ -35,7 +35,7 @@ pub(super) struct EngineerReadView {
     changed_files_after_action: String,
     verification_status: String,
     verification_summary: String,
-    terminal_bridge_context: Option<TerminalBridgeContext>,
+    terminal_bridge_context: Option<EngineerHandoffContext>,
     memory_record_count: usize,
     evidence_record_count: usize,
 }
@@ -45,11 +45,11 @@ impl EngineerReadView {
         let artifacts = validated_engineer_read_artifacts(&state_root)?;
         let handoff_source = artifacts.handoff_file_name.clone();
         let handoff = load_runtime_handoff_snapshot(
-            &crate::terminal_engineer_bridge::SelectedHandoffArtifact {
+            &crate::engineer_handoff::SelectedHandoffArtifact {
                 path: artifacts.handoff_path.clone(),
                 file_name: match handoff_source.as_str() {
                     ENGINEER_HANDOFF_FILE_NAME => ENGINEER_HANDOFF_FILE_NAME,
-                    _ => crate::terminal_engineer_bridge::COMPATIBILITY_HANDOFF_FILE_NAME,
+                    _ => crate::engineer_handoff::COMPATIBILITY_HANDOFF_FILE_NAME,
                 },
             },
             "engineer read",
@@ -163,7 +163,7 @@ impl EngineerReadView {
                 &handoff_source,
             )?
             .to_string(),
-            terminal_bridge_context: TerminalBridgeContext::from_engineer_evidence(
+            terminal_bridge_context: EngineerHandoffContext::from_engineer_evidence(
                 &handoff.evidence_records,
             )?,
             memory_record_count: handoff.memory_records.len(),
@@ -602,7 +602,7 @@ mod tests {
     // --- render_lines: terminal bridge context branches ---
 
     fn make_view_with_bridge(
-        bridge: Option<TerminalBridgeContext>,
+        bridge: Option<EngineerHandoffContext>,
         goals: Vec<String>,
         decisions: Vec<String>,
         memory_count: usize,
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn render_lines_terminal_bridge_some_with_last_output() {
-        let bridge = TerminalBridgeContext {
+        let bridge = EngineerHandoffContext {
             continuity_source: "state-root".to_string(),
             handoff_file_name: "terminal-handoff.json".to_string(),
             working_directory: "/home/user/project".to_string(),
@@ -681,7 +681,7 @@ mod tests {
 
     #[test]
     fn render_lines_terminal_bridge_some_without_last_output() {
-        let bridge = TerminalBridgeContext {
+        let bridge = EngineerHandoffContext {
             continuity_source: "state-root".to_string(),
             handoff_file_name: "terminal-handoff.json".to_string(),
             working_directory: "/home/user/project".to_string(),
@@ -832,7 +832,7 @@ mod tests {
 
     #[test]
     fn render_lines_bridge_context_emits_terminal_mode_boundary() {
-        let bridge = TerminalBridgeContext {
+        let bridge = EngineerHandoffContext {
             continuity_source: "src".to_string(),
             handoff_file_name: "h.json".to_string(),
             working_directory: "/wd".to_string(),

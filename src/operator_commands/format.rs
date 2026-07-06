@@ -1,6 +1,6 @@
+use crate::engineer_handoff::{EngineerHandoffContext, TERMINAL_MODE_BOUNDARY};
 use crate::goals::{GoalRecord, GoalStatus};
 use crate::sanitization::sanitize_terminal_text;
-use crate::terminal_engineer_bridge::{TERMINAL_MODE_BOUNDARY, TerminalBridgeContext};
 
 pub(crate) fn print_text(label: &str, value: impl AsRef<str>) {
     println!("{label}: {}", sanitize_terminal_text(value.as_ref()));
@@ -11,7 +11,7 @@ pub(crate) fn print_display(label: &str, value: impl std::fmt::Display) {
 }
 
 pub(crate) fn print_terminal_bridge_section(
-    terminal_bridge_context: Option<&TerminalBridgeContext>,
+    terminal_bridge_context: Option<&EngineerHandoffContext>,
     default_source: &str,
 ) {
     match terminal_bridge_context {

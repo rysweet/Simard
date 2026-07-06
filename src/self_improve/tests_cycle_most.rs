@@ -1,6 +1,6 @@
 use super::cycle::*;
 use super::types::{ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange};
-use crate::gym_bridge::ScoreDimensions;
+use crate::gym_client::ScoreDimensions;
 use crate::gym_scoring::GymSuiteScore;
 
 fn make_score(v: f64) -> GymSuiteScore {
@@ -115,7 +115,7 @@ mod cycle_inline {
     use super::super::types::{
         ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase,
     };
-    use crate::gym_bridge::ScoreDimensions;
+    use crate::gym_client::ScoreDimensions;
     use crate::gym_scoring::{GymSuiteScore, Regression, RegressionSeverity};
 
     fn make_score(overall: f64, dims: ScoreDimensions) -> GymSuiteScore {

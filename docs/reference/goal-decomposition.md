@@ -77,7 +77,7 @@ the parent**. It is invoked two ways:
 - **Manually**, by the operator, via
   [`simard goal decompose <goal_id>`](#operator-cli).
 
-Both paths write through the same cognitive-memory writer bridge that backs
+Both paths write through the same cognitive-memory writer client that backs
 `goal add` / `goal remove`, so decomposition is serialized by the daemon
 when one is running (see [goal-board persistence](../concepts/goal-board-persistence.md)).
 
@@ -175,7 +175,7 @@ internally — `SUPERSEDES` for caller-key fact revisions, and
 for provenance — but those are written by dedicated provenance methods, not
 a general edge API. Representing goal edges as typed relationship **facts**
 gives **real, queryable** parent↔child edges today, composes with the
-existing snapshot persistence and bridge ladder, and needs no upstream
+existing snapshot persistence and client ladder, and needs no upstream
 `amplihack-memory-lib` change or pin bump. Promoting these to first-class
 graph edges (a typed-edge API upstream + a pin bump under the
 [self-maintain-deps pattern](../howto/self-maintain-dependency-pins.md)) is
@@ -373,7 +373,7 @@ cannot steer the decomposer. Its output is a fenced JSON block: a list of
 driver function `goal_curation::decompose_goal` parses that block, clamps the
 list to `[2, 6]`, mints a child goal id per entry, then writes each child
 goal + its `decomposes_into` edge (and any `depends_on` edges) through the
-bridge. The prompt wording is pinned by a content-pin test
+client. The prompt wording is pinned by a content-pin test
 (`src/ooda_brain/prompt_store_tests.rs`) so the parser contract cannot drift
 silently.
 
@@ -394,9 +394,9 @@ Triggers decomposition of an existing goal manually.
 work begins; an unknown or malformed id exits non-zero with a clear message
 and writes nothing.
 
-It routes through the same cognitive-memory **writer bridge** path as
-`goal add` / `goal remove` (`launch_writer_bridge(&state_root)` →
-`bridge.ops()`, in `src/operator_cli/goal.rs`), so:
+It routes through the same cognitive-memory **writer client** path as
+`goal add` / `goal remove` (`launch_writer_client(&state_root)` →
+`client.ops()`, in `src/operator_cli/goal.rs`), so:
 
 - when the OODA daemon is running, the write is serialized through the
   daemon IPC socket;
@@ -436,7 +436,7 @@ $ simard goal decompose goal-7a1c --max-children 4 --dry-run
   1. Add parent_goal_id + GoalNode data model (done: serde back-compat test green)
   2. Implement typed-edge relationship facts (done: edge round-trips via search_facts)
   3. Add decompose_goal driver + prompt asset (done: 2-6 children, content-pin test green)
-  4. Wire simard goal decompose CLI verb (done: verb routes through writer bridge)
+  4. Wire simard goal decompose CLI verb (done: verb routes through writer client)
 ```
 
 After a (non-dry) run the children are active goals and the parent is demoted

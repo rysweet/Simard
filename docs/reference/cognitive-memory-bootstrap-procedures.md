@@ -168,7 +168,7 @@ The seeder is exposed as a single public function:
 ///
 /// Idempotent: safe to call on every daemon start.
 pub fn seed_bootstrap_procedures(
-    bridge: &dyn CognitiveMemoryOps,
+    client: &dyn CognitiveMemoryOps,
 ) -> SimardResult<usize>;
 ```
 
@@ -176,9 +176,9 @@ Algorithm:
 
 ```
 for procedure in BOOTSTRAP_PROCEDURES {
-    let hits = bridge.recall_procedure(&procedure.name, 1)?;
+    let hits = client.recall_procedure(&procedure.name, 1)?;
     if hits.is_empty() {
-        bridge.store_procedure(&procedure.name, &procedure.steps, &procedure.prerequisites)?;
+        client.store_procedure(&procedure.name, &procedure.steps, &procedure.prerequisites)?;
         seeded_count += 1;
     }
 }
@@ -189,12 +189,12 @@ daemon never produces duplicate procedures.
 
 ### Wiring
 
-`seed_bootstrap_procedures` is called once during `OodaBridges`
+`seed_bootstrap_procedures` is called once during `OodaClients`
 construction, immediately after `LibraryCognitiveMemory::open`
 succeeds and before the OODA loop starts. The exact call site lands
 at implementation time in whichever of `bin/simard/main.rs` or
 `src/operator_commands_ooda/daemon/mod.rs` constructs the
-`OodaBridges` (current daemon boot wiring threads both candidates);
+`OodaClients` (current daemon boot wiring threads both candidates);
 the requirement is **once per daemon start, post-`open`,
 pre-loop**, regardless of file.
 
@@ -238,7 +238,7 @@ let steps = vec![
     outcome.detail.clone(),      // what happened
 ];
 
-bridge.store_procedure(&name, &steps, &[])?;
+client.store_procedure(&name, &steps, &[])?;
 ```
 
 The `pattern`, `scope`, `base-triggers`, and `derive_triggers_from_objective`
@@ -354,7 +354,7 @@ Before ws2 #2295 two recall paths coexisted and disagreed:
   had run. This was the cycle-238 symptom.
 
 Both call sites now share one entry point,
-`memory_consolidation::recall_procedures_for_objective(bridge,
+`memory_consolidation::recall_procedures_for_objective(client,
 objective, max)` (re-exported as `simard::recall_procedures_for_objective`):
 
 1. Tokenize the objective with the shared `tokenize_objective`
@@ -470,7 +470,7 @@ procedure count:
 |-----------------------------------------------|-------------------------------------------------------|
 | `seed_bootstrap_procedures`                   | `src/cognitive_memory/bootstrap_procedures.rs`         |
 | `BOOTSTRAP_PROCEDURES` constant               | `src/cognitive_memory/bootstrap_procedures.rs`         |
-| Daemon boot wiring                            | Once-per-start call from the `OodaBridges` constructor, post-`LibraryCognitiveMemory::open`, pre-loop. Current daemon construction is in `src/operator_commands_ooda/daemon/mod.rs`. |
+| Daemon boot wiring                            | Once-per-start call from the `OodaClients` constructor, post-`LibraryCognitiveMemory::open`, pre-loop. Current daemon construction is in `src/operator_commands_ooda/daemon/mod.rs`. |
 | OODA cycle procedure storage                  | `src/ooda_loop/cycle.rs` (currently at `cycle.rs:343`, the `format!("ooda:{}", outcome.action.kind)` site) |
 | Runtime pattern + trigger mapping             | `src/ooda_loop/cycle.rs` (next to the storage site)   |
 | `derive_triggers_from_objective` helper       | `src/ooda_loop/cycle.rs`                              |

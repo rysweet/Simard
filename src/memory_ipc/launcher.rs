@@ -1,9 +1,9 @@
 //! Cognitive-memory bridge launchers shared by dashboard, meeting, and
 //! engineer call sites (issue #1590, spec recommendation C / A2).
 //!
-//! Two opaque types — [`WriterBridge`] and [`ReaderBridge`] — wrap a boxed
+//! Two opaque types — [`WriterClient`] and [`ReaderClient`] — wrap a boxed
 //! [`CognitiveMemoryOps`] trait object so callers can write `let bridge =
-//! launch_writer_bridge(state_root)?;` and pass `bridge.ops()` straight
+//! launch_writer_client(state_root)?;` and pass `bridge.ops()` straight
 //! into [`crate::goal_curation::save_goal_board`] / `load_goal_board`.
 //!
 //! Writer ladder:
@@ -40,16 +40,16 @@ use crate::error::{SimardError, SimardResult};
 use super::{RemoteCognitiveMemory, SharedMemory, reap_stale_open_lock, socket_path_for};
 
 /// Writer bridge to cognitive memory. Holds a `Box<dyn CognitiveMemoryOps>`
-/// underneath; callers should use [`WriterBridge::ops`] to access it.
-pub struct WriterBridge {
+/// underneath; callers should use [`WriterClient::ops`] to access it.
+pub struct WriterClient {
     inner: Box<dyn CognitiveMemoryOps>,
 }
 
-impl WriterBridge {
+impl WriterClient {
     /// Construct a writer bridge, asserting the wrapped backend is not
     /// read-only.
     ///
-    /// Wrapping a read-only handle as a `WriterBridge` is exactly the
+    /// Wrapping a read-only handle as a `WriterClient` is exactly the
     /// silent-degradation hazard the issue #1590 follow-up eliminates:
     /// `store_fact` returning `Ok(())` against a read-only backend
     /// produces "hollow success" responses (e.g. dashboard
@@ -60,7 +60,7 @@ impl WriterBridge {
     fn checked_new(inner: Box<dyn CognitiveMemoryOps>) -> Self {
         assert!(
             !inner.is_read_only(),
-            "WriterBridge: refusing to wrap a read-only handle (silent-degradation hazard — \
+            "WriterClient: refusing to wrap a read-only handle (silent-degradation hazard — \
              writes against this bridge would no-op without surfacing an error)"
         );
         Self { inner }
@@ -89,11 +89,11 @@ impl WriterBridge {
 
 /// Reader bridge to cognitive memory. Either the daemon's IPC client (which
 /// serializes through the daemon) or a direct [`LibraryCognitiveMemory::open`].
-pub struct ReaderBridge {
+pub struct ReaderClient {
     inner: Box<dyn CognitiveMemoryOps>,
 }
 
-impl ReaderBridge {
+impl ReaderClient {
     pub fn ops(&self) -> &dyn CognitiveMemoryOps {
         &*self.inner
     }
@@ -105,7 +105,7 @@ impl ReaderBridge {
 // The OODA daemon owns one writer per process. At startup it registers
 // that writer (along with the state_root it was opened against) here.
 // Same-process callers — dashboard handler, reflection loop, etc. — that
-// ask `launch_writer_bridge(state_root)` for the same state_root receive
+// ask `launch_writer_client(state_root)` for the same state_root receive
 // a shared handle to the daemon's writer immediately, bypassing IPC and
 // the direct-open ladder.
 //
@@ -133,7 +133,7 @@ fn canonical_or_self(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// Register an in-process writer that [`launch_writer_bridge`] should
+/// Register an in-process writer that [`launch_writer_client`] should
 /// return immediately when called with the same `state_root`.
 ///
 /// The OODA daemon calls this at startup with its live
@@ -165,7 +165,7 @@ pub fn register_in_process_writer(state_root: PathBuf, writer: Arc<dyn Cognitive
 /// Clear any registered in-process writer.
 ///
 /// **Shutdown-only — do not call from request paths.** This drops the
-/// `Weak` reference so the next [`launch_writer_bridge`] call falls
+/// `Weak` reference so the next [`launch_writer_client`] call falls
 /// through to the IPC/disk ladder. The OODA daemon's signal-driven
 /// shutdown sequence calls this immediately after `persist_board` so
 /// the writer Arc can drop deterministically before
@@ -197,7 +197,7 @@ fn lookup_in_process_writer(state_root: &Path) -> Option<Arc<dyn CognitiveMemory
 // When neither the daemon's in-process writer (tier 0) nor its IPC socket
 // (tier 1) is available, the launcher opens the library store directly. The
 // naive implementation opened a *fresh* `LibraryCognitiveMemory` on every
-// `launch_writer_bridge` / `open_reader_bridge` call, so a sequence of
+// `launch_writer_client` / `open_reader_client` call, so a sequence of
 // open→write→drop→reopen→read cycles against the same `state_root` within one
 // process (e.g. the dashboard goal-CRUD handlers, or any same-process
 // read-after-write) reopened the lbug `Database` repeatedly.
@@ -316,11 +316,11 @@ pub fn clear_tier2_store_cache() {
 /// **No read-only fallback.** A writer bridge that cannot write is a
 /// silent-degradation hazard (the dashboard hollow-success bug from
 /// issue #1590); if no tier yields a writer, the launcher returns `Err`.
-pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
+pub fn launch_writer_client(state_root: &Path) -> SimardResult<WriterClient> {
     #[cfg(test)]
     crate::test_support::hermetic_guard::assert_state_root_isolated(
         state_root,
-        "launch_writer_bridge",
+        "launch_writer_client",
     );
 
     let _ = std::fs::create_dir_all(state_root);
@@ -328,7 +328,7 @@ pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
     // (0) In-process Arc shortcut — same-process callers sharing the
     // daemon's writer.
     if let Some(arc) = lookup_in_process_writer(state_root) {
-        return Ok(WriterBridge::checked_new(Box::new(SharedMemory(arc))));
+        return Ok(WriterClient::checked_new(Box::new(SharedMemory(arc))));
     }
 
     // (1) Prefer the running daemon's IPC writer when the resolved socket
@@ -343,11 +343,11 @@ pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
     if sock.exists() {
         match RemoteCognitiveMemory::connect(&sock) {
             Ok(client) => {
-                return Ok(WriterBridge::checked_new(Box::new(client)));
+                return Ok(WriterClient::checked_new(Box::new(client)));
             }
             Err(e) => {
                 eprintln!(
-                    "[simard] launch_writer_bridge: socket {} present but connect failed \
+                    "[simard] launch_writer_client: socket {} present but connect failed \
                      ({e}); falling back to direct open",
                     sock.display()
                 );
@@ -361,7 +361,7 @@ pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
     // eliminating the open→write→drop→reopen→read metadata-loss race that made
     // `full_goal_lifecycle_crud` flaky (issue #2320).
     if let Err(e) = reap_stale_open_lock(state_root) {
-        eprintln!("[simard] launch_writer_bridge: stale-lock reap failed: {e}");
+        eprintln!("[simard] launch_writer_client: stale-lock reap failed: {e}");
     }
 
     let mem = shared_tier2_store(state_root).map_err(|e| SimardError::RuntimeInitFailed {
@@ -373,7 +373,7 @@ pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
             state_root.display()
         ),
     })?;
-    Ok(WriterBridge::checked_new(Box::new(SharedMemory(
+    Ok(WriterClient::checked_new(Box::new(SharedMemory(
         mem as Arc<dyn CognitiveMemoryOps>,
     ))))
 }
@@ -385,10 +385,10 @@ pub fn launch_writer_bridge(state_root: &Path) -> SimardResult<WriterBridge> {
 ///   1. Try `RemoteCognitiveMemory::connect(socket_path_for(state_root))`.
 ///   2. Otherwise a direct [`LibraryCognitiveMemory::open`] — creates the
 ///      store if the DB has never been opened.
-pub fn open_reader_bridge(state_root: &Path) -> SimardResult<ReaderBridge> {
+pub fn open_reader_client(state_root: &Path) -> SimardResult<ReaderClient> {
     // (0) Same-process daemon writer: serves reads too.
     if let Some(arc) = lookup_in_process_writer(state_root) {
-        return Ok(ReaderBridge {
+        return Ok(ReaderClient {
             inner: Box::new(SharedMemory(arc)),
         });
     }
@@ -401,13 +401,13 @@ pub fn open_reader_bridge(state_root: &Path) -> SimardResult<ReaderBridge> {
     if sock.exists() {
         match RemoteCognitiveMemory::connect(&sock) {
             Ok(client) => {
-                return Ok(ReaderBridge {
+                return Ok(ReaderClient {
                     inner: Box::new(client),
                 });
             }
             Err(e) => {
                 eprintln!(
-                    "[simard] open_reader_bridge: socket {} present but connect failed ({e}); \
+                    "[simard] open_reader_client: socket {} present but connect failed ({e}); \
                      falling back to direct open",
                     sock.display()
                 );
@@ -423,7 +423,7 @@ pub fn open_reader_bridge(state_root: &Path) -> SimardResult<ReaderBridge> {
     // just-written goal-board snapshot immediately visible here instead of
     // racing a fresh reopen (issue #2320).
     let mem = shared_tier2_store(state_root)?;
-    Ok(ReaderBridge {
+    Ok(ReaderClient {
         inner: Box::new(SharedMemory(mem as Arc<dyn CognitiveMemoryOps>)),
     })
 }

@@ -43,7 +43,7 @@ surfaced **three ways**.
 ```mermaid
 flowchart LR
   subgraph daemon["simard daemon (one process)"]
-    sites["migrated signal sites\n(distill, brain, engineer, daemon cycle,\ncost bridge, memory + goal gauges)"]
+    sites["migrated signal sites\n(distill, brain, engineer, daemon cycle,\ncost client, memory + goal gauges)"]
     facade["telemetry facade\ncounter_add / gauge_set / histogram_record"]
     reg["in-process atomic registry\n(snapshot source of truth)"]
     otel["OTel SdkMeterProvider\n(instruments -> OTLP, gated)"]

@@ -2,6 +2,9 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::base_types::BaseTypeId;
+use crate::engineer_handoff::{
+    EngineerHandoffContext, ScopedHandoffMode, persist_handoff_artifacts,
+};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceRecord, EvidenceSource, EvidenceStore, FileBackedEvidenceStore};
 use crate::goals::GoalRecord;
@@ -10,9 +13,6 @@ use crate::memory::{FileBackedMemoryStore, MemoryRecord, MemoryScope, MemoryStor
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeState, RuntimeTopology};
 use crate::sanitization::objective_metadata;
 use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
-use crate::terminal_engineer_bridge::{
-    ScopedHandoffMode, TerminalBridgeContext, persist_handoff_artifacts,
-};
 
 use super::types::{
     EngineerActionKind, ExecutedEngineerAction, RepoInspection, SessionErrorReflection,
@@ -99,7 +99,7 @@ pub fn persist_engineer_loop_artifacts(
     inspection: &RepoInspection,
     action: &ExecutedEngineerAction,
     verification: &VerificationReport,
-    terminal_bridge_context: Option<&TerminalBridgeContext>,
+    terminal_bridge_context: Option<&EngineerHandoffContext>,
 ) -> SimardResult<()> {
     let session_ids = UuidSessionIdGenerator;
     let mut session = SessionRecord::new(
@@ -141,7 +141,7 @@ pub(crate) fn persist_artifacts_with_session(
     inspection: &RepoInspection,
     action: &ExecutedEngineerAction,
     verification: &VerificationReport,
-    terminal_bridge_context: Option<&TerminalBridgeContext>,
+    terminal_bridge_context: Option<&EngineerHandoffContext>,
 ) -> SimardResult<()> {
     let memory_store = FileBackedMemoryStore::try_new(state_root.join("memory_records.json"))?;
     let evidence_store =

@@ -103,7 +103,7 @@ impl CognitiveMemoryOps for ProcMock {
     ) -> SimardResult<String> {
         *self.store_calls.lock().unwrap() += 1;
         if self.fail_store {
-            return Err(SimardError::BridgeError(
+            return Err(SimardError::RpcError(
                 "stub: store_procedure deliberately failed".to_string(),
             ));
         }

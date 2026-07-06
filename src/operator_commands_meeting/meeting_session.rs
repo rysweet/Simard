@@ -17,13 +17,13 @@ fn load_meeting_system_prompt() -> String {
 
 /// Launch a cognitive memory backend suitable for meeting mode.
 ///
-/// Delegates to [`memory_ipc::launch_writer_bridge`] so the daemon-IPC →
+/// Delegates to [`memory_ipc::launch_writer_client`] so the daemon-IPC →
 /// native-write → read-only ladder lives in one place (issue #1590,
 /// spec recommendation C / A2).
 fn launch_real_meeting_bridge() -> Result<Box<dyn CognitiveMemoryOps>, Box<dyn std::error::Error>> {
     let state_root = memory_ipc::default_state_root();
-    let bridge = memory_ipc::launch_writer_bridge(&state_root)?;
-    // Move the boxed ops out of the WriterBridge wrapper so existing call
+    let bridge = memory_ipc::launch_writer_client(&state_root)?;
+    // Move the boxed ops out of the WriterClient wrapper so existing call
     // sites that hold `Box<dyn CognitiveMemoryOps>` keep working unchanged.
     Ok(bridge.into_box())
 }

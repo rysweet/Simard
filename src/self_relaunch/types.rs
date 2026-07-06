@@ -25,7 +25,7 @@ pub enum RelaunchGate {
     Smoke,
     UnitTest,
     GymBaseline,
-    BridgeHealth,
+    RpcHealth,
 }
 
 impl Display for RelaunchGate {
@@ -34,7 +34,7 @@ impl Display for RelaunchGate {
             Self::Smoke => "smoke",
             Self::UnitTest => "unit-test",
             Self::GymBaseline => "gym-baseline",
-            Self::BridgeHealth => "bridge-health",
+            Self::RpcHealth => "bridge-health",
         };
         f.write_str(label)
     }
@@ -59,7 +59,7 @@ pub fn default_gates() -> Vec<RelaunchGate> {
         RelaunchGate::Smoke,
         RelaunchGate::UnitTest,
         RelaunchGate::GymBaseline,
-        RelaunchGate::BridgeHealth,
+        RelaunchGate::RpcHealth,
     ]
 }
 
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn relaunch_gate_display() {
         assert_eq!(RelaunchGate::Smoke.to_string(), "smoke");
-        assert_eq!(RelaunchGate::BridgeHealth.to_string(), "bridge-health");
+        assert_eq!(RelaunchGate::RpcHealth.to_string(), "bridge-health");
     }
 
     #[test]
@@ -78,7 +78,7 @@ mod tests {
         let gates = default_gates();
         assert_eq!(gates.len(), 4);
         assert_eq!(gates[0], RelaunchGate::Smoke);
-        assert_eq!(gates[3], RelaunchGate::BridgeHealth);
+        assert_eq!(gates[3], RelaunchGate::RpcHealth);
     }
 
     #[test]
@@ -117,7 +117,7 @@ mod tests {
         assert_eq!(RelaunchGate::Smoke.to_string(), "smoke");
         assert_eq!(RelaunchGate::UnitTest.to_string(), "unit-test");
         assert_eq!(RelaunchGate::GymBaseline.to_string(), "gym-baseline");
-        assert_eq!(RelaunchGate::BridgeHealth.to_string(), "bridge-health");
+        assert_eq!(RelaunchGate::RpcHealth.to_string(), "bridge-health");
     }
 
     #[test]
@@ -168,11 +168,11 @@ mod tests {
     #[test]
     fn gate_result_debug() {
         let result = GateResult {
-            gate: RelaunchGate::BridgeHealth,
+            gate: RelaunchGate::RpcHealth,
             passed: false,
             detail: "err".to_string(),
         };
         let debug = format!("{result:?}");
-        assert!(debug.contains("BridgeHealth"), "{debug}");
+        assert!(debug.contains("RpcHealth"), "{debug}");
     }
 }

@@ -5,24 +5,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::json;
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
 use simard::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
-use simard::gym_bridge::GymBridge;
-use simard::knowledge_bridge::KnowledgeBridge;
-use simard::memory_bridge::CognitiveMemoryBridge;
+use simard::gym_client::GymClient;
+use simard::knowledge_client::KnowledgeClient;
+use simard::memory_client::CognitiveMemoryClient;
 use simard::memory_consolidation::{
     FactExtraction, consolidation_intake, consolidation_persistence, intake_memory_operations,
     persistence_memory_operations, preparation_memory_operations, reflection_memory_operations,
 };
-use simard::ooda_loop::{OodaBridges, OodaConfig, OodaState, run_ooda_cycle};
+use simard::ooda_loop::{OodaClients, OodaConfig, OodaState, run_ooda_cycle};
+use simard::rpc::RpcErrorPayload;
+use simard::rpc_transport::InMemoryRpcTransport;
 use simard::session::SessionId;
 
 /// Build a bridge whose transport counts calls per method category.
-fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
+fn counting_bridge() -> (CognitiveMemoryClient, Arc<AtomicU32>) {
     let call_count = Arc::new(AtomicU32::new(0));
     let counter = call_count.clone();
-    let transport = InMemoryBridgeTransport::new("lifecycle-test", move |method, _params| {
+    let transport = InMemoryRpcTransport::new("lifecycle-test", move |method, _params| {
         counter.fetch_add(1, Ordering::SeqCst);
         match method {
             "memory.record_sensory" => Ok(json!({"id": "sen_1"})),
@@ -37,13 +37,13 @@ fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
             "memory.clear_working" => Ok(json!({"count": 2})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
             "memory.consolidate_episodes" => Ok(json!({"id": null})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         }
     });
-    (CognitiveMemoryBridge::new(Box::new(transport)), call_count)
+    (CognitiveMemoryClient::new(Box::new(transport)), call_count)
 }
 
 fn test_session_id() -> SessionId {
@@ -120,8 +120,8 @@ fn full_session_lifecycle_triggers_all_consolidation_phases() {
 // Test 2: OODA cycle triggers consolidation phases end-to-end
 // ============================================================================
 
-fn full_mock_memory_transport() -> InMemoryBridgeTransport {
-    InMemoryBridgeTransport::new("ooda-lifecycle-test", |method, _params| match method {
+fn full_mock_memory_transport() -> InMemoryRpcTransport {
+    InMemoryRpcTransport::new("ooda-lifecycle-test", |method, _params| match method {
         "memory.search_facts" => Ok(json!({"facts": []})),
         "memory.store_fact" => Ok(json!({"id": "sem_1"})),
         "memory.store_episode" => Ok(json!({"id": "epi_1"})),
@@ -141,7 +141,7 @@ fn full_mock_memory_transport() -> InMemoryBridgeTransport {
         "memory.clear_working" => Ok(json!({"count": 0})),
         "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
         "memory.store_procedure" => Ok(json!({"id": "proc_new"})),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(RpcErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
@@ -150,21 +150,21 @@ fn full_mock_memory_transport() -> InMemoryBridgeTransport {
 
 #[test]
 fn ooda_cycle_runs_with_consolidation_wired_in() {
-    let bridges = OodaBridges {
-        memory: Box::new(CognitiveMemoryBridge::new(Box::new(
+    let bridges = OodaClients {
+        memory: Box::new(CognitiveMemoryClient::new(Box::new(
             full_mock_memory_transport(),
         ))),
-        knowledge: KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
+        knowledge: KnowledgeClient::new(Box::new(InMemoryRpcTransport::new(
             "test-knowledge",
             |method, _params| match method {
                 "knowledge.list_packs" => Ok(json!({"packs": []})),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(RpcErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
             },
         ))),
-        gym: GymBridge::new(Box::new(InMemoryBridgeTransport::new(
+        gym: GymClient::new(Box::new(InMemoryRpcTransport::new(
             "test-gym",
             |_method, _params| {
                 Ok(json!({
@@ -221,7 +221,7 @@ fn ooda_cycle_runs_with_consolidation_wired_in() {
 fn cross_session_recall_hydrates_prior_facts() {
     let call_count = Arc::new(AtomicU32::new(0));
     let counter = call_count.clone();
-    let transport = InMemoryBridgeTransport::new("recall-test", move |method, _params| {
+    let transport = InMemoryRpcTransport::new("recall-test", move |method, _params| {
         counter.fetch_add(1, Ordering::SeqCst);
         match method {
             "memory.search_facts" => Ok(json!({
@@ -248,13 +248,13 @@ fn cross_session_recall_hydrates_prior_facts() {
             "memory.get_working" => Ok(json!({"slots": []})),
             "memory.store_episode" => Ok(json!({"id": "epi_1"})),
             "memory.record_sensory" => Ok(json!({"id": "sen_1"})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         }
     });
-    let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+    let bridge = CognitiveMemoryClient::new(Box::new(transport));
 
     // Start a new session: intake records the objective.
     let sid = SessionId::parse("session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
@@ -283,7 +283,7 @@ fn cross_session_recall_hydrates_prior_facts() {
 fn multiple_ooda_cycles_accumulate_consolidation() {
     let call_count = Arc::new(AtomicU32::new(0));
     let counter = call_count.clone();
-    let transport = InMemoryBridgeTransport::new("multi-cycle-test", move |method, _params| {
+    let transport = InMemoryRpcTransport::new("multi-cycle-test", move |method, _params| {
         counter.fetch_add(1, Ordering::SeqCst);
         match method {
             "memory.search_facts" => Ok(json!({"facts": []})),
@@ -302,26 +302,26 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
             "memory.clear_working" => Ok(json!({"count": 0})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         }
     });
 
-    let mut bridges = OodaBridges {
-        memory: Box::new(CognitiveMemoryBridge::new(Box::new(transport))),
-        knowledge: KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
+    let mut bridges = OodaClients {
+        memory: Box::new(CognitiveMemoryClient::new(Box::new(transport))),
+        knowledge: KnowledgeClient::new(Box::new(InMemoryRpcTransport::new(
             "k",
             |method, _params| match method {
                 "knowledge.list_packs" => Ok(json!({"packs": []})),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(RpcErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
             },
         ))),
-        gym: GymBridge::new(Box::new(InMemoryBridgeTransport::new(
+        gym: GymClient::new(Box::new(InMemoryRpcTransport::new(
             "g",
             |_method, _params| {
                 Ok(json!({

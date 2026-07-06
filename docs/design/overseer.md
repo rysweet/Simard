@@ -418,7 +418,7 @@ telemetry surface `simard status` uses, with **no Cargo-feature dependency**:
 The daemon-side host type is still `Mind` (the `*Brain` → reasoner rename has
 not landed at HEAD), so this document uses `Mind` deliberately. The pr-verify
 "no `Bridge` naming" scan (check #3) is therefore scoped to **added lines only**
-— pre-existing `terminal_engineer_bridge` code is untouched by the Overseer.
+— pre-existing `engineer_handoff` code is untouched by the Overseer.
 
 ## Phased roadmap
 

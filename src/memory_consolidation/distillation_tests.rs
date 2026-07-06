@@ -117,7 +117,7 @@ impl DistillRecipeRunner for ErroringRunner {
         _episodes: &[CognitiveEpisode],
     ) -> SimardResult<Vec<crate::memory_consolidation::distillation::DistilledFact>> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
-        Err(SimardError::BridgeError(
+        Err(SimardError::RpcError(
             "stub: recipe runner deliberately failed".to_string(),
         ))
     }
@@ -1304,14 +1304,14 @@ impl DistillRecipeRunner for ScriptedRunner {
                     source_episode_id: (*src).to_string(),
                 })
                 .collect()),
-            Attempt::Parse => Err(SimardError::BridgeError(
+            Attempt::Parse => Err(SimardError::RpcError(
                 "distill: facts document did not contain a parseable { \"facts\": [...] } object: hi"
                     .to_string(),
             )),
-            Attempt::Terminal => Err(SimardError::BridgeError(
+            Attempt::Terminal => Err(SimardError::RpcError(
                 "distill: recipe exited with exit status: 1: stderr= stdout=".to_string(),
             )),
-            Attempt::Spawn => Err(SimardError::BridgeError(
+            Attempt::Spawn => Err(SimardError::RpcError(
                 "distill: recipe-runner-rs spawn failed: no such file".to_string(),
             )),
         }

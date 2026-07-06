@@ -153,5 +153,5 @@ fn spawn_subprocess_nonexistent_binary_returns_error() {
     let dir = tempfile::tempdir().expect("create temp dir");
     let sock = dir.path().join("spawn.sock");
     let result = spawn_subprocess(std::path::Path::new("/no/binary"), "test", &sock);
-    assert!(matches!(result, Err(SimardError::BridgeSpawnFailed { .. })));
+    assert!(matches!(result, Err(SimardError::RpcSpawnFailed { .. })));
 }

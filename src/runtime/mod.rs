@@ -251,7 +251,7 @@ impl RuntimeKernel {
     }
 
     /// Attach a cognitive memory backend for session lifecycle consolidation.
-    pub fn set_cognitive_bridge(&mut self, bridge: Box<dyn CognitiveMemoryOps>) {
+    pub fn set_cognitive_client(&mut self, bridge: Box<dyn CognitiveMemoryOps>) {
         self.cognitive_bridge = Some(bridge);
     }
 

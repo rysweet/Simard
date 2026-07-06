@@ -5,13 +5,13 @@
 //! detection -> improvement tracking, without requiring a running Python
 //! bridge server.
 
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
-use simard::gym_bridge::{GymBridge, GymScenarioResult, GymSuiteResult, ScoreDimensions};
+use simard::gym_client::{GymClient, GymScenarioResult, GymSuiteResult, ScoreDimensions};
 use simard::gym_scoring::{
     GymSuiteScore, RegressionSeverity, TrendDirection, aggregate_suite_scores, detect_regression,
     suite_score_from_result, track_improvement,
 };
+use simard::rpc::RpcErrorPayload;
+use simard::rpc_transport::InMemoryRpcTransport;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -58,8 +58,8 @@ fn suite_score(overall: f64, accuracy: f64) -> GymSuiteScore {
     }
 }
 
-fn mock_bridge_with_scenarios() -> GymBridge {
-    let transport = InMemoryBridgeTransport::new("gym-eval", |method, params| match method {
+fn mock_bridge_with_scenarios() -> GymClient {
+    let transport = InMemoryRpcTransport::new("gym-eval", |method, params| match method {
         "gym.list_scenarios" => Ok(serde_json::json!([
             {
                 "id": "L1",
@@ -146,16 +146,16 @@ fn mock_bridge_with_scenarios() -> GymBridge {
             "scenarios_total": 2,
             "degraded_sources": []
         })),
-        _ => Err(BridgeErrorPayload {
+        _ => Err(RpcErrorPayload {
             code: -32601,
             message: format!("unknown method: {method}"),
         }),
     });
-    GymBridge::new(Box::new(transport))
+    GymClient::new(Box::new(transport))
 }
 
 // ---------------------------------------------------------------------------
-// Bridge integration tests
+// RPC-client integration tests
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -192,13 +192,13 @@ fn bridge_run_suite_returns_aggregate_result() {
 
 #[test]
 fn bridge_error_propagates_as_simard_error() {
-    let transport = InMemoryBridgeTransport::new("gym-eval", |_method, _params| {
-        Err(BridgeErrorPayload {
+    let transport = InMemoryRpcTransport::new("gym-eval", |_method, _params| {
+        Err(RpcErrorPayload {
             code: -32603,
             message: "eval backend crashed".to_string(),
         })
     });
-    let bridge = GymBridge::new(Box::new(transport));
+    let bridge = GymClient::new(Box::new(transport));
     let err = bridge.list_scenarios().unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("eval backend crashed"));

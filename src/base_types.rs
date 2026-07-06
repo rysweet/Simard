@@ -17,7 +17,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::base_type_turn::EnrichmentBridges;
+use crate::base_type_turn::EnrichmentClients;
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
 use crate::metadata::BackendDescriptor;
@@ -204,16 +204,16 @@ pub trait BaseTypeSession: Send {
     ///
     /// Defaults to `None` (enrichment not supported / not configured). Adapters
     /// that support memory + knowledge enrichment override this to expose their
-    /// stored [`EnrichmentBridges`]. See [`BaseTypeSession::enrich_input`].
-    fn enrichment(&self) -> Option<&EnrichmentBridges> {
+    /// stored [`EnrichmentClients`]. See [`BaseTypeSession::enrich_input`].
+    fn enrichment(&self) -> Option<&EnrichmentClients> {
         None
     }
 
-    /// Mutable access to this session's [`EnrichmentBridges`] so the runtime
+    /// Mutable access to this session's [`EnrichmentClients`] so the runtime
     /// (or tests) can inject configured bridges after the session is created.
     ///
     /// Defaults to `None` for adapters that do not support enrichment.
-    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentBridges> {
+    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentClients> {
         None
     }
 

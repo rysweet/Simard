@@ -429,7 +429,7 @@ pub(crate) fn refuse_if_draining(state_dir: &Path) -> SimardResult<()> {
             "[engineer] dispatch refused: safe-update is draining (flag at {})",
             flag.display()
         );
-        return Err(SimardError::BridgeCallFailed {
+        return Err(SimardError::RpcCallFailed {
             bridge: "engineer".to_string(),
             method: "spawn_agent_for_goal".to_string(),
             reason: format!(
@@ -764,11 +764,11 @@ mod tests {
         std::fs::write(dir.path().join("draining.flag"), b"").unwrap();
         let err = refuse_if_draining(dir.path()).unwrap_err();
         match err {
-            SimardError::BridgeCallFailed { bridge, method, .. } => {
+            SimardError::RpcCallFailed { bridge, method, .. } => {
                 assert_eq!(bridge, "engineer");
                 assert_eq!(method, "spawn_agent_for_goal");
             }
-            other => panic!("expected BridgeCallFailed, got {other:?}"),
+            other => panic!("expected RpcCallFailed, got {other:?}"),
         }
     }
 

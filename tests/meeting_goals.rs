@@ -3,8 +3,6 @@
 
 use serde_json::json;
 
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
 use simard::goal_curation::{
     ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS, add_active_goal,
     add_backlog_item, archive_completed, load_goal_board, persist_board, promote_to_active,
@@ -18,26 +16,27 @@ use simard::meeting_facilitator::{
     ActionItem, MeetingDecision, MeetingSessionStatus, add_note, close_meeting, record_action_item,
     record_decision, start_meeting,
 };
-use simard::memory_bridge::CognitiveMemoryBridge;
+use simard::memory_client::CognitiveMemoryClient;
 use simard::research_tracker::{
     DeveloperWatch, ResearchStatus, ResearchTopic, add_research_topic, track_developer,
     update_topic_status,
 };
+use simard::rpc::RpcErrorPayload;
+use simard::rpc_transport::InMemoryRpcTransport;
 
-fn mock_bridge() -> CognitiveMemoryBridge {
-    let transport =
-        InMemoryBridgeTransport::new("test-integration", |method, _params| match method {
-            "memory.record_sensory" => Ok(json!({"id": "sen_int"})),
-            "memory.store_episode" => Ok(json!({"id": "epi_int"})),
-            "memory.store_fact" => Ok(json!({"id": "sem_int"})),
-            "memory.store_prospective" => Ok(json!({"id": "pro_int"})),
-            "memory.search_facts" => Ok(json!({"facts": []})),
-            _ => Err(BridgeErrorPayload {
-                code: -32601,
-                message: format!("unknown method: {method}"),
-            }),
-        });
-    CognitiveMemoryBridge::new(Box::new(transport))
+fn mock_bridge() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("test-integration", |method, _params| match method {
+        "memory.record_sensory" => Ok(json!({"id": "sen_int"})),
+        "memory.store_episode" => Ok(json!({"id": "epi_int"})),
+        "memory.store_fact" => Ok(json!({"id": "sem_int"})),
+        "memory.store_prospective" => Ok(json!({"id": "pro_int"})),
+        "memory.search_facts" => Ok(json!({"facts": []})),
+        _ => Err(RpcErrorPayload {
+            code: -32601,
+            message: format!("unknown method: {method}"),
+        }),
+    });
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 fn sample_active(id: &str, priority: u32) -> ActiveGoal {

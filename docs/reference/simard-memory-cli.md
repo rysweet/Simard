@@ -289,7 +289,7 @@ over the direct-open tier:
 | working | none — no trait enumerator | count only | count only |
 | sensory | none — no trait enumerator | count only | count only |
 
-When a neutral sampler is **not** available on the active bridge (for
+When a neutral sampler is **not** available on the active client (for
 example, `get_episodes` over the socket, which `RemoteCognitiveMemory`
 does not expose), `dump` prints the count and notes that full rows need a
 direct open. It never crashes and never silently drops the type:
@@ -327,13 +327,13 @@ treats every sample row as advisory.
 
 ## Lock-safe read path
 
-Both commands open the store through `open_reader_bridge(state_root)`
+Both commands open the store through `open_reader_client(state_root)`
 (`src/memory_ipc/launcher.rs`), the canonical read-only consumer entry
 point. Its resolution ladder is what makes the commands safe to run while
 the daemon owns the store:
 
 ```
-open_reader_bridge(state_root)
+open_reader_client(state_root)
   0. in-process writer Arc      → same-process callers (not the CLI)
   1. daemon socket present?     → RemoteCognitiveMemory::connect(
                                     <state_root>/memory.sock)         ← no lock contention
@@ -553,11 +553,11 @@ Deliberately excluded from this change:
 | `import` completes (items restored, including 0 on an empty snapshot) | `0` |
 | Unparseable arguments (unknown flag, bad `--limit`, missing `import` path) | non-zero, usage to stderr |
 | `import` snapshot file missing or not a valid snapshot envelope | non-zero, error to stderr |
-| Bridge open fails on every tier | non-zero, error to stderr |
+| Client open fails on every tier | non-zero, error to stderr |
 
 A successful read of an empty store is **not** an error — the all-zeros
 table is valid output. Only an unparseable invocation or a genuine
-bridge-open failure exits non-zero.
+client-open failure exits non-zero.
 
 ---
 
@@ -569,7 +569,7 @@ bridge-open failure exits non-zero.
 | Subcommand registration | `src/operator_cli/mod.rs` |
 | Snapshot import / restore (`import_memory_snapshot`, `restore_snapshot`) | `src/remote_transfer/mod.rs`, `src/memory_snapshot.rs` |
 | Startup auto-restore (empty store + newer snapshot) | `src/operator_commands_ooda/daemon/` |
-| Read bridge (`open_reader_bridge`) | `src/memory_ipc/launcher.rs` |
+| Read client (`open_reader_client`) | `src/memory_ipc/launcher.rs` |
 | `CognitiveStatistics` (`get_statistics`) | `src/memory_cognitive.rs` |
 | `GraphStats` (edges / dedup, issue #2331) | `src/memory_cognitive.rs` |
 | `graph_stats` computation (issue #2331) | `src/cognitive_memory/library_adapter.rs` |

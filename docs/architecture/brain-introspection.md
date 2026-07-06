@@ -1,6 +1,6 @@
 ---
 title: Brain introspection + memory hygiene
-description: Design rationale for Simard's periodic brain self-examination and memory-hygiene pass (#2419) — why a daemon interval task (not a standing goal or per-cycle hook), the bridge-reachability finding that drives the safe-first increment split, the cadence/knobs, and the safety model for bounded reversible pruning.
+description: Design rationale for Simard's periodic brain self-examination and memory-hygiene pass (#2419) — why a daemon interval task (not a standing goal or per-cycle hook), the client-reachability finding that drives the safe-first increment split, the cadence/knobs, and the safety model for bounded reversible pruning.
 last_updated: 2026-06-27
 review_schedule: as-needed
 owner: simard
@@ -79,17 +79,17 @@ memory operations run in the hook**. The recipe reasons over the real numbers
 the hook already measured (passed as `-c stats=<json>`) and *recommends* prunes;
 it never deletes.
 
-## The bridge-reachability finding (drives the increment split)
+## The client-reachability finding (drives the increment split)
 
-The single most important design fact: the daemon's `bridges.memory` is a
-`CognitiveMemoryBridge` — a **JSON-RPC IPC client** — not the in-process
-`LibraryCognitiveMemory`. Over that bridge:
+The single most important design fact: the daemon's `clients.memory` is a
+`CognitiveMemoryClient` — a **JSON-RPC IPC client** — not the in-process
+`LibraryCognitiveMemory`. Over that client:
 
 - `prune_superseded()` falls through to the **default trait impl `Ok(0)` — a
   no-op**. Only `LibraryCognitiveMemory` reclaims superseded rows.
 - `graph_stats()` returns the **empty default**.
 - `backup_memory()` needs a `&dyn MemoryStore`; daemon-side there is **no
-  store** — it lives in the bridge *server* process.
+  store** — it lives in the memory *server* (daemon) process.
 
 So the naïve design — "bounded destructive superseded-prune + backup in the
 daemon Rust hook" — would **silently delete nothing while reporting success**: a
@@ -105,7 +105,7 @@ hollow-success / silent-degradation bug the codebase explicitly warns against.
 | Backup before destructive ops | n/a (no destructive ops daemon-side) | 🔜 `memory.backup` server RPC |
 
 The follow-up (filed as an issue) adds `memory.prune_superseded` +
-`memory.backup` RPCs **on the bridge server**, where the store actually lives,
+`memory.backup` RPCs **on the memory server**, where the store actually lives,
 to enable backed-up, bounded, reversible deletion. Until then, the pass is
 read-mostly and the only daemon-side deletion is transient sensory rows.
 

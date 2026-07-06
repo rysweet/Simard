@@ -3,8 +3,8 @@
 //!
 //! Spec sections 3-7: every dashboard handler that today reads or writes
 //! `<state_root>/goal_records.json` must instead flow through cognitive
-//! memory via `load_goal_board(open_reader_bridge(...).ops())` for reads
-//! and `save_goal_board(&board, launch_writer_bridge(...).ops())` for
+//! memory via `load_goal_board(open_reader_client(...).ops())` for reads
+//! and `save_goal_board(&board, launch_writer_client(...).ops())` for
 //! writes.
 //!
 //! To test this without standing up the full Axum stack, the migration

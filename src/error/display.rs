@@ -218,29 +218,29 @@ impl Display for SimardError {
             Self::ClockBeforeUnixEpoch { reason } => {
                 write!(f, "system clock is before UNIX epoch: {reason}")
             }
-            Self::BridgeSpawnFailed { bridge, reason } => {
+            Self::RpcSpawnFailed { bridge, reason } => {
                 write!(f, "bridge '{bridge}' failed to spawn: {reason}")
             }
-            Self::BridgeTransportError { bridge, reason } => {
+            Self::RpcTransportError { bridge, reason } => {
                 write!(f, "bridge '{bridge}' transport error: {reason}")
             }
-            Self::BridgeProtocolError { bridge, reason } => {
+            Self::RpcProtocolError { bridge, reason } => {
                 write!(f, "bridge '{bridge}' protocol error: {reason}")
             }
-            Self::BridgeCallFailed {
+            Self::RpcCallFailed {
                 bridge,
                 method,
                 reason,
             } => {
                 write!(f, "bridge '{bridge}' call to '{method}' failed: {reason}")
             }
-            Self::BridgeCircuitOpen { bridge } => {
+            Self::RpcCircuitOpen { bridge } => {
                 write!(
                     f,
                     "bridge '{bridge}' circuit is open — calls are rejected until the bridge recovers"
                 )
             }
-            Self::BridgeError(msg) => {
+            Self::RpcError(msg) => {
                 write!(f, "bridge error: {msg}")
             }
             Self::BudgetExceeded {
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn bridge_transport_error_display() {
-        let err = SimardError::BridgeTransportError {
+        let err = SimardError::RpcTransportError {
             bridge: "subprocess".into(),
             reason: "child missing".into(),
         };

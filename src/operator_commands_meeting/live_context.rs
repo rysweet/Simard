@@ -3,7 +3,7 @@ use crate::error::SimardResult;
 
 /// Search the bridge for facts matching `query`.
 ///
-/// Bridge errors propagate per PHILOSOPHY.md — no silent degradation.
+/// Client errors propagate per PHILOSOPHY.md — no silent degradation.
 fn search_bridge(
     bridge: &dyn CognitiveMemoryOps,
     query: &str,
@@ -117,9 +117,9 @@ pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> Sim
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::BridgeErrorPayload;
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
-    use crate::memory_bridge::CognitiveMemoryBridge;
+    use crate::memory_client::CognitiveMemoryClient;
+    use crate::rpc::RpcErrorPayload;
+    use crate::rpc_transport::InMemoryRpcTransport;
 
     /// Mutex to serialize tests that mutate the `SIMARD_OPERATOR_NAME` env var.
     /// `set_var`/`remove_var` are process-global so concurrent tests would race.
@@ -158,25 +158,25 @@ mod tests {
 
     // ── search_bridge ─────────────────────────────────────────────
 
-    fn empty_bridge() -> CognitiveMemoryBridge {
-        let transport = InMemoryBridgeTransport::new("test-ctx", |method, _params| match method {
+    fn empty_bridge() -> CognitiveMemoryClient {
+        let transport = InMemoryRpcTransport::new("test-ctx", |method, _params| match method {
             "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         });
-        CognitiveMemoryBridge::new(Box::new(transport))
+        CognitiveMemoryClient::new(Box::new(transport))
     }
 
-    fn failing_bridge() -> CognitiveMemoryBridge {
-        let transport = InMemoryBridgeTransport::new("test-fail", |_method, _params| {
-            Err(BridgeErrorPayload {
+    fn failing_bridge() -> CognitiveMemoryClient {
+        let transport = InMemoryRpcTransport::new("test-fail", |_method, _params| {
+            Err(RpcErrorPayload {
                 code: -1,
                 message: "forced error".to_string(),
             })
         });
-        CognitiveMemoryBridge::new(Box::new(transport))
+        CognitiveMemoryClient::new(Box::new(transport))
     }
 
     #[test]

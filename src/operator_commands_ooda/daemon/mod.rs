@@ -3,14 +3,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::bridge_launcher::{launch_gym_bridge_native, launch_knowledge_bridge_native};
 use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
 use crate::goal_curation::persist_board;
 use crate::identity::OperatingMode;
 use crate::memory_ipc;
 use crate::ooda_loop::{
-    OodaBridges, OodaConfig, OodaPhase, OodaState, run_ooda_cycle, summarize_cycle_report,
+    OodaClients, OodaConfig, OodaPhase, OodaState, run_ooda_cycle, summarize_cycle_report,
 };
+use crate::rpc_subprocess_launcher::{launch_gym_client_native, launch_knowledge_client_native};
 use crate::runtime_config::RuntimeConfig;
 use crate::session_builder::{LlmProvider, SessionBuilder};
 
@@ -127,7 +127,7 @@ pub fn run_ooda_daemon(
     // Register the live writer for in-process callers (dashboard, OODA
     // loop, reflection, etc.) so they bypass IPC and disk re-open and
     // share this exact handle. This eliminates the dashboard's
-    // hollow-success failure mode where launch_writer_bridge previously
+    // hollow-success failure mode where launch_writer_client previously
     // fell through to a read-only handle when both IPC and direct open
     // failed (issue #1590 follow-up).
     memory_ipc::register_in_process_writer(state_root.clone(), Arc::clone(&shared_mem));
@@ -166,8 +166,8 @@ pub fn run_ooda_daemon(
 
     let memory: Box<dyn CognitiveMemoryOps> =
         Box::new(memory_ipc::SharedMemory(Arc::clone(&shared_mem)));
-    let knowledge = launch_knowledge_bridge_native()?;
-    let gym = launch_gym_bridge_native()?;
+    let knowledge = launch_knowledge_client_native()?;
+    let gym = launch_gym_client_native()?;
 
     // One-time bootstrap: snapshot SIMARD_LLM_PROVIDER (if set in env)
     // to <state_root>/config.toml so child processes (engineer subprocesses
@@ -334,7 +334,7 @@ pub fn run_ooda_daemon(
         None
     };
 
-    let mut bridges = OodaBridges {
+    let mut bridges = OodaClients {
         memory,
         knowledge,
         gym,
@@ -1531,7 +1531,7 @@ fn shutdown_daemon(
     state_root: &std::path::Path,
     shared_mem: &Arc<dyn CognitiveMemoryOps>,
     state: &mut OodaState,
-    bridges: &mut OodaBridges,
+    bridges: &mut OodaClients,
     signal_driven: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     daemon_log(state_root, "[simard] OODA daemon: shutdown sequence start");
@@ -1583,7 +1583,7 @@ fn shutdown_daemon(
     // 4. Clear in-process writer registration so the Weak ref drops.
     memory_ipc::clear_in_process_writer();
 
-    // 5. Bridges (and the daemon-owned strong Arc to LibraryCognitiveMemory)
+    // 5. Clients (and the daemon-owned strong Arc to LibraryCognitiveMemory)
     //    drop on function return — the inherent Database::drop runs
     //    force_checkpoint_on_close as a backstop.
     daemon_log(
@@ -1596,19 +1596,19 @@ fn shutdown_daemon(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::BridgeErrorPayload;
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
     use crate::cognitive_memory::CognitiveMemoryOps;
     use crate::goal_curation::GoalBoard;
-    use crate::gym_bridge::GymBridge;
-    use crate::knowledge_bridge::KnowledgeBridge;
-    use crate::memory_bridge::CognitiveMemoryBridge;
-    use crate::ooda_loop::{OodaBridges, OodaState};
+    use crate::gym_client::GymClient;
+    use crate::knowledge_client::KnowledgeClient;
+    use crate::memory_client::CognitiveMemoryClient;
+    use crate::ooda_loop::{OodaClients, OodaState};
+    use crate::rpc::RpcErrorPayload;
+    use crate::rpc_transport::InMemoryRpcTransport;
     use serde_json::json;
 
     fn mock_memory() -> Box<dyn CognitiveMemoryOps> {
-        Box::new(CognitiveMemoryBridge::new(Box::new(
-            InMemoryBridgeTransport::new("test-daemon-shutdown", |method, _params| match method {
+        Box::new(CognitiveMemoryClient::new(Box::new(
+            InMemoryRpcTransport::new("test-daemon-shutdown", |method, _params| match method {
                 "memory.search_facts" => Ok(json!({"facts": []})),
                 "memory.store_fact" => Ok(json!({"id": "sem_1"})),
                 "memory.store_episode" => Ok(json!({"id": "epi_1"})),
@@ -1616,7 +1616,7 @@ mod tests {
                     "sensory_count": 0, "working_count": 0, "episodic_count": 0,
                     "semantic_count": 0, "procedural_count": 0, "prospective_count": 0
                 })),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(RpcErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
@@ -1625,8 +1625,8 @@ mod tests {
     }
 
     fn mock_shared_mem() -> Arc<dyn CognitiveMemoryOps> {
-        Arc::new(CognitiveMemoryBridge::new(Box::new(
-            InMemoryBridgeTransport::new("test-daemon-shared", |method, _params| match method {
+        Arc::new(CognitiveMemoryClient::new(Box::new(
+            InMemoryRpcTransport::new("test-daemon-shared", |method, _params| match method {
                 "memory.search_facts" => Ok(json!({"facts": []})),
                 "memory.store_fact" => Ok(json!({"id": "sem_1"})),
                 "memory.store_episode" => Ok(json!({"id": "epi_1"})),
@@ -1634,7 +1634,7 @@ mod tests {
                     "sensory_count": 0, "working_count": 0, "episodic_count": 0,
                     "semantic_count": 0, "procedural_count": 0, "prospective_count": 0
                 })),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(RpcErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
@@ -1642,12 +1642,12 @@ mod tests {
         )))
     }
 
-    fn mock_knowledge() -> KnowledgeBridge {
-        KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
+    fn mock_knowledge() -> KnowledgeClient {
+        KnowledgeClient::new(Box::new(InMemoryRpcTransport::new(
             "test-knowledge",
             |method, _params| match method {
                 "knowledge.list_packs" => Ok(json!({"packs": []})),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(RpcErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
@@ -1655,15 +1655,15 @@ mod tests {
         )))
     }
 
-    fn mock_gym() -> GymBridge {
-        GymBridge::new(Box::new(InMemoryBridgeTransport::new(
+    fn mock_gym() -> GymClient {
+        GymClient::new(Box::new(InMemoryRpcTransport::new(
             "test-gym",
             |_method, _params| Ok(json!({"suite_id": "test", "success": true})),
         )))
     }
 
-    fn test_bridges() -> OodaBridges {
-        OodaBridges {
+    fn test_bridges() -> OodaClients {
+        OodaClients {
             memory: mock_memory(),
             knowledge: mock_knowledge(),
             gym: mock_gym(),

@@ -100,7 +100,7 @@ pub fn run_goal_curation_read_probe(
     // Goals live in cognitive memory (issue #1590) and the canonical
     // store is the daemon's `default_state_root()` — same path the
     // greeting banner reads (issue #1744).
-    let bridge = crate::memory_ipc::launch_writer_bridge(&state_root)?;
+    let bridge = crate::memory_ipc::launch_writer_client(&state_root)?;
     let board = crate::goal_curation::load_goal_board(bridge.ops())?;
     let goal_records = crate::goal_curation::active_goals_as_records(&board);
     let register = GoalRegisterView::from_records(goal_records);
@@ -156,7 +156,7 @@ mod tests {
         // Seed an empty goal board through cognitive memory rather than
         // writing the legacy on-disk goal-records file (issue #1590).
         let bridge =
-            crate::memory_ipc::launch_writer_bridge(state.state_root()).expect("writer bridge");
+            crate::memory_ipc::launch_writer_client(state.state_root()).expect("writer bridge");
         crate::goal_curation::save_goal_board(
             &crate::goal_curation::GoalBoard::new(),
             bridge.ops(),
@@ -181,7 +181,7 @@ mod tests {
     fn goal_curation_read_probe_with_empty_cognitive_memory() {
         let state = crate::test_support::HermeticState::new();
         let bridge =
-            crate::memory_ipc::launch_writer_bridge(state.state_root()).expect("writer bridge");
+            crate::memory_ipc::launch_writer_client(state.state_root()).expect("writer bridge");
         crate::goal_curation::save_goal_board(
             &crate::goal_curation::GoalBoard::new(),
             bridge.ops(),
@@ -247,7 +247,7 @@ mod tests {
         let state_root = state.state_root().to_path_buf();
 
         // Seed 4 active goals into cognitive memory at this state root.
-        let bridge = crate::memory_ipc::launch_writer_bridge(&state_root).expect("writer bridge");
+        let bridge = crate::memory_ipc::launch_writer_client(&state_root).expect("writer bridge");
         let board = seeded_board(4);
         crate::goal_curation::save_goal_board(&board, bridge.ops()).expect("seed board");
 
@@ -291,7 +291,7 @@ mod tests {
         let state = crate::test_support::HermeticState::new();
         let state_root = state.state_root().to_path_buf();
 
-        let bridge = crate::memory_ipc::launch_writer_bridge(&state_root).expect("writer bridge");
+        let bridge = crate::memory_ipc::launch_writer_client(&state_root).expect("writer bridge");
         let board = seeded_board(4);
         crate::goal_curation::save_goal_board(&board, bridge.ops()).expect("seed board");
 
@@ -321,7 +321,7 @@ mod tests {
         let state = crate::test_support::HermeticState::new();
         let state_root = state.state_root().to_path_buf();
 
-        let bridge = crate::memory_ipc::launch_writer_bridge(&state_root).expect("writer bridge");
+        let bridge = crate::memory_ipc::launch_writer_client(&state_root).expect("writer bridge");
         crate::goal_curation::save_goal_board(
             &crate::goal_curation::GoalBoard::new(),
             bridge.ops(),
@@ -353,7 +353,7 @@ mod tests {
         let state = crate::test_support::HermeticState::new();
         let state_root = state.state_root().to_path_buf();
 
-        let bridge = crate::memory_ipc::launch_writer_bridge(&state_root).expect("writer bridge");
+        let bridge = crate::memory_ipc::launch_writer_client(&state_root).expect("writer bridge");
         crate::goal_curation::save_goal_board(
             &crate::goal_curation::GoalBoard::new(),
             bridge.ops(),

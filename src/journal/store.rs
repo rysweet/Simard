@@ -50,7 +50,7 @@ fn date_from_concept(concept: &str) -> Option<NaiveDate> {
 //
 // The same persistence logic, expressed against a borrowed
 // `&dyn CognitiveMemoryOps` rather than an owned `Arc`. Callers that only hold
-// a borrowed handle — the dashboard's `open_reader_bridge(...).ops()` and the
+// a borrowed handle — the dashboard's `open_reader_client(...).ops()` and the
 // background journal thread's `ThreadContext::memory` — reuse these directly
 // instead of forcing an `Arc` they do not have. [`JournalStore`] delegates to
 // them so there is exactly one implementation.

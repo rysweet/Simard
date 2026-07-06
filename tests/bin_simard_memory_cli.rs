@@ -3,7 +3,7 @@
 //! These exercise the *external-service integration* the unit tests in
 //! `operator_cli::memory` cannot: a real `simard` process opening an on-disk
 //! cognitive-memory store written by a *separate* process. This is the
-//! tier-2 "direct open" path of `open_reader_bridge` — the same path the
+//! tier-2 "direct open" path of `open_reader_client` — the same path the
 //! operator uses against a live store when the OODA daemon is down.
 //!
 //! The store is seeded here with one row of every one of the six cognitive
@@ -286,7 +286,7 @@ fn dump_facts_json_runs_against_on_disk_store() {
 #[test]
 fn empty_store_reports_zero_counts_without_error() {
     let tmp = TempDir::new().unwrap();
-    // No seeding: open_reader_bridge creates the store on first open.
+    // No seeding: open_reader_client creates the store on first open.
     let assert = bin()
         .args(["memory", "stats", tmp.path().to_str().unwrap(), "--json"])
         .assert()

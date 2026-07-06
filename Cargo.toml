@@ -86,7 +86,7 @@ rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "d
 # De-fork (issue #2323): the gym/eval RUNNER is now the upstream
 # `amplihack-agent-eval` crate (native Rust GymRunner + scenario/result types),
 # replacing the private `src/native_gym.rs` reimplementation. Only the bridge
-# wiring (`src/gym_runner_bridge.rs`) and Simard-specific scoring/history stay
+# wiring (`src/gym_runner_client.rs`) and Simard-specific scoring/history stay
 # in this crate. The crate is a light workspace member (serde/serde_json/
 # thiserror/tracing/chrono only — no heavy workspace deps are transitive).
 # Bumped (issue #2626) to the current HEAD of amplihack-rs `main` (verified via

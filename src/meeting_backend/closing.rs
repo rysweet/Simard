@@ -584,7 +584,7 @@ impl MeetingBackend {
             #[cfg(not(test))]
             {
                 let state_root = crate::memory_ipc::default_state_root();
-                match crate::memory_ipc::launch_writer_bridge(&state_root) {
+                match crate::memory_ipc::launch_writer_client(&state_root) {
                     Ok(bridge) => match crate::goal_curation::load_goal_board(bridge.ops()) {
                         Ok(board) => {
                             if let Err(e) = crate::goal_curation::write_goal_carryover(
@@ -1139,7 +1139,7 @@ fn write_goals_from_decisions(decisions: &[crate::meeting_facilitator::MeetingDe
     if decisions.is_empty() {
         return;
     }
-    // `CognitiveMemoryGoalStore::put` calls `launch_writer_bridge` with
+    // `CognitiveMemoryGoalStore::put` calls `launch_writer_client` with
     // `simard_state_root()` (`$HOME/.simard`), which trips the hermetic
     // guard in test builds. Skip the real write in tests — goal persistence
     // is validated via dedicated integration tests with HermeticState.

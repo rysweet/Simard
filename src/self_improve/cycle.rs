@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::engineer_loop::RepoInspection;
 use crate::error::SimardResult;
-use crate::gym_bridge::GymBridge;
+use crate::gym_client::GymClient;
 use crate::gym_scoring::{
     GymSuiteScore, Regression, RegressionSeverity, detect_regression, suite_score_from_result,
 };
@@ -21,7 +21,7 @@ use super::types::{ImprovementConfig, ImprovementCycle, ImprovementDecision, Imp
 /// The gym bridge is called twice: once for baseline and once for re-evaluation.
 /// If either call fails, the error propagates immediately (Pillar 11).
 pub fn run_improvement_cycle(
-    gym: &GymBridge,
+    gym: &GymClient,
     config: &ImprovementConfig,
 ) -> SimardResult<ImprovementCycle> {
     // Phase 1: Eval — establish baseline

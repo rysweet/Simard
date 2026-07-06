@@ -58,7 +58,7 @@ impl BaseTypeSession for FakeSession {
         if let Some(sub) = &self.fail_substring
             && input.objective.contains(sub.as_str())
         {
-            return Err(SimardError::BridgeTransportError {
+            return Err(SimardError::RpcTransportError {
                 bridge: "fake-session".to_string(),
                 reason: format!("injected failure for objective containing '{sub}'"),
             });

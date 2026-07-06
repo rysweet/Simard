@@ -93,7 +93,7 @@ GYM
 GOAL BOARD
   [p0] in-progress   Rationalize telemetry onto OpenTelemetry      (goal-2f9c)
   [p1] in-progress   Fix auth token refresh                        (goal-a13b)
-  [p2] not-started   Add retry logic to bridge                     (goal-77de)
+  [p2] not-started   Add retry logic to client                     (goal-77de)
 
 ACTIVE WORKSTREAMS
   recipe   ooda-cycle              running — decide phase, cycle 47

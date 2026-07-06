@@ -20,7 +20,7 @@ use crate::identity::{
     IdentityManifest, ManifestContract, OperatingMode,
 };
 use crate::memory::{FileBackedMemoryStore, MemoryStore};
-use crate::memory_bridge_adapter::CognitiveBridgeMemoryStore;
+use crate::memory_store_adapter::CognitiveClientMemoryStore;
 use crate::metadata::{Freshness, Provenance};
 use crate::prompt_assets::{FilePromptAssetStore, PromptAssetStore};
 use crate::reflection::{ReflectionSnapshot, ReflectiveRuntime};
@@ -74,11 +74,11 @@ fn build_memory_store(
                 Arc::clone(&shared),
             );
 
-            let store = CognitiveBridgeMemoryStore::new(
+            let store = CognitiveClientMemoryStore::new(
                 crate::memory_ipc::SharedMemory(Arc::clone(&shared)),
                 config.memory_store_path(),
             )?;
-            store.hydrate_from_bridge()?;
+            store.hydrate_from_client()?;
 
             eprintln!("[simard] consolidation hooks active — session lifecycle hooks enabled");
 
@@ -107,7 +107,7 @@ fn build_memory_store(
 struct AssembledParts {
     ports: RuntimePorts,
     request: RuntimeRequest,
-    /// Cognitive memory backend for `RuntimeKernel::set_cognitive_bridge()`.
+    /// Cognitive memory backend for `RuntimeKernel::set_cognitive_client()`.
     consolidation_bridge: Option<Box<dyn CognitiveMemoryOps>>,
 }
 
@@ -171,7 +171,7 @@ pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRun
     let parts = assemble_parts(config)?;
     let mut runtime = LocalRuntime::compose(parts.ports, parts.request)?;
     if let Some(bridge) = parts.consolidation_bridge {
-        runtime.set_cognitive_bridge(bridge);
+        runtime.set_cognitive_client(bridge);
     }
     Ok(runtime)
 }
@@ -183,7 +183,7 @@ pub fn assemble_local_runtime_from_handoff(
     let parts = assemble_parts(config)?;
     let mut runtime = LocalRuntime::compose_from_handoff(parts.ports, parts.request, snapshot)?;
     if let Some(bridge) = parts.consolidation_bridge {
-        runtime.set_cognitive_bridge(bridge);
+        runtime.set_cognitive_client(bridge);
     }
     Ok(runtime)
 }

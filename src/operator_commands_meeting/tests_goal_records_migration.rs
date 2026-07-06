@@ -3,12 +3,12 @@
 //!
 //! Spec sections 8 (`goal_curation.rs`) and 9 (`improvement_curation.rs`):
 //! these read probes must obtain their goal data via
-//! `active_goals_as_records(&load_goal_board(&launch_writer_bridge(...)))`
+//! `active_goals_as_records(&load_goal_board(&launch_writer_client(...)))`
 //! rather than `FileBackedGoalStore::try_new(... "goal_records.json")`.
 //!
 //! These tests will not compile until the migration adds
 //! `crate::goal_curation::active_goals_as_records` and
-//! `crate::memory_ipc::launch_writer_bridge`.
+//! `crate::memory_ipc::launch_writer_client`.
 
 use crate::cognitive_memory::LibraryCognitiveMemory;
 use crate::goal_curation::{

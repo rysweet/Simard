@@ -440,14 +440,14 @@ fn no_progress_breaker_fires_after_restart_using_persisted_counter() {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn load_or_migrate_writes_file_from_memory_snapshot() {
-    use crate::memory_ipc::launch_writer_bridge;
+    use crate::memory_ipc::launch_writer_client;
     use crate::test_support::hermetic::HermeticState;
 
     let state = HermeticState::new();
     let root = state.state_root();
 
     // Seed the legacy cognitive-memory snapshot (the pre-#1 source of truth).
-    let bridge = launch_writer_bridge(root).expect("writer bridge");
+    let bridge = launch_writer_client(root).expect("writer bridge");
     crate::goal_curation::save_goal_board(&board(vec![goal("legacy", 1, None)]), bridge.ops())
         .expect("seed memory snapshot");
 
