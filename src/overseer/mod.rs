@@ -66,6 +66,8 @@ pub mod whisper_ops;
 pub mod wiring;
 
 #[cfg(test)]
+mod tests_gap_scan;
+#[cfg(test)]
 mod tests_goal_health;
 #[cfg(test)]
 mod tests_m1;
@@ -84,8 +86,8 @@ pub use capabilities::{
     sanitize_recalled,
 };
 pub use config::{
-    daily_budget_usd, goal_health_enabled, memory_recall_enabled, overseer_acting_enabled,
-    overseer_author_login, overseer_enabled,
+    daily_budget_usd, gap_scan_enabled, gap_scan_every_n, goal_health_enabled,
+    memory_recall_enabled, overseer_acting_enabled, overseer_author_login, overseer_enabled,
 };
 pub use guardrails::{
     AutonomyGate, BudgetGate, ConflictSequencer, RecursionGuard, RiskClass, Subject,
@@ -97,7 +99,7 @@ pub use sensor::{
     ObserverReport, OverseerSensorThread, SnapshotSource, SnapshotStatusReader,
     blocked_goals_from_board, in_flight_from_board, observed_from_snapshot, run_observer_cycle,
 };
-pub use signal::{Priority, Problem, ProblemKind, Signal, signals_from};
+pub use signal::{GapCategory, GapItem, Priority, Problem, ProblemKind, Signal, signals_from};
 pub use whisper_ops::{
     MeetingHandoffWhisperSink, WhisperRecord, WhisperSink, WhisperUrgency, compose_whisper_note,
     note_signature, whisper_signature,
@@ -171,6 +173,15 @@ pub struct Overseer {
     /// same observation signature is not re-recorded every tick. Reuses the
     /// [`WhisperGate`] primitive (900 s window) keyed by observation signature.
     write_back_gate: WhisperGate,
+    /// Whether the recurring backlog-coverage gap-scan is enabled (config
+    /// opt-out). When off, the gap-scan action is held (never notifies/files)
+    /// even though gaps were observed.
+    gap_scan_enabled: bool,
+    /// Dedup gate for the gap-scan, keyed on each gap's signature, so a recurring
+    /// gap is notified + filed at most once per window (never every tick). Kept
+    /// distinct from `blocked_goal_gate` so goal-health and gap-scan dedup never
+    /// interfere.
+    gap_gate: WhisperGate,
 }
 
 /// The result of one meta-OODA turn. Side-effect free: it reports what was
@@ -221,6 +232,15 @@ pub enum ActOutcome {
     GoalHealthSuppressed {
         reason: &'static str,
     },
+    /// The recurring backlog-coverage gap-scan flagged (and/or suppressed)
+    /// backlog gaps this act. `flagged` gaps got the consolidated operator
+    /// notification + one deduped issue each; `suppressed` gaps were within the
+    /// per-gap dedup window (a recurring gap, not re-notified/re-filed). Feeds the
+    /// DEDICATED tick counters — never the generic `issues_filed`/`escalations`.
+    WorkstreamGapsFlagged {
+        flagged: usize,
+        suppressed: usize,
+    },
 }
 
 impl Overseer {
@@ -249,6 +269,11 @@ impl Overseer {
             // window (never per-tick), with a generous per-hour cap.
             memory_recall_enabled: false,
             write_back_gate: WhisperGate::new(900, 5),
+            gap_scan_enabled: false,
+            // 15-minute dedup window so a recurring gap notifies/files once per
+            // window; a generous per-hour cap covers a maxed-out tick's distinct
+            // gaps (bounded by `sensor::MAX_GAPS_PER_TICK`) without flooding.
+            gap_gate: WhisperGate::new(900, 200),
         }
     }
 
@@ -277,6 +302,14 @@ impl Overseer {
     /// Overseer behaves exactly as before — no read, no write-back, counters `0`.
     pub fn with_memory_recall_enabled(mut self, enabled: bool) -> Self {
         self.memory_recall_enabled = enabled;
+        self
+    }
+
+    /// Enable/disable the recurring backlog-coverage gap-scan. Off by default;
+    /// the daemon sets this from [`config::gap_scan_enabled`] (and its every-N
+    /// cadence). When off, observed gaps are held (never notified/filed).
+    pub fn with_gap_scan_enabled(mut self, enabled: bool) -> Self {
+        self.gap_scan_enabled = enabled;
         self
     }
 
@@ -321,6 +354,17 @@ impl Overseer {
         // deserializing the same snapshot twice this tick.
         let (blocked_goals, in_flight) = self.caps.goals.observe_board().unwrap_or_default();
         observed.blocked_goals = blocked_goals;
+
+        // Enrich with the recurring backlog-coverage gap-scan: important work
+        // that SHOULD have an active workstream but does not, already correlated
+        // against in-flight workstreams / open PRs so only GENUINE gaps appear.
+        // Read-only; a survey failure degrades to "no gaps", never aborts. The
+        // gap-scan action itself is gated (held) when the scan is disabled.
+        observed.workstream_gaps = self
+            .caps
+            .goals
+            .workstream_gaps(&observed.anomalies)
+            .unwrap_or_default();
 
         // Cognitive-memory recall (#2628) — the USE step. Key off the pre-recall
         // signals/problems (never a full-graph scan), then run ONE whole-pass,
@@ -477,6 +521,16 @@ impl Overseer {
             };
         }
 
+        // Gap-scan opt-out: when disabled, hold the whole flag-gaps action (no
+        // notification, no issue) even though gaps were observed.
+        if matches!(iv, Intervention::FlagWorkstreamGaps { .. }) && !self.gap_scan_enabled {
+            return PlannedIntervention {
+                intervention: iv.clone(),
+                admitted: false,
+                note: "held: gap-scan disabled (SIMARD_OVERSEER_GAP_SCAN)".to_string(),
+            };
+        }
+
         // Autonomy: HIGH-RISK requires opt-in, else it is escalated (held).
         if let Err(e) = self.autonomy.admit(iv) {
             return PlannedIntervention {
@@ -566,6 +620,7 @@ impl Overseer {
             Intervention::EscalateBlockedGoal { goal_id, reason } => {
                 self.act_escalate_blocked_goal(goal_id, reason)
             }
+            Intervention::FlagWorkstreamGaps { gaps } => self.act_flag_workstream_gaps(gaps),
         }
     }
 
@@ -769,6 +824,90 @@ impl Overseer {
             "overseer suppressed a goal-board health action (dedup window / per-hour cap)"
         );
         ActOutcome::GoalHealthSuppressed { reason }
+    }
+
+    /// FLAG the backlog-coverage gaps the recurring gap-scan found: notify the
+    /// operator on BOTH channels (email + Signal) with ONE consolidated,
+    /// provenance-labelled summary AND file one DEDUPED issue per fresh gap via
+    /// the SAME M1 stewardship path goal-health uses. Fails CLOSED without a
+    /// DISTINCT steward identity (anti-recursion). Deduped per gap signature so a
+    /// recurring gap notifies/files at most once per window; the dedup slot is
+    /// consumed only after a successful file, so a failure retries rather than
+    /// silently losing the gap.
+    fn act_flag_workstream_gaps(&mut self, gaps: &[GapItem]) -> Result<ActOutcome, OverseerError> {
+        if !self.recursion.is_configured() {
+            return Err(OverseerError::Recursion {
+                subject: format!(
+                    "flag workstream gaps (unconfigured steward identity): {} gap(s)",
+                    gaps.len()
+                ),
+            });
+        }
+
+        let now = now_secs();
+        // Peek every gap first (no commit) so the consolidated notification names
+        // exactly the FRESH gaps; a recurring gap within the dedup window is
+        // counted as suppressed and neither re-notified nor re-filed.
+        let mut fresh: Vec<GapItem> = Vec::new();
+        let mut suppressed = 0usize;
+        for g in gaps {
+            let sig = format!("workstream-gap:{}", g.signature);
+            match self.gap_gate.peek(&sig, now) {
+                WhisperDecision::Deliver => fresh.push(g.clone()),
+                WhisperDecision::SuppressDuplicate | WhisperDecision::SuppressCapReached => {
+                    suppressed += 1
+                }
+            }
+        }
+
+        if fresh.is_empty() {
+            tracing::debug!(
+                target: "overseer::gap_scan",
+                flagged = 0usize,
+                suppressed,
+                "overseer gap-scan: every observed gap is within the dedup window (suppressed)"
+            );
+            return Ok(ActOutcome::WorkstreamGapsFlagged {
+                flagged: 0,
+                suppressed,
+            });
+        }
+
+        // ONE consolidated operator notification (email + Signal) naming every
+        // fresh gap — the SAME mandatory notifier the merge / goal-health paths use.
+        let notifier = self.notifier.as_ref().ok_or(OverseerError::Capability {
+            what: "notify.operator",
+            detail: "no operator notifier configured".to_string(),
+        })?;
+        let notification = OperatorNotification::workstream_gap(fresh.len(), &fresh);
+        let report = notifier.notify(&notification);
+
+        // One DEDUPED issue per fresh gap via the M1 stewardship path.
+        for g in &fresh {
+            let run = OrchestratorRunBrief {
+                recipe_name: "smart-orchestrator".to_string(),
+                failed_step: "workstream-gap-scan".to_string(),
+                source_module: "overseer".to_string(),
+                failure_kind: format!("workstream_gap:{}", g.category.label()),
+                error_text: format!("{} — {}", g.ref_id, g.why_it_matters),
+            };
+            self.caps.issues.file(&run)?;
+            let sig = format!("workstream-gap:{}", g.signature);
+            self.gap_gate.commit(&sig, now);
+        }
+
+        tracing::info!(
+            target: "overseer::gap_scan",
+            flagged = fresh.len(),
+            suppressed,
+            dispatched = report.dispatched(),
+            all_sent = report.all_sent(),
+            "overseer flagged uncovered backlog work: notified the operator + filed deduped issue(s)"
+        );
+        Ok(ActOutcome::WorkstreamGapsFlagged {
+            flagged: fresh.len(),
+            suppressed,
+        })
     }
 
     /// Best-effort advisory whisper steering Simard to carve ONE bounded,
@@ -998,6 +1137,16 @@ fn classify_signal(s: &Signal) -> (ProblemKind, Priority, String, String) {
                 "recurring signature seen {occurrences}× in cognitive memory ({signature})"
             )),
         ),
+        // The recurring gap-scan surfaces ONE consolidated signal per Observe
+        // pass, so it maps to a SINGLE high-priority coverage problem with a
+        // stable, evidence-independent dedup key. Uncovered p1/p2 goals, bug/P1
+        // issues, and live anomalies all rank High.
+        Signal::WorkstreamGap { gaps } => (
+            ProblemKind::WorkstreamCoverage,
+            Priority::High,
+            "workstream-gap".to_string(),
+            format!("{} uncovered workstream(s)", gaps.len()),
+        ),
     }
 }
 
@@ -1118,6 +1267,19 @@ pub fn decide(problem: &Problem) -> Intervention {
             note: compose_whisper_note(problem, &ObservedState::default()),
             urgency: WhisperUrgency::Normal,
         },
+        // Backlog-coverage gaps carry the consolidated `WorkstreamGap` evidence
+        // forward verbatim so Act can notify + file the specific gaps.
+        ProblemKind::WorkstreamCoverage => {
+            let gaps = problem
+                .evidence
+                .iter()
+                .find_map(|s| match s {
+                    Signal::WorkstreamGap { gaps } => Some(gaps.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            Intervention::FlagWorkstreamGaps { gaps }
+        }
     }
 }
 

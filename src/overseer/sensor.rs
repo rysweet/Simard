@@ -44,7 +44,7 @@ use crate::overseer::config;
 use crate::overseer::intervention::Intervention;
 use crate::overseer::observer::{StewardshipIssueFiler, decide_read_only, is_m1_permitted};
 use crate::overseer::orient;
-use crate::overseer::signal::{Problem, Signal, signals_from};
+use crate::overseer::signal::{GapCategory, GapItem, Problem, Signal, signals_from};
 
 // ─────────────────────────── Observe adapter ───────────────────────────────
 
@@ -146,6 +146,11 @@ pub fn observed_from_snapshot(snap: &StatusSnapshot) -> ObservedState {
         // side-effect free.
         recall: None,
         recall_error: None,
+        // Backlog-coverage gaps are surveyed from the live board + issues by the
+        // acting Overseer's Observe pass via the goal curator, not from the
+        // read-only status snapshot; left empty here so this projection stays
+        // additive and side-effect free.
+        workstream_gaps: Vec::new(),
     }
 }
 
@@ -222,8 +227,205 @@ fn safeguard_marker_count(reason: &str) -> Option<u32> {
     digits.parse::<u32>().ok()
 }
 
-// ─────────────────────────── Read-only cycle ───────────────────────────────
+// ───────────────────── Backlog-coverage gap-scan (pure) ─────────────────────
 
+/// Maximum length (in `char`s) of any rendered gap field. Bounds a hostile issue
+/// title / anomaly string so it can never inflate a notification, an issue body,
+/// or a log line (V4).
+pub const MAX_GAP_FIELD_LEN: usize = 120;
+
+/// Maximum number of gaps surfaced in one Observe pass. Bounds a pathological
+/// board / issue list so one tick can never flood the operator (V4).
+pub const MAX_GAPS_PER_TICK: usize = 25;
+
+/// Goal-board priority bar (inclusive) at or below which an uncovered goal is a
+/// gap: p1/p2 only. A p3+ goal is below the "should already have a workstream"
+/// bar and is not flagged.
+const GAP_GOAL_PRIORITY_BAR: u32 = 2;
+
+/// High-signal issue labels: an open issue carrying ANY of these deserves an
+/// active workstream. Matched case-insensitively.
+const HIGH_SIGNAL_LABELS: [&str; 3] = ["bug", "P1", "workflow:default"];
+
+/// A high-signal open GitHub issue surveyed for the gap-scan. Built from a
+/// label-aware `gh issue list` read (numbers + labels are trusted metadata; the
+/// title is untrusted free text and is only ever rendered as a bounded field,
+/// never folded into a signature — V3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SurveyedIssue {
+    /// `owner/name` slug.
+    pub repo: String,
+    /// The issue number.
+    pub number: u64,
+    /// The issue title (untrusted free text).
+    pub title: String,
+    /// The issue's labels.
+    pub labels: Vec<String>,
+}
+
+/// Detect GENUINE backlog-coverage gaps across the WHOLE work picture: the goal
+/// board, high-signal open issues, and live anomalies. Pure and hermetic — no
+/// I/O, no clock — so it is unit-tested with hand-built inputs.
+///
+/// A candidate is a GAP iff it has NO active workstream AND NO open PR AND (for
+/// anomalies) NO fix in flight. `coverage` is the pre-computed set of gap
+/// signatures already covered by in-flight workstreams / open PRs, so a candidate
+/// whose signature is in `coverage` is deduped away (never re-flagged).
+///
+/// - Goals: a `Blocked` goal is DELEGATED to `goal_health` and never re-flagged
+///   here (no double-notify). A p1/p2 goal with no assignee, no active
+///   PR/branch/session/engineer ref, and no coverage is a gap.
+/// - Issues: an open issue carrying a high-signal label with no coverage is a gap.
+/// - Anomalies: a live anomaly with no coverage is a gap.
+///
+/// All rendered fields are bounded ([`MAX_GAP_FIELD_LEN`]) and the total is
+/// bounded ([`MAX_GAPS_PER_TICK`]).
+pub fn detect_workstream_gaps(
+    board: &GoalBoard,
+    issues: &[SurveyedIssue],
+    anomalies: &[String],
+    coverage: &[String],
+) -> Vec<GapItem> {
+    let is_covered = |sig: &str| coverage.iter().any(|c| c == sig);
+    let mut gaps: Vec<GapItem> = Vec::new();
+
+    // 1. Goal board — uncovered high-priority goals.
+    for g in &board.active {
+        // Blocked goals flow through goal_health; never re-flag them here.
+        if matches!(g.status, GoalProgress::Blocked(_)) {
+            continue;
+        }
+        if g.priority > GAP_GOAL_PRIORITY_BAR || goal_has_active_workstream(g) {
+            continue;
+        }
+        let signature = format!("goal:{}", g.id);
+        if is_covered(&signature) {
+            continue;
+        }
+        gaps.push(GapItem {
+            category: GapCategory::GoalUncovered,
+            ref_id: truncate_field(&g.id),
+            title: truncate_field(&g.description),
+            why_it_matters: truncate_field(&format!(
+                "p{} goal with no active engineer and no open PR",
+                g.priority
+            )),
+            signature,
+        });
+    }
+
+    // 2. High-signal open issues with no open PR / active workstream.
+    for issue in issues {
+        let matched: Vec<&str> = HIGH_SIGNAL_LABELS
+            .iter()
+            .copied()
+            .filter(|h| issue.labels.iter().any(|l| l.eq_ignore_ascii_case(h)))
+            .collect();
+        if matched.is_empty() {
+            continue;
+        }
+        // Signature is built from TRUSTED metadata only (slugified repo + numeric
+        // id) — never the untrusted title (V3).
+        let ref_id = format!("{}#{}", repo_slug(&issue.repo), issue.number);
+        let signature = format!("issue:{ref_id}");
+        if is_covered(&signature) {
+            continue;
+        }
+        gaps.push(GapItem {
+            category: GapCategory::IssueUncovered,
+            ref_id: truncate_field(&ref_id),
+            title: truncate_field(&issue.title),
+            why_it_matters: truncate_field(&format!(
+                "high-signal open issue ({}) with no open PR and no active workstream",
+                matched.join(", ")
+            )),
+            signature,
+        });
+    }
+
+    // 3. Live anomalies with no fix in flight.
+    for a in anomalies {
+        let slug = anomaly_slug(a);
+        if slug.is_empty() {
+            continue;
+        }
+        let signature = format!("anomaly:{slug}");
+        if is_covered(&signature) {
+            continue;
+        }
+        gaps.push(GapItem {
+            category: GapCategory::AnomalyUnaddressed,
+            ref_id: truncate_field(a),
+            title: truncate_field(a),
+            why_it_matters: "live anomaly with no fix in flight".to_string(),
+            signature,
+        });
+    }
+
+    gaps.truncate(MAX_GAPS_PER_TICK);
+    gaps
+}
+
+/// True when a goal already has an active workstream: an assignee or a
+/// PR/branch/session/engineer work-in-progress ref. (An `issue`-only ref links a
+/// tracking issue, not active work, so it does not count as coverage.)
+fn goal_has_active_workstream(goal: &ActiveGoal) -> bool {
+    if goal.assigned_to.is_some() {
+        return true;
+    }
+    goal.wip_refs
+        .iter()
+        .any(|w| matches!(w.kind.as_str(), "pr" | "branch" | "session" | "engineer"))
+}
+
+/// Bound a rendered gap field to [`MAX_GAP_FIELD_LEN`] `char`s (trimmed).
+fn truncate_field(s: &str) -> String {
+    let s = s.trim();
+    if s.chars().count() <= MAX_GAP_FIELD_LEN {
+        s.to_string()
+    } else {
+        s.chars().take(MAX_GAP_FIELD_LEN).collect()
+    }
+}
+
+/// Slugify a `owner/name` repo into the restricted signature alphabet, preserving
+/// `/`, `_`, and `-` and mapping anything else to `_`. Trusted input; this only
+/// guarantees the built signature stays a restricted slug even for exotic slugs.
+fn repo_slug(repo: &str) -> String {
+    repo.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Build a stable, restricted slug from an anomaly string: lowercase, every run
+/// of non-alphanumerics collapses to a single `_`, trimmed of leading/trailing
+/// `_`, and bounded. Deterministic, so the same anomaly always yields the same
+/// signature (dedup on repeat).
+fn anomaly_slug(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().min(MAX_GAP_FIELD_LEN));
+    let mut last_underscore = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            last_underscore = false;
+        } else if !last_underscore {
+            out.push('_');
+            last_underscore = true;
+        }
+        if out.len() >= MAX_GAP_FIELD_LEN {
+            break;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+// ─────────────────────────── Read-only cycle ───────────────────────────────
 /// The result of one read-only observer pass. Side-effect free apart from the
 /// deduplicated issues recorded in `issues_filed` (suppressed under `dry_run`).
 #[derive(Clone, Debug)]

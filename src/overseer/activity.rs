@@ -59,6 +59,11 @@ pub struct OverseerTotals {
     pub goals_unblocked: u64,
     /// Genuinely-blocked "needs human review" goals escalated to the operator.
     pub goals_escalated: u64,
+    /// Backlog-coverage gaps flagged by the recurring gap-scan (operator
+    /// notified + deduped issue filed).
+    pub workstream_gaps_detected: u64,
+    /// Backlog-coverage gaps suppressed as recurring (within the dedup window).
+    pub workstream_gaps_suppressed: u64,
     pub held: u64,
     pub errors: u64,
 }
@@ -222,6 +227,8 @@ impl OverseerActivity {
             t.escalations += rep.escalations as u64;
             t.goals_unblocked += rep.goals_unblocked as u64;
             t.goals_escalated += rep.goals_escalated as u64;
+            t.workstream_gaps_detected += rep.workstream_gaps_detected as u64;
+            t.workstream_gaps_suppressed += rep.workstream_gaps_suppressed as u64;
             t.held += rep.held as u64;
             t.errors += rep.errors as u64;
         }
@@ -230,8 +237,8 @@ impl OverseerActivity {
 
     /// Count of *actions taken* over the retained window (issues filed, fix
     /// workstreams launched, PRs merged, deploys, escalations, goal-board
-    /// self-heals + escalations). `held` is deliberately excluded: holding is
-    /// observing-and-waiting, not an action.
+    /// self-heals + escalations, backlog-coverage gaps flagged). `held` is
+    /// deliberately excluded: holding is observing-and-waiting, not an action.
     pub fn interventions(&self) -> u64 {
         let t = &self.totals;
         t.issues_filed
@@ -241,6 +248,7 @@ impl OverseerActivity {
             + t.escalations
             + t.goals_unblocked
             + t.goals_escalated
+            + t.workstream_gaps_detected
     }
 
     /// The honest one-line status summary rendered on every surface.
@@ -430,6 +438,13 @@ pub fn humanize_tick(r: &OverseerTickReport) -> String {
             "recorded {} memory note{}",
             r.memory_writes,
             plural(r.memory_writes)
+        ));
+    }
+    if r.workstream_gaps_detected > 0 {
+        did.push(format!(
+            "flagged {} workstream gap{}",
+            r.workstream_gaps_detected,
+            plural(r.workstream_gaps_detected)
         ));
     }
 

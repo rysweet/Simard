@@ -11,7 +11,7 @@
 
 use std::fmt;
 
-use crate::overseer::signal::{Problem, Signal};
+use crate::overseer::signal::{GapItem, Problem, Signal};
 
 /// Small, cheap error type shared by every capability. Kept intentionally tiny
 /// so `Result<T, OverseerError>` never trips `clippy::result_large_err`.
@@ -117,6 +117,17 @@ pub struct ObservedState {
     /// on failure — so callers, the tick report, and tests can always tell an
     /// empty graph from an unreachable one (no silent fallback).
     pub recall_error: Option<String>,
+    /// Genuine backlog-coverage gaps surfaced this Observe pass — important work
+    /// that SHOULD have an active workstream but does not (uncovered high-priority
+    /// goals, high-signal issues with no PR, live anomalies with no fix in
+    /// flight). Populated by the sensor's [`sensor::detect_workstream_gaps`]
+    /// projection via [`GoalCurator::workstream_gaps`], already correlated against
+    /// in-flight workstreams / open PRs so only GENUINE gaps appear. Empty when
+    /// the backlog is fully covered or unreadable (degrade-to-empty, never a
+    /// panic).
+    ///
+    /// [`sensor::detect_workstream_gaps`]: crate::overseer::sensor::detect_workstream_gaps
+    pub workstream_gaps: Vec<GapItem>,
 }
 
 /// A `(repo, pr)` pair. `repo` is an `owner/name` slug.
@@ -379,6 +390,23 @@ pub trait GoalCurator {
         Ok((self.blocked_goals()?, self.in_flight()?))
     }
 
+    /// Survey the WHOLE work picture for backlog-coverage GAPS — important work
+    /// that SHOULD have an active workstream but does not — for the recurring
+    /// "WHAT WORKSTREAMS ARE WE MISSING?" gap-scan, already correlated against
+    /// in-flight workstreams + open PRs so only GENUINE gaps are returned.
+    /// `anomalies` are the live telemetry anomalies from this Observe pass (so an
+    /// anomaly with no fix in flight can be flagged); the adapter surveys the goal
+    /// board + high-signal open issues itself.
+    ///
+    /// **Reuse:** `crate::goal_curation::load_goal_board` projected by
+    /// [`crate::overseer::sensor::detect_workstream_gaps`], plus a best-effort
+    /// `gh issue list` label survey and the open-PR list for correlation. Read-
+    /// only; any survey failure degrades to an empty list (logged), never a panic.
+    /// The default returns an empty list for fakes that do not model a board.
+    fn workstream_gaps(&self, _anomalies: &[String]) -> Result<Vec<GapItem>, OverseerError> {
+        Ok(Vec::new())
+    }
+
     /// Auto-unblock + reactivate a false-parked goal — the exact operation
     /// `simard goal unblock` performs: restore a `Blocked` goal to `NotStarted`
     /// so the next OODA cycle re-enters the spawn path.
@@ -533,6 +561,8 @@ fn signal_keyword(s: &Signal) -> Option<String> {
         Signal::DriftCorrection { goal_id, .. } => format!("drift:{goal_id}"),
         Signal::GoalBlocked { goal_id, .. } => format!("blocked:{goal_id}"),
         Signal::RecurringSignature { signature, .. } => signature.clone(),
+        // A consolidated batch of gaps carries no single recall key on its own.
+        Signal::WorkstreamGap { .. } => String::new(),
     };
     if kw.is_empty() { None } else { Some(kw) }
 }

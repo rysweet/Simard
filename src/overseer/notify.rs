@@ -24,6 +24,7 @@
 use std::sync::Mutex;
 
 use crate::conversation_channel::{ConversationChannel, OutKind, Outbound};
+use crate::overseer::signal::GapItem;
 use crate::overseer::whisper_ops::WhisperUrgency;
 
 // ─────────────────────────── notification content ──────────────────────────
@@ -91,6 +92,22 @@ impl OperatorNotification {
 
     /// A short, plain-language body suitable for email or a Signal message.
     pub fn plain_text(&self) -> String {
+        // The gap-scan notification carries a pre-rendered, provenance-labelled
+        // list in `problem`; render it directly rather than through the generic
+        // "performed a <kind>" template, which does not fit a flag-only action.
+        if self.kind == "workstream-gap" {
+            let who = if self.autonomous {
+                "The Overseer autonomously"
+            } else {
+                "The operator"
+            };
+            return format!(
+                "{who} flagged backlog-coverage gaps in {repo}.\n\n{problem}\n",
+                who = who,
+                repo = self.repo,
+                problem = self.problem,
+            );
+        }
         let who = if self.autonomous {
             "The Overseer autonomously"
         } else {
@@ -159,7 +176,44 @@ impl OperatorNotification {
             autonomous: true,
         }
     }
+
+    /// Build a backlog-coverage gap notification: the recurring gap-scan's
+    /// consolidated, provenance-labelled list of uncovered work — each gap says
+    /// WHAT is uncovered and WHY it matters. `count` is the number of gaps flagged
+    /// this tick; `gaps` are those gaps. The rendered body is bounded (each field
+    /// is already capped by the detector and at most [`MAX_GAPS_RENDERED`] gaps are
+    /// listed) so a hostile issue title can never inflate the notification.
+    pub fn workstream_gap(count: usize, gaps: &[GapItem]) -> Self {
+        let mut body = String::from("Uncovered work:");
+        for g in gaps.iter().take(MAX_GAPS_RENDERED) {
+            body.push_str(&format!(
+                "\n  • {} {} — {}: {}",
+                g.category.label(),
+                g.ref_id,
+                g.title,
+                g.why_it_matters
+            ));
+        }
+        if gaps.len() > MAX_GAPS_RENDERED {
+            body.push_str(&format!(
+                "\n  • … and {} more",
+                gaps.len() - MAX_GAPS_RENDERED
+            ));
+        }
+        Self {
+            kind: "workstream-gap",
+            headline: format!("{count} uncovered workstream(s)"),
+            problem: body,
+            link: None,
+            repo: "rysweet/Simard".to_string(),
+            autonomous: true,
+        }
+    }
 }
+
+/// Cap on how many gaps a single notification body lists, so even a maxed-out
+/// tick keeps the body well under any channel limit.
+const MAX_GAPS_RENDERED: usize = 15;
 
 fn short_commit(commit: &str) -> &str {
     &commit[..commit.len().min(12)]

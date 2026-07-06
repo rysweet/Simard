@@ -642,6 +642,12 @@ pub fn run_ooda_daemon(
     // Monotonic origin for the cadence; virtual seconds since daemon start.
     let overseer_epoch = Instant::now();
     let mut overseer_cadence = crate::overseer::OverseerCadence::new(overseer_interval_secs, 0);
+    // Gap-scan cadence: run the backlog-coverage survey/act once every N Overseer
+    // ticks (default every tick; clamped floor 1). Resolved once at startup; the
+    // per-tick index throttles which ticks actually run the gap-scan.
+    let overseer_gap_scan_enabled = crate::overseer::gap_scan_enabled();
+    let overseer_gap_scan_every_n = crate::overseer::gap_scan_every_n();
+    let mut overseer_gap_scan_tick_idx: u64 = 0;
     // Prevents overlapping ticks from stacking up if one runs long.
     let overseer_tick_running = Arc::new(AtomicBool::new(false));
     let overseer_repo_root = bridges.repo_root.clone();
@@ -1265,6 +1271,13 @@ pub fn run_ooda_daemon(
                 let mem_for_tick = Arc::clone(&shared_mem);
                 let repo_root_for_tick = overseer_repo_root.clone();
                 let state_root_for_tick = state_root.clone();
+                // Gap-scan every-N cadence: the first tick (idx 0) always runs the
+                // scan, then it runs once every N ticks. Disabled entirely when the
+                // gap-scan is off. Computed on the main loop thread so the index
+                // persists across ticks (each tick rebuilds the Overseer).
+                let gap_scan_due = overseer_gap_scan_enabled
+                    && overseer_gap_scan_tick_idx.is_multiple_of(overseer_gap_scan_every_n);
+                overseer_gap_scan_tick_idx = overseer_gap_scan_tick_idx.wrapping_add(1);
                 // Capture the cognitive-thread heartbeats + feed context on the
                 // main loop thread (before the tick spawns) so the Overseer
                 // activity feed (#2419) lists every operator/steward thread, not
@@ -1284,11 +1297,14 @@ pub fn run_ooda_daemon(
                         }
                         let _clear = ClearOnDrop(running);
 
-                        let mut overseer = crate::overseer::build_overseer(
+                        // Apply the gap-scan cadence for THIS tick on top of the
+                        // config default build_overseer sets.
+                        let overseer = crate::overseer::build_overseer(
                             mem_for_tick,
                             repo_root_for_tick,
                             state_root_for_tick.clone(),
                         );
+                        let mut overseer = overseer.with_gap_scan_enabled(gap_scan_due);
                         let report = crate::overseer::run_overseer_tick_isolated(&mut overseer);
                         daemon_log(
                             &state_root_for_tick,
@@ -1296,8 +1312,9 @@ pub fn run_ooda_daemon(
                                 "[simard] overseer tick: problems={} issues_filed={} \
                                  recipes_launched={} prs_merged={} deploys={} escalations={} \
                                  held={} goals_unblocked={} goals_escalated={} \
-                                 memory_recalls={} memory_writes={} memory_errors={} errors={} \
-                                 panicked={} ({}ms)",
+                                 memory_recalls={} memory_writes={} memory_errors={} \
+                                 workstream_gaps_detected={} workstream_gaps_suppressed={} \
+                                 errors={} panicked={} ({}ms)",
                                 report.problems,
                                 report.issues_filed,
                                 report.recipes_launched,
@@ -1310,6 +1327,8 @@ pub fn run_ooda_daemon(
                                 report.memory_recalls,
                                 report.memory_writes,
                                 report.memory_errors,
+                                report.workstream_gaps_detected,
+                                report.workstream_gaps_suppressed,
                                 report.errors,
                                 report.panicked,
                                 report.duration_ms,
