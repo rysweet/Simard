@@ -159,53 +159,48 @@ impl DistillFactSink for InProcessFactSink<'_> {
             .batch
             .iter()
             .any(|e| e.node_id == fact.source_episode_id);
-        let confidence =
-            crate::fact_reliability::score_fact_reliability(&fact.concept, &fact.content, grounded);
 
-        if confidence < DISTILL_RELIABILITY_THRESHOLD {
-            tracing::warn!(
-                target: "simard::distill",
-                concept = %fact.concept,
-                source_episode_id = %fact.source_episode_id,
-                confidence,
-                threshold = DISTILL_RELIABILITY_THRESHOLD,
-                "distill: quarantined low-reliability fact (below threshold), not promoted"
-            );
-            return Ok(false);
-        }
-
-        // Do not let a weaker-or-equal new fact clobber a stronger existing
-        // *version of the same fact* (identity = concept + content). Mirrors the
-        // server-side gate's dedup so both seams agree.
-        let new_content = fact.content.trim();
-        let existing = self
-            .memory
-            .search_facts(&fact.concept, 5, confidence)
-            .unwrap_or_default();
-        if existing
-            .iter()
-            .any(|f| f.content.trim() == new_content && f.confidence >= confidence)
-        {
-            tracing::info!(
-                target: "simard::distill",
-                concept = %fact.concept,
-                confidence,
-                "distill: an equal-or-stronger copy of this fact already exists; not downgrading prior"
-            );
-            return Ok(false);
-        }
-
+        // Score → threshold → dedup → persist through the single shared gate, so
+        // this in-process seam and the IPC server's `StoreFactGated` handler
+        // decide every fact's disposition identically.
         let source = format!("distill:{}", fact.source_episode_id);
-        self.memory.store_fact_with_provenance(
+        let decision = crate::fact_reliability::commit_gated_fact(
+            self.memory,
             &fact.concept,
             &fact.content,
-            confidence,
+            grounded,
             &source,
-            Some(std::slice::from_ref(&fact.concept)),
-            None,
+            std::slice::from_ref(&fact.concept),
             std::slice::from_ref(&fact.source_episode_id),
         )?;
-        Ok(true)
+
+        match decision {
+            crate::fact_reliability::FactGateDecision::Stored { .. } => Ok(true),
+            // A below-threshold score and a dedup skip are BOTH quarantines; the
+            // confidence tells them apart (a dedup skip cleared the threshold).
+            crate::fact_reliability::FactGateDecision::Quarantined { confidence }
+                if confidence < DISTILL_RELIABILITY_THRESHOLD =>
+            {
+                tracing::warn!(
+                    target: "simard::distill",
+                    concept = %fact.concept,
+                    source_episode_id = %fact.source_episode_id,
+                    confidence,
+                    threshold = DISTILL_RELIABILITY_THRESHOLD,
+                    "distill: quarantined low-reliability fact (below threshold), not promoted"
+                );
+                Ok(false)
+            }
+            crate::fact_reliability::FactGateDecision::Quarantined { confidence } => {
+                tracing::info!(
+                    target: "simard::distill",
+                    concept = %fact.concept,
+                    confidence,
+                    "distill: an equal-or-stronger copy of this fact already exists; not downgrading prior"
+                );
+                Ok(false)
+            }
+        }
     }
 
     fn commit_procedure(&mut self, procedure: &DistilledProcedure) -> SimardResult<()> {
@@ -450,18 +445,23 @@ pub fn distill_recent_episodes_with_runner(
     })
 }
 
-/// Build the JSON `context` payload for the `distill_reliability_gate` metric.
-fn build_reliability_gate_context(candidate_facts: u32, quarantined: u32, promoted: u32) -> String {
-    let block_rate = if candidate_facts == 0 {
+/// Block-rate of the reliability gate for one pass: fraction of candidate facts
+/// quarantined. `0.0` when there were no candidates.
+fn gate_block_rate(quarantined: u32, candidate_facts: u32) -> f64 {
+    if candidate_facts == 0 {
         0.0
     } else {
         quarantined as f64 / candidate_facts as f64
-    };
+    }
+}
+
+/// Build the JSON `context` payload for the `distill_reliability_gate` metric.
+fn build_reliability_gate_context(candidate_facts: u32, quarantined: u32, promoted: u32) -> String {
     serde_json::json!({
         "candidate_facts": candidate_facts,
         "promoted": promoted,
         "quarantined": quarantined,
-        "block_rate": block_rate,
+        "block_rate": gate_block_rate(quarantined, candidate_facts),
         "threshold": DISTILL_RELIABILITY_THRESHOLD,
     })
     .to_string()
@@ -474,11 +474,7 @@ fn record_reliability_gate_metric(candidate_facts: u32, quarantined: u32, promot
     if cfg!(test) {
         return;
     }
-    let block_rate = if candidate_facts == 0 {
-        0.0
-    } else {
-        quarantined as f64 / candidate_facts as f64
-    };
+    let block_rate = gate_block_rate(quarantined, candidate_facts);
     let context = build_reliability_gate_context(candidate_facts, quarantined, promoted);
     if let Err(e) =
         crate::self_metrics::record_metric("distill_reliability_gate", block_rate, &context)

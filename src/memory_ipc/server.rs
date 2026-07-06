@@ -323,22 +323,22 @@ fn drain_pass_ledger(pass_id: &str) -> usize {
         .unwrap_or(0) as usize
 }
 
-/// The single authoritative distillation write-boundary gate (issue #2679).
+/// The authoritative server-side distillation write-boundary gate (issue #2679).
 ///
 /// Applied per fact when the distiller agentic step commits a fact through the
 /// daemon socket. The server — NOT the client, NOT Simard's distillation module —
 /// decides every fact's disposition here, in order:
 ///
+///   0. **Validate** the opaque input fields (non-empty, within length caps).
 ///   1. **Ground** the fact by confirming at least one `source_episode_id`
 ///      resolves to a real episode node in the store (store-existence check).
-///   2. **Score** it with the shared [`crate::fact_reliability`] scorer using that
-///      resolved `grounded` flag — NEVER the client's `confidence` hint.
-///   3. **Quarantine** anything below `RELIABILITY_THRESHOLD` (ungrounded,
-///      empty-content, off-spec) — writing nothing.
-///   4. **Dedup**: never let a weaker-or-equal restatement clobber an existing
-///      equal-or-stronger fact of the same identity (concept + content).
-///   5. **Persist** survivors via `store_fact_with_provenance` with the
-///      *server-computed* confidence and the source-episode provenance edges.
+///   2. **Score → quarantine → dedup → persist** via the single shared
+///      [`crate::fact_reliability::commit_gated_fact`], so this server seam and
+///      the in-process `DistillFactSink` reach an identical store/quarantine
+///      decision. The client's `confidence` hint is NEVER consulted; the gate
+///      re-derives confidence from the resolved `grounded` flag, quarantines
+///      anything below `RELIABILITY_THRESHOLD` or duplicating an equal-or-stronger
+///      prior, and persists survivors via `store_fact_with_provenance`.
 ///
 /// The disposition flows back as [`MemoryResponse::FactWrite`] — there is no
 /// document for Simard to deserialize anywhere in the path.
@@ -351,16 +351,7 @@ fn gated_fact_write(
     source_episode_ids: &[String],
     pass_id: &str,
 ) -> MemoryResponse {
-    use crate::fact_reliability::{RELIABILITY_THRESHOLD, score_fact_reliability};
-
-    let quarantine = |confidence: f64| {
-        MemoryResponse::FactWrite(super::FactWriteOutcome {
-            stored: false,
-            quarantined: true,
-            confidence,
-            node_id: None,
-        })
-    };
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
 
     // (0) Input validation at the boundary (issue #2679 hardening). Every field
     // is opaque data; a required field that is empty, or a field that exceeds its
@@ -374,7 +365,12 @@ fn gated_fact_write(
         || concept.len() > MAX_CONCEPT_LEN
         || content.len() > MAX_CONTENT_LEN
     {
-        return quarantine(0.0);
+        return MemoryResponse::FactWrite(super::FactWriteOutcome {
+            stored: false,
+            quarantined: true,
+            confidence: 0.0,
+            node_id: None,
+        });
     }
 
     // (1) Grounding — the fact is grounded iff at least one cited episode id
@@ -385,41 +381,23 @@ fn gated_fact_write(
         .iter()
         .any(|id| memory.episode_exists(id).unwrap_or(false));
 
-    // (2) Score with the shared scorer — the client's confidence is ignored.
-    let confidence = score_fact_reliability(concept, content, grounded);
-
-    // (3) Threshold quarantine.
-    if confidence < RELIABILITY_THRESHOLD {
-        return quarantine(confidence);
-    }
-
-    // (4) Identity dedup: do not downgrade/duplicate an equal-or-stronger prior
-    // version of the *same* fact (concept + content). `search_facts` is queried
-    // with the new confidence as `min_confidence` so it returns only priors
-    // strong enough to block; the explicit `>=` is belt-and-suspenders against a
-    // backend that ignores the filter.
-    let new_content = content.trim();
-    let existing = memory
-        .search_facts(concept, 5, confidence)
-        .unwrap_or_default();
-    if existing
-        .iter()
-        .any(|f| f.content.trim() == new_content && f.confidence >= confidence)
-    {
-        return quarantine(confidence);
-    }
-
-    // (5) Persist with the server-computed confidence and provenance edges.
-    match memory.store_fact_with_provenance(
+    // (2–5) Score → threshold → dedup → persist through the single shared gate,
+    // so this server seam and the in-process `DistillFactSink` decide every
+    // fact's disposition identically. The client's `confidence` hint is never
+    // consulted; the gate re-derives it.
+    match commit_gated_fact(
+        memory,
         concept,
         content,
-        confidence,
+        grounded,
         source_id,
-        Some(tags),
-        None,
+        tags,
         source_episode_ids,
     ) {
-        Ok(node_id) => {
+        Ok(FactGateDecision::Stored {
+            confidence,
+            node_id,
+        }) => {
             // Record the gate-accepted fact against the pass ledger so the
             // distiller can report how many facts a pass committed.
             ledger_record_stored(pass_id);
@@ -428,6 +406,14 @@ fn gated_fact_write(
                 quarantined: false,
                 confidence,
                 node_id: Some(node_id),
+            })
+        }
+        Ok(FactGateDecision::Quarantined { confidence }) => {
+            MemoryResponse::FactWrite(super::FactWriteOutcome {
+                stored: false,
+                quarantined: true,
+                confidence,
+                node_id: None,
             })
         }
         Err(e) => MemoryResponse::Error(e.to_string()),

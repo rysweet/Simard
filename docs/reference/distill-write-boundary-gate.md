@@ -80,12 +80,17 @@ writer.
 
 ## `fact_reliability` — the shared scorer
 
-`src/fact_reliability.rs` is a small, pure module holding the scorer, the
-threshold constant, and the concept-label helpers. It exists so the **stub
-in-process loop** (used by test runners) and the **IPC handler** reach the
-**same disposition** for the same fact — one implementation, two call sites.
-Extracting it also shrinks the `src/memory_consolidation` fork, keeping
-engine-shaped logic consolidated per the G2 architecture rule.
+`src/fact_reliability.rs` is a small, mostly-pure module holding the scorer, the
+threshold constant, the concept-label helpers, and — since the #2679 refactor —
+the shared **write-boundary gate orchestration** itself
+(`commit_gated_fact`: score → threshold → identity-dedup → persist). It exists so
+the **stub in-process loop** (used by test runners) and the **IPC handler** reach
+the **same disposition** for the same fact — one implementation, two call sites.
+Each seam resolves only what genuinely differs per boundary (grounding —
+batch-membership vs. store-existence) and then defers the score/threshold/dedup/
+persist decision to the one shared function, so the two seams can never drift.
+Consolidating the gate here also shrinks the `src/memory_consolidation` fork,
+keeping engine-shaped logic consolidated per the G2 architecture rule.
 
 The scorer is a **pure function of one fact plus its resolved grounding** — it
 takes **no batch argument**. Grounding is the dominant, *necessary* signal (a
@@ -103,6 +108,7 @@ exactly what lets the stub and the IPC handler agree on every decision.
 |--------|---------|
 | `fact_reliability::score_fact_reliability(concept: &str, content: &str, grounded: bool) -> f64` | Confidence in `[0.0, 1.0]` from the fact's concept/content and whether its provenance resolved. Deterministic; fail-closed (ungrounded / empty → low → quarantined). No batch argument. |
 | `fact_reliability::fact_passes_gate(concept, content, grounded) -> bool` | Thin predicate: `score >= RELIABILITY_THRESHOLD`. The shared store/quarantine decision. |
+| `fact_reliability::commit_gated_fact(memory, concept, content, grounded, source_id, tags, source_episode_ids) -> SimardResult<FactGateDecision>` | The shared gate orchestration both seams call: score → threshold → identity-dedup → `store_fact_with_provenance`. Grounding is resolved by the caller; the returned `FactGateDecision` is `Stored { confidence, node_id }` or `Quarantined { confidence }` (a `confidence >= RELIABILITY_THRESHOLD` quarantine is a dedup skip, below is a low-reliability block). |
 | `fact_reliability::RELIABILITY_THRESHOLD` (re-exported as `distillation::DISTILL_RELIABILITY_THRESHOLD`) | Minimum confidence to store rather than quarantine (`0.5`). |
 | `fact_reliability::canonical_concept(label) -> Option<&'static str>` | Canonicalises / validates a concept label. |
 

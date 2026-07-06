@@ -239,3 +239,87 @@ fn gate_predicate_matches_scored_threshold_across_a_matrix() {
         );
     }
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Shared write-boundary gate: commit_gated_fact drives score → threshold →
+// dedup → persist for BOTH seams, so the two can never drift.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A grounded, well-formed, known-concept fact clears the gate and is persisted;
+/// re-committing the identical fact is a dedup quarantine (its score still
+/// clears the threshold); and an ungrounded empty fact is a low-reliability
+/// quarantine (its score is below the threshold). These three dispositions are
+/// exactly what the IPC server seam and the in-process `DistillFactSink` seam
+/// now share, verbatim, by calling this one function.
+#[test]
+fn commit_gated_fact_stores_dedups_and_quarantines() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("episode payload for gate test", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let tags = [String::from("bug-pattern")];
+    let episode_ids = [ep.clone()];
+
+    // (1) Grounded, ≥3 words, known concept → stored with the gate-computed
+    // confidence (never a client hint), returning the new node id.
+    let stored = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        "empty outcome list panics cycle",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    let FactGateDecision::Stored {
+        confidence,
+        node_id,
+    } = stored.clone()
+    else {
+        panic!("expected Stored, got {stored:?}");
+    };
+    assert!(stored.stored());
+    assert!(confidence >= RELIABILITY_THRESHOLD);
+    assert!(!node_id.is_empty());
+
+    // (2) Identical fact again → dedup quarantine; its score still clears the
+    // threshold, so a caller can tell it apart from a low-reliability block.
+    let dup = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        "empty outcome list panics cycle",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(!dup.stored());
+    assert!(
+        dup.confidence() >= RELIABILITY_THRESHOLD,
+        "a dedup quarantine cleared the threshold; only the prior blocks it"
+    );
+
+    // (3) Ungrounded empty fact → low-reliability quarantine (score below the
+    // threshold), nothing written.
+    let blocked = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        "   ",
+        false,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(!blocked.stored());
+    assert!(
+        blocked.confidence() < RELIABILITY_THRESHOLD,
+        "an ungrounded empty fact scores below the threshold"
+    );
+}

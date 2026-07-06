@@ -140,3 +140,104 @@ pub fn score_fact_reliability(concept: &str, content: &str, grounded: bool) -> f
 pub fn fact_passes_gate(concept: &str, content: &str, grounded: bool) -> bool {
     score_fact_reliability(concept, content, grounded) >= RELIABILITY_THRESHOLD
 }
+
+/// Disposition of one write-boundary gate decision (issue #2679), returned by
+/// [`commit_gated_fact`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum FactGateDecision {
+    /// The fact cleared the gate and was persisted with the gate-computed
+    /// `confidence`; `node_id` is the new fact node's id.
+    Stored { confidence: f64, node_id: String },
+    /// The fact was blocked — either below [`RELIABILITY_THRESHOLD`] or an
+    /// equal-or-stronger prior of the same identity already exists. Nothing was
+    /// written. `confidence` is still the gate-computed score (a caller can
+    /// compare it against [`RELIABILITY_THRESHOLD`] to tell a low-reliability
+    /// quarantine from a dedup skip).
+    Quarantined { confidence: f64 },
+}
+
+impl FactGateDecision {
+    /// `true` when the fact was persisted.
+    pub fn stored(&self) -> bool {
+        matches!(self, Self::Stored { .. })
+    }
+
+    /// The gate-computed reliability score, available for both dispositions.
+    pub fn confidence(&self) -> f64 {
+        match self {
+            Self::Stored { confidence, .. } | Self::Quarantined { confidence } => *confidence,
+        }
+    }
+}
+
+/// The single shared write-boundary gate (issue #2679): **score → threshold →
+/// identity-dedup → persist**, applied to one fact.
+///
+/// Both seams that reach the write boundary call this so a fact stores or
+/// quarantines identically no matter which boundary writes it:
+///
+///   1. the IPC server's `StoreFactGated` handler (server-side, real subprocess
+///      path), and
+///   2. the in-process `DistillFactSink` used by the deterministic test stubs.
+///
+/// `grounded` is resolved by the caller — store-existence for the server,
+/// batch-membership for the in-process sink — because the notion of "grounded"
+/// differs per seam. Everything downstream of grounding is identical and lives
+/// here:
+///
+///   - Confidence is ALWAYS [`score_fact_reliability`]'s output, never a client
+///     hint.
+///   - Below [`RELIABILITY_THRESHOLD`] → [`FactGateDecision::Quarantined`].
+///   - A weaker-or-equal restatement never clobbers an existing equal-or-stronger
+///     fact of the same identity (`concept` + trimmed `content`); such a fact is
+///     also quarantined (its score still cleared the threshold, so the caller can
+///     distinguish it by `confidence >= RELIABILITY_THRESHOLD`).
+///   - Survivors persist via `store_fact_with_provenance` with the gate-computed
+///     confidence and the source-episode provenance edges.
+pub fn commit_gated_fact(
+    memory: &dyn crate::cognitive_memory::CognitiveMemoryOps,
+    concept: &str,
+    content: &str,
+    grounded: bool,
+    source_id: &str,
+    tags: &[String],
+    source_episode_ids: &[String],
+) -> crate::error::SimardResult<FactGateDecision> {
+    let confidence = score_fact_reliability(concept, content, grounded);
+
+    // Threshold quarantine.
+    if confidence < RELIABILITY_THRESHOLD {
+        return Ok(FactGateDecision::Quarantined { confidence });
+    }
+
+    // Identity dedup: do not downgrade/duplicate an equal-or-stronger prior
+    // version of the *same* fact (concept + content). `search_facts` is queried
+    // with the new confidence as `min_confidence` so it returns only priors
+    // strong enough to block; the explicit `>=` is belt-and-suspenders against a
+    // backend that ignores the filter.
+    let new_content = content.trim();
+    let existing = memory
+        .search_facts(concept, 5, confidence)
+        .unwrap_or_default();
+    if existing
+        .iter()
+        .any(|f| f.content.trim() == new_content && f.confidence >= confidence)
+    {
+        return Ok(FactGateDecision::Quarantined { confidence });
+    }
+
+    // Persist with the gate-computed confidence and provenance edges.
+    let node_id = memory.store_fact_with_provenance(
+        concept,
+        content,
+        confidence,
+        source_id,
+        Some(tags),
+        None,
+        source_episode_ids,
+    )?;
+    Ok(FactGateDecision::Stored {
+        confidence,
+        node_id,
+    })
+}
