@@ -14,6 +14,7 @@ export class OverviewPage {
   readonly recentActionsList: Locator;
   readonly openPrsCard: Locator;
   readonly openPrsList: Locator;
+  readonly mergeReadinessCard: Locator;
 
   constructor(page: Page) {
     this.page = page;
@@ -27,8 +28,13 @@ export class OverviewPage {
     this.agentLiveStatus = page.locator('#agent-live-status');
     this.recentActionsCard = page.locator('#tab-overview .card:has(#recent-actions-list)');
     this.recentActionsList = page.locator('#recent-actions-list');
+    // Retained to assert the duplicative Open PRs card is GONE (#26).
     this.openPrsCard = page.locator('#tab-overview .card:has(#open-prs-list)');
     this.openPrsList = page.locator('#open-prs-list');
+    // Merge Readiness is the single Overview PR surface kept after the removal.
+    this.mergeReadinessCard = page.locator(
+      '#tab-overview .card[data-testid="merge-readiness-card"]',
+    );
   }
 
   async getTabNames(): Promise<string[]> {
