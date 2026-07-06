@@ -40,7 +40,7 @@ const ADAPTER_TAG: &str = "journal";
 ///
 /// Returns `None` when neither exists (the caller then uses the deterministic
 /// fallback).
-fn resolve_recipe_path(repo_root: &Path, filename: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_recipe_path(repo_root: &Path, filename: &str) -> Option<PathBuf> {
     if let Some(home) = dirs::home_dir() {
         let hot = home
             .join(".simard")
@@ -124,20 +124,31 @@ impl JournalRecipe {
                 truncate(stderr.trim(), 200)
             )));
         }
-        let envelope: RecipeEnvelope = serde_json::from_slice(&output.stdout)
-            .map_err(|e| invocation_failed(format!("bad JSON envelope: {e}")))?;
-        if !envelope.success {
-            return Err(invocation_failed(
-                "recipe reported success=false".to_string(),
-            ));
-        }
-        envelope
-            .step_results
-            .last()
-            .map(|s| s.output.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| invocation_failed("recipe produced no output".to_string()))
+        extract_recipe_output(&output.stdout)
     }
+}
+
+/// Parse the `recipe-runner-rs --output-format json` envelope on `stdout` and
+/// return the final step's trimmed output.
+///
+/// Split out from [`JournalRecipe::run`] so the external-service data contract
+/// (the envelope shape, the `success` flag, and the non-empty final output) is
+/// deterministically testable without spawning the runner. Errors on a malformed
+/// envelope, a `success == false` report, or empty/absent output.
+pub(crate) fn extract_recipe_output(stdout: &[u8]) -> SimardResult<String> {
+    let envelope: RecipeEnvelope = serde_json::from_slice(stdout)
+        .map_err(|e| invocation_failed(format!("bad JSON envelope: {e}")))?;
+    if !envelope.success {
+        return Err(invocation_failed(
+            "recipe reported success=false".to_string(),
+        ));
+    }
+    envelope
+        .step_results
+        .last()
+        .map(|s| s.output.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| invocation_failed("recipe produced no output".to_string()))
 }
 
 fn invocation_failed(reason: String) -> SimardError {
@@ -161,7 +172,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// Episodic memories are pre-sorted oldest-to-newest and carry a human-readable
 /// timestamp label, and the prepared-context substance (facts/triggers/
 /// procedures) is passed verbatim so the model summarises *what* they were.
-fn day_context_json(day: &DayContext) -> String {
+pub(crate) fn day_context_json(day: &DayContext) -> String {
     let mut moments: Vec<_> = day.episodes.iter().collect();
     moments.sort_by_key(|e| e.temporal_index);
     let episodes: Vec<_> = moments

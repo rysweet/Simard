@@ -54,6 +54,8 @@ mod tests_jargon;
 #[cfg(test)]
 mod tests_pr_source;
 #[cfg(test)]
+mod tests_recipe;
+#[cfg(test)]
 mod tests_render;
 #[cfg(test)]
 mod tests_render_report;
