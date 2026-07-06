@@ -36,6 +36,11 @@ fn main() {
     let proposal = arg(&args, "--proposal").unwrap_or("");
     let weak_threshold = arg(&args, "--weak-threshold").unwrap_or("0.7");
     let target_dim = arg(&args, "--target-dimension").unwrap_or("");
+    // Bound the free-text proposal before it rides on argv (issues #2640/#2692):
+    // a generous ceiling defensively closes the E2BIG argv-overflow class, and the
+    // same pass collapses newlines so a multi-line proposal can never break the
+    // recipe's YAML interpolation (#2127).
+    let proposal = simard::ooda_brain::sanitize::sanitize_context_var(proposal, 8000);
     let recipe =
         arg(&args, "--recipe").unwrap_or("amplifier-bundle/recipes/simard-self-improve-cycle.yaml");
     let amplihack_home =

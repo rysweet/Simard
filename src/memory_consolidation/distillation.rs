@@ -985,8 +985,9 @@ fn resolve_recipe_path(repo_root: &Path) -> Option<std::path::PathBuf> {
 }
 
 /// Concrete subprocess-based recipe runner. Shells out to
-/// `recipe-runner-rs` with the episodes JSON inlined as a single
-/// `-c episodes=<json>` context entry.
+/// `recipe-runner-rs`, delivering the episodes JSON through the shared file
+/// channel (`-c episodes_path=<abs>`) so an unbounded batch can never overflow
+/// `ARG_MAX` (issues #2640/#2692).
 pub struct RecipeRunnerSubprocess {
     recipe_path: std::path::PathBuf,
     agent_binary: &'static str,
@@ -1159,13 +1160,27 @@ impl RecipeRunnerSubprocess {
         } else {
             ""
         };
+        // Route the (unbounded) episodes batch through the shared file channel:
+        // up to 50 full-text episodes is far more than a single argv token can
+        // hold, so inlining `-c episodes=<json>` risked the same E2BIG spawn
+        // failure the journal hit (issues #2640/#2692). The payload goes to a
+        // private temp file and only `episodes_path=<abs>` rides on argv; the
+        // guard lives until after `output()` so the file exists while the recipe
+        // reads it.
+        let episodes_cf =
+            crate::recipe_context_file::ContextFile::write("distill", "episodes", &payload_json)
+                .map_err(|e| {
+                    SimardError::RpcError(format!(
+                        "distill: episodes context-file write failed: {e}"
+                    ))
+                })?;
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
             .arg("--output-format")
             .arg("json")
             .arg("-c")
-            .arg(format!("episodes={payload_json}"))
+            .arg(episodes_cf.arg_value())
             .arg("-c")
             .arg(format!("strict_json_instruction={strict_json_instruction}"))
             .arg("-c")

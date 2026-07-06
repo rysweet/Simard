@@ -188,6 +188,17 @@ impl RecipeMergeJudge {
         prior_output: &str,
     ) -> SimardResult<String> {
         let escalation_note = build_merge_escalation_note(rung, prior_output);
+        // Route the (arbitrary-size) PR body through the shared file channel so a
+        // long PR body can never overflow ARG_MAX and fail the spawn with E2BIG
+        // (issues #2640/#2692); only `pr_body_path=<abs>` rides on argv, and the
+        // guard lives until after `output()` so the file exists while the recipe
+        // reads it.
+        let pr_body_cf =
+            crate::recipe_context_file::ContextFile::write(ADAPTER_TAG, "pr_body", &snapshot.body)
+                .map_err(|e| SimardError::AdapterInvocationFailed {
+                    base_type: ADAPTER_TAG.to_string(),
+                    reason: format!("pr_body context-file write failed: {e}"),
+                })?;
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
             // issue #2428: text mode prints only the SUCCESS banner to stdout;
@@ -200,7 +211,7 @@ impl RecipeMergeJudge {
             .arg("-c")
             .arg(format!("repo={repo}"))
             .arg("-c")
-            .arg(format!("pr_body={}", snapshot.body))
+            .arg(pr_body_cf.arg_value())
             // issue #2432: the (possibly empty) escalation/schema-repair note.
             .arg("-c")
             .arg(format!("escalation_note={escalation_note}"))

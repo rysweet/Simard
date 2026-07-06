@@ -149,27 +149,69 @@ impl JournalDrafter for TemplateDrafter {
 
         // ── Remembered moments (episodic memories, chronological) ───────
         if !day.episodes.is_empty() {
-            blocks.push("## Remembered moments".to_string());
             // Oldest-to-newest so the report reads as a timeline, and each moment
-            // shows when it occurred (issue #2606).
-            let mut moments: Vec<_> = day.episodes.iter().collect();
+            // shows when it occurred (issue #2606). Raw error-log episodes (e.g.
+            // a historical `recipe-runner-rs spawn failed: Argument list too long`
+            // dump) are dropped here so a degraded, deterministic journal can
+            // never again be a wall of raw error text (issues #2640/#2692, A3).
+            let mut moments: Vec<_> = day
+                .episodes
+                .iter()
+                .filter(|e| !is_raw_error_log_episode(&e.content))
+                .collect();
             moments.sort_by_key(|e| e.temporal_index);
-            let mut body = String::from(
-                "These are the day's episodic memories, listed in the order they occurred:",
-            );
-            for ep in moments {
-                let _ = write!(
-                    body,
-                    "\n- [{}] {}",
-                    episode_time_label(ep.temporal_index),
-                    ep.content.trim()
+            if !moments.is_empty() {
+                blocks.push("## Remembered moments".to_string());
+                let mut body = String::from(
+                    "These are the day's episodic memories, listed in the order they occurred:",
                 );
+                for ep in moments {
+                    let _ = write!(
+                        body,
+                        "\n- [{}] {}",
+                        episode_time_label(ep.temporal_index),
+                        ep.content.trim()
+                    );
+                }
+                blocks.push(body);
             }
-            blocks.push(body);
         }
 
         blocks.join("\n\n")
     }
+}
+
+/// True when an episode's content is a raw machine error / log-line dump rather
+/// than a human-readable remembered moment. Such episodes (recorded when a
+/// subprocess step failed) are unfit for the reader-facing journal: they carry
+/// errno text, stack traces, and log-level prefixes. Dropping them from the
+/// deterministic-fallback "Remembered moments" section keeps a degraded journal
+/// readable and jargon-free (issues #2640/#2692). This filter is deliberately
+/// conservative — it only excludes clear error/log signatures — because it runs
+/// solely on the offline fallback path, never on the preferred agentic path.
+fn is_raw_error_log_episode(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    const ERROR_SIGNATURES: &[&str] = &[
+        "argument list too long",
+        "os error ",
+        "spawn failed",
+        "recipe failed",
+        "recipe-runner-rs",
+        "panicked at",
+        "stack backtrace",
+        " error=",
+        "error: ",
+        "traceback (most recent call last)",
+    ];
+    if ERROR_SIGNATURES.iter().any(|sig| lower.contains(sig)) {
+        return true;
+    }
+    // A leading log-level token (`WARN …`, `ERROR …`, `DEBUG …`) marks a raw log
+    // line rather than a remembered moment.
+    let head = lower.trim_start();
+    ["warn ", "error ", "debug ", "trace "]
+        .iter()
+        .any(|level| head.starts_with(level))
 }
 
 /// A professional, third-person one-paragraph summary of the day's activity.

@@ -9,7 +9,10 @@
 # preferred, prompt-first path (guideline G3).
 #
 # Context vars (passed via -c):
-#   day_context — JSON object describing the day:
+#   day_context_path — ABSOLUTE path to a file containing the JSON object
+#     describing the day (issues #2640/#2692). The value is delivered via a file,
+#     never inlined into argv, so a full 24 h of context can never overflow
+#     ARG_MAX and fail the spawn with E2BIG. The agent READS this file. Shape:
 #     {
 #       "date": "YYYY-MM-DD",
 #       "episodes":  [ { "time": "<label>", "content": "<what happened>" }, ... ],
@@ -36,7 +39,7 @@ tags: ["simard", "journal", "report"]
 
 context:
   # Declared so the substitution always resolves even if the caller omits it.
-  day_context: "{}"
+  day_context_path: ""
 
 steps:
   - id: "draft"
@@ -54,8 +57,12 @@ steps:
 
       ## Input (the day's context)
 
-      ```json
-      {{day_context}}
+      The day's context is a JSON object saved to a file (it is too large to
+      pass inline). **Read the file at this absolute path** with your
+      file-reading tool and use its FULL contents as the input:
+
+      ```
+      {{day_context_path}}
       ```
 
       Use ONLY what the input contains. Do not invent events, numbers, PRs, or

@@ -8,13 +8,31 @@
 //! it. Both shell out to `recipe-runner-rs` exactly like the episode-distiller
 //! ([`crate::memory_consolidation::distillation`]).
 //!
-//! Robustness first: each pass **degrades per call** to its deterministic
-//! equivalent (the [`TemplateDrafter`] report / the glossary
-//! [`scrub_jargon`] reviewer) on any failure — missing recipe assets, no agent
-//! binary, `recipe-runner-rs` not on `PATH`, a spawn/exit error, or empty
-//! output — so a language-model hiccup can never fail or stall a journal tick.
-//! The generator's unconditional secret-redaction post-pass runs regardless of
-//! which reviewer produced the text, so a credential survives neither path.
+//! ## E2BIG-safe transport (issues #2640/#2692)
+//!
+//! The day's context and the draft are *unbounded* — a busy 24 h of episodic
+//! memories, PR summaries, and a full narrative rewrite. Inlining them as
+//! `-c day_context=<…>` / `-c draft=<…>` argv tokens overflowed the kernel's
+//! per-argument limit and `execve` failed with `E2BIG` ("Argument list too
+//! long", `errno 7`) BEFORE `recipe-runner-rs` ever started — the live,
+//! once-per-hour journal failure. Both values are now delivered through the
+//! shared file channel ([`crate::recipe_context_file::ContextFile`]): the payload
+//! is written to a private temp file and only a short `<key>_path=<abs>` rides on
+//! argv, so `ARG_MAX` is irrelevant and the recipe reads the full payload from
+//! the file (mirrors the distiller's `facts_output_path`).
+//!
+//! ## No silent fallback (operator rule: fallback == silent failure)
+//!
+//! A genuine spawn failure is NOT swallowed into a bare `warn!`. It is classified
+//! ([`crate::overseer::diagnosis::classify_spawn_failure`]) and recorded into the
+//! Overseer's [`crate::overseer::failure_sink`] so the next Observe pass lifts it
+//! into a corrective `Signal::StepFailureDiagnosed`; the degrade is logged at
+//! `error` level. The deterministic fallback ([`TemplateDrafter`] /
+//! [`scrub_jargon`]) is a readable last resort only: its "Remembered moments"
+//! section drops raw error-log episodes so a degraded journal can never again be
+//! a dump of historical E2BIG error text. The generator's unconditional
+//! secret-redaction post-pass runs regardless of which reviewer produced the
+//! text, so a credential survives neither path.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -26,6 +44,9 @@ use crate::journal::generate::{JournalDrafter, JournalReviewer, TemplateDrafter}
 use crate::journal::jargon::scrub_jargon;
 use crate::journal::providers::episode_time_label;
 use crate::journal::types::DayContext;
+use crate::overseer::diagnosis::classify_spawn_failure;
+use crate::overseer::failure_sink::record_step_failure;
+use crate::recipe_context_file::ContextFile;
 
 /// Recipe that writes the narrative engineering-and-research report draft.
 const JOURNAL_DRAFT_RECIPE: &str = "journal-narrative.yaml";
@@ -102,20 +123,44 @@ impl JournalRecipe {
     }
 
     /// Run the recipe with the given context vars and return the final step's
-    /// output text (trimmed). Errors on spawn/exit failure, a bad or
-    /// `success == false` envelope, or empty output.
+    /// output text (trimmed). Every context value is *unbounded*, so each is
+    /// delivered through the shared file channel ([`ContextFile`]): the payload
+    /// goes to a private temp file and only the short `<key>_path=<abs>` rides on
+    /// argv, so a full day's context can never overflow `ARG_MAX` and fail the
+    /// spawn with `E2BIG` (issues #2640/#2692). Errors on spawn/exit failure, a
+    /// bad or `success == false` envelope, or empty output.
+    ///
+    /// A pre-exec spawn failure (the E2BIG defect and its siblings) is an
+    /// `io::Error` with no child, so it is classified and recorded into the
+    /// Overseer's failure sink here — never swallowed — before it propagates.
     fn run(&self, ctx: &[(&str, String)]) -> SimardResult<String> {
         let mut cmd = Command::new("recipe-runner-rs");
         cmd.arg(self.recipe_path.as_os_str())
             .arg("--output-format")
             .arg("json")
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary);
+        // Route every context var through the file channel; the guards must
+        // outlive `output()` so the files exist while the recipe reads them.
+        let mut guards: Vec<ContextFile> = Vec::with_capacity(ctx.len());
         for (key, value) in ctx {
-            cmd.arg("-c").arg(format!("{key}={value}"));
+            let cf = ContextFile::write(ADAPTER_TAG, key, value).map_err(|e| {
+                // A temp-file write failure (e.g. ENOSPC) is a spawn-class
+                // failure too: classify + record before degrading.
+                record_step_failure(classify_spawn_failure(&e));
+                invocation_failed(format!(
+                    "recipe-runner-rs context-file write failed for {key}: {e}"
+                ))
+            })?;
+            cmd.arg("-c").arg(cf.arg_value());
+            guards.push(cf);
         }
-        let output = cmd
-            .output()
-            .map_err(|e| invocation_failed(format!("recipe-runner-rs spawn failed: {e}")))?;
+        let output = cmd.output().map_err(|e| {
+            // Pre-exec spawn failure (E2BIG / ENOSPC / ENOMEM / …). Record a
+            // structured diagnosis for the Overseer to act on — the "no silent
+            // fallback" invariant — then surface the error to the caller.
+            record_step_failure(classify_spawn_failure(&e));
+            invocation_failed(format!("recipe-runner-rs spawn failed: {e}"))
+        })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(invocation_failed(format!(
@@ -229,10 +274,15 @@ impl JournalDrafter for RecipeDrafter {
         match self.recipe.run(&[("day_context", day_context_json(day))]) {
             Ok(text) => text,
             Err(e) => {
-                tracing::warn!(
+                // Loud, not swallowed: the spawn-failure arm of `run` already
+                // recorded a structured diagnosis into the Overseer failure sink;
+                // log the degrade at `error` so it is visible in the operator log
+                // too. The deterministic fallback is a readable last resort.
+                tracing::error!(
                     target: "simard::journal",
                     error = %e,
-                    "journal draft recipe failed; using the deterministic report drafter"
+                    "journal draft recipe failed and was recorded for the Overseer; \
+                     degrading to the deterministic report drafter"
                 );
                 self.fallback.draft(day)
             }
@@ -259,10 +309,14 @@ impl JournalReviewer for RecipeReviewer {
         match self.recipe.run(&[("draft", draft.to_string())]) {
             Ok(text) => text,
             Err(e) => {
-                tracing::warn!(
+                // Loud, not swallowed: `run` recorded the structured diagnosis
+                // for the Overseer; log the degrade at `error`. The glossary
+                // scrubber is the readable last-resort de-jargon pass.
+                tracing::error!(
                     target: "simard::journal",
                     error = %e,
-                    "journal de-jargon recipe failed; using the glossary reviewer"
+                    "journal de-jargon recipe failed and was recorded for the Overseer; \
+                     degrading to the glossary reviewer"
                 );
                 scrub_jargon(draft)
             }

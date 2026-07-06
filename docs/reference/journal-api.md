@@ -26,6 +26,9 @@ related:
   - ./telemetry-metrics.md
   - ../design/overseer.md
   - ../architecture/episode-distillation.md
+  - ./recipe-context-file-transport.md
+  - ../concepts/journal-recipe-spawn-e2big.md
+  - ../howto/diagnose-journal-e2big-spawn-failures.md
 ---
 
 # Journal API

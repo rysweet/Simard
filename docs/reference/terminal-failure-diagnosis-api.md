@@ -20,6 +20,8 @@ related:
   - ../reference/overseer-activity-feed.md
   - ../howto/watch-overseer-activity.md
   - ../reference/terminal-session-idle-detection.md
+  - ../reference/recipe-context-file-transport.md
+  - ../concepts/journal-recipe-spawn-e2big.md
   - ../../src/terminal_session/failure_diagnosis.rs
   - ../../src/terminal_session/execution.rs
   - ../../src/overseer/failure_sink.rs

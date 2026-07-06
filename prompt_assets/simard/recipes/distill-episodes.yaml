@@ -5,8 +5,11 @@
 # and emit a single JSON envelope of derived facts.
 #
 # Context vars (passed via -c):
-#   episodes — JSON array of objects with
-#     { id, source_label, temporal_index, content }
+#   episodes_path — ABSOLUTE path to a file containing the JSON array of episode
+#     objects, each { id, source_label, temporal_index, content } (issues
+#     #2640/#2692). A batch of up to 50 full-text episodes is unbounded, so it is
+#     delivered via a file and never inlined into argv — it can never overflow
+#     ARG_MAX and fail the spawn with E2BIG. The agent READS this file.
 #   facts_output_path — ABSOLUTE path to the file the agent MUST write its JSON
 #     envelope to (issues #2622/#2619). This is the ONLY channel Simard reads the
 #     result from; stdout is ignored, so the copilot launcher banner and log
@@ -56,6 +59,11 @@ context:
   # #2622/#2619). Declared so the `{{facts_output_path}}` substitution always
   # resolves, even when the recipe is run without the override.
   facts_output_path: ""
+  # Empty by default; the distill subprocess overrides this with the absolute
+  # path of the per-invocation episodes file the agent must read (issues
+  # #2640/#2692). Declared so the `{{episodes_path}}` substitution always
+  # resolves, even when the recipe is run without the override.
+  episodes_path: ""
 
 steps:
   - id: "distill"
@@ -80,8 +88,12 @@ steps:
         timestamp; you only need it for ordering, if at all).
       - `content` — the free-text payload of the episode.
 
-      ```json
-      {{episodes}}
+      The batch is saved to a file (it is too large to pass inline). **Read the
+      file at this absolute path** with your file-reading tool and use its FULL
+      contents as the episodes array:
+
+      ```
+      {{episodes_path}}
       ```
 
       ## Your job
