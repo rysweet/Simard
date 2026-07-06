@@ -320,14 +320,42 @@ pub(crate) const PART_01: &str = r#"
        value. Use this for any interpolated title="…" / other quoted attribute
        sink so a future dynamic/peer-supplied value cannot inject attributes. */
     function escAttr(s){return esc(s).replace(/"/g,'&quot;');}
-    async function apiFetch(url,opts){
+    /* apiFetch de-dupes concurrent duplicate GETs (a manual Refresh and a
+       background tick for the same endpoint share one in-flight request) and
+       records a client-clock freshness stamp per endpoint. Both stores live in
+       browser memory for the page's lifetime — nothing is persisted, and the
+       de-dupe key never contains a body, token, or PII (#2649). */
+    const inFlightFetches=new Map();
+    const lastOk={};
+    function fetchDedupeKey(url,method){
+      let pathname=url,search='';
+      try{const u=new URL(url,window.location.origin);pathname=u.pathname;search=u.search;}catch(_){}
+      return method+' '+pathname+search;
+    }
+    async function apiFetchRaw(url,opts){
       const r=await fetch(url,opts);
       if(r.status===401){window.location.href='/login';throw new Error('Session expired — redirecting to login');}
       if(!r.ok){const t=await r.text();throw new Error(t||('HTTP '+r.status));}
+      try{const u=new URL(url,window.location.origin);lastOk[u.pathname]=Date.now();}catch(_){lastOk[url]=Date.now();}
       const text=await r.text();
       if(!text)return {};
       return JSON.parse(text);
     }
+    async function apiFetch(url,opts){
+      const method=((opts&&opts.method)||'GET').toUpperCase();
+      /* GET only: mutations and search POSTs are never collapsed. */
+      if(method!=='GET')return apiFetchRaw(url,opts);
+      const key=fetchDedupeKey(url,method);
+      const inflight=inFlightFetches.get(key);
+      if(inflight)return inflight;
+      const p=apiFetchRaw(url,opts);
+      inFlightFetches.set(key,p);
+      /* Clear on settle (success AND failure) so a rejected fetch cannot poison
+         the key and lock out future requests to that endpoint. */
+      p.then(function(){inFlightFetches.delete(key);},function(){inFlightFetches.delete(key);});
+      return p;
+    }
+    window.apiFetch=apiFetch;
     function timeAgo(ts){
       if(!ts)return'—';
       const d=parseTs(ts);if(!d||isNaN(d))return String(ts);
@@ -653,11 +681,16 @@ pub(crate) const PART_01: &str = r#"
       return safe.replace(m[0], m[0]+btn);
     }
 
-    /* --- Active tab tracking for auto-refresh --- */
+    /* --- Active tab tracking (#2649: background scheduler owns refresh) --- */
+    /* activeTab is read by the background scheduler (part_05.rs) so a
+       return-to-visible can immediately refresh whatever tab the operator is
+       looking at. Per-tab refresh timers are no longer armed or wiped on tab
+       activation — the scheduler owns one persistent, visibility-gated timer
+       per fetcher for the page's lifetime. */
     let activeTab='overview';
-    let tabRefreshTimers={};
-
-    function clearTabTimers(){Object.values(tabRefreshTimers).forEach(clearInterval);tabRefreshTimers={};}
+    /* The Workers live PTY cannot be prefetched, so it is initialised lazily on
+       the first Workers activation, never by the background scheduler. */
+    let workersTerminalInit=false;
 
     /* --- Tabs --- */
     function updateDocumentTitleForTab(slug){
@@ -674,21 +707,11 @@ pub(crate) const PART_01: &str = r#"
     const CANONICAL_TABS=['overview','goals','activity','workers','pull-requests','resources','chat','overseer','journal','creative-ideas'];
     const TAB_ALIASES={"status":"overview","workboard":"goals","logs":"activity","traces":"activity","thinking":"activity","brain-failures":"activity","processes":"workers","terminal":"workers","merge-decisions":"pull-requests","pr-readiness":"pull-requests","memory":"resources","costs":"resources"};
 
-    /* Kick off the data fetches for every sub-section a consolidated tab now
-       hosts, so no view lost its refresh when its old tab was absorbed. */
-    function runTabFetches(slug){
-      clearTabTimers();
-      if(slug==='overview'){fetchStatusSnapshot();tabRefreshTimers.status=setInterval(fetchStatusSnapshot,30000);}
-      if(slug==='goals'){fetchGoals();fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
-      if(slug==='activity'){fetchLogs();fetchTraces();fetchThinking();fetchOodaCycles();fetchBrainFailures();tabRefreshTimers.logs=setInterval(fetchLogs,15000);tabRefreshTimers.thinking=setInterval(fetchThinking,30000);tabRefreshTimers.oodaCycles=setInterval(fetchOodaCycles,30000);tabRefreshTimers.brainFailures=setInterval(fetchBrainFailures,30000);}
-      if(slug==='workers'){fetchProcessTree();initAgentLogTerminal();fetchSubagentSessions();fetchTmuxSessions();tabRefreshTimers.proc=setInterval(fetchProcessTree,15000);tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
-      if(slug==='pull-requests'){fetchMergeJudge();fetchPrReadiness();tabRefreshTimers.mergeJudge=setInterval(fetchMergeJudge,30000);tabRefreshTimers.prReadiness=setInterval(fetchPrReadiness,30000);}
-      if(slug==='resources'){fetchRecentMemories();fetchMemoryHistory();fetchMemoryGraph();fetchMemory();fetchCosts();}
-      if(slug==='chat'){loadChatSessions();}
-      if(slug==='overseer'){fetchOverseer();tabRefreshTimers.overseer=setInterval(fetchOverseer,30000);}
-      if(slug==='journal'&&typeof loadJournal==='function'){loadJournal();}
-      if(slug==='creative-ideas'&&typeof loadCreativeIdeas==='function'){loadCreativeIdeas();}
-    }
+    /* #2649: the per-tab fetch/refresh chain that used to live here
+       (runTabFetches / clearTabTimers) is retired. Background prefetch and
+       persistent per-tab refresh are now owned by the TAB_LOADERS registry and
+       startBackgroundScheduler() in part_05.rs, so every tab loads on page open
+       and stays fresh regardless of which tab is currently visible. */
 
     /* Activate a canonical tab by slug. `slug` is always one of CANONICAL_TABS
        (callers pass a validated value); `section`, when given, is a retired
@@ -704,7 +727,13 @@ pub(crate) const PART_01: &str = r#"
       panel.classList.add('active');
       activeTab=slug;
       updateDocumentTitleForTab(slug);
-      runTabFetches(slug);
+      /* #2649: render from the already-prefetched cache — never block on a
+         fetch and never wipe a background timer. Attach the Workers live
+         terminal lazily on first activation (it is excluded from background
+         prefetch), then kick a non-blocking refresh so the panel the operator
+         just opened is current. */
+      if(slug==='workers'&&!workersTerminalInit){workersTerminalInit=true;try{initAgentLogTerminal();}catch(_){}}
+      if(typeof refreshTab==='function'){refreshTab(slug);}
       if(section){const el=document.getElementById('section-'+section);if(el&&el.scrollIntoView)el.scrollIntoView({block:'start'});}
     }
 

@@ -10,6 +10,9 @@ pub mod tab_meta;
 #[cfg(test)]
 mod tests_tab_meta;
 
+#[cfg(test)]
+mod tests_tab_prefetch;
+
 use part_00::PART_00;
 use part_01::PART_01;
 use part_02::PART_02;
