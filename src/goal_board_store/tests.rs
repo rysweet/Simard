@@ -163,7 +163,7 @@ fn commit_cycle_tombstones_and_persists() {
     // Daemon commits its post-cycle board, tombstoning goal "b" (archived).
     let in_flight = board(vec![goal("a", 1, None), goal("b", 2, None)]);
     let tracker = NoProgressTracker::new();
-    let reconciled = commit_cycle(root, &in_flight, &tracker, &["b".to_string()]).unwrap();
+    let reconciled = commit_cycle(root, &in_flight, &tracker, 1, &["b".to_string()]).unwrap();
 
     let ids: HashSet<&str> = reconciled.active.iter().map(|g| g.id.as_str()).collect();
     assert!(ids.contains("a"));
@@ -300,7 +300,8 @@ fn four_ladybug_goals_auto_complete_via_done_gate_and_never_return() {
     // The daemon drops the just-completed goals and commits the cycle,
     // tombstoning every id that left the board.
     in_flight.active.retain(|g| !done.contains(g.id.as_str()));
-    let reconciled = commit_cycle(root, &in_flight, &NoProgressTracker::new(), &completed).unwrap();
+    let reconciled =
+        commit_cycle(root, &in_flight, &NoProgressTracker::new(), 1, &completed).unwrap();
     let live: HashSet<&str> = reconciled.active.iter().map(|g| g.id.as_str()).collect();
     for id in ladybug_ids {
         assert!(
@@ -570,5 +571,169 @@ fn heal_stale_no_progress_blocks_is_idempotent() {
         twice.active[0].status,
         GoalProgress::NotStarted,
         "a second heal pass must be a no-op"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Durable, brain-relative OODA cycle counter (issue #1)
+//
+// The OODA "cycle #" must reflect the BRAIN's total lived cognition — a
+// monotonic counter persisted in the durable goal-board store — NOT the
+// current daemon process's uptime. Before this feature the counter lived only
+// in `OodaState::cycle_count`, so every daemon restart (a frequent deploy)
+// reset it to 1 and the dashboard perpetually showed "Cycle #1".
+//
+// CONTRACT specified by these tests:
+//   * `PersistentGoalState` carries `#[serde(default)] pub cycle_count: u32`.
+//   * `commit_cycle(state_root, in_flight, tracker, cycle_count, new_tombstones)`
+//     persists the cycle number inside the same flock'd atomic read-modify-write,
+//     applying a MONOTONIC guard (`s.cycle_count = s.cycle_count.max(cycle_count)`)
+//     so the durable counter can never rewind.
+//   * `load()` returns the last committed `cycle_count` (read-your-writes),
+//     surviving a simulated restart.
+//   * A fresh brain (no file) loads `cycle_count == 0`; the daemon's startup
+//     seed + first `+= 1` makes the first cycle #1.
+//   * A legacy file lacking the field deserialises to `0` (serde default) and
+//     is re-stamped on the next commit (self-healing, no migration code).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cycle_count_round_trips_through_store() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    mutate(root, |s| {
+        s.cycle_count = 7;
+    })
+    .unwrap();
+
+    let loaded = load(root);
+    assert_eq!(
+        loaded.cycle_count, 7,
+        "the durable cycle counter must round-trip through the store"
+    );
+    assert_eq!(loaded.version, STORE_VERSION);
+}
+
+#[test]
+fn fresh_brain_starts_at_zero_then_first_cycle_is_one() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    // A brand-new brain has no persisted state: no lived cycles yet.
+    let fresh = load(root);
+    assert_eq!(
+        fresh.cycle_count, 0,
+        "a fresh brain has zero prior cycles (the daemon seeds OodaState from this)"
+    );
+
+    // The daemon's first cycle: seed (0) + 1 == 1 (mirrors `state.cycle_count += 1`).
+    let b = board(vec![goal("alpha", 1, None)]);
+    let tracker = NoProgressTracker::new();
+    let mut cycle = fresh.cycle_count;
+    cycle += 1;
+    commit_cycle(root, &b, &tracker, cycle, &[]).unwrap();
+    assert_eq!(
+        load(root).cycle_count,
+        1,
+        "a fresh brain's first cycle must be #1"
+    );
+
+    // The second cycle advances to #2.
+    cycle += 1;
+    commit_cycle(root, &b, &tracker, cycle, &[]).unwrap();
+    assert_eq!(
+        load(root).cycle_count,
+        2,
+        "the counter increments on each cycle"
+    );
+}
+
+#[test]
+fn cycle_count_survives_simulated_restart_and_continues() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let b = board(vec![goal("alpha", 1, None)]);
+    let tracker = NoProgressTracker::new();
+
+    // Run four cycles in the "first" daemon process.
+    for n in 1..=4 {
+        commit_cycle(root, &b, &tracker, n, &[]).unwrap();
+    }
+    assert_eq!(load(root).cycle_count, 4);
+
+    // --- Simulate a daemon restart (a deploy): a NEW process LOADS the durable
+    // brain state instead of resetting to 0/1. ---
+    let after_restart = load(root);
+    assert_eq!(
+        after_restart.cycle_count, 4,
+        "the persisted brain counter must survive the restart"
+    );
+
+    // The restarted daemon seeds OodaState from the durable value and runs its
+    // first post-restart cycle (seed + 1), then commits it.
+    let next = after_restart.cycle_count + 1;
+    commit_cycle(root, &b, &tracker, next, &[]).unwrap();
+
+    let reloaded = load(root);
+    assert_eq!(
+        reloaded.cycle_count, 5,
+        "the counter CONTINUES the brain's lived cognition across the restart"
+    );
+    assert_ne!(
+        reloaded.cycle_count, 1,
+        "the cycle counter must NOT reset to 1 on daemon restart (the reported bug)"
+    );
+}
+
+#[test]
+fn commit_cycle_is_monotonic_and_never_rewinds() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let b = board(vec![goal("alpha", 1, None)]);
+    let tracker = NoProgressTracker::new();
+
+    commit_cycle(root, &b, &tracker, 5, &[]).unwrap();
+    assert_eq!(load(root).cycle_count, 5);
+
+    // A stale / lower value (e.g. a racing writer, or a rolled-back OodaState)
+    // must never rewind the durable counter.
+    commit_cycle(root, &b, &tracker, 3, &[]).unwrap();
+    assert_eq!(
+        load(root).cycle_count,
+        5,
+        "a lower cycle_count must not rewind the monotonic brain counter"
+    );
+
+    // A higher value advances it.
+    commit_cycle(root, &b, &tracker, 6, &[]).unwrap();
+    assert_eq!(load(root).cycle_count, 6);
+}
+
+#[test]
+fn legacy_file_without_cycle_count_loads_as_zero_and_self_heals() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    // A goal_board.json written by an OLDER daemon build has no `cycle_count`
+    // field. Every field is `#[serde(default)]`, so it must still deserialise —
+    // with `cycle_count == 0` — rather than failing the load.
+    let path = store_path(root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, r#"{"version":1}"#).unwrap();
+
+    let legacy = load(root);
+    assert_eq!(
+        legacy.cycle_count, 0,
+        "a legacy file lacking the field must load cycle_count as the serde default 0"
+    );
+
+    // The next commit re-stamps the field (self-healing; no migration code).
+    let b = board(vec![goal("alpha", 1, None)]);
+    commit_cycle(root, &b, &NoProgressTracker::new(), 1, &[]).unwrap();
+    assert_eq!(
+        load(root).cycle_count,
+        1,
+        "the next commit must re-stamp the durable cycle_count"
     );
 }

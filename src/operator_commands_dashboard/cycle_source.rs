@@ -1,21 +1,21 @@
 //! Single authoritative source for the dashboard's "Cycle #N" counter.
 //!
-//! `daemon_health.json` carries a `cycle_number` field that is a
-//! *process-local* counter: the OODA daemon writes it as `cycles_run + 1`,
-//! and both `cycles_run` and the in-memory `OodaState::cycle_count` reset to
-//! `0` every time the daemon process restarts. The persisted cycle-report
-//! files (`cycle_<N>.json`) carry the *cumulative* cycle number that the
-//! Thinking tab and the Recent Actions feed already display. After a daemon
-//! restart the two disagree — health says `#1` while the reports (and
-//! Thinking/Recent Actions) say `#1159` — which is the self-contradiction
-//! reported in issue #1680.
+//! `daemon_health.json` carries a `cycle_number` field. As of issue #1 the
+//! OODA daemon writes it from the *durable* brain counter
+//! (`OodaState::cycle_count`, seeded at startup from
+//! `PersistentGoalState.cycle_count`), so it is monotonic across restarts and
+//! no longer resets to `1` on every deploy. The persisted cycle-report files
+//! (`cycle_<N>.json`) carry the same cumulative cycle number that the Thinking
+//! tab and the Recent Actions feed display.
 //!
 //! Every dashboard panel that renders "Cycle #N" must read from one source.
-//! This module computes that single value: the maximum of the process-local
-//! health counter and the highest persisted cycle-report number. The maximum
-//! is correct because the persisted count is monotonic across restarts, and
-//! when no restart has occurred the in-flight cycle is reflected by the health
-//! counter (which is then `>=` the latest persisted report).
+//! This module computes that single value: the maximum of the health counter
+//! and the highest persisted cycle-report number. Taking the maximum is a
+//! belt-and-braces safety net — the two now share the durable, monotonic brain
+//! counter, but the `max` also covers the narrow window right after a restart,
+//! before the first post-restart cycle has re-stamped `daemon_health.json`, so
+//! the historic "#1 after restart" self-contradiction (issue #1680) can never
+//! reappear.
 
 use std::path::Path;
 
@@ -231,5 +231,35 @@ mod tests {
     fn authoritative_handles_missing_health_and_reports() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(authoritative_cycle_number(tmp.path(), None), 0);
+    }
+
+    #[test]
+    fn durable_brain_counter_is_the_dashboards_cycle_source_after_restart() {
+        // Issue #1: on a daemon restart the process-local counter resets, but
+        // the durable brain counter (`PersistentGoalState.cycle_count`) is
+        // monotonic. The daemon now seeds `daemon_health.json`'s `cycle_number`
+        // from that durable value, so the dashboard's single authoritative
+        // cycle number renders the brain-relative count — never the reset "#1".
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // The brain has durably lived 1159 cycles.
+        crate::goal_board_store::mutate(root, |s| {
+            s.cycle_count = 1159;
+        })
+        .unwrap();
+        let durable = crate::goal_board_store::load(root).cycle_count as u64;
+        assert_eq!(durable, 1159);
+
+        // A freshly restarted process, before any new cycle report is written
+        // to disk: health carries the durable brain count (not `cycles_run + 1`
+        // == 1). The authoritative dashboard number must be the brain-relative
+        // value.
+        let health = json!({ "cycle_number": durable });
+        assert_eq!(
+            authoritative_cycle_number(root, Some(&health)),
+            1159,
+            "the dashboard must render the durable brain-relative cycle, never the process-reset #1",
+        );
     }
 }

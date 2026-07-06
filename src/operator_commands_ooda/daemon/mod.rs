@@ -28,6 +28,35 @@ mod brains;
 mod config;
 pub use config::DaemonDashboardConfig;
 
+/// Seed the durable, brain-relative OODA cycle counter for a starting daemon
+/// (issue #1).
+///
+/// Returns `persistent_cycle_count` when it is already authoritative (non-zero)
+/// — the steady-state path, where the durable `PersistentGoalState.cycle_count`
+/// is the source of truth. When it is `0` — a brain upgraded from a build that
+/// never persisted the field — the count is recovered from the highest
+/// `cycle_<N>.json` report filename already on disk, so the displayed number
+/// does not dip to `#1` for a single deploy after the upgrade. A genuinely
+/// fresh brain (no reports) stays at `0`, so its first cycle is `#1`.
+///
+/// Read-only and idempotent: it only inspects report filenames (never bodies,
+/// never the network, never a write), and a single successful `commit_cycle`
+/// makes the `== 0` guard permanently false so the backfill never runs again.
+fn seed_cycle_count(persistent_cycle_count: u32, state_root: &std::path::Path) -> u32 {
+    if persistent_cycle_count != 0 {
+        return persistent_cycle_count;
+    }
+    let latest =
+        crate::operator_commands_dashboard::cycle_source::latest_persisted_cycle_number(state_root);
+    if latest > 0 {
+        // `latest_persisted_cycle_number` returns u64; the counter is u32.
+        // Saturate rather than wrap on the (unreachable in practice) overflow.
+        u32::try_from(latest).unwrap_or(u32::MAX)
+    } else {
+        0
+    }
+}
+
 /// Run one or more OODA cycles as a daemon-style loop.
 ///
 /// Launches all bridges, opens a RustyClawd session via [`SessionBuilder`]
@@ -367,6 +396,15 @@ pub fn run_ooda_daemon(
     let board = crate::goal_board_store::heal_stale_no_progress_blocks(board);
     let mut state = OodaState::new(board);
     state.no_progress_tracker = persistent.no_progress;
+    // Seed the OODA cycle counter from durable brain memory so the cycle number
+    // reflects the brain's total lived cognition and CONTINUES across restarts,
+    // instead of resetting to 1 on every daemon restart / deploy (issue #1).
+    // `OodaState::new` leaves this at 0 (the fresh-brain default); the first
+    // cycle's `+= 1` then makes a brand-new brain's first cycle #1. The
+    // one-time report backfill (see `seed_cycle_count`) recovers the count from
+    // the highest persisted `cycle_<N>.json` for a brain upgraded from a build
+    // that never persisted the field, so it never dips to #1 for one deploy.
+    state.cycle_count = seed_cycle_count(persistent.cycle_count, &state_root);
     let config = OodaConfig::default();
 
     // Issue #1197: sweep orphaned engineer worktrees from prior crashed
@@ -1006,12 +1044,17 @@ pub fn run_ooda_daemon(
             let _ = std::fs::create_dir_all(&health_dir);
             let heartbeat = serde_json::json!({
                 "timestamp": chrono::Utc::now().to_rfc3339(),
-                "cycle_number": cycles_run + 1,
+                // Brain-relative cycle number (issue #1): this runs BEFORE
+                // `run_ooda_cycle` does `state.cycle_count += 1`, so the cycle
+                // about to run is `state.cycle_count + 1`. Derived from the
+                // durable counter so a restart keeps the accumulated number
+                // instead of resetting the dashboard to "#1".
+                "cycle_number": state.cycle_count + 1,
                 "status": "running",
                 "cycle_phase": state.current_phase.to_string(),
                 "cycle_start_epoch": cycle_start_epoch,
                 "interval_secs": interval_secs,
-                "actions_taken": format!("Starting cycle #{}", cycles_run + 1),
+                "actions_taken": format!("Starting cycle #{}", state.cycle_count + 1),
             });
             let _ = std::fs::write(
                 health_dir.join("daemon_health.json"),
@@ -1090,6 +1133,7 @@ pub fn run_ooda_daemon(
                         &state_root,
                         &state.active_goals,
                         &state.no_progress_tracker,
+                        state.cycle_count,
                         &tombstones,
                     ) {
                         Ok(committed) => {
@@ -1127,7 +1171,11 @@ pub fn run_ooda_daemon(
                     let _ = std::fs::create_dir_all(&health_dir);
                     let health = serde_json::json!({
                         "timestamp": chrono::Utc::now().to_rfc3339(),
-                        "cycle_number": cycles_run + 1,
+                        // Brain-relative cycle number (issue #1): `run_ooda_cycle`
+                        // has already advanced `state.cycle_count`, so this is the
+                        // durable count of the cycle just completed — the single
+                        // authoritative "Cycle #N" the dashboard renders.
+                        "cycle_number": state.cycle_count,
                         "status": "healthy",
                         "cycle_phase": "sleep",
                         "cycle_start_epoch": cycle_start_epoch,
@@ -1553,6 +1601,7 @@ fn shutdown_daemon(
         state_root,
         &state.active_goals,
         &state.no_progress_tracker,
+        state.cycle_count,
         &[],
     ) {
         daemon_log(
@@ -1823,5 +1872,63 @@ mod tests {
         };
         assert!(cfg.enabled);
         assert_eq!(cfg.port, 8080);
+    }
+
+    // --- Durable cycle counter: one-time report backfill (issue #1) ---
+
+    #[test]
+    fn seed_cycle_count_uses_persisted_value_when_nonzero() {
+        // Steady state: the durable field is authoritative; no directory scan,
+        // no backfill — the persisted value passes straight through even if
+        // stray report files exist on disk.
+        let tmp = tempfile::tempdir().unwrap();
+        let reports = tmp.path().join("cycle_reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(reports.join("cycle_9999.json"), "{}").unwrap();
+
+        assert_eq!(seed_cycle_count(1159, tmp.path()), 1159);
+    }
+
+    #[test]
+    fn seed_cycle_count_backfills_from_highest_report_when_zero() {
+        // A brain upgraded from a build that never persisted `cycle_count`:
+        // the field defaults to 0, but thousands of `cycle_<N>.json` reports
+        // prove a high cumulative count. The seed recovers it so the display
+        // never dips to #1 for one deploy.
+        let tmp = tempfile::tempdir().unwrap();
+        let reports = tmp.path().join("state").join("cycle_reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        for n in [1157u32, 1158, 1159] {
+            std::fs::write(reports.join(format!("cycle_{n}.json")), "{}").unwrap();
+        }
+        // Ignores non-cycle files.
+        std::fs::write(reports.join("summary.json"), "{}").unwrap();
+
+        assert_eq!(
+            seed_cycle_count(0, tmp.path()),
+            1159,
+            "backfill must recover the highest persisted cycle index",
+        );
+    }
+
+    #[test]
+    fn seed_cycle_count_stays_zero_for_fresh_brain() {
+        // No reports and no durable value: a genuinely fresh brain stays at 0,
+        // so its first cycle increments to and displays #1.
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(seed_cycle_count(0, tmp.path()), 0);
+    }
+
+    #[test]
+    fn seed_cycle_count_backfill_is_idempotent() {
+        // Repeated startup seeds over the same on-disk state yield the same
+        // value (read-only; no state mutation).
+        let tmp = tempfile::tempdir().unwrap();
+        let reports = tmp.path().join("cycle_reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(reports.join("cycle_42.json"), "{}").unwrap();
+
+        assert_eq!(seed_cycle_count(0, tmp.path()), 42);
+        assert_eq!(seed_cycle_count(0, tmp.path()), 42);
     }
 }

@@ -114,6 +114,7 @@ nav:
     - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
     - Overseer Root-Cause (WHY) Principle: concepts/overseer-root-cause-why.md
     - Authoritative Goal-Board Store: concepts/authoritative-goal-board-store.md
+    - Brain-Relative OODA Cycle Counter: concepts/brain-relative-ooda-cycle-counter.md
     - Goal-Board Corruption Guards: concepts/goal-board-corruption-guards.md
     - File-Backed Goal-Store Simplification: concepts/file-backed-goal-store-simplification.md
     - Goal-Fact Dedup in Preparation: concepts/goal-fact-dedup-in-preparation.md
@@ -158,6 +159,7 @@ nav:
     - Set Up the Signal Channel: howto/set-up-the-signal-channel.md
     - Diagnose Handoff Accumulation: howto/diagnose-handoff-accumulation.md
     - Inspect the Durable Goal Register: howto/inspect-durable-goal-register.md
+    - Inspect and Verify the OODA Cycle Counter: howto/inspect-the-ooda-cycle-counter.md
     - Decompose a Large Goal: howto/decompose-a-large-goal.md
     - Route a Goal to its Target Repo: howto/route-a-goal-to-its-target-repo.md
     - Diagnose a Rejected Goal Completion: howto/diagnose-a-rejected-goal-completion.md
@@ -290,6 +292,7 @@ nav:
     - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md
     - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
     - No-Progress Breaker API: reference/no-progress-breaker-api.md
+    - Durable OODA Cycle Counter API: reference/durable-ooda-cycle-counter.md
     - Progress-Evidence API: reference/progress-evidence-api.md
     - Trustworthy-Confidence API: reference/trustworthy-confidence-api.md
     - External-Signal Completion Gate: reference/external-signal-completion-gate.md
