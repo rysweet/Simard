@@ -79,24 +79,20 @@ test.describe('Dashboard Overview @structural', () => {
 
   test('all dashboard tabs are present', async () => {
     const names = await overview.getTabNames();
-    // The dashboard is a living surface — new tabs are added as Simard grows
-    // capability. This test guards that all known stable tabs remain present;
-    // it does not demand they be the only tabs. See PR #1169 ambiguity resolution.
-    expect(names.length).toBeGreaterThanOrEqual(13);
+    // #2627: the dashboard was consolidated onto a fixed nine-tab taxonomy.
+    // This guards that all nine canonical tabs remain present; former
+    // standalone tabs now live as sub-sections inside their parent tab.
+    expect(names.length).toBeGreaterThanOrEqual(9);
     for (const required of [
       'Overview',
       'Goals',
-      'Traces',
-      'Logs',
-      'Processes',
-      'Memory',
-      'Costs',
+      'Activity',
+      'Workers',
+      'Pull Requests',
+      'Resources',
       'Chat',
-      'Workboard',
-      '🧠 Thinking',
-      'Brain Failures',
-      'Merge Decisions',
-      'PR Readiness',
+      'Overseer',
+      'Journal',
     ]) {
       expect(names).toContain(required);
     }

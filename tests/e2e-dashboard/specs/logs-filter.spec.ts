@@ -40,7 +40,8 @@ async function mockLogs(page: Page, withLevels: boolean): Promise<void> {
 
 async function openLogsTab(page: Page): Promise<void> {
   await page.goto('/');
-  await page.locator('.tab[data-tab="logs"]').click();
+  // #2627: the Logs view is now the Logs sub-section of the Activity tab.
+  await page.locator('.tab[data-tab="activity"]').click();
   // Default ("All levels") shows every line.
   await expect(page.locator('#daemon-log')).toContainText(INFO_LINE_1);
 }

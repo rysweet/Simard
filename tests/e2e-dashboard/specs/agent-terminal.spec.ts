@@ -23,10 +23,10 @@ test.describe('Agent Terminal Widget @structural', () => {
 
   test('Terminal tab is present and selectable', async ({ authenticatedPage }) => {
     await authenticatedPage.goto('/');
-    const terminalTab = authenticatedPage.locator('[data-tab="terminal"], button:has-text("Terminal")').first();
+    const terminalTab = authenticatedPage.locator('[data-tab="workers"]').first();
     await expect(terminalTab).toBeVisible();
     await terminalTab.click();
-    await expect(authenticatedPage.locator('#tab-terminal')).toBeVisible();
+    await expect(authenticatedPage.locator('#tab-workers')).toBeVisible();
     await expect(authenticatedPage.locator('#xterm-host')).toBeVisible();
   });
 
@@ -41,7 +41,7 @@ test.describe('Agent Terminal Widget @structural', () => {
     });
 
     await authenticatedPage.goto('/');
-    await authenticatedPage.locator('[data-tab="terminal"], button:has-text("Terminal")').first().click();
+    await authenticatedPage.locator('[data-tab="workers"]').first().click();
 
     // Enter agent name and connect.
     const nameInput = authenticatedPage.locator('#agent-log-name');
@@ -68,7 +68,7 @@ test.describe('Agent Terminal Widget @structural', () => {
     });
 
     await authenticatedPage.goto('/');
-    await authenticatedPage.locator('[data-tab="terminal"], button:has-text("Terminal")').first().click();
+    await authenticatedPage.locator('[data-tab="workers"]').first().click();
     await authenticatedPage.locator('#agent-log-name').fill('planner');
     await authenticatedPage.locator('#agent-log-connect').click();
     await expect(authenticatedPage.locator('#xterm-host')).toContainText('hello', { timeout: 5_000 });
@@ -88,7 +88,7 @@ test.describe('Agent Terminal Widget @structural', () => {
     });
 
     await authenticatedPage.goto('/');
-    await authenticatedPage.locator('[data-tab="terminal"], button:has-text("Terminal")').first().click();
+    await authenticatedPage.locator('[data-tab="workers"]').first().click();
     await authenticatedPage.locator('#agent-log-name').fill('../etc/passwd');
     await authenticatedPage.locator('#agent-log-connect').click();
 

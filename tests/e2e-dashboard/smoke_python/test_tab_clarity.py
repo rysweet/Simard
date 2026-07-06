@@ -34,10 +34,46 @@ from playwright.sync_api import Page, expect
 BANNED_JARGON: tuple[str, ...] = (
     "OODA",
     "Observe-Orient-Decide-Act",
+    "spawn_engineer",
+    "LadybugDB",
+    "cognitive memory",
     "synergize",
     "leverage",
     "ideate",
 )
+
+# The nine canonical tabs after the #2627 consolidation, in nav-render order.
+# Views that were formerly standalone tabs now live as sub-sections inside one
+# of these parents (see ``CANONICAL_TABS`` / the alias map below).
+CANONICAL_SLUGS: tuple[str, ...] = (
+    "overview",
+    "goals",
+    "activity",
+    "workers",
+    "pull-requests",
+    "resources",
+    "chat",
+    "overseer",
+    "journal",
+)
+
+# Every retired top-level slug maps to the parent tab it now lives under, so an
+# old bookmark / deep link keeps working instead of 404-ing. Mirrors the Rust
+# ``TAB_ALIASES`` allowlist and ``docs/dashboard.md#deep-links-and-tab-aliases``.
+RETIRED_SLUG_PARENTS: dict[str, str] = {
+    "status": "overview",
+    "workboard": "goals",
+    "logs": "activity",
+    "traces": "activity",
+    "thinking": "activity",
+    "brain-failures": "activity",
+    "processes": "workers",
+    "terminal": "workers",
+    "merge-decisions": "pull-requests",
+    "pr-readiness": "pull-requests",
+    "memory": "resources",
+    "costs": "resources",
+}
 
 
 def _discover_tab_slugs(page: Page) -> list[str]:
@@ -63,19 +99,23 @@ def loaded_dashboard(page: Page, dashboard_url: str) -> Page:
     return page
 
 
-def test_at_least_eleven_tabs_discoverable(loaded_dashboard: Page) -> None:
-    """Sanity: the nav exposes the eleven tabs the contract covers."""
+def test_at_least_nine_tabs_discoverable(loaded_dashboard: Page) -> None:
+    """Sanity: the nav exposes exactly the nine consolidated tabs (#2627)."""
     slugs = _discover_tab_slugs(loaded_dashboard)
-    assert len(slugs) >= 11, (
-        f"expected >=11 tabs, discovered {len(slugs)}: {slugs}"
+    assert len(slugs) >= 9, (
+        f"expected >=9 tabs, discovered {len(slugs)}: {slugs}"
     )
-    # Slugs we know must be present (drift detector for #1995).
-    required = {
-        "overview", "goals", "traces", "logs", "processes",
-        "memory", "costs", "chat", "workboard", "thinking", "terminal",
-    }
+    # The nine canonical slugs must all be present (drift detector for #2627).
+    required = set(CANONICAL_SLUGS)
     missing = required - set(slugs)
-    assert not missing, f"required tabs missing from nav: {sorted(missing)}"
+    assert not missing, f"required canonical tabs missing from nav: {sorted(missing)}"
+    # The retired 17-tab slugs must NOT reappear as top-level nav buttons — they
+    # now live as sub-sections reachable via their deep-link alias.
+    retired = set(RETIRED_SLUG_PARENTS) & set(slugs)
+    assert not retired, (
+        f"retired slugs must not be top-level tabs after consolidation: "
+        f"{sorted(retired)}"
+    )
 
 
 def test_tab_identity_contract_for_every_tab(
@@ -155,3 +195,60 @@ def test_tab_identity_contract_for_every_tab(
             file=sys.stderr,
         )
     print(file=sys.stderr)
+
+
+# ----- #2627: deep-link continuity for retired slugs -----
+
+
+@pytest.mark.parametrize(
+    ("retired", "parent"),
+    sorted(RETIRED_SLUG_PARENTS.items()),
+)
+def test_retired_slug_deep_link_resolves_to_parent(
+    page: Page,
+    dashboard_url: str,
+    retired: str,
+    parent: str,
+) -> None:
+    """A ``#<retired-slug>`` deep link activates its new parent tab.
+
+    Old bookmarks, browser history, and links in bug reports must keep working
+    after the consolidation: navigating to ``/#logs`` should land on the
+    **Activity** tab (which now hosts the Logs sub-section) rather than 404 or
+    show a blank page.
+    """
+    page.goto(f"{dashboard_url}/#{retired}")
+    page.wait_for_selector(".tab[data-tab]", timeout=10_000)
+    # The parent tab's panel becomes visible via the client-side alias resolver.
+    parent_panel = page.locator(f"#tab-{parent}")
+    expect(parent_panel).to_be_visible(timeout=5_000)
+    # The retired slug must NOT resolve to a panel of its own (it is a
+    # sub-section now, not a top-level tab).
+    assert page.locator(f"#tab-{retired}").count() == 0, (
+        f"retired slug {retired!r} must not have its own top-level panel"
+    )
+
+
+def test_unknown_hash_falls_back_to_overview(
+    page: Page,
+    dashboard_url: str,
+) -> None:
+    """An unknown/malformed ``#hash`` falls back to Overview with no injection.
+
+    The resolver treats ``location.hash`` as untrusted input: it validates the
+    value against ``^[a-z-]+$``, matches it against the allowlist, and defaults
+    to the Overview tab on any miss — it never concatenates the hash into a DOM
+    selector or element id.
+    """
+    page.goto(f"{dashboard_url}/#definitely-not-a-real-tab")
+    page.wait_for_selector(".tab[data-tab]", timeout=10_000)
+    expect(page.locator("#tab-overview")).to_be_visible(timeout=5_000)
+
+    # A malformed hash containing selector metacharacters must also fall back to
+    # Overview and must not inject any element into the DOM.
+    page.goto(f"{dashboard_url}/#<img src=x onerror=alert(1)>")
+    page.wait_for_selector(".tab[data-tab]", timeout=10_000)
+    expect(page.locator("#tab-overview")).to_be_visible(timeout=5_000)
+    assert page.locator("img[onerror]").count() == 0, (
+        "a malformed deep-link hash must never inject markup into the DOM"
+    )

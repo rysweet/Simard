@@ -46,11 +46,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     match app.active_tab {
         Tab::Overview => tabs::overview::draw(f, app, chunks[1]),
         Tab::Goals => tabs::goals::draw(f, app, chunks[1]),
-        Tab::Engineers => tabs::engineers::draw(f, app, chunks[1]),
         Tab::Activity => tabs::activity::draw(f, app, chunks[1]),
-        Tab::Meeting => tabs::meeting::draw(f, app, chunks[1]),
-        Tab::Stats => tabs::stats::draw(f, app, chunks[1]),
-        Tab::Status => tabs::status::draw(f, app, chunks[1]),
+        Tab::Workers => tabs::workers::draw(f, app, chunks[1]),
+        Tab::Chat => tabs::chat::draw(f, app, chunks[1]),
         Tab::Overseer => tabs::overseer::draw(f, app, chunks[1]),
         Tab::Journal => tabs::journal::draw(f, app, chunks[1]),
     }
@@ -58,10 +56,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     // If an update notice is available, show it in the footer area
     let footer_text = if let Some(ref notice) = app.update_notice {
         format!(
-            "{notice}  | Alt+1\u{2013}9: tabs | Tab/Shift+Tab: cycle | \u{2190}/\u{2192}: prev/next | q: quit"
+            "{notice}  | Alt+1\u{2013}7: tabs | Tab/Shift+Tab: cycle | \u{2190}/\u{2192}: prev/next | q: quit"
         )
     } else {
-        "Alt+1\u{2013}9: tabs | Tab/Shift+Tab: cycle | \u{2190}/\u{2192}: prev/next | q: quit"
+        "Alt+1\u{2013}7: tabs | Tab/Shift+Tab: cycle | \u{2190}/\u{2192}: prev/next | q: quit"
             .to_string()
     };
     let footer_style = if app.update_notice.is_some() {
@@ -71,4 +69,80 @@ pub fn draw(f: &mut Frame, app: &App) {
     };
     let footer = Paragraph::new(footer_text).style(footer_style);
     f.render_widget(footer, chunks[2]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// Flatten the rendered buffer into a single string (rows joined by `\n`),
+    /// so tests can assert on visible text without a real terminal/PTY.
+    fn buffer_to_string(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> String {
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                let sym = buf
+                    .cell((x, y))
+                    .map(|c| c.symbol().to_string())
+                    .unwrap_or_else(|| " ".to_string());
+                out.push_str(&sym);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Headless (no-PTY) smoke test: rendering the full frame on every tab must
+    /// succeed against the in-memory `TestBackend`. This lets CI exercise the
+    /// consolidated seven-tab TUI without allocating a pseudo-terminal.
+    #[test]
+    fn draw_renders_every_tab_without_pty() {
+        const W: u16 = 100;
+        const H: u16 = 40;
+
+        for tab in ALL_TABS {
+            let mut app = App::new("simard-ooda.service".to_string(), None);
+            app.active_tab = tab;
+
+            let backend = TestBackend::new(W, H);
+            let mut terminal = Terminal::new(backend).unwrap();
+
+            // Must not panic for any tab.
+            terminal.draw(|f| draw(f, &app)).unwrap();
+
+            let rendered = buffer_to_string(&terminal, W, H);
+            // The bordered tab-bar block title is always present, proving the
+            // frame reached the render stage rather than short-circuiting.
+            assert!(
+                rendered.contains("simard-tui"),
+                "tab {tab:?}: expected the tab-bar block to render:\n{rendered}"
+            );
+        }
+    }
+
+    /// The tab bar must advertise every tab in the consolidated set, so no
+    /// consolidated view becomes unreachable. Verified purely from the
+    /// in-memory buffer — no PTY required.
+    #[test]
+    fn tab_bar_lists_all_seven_tabs_without_pty() {
+        const W: u16 = 100;
+        const H: u16 = 40;
+
+        let app = App::new("simard-ooda.service".to_string(), None);
+        let backend = TestBackend::new(W, H);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+
+        let rendered = buffer_to_string(&terminal, W, H);
+        for tab in ALL_TABS {
+            let label = tab.label();
+            assert!(
+                rendered.contains(label),
+                "tab bar is missing label {label:?} for {tab:?}:\n{rendered}"
+            );
+        }
+    }
 }

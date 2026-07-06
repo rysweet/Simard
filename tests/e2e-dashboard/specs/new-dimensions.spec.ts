@@ -88,16 +88,16 @@ test.describe('Merge Decisions Tab @structural', () => {
   test('merge-decisions tab renders and shows decisions', async ({
     authenticatedPage,
   }) => {
-    const tab = authenticatedPage.locator('.tab[data-tab="merge-decisions"]');
+    const tab = authenticatedPage.locator('.tab[data-tab="pull-requests"]');
     await expect(tab).toBeVisible();
     await tab.click();
-    await expect(authenticatedPage.locator('#tab-merge-decisions')).toBeVisible();
+    await expect(authenticatedPage.locator('#tab-pull-requests')).toBeVisible();
 
     // Panel should contain decision data
-    const panel = authenticatedPage.locator('#tab-merge-decisions');
+    const panel = authenticatedPage.locator('#tab-pull-requests');
     await authenticatedPage.waitForFunction(
       () => {
-        const el = document.getElementById('tab-merge-decisions');
+        const el = document.getElementById('tab-pull-requests');
         return el && el.innerText.length > 10;
       },
       { timeout: 10_000 },
@@ -109,11 +109,11 @@ test.describe('Merge Decisions Tab @structural', () => {
   test('merge-decisions tab shows verdict and PR number', async ({
     authenticatedPage,
   }) => {
-    await authenticatedPage.locator('.tab[data-tab="merge-decisions"]').click();
-    const panel = authenticatedPage.locator('#tab-merge-decisions');
+    await authenticatedPage.locator('.tab[data-tab="pull-requests"]').click();
+    const panel = authenticatedPage.locator('#tab-pull-requests');
     await authenticatedPage.waitForFunction(
       () => {
-        const el = document.getElementById('tab-merge-decisions');
+        const el = document.getElementById('tab-pull-requests');
         return el && el.innerText.length > 10;
       },
       { timeout: 10_000 },
@@ -127,7 +127,7 @@ test.describe('Merge Decisions Tab @structural', () => {
   test('no JS errors on merge-decisions tab', async ({ authenticatedPage }) => {
     const errors: string[] = [];
     authenticatedPage.on('pageerror', (err) => errors.push(err.message));
-    await authenticatedPage.locator('.tab[data-tab="merge-decisions"]').click();
+    await authenticatedPage.locator('.tab[data-tab="pull-requests"]').click();
     await authenticatedPage.waitForTimeout(2000);
     expect(errors).toEqual([]);
   });
@@ -148,15 +148,15 @@ test.describe('PR Readiness Tab @structural', () => {
   test('pr-readiness tab renders and shows PR data', async ({
     authenticatedPage,
   }) => {
-    const tab = authenticatedPage.locator('.tab[data-tab="pr-readiness"]');
+    const tab = authenticatedPage.locator('.tab[data-tab="pull-requests"]');
     await expect(tab).toBeVisible();
     await tab.click();
-    await expect(authenticatedPage.locator('#tab-pr-readiness')).toBeVisible();
+    await expect(authenticatedPage.locator('#tab-pull-requests')).toBeVisible();
 
-    const panel = authenticatedPage.locator('#tab-pr-readiness');
+    const panel = authenticatedPage.locator('#tab-pull-requests');
     await authenticatedPage.waitForFunction(
       () => {
-        const el = document.getElementById('tab-pr-readiness');
+        const el = document.getElementById('tab-pull-requests');
         return el && el.innerText.length > 10;
       },
       { timeout: 10_000 },
@@ -168,11 +168,11 @@ test.describe('PR Readiness Tab @structural', () => {
   test('pr-readiness shows CI status and review state', async ({
     authenticatedPage,
   }) => {
-    await authenticatedPage.locator('.tab[data-tab="pr-readiness"]').click();
-    const panel = authenticatedPage.locator('#tab-pr-readiness');
+    await authenticatedPage.locator('.tab[data-tab="pull-requests"]').click();
+    const panel = authenticatedPage.locator('#tab-pull-requests');
     await authenticatedPage.waitForFunction(
       () => {
-        const el = document.getElementById('tab-pr-readiness');
+        const el = document.getElementById('tab-pull-requests');
         return el && el.innerText.length > 10;
       },
       { timeout: 10_000 },
@@ -184,7 +184,7 @@ test.describe('PR Readiness Tab @structural', () => {
   test('no JS errors on pr-readiness tab', async ({ authenticatedPage }) => {
     const errors: string[] = [];
     authenticatedPage.on('pageerror', (err) => errors.push(err.message));
-    await authenticatedPage.locator('.tab[data-tab="pr-readiness"]').click();
+    await authenticatedPage.locator('.tab[data-tab="pull-requests"]').click();
     await authenticatedPage.waitForTimeout(2000);
     expect(errors).toEqual([]);
   });
@@ -205,15 +205,15 @@ test.describe('Brain Failures Tab @structural', () => {
   test('brain-failures tab renders and shows failure data', async ({
     authenticatedPage,
   }) => {
-    const tab = authenticatedPage.locator('.tab[data-tab="brain-failures"]');
+    const tab = authenticatedPage.locator('.tab[data-tab="activity"]');
     await expect(tab).toBeVisible();
     await tab.click();
-    await expect(authenticatedPage.locator('#tab-brain-failures')).toBeVisible();
+    await expect(authenticatedPage.locator('#tab-activity')).toBeVisible();
 
-    const panel = authenticatedPage.locator('#tab-brain-failures');
+    const panel = authenticatedPage.locator('#tab-activity');
     await authenticatedPage.waitForFunction(
       () => {
-        const el = document.getElementById('tab-brain-failures');
+        const el = document.getElementById('tab-activity');
         return el && el.innerText.length > 10;
       },
       { timeout: 10_000 },
@@ -225,11 +225,11 @@ test.describe('Brain Failures Tab @structural', () => {
   test('brain-failures tab shows component and recovery info', async ({
     authenticatedPage,
   }) => {
-    await authenticatedPage.locator('.tab[data-tab="brain-failures"]').click();
-    const panel = authenticatedPage.locator('#tab-brain-failures');
+    await authenticatedPage.locator('.tab[data-tab="activity"]').click();
+    const panel = authenticatedPage.locator('#tab-activity');
     await authenticatedPage.waitForFunction(
       () => {
-        const el = document.getElementById('tab-brain-failures');
+        const el = document.getElementById('tab-activity');
         return el && el.innerText.length > 10;
       },
       { timeout: 10_000 },
@@ -241,7 +241,7 @@ test.describe('Brain Failures Tab @structural', () => {
   test('no JS errors on brain-failures tab', async ({ authenticatedPage }) => {
     const errors: string[] = [];
     authenticatedPage.on('pageerror', (err) => errors.push(err.message));
-    await authenticatedPage.locator('.tab[data-tab="brain-failures"]').click();
+    await authenticatedPage.locator('.tab[data-tab="activity"]').click();
     await authenticatedPage.waitForTimeout(2000);
     expect(errors).toEqual([]);
   });
@@ -288,8 +288,8 @@ test.describe('New Dimensions Tab Rendering @smoke', () => {
     const errors: string[] = [];
     authenticatedPage.on('pageerror', (err) => errors.push(err.message));
     await authenticatedPage.goto('/');
-    await authenticatedPage.locator('.tab[data-tab="merge-decisions"]').click();
-    await expect(authenticatedPage.locator('#tab-merge-decisions')).toBeVisible();
+    await authenticatedPage.locator('.tab[data-tab="pull-requests"]').click();
+    await expect(authenticatedPage.locator('#tab-pull-requests')).toBeVisible();
     await authenticatedPage.waitForResponse(
       (resp) => resp.url().includes('/api/merge-judge') && resp.status() === 200,
       { timeout: 10_000 },
@@ -303,8 +303,8 @@ test.describe('New Dimensions Tab Rendering @smoke', () => {
     const errors: string[] = [];
     authenticatedPage.on('pageerror', (err) => errors.push(err.message));
     await authenticatedPage.goto('/');
-    await authenticatedPage.locator('.tab[data-tab="pr-readiness"]').click();
-    await expect(authenticatedPage.locator('#tab-pr-readiness')).toBeVisible();
+    await authenticatedPage.locator('.tab[data-tab="pull-requests"]').click();
+    await expect(authenticatedPage.locator('#tab-pull-requests')).toBeVisible();
     await authenticatedPage.waitForResponse(
       (resp) => resp.url().includes('/api/prs') && resp.status() === 200,
       { timeout: 10_000 },
@@ -318,8 +318,8 @@ test.describe('New Dimensions Tab Rendering @smoke', () => {
     const errors: string[] = [];
     authenticatedPage.on('pageerror', (err) => errors.push(err.message));
     await authenticatedPage.goto('/');
-    await authenticatedPage.locator('.tab[data-tab="brain-failures"]').click();
-    await expect(authenticatedPage.locator('#tab-brain-failures')).toBeVisible();
+    await authenticatedPage.locator('.tab[data-tab="activity"]').click();
+    await expect(authenticatedPage.locator('#tab-activity')).toBeVisible();
     await authenticatedPage.waitForResponse(
       (resp) => resp.url().includes('/api/brain-failures') && resp.status() === 200,
       { timeout: 10_000 },

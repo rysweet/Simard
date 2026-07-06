@@ -21,7 +21,7 @@ fn tab_meta_slugs_unique() {
             t.slug
         );
     }
-    assert_eq!(TAB_METADATA.len(), 17, "expected 17 tabs");
+    assert_eq!(TAB_METADATA.len(), 9, "expected 9 tabs");
 }
 
 #[test]
@@ -310,26 +310,25 @@ fn rendered_html_demotes_brand_h1_to_div() {
 
 #[test]
 fn rendered_html_workboard_label_replaces_whiteboard() {
-    // #1995: the visible label must match the slug. There should be no
-    // remaining "Whiteboard" in user-facing nav text.
-    let nav_slice = {
-        let start = INDEX_HTML
-            .find(r#"data-tab="workboard""#)
-            .expect("workboard nav entry should be present");
-        // Take a small window around the nav entry.
-        let end = INDEX_HTML[start..]
-            .find("</div>")
-            .map(|e| start + e)
-            .unwrap_or(INDEX_HTML.len());
-        &INDEX_HTML[start..end]
-    };
+    // #1995 + #2627 consolidation: the former standalone `workboard` tab is
+    // now the **Work Board** sub-section of the **Goals** tab, so it must no
+    // longer appear as a top-level nav button — but the label lineage
+    // (`Whiteboard → Workboard → Work Board`) must have shed "Whiteboard"
+    // entirely from user-facing text.
     assert!(
-        nav_slice.contains("Workboard"),
-        "workboard nav entry should render the label `Workboard`; got: {nav_slice}"
+        !INDEX_HTML.contains(r#"data-tab="workboard""#),
+        "workboard must no longer be a top-level nav tab after consolidation; \
+         it lives as the `Work Board` sub-section of the Goals tab"
     );
     assert!(
-        !nav_slice.contains("Whiteboard"),
-        "workboard nav entry must not still say `Whiteboard`: {nav_slice}"
+        INDEX_HTML.contains(r#"<h2 class="subsection">Work Board</h2>"#),
+        "the retired workboard view must render as a `Work Board` sub-section \
+         header inside the Goals tab"
+    );
+    assert!(
+        !INDEX_HTML.contains("Whiteboard"),
+        "no user-facing text may still say `Whiteboard` (label lineage ends at \
+         `Work Board`)"
     );
 }
 
@@ -757,4 +756,202 @@ fn feedback_widget_posts_report_and_context_to_authed_endpoint() {
             "widget JS must capture the '{key}' context field"
         );
     }
+}
+// ----- #2627: tab consolidation (17 → 9 canonical tabs) -----
+//
+// The dashboard nav is consolidated from 17 adjacent/overlapping tabs to a
+// single coherent 9-tab taxonomy. Views that answer the same operator
+// question are grouped into labelled **sub-sections** (rendered as `<h2>`,
+// never a second `page-h1`) inside one parent tab, and every retired
+// top-level slug keeps working as a deep-link alias. The durable definition
+// of this taxonomy lives in `docs/dashboard.md#canonical-tab-taxonomy`; these
+// tests pin the source-of-truth table and the rendered HTML to it.
+
+/// The nine canonical dashboard tabs, in nav-render order, paired with the
+/// label each must expose. This is the single in-test statement of the
+/// consolidated taxonomy that `docs/dashboard.md` documents.
+const CANONICAL_TABS: &[(&str, &str)] = &[
+    ("overview", "Overview"),
+    ("goals", "Goals"),
+    ("activity", "Activity"),
+    ("workers", "Workers"),
+    ("pull-requests", "Pull Requests"),
+    ("resources", "Resources"),
+    ("chat", "Chat"),
+    ("overseer", "Overseer"),
+    ("journal", "Journal"),
+];
+
+/// Slugs that were real top-level tabs in the 17-tab set and must NOT survive
+/// as nav tabs after consolidation — each is now a sub-section reachable via
+/// its deep-link alias.
+const RETIRED_SLUGS: &[&str] = &[
+    "traces",
+    "logs",
+    "processes",
+    "memory",
+    "costs",
+    "workboard",
+    "thinking",
+    "brain-failures",
+    "merge-decisions",
+    "pr-readiness",
+    "terminal",
+    "status",
+];
+
+#[test]
+fn tab_meta_matches_canonical_taxonomy() {
+    // Exact slug + label + order. Anchors the whole consolidation: if a tab is
+    // added, removed, renamed, or reordered, this fails until the taxonomy and
+    // docs/dashboard.md agree again.
+    assert_eq!(
+        TAB_METADATA.len(),
+        CANONICAL_TABS.len(),
+        "expected exactly {} canonical tabs, found {}",
+        CANONICAL_TABS.len(),
+        TAB_METADATA.len()
+    );
+    for (i, (slug, label)) in CANONICAL_TABS.iter().enumerate() {
+        assert_eq!(
+            TAB_METADATA[i].slug, *slug,
+            "tab #{i} slug should be {slug:?}, got {:?}",
+            TAB_METADATA[i].slug
+        );
+        assert_eq!(
+            TAB_METADATA[i].label, *label,
+            "tab #{i} ({slug}) label should be {label:?}, got {:?}",
+            TAB_METADATA[i].label
+        );
+    }
+}
+
+#[test]
+fn tab_meta_has_no_retired_top_level_slugs() {
+    let live: HashSet<&str> = TAB_METADATA.iter().map(|t| t.slug).collect();
+    for retired in RETIRED_SLUGS {
+        assert!(
+            !live.contains(retired),
+            "retired slug {retired:?} must not remain a top-level tab; it should \
+             be a sub-section reachable via its deep-link alias"
+        );
+    }
+}
+
+#[test]
+fn tab_meta_uses_no_bridge_names() {
+    // Binding constraint: no consolidated tab may be named "Bridge".
+    for t in TAB_METADATA {
+        assert!(
+            !t.label.contains("Bridge") && !t.h1.contains("Bridge") && !t.slug.contains("bridge"),
+            "tab {:?} must not use a `Bridge` name",
+            t.slug
+        );
+    }
+}
+
+#[test]
+fn rendered_html_has_exactly_nine_page_h1s() {
+    // Invariant 2 across the consolidated set: each tab panel owns exactly one
+    // `<h1 class="page-h1">`, so the rendered HTML has exactly nine of them.
+    // Sub-sections must use `<h2>`, never a second page-h1.
+    let count = INDEX_HTML.matches(r#"<h1 class="page-h1">"#).count();
+    assert_eq!(
+        count, 9,
+        "expected exactly 9 page-h1 headings (one per consolidated tab), found {count}; \
+         a stray page-h1 usually means an absorbed panel kept its old <h1> instead of \
+         being demoted to an <h2 class=\"subsection\">"
+    );
+}
+
+#[test]
+fn rendered_html_contains_consolidated_sub_section_headers() {
+    // Data-preservation contract (invariant 5): every former standalone view
+    // survives as a labelled sub-section header inside its parent tab. Sub-
+    // section headers render as `<h2 class="subsection">…</h2>` so invariant 2
+    // (one page-h1 per tab) still holds.
+    let required_subsections = [
+        // Overview absorbs the old `overview` + `status` tabs, plus a Stats panel.
+        "Summary",
+        "Health",
+        "Stats",
+        // Goals absorbs the old `workboard` tab.
+        "Work Board",
+        // Activity absorbs logs/traces/thinking/brain-failures.
+        "Logs",
+        "Traces",
+        "Thinking",
+        "Failures",
+        // Workers absorbs processes/terminal (+ the engineers process-tree view).
+        "Processes",
+        "Engineers",
+        "Terminal",
+        // Pull Requests absorbs merge-decisions/pr-readiness.
+        "Merge Decisions",
+        "Readiness",
+        // Resources absorbs memory/costs.
+        "Memory",
+        "Costs",
+    ];
+    for name in required_subsections {
+        let needle = format!(r#"<h2 class="subsection">{name}</h2>"#);
+        assert!(
+            INDEX_HTML.contains(&needle),
+            "consolidated dashboard is missing the {name:?} sub-section header; \
+             expected to find: {needle} — a merged view must survive as a labelled \
+             `<h2 class=\"subsection\">` inside its parent tab so no data is lost"
+        );
+    }
+}
+
+#[test]
+fn rendered_html_wires_tab_alias_allowlist() {
+    // Deep-link continuity: every retired top-level slug resolves to its new
+    // parent tab through a client-side allowlist. The resolver treats
+    // `location.hash` as untrusted — it validates against `^[a-z-]+$` and falls
+    // back to `overview` — and never concatenates the hash into a selector.
+    assert!(
+        INDEX_HTML.contains("TAB_ALIASES"),
+        "rendered HTML must define the client-side TAB_ALIASES deep-link allowlist"
+    );
+    // Every retired slug maps to its documented parent tab (compact JSON form).
+    let alias_pairs = [
+        ("status", "overview"),
+        ("workboard", "goals"),
+        ("logs", "activity"),
+        ("traces", "activity"),
+        ("thinking", "activity"),
+        ("brain-failures", "activity"),
+        ("processes", "workers"),
+        ("terminal", "workers"),
+        ("merge-decisions", "pull-requests"),
+        ("pr-readiness", "pull-requests"),
+        ("memory", "resources"),
+        ("costs", "resources"),
+    ];
+    for (retired, parent) in alias_pairs {
+        let needle = format!(r#""{retired}":"{parent}""#);
+        assert!(
+            INDEX_HTML.contains(&needle),
+            "TAB_ALIASES must map retired slug {retired:?} to parent tab {parent:?}; \
+             expected to find: {needle}"
+        );
+    }
+    // The untrusted-hash validator must be present so a crafted hash can never
+    // reach a DOM selector.
+    assert!(
+        INDEX_HTML.contains("^[a-z-]+$"),
+        "the deep-link resolver must validate location.hash against ^[a-z-]+$ \
+         before using it"
+    );
+    // Sub-sections introduced by consolidation (never standalone tabs) must NOT
+    // gain a bogus alias — there are no old bookmarks to preserve.
+    assert!(
+        !INDEX_HTML.contains(r#""stats":"overview""#),
+        "the Stats sub-section was never a standalone tab and must not have an alias"
+    );
+    assert!(
+        !INDEX_HTML.contains(r#""engineers":"workers""#),
+        "the Engineers sub-section was never a standalone tab and must not have an alias"
+    );
 }

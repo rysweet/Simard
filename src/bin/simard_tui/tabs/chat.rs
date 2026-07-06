@@ -1,4 +1,8 @@
-//! Meeting tab: interactive REPL for `simard meeting start`.
+//! Chat tab: interactive REPL for `simard meeting start`.
+//!
+//! Labelled **Chat** to match the dashboard's Chat tab (#2627); the underlying
+//! process is still the meeting backend, so the internal `MeetingStatus` /
+//! `meeting_*` state names are unchanged.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -7,19 +11,19 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::app::{App, MeetingStatus, SPINNER_FRAMES};
 
-/// Render the Meeting tab content within the given area.
+/// Render the Chat tab content within the given area.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(5)])
         .split(area);
 
-    // Title shows meeting status
+    // Title shows chat/meeting status
     let title = match &app.meeting_status {
-        MeetingStatus::NotStarted => "Meeting — Not Started".to_string(),
-        MeetingStatus::Running => "Meeting — Running".to_string(),
-        MeetingStatus::Exited(code) => format!("Meeting — Exited ({code})"),
-        MeetingStatus::Error(e) => format!("Meeting — Error: {e}"),
+        MeetingStatus::NotStarted => "Chat — Not Started".to_string(),
+        MeetingStatus::Running => "Chat — Running".to_string(),
+        MeetingStatus::Exited(code) => format!("Chat — Exited ({code})"),
+        MeetingStatus::Error(e) => format!("Chat — Error: {e}"),
     };
 
     // Output area (auto-scroll to bottom)
