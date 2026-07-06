@@ -36,6 +36,14 @@ pub const SMART_ORCHESTRATOR_RECIPE: &str = "amplifier-bundle/recipes/smart-orch
 /// ceiling defensively closes the E2BIG argv-overflow class, and the same pass
 /// collapses newlines so a multi-line brief can never break the recipe's YAML
 /// interpolation (#2127). `target_repo` is a short slug and stays verbatim.
+///
+/// A `spawn_payload::recipe_context` file channel (`task_description_path`)
+/// would make this lossless, but `smart-orchestrator.yaml` is an EXTERNAL asset
+/// (amplihack bundle, not this repo) that reads `{{task_description}}` inline
+/// with no `{{task_description_path}}` support — filing a large value would leave
+/// the orchestrator with an empty task. Bounded-inline (E2BIG-safe: 8000 chars ≪
+/// ARG_MAX) stays the safe disposition until that external asset gains a `_path`
+/// read.
 pub fn smart_orchestrator_args(brief: &RecipeBrief) -> Vec<String> {
     let task_description =
         crate::ooda_brain::sanitize::sanitize_context_var(&brief.task_description, 8000);
@@ -166,9 +174,15 @@ impl RecipeRunner for AmplihackRecipeRunner {
         // Preserve AMPLIHACK_AGENT_BINARY if the caller set it (Copilot/Claude
         // parity) — inherited automatically; we do not override it.
 
-        let child = cmd.spawn().map_err(|e| OverseerError::Capability {
-            what: "recipe.spawn",
-            detail: format!("spawn amplihack: {e}"),
+        let child = cmd.spawn().map_err(|e| {
+            // Pre-exec spawn failure (E2BIG and siblings) has no child; classify
+            // + record into the Overseer sink before surfacing — no silent drop
+            // (issue #2640).
+            crate::spawn_payload::record_spawn_failure(&e, "overseer.recipe.spawn");
+            OverseerError::Capability {
+                what: "recipe.spawn",
+                detail: format!("spawn amplihack: {e}"),
+            }
         })?;
         let id = format!("recipe-{}", child.id());
         self.runs

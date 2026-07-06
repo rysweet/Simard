@@ -28,9 +28,9 @@ use crate::identity::OperatingMode;
 #[cfg(test)]
 use crate::knowledge_client::KnowledgeClient;
 use crate::metadata::{BackendDescriptor, Freshness};
-use crate::prompt_delivery::{PromptDelivery, apply_std};
 use crate::runtime::RuntimeTopology;
 use crate::sanitization::objective_metadata;
+use crate::spawn_payload::attach_prompt_std;
 use crate::terminal_session::execute_terminal_turn;
 
 /// Default command used to launch the copilot subprocess (non-meeting mode).
@@ -357,11 +357,12 @@ impl CopilotSdkSession {
     /// instruction injection that caused meeting prompts to be misinterpreted
     /// as engineering tasks (issue #2170).
     ///
-    /// The (possibly large) prompt is delivered to copilot on STDIN via
-    /// [`prompt_delivery::apply_std`], never as an argv token: passing it as
-    /// `-p "$(cat …)"` inlined the whole prompt into `argv`, which for
-    /// large-context turns exceeded `ARG_MAX` and made `exec` fail with `E2BIG`
-    /// ("Argument list too long", exit 126) — the live defect fixed by #2640.
+    /// The (possibly large) prompt is delivered to copilot on STDIN via the
+    /// single spawn facade ([`crate::spawn_payload::attach_prompt_std`]), never
+    /// as an argv token: passing it as `-p "$(cat …)"` inlined the whole prompt
+    /// into `argv`, which for large-context turns exceeded `ARG_MAX` and made
+    /// `exec` fail with `E2BIG` ("Argument list too long", exit 126) — the live
+    /// defect fixed by #2640.
     fn run_meeting_turn(&mut self, input: BaseTypeTurnInput) -> SimardResult<BaseTypeOutcome> {
         let session_id = self
             .session_uuid
@@ -382,13 +383,15 @@ impl CopilotSdkSession {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        // Force stdin delivery: copilot reads the prompt from stdin when no `-p`
-        // is given, so the prompt never contributes to `argv` regardless of size.
-        let applied = apply_std(&mut command, formatted.as_bytes(), PromptDelivery::Stdin)
-            .map_err(|err| SimardError::AdapterInvocationFailed {
+        // Force stdin delivery through the single spawn facade: copilot reads
+        // the prompt from stdin when no `-p` is given, so the prompt never
+        // contributes to `argv` regardless of size (issue #2640).
+        let applied = attach_prompt_std(&mut command, formatted.as_bytes()).map_err(|err| {
+            SimardError::AdapterInvocationFailed {
                 base_type: self.descriptor.id.to_string(),
                 reason: format!("failed to prepare copilot meeting prompt delivery: {err}"),
-            })?;
+            }
+        })?;
 
         let mut child = command
             .spawn()

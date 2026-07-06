@@ -195,9 +195,15 @@ deployed copy.\n";
 /// [`AgentKind`]. Each kind has its own prompt-passing convention.
 ///
 /// * `RustyClawd` uses `--auto -- -p <prompt>` (the `--` separator is
-///   required so the inner `-p` reaches the autonomous loop).
-/// * `copilot` accepts `-p <prompt>` directly with `--allow-all-paths`
-///   so it can read/write across the workspace.
+///   required so the inner `-p` reaches the autonomous loop). Not
+///   production-wired; its inline prompt path is unchanged.
+/// * `copilot` is **prompt-less**: the prompt is delivered on STDIN by
+///   [`run_engineer_subprocess`] (issue #2640), never as a `-p <prompt>` argv
+///   token. A large engineer prompt (objective + repo inspection + guidelines)
+///   inlined into argv would overflow the kernel's `ARG_MAX` and fail `exec`
+///   with E2BIG ("Argument list too long"). copilot reads its prompt from
+///   stdin when no `-p` is given, so the invocation is immune to prompt size.
+///   The `prompt` argument is therefore ignored for the Copilot kind.
 ///
 /// Visibility note: `pub` for the integration regression test
 /// `tests/engineer_copilot_permissions.rs`. Treat as test-visible internal
@@ -218,18 +224,23 @@ pub fn engineer_argv(kind: AgentKind, prompt: &str, max_turns: u32) -> Vec<Strin
         ],
         AgentKind::Copilot => vec![
             kind.subcommand().to_string(),
-            // Issue #1717: without --allow-all-tools the Copilot CLI's
-            // tool allow-list defaults to interactive prompting, and a
-            // headless engineer subprocess (no TTY) can only *read*: every
-            // file write, `git commit`, `gh pr create`, `amplihack recipe
-            // run`, etc. fail with "Permission denied and could not request
-            // permission from user". Both permission flags MUST precede -p
-            // so the Copilot CLI parser treats them as flags rather than
-            // prompt content.
+            // Issue #2640: prompt-less argv. The prompt rides on STDIN (see
+            // `run_engineer_subprocess`), so it never contributes to ARG_MAX.
+            // `--subprocess-safe` skips interactive staging so the headless
+            // subprocess reads its stdin prompt non-interactively — the same
+            // proven `amplihack copilot --subprocess-safe …` stdin invocation
+            // the OODA launch and meeting turns use.
+            "--subprocess-safe".to_string(),
+            // Issue #1717: without --allow-all-tools the Copilot CLI's tool
+            // allow-list defaults to interactive prompting, and a headless
+            // engineer subprocess (no TTY) can only *read*: every file write,
+            // `git commit`, `gh pr create`, `amplihack recipe run`, etc. fail
+            // with "Permission denied". Both permission flags are required, and
+            // --allow-all-tools MUST precede --allow-all-paths (the pinned
+            // #1717 order). `COPILOT_ALLOW_ALL=1` in the child env is the
+            // belt-and-suspenders fallback if the flag is ever renamed.
             "--allow-all-tools".to_string(),
             "--allow-all-paths".to_string(),
-            "-p".to_string(),
-            prompt.to_string(),
         ],
     }
 }
@@ -274,29 +285,52 @@ pub fn run_engineer_subprocess(
     let mut cmd = Command::new(&bin);
     cmd.args(&argv)
         .current_dir(workspace)
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // Belt-and-suspenders permission grant for the Copilot CLI subprocess.
-    //
-    // `--allow-all-tools` (in `engineer_argv`) is the primary mechanism for
-    // auto-approving non-interactive write/git/gh tool calls. If a future
-    // upstream Copilot CLI release renames or removes that flag, the
-    // documented `COPILOT_ALLOW_ALL` env var keeps the engineer subprocess
-    // from regressing back to the symptom motivating issue #1717 (every
-    // engineer plan ending in a permission-denied table). Setting only for
-    // the Copilot kind keeps the RustyClawd path byte-identical.
-    if matches!(kind, AgentKind::Copilot) {
-        cmd.env("COPILOT_ALLOW_ALL", "1");
-    }
+    // Prompt delivery differs by agent kind (issue #2640):
+    //   * Copilot's argv is prompt-less; the (possibly large) prompt is streamed
+    //     on STDIN via the shared spawn facade, so it never contributes to
+    //     ARG_MAX and `exec` can never fail with E2BIG. Fed from a separate
+    //     thread so a large prompt cannot deadlock against the child filling
+    //     its stdout pipe.
+    //   * RustyClawd keeps its inline `-- -p <prompt>` form (its autonomous loop
+    //     requires the inner `-p`) and reads no stdin. It is not
+    //     production-wired, so its path is left byte-identical.
+    let prompt_feed = match kind {
+        AgentKind::Copilot => {
+            // Belt-and-suspenders permission grant for the Copilot CLI
+            // subprocess (issue #1717): if a future upstream release renames or
+            // removes `--allow-all-tools`, `COPILOT_ALLOW_ALL` keeps the
+            // engineer from regressing to a permission-denied table.
+            cmd.env("COPILOT_ALLOW_ALL", "1");
+            let applied = crate::spawn_payload::attach_prompt_std(&mut cmd, prompt.as_bytes())
+                .map_err(|e| SimardError::ActionExecutionFailed {
+                    action: action_label.clone(),
+                    reason: format!("failed to prepare copilot prompt delivery: {e}"),
+                })?;
+            Some(applied)
+        }
+        AgentKind::RustyClawd => {
+            cmd.stdin(Stdio::null());
+            None
+        }
+    };
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| SimardError::ActionExecutionFailed {
             action: action_label.clone(),
             reason: format!("failed to spawn `{bin}`: {e}"),
         })?;
+
+    // Stream the Copilot prompt on stdin from a feeder thread before we block on
+    // the child's output; the feeder closes stdin on completion so copilot reads
+    // EOF and starts work.
+    let feeder = prompt_feed.map(|applied| {
+        let stdin = child.stdin.take();
+        thread::spawn(move || applied.feed(stdin))
+    });
 
     // Wait unbounded. Engineer subprocesses are agentic and must run to
     // natural completion or natural failure; do NOT SIGKILL on a wall clock.
@@ -306,6 +340,25 @@ pub fn run_engineer_subprocess(
             action: action_label.clone(),
             reason: format!("failed to collect child output: {e}"),
         })?;
+
+    // Surface a stdin-feed failure loudly — no silent fallback (issue #2640).
+    if let Some(feeder) = feeder {
+        match feeder.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err(SimardError::ActionExecutionFailed {
+                    action: action_label.clone(),
+                    reason: format!("failed to stream copilot prompt on stdin: {e}"),
+                });
+            }
+            Err(_) => {
+                return Err(SimardError::ActionExecutionFailed {
+                    action: action_label.clone(),
+                    reason: "copilot prompt feeder thread panicked".to_string(),
+                });
+            }
+        }
+    }
 
     let stdout_tail = keep_summary_tail(&output.stdout);
     let stderr_tail = keep_summary_tail(&output.stderr);
@@ -670,45 +723,53 @@ mod tests {
     }
 
     #[test]
-    fn engineer_argv_copilot_uses_p_without_dash_separator() {
+    fn engineer_argv_copilot_is_prompt_less_for_stdin_delivery() {
+        // Issue #2640: the Copilot engineer argv carries NO prompt — it rides on
+        // stdin — so a large objective can never overflow ARG_MAX / fail exec
+        // with E2BIG.
         let argv = engineer_argv(AgentKind::Copilot, "hello world", 7);
         assert_eq!(argv[0], "copilot");
-        // The original (broken) contract only granted filesystem reads via
-        // --allow-all-paths. Issue #1717 added --allow-all-tools so writes
-        // (gh/git/file/amplihack) are also auto-approved in non-interactive
-        // mode. Both must be present and both must come before -p so the
-        // Copilot CLI parser sees them as flags rather than prompt content.
+        // `--subprocess-safe` lets the headless subprocess read its stdin prompt
+        // non-interactively (same proven invocation as the OODA/meeting paths).
+        assert!(
+            argv.iter().any(|a| a == "--subprocess-safe"),
+            "copilot argv must include --subprocess-safe for stdin prompt \
+             delivery (issue #2640): {argv:?}"
+        );
+        // Issue #1717: both permission flags present so non-interactive
+        // writes/git/gh/amplihack tools are auto-approved.
         assert!(
             argv.iter().any(|a| a == "--allow-all-tools"),
-            "copilot argv must include --allow-all-tools so non-interactive \
-             writes/git/gh/amplihack tools are auto-approved (issue #1717): {argv:?}"
+            "copilot argv must include --allow-all-tools (issue #1717): {argv:?}"
         );
         assert!(argv.iter().any(|a| a == "--allow-all-paths"));
-        assert!(argv.iter().any(|a| a == "-p"));
-        assert!(argv.iter().any(|a| a == "hello world"));
-        // copilot does not use the `--` separator that RustyClawd needs.
+        // THE FIX: neither `-p` nor the prompt body may appear in argv.
+        assert!(
+            !argv.iter().any(|a| a == "-p"),
+            "issue #2640: copilot argv must NOT pass the prompt via -p (it is on \
+             stdin): {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a == "hello world"),
+            "issue #2640: the prompt body must never appear in copilot argv: {argv:?}"
+        );
+        // copilot does not use the `--` separator that RustyClawd needs, nor the
+        // RustyClawd-only --auto / --max-turns flags.
         assert!(
             !argv.iter().any(|a| a == "--"),
             "copilot argv should not include `--` separator: {argv:?}"
         );
-        // copilot is not driven by --auto / --max-turns; ensure those
-        // RustyClawd-specific flags are absent so behaviour matches the
-        // amplihack copilot subcommand surface.
         assert!(!argv.iter().any(|a| a == "--auto"));
         assert!(!argv.iter().any(|a| a == "--max-turns"));
     }
 
-    /// Pin the exact positional ordering of the Copilot permission flags.
+    /// Pin the exact prompt-less Copilot argv and the #1717 permission-flag
+    /// order.
     ///
-    /// The Copilot CLI's argument parser treats anything after `-p` as
-    /// part of the prompt (or as a positional argument). If
-    /// `--allow-all-tools` or `--allow-all-paths` ever lands *after* `-p`,
-    /// the subprocess will silently regress to interactive prompting and
-    /// fail closed in headless mode (the symptom that motivated #1717:
-    /// engineer plans with empty PR pipelines).
-    ///
-    /// This test pins the canonical order:
-    ///   `copilot --allow-all-tools --allow-all-paths -p <prompt>`
+    /// The prompt is delivered on stdin (issue #2640), so there is no `-p` for
+    /// the permission flags to precede; the canonical order is now:
+    ///   `copilot --subprocess-safe --allow-all-tools --allow-all-paths`
+    /// with `--allow-all-tools` still before `--allow-all-paths` (#1717).
     #[test]
     fn engineer_argv_copilot_grants_tool_permissions_for_non_interactive() {
         let argv = engineer_argv(AgentKind::Copilot, "any prompt", 1);
@@ -721,27 +782,19 @@ mod tests {
             .iter()
             .position(|a| a == "--allow-all-paths")
             .expect("--allow-all-paths must be present in Copilot argv");
-        let p_pos = argv
-            .iter()
-            .position(|a| a == "-p")
-            .expect("-p must be present in Copilot argv");
 
         assert!(
             tools_pos < paths_pos,
             "--allow-all-tools must precede --allow-all-paths: {argv:?}"
         );
-        assert!(
-            paths_pos < p_pos,
-            "permission flags must precede -p so the parser treats them as \
-             flags not prompt content: {argv:?}"
-        );
 
-        // The subcommand itself stays at index 0; permission flags follow.
+        // Exact prompt-less slots: subcommand, stdin-enabling flag, then the
+        // ordered permission flags. No `-p`, no prompt.
         assert_eq!(argv[0], "copilot");
-        assert_eq!(argv[1], "--allow-all-tools", "exact slot 1: {argv:?}");
-        assert_eq!(argv[2], "--allow-all-paths", "exact slot 2: {argv:?}");
-        assert_eq!(argv[3], "-p", "exact slot 3: {argv:?}");
-        assert_eq!(argv[4], "any prompt", "exact slot 4: {argv:?}");
+        assert_eq!(argv[1], "--subprocess-safe", "exact slot 1: {argv:?}");
+        assert_eq!(argv[2], "--allow-all-tools", "exact slot 2: {argv:?}");
+        assert_eq!(argv[3], "--allow-all-paths", "exact slot 3: {argv:?}");
+        assert_eq!(argv.len(), 4, "copilot argv must be prompt-less: {argv:?}");
     }
 
     #[test]
