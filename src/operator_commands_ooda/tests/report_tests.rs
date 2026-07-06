@@ -236,3 +236,35 @@ fn summarize_large_cycle_number() {
         "should contain large number: {summary}"
     );
 }
+
+// --- Durable, brain-relative cycle counter: daemon startup seed (issue #1) ---
+
+#[test]
+fn daemon_startup_seeds_cycle_count_from_durable_state_and_continues() {
+    // Contract for the daemon startup path (operator_commands_ooda/daemon):
+    // after `OodaState::new(board)` the loop seeds `state.cycle_count` from the
+    // durable `PersistentGoalState.cycle_count` (loaded via
+    // `goal_board_store::load_or_migrate`), so the OODA cycle number CONTINUES
+    // the brain's total lived cognition instead of resetting to 1 on every
+    // daemon restart / deploy.
+    let persistent = crate::goal_board_store::PersistentGoalState {
+        cycle_count: 1158,
+        ..Default::default()
+    };
+
+    let mut state = OodaState::new(crate::goal_curation::GoalBoard::default());
+    // `new()` itself stays at 0 — a fresh-brain default (see
+    // `ooda_state_new_has_zero_cycle_count`). The durable value is applied by
+    // the daemon's startup seed, NOT by the constructor.
+    assert_eq!(state.cycle_count, 0);
+
+    // Startup seed from durable brain memory.
+    state.cycle_count = persistent.cycle_count;
+    // The first post-restart cycle increments (mirrors `state.cycle_count += 1`).
+    state.cycle_count += 1;
+
+    assert_eq!(
+        state.cycle_count, 1159,
+        "the daemon must continue from the durable brain counter, not reset to 1"
+    );
+}

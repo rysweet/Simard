@@ -73,6 +73,16 @@ pub struct PersistentGoalState {
     /// persisted so a livelock spanning a daemon restart is still bounded.
     #[serde(default)]
     pub no_progress: NoProgressTracker,
+    /// The brain's total lived OODA cognition: a monotonic cycle counter
+    /// persisted across daemon restarts (issue #1). Before this field the OODA
+    /// cycle number lived only in `OodaState::cycle_count`, so every daemon
+    /// restart (a frequent deploy) reset it to 1 and the dashboard perpetually
+    /// showed "Cycle #1", erasing the sense of accumulated cognitive activity.
+    /// The daemon seeds `OodaState::cycle_count` from this at startup and
+    /// re-stamps it every `commit_cycle`, under the same `flock`, so the number
+    /// reflects the brain's persistent memory rather than process uptime.
+    #[serde(default)]
+    pub cycle_count: u32,
 }
 
 /// Absolute path of the authoritative goal-board file for `state_root`.
@@ -393,13 +403,15 @@ pub fn load_or_migrate(
 /// 2. Under the store lock, re-read the current file (picking up any operator
 ///    edit made *during* the cycle), [`reconcile`] the daemon's `in_flight`
 ///    board against it honouring the full tombstone set, and persist the
-///    reconciled board plus the `tracker`.
+///    reconciled board, the `tracker`, and the monotonic `cycle_count` (the
+///    brain's lived OODA cycle number — issue #1).
 ///
 /// Returns the reconciled board that was persisted.
 pub fn commit_cycle(
     state_root: &Path,
     in_flight: &GoalBoard,
     tracker: &NoProgressTracker,
+    cycle_count: u32,
     new_tombstones: &[String],
 ) -> SimardResult<GoalBoard> {
     if !new_tombstones.is_empty() {
@@ -412,6 +424,10 @@ pub fn commit_cycle(
         let reconciled = reconcile(&s.board, &in_flight, &tombstones);
         s.board = reconciled.clone();
         s.no_progress = tracker;
+        // Persist the brain's lived cycle count with a monotonic guard so a
+        // stale/lower value (a racing writer, or a rolled-back `OodaState`)
+        // can never rewind the durable counter (issue #1).
+        s.cycle_count = s.cycle_count.max(cycle_count);
         reconciled
     })
 }

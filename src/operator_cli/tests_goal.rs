@@ -395,6 +395,7 @@ fn operator_remove_via_cli_survives_daemon_cycle_and_restart() {
         &root,
         &daemon_in_flight,
         &crate::goal_curation::NoProgressTracker::new(),
+        1,
         &[],
     )
     .expect("cycle commit");
