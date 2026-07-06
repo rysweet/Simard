@@ -197,6 +197,7 @@ nav:
     - StatusSnapshot API: reference/status-snapshot-api.md
     - Daily-Budget Display Guard: reference/daily-budget-display-guard.md
     - Overseer Activity Feed: reference/overseer-activity-feed.md
+    - Overseer Tick Details: reference/overseer-tick-details.md
     - Overseer Goal-Board Health API: reference/overseer-goal-board-health-api.md
     - Overseer Memory-Recall API: reference/overseer-memory-recall-api.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md

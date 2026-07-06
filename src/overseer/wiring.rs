@@ -39,8 +39,8 @@ use crate::goal_curation::{
 
 use crate::overseer::audit::SelfQualityAuditor;
 use crate::overseer::capabilities::{
-    BlockedGoal, DeployReport, Deployer, GoalBrief, GoalCurator, InFlightItem, MemoryRecall,
-    ObservationEpisode, OverseerError, RecallKeys, RecalledEpisode, RecalledFact,
+    BlockedGoal, DeployReport, Deployer, GoalBrief, GoalCurator, InFlightItem, IssueOutcome,
+    MemoryRecall, ObservationEpisode, OverseerError, RecallKeys, RecalledEpisode, RecalledFact,
     RecalledProcedure, RecalledProspective, RecordOutcome,
 };
 use crate::overseer::config::{
@@ -49,6 +49,7 @@ use crate::overseer::config::{
 };
 use crate::overseer::deploy::GuardedDeployer;
 use crate::overseer::guardrails::RecursionGuard;
+use crate::overseer::intervention::{Intervention, PlannedIntervention};
 use crate::overseer::launch::SmartOrchestratorLauncher;
 use crate::overseer::meeting_ops::MeetingGoalTransfer;
 use crate::overseer::merge_ops::MergePrOps;
@@ -57,7 +58,8 @@ use crate::overseer::observer::StewardshipIssueFiler;
 use crate::overseer::sensor::{
     SnapshotStatusReader, blocked_goals_from_board, in_flight_from_board,
 };
-use crate::overseer::{ActOutcome, Capabilities, Overseer};
+use crate::overseer::signal::{DETAIL_CAP, Signal, sanitize_detail};
+use crate::overseer::{ActOutcome, Capabilities, CycleReport, Overseer};
 
 // ─────────────────────────── cadence scheduler ─────────────────────────────
 
@@ -109,8 +111,12 @@ impl OverseerCadence {
 ///
 /// Derives `Serialize`/`Deserialize` (additive; no logic change) so the acting
 /// tick's outcome can be recorded verbatim into the durable
-/// [activity feed](crate::overseer::activity).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// [activity feed](crate::overseer::activity). The `*_details` vectors carry the
+/// human-readable, per-tick DETAIL lines (issue #21) — WHAT was observed and
+/// WHAT was done, with concrete values — alongside the summary counts. Both are
+/// `#[serde(default)]` so a feed written by an older build (which lacked them)
+/// still deserializes, defaulting to empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverseerTickReport {
     /// Problems raised this cycle (post-dedup against in-flight work).
@@ -157,6 +163,16 @@ pub struct OverseerTickReport {
     pub panicked: bool,
     /// Wall-clock duration of the tick in milliseconds.
     pub duration_ms: u64,
+    /// Human-readable lines describing WHAT was observed this tick — the ranked
+    /// problems and their concrete evidence signals, plus benign observations
+    /// that raised no problem. Bounded to [`DETAIL_CAP`] with a `(+N more)`
+    /// sentinel. Additive (issue #21); empty on ticks that observed nothing.
+    pub observed_details: Vec<String>,
+    /// Human-readable lines describing WHAT was done this tick — each admitted
+    /// intervention and its outcome (`did: …`), each held intervention and why
+    /// (`held: …`), and isolated failures. Bounded to [`DETAIL_CAP`] with a
+    /// `(+N more)` sentinel. Additive (issue #21); empty on no-action ticks.
+    pub action_details: Vec<String>,
 }
 
 /// Run ONE Overseer meta-OODA turn: `run_cycle` (Observe→Orient→Decide→plan)
@@ -187,15 +203,22 @@ pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
                 report.memory_errors += 1;
             }
 
+            report.observed_details = cap_details(observed_details_from(&cycle));
+            let mut actions: Vec<String> = Vec::new();
             for planned in &cycle.plan {
                 if !planned.admitted {
                     report.held += 1;
+                    actions.push(describe_hold(planned));
                     continue;
                 }
                 match overseer.act(&planned.intervention) {
-                    Ok(outcome) => tally_outcome(&mut report, &outcome),
+                    Ok(outcome) => {
+                        tally_outcome(&mut report, &outcome);
+                        actions.push(describe_action(&planned.intervention, &outcome));
+                    }
                     Err(e) => {
                         report.errors += 1;
+                        actions.push(describe_act_error(&planned.intervention, &e));
                         tracing::warn!(
                             target: "overseer::tick",
                             intervention = planned.intervention.label(),
@@ -205,6 +228,7 @@ pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
                     }
                 }
             }
+            report.action_details = cap_details(actions);
 
             // Deliberate, de-duplicated write-back of the Overseer's own
             // observation (#2628). A store increments `memory_writes`; a
@@ -301,6 +325,174 @@ fn tally_outcome(report: &mut OverseerTickReport, outcome: &ActOutcome) {
         | ActOutcome::Reported
         | ActOutcome::Audited => {}
     }
+}
+
+// ─────────────────── informative detail rendering (issue #21) ───────────────
+//
+// These pure renderers turn the typed cycle output into the human-readable
+// `observed_details` / `action_details` lines the activity log carries. They
+// enumerate the ACTUAL problems and actions with concrete values, so an operator
+// can tell WHAT the Overseer saw and WHAT it did — never just "saw N problems".
+
+/// Bound a detail list to [`DETAIL_CAP`], replacing the overflow with a single
+/// `(+N more)` sentinel so the persisted feed stays deterministic and small.
+fn cap_details(mut v: Vec<String>) -> Vec<String> {
+    if v.len() > DETAIL_CAP {
+        let extra = v.len() - DETAIL_CAP;
+        v.truncate(DETAIL_CAP);
+        v.push(format!("(+{extra} more)"));
+    }
+    v
+}
+
+/// Build the WHAT-was-observed lines: each ranked problem (kind + concrete
+/// summary), enumerating its individual evidence signals only when more than one
+/// merged into the problem (a single signal's `describe` just restates the
+/// summary), followed by any benign observed signals that raised no problem
+/// (e.g. a signal already covered by Simard's in-flight work). Ordered
+/// deterministically (problems first, in rank order) for hermetic tests.
+fn observed_details_from(cycle: &CycleReport) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut used: Vec<&Signal> = Vec::new();
+    for p in &cycle.problems {
+        out.push(sanitize_detail(&format!("{:?} — {}", p.kind, p.summary)));
+        // Enumerate the merged evidence only when it adds detail beyond the
+        // summary (multiple signals folded into one problem).
+        if p.evidence.len() > 1 {
+            for ev in &p.evidence {
+                out.push(format!("  {}", ev.describe()));
+            }
+        }
+        for ev in &p.evidence {
+            used.push(ev);
+        }
+    }
+    // Signals that never became a problem are still worth surfacing (benign, but
+    // "state why nothing happened" beats silence).
+    for sig in &cycle.signals {
+        if !used.contains(&sig) {
+            out.push(sig.describe());
+        }
+    }
+    out
+}
+
+/// `owner/name#pr` for a PR-shaped intervention, else the generic target.
+fn pr_target(iv: &Intervention) -> String {
+    match iv {
+        Intervention::VerifyAndMergePr { repo, pr }
+        | Intervention::ResolveConflict { repo, pr } => {
+            format!("{repo}#{pr}")
+        }
+        _ => intervention_target(iv),
+    }
+}
+
+/// A short, human-readable descriptor of an intervention's TARGET (the subject it
+/// acts on), used to name held/failed actions concretely.
+fn intervention_target(iv: &Intervention) -> String {
+    match iv {
+        Intervention::LaunchRecipe { brief } => format!("recipe for {}", brief.target_repo),
+        Intervention::VerifyAndMergePr { repo, pr } => format!("verify-and-merge {repo}#{pr}"),
+        Intervention::ResolveConflict { repo, pr } => format!("resolve-conflict {repo}#{pr}"),
+        Intervention::Deploy { commit } => format!("deploy {}", short_commit(commit)),
+        Intervention::FileIssue { run } => {
+            format!("issue for {} ({})", run.source_module, run.failure_kind)
+        }
+        Intervention::TransferGoal { goal } => format!("transfer goal '{}'", goal.title),
+        Intervention::Report => "status report".to_string(),
+        Intervention::RunAudit { .. } => "quality audit".to_string(),
+        Intervention::Escalate { reason } => format!("escalation: {reason}"),
+        Intervention::Whisper { .. } => "advisory whisper".to_string(),
+        Intervention::UnblockGoal { goal_id, .. } => format!("unblock goal {goal_id}"),
+        Intervention::EscalateBlockedGoal { goal_id, .. } => {
+            format!("escalate blocked goal {goal_id}")
+        }
+    }
+}
+
+/// The operator-facing reason an escalation was raised.
+fn escalate_reason(iv: &Intervention) -> String {
+    match iv {
+        Intervention::Escalate { reason } | Intervention::EscalateBlockedGoal { reason, .. } => {
+            reason.clone()
+        }
+        _ => intervention_target(iv),
+    }
+}
+
+/// First 12 chars of a commit SHA (enough to identify, short enough that the
+/// full 40-char blob never trips the high-entropy secret redactor).
+fn short_commit(c: &str) -> String {
+    c.chars().take(12).collect()
+}
+
+/// Render one ADMITTED intervention + its outcome as a `did: …` action line
+/// carrying the concrete identifiers (PR numbers, issue URLs, workstream ids,
+/// goal ids) an operator needs. Sanitised, so a capability that returned a
+/// secret-bearing url/id can never leak it into the persisted feed.
+fn describe_action(iv: &Intervention, outcome: &ActOutcome) -> String {
+    let body = match outcome {
+        ActOutcome::Launched(h) => {
+            format!("launched workstream {} ({})", h.id, intervention_target(iv))
+        }
+        ActOutcome::Merged => format!("merged PR {}", pr_target(iv)),
+        ActOutcome::ConflictResolved => format!("resolved conflicts on {}", pr_target(iv)),
+        ActOutcome::Deployed(r) => format!("deployed {}", short_commit(&r.deployed_commit)),
+        ActOutcome::IssueFiled(o) => match o {
+            IssueOutcome::FiledNew { url } => format!("filed issue {url}"),
+            IssueOutcome::MatchedExisting { url } => format!("matched existing issue {url}"),
+        },
+        ActOutcome::GoalTransferred => format!("transferred {}", intervention_target(iv)),
+        ActOutcome::Reported => "emitted a status report".to_string(),
+        ActOutcome::Audited => "ran a quality audit".to_string(),
+        ActOutcome::Escalated => format!("escalated to operator: {}", escalate_reason(iv)),
+        ActOutcome::Whispered { signature, .. } => {
+            format!("whispered steering note ({signature})")
+        }
+        ActOutcome::WhisperSuppressed { reason } => format!("whisper suppressed — {reason}"),
+        ActOutcome::GoalUnblocked { goal_id } => {
+            format!("self-healed blocked goal {goal_id} (unblocked + reactivated)")
+        }
+        ActOutcome::GoalEscalated { goal_id } => {
+            format!("escalated blocked goal {goal_id} for human review")
+        }
+        ActOutcome::GoalHealthSuppressed { reason } => {
+            format!("goal-board action suppressed — {reason}")
+        }
+    };
+    sanitize_detail(&format!("did: {body}"))
+}
+
+/// Render a HELD intervention as a `held: …` line that names the concrete target
+/// it declined to act on AND the gate reason — so "no action" is always
+/// explained, never a silent gap.
+fn describe_hold(planned: &PlannedIntervention) -> String {
+    sanitize_detail(&format!(
+        "held: {} — {}",
+        intervention_target(&planned.intervention),
+        planned.note
+    ))
+}
+
+/// Render an isolated act failure as a `did: … failed` line, classified by the
+/// failing capability/gate. Sanitised so a raw error body (which may echo a
+/// token) never leaks into the persisted, operator-visible feed.
+fn describe_act_error(iv: &Intervention, err: &OverseerError) -> String {
+    let (kind, detail): (&str, String) = match err {
+        OverseerError::Capability { what, detail } => (what, detail.clone()),
+        OverseerError::Gated { risk, .. } => ("gated", format!("risk={risk}")),
+        OverseerError::Budget {
+            spent_usd,
+            budget_usd,
+        } => ("budget", format!("${spent_usd:.2} of ${budget_usd:.2}")),
+        OverseerError::Recursion { subject } => ("recursion", format!("own {subject}")),
+        OverseerError::Conflict { with } => ("conflict", format!("overlaps {with}")),
+    };
+    sanitize_detail(&format!(
+        "did: {} failed — {kind}: {detail} (isolated)",
+        intervention_target(iv)
+    ))
 }
 
 // ─────────────────────────── identity ──────────────────────────────────────
@@ -1001,6 +1193,347 @@ mod tests {
             Intervention::Report.label(),
             "report",
             "label churn would break tracing dashboards"
+        );
+    }
+
+    // ── issue #21: informative detail strings ─────────────────────────────
+    //
+    // The activity log must say WHAT was observed (concrete signal values) and
+    // WHAT was done (concrete actions + outcomes), not bare counts. These tests
+    // pin `sanitize_detail`, the `describe_*` renderers, and the detail-vec
+    // population inside `overseer_tick` (bounded, with a `(+N more)` sentinel).
+
+    use crate::overseer::capabilities::OverseerError;
+    use crate::overseer::intervention::PlannedIntervention;
+    use crate::overseer::signal::DETAIL_STR_CAP;
+
+    #[test]
+    fn sanitize_detail_strips_ansi_and_c0_controls() {
+        let dirty = "\u{1b}[1;31mred\u{1b}[0m\tline\nbreak";
+        let clean = sanitize_detail(dirty);
+        assert!(
+            !clean.contains('\u{1b}'),
+            "ANSI escape bytes must be stripped: {clean:?}"
+        );
+        assert!(
+            !clean.contains('\n') && !clean.contains('\t'),
+            "C0 controls (newline/tab) must be collapsed to spaces: {clean:?}"
+        );
+        assert!(clean.contains("red"), "benign text must survive: {clean:?}");
+        assert!(
+            clean.contains("line"),
+            "benign text must survive: {clean:?}"
+        );
+    }
+
+    #[test]
+    fn sanitize_detail_redacts_token_shaped_secrets() {
+        let ghp = sanitize_detail("pushed with ghp_EXAMPLE_FAKE_TOKEN_do_not_use_00");
+        assert!(
+            !ghp.contains("ghp_EXAMPLE_FAKE_TOKEN_do_not_use_00"),
+            "a GitHub token must be redacted before it is persisted/rendered: {ghp:?}"
+        );
+        let bearer = sanitize_detail("leaked credential blob EXAMPLEfakebearertokenDONOTUSE00");
+        assert!(
+            !bearer.contains("EXAMPLEfakebearertokenDONOTUSE00"),
+            "a Bearer token must be redacted: {bearer:?}"
+        );
+    }
+
+    #[test]
+    fn sanitize_detail_truncates_to_the_cap_with_an_ellipsis() {
+        let long = "x".repeat(DETAIL_STR_CAP * 3);
+        let out = sanitize_detail(&long);
+        // Bounded well within a small multiple of the cap and marked truncated.
+        assert!(
+            out.chars().count() <= DETAIL_STR_CAP + 1,
+            "a detail line must be truncated to DETAIL_STR_CAP: got {} chars",
+            out.chars().count()
+        );
+        assert!(
+            out.ends_with('…'),
+            "a truncated detail must end with an ellipsis marker: {out:?}"
+        );
+    }
+
+    #[test]
+    fn describe_action_merge_names_repo_and_pr() {
+        let s = describe_action(
+            &Intervention::VerifyAndMergePr {
+                repo: "rysweet/Simard".to_string(),
+                pr: 123,
+            },
+            &ActOutcome::Merged,
+        );
+        assert!(
+            s.starts_with("did:"),
+            "action lines self-prefix with 'did:': {s:?}"
+        );
+        assert!(s.contains("rysweet/Simard"), "must name the repo: {s:?}");
+        assert!(s.contains("123"), "must name the PR number: {s:?}");
+        assert!(
+            s.to_lowercase().contains("merg"),
+            "must say it merged: {s:?}"
+        );
+    }
+
+    #[test]
+    fn describe_action_issue_carries_the_url() {
+        let s = describe_action(
+            &Intervention::FileIssue {
+                run: crate::overseer::capabilities::OrchestratorRunBrief {
+                    recipe_name: "smart-orchestrator".to_string(),
+                    failed_step: "build".to_string(),
+                    source_module: "overseer".to_string(),
+                    failure_kind: "compile".to_string(),
+                    error_text: "boom".to_string(),
+                },
+            },
+            &ActOutcome::IssueFiled(IssueOutcome::FiledNew {
+                url: "https://github.com/rysweet/Simard/issues/321".to_string(),
+            }),
+        );
+        assert!(
+            s.contains("https://github.com/rysweet/Simard/issues/321"),
+            "a filed issue must surface its URL so operators can click through: {s:?}"
+        );
+    }
+
+    #[test]
+    fn describe_action_launch_names_the_workstream() {
+        let s = describe_action(
+            &Intervention::LaunchRecipe {
+                brief: RecipeBrief {
+                    task_description: "fix distill".to_string(),
+                    target_repo: "rysweet/Simard".to_string(),
+                    sequence_group: None,
+                },
+            },
+            &ActOutcome::Launched(WorkstreamHandle {
+                id: "ws-77".to_string(),
+            }),
+        );
+        assert!(
+            s.to_lowercase().contains("launch"),
+            "must say launched: {s:?}"
+        );
+        assert!(
+            s.contains("ws-77"),
+            "must name the workstream handle: {s:?}"
+        );
+    }
+
+    #[test]
+    fn describe_action_escalation_carries_the_reason() {
+        let s = describe_action(
+            &Intervention::Escalate {
+                reason: "high-risk deploy needs a human".to_string(),
+            },
+            &ActOutcome::Escalated,
+        );
+        assert!(
+            s.to_lowercase().contains("escalat"),
+            "must say escalated: {s:?}"
+        );
+        assert!(
+            s.contains("high-risk deploy needs a human"),
+            "must carry WHY it escalated: {s:?}"
+        );
+    }
+
+    #[test]
+    fn describe_action_goal_unblock_names_the_goal() {
+        let s = describe_action(
+            &Intervention::UnblockGoal {
+                goal_id: "g-9".to_string(),
+                reason: "false-parked perpetual goal".to_string(),
+            },
+            &ActOutcome::GoalUnblocked {
+                goal_id: "g-9".to_string(),
+            },
+        );
+        assert!(
+            s.contains("g-9"),
+            "must name the reactivated goal id: {s:?}"
+        );
+    }
+
+    #[test]
+    fn describe_hold_states_what_was_held_and_why() {
+        let held = describe_hold(&PlannedIntervention {
+            intervention: Intervention::VerifyAndMergePr {
+                repo: "rysweet/Simard".to_string(),
+                pr: 7,
+            },
+            admitted: false,
+            note: "verify-merge is opt-in; escalated to operator".to_string(),
+        });
+        assert!(
+            held.starts_with("held:"),
+            "held lines self-prefix with 'held:': {held:?}"
+        );
+        assert!(
+            held.contains("rysweet/Simard"),
+            "must name the target repo: {held:?}"
+        );
+        assert!(held.contains('7'), "must name the target PR: {held:?}");
+        assert!(
+            held.contains("verify-merge is opt-in; escalated to operator"),
+            "must carry the gate reason so 'no action' is explained: {held:?}"
+        );
+    }
+
+    #[test]
+    fn describe_act_error_is_classified_and_never_leaks_the_raw_body() {
+        let err = OverseerError::Capability {
+            what: "merge",
+            detail: "remote said: token ghp_EXAMPLE_FAKE_TOKEN_do_not_use_00 invalid".to_string(),
+        };
+        let s = describe_act_error(
+            &Intervention::VerifyAndMergePr {
+                repo: "rysweet/Simard".to_string(),
+                pr: 5,
+            },
+            &err,
+        );
+        assert!(
+            s.to_lowercase().contains("merge"),
+            "an act error must be classified by capability/kind: {s:?}"
+        );
+        assert!(
+            !s.contains("ghp_EXAMPLE_FAKE_TOKEN_do_not_use_00"),
+            "a raw error body may carry secrets and must be redacted: {s:?}"
+        );
+        assert!(
+            s.to_lowercase().contains("fail"),
+            "an act error line must read as a failure: {s:?}"
+        );
+    }
+
+    #[test]
+    fn tick_records_observed_details_with_concrete_values() {
+        // A high distill-failure rate must surface as a concrete observed line.
+        let observed = ObservedState {
+            distill_fail_pct: Some(62.0),
+            ..ObservedState::default()
+        };
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(FakeStatus(observed)), Box::new(prs)));
+        let report = overseer_tick(&mut overseer);
+
+        assert_eq!(report.problems, 1, "the distill signal raises one problem");
+        assert!(
+            !report.observed_details.is_empty(),
+            "an observed problem must produce a human-readable detail line, not just a count"
+        );
+        let joined = report.observed_details.join(" | ");
+        assert!(
+            joined.contains("62"),
+            "the observed detail must carry the concrete distill_fail_pct: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn tick_records_action_details_for_a_launched_workstream() {
+        let observed = ObservedState {
+            distill_fail_pct: Some(62.0),
+            ..ObservedState::default()
+        };
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(FakeStatus(observed)), Box::new(prs)));
+        let report = overseer_tick(&mut overseer);
+
+        assert_eq!(report.recipes_launched, 1, "the tick launches a fix");
+        let joined = report.action_details.join(" | ");
+        assert!(
+            joined.to_lowercase().contains("launch"),
+            "a launched workstream must be described as an action taken: {joined:?}"
+        );
+        assert!(
+            joined.contains("ws-1"),
+            "the action detail must name the concrete workstream handle: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn tick_records_action_details_for_a_merged_pr() {
+        let observed = ObservedState {
+            ready_prs: vec![crate::overseer::capabilities::PrRef {
+                repo: "rysweet/Simard".to_string(),
+                pr: 42,
+            }],
+            ..ObservedState::default()
+        };
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(FakeStatus(observed)), Box::new(prs)))
+            .with_verify_merge_autonomy(true);
+        let report = overseer_tick(&mut overseer);
+
+        assert_eq!(report.prs_merged, 1);
+        let joined = report.action_details.join(" | ");
+        assert!(
+            joined.contains("rysweet/Simard") && joined.contains("42"),
+            "a merged PR must be named concretely in the action details: {joined:?}"
+        );
+        assert!(
+            joined.to_lowercase().contains("merg"),
+            "the action detail must state the merge outcome: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn tick_records_why_a_held_intervention_took_no_action() {
+        let observed = ObservedState {
+            ready_prs: vec![crate::overseer::capabilities::PrRef {
+                repo: "rysweet/Simard".to_string(),
+                pr: 7,
+            }],
+            ..ObservedState::default()
+        };
+        // Default autonomy → the merge is HELD; the log must SAY WHY, not go silent.
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(FakeStatus(observed)), Box::new(prs)));
+        let report = overseer_tick(&mut overseer);
+
+        assert_eq!(report.held, 1);
+        let joined = report.action_details.join(" | ");
+        assert!(
+            joined.to_lowercase().contains("held"),
+            "a held intervention must appear in the details as held, not vanish: {joined:?}"
+        );
+        assert!(
+            joined.contains("rysweet/Simard") && joined.contains('7'),
+            "the held line must name the concrete PR it declined to act on: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn observed_details_are_bounded_with_a_plus_n_more_sentinel() {
+        // Far more distinct problems than the cap → the vec is bounded and the
+        // overflow is summarised, never rendered unbounded.
+        let anomalies: Vec<String> = (0..(DETAIL_CAP + 12))
+            .map(|i| format!("anomaly-{i}"))
+            .collect();
+        let observed = ObservedState {
+            anomalies,
+            ..ObservedState::default()
+        };
+        let (prs, _merges) = RecordingPrs::new(true);
+        let mut overseer = Overseer::new(caps_with(Box::new(FakeStatus(observed)), Box::new(prs)));
+        let report = overseer_tick(&mut overseer);
+
+        assert!(
+            report.observed_details.len() <= DETAIL_CAP + 1,
+            "observed_details must be capped at DETAIL_CAP (+1 for the sentinel): got {}",
+            report.observed_details.len()
+        );
+        let last = report
+            .observed_details
+            .last()
+            .expect("capped detail list is non-empty");
+        assert!(
+            last.to_lowercase().contains("more"),
+            "the final capped entry must summarise the overflow (e.g. '(+N more)'): {last:?}"
         );
     }
 }

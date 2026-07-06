@@ -541,6 +541,15 @@ fn render_overseer(
                     r.timestamp,
                     crate::overseer::activity::humanize_tick(&r.report)
                 );
+                // WHAT it observed + WHAT it did, beneath the summary (issue #21).
+                let details = crate::overseer::activity::humanize_tick_details(&r.report);
+                let detail_shown = details.len().min(DETAIL_ROWS);
+                for d in details.iter().take(DETAIL_ROWS) {
+                    let _ = writeln!(out, "      {d}");
+                }
+                if details.len() > detail_shown {
+                    let _ = writeln!(out, "      … {} more", details.len() - detail_shown);
+                }
             }
             if a.recent.len() > shown {
                 label(
@@ -556,3 +565,6 @@ fn render_overseer(
 
 /// How many recent-activity rows the terminal render shows before summarizing.
 const RECENT_ROWS: usize = 20;
+
+/// How many per-tick detail lines the terminal render shows before summarizing.
+const DETAIL_ROWS: usize = 12;

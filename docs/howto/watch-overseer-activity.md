@@ -7,6 +7,7 @@ owner: simard
 doc_type: howto
 related:
   - ../reference/overseer-activity-feed.md
+  - ../reference/overseer-tick-details.md
   - ../reference/status-snapshot-api.md
   - ./simard-status.md
   - ../dashboard.md
@@ -63,7 +64,8 @@ You will see three things, newest-first, auto-refreshing every ~30 seconds:
   enabled, its cadence, last run, next due, and a one-word health
   (`ok` / `idle` / `erroring` / `backoff` / `disabled`).
 - **Recent activity** — a timeline of ticks in plain language: what it *saw* and
-  what it *did*, or why it *held*.
+  what it *did*, or why it *held* — with the **specifics** shown beneath each
+  summary (which problems, which issue/PR, which workstream, which gate).
 
 A healthy, working tab reads something like:
 
@@ -74,13 +76,24 @@ Operator threads
   overseer                 enabled   every 15 min   last 2 min ago   next in 13 min   ok
 
 Recent activity
-  15:30  observed 2 problems → filed 1 issue, launched 1 fix, held 1 (waiting on a gate)   0.8s
-  15:15  observed 1 problem  → merged 1 green PR                                            1.2s
-  15:00  observing, 0 interventions                                                        0.4s
+  15:30  saw 3 problems → filed 1 issue, launched 1 fix, held 1 (waiting on a gate)   0.8s
+           observed: distill parse-failure rate 34% (threshold 20%)
+           observed: CI failures rysweet/Simard: 3 failing across recent runs
+           observed: blocked goal g-42: waiting on upstream review — needs human review
+           did: filed issue https://github.com/rysweet/Simard/issues/2631
+           did: launched workstream w-7 (fix distill parse failures)
+           held: verify-and-merge PR rysweet/Simard#1299 — budget gate: $19.80 of $20.00 spent
+  15:15  saw 1 problem  → merged 1 green PR                                            1.2s
+           observed: PR rysweet/Simard#1287 green and merge-ready
+           did: merged PR rysweet/Simard#1287
+  15:00  observing, 0 interventions                                                    0.4s
 ```
 
-The language stays plain on purpose — the tab is meant to be understandable
-without knowing Simard's internals.
+The summary line stays short; the indented detail lines say **exactly** what was
+observed and done (see the
+[Overseer tick details reference](../reference/overseer-tick-details.md)). The
+language stays plain on purpose — the tab is meant to be understandable without
+knowing Simard's internals.
 
 ## Option 2 — the TUI Overseer pane
 
@@ -105,9 +118,17 @@ OVERSEER
   last tick         2026-07-05T15:30:00Z (live)
   threads           overseer: ok (last 15:30, next 15:45)
   recent
-    15:30  observed 2 · filed 1 · launched 1 · held 1
-    15:15  observed 1 · merged 1
-    15:00  observing, 0 interventions
+    15:30  saw 3 problems  ·  filed 1 issue, launched 1 fix, held 1
+             observed: distill parse-failure rate 34% (threshold 20%)
+             observed: CI failures rysweet/Simard: 3 failing across recent runs
+             observed: blocked goal g-42: waiting on upstream review — needs human review
+             did: filed issue https://github.com/rysweet/Simard/issues/2631
+             did: launched workstream w-7 (fix distill parse failures)
+             held: verify-and-merge PR rysweet/Simard#1299 — budget gate: $19.80 of $20.00 spent
+    15:15  saw 1 problem  ·  merged 1 PR
+             observed: PR rysweet/Simard#1287 green and merge-ready
+             did: merged PR rysweet/Simard#1287
+    15:00  observing, no action needed
 ```
 
 See [Read Simard's status](./simard-status.md) for the full report and how
@@ -135,7 +156,20 @@ curl -fsS -H "Authorization: Bearer $SIMARD_DASHBOARD_TOKEN" \
   http://localhost:8080/api/overseer \
   | jq -r '.section.data.recent[:3][]
       | "\(.timestamp)  obs=\(.report.problems) filed=\(.report.issues_filed) merged=\(.report.prs_merged) held=\(.report.held)"'
+
+# The SPECIFICS of the latest tick — what it observed and what it did.
+curl -fsS -H "Authorization: Bearer $SIMARD_DASHBOARD_TOKEN" \
+  http://localhost:8080/api/overseer \
+  | jq -r '.section.data.recent[0].report
+      | (.observed_details // [] | .[] | "observed: \(.)"),
+        (.action_details   // [] | .[])'
 ```
+
+`observed_details` are stored **bare**, so the snippet adds the `observed: `
+label itself; `action_details` are stored **self-prefixed** (`did:` / `held:` /
+`… suppressed …`), so they print verbatim — adding `did:` here would double-label
+a `held:` line. See the
+[tick details reference](../reference/overseer-tick-details.md#prefix-ownership).
 
 `recent` is newest-first and capped at 100 ticks; `totals` is summed over the
 records currently retained (a rolling window, not an all-time counter). Always
@@ -202,6 +236,9 @@ The cadence also drives the feed's `live`/`stale` window: a tick is `live` until
 
 - [Overseer activity feed reference](../reference/overseer-activity-feed.md) —
   data model, file contract, and endpoint schema.
+- [Overseer tick details reference](../reference/overseer-tick-details.md) —
+  the informative `observed_details` / `action_details` lines under each tick:
+  what was observed, what was done, and why it held.
 - [Read Simard's status](./simard-status.md) — the full status report.
 - [Dashboard](../dashboard.md) and [`simard-tui`](../reference/simard-tui.md) —
   the surfaces this tab/pane live in.

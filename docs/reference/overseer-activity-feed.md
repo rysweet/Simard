@@ -6,6 +6,7 @@ review_schedule: as-needed
 owner: simard
 doc_type: reference
 related:
+  - ./overseer-tick-details.md
   - ./status-snapshot-api.md
   - ./telemetry-metrics.md
   - ./stewardship-api.md
@@ -127,9 +128,12 @@ pub struct OverseerThreadStatus {
 }
 ```
 
-`OverseerTickReport` is the existing outcome tally emitted by the Overseer
-meta-loop (`src/overseer/wiring.rs`), now `Serialize`/`Deserialize` so it can be
-recorded. Its fields are recorded **verbatim** — no interpretation:
+`OverseerTickReport` is the outcome report emitted by the Overseer meta-loop
+(`src/overseer/wiring.rs`), `Serialize`/`Deserialize` so it can be recorded. It
+carries the raw **counts** below (recorded verbatim — no interpretation) **plus**
+two human-readable **detail** lists that say *what* it observed and *what* it did
+with concrete values — see the
+[Overseer tick details reference](./overseer-tick-details.md):
 
 | Field | Meaning |
 |---|---|
@@ -143,6 +147,18 @@ recorded. Its fields are recorded **verbatim** — no interpretation:
 | `errors` | Capability errors encountered while acting (isolated, never fatal). |
 | `panicked` | The tick itself panicked and was isolated. Recorded, not swallowed. |
 | `duration_ms` | Wall-clock duration of the tick. |
+| `observed_details` | **Additive.** Bare (unprefixed) lines — one per evidence signal of each ranked problem, plus benign non-escalating signals — with concrete values (e.g. `"distill parse-failure rate 34% (threshold 20%)"`). `#[serde(default)]`, capped at 24 lines. |
+| `action_details` | **Additive.** Self-prefixed lines — one per action taken / held / suppressed — with ids and URLs (e.g. `"did: filed issue https://github.com/…/2631"`, `"held: verify-and-merge PR …"`). `#[serde(default)]`, capped at 24 lines. |
+
+The two detail lists are **additive and backward-compatible**: both carry
+`#[serde(default)]`, so an older file (or an older reader) simply shows empty
+details and the surfaces fall back to the count-only summary. Adding them does
+**not** bump `SCHEMA_VERSION`. Because `Vec` is not `Copy`, `OverseerTickReport`
+drops its `Copy` derive but keeps `Clone`/`Debug`/`Default`/`PartialEq`/`Eq`/
+`Serialize`/`Deserialize`. Every detail line is sanitized (control-strip,
+whitespace-collapse, secret-redact, truncate) at capture time — the full
+contract is in the
+[Overseer tick details reference](./overseer-tick-details.md).
 
 ### `health` derivation
 
@@ -294,7 +310,16 @@ which the SPA shows as a soft banner while keeping the last good render.
           "report": {
             "problems": 2, "issues_filed": 1, "recipes_launched": 1,
             "prs_merged": 0, "deploys": 0, "escalations": 0,
-            "held": 1, "errors": 0, "panicked": false, "duration_ms": 843
+            "held": 1, "errors": 0, "panicked": false, "duration_ms": 843,
+            "observed_details": [
+              "distill parse-failure rate 34% (threshold 20%)",
+              "blocked goal g-42: waiting on upstream review — needs human review"
+            ],
+            "action_details": [
+              "did: filed issue https://github.com/rysweet/Simard/issues/2631",
+              "did: launched workstream w-7 (fix distill parse failures)",
+              "held: verify-and-merge PR rysweet/Simard#1299 — budget gate: $19.80 of $20.00 spent"
+            ]
           }
         }
       ]
@@ -347,7 +372,11 @@ tabs):
    **saw** (problems observed) and what it **did** (issues filed, workstreams
    launched, PRs merged, deploys, escalations) — or, when nothing needed doing,
    **why it held** ("observed 2 problems, held 1 — waiting on a gate", or
-   "observing, 0 interventions").
+   "observing, 0 interventions"). Beneath each summary the tab renders the
+   tick's **informative detail lines** — the specific problems observed (with
+   values) and actions taken (with issue/PR numbers and URLs), or the gate
+   reason it held — from `report.observed_details` / `report.action_details`.
+   See the [Overseer tick details reference](./overseer-tick-details.md).
 
 Every interpolated value is escaped (`esc()` / `escAttr()`) before it reaches
 `innerHTML`, so a value that ever contained markup renders inert — covered by an
@@ -360,7 +389,8 @@ by pressing **`Alt+8`** (the footer lists `Alt+1–8`; bare digits are ignored s
 they never steal input on the Meeting tab). It assembles the same
 `StatusSnapshot`, reads `snapshot.overseer`, and renders a bordered pane with the
 identical content as the dashboard tab — the Overseer status line, the operator-
-thread rows, and the newest-first activity timeline — in the TUI's existing
+thread rows, and the newest-first activity timeline (each tick's summary plus its
+informative [detail lines](./overseer-tick-details.md)) — in the TUI's existing
 style. The disabled / observing / absent states render as the same honest
 one-liners. See [`simard-tui`](./simard-tui.md).
 
@@ -405,6 +435,10 @@ writing `overseer/activity.json`. Until then the surfaces show
 
 ## See also
 
+- [Overseer tick details reference](./overseer-tick-details.md) — the
+  informative `observed_details` / `action_details` lines rendered beneath each
+  tick's summary: the detail model, the `sanitize_detail` safety contract, the
+  typed `describe_*` renderers, and per-surface rendering.
 - [How to watch Overseer activity](../howto/watch-overseer-activity.md) — the
   operator walkthrough with rendered output.
 - [StatusSnapshot API reference](./status-snapshot-api.md) — the section model

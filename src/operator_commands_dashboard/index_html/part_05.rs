@@ -341,6 +341,20 @@ pub(crate) const PART_05: &str = r#"      try {
       else action='observing, no action needed';
       return saw+' · '+action;
     }
+    function overseerTickDetails(r){
+      r=r||{};
+      const obs=Array.isArray(r.observed_details)?r.observed_details:[];
+      const act=Array.isArray(r.action_details)?r.action_details:[];
+      const rows=[];
+      for(const o of obs) rows.push('observed: '+esc(o));
+      for(const a of act) rows.push(esc(a));
+      if(!rows.length) return '';
+      let html='';
+      for(const row of rows){
+        html+='<div style="color:#8b949e;font-size:.8rem;padding-left:1.2rem;white-space:pre-wrap">'+row+'</div>';
+      }
+      return html;
+    }
     async function fetchOverseer(){
       const statusEl=document.getElementById('overseer-status');
       const threadsEl=document.getElementById('overseer-threads');
@@ -400,6 +414,7 @@ pub(crate) const PART_05: &str = r#"      try {
             items+='<div style="padding:.35rem .1rem;border-bottom:1px solid #21262d;font-size:.85rem">'
               +'<span style="color:#8b949e">'+esc(rec.timestamp||'')+'</span> — '
               +'<span style="color:#c9d1d9">'+esc(overseerTickHuman(rec.report))+'</span>'
+              +overseerTickDetails(rec.report)
               +'</div>';
           }
           recentEl.innerHTML='<div data-testid="overseer-recent-list">'+items+'</div>';

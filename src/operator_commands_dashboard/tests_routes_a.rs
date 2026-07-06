@@ -806,6 +806,54 @@ mod tests {
         );
     }
 
+    /// #21 — the Overseer tab must render the informative per-tick DETAILS
+    /// (what it observed + what it did), not only the summary one-liner. A
+    /// dedicated `overseerTickDetails(r)` helper reads the two structured
+    /// arrays the report now carries.
+    #[test]
+    fn overseer_tab_defines_and_wires_a_detail_renderer() {
+        assert!(
+            INDEX_HTML.contains("function overseerTickDetails("),
+            "the SPA must define overseerTickDetails() to render observed/action details"
+        );
+        let details = js_fn_body("function overseerTickDetails(");
+        assert!(
+            details.contains("observed_details"),
+            "overseerTickDetails must read the observed_details array:\n{details}"
+        );
+        assert!(
+            details.contains("action_details"),
+            "overseerTickDetails must read the action_details array:\n{details}"
+        );
+        // The recent-activity loop must actually call the detail renderer.
+        let recent = js_fn_body("function fetchOverseer()");
+        assert!(
+            recent.contains("overseerTickDetails("),
+            "fetchOverseer must invoke overseerTickDetails for each recent tick:\n{recent}"
+        );
+    }
+
+    /// #21 — every detail string is attacker-influenceable feed content (repo
+    /// slugs, issue URLs, blocked-goal reasons, anomaly text). Each must pass
+    /// through `esc(...)`; a `</div><script>`-style payload must render inert.
+    #[test]
+    fn overseer_detail_renderer_escapes_every_string() {
+        let details = js_fn_body("function overseerTickDetails(");
+        assert!(
+            details.contains("esc("),
+            "overseerTickDetails must escape every interpolated detail string \
+             via esc(...); an unescaped feed value is an XSS vector:\n{details}"
+        );
+        // No detail array element may be concatenated raw into innerHTML.
+        for raw in ["+d+", "+line+", "+s+", "+detail+"] {
+            assert!(
+                !details.contains(raw),
+                "a detail string must never be concatenated unescaped ('{raw}') \
+                 into innerHTML:\n{details}"
+            );
+        }
+    }
+
     // -------------------------------------------------------------------
     // Issue #1682 — Traces-tab cost rows must be human-readable.
     //
