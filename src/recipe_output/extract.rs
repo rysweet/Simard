@@ -366,7 +366,16 @@ pub fn strip_json_trailing_commas(s: &str) -> Cow<'_, str> {
             if j < bytes.len() && (bytes[j] == b'}' || bytes[j] == b']') {
                 // Trailing comma: on the first hit, seed the owned buffer with
                 // everything before it; then drop this comma by not pushing it.
-                out.get_or_insert_with(|| Vec::from(&bytes[..i]));
+                // Reserve the full input length up front — the rest of the scan
+                // pushes byte-by-byte and only ever removes a handful of commas,
+                // so `bytes.len()` is a tight upper bound that eliminates the
+                // reallocations a capacity-`i` seed would incur on a large
+                // (multi-fact) repaired document.
+                out.get_or_insert_with(|| {
+                    let mut v = Vec::with_capacity(bytes.len());
+                    v.extend_from_slice(&bytes[..i]);
+                    v
+                });
                 i += 1;
                 continue;
             }
