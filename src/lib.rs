@@ -16,6 +16,7 @@ pub mod base_types;
 pub mod bootstrap;
 pub mod build_lock;
 pub mod cargo_jobs;
+pub mod ci_health;
 pub mod cmd_cleanup;
 pub mod cmd_ensure_deps;
 pub mod cmd_install;

@@ -166,6 +166,19 @@ fn display_stewardship_invalid_run_summary() {
     assert!(msg.contains("run_id"), "{msg}");
 }
 
+// --- Display: CiHealthGhCommandFailed ---
+
+#[test]
+fn display_ci_health_gh_command_failed() {
+    let err = SimardError::CiHealthGhCommandFailed {
+        reason: "gh run list exited 1".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("ci-health"), "{msg}");
+    assert!(msg.contains("gh"), "{msg}");
+    assert!(msg.contains("gh run list exited 1"), "{msg}");
+}
+
 // --- Display: MergeAuthorityGhCommandFailed ---
 
 #[test]

@@ -8,4 +8,11 @@ ignore = [
     # rustyclawd-tools → octocrab → jsonwebtoken → rsa.
     # Tracked upstream: https://github.com/RustCrypto/RSA/issues/19
     "RUSTSEC-2023-0071",
+    # RUSTSEC-2026-0204: invalid pointer dereference in the `fmt::Display` impl
+    # for `Atomic`/`Shared` in `crossbeam-epoch`. Issued 2026-07-06 with no
+    # fixed upstream release. Transitive dep via
+    # simard → rustyclawd-tools → moka → crossbeam-epoch. Only reachable by
+    # `Display`-formatting a null crossbeam `Atomic`/`Shared`, which Simard
+    # never does. Tracked upstream: https://rustsec.org/advisories/RUSTSEC-2026-0204
+    "RUSTSEC-2026-0204",
 ]
