@@ -7,6 +7,7 @@ owner: simard
 doc_type: howto
 related:
   - ../reference/goal-decomposition.md
+  - ../reference/goal-decompose-result-channel.md
   - ../reference/goal-board-api.md
   - ../reference/simard-cli.md
   - ./unblock-stuck-ooda-goals.md
@@ -177,12 +178,15 @@ percentage; it is not surfaced as a separate `goal list` column.
 | Exits non-zero with `invalid goal id '<id>': …` and nothing is written | `<goal_id>` failed `validate_goal_id` (empty, too long, leading `-`/`.`, or a disallowed character) | Re-check the id with `simard goal list`; ids are charset-validated before any work begins. |
 | Exits non-zero with `goal '<id>' not found on active board` | The id is not an active goal | Decomposition operates on an active goal; promote or re-check the id first. |
 | Exits non-zero with `decomposition failed: …` and the goal is left intact | The decomposer returned an unusable shape (fewer than 2 sub-goals after clamping, a malformed child id, or the decomposer itself errored) | This is the **deterministic-fallback** safeguard refusing to write garbage — the board and graph are untouched. Adjust the goal wording or the prompt and re-run. (A fan-out larger than 6 is **clamped** to 6, not rejected.) |
+| Exits non-zero with `invalid sub_goals: …` and nothing is written | The decomposition agent wrote **nothing** (missing / empty file) or wrote unparseable JSON to its result file — the loud `field: "sub_goals"` error from the [result channel](../reference/goal-decompose-result-channel.md) (issue #2708) | Expected loud failure, never a silent empty decomposition. Re-run; if it persists, confirm the hot-reload assets carry the file-channel instructions (`grep -l sub_goals_output ~/.simard/prompt_assets/simard/recipes/goal-decomposition.yaml ~/.simard/prompt_assets/simard/goal_decomposition.md`) — a stale "write to stdout" asset makes the agent write nothing to the file. |
+| Previously: `could not parse sub-goals from decomposition output` even though the run took ~48 s | The retired transport scraped the agent's JSON from `recipe-runner-rs` **stdout** and the launcher banner / ANSI / log noise broke the brace scan | Fixed in issue #2708: the agent writes to a dedicated `sub_goals_output` file and stdout is no longer parsed. Ensure the deployed build and hot-reload assets include the fix. |
 | Children landed in the backlog instead of the board | Promoting all children would exceed `MAX_ACTIVE_GOALS = 20` | Expected. They stay linked to the parent through their `decomposes_into` edges and are promoted later by backlog scoring. |
 | Re-running `decompose` did not create duplicate edges | The edge caller key (`goal-edge:{type}:{from}->{to}`) makes writes idempotent | Expected — a re-run supersedes the prior edge fact instead of appending. |
 
 ## Related
 
 - [Goal decomposition & the goal graph](../reference/goal-decomposition.md) — the data model, edge model, roll-up rule, and full CLI contract
+- [Goal-decompose result channel](../reference/goal-decompose-result-channel.md) — how the agent's `{ "sub_goals": [...] }` reaches Simard over a clean result file (issue #2708) and its loud failure taxonomy
 - [Goal board API reference](../reference/goal-board-api.md)
 - [Simard CLI reference](../reference/simard-cli.md) — the `simard goal` verb tree
 - [How to unblock stuck OODA goals](./unblock-stuck-ooda-goals.md)
