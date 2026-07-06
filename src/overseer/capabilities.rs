@@ -11,6 +11,8 @@
 
 use std::fmt;
 
+use crate::overseer::signal::{Problem, Signal};
+
 /// Small, cheap error type shared by every capability. Kept intentionally tiny
 /// so `Result<T, OverseerError>` never trips `clippy::result_large_err`.
 #[derive(Clone, Debug, PartialEq)]
@@ -102,6 +104,19 @@ pub struct ObservedState {
     /// A short description of observed drift from the active goal's intent, when
     /// the Overseer can see it. `None` when no drift is observed.
     pub drift_detail: Option<String>,
+    /// The bounded cognitive-memory recall for this Observe pass (issue #2628).
+    /// `None` when recall is disabled or has not run; `Some(empty)` when the
+    /// graph had nothing relevant (a valid, successful result). Populated by the
+    /// Overseer's whole-pass recall via [`MemoryRecall`]; consumed by
+    /// `signals_from`/Orient to detect a recurring signature. Kept **distinct**
+    /// from [`recall_error`](Self::recall_error) so an empty graph is never
+    /// confused with a swallowed error.
+    pub recall: Option<MemorySnapshot>,
+    /// Set to the surfaced error string when recall **failed** this pass (issue
+    /// #2628). Kept separate from [`recall`](Self::recall) — which stays `None`
+    /// on failure — so callers, the tick report, and tests can always tell an
+    /// empty graph from an unreachable one (no silent fallback).
+    pub recall_error: Option<String>,
 }
 
 /// A `(repo, pr)` pair. `repo` is an `owner/name` slug.
@@ -384,4 +399,312 @@ pub trait GoalCurator {
 /// `prompt_assets/simard/recipes/monthly-self-quality-audit.yaml`.
 pub trait Auditor {
     fn run_audit(&self, scope: &AuditScope) -> Result<AuditReport, OverseerError>;
+}
+
+// ───────────────────── cognitive-memory recall (#2628) ─────────────────────
+//
+// The Overseer's bounded READ access to Simard's cognitive-memory graph plus
+// one deliberate, de-duplicated episodic WRITE-back, as a first-class part of
+// its Observe/Orient loop. Every type here is an owned, self-contained
+// projection so signal derivation stays pure; the concrete adapter
+// (`wiring::MemoryRecallOps`) is a thin reuse of the already-shipped
+// `CognitiveMemoryOps` handle the daemon already shares — never a second store,
+// never a reimplementation of memory logic (guideline G2: no new memory-lib
+// API is required).
+
+/// Maximum length (bytes) any single recalled/derived text may reach before it
+/// is allowed to egress (a `Problem.summary`, a log line, an operator
+/// notification). Bounds log/notification-injection blast radius.
+pub const RECALLED_TEXT_MAX_LEN: usize = 8192;
+
+/// Sanitize a piece of **untrusted** recalled/derived text before it may reach
+/// any egress surface (a `Problem.summary`, a `tracing` field, an operator
+/// notification). Simard's cognitive-memory graph is multi-writer, so recalled
+/// content is untrusted input: this is the single admission boundary that
+/// neutralises log/notification injection and header spoofing.
+///
+/// It (1) replaces every control character — including `CR`, `LF`, `TAB`, and
+/// ANSI `ESC` — with a single space so no newline or control byte survives, and
+/// (2) caps the result at [`RECALLED_TEXT_MAX_LEN`] bytes on a UTF-8 boundary so
+/// a huge recalled blob can never flood a log or a notification. Plain text
+/// (no control chars, within the cap) is returned unchanged.
+pub fn sanitize_recalled(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().min(RECALLED_TEXT_MAX_LEN));
+    for c in s.chars() {
+        // Reserve room on a UTF-8 boundary so the cap is never exceeded.
+        if out.len() + c.len_utf8() > RECALLED_TEXT_MAX_LEN {
+            break;
+        }
+        if c.is_control() {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Hard, constant per-kind caps the recall pass enforces so recall can never fan
+/// out into an unbounded read. Budgets are constants (not env knobs): bounding
+/// result **size** — plus the panic-isolated tick — is what keeps recall
+/// non-blocking, since the calls are in-process against the shared store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecallBudget {
+    pub semantic: u32,
+    pub episodic: u32,
+    pub procedural: u32,
+    pub prospective: u32,
+}
+
+impl Default for RecallBudget {
+    /// The library-balanced default: `5 / 5 / 3 / 5`.
+    fn default() -> Self {
+        Self {
+            semantic: 5,
+            episodic: 5,
+            procedural: 3,
+            prospective: 5,
+        }
+    }
+}
+
+/// The keyword sets the Overseer recalls against, derived from the cycle's
+/// Signals and Problems — **never** a full-graph scan. Mirrors
+/// `crate::stewardship::failure_signature` semantics so the recall key and the
+/// stewardship dedup key line up.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecallKeys {
+    /// Free-text keywords built from the detected Signals/Problems (e.g.
+    /// `distill_fail`, `restart_churn`, a blocked-goal id). Deduped + sorted so
+    /// recall is reproducible.
+    pub keywords: Vec<String>,
+    /// Stable `failure_signature`-style keys, one per Problem, used both to
+    /// query episodes and to detect a recurring signature on recall.
+    pub signatures: Vec<String>,
+}
+
+impl RecallKeys {
+    /// Derive the recall keys from this cycle's `signals` and `problems`. The
+    /// keyword set comes from the signals (one stable token per variant); the
+    /// signatures are the problems' `dedup_key`s (already `failure_signature`
+    /// shaped). Both are deduped and sorted so recall is deterministic.
+    pub fn from_signals(signals: &[Signal], problems: &[Problem]) -> Self {
+        let mut keywords: Vec<String> = signals.iter().filter_map(signal_keyword).collect();
+        keywords.sort();
+        keywords.dedup();
+
+        let mut signatures: Vec<String> = problems.iter().map(|p| p.dedup_key.clone()).collect();
+        signatures.sort();
+        signatures.dedup();
+
+        Self {
+            keywords,
+            signatures,
+        }
+    }
+
+    /// A single deterministic query string joining every keyword and signature —
+    /// the shape the underlying keyword/ranked recalls (and the single-`&str`
+    /// `check_triggers` probe) consume. Order-stable because the fields are
+    /// already sorted.
+    pub fn query(&self) -> String {
+        let mut terms: Vec<&str> = self.keywords.iter().map(String::as_str).collect();
+        terms.extend(self.signatures.iter().map(String::as_str));
+        terms.join(" ")
+    }
+}
+
+/// One stable keyword for a signal variant (values elided). `None` for variants
+/// that carry no useful recall key on their own.
+fn signal_keyword(s: &Signal) -> Option<String> {
+    let kw = match s {
+        Signal::DistillFailureRate { .. } => "distill_fail".to_string(),
+        Signal::RestartChurn { .. } => "restart_churn".to_string(),
+        Signal::LadderExhausted { .. } => "ladder_exhausted".to_string(),
+        Signal::BudgetPressure { .. } => "budget_pressure".to_string(),
+        Signal::EngineerSpawnRate { .. } => "engineer_spawn".to_string(),
+        Signal::MemoryGrowth { .. } => "memory_growth".to_string(),
+        Signal::GymSkipped => "gym_skipped".to_string(),
+        Signal::CiFailureCluster { repo, .. } => format!("ci:{repo}"),
+        Signal::PrReadyToMerge { repo, pr } => format!("pr:{repo}#{pr}"),
+        Signal::StaleGoal { goal_id } => format!("goal:{goal_id}"),
+        Signal::Anomaly { detail } => format!("anomaly:{detail}"),
+        Signal::LoopDetected { goal_id, .. } => format!("loop:{goal_id}"),
+        Signal::DriftCorrection { goal_id, .. } => format!("drift:{goal_id}"),
+        Signal::GoalBlocked { goal_id, .. } => format!("blocked:{goal_id}"),
+        Signal::RecurringSignature { signature, .. } => signature.clone(),
+    };
+    if kw.is_empty() { None } else { Some(kw) }
+}
+
+/// The bundle of recalled results for one Observe pass, stored on
+/// [`ObservedState::recall`] and consumed by `signals_from`/Orient. An empty
+/// snapshot is a valid, successful result (the graph had nothing relevant); it
+/// is **distinct** from a recall error.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MemorySnapshot {
+    pub facts: Vec<RecalledFact>,
+    pub episodes: Vec<RecalledEpisode>,
+    pub procedures: Vec<RecalledProcedure>,
+    pub prospectives: Vec<RecalledProspective>,
+}
+
+/// A flattened, owned projection of a semantic fact. All free text is untrusted
+/// input (see the security model in the reference doc).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecalledFact {
+    pub id: String,
+    /// Concept / prior root-cause — untrusted text.
+    pub content: String,
+    /// Ranking score from the underlying ranked recall.
+    pub score: f32,
+}
+
+/// A flattened, owned projection of an episodic memory.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecalledEpisode {
+    pub id: String,
+    /// Untrusted summary text.
+    pub summary: String,
+    /// Parsed `failure_signature` — the LOAD-BEARING key Orient counts to raise a
+    /// [`Signal::RecurringSignature`]. `None` when the episode carried no
+    /// signature.
+    pub failure_signature: Option<String>,
+    pub score: f32,
+}
+
+/// A flattened, owned projection of a procedural runbook. Advisory-only egress.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecalledProcedure {
+    pub id: String,
+    /// Stored runbook text — untrusted; advisory-only.
+    pub content: String,
+}
+
+/// A flattened, owned projection of a prospective memory / deferred idea.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecalledProspective {
+    pub id: String,
+    /// Deferred-intention text — untrusted.
+    pub content: String,
+}
+
+/// The Overseer's deliberate episodic write-back payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservationEpisode {
+    /// Human-readable one-line summary of what the Overseer observed/decided.
+    pub content: String,
+    /// The observation signature this episode is keyed on — also the de-dup key
+    /// for the write-back gate.
+    pub signature: String,
+}
+
+/// Outcome of a deliberate write-back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecordOutcome {
+    /// A new episode was written; carries the new node id.
+    Stored { node_id: String },
+    /// An identical-signature observation was written within the dedup window;
+    /// nothing was persisted this tick.
+    Deduplicated,
+}
+
+/// Bounded READ access to Simard's cognitive-memory graph, plus one deliberate,
+/// de-duplicated episodic WRITE-back. Every read method is **fail-closed**: an
+/// underlying memory error is returned as `OverseerError::Capability`, never
+/// collapsed into an empty result (that would be a silent fallback). Each read
+/// takes a single-kind `limit` (the caller passes the matching field of
+/// [`RecallBudget`]) so no method ever sees budget fields it does not use.
+///
+/// **Reuse:** the production adapter (`crate::overseer::wiring::MemoryRecallOps`)
+/// maps each method onto an already-shipped
+/// [`CognitiveMemoryOps`](crate::cognitive_memory::CognitiveMemoryOps) query over
+/// the daemon's single shared `Arc` handle — no new memory-library API.
+pub trait MemoryRecall: Send + Sync {
+    /// Recall up to `limit` semantic facts relevant to `keys` (concepts, prior
+    /// root-causes).
+    fn recall_semantic(
+        &self,
+        keys: &RecallKeys,
+        limit: u32,
+    ) -> Result<Vec<RecalledFact>, OverseerError>;
+
+    /// Recall up to `limit` episodic memories relevant to `keys` (prior
+    /// occurrences of a problem and their outcomes). Carries each episode's
+    /// failure signature so Orient can detect a recurring signature.
+    fn recall_episodic(
+        &self,
+        keys: &RecallKeys,
+        limit: u32,
+    ) -> Result<Vec<RecalledEpisode>, OverseerError>;
+
+    /// Recall up to `limit` procedural runbooks relevant to `keys`. Surfaced by
+    /// Decide when a recurring signature is seen.
+    fn recall_procedural(
+        &self,
+        keys: &RecallKeys,
+        limit: u32,
+    ) -> Result<Vec<RecalledProcedure>, OverseerError>;
+
+    /// Recall up to `limit` prospective memories / ideas whose triggers match
+    /// `keys` (deferred intentions the current situation should re-surface).
+    fn recall_prospective(
+        &self,
+        keys: &RecallKeys,
+        limit: u32,
+    ) -> Result<Vec<RecalledProspective>, OverseerError>;
+
+    /// Write the Overseer's own observation back as one episodic memory. Returns
+    /// whether it was stored or (in a backend that models its own dedup)
+    /// suppressed; the Overseer additionally gates this call so a repeated
+    /// signature within the window never reaches the backend at all.
+    fn record_observation(
+        &self,
+        episode: &ObservationEpisode,
+    ) -> Result<RecordOutcome, OverseerError>;
+}
+
+/// An inert [`MemoryRecall`] for tests that do not exercise the memory seam:
+/// every read returns an empty result and the write-back is a no-op. Only used
+/// by capability-constructor helpers in other `overseer` test modules (their
+/// Overseers leave recall disabled, so this handle is never actually queried).
+#[cfg(test)]
+pub(crate) struct InertMemoryRecall;
+
+#[cfg(test)]
+impl MemoryRecall for InertMemoryRecall {
+    fn recall_semantic(
+        &self,
+        _keys: &RecallKeys,
+        _limit: u32,
+    ) -> Result<Vec<RecalledFact>, OverseerError> {
+        Ok(Vec::new())
+    }
+    fn recall_episodic(
+        &self,
+        _keys: &RecallKeys,
+        _limit: u32,
+    ) -> Result<Vec<RecalledEpisode>, OverseerError> {
+        Ok(Vec::new())
+    }
+    fn recall_procedural(
+        &self,
+        _keys: &RecallKeys,
+        _limit: u32,
+    ) -> Result<Vec<RecalledProcedure>, OverseerError> {
+        Ok(Vec::new())
+    }
+    fn recall_prospective(
+        &self,
+        _keys: &RecallKeys,
+        _limit: u32,
+    ) -> Result<Vec<RecalledProspective>, OverseerError> {
+        Ok(Vec::new())
+    }
+    fn record_observation(
+        &self,
+        _episode: &ObservationEpisode,
+    ) -> Result<RecordOutcome, OverseerError> {
+        Ok(RecordOutcome::Deduplicated)
+    }
 }

@@ -140,6 +140,12 @@ pub fn observed_from_snapshot(snap: &StatusSnapshot) -> ObservedState {
         consecutive_no_action: None,
         active_goal_id: None,
         drift_detail: None,
+        // Memory recall (#2628) is populated by the acting Overseer's Observe
+        // pass (via the shared memory handle), not from the read-only status
+        // snapshot; left `None` here so this projection stays additive and
+        // side-effect free.
+        recall: None,
+        recall_error: None,
     }
 }
 

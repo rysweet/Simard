@@ -22,6 +22,8 @@ related:
   - ../howto/add-a-new-cognitive-thread.md
   - ../reference/overseer-activity-feed.md
   - ../howto/watch-overseer-activity.md
+  - ../reference/overseer-memory-recall-api.md
+  - ../howto/configure-overseer-memory-recall.md
   - ../reference/status-snapshot-api.md
   - ../concepts/unified-telemetry-and-status.md
   - ../reference/stewardship-api.md

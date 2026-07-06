@@ -425,6 +425,13 @@ pub fn humanize_tick(r: &OverseerTickReport) -> String {
             plural(r.goals_escalated)
         ));
     }
+    if r.memory_writes > 0 {
+        did.push(format!(
+            "recorded {} memory note{}",
+            r.memory_writes,
+            plural(r.memory_writes)
+        ));
+    }
 
     let saw = format!("saw {} problem{}", r.problems, plural(r.problems));
     let action = if !did.is_empty() {

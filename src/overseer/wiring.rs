@@ -31,7 +31,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::cognitive_memory::CognitiveMemoryOps;
+use crate::cognitive_memory::{CognitiveMemoryOps, RecallWeightSet};
 use crate::goal_curation::{BacklogItem, GoalBoard, GoalProgress};
 use crate::goal_curation::{
     DEFAULT_STEWARD_SCORE, add_backlog_item, load_goal_board, save_goal_board,
@@ -39,10 +39,13 @@ use crate::goal_curation::{
 
 use crate::overseer::audit::SelfQualityAuditor;
 use crate::overseer::capabilities::{
-    BlockedGoal, DeployReport, Deployer, GoalBrief, GoalCurator, InFlightItem, OverseerError,
+    BlockedGoal, DeployReport, Deployer, GoalBrief, GoalCurator, InFlightItem, MemoryRecall,
+    ObservationEpisode, OverseerError, RecallKeys, RecalledEpisode, RecalledFact,
+    RecalledProcedure, RecalledProspective, RecordOutcome,
 };
 use crate::overseer::config::{
-    goal_health_enabled, overseer_author_login, overseer_interval_secs, whisper_enabled,
+    goal_health_enabled, memory_recall_enabled, overseer_author_login, overseer_interval_secs,
+    whisper_enabled,
 };
 use crate::overseer::deploy::GuardedDeployer;
 use crate::overseer::guardrails::RecursionGuard;
@@ -139,6 +142,16 @@ pub struct OverseerTickReport {
     pub goals_health_suppressed: usize,
     /// Capability errors encountered while acting (isolated, never fatal).
     pub errors: usize,
+    /// Completed whole cognitive-memory recall passes this tick (issue #2628):
+    /// **1** when all four bounded sub-reads returned `Ok` (even on an empty
+    /// graph), **0** otherwise. At most 1 per tick.
+    pub memory_recalls: usize,
+    /// Episodic observations actually persisted back into memory this tick
+    /// (dedup suppressions excluded).
+    pub memory_writes: usize,
+    /// Surfaced memory failures this tick — a failed recall pass and/or a failed
+    /// write-back (0, 1, or 2), never swallowed (no silent fallback).
+    pub memory_errors: usize,
     /// Set when the tick itself panicked and was isolated by
     /// [`run_overseer_tick_isolated`].
     pub panicked: bool,
@@ -161,6 +174,19 @@ pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
     match overseer.run_cycle() {
         Ok(cycle) => {
             report.problems = cycle.problems.len();
+
+            // Cognitive-memory recall (#2628) counters, derived from the Observe
+            // pass. A completed whole recall pass leaves `recall = Some(..)`
+            // (even for an empty graph); a failed pass leaves `recall = None`
+            // and `recall_error = Some(..)` — mutually exclusive, so a pass adds
+            // to exactly one of `memory_recalls` / `memory_errors`.
+            if cycle.observed.recall.is_some() {
+                report.memory_recalls += 1;
+            }
+            if cycle.observed.recall_error.is_some() {
+                report.memory_errors += 1;
+            }
+
             for planned in &cycle.plan {
                 if !planned.admitted {
                     report.held += 1;
@@ -177,6 +203,24 @@ pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
                             "overseer intervention failed — isolated, continuing"
                         );
                     }
+                }
+            }
+
+            // Deliberate, de-duplicated write-back of the Overseer's own
+            // observation (#2628). A store increments `memory_writes`; a
+            // de-duplicated / disabled / clean-tick write records nothing; a
+            // backing-store error is SURFACED and counted (never swallowed) and
+            // the tick still completes.
+            match overseer.write_back_observation(&cycle.problems) {
+                Ok(Some(RecordOutcome::Stored { .. })) => report.memory_writes += 1,
+                Ok(_) => {}
+                Err(e) => {
+                    report.memory_errors += 1;
+                    tracing::warn!(
+                        target: "overseer::memory",
+                        error = %e,
+                        "overseer memory write-back failed — surfaced, continuing"
+                    );
                 }
             }
         }
@@ -206,6 +250,9 @@ pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
         goals_unblocked = report.goals_unblocked,
         goals_escalated = report.goals_escalated,
         goals_health_suppressed = report.goals_health_suppressed,
+        memory_recalls = report.memory_recalls,
+        memory_writes = report.memory_writes,
+        memory_errors = report.memory_errors,
         errors = report.errors,
         duration_ms = report.duration_ms,
         "overseer tick complete"
@@ -384,6 +431,163 @@ fn slugify(s: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+// ─────────────────────────── memory recall (#2628) ─────────────────────────
+
+/// Production [`MemoryRecall`]: bounded read access to Simard's cognitive-memory
+/// graph plus one deliberate, de-duplicated episodic write-back, over the
+/// **same** shared [`CognitiveMemoryOps`] handle the daemon already holds
+/// (single-source — never a second store). Each method is a thin adapter onto an
+/// already-shipped memory query (guideline G2: no new memory-library API), maps
+/// every underlying `Err` to `OverseerError::Capability { what: "memory-recall" }`
+/// (fail-closed, never an empty `Ok`), and enforces the per-kind size budgets.
+pub struct MemoryRecallOps {
+    mem: Arc<dyn CognitiveMemoryOps>,
+}
+
+/// The fixed provenance every Overseer write-back carries. Never caller-chosen,
+/// so a hostile payload can never spoof a different author into the graph.
+const OVERSEER_SOURCE_LABEL: &str = "overseer";
+
+/// Minimum confidence for semantic recall — `0.0` keeps recall inclusive; the
+/// ranked order (not a hard floor) decides relevance.
+const RECALL_MIN_CONFIDENCE: f64 = 0.0;
+
+impl MemoryRecallOps {
+    pub fn new(mem: Arc<dyn CognitiveMemoryOps>) -> Self {
+        Self { mem }
+    }
+
+    /// Map any backing-store error to the recall capability error. The `what`
+    /// tag is fixed so telemetry and tests can key on the recall seam.
+    fn cap_err(e: impl std::fmt::Display) -> OverseerError {
+        OverseerError::Capability {
+            what: "memory-recall",
+            detail: e.to_string(),
+        }
+    }
+}
+
+/// Parse the `[sig:…]` marker the Overseer's own write-back embeds so a later
+/// recall can recover an episode's failure signature (episodes carry no typed
+/// signature field on the read path). `None` when the episode carried none.
+fn parse_failure_signature(content: &str) -> Option<String> {
+    let start = content.find("[sig:")? + "[sig:".len();
+    let rest = &content[start..];
+    let end = rest.find(']')?;
+    let sig = rest[..end].trim();
+    if sig.is_empty() {
+        None
+    } else {
+        Some(sig.to_string())
+    }
+}
+
+impl MemoryRecall for MemoryRecallOps {
+    fn recall_semantic(
+        &self,
+        keys: &RecallKeys,
+        limit: u32,
+    ) -> Result<Vec<RecalledFact>, OverseerError> {
+        let facts = self
+            .mem
+            .recall_facts_ranked(
+                &keys.query(),
+                limit,
+                RECALL_MIN_CONFIDENCE,
+                RecallWeightSet::default(),
+            )
+            .map_err(Self::cap_err)?;
+        Ok(facts
+            .into_iter()
+            .map(|f| RecalledFact {
+                id: f.node_id,
+                content: f.content,
+                score: f.confidence as f32,
+            })
+            .collect())
+    }
+
+    fn recall_episodic(
+        &self,
+        keys: &RecallKeys,
+        limit: u32,
+    ) -> Result<Vec<RecalledEpisode>, OverseerError> {
+        let episodes = self
+            .mem
+            .recall_episodes_ranked(&keys.query(), limit, RecallWeightSet::default())
+            .map_err(Self::cap_err)?;
+        Ok(episodes
+            .into_iter()
+            .map(|e| RecalledEpisode {
+                failure_signature: parse_failure_signature(&e.content),
+                id: e.node_id,
+                summary: e.content,
+                score: 0.0,
+            })
+            .collect())
+    }
+
+    fn recall_procedural(
+        &self,
+        keys: &RecallKeys,
+        limit: u32,
+    ) -> Result<Vec<RecalledProcedure>, OverseerError> {
+        let procs = self
+            .mem
+            .recall_procedure(&keys.query(), limit)
+            .map_err(Self::cap_err)?;
+        Ok(procs
+            .into_iter()
+            .map(|p| RecalledProcedure {
+                content: if p.steps.is_empty() {
+                    p.name.clone()
+                } else {
+                    format!("{}: {}", p.name, p.steps.join(" → "))
+                },
+                id: p.node_id,
+            })
+            .collect())
+    }
+
+    fn recall_prospective(
+        &self,
+        keys: &RecallKeys,
+        limit: u32,
+    ) -> Result<Vec<RecalledProspective>, OverseerError> {
+        // `check_triggers` takes a single `&str`, so join the keys into one
+        // deterministic probe rather than fanning out per key.
+        let hits = self
+            .mem
+            .check_triggers(&keys.query())
+            .map_err(Self::cap_err)?;
+        Ok(hits
+            .into_iter()
+            .take(limit as usize)
+            .map(|p| RecalledProspective {
+                id: p.node_id,
+                content: p.description,
+            })
+            .collect())
+    }
+
+    fn record_observation(
+        &self,
+        episode: &ObservationEpisode,
+    ) -> Result<RecordOutcome, OverseerError> {
+        // Embed the signature marker so a later recall can recover it, and carry
+        // a typed metadata copy. Provenance is FIXED (`source_label` is never
+        // caller-chosen), and the metadata is a validated JSON object carrying
+        // only the signature — no secrets, tokens, or env.
+        let content = format!("{} [sig:{}]", episode.content, episode.signature);
+        let metadata = serde_json::json!({ "signature": episode.signature });
+        let node_id = self
+            .mem
+            .store_episode(&content, OVERSEER_SOURCE_LABEL, Some(&metadata))
+            .map_err(Self::cap_err)?;
+        Ok(RecordOutcome::Stored { node_id })
+    }
+}
+
 // ─────────────────────────── deployer (safe stub) ──────────────────────────
 
 /// A [`Deployer`] that REFUSES autonomous deploys. The deterministic Decide
@@ -430,8 +634,11 @@ pub fn assemble_capabilities(
         issues: Box::new(StewardshipIssueFiler::new(Arc::new(
             crate::stewardship::RealGhClient,
         ))),
-        goals: Box::new(BoardGoalCurator::new(mem)),
+        // The goal curator and the memory-recall seam SHARE the one
+        // `Arc<dyn CognitiveMemoryOps>` handle (single-source; no second store).
+        goals: Box::new(BoardGoalCurator::new(Arc::clone(&mem))),
         auditor: Box::new(SelfQualityAuditor::from_env(repo_root, state_root)),
+        memory: Box::new(MemoryRecallOps::new(mem)),
     }
 }
 
@@ -466,6 +673,11 @@ pub fn build_overseer(
         // Enabled by default (opt-out via SIMARD_OVERSEER_GOAL_HEALTH).
         .with_goal_health_enabled(goal_health_enabled())
         .with_operator_notifier(Box::new(DualChannelNotifier::from_env()))
+        // Cognitive-memory recall (#2628): the Overseer reads Simard's memory
+        // graph in Observe/Orient and writes its observation back — over the
+        // SAME shared handle assembled above. Enabled by default (opt-out via
+        // SIMARD_OVERSEER_MEMORY_RECALL); a disabled Overseer forces it off.
+        .with_memory_recall_enabled(memory_recall_enabled())
 }
 
 /// Resolve the acting Overseer's tick cadence (seconds), clamped to the config
@@ -645,6 +857,7 @@ mod tests {
             issues: Box::new(FakeIssues),
             goals: Box::new(FakeGoals(vec![])),
             auditor: Box::new(FakeAuditor),
+            memory: Box::new(crate::overseer::capabilities::InertMemoryRecall),
         }
     }
 

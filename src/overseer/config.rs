@@ -41,6 +41,14 @@ pub const SIMARD_OVERSEER_WHISPER_ENV: &str = "SIMARD_OVERSEER_WHISPER";
 /// sense while the Overseer runs, so a disabled Overseer forces it off.
 pub const SIMARD_OVERSEER_GOAL_HEALTH_ENV: &str = "SIMARD_OVERSEER_GOAL_HEALTH";
 
+/// Opt-out flag for the Overseer's **cognitive-memory recall** (issue #2628):
+/// bounded read access to Simard's memory graph in Observe/Orient plus one
+/// deliberate, de-duplicated episodic write-back. ON by default whenever the
+/// acting Overseer runs; an explicit falsey value (`0`/`false`/`no`/`off`)
+/// disables it. Recall only makes sense while the Overseer runs, so a disabled
+/// Overseer forces it off regardless of this flag.
+pub const SIMARD_OVERSEER_MEMORY_RECALL_ENV: &str = "SIMARD_OVERSEER_MEMORY_RECALL";
+
 /// GitHub login the acting Overseer authors its own workstreams under. Sourced
 /// here so the daemon and the merge/recursion path agree on ONE stable, DISTINCT
 /// identity (never the human operator's login). Defaults to
@@ -144,6 +152,29 @@ pub fn goal_health_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool
 /// Production entry point: read the real process environment.
 pub fn goal_health_enabled() -> bool {
     goal_health_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve whether the Overseer's **cognitive-memory recall** (issue #2628) is
+/// enabled, with **default ON** opt-out semantics consistent with the acting
+/// Overseer. Enabled UNLESS [`SIMARD_OVERSEER_MEMORY_RECALL_ENV`] is an explicit
+/// falsey value — AND only while the acting Overseer itself is enabled (an
+/// explicitly-disabled Overseer forces recall off, since recall only makes
+/// sense while the Overseer runs). Never panics on a malformed value.
+pub fn memory_recall_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    // No Overseer ⇒ no memory recall.
+    if !overseer_acting_enabled_from(&lookup) {
+        return false;
+    }
+    // Opt-out: enabled unless an explicit falsey value is set.
+    !matches!(
+        lookup(SIMARD_OVERSEER_MEMORY_RECALL_ENV).as_deref().map(str::trim),
+        Some(v) if is_falsey(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn memory_recall_enabled() -> bool {
+    memory_recall_enabled_from(|k| std::env::var(k).ok())
 }
 
 /// Resolve the Overseer's DISTINCT author login. Falls back to
