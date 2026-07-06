@@ -311,13 +311,23 @@ impl GoalDecomposer for RecipeGoalDecomposer {
             .trim()
             .to_string();
 
+        // Bound the free-text goal vars before they ride on argv (issues
+        // #2640/#2692). A goal description / plan is goal-scoped and small in
+        // practice, but bounding closes the E2BIG argv-overflow class defensively
+        // and — reusing the ooda_brain sanitizer — also collapses newlines so a
+        // multi-line description can never break YAML interpolation (#2127). The
+        // cap is generous (8000 chars) so real goal text is never truncated.
+        let goal_description =
+            crate::ooda_brain::sanitize::sanitize_context_var(&parent.description, 8000);
+        let plan = crate::ooda_brain::sanitize::sanitize_context_var(&plan, 8000);
+
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
             .arg("-c")
             .arg(format!("goal_id={}", parent.id))
             .arg("-c")
-            .arg(format!("goal_description={}", parent.description))
+            .arg(format!("goal_description={goal_description}"))
             .arg("-c")
             .arg(format!("plan={plan}"))
             .arg("-c")

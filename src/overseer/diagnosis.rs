@@ -110,6 +110,54 @@ pub fn classify_terminal_failure(status: &ExitStatus, transcript: &str) -> Failu
     }
 }
 
+/// Classify a **pre-exec spawn** failure — an [`std::io::Error`] returned by
+/// `Command::output()`/`spawn()` BEFORE any child process exists — into a
+/// structured [`FailureDiagnosis`] (issues #2640/#2692).
+///
+/// The live journal defect surfaces here, not in [`classify_terminal_failure`]:
+/// when the inlined `-c day_context=<…>` argv token exceeds `ARG_MAX`, `execve`
+/// fails with `E2BIG` (`errno 7`) and the runner never runs, so there is no
+/// [`ExitStatus`] and no transcript for the exit-code classifier to read. This
+/// sibling keys off the OS errno first (the authoritative signal), with a
+/// message-string fallback for platforms/wrappers that surface no numeric errno.
+///
+/// A spawn failure has no child, so `exit_code` is always `None`. Never panics
+/// and never drops silently: an unmapped errno classifies as
+/// [`FailureCause::Unknown`] with the same bounded evidence, so the caller always
+/// records *something* structured for the Overseer to act on.
+pub fn classify_spawn_failure(err: &std::io::Error) -> FailureDiagnosis {
+    FailureDiagnosis {
+        cause: classify_spawn_cause(err),
+        exit_code: None,
+        evidence: bounded_spawn_evidence(&err.to_string()),
+    }
+}
+
+/// Pure classification of a spawn [`std::io::Error`]: errno first (E2BIG=7,
+/// ENOSPC=28, ENOMEM=12), then a message-string fallback for the E2BIG marker
+/// when no numeric errno is present. Any other errno is a structured
+/// [`FailureCause::Unknown`] — never a silent drop.
+fn classify_spawn_cause(err: &std::io::Error) -> FailureCause {
+    if let Some(errno) = err.raw_os_error() {
+        match errno {
+            // E2BIG — the exact journal defect: an argv token exceeded ARG_MAX.
+            7 => return FailureCause::ArgListTooLong,
+            // ENOSPC — the temp-file write for the file-channel could fail here.
+            28 => return FailureCause::DiskFull,
+            // ENOMEM — the host could not allocate to fork/exec the child.
+            12 => return FailureCause::OutOfMemory,
+            _ => {}
+        }
+    }
+    // Fallback for errors that carry no numeric errno (e.g. a wrapped message):
+    // still catch the E2BIG marker so the headline cause is never missed.
+    let lower = err.to_string().to_ascii_lowercase();
+    if lower.contains("argument list too long") || lower.contains("e2big") {
+        return FailureCause::ArgListTooLong;
+    }
+    FailureCause::Unknown
+}
+
 /// Pure classification: transcript markers first (the shell's own diagnostic),
 /// then well-known exit-code fallbacks. First match wins; ordering matters so
 /// exit-126 + "Argument list too long" diagnoses as E2BIG, not "not executable".
@@ -170,4 +218,19 @@ fn bounded_evidence(transcript: &str) -> String {
         chars[chars.len() - MAX_EVIDENCE_LEN..].iter().collect()
     };
     format!("…{tail}")
+}
+
+/// Build a bounded, single-line excerpt of a spawn [`std::io::Error`] message,
+/// capped so the WHOLE string (ellipsis included) never exceeds
+/// [`MAX_EVIDENCE_LEN`]. Unlike [`bounded_evidence`] (which keeps the transcript
+/// tail and may run one char over with its leading ellipsis), an io-error
+/// message is short and front-loaded — the cause is at the start — so we keep the
+/// head and cap the total length exactly.
+fn bounded_spawn_evidence(message: &str) -> String {
+    let one_line = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= MAX_EVIDENCE_LEN {
+        return one_line;
+    }
+    let head: String = one_line.chars().take(MAX_EVIDENCE_LEN - 1).collect();
+    format!("{head}…")
 }

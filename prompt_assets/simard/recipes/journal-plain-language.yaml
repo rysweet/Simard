@@ -15,7 +15,10 @@
 # credential never survives even if the model leaves one in.
 #
 # Context vars (passed via -c):
-#   draft — the report draft (Markdown text) to rewrite.
+#   draft_path — ABSOLUTE path to a file containing the report draft (Markdown
+#     text) to rewrite (issues #2640/#2692). Delivered via a file, never inlined
+#     into argv, so a full-length draft can never overflow ARG_MAX / fail the
+#     spawn with E2BIG. The agent READS this file.
 #
 # Output: the rewritten, plain-language report as Markdown text (NOT JSON),
 # returned verbatim as the final narrative.
@@ -27,7 +30,7 @@ author: "Simard"
 tags: ["simard", "journal", "plain-language"]
 
 context:
-  draft: ""
+  draft_path: ""
 
 steps:
   - id: "dejargon"
@@ -40,7 +43,13 @@ steps:
 
       ## Draft to rewrite
 
-      {{draft}}
+      The draft is saved to a file (it is too large to pass inline). **Read the
+      file at this absolute path** with your file-reading tool and rewrite its
+      FULL contents:
+
+      ```
+      {{draft_path}}
+      ```
 
       ## Rewrite rules (be thorough — this check has teeth)
 

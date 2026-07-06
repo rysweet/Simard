@@ -114,6 +114,10 @@ pub mod overseer;
 mod persistence;
 pub mod prompt_assets;
 pub mod prompt_delivery;
+// Issues #2640/#2692: shared "path-in-argv, content-in-file" transport for
+// unbounded recipe context values, so a large payload never overflows ARG_MAX
+// (the live journal E2BIG recipe-spawn failure).
+pub mod recipe_context_file;
 pub mod recipe_output;
 pub mod reflection;
 pub mod remote_azlin;

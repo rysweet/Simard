@@ -106,6 +106,7 @@ nav:
     - Hybrid Cognition Measurement (benchmark + live): concepts/hybrid-cognition-measurement.md
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
     - Self-Diagnose on Step Error (ask WHY): concepts/self-diagnose-on-step-error.md
+    - Journal E2BIG Recipe-Spawn (file the context): concepts/journal-recipe-spawn-e2big.md
     - Unified Telemetry and Status: concepts/unified-telemetry-and-status.md
     - Goal-Board Persistence: concepts/goal-board-persistence.md
     - Keeping the OODA Daemon Steerable: concepts/steerable-ooda-daemon.md
@@ -143,6 +144,7 @@ nav:
     - Diagnose Brain Decision Parse Failures: howto/diagnose-brain-decision-parse-failures.md
     - Diagnose Decide/Orient Parse Failures: howto/diagnose-decide-orient-parse-failures.md
     - Diagnose and Recover OODA Step Failures: howto/diagnose-and-recover-ooda-step-failures.md
+    - Diagnose Journal E2BIG Spawn Failures: howto/diagnose-journal-e2big-spawn-failures.md
     - Interpret Brain Confidence and Verify Completion: howto/interpret-brain-confidence-and-verify-completion.md
     - Configure Brain Introspection: howto/configure-brain-introspection.md
     - Start a Meeting: howto/start-a-meeting.md
@@ -228,6 +230,7 @@ nav:
     - RPC Wire Protocol: reference/rpc-wire-protocol.md
     - Argv-Free Copilot/OODA Invocation: reference/argv-free-copilot-invocation.md
     - Terminal Failure Diagnosis API: reference/terminal-failure-diagnosis-api.md
+    - Recipe Context-File Transport: reference/recipe-context-file-transport.md
     - Text-Parsing Wire Formats: reference/text-parsing-wire-formats.md
     - Recipe Context-Var Sanitization: reference/recipe-context-var-sanitization.md
     - Engineer-Loop argv Sanitization: reference/engineer-loop-argv-sanitization.md

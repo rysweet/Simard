@@ -114,13 +114,22 @@ impl ProgressEvidenceChecker for RecipeProgressChecker {
             .to_string();
         let wip_summary = render_wip_summary(goal);
 
+        // Bound the free-text goal vars before they ride on argv (issues
+        // #2640/#2692): defensively closes the E2BIG argv-overflow class and,
+        // reusing the ooda_brain sanitizer, collapses newlines so a multi-line
+        // description/plan/WIP summary can never break YAML interpolation
+        // (#2127). The cap is generous (8000 chars) so real goal text survives.
+        let problem = crate::ooda_brain::sanitize::sanitize_context_var(&goal.description, 8000);
+        let plan = crate::ooda_brain::sanitize::sanitize_context_var(&plan, 8000);
+        let wip_summary = crate::ooda_brain::sanitize::sanitize_context_var(&wip_summary, 8000);
+
         let result = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
             .arg("-c")
             .arg(format!("goal_id={}", goal.id))
             .arg("-c")
-            .arg(format!("problem={}", goal.description))
+            .arg(format!("problem={problem}"))
             .arg("-c")
             .arg(format!("plan={plan}"))
             .arg("-c")
