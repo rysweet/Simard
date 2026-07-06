@@ -41,9 +41,9 @@ applier over the one meeting engine
 > **Naming.** This abstraction is deliberately **not** called a "bridge." It is a
 > first-class chat/conversation abstraction. No new type, module, field, trait,
 > or feature introduced here contains `bridge`/`Bridge`. `SignalConversation`
-> does **not** implement the pre-existing memory `BridgeTransport` trait — that
+> does **not** implement the pre-existing memory `RpcTransport` trait — that
 > trait is the cognitive-memory transport and is out of scope here. The
-> pre-existing `bridge*` modules (memory / knowledge / gym) are untouched.
+> pre-existing memory / knowledge / gym RPC-client modules are untouched.
 
 ## Problem
 

@@ -29,7 +29,7 @@ Two of the four git-rev pins in the root `Cargo.toml` had drifted behind their
 upstream default branch:
 
 - `amplihack-agent-eval` (`rysweet/amplihack-rs`) — the sole gym/eval engine
-  behind [`gym_runner_bridge`](../architecture/gym-eval-library-adapter.md).
+  behind [`gym_runner_client`](../architecture/gym-eval-library-adapter.md).
 - `amplihack-memory` (`rysweet/amplihack-memory-lib`) — the sole cognitive-memory
   backend behind
   [`LibraryCognitiveMemory`](../architecture/cognitive-memory-library-adapter.md).
@@ -130,12 +130,12 @@ edited. This was verified by a clean compile, not assumed.
 
 | Consumer | Upstream type surface it depends on | Result of the bump |
 | --- | --- | --- |
-| `src/gym_runner_bridge.rs` | imports `amplihack_agent_eval::gym::{GymConfig, GymRunner, GymScenarioResult}` and drives the three `gym.*` handlers via `GymRunner::new(gym_config())`; scenario/suite payloads cross the wire as the bridge's own `crate::gym_bridge::{GymScenarioResult, GymSuiteResult}` mirrors, not upstream types | compiles unchanged |
+| `src/gym_runner_client.rs` | imports `amplihack_agent_eval::gym::{GymConfig, GymRunner, GymScenarioResult}` and drives the three `gym.*` handlers via `GymRunner::new(gym_config())`; scenario/suite payloads cross the wire as the client's own `crate::gym_client::{GymScenarioResult, GymSuiteResult}` mirrors, not upstream types | compiles unchanged |
 | `src/cognitive_memory/library_adapter.rs` | the **sole** compile-time consumer of the crate's Rust surface — one `use amplihack_memory::{AccessKind, CognitiveMemory, DedupMode, DedupOptions, EpisodicMemory, FactInput, MemoryError, ProceduralMemory, ProspectiveMemory, RecallOptions, RecallWeights, RetentionPolicy, SemanticFact, StoreFactOptions, WorkingMemorySlot}`; this is where the `RecallWeightSet → RecallWeights` conversion is adapter-local | compiles unchanged |
 | `src/cognitive_memory/mod.rs` (`RecallWeightSet`), `src/memory_cognitive.rs`, `src/ooda_loop/phase_weights.rs` | backend-agnostic **mirror** types: by the issue #2329 design the `CognitiveMemoryOps` trait and these mirrors deliberately never name a library type (`memory_cognitive.rs` mirrors the six-type model over `serde` only; `RecallWeightSet` mirrors `RecallWeights`; `phase_weights` maps `OodaPhase → RecallWeightSet`) | compile unchanged — insulated from the crate surface by construction, not merely by an API match |
 
 The two stable seams — the
-[gym bridge wire protocol](../architecture/gym-eval-library-adapter.md#wire-protocol)
+[gym client wire protocol](../architecture/gym-eval-library-adapter.md#wire-protocol)
 and the
 [`CognitiveMemoryOps` trait](../architecture/cognitive-memory-library-adapter.md) —
 absorb the upstream revisions with no call-site drift.
@@ -220,7 +220,7 @@ The bump is "done" only when every gate below is green.
 | Single engine | `cargo tree -i lbug` | resolves to exactly one `lbug v0.17.1` |
 | Supply chain | `cargo deny --locked check` / `cargo audit` / `cargo vet --locked` | all green |
 | No new stray prints | AST meta-test (`syn` scan) | no new `println!`/`eprint!`/`dbg!` in the diff |
-| No new bridge-cased identifiers | diff review | no new CamelCase `…bridge` type/struct names introduced (pre-existing snake_case `gym_runner_bridge` names stay) |
+| No new client-cased identifiers | diff review | no new CamelCase `…client` type/struct names introduced (pre-existing snake_case `gym_runner_client` names stay) |
 
 **Process constraints (binding).** The bump PR is opened against `rysweet/Simard`
 off the latest `origin/main` and is landed through the normal

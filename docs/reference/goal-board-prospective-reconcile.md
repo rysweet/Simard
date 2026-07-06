@@ -78,13 +78,13 @@ backlog semantics. The fix is deliberately **surgical**: keep the
 A reconcile step runs **before preparation, every OODA cycle**. For each
 Active goal in the live `GoalBoard` it ensures a `pending` prospective
 exists in the library store, written through the daemon's own memory
-bridge:
+client:
 
 ```
 for goal in goal_board.active:
     trigger_condition = goal_slug(goal.id).replace('-', ' ')   // slug-phrase
     if no pending prospective with this trigger_condition:
-        bridges.memory.store_prospective(
+        clients.memory.store_prospective(
             description       = "goal:{goal.description}",
             trigger_condition = trigger_condition,
             action_on_trigger = "Pursue goal: …",
@@ -204,7 +204,7 @@ reconcile lands.
 | Slug-phrase transform / `GOAL_PROSPECTIVE_PREFIX` | `src/goals/cognitive_memory_store.rs` |
 | Objective probe (`build_objective_probe`) | `src/ooda_loop/cycle.rs` |
 | Live `GoalBoard` load/persist | `src/goal_curation/operations.rs` |
-| Daemon memory bridge wiring | `src/operator_commands_ooda/daemon/mod.rs` |
+| Daemon memory client wiring | `src/operator_commands_ooda/daemon/mod.rs` |
 
 ---
 

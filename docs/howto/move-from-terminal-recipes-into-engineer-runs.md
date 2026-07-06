@@ -21,17 +21,17 @@ Use this guide when you want one specific operator workflow:
 3. inspect the truthful terminal audit trail
 4. continue into the existing repo-grounded engineer loop with the same explicit `state-root`
 
-This bridge is local and file-backed. It is not hidden orchestration, remote continuation, or an automatic resume system.
+This client is local and file-backed. It is not hidden orchestration, remote continuation, or an automatic resume system.
 
 ## Prerequisites
 
 - [ ] You are in the repository root
 - [ ] `cargo run --quiet -- ...` works locally
-- [ ] You want a local file-backed bridge, not a network service or remote orchestrator
+- [ ] You want a local file-backed client, not a network service or remote orchestrator
 
 ## 1. Create one explicit durable state root
 
-The bridge only works when the terminal and engineer commands point at the same durable state root.
+The client only works when the terminal and engineer commands point at the same durable state root.
 
 ```bash
 STATE_ROOT="$(mktemp -d /tmp/simard-terminal-engineer.XXXXXX)"
@@ -100,7 +100,7 @@ This confirms the readback contract:
 
 - `terminal-read` is read-only
 - the terminal audit comes from a terminal-scoped handoff artifact
-- the printed bridge guidance stays explicit and local
+- the printed client guidance stays explicit and local
 
 ## 5. Continue into the repo-grounded engineer loop
 
@@ -155,7 +155,7 @@ Selected action: cargo-metadata-scan
 Verification status: verified
 ```
 
-This proves the bridge stayed honest after execution:
+This proves the client stayed honest after execution:
 
 - engineer readback prefers the engineer-scoped handoff
 - the carried terminal summary remains a separate section
@@ -163,13 +163,13 @@ This proves the bridge stayed honest after execution:
 
 ## 7. Configuration rules that matter
 
-For predictable bridge behavior, keep these rules in mind:
+For predictable client behavior, keep these rules in mind:
 
 - pass the same explicit `state-root` argument to both the terminal command and the later engineer command
 - treat `engineer terminal*` and `engineer run/read` as separate operator-visible modes even though they share the `simard engineer ...` namespace
 - expect `terminal-read` to prefer `latest_terminal_handoff.json`
 - expect `engineer read` to prefer `latest_engineer_handoff.json`
-- expect compatibility bridge to `latest_handoff.json` only when the mode-specific file is absent
+- expect compatibility client to `latest_handoff.json` only when the mode-specific file is absent
 - expect a malformed mode-specific handoff to fail explicitly instead of silently falling back
 - keep `workspace-root` and engineer `objective` explicit on every engineer run
 
@@ -189,7 +189,7 @@ That is the intended fail-closed behavior. If `latest_terminal_handoff.json` or 
 
 ### The engineer loop ignored the terminal recipe and still inspected the repo
 
-That is correct. The bridge is descriptive continuity, not authority transfer. Engineer mode must remain repo-grounded, planned, bounded, and explicitly verified.
+That is correct. The client is descriptive continuity, not authority transfer. Engineer mode must remain repo-grounded, planned, bounded, and explicitly verified.
 
 ## Related reading
 

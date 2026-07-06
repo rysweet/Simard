@@ -1,6 +1,6 @@
 ---
 title: Recover from a meeting close timeout
-description: What to do when `simard meeting`'s `/close` writes a partial handoff because an agent or bridge exceeded its budget — how to detect, inspect, complete, and re-ingest the bundle.
+description: What to do when `simard meeting`'s `/close` writes a partial handoff because an agent or client exceeded its budget — how to detect, inspect, complete, and re-ingest the bundle.
 last_updated: 2026-06-02
 review_schedule: as-needed
 owner: simard
@@ -17,7 +17,7 @@ related:
 `simard meeting`'s `/close` finalizes the session within a bounded
 budget (default 60s; see [Meeting close
 lifecycle](../reference/meeting-close-lifecycle.md)). When an LLM
-stream, summarizer, or cognitive-memory bridge subprocess exceeds
+stream, summarizer, or cognitive-memory client subprocess exceeds
 its inner timeout, the close still **writes a deserialize-valid
 handoff bundle to disk** and prints the bundle paths, but the bundle
 is marked **partial** through tracing. This page is the operator
@@ -265,7 +265,7 @@ line and address the underlying cause:
 |---|---|---|
 | `agent_close_timeout` | A child subprocess (Copilot SDK, local-harness PTY) is slow to shut down | Check `journalctl --since "1h ago" -p warning` for subprocess-shutdown patterns; the default is now 45s (raised from 15s in #1999) — consider bumping `SIMARD_MEETING_AGENT_CLOSE_TIMEOUT_SECS` to 90 if your environment routinely shows >45s shutdowns |
 | `summary_empty` | The summarizer LLM call did not return in time, or returned without structured fields | Raise `SIMARD_MEETING_CLOSE_TIMEOUT_SECS` to 120 if the provider is consistently slow; or switch base-type via `--base-type` (see [base-type adapters](../reference/base-type-adapters.md)) |
-| `bridge_timeout` | The cognitive-memory bridge subprocess is stalled or dead | Check `journalctl -u simard-ooda --since "1h ago" \| grep bridge`; restart the daemon if the bridge process is hung |
+| `bridge_timeout` | The cognitive-memory client subprocess is stalled or dead | Check `journalctl -u simard-ooda --since "1h ago" \| grep client`; restart the daemon if the client process is hung |
 | `close_timeout` | A phase outside the named inner budgets exceeded the master | File a bug — the master should rarely fire if every inner budget is healthy |
 | `persistence_error` | IO error writing the bundle (disk full, permission denied) | Resolve the underlying disk/permission issue; rerun the meeting |
 

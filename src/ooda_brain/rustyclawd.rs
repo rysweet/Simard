@@ -355,7 +355,7 @@ fn parse_decision_from_response(raw: &str) -> Result<EngineerLifecycleDecision, 
 /// **Why per-call session:** the engineer-lifecycle skip branch only fires
 /// when an engineer is already alive (rare). Per-call session open mirrors
 /// `engineer_plan` / `review_pipeline` and avoids threading
-/// `Arc<Mutex<Box<dyn BaseTypeSession>>>` through `OodaBridges`. If profiling
+/// `Arc<Mutex<Box<dyn BaseTypeSession>>>` through `OodaClients`. If profiling
 /// later shows session-open cost dominating, swap to a cached session
 /// without changing the `LlmSubmitter` trait.
 ///

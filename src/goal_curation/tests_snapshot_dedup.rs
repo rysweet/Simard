@@ -13,7 +13,7 @@ use crate::cognitive_memory::{CognitiveMemoryOps, RecallWeightSet};
 use crate::goal_curation::{
     ActiveGoal, GoalBoard, GoalProgress, add_active_goal, load_goal_board, save_goal_board,
 };
-use crate::memory_ipc::launch_writer_bridge;
+use crate::memory_ipc::launch_writer_client;
 use crate::state_root::STATE_ROOT_ENV;
 
 fn isolated_state_root() -> (TempDir, std::path::PathBuf) {
@@ -55,7 +55,7 @@ fn live_snapshot_count(bridge: &dyn CognitiveMemoryOps) -> usize {
 #[serial(cognitive_memory)]
 fn repeated_snapshot_saves_supersede_not_duplicate() {
     let (_tmp, root) = isolated_state_root();
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let bridge = launch_writer_client(&root).expect("writer bridge");
 
     // Save #1: one live snapshot.
     let mut board = GoalBoard::new();

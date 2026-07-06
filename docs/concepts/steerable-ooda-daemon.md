@@ -268,7 +268,7 @@ sentinel-`Blocked` + `gh`-filed tracking issue. It reuses the existing
 sentinel-`Blocked` + file-an-issue machinery and the done-gate rather than
 introducing a new state-machine in the reasoners, keeping the change inside
 `goal_curation` / `ooda_loop` (the naming-cleanup rename owns the
-`ooda_brain` / reasoner / bridge files, so those are left untouched).
+`ooda_brain` / reasoner / client files, so those are left untouched).
 
 The no-progress signal is the classifier
 `ooda_actions::outcome_made_no_progress`, co-located with the detail author

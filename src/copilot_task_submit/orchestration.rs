@@ -14,6 +14,7 @@ use super::types::{
 };
 use crate::base_types::BaseTypeId;
 use crate::copilot_status_probe::{CopilotStatusProbeResult, probe_local_copilot_status};
+use crate::engineer_handoff::{ScopedHandoffMode, persist_handoff_artifacts};
 use crate::error::{SimardError, SimardResult};
 use crate::evidence::{EvidenceRecord, EvidenceSource, EvidenceStore, FileBackedEvidenceStore};
 use crate::handoff::{CopilotSubmitAudit, RuntimeHandoffSnapshot};
@@ -21,7 +22,6 @@ use crate::identity::OperatingMode;
 use crate::memory::{FileBackedMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeState, RuntimeTopology};
 use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
-use crate::terminal_engineer_bridge::{ScopedHandoffMode, persist_handoff_artifacts};
 use crate::terminal_session::{
     PtyTerminalSession, TerminalSessionCapture, compact_terminal_evidence_value,
 };

@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use serde_json::{Value, json};
 
 use simard::{
-    AgentRole, BridgeErrorPayload, CognitiveMemoryBridge, HeartbeatStatus, InMemoryBridgeTransport,
+    AgentRole, CognitiveMemoryClient, HeartbeatStatus, InMemoryRpcTransport, RpcErrorPayload,
     SubordinateConfig, SubordinateHandle, SubordinateIdentity, SubordinateProgress, assign_goal,
     check_heartbeat, compose_identity, identity_for_role, kill_subordinate, max_retries_per_goal,
     max_subordinate_depth, poll_progress, read_assigned_goal, report_progress, role_for_objective,
@@ -22,9 +22,9 @@ struct StoredFact {
     tags: Vec<String>,
 }
 
-fn mock_hive_bridge() -> CognitiveMemoryBridge {
+fn mock_hive_bridge() -> CognitiveMemoryClient {
     let store: &'static Mutex<Vec<StoredFact>> = Box::leak(Box::new(Mutex::new(Vec::new())));
-    let transport = InMemoryBridgeTransport::new("test-hive", move |method, params| match method {
+    let transport = InMemoryRpcTransport::new("test-hive", move |method, params| match method {
         "memory.store_fact" => {
             let mut facts = store.lock().unwrap();
             let id = format!("fact-{}", facts.len() + 1);
@@ -65,12 +65,12 @@ fn mock_hive_bridge() -> CognitiveMemoryBridge {
                 .collect();
             Ok(json!({"facts": matching}))
         }
-        _ => Err(BridgeErrorPayload {
+        _ => Err(RpcErrorPayload {
             code: -32601,
             message: format!("method not found: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 #[allow(dead_code)]

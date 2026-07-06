@@ -12,9 +12,9 @@
 //!
 //! # Naming
 //!
-//! Nothing here is named `bridge`/`Bridge`. `SignalConversation` is a first-class
+//! Nothing here is an RPC transport or client. `SignalConversation` is a first-class
 //! conversation channel; it does not implement, extend, or route through the
-//! pre-existing cognitive-memory `BridgeTransport`.
+//! pre-existing cognitive-memory `RpcTransport`.
 //!
 //! This step delivers the config type, the two remote-command-surface guardrails,
 //! the signal-cli JSON-RPC transport, and the `SignalConversation` channel:

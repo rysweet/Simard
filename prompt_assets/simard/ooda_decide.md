@@ -259,5 +259,5 @@ observed, the `simard rollback-watchdog` service handles rollback; the brain
 should not invoke `simard rollback` directly except when an operator escalates.
 
 While `~/.simard/state/draining.flag` is present, the engineer-dispatch site
-will refuse new dispatches with a `BridgeCallFailed` error. Brains that see
+will refuse new dispatches with a `RpcCallFailed` error. Brains that see
 this error should treat it as expected, not as a real failure.

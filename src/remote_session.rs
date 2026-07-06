@@ -147,7 +147,7 @@ pub fn deploy_agent(
     executor: &dyn AzlinExecutor,
 ) -> SimardResult<()> {
     if session.status != RemoteStatus::Running {
-        return Err(SimardError::BridgeTransportError {
+        return Err(SimardError::RpcTransportError {
             bridge: "remote-session".to_string(),
             reason: format!(
                 "cannot deploy to session '{}' in status '{}'",
@@ -188,7 +188,7 @@ pub fn establish_pty(
     executor: &dyn AzlinExecutor,
 ) -> SimardResult<String> {
     if session.status != RemoteStatus::Running {
-        return Err(SimardError::BridgeTransportError {
+        return Err(SimardError::RpcTransportError {
             bridge: "remote-session".to_string(),
             reason: format!(
                 "cannot establish PTY to session '{}' in status '{}'",
@@ -209,7 +209,7 @@ pub fn destroy_session(
     executor: &dyn AzlinExecutor,
 ) -> SimardResult<()> {
     if session.is_terminal() {
-        return Err(SimardError::BridgeTransportError {
+        return Err(SimardError::RpcTransportError {
             bridge: "remote-session".to_string(),
             reason: format!(
                 "session '{}' is already in terminal status '{}'",
@@ -236,7 +236,7 @@ pub fn destroy_session(
 /// is temporarily busy with data transfer.
 pub fn begin_transfer(session: &mut RemoteSession) -> SimardResult<()> {
     if session.status != RemoteStatus::Running {
-        return Err(SimardError::BridgeTransportError {
+        return Err(SimardError::RpcTransportError {
             bridge: "remote-session".to_string(),
             reason: format!(
                 "cannot begin transfer for session '{}' in status '{}'",
@@ -251,7 +251,7 @@ pub fn begin_transfer(session: &mut RemoteSession) -> SimardResult<()> {
 /// Transition a session back to Running after a transfer completes.
 pub fn end_transfer(session: &mut RemoteSession) -> SimardResult<()> {
     if session.status != RemoteStatus::Transferring {
-        return Err(SimardError::BridgeTransportError {
+        return Err(SimardError::RpcTransportError {
             bridge: "remote-session".to_string(),
             reason: format!(
                 "cannot end transfer for session '{}' in status '{}'",
@@ -348,7 +348,7 @@ mod tests {
         let mut session = create_remote_session(&test_config(), &executor).unwrap();
         destroy_session(&mut session, &executor).unwrap();
         let err = destroy_session(&mut session, &executor).unwrap_err();
-        assert!(matches!(err, SimardError::BridgeTransportError { .. }));
+        assert!(matches!(err, SimardError::RpcTransportError { .. }));
     }
 
     #[test]
@@ -371,7 +371,7 @@ mod tests {
         let mut session = create_remote_session(&test_config(), &executor).unwrap();
         destroy_session(&mut session, &executor).unwrap();
         let err = begin_transfer(&mut session).unwrap_err();
-        assert!(matches!(err, SimardError::BridgeTransportError { .. }));
+        assert!(matches!(err, SimardError::RpcTransportError { .. }));
     }
 
     #[test]

@@ -20,7 +20,7 @@ related:
 The `CognitiveMemoryGoalStore` maintains a prospective-memory mirror for
 Active goals so they surface via `check_triggers` during OODA preparation
 (issue #2207). Under normal operation `put()` keeps the mirror in sync,
-but transient bridge failures can leave drift: an Active goal without a
+but transient client failures can leave drift: an Active goal without a
 prospective trigger, or a completed goal with a stale trigger still
 pending.
 
@@ -112,7 +112,7 @@ errors (it does not swallow them), callers know when drift occurs:
   risks drift. All production callers (`meeting_backend::closing`, OODA
   curate, dashboard mutation handlers) propagate or log the error.
 
-- **Monitor logs.** Bridge failures that cause prospective-mirror errors
+- **Monitor logs.** Client failures that cause prospective-mirror errors
   appear in stderr with the prefix
   `[simard] CognitiveMemoryGoalStore::put:`. Set up log alerting for
   this prefix if running in production.

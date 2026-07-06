@@ -560,7 +560,7 @@ The `goal-board:snapshot` fact payload is a JSON object:
   "backlog": [
     {
       "id": "b-retry",
-      "description": "Add retry logic to bridge",
+      "description": "Add retry logic to client",
       "source": "review",
       "score": 0.72
     }

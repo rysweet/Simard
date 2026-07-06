@@ -5,8 +5,8 @@ Validates the complete migration path:
   2. flock serialization prevents concurrent write corruption
   3. read_only mode allows multiple concurrent readers
   4. Memory facade initializes with distributed topology
-  5. Simard memory bridge creates backend via facade when available
-  6. Bridge JSON-RPC protocol works end-to-end through ladybug
+  5. Simard memory client creates backend via facade when available
+  6. RPC (JSON-RPC) protocol works end-to-end through ladybug
   7. kuzu/ladybug import conflict is absent in production code path
   8. remote_transfer.rs deprecation markers are present
 
@@ -276,12 +276,12 @@ class TestAmplihackLadybugStore:
 
 
 # ===================================================================
-# Scenario 5: Simard memory bridge uses Memory facade
+# Scenario 5: Simard memory client uses Memory facade
 # ===================================================================
 
 
-class TestSimardBridgeFacade:
-    """Verify Simard memory bridge creates backend via Memory facade."""
+class TestSimardRpcFacade:
+    """Verify Simard memory client creates backend via Memory facade."""
 
     def test_bridge_module_imports_facade(self):
         bridge_path = (
@@ -322,12 +322,12 @@ class TestSimardBridgeFacade:
 
 
 # ===================================================================
-# Scenario 6: Bridge JSON-RPC protocol end-to-end
+# Scenario 6: RPC (JSON-RPC) protocol end-to-end
 # ===================================================================
 
 
-class TestBridgeProtocol:
-    """End-to-end test: send JSON-RPC to the bridge subprocess via stdin/stdout."""
+class TestRpcProtocol:
+    """End-to-end test: send JSON-RPC to the RPC subprocess via stdin/stdout."""
 
     @pytest.fixture
     def bridge_proc(self, tmp_path):

@@ -309,7 +309,7 @@ impl crate::ooda_loop::OrchestratorSessionFactory for ProviderSessionFactory {
             .address("ooda-daemon-engineer://local")
             .adapter_tag(&self.adapter_tag)
             .open()
-            .map_err(|e| crate::error::SimardError::BridgeTransportError {
+            .map_err(|e| crate::error::SimardError::RpcTransportError {
                 bridge: "ooda-session-factory".to_string(),
                 reason: e,
             })

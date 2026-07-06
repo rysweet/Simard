@@ -38,7 +38,7 @@ Per-file post-#1749 line coverage:
 | `simard_self_improve_recipe.rs`       |   87.04% |  100.00% |     82.00% |
 
 > `simard_ooda_step.rs` falls below 70% at the file level because its
-> `cmd_observe` and `cmd_act` paths are bridge-dependent and require a live
+> `cmd_observe` and `cmd_act` paths are client-dependent and require a live
 > cognitive-memory / runtime state-root. The acceptance criterion for #1749
 > is the **group aggregate**, which sits at 76.07%.
 

@@ -1,6 +1,6 @@
 ---
 title: Simard CLI reference
-description: Reference for the shipped `simard` command tree, the shared-state-root bridge between terminal sessions and the repo-grounded engineer loop, the `engineer read` audit companion, the shipped bounded `engineer copilot-submit` contract, and the legacy compatibility binaries that still expose selected older runtime behaviors.
+description: Reference for the shipped `simard` command tree, the shared-state-root client between terminal sessions and the repo-grounded engineer loop, the `engineer read` audit companion, the shipped bounded `engineer copilot-submit` contract, and the legacy compatibility binaries that still expose selected older runtime behaviors.
 last_updated: 2026-04-03
 review_schedule: as-needed
 owner: simard
@@ -102,7 +102,7 @@ enhance-simard-meeting-experience	p1	blocked: 🔒 [OODA-SAFEGUARD] OODA brain f
 backlog: 0 item(s)
 ```
 
-Exits non-zero on bridge-open / persistence errors. An empty board prints
+Exits non-zero on client-open / persistence errors. An empty board prints
 `(none)` and exits zero.
 
 ### `simard goal add`
@@ -166,7 +166,7 @@ invocation so a single command can sweep a known fixture vector
 Behaviour contract:
 
 - Routes through the daemon's IPC writer (tier 1 of
-  `launch_writer_bridge`) when a daemon socket is reachable, otherwise
+  `launch_writer_client`) when a daemon socket is reachable, otherwise
   takes the writer lock directly. The operator never needs to pause the
   daemon.
 - Persists via [`save_goal_board_with_removals`](./goal-board-api.md#save_goal_board_with_removals)
@@ -180,7 +180,7 @@ Behaviour contract:
   `removed=N skipped_unknown=M active_after=K backlog_after=L`. No goal
   ids or descriptions are echoed to stdout to keep the surface
   scriptable.
-- Exits non-zero only on bridge-open / persistence failure, never on
+- Exits non-zero only on client-open / persistence failure, never on
   unknown ids.
 - Goal payloads are not logged at any verbosity level. Operators wanting
   before/after evidence should pipe `simard goal list` either side of
@@ -223,7 +223,7 @@ Behaviour contract:
 - **Idempotent.** Empty match set → no-op, exit zero. A summary is
   logged to stderr in the same shape as `goal remove`:
   `removed=N skipped_unknown=0 active_after=K backlog_after=L`.
-- Exits non-zero only on bridge-open / persistence failure.
+- Exits non-zero only on client-open / persistence failure.
 
 Use this command as the live-cleanup tool when the fixture-leak class
 of corruption is suspected but the operator does not yet know the
@@ -280,7 +280,7 @@ cognitive memory @ /home/azureuser/.simard/cognitive  (via daemon socket)
 `--json` emits a stable object keyed by the raw field stems
 (`sensory`/`working`/`episodic`/`semantic`/`procedural`/`prospective`) plus
 `total`. A successful read of an empty store prints all-zeros and exits
-zero; only an unparseable invocation or a bridge-open failure exits
+zero; only an unparseable invocation or a client-open failure exits
 non-zero.
 
 ### `simard memory dump [state-root] [--type=TYPE] [--limit=N] [--json]`
@@ -455,7 +455,7 @@ positional and the env fallback.
 
 The cognitive-memory IPC socket (the Unix-domain socket that fronts the
 daemon's writer lock — see
-[bridge helpers](./cognitive-memory-bridge-helpers.md)) lives **next to
+[client helpers](./cognitive-memory-client-helpers.md)) lives **next to
 the cognitive-memory database it fronts**, not at a fixed
 `$HOME/.simard/memory.sock`. This is what makes
 `SIMARD_STATE_ROOT=$TMPDIR/...` actually hermetic: a test that overrides
@@ -492,7 +492,7 @@ client connect) MUST use the same helper — there is no inline
 > [How to clean a fixture leak from the live goal board](../howto/clean-fixture-leaks.md)
 > for the connected remediation.
 
-## Terminal-to-engineer bridge
+## Terminal-to-engineer client
 
 The `simard engineer ...` namespace now exposes two distinct shipped operator-visible surfaces:
 
@@ -501,7 +501,7 @@ The `simard engineer ...` namespace now exposes two distinct shipped operator-vi
 
 `engineer copilot-submit` now sits on the terminal-session side of that boundary as a stricter one-shot local Copilot submission surface.
 
-The bridge between them is explicit and local-only:
+The client between them is explicit and local-only:
 
 - reuse the same explicit `state-root`
 - inspect the persisted terminal summary through `terminal-read`
@@ -511,7 +511,7 @@ Simard writes mode-scoped handoffs under the shared root:
 
 - `latest_terminal_handoff.json`
 - `latest_engineer_handoff.json`
-- `latest_handoff.json` as the compatibility bridge
+- `latest_handoff.json` as the compatibility client
 
 Readback is fail-closed:
 
@@ -520,7 +520,7 @@ Readback is fail-closed:
 - lookup of `latest_handoff.json` happens only when the mode-scoped file is absent
 - if a mode-scoped handoff exists but is malformed, the command fails instead of silently replaying older data
 
-The bridge is descriptive continuity only. It does not auto-resume, auto-launch engineer mode, infer a repo path, or replace the engineer loop's inspect -> plan -> act -> verify contract.
+The client is descriptive continuity only. It does not auto-resume, auto-launch engineer mode, infer a repo path, or replace the engineer loop's inspect -> plan -> act -> verify contract.
 
 ## Mode reference
 
@@ -549,7 +549,7 @@ persist truthful local evidence and memory'
 simard engineer run single-process "$PWD" "$ENGINEER_OBJECTIVE" "$STATE_ROOT"
 ```
 
-To continue from a terminal recipe or terminal session, reuse the same `STATE_ROOT`. The terminal bridge stays local and explicit; Simard does not infer the engineer objective for you.
+To continue from a terminal recipe or terminal session, reuse the same `STATE_ROOT`. The terminal client stays local and explicit; Simard does not infer the engineer objective for you.
 
 ### `simard engineer read <topology> [state-root]`
 
@@ -1188,7 +1188,7 @@ Runs the continuous OODA (Observe-Orient-Decide-Act) daemon loop for autonomous 
 
 Key behavior:
 
-- launches memory, knowledge, and gym bridges
+- launches memory, knowledge, and gym clients
 - loads the goal board from cognitive memory
 - runs OODA cycles in a loop with 60-second sleep between cycles
 - `--cycles=N` limits the daemon to N cycles; `--cycles=0` or omitting the flag runs indefinitely
@@ -1218,7 +1218,7 @@ SIMARD_STATE_ROOT="$PWD/target/simard-state" simard ooda run
 
 Each cycle follows the four OODA phases:
 
-1. **Observe** — gather goal statuses, gym health, memory statistics; degrades honestly if a bridge is unavailable (Pillar 11)
+1. **Observe** — gather goal statuses, gym health, memory statistics; degrades honestly if a client is unavailable (Pillar 11)
 2. **Orient** — rank goals by urgency (blocked 1.0 > not-started 0.8 > in-progress scaled by remaining %). Also injects synthetic priorities: memory consolidation (urgency 0.5) when episodic count exceeds 100, and improvement cycles (urgency 0.7) when gym score drops below 70%
 3. **Decide** — select up to `max_concurrent_actions` (default 3) actions from the priority list; completed goals (urgency 0) are skipped
 4. **Act** — dispatch actions independently; each action produces its own outcome

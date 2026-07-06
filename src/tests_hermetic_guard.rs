@@ -10,7 +10,7 @@
 //!      `save_goal_board_with_removals`)
 //!   2. `cognitive_memory::LibraryCognitiveMemory::store_fact`
 //!      (and its `store_episode` / `store_procedure` siblings)
-//!   3. `memory_ipc::launcher::launch_writer_bridge`
+//!   3. `memory_ipc::launcher::launch_writer_client`
 //!
 //! Each site asserts:
 //!   - `default_state_root()` is under `env::temp_dir()`.
@@ -36,7 +36,7 @@
 //!    short-circuits and the negative path becomes a no-op.
 //! 4. **Three sites**: the guard fires from all of
 //!    `save_goal_board` / `save_goal_board_with_removals`,
-//!    `store_fact`, and `launch_writer_bridge`.
+//!    `store_fact`, and `launch_writer_client`.
 //!
 //! The tests deliberately do NOT exercise an absolute "outside temp_dir"
 //! path because that would require writing into a real location on the
@@ -56,7 +56,7 @@ use crate::goal_curation::{
     ActiveGoal, GoalBoard, GoalProgress, add_active_goal, save_goal_board,
     save_goal_board_with_removals,
 };
-use crate::memory_ipc::{TEST_ALLOW_LIVE_STATE_ENV, launch_writer_bridge};
+use crate::memory_ipc::{TEST_ALLOW_LIVE_STATE_ENV, launch_writer_client};
 use crate::state_root::STATE_ROOT_ENV;
 
 // ─── env helpers ───────────────────────────────────────────────────────────
@@ -140,7 +140,7 @@ fn save_goal_board_against_tempdir_state_root_does_not_trip_guard() {
 
     let board = sample_board();
     let bridge =
-        launch_writer_bridge(tmp.path()).expect("writer bridge against hermetic state root");
+        launch_writer_client(tmp.path()).expect("writer bridge against hermetic state root");
     save_goal_board(&board, bridge.ops())
         .expect("save_goal_board against TempDir state root must succeed");
 }
@@ -153,7 +153,7 @@ fn save_goal_board_with_removals_against_tempdir_state_root_does_not_trip_guard(
     let _allow = EnvGuard::unset(TEST_ALLOW_LIVE_STATE_ENV);
 
     let board = sample_board();
-    let bridge = launch_writer_bridge(tmp.path()).expect("writer bridge");
+    let bridge = launch_writer_client(tmp.path()).expect("writer bridge");
     save_goal_board_with_removals(&board, &[], bridge.ops())
         .expect("save_goal_board_with_removals against TempDir state root must succeed");
 }
@@ -177,7 +177,7 @@ fn save_goal_board_against_home_simard_state_root_trips_guard() {
         // bypass the launcher's guard via the test-only constructor.
         let mem =
             LibraryCognitiveMemory::open(&state_root).expect("open DB at fake home state root");
-        let bridge = crate::memory_ipc::WriterBridge::from_ops_for_test(Box::new(mem));
+        let bridge = crate::memory_ipc::WriterClient::from_ops_for_test(Box::new(mem));
         let _ = save_goal_board(&board, bridge.ops());
     }));
     assert!(
@@ -220,18 +220,18 @@ fn store_fact_against_home_simard_state_root_trips_guard() {
 
 #[test]
 #[serial(cognitive_memory)]
-fn launch_writer_bridge_against_home_simard_state_root_trips_guard() {
+fn launch_writer_client_against_home_simard_state_root_trips_guard() {
     let (_home_tmp, home, state_root) = fake_home_under_temp();
     let _home_guard = EnvGuard::set("HOME", home.to_str().unwrap());
     let _state_unset = EnvGuard::unset(STATE_ROOT_ENV);
     let _allow = EnvGuard::unset(TEST_ALLOW_LIVE_STATE_ENV);
 
     let panicked = catch_unwind(AssertUnwindSafe(|| {
-        let _ = launch_writer_bridge(&state_root);
+        let _ = launch_writer_client(&state_root);
     }));
     assert!(
         panicked.is_err(),
-        "launch_writer_bridge MUST panic when state_root is under \
+        "launch_writer_client MUST panic when state_root is under \
          HOME/.simard ({}). The launcher fires the guard before \
          returning a writer regardless of the tier selected.",
         state_root.display(),
@@ -252,7 +252,7 @@ fn allow_live_state_env_silences_guard_for_install_harness_use() {
 
     // With the opt-out env var set, the guard must short-circuit and
     // the write must complete normally.
-    let bridge = launch_writer_bridge(&state_root)
+    let bridge = launch_writer_client(&state_root)
         .expect("with SIMARD_TEST_ALLOW_LIVE_STATE=1, launch must succeed");
     save_goal_board(&board, bridge.ops())
         .expect("with SIMARD_TEST_ALLOW_LIVE_STATE=1, save must succeed");
@@ -269,7 +269,7 @@ fn allow_live_state_env_only_value_one_silences_guard() {
     let _allow = EnvGuard::set(TEST_ALLOW_LIVE_STATE_ENV, "yes");
 
     let panicked = catch_unwind(AssertUnwindSafe(|| {
-        let _ = launch_writer_bridge(&state_root);
+        let _ = launch_writer_client(&state_root);
     }));
     assert!(
         panicked.is_err(),

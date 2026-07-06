@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::json;
 
-use simard::gym_bridge::ScoreDimensions;
+use simard::gym_client::ScoreDimensions;
 use simard::gym_scoring::{GymSuiteScore, detect_regression};
 use simard::self_improve::{
     ImprovementConfig, ImprovementCycle, ImprovementDecision, ImprovementPhase, ProposedChange,

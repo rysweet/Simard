@@ -1,18 +1,18 @@
 use super::*;
-use crate::bridge::BridgeErrorPayload;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_client::CognitiveMemoryClient;
+use crate::rpc::RpcErrorPayload;
+use crate::rpc_transport::InMemoryRpcTransport;
 
 // -- helpers --
 
 fn mock_memory_with_facts(facts: Vec<CognitiveFact>) -> Box<dyn CognitiveMemoryOps> {
     let facts_json = serde_json::to_value(&facts).unwrap();
-    Box::new(CognitiveMemoryBridge::new(Box::new(
-        InMemoryBridgeTransport::new("test-ideas", move |method, _params| match method {
+    Box::new(CognitiveMemoryClient::new(Box::new(
+        InMemoryRpcTransport::new("test-ideas", move |method, _params| match method {
             "memory.search_facts" => Ok(serde_json::json!({ "facts": facts_json })),
             "memory.store_fact" => Ok(serde_json::json!({"id": "sem_x"})),
             "memory.store_episode" => Ok(serde_json::json!({"id": "epi_x"})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),

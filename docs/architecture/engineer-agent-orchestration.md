@@ -66,7 +66,7 @@ Engineer loop (run_local_engineer_loop)
     │   └── pre-mutation guard (abort if mutating + dirty worktree)
     │
     ├── SessionPhase::Preparation
-    │   └── load terminal bridge context
+    │   └── load terminal client context
     │
     ├── SessionPhase::Planning
     │   └── build agent prompt

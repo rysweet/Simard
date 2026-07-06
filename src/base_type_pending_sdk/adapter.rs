@@ -1,7 +1,7 @@
 //! [`PendingSdkAdapter`] – catalog entry for SDKs whose Rust bindings are not
 //! yet available.
 
-use crate::base_type_turn::EnrichmentBridges;
+use crate::base_type_turn::EnrichmentClients;
 use crate::base_types::{
     BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeSession, BaseTypeSessionRequest,
     standard_session_capabilities,
@@ -75,7 +75,7 @@ impl BaseTypeFactory for PendingSdkAdapter {
             descriptor: self.descriptor.clone(),
             request,
             not_implemented_reason: self.not_implemented_reason.clone(),
-            enrichment: EnrichmentBridges::new(),
+            enrichment: EnrichmentClients::new(),
             is_open: false,
             is_closed: false,
         }))

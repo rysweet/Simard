@@ -4,7 +4,7 @@
 //!
 //! `bootstrap::assembly` and `meeting_backend` are the production callers:
 //! every per-record write flows through cognitive memory via the bridge
-//! helpers (`launch_writer_bridge` / `open_reader_bridge`). The legacy
+//! helpers (`launch_writer_client` / `open_reader_client`). The legacy
 //! on-disk `goal_records.json` and `state/goal_store.json` files are no
 //! longer produced — closing the half-migration gap that PR #1593 /
 //! PR #1600 / issue #1668 left behind.
@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::error::{SimardError, SimardResult};
-use crate::memory_ipc::{launch_writer_bridge, open_reader_bridge};
+use crate::memory_ipc::{launch_writer_client, open_reader_client};
 use crate::metadata::{BackendDescriptor, Freshness};
 
 use super::{GoalRecord, GoalStatus, GoalStore};
@@ -43,7 +43,7 @@ const GOAL_PROSPECTIVE_PREFIX: &str = "goal:";
 pub(crate) const GOAL_STORE_LIST_LIMIT: u32 = 256;
 
 /// `GoalStore` implementation backed by cognitive memory through the
-/// bridge helpers (`launch_writer_bridge` / `open_reader_bridge`).
+/// bridge helpers (`launch_writer_client` / `open_reader_client`).
 ///
 /// Each method opens a fresh bridge for the duration of one call and
 /// drops it afterwards. With the tier-0 in-process Arc shortcut
@@ -94,7 +94,7 @@ impl CognitiveMemoryGoalStore {
         // state_root), `list()` returns an empty Vec rather than
         // surfacing the error — `GoalStore::list` is best-effort and the
         // FileBackedGoalStore behaved the same way (`load_json_or_default`).
-        let reader = match open_reader_bridge(&self.state_root) {
+        let reader = match open_reader_client(&self.state_root) {
             Ok(r) => r,
             Err(_) => return Ok(Vec::new()),
         };
@@ -160,7 +160,7 @@ impl CognitiveMemoryGoalStore {
             return Ok(());
         }
 
-        let writer = launch_writer_bridge(&self.state_root)?;
+        let writer = launch_writer_client(&self.state_root)?;
 
         // De-fork Phase 2b (issue #2307): the library backend's `check_triggers`
         // is a FIRE-ONCE mutator (marks matches `"triggered"`) that matches on
@@ -203,7 +203,7 @@ impl GoalStore for CognitiveMemoryGoalStore {
 
     fn put(&self, record: GoalRecord) -> SimardResult<()> {
         let content = Self::encode(&record)?;
-        let writer = launch_writer_bridge(&self.state_root)?;
+        let writer = launch_writer_client(&self.state_root)?;
 
         // Primary storage: semantic fact (authoritative record). Issue #2329:
         // route through CallerKey dedup keyed per goal slug so each goal's record
@@ -426,11 +426,11 @@ pub fn migrate_file_backed_goal_store_if_present(state_root: &std::path::Path) {
     // read-only reader bridge) is deliberate: write-mode opens replay
     // the WAL, handling the edge case where a prior writer left an
     // un-checkpointed WAL that read-only mode cannot recover.
-    let writer = match launch_writer_bridge(state_root) {
+    let writer = match launch_writer_client(state_root) {
         Ok(w) => w,
         Err(e) => {
             eprintln!(
-                "[simard] goal_store migration: launch_writer_bridge failed ({e}) — \
+                "[simard] goal_store migration: launch_writer_client failed ({e}) — \
                  leaving file in place for next retry"
             );
             return;
@@ -663,7 +663,7 @@ mod tests {
         // The prospective trigger condition is the slug with dashes→spaces.
         // Open a reader bridge and check triggers with the expected phrase.
         let reader =
-            crate::memory_ipc::open_reader_bridge(&root).expect("reader bridge should open");
+            crate::memory_ipc::open_reader_client(&root).expect("reader bridge should open");
         let triggered = reader
             .ops()
             .check_triggers("fix authentication bug")
@@ -699,7 +699,7 @@ mod tests {
 
         // The trigger should no longer fire for the completed goal.
         let reader =
-            crate::memory_ipc::open_reader_bridge(&root).expect("reader bridge should open");
+            crate::memory_ipc::open_reader_client(&root).expect("reader bridge should open");
         let triggered = reader
             .ops()
             .check_triggers("deploy ci pipeline")
@@ -748,7 +748,7 @@ mod tests {
         // After reconciliation: Active goal should still have a trigger,
         // Completed goal should not.
         let reader =
-            crate::memory_ipc::open_reader_bridge(&root).expect("reader bridge should open");
+            crate::memory_ipc::open_reader_client(&root).expect("reader bridge should open");
 
         let active_triggers = reader
             .ops()
@@ -790,7 +790,7 @@ mod tests {
 
         // Manually resolve the prospective to simulate drift.
         {
-            let writer = crate::memory_ipc::launch_writer_bridge(&root).expect("writer bridge");
+            let writer = crate::memory_ipc::launch_writer_client(&root).expect("writer bridge");
             let triggered = writer
                 .ops()
                 .check_triggers("drifted goal")
@@ -819,7 +819,7 @@ mod tests {
             .reconcile_prospectives()
             .expect("reconcile_prospectives");
 
-        let reader = crate::memory_ipc::open_reader_bridge(&root).expect("reader bridge");
+        let reader = crate::memory_ipc::open_reader_client(&root).expect("reader bridge");
         let triggered = reader
             .ops()
             .check_triggers("drifted goal")
@@ -846,7 +846,7 @@ mod tests {
             .expect("put proposed goal");
 
         {
-            let reader = crate::memory_ipc::open_reader_bridge(&root).expect("reader bridge");
+            let reader = crate::memory_ipc::open_reader_client(&root).expect("reader bridge");
             let before = reader.ops().get_statistics().expect("get_statistics");
             assert_eq!(
                 before.prospective_count, 0,
@@ -860,7 +860,7 @@ mod tests {
             .expect("put active goal");
 
         // Open a fresh reader to see the write.
-        let reader = crate::memory_ipc::open_reader_bridge(&root).expect("reader bridge");
+        let reader = crate::memory_ipc::open_reader_client(&root).expect("reader bridge");
         let after = reader.ops().get_statistics().expect("get_statistics");
         assert!(
             after.prospective_count > 0,

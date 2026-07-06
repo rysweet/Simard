@@ -119,11 +119,11 @@ current graceful shutdown sequence:
 
 | Step | Operation | Failure mode when signal-driven |
 |---|---|---|
-| 1 | `persist_board(&state.active_goals, &*bridges.memory)` | Logged, next step still runs. |
+| 1 | `persist_board(&state.active_goals, &*clients.memory)` | Logged, next step still runs. |
 | 2 | `shared_mem.checkpoint()` | Logged, next step still runs. |
-| 3 | `bridges.session.close()` | Logged, next step still runs. |
+| 3 | `clients.session.close()` | Logged, next step still runs. |
 | 4 | `memory_ipc::clear_in_process_writer()` | Cannot fail. |
-| 5 | Bridges and the daemon-owned `Arc<dyn CognitiveMemoryOps>` drop on return. | Drop-time failures are logged by the backend. |
+| 5 | Clients and the daemon-owned `Arc<dyn CognitiveMemoryOps>` drop on return. | Drop-time failures are logged by the backend. |
 
 Normal-exit callers receive errors. Signal-driven shutdown logs errors and keeps
 progressing because the process is already exiting.
@@ -137,7 +137,7 @@ The current backup loop is in `src/operator_commands_ooda/daemon/backup.rs`.
 to `86_400` seconds (one day). `last_backup: Option<Instant>` starts as `None`,
 so the first daemon cycle always runs a backup.
 
-`run_verified_backup(bridge, state_root)` does three things:
+`run_verified_backup(client, state_root)` does three things:
 
 1. Builds a `BackupConfig` rooted at `state_root/backups` and opens the
    file-backed memory store at `state_root/memory_records.json`.
@@ -199,7 +199,7 @@ Restore is an API operation, not a raw `cp` of lbug files. Use
 use simard::memory_backup::{ensure_backup_valid, restore_from_backup};
 
 ensure_backup_valid(&backup_dir)?;
-let restored = restore_from_backup(bridge, file_store, &backup_dir)?;
+let restored = restore_from_backup(client, file_store, &backup_dir)?;
 ```
 
 `restore_from_backup` rejects `Corrupted` and `Incomplete` backups before it
@@ -268,14 +268,14 @@ run the import), follow the
 
 ```rust
 pub fn backup_memory(
-    bridge: &dyn CognitiveMemoryOps,
+    client: &dyn CognitiveMemoryOps,
     store: &dyn MemoryStore,
     agent_name: &str,
     config: &BackupConfig,
 ) -> SimardResult<BackupManifest>;
 
 pub fn backup_memory_verified(
-    bridge: &dyn CognitiveMemoryOps,
+    client: &dyn CognitiveMemoryOps,
     store: &dyn MemoryStore,
     agent_name: &str,
     config: &BackupConfig,
@@ -287,7 +287,7 @@ pub fn ensure_backup_valid(backup_dir: &Path) -> SimardResult<BackupManifest>;
 pub fn list_backups(config: &BackupConfig) -> SimardResult<Vec<BackupVerification>>;
 pub fn prune_old_backups(config: &BackupConfig) -> SimardResult<usize>;
 pub fn restore_from_backup(
-    bridge: &dyn CognitiveMemoryOps,
+    client: &dyn CognitiveMemoryOps,
     store: &dyn MemoryStore,
     backup_dir: &Path,
 ) -> SimardResult<usize>;
@@ -307,7 +307,7 @@ pub enum BackupStatus;
 ```rust
 // src/operator_commands_ooda/daemon/backup.rs
 pub fn run_verified_backup(
-    bridge: &dyn CognitiveMemoryOps,
+    client: &dyn CognitiveMemoryOps,
     state_root: &Path,
 ) -> SimardResult<BackupManifest>;
 ```

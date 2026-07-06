@@ -19,12 +19,12 @@ use std::process::ExitCode;
 
 use serde::Serialize;
 
+use simard::engineer_handoff::EngineerHandoffContext;
 use simard::engineer_loop::{
     ExecutedEngineerAction, RepoInspection, VerificationReport, inspect_workspace,
     persist_engineer_loop_artifacts, run_optional_review, spawn_agent_for_goal,
 };
 use simard::runtime::RuntimeTopology;
-use simard::terminal_engineer_bridge::TerminalBridgeContext;
 
 fn die(msg: impl AsRef<str>) -> ExitCode {
     eprintln!("simard-engineer-step: {}", msg.as_ref());
@@ -125,7 +125,7 @@ fn cmd_persist(args: &[String]) -> Result<(), String> {
         serde_json::from_str(&action_json).map_err(|e| format!("parse action-json: {e}"))?;
     let verification: VerificationReport = serde_json::from_str(&verification_json)
         .map_err(|e| format!("parse verification-json: {e}"))?;
-    let bridge_context: Option<TerminalBridgeContext> = match arg(args, "--terminal-bridge-json") {
+    let bridge_context: Option<EngineerHandoffContext> = match arg(args, "--terminal-bridge-json") {
         Some(s) if !s.is_empty() && s != "null" => {
             Some(serde_json::from_str(&s).map_err(|e| format!("parse terminal-bridge-json: {e}"))?)
         }

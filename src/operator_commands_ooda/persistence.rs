@@ -200,7 +200,7 @@ fn extract_quoted_after(text: &str, prefix: &str) -> Option<String> {
 /// and goal curation sessions can recall what happened. Best-effort: failures
 /// are logged but do not abort the daemon.
 pub(crate) fn persist_cycle_to_memory(
-    bridges: &crate::ooda_loop::OodaBridges,
+    bridges: &crate::ooda_loop::OodaClients,
     report: &crate::ooda_loop::CycleReport,
 ) {
     use serde_json::json;

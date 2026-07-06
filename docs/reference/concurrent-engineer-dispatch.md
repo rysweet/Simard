@@ -34,10 +34,10 @@ umbrella goal into several distinct goals so the plan is genuinely parallel
 was parallel; the **dispatch** serialized it.
 
 `dispatch_actions` spawned one thread per `PlannedAction`, but every
-non-`LaunchSession`/`SafeUpdate` action acquired a **global `bridges`+`state`
+non-`LaunchSession`/`SafeUpdate` action acquired a **global `clients`+`state`
 `Mutex` and held both for the entire `dispatch_one`**. For `AdvanceGoal` that
 critical section included the slow goal-action LLM `run_turn` (~30–90 s) on the
-**single shared `bridges.session`** plus the engineer spawn. So all
+**single shared `clients.session`** plus the engineer spawn. So all
 `AdvanceGoal` dispatches in a round serialized on that lock/session → only ~1
 engineer effectively started per round even though coverage had planned many
 (observed: "covered 7/7 incomplete goals (cap 8)" but engineers ramped ~1 per
@@ -49,14 +49,14 @@ under the lock was the LLM `run_turn`.
 
 ## Two-phase dispatch
 
-`dispatch_actions_bounded(actions, bridges, state, max_concurrency)` partitions
+`dispatch_actions_bounded(actions, clients, state, max_concurrency)` partitions
 the planned actions and dispatches them in two phases. `dispatch_actions` is a
 thin wrapper that passes `max_concurrency = usize::MAX`; the Act phase calls the
 bounded form with the AIMD cap.
 
 | Phase | Actions | Concurrency | Behavior |
 |-------|---------|-------------|----------|
-| **Phase 1 — serialized** | `LaunchSession` and `SafeUpdate` (independent, no shared state); **assigned-goal heartbeat** `AdvanceGoal`; every non-`AdvanceGoal` kind | One thread per action; the non-independent kinds take a short global `bridges`+`state` lock | Unchanged from before — today's behavior over this subset. |
+| **Phase 1 — serialized** | `LaunchSession` and `SafeUpdate` (independent, no shared state); **assigned-goal heartbeat** `AdvanceGoal`; every non-`AdvanceGoal` kind | One thread per action; the non-independent kinds take a short global `clients`+`state` lock | Unchanged from before — today's behavior over this subset. |
 | **Phase 2 — concurrent** | **Unassigned spawn-path** `AdvanceGoal` (the engineer-spawn path) | Up to `max_concurrency` at once | New: each goal opens its own LLM session; the global lock is never held across `run_turn` or the spawn. |
 
 Classification is `concurrent::is_concurrent_advance_candidate`: an
@@ -73,7 +73,7 @@ existing `ActionOutcome` semantics for downstream consumers.
 ## Per-thread LLM sessions
 
 The reason serialized dispatch could not be made concurrent before is that all
-threads shared one `bridges.session`. Phase 2 fixes this with a session
+threads shared one `clients.session`. Phase 2 fixes this with a session
 **factory**:
 
 ```rust
@@ -82,12 +82,12 @@ pub trait OrchestratorSessionFactory: Send + Sync {
 }
 ```
 
-- `OodaBridges.session_factory: Option<Arc<dyn OrchestratorSessionFactory>>`.
+- `OodaClients.session_factory: Option<Arc<dyn OrchestratorSessionFactory>>`.
   The daemon wires `ProviderSessionFactory` (built via `SessionBuilder`), so
   each spawn-candidate goal mints its **own** session and the `run_turn` calls
   run in parallel.
 - When `session_factory` is `None` (tests and non-daemon callers), Phase 2
-  falls back to the single shared `bridges.session` **under a lock**, i.e.
+  falls back to the single shared `clients.session` **under a lock**, i.e.
   serialized — behavior is unchanged for those callers, and there is no silent
   loss of the LLM (it fails visibly if no session and no factory exist).
 

@@ -31,7 +31,7 @@ mod tests_dispatch_concurrency;
 mod tests_goal_session;
 
 use crate::error::SimardResult;
-use crate::ooda_loop::{ActionKind, ActionOutcome, OodaBridges, OodaState, PlannedAction};
+use crate::ooda_loop::{ActionKind, ActionOutcome, OodaClients, OodaState, PlannedAction};
 
 /// Minimum procedure usage count required for skill extraction.
 const SKILL_MIN_USAGE: u32 = 3;
@@ -68,7 +68,7 @@ fn make_outcome(action: &PlannedAction, success: bool, detail: String) -> Action
 /// `scaler.current_max()` cap.
 pub fn dispatch_actions(
     actions: &[PlannedAction],
-    bridges: &mut OodaBridges,
+    bridges: &mut OodaClients,
     state: &mut OodaState,
 ) -> SimardResult<Vec<ActionOutcome>> {
     dispatch_actions_bounded(actions, bridges, state, usize::MAX)
@@ -84,7 +84,7 @@ pub fn dispatch_actions(
 /// [`crate::ooda_actions::concurrent`]).
 pub fn dispatch_actions_bounded(
     actions: &[PlannedAction],
-    bridges: &mut OodaBridges,
+    bridges: &mut OodaClients,
     state: &mut OodaState,
     max_concurrency: usize,
 ) -> SimardResult<Vec<ActionOutcome>> {
@@ -181,7 +181,7 @@ pub fn dispatch_actions_bounded(
 /// Dispatch a single planned action and return its outcome.
 fn dispatch_one(
     action: &PlannedAction,
-    bridges: &mut OodaBridges,
+    bridges: &mut OodaClients,
     state: &mut OodaState,
 ) -> ActionOutcome {
     match action.kind {

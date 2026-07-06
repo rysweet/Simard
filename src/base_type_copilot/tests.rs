@@ -914,18 +914,18 @@ fn build_copilot_terminal_objective_with_working_dir() {
 // still guards the Copilot factory seam.
 
 use super::CopilotSdkSession;
-use crate::bridge::BridgeErrorPayload;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
 use crate::cognitive_memory::CognitiveMemoryOps;
-use crate::knowledge_bridge::KnowledgeBridge;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::knowledge_client::KnowledgeClient;
+use crate::memory_client::CognitiveMemoryClient;
+use crate::rpc::RpcErrorPayload;
+use crate::rpc_transport::InMemoryRpcTransport;
 use serde_json::json;
 
 /// Mock cognitive-memory bridge returning a single semantic fact for any
 /// `search_facts` query and no procedures.
 fn enrichment_memory() -> Box<dyn CognitiveMemoryOps> {
-    Box::new(CognitiveMemoryBridge::new(Box::new(
-        InMemoryBridgeTransport::new("test-copilot-mem", |method, _params| match method {
+    Box::new(CognitiveMemoryClient::new(Box::new(
+        InMemoryRpcTransport::new("test-copilot-mem", |method, _params| match method {
             "memory.search_facts" => Ok(json!({
                 "facts": [{
                     "node_id": "f1",
@@ -937,7 +937,7 @@ fn enrichment_memory() -> Box<dyn CognitiveMemoryOps> {
                 }]
             })),
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
-            other => Err(BridgeErrorPayload {
+            other => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown method: {other}"),
             }),
@@ -949,9 +949,9 @@ fn enrichment_memory() -> Box<dyn CognitiveMemoryOps> {
 /// supplied bridge's query failure surfaces (no silent swallow) per the
 /// `prepare_turn_context` contract.
 fn failing_memory() -> Box<dyn CognitiveMemoryOps> {
-    Box::new(CognitiveMemoryBridge::new(Box::new(
-        InMemoryBridgeTransport::new("test-copilot-mem-fail", |_method, _params| {
-            Err(BridgeErrorPayload {
+    Box::new(CognitiveMemoryClient::new(Box::new(
+        InMemoryRpcTransport::new("test-copilot-mem-fail", |_method, _params| {
+            Err(RpcErrorPayload {
                 code: -32000,
                 message: "simulated memory backend failure".to_string(),
             })
@@ -961,8 +961,8 @@ fn failing_memory() -> Box<dyn CognitiveMemoryOps> {
 
 /// Mock knowledge bridge with one pack that matches a "rust" objective and a
 /// canned non-empty query answer.
-fn enrichment_knowledge() -> KnowledgeBridge {
-    KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
+fn enrichment_knowledge() -> KnowledgeClient {
+    KnowledgeClient::new(Box::new(InMemoryRpcTransport::new(
         "test-copilot-knowledge",
         |method, _params| match method {
             "knowledge.list_packs" => Ok(json!({"packs": [{
@@ -976,7 +976,7 @@ fn enrichment_knowledge() -> KnowledgeBridge {
                 "sources": [{"title": "Ownership", "section": "Basics"}],
                 "confidence": 0.88
             })),
-            other => Err(BridgeErrorPayload {
+            other => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown method: {other}"),
             }),

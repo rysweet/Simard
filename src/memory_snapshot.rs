@@ -323,12 +323,12 @@ mod tests {
 
     #[test]
     fn round_trip_save_and_load() {
-        use crate::bridge_subprocess::InMemoryBridgeTransport;
-        use crate::memory_bridge::CognitiveMemoryBridge;
+        use crate::memory_client::CognitiveMemoryClient;
+        use crate::rpc_transport::InMemoryRpcTransport;
         use serde_json::json;
 
         let transport =
-            InMemoryBridgeTransport::new("test-snapshot", move |method, _params| match method {
+            InMemoryRpcTransport::new("test-snapshot", move |method, _params| match method {
                 "memory.search_facts" => Ok(json!({
                     "facts": [{
                         "node_id": "f1",
@@ -343,12 +343,12 @@ mod tests {
                 "memory.store_fact" => Ok(json!({"id": "imported-1"})),
                 "memory.store_procedure" => Ok(json!({"id": "imported-p1"})),
                 "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-                _ => Err(crate::bridge::BridgeErrorPayload {
+                _ => Err(crate::rpc::RpcErrorPayload {
                     code: -32601,
                     message: format!("unknown: {method}"),
                 }),
             });
-        let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+        let bridge = CognitiveMemoryClient::new(Box::new(transport));
 
         let dir = std::env::temp_dir().join("simard-test-roundtrip-snapshots");
         let _ = std::fs::remove_dir_all(&dir);
@@ -486,9 +486,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::bridge::BridgeErrorPayload;
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
-    use crate::memory_bridge::CognitiveMemoryBridge;
+    use crate::memory_client::CognitiveMemoryClient;
+    use crate::rpc::RpcErrorPayload;
+    use crate::rpc_transport::InMemoryRpcTransport;
     use serde_json::json;
 
     /// A one-fact, one-procedure snapshot. Restoring it issues exactly two
@@ -523,12 +523,12 @@ mod tests {
     /// `store_procedure`) bump the returned counter. The counter is the
     /// "durable memory touched" probe: a fail-closed restore must leave it at 0.
     fn dest_bridge(
-        stats: impl Fn() -> Result<serde_json::Value, BridgeErrorPayload> + Send + Sync + 'static,
-    ) -> (CognitiveMemoryBridge, Arc<AtomicUsize>) {
+        stats: impl Fn() -> Result<serde_json::Value, RpcErrorPayload> + Send + Sync + 'static,
+    ) -> (CognitiveMemoryClient, Arc<AtomicUsize>) {
         let writes = Arc::new(AtomicUsize::new(0));
         let writes_h = Arc::clone(&writes);
         let transport =
-            InMemoryBridgeTransport::new("test-dest", move |method, _params| match method {
+            InMemoryRpcTransport::new("test-dest", move |method, _params| match method {
                 "memory.get_statistics" => stats(),
                 "memory.store_fact" => {
                     writes_h.fetch_add(1, Ordering::SeqCst);
@@ -538,12 +538,12 @@ mod tests {
                     writes_h.fetch_add(1, Ordering::SeqCst);
                     Ok(json!({"id": "imported-proc"}))
                 }
-                _ => Err(BridgeErrorPayload {
+                _ => Err(RpcErrorPayload {
                     code: -32601,
                     message: format!("unexpected method: {method}"),
                 }),
             });
-        (CognitiveMemoryBridge::new(Box::new(transport)), writes)
+        (CognitiveMemoryClient::new(Box::new(transport)), writes)
     }
 
     fn zero_stats() -> serde_json::Value {
@@ -581,7 +581,7 @@ mod tests {
         // so still-present-but-unreadable durable memory is never overwritten or
         // duplicated. This is the core #2561 regression guard.
         let (bridge, writes) = dest_bridge(|| {
-            Err(BridgeErrorPayload {
+            Err(RpcErrorPayload {
                 code: -32000,
                 message: "transient read failure at startup".to_string(),
             })
@@ -682,7 +682,7 @@ mod tests {
         .expect("write snapshot file");
 
         let (bridge, writes) = dest_bridge(|| {
-            Err(BridgeErrorPayload {
+            Err(RpcErrorPayload {
                 code: -32000,
                 message: "transient read failure at startup".to_string(),
             })

@@ -192,11 +192,11 @@ struct StoredFactCall {
 
 /// Shared mutable state captured by the in-memory bridge handler closure.
 #[derive(Default)]
-struct BridgeRecording {
+struct RpcRecording {
     stored_facts: std::sync::Mutex<Vec<StoredFactCall>>,
 }
 
-impl BridgeRecording {
+impl RpcRecording {
     fn shared() -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self::default())
     }
@@ -209,14 +209,14 @@ impl BridgeRecording {
 /// Build a recording bridge whose `memory.search_facts` returns no facts and
 /// whose `memory.store_fact` records every call into the supplied recording.
 fn recording_bridge_empty(
-    recording: std::sync::Arc<BridgeRecording>,
-) -> crate::memory_bridge::CognitiveMemoryBridge {
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
-    use crate::memory_bridge::CognitiveMemoryBridge;
+    recording: std::sync::Arc<RpcRecording>,
+) -> crate::memory_client::CognitiveMemoryClient {
+    use crate::memory_client::CognitiveMemoryClient;
+    use crate::rpc_transport::InMemoryRpcTransport;
     use serde_json::json;
     let recording_for_handler = recording;
     let transport =
-        InMemoryBridgeTransport::new("test-record-empty", move |method, params| match method {
+        InMemoryRpcTransport::new("test-record-empty", move |method, params| match method {
             "memory.search_facts" => Ok(json!({"facts": []})),
             "memory.store_fact" => {
                 let concept = params
@@ -237,27 +237,27 @@ fn recording_bridge_empty(
                 Ok(json!({"id": "sem_x"}))
             }
             "memory.store_episode" => Ok(json!({"id": "epi_x"})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::rpc::RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown method: {method}"),
             }),
         });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 /// Build a recording bridge whose `memory.search_facts` returns the given
 /// snapshot fact and whose `memory.store_fact` records every call.
 fn recording_bridge_with_snapshot(
     snapshot_json: &str,
-    recording: std::sync::Arc<BridgeRecording>,
-) -> crate::memory_bridge::CognitiveMemoryBridge {
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
-    use crate::memory_bridge::CognitiveMemoryBridge;
+    recording: std::sync::Arc<RpcRecording>,
+) -> crate::memory_client::CognitiveMemoryClient {
+    use crate::memory_client::CognitiveMemoryClient;
+    use crate::rpc_transport::InMemoryRpcTransport;
     use serde_json::json;
     let snapshot_json = snapshot_json.to_string();
     let recording_for_handler = recording;
     let transport =
-        InMemoryBridgeTransport::new("test-record-snapshot", move |method, params| match method {
+        InMemoryRpcTransport::new("test-record-snapshot", move |method, params| match method {
             "memory.search_facts" => Ok(json!({
                 "facts": [{
                     "node_id": "f1",
@@ -287,26 +287,26 @@ fn recording_bridge_with_snapshot(
                 Ok(json!({"id": "sem_x"}))
             }
             "memory.store_episode" => Ok(json!({"id": "epi_x"})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::rpc::RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown method: {method}"),
             }),
         });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 /// Build a bridge whose `memory.search_facts` always returns an error
 /// (simulates the cognitive-memory subprocess being unavailable).
-fn bridge_search_fails() -> crate::memory_bridge::CognitiveMemoryBridge {
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
-    use crate::memory_bridge::CognitiveMemoryBridge;
-    let transport = InMemoryBridgeTransport::new("test-search-fails", |method, _params| {
-        Err(crate::bridge::BridgeErrorPayload {
+fn bridge_search_fails() -> crate::memory_client::CognitiveMemoryClient {
+    use crate::memory_client::CognitiveMemoryClient;
+    use crate::rpc_transport::InMemoryRpcTransport;
+    let transport = InMemoryRpcTransport::new("test-search-fails", |method, _params| {
+        Err(crate::rpc::RpcErrorPayload {
             code: -32000,
             message: format!("simulated bridge failure for method: {method}"),
         })
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 /// Helper: unique temp dir for each test (avoids cross-test state pollution).
@@ -359,7 +359,7 @@ fn load_goal_board_reads_from_cognitive_memory() {
         last_progress_update_at: None,
     });
     let snapshot_json = serde_json::to_string(&mem_board).unwrap();
-    let recording = BridgeRecording::shared();
+    let recording = RpcRecording::shared();
     let bridge = recording_bridge_with_snapshot(&snapshot_json, recording.clone());
 
     let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
@@ -376,7 +376,7 @@ fn load_goal_board_reads_from_cognitive_memory() {
 #[serial_test::serial(cognitive_memory)]
 fn load_goal_board_returns_empty_when_memory_has_no_snapshot() {
     let root = tmp_state_root("mem-empty");
-    let recording = BridgeRecording::shared();
+    let recording = RpcRecording::shared();
     let bridge = recording_bridge_empty(recording.clone());
 
     let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
@@ -418,7 +418,7 @@ fn load_goal_board_migrates_legacy_disk_file_into_memory_then_deletes_it() {
     let path = root.join("goal_records.json");
     std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
 
-    let recording = BridgeRecording::shared();
+    let recording = RpcRecording::shared();
     let bridge = recording_bridge_empty(recording.clone());
     let _ = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
 
@@ -438,7 +438,7 @@ fn load_goal_board_migrates_legacy_disk_file_into_memory_then_deletes_it() {
 #[serial_test::serial(cognitive_memory)]
 fn load_goal_board_migration_is_noop_when_no_legacy_file() {
     let root = tmp_state_root("migrate-noop");
-    let recording = BridgeRecording::shared();
+    let recording = RpcRecording::shared();
     let bridge = recording_bridge_empty(recording.clone());
 
     let _ = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
@@ -456,7 +456,7 @@ fn load_goal_board_migration_handles_corrupt_legacy_file_without_panic() {
     let path = root.join("goal_records.json");
     std::fs::write(&path, b"NOT VALID JSON").unwrap();
 
-    let recording = BridgeRecording::shared();
+    let recording = RpcRecording::shared();
     let bridge = recording_bridge_empty(recording.clone());
     let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
 
@@ -495,7 +495,7 @@ fn load_goal_board_runs_migration_only_once_in_practice() {
     let path = root.join("goal_records.json");
     std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
 
-    let recording = BridgeRecording::shared();
+    let recording = RpcRecording::shared();
     let bridge = recording_bridge_empty(recording.clone());
     with_state_root(&root, || {
         super::load_goal_board(&bridge).unwrap();
@@ -528,7 +528,7 @@ fn save_goal_board_persists_only_to_memory_and_writes_no_disk_file() {
         last_progress_update_at: None,
     });
 
-    let recording = BridgeRecording::shared();
+    let recording = RpcRecording::shared();
     let bridge = recording_bridge_empty(recording.clone());
     with_state_root(&root, || super::save_goal_board(&board, &bridge).unwrap());
 
@@ -563,7 +563,7 @@ fn save_goal_board_rejects_suspect_board_without_persisting() {
         last_progress_update_at: None,
     });
 
-    let recording = BridgeRecording::shared();
+    let recording = RpcRecording::shared();
     let bridge = recording_bridge_empty(recording.clone());
     let err = with_state_root(&root, || {
         super::save_goal_board(&board, &bridge).unwrap_err()
@@ -600,7 +600,7 @@ fn save_goal_board_accepts_a_well_formed_board() {
         wip_refs: vec![],
         last_progress_update_at: None,
     });
-    let recording = BridgeRecording::shared();
+    let recording = RpcRecording::shared();
     let bridge = recording_bridge_empty(recording.clone());
 
     with_state_root(&root, || super::save_goal_board(&board, &bridge).unwrap());
@@ -758,12 +758,12 @@ fn backlog_with(id: &str, description: &str, source: &str, score: f64) -> Backlo
 /// assert on stored counts/content.
 #[allow(clippy::type_complexity)]
 fn stateful_bridge() -> (
-    crate::memory_bridge::CognitiveMemoryBridge,
+    crate::memory_client::CognitiveMemoryClient,
     std::sync::Arc<std::sync::Mutex<Vec<crate::memory_cognitive::CognitiveFact>>>,
 ) {
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
-    use crate::memory_bridge::CognitiveMemoryBridge;
+    use crate::memory_client::CognitiveMemoryClient;
     use crate::memory_cognitive::CognitiveFact;
+    use crate::rpc_transport::InMemoryRpcTransport;
     use serde_json::json;
 
     let facts: std::sync::Arc<std::sync::Mutex<Vec<CognitiveFact>>> =
@@ -772,7 +772,7 @@ fn stateful_bridge() -> (
     let facts_for_handler = facts.clone();
     let counter_for_handler = counter.clone();
 
-    let transport = InMemoryBridgeTransport::new("test-stateful", move |method, params| {
+    let transport = InMemoryRpcTransport::new("test-stateful", move |method, params| {
         match method {
             "memory.search_facts" => {
                 let snapshot = facts_for_handler.lock().unwrap().clone();
@@ -824,29 +824,29 @@ fn stateful_bridge() -> (
                 Ok(json!({ "id": node_id }))
             }
             "memory.store_episode" => Ok(json!({ "id": "epi_x" })),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::rpc::RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown method: {method}"),
             }),
         }
     });
-    (CognitiveMemoryBridge::new(Box::new(transport)), facts)
+    (CognitiveMemoryClient::new(Box::new(transport)), facts)
 }
 
-/// Bridge whose `memory.search_facts` always errors but whose
+/// Client whose `memory.search_facts` always errors but whose
 /// `memory.store_fact` succeeds and is recorded. Used to verify the
 /// read-failure fallback path in `save_goal_board`.
 fn bridge_search_fails_store_works(
-    recording: std::sync::Arc<BridgeRecording>,
-) -> crate::memory_bridge::CognitiveMemoryBridge {
-    use crate::bridge_subprocess::InMemoryBridgeTransport;
-    use crate::memory_bridge::CognitiveMemoryBridge;
+    recording: std::sync::Arc<RpcRecording>,
+) -> crate::memory_client::CognitiveMemoryClient {
+    use crate::memory_client::CognitiveMemoryClient;
+    use crate::rpc_transport::InMemoryRpcTransport;
     use serde_json::json;
     let recording_for_handler = recording;
     let transport =
-        InMemoryBridgeTransport::new("test-search-fails-store-works", move |method, params| {
+        InMemoryRpcTransport::new("test-search-fails-store-works", move |method, params| {
             match method {
-                "memory.search_facts" => Err(crate::bridge::BridgeErrorPayload {
+                "memory.search_facts" => Err(crate::rpc::RpcErrorPayload {
                     code: -32000,
                     message: "simulated search_facts failure".to_string(),
                 }),
@@ -869,13 +869,13 @@ fn bridge_search_fails_store_works(
                     Ok(json!({ "id": "sem_x" }))
                 }
                 "memory.store_episode" => Ok(json!({ "id": "epi_x" })),
-                _ => Err(crate::bridge::BridgeErrorPayload {
+                _ => Err(crate::rpc::RpcErrorPayload {
                     code: -32601,
                     message: format!("unknown method: {method}"),
                 }),
             }
         });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 // ── merge_boards: pure helper unit tests (9 cases per design spec) ──────
@@ -1362,7 +1362,7 @@ fn save_goal_board_collision_persists_in_flight_fields() {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn save_goal_board_read_failure_falls_back_to_persisting_in_flight() {
-    let recording = BridgeRecording::shared();
+    let recording = RpcRecording::shared();
     let bridge = bridge_search_fails_store_works(recording.clone());
     let root = tmp_state_root("save-readfail");
 
@@ -1482,7 +1482,7 @@ fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
 
     for iter in 0..50u32 {
         let (bridge, _facts) = stateful_bridge();
-        let bridge: Arc<crate::memory_bridge::CognitiveMemoryBridge> = Arc::new(bridge);
+        let bridge: Arc<crate::memory_client::CognitiveMemoryClient> = Arc::new(bridge);
         let barrier = Arc::new(Barrier::new(2));
 
         let alpha_id = format!("alpha-concur-{iter:04}");
@@ -1572,7 +1572,7 @@ fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
 
     for iter in 0..25u32 {
         let (bridge, _facts) = stateful_bridge();
-        let bridge: Arc<crate::memory_bridge::CognitiveMemoryBridge> = Arc::new(bridge);
+        let bridge: Arc<crate::memory_client::CognitiveMemoryClient> = Arc::new(bridge);
         let barrier = Arc::new(Barrier::new(2));
 
         // Seed a guard-clean active goal so board_integrity_suspect passes

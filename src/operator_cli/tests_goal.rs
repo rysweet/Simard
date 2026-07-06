@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, add_active_goal, save_goal_board};
-use crate::memory_ipc::launch_writer_bridge;
+use crate::memory_ipc::launch_writer_client;
 use crate::ooda_actions::advance_goal::spawn::{
     BRAIN_FAILURE_BLOCKED_PREFIX, BRAIN_FAILURE_BLOCKED_SUFFIX,
 };
@@ -48,7 +48,7 @@ fn seed_board(root: &Path, goals: Vec<ActiveGoal>) {
     for goal in goals {
         add_active_goal(&mut board, goal).expect("add goal under MAX_ACTIVE_GOALS");
     }
-    let writer = launch_writer_bridge(root).expect("writer bridge");
+    let writer = launch_writer_client(root).expect("writer bridge");
     save_goal_board(&board, writer.ops()).expect("save board");
 }
 
@@ -73,7 +73,7 @@ fn active_goal(id: &str, status: GoalProgress) -> ActiveGoal {
 
 /// Re-read the persisted goal board from cognitive memory at `root`.
 fn load_board(root: &Path) -> GoalBoard {
-    let writer = launch_writer_bridge(root).expect("writer bridge");
+    let writer = launch_writer_client(root).expect("writer bridge");
     crate::goal_curation::load_goal_board(writer.ops()).expect("load board")
 }
 
@@ -376,7 +376,7 @@ fn operator_remove_via_cli_survives_daemon_cycle_and_restart() {
     );
 
     // Daemon adopts the board; its in-flight copy holds BOTH goals.
-    let bridge = launch_writer_bridge(&root).expect("writer bridge");
+    let bridge = launch_writer_client(&root).expect("writer bridge");
     let daemon_in_flight = crate::goal_board_store::load_or_migrate(&root, bridge.ops())
         .expect("migrate")
         .board;

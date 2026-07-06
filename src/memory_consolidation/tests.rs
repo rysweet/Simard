@@ -1,17 +1,17 @@
 use super::*;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_client::CognitiveMemoryClient;
 use crate::memory_cognitive::{CognitiveStatistics, CognitiveWorkingSlot};
+use crate::rpc_transport::InMemoryRpcTransport;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
+fn counting_bridge() -> (CognitiveMemoryClient, Arc<AtomicU32>) {
     let call_count = Arc::new(AtomicU32::new(0));
     let counter = call_count.clone();
-    let transport = InMemoryBridgeTransport::new("test", move |method, _params| {
+    let transport = InMemoryRpcTransport::new("test", move |method, _params| {
         counter.fetch_add(1, Ordering::SeqCst);
         match method {
             "memory.record_sensory" => Ok(json!({"id": "sen_1"})),
@@ -30,13 +30,13 @@ fn counting_bridge() -> (CognitiveMemoryBridge, Arc<AtomicU32>) {
             // so legacy fixtures keep working without any test-side
             // changes.
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::rpc::RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         }
     });
-    (CognitiveMemoryBridge::new(Box::new(transport)), call_count)
+    (CognitiveMemoryClient::new(Box::new(transport)), call_count)
 }
 
 fn test_session_id() -> SessionId {
@@ -289,7 +289,7 @@ fn consolidation_intake_returns_zero_when_no_prior_facts() {
 fn consolidation_intake_with_facts_pushes_to_working_memory() {
     let call_count = Arc::new(AtomicU32::new(0));
     let counter = call_count.clone();
-    let transport = InMemoryBridgeTransport::new("test-intake", move |method, _params| {
+    let transport = InMemoryRpcTransport::new("test-intake", move |method, _params| {
         counter.fetch_add(1, Ordering::SeqCst);
         match method {
             "memory.search_facts" => Ok(json!({
@@ -304,13 +304,13 @@ fn consolidation_intake_with_facts_pushes_to_working_memory() {
             })),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
             "memory.store_episode" => Ok(json!({"id": "epi_1"})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::rpc::RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         }
     });
-    let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+    let bridge = CognitiveMemoryClient::new(Box::new(transport));
     let hydrated = consolidation_intake(&test_session_id(), "test-objective", &bridge).unwrap();
     assert_eq!(hydrated, 1);
     // search_facts + push_working + store_episode = 3
@@ -337,9 +337,9 @@ fn consolidation_persistence_flushes_and_consolidates() {
 /// Build a bridge whose `search_facts("goal-store:record", ...)` returns
 /// multiple revisions for the same goal slug. This simulates the append-only
 /// fact store returning historical rows alongside the current version.
-fn goal_dedup_bridge() -> CognitiveMemoryBridge {
+fn goal_dedup_bridge() -> CognitiveMemoryClient {
     use crate::goals::GoalRecord;
-    let transport = InMemoryBridgeTransport::new("goal-dedup", move |method, params| {
+    let transport = InMemoryRpcTransport::new("goal-dedup", move |method, params| {
         match method {
             "memory.search_facts" => {
                 // Inspect the query parameter to route goal vs objective searches.
@@ -426,13 +426,13 @@ fn goal_dedup_bridge() -> CognitiveMemoryBridge {
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::rpc::RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         }
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 #[test]
@@ -480,7 +480,7 @@ fn preparation_deduplicates_goal_facts_by_slug_keeping_latest() {
 #[test]
 fn preparation_does_not_include_unparseable_goal_facts() {
     // A bridge that returns one valid goal fact and one with malformed JSON.
-    let transport = InMemoryBridgeTransport::new("bad-json", move |method, params| match method {
+    let transport = InMemoryRpcTransport::new("bad-json", move |method, params| match method {
         "memory.search_facts" => {
             let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
             if query == "goal-store:record" {
@@ -512,12 +512,12 @@ fn preparation_does_not_include_unparseable_goal_facts() {
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
         "memory.push_working" => Ok(json!({"id": "wrk_1"})),
         "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::rpc::RpcErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+    let bridge = CognitiveMemoryClient::new(Box::new(transport));
     let ctx =
         preparation_memory_operations("unrelated objective", &test_session_id(), &bridge).unwrap();
 
@@ -547,7 +547,7 @@ fn preparation_uses_goal_store_list_limit_not_hardcoded_20() {
     let captured_limit = Arc::new(Mutex::new(0u32));
     let limit_capture = captured_limit.clone();
 
-    let transport = InMemoryBridgeTransport::new("limit-check", move |method, params| {
+    let transport = InMemoryRpcTransport::new("limit-check", move |method, params| {
         match method {
             "memory.search_facts" => {
                 let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
@@ -563,13 +563,13 @@ fn preparation_uses_goal_store_list_limit_not_hardcoded_20() {
             "memory.recall_procedure" => Ok(json!({"procedures": []})),
             "memory.push_working" => Ok(json!({"id": "wrk_1"})),
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::rpc::RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         }
     });
-    let bridge = CognitiveMemoryBridge::new(Box::new(transport));
+    let bridge = CognitiveMemoryClient::new(Box::new(transport));
     preparation_memory_operations("check limit", &test_session_id(), &bridge).unwrap();
 
     let limit = *captured_limit.lock().unwrap();
@@ -586,20 +586,20 @@ fn preparation_uses_goal_store_list_limit_not_hardcoded_20() {
 
 /// Build a counting bridge that satisfies every call needed by the
 /// persistence phase *and* the snapshot save (search_facts + recall_procedure).
-fn persistence_capable_bridge() -> CognitiveMemoryBridge {
-    let transport = InMemoryBridgeTransport::new("snapshot-fail", |method, _params| match method {
+fn persistence_capable_bridge() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("snapshot-fail", |method, _params| match method {
         "memory.consolidate_episodes" => Ok(json!({"id": null})),
         "memory.clear_working" => Ok(json!({"count": 0})),
         "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
         "memory.store_episode" => Ok(json!({"id": "epi_1"})),
         "memory.search_facts" => Ok(json!({"facts": []})),
         "memory.recall_procedure" => Ok(json!({"procedures": []})),
-        _ => Err(crate::bridge::BridgeErrorPayload {
+        _ => Err(crate::rpc::RpcErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         }),
     });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 #[test]
@@ -758,25 +758,24 @@ fn round_trip_execution_memory_recall() {
 fn compound_objective_bridge(
     captured_queries: Arc<std::sync::Mutex<Vec<String>>>,
     facts_per_query: std::collections::HashMap<String, Vec<serde_json::Value>>,
-) -> CognitiveMemoryBridge {
-    let transport =
-        InMemoryBridgeTransport::new("compound-obj", move |method, params| match method {
-            "memory.search_facts" => {
-                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                captured_queries.lock().unwrap().push(query.to_string());
-                let facts = facts_per_query.get(query).cloned().unwrap_or_default();
-                Ok(json!({ "facts": facts }))
-            }
-            "memory.check_triggers" => Ok(json!({"prospectives": []})),
-            "memory.recall_procedure" => Ok(json!({"procedures": []})),
-            "memory.push_working" => Ok(json!({"id": "wrk_1"})),
-            "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
-                code: -32601,
-                message: format!("unknown: {method}"),
-            }),
-        });
-    CognitiveMemoryBridge::new(Box::new(transport))
+) -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("compound-obj", move |method, params| match method {
+        "memory.search_facts" => {
+            let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            captured_queries.lock().unwrap().push(query.to_string());
+            let facts = facts_per_query.get(query).cloned().unwrap_or_default();
+            Ok(json!({ "facts": facts }))
+        }
+        "memory.check_triggers" => Ok(json!({"prospectives": []})),
+        "memory.recall_procedure" => Ok(json!({"procedures": []})),
+        "memory.push_working" => Ok(json!({"id": "wrk_1"})),
+        "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
+        _ => Err(crate::rpc::RpcErrorPayload {
+            code: -32601,
+            message: format!("unknown: {method}"),
+        }),
+    });
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 #[test]

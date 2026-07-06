@@ -38,10 +38,10 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::base_types::BaseTypeId;
+use crate::engineer_handoff::{EngineerHandoffContext, SHARED_EXPLICIT_STATE_ROOT_SOURCE};
 use crate::error::{SimardError, SimardResult};
 use crate::runtime::RuntimeTopology;
 use crate::session::{SessionPhase, SessionRecord, UuidSessionIdGenerator};
-use crate::terminal_engineer_bridge::{SHARED_EXPLICIT_STATE_ROOT_SOURCE, TerminalBridgeContext};
 
 use execution::{
     parse_status_paths, run_command, run_command_allow_failure, trimmed_stdout,
@@ -210,8 +210,10 @@ pub fn run_local_engineer_loop(
     session.advance(SessionPhase::Preparation)?;
 
     let phase_start = Instant::now();
-    let terminal_bridge_context =
-        TerminalBridgeContext::load_from_state_root(&state_root, SHARED_EXPLICIT_STATE_ROOT_SOURCE);
+    let terminal_bridge_context = EngineerHandoffContext::load_from_state_root(
+        &state_root,
+        SHARED_EXPLICIT_STATE_ROOT_SOURCE,
+    );
     match &terminal_bridge_context {
         Ok(_) => {
             phase_traces.push(PhaseTrace {
@@ -252,7 +254,7 @@ pub fn run_local_engineer_loop(
     // that the engineer session's goal board matches. A drift means
     // goals curated in the meeting may have silently vanished.
     let phase_start = Instant::now();
-    match crate::memory_ipc::launch_writer_bridge(&state_root) {
+    match crate::memory_ipc::launch_writer_client(&state_root) {
         Ok(bridge) => match crate::goal_curation::load_goal_board(bridge.ops()) {
             Ok(board) => match crate::goal_curation::verify_goal_carryover(&board, bridge.ops()) {
                 Ok(crate::goal_curation::CarryoverVerification::Drifted {

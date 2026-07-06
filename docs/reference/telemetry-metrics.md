@@ -162,7 +162,7 @@ gauges the section renders `absent`, never a fabricated zero.
 
 ### LLM usage — `simard.llm.*`
 
-Bridged from `cost_tracking` (the ledger format is unchanged; these are
+Mirrored from `cost_tracking` (the ledger format is unchanged; these are
 additive emissions).
 
 | Metric | Type | Attributes | Meaning |

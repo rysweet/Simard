@@ -103,7 +103,7 @@ The preparation phase
 multi-word objective fragments:
 
 ```rust
-let per_fragment = bridge.search_facts(fragment, 10, 0.0)?;
+let per_fragment = client.search_facts(fragment, 10, 0.0)?;
 ```
 
 A fragment like `"investigate the failing CI on the auth module"`
@@ -209,7 +209,7 @@ importantly `goal-store:record`).
 >
 > - **`goal-store:record` must stay a single token.** The
 >   preparation phase loads goal facts with
->   `bridge.search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)`
+>   `client.search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)`
 >   where `GOAL_STORE_FACT_CONCEPT == "goal-store:record"`. That
 >   string has no internal whitespace, so the whitespace-only
 >   tokenizer yields exactly one token — `goal-store:record` —
@@ -402,10 +402,10 @@ The preparation phase
 
 1. **Per-objective-fragment recall.** The objective is split on `"; "`
    into fragments; each fragment is passed to
-   `bridge.search_facts(fragment, 10, 0.0)`. With tokenization, a
+   `client.search_facts(fragment, 10, 0.0)`. With tokenization, a
    multi-word fragment matches any fact sharing a keyword — this is the
    call that previously always returned zero.
-2. **Goal-fact load.** `bridge.search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)`
+2. **Goal-fact load.** `client.search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)`
    loads active goal records. Because `goal-store:record` has no
    whitespace it tokenizes to a single token and stays on the
    preserved exact-match path — its results are identical to before.

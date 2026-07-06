@@ -18,7 +18,7 @@ related:
   - ./deflaking-known-flaky-tests.md
   - ./COVERAGE_BASELINE.md
   - ../reference/goal-board-api.md
-  - ../reference/cognitive-memory-bridge-helpers.md
+  - ../reference/cognitive-memory-client-helpers.md
 ---
 
 # serial(cognitive_memory) test isolation — the watched env surface
@@ -175,8 +175,8 @@ if**, at run time, it does any of:
   env, directly or via `resolve_state_root()` / `memory_ipc::socket_path_for`
   default resolution.
 - **(D)** Opens cognitive memory at the **env-derived default path**
-  (`LibraryCognitiveMemory::open`, `CognitiveMemoryBridge`, `open_native`,
-  `launch_writer_bridge` against a path obtained from the global env) **or**
+  (`LibraryCognitiveMemory::open`, `CognitiveMemoryClient`, `open_native`,
+  `launch_writer_client` against a path obtained from the global env) **or**
   invokes one of the **async dashboard route handlers** that resolve the state
   root internally via `resolve_state_root()` — `seed_goals`, `add_goal`,
   `remove_goal`, `update_goal_status`, `promote_backlog_item`, `demote_goal`,
@@ -188,12 +188,12 @@ if**, at run time, it does any of:
   > that symbol is deleted and is no longer a current API.
 
   > **Not rule (D):** `dashboard_goal_board_snapshot(state_root)`,
-  > `dashboard_save_goal_board(state_root, board)`, `save_goal_board(board, bridge)`,
-  > `save_goal_board_with_removals(…)`, and `load_goal_board(bridge)` take an
-  > **explicit** `state_root: &Path` or `bridge: &dyn CognitiveMemoryOps` and
+  > `dashboard_save_goal_board(state_root, board)`, `save_goal_board(board, client)`,
+  > `save_goal_board_with_removals(…)`, and `load_goal_board(client)` take an
+  > **explicit** `state_root: &Path` or `client: &dyn CognitiveMemoryOps` and
   > **never read the environment**. Calling them is isolated by construction
   > (exclusion #2); they require the key only if the test *also* derives that
-  > path or bridge from the global env (via `resolve_state_root()` or
+  > path or client from the global env (via `resolve_state_root()` or
   > `HermeticState`).
 
 **Exclusions — do NOT annotate solely because of these:**
@@ -239,7 +239,7 @@ class the #2360 work left open by:
 2. Multi-keying every remaining env mutator into `cognitive_memory` (adding —
    never removing — the key alongside any existing semantic group). This folded
    in the previously-uncaught variables, including `SIMARD_SKIP_GYM`
-   (`gym_runner_bridge`), `NO_COLOR` (`meeting_repl`), `ENV_OVERRIDE`
+   (`gym_runner_client`), `NO_COLOR` (`meeting_repl`), `ENV_OVERRIDE`
    (`prompt_delivery_env`), `SIMARD_NO_UPDATE_CHECK` (`update_check_env`),
    `ENV_LLM_PROVIDER` (`runtime_config`), `ANTHROPIC_API_KEY` (`review_pipeline`,
    `self_improve_executor`), `SIMARD_DASHBOARD_PORT`, `SIMARD_OPERATOR_NAME`,
@@ -540,12 +540,12 @@ use simard::test_support::HermeticState;
 #[serial_test::serial(cognitive_memory)]   // required by the Annotation Decision Rule (A)
 fn promotes_backlog_item_into_active() {
     let state = HermeticState::new();
-    let bridge = launch_writer_bridge(state.state_root()).expect("bridge");
+    let client = launch_writer_client(state.state_root()).expect("client");
 
-    save_goal_board(&seed_board(), bridge.ops()).expect("seed");
-    promote_backlog_item(&id, bridge.ops()).expect("promote");
+    save_goal_board(&seed_board(), client.ops()).expect("seed");
+    promote_backlog_item(&id, client.ops()).expect("promote");
 
-    let board = load_goal_board(bridge.ops()).expect("load");
+    let board = load_goal_board(client.ops()).expect("load");
     assert_eq!(board.active.len(), 3);
 }
 ```
@@ -598,7 +598,7 @@ let board = dashboard_goal_board_snapshot(state.state_root())?;
 
 `dashboard_goal_board_snapshot(state_root)` / `dashboard_save_goal_board(state_root, board)`
 are **already** the explicit-`state_root` form (they call
-`open_reader_bridge`/`launch_writer_bridge` on the passed path); there is no
+`open_reader_client`/`launch_writer_client` on the passed path); there is no
 zero-arg env-default form and no separate `_at` overload to add.
 `full_goal_lifecycle_crud` already reads its final assertion via the explicit,
 synchronous `dashboard_goal_board_snapshot(state.state_root())`
@@ -819,5 +819,5 @@ Acceptance gate:
 - [Goal board API](../reference/goal-board-api.md) — the handler surface
   (`save_goal_board`, `load_goal_board`, …) whose env-default reads are
   serialized here.
-- [Cognitive memory bridge helpers](../reference/cognitive-memory-bridge-helpers.md)
-  — `launch_writer_bridge` and the per-state-root socket path.
+- [Cognitive memory client helpers](../reference/cognitive-memory-client-helpers.md)
+  — `launch_writer_client` and the per-state-root socket path.

@@ -70,7 +70,7 @@ identical image, a `touch`, a redeploy script that copies a byte-identical
 binary into place, a backup/restore that rewrites the file — makes
 `binary_changed` return `true` even though the running code is unchanged. The
 daemon then closes its LLM session, `exec()`s a fresh copy of the *same* image,
-and pays full cold-start cost (bridge spawn, memory recall, preparation) for no
+and pays full cold-start cost (client spawn, memory recall, preparation) for no
 behavioral change.
 
 On a host that rebuilds periodically this produces a self-restart every
@@ -196,7 +196,7 @@ The loop call site is unchanged in shape — only the gate's semantics tighten:
 // src/operator_commands_ooda/daemon/mod.rs
 #[cfg(unix)]
 if auto_reload && binary_changed(start_time) {
-    if let Some(ref mut session) = bridges.session {
+    if let Some(ref mut session) = clients.session {
         let _ = session.close();
     }
     exec_self_reload()?;
@@ -240,7 +240,7 @@ daemon still use `--no-auto-reload`.
 - **Zero-shell exec.** The relaunch uses `Command::exec()` directly — there is
   no `sh -c`, so there is no shell-injection surface in the reload path.
 - **Session drained first.** The LLM session is closed before `exec()` so a
-  genuine reload does not leak the bridge/session resources.
+  genuine reload does not leak the client/session resources.
 - **Panic-free.** The gate performs no unwrap/expect on I/O and no unbounded
   allocation; it is safe to call every cycle.
 

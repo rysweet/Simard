@@ -80,7 +80,7 @@ callers (OODA, goals, consolidation, dashboards, bootstrap)
         │
         └─ RemoteCognitiveMemory    (the daemon's IPC client — unchanged)
 
-   selected in ooda_loop::bridge_factory::connect_memory()
+   selected in ooda_loop::client_factory::connect_memory()
 ```
 
 `RemoteCognitiveMemory` is the daemon's IPC client; `connect_memory()` still
@@ -93,7 +93,7 @@ single-writer store). When no socket is present, the direct backend is always
 > `store_fact_with_provenance`, `store_procedure_with_provenance`, and
 > `episodes_for_fact` — delegating to the library's `DERIVES_FROM` /
 > `PROCEDURE_DERIVES_FROM` edge API (rev `758e0a7…`). The other implementors
-> (`RemoteCognitiveMemory`, bridge/test stubs) inherit no-provenance defaults
+> (`RemoteCognitiveMemory`, client/test stubs) inherit no-provenance defaults
 > and keep compiling unchanged. See
 > [Cognitive-memory provenance](../reference/cognitive-memory-provenance.md).
 
@@ -170,7 +170,7 @@ CLI all run on the library backend.
 
 ### Runtime backend selection
 
-`connect_memory(state_root)` (in `ooda_loop::bridge_factory`) collapses to a
+`connect_memory(state_root)` (in `ooda_loop::client_factory`) collapses to a
 **two-tier** precedence:
 
 1. a live daemon socket exists → `RemoteCognitiveMemory` (IPC client; unchanged),
@@ -377,7 +377,7 @@ The `Err` arm is the crux: a read failure is never coerced into "empty", so a
 snapshot can never be layered on top of still-present-but-unreadable durable
 memory (which would duplicate every memory once reads recover). The default trait
 implementation derives the answer from `get_statistics()?`, so every backend that
-*surfaces* its read/transport errors (the bridge and IPC clients, test mocks)
+*surfaces* its read/transport errors (the client and IPC clients, test mocks)
 fails closed automatically.
 
 **Residual gap.** For the direct library backend the last gap stays open until
@@ -571,7 +571,7 @@ That reader currently points at the **abandoned** native goal store and will
 increasingly return `GoalBoard::default()` as the old file goes stale. The
 documented follow-up is to migrate it to read the goal-board snapshot through the
 library (e.g. `search_facts("goal-board:snapshot", …)` via the goals
-reader-bridge) and then drop the direct `lbug` dependency entirely. It is
+reader-client) and then drop the direct `lbug` dependency entirely. It is
 deferred here to avoid writer contention with the daemon (there is no read-only
 library constructor at the pinned commit) and to keep TUI/IPC changes out of the
 de-fork scope.

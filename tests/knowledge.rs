@@ -3,14 +3,14 @@
 //! These tests use an in-memory bridge transport to verify the full contract
 //! without requiring a running Python bridge server or installed knowledge packs.
 
-use simard::bridge::{BRIDGE_ERROR_METHOD_NOT_FOUND, BridgeErrorPayload};
-use simard::bridge_subprocess::InMemoryBridgeTransport;
-use simard::knowledge_bridge::{KnowledgeBridge, KnowledgePackInfo};
+use simard::knowledge_client::{KnowledgeClient, KnowledgePackInfo};
 use simard::knowledge_context::{PlanningContext, enrich_planning_context};
+use simard::rpc::{RPC_ERROR_METHOD_NOT_FOUND, RpcErrorPayload};
+use simard::rpc_transport::InMemoryRpcTransport;
 
 /// Build a mock transport that simulates the Python knowledge bridge server.
-fn mock_knowledge_transport() -> InMemoryBridgeTransport {
-    InMemoryBridgeTransport::new("knowledge-integration", |method, params| match method {
+fn mock_knowledge_transport() -> InMemoryRpcTransport {
+    InMemoryRpcTransport::new("knowledge-integration", |method, params| match method {
         "bridge.health" => Ok(serde_json::json!({
             "server_name": "simard-knowledge",
             "healthy": true,
@@ -26,7 +26,7 @@ fn mock_knowledge_transport() -> InMemoryBridgeTransport {
                 .unwrap_or("");
 
             if pack == "unknown-pack" {
-                return Err(BridgeErrorPayload {
+                return Err(RpcErrorPayload {
                     code: -32603,
                     message: format!("pack '{pack}' not found"),
                 });
@@ -100,14 +100,14 @@ fn mock_knowledge_transport() -> InMemoryBridgeTransport {
                     "article_count": 210,
                     "section_count": 890,
                 })),
-                _ => Err(BridgeErrorPayload {
+                _ => Err(RpcErrorPayload {
                     code: -32603,
                     message: format!("pack '{pack}' not found"),
                 }),
             }
         }
-        _ => Err(BridgeErrorPayload {
-            code: BRIDGE_ERROR_METHOD_NOT_FOUND,
+        _ => Err(RpcErrorPayload {
+            code: RPC_ERROR_METHOD_NOT_FOUND,
             message: format!("unknown method: {method}"),
         }),
     })
@@ -119,7 +119,7 @@ fn mock_knowledge_transport() -> InMemoryBridgeTransport {
 
 #[test]
 fn list_packs_returns_all_available() {
-    let bridge = KnowledgeBridge::new(Box::new(mock_knowledge_transport()));
+    let bridge = KnowledgeClient::new(Box::new(mock_knowledge_transport()));
     let packs = bridge.list_packs().unwrap();
     assert_eq!(packs.len(), 4);
 
@@ -132,7 +132,7 @@ fn list_packs_returns_all_available() {
 
 #[test]
 fn list_packs_includes_article_counts() {
-    let bridge = KnowledgeBridge::new(Box::new(mock_knowledge_transport()));
+    let bridge = KnowledgeClient::new(Box::new(mock_knowledge_transport()));
     let packs = bridge.list_packs().unwrap();
     let rust = packs.iter().find(|p| p.name == "rust-expert").unwrap();
     assert_eq!(rust.article_count, 150);
@@ -145,7 +145,7 @@ fn list_packs_includes_article_counts() {
 
 #[test]
 fn query_pack_returns_answer_and_sources() {
-    let bridge = KnowledgeBridge::new(Box::new(mock_knowledge_transport()));
+    let bridge = KnowledgeClient::new(Box::new(mock_knowledge_transport()));
     let result = bridge
         .query("rust-expert", "What is ownership?", 10)
         .unwrap();
@@ -161,7 +161,7 @@ fn query_pack_returns_answer_and_sources() {
 
 #[test]
 fn query_unknown_pack_returns_error() {
-    let bridge = KnowledgeBridge::new(Box::new(mock_knowledge_transport()));
+    let bridge = KnowledgeClient::new(Box::new(mock_knowledge_transport()));
     let result = bridge.query("unknown-pack", "anything", 5);
     assert!(result.is_err());
     let error_msg = result.unwrap_err().to_string();
@@ -170,7 +170,7 @@ fn query_unknown_pack_returns_error() {
 
 #[test]
 fn query_empty_question_returns_zero_confidence() {
-    let bridge = KnowledgeBridge::new(Box::new(mock_knowledge_transport()));
+    let bridge = KnowledgeClient::new(Box::new(mock_knowledge_transport()));
     let result = bridge.query("rust-expert", "", 5).unwrap();
     assert!(result.confidence < f64::EPSILON);
     assert!(result.sources.is_empty());
@@ -183,7 +183,7 @@ fn query_empty_question_returns_zero_confidence() {
 
 #[test]
 fn pack_info_returns_metadata() {
-    let bridge = KnowledgeBridge::new(Box::new(mock_knowledge_transport()));
+    let bridge = KnowledgeClient::new(Box::new(mock_knowledge_transport()));
     let info = bridge.pack_info("rust-expert").unwrap();
     assert_eq!(info.name, "rust-expert");
     assert_eq!(
@@ -196,7 +196,7 @@ fn pack_info_returns_metadata() {
 
 #[test]
 fn pack_info_unknown_returns_error() {
-    let bridge = KnowledgeBridge::new(Box::new(mock_knowledge_transport()));
+    let bridge = KnowledgeClient::new(Box::new(mock_knowledge_transport()));
     let result = bridge.pack_info("nonexistent");
     assert!(result.is_err());
     let error_msg = result.unwrap_err().to_string();
@@ -209,7 +209,7 @@ fn pack_info_unknown_returns_error() {
 
 #[test]
 fn health_check_reports_healthy() {
-    let bridge = KnowledgeBridge::new(Box::new(mock_knowledge_transport()));
+    let bridge = KnowledgeClient::new(Box::new(mock_knowledge_transport()));
     let health = bridge.health().unwrap();
     assert_eq!(health.server_name, "simard-knowledge");
     assert!(health.healthy);
@@ -221,7 +221,7 @@ fn health_check_reports_healthy() {
 
 #[test]
 fn enrich_context_picks_relevant_packs_for_rust_objective() {
-    let bridge = KnowledgeBridge::new(Box::new(mock_knowledge_transport()));
+    let bridge = KnowledgeClient::new(Box::new(mock_knowledge_transport()));
     let ctx =
         enrich_planning_context("Fix Rust ownership bug in the borrow checker", &bridge).unwrap();
 
@@ -235,7 +235,7 @@ fn enrich_context_picks_relevant_packs_for_rust_objective() {
 
 #[test]
 fn enrich_context_picks_docker_for_container_objective() {
-    let bridge = KnowledgeBridge::new(Box::new(mock_knowledge_transport()));
+    let bridge = KnowledgeClient::new(Box::new(mock_knowledge_transport()));
     let ctx = enrich_planning_context(
         "Build Docker containers for the microservice deployment",
         &bridge,
@@ -252,7 +252,7 @@ fn enrich_context_picks_docker_for_container_objective() {
 
 #[test]
 fn enrich_context_returns_empty_for_unrelated_objective() {
-    let bridge = KnowledgeBridge::new(Box::new(mock_knowledge_transport()));
+    let bridge = KnowledgeClient::new(Box::new(mock_knowledge_transport()));
     let ctx = enrich_planning_context("xyzzy plugh frobnicate", &bridge).unwrap();
     assert!(ctx.is_empty());
     assert!(ctx.pack_sources.is_empty());
@@ -260,7 +260,7 @@ fn enrich_context_returns_empty_for_unrelated_objective() {
 
 #[test]
 fn enrich_context_caps_at_three_packs() {
-    let bridge = KnowledgeBridge::new(Box::new(mock_knowledge_transport()));
+    let bridge = KnowledgeClient::new(Box::new(mock_knowledge_transport()));
     // Objective that matches all four packs.
     let ctx = enrich_planning_context(
         "Deploy Rust Python Docker Kubernetes containers pods programming language",
@@ -276,13 +276,13 @@ fn enrich_context_caps_at_three_packs() {
 
 #[test]
 fn enrich_context_returns_error_on_bridge_failure() {
-    let failing = InMemoryBridgeTransport::new("knowledge-fail", |_method, _params| {
-        Err(BridgeErrorPayload {
+    let failing = InMemoryRpcTransport::new("knowledge-fail", |_method, _params| {
+        Err(RpcErrorPayload {
             code: -32603,
             message: "bridge is down".to_string(),
         })
     });
-    let bridge = KnowledgeBridge::new(Box::new(failing));
+    let bridge = KnowledgeClient::new(Box::new(failing));
     let result = enrich_planning_context("Fix Rust bug", &bridge);
     assert!(
         result.is_err(),

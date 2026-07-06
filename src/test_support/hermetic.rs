@@ -32,7 +32,7 @@ use crate::state_root::STATE_ROOT_ENV;
 ///     // SIMARD_STATE_ROOT == state.state_root()
 ///     // SIMARD_MEMORY_SOCKET is unset → socket_path_for(state_root)
 ///     //   resolves to <state_root>/memory.sock
-///     let bridge = launch_writer_bridge(state.state_root()).expect("bridge");
+///     let bridge = launch_writer_client(state.state_root()).expect("bridge");
 ///     save_goal_board(&board, bridge.ops()).expect("save");
 /// }
 /// ```
@@ -81,7 +81,7 @@ impl HermeticState {
     }
 
     /// Path of the hermetic state root. Caller passes this into
-    /// `launch_writer_bridge` / `open_reader_bridge` etc.
+    /// `launch_writer_client` / `open_reader_client` etc.
     pub fn state_root(&self) -> &Path {
         &self.state_root
     }

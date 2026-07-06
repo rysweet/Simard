@@ -34,7 +34,7 @@ use crate::goal_curation::GoalProgress;
 use crate::goal_curation::progress_evidence::ProgressEvidenceChecker;
 use crate::ooda_brain::OodaBrain;
 use crate::ooda_loop::{
-    ActionOutcome, OodaBridges, OodaState, OrchestratorSessionFactory, PlannedAction,
+    ActionOutcome, OodaClients, OodaState, OrchestratorSessionFactory, PlannedAction,
 };
 
 use super::advance_goal::spawn::{dispatch_spawn_engineer, is_brain_failure_marker, lock_state};
@@ -119,7 +119,7 @@ struct AdvanceCtx<'a> {
 pub(super) fn dispatch_advance_concurrent(
     actions: &[PlannedAction],
     indices: &[usize],
-    bridges: &mut OodaBridges,
+    bridges: &mut OodaClients,
     state: &mut OodaState,
     max_concurrency: usize,
     results: &mut [Option<ActionOutcome>],

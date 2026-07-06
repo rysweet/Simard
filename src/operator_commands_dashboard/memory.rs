@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::routes::resolve_state_root;
 use crate::memory_cognitive::CognitiveStatistics;
-use crate::memory_ipc::open_reader_bridge;
+use crate::memory_ipc::open_reader_client;
 
 // ---------------------------------------------------------------------------
 // Memory history — per-cycle snapshots with deltas and growth rates (#2136)
@@ -179,9 +179,9 @@ pub(crate) async fn memory_history() -> Json<Value> {
     let history_path = state_root.join("memory_history.json");
 
     // Get current stats via the library backend, routed through
-    // `open_reader_bridge` so the daemon's IPC writer serves embedded reads.
+    // `open_reader_client` so the daemon's IPC writer serves embedded reads.
     let stats_result =
-        open_reader_bridge(&state_root).and_then(|reader| reader.ops().get_statistics());
+        open_reader_client(&state_root).and_then(|reader| reader.ops().get_statistics());
 
     let stats = match stats_result {
         Ok(s) => s,
@@ -241,7 +241,7 @@ pub(crate) async fn memory_history() -> Json<Value> {
 /// list and the last-hour window stay empty/unavailable on this backend.
 pub(crate) async fn memory_recent() -> Json<Value> {
     let state_root = resolve_state_root();
-    let total = open_reader_bridge(&state_root)
+    let total = open_reader_client(&state_root)
         .and_then(|reader| reader.ops().get_statistics())
         .map(|stats| stats.total())
         .unwrap_or(0);
@@ -363,12 +363,12 @@ pub(crate) async fn memory_search(Json(body): Json<Value>) -> Json<Value> {
 ///
 /// De-fork Phase 2b (issue #2307): the node/edge graph was built from raw
 /// Cypher against the deleted native schema. Aggregate statistics are still
-/// available through the trait (routed via `open_reader_bridge`), so those are
+/// available through the trait (routed via `open_reader_client`), so those are
 /// surfaced; the per-node graph is reported as unavailable rather than reading
 /// the abandoned native store.
 pub(crate) async fn memory_graph() -> Json<Value> {
     let state_root = resolve_state_root();
-    let stats = open_reader_bridge(&state_root)
+    let stats = open_reader_client(&state_root)
         .and_then(|reader| reader.ops().get_statistics())
         .unwrap_or_default();
     Json(json!({

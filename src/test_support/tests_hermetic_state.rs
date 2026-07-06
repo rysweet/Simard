@@ -220,7 +220,7 @@ fn sequential_hermetic_states_do_not_cross_contaminate() {
 #[serial(cognitive_memory)]
 fn hermetic_state_root_is_a_writable_directory() {
     // Sanity: the helper must actually create the directory before
-    // returning, so downstream `launch_writer_bridge(state_root)` calls
+    // returning, so downstream `launch_writer_client(state_root)` calls
     // do not fail with ENOENT.
     let state = HermeticState::new();
     let root = state.state_root();

@@ -1,6 +1,6 @@
 ---
 title: Architecture Overview
-description: How Simard's components fit together — from the runtime kernel to the Python ecosystem bridges, cognitive memory, agent composition, OODA loop, and self-improvement.
+description: How Simard's components fit together — from the runtime kernel to the Python ecosystem clients, cognitive memory, agent composition, OODA loop, and self-improvement.
 last_updated: 2026-03-31
 owner: simard
 doc_type: concept
@@ -45,10 +45,10 @@ graph TB
         RT --> GC
     end
 
-    subgraph "Bridge Layer"
-        MB[Memory Bridge]
-        KB[Knowledge Bridge]
-        GB[Gym Bridge]
+    subgraph "RPC / Client Layer"
+        MB[Memory Client]
+        KB[Knowledge Client]
+        GB[Gym Client]
         CB --> MB
         CB --> KB
         CB --> GB
@@ -124,9 +124,9 @@ Two additional base types are planned per the original spec: `claude-agent-sdk` 
 
 See [Base Type Adapters](../reference/base-type-adapters.md) for the full reference.
 
-### Bridge Infrastructure
+### RPC Transport Infrastructure
 
-Simard uses a bridge abstraction (`BridgeTransport` trait) for knowledge and gym services. All bridges now use native Rust transports (`NativeBridgeTransport`):
+Simard uses an RPC transport abstraction (`RpcTransport` trait) for knowledge and gym services. All clients now use native Rust transports (`NativeRpcTransport`):
 
 ```
 Simard (Rust) ──native──→ NativeKnowledge (rusqlite, pack manifests)
@@ -134,13 +134,13 @@ Simard (Rust) ──native──→ NativeKnowledge (rusqlite, pack manifests)
               ──native──→ LibraryCognitiveMemory (amplihack-memory-lib → LadybugDB)
 ```
 
-Each bridge has:
-- A Rust trait (`BridgeTransport`) with typed request/response methods
-- An `InMemoryBridgeTransport` for unit testing
-- A `NativeBridgeTransport` for production
+Each client has:
+- A Rust trait (`RpcTransport`) with typed request/response methods
+- An `InMemoryRpcTransport` for unit testing
+- A `NativeRpcTransport` for production
 - A `CircuitBreakerTransport` wrapper for fault tolerance
 
-See [Bridge Pattern](bridge-pattern.md) for wire protocol details.
+See [RPC Transport Pattern](rpc-pattern.md) for wire protocol details.
 
 ### Cognitive Memory
 
@@ -155,7 +155,7 @@ Simard's memory uses six types modeled after cognitive psychology, provided by `
 | **Procedural** | Learned sequences | Long-term | "fix-and-verify: read → edit → test → commit" |
 | **Prospective** | Future intentions | Until triggered | "re-run gym after self-improve completes" |
 
-Memory is accessed through bridges (`CognitiveMemoryBridge`, `CognitiveBridgeMemoryStore`) and includes consolidation (`memory_consolidation`), hive mind sharing (`memory_hive`), and phase-mapped operations for each session lifecycle step.
+Memory is accessed through typed clients (`CognitiveMemoryClient`, `CognitiveClientMemoryStore`) and includes consolidation (`memory_consolidation`), hive mind sharing (`memory_hive`), and phase-mapped operations for each session lifecycle step.
 
 See [Cognitive Memory](cognitive-memory.md) for the full lifecycle.
 
@@ -234,7 +234,7 @@ The `ooda_scheduler` manages action slots with status tracking (scheduled, runni
 ### Gym and Benchmarks
 
 - **Gym** (`gym`) — benchmark scenario loading, execution, suite reports, and cross-run comparison
-- **Gym Bridge** (`gym_bridge`) — bridge to Python evaluation infrastructure
+- **Gym Client** (`gym_client`) — client for Python evaluation infrastructure
 - **Gym Scoring** (`gym_scoring`) — dimension trends, regression detection, and improvement tracking
 
 ### Remote Orchestration
@@ -245,7 +245,7 @@ The `ooda_scheduler` manages action slots with status tracking (scheduled, runni
 
 ### Knowledge Integration
 
-- **Knowledge Bridge** (`knowledge_bridge`) — bridge to knowledge graph packs (LadybugDB)
+- **Knowledge Client** (`knowledge_client`) — client for knowledge graph packs (LadybugDB)
 - **Knowledge Context** (`knowledge_context`) — enriches planning context with domain knowledge for base type turns
 
 ### Skill Building
@@ -262,15 +262,15 @@ The codebase is organized into 65+ modules across these subsystems:
 | **Base types** | `base_types`, `base_type_copilot`, `base_type_harness`, `base_type_turn` |
 | **Identity** | `identity`, `identity_auth`, `identity_composition`, `agent_roles` |
 | **Agent orchestration** | `agent_program`, `agent_supervisor`, `agent_goal_assignment` |
-| **Memory** | `memory`, `memory_bridge`, `memory_bridge_adapter`, `memory_cognitive`, `memory_consolidation`, `memory_hive` |
-| **Bridges** | `bridge`, `bridge_circuit`, `bridge_subprocess`, `bridge_launcher` |
-| **Engineer** | `engineer_loop`, `terminal_session`, `terminal_engineer_bridge` |
+| **Memory** | `memory`, `memory_client`, `memory_store_adapter`, `memory_cognitive`, `memory_consolidation`, `memory_hive` |
+| **RPC transport** | `rpc`, `rpc_circuit_breaker`, `rpc_transport`, `rpc_subprocess_launcher` |
+| **Engineer** | `engineer_loop`, `terminal_session`, `engineer_handoff` |
 | **OODA** | `ooda_loop`, `ooda_actions`, `ooda_scheduler` |
 | **Review/Improve** | `review`, `self_improve`, `self_relaunch`, `improvements` |
 | **Meeting/Goals** | `meeting_facilitator`, `meetings`, `goal_curation`, `goals` |
-| **Gym** | `gym`, `gym_bridge`, `gym_scoring` |
+| **Gym** | `gym`, `gym_client`, `gym_scoring` |
 | **Remote** | `remote_azlin`, `remote_session`, `remote_transfer` |
-| **Knowledge** | `knowledge_bridge`, `knowledge_context` |
+| **Knowledge** | `knowledge_client`, `knowledge_context` |
 | **Operator CLI** | `operator_cli`, `operator_commands`, `operator_commands_*` (5 submodules) |
 | **Supporting** | `prompt_assets`, `evidence`, `handoff`, `reflection`, `sanitization`, `persistence` |
 | **Research** | `research_tracker`, `skill_builder` |
@@ -282,7 +282,7 @@ See [Implementation Plan](implementation-plan.md) for the full phased roadmap.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
-| 0 | Bridge Infrastructure | Merged |
+| 0 | RPC Transport Infrastructure | Merged |
 | 1 | Cognitive Memory | Merged |
 | 2 | Knowledge Packs | Merged |
 | 3 | Real Base Type Adapters | Merged |

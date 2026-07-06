@@ -32,12 +32,12 @@ fn assess_features() -> Vec<Feature> {
             requirement: "Launch amplihack interactively in a virtual TTY",
             evidence: vec![
                 "src/terminal_session.rs — PtyTerminalSession with PTY allocation",
-                "src/terminal_engineer_bridge.rs — bridge between engineer loop and terminal",
+                "src/engineer_handoff/ — handoff between engineer loop and terminal",
                 "src/operator_commands_terminal.rs — engineer terminal subcommand",
                 "CLI: engineer terminal <topology> <objective>",
             ],
             status: if module_exists(src, "terminal_session")
-                && module_exists(src, "terminal_engineer_bridge")
+                && module_exists(src, "engineer_handoff")
             {
                 Status::Implemented
             } else {
@@ -48,11 +48,11 @@ fn assess_features() -> Vec<Feature> {
             id: "B",
             requirement: "Structured understanding of amplihack ecosystem",
             evidence: vec![
-                "src/knowledge_bridge.rs — KnowledgeBridge for external knowledge",
+                "src/knowledge_client.rs — KnowledgeClient for external knowledge",
                 "src/knowledge_context.rs — context injection from knowledge graph",
                 "src/research_tracker.rs — ResearchTracker for topics and developer watch",
             ],
-            status: if module_exists(src, "knowledge_bridge")
+            status: if module_exists(src, "knowledge_client")
                 && module_exists(src, "research_tracker")
             {
                 Status::Implemented
@@ -122,7 +122,7 @@ fn assess_features() -> Vec<Feature> {
             requirement: "Migrate memory/state between machines",
             evidence: vec![
                 "src/remote_transfer.rs — snapshot-based state transfer",
-                "src/memory_bridge_adapter.rs — hydrate_from_bridge() for cross-session recovery",
+                "src/memory_store_adapter.rs — hydrate_from_client() for cross-session recovery",
                 "src/handoff.rs — handoff/handover protocol",
                 "CLI: handover command",
             ],
@@ -138,7 +138,7 @@ fn assess_features() -> Vec<Feature> {
             evidence: vec![
                 "src/gym/ — 9 benchmark scenarios, class-specific scoring",
                 "src/gym_scoring.rs — GymSuiteScore, regression detection",
-                "src/gym_bridge.rs — GymBridge for external gym engines",
+                "src/gym_client.rs — GymClient for external gym engines",
                 "CLI: gym list/run/compare/run-suite",
             ],
             status: if (module_exists(src, "gym") || src.join("gym").is_dir())
@@ -228,7 +228,7 @@ fn assess_features() -> Vec<Feature> {
             requirement: "Research topics list",
             evidence: vec![
                 "src/research_tracker.rs — topic tracking and developer watch",
-                "src/knowledge_bridge.rs — knowledge ingestion",
+                "src/knowledge_client.rs — knowledge ingestion",
             ],
             status: if module_exists(src, "research_tracker") {
                 Status::Implemented
@@ -314,7 +314,7 @@ fn simard_feature_comparison_against_original_prompt() {
     println!("  Architecture: identity/runtime/base-type separation is real.");
     println!("  I have 5 base types, 9 gym scenarios, a full OODA loop with");
     println!("  improvement proposals, meeting REPL, goal curation with top-5");
-    println!("  seeding, memory persistence with bridge query + retry,");
+    println!("  seeding, memory persistence with client query + retry,");
     println!("  5 tracked developers, and dual rysweet/rysweet_microsoft identity.");
     println!();
     println!("  To become fully operational, I need:");

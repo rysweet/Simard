@@ -5,25 +5,25 @@ use crate::base_types::{
     ensure_session_not_already_open, ensure_session_not_closed, ensure_session_open,
     standard_session_capabilities,
 };
-use crate::bridge_subprocess::InMemoryBridgeTransport;
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_client::CognitiveMemoryClient;
 use crate::metadata::{BackendDescriptor, Freshness};
+use crate::rpc_transport::InMemoryRpcTransport;
 use crate::runtime::RuntimeTopology;
 use serde_json::json;
 
-pub(super) fn mock_bridge() -> CognitiveMemoryBridge {
+pub(super) fn mock_bridge() -> CognitiveMemoryClient {
     let transport =
-        InMemoryBridgeTransport::new("test-meeting-repl", |method, _params| match method {
+        InMemoryRpcTransport::new("test-meeting-repl", |method, _params| match method {
             "memory.record_sensory" => Ok(json!({"id": "sen_r1"})),
             "memory.store_episode" => Ok(json!({"id": "epi_r1"})),
             "memory.store_fact" => Ok(json!({"id": "sem_r1"})),
             "memory.store_prospective" => Ok(json!({"id": "pro_r1"})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
+            _ => Err(crate::rpc::RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown method: {method}"),
             }),
         });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 /// Mock agent that returns a canned response for every turn.

@@ -15,7 +15,7 @@
 //!
 //! When an agent migrates to a remote VM, it needs to carry its cognitive
 //! memory state. This module exports facts and procedures from a local
-//! `CognitiveMemoryBridge`, serializes them into a `MemorySnapshot`, and
+//! `CognitiveMemoryClient`, serializes them into a `MemorySnapshot`, and
 //! can import that snapshot into a remote bridge.
 //!
 //! Only facts and procedures are replicated. Sensory and working memory

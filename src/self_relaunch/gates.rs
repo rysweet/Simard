@@ -29,7 +29,7 @@ fn run_gate(binary: &Path, gate: RelaunchGate, config: &RelaunchConfig) -> GateR
         RelaunchGate::Smoke => run_smoke_gate(binary),
         RelaunchGate::UnitTest => run_unit_test_gate(config),
         RelaunchGate::GymBaseline => run_gym_baseline_gate(binary),
-        RelaunchGate::BridgeHealth => run_bridge_health_gate(binary, config),
+        RelaunchGate::RpcHealth => run_bridge_health_gate(binary, config),
     }
 }
 
@@ -123,12 +123,12 @@ fn run_bridge_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult 
         .output()
     {
         Ok(output) if output.status.success() => GateResult {
-            gate: RelaunchGate::BridgeHealth,
+            gate: RelaunchGate::RpcHealth,
             passed: true,
             detail: "bridge health check passed".to_string(),
         },
         Ok(output) => GateResult {
-            gate: RelaunchGate::BridgeHealth,
+            gate: RelaunchGate::RpcHealth,
             passed: false,
             detail: format!(
                 "bridge health failed (exit {}): {}",
@@ -137,7 +137,7 @@ fn run_bridge_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult 
             ),
         },
         Err(e) => GateResult {
-            gate: RelaunchGate::BridgeHealth,
+            gate: RelaunchGate::RpcHealth,
             passed: false,
             detail: format!("bridge health probe failed to run: {e}"),
         },
@@ -296,7 +296,7 @@ mod tests {
         let gates = [
             RelaunchGate::Smoke,
             RelaunchGate::GymBaseline,
-            RelaunchGate::BridgeHealth,
+            RelaunchGate::RpcHealth,
         ];
         let results = verify_canary(Path::new("/no-such-binary-99999"), &gates, &config).unwrap();
         assert_eq!(

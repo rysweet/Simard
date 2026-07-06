@@ -64,7 +64,7 @@ surfaces *specific* past situations. Both arrive in the
 
 PR-C adds one method to `CognitiveMemoryOps`
 (`src/cognitive_memory/mod.rs`) with a default no-op so legacy
-bridges keep compiling:
+clients keep compiling:
 
 ```rust
 pub trait CognitiveMemoryOps {
@@ -245,7 +245,7 @@ pub struct PreparedContext {
 ```
 
 All other `PreparedContext` constructors in the codebase (test stubs,
-snapshot importers, mock bridges) are updated to add
+snapshot importers, mock clients) are updated to add
 `episodic_recall: vec![]` so compilation stays green.
 
 ---
@@ -289,7 +289,7 @@ out of the recall result inside `preparation_memory_operations`,
 *after* the trait call returns:
 
 ```rust
-let recalled = bridge
+let recalled = client
     .search_episodes_by_keywords(&tokens, 5)?
     .into_iter()
     .filter(|e| !e.source_label.starts_with("session-"))

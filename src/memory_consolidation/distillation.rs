@@ -719,7 +719,7 @@ fn record_reliability_gate_metric(candidate_facts: u32, quarantined: u32, promot
 // `metrics.jsonl`, mirroring `record_reliability_gate_metric` (#2433).
 
 /// Machine-readable class of a distillation failure, derived from the stable
-/// leading prefix of the `SimardError::BridgeError` message emitted at each
+/// leading prefix of the `SimardError::RpcError` message emitted at each
 /// runner/parse site in this module. Covers every `Err` `run_all` can surface.
 /// Post-#2622/#2619 the distill result is read from the agent's dedicated facts
 /// file, so a parse failure now manifests as a *missing / empty / unparseable
@@ -783,18 +783,18 @@ impl DistillFailureClass {
 /// Classify a distillation `SimardError` into a [`DistillFailureClass`].
 ///
 /// Discrimination anchors on the **stable leading prefix** this module emits
-/// for each class (`SimardError::BridgeError(msg)` → `msg.starts_with(...)`),
+/// for each class (`SimardError::RpcError(msg)` → `msg.starts_with(...)`),
 /// NOT on `contains`. Several messages embed foreign text (terminal failures
 /// carry up to 200 chars each of recipe stderr/stdout; parse failures carry the
 /// facts-document excerpt), and that variable tail always trails the fixed
 /// prefix — so anchoring keeps a non-zero exit from being misread as a
 /// parse-failure and corrupting `distill_parse_success_rate`.
 ///
-/// The prefixes mirror the `BridgeError` sites in this file. Post-#2622/#2619 a
+/// The prefixes mirror the `RpcError` sites in this file. Post-#2622/#2619 a
 /// parse failure surfaces as a missing / empty / unparseable **facts document**
 /// (the agent's dedicated file), all of which map to `ParseFailure`.
 pub fn classify_distill_error(err: &SimardError) -> DistillFailureClass {
-    let SimardError::BridgeError(msg) = err else {
+    let SimardError::RpcError(msg) = err else {
         return DistillFailureClass::Other;
     };
     if msg.starts_with("distill: recipe-runner-rs spawn failed")
@@ -1124,7 +1124,7 @@ impl RecipeRunnerSubprocess {
             })
             .collect();
         let payload_json = serde_json::to_string(&payload).map_err(|e| {
-            SimardError::BridgeError(format!(
+            SimardError::RpcError(format!(
                 "distill: failed to serialize episodes payload: {e}"
             ))
         })?;
@@ -1140,7 +1140,7 @@ impl RecipeRunnerSubprocess {
             .prefix("simard-distill-")
             .tempdir()
             .map_err(|e| {
-                SimardError::BridgeError(format!(
+                SimardError::RpcError(format!(
                     "distill: failed to create facts output tempdir: {e}"
                 ))
             })?;
@@ -1172,7 +1172,7 @@ impl RecipeRunnerSubprocess {
             .arg(format!("facts_output_path={facts_path_arg}"))
             .output()
             .map_err(|e| {
-                SimardError::BridgeError(format!("distill: recipe-runner-rs spawn failed: {e}"))
+                SimardError::RpcError(format!("distill: recipe-runner-rs spawn failed: {e}"))
             })?;
 
         harvest_facts_file(&output, &facts_path)
@@ -1199,7 +1199,7 @@ fn harvest_facts_file(output: &std::process::Output, facts_path: &Path) -> Simar
         // both — never a silent or context-free failure.
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        return Err(SimardError::BridgeError(format!(
+        return Err(SimardError::RpcError(format!(
             "distill: recipe exited with {}: stderr={} stdout={}",
             output.status,
             truncate(stderr.trim(), 200),
@@ -1208,7 +1208,7 @@ fn harvest_facts_file(output: &std::process::Output, facts_path: &Path) -> Simar
     }
 
     std::fs::read_to_string(facts_path).map_err(|e| {
-        SimardError::BridgeError(format!(
+        SimardError::RpcError(format!(
             "distill: facts output file was not written by the agent ({}): {e}",
             facts_path.display()
         ))
@@ -1257,14 +1257,14 @@ pub(crate) fn parse_facts(document: &str) -> SimardResult<Vec<DistilledFact>> {
 pub(crate) fn parse_facts_document(document: &str) -> SimardResult<DistillOutput> {
     let trimmed = document.trim();
     if trimmed.is_empty() {
-        return Err(SimardError::BridgeError(
+        return Err(SimardError::RpcError(
             "distill: facts document was empty; the agent produced no output".to_string(),
         ));
     }
     if let Some(output) = scan_cleaned_for_facts(trimmed) {
         return Ok(output);
     }
-    Err(SimardError::BridgeError(format!(
+    Err(SimardError::RpcError(format!(
         "distill: facts document did not contain a parseable {{ \"facts\": [...] }} object: {}",
         truncate(trimmed, 200)
     )))
@@ -1795,7 +1795,7 @@ mod unit_tests {
             ("something unexpected", Other),
         ];
         for (msg, expected) in cases {
-            let err = SimardError::BridgeError(msg.to_string());
+            let err = SimardError::RpcError(msg.to_string());
             assert_eq!(classify_distill_error(&err), expected, "msg: {msg}");
         }
     }
@@ -1805,7 +1805,7 @@ mod unit_tests {
         // A terminal failure embeds the recipe's stdout, which may itself
         // contain the parse-failure phrase; prefix anchoring must keep it a
         // terminal failure so recipe_exited_ok stays false.
-        let terminal = SimardError::BridgeError(
+        let terminal = SimardError::RpcError(
             "distill: recipe exited with exit status: 1: stderr= stdout=recipe run did not \
              yield a parseable object"
                 .to_string(),
@@ -1918,7 +1918,7 @@ mod unit_tests {
         // facts document (process exited 0) MUST classify as parse-failure so it
         // lands in the distill_parse_success_rate denominator (parse_attempted =
         // true).
-        let err = SimardError::BridgeError(
+        let err = SimardError::RpcError(
             "distill: facts document did not contain a parseable \
              { \"facts\": [...] } object: launcher banner..."
                 .to_string(),

@@ -317,7 +317,7 @@ pub trait EvidenceSource: Send + Sync {
 
 /// Blanket impl so an `&dyn EvidenceSource` (e.g. `Arc::as_ref()`) satisfies the
 /// `E: EvidenceSource` bound on [`CompletionEvidenceGate`] without cloning the
-/// source. Lets the daemon store one `Arc<dyn EvidenceSource>` on `OodaBridges`
+/// source. Lets the daemon store one `Arc<dyn EvidenceSource>` on `OodaClients`
 /// and pass it by reference into the gate each cycle.
 impl<T: EvidenceSource + ?Sized> EvidenceSource for &T {
     fn any_pr_merged(&self, goal: &ActiveGoal) -> SimardResult<bool> {

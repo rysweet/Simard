@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use crate::error::{SimardError, SimardResult};
 use crate::goal_curation::{load_goal_board, save_goal_board_with_removals};
-use crate::gym_bridge::ScoreDimensions;
+use crate::gym_client::ScoreDimensions;
 use crate::gym_scoring::GymSuiteScore;
 use crate::memory_consolidation;
 use crate::memory_consolidation::preparation_memory_operations_with_active_slugs_phased;
@@ -22,12 +22,12 @@ use super::{
 /// the highest-scoring backlog items to fill any freed active slots. This
 /// implements the meta-goal of continually seeking the best goals to pursue.
 ///
-/// Takes `&mut OodaBridges` so that the optional session can be used for
+/// Takes `&mut OodaClients` so that the optional session can be used for
 /// `run_turn` calls during `AdvanceGoal` dispatch.
 #[tracing::instrument(skip_all, fields(cycle = state.cycle_count))]
 pub fn run_ooda_cycle(
     state: &mut OodaState,
-    bridges: &mut OodaBridges,
+    bridges: &mut OodaClients,
     config: &OodaConfig,
 ) -> SimardResult<CycleReport> {
     // Install per-cycle brain-judgment task-local. Was a `thread_local!`
@@ -73,7 +73,7 @@ fn build_objective_probe(active: &[crate::goal_curation::ActiveGoal]) -> String 
 
 fn run_ooda_cycle_inner(
     state: &mut OodaState,
-    bridges: &mut OodaBridges,
+    bridges: &mut OodaClients,
     config: &OodaConfig,
 ) -> SimardResult<CycleReport> {
     crate::ooda_brain::clear_brain_judgments();

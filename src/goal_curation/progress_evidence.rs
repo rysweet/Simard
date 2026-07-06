@@ -38,7 +38,7 @@ pub enum EvidenceDecision {
 /// by sufficient evidence (LLM-reviewed or heuristic).
 ///
 /// `Send + Sync` so a single `Arc<dyn ProgressEvidenceChecker>` can be
-/// installed on `OodaBridges` and shared across OODA actions.
+/// installed on `OodaClients` and shared across OODA actions.
 pub trait ProgressEvidenceChecker: Send + Sync {
     fn check(
         &self,

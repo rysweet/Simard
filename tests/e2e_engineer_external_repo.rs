@@ -128,7 +128,7 @@ fn ooda_daemon_seeds_five_goals() {
     // session. This test is `#[ignore]`d by default (issue #2047); when
     // force-run without either dependency, fail loudly instead of silently
     // passing by an early `return`.
-    common::require_memory_bridge("ooda_daemon_seeds_five_goals", &stderr);
+    common::require_memory_client("ooda_daemon_seeds_five_goals", &stderr);
     common::require_llm_provider("ooda_daemon_seeds_five_goals", &stderr);
 
     assert!(

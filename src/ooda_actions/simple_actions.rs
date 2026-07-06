@@ -1,6 +1,6 @@
 //! Simple one-shot action dispatchers (consolidate, research, improve, gym, skill).
 
-use crate::ooda_loop::{ActionOutcome, OodaBridges, PlannedAction};
+use crate::ooda_loop::{ActionOutcome, OodaClients, PlannedAction};
 use crate::self_improve::{ImprovementConfig, run_improvement_cycle, summarize_cycle};
 use crate::skill_builder::extract_skill_candidates;
 
@@ -23,7 +23,7 @@ use super::{SKILL_MIN_USAGE, make_outcome};
 /// attribute work to the correct pass.
 pub(super) fn dispatch_consolidate_memory(
     action: &PlannedAction,
-    bridges: &OodaBridges,
+    bridges: &OodaClients,
 ) -> ActionOutcome {
     // Pass 1: textual dedup. Errors here are fatal for the outcome
     // because they signal a backend problem that would also affect
@@ -59,7 +59,7 @@ pub(super) fn dispatch_consolidate_memory(
 /// ResearchQuery: list available knowledge packs.
 pub(super) fn dispatch_research_query(
     action: &PlannedAction,
-    bridges: &OodaBridges,
+    bridges: &OodaClients,
 ) -> ActionOutcome {
     match bridges.knowledge.list_packs() {
         Ok(packs) => make_outcome(
@@ -79,7 +79,7 @@ pub(super) fn dispatch_research_query(
 /// from the orient/decide phases.
 pub(super) fn dispatch_run_improvement(
     action: &PlannedAction,
-    bridges: &OodaBridges,
+    bridges: &OodaClients,
 ) -> ActionOutcome {
     let config = ImprovementConfig::default();
     match run_improvement_cycle(&bridges.gym, &config) {
@@ -102,7 +102,7 @@ pub(super) fn dispatch_run_improvement(
 /// RunGymEval: run the progressive gym suite and return the score.
 pub(super) fn dispatch_run_gym_eval(
     action: &PlannedAction,
-    bridges: &OodaBridges,
+    bridges: &OodaClients,
 ) -> ActionOutcome {
     match bridges.gym.run_suite("progressive") {
         Ok(result) => {
@@ -124,7 +124,7 @@ pub(super) fn dispatch_run_gym_eval(
 }
 
 /// BuildSkill: extract skill candidates from procedural memory.
-pub(super) fn dispatch_build_skill(action: &PlannedAction, bridges: &OodaBridges) -> ActionOutcome {
+pub(super) fn dispatch_build_skill(action: &PlannedAction, bridges: &OodaClients) -> ActionOutcome {
     match extract_skill_candidates(&*bridges.memory, SKILL_MIN_USAGE) {
         Ok(candidates) => {
             let names: Vec<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
@@ -146,7 +146,7 @@ pub(super) fn dispatch_build_skill(action: &PlannedAction, bridges: &OodaBridges
 /// and store noteworthy events as semantic facts in cognitive memory.
 pub(super) fn dispatch_poll_developer_activity(
     action: &PlannedAction,
-    bridges: &OodaBridges,
+    bridges: &OodaClients,
 ) -> ActionOutcome {
     use crate::research_tracker::{
         default_developer_watches, poll_all_developer_activity, summarize_poll_results,
@@ -168,7 +168,7 @@ pub(super) fn dispatch_poll_developer_activity(
 /// and surface promising research ideas as `research:` issue proposals.
 pub(super) fn dispatch_extract_ideas(
     action: &PlannedAction,
-    bridges: &OodaBridges,
+    bridges: &OodaClients,
 ) -> ActionOutcome {
     use crate::research_tracker::{extract_ideas, summarize_extraction};
 

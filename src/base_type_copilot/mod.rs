@@ -14,7 +14,7 @@ use std::process::Command;
 use tempfile::NamedTempFile;
 
 use crate::base_type_turn::{
-    EnrichmentBridges, EnrichmentSource, TurnContext, format_turn_input, parse_turn_output,
+    EnrichmentClients, EnrichmentSource, TurnContext, format_turn_input, parse_turn_output,
 };
 use crate::base_types::{
     BaseTypeCapability, BaseTypeDescriptor, BaseTypeFactory, BaseTypeId, BaseTypeOutcome,
@@ -26,7 +26,7 @@ use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
 #[cfg(test)]
-use crate::knowledge_bridge::KnowledgeBridge;
+use crate::knowledge_client::KnowledgeClient;
 use crate::metadata::{BackendDescriptor, Freshness};
 use crate::runtime::RuntimeTopology;
 use crate::sanitization::objective_metadata;
@@ -124,7 +124,7 @@ impl CopilotSdkAdapter {
     /// hardcoded-`None` regression of issue #1664 that silently dropped all
     /// memory and knowledge enrichment in the primary production adapter.
     ///
-    /// Bridges are launched lazily in [`BaseTypeFactory::open_session`]; a
+    /// Clients are launched lazily in [`BaseTypeFactory::open_session`]; a
     /// launch failure logs and degrades to `None` so a missing knowledge pack
     /// or an unavailable memory store never breaks turn dispatch (see
     /// [`crate::base_type_turn::launch_enrichment_bridges`]).
@@ -150,7 +150,7 @@ impl CopilotSdkAdapter {
         // previously-hardcoded `None`/`None`. When enrichment is configured
         // the bridges are launched here (with graceful degradation) via the
         // shared [`EnrichmentSource::resolve`] and stored in the normalized
-        // `EnrichmentBridges` bundle (issue #1665) so that the shared
+        // `EnrichmentClients` bundle (issue #1665) so that the shared
         // `enrich_input` entry point actually injects memory facts, procedures,
         // and domain knowledge into every turn.
         let enrichment = self.enrichment.resolve();
@@ -188,7 +188,7 @@ struct CopilotSdkSession {
     descriptor: BaseTypeDescriptor,
     config: CopilotAdapterConfig,
     request: BaseTypeSessionRequest,
-    enrichment: EnrichmentBridges,
+    enrichment: EnrichmentClients,
     is_open: bool,
     is_closed: bool,
     turn_count: u32,
@@ -241,7 +241,7 @@ impl CopilotSdkSession {
             },
             config: CopilotAdapterConfig::default(),
             request,
-            enrichment: EnrichmentBridges::new(),
+            enrichment: EnrichmentClients::new(),
             is_open: false,
             is_closed: false,
             turn_count: 0,
@@ -254,12 +254,12 @@ impl CopilotSdkSession {
     #[cfg(test)]
     fn with_test_bridges(
         mut self,
-        memory_bridge: Option<Box<dyn CognitiveMemoryOps>>,
-        knowledge_bridge: Option<KnowledgeBridge>,
+        memory_client: Option<Box<dyn CognitiveMemoryOps>>,
+        knowledge_client: Option<KnowledgeClient>,
     ) -> Self {
-        self.enrichment = EnrichmentBridges {
-            memory: memory_bridge,
-            knowledge: knowledge_bridge,
+        self.enrichment = EnrichmentClients {
+            memory: memory_client,
+            knowledge: knowledge_client,
         };
         self
     }
@@ -519,11 +519,11 @@ impl BaseTypeSession for CopilotSdkSession {
         &self.descriptor
     }
 
-    fn enrichment(&self) -> Option<&EnrichmentBridges> {
+    fn enrichment(&self) -> Option<&EnrichmentClients> {
         Some(&self.enrichment)
     }
 
-    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentBridges> {
+    fn enrichment_mut(&mut self) -> Option<&mut EnrichmentClients> {
         Some(&mut self.enrichment)
     }
 

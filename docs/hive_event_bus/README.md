@@ -10,7 +10,7 @@ sync) without yet committing to a network transport.
 
 > **Scope:** The bus is **in-process only**. It does not cross process or
 > machine boundaries. A future workstream may add a network adapter that
-> bridges this bus to a remote transport; nothing in this module assumes one.
+> clients this bus to a remote transport; nothing in this module assumes one.
 
 [`tokio::sync::broadcast`]: https://docs.rs/tokio/latest/tokio/sync/broadcast/index.html
 [#949]: https://github.com/rysweet/Simard/issues/949
@@ -472,7 +472,7 @@ this is a feature-flag delta on an existing dependency.
 - **Persistence.** Events are not stored; restart loses everything in flight.
 - **Replay.** Late subscribers cannot ask for prior events. (A separate
   event log module may layer on top later.)
-- **Cross-process delivery.** No IPC, no network. A future bridge module
+- **Cross-process delivery.** No IPC, no network. A future client module
   may forward events to a transport.
 - **Backpressure on publishers.** Publishers are never blocked. If you
   need ordered, durable delivery, this is not the primitive.

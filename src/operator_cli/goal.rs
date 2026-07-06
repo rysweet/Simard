@@ -37,7 +37,7 @@
 use std::error::Error;
 
 use crate::goal_curation::{GoalDecomposer, GoalProgress, simard_state_root};
-use crate::memory_ipc::launch_writer_bridge;
+use crate::memory_ipc::launch_writer_client;
 use crate::ooda_actions::advance_goal::spawn::is_brain_failure_marker;
 
 use super::args::{next_required, reject_extra_args};
@@ -161,7 +161,7 @@ pub(super) fn dispatch_goal_command(
 /// live board. Surfaces I/O / parse failures as `Err` so the CLI exits non-zero.
 fn load_board() -> Result<crate::goal_curation::GoalBoard, Box<dyn Error>> {
     let state_root = simard_state_root();
-    let bridge = launch_writer_bridge(&state_root)
+    let bridge = launch_writer_client(&state_root)
         .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
     let persistent = crate::goal_board_store::load_or_migrate(&state_root, bridge.ops())
         .map_err(|e| format!("failed to load authoritative goal store: {e}"))?;
@@ -182,7 +182,7 @@ fn with_board<R>(
     f: impl FnOnce(&mut crate::goal_curation::GoalBoard) -> Result<R, Box<dyn Error>>,
 ) -> Result<R, Box<dyn Error>> {
     let state_root = simard_state_root();
-    let bridge = launch_writer_bridge(&state_root)
+    let bridge = launch_writer_client(&state_root)
         .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
     crate::goal_board_store::load_or_migrate(&state_root, bridge.ops())
         .map_err(|e| format!("failed to load authoritative goal store: {e}"))?;
@@ -217,7 +217,7 @@ fn commit_board_blind(board: &crate::goal_curation::GoalBoard) -> Result<(), Box
         s.board = b;
     })
     .map_err(|e| format!("failed to persist goal board: {e}"))?;
-    let bridge = launch_writer_bridge(&state_root)
+    let bridge = launch_writer_client(&state_root)
         .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
     if let Err(e) = crate::goal_curation::overwrite_memory_cache(board, bridge.ops()) {
         eprintln!("[simard] goal: warning: memory cache refresh failed: {e}");
@@ -582,7 +582,7 @@ fn handle_decompose(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn Error
     }
 
     let state_root = simard_state_root();
-    let bridge = launch_writer_bridge(&state_root)
+    let bridge = launch_writer_client(&state_root)
         .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
     let ops = bridge.ops();
 

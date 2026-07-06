@@ -12,14 +12,14 @@
 
 use serde_json::json;
 use simard::base_types::{BaseTypeOutcome, BaseTypeTurnInput};
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
 use simard::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, add_active_goal};
-use simard::gym_bridge::GymBridge;
+use simard::gym_client::GymClient;
 use simard::identity::OperatingMode;
-use simard::knowledge_bridge::KnowledgeBridge;
-use simard::memory_bridge::CognitiveMemoryBridge;
-use simard::ooda_loop::{ActionKind, OodaBridges, OodaConfig, OodaState, run_ooda_cycle};
+use simard::knowledge_client::KnowledgeClient;
+use simard::memory_client::CognitiveMemoryClient;
+use simard::ooda_loop::{ActionKind, OodaClients, OodaConfig, OodaState, run_ooda_cycle};
+use simard::rpc::RpcErrorPayload;
+use simard::rpc_transport::InMemoryRpcTransport;
 use simard::session_builder::{LlmProvider, SessionBuilder};
 use simard::test_support::TestAdapter;
 
@@ -27,8 +27,8 @@ use simard::test_support::TestAdapter;
 // Test helpers (reused mock transports)
 // ---------------------------------------------------------------------------
 
-fn mock_memory() -> CognitiveMemoryBridge {
-    CognitiveMemoryBridge::new(Box::new(InMemoryBridgeTransport::new(
+fn mock_memory() -> CognitiveMemoryClient {
+    CognitiveMemoryClient::new(Box::new(InMemoryRpcTransport::new(
         "daemon-mem",
         |method, _params| match method {
             "memory.search_facts" => Ok(json!({"facts": []})),
@@ -51,7 +51,7 @@ fn mock_memory() -> CognitiveMemoryBridge {
             "memory.clear_working" => Ok(json!({"count": 0})),
             "memory.prune_expired_sensory" => Ok(json!({"count": 0})),
             "memory.store_procedure" => Ok(json!({"id": "proc_new"})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
@@ -59,8 +59,8 @@ fn mock_memory() -> CognitiveMemoryBridge {
     )))
 }
 
-fn mock_gym() -> GymBridge {
-    GymBridge::new(Box::new(InMemoryBridgeTransport::new(
+fn mock_gym() -> GymClient {
+    GymClient::new(Box::new(InMemoryRpcTransport::new(
         "daemon-gym",
         |_method, _params| {
             Ok(json!({
@@ -75,12 +75,12 @@ fn mock_gym() -> GymBridge {
     )))
 }
 
-fn mock_knowledge() -> KnowledgeBridge {
-    KnowledgeBridge::new(Box::new(InMemoryBridgeTransport::new(
+fn mock_knowledge() -> KnowledgeClient {
+    KnowledgeClient::new(Box::new(InMemoryRpcTransport::new(
         "daemon-knowledge",
         |method, _params| match method {
             "knowledge.list_packs" => Ok(json!({"packs": []})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
@@ -88,8 +88,8 @@ fn mock_knowledge() -> KnowledgeBridge {
     )))
 }
 
-fn test_bridges() -> OodaBridges {
-    OodaBridges {
+fn test_bridges() -> OodaClients {
+    OodaClients {
         memory: Box::new(mock_memory()),
         knowledge: mock_knowledge(),
         gym: mock_gym(),

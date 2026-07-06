@@ -358,9 +358,9 @@ fn recipe_mirrors_carry_the_guidelines_marker() {
 // or brain as a "Bridge" — via collocations, NOT a blanket ban on the
 // substring: `engineer_system.md` legitimately hosts the standing "never name
 // anything Bridge" rule, and `ooda_decide.md` references a pre-existing
-// `BridgeCallFailed` error type. Neither is a phase rename.
+// `RpcCallFailed` error type. Neither is a phase rename.
 
-const BRIDGE_RENAME_COLLOCATIONS: &[&str] = &[
+const FORBIDDEN_PHASE_COLLOCATIONS: &[&str] = &[
     "bridge phase",
     "bridge brain",
     "brain bridge",
@@ -381,7 +381,7 @@ fn edited_ooda_reasoners_do_not_rename_phases_as_bridge() {
     ];
     for f in OODA_REASONERS {
         let lc = prompt_lc(f);
-        for collocation in BRIDGE_RENAME_COLLOCATIONS {
+        for collocation in FORBIDDEN_PHASE_COLLOCATIONS {
             assert_absent(
                 &lc,
                 collocation,
@@ -392,7 +392,7 @@ fn edited_ooda_reasoners_do_not_rename_phases_as_bridge() {
     }
     for yaml in mirrors {
         let lc = recipe(yaml).to_lowercase();
-        for collocation in BRIDGE_RENAME_COLLOCATIONS {
+        for collocation in FORBIDDEN_PHASE_COLLOCATIONS {
             assert_absent(
                 &lc,
                 collocation,

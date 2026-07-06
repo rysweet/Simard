@@ -38,11 +38,10 @@ pub fn spawn_server(
     // would falsely report "socket in use" — leaving the new daemon
     // without an IPC server while meetings kept falling back to direct open.
     let _ = std::fs::remove_file(&socket_path);
-    let listener =
-        UnixListener::bind(&socket_path).map_err(|e| SimardError::BridgeSpawnFailed {
-            bridge: "memory-ipc".into(),
-            reason: format!("bind {}: {e}", socket_path.display()),
-        })?;
+    let listener = UnixListener::bind(&socket_path).map_err(|e| SimardError::RpcSpawnFailed {
+        bridge: "memory-ipc".into(),
+        reason: format!("bind {}: {e}", socket_path.display()),
+    })?;
 
     let socket_clone = socket_path.clone();
     let mem = Arc::clone(&memory);
@@ -76,7 +75,7 @@ pub fn spawn_server(
                 }
             }
         })
-        .map_err(|e| SimardError::BridgeSpawnFailed {
+        .map_err(|e| SimardError::RpcSpawnFailed {
             bridge: "memory-ipc".into(),
             reason: format!("spawn server thread: {e}"),
         })?;

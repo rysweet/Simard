@@ -2,9 +2,7 @@ use serde_json::json;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use simard::bridge::BridgeErrorPayload;
-use simard::bridge_subprocess::InMemoryBridgeTransport;
-use simard::memory_bridge::CognitiveMemoryBridge;
+use simard::memory_client::CognitiveMemoryClient;
 use simard::memory_cognitive::{
     CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveWorkingSlot,
 };
@@ -13,13 +11,15 @@ use simard::memory_consolidation::{
     persistence_memory_operations, preparation_memory_operations, reflection_memory_operations,
 };
 use simard::memory_hive::{DEFAULT_CONFIDENCE_GATE, DEFAULT_QUALITY_THRESHOLD, HiveConfig};
+use simard::rpc::RpcErrorPayload;
+use simard::rpc_transport::InMemoryRpcTransport;
 use simard::session::SessionId;
 
 // ---------------------------------------------------------------------------
 // Stateful in-memory mock that supports store-then-search-back patterns
 // ---------------------------------------------------------------------------
 
-fn stateful_bridge() -> CognitiveMemoryBridge {
+fn stateful_bridge() -> CognitiveMemoryClient {
     let facts: Arc<Mutex<Vec<CognitiveFact>>> = Arc::new(Mutex::new(Vec::new()));
     let slots: Arc<Mutex<Vec<CognitiveWorkingSlot>>> = Arc::new(Mutex::new(Vec::new()));
     let procs: Arc<Mutex<Vec<CognitiveProcedure>>> = Arc::new(Mutex::new(Vec::new()));
@@ -36,7 +36,7 @@ fn stateful_bridge() -> CognitiveMemoryBridge {
     );
 
     let transport =
-        InMemoryBridgeTransport::new("stateful-memory", move |method, params| match method {
+        InMemoryRpcTransport::new("stateful-memory", move |method, params| match method {
             "memory.store_fact" => {
                 let mut g = f.lock().unwrap();
                 let id = format!("sem_{:04}", g.len());
@@ -222,12 +222,12 @@ fn stateful_bridge() -> CognitiveMemoryBridge {
                 "prospective_count": pr.lock().unwrap().len() as u64,
             })),
             "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-            _ => Err(BridgeErrorPayload {
+            _ => Err(RpcErrorPayload {
                 code: -32601,
                 message: format!("unknown: {method}"),
             }),
         });
-    CognitiveMemoryBridge::new(Box::new(transport))
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 fn test_session_id() -> SessionId {
@@ -459,14 +459,14 @@ fn feral_large_payload() {
 
 #[test]
 fn feral_unknown_method_returns_error() {
-    let transport = InMemoryBridgeTransport::new("test", |method, _| {
-        Err(BridgeErrorPayload {
+    let transport = InMemoryRpcTransport::new("test", |method, _| {
+        Err(RpcErrorPayload {
             code: -32601,
             message: format!("unknown: {method}"),
         })
     });
     assert!(
-        CognitiveMemoryBridge::new(Box::new(transport))
+        CognitiveMemoryClient::new(Box::new(transport))
             .get_statistics()
             .is_err()
     );

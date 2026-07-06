@@ -1,10 +1,10 @@
 #![allow(deprecated)]
 
 use super::*;
-use crate::bridge_subprocess::InMemoryBridgeTransport;
 use crate::memory::{FileBackedMemoryStore, MemoryRecord, MemoryScope, MemoryStore};
-use crate::memory_bridge::CognitiveMemoryBridge;
+use crate::memory_client::CognitiveMemoryClient;
 use crate::memory_cognitive::{CognitiveFact, CognitiveProcedure};
+use crate::rpc_transport::InMemoryRpcTransport;
 use crate::session::{SessionId, SessionPhase};
 use serde_json::json;
 use std::sync::Mutex;
@@ -15,93 +15,92 @@ struct MockStore {
     procedures: Vec<CognitiveProcedure>,
 }
 
-fn mock_bridge() -> CognitiveMemoryBridge {
+fn mock_bridge() -> CognitiveMemoryClient {
     let store: &'static Mutex<MockStore> = Box::leak(Box::new(Mutex::new(MockStore {
         facts: vec![],
         procedures: vec![],
     })));
 
-    let transport =
-        InMemoryBridgeTransport::new("test-backup", move |method, params| match method {
-            "memory.search_facts" => {
-                let s = store.lock().unwrap();
-                let facts: Vec<serde_json::Value> = s
-                    .facts
-                    .iter()
-                    .map(|f| {
-                        json!({
-                            "node_id": f.node_id, "concept": f.concept,
-                            "content": f.content, "confidence": f.confidence,
-                            "source_id": f.source_id, "tags": f.tags,
-                        })
+    let transport = InMemoryRpcTransport::new("test-backup", move |method, params| match method {
+        "memory.search_facts" => {
+            let s = store.lock().unwrap();
+            let facts: Vec<serde_json::Value> = s
+                .facts
+                .iter()
+                .map(|f| {
+                    json!({
+                        "node_id": f.node_id, "concept": f.concept,
+                        "content": f.content, "confidence": f.confidence,
+                        "source_id": f.source_id, "tags": f.tags,
                     })
-                    .collect();
-                Ok(json!({"facts": facts}))
-            }
-            "memory.recall_procedure" => {
-                let s = store.lock().unwrap();
-                let procs: Vec<serde_json::Value> = s
-                    .procedures
-                    .iter()
-                    .map(|p| {
-                        json!({
-                            "node_id": p.node_id, "name": p.name,
-                            "steps": p.steps, "prerequisites": p.prerequisites,
-                            "usage_count": p.usage_count,
-                        })
+                })
+                .collect();
+            Ok(json!({"facts": facts}))
+        }
+        "memory.recall_procedure" => {
+            let s = store.lock().unwrap();
+            let procs: Vec<serde_json::Value> = s
+                .procedures
+                .iter()
+                .map(|p| {
+                    json!({
+                        "node_id": p.node_id, "name": p.name,
+                        "steps": p.steps, "prerequisites": p.prerequisites,
+                        "usage_count": p.usage_count,
                     })
-                    .collect();
-                Ok(json!({"procedures": procs}))
-            }
-            "memory.store_fact" => {
-                let mut s = store.lock().unwrap();
-                let id = format!("fact-{}", s.facts.len() + 1);
-                s.facts.push(CognitiveFact {
-                    node_id: id.clone(),
-                    concept: params["concept"].as_str().unwrap_or("").to_string(),
-                    content: params["content"].as_str().unwrap_or("").to_string(),
-                    confidence: params["confidence"].as_f64().unwrap_or(0.0),
-                    source_id: params["source_id"].as_str().unwrap_or("").to_string(),
-                    tags: params["tags"]
-                        .as_array()
-                        .unwrap_or(&vec![])
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect(),
-                    usage_count: 0,
-                    last_accessed_at: None,
-                });
-                Ok(json!({"id": id}))
-            }
-            "memory.store_procedure" => {
-                let mut s = store.lock().unwrap();
-                let id = format!("proc-{}", s.procedures.len() + 1);
-                s.procedures.push(CognitiveProcedure {
-                    node_id: id.clone(),
-                    name: params["name"].as_str().unwrap_or("").to_string(),
-                    steps: params["steps"]
-                        .as_array()
-                        .unwrap_or(&vec![])
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect(),
-                    prerequisites: params["prerequisites"]
-                        .as_array()
-                        .unwrap_or(&vec![])
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect(),
-                    usage_count: 0,
-                });
-                Ok(json!({"id": id}))
-            }
-            "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
-            _ => Err(crate::bridge::BridgeErrorPayload {
-                code: -32601,
-                message: format!("unknown method: {method}"),
-            }),
-        });
-    CognitiveMemoryBridge::new(Box::new(transport))
+                })
+                .collect();
+            Ok(json!({"procedures": procs}))
+        }
+        "memory.store_fact" => {
+            let mut s = store.lock().unwrap();
+            let id = format!("fact-{}", s.facts.len() + 1);
+            s.facts.push(CognitiveFact {
+                node_id: id.clone(),
+                concept: params["concept"].as_str().unwrap_or("").to_string(),
+                content: params["content"].as_str().unwrap_or("").to_string(),
+                confidence: params["confidence"].as_f64().unwrap_or(0.0),
+                source_id: params["source_id"].as_str().unwrap_or("").to_string(),
+                tags: params["tags"]
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+                usage_count: 0,
+                last_accessed_at: None,
+            });
+            Ok(json!({"id": id}))
+        }
+        "memory.store_procedure" => {
+            let mut s = store.lock().unwrap();
+            let id = format!("proc-{}", s.procedures.len() + 1);
+            s.procedures.push(CognitiveProcedure {
+                node_id: id.clone(),
+                name: params["name"].as_str().unwrap_or("").to_string(),
+                steps: params["steps"]
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+                prerequisites: params["prerequisites"]
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+                usage_count: 0,
+            });
+            Ok(json!({"id": id}))
+        }
+        "memory.search_episodes_by_keywords" => Ok(json!({"episodes": []})),
+        _ => Err(crate::rpc::RpcErrorPayload {
+            code: -32601,
+            message: format!("unknown method: {method}"),
+        }),
+    });
+    CognitiveMemoryClient::new(Box::new(transport))
 }
 
 fn test_session_id() -> SessionId {

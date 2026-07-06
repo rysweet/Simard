@@ -86,7 +86,7 @@ The push-time gate is intentionally narrow on tests — full-suite
 gating (and the deeper `--all-targets --all-features --locked` clippy
 pass) belongs in CI, not in the local pre-push hook. Local pre-push
 exists to catch the multi-thread race classes (writer-Arc lifecycle,
-IPC bridge teardown, consolidation order-of-operations) **before**
+IPC client teardown, consolidation order-of-operations) **before**
 they leave a developer machine, while staying inside a ≤ 90 second
 budget on a dev host.
 

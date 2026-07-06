@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
+use crate::engineer_handoff::{
+    TERMINAL_HANDOFF_FILE_NAME, TERMINAL_MODE_BOUNDARY, load_runtime_handoff_snapshot,
+};
 use crate::operator_commands::{
     optional_terminal_evidence_value, print_display, print_text,
     render_redacted_objective_metadata, required_terminal_evidence_value, terminal_evidence_values,
     validated_terminal_read_artifacts,
-};
-use crate::terminal_engineer_bridge::{
-    TERMINAL_HANDOFF_FILE_NAME, TERMINAL_MODE_BOUNDARY, load_runtime_handoff_snapshot,
 };
 use crate::{
     CopilotSubmitAudit, FileBackedEvidenceStore, FileBackedMemoryStore, RuntimeHandoffSnapshot,
@@ -41,11 +41,11 @@ impl TerminalReadView {
     pub(super) fn load(state_root: PathBuf) -> crate::SimardResult<Self> {
         let artifacts = validated_terminal_read_artifacts(&state_root)?;
         let handoff = load_runtime_handoff_snapshot(
-            &crate::terminal_engineer_bridge::SelectedHandoffArtifact {
+            &crate::engineer_handoff::SelectedHandoffArtifact {
                 path: artifacts.handoff_path.clone(),
                 file_name: match artifacts.handoff_file_name.as_str() {
                     TERMINAL_HANDOFF_FILE_NAME => TERMINAL_HANDOFF_FILE_NAME,
-                    _ => crate::terminal_engineer_bridge::COMPATIBILITY_HANDOFF_FILE_NAME,
+                    _ => crate::engineer_handoff::COMPATIBILITY_HANDOFF_FILE_NAME,
                 },
             },
             "terminal read",

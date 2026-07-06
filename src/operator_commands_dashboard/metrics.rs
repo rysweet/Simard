@@ -10,7 +10,7 @@ use super::subagent::{count_json_records, file_metrics};
 use crate::cognitive_memory::metrics::RECALL_PRECISION_METRIC;
 use crate::cognitive_memory::recall_precision_bench::RECALL_PRECISION_SUITE;
 use crate::gym_history::{ScoreHistory, generate_signals};
-use crate::memory_ipc::open_reader_bridge;
+use crate::memory_ipc::open_reader_client;
 use crate::self_metrics::MetricEntry;
 
 // ---------------------------------------------------------------------------
@@ -41,11 +41,11 @@ pub(crate) async fn memory_metrics() -> Json<Value> {
         .unwrap_or(0);
 
     // Query the library-backed cognitive memory for live statistics (#419),
-    // routed through `open_reader_bridge` so the daemon's IPC writer serves the
+    // routed through `open_reader_client` so the daemon's IPC writer serves the
     // read when running embedded. Capture the error so the dashboard can show
     // *why* data is missing instead of silently returning zeros.
     let native_result =
-        open_reader_bridge(&state_root).and_then(|reader| reader.ops().get_statistics());
+        open_reader_client(&state_root).and_then(|reader| reader.ops().get_statistics());
     let native_error = native_result.as_ref().err().map(|e| e.to_string());
     let native_stats = native_result.ok();
 

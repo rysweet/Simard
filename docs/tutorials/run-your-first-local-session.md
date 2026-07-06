@@ -19,7 +19,7 @@ related:
 
 This tutorial exercises the shipped local-session flows through the canonical `simard` CLI.
 
-The first half focuses on the honest bridge from bounded terminal recipes into the repo-grounded engineer loop. It now includes the shipped bounded `engineer copilot-submit` slice so you can see where that stricter one-shot Copilot handoff fits before the later repo-grounded engineer run. The later steps show how meeting, goal, review, improvement, bootstrap, and gym surfaces still fit into the same local operator story.
+The first half focuses on the honest client from bounded terminal recipes into the repo-grounded engineer loop. It now includes the shipped bounded `engineer copilot-submit` slice so you can see where that stricter one-shot Copilot handoff fits before the later repo-grounded engineer run. The later steps show how meeting, goal, review, improvement, bootstrap, and gym surfaces still fit into the same local operator story.
 
 Use `simard` as the canonical operator-facing CLI. `simard_operator_probe` and `simard-gym` remain compatibility surfaces for older scripts, and `engineer terminal*` plus `engineer run/read` still share one honest local state model while remaining separate operator-visible modes.
 
@@ -103,7 +103,7 @@ Look for:
 - `Terminal transcript preview:`
 - `Next step 1: run 'simard engineer run <topology> <workspace-root> <objective> <same-state-root>'`
 
-**Checkpoint**: the terminal readback stays read-only, and the bridge guidance plus prompt-check audit are coming from durable local state rather than from a hidden resume system.
+**Checkpoint**: the terminal readback stays read-only, and the client guidance plus prompt-check audit are coming from durable local state rather than from a hidden resume system.
 
 ## Step 5: Run the bounded `engineer copilot-submit` slice
 
@@ -314,7 +314,7 @@ You now know how to:
 ## Next steps
 
 - Use [How to configure bootstrap and inspect reflection](../howto/configure-bootstrap-and-inspect-reflection.md) when you need the bootstrap contract in more detail.
-- Use [How to move from terminal recipes into engineer runs](../howto/move-from-terminal-recipes-into-engineer-runs.md) when you want the narrow terminal-to-engineer bridge workflow only.
+- Use [How to move from terminal recipes into engineer runs](../howto/move-from-terminal-recipes-into-engineer-runs.md) when you want the narrow terminal-to-engineer client workflow only.
 - Use [How to carry meeting decisions into engineer sessions](../howto/carry-meeting-decisions-into-engineer-sessions.md) when you need a narrower handoff-focused workflow.
 - Use [How to inspect meeting records](../howto/inspect-meeting-records.md) when you need the read-only meeting audit flow.
 - Use [How to inspect improvement-curation state](../howto/inspect-improvement-curation-state.md) when you need the read-only review-to-priority audit flow.

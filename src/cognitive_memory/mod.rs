@@ -5,7 +5,7 @@
 //! the only implementation is [`LibraryCognitiveMemory`], which delegates to the
 //! upstream `amplihack-memory-lib` `CognitiveMemory` (persistent, lbug-backed).
 //! The legacy bridge client
-//! ([`CognitiveMemoryBridge`](crate::memory_bridge::CognitiveMemoryBridge)) and
+//! ([`CognitiveMemoryClient`](crate::memory_client::CognitiveMemoryClient)) and
 //! the IPC client also implement the trait so callers stay backend-agnostic.
 
 use std::collections::HashMap;
@@ -204,7 +204,7 @@ pub fn forgetting_score(
 /// Trait abstracting cognitive memory operations.
 ///
 /// Both [`LibraryCognitiveMemory`] (amplihack-memory-lib, lbug-backed) and
-/// [`CognitiveMemoryBridge`](crate::memory_bridge::CognitiveMemoryBridge)
+/// [`CognitiveMemoryClient`](crate::memory_client::CognitiveMemoryClient)
 /// (Python subprocess) implement this trait so callers are backend-agnostic.
 pub trait CognitiveMemoryOps: Send + Sync {
     fn record_sensory(
@@ -716,7 +716,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// implementations are writers (the IPC client, the daemon's
     /// in-process Arc, the live [`LibraryCognitiveMemory`]).
     ///
-    /// `WriterBridge` constructors assert that this is `false` so a
+    /// `WriterClient` constructors assert that this is `false` so a
     /// read-only handle cannot be silently wrapped as a writer — the
     /// "hollow success" failure mode that issue #1590's follow-up
     /// targets.

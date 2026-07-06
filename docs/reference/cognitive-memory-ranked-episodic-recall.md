@@ -328,7 +328,7 @@ same signal.
 Two methods are added to the backend-agnostic `CognitiveMemoryOps` trait, and
 `CognitiveFact` gains two fields. Both new methods have **default
 implementations**, so existing implementors and test mocks (legacy Python
-bridge, IPC client, in-memory mocks) compile unchanged; only
+client, IPC client, in-memory mocks) compile unchanged; only
 `LibraryCognitiveMemory` overrides them.
 
 ```rust
@@ -367,7 +367,7 @@ fn reinforce_access(&self, node_id: &str, kind: MemoryKind) -> SimardResult<()> 
 Notes:
 
 - The trait stays `&self`. The library's `recall_episodes_ranked` and
-  `record_access` are `&mut self` (they *can* mutate); the adapter bridges that
+  `record_access` are `&mut self` (they *can* mutate); the adapter clients that
   through its existing `Mutex` write-lock — durability and recovery are
   unchanged because every touched method already write-locks.
 - The trait takes the Simard-owned `RecallWeightSet`, **not** the library's
@@ -396,11 +396,11 @@ let (raw_recall_count, session_filtered_count, episodic_recall) =
     if tokens.is_empty() {
         (0, 0, Vec::<CognitiveEpisode>::new())   // unchanged short-circuit
     } else {
-        // was: bridge.search_episodes_by_keywords(&tokens, 5)?
+        // was: client.search_episodes_by_keywords(&tokens, 5)?
         // The query is the space-joined keyword tokens, so the non-library
         // default impl re-splits it into exactly the filtered keyword set.
         let query = tokens.join(" ");
-        let raw = bridge.recall_episodes_ranked(&query, 5, weights)?;
+        let raw = client.recall_episodes_ranked(&query, 5, weights)?;
         let raw_len = raw.len();
         let kept: Vec<CognitiveEpisode> = raw
             .into_iter()
@@ -424,14 +424,14 @@ recall call and its ordering change.
 use crate::ooda_loop::phase_weights::weights_for_phase;
 
 // During OODA Observe — recency-biased: freshest relevant episodes first.
-let observed = bridge.recall_episodes_ranked(
+let observed = client.recall_episodes_ranked(
     objective,
     5,                                       // limit
     weights_for_phase(OodaPhase::Observe),
 )?;
 
 // During OODA Decide — confidence-biased: most trusted recollection first.
-let decided = bridge.recall_episodes_ranked(
+let decided = client.recall_episodes_ranked(
     objective,
     5,
     weights_for_phase(OodaPhase::Decide),
@@ -449,7 +449,7 @@ purely because it is newer.
 ```rust
 // epi_src was distilled into a fact and flagged `compressed = true`.
 // The library ranker skips it; the UNION backfill recovers it.
-let recalled = bridge.recall_episodes_ranked("auth null check", 5, weights)?;
+let recalled = client.recall_episodes_ranked("auth null check", 5, weights)?;
 assert!(
     recalled.iter().any(|e| e.node_id == epi_src.node_id),
     "compressed consolidation source must remain recallable",
@@ -463,11 +463,11 @@ assert!(
 // `reinforce_prepared_context` (from `advance.rs`) for every recalled memory
 // surfaced into the cycle's prompt; it can also be called directly, e.g. after a
 // recalled fact and procedure grounded a committed action:
-bridge.reinforce_access(&used_fact.node_id, MemoryKind::Fact)?;
-bridge.reinforce_access(&used_procedure.node_id, MemoryKind::Procedure)?;
+client.reinforce_access(&used_fact.node_id, MemoryKind::Fact)?;
+client.reinforce_access(&used_procedure.node_id, MemoryKind::Procedure)?;
 
 // A later recall of the same fact now shows the reinforcement:
-let again = bridge.recall_facts_ranked(query, 10, 0.0, weights)?;
+let again = client.recall_facts_ranked(query, 10, 0.0, weights)?;
 let f = again.iter().find(|f| f.node_id == used_fact.node_id).unwrap();
 assert!(f.usage_count >= 1);
 assert!(f.last_accessed_at.is_some());
@@ -478,8 +478,8 @@ assert!(f.last_accessed_at.is_some());
 ```rust
 // Two successive preparation passes over an unchanged store recall episodes
 // in the SAME order — preparing a cycle never reinforces.
-let first  = preparation_memory_operations(objective, &session, bridge)?;
-let second = preparation_memory_operations(objective, &session, bridge)?;
+let first  = preparation_memory_operations(objective, &session, client)?;
+let second = preparation_memory_operations(objective, &session, client)?;
 assert_eq!(
     ids(&first.episodic_recall),
     ids(&second.episodic_recall),

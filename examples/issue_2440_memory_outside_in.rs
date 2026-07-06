@@ -286,7 +286,7 @@ impl DistillRecipeRunner for FlakyParseRunner {
             // EXACT production prefix for a parse miss → classified ParseFailure
             // (transient): recipe exited 0 but its output had no parseable
             // `{ "facts": [...] }` object.
-            return Err(SimardError::BridgeError(
+            return Err(SimardError::RpcError(
                 "distill: `distill` step output did not contain a parseable `{ \"facts\": [...] }` object".to_string(),
             ));
         }
