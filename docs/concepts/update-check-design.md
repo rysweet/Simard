@@ -1,7 +1,7 @@
 ---
 title: Update check design
-description: "Why the update check works the way it does — fire-and-forget for CLI, channel-based for TUI, prerelease-aware semver, shared platform detection."
-last_updated: 2026-06-10
+description: "Why the launch-time update check works the way it does — in-process ureq, the semver crate, a 24h cache, a bounded upgrade prompt, and fail-open-but-surfaced error handling."
+last_updated: 2026-07-06
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -13,133 +13,198 @@ related:
 
 # Update check design
 
-This document explains the design decisions behind Simard's automatic
-update check. For usage, see the [how-to](../howto/check-for-updates.md).
-For the full API, see the [reference](../reference/update-check.md).
+This document explains the design decisions behind Simard's launch-time
+update check (issue #2250). For usage, see the
+[how-to](../howto/check-for-updates.md). For the full API and behavior
+contract, see the [reference](../reference/update-check.md).
 
 ## Problem
 
-Users running older versions of Simard miss bug fixes and new
-features. The update check ensures they are informed without
-disrupting their workflow.
+Operators running older versions of Simard miss bug fixes and new
+features. The update check informs them at launch without disrupting the
+workflow, and — in an interactive terminal — offers a friendly path to
+upgrade.
 
-Three constraints shaped the design:
+Five constraints shaped the design:
 
-1. **Never block startup.** A CLI tool that stalls for 5 seconds on
-   every launch is unusable. The check must be fully asynchronous.
+1. **Never block startup.** A CLI tool that stalls on every launch is
+   unusable. The check must be fully asynchronous and time-bounded.
 2. **Never corrupt the TUI.** The TUI runs in raw mode on an alternate
-   screen. Any uncoordinated write to stderr or stdout corrupts the
-   display. The check must communicate through a controlled channel.
-3. **Never lie about versions.** A prerelease like `1.0.0-rc1` must
-   not be treated as equal to or newer than `1.0.0`. Version
-   comparison must be prerelease-aware.
+   screen. Any uncoordinated write to stderr/stdout — or a blocking
+   stdin prompt — corrupts the display. The TUI path must communicate
+   through a controlled channel and never prompt.
+3. **Never lie about versions.** A pre-release like `1.0.0-rc1` must not
+   be treated as equal to or newer than `1.0.0`. Comparison must be
+   pre-release-aware.
+4. **Fail open, but surface the failure.** A GitHub API or network error
+   is a convenience-check failure, not a core-logic failure — it must
+   never block or crash the binary. But the failure must be *logged*,
+   not silently swallowed (surface, don't hide).
+5. **Be a safe notifier, not an installer.** The check reports that
+   something newer exists. It must never download, install, or execute
+   an upgrade on its own.
 
 ## Design decisions
 
-### Fire-and-forget for CLI
+### In-process HTTP via `ureq` (not a subprocess)
 
-`run_update_check()` spawns a thread and does **not** join it. The
-thread runs independently: it queries GitHub, compares versions, and
-prints to stderr if needed. If `main()` finishes before the thread
-completes, the thread is silently terminated by process exit.
+The check fetches the GitHub Releases API directly with the
+[`ureq`](https://docs.rs/ureq/3.3.0) client — a `ureq::Agent` with a
+5-second `timeout_global`, a `User-Agent`, and the standard GitHub
+`Accept` / `X-GitHub-Api-Version` headers — over `rustls` TLS only.
 
-This means:
+Earlier iterations shelled out to `gh api` with a `curl` fallback. That
+was replaced because:
 
-- CLI startup latency is zero (thread spawn is ~microseconds).
-- For very fast commands (`simard --version`), the notice may not
-  appear because the process exits before the HTTP request completes.
-  This is acceptable — the user will see the notice on the next
-  command that takes longer.
-- The thread writes to stderr, which is safe for CLI because no other
-  code is competing for stderr in a meaningful way.
+- **No `PATH`-hijack surface.** Spawning `gh`/`curl` means trusting
+  whatever binary happens to be first on `PATH`. An in-process client
+  removes that attack surface entirely.
+- **No process-management complexity.** No child-process spawn,
+  timeout-kill, or stdout-plumbing code to get right.
+- **`ureq` is already in the dependency tree.** Promoting it to a direct,
+  pinned (`=3.3.0`) dependency reuses what the build already carries,
+  per the #2250 "reuse existing deps" constraint.
 
-### Channel-based for TUI
+The request is deliberately **unauthenticated**: this is a public,
+read-only notifier, so no token is ever attached and there is no
+credential to leak. Unauthenticated GitHub requests are rate-limited to
+60/hour/IP; the 24-hour cache and fail-open behavior make that a
+non-issue (a 403 rate-limit response just becomes `None` + a warning).
 
-`run_update_check_background()` returns an `Option<mpsc::Receiver<String>>`.
-The TUI stores the receiver in the `App` struct and calls `try_recv()`
-on each event-loop tick (the poll timeout is 2 seconds, but this is not
-a dedicated timer — any input event also triggers a tick). When the
-notice arrives, it is stored in `App.update_notice`, the receiver is
-set to `None` (one-shot), and the notice is rendered in the footer.
+### The `semver` crate (not a hand-rolled parser)
 
-This follows the same pattern already used for GitHub stats in the
-Stats tab — a background thread sends data through a channel, and the
-TUI polls it during its normal render loop. The pattern works because:
+Version comparison uses the [`semver`](https://docs.rs/semver/1.0.28)
+crate (also promoted to a direct `=1.0.28` dependency), replacing the
+earlier bespoke tuple parser. The GitHub `tag_name` (with any leading
+`v` stripped) and `env!("CARGO_PKG_VERSION")` are each parsed into a
+`semver::Version`, and an update is reported only when the latest is
+**strictly greater**.
 
-- `mpsc::Receiver` is `!Sync` but `Send`, matching the TUI's
-  single-threaded event loop.
-- `try_recv()` is non-blocking, so it adds no latency to the render
-  cycle.
-- The notice is rendered by the TUI's own draw code, so it respects
-  the alternate screen and raw mode.
-
-### Prerelease-aware semver
-
-`parse_semver()` returns a 4-tuple `(major, minor, patch, is_release)`
-where `is_release` is `true` for releases and `false` for prereleases.
-Rust's tuple comparison evaluates left-to-right, and `false < true`,
-so:
+Delegating to `semver` gives correct, well-tested pre-release ordering
+for free:
 
 ```
-(1, 0, 0, false)  <  (1, 0, 0, true)
- ↑ 1.0.0-rc1          ↑ 1.0.0
+1.0.0-rc1  <  1.0.0  <  1.0.1-beta.1
 ```
 
-This means:
+So `is_newer("1.0.0", "1.0.0-rc1")` is `true` (release beats its
+pre-release), while `is_newer("1.0.0-rc1", "1.0.0")` is `false`. The
+alternative — stripping pre-release metadata — would make `1.0.0-rc1`
+compare equal to `1.0.0` and hide the fact that a stable release is
+available. Using the crate also means Simard's notion of "newer" matches
+the ecosystem's, with less code to maintain.
 
-- `is_newer("1.0.0", "1.0.0-rc1")` → `true` (release is newer than
-  its prerelease).
-- `is_newer("1.0.0-rc1", "1.0.0")` → `false` (prerelease is not
-  newer than its release).
-- `is_newer("1.0.1-beta", "1.0.0")` → `true` (higher patch wins
-  regardless of prerelease).
+### A 24-hour cache (reversing the earlier "no cache" call)
 
-The alternative — stripping prerelease metadata entirely — would make
-`1.0.0-rc1` compare equal to `1.0.0`, hiding the fact that the user
-is on a prerelease and a stable release is available.
+The result is cached at `~/.simard/update_cache.json` — under Simard's
+standard state root (`SIMARD_STATE_ROOT` if set, otherwise
+`$HOME/.simard`) — with a 24-hour TTL. A fresh cache short-circuits the
+network entirely.
 
-### Shared platform detection
+Placing the cache under the shared state root (rather than an XDG
+`~/.config` path) keeps it alongside the rest of Simard's on-disk state —
+agent registry, snapshots, `config.toml` — so a single `SIMARD_STATE_ROOT`
+override relocates everything together, and there is no second location
+convention to remember.
 
-The update check reuses `cmd_self_update::platform::platform_suffix()`
-for asset detection, rather than maintaining its own platform strings.
-This ensures that:
+This **reverses an earlier design choice** that deliberately avoided
+caching. The trade-off changed for two reasons:
 
-- Platform names match the release asset naming convention (`macos-*`,
-  not `darwin-*`).
-- Changes to the naming convention only need to be made in one place.
-- The `self-update` command and the update check agree on which
-  platforms have pre-built binaries.
+- **Unauthenticated rate limits.** Once the check stopped using `gh`'s
+  authenticated quota and moved to unauthenticated requests, one HTTP
+  call per launch became a real concern for operators who launch `simard`
+  frequently. A 24h cache bounds that to at most one request per day.
+- **Stale-cache risk is contained.** The classic objection to caching —
+  showing "up to date" when a release exists — is bounded to a 24-hour
+  window, which is acceptable for a convenience notifier, and the TTL is
+  short enough that operators still learn about releases promptly.
 
-### No caching
+The cache is treated as **untrusted input**: on read it is re-validated
+(semver re-parse, URL re-allowlist) and re-sanitized exactly like a live
+response, written atomically (temp file + `rename`) with `0700`/`0600`
+permissions, and never followed through a symlink. A corrupt, missing,
+or unwritable cache is a harmless miss — never a hard error — which keeps
+the whole path fail-open even when `HOME` is unset.
 
-The check makes a fresh HTTP request on every launch. The cost is one
-small JSON response (~2KB) per launch. Caching was considered and
-rejected because:
+### Fail-open, but surfaced via `tracing`
 
-- It adds disk I/O and cache-invalidation logic for negligible gain.
-- The check runs in a background thread, so the network latency is
-  invisible to the user.
-- Stale-cache bugs (showing "up to date" when a new release exists)
-  are worse than the cost of one HTTP request.
+Every failure mode — DNS/connect error, timeout, non-2xx status, rate
+limit, oversized body, malformed JSON, unparseable semver — resolves to
+`None`. The launch never blocks and the process never panics.
 
-### Dual transport (gh + curl)
+Crucially, these are **not silently swallowed**: each failure is logged
+via `tracing::warn!` with the failure *category* (never the raw body or
+headers). This satisfies the #2250 "surface, don't hide" requirement —
+an operator debugging "why don't I see update notices?" can find the
+reason in the logs, while normal launches stay quiet and fast.
 
-The check tries `gh api` first because it handles authentication
-(private repos, rate limits) automatically. If `gh` fails for any
-reason — missing binary, auth failure, timeout, non-zero exit — it
-falls back to `curl` against the public GitHub API. Both have hard
-timeouts with `child.kill()` to prevent indefinite hangs.
+### Fire-and-forget for CLI, channel-based for TUI
 
-## Relationship to safe-update
+`run_update_check()` spawns a detached thread and does **not** join it.
+CLI startup latency is effectively zero; for very fast commands
+(`simard --version`) the notice may not appear because the process exits
+first, which is fine — the operator sees it on the next longer command.
+Writing to stderr is safe here because nothing else competes for it.
 
-The update check is *informational only* — it tells the user a newer
-version exists. It does not download, install, or execute anything.
+`run_update_check_background()` instead returns an
+`Option<mpsc::Receiver<String>>`. The TUI polls `try_recv()` in its
+event loop, renders the notice in its own draw cycle, then drops the
+receiver (one-shot). This reuses the exact pattern already used for
+GitHub stats in the TUI: a background thread feeds a channel that the
+single-threaded render loop drains, so the notice always respects the
+alternate screen and raw mode. The TUI therefore never writes stray
+stderr and never blocks on a prompt.
 
-`simard self-update` is the manual upgrade command. `simard safe-update`
-is the autonomous upgrade flow with drain, snapshot, pre-test, swap,
-validate, and rollback phases. The update check and these commands are
-independent: the check runs on every launch, the upgrade commands run
-only when explicitly invoked.
+The notice string sent through the channel is formatted with the **same
+version convention as the CLI banner** — `X.Y.Z -> A.B.C`, an ASCII `->`
+arrow and no `v` prefix. This is a deliberate reformat: an earlier TUI
+build used a Unicode arrow with `v`-prefixed versions
+(`v0.26.0 → v0.27.0`), which drifted from the CLI banner. Standardizing
+both surfaces on one format keeps them consistent and lets a single
+banner-format test cover the version rendering.
+
+### A bounded, non-installing upgrade prompt
+
+In an interactive terminal the CLI follows the banner with
+`Upgrade now? [y/N]`, read on a background thread with a ~10-second
+`recv_timeout` and a default of **No**. Timeout, EOF, a non-TTY stdin,
+`SIMARD_NONINTERACTIVE=1`, and the TUI context all resolve to No, so the
+prompt can never hang an unattended or piped launch.
+
+The prompt is deliberately **display-only**: answering `y` prints a hint
+to run `simard update` and does nothing else. Actual upgrading —
+download, integrity verification, binary swap — stays behind the
+explicit, sha256/signature-gated `simard update` command
+(`cmd_self_update`). Keeping the notifier and the installer strictly
+separate means a spoofed release response can, at worst, mislead; it can
+never cause code execution.
+
+### Exact, sanitized banner text
+
+The banner's first line is the literal
+`simard: update available X.Y.Z -> A.B.C` — an ASCII `->` and no `v`
+prefix — so it is stable and testable. The versions printed are the
+re-serialized semver values, and the `release_url` / `release_notes`
+carried in `UpdateInfo` are stripped of ESC/BEL/CR and C0/C1 control
+characters. Together with host-allowlisting the `release_url` to
+`github.com/rysweet/Simard/`, this prevents a malicious release body from
+injecting terminal escape sequences or phishing links through the notice.
+
+## Relationship to the upgrade commands
+
+The update check is *informational only* — it tells the operator a newer
+version exists and, at most, hints at the upgrade command. It never
+downloads, installs, or executes anything.
+
+- `simard update` is the manual, integrity-verified upgrade command.
+- `simard safe-update` is the autonomous upgrade flow with drain,
+  snapshot, pre-test, swap, validate, and rollback phases (see
+  [Safe self-update](../safe-self-update.md)).
+
+The check and these commands are independent: the check runs at every
+launch; the upgrade commands run only when explicitly invoked. Removing
+`has_platform_asset` from `UpdateInfo` (#2250) reinforced this split —
+platform-asset selection is the installer's job, not the notifier's.
 
 ## See also
 
