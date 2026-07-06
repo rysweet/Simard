@@ -78,9 +78,18 @@ path = "src/bin/simard_tui/main.rs"
 # `cognitive_memory::metrics::precision_at_k` now delegates to it, and the
 # fixed-corpus recall-precision benchmark + live rail both score through the same
 # upstream primitive (issue #2491 / #2494). No lbug/engine change, so the store
-# format stays v41. The pin points at an upstream-`main` commit (not a feature
-# branch), so the build can never be frozen against an unmerged, GC-able ref.
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "2266cc247d66c773c33300546a97502d53497c20", features = ["persistent"] }
+# format stays v41.
+#
+# Bumped again to the squash-merge commit of amplihack-memory-lib PR #120 on
+# `main` (which lands directly on top of PR #121), adding the first-class
+# `creative_idea` prospective memory type (CreativeIdeaStatus lifecycle state
+# machine + typed MemoryLink/MemoryLinkKind edges incl. Goal; guideline G2)
+# which Simard's Creative Ideas thread re-exports. This pin therefore carries
+# BOTH the measurement primitive (#121) and the creative-idea memory type (#120)
+# with no lbug/engine change, so the store format stays v41. The pin points at an
+# upstream-`main` commit (not a feature branch), so the build can never be frozen
+# against an unmerged, GC-able ref.
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "e005a5963b38bc02610fa5b0bef7e52625dcd092", features = ["persistent"] }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
 # De-fork (issue #2323): the gym/eval RUNNER is now the upstream

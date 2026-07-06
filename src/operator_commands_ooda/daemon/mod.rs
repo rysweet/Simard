@@ -612,6 +612,14 @@ pub fn run_ooda_daemon(
         mind.register(Box::new(
             crate::cognitive_threads::EngineerLogAnalysisThread::from_env(),
         ));
+        // Creative Ideas generator thread (issue #2606-adjacent): a divergent
+        // idea-generation background thread, default-ON opt-out via
+        // `SIMARD_CREATIVE_IDEAS_ENABLED` (its `enabled()` gate keeps an
+        // opted-out thread inert). Reuses `ThreadKind::BackgroundThought`.
+        crate::cognitive_threads::threads::creative_ideas::register(
+            &mut mind,
+            crate::creative_ideas::CreativeIdeasConfig::from_env(),
+        );
         // NOTE: the Overseer M1 read-only observer sensor that previously
         // registered here (default-OFF, `SIMARD_OVERSEER_ENABLED` truthy) is
         // SUPERSEDED by the acting Overseer periodic task driven below in the

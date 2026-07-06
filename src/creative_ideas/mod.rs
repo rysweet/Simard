@@ -17,8 +17,11 @@
 #![allow(dead_code)]
 
 pub mod dedup;
+pub mod pipeline;
+pub mod prompt;
 pub mod reviewers;
 pub mod routing;
+pub mod source;
 pub mod synthesis;
 
 #[cfg(test)]
@@ -46,11 +49,12 @@ pub const CREATIVE_IDEA_OWNER: &str = "rysweet";
 
 /// Configuration + gating for the Creative Ideas subsystem.
 ///
-/// A default-constructed config is **disabled**. [`Self::from_env`] is the
-/// single source of truth for gating and cadence.
+/// A default-constructed config is **enabled** (default-ON, opt-out) —
+/// consistent with the Overseer and Journal cognitive threads.
+/// [`Self::from_env`] is the single source of truth for gating and cadence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreativeIdeasConfig {
-    /// `SIMARD_CREATIVE_IDEAS_ENABLED` (default `false`).
+    /// `SIMARD_CREATIVE_IDEAS_ENABLED` (default `true`; opt-out via a falsey value).
     pub enabled: bool,
     /// `SIMARD_CREATIVE_IDEAS_INTERVAL_SECS` (default `86_400`).
     pub interval_secs: u64,
@@ -61,7 +65,7 @@ pub struct CreativeIdeasConfig {
 impl Default for CreativeIdeasConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             interval_secs: DEFAULT_INTERVAL_SECS,
             batch: DEFAULT_BATCH,
         }
@@ -77,14 +81,15 @@ impl CreativeIdeasConfig {
 
     /// Parse from an arbitrary env resolver (test seam).
     ///
-    /// The truthy check mirrors the Overseer's gate: only an explicit truthy
-    /// value enables the subsystem; unset/empty/garbage leaves it OFF.
+    /// The gate mirrors the Overseer/Journal pattern: the subsystem is
+    /// **default-ON** and only an explicit *falsey* value opts out; unset/empty
+    /// leaves it enabled.
     #[must_use]
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
-        let enabled = lookup(ENABLED_ENV)
+        let enabled = !lookup(ENABLED_ENV)
             .as_deref()
             .map(str::trim)
-            .is_some_and(is_truthy);
+            .is_some_and(is_falsey);
         let interval_secs = lookup(INTERVAL_SECS_ENV)
             .as_deref()
             .map(str::trim)
@@ -104,15 +109,18 @@ impl CreativeIdeasConfig {
         }
     }
 
-    /// True only when the master switch is truthy.
+    /// True unless the master switch was explicitly set to a falsey value.
     #[must_use]
     pub fn enabled(&self) -> bool {
         self.enabled
     }
 }
 
-/// Recognise an explicit truthy env value (case-insensitive; trimmed). Anything
-/// else — including `0`/`false`/empty/unset — is falsey.
-fn is_truthy(v: &str) -> bool {
-    matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+/// Recognise an explicit falsey env value (case-insensitive; trimmed). Anything
+/// else — including unset/empty and truthy values — leaves the subsystem ON.
+fn is_falsey(v: &str) -> bool {
+    matches!(
+        v.to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
 }

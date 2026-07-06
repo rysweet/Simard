@@ -9,10 +9,10 @@
 //! `main` and run the new code. The pins are advanced as upstream lands work:
 //!
 //!   * `amplihack-agent-eval`  59548a96… → **2a93441d…** (amplihack-rs main)
-//!   * `amplihack-memory`       f8003708… → **2266cc24…** (memory-lib main —
-//!     the squash-merge of PR #121, which lands the decoupled
-//!     `measurement::precision_at_k` recall-quality primitive that Simard's
-//!     hybrid measurement surface delegates to, on top of the #2626 bump)
+//!   * `amplihack-memory`       f8003708… → **e005a596…** (memory-lib main —
+//!     the squash-merge of PR #120, which lands the first-class `creative_idea`
+//!     prospective memory type on top of PR #121's `measurement::precision_at_k`
+//!     recall-quality primitive, so the single pin carries both)
 //!
 //! These are the exact 40-char SHAs verified against `git ls-remote … main`
 //! at authoring time.
@@ -43,9 +43,12 @@ use std::path::PathBuf;
 /// amplihack-rs `main` HEAD carrying the `amplihack-agent-eval` crate to adopt.
 const AGENT_EVAL_TARGET_REV: &str = "2a93441d1837f9f853d5dddc56cc1088353a8872";
 /// amplihack-memory-lib `main` commit carrying the `amplihack-memory` crate:
-/// PR #121's squash-merge (the `measurement::precision_at_k` primitive, on top
-/// of the #2626 pin), which Simard's hybrid measurement surface delegates to.
-const MEMORY_TARGET_REV: &str = "2266cc247d66c773c33300546a97502d53497c20";
+/// PR #120's squash-merge (the first-class `creative_idea` prospective memory
+/// type — CreativeIdeaStatus lifecycle + typed MemoryLink/MemoryLinkKind — which
+/// Simard's Creative Ideas thread re-exports), which lands directly on top of
+/// PR #121's `measurement::precision_at_k` primitive, so this single rev carries
+/// BOTH upstream additions.
+const MEMORY_TARGET_REV: &str = "e005a5963b38bc02610fa5b0bef7e52625dcd092";
 
 /// The stale revs the bump must move *off of* (anti-regression sentinels).
 const AGENT_EVAL_STALE_REV: &str = "59548a96049ab8d558110bcaf9c82a4316f1bbf0";

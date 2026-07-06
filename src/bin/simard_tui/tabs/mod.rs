@@ -7,6 +7,7 @@
 
 pub mod activity;
 pub mod chat;
+pub mod creative_ideas;
 pub mod goals;
 pub mod journal;
 pub mod overseer;

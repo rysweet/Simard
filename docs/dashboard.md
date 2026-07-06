@@ -1,6 +1,6 @@
 ---
 title: Dashboard
-description: Read-only web dashboard for inspecting the autonomous OODA daemon across nine consolidated tabs — Overview, Goals, Activity, Workers, Pull Requests, Resources, Chat, Overseer, and Journal — mirrored by a consistent terminal UI (TUI).
+description: Read-only web dashboard for inspecting the autonomous OODA daemon across ten tabs — Overview, Goals, Activity, Workers, Pull Requests, Resources, Chat, Overseer, Journal, and Creative Ideas — mirrored by a consistent terminal UI (TUI).
 last_updated: 2026-07-06
 owner: simard
 doc_type: howto
@@ -37,9 +37,11 @@ order:
 | **Chat** | — | Direct chat with Simard. Conversations are saved as durable, resumable **sessions**: a sidebar lists every saved chat, the panel fills the page, and assistant replies stream in incrementally. See [Chat: durable, resumable sessions](#chat-tab-durable-resumable-sessions). |
 | **Overseer** | — | The overseer goal-board health view: per-goal health, staleness, and the intervention signals that decide when a stalled goal needs attention. |
 | **Journal** | — | The daemon's narrative journal — a human-readable, chronological record of what Simard decided and why, newest entries first. |
+| **Creative Ideas** | — | The pool of candidate self-improvement ideas Simard generates for herself, each reviewed for feasibility, worth, and measurability. Browse and search by review status (new · needs-revision · needs-human-review · accepted · in-progress · completed · deferred · rejected). |
 
-**Overseer** and **Journal** are standalone tabs with no sub-sections; they are
-owned by separate features and are kept intact by the consolidation.
+**Overseer**, **Journal**, and **Creative Ideas** are standalone tabs with no
+sub-sections; they are owned by separate features and are kept intact by the
+consolidation.
 
 Every former standalone tab now lives as a sub-section and keeps its old deep
 link — see [Deep links and tab aliases](#deep-links-and-tab-aliases). The same
@@ -283,7 +285,7 @@ The terminal UI (`simard tui`) presents the **same tab taxonomy** as the web
 dashboard so an operator moving between the two never has to relearn the layout.
 Tab names, relative order, and grouping match the dashboard exactly.
 
-The TUI renders a **seven-tab subset** of the nine dashboard tabs. It omits
+The TUI renders an **eight-tab subset** of the ten dashboard tabs. It omits
 **Pull Requests** and **Resources**, whose data pipelines exist only in the web
 surface; adding them to the TUI would be new feature work, not consolidation, and
 is deliberately out of scope. The TUI never invents a tab the dashboard does not
@@ -298,8 +300,9 @@ have, and never shows a name the dashboard does not use.
 | 5 | **Chat** | `5` | Chat | — |
 | 6 | **Overseer** | `6` | Overseer | — |
 | 7 | **Journal** | `7` | Journal | — |
+| 8 | **Creative Ideas** | `8` | Creative Ideas | — |
 
-Number keys `1`–`7` (with the platform tab modifier) jump straight to a tab;
+Number keys `1`–`8` (with the platform tab modifier) jump straight to a tab;
 `Tab` / `Shift+Tab` cycle forward and backward. Merged views appear as
 **panels** (ratatui sub-views) within their parent tab — e.g. the **Activity**
 tab stacks Logs, Traces, Thinking, and Failures panels — so the terminal keeps

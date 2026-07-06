@@ -10,6 +10,7 @@ use super::auth::{login, login_page, require_auth};
 use super::brain_failures::brain_failures;
 use super::chat::ws_chat_handler;
 use super::chat_store::{chat_session_by_id, chat_sessions};
+use super::creative_ideas::{creative_ideas, creative_ideas_search};
 use super::current_work::current_work;
 use super::distributed::{distributed, vacate_vm};
 use super::feedback::{feedback_status, feedback_submit};
@@ -91,6 +92,8 @@ pub fn build_router() -> Router {
         .route("/api/journal/search", post(journal_search))
         .route("/api/journal/entry/{date}", get(journal_entry))
         .route("/api/journal/render/{date}", get(journal_render))
+        .route("/api/creative-ideas", get(creative_ideas))
+        .route("/api/creative-ideas/search", post(creative_ideas_search))
         .route("/api/status/snapshot", get(status_snapshot))
         .route("/api/feedback", post(feedback_submit))
         .route("/api/feedback/status/{id}", get(feedback_status))
