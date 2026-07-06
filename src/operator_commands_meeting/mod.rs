@@ -15,5 +15,6 @@ pub use goal_curation::{run_goal_curation_probe, run_goal_curation_read_probe};
 pub use improvement_curation::{
     run_improvement_curation_probe, run_improvement_curation_read_probe,
 };
+pub(crate) use meeting_session::build_enriched_meeting_system_prompt;
 pub use meeting_session::run_meeting_repl_command;
 pub use probes::{run_meeting_probe, run_meeting_read_probe};

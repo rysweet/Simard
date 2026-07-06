@@ -217,7 +217,7 @@ fn same_operator_two_messages_share_one_continuous_session() {
     set_hermetic_env(tmp.path());
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-    let mut make_backend = |_op: &str| recording_backend(REPLY, &captured);
+    let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured));
 
     let mut ch = channel(
         vec![
@@ -278,7 +278,7 @@ fn distinct_operators_get_isolated_sessions() {
     set_hermetic_env(tmp.path());
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-    let mut make_backend = |_op: &str| recording_backend(REPLY, &captured);
+    let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured));
 
     let mut ch = channel(
         vec![
@@ -330,7 +330,7 @@ fn new_command_starts_a_fresh_session_and_retains_the_old_one() {
     set_hermetic_env(tmp.path());
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-    let mut make_backend = |_op: &str| recording_backend(REPLY, &captured);
+    let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured));
 
     let mut ch = channel(
         vec![
@@ -403,7 +403,7 @@ fn reset_is_an_alias_for_new() {
     set_hermetic_env(tmp.path());
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-    let mut make_backend = |_op: &str| recording_backend(REPLY, &captured);
+    let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured));
 
     let mut ch = channel(
         vec![
@@ -448,7 +448,7 @@ fn conversation_resumes_after_a_simulated_restart() {
     // daemon "stops". Its in-memory backends are dropped at the end of the run.
     let captured1: Captured = Arc::new(Mutex::new(Vec::new()));
     {
-        let mut make_backend = |_op: &str| recording_backend(REPLY, &captured1);
+        let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured1));
         let mut ch = channel(
             vec![receive_line(OPERATOR, "the code word is BANANA")],
             &[OPERATOR],
@@ -465,7 +465,7 @@ fn conversation_resumes_after_a_simulated_restart() {
     // state root. The next message must resume the existing conversation.
     let captured2: Captured = Arc::new(Mutex::new(Vec::new()));
     {
-        let mut make_backend = |_op: &str| recording_backend(REPLY, &captured2);
+        let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured2));
         let mut ch = channel(
             vec![receive_line(OPERATOR, "what is the code word")],
             &[OPERATOR],
@@ -515,7 +515,7 @@ fn synced_echo_of_simards_reply_is_not_reconsumed_as_a_turn() {
     set_hermetic_env(tmp.path());
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-    let mut make_backend = |_op: &str| recording_backend(REPLY, &captured);
+    let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured));
 
     let mut ch = channel(
         vec![
@@ -560,7 +560,7 @@ fn reply_synced_from_linked_device_is_ignored() {
     set_hermetic_env(tmp.path());
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-    let mut make_backend = |_op: &str| recording_backend(REPLY, &captured);
+    let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured));
 
     let mut ch = channel(
         vec![
@@ -597,7 +597,7 @@ fn help_does_not_persist_a_turn_or_reset_the_session() {
     set_hermetic_env(tmp.path());
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-    let mut make_backend = |_op: &str| recording_backend(REPLY, &captured);
+    let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured));
 
     let mut ch = channel(
         vec![
@@ -634,5 +634,54 @@ fn help_does_not_persist_a_turn_or_reset_the_session() {
         captured.lock().unwrap().len(),
         2,
         "only the two real messages reach the reasoner; /help does not"
+    );
+}
+
+// ── 7. No silent degradation: a make_backend failure propagates ──────────────
+
+/// The real `run` builds each per-operator backend inside `make_backend` by
+/// opening that operator's own cognitive-memory store (recall) and building the
+/// enriched OODA-context system prompt (issue #2527 follow-up, wired onto the
+/// per-operator `run_continuous`/`make_backend` structure of #2575/#2577). Both
+/// of those steps can fail, which is why `make_backend` returns
+/// `SimardResult<MeetingBackend>`.
+///
+/// This pins that a `make_backend` failure on a real turn PROPAGATES out of
+/// `run_continuous` rather than being swallowed into a bare/empty reply or a
+/// half-persisted conversation (PHILOSOPHY.md: no silent degradation).
+#[test]
+#[serial(cognitive_memory)]
+fn make_backend_failure_propagates_for_a_real_turn() {
+    let tmp = tempfile::tempdir().unwrap();
+    set_hermetic_env(tmp.path());
+
+    // Simulate recall/memory wiring failing while minting the per-operator
+    // backend (e.g. the cognitive-memory store or the enriched prompt fails).
+    let mut make_backend = |_op: &str| -> SimardResult<MeetingBackend> {
+        Err(crate::error::SimardError::BridgeError(
+            "simulated recall/memory failure while wiring the Signal backend".to_string(),
+        ))
+    };
+
+    let mut ch = channel(
+        vec![receive_line(OPERATOR, "hello simard")],
+        &[OPERATOR],
+        ACCOUNT,
+        None,
+    );
+
+    let result = block_on(run_continuous(&mut ch, tmp.path(), &mut make_backend));
+    assert!(
+        result.is_err(),
+        "a make_backend failure on a real turn must propagate out of run_continuous"
+    );
+
+    // Nothing was silently persisted as a completed conversation: no session
+    // content file exists (the turn never reached the backend).
+    assert!(
+        session_store::list_sessions_at(tmp.path())
+            .unwrap()
+            .is_empty(),
+        "a failed backend build must not persist a conversation turn"
     );
 }

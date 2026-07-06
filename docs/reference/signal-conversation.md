@@ -1,7 +1,7 @@
 ---
 title: Signal channel reference
 description: Reference for SignalConversation — the optional, feature-gated ConversationChannel that connects Simard to a locally-run signal-cli JSON-RPC daemon, with a sender allowlist, operator-identity binding, high-risk gating, Note-to-Self (sync-sent) command handling with loop prevention, inbound commands, and outbound notifications.
-last_updated: 2026-07-04
+last_updated: 2026-07-06
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -33,7 +33,10 @@ installation and linking.
 
 > **Naming.** `SignalConversation` is a first-class conversation channel. It does
 > **not** implement, extend, or route through the pre-existing cognitive-memory
-> `BridgeTransport`. No symbol added by this feature contains `bridge`/`Bridge`.
+> `BridgeTransport`. No symbol this feature *defines* contains `bridge`/`Bridge`:
+> the per-operator OODA/graph-memory wiring (issue #2527) does call the external
+> helper `memory_ipc::launch_writer_bridge`, but binds the returned cognitive-
+> memory handle locally as `memory`.
 
 ## Feature gate
 
@@ -374,6 +377,15 @@ conversation** — the session is keyed by operator identity, persisted across d
 restarts, and controlled with `/new` (reset), `/help`, and `/close`. See
 [Signal continuous conversation](./signal-continuous-conversation.md).
 
+Every Signal conversation also starts with the **same live OODA-loop context as
+the CLI meeting** — recent meetings, decisions, active goals, operator identity,
+and known projects are recalled into the system prompt (via the shared
+`build_enriched_meeting_system_prompt`) — and each per-operator backend carries its
+own graph cognitive-memory store, so `/close` **consolidates** the conversation
+back into graph memory (episodes, summary facts), not just the handoff bundle
+(issue #2527). See
+[Signal continuous conversation](./signal-continuous-conversation.md).
+
 ## Notifications out
 
 `SignalConversation::notify` (`src/signal_conversation/channel.rs`) sends a message
@@ -417,8 +429,9 @@ OODA / merge authority / gate ─▶ SignalConversation::notify ─▶ transport
 **Meeting turn / carryover:** identical to every channel — a `Conversation` inbound
 flows through `run_conversation` + `MeetingBackend`, with `/close` writing the
 handoff under `default_handoff_dir()` (`$SIMARD_HANDOFF_DIR`, else
-`<state_root>/meeting_handoffs`, default `~/.simard/meeting_handoffs`) and
-`check_meeting_handoffs` carrying decisions onto the goal board. See
+`<state_root>/meeting_handoffs`, default `~/.simard/meeting_handoffs`),
+**consolidating the conversation into graph cognitive memory** (episodes, summary
+facts), and `check_meeting_handoffs` carrying decisions onto the goal board. See
 [Conversation channels](../architecture/conversation-channel.md).
 
 ## Testing

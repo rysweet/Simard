@@ -397,3 +397,99 @@ fn all_types_contains_error_handling() {
     let ctx = build_live_meeting_context(&bridge).unwrap();
     assert!(ctx.contains("Add better error handling"));
 }
+
+// ── build_enriched_meeting_system_prompt ────────────────────────────
+//
+// The enriched prompt is the single source of truth for "what context a
+// Simard conversation starts with", shared by every operator↔Simard channel
+// (CLI meeting REPL + Signal). These tests pin that it is exactly the base
+// `meeting_system.md` identity prompt followed by the live OODA-loop context
+// recalled from graph cognitive memory — and that recall failures propagate
+// (PHILOSOPHY.md: no silent degradation).
+
+use super::build_enriched_meeting_system_prompt;
+
+#[serial_test::serial(cognitive_memory)]
+#[test]
+fn enriched_prompt_appends_live_context_after_base() {
+    // `build_live_meeting_context` resolves the operator name from the
+    // process-global `SIMARD_OPERATOR_NAME` env var. This test builds the live
+    // context twice (once inside the enriched prompt, once directly) and
+    // compares them as a suffix, so it must serialize with — and hold the lock
+    // against — the other env-mutating tests and pin the var to a deterministic
+    // state. Otherwise a concurrent mutation landing between the two builds
+    // would make the two contexts differ and the suffix check flake.
+    let _lock = ENV_MUTEX.lock().unwrap();
+    unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
+
+    let bridge = bridge_with_meeting_facts();
+    let enriched = build_enriched_meeting_system_prompt(&bridge).unwrap();
+    let live = build_live_meeting_context(&bridge).unwrap();
+
+    // The enriched prompt is `{base}\n\n{live}` — regardless of whether the base
+    // asset is present in the test env, the live context is the suffix, joined
+    // by exactly one blank line. This pins the DRY join used by both channels.
+    assert!(
+        enriched.ends_with(&format!("\n\n{live}")),
+        "enriched prompt must end with the live OODA context, blank-line separated"
+    );
+    assert!(
+        enriched.contains("## Live State (from cognitive memory)"),
+        "enriched prompt must carry the recalled live-state section"
+    );
+}
+
+#[test]
+fn enriched_prompt_carries_recalled_facts() {
+    let bridge = bridge_with_meeting_facts();
+    let enriched = build_enriched_meeting_system_prompt(&bridge).unwrap();
+    // A fact recalled from graph memory reaches the system prompt verbatim, so
+    // a Signal/CLI session starts already knowing Simard's own OODA state.
+    assert!(
+        enriched.contains("Discussed deployment timeline"),
+        "recalled meeting fact must appear in the enriched prompt"
+    );
+}
+
+#[test]
+fn enriched_prompt_includes_all_fact_types() {
+    let bridge = bridge_with_all_fact_types();
+    let enriched = build_enriched_meeting_system_prompt(&bridge).unwrap();
+    for expected in [
+        "Previous Meeting Summaries",
+        "Past Decisions",
+        "Active Goals",
+        "Operator Context",
+        "Known Projects",
+        "Research Topics",
+        "Improvement Backlog",
+    ] {
+        assert!(
+            enriched.contains(expected),
+            "enriched prompt missing OODA section: {expected}"
+        );
+    }
+}
+
+#[test]
+fn enriched_prompt_propagates_bridge_errors() {
+    // No silent degradation: if recall fails, the enriched prompt is NOT built
+    // from a partial/bare base — the error propagates so the caller fails loud.
+    let bridge = erroring_bridge();
+    let result = build_enriched_meeting_system_prompt(&bridge);
+    assert!(
+        result.is_err(),
+        "recall failure must propagate out of build_enriched_meeting_system_prompt"
+    );
+}
+
+#[test]
+fn live_context_propagates_bridge_errors() {
+    // Companion contract for the underlying recall builder.
+    let bridge = erroring_bridge();
+    let result = build_live_meeting_context(&bridge);
+    assert!(
+        result.is_err(),
+        "recall failure must propagate out of build_live_meeting_context"
+    );
+}

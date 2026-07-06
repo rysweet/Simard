@@ -1,6 +1,7 @@
 use std::io::{self, BufReader};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
+use crate::error::SimardResult;
 use crate::greeting_banner::print_greeting_banner;
 use crate::identity::OperatingMode;
 use crate::meeting_repl::run_meeting_repl;
@@ -13,6 +14,24 @@ use super::live_context::build_live_meeting_context;
 fn load_meeting_system_prompt() -> String {
     let path = prompt_root().join("simard/meeting_system.md");
     std::fs::read_to_string(&path).unwrap_or_default()
+}
+
+/// Build the full meeting system prompt: the base `meeting_system.md` identity
+/// prompt plus the live OODA-loop state recalled from the graph cognitive
+/// memory (past meetings, decisions, active goals, operator identity, known
+/// projects, research topics, improvements).
+///
+/// This is the single source of truth for "what context a Simard conversation
+/// starts with". Every operator↔Simard channel — the CLI meeting REPL and the
+/// Signal conversation channel — builds its system prompt through this helper
+/// so all channels get identical OODA-loop context and the same graph-memory
+/// wiring. Bridge errors propagate per PHILOSOPHY.md (no silent degradation).
+pub(crate) fn build_enriched_meeting_system_prompt(
+    bridge: &dyn CognitiveMemoryOps,
+) -> SimardResult<String> {
+    let base_prompt = load_meeting_system_prompt();
+    let live_context = build_live_meeting_context(bridge)?;
+    Ok(format!("{base_prompt}\n\n{live_context}"))
 }
 
 /// Launch a cognitive memory backend suitable for meeting mode.
@@ -64,9 +83,7 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
     print_greeting_banner(Some(&*bridge));
 
     let agent_session = open_meeting_agent_session();
-    let base_prompt = load_meeting_system_prompt();
-    let live_context = build_live_meeting_context(&*bridge)?;
-    let meeting_system_prompt = format!("{base_prompt}\n\n{live_context}");
+    let meeting_system_prompt = build_enriched_meeting_system_prompt(&*bridge)?;
 
     if agent_session.is_some() {
         tracing::info!("Meeting agent ready");
