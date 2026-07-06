@@ -14,6 +14,7 @@
 //! it surfaces a **loud** error and leaves the board and graph untouched rather
 //! than silently producing zero or malformed children.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -23,6 +24,7 @@ use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 
 use super::edges::{write_edge, write_node};
+use super::prioritize::{PrioritizationSignals, prioritize};
 use super::types::{
     ActiveGoal, BacklogItem, GoalBoard, GoalEdge, GoalEdgeType, GoalNode, MAX_ACTIVE_GOALS,
 };
@@ -206,16 +208,30 @@ pub fn decompose_goal(
                 // over real backlog work; it is a tracking anchor, not a task.
                 score: 0.0,
             });
-            for (child_id, proposal) in child_ids.iter().zip(proposals.iter()) {
-                board.active.push(
+            // Issue #2695 follow-up: a decomposition's children would otherwise
+            // ALL inherit the single flat `parent.priority` — the exact "flat
+            // siblings ⇒ no prioritization" case the operator complains about.
+            // Differentiate them with the prioritization pass, driven by the
+            // structured inter-sibling `depends_on` ordering the decomposer
+            // emitted (a sibling others depend on is a bottleneck and ranks up).
+            // The pass keeps a no-signal child on the neutral tier, so it
+            // spreads the siblings without clobbering.
+            let children: Vec<ActiveGoal> = child_ids
+                .iter()
+                .zip(proposals.iter())
+                .map(|(child_id, proposal)| {
                     ActiveGoal::new(
                         child_id.clone(),
                         proposal.description.clone(),
                         parent.priority,
                     )
                     .with_repo(parent.repo.clone())
-                    .with_parent(Some(goal_id.to_string())),
-                );
+                    .with_parent(Some(goal_id.to_string()))
+                })
+                .collect();
+            let signals = sibling_dependency_signals(&child_ids, &proposals);
+            for child in prioritize(&children, &signals, chrono::Utc::now()) {
+                board.active.push(child);
             }
         }
         ChildPlacement::Backlog => {
@@ -238,6 +254,40 @@ pub fn decompose_goal(
         child_ids,
         placement,
     })
+}
+
+/// Build the [`PrioritizationSignals`] for a freshly-decomposed sibling set from
+/// the decomposer's structured `depends_on` ordering (issue #2695 follow-up).
+///
+/// Maps each child id to the ids of the siblings it is gated on (its blockers),
+/// mirroring the `depends_on` edges written into the graph. The prioritization
+/// pass reads this to rank a depended-on sibling (a bottleneck) above the leaves
+/// that wait on it. Out-of-range and self-referential indices are dropped so a
+/// malformed proposal cannot forge a signal.
+fn sibling_dependency_signals(
+    child_ids: &[String],
+    proposals: &[SubGoalProposal],
+) -> PrioritizationSignals {
+    let mut depends_on: HashMap<String, Vec<String>> = HashMap::new();
+    for (idx, child_id) in child_ids.iter().enumerate() {
+        let Some(proposal) = proposals.get(idx) else {
+            continue;
+        };
+        let blockers: Vec<String> = proposal
+            .depends_on
+            .iter()
+            .filter_map(|&dep| child_ids.get(dep))
+            .filter(|dep_id| *dep_id != child_id)
+            .cloned()
+            .collect();
+        if !blockers.is_empty() {
+            depends_on.insert(child_id.clone(), blockers);
+        }
+    }
+    PrioritizationSignals {
+        depends_on,
+        ..Default::default()
+    }
 }
 
 // ---------------------------------------------------------------------------

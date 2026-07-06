@@ -167,6 +167,27 @@ pub struct ActiveGoal {
     /// omitted entirely when unset) and lets legacy JSON without the key load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_goal_id: Option<String>,
+    /// Provenance flag: `true` only when the operator EXPLICITLY set this goal's
+    /// priority (via `simard goal set-priority`), `false` for every other origin
+    /// — dashboard/CLI-added defaults, decomposition inheritance, seeded goals,
+    /// meeting-derived goals (issue #2695 follow-up). The prioritization pass
+    /// ([`super::prioritize::prioritize`]) re-scores only non-explicit goals, so
+    /// this flag is what keeps the operator's hand-set priorities intact while
+    /// the flat/undifferentiated ones get spread apart.
+    ///
+    /// `#[serde(default, skip_serializing_if)]` keeps pre-#2695 goal-board
+    /// snapshots byte-identical (the key is omitted entirely when `false`) and
+    /// lets legacy JSON without the key load as non-explicit (pass-eligible).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub priority_explicit: bool,
+}
+
+/// `skip_serializing_if` predicate: omit a `bool` field when it is `false` so
+/// the serialized form stays additive (no key for the default). Kept as a named
+/// free function because serde's `skip_serializing_if` requires a path to a
+/// `fn(&T) -> bool`.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl ActiveGoal {
@@ -184,6 +205,7 @@ impl ActiveGoal {
             wip_refs: Vec::new(),
             last_progress_update_at: None,
             parent_goal_id: None,
+            priority_explicit: false,
         }
     }
 
@@ -199,6 +221,16 @@ impl ActiveGoal {
     #[must_use]
     pub fn with_parent(mut self, parent_goal_id: Option<String>) -> Self {
         self.parent_goal_id = parent_goal_id;
+        self
+    }
+
+    /// Builder: mark (or clear) this goal's priority as operator-set provenance
+    /// (issue #2695 follow-up). Only the operator `simard goal set-priority`
+    /// path sets this `true`; the prioritization pass leaves such goals' exact
+    /// priorities untouched.
+    #[must_use]
+    pub fn with_priority_explicit(mut self, explicit: bool) -> Self {
+        self.priority_explicit = explicit;
         self
     }
 
@@ -542,6 +574,7 @@ mod tests {
     fn sample_goal() -> ActiveGoal {
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: "g-1".to_string(),
             description: "Ship MVP".to_string(),
@@ -575,6 +608,7 @@ mod tests {
     fn active_goal_assigned_to_none() {
         let g = ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: "g-2".to_string(),
             description: "Unassigned".to_string(),
@@ -721,6 +755,7 @@ mod tests {
         let goals: Vec<ActiveGoal> = (0..MAX_ACTIVE_GOALS)
             .map(|i| ActiveGoal {
                 parent_goal_id: None,
+                priority_explicit: false,
                 repo: None,
                 id: format!("g-{i}"),
                 description: format!("Goal {i}"),
@@ -744,6 +779,7 @@ mod tests {
         let goals: Vec<ActiveGoal> = (0..MAX_ACTIVE_GOALS + 2)
             .map(|i| ActiveGoal {
                 parent_goal_id: None,
+                priority_explicit: false,
                 repo: None,
                 id: format!("g-{i}"),
                 description: format!("Goal {i}"),

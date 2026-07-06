@@ -66,6 +66,7 @@ fn simard_goal(id: &str, status: GoalProgress) -> ActiveGoal {
         wip_refs: vec![],
         last_progress_update_at: None,
         parent_goal_id: None,
+        priority_explicit: false,
     }
 }
 

@@ -217,6 +217,38 @@ list` by construction. See
 [Goals tab lifecycle-status badges](reference/dashboard-goal-lifecycle-status.md)
 for the full reference.
 
+### Goals tab: hierarchy nesting & differentiated priorities
+
+The **Goals** tab's active-goals table renders as a **priority-ordered tree**
+rather than a flat list. Two coupled improvements sit on top of the
+lifecycle-status badges above:
+
+- **Hierarchy.** Sub-goals produced by
+  [`simard goal decompose`](reference/goal-decomposition.md) render **nested
+  and indented under their parent** umbrella goal, grouped by the structured
+  `parent_goal_id` back-reference (not by parsing text). Orphans and children
+  whose parent has left the active set render at the root, and the tree walk is
+  cycle-/depth-safe.
+- **Differentiated priorities — display + substance.** The tab **orders goals
+  by priority (highest first)** at every level and shows each goal's priority
+  as a coloured **tier pill** — **Critical** (`≤1`, red `#f85149`), **High**
+  (`2`, orange `#db6d28`), **Medium** (`3`, amber `#d29922`), **Low** (`4`,
+  blue `#388bfd`), **Minimal** (`≥5`, grey `#8b949e`) — via `humanizePriority`
+  / `priorityTierKey` / the hard-coded `GOAL_PRIORITY_COLORS` allowlist,
+  escaped last. Underneath, a deterministic goal-curation **prioritization
+  pass** spreads the priorities of undifferentiated goals (the wall of `p3`,
+  including decomposition children that inherit the parent's value) across
+  `p1…p5` using structured signals (blocking `depends_on` edges, in-flight
+  `wip_refs`, lifecycle status, standing/perpetual, staleness). Priorities the
+  operator set with `simard goal set-priority` are marked
+  `priority_explicit = true` and are **never** reshuffled.
+
+Both hierarchy (`parent_goal_id`) and provenance (`priority_explicit`) are
+additive fields on `/api/goals`, and the `active` array is returned sorted by
+priority ascending. See
+[Goals tab hierarchy & differentiated priorities](reference/dashboard-goal-hierarchy-priority.md)
+for the full reference.
+
 ### Goals tab → Work Board: plain-English Task Memory & Recent Actions
 
 A live Playwright audit of the **Work Board** sub-section (in the **Goals** tab)

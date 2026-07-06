@@ -11,7 +11,7 @@ use axum::extract::Path;
 use serde_json::json;
 
 use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
-use crate::goal_curation::{GoalBoard, GoalProgress, save_goal_board};
+use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, save_goal_board};
 use crate::memory_ipc::{clear_in_process_writer, register_in_process_writer};
 use crate::operator_commands_dashboard::goals::*;
 use crate::operator_commands_dashboard::{
@@ -86,6 +86,7 @@ fn init_board_with_goals(state: &HermeticState) -> SharedMemoryGuard {
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: "existing-goal".to_string(),
         description: "An existing active goal".to_string(),
@@ -255,6 +256,7 @@ async fn add_goal_rejects_when_at_max_active() {
     for i in 0..crate::goal_curation::MAX_ACTIVE_GOALS {
         board.active.push(crate::goal_curation::ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: format!("max-goal-{i}"),
             description: format!("Max goal {i}"),
@@ -468,6 +470,7 @@ async fn promote_backlog_item_rejects_when_at_max_active() {
     for i in 0..crate::goal_curation::MAX_ACTIVE_GOALS {
         board.active.push(crate::goal_curation::ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: format!("full-{i}"),
             description: format!("Full board goal {i}"),
@@ -579,6 +582,7 @@ async fn goals_includes_status_chip_for_active_goals() {
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: "chip-test".to_string(),
         description: "Goal with current_activity".to_string(),
@@ -1043,6 +1047,7 @@ const OODA_BLOCK_REASON: &str =
 fn goal_in_status(id: &str, status: GoalProgress) -> crate::goal_curation::ActiveGoal {
     crate::goal_curation::ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: id.to_string(),
         description: format!("Goal {id}"),
@@ -1253,4 +1258,216 @@ async fn goals_status_progress_matches_live_goal_store() {
             stored.id
         );
     }
+}
+
+// ===========================================================================
+// Issue #2695 follow-up — Goal HIERARCHY + differentiated PRIORITY (backend).
+//
+// The Goals tab must (1) represent the parent→child decomposition hierarchy and
+// (2) surface + order goals by priority so priority is visible and actionable.
+// This backend half of the contract pins the `/api/goals` shape:
+//   * active goals ordered by priority ASCENDING (p1 = highest first), with a
+//     stable id tiebreak, so the client renders a priority-ordered tree;
+//   * each goal additively exposes `parent_goal_id` (structured hierarchy edge,
+//     G3 — no brittle parsing) and `priority_explicit` (operator-set provenance);
+//   * the create path validates priority (>=1, no silent p0) and server-derives
+//     `priority_explicit` (a client cannot forge operator-set provenance).
+//
+// The frontend rendering half lives in `index_html/tests_tab_meta.rs`; the
+// prioritization-pass substance lives in `goal_curation/tests_prioritize.rs`.
+// These are RED until `goals_at` orders + emits the new fields, `add_goal_at`
+// validates + derives provenance, and `ActiveGoal.priority_explicit` exists.
+// ===========================================================================
+
+/// Seed a hermetic board with the given active goals through the same tier-0
+/// shared-writer path the handlers use. Returns the `SharedMemoryGuard` (bind
+/// it so the writer stays registered for the life of the test).
+#[must_use]
+fn seed_active_board(state: &HermeticState, goals: Vec<ActiveGoal>) -> SharedMemoryGuard {
+    let guard = SharedMemoryGuard::register(state);
+    save_goal_board(&GoalBoard::new(), guard.ops()).expect("init empty board");
+    let mut board = GoalBoard::new();
+    board.active = goals;
+    dashboard_save_goal_board(state.state_root(), &board).expect("seed active board");
+    guard
+}
+
+/// The ordered list of active-goal ids in a `/api/goals` response.
+fn active_ids(active: &[serde_json::Value]) -> Vec<String> {
+    active
+        .iter()
+        .map(|g| g["id"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn goals_active_ordered_by_priority_ascending_with_stable_id_tiebreak() {
+    // Seeded deliberately OUT of priority order, with a duplicate priority to
+    // exercise the stable id tiebreak.
+    let state = HermeticState::new();
+    let _mem = seed_active_board(
+        &state,
+        vec![
+            ActiveGoal::new("b-goal", "priority 2, id b", 2),
+            ActiveGoal::new("a-goal", "priority 2, id a", 2),
+            ActiveGoal::new("c-goal", "priority 1, id c", 1),
+            ActiveGoal::new("d-goal", "priority 4, id d", 4),
+        ],
+    );
+
+    let result = goals_at(state.state_root()).await;
+    let active = result.0["active"].as_array().expect("active array");
+
+    // Highest-priority-first = ascending numeric priority; equal priorities keep
+    // a stable ascending-id order.
+    assert_eq!(
+        active_ids(active),
+        vec![
+            "c-goal".to_string(), // p1
+            "a-goal".to_string(), // p2, id 'a' before 'b'
+            "b-goal".to_string(), // p2
+            "d-goal".to_string(), // p4
+        ],
+        "/api/goals must return active goals ordered by priority ascending \
+         (highest first) with a stable id tiebreak"
+    );
+
+    // The emitted priority sequence must itself be non-decreasing.
+    let priorities: Vec<u64> = active
+        .iter()
+        .map(|g| g["priority"].as_u64().unwrap_or(0))
+        .collect();
+    assert!(
+        priorities.windows(2).all(|w| w[0] <= w[1]),
+        "emitted priorities must be non-decreasing (priority is visible AND ordered); got {priorities:?}"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn goals_expose_parent_goal_id_for_hierarchy() {
+    // A decomposition: parent "umbrella" with one child "sub-task".
+    let state = HermeticState::new();
+    let _mem = seed_active_board(
+        &state,
+        vec![
+            ActiveGoal::new("umbrella", "the parent goal", 1),
+            ActiveGoal::new("sub-task", "a decomposed child", 2)
+                .with_parent(Some("umbrella".to_string())),
+        ],
+    );
+
+    let result = goals_at(state.state_root()).await;
+    let active = result.0["active"].as_array().expect("active array");
+
+    let child = active_by_id(active, "sub-task");
+    assert_eq!(
+        child["parent_goal_id"],
+        json!("umbrella"),
+        "a child goal must additively expose its parent_goal_id so the tab can nest it \
+         under its parent (structured hierarchy edge, not brittle parsing)"
+    );
+
+    let parent = active_by_id(active, "umbrella");
+    assert_eq!(
+        parent["parent_goal_id"],
+        json!(null),
+        "a top-level goal must expose a null parent_goal_id (it roots the tree)"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn goals_expose_priority_explicit_provenance() {
+    // One operator-pinned goal, one ordinary (pass-eligible) goal.
+    let state = HermeticState::new();
+    let _mem = seed_active_board(
+        &state,
+        vec![
+            ActiveGoal::new("pinned", "operator pinned", 1).with_priority_explicit(true),
+            ActiveGoal::new("ordinary", "not pinned", 3),
+        ],
+    );
+
+    let result = goals_at(state.state_root()).await;
+    let active = result.0["active"].as_array().expect("active array");
+
+    assert_eq!(
+        active_by_id(active, "pinned")["priority_explicit"],
+        json!(true),
+        "an operator-pinned goal must expose priority_explicit==true so the pass leaves it alone"
+    );
+    assert_eq!(
+        active_by_id(active, "ordinary")["priority_explicit"],
+        json!(false),
+        "an ordinary goal must expose priority_explicit==false (eligible for differentiation)"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn add_goal_at_rejects_zero_priority() {
+    // SR-V1: the create path must validate priority (>=1) rather than silently
+    // persisting a p0 goal.
+    let state = HermeticState::new();
+    let _mem = init_empty_board(&state);
+
+    let resp = add_goal_at(
+        state.state_root(),
+        Json(json!({ "description": "invalid zero priority", "priority": 0 })),
+    )
+    .await;
+
+    assert!(
+        resp.0.get("error").is_some(),
+        "adding a goal with priority 0 must return an error (priority must be >= 1), got: {}",
+        resp.0
+    );
+
+    // And no p0 goal may have been persisted.
+    let listed = goals_at(state.state_root()).await;
+    let active = listed.0["active"].as_array().expect("active array");
+    assert!(
+        active
+            .iter()
+            .all(|g| g["priority"].as_u64().unwrap_or(0) >= 1),
+        "no active goal may carry priority 0 after a rejected add"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn add_goal_at_ignores_client_supplied_priority_explicit() {
+    // SR-V2: `priority_explicit` is server-derived provenance. A dashboard-added
+    // goal is NOT operator-set-priority, so it must remain non-explicit even if a
+    // client tries to forge the flag — otherwise a client could exempt a goal
+    // from differentiation.
+    let state = HermeticState::new();
+    let _mem = init_empty_board(&state);
+
+    let resp = add_goal_at(
+        state.state_root(),
+        Json(json!({
+            "description": "client tries to forge provenance",
+            "priority": 3,
+            "priority_explicit": true
+        })),
+    )
+    .await;
+    assert_eq!(
+        resp.0["status"], "ok",
+        "add should succeed, got: {}",
+        resp.0
+    );
+
+    let listed = goals_at(state.state_root()).await;
+    let active = listed.0["active"].as_array().expect("active array");
+    assert_eq!(active.len(), 1, "exactly one goal should have been added");
+    assert_eq!(
+        active[0]["priority_explicit"],
+        json!(false),
+        "a client-supplied priority_explicit must be IGNORED; dashboard-added goals stay \
+         non-explicit (server-derived provenance)"
+    );
 }

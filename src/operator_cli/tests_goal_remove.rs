@@ -60,6 +60,7 @@ fn isolated_state_root() -> (TempDir, PathBuf) {
 fn active_goal_with_desc(id: &str, description: &str) -> ActiveGoal {
     ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: id.to_string(),
         description: description.to_string(),

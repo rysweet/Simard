@@ -94,6 +94,7 @@ fn test_bridges() -> OodaClients {
 fn sample_goal(id: &str, priority: u32, progress: GoalProgress) -> ActiveGoal {
     ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: id.to_string(),
         description: format!("Goal {id}"),

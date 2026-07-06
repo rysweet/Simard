@@ -35,6 +35,7 @@ fn seeded_board() -> GoalBoard {
     for (i, d) in descs.iter().enumerate() {
         board.active.push(ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: format!("seed-goal-{i}"),
             description: (*d).to_string(),
@@ -116,6 +117,7 @@ fn tier2_writer_and_reader_share_one_store() {
     let mut board = seeded_board();
     board.active.push(ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: "fourth-goal".to_string(),
         description: "Establish hive-mind sync with remote Simard instances".to_string(),

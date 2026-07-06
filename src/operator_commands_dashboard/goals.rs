@@ -91,8 +91,15 @@ pub(crate) async fn goals() -> Json<Value> {
 pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
     let board = dashboard_goal_board_snapshot(state_root).unwrap_or_default();
 
-    let active: Vec<Value> = board
-        .active
+    // Issue #2695 follow-up: emit active goals ordered by priority ASCENDING
+    // (p1 = highest first) with a stable id tiebreak, so the Goals tab renders a
+    // priority-ordered tree and priority is both visible AND actionable. The
+    // ordering is a display concern here; the SUBSTANCE (differentiating flat
+    // priorities) is the prioritization pass on the curation/decompose path.
+    let mut active_goals = board.active;
+    active_goals.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
+
+    let active: Vec<Value> = active_goals
         .into_iter()
         .map(|g| {
             // Issue #1684: render the raw brain-log `current_activity` string
@@ -105,6 +112,15 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
                 "id": g.id,
                 "description": g.description,
                 "priority": g.priority,
+                // Issue #2695 follow-up: additively expose the structured
+                // decomposition back-reference so the Goals tab can NEST a
+                // sub-goal under its active parent from durable board data (G3),
+                // never by parsing the description. `null` for a top-level goal.
+                "parent_goal_id": g.parent_goal_id,
+                // Issue #2695 follow-up: additively expose operator-set priority
+                // provenance so the client (and the prioritization pass) can tell
+                // a hand-pinned priority from a differentiate-eligible default.
+                "priority_explicit": g.priority_explicit,
                 "status": g.status.to_string(),
                 // Issue #20: additively expose the SERIALIZED `GoalProgress`
                 // enum so the Goals tab can render a distinct, correctly-labeled
@@ -208,6 +224,7 @@ pub(crate) async fn seed_goals_at(state_root: &std::path::Path) -> Json<Value> {
     let now = chrono::Utc::now().to_rfc3339();
     board.active.push(ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: "self-improvement".to_string(),
         description:
@@ -222,6 +239,7 @@ pub(crate) async fn seed_goals_at(state_root: &std::path::Path) -> Json<Value> {
     });
     board.active.push(ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: "knowledge-growth".to_string(),
         description:
@@ -236,6 +254,7 @@ pub(crate) async fn seed_goals_at(state_root: &std::path::Path) -> Json<Value> {
     });
     board.active.push(ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
             repo: None,
         id: "operational-health".to_string(),
         description: "Maintain system health: budget compliance, resource usage, and error rates within thresholds".to_string(),
@@ -310,6 +329,19 @@ pub(crate) async fn add_goal_at(
             )}));
         }
         let priority = body.get("priority").and_then(|v| v.as_u64()).unwrap_or(3) as u32;
+        // SR-V1 (#2695 follow-up): validate priority at ingress rather than
+        // silently persisting a p0 goal. p0 has no meaning (priorities are
+        // 1 = highest .. n) and would poison the priority ordering/tiering.
+        if priority < 1 {
+            return Json(json!({"error": "priority must be >= 1"}));
+        }
+        // SR-V2 (#2695 follow-up): `priority_explicit` is SERVER-DERIVED
+        // provenance — only the operator `simard goal set-priority` path sets it.
+        // A dashboard-added goal is NOT operator-set-priority, so it stays
+        // non-explicit (differentiate-eligible) regardless of any client-supplied
+        // `priority_explicit`, which is ignored so a client cannot forge
+        // provenance and exempt a goal from the prioritization pass.
+        //
         // Issue #2359 (BUG 1): an optional target-repo slug routes the goal's
         // engineer to ~/src/<slug>. Shape-only validation here; the
         // existence/git-repo check happens later in `resolve_goal_repo` at
@@ -328,6 +360,7 @@ pub(crate) async fn add_goal_at(
         };
         board.active.push(ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo,
             id: id.clone(),
             description: desc,
@@ -463,6 +496,7 @@ pub(crate) async fn promote_backlog_item_at(
 
     board.active.push(ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: item.id,
         description: item.description,
