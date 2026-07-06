@@ -265,3 +265,77 @@ fn assemble_reads_cost_ledger_under_state_root() {
     assert_eq!(all.tokens_out, 400);
     assert_eq!(llm.daily_budget_usd, Some(25.0));
 }
+
+// ── daily budget display guard (issue #6) ────────────────────────────────────
+//
+// The status display must report the *actual* guard. The daily budget is always
+// guarded — `crate::overseer::config::resolve_daily_budget_usd` falls back to
+// `DEFAULT_DAILY_BUDGET_USD` when the env is unset/empty/unparseable/non-positive
+// — so the provider must never emit `None` (rendered "unset (no guard)") when a
+// default applies. These pin that the provider single-sources the ceiling
+// through the canonical resolver rather than reading the raw env directly.
+
+/// Write a minimal single-entry cost ledger so the `llm` section assembles as
+/// `live` (the provider returns `absent` when no ledger exists).
+fn write_cost_ledger(state_root: &std::path::Path) {
+    let ledger = state_root.join("costs").join("ledger.jsonl");
+    std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    let line = format!(
+        "{{\"timestamp\":\"{now}\",\"session_id\":\"s\",\"model\":\"gpt\",\"prompt_tokens_est\":1000,\"completion_tokens_est\":200,\"cost_usd_est\":1.5,\"context\":\"c\"}}"
+    );
+    std::fs::write(&ledger, format!("{line}\n")).unwrap();
+}
+
+#[test]
+#[serial(status_env)]
+fn assemble_daily_budget_defaults_to_guard_when_env_unset() {
+    // Bug #6: running outside the daemon's systemd env (var absent) previously
+    // reported no budget guard. The budget is always guarded, so an unset env
+    // must surface the canonical default ceiling — never `None`.
+    let _skip = EnvGuard::unset("SIMARD_SKIP_GYM");
+    let _budget = EnvGuard::unset("SIMARD_DAILY_BUDGET_USD");
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_cost_ledger(dir.path());
+
+    let snap = status::assemble(&hermetic_opts(dir.path()));
+    let llm: &LlmUsage = snap.llm.data.as_ref().expect("llm present");
+    assert_eq!(
+        llm.daily_budget_usd,
+        Some(simard::overseer::config::DEFAULT_DAILY_BUDGET_USD),
+        "unset env must resolve to the canonical default guard, not None"
+    );
+}
+
+#[test]
+#[serial(status_env)]
+fn assemble_daily_budget_reflects_explicit_env() {
+    let _skip = EnvGuard::unset("SIMARD_SKIP_GYM");
+    let _budget = EnvGuard::set("SIMARD_DAILY_BUDGET_USD", "250");
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_cost_ledger(dir.path());
+
+    let snap = status::assemble(&hermetic_opts(dir.path()));
+    let llm: &LlmUsage = snap.llm.data.as_ref().expect("llm present");
+    assert_eq!(llm.daily_budget_usd, Some(250.0));
+}
+
+#[test]
+#[serial(status_env)]
+fn assemble_daily_budget_nonpositive_env_falls_back_to_guard() {
+    // A non-positive value is not a real ceiling; the canonical resolver rejects
+    // it and applies the default guard. The display must mirror that reality
+    // rather than reporting a misleading `0`.
+    let _skip = EnvGuard::unset("SIMARD_SKIP_GYM");
+    let _budget = EnvGuard::set("SIMARD_DAILY_BUDGET_USD", "0");
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_cost_ledger(dir.path());
+
+    let snap = status::assemble(&hermetic_opts(dir.path()));
+    let llm: &LlmUsage = snap.llm.data.as_ref().expect("llm present");
+    assert_eq!(
+        llm.daily_budget_usd,
+        Some(simard::overseer::config::DEFAULT_DAILY_BUDGET_USD),
+        "non-positive env must fall back to the canonical default guard"
+    );
+}

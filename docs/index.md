@@ -62,6 +62,7 @@ Terminal sessions and repo-grounded engineer runs now bridge through one explici
 - [Meeting close lifecycle reference](./reference/meeting-close-lifecycle.md) - Bounded close, partial-handoff envelope, atomic writes (#1908).
 - [Handoff lifecycle API reference](./reference/handoff-lifecycle-api.md) - Write guard, batch processing, and reaping for meeting handoff files (#2268).
 - [State-root resolution reference](./reference/state-root-resolution.md) - The shared helper honoring `SIMARD_STATE_ROOT` across every Simard mode (#1906).
+- [Daily-budget display guard reference](./reference/daily-budget-display-guard.md) - Why `simard status`, the dashboard monitoring JSON, and the TUI all resolve the daily LLM budget through the single canonical `overseer::config` resolver, so the displayed ceiling always matches the Overseer `BudgetGate` and the false "unset (no guard)" line can no longer appear (#6).
 - [How to recover from a meeting close timeout](./howto/recover-from-meeting-close-timeout.md) - Playbook when `handoff_partial=true` fires.
 - [LightweightChatSession reference](./reference/lightweight-chat-session.md) - Direct-subprocess session used for Copilot-provider meeting turns (no PTY overhead).
 - [Dashboard Chat reference](./reference/dashboard-chat.md) - Durable, resumable dashboard chat sessions: the on-disk `chat_sessions/` store, the `GET /api/chat/sessions[/{id}]` REST API, and the `/ws/chat` streaming protocol with non-streaming fallback (issue #2577).

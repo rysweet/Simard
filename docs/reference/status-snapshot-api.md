@@ -13,6 +13,7 @@ related:
   - ./simard-tui.md
   - ../dashboard.md
   - ./operator-read-state-root-contract.md
+  - ./daily-budget-display-guard.md
 ---
 
 # StatusSnapshot API reference
@@ -58,7 +59,7 @@ rather than fabricating data:
 |---|---|---|
 | Daemon / uptime | `systemctl show simard.service` (`LoadState`, `ActiveState`, `MainPID`, `NRestarts`, `ExecMainStartTimestamp`) | ~~`journalctl \| grep`~~ |
 | Resource snapshot | `/proc/loadavg`, `/proc/meminfo`, `/proc/<daemon-pid>/status` (RSS), `statvfs` (disk), `pgrep` (live engineers) | — |
-| LLM usage | `cost_tracking` ledger (`costs/ledger.jsonl`) + `$SIMARD_DAILY_BUDGET_USD` | — |
+| LLM usage | `cost_tracking` ledger (`costs/ledger.jsonl`) + daily budget via `overseer::config::daily_budget_usd()` (single-sourced; always the enforced ceiling — see the [daily-budget display guard](./daily-budget-display-guard.md)) | ~~raw `$SIMARD_DAILY_BUDGET_USD`~~ |
 | Memory / brain | `metrics_snapshot.json` — the daemon-sampled `simard.memory.nodes` / `.edges` gauges | ~~LadybugDB open from the CLI~~ |
 | Gym | `$SIMARD_SKIP_GYM` | — |
 | Goal board | *deferred* — rendered `unavailable`; surfaced live in the daemon-hosted dashboard / TUI goal tabs | — |

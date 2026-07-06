@@ -224,7 +224,7 @@ fn render_llm(out: &mut String, env: &SectionEnvelope<super::LlmUsage>) {
                 let spent = l.ledger_today.as_ref().map(|w| w.cost_usd).unwrap_or(0.0);
                 label(out, "daily budget", format!("${spent:.2} / ${b:.2}"));
             }
-            None => label(out, "daily budget", "unset (no guard)"),
+            None => label(out, "daily budget", "n/a"),
         }
         match &l.reconciliation {
             Some(r) => label(

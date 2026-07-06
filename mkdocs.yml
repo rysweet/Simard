@@ -193,6 +193,7 @@ nav:
     - CLI Reference: reference/simard-cli.md
     - Telemetry Metrics: reference/telemetry-metrics.md
     - StatusSnapshot API: reference/status-snapshot-api.md
+    - Daily-Budget Display Guard: reference/daily-budget-display-guard.md
     - Overseer Activity Feed: reference/overseer-activity-feed.md
     - Overseer Goal-Board Health API: reference/overseer-goal-board-health-api.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md

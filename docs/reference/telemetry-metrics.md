@@ -10,6 +10,7 @@ related:
   - ./status-snapshot-api.md
   - ../howto/simard-status.md
   - ./runtime-contracts.md
+  - ./daily-budget-display-guard.md
 ---
 
 # Telemetry metrics reference
@@ -245,7 +246,7 @@ traces and is **off by default**.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Enables OTLP export for **both** traces and metrics. Unset = local/in-process only. | unset (export off) |
 | `SIMARD_LOG_JSON` | `1` switches the fmt log layer to JSON; unrelated to metrics but part of the same `init_tracing()`. | text |
 | `SIMARD_STATE_ROOT` | Overrides the state root (`$HOME/.simard`), which is where `telemetry/metrics_snapshot.json`, the cost ledger, and `self_metrics` live. | `$HOME/.simard` |
-| `SIMARD_DAILY_BUDGET_USD` | The daily budget guard the LLM-usage section compares spend against. | unset (no guard) |
+| `SIMARD_DAILY_BUDGET_USD` | The daily budget guard the LLM-usage section compares spend against. Single-sourced through `overseer::config::daily_budget_usd()`, so the displayed ceiling always matches the Overseer `BudgetGate` even when unset; see the [daily-budget display guard](./daily-budget-display-guard.md). | `500` (always guarded) |
 | `SIMARD_SKIP_GYM` | Respected by the gym section of the status snapshot. | unset |
 
 ## Relationship to the four legacy stores
