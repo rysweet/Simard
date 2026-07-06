@@ -364,34 +364,65 @@ pub async fn run(config: SignalConfig) -> SimardResult<()> {
         });
     }
 
-    let system_prompt = load_meeting_system_prompt();
     let state_root = crate::state_root::simard_state_root();
 
     // Per-operator backend factory: each operator gets an independent meeting
-    // backend (its own agent session + its own history), so two operators never
-    // share context. `run_continuous` calls this once per operator on first
-    // touch and replays that operator's persisted history into the fresh
-    // backend. A post-startup agent-open failure (unexpected after the provider
-    // check above) degrades to a backend that reports the outage per turn rather
-    // than crashing the daemon that serves every operator.
-    let mut make_backend = |_operator: &str| -> crate::meeting_backend::MeetingBackend {
-        let agent: Box<dyn crate::base_types::BaseTypeSession> = match open_signal_agent_session() {
-            Some(a) => a,
-            None => {
-                eprintln!(
-                    "[simard][ERROR] signal: agent session open failed after startup validation; \
-                     replies will report the outage until it recovers"
-                );
-                Box::new(UnavailableAgent::new())
-            }
+    // backend (its own agent session, its own history, AND its own cognitive-
+    // memory store), so two operators never share context. `run_continuous`
+    // calls this once per operator on first touch and replays that operator's
+    // persisted history into the fresh backend.
+    //
+    // This is where the Signal channel is wired into the same OODA-loop context
+    // and graph cognitive-memory model as the CLI meeting (issue #2527 follow-up,
+    // adapted to the per-operator run_continuous structure of #2575/#2577):
+    //
+    //   1. Recall — a live cognitive-memory store is opened on the daemon's
+    //      state root (`launch_writer_bridge`, which shares the running daemon's
+    //      store over IPC when one is up). The system prompt is enriched with the
+    //      live OODA state (goals, decisions, operator identity, projects, …) via
+    //      the shared `build_enriched_meeting_system_prompt`, so Simard starts a
+    //      Signal chat already knowing her own state — no manual context loading.
+    //   2. Write-back — that same store is moved into the `MeetingBackend`, so on
+    //      `/close` the Signal conversation is consolidated back into graph memory
+    //      (episodes, summary facts, goal carryover) exactly like the CLI meeting
+    //      (see `meeting_backend::closing`).
+    //
+    // Each per-operator backend gets its OWN store instance because the store is
+    // moved into the backend. Memory/recall failures propagate (PHILOSOPHY.md:
+    // no silent degradation); a post-startup agent-open failure (unexpected after
+    // the provider check above) still degrades to a backend that reports the
+    // outage per turn rather than crashing the daemon that serves every operator.
+    let mut make_backend =
+        |_operator: &str| -> SimardResult<crate::meeting_backend::MeetingBackend> {
+            let agent: Box<dyn crate::base_types::BaseTypeSession> = match open_signal_agent_session(
+            ) {
+                Some(a) => a,
+                None => {
+                    eprintln!(
+                        "[simard][ERROR] signal: agent session open failed after startup validation; \
+                             replies will report the outage until it recovers"
+                    );
+                    Box::new(UnavailableAgent::new())
+                }
+            };
+
+            // Open this operator's own cognitive-memory store on the daemon's
+            // state root (recall + write-back). Named `memory`, never `bridge`,
+            // per the signal_conversation naming guardrail.
+            let memory = crate::memory_ipc::launch_writer_bridge(&state_root)?.into_box();
+
+            // Recall: enrich the prompt with live OODA context (borrows the
+            // store), then move the store into the backend for write-back.
+            let system_prompt =
+                crate::operator_commands_meeting::build_enriched_meeting_system_prompt(&*memory)?;
+
+            Ok(crate::meeting_backend::MeetingBackend::new_session(
+                "signal",
+                agent,
+                Some(memory),
+                system_prompt,
+            ))
         };
-        crate::meeting_backend::MeetingBackend::new_session(
-            "signal",
-            agent,
-            None,
-            system_prompt.clone(),
-        )
-    };
 
     run_continuous(&mut channel, &state_root, &mut make_backend).await
 }
@@ -468,8 +499,10 @@ fn redact_operator(operator: &str) -> String {
 ///      onto a fresh session id (previous history retained on disk); `/help`
 ///      shows the lifecycle banner; `/close` ends the current conversation.
 ///
-/// `make_backend(operator)` mints a fresh backend for a given operator key; the
-/// real `run` supplies the meeting agent + system prompt, tests inject a fake.
+/// `make_backend(operator)` mints a fresh backend for a given operator key —
+/// the real `run` supplies the meeting agent, the enriched OODA-context system
+/// prompt, and the operator's own cognitive-memory store (and so may fail if
+/// recall/memory setup fails); tests inject a fake.
 /// Loop-prevention (device gate + echo suppression) stays entirely inside
 /// [`SignalConversation::recv`], so Simard's own outbound is never re-consumed
 /// as a new turn.
@@ -481,7 +514,7 @@ pub async fn run_continuous<T, H, F>(
 where
     T: SignalTransport + Send,
     H: SignalCommandHandler,
-    F: FnMut(&str) -> crate::meeting_backend::MeetingBackend,
+    F: FnMut(&str) -> SimardResult<crate::meeting_backend::MeetingBackend>,
 {
     use std::collections::HashMap;
 
@@ -586,7 +619,7 @@ where
                     fresh
                 }
             };
-            let mut backend = make_backend(&operator);
+            let mut backend = make_backend(&operator)?;
             let resumed = match session_store::load_session_at(state_root, &sid)? {
                 Some(sess) => {
                     let n = sess.history.len();
@@ -649,12 +682,6 @@ where
         channel.send(out).await?;
     }
     Ok(())
-}
-
-/// Load the shared meeting system prompt (same asset the CLI/dashboard use).
-fn load_meeting_system_prompt() -> String {
-    let path = crate::operator_commands::prompt_root().join("simard/meeting_system.md");
-    std::fs::read_to_string(&path).unwrap_or_default()
 }
 
 /// Open a Meeting-mode agent session for the Signal channel, mirroring the CLI

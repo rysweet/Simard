@@ -217,7 +217,7 @@ fn same_operator_two_messages_share_one_continuous_session() {
     set_hermetic_env(tmp.path());
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-    let mut make_backend = |_op: &str| recording_backend(REPLY, &captured);
+    let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured));
 
     let mut ch = channel(
         vec![
@@ -278,7 +278,7 @@ fn distinct_operators_get_isolated_sessions() {
     set_hermetic_env(tmp.path());
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-    let mut make_backend = |_op: &str| recording_backend(REPLY, &captured);
+    let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured));
 
     let mut ch = channel(
         vec![
@@ -330,7 +330,7 @@ fn new_command_starts_a_fresh_session_and_retains_the_old_one() {
     set_hermetic_env(tmp.path());
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-    let mut make_backend = |_op: &str| recording_backend(REPLY, &captured);
+    let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured));
 
     let mut ch = channel(
         vec![
@@ -403,7 +403,7 @@ fn reset_is_an_alias_for_new() {
     set_hermetic_env(tmp.path());
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-    let mut make_backend = |_op: &str| recording_backend(REPLY, &captured);
+    let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured));
 
     let mut ch = channel(
         vec![
@@ -448,7 +448,7 @@ fn conversation_resumes_after_a_simulated_restart() {
     // daemon "stops". Its in-memory backends are dropped at the end of the run.
     let captured1: Captured = Arc::new(Mutex::new(Vec::new()));
     {
-        let mut make_backend = |_op: &str| recording_backend(REPLY, &captured1);
+        let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured1));
         let mut ch = channel(
             vec![receive_line(OPERATOR, "the code word is BANANA")],
             &[OPERATOR],
@@ -465,7 +465,7 @@ fn conversation_resumes_after_a_simulated_restart() {
     // state root. The next message must resume the existing conversation.
     let captured2: Captured = Arc::new(Mutex::new(Vec::new()));
     {
-        let mut make_backend = |_op: &str| recording_backend(REPLY, &captured2);
+        let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured2));
         let mut ch = channel(
             vec![receive_line(OPERATOR, "what is the code word")],
             &[OPERATOR],
@@ -515,7 +515,7 @@ fn synced_echo_of_simards_reply_is_not_reconsumed_as_a_turn() {
     set_hermetic_env(tmp.path());
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-    let mut make_backend = |_op: &str| recording_backend(REPLY, &captured);
+    let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured));
 
     let mut ch = channel(
         vec![
@@ -560,7 +560,7 @@ fn reply_synced_from_linked_device_is_ignored() {
     set_hermetic_env(tmp.path());
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-    let mut make_backend = |_op: &str| recording_backend(REPLY, &captured);
+    let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured));
 
     let mut ch = channel(
         vec![
@@ -597,7 +597,7 @@ fn help_does_not_persist_a_turn_or_reset_the_session() {
     set_hermetic_env(tmp.path());
 
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
-    let mut make_backend = |_op: &str| recording_backend(REPLY, &captured);
+    let mut make_backend = |_op: &str| Ok(recording_backend(REPLY, &captured));
 
     let mut ch = channel(
         vec![
