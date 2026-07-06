@@ -274,28 +274,41 @@ fn scan_balanced(bytes: &[u8], start: usize) -> Option<usize> {
 /// candidate against a typed envelope — e.g. distillation parses each span as a
 /// `{ "facts": [...] }` object and keeps the first that deserialises.
 pub fn balanced_objects(s: &str) -> Vec<&str> {
-    let bytes = s.as_bytes();
     let mut spans = Vec::new();
+    for_each_balanced_object(s, |span| spans.push(span));
+    spans
+}
+
+/// Visit every balanced `{…}` span in `s`, in source order — the shared scan
+/// both [`balanced_objects`] (which collects them) and [`last_balanced_object`]
+/// (which keeps only the last) drive, so the string-aware brace walk lives in
+/// exactly one place. See [`balanced_objects`] for the string-literal and
+/// unmatched-opener handling this implements.
+fn for_each_balanced_object<'a>(s: &'a str, mut f: impl FnMut(&'a str)) {
+    let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'{'
             && let Some(end) = scan_balanced(bytes, i)
         {
-            spans.push(&s[i..=end]);
+            f(&s[i..=end]);
             i = end + 1;
             continue;
         }
         i += 1;
     }
-    spans
 }
 
 /// Return the **last** balanced top-level `{…}` span in `s`, or `None`.
 ///
 /// Returning the last span means a leading "thinking"/banner object cannot
-/// shadow the real answer object that follows it.
+/// shadow the real answer object that follows it. Keeps only the final span as
+/// it scans, so no intermediate `Vec` of every candidate is allocated (the
+/// common case is one payload preceded by log/banner noise).
 pub fn last_balanced_object(s: &str) -> Option<&str> {
-    balanced_objects(s).pop()
+    let mut last = None;
+    for_each_balanced_object(s, |span| last = Some(span));
+    last
 }
 
 /// Strip JSON **trailing commas** — a `,` immediately preceding a closing `}`
@@ -401,10 +414,20 @@ fn next_nonspace_is_close(bytes: &[u8], mut i: usize) -> bool {
 ///
 /// Returns `None` when neither view contains a balanced object.
 pub fn extract_json_payload(raw: &str) -> Option<String> {
-    for cleaned in [strip_recipe_noise(raw), strip_ansi(raw)] {
-        if let Some(obj) = last_balanced_object(cleaned.as_ref()) {
-            return Some(obj.to_string());
-        }
+    // View 1 — whole-line noise strip. This already ANSI-strips internally, so
+    // it is tried first and, in the common case, is the only cleaning pass run.
+    let view1 = strip_recipe_noise(raw);
+    if let Some(obj) = last_balanced_object(view1.as_ref()) {
+        return Some(obj.to_string());
+    }
+    // View 2 (fallback only) — line-preserving ANSI strip, which recovers a
+    // payload sharing a physical line with a leading log prefix (view 1 would
+    // drop that whole line). Computed lazily so the common path pays for just
+    // one `strip_ansi` pass instead of the two an eager `[view1, view2]` array
+    // would force (view 1 already performs an ANSI strip of its own).
+    let view2 = strip_ansi(raw);
+    if let Some(obj) = last_balanced_object(view2.as_ref()) {
+        return Some(obj.to_string());
     }
     None
 }
