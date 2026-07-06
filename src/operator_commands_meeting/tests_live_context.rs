@@ -409,8 +409,19 @@ fn all_types_contains_error_handling() {
 
 use super::build_enriched_meeting_system_prompt;
 
+#[serial_test::serial(cognitive_memory)]
 #[test]
 fn enriched_prompt_appends_live_context_after_base() {
+    // `build_live_meeting_context` resolves the operator name from the
+    // process-global `SIMARD_OPERATOR_NAME` env var. This test builds the live
+    // context twice (once inside the enriched prompt, once directly) and
+    // compares them as a suffix, so it must serialize with — and hold the lock
+    // against — the other env-mutating tests and pin the var to a deterministic
+    // state. Otherwise a concurrent mutation landing between the two builds
+    // would make the two contexts differ and the suffix check flake.
+    let _lock = ENV_MUTEX.lock().unwrap();
+    unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
+
     let bridge = bridge_with_meeting_facts();
     let enriched = build_enriched_meeting_system_prompt(&bridge).unwrap();
     let live = build_live_meeting_context(&bridge).unwrap();
