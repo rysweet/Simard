@@ -863,13 +863,6 @@ impl ParseFailureShape {
             Self::UnparseableObject => "unparseable-object",
         }
     }
-
-    /// `true` ONLY for [`UnparseableObject`](Self::UnparseableObject) — the one
-    /// shape a `strip_json_*` recovery transform can turn into a success. The
-    /// source-side shapes (missing / empty) can never be fixed by parsing.
-    pub fn is_parser_addressable(self) -> bool {
-        matches!(self, Self::UnparseableObject)
-    }
 }
 
 /// Sub-classify a [`DistillFailureClass::ParseFailure`] `SimardError` into its
@@ -2170,7 +2163,6 @@ mod unit_tests {
     //   pub enum ParseFailureShape { MissingFile, EmptyDocument, UnparseableObject }
     //   impl ParseFailureShape {
     //       pub fn as_str(self) -> &'static str;        // stable snake-case labels
-    //       pub fn is_parser_addressable(self) -> bool; // true ONLY for UnparseableObject
     //   }
     //   pub fn classify_parse_failure_shape(err: &SimardError) -> Option<ParseFailureShape>;
     //
@@ -2187,16 +2179,6 @@ mod unit_tests {
             ParseFailureShape::UnparseableObject.as_str(),
             "unparseable-object"
         );
-    }
-
-    #[test]
-    fn only_unparseable_object_is_parser_addressable() {
-        // The load-bearing gate: MissingFile / EmptyDocument are source-side
-        // (prompt/retry), so no strip_json_* transform can recover them. Only an
-        // unparseable object is worth parser effort.
-        assert!(ParseFailureShape::UnparseableObject.is_parser_addressable());
-        assert!(!ParseFailureShape::MissingFile.is_parser_addressable());
-        assert!(!ParseFailureShape::EmptyDocument.is_parser_addressable());
     }
 
     #[test]

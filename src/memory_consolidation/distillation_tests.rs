@@ -1569,9 +1569,8 @@ fn surviving_parse_failure_writes_nothing_when_capture_disabled() {
 // SimardError the class is and threaded into the raw-capture header).
 
 /// Public-API integration: the three `ParseFailure` prefixes map to the three
-/// shapes, and only `UnparseableObject` is parser-addressable. Complements the
-/// inline unit tests by exercising the symbols through the crate path (a private
-/// classifier would fail to resolve here).
+/// shapes. Complements the inline unit tests by exercising the symbols through
+/// the crate path (a private classifier would fail to resolve here).
 #[test]
 fn classify_parse_failure_shape_maps_the_three_shapes_via_public_api() {
     let missing = SimardError::RpcError(
@@ -1596,18 +1595,6 @@ fn classify_parse_failure_shape_maps_the_three_shapes_via_public_api() {
     assert_eq!(
         classify_parse_failure_shape(&unparseable),
         Some(ParseFailureShape::UnparseableObject)
-    );
-
-    // The gate that decides whether parser work is even worthwhile.
-    assert!(
-        classify_parse_failure_shape(&unparseable)
-            .unwrap()
-            .is_parser_addressable()
-    );
-    assert!(
-        !classify_parse_failure_shape(&empty)
-            .unwrap()
-            .is_parser_addressable()
     );
 
     // A non-`ParseFailure` error carries no shape.
