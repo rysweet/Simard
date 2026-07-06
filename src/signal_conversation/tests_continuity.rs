@@ -636,3 +636,52 @@ fn help_does_not_persist_a_turn_or_reset_the_session() {
         "only the two real messages reach the reasoner; /help does not"
     );
 }
+
+// ── 7. No silent degradation: a make_backend failure propagates ──────────────
+
+/// The real `run` builds each per-operator backend inside `make_backend` by
+/// opening that operator's own cognitive-memory store (recall) and building the
+/// enriched OODA-context system prompt (issue #2527 follow-up, wired onto the
+/// per-operator `run_continuous`/`make_backend` structure of #2575/#2577). Both
+/// of those steps can fail, which is why `make_backend` returns
+/// `SimardResult<MeetingBackend>`.
+///
+/// This pins that a `make_backend` failure on a real turn PROPAGATES out of
+/// `run_continuous` rather than being swallowed into a bare/empty reply or a
+/// half-persisted conversation (PHILOSOPHY.md: no silent degradation).
+#[test]
+#[serial(cognitive_memory)]
+fn make_backend_failure_propagates_for_a_real_turn() {
+    let tmp = tempfile::tempdir().unwrap();
+    set_hermetic_env(tmp.path());
+
+    // Simulate recall/memory wiring failing while minting the per-operator
+    // backend (e.g. the cognitive-memory store or the enriched prompt fails).
+    let mut make_backend = |_op: &str| -> SimardResult<MeetingBackend> {
+        Err(crate::error::SimardError::BridgeError(
+            "simulated recall/memory failure while wiring the Signal backend".to_string(),
+        ))
+    };
+
+    let mut ch = channel(
+        vec![receive_line(OPERATOR, "hello simard")],
+        &[OPERATOR],
+        ACCOUNT,
+        None,
+    );
+
+    let result = block_on(run_continuous(&mut ch, tmp.path(), &mut make_backend));
+    assert!(
+        result.is_err(),
+        "a make_backend failure on a real turn must propagate out of run_continuous"
+    );
+
+    // Nothing was silently persisted as a completed conversation: no session
+    // content file exists (the turn never reached the backend).
+    assert!(
+        session_store::list_sessions_at(tmp.path())
+            .unwrap()
+            .is_empty(),
+        "a failed backend build must not persist a conversation turn"
+    );
+}

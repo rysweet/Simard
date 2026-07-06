@@ -47,6 +47,22 @@ pub fn bridge_with_meeting_facts() -> CognitiveMemoryBridge {
     CognitiveMemoryBridge::new(Box::new(transport))
 }
 
+/// Create a bridge whose `search_facts` (and every other method) fails.
+///
+/// Used to pin the "no silent degradation" contract (PHILOSOPHY.md): recall
+/// failures must propagate out of `build_live_meeting_context` and
+/// `build_enriched_meeting_system_prompt`, never be swallowed into a partial or
+/// empty prompt.
+pub fn erroring_bridge() -> CognitiveMemoryBridge {
+    let transport = InMemoryBridgeTransport::new("test-error", |method, _params| {
+        Err(crate::bridge::BridgeErrorPayload {
+            code: crate::bridge::BRIDGE_ERROR_INTERNAL,
+            message: format!("simulated recall failure on {method}"),
+        })
+    });
+    CognitiveMemoryBridge::new(Box::new(transport))
+}
+
 /// Create a bridge that returns facts for a specific query prefix.
 pub fn bridge_with_specific_facts(
     prefix: &'static str,
