@@ -583,6 +583,116 @@ pub(crate) const PART_01: &str = r#"
        (issue #20). Completed=green, in-progress=accent, not-started/proposed=
        grey, paused=muted. */
     const GOAL_STATUS_COLORS={'not-started':'#8b949e','proposed':'#8b949e','in-progress':'var(--accent)','blocked':'#d29922','paused':'#6e7681','completed':'#2ea043'};
+    /* Issue #2695 follow-up: classify a NUMERIC goal priority to a canonical
+       tier KEY by its value (never by parsing free-form text). The key indexes
+       the hardcoded GOAL_PRIORITY_COLORS allowlist below so priority data is
+       never interpolated into a style= attribute. Lower number = higher
+       priority: <=1 critical, 2 high, 3 medium, 4 low, >=5 minimal. */
+    function priorityTierKey(priority){
+      const p=Number(priority);
+      if(!Number.isFinite(p))return'medium';
+      if(p<=1)return'critical';
+      if(p===2)return'high';
+      if(p===3)return'medium';
+      if(p===4)return'low';
+      return'minimal';
+    }
+    /* Plain-English priority TIER LABEL (e.g. "Critical"). Returns PLAIN TEXT —
+       callers esc() the RESULT last and append the raw "(pN)" number; this runs
+       on the RAW priority, never on already-escaped text (escape-last). */
+    function humanizePriority(priority){
+      const p=Number(priority);
+      if(!Number.isFinite(p))return'\u2014';
+      return{critical:'Critical',high:'High',medium:'Medium',low:'Low',minimal:'Minimal'}[priorityTierKey(p)];
+    }
+    /* Hardcoded allowlist: one colour per priority tier key, a hotter=more-urgent
+       heat gradient. Goal-supplied priority is classified to a key first, so only
+       these colours ever reach the DOM. The Critical red and Medium amber match
+       hues used in other columns (Current Activity / Status) but live in the
+       distinct Priority column with their own labels, so they stay unambiguous. */
+    const GOAL_PRIORITY_COLORS={critical:'#f85149',high:'#db6d28',medium:'#d29922',low:'#388bfd',minimal:'#8b949e'};
+    /* Issue #2695 follow-up: order goals by priority ASCENDING (lower number =
+       higher priority = first) with a stable id tiebreak. Applied at BOTH the
+       top level and within each parent's children so priority-first ordering
+       holds at every level of the tree. Returns a NEW array (non-mutating). */
+    function sortGoalsByPriority(goals){
+      return (goals||[]).slice().sort((a,b)=>{
+        const pa=Number(a&&a.priority), pb=Number(b&&b.priority);
+        const na=Number.isFinite(pa)?pa:Infinity, nb=Number.isFinite(pb)?pb:Infinity;
+        if(na!==nb)return na-nb;
+        return String((a&&a.id)||'').localeCompare(String((b&&b.id)||''));
+      });
+    }
+    /* Issue #2695 follow-up: group decomposed sub-goals under their parent using
+       the structured parent_goal_id edge (G3 — never parse the description), and
+       order the resulting tree by priority at every level. Returns priority-
+       ordered top-level ENTRIES, each either:
+         {kind:'goal',  goal, children[], rep}      standalone/active-parent goal
+         {kind:'umbrella', header, children[], rep} demoted decompose-parent group
+       Nesting rules:
+         * parent_goal_id null / self / resolves to neither set -> the goal roots
+           the tree (orphans + completed/tombstoned-parent children at root);
+         * parent_goal_id matches an ACTIVE, top-level goal -> nest under it;
+         * parent_goal_id matches a demoted `decompose-parent` node in `backlog`
+           (the normal post-decompose case, where the umbrella left the active
+           board) -> nest under a header synthesised from that backlog node.
+       Depth is capped at a single grouping level (decomposition is one level) and
+       a parent that is itself nested is not a nesting target, so a cyclic/deep
+       parent chain can never loop or indent unboundedly — such nodes fall to the
+       root. `rep` is the entry's representative priority for top-level ordering:
+       an active parent's own priority, or a demoted group's min child priority. */
+    function groupGoalsByParent(active,backlog){
+      const list=active||[];
+      const activeById={};
+      for(const g of list){ if(g&&g.id!=null) activeById[String(g.id)]=g; }
+      const backlogById={};
+      for(const b of (backlog||[])){ if(b&&b.id!=null) backlogById[String(b.id)]=b; }
+      const parentKey=g=>{
+        const pid=(g&&g.parent_goal_id!=null)?String(g.parent_goal_id):null;
+        return (pid!==null&&pid!==String(g&&g.id))?pid:null;
+      };
+      const resolves=pid=>pid!==null&&(Object.prototype.hasOwnProperty.call(activeById,pid)||Object.prototype.hasOwnProperty.call(backlogById,pid));
+      // An active goal can HOST children only when it is itself top-level (its
+      // own parent does not resolve) — this caps depth at one level and breaks
+      // any parent-chain cycle by refusing to nest under a nested node.
+      const isTopLevelActive=g=>!resolves(parentKey(g));
+      const childrenOf={};
+      const demotedHeaders={};
+      const roots=[];
+      for(const g of list){
+        const pid=parentKey(g);
+        if(pid!==null&&Object.prototype.hasOwnProperty.call(activeById,pid)&&isTopLevelActive(activeById[pid])){
+          (childrenOf[pid]=childrenOf[pid]||[]).push(g);
+        }else if(pid!==null&&Object.prototype.hasOwnProperty.call(backlogById,pid)){
+          (childrenOf[pid]=childrenOf[pid]||[]).push(g);
+          demotedHeaders[pid]=backlogById[pid];
+        }else{
+          roots.push(g); // null / self / unresolved / non-top-level parent
+        }
+      }
+      const entries=[];
+      for(const g of roots){
+        entries.push({
+          kind:'goal',
+          goal:g,
+          children:sortGoalsByPriority(childrenOf[String(g&&g.id)]||[]),
+          rep:Number(g&&g.priority)
+        });
+      }
+      for(const pid in demotedHeaders){
+        if(!Object.prototype.hasOwnProperty.call(demotedHeaders,pid))continue;
+        const kids=sortGoalsByPriority(childrenOf[pid]||[]);
+        const rep=kids.reduce((m,c)=>{const p=Number(c&&c.priority);return Number.isFinite(p)?Math.min(m,p):m;},Infinity);
+        entries.push({kind:'umbrella',header:demotedHeaders[pid],children:kids,rep:rep});
+      }
+      return entries.sort((a,b)=>{
+        const na=Number.isFinite(a.rep)?a.rep:Infinity, nb=Number.isFinite(b.rep)?b.rep:Infinity;
+        if(na!==nb)return na-nb;
+        const ia=a.kind==='goal'?String((a.goal&&a.goal.id)||''):String((a.header&&a.header.id)||'');
+        const ib=b.kind==='goal'?String((b.goal&&b.goal.id)||''):String((b.header&&b.header.id)||'');
+        return ia.localeCompare(ib);
+      });
+    }
     function humanizeTaskMemory(content){
       const raw=(content==null)?'':String(content);
       const trimmed=raw.trim();

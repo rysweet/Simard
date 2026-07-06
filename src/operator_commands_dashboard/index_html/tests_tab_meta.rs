@@ -1062,3 +1062,111 @@ fn rendered_html_goals_status_classifier_and_color_allowlist() {
          it must be a distinct amber so blocked != failed"
     );
 }
+
+// ===========================================================================
+// Issue #2695 follow-up — Goals tab HIERARCHY + differentiated PRIORITY (front).
+//
+// The rendered Goals tab must (1) NEST decomposed sub-goals under their parent
+// using the structured `parent_goal_id` field (not brittle parsing), (2) render
+// each goal's priority VISIBLY with a distinct tier, and (3) ORDER goals by
+// priority (highest first). These are the frontend half of the contract; the
+// backend `/api/goals` shape is pinned in `tests_goals_crud.rs` and the
+// prioritization substance in `goal_curation/tests_prioritize.rs`.
+//
+// Following the escape-last + hardcoded-color-allowlist invariants already used
+// for the lifecycle badge (#20): a `priorityTierKey()` classifier maps the
+// NUMERIC priority to a canonical tier key that indexes a hardcoded
+// `GOAL_PRIORITY_COLORS` allowlist (goal data is never interpolated into a
+// style= attribute), and `humanizePriority()` returns PLAIN TEXT (esc()'d last).
+//
+// RED until the render adds the tier helpers, the priority sort, and the
+// parent-child nesting.
+// ===========================================================================
+
+#[test]
+fn rendered_html_goals_defines_priority_tier_helpers() {
+    for needle in ["function priorityTierKey(", "function humanizePriority("] {
+        assert!(
+            INDEX_HTML.contains(needle),
+            "the Goals tab must define {needle:?} so each goal's priority is shown with a \
+             distinct, human-readable tier"
+        );
+    }
+}
+
+#[test]
+fn rendered_html_goals_priority_tier_color_allowlist_is_hardcoded() {
+    // A hardcoded color allowlist drives the tier stripe/pill so goal-supplied
+    // data is never interpolated into a style= attribute.
+    assert!(
+        INDEX_HTML.contains("GOAL_PRIORITY_COLORS"),
+        "a hardcoded GOAL_PRIORITY_COLORS allowlist must drive the priority-tier color \
+         (priority data must never be interpolated into a style= attribute)"
+    );
+    // The tier key must index the color map — classification by the numeric
+    // value, not by parsing free-form text.
+    assert!(
+        INDEX_HTML.contains("GOAL_PRIORITY_COLORS[priorityTierKey("),
+        "the priority-tier color must be looked up as GOAL_PRIORITY_COLORS[priorityTierKey(...)] \
+         so only allowlisted colors reach the DOM"
+    );
+}
+
+#[test]
+fn rendered_html_goals_priority_is_humanized_escape_last() {
+    // The priority cell/pill must render the humanized priority label.
+    assert!(
+        INDEX_HTML.contains("humanizePriority("),
+        "the Goals tab must render humanizePriority(...) so priority is visible and labeled, \
+         not a bare number with no tier"
+    );
+    // escape-last invariant: humanize the RAW priority, then esc() the result;
+    // never humanize already-escaped text.
+    assert!(
+        !INDEX_HTML.contains("humanizePriority(esc("),
+        "humanizePriority must run on the raw priority value, never on already-escaped text \
+         (escape-last invariant)"
+    );
+}
+
+#[test]
+fn rendered_html_goals_ordered_by_priority() {
+    // A named comparator sorts goals by priority ascending (highest first). It
+    // is required at BOTH the top level and within a parent's children, so the
+    // priority-first ordering holds at every level of the hierarchy.
+    assert!(
+        INDEX_HTML.contains("function sortGoalsByPriority("),
+        "the Goals tab must define sortGoalsByPriority(...) to order goals by priority \
+         (highest first) at every level of the tree"
+    );
+    assert!(
+        INDEX_HTML.contains("sortGoalsByPriority("),
+        "sortGoalsByPriority(...) must actually be applied to the goals before rendering"
+    );
+    // Regression guard: the goals list must no longer be rendered in raw
+    // server/insertion order via a bare `d.active.map(` with no ordering pass.
+    assert!(
+        !INDEX_HTML.contains("d.active.map(g=>{"),
+        "the Goals tab must not render d.active in raw order; goals must be ordered by \
+         priority (and grouped by parent) first"
+    );
+}
+
+#[test]
+fn rendered_html_goals_render_parent_child_hierarchy() {
+    // Nesting is driven by the structured parent_goal_id field (G3), never by
+    // parsing the description or a graph query at render time.
+    assert!(
+        INDEX_HTML.contains("parent_goal_id"),
+        "the Goals tab render must reference parent_goal_id to nest sub-goals under their \
+         parent (structured hierarchy edge, not brittle parsing)"
+    );
+    // A child must be visually indented/nested under its parent — the render
+    // groups children by parent id. A dedicated grouping helper keeps the tree
+    // build cycle-safe (visited-set + depth cap) rather than an ad-hoc inline map.
+    assert!(
+        INDEX_HTML.contains("function groupGoalsByParent("),
+        "the Goals tab must define groupGoalsByParent(...) so decomposed children are \
+         grouped/nested under their active parent (orphans/backlog-parent children at root)"
+    );
+}

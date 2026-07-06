@@ -1154,6 +1154,7 @@ mod tests_refuted_lessons {
     fn refuted_goal(id: &str, desc: &str) -> ActiveGoal {
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: id.to_string(),
             description: desc.to_string(),
@@ -1286,6 +1287,7 @@ mod tests_sweep {
     fn make_goal(id: &str, session: Option<&str>) -> ActiveGoal {
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: id.to_string(),
             description: format!("Goal {id}"),
@@ -1423,6 +1425,7 @@ mod tests_board_integrity {
     fn make_goal(id: &str, desc: &str) -> ActiveGoal {
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: id.to_string(),
             description: desc.to_string(),
@@ -1706,6 +1709,7 @@ mod tests_objective_probe {
     fn active_goal(id: &str, description: &str) -> ActiveGoal {
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: id.to_string(),
             description: description.to_string(),

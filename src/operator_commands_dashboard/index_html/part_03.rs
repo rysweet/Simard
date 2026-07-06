@@ -1,14 +1,30 @@
 pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals');
         if(d.active?.length){
-          document.getElementById('goals-active').innerHTML=`<table class="proc-table">
-            <tr><th>Priority</th><th>ID</th><th>Description</th><th>Status</th><th>Current Activity</th><th>Actions</th></tr>
-            ${d.active.map(g=>{
+          // Issue #2695 follow-up: render the active goals as a priority-ordered
+          // TREE — decomposed sub-goals nested under their parent (an active
+          // parent, or an umbrella header synthesised from the demoted
+          // `decompose-parent` backlog node) — instead of a flat, insertion-
+          // ordered list. Grouping is driven by the structured parent_goal_id
+          // edge (G3); ordering by priority at every level; each goal shows a
+          // distinct priority TIER pill.
+          // Priority TIER pill: classify the numeric priority to a tier key that
+          // indexes the hardcoded GOAL_PRIORITY_COLORS allowlist (priority data
+          // is never interpolated into a style= attribute); the label runs
+          // humanizePriority on the RAW value, esc()'d last, with the raw "(pN)"
+          // number appended so nothing is hidden.
+          function prioPillFor(priority){
+            const prioColor=GOAL_PRIORITY_COLORS[priorityTierKey(priority)];
+            const prioLabel=esc(humanizePriority(priority))+' (p'+priority+')';
+            return '<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:'+prioColor+';color:#fff;font-size:.72rem;font-weight:600;white-space:nowrap">'+prioLabel+'</span>';
+          }
+          function renderGoalRow(g,depth){
               const chipColors={'Working':'#2ea043','Skipped':'#8b949e','Failed':'#f85149','Spawned engineer':'#a371f7','Waiting':'#6e7681'};
               const chip=g.status_chip||'Waiting';
               const chipColor=chipColors[chip]||'#6e7681';
               const chipHtml='<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:'+chipColor+';color:#fff;font-size:.7rem;font-weight:600;white-space:nowrap">'+esc(chip)+'</span>';
               const detailText=g.detail||'';
               const detailHtml=detailText?'<span style="font-size:.8rem;margin-left:6px">'+esc(detailText)+'</span>':'';
+              const prioPill=prioPillFor(g.priority);
               // Issue #20: render each goal's LIVE lifecycle status as a
               // distinctly-colored badge driven by the additive serialized-enum
               // g.status_progress (falling back to the legacy g.status string
@@ -16,33 +32,66 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
               // status-string cell that — paired with the red activity chip —
               // made every goal read as failed/blocked.
               const lifeColor=GOAL_STATUS_COLORS[goalLifecycleKey(g.status_progress)];
-              const lifeLabel=(g.status_progress!=null)?humanizeGoalProgress(g.status_progress):(g.status||'—');
+              const lifeLabel=(g.status_progress!=null)?humanizeGoalProgress(g.status_progress):(g.status||'\u2014');
               const statusBadge='<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:'+lifeColor+';color:#fff;font-size:.72rem;font-weight:600">'+esc(lifeLabel)+'</span>';
               const full=g.detail_full||'';
               const isFailed=(chip==='Failed');
               const expandHtml=(full&&full!==detailText)?'<details style="display:inline;margin-left:6px"'+(isFailed?' open':'')+' ><summary style="display:inline;cursor:pointer;color:'+(isFailed?'#f85149':'#8b949e')+';font-size:.7rem">'+(isFailed?'error details':'show full log')+'</summary><pre style="margin:.3rem 0 0;white-space:pre-wrap;font-size:.75rem;color:'+(isFailed?'#f85149':'#8b949e')+'">'+esc(full)+'</pre></details>':'';
-              let wipHtml='—';
+              let wipHtml='\u2014';
               if(chip!=='Waiting'||detailText||g.wip_refs?.length){
                 let parts=[];
                 parts.push('<div style="font-size:.8rem;line-height:1.4">'+chipHtml+' '+detailHtml+expandHtml+'</div>');
                 if(g.wip_refs?.length) parts.push(g.wip_refs.map(r=>{
-                  const icon=r.kind==='pr'?'🔀':r.kind==='issue'?'🐛':r.kind==='branch'?'🌿':r.kind==='session'?'💻':'📌';
+                  const icon=r.kind==='pr'?'\ud83d\udd00':r.kind==='issue'?'\ud83d\udc1b':r.kind==='branch'?'\ud83c\udf3f':r.kind==='session'?'\ud83d\udcbb':'\ud83d\udccc';
                   return r.url?'<a href="'+esc(r.url)+'" target="_blank" style="color:var(--accent);text-decoration:none;font-size:.8rem">'+icon+' '+esc(r.label)+'</a>':'<span style="font-size:.8rem">'+icon+' '+esc(r.label)+'</span>';
                 }).join('<br>'));
                 wipHtml=parts.join('');
               }
+              // Nest a sub-goal by indenting its ID cell and prefixing a tree
+              // marker so the parent→child decomposition hierarchy is visible.
+              const indent=depth>0?('padding-left:'+(depth*20+8)+'px'):'';
+              const nestMark=depth>0?'<span style="color:#8b949e">\u21b3 </span>':'';
               return `<tr>
-              <td style="text-align:center">${g.priority??'—'}</td>
-              <td><code>${esc(g.id)}</code></td>
+              <td style="text-align:center">${prioPill}</td>
+              <td style="${indent}">${nestMark}<code>${esc(g.id)}</code></td>
               <td>${esc(g.description)}</td>
               <td>${statusBadge}</td>
               <td>${wipHtml}</td>
               <td>
-                <button class="btn" style="font-size:.7rem;padding:2px 6px" onclick="demoteGoal('${esc(g.id)}')">▼ Backlog</button>
+                <button class="btn" style="font-size:.7rem;padding:2px 6px" onclick="demoteGoal('${esc(g.id)}')">\u25bc Backlog</button>
                 <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:4px" onclick="updateGoalStatus('${esc(g.id)}')">Status</button>
-                <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:4px;color:#f85149" onclick="removeGoal('${esc(g.id)}')">✕</button>
+                <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:4px;color:#f85149" onclick="removeGoal('${esc(g.id)}')">\u2715</button>
               </td>
-            </tr>`;}).join('')}
+            </tr>`;
+          }
+          // Synthesised header for a decompose-parent group whose umbrella left
+          // the active board (demoted to a `decompose-parent` backlog tracking
+          // node). Keeps the umbrella visible ABOVE its promoted children; its
+          // representative priority is the highest-importance (min) child.
+          function renderUmbrellaHeader(node,childCount,rep){
+              const prioPill=Number.isFinite(rep)?prioPillFor(rep):'<span style="color:#8b949e">\u2014</span>';
+              return `<tr style="background:rgba(139,148,158,.08)">
+              <td style="text-align:center">${prioPill}</td>
+              <td><span title="decomposed parent (tracking node)">\ud83d\udcc2 </span><code>${esc(node.id)}</code></td>
+              <td>${esc(node.description)} <span style="color:#8b949e;font-size:.75rem">(decomposed \u2192 ${childCount} sub-goal${childCount===1?'':'s'})</span></td>
+              <td><span style="display:inline-block;padding:1px 8px;border-radius:10px;background:#6e7681;color:#fff;font-size:.72rem;font-weight:600">Decomposed</span></td>
+              <td>\u2014</td>
+              <td><span style="color:#8b949e;font-size:.75rem">tracking node</span></td>
+            </tr>`;
+          }
+          const rowsHtml=groupGoalsByParent(d.active,d.backlog).map(entry=>{
+            let html;
+            if(entry.kind==='umbrella'){
+              html=renderUmbrellaHeader(entry.header,entry.children.length,entry.rep);
+            }else{
+              html=renderGoalRow(entry.goal,0);
+            }
+            for(const child of entry.children){ html+=renderGoalRow(child,1); }
+            return html;
+          }).join('');
+          document.getElementById('goals-active').innerHTML=`<table class="proc-table">
+            <tr><th>Priority</th><th>ID</th><th>Description</th><th>Status</th><th>Current Activity</th><th>Actions</th></tr>
+            ${rowsHtml}
           </table>
           <div style="margin-top:.5rem;color:#8b949e;font-size:.8rem">${d.active_count} active goal(s)</div>`;
         }else{document.getElementById('goals-active').innerHTML='<span style="color:#8b949e">No active goals. Use "Seed Default Goals" or run the agent daemon to generate goals from meetings.</span>';}
