@@ -420,6 +420,10 @@ fn run_ooda_daemon_with_session_uses_session_for_advance_goal() {
     let mut state = OodaState::new(board);
     let config = OodaConfig {
         max_concurrent_actions: 2,
+        // Hermetic: pin the scaler off so ambient SIMARD_SCALING=auto (set on
+        // OODA hosts) can't inject an AIMD scaler that makes the number of
+        // dispatched actions env/load-dependent.
+        scaler: None,
         ..Default::default()
     };
 

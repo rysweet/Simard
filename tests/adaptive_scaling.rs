@@ -315,6 +315,12 @@ fn scaler_current_max_can_override_config() {
     // Use scaler's current_max as the config limit.
     let config = OodaConfig {
         max_concurrent_actions: scaler.current_max(),
+        // Hermetic: pin the config's own scaler off. This test feeds
+        // `scaler.current_max()` into `max_concurrent_actions` and asserts the
+        // cap holds; ambient SIMARD_SCALING=auto (set on OODA hosts) would
+        // otherwise inject a *different* AIMD scaler whose adjust() overrides
+        // that cap.
+        scaler: None,
         ..OodaConfig::default()
     };
 

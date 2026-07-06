@@ -157,6 +157,10 @@ fn decide_selects_actions_within_concurrent_limit() {
     let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
     let config = OodaConfig {
         max_concurrent_actions: 2,
+        // Hermetic: pin the scaler off so ambient SIMARD_SCALING=auto (set on
+        // OODA hosts) can't inject an AIMD scaler whose adjust() overrides this
+        // cap, making the assertion env/load-dependent.
+        scaler: None,
         ..Default::default()
     };
     let actions = decide(&priorities, &config).unwrap();

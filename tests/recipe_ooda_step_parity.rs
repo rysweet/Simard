@@ -161,6 +161,11 @@ fn parity_decide_caps_at_max_concurrent_actions() {
         .collect();
     let config = OodaConfig {
         max_concurrent_actions: 2,
+        // Hermetic: pin the scaler off so ambient SIMARD_SCALING=auto (set on
+        // OODA hosts) can't inject an AIMD scaler whose adjust() overrides this
+        // cap. The CLI subprocess already sees scaler=None (#[serde(skip)]), so
+        // this also keeps the in-process `direct` path in parity with it.
+        scaler: None,
         ..Default::default()
     };
 
