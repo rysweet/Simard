@@ -30,7 +30,7 @@ order:
 |-----|--------------|-------|
 | **Overview** | Summary · Health · Stats | Daemon status (OODA loop active / stopped), current cycle number, top-priority goal, last cycle's actions, and the recent-actions stream (**Summary**); system status — version, daemon state, active process count, disk usage — open PRs, open issues, and the **Machines & Memory Sharing** card, i.e. whether Simard runs on one machine or a group and how they share what they've learned (**Health**); and aggregate run counters and rollups (**Stats**). |
 | **Goals** | Goals · Work Board | The full goal register — active top-N goals with priority, status, and current activity, plus the proposed backlog with promote/dismiss controls (**Goals**) — and the shared scratch canvas with Task Memory and Recent Actions (**Work Board**). |
-| **Activity** | Logs · Traces · Thinking · Failures | The **Background Service Log** (live activity from Simard's always-on background process), the cost ledger, and per-cycle reports, with a severity menu (All / Errors / Warnings / Info) and free-text search (**Logs**); recent agent traces from the cost ledger, journald, and in-process spans, plus OTEL status, each row read as plain language — **when**, **what**, **who** (**Traces**); the **Thinking** panel's two halves — a **Cycle History** table (collapsed per-cycle timeline with real timestamps, a `×N` repeat-count for runs of equivalent cycles, difference-carrying summaries, and a self-hiding duration-trend chart) and the **Agent Internal Reasoning** OODA Observe/Orient/Decide/Act breakdown, see [Thinking: Cycle History](#thinking-tab-cycle-history-21) (**Thinking**); and brain-fallback and decision failures (**Failures**). |
+| **Activity** | Logs · Traces · Thinking · Failures | The **Background Service Log** (live activity from Simard's always-on background process), the cost ledger, and the **Cycle Reports** card — recent OODA cycles with their live cycle number, real per-cycle tree status, and Observe/Orient/Decide/Act detail, collapsed with a `×N` repeat-count and refreshed live, see [Activity: Cycle Reports](#activity-tab-logs-cycle-reports-26) — with a severity menu (All / Errors / Warnings / Info) and free-text search (**Logs**); recent agent traces from the cost ledger, journald, and in-process spans, plus OTEL status, each row read as plain language — **when**, **what**, **who** (**Traces**); the **Thinking** panel's two halves — a **Cycle History** table (collapsed per-cycle timeline with real timestamps, a `×N` repeat-count for runs of equivalent cycles, difference-carrying summaries, and a self-hiding duration-trend chart) and the **Agent Internal Reasoning** OODA Observe/Orient/Decide/Act breakdown, see [Thinking: Cycle History](#thinking-tab-cycle-history-21) (**Thinking**); and brain-fallback and decision failures (**Failures**). |
 | **Workers** | Processes · Engineers · Terminal | The live process tree under the daemon — engineer subprocesses, LLM sessions, tmux sessions, and their resource usage (**Processes** / **Engineers**) — and a browser-attached PTY into the daemon host (**Terminal**). |
 | **Pull Requests** | Merge Decisions · Readiness | Automated merge decisions and the rationale behind each (**Merge Decisions**), and per-PR readiness checks covering CI, review, and mergeability (**Readiness**). |
 | **Resources** | Memory · Costs | The cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters, full-text search, the live **Memory Store** counts, and the **Memory Files** panel (**Memory**); and per-provider, per-model token spend across the active session (**Costs**). See [Memory architecture](memory.md). |
@@ -63,6 +63,29 @@ array parallel to `daemon_log_lines`, with an identical client-side fallback
 classifier. This is required because the daemon emits human-readable lines with
 no level token of their own — without classification, selecting any level
 (even *Info*) matched nothing and the control appeared inert.
+
+### Activity tab → Logs: Cycle Reports (#26)
+
+The **Cycle Reports** card in the **Logs** sub-section lists recent OODA cycles
+in operator language. It shows each cycle's **live** number (`#13`, `#14`, …,
+never a frozen `#1`), its **actual** working-tree status ("working tree clean"
+vs. "uncommitted changes", not a stale constant), and per-cycle
+Observe/Orient/Decide/Act detail — the observed signals, the decided action(s),
+and the outcome. Consecutive equivalent cycles collapse into a single row with a
+`×N` repeat-count and the cycle range `#A–#B`, so real forward progress stands
+out from a stuck loop, and the card refreshes live every 15 s with the rest of
+the Logs panel.
+
+The card reads through the **same** shared cycle-report reader
+(`cycle_source::read_cycle_reports_collapsed`, unioning both `cycle_reports/`
+and `state/cycle_reports/`, newest-first) and the **same** strict display-layer
+collapse (`thinking_collapse.rs`, `collapse_reports`) that feed the Thinking
+sub-section's [Agent Internal Reasoning](#thinking-tab-cycle-history-21) view,
+and renders through the **same** shared client entry-renderer (`renderCycleEntry`)
+— so the two views agree on the same data instead of the card rendering a stale
+copy. Full contract, the `/api/logs` → `cycle_reports` schema, the shared-path
+reconciliation, and the before/after are documented in the
+[Activity tab — Cycle Reports reference](reference/dashboard-activity-cycle-reports.md).
 
 ### Chat tab: durable, resumable sessions
 
@@ -555,3 +578,4 @@ The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (def
 - [Dashboard Feedback Widget](reference/dashboard-feedback-widget.md)
 - [How to report a bug or request a feature from the dashboard](howto/report-a-bug-or-request-a-feature.md)
 - [Thinking tab — Cycle History (timestamps, collapse, duration trend)](reference/dashboard-thinking-cycle-history.md)
+- [Activity tab — Cycle Reports (live cycle number, accurate tree status, shared detail)](reference/dashboard-activity-cycle-reports.md)

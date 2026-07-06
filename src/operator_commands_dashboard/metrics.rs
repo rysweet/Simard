@@ -112,57 +112,14 @@ pub(crate) async fn memory_metrics() -> Json<Value> {
 
 pub(crate) async fn ooda_thinking() -> Json<Value> {
     let state_root = resolve_state_root();
-    let dir = state_root.join("cycle_reports");
-    let mut reports = Vec::new();
-
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        paths.sort_by(|a, b| {
-            let num = |p: &std::fs::DirEntry| -> u32 {
-                p.file_name()
-                    .to_str()
-                    .unwrap_or("")
-                    .strip_prefix("cycle_")
-                    .unwrap_or("")
-                    .strip_suffix(".json")
-                    .unwrap_or("")
-                    .parse()
-                    .unwrap_or(0)
-            };
-            num(b).cmp(&num(a))
-        });
-
-        for entry in paths.into_iter().take(20) {
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                if let Ok(val) = serde_json::from_str::<Value>(&content) {
-                    reports.push(val);
-                } else {
-                    // Legacy one-line summary
-                    let cycle_num = entry
-                        .file_name()
-                        .to_str()
-                        .unwrap_or("")
-                        .strip_prefix("cycle_")
-                        .unwrap_or("")
-                        .strip_suffix(".json")
-                        .unwrap_or("")
-                        .parse::<u32>()
-                        .unwrap_or(0);
-                    reports.push(json!({
-                        "cycle_number": cycle_num,
-                        "summary": content.trim(),
-                        "legacy": true,
-                    }));
-                }
-            }
-        }
-    }
-
-    // Issue #2580: collapse consecutive identical deferrals ("goal already has
-    // a live, healthy engineer") into a single counted entry and flag a genuine
-    // loop only when a non-progressing decision repeats, so the tab shows
-    // forward progress instead of the same line over and over.
-    let reports = super::thinking_collapse::collapse_reports(reports);
+    // Issue #2580 + #26: the Thinking tab's "Cycle History" and the Activity
+    // tab's "Cycle Reports" card now read from ONE shared reader, so they always
+    // agree instead of diverging on a stale copy. It unions both persisted cycle
+    // dirs, orders newest-first, stamps the authoritative filename cycle number,
+    // and collapses consecutive identical deferrals ("goal already has a live,
+    // healthy engineer") into a single counted entry — flagging a genuine loop
+    // only when a non-progressing decision repeats.
+    let reports = super::cycle_source::read_cycle_reports_collapsed(&state_root);
 
     Json(json!({ "reports": reports }))
 }

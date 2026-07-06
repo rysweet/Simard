@@ -357,7 +357,16 @@ pub(crate) const PART_04: &str = r#"            let fmt;
         const d=await apiFetch('/api/ooda-thinking');
         const el=document.getElementById('thinking-timeline');
         if(!d.reports?.length){el.innerHTML='<span style="color:#8b949e">No cycle reports yet. The agent daemon generates these during autonomous work.</span>';return;}
-        el.innerHTML=d.reports.map(rpt=>{
+        el.innerHTML=d.reports.map(renderCycleEntry).join('');
+      }catch(e){document.getElementById('thinking-timeline').innerHTML='<span class="err">Failed to load: '+esc(e.toString())+'</span>';}
+    }
+
+    /* Shared per-cycle renderer (#26): renders ONE collapsed cycle report — the
+       same object shape `/api/ooda-thinking` (→ reports) and `/api/logs`
+       (→ cycle_reports) now BOTH return from the single server-side reader. Used
+       by both the Thinking tab timeline and the Activity tab's "Cycle Reports"
+       card so the two views can never diverge into a stale, detail-less copy. */
+    function renderCycleEntry(rpt){
           if(rpt.legacy){
             return `<div class="thinking-cycle legacy">
               <div class="cycle-header"><span class="cycle-num">Cycle #${rpt.cycle_number}</span><span class="cycle-badge">legacy</span></div>
@@ -456,8 +465,6 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             </div>
             <div class="cycle-phases">${phases.join('')}</div>
           </div>`;
-        }).join('');
-      }catch(e){document.getElementById('thinking-timeline').innerHTML='<span class="err">Failed to load: '+esc(e.toString())+'</span>';}
     }
 
     /* --- OODA Cycle History (issue #2135) --- */
