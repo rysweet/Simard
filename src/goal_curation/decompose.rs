@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::Deserialize;
+use tempfile::TempDir;
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
@@ -304,6 +305,40 @@ impl RecipeGoalDecomposer {
             repo_root: repo_root.to_path_buf(),
         })
     }
+
+    /// Allocate a private, in-tree result channel (#2708) for one decomposition
+    /// run.
+    ///
+    /// Returns the owning [`TempDir`] — the caller keeps it alive across the
+    /// child run so the file survives, then drops it (RAII) to remove the dir
+    /// on every exit — and the **absolute** path the agent is told to write.
+    ///
+    /// The dir lives under `<repo_root>/target/` (git-ignored) because a
+    /// workspace-sandboxed agent (copilot/claude) can refuse a `/tmp` write, and
+    /// it is an `O_EXCL` 0700 [`TempDir`] to defeat symlink/TOCTOU races. The
+    /// file itself is left for the agent to create — some agents are create-only
+    /// and refuse to overwrite a pre-made file.
+    fn allocate_result_channel(&self) -> SimardResult<(TempDir, PathBuf)> {
+        let target_dir = self.repo_root.join("target");
+        fs::create_dir_all(&target_dir).map_err(|e| SimardError::InvalidGoalRecord {
+            field: "decomposer".to_string(),
+            reason: format!(
+                "could not create result-channel dir '{}': {e}",
+                target_dir.display()
+            ),
+        })?;
+        let result_dir = tempfile::Builder::new()
+            .prefix("simard-subgoals-")
+            .tempdir_in(&target_dir)
+            .map_err(|e| SimardError::InvalidGoalRecord {
+                field: "decomposer".to_string(),
+                reason: format!("could not allocate result-channel dir: {e}"),
+            })?;
+        // Absolute path so the agent resolves it against its own cwd correctly.
+        let path = result_dir.path().join("sub_goals.json");
+        let result_path = std::path::absolute(&path).unwrap_or(path);
+        Ok((result_dir, result_path))
+    }
 }
 
 impl GoalDecomposer for RecipeGoalDecomposer {
@@ -322,33 +357,8 @@ impl GoalDecomposer for RecipeGoalDecomposer {
         // Dedicated clean result channel (#2708): the agent writes ONLY its
         // {"sub_goals":[…]} JSON to a file we own, so a successful decomposition
         // can never be discarded by ANSI/log/banner noise on the shared
-        // recipe-runner-rs stdout. The result dir lives in-tree under target/
-        // (git-ignored and reliably writable by a workspace-sandboxed agent,
-        // unlike a /tmp path) and is an unpredictable O_EXCL TempDir (0700) to
-        // defeat symlink/TOCTOU races. The handle is held alive across the child
-        // run and the read, then dropped (RAII) to remove the file on every exit.
-        let target_dir = self.repo_root.join("target");
-        fs::create_dir_all(&target_dir).map_err(|e| SimardError::InvalidGoalRecord {
-            field: "decomposer".to_string(),
-            reason: format!(
-                "could not create result-channel dir '{}': {e}",
-                target_dir.display()
-            ),
-        })?;
-        let result_dir = tempfile::Builder::new()
-            .prefix("simard-subgoals-")
-            .tempdir_in(&target_dir)
-            .map_err(|e| SimardError::InvalidGoalRecord {
-                field: "decomposer".to_string(),
-                reason: format!("could not allocate result-channel dir: {e}"),
-            })?;
-        // Pass an ABSOLUTE path so the agent resolves it against its own cwd
-        // correctly. We do NOT pre-create the file — some agents are create-only
-        // and refuse to overwrite — so the agent creates it in this owned dir.
-        let result_path = {
-            let p = result_dir.path().join("sub_goals.json");
-            std::path::absolute(&p).unwrap_or(p)
-        };
+        // recipe-runner-rs stdout (that stdout brace-scan was the root cause).
+        let (result_dir, result_path) = self.allocate_result_channel()?;
 
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
@@ -383,8 +393,11 @@ impl GoalDecomposer for RecipeGoalDecomposer {
 
         // The payload arrives ONLY through the result file; stdout is never
         // parsed for sub-goals (that stdout brace-scan was the #2708 root cause).
-        // `result_dir` is still in scope here, so the file is not yet cleaned up.
-        read_subgoals_from_file(&result_path)
+        // Read while the channel is still alive, then drop the TempDir (RAII) to
+        // remove it regardless of the parse outcome.
+        let subgoals = read_subgoals_from_file(&result_path);
+        drop(result_dir);
+        subgoals
     }
 }
 
