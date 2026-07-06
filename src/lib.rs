@@ -65,6 +65,15 @@ pub mod goal_board_store;
 pub mod goal_curation;
 pub mod goals;
 pub mod greeting_banner;
+// Phase 4 of issue #2713: the LOCAL "COIN Gym" harness — runs the COIN
+// benchmark shape locally, scores vs. the published leaderboard, and A/Bs a
+// single-model baseline against a multi-agent team, mirroring skwaq's
+// failure-analysis + overfitting-reviewer gating. The harness executor delegates
+// to `coin evaluate` (Docker + instrumented replay is Phase 3/VM); a mock oracle
+// exercises the whole pipeline offline. See
+// `docs/research/coin-benchmark-and-skwaq-study.md` (design) and
+// `docs/howto/run-the-coin-gym-harness.md` (usage).
+pub mod coin_gym;
 pub mod gym;
 pub mod gym_client;
 pub mod gym_history;
@@ -341,6 +350,7 @@ pub use rpc_circuit_breaker::{CircuitBreakerConfig, CircuitBreakerTransport, Cir
 pub use rpc_transport::{InMemoryRpcTransport, SubprocessRpcTransport};
 pub use test_support::TestAdapter;
 
+pub use coin_gym::{coin_gym_usage, dispatch_coin_gym_cli};
 pub use engineer_handoff::{
     ENGINEER_HANDOFF_FILE_NAME, ENGINEER_MODE_BOUNDARY, EngineerHandoffContext,
     SHARED_DEFAULT_STATE_ROOT_SOURCE, SHARED_EXPLICIT_STATE_ROOT_SOURCE,

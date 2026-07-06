@@ -505,6 +505,14 @@ coin-gym improve <suite> --holdout fresh             # one self-improvement cycl
 coin-gym profiles                                    # list per-model isolated state
 ```
 
+> **Implemented (Phase 4).** The Phase-4 CLI landed as
+> `coin-gym run <model> [--strategy baseline|team] [--profile <name>] [--targets <path>]`,
+> `score|compare|improve <run-id> [--profile <name>]`, and `profiles`. The
+> `improve` command runs the **offline** failure-analyst + overfitting-reviewer
+> gate over a saved run; the live `--holdout fresh` verify/rollback cycle
+> sketched above needs live grading and is Phase 5. See
+> [Run the LOCAL COIN Gym harness](../howto/run-the-coin-gym-harness.md).
+
 ### 3.6 Anti-overfitting: the central design tension
 
 skwaq's whole loop is a fight against **building to the benchmark**. COIN gives
@@ -536,8 +544,17 @@ that fight a stronger footing than skwaq's static suites:
 | 1 | LEARN COIN (this doc, Part 1) | ✅ done |
 | 2 | STUDY skwaq loop (this doc, Part 2) | ✅ done |
 | 3 | Provision compute (`azlin` VM) + pull COIN snapshot | ⏭ tracked (issue) |
-| 4 | Build the LOCAL COIN Gym harness (Part 3) | ⏭ tracked (issue) |
+| 4 | Build the LOCAL COIN Gym harness (Part 3) | ✅ done — Rust `coin_gym` module + `coin-gym` CLI; see [Run the LOCAL COIN Gym harness](../howto/run-the-coin-gym-harness.md) |
 | 5 | Iterative self-improve (baseline vs team; failure-analysis + overfit gate) | ⏭ tracked (issue) |
+
+> **Phase 4 note (language).** The harness landed as a Rust module
+> (`src/coin_gym/`) exposing a `coin-gym` CLI, not a standalone Python package:
+> the Simard repo enforces a Rust-only policy (issue #2155,
+> `scripts/check-rust-only-gate.sh`) and this design already called the harness a
+> "Simard crate". COIN's own `coin evaluate` tool (Python/uv/Docker) stays an
+> **external** oracle the harness delegates to via a mockable executor — never
+> re-implemented. See
+> [Run the LOCAL COIN Gym harness](../howto/run-the-coin-gym-harness.md).
 
 Phases 3–5 are captured in the tracking issue **"Build LOCAL COIN Gym harness —
 phases 3-5"** in `rysweet/Simard`, which carries the harness design above plus

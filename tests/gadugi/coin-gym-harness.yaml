@@ -1,0 +1,55 @@
+name: "LOCAL COIN Gym harness CLI (#2713 Phase 4)"
+description: "Outside-in coverage for the coin-gym CLI: the full offline pipeline (target-load → agent-run → mock-grade → score), the baseline-vs-team precision trade-off at equal reach, score/compare/improve reloading a saved run, the overfitting-reviewer gate accepting general tactics while flagging the live loop as Phase 5, isolated per-model profiles, and usage-on-error. Hermetic and network-free; grades against a mock oracle (real coin evaluate is Phase 3)."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "COIN Gym harness end-to-end pipeline"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/coin-gym-harness.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "coin-gym"
+    - "benchmark"
+    - "baseline-vs-team"
+    - "overfitting-gate"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

@@ -9,6 +9,10 @@ name = "simard-gym"
 path = "src/bin/simard_gym.rs"
 
 [[bin]]
+name = "coin-gym"
+path = "src/bin/coin_gym.rs"
+
+[[bin]]
 name = "simard-rust-gym"
 path = "src/bin/simard_rust_gym.rs"
 
