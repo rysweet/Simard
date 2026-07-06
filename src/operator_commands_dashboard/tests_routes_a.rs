@@ -1475,4 +1475,146 @@ mod tests {
              /api/status `deployed` field, alongside the build number (#2727)"
         );
     }
+
+    /// Integration wiring (issue #2727) — closes the two review-flagged gaps the
+    /// pure-helper unit tests above cannot reach, in a single end-to-end test
+    /// against the REAL `build_router()`:
+    ///
+    /// * **Security:** an *unauthenticated* `GET /api/status` must be denied
+    ///   with `401`, so the additive `deployed` field never leaks past the auth
+    ///   layer (defends the posture against future router/middleware refactors).
+    /// * **Philosophy:** the private `status()` handler must actually *wire* the
+    ///   `deployed` string into the response JSON when the compile-time build
+    ///   timestamp is present — the single `json!()` insertion the unit tests
+    ///   can't exercise. The surfaced value must equal the canonical
+    ///   `deployed_pt()` and carry the DST-aware `YYYY-MM-DD HH:MM PST|PDT` shape.
+    ///
+    /// Runs the router over an ephemeral loopback server and speaks raw HTTP/1.1
+    /// so no extra test dependency is needed. Authenticates via the deterministic
+    /// `SIMARD_DASHBOARD_TOKEN` bearer path (independent of the process-global
+    /// `LOGIN_CODE` value). Carries the `cognitive_memory` serial key because it
+    /// mutates a process-global env var and the `status` handler reads the
+    /// state-root env — the #2360/#2375 env-tearing surface.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn api_status_denies_unauth_and_wires_deployed_2727() {
+        use crate::operator_commands_dashboard::auth;
+        use std::net::SocketAddr;
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // One-shot HTTP/1.1 GET over a raw socket: returns (status_code, body).
+        // `Connection: close` lets the server delimit the body by EOF so
+        // `read_to_end` completes without an HTTP client dependency.
+        async fn http_get(addr: SocketAddr, path: &str, bearer: Option<&str>) -> (u16, String) {
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("connect to ephemeral dashboard server");
+            let mut req =
+                format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
+            if let Some(b) = bearer {
+                req.push_str(&format!("Authorization: Bearer {b}\r\n"));
+            }
+            req.push_str("\r\n");
+            stream
+                .write_all(req.as_bytes())
+                .await
+                .expect("write request");
+            let mut raw = Vec::new();
+            stream.read_to_end(&mut raw).await.expect("read response");
+            let text = String::from_utf8_lossy(&raw).into_owned();
+            let code = text
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|c| c.parse::<u16>().ok())
+                .unwrap_or(0);
+            let body = text
+                .split_once("\r\n\r\n")
+                .map(|(_, b)| b.to_string())
+                .unwrap_or_default();
+            (code, body)
+        }
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("bind ephemeral loopback port");
+            let addr: SocketAddr = listener.local_addr().expect("local addr");
+            let server = tokio::spawn(async move {
+                let _ = axum::serve(listener, build_router()).await;
+            });
+
+            // --- Security: unauthenticated request is denied (401). ---
+            let (unauth_code, _) =
+                tokio::time::timeout(Duration::from_secs(30), http_get(addr, "/api/status", None))
+                    .await
+                    .expect("unauthenticated /api/status request timed out");
+            assert_eq!(
+                unauth_code, 401,
+                "unauthenticated GET /api/status must be denied (401) — the additive \
+                 `deployed` field must never bypass the auth layer"
+            );
+
+            // --- Authenticated: the `deployed` field is wired into the JSON. ---
+            // `require_auth` first requires a login code to be configured, then
+            // accepts a bearer equal to SIMARD_DASHBOARD_TOKEN. Configure both;
+            // the bearer path is deterministic regardless of the LOGIN_CODE value.
+            auth::init_login_code();
+            let token = "itest-deployed-2727";
+            // SAFETY: env mutation is serialised by `#[serial_test::serial(
+            // cognitive_memory)]`; the var is set before the request that reads it
+            // and cleared only after the full response has been received.
+            unsafe { std::env::set_var("SIMARD_DASHBOARD_TOKEN", token) };
+
+            let (ok_code, body) = tokio::time::timeout(
+                Duration::from_secs(30),
+                http_get(addr, "/api/status", Some(token)),
+            )
+            .await
+            .expect("authenticated /api/status request timed out");
+
+            // SAFETY: see the paired set_var above; the server has finished
+            // handling the request (its response was fully read) before we clear it.
+            unsafe { std::env::remove_var("SIMARD_DASHBOARD_TOKEN") };
+
+            assert_eq!(
+                ok_code, 200,
+                "authenticated GET /api/status must succeed (200); body={body:?}"
+            );
+            let json: serde_json::Value =
+                serde_json::from_str(&body).expect("/api/status must return a JSON object");
+
+            // The test binary bakes SIMARD_BUILD_TIMESTAMP via build.rs, so
+            // deployed_pt() is Some here and status() must surface exactly it.
+            let expected = deployed_pt()
+                .expect("deployed_pt() is Some in a normal build (build.rs bakes the timestamp)");
+            let deployed = json.get("deployed").and_then(|v| v.as_str()).expect(
+                "status() must wire the `deployed` field into the JSON when the build \
+                 timestamp is present (#2727)",
+            );
+            assert_eq!(
+                deployed, expected,
+                "the wired `deployed` field must equal the canonical deployed_pt()"
+            );
+            let parts: Vec<&str> = deployed.split(' ').collect();
+            assert_eq!(
+                parts.len(),
+                3,
+                "deployed must be `YYYY-MM-DD HH:MM PST|PDT`: {deployed:?}"
+            );
+            assert!(
+                parts[2] == "PST" || parts[2] == "PDT",
+                "the wired `deployed` must carry a DST-aware PST/PDT abbreviation: {deployed:?}"
+            );
+
+            server.abort();
+        });
+    }
 }
