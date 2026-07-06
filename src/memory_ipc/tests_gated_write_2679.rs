@@ -353,6 +353,86 @@ fn remember_procedure_provenance_returns_an_id() {
     );
 }
 
+/// Grounding symmetry with the fact gate (issue #2679): a procedure that CITES
+/// source episodes none of which resolve has fabricated provenance and MUST be
+/// rejected server-side — its `PROCEDURE_DERIVES_FROM` edges would otherwise
+/// dangle. (A procedure citing no sources is unaffected; there is nothing to
+/// fabricate.)
+#[test]
+fn remember_procedure_provenance_rejects_ungrounded_provenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("memory.sock");
+    let mem: Arc<dyn CognitiveMemoryOps> =
+        Arc::new(LibraryCognitiveMemory::in_memory().expect("in-memory db"));
+    let _handle = spawn_server(sock.clone(), Arc::clone(&mem)).expect("spawn server");
+    for _ in 0..50 {
+        if sock.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let client = RemoteCognitiveMemory::connect(&sock).expect("connect");
+    let result = client.remember_procedure_provenance(
+        "ci-fix:ghost",
+        &["re-run".to_string()],
+        &[],
+        &["epi_does_not_exist".to_string()],
+        "pass-xyz",
+    );
+    assert!(
+        result.is_err(),
+        "a procedure whose cited provenance does not resolve must be rejected"
+    );
+
+    // Nothing leaked into procedural memory.
+    let procs = client.recall_procedure("ci-fix", 10).expect("recall");
+    assert!(
+        procs.is_empty(),
+        "no ungrounded procedure may leak into procedural memory"
+    );
+}
+
+/// Batch grounding (issue #2679): a fact grounds iff *at least one* of its cited
+/// episode ids resolves. This pins the `any_episode_exists` batch semantics — a
+/// mix of a bogus id and a real id must still ground (and store) the fact.
+#[test]
+fn remember_fact_gated_grounds_when_any_cited_episode_resolves() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("memory.sock");
+    let mem: Arc<dyn CognitiveMemoryOps> =
+        Arc::new(LibraryCognitiveMemory::in_memory().expect("in-memory db"));
+    let real_id = mem
+        .store_episode("observed a real failure", "engineer-cycle", None)
+        .expect("store_episode");
+    let _handle = spawn_server(sock.clone(), Arc::clone(&mem)).expect("spawn server");
+    for _ in 0..50 {
+        if sock.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let client = RemoteCognitiveMemory::connect(&sock).expect("connect");
+    let outcome = client
+        .remember_fact_gated(
+            "bug-pattern",
+            "grounded via one real cited episode",
+            0.0,
+            &["bug-pattern".to_string()],
+            "distill:mixed",
+            &["epi_does_not_exist".to_string(), real_id.clone()],
+            "pass-mixed",
+        )
+        .expect("remember_fact_gated call");
+
+    assert!(
+        outcome.stored,
+        "a fact citing at least one resolving episode must be grounded and stored"
+    );
+    assert!(!outcome.quarantined);
+}
+
 /// Issue #2679 write ledger: the server counts facts the gate ACCEPTED for a
 /// distillation `pass_id`, and `drain_pass_ledger` returns then clears that
 /// count — the only way the distiller (which gets no returned document) can

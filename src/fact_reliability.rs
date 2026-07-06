@@ -37,6 +37,15 @@
 /// provenance or empty content does not.
 pub const RELIABILITY_THRESHOLD: f64 = 0.5;
 
+/// How many same-`concept` priors the identity-dedup step in
+/// [`commit_gated_fact`] inspects when deciding whether a new fact merely
+/// restates an equal-or-stronger existing fact. `search_facts` returns priors
+/// ranked strongest-first and filtered to `>= confidence`, so a genuine
+/// equal-or-stronger duplicate surfaces within the first few results; the
+/// window is kept intentionally small to bound the per-write query cost on the
+/// distillation hot path.
+const DEDUP_PRIOR_SCAN_LIMIT: u32 = 5;
+
 /// The closed concept-label set the distillation recipe is constrained to. A
 /// fact whose concept does not canonicalize into this set is off-spec and loses
 /// the concept-validity component of its reliability score (but is NOT dropped —
@@ -221,7 +230,7 @@ pub fn commit_gated_fact(
     // backend that ignores the filter.
     let new_content = content.trim();
     let existing = memory
-        .search_facts(concept, 5, confidence)
+        .search_facts(concept, DEDUP_PRIOR_SCAN_LIMIT, confidence)
         .unwrap_or_default();
     if existing
         .iter()

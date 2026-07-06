@@ -469,6 +469,9 @@ impl CognitiveMemoryOps for SharedMemory {
     fn episode_exists(&self, node_id: &str) -> SimardResult<bool> {
         self.0.episode_exists(node_id)
     }
+    fn any_episode_exists(&self, node_ids: &[String]) -> SimardResult<bool> {
+        self.0.any_episode_exists(node_ids)
+    }
     fn list_undistilled_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
         self.0.list_undistilled_episodes(limit)
     }

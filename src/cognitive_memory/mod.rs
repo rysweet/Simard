@@ -478,6 +478,22 @@ pub trait CognitiveMemoryOps: Send + Sync {
         Ok(false)
     }
 
+    /// Batch grounding check: report whether *any* of `node_ids` resolves to a
+    /// real episode node in this store (issue #2679).
+    ///
+    /// This is the batch form of [`episode_exists`](Self::episode_exists) the
+    /// distillation write-boundary gate uses to ground a fact against *all* of
+    /// its cited `source_episode_ids` at once. The default impl simply probes
+    /// each id via [`episode_exists`](Self::episode_exists) (fail-closed per id),
+    /// so every backend keeps working unchanged; [`LibraryCognitiveMemory`]
+    /// overrides it to materialize the episode set ONCE per call instead of once
+    /// per cited id, avoiding an O(cited·episodes) re-scan on the write hot path.
+    fn any_episode_exists(&self, node_ids: &[String]) -> SimardResult<bool> {
+        Ok(node_ids
+            .iter()
+            .any(|id| self.episode_exists(id).unwrap_or(false)))
+    }
+
     /// Return up to `limit` undistilled episodes, newest first.
     ///
     /// Default impl returns empty, which makes the distillation pass a

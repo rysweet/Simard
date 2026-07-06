@@ -1185,6 +1185,28 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
             .any(|e| e.node_id == node_id))
     }
 
+    fn any_episode_exists(&self, node_ids: &[String]) -> SimardResult<bool> {
+        // Batch grounding for the write-boundary gate (issue #2679): materialize
+        // the episode enumeration ONCE (the same unfiltered, compressed-inclusive
+        // `get_episodes(_, true)` scan `episode_exists` uses) and test every
+        // candidate id against it, instead of re-materializing the full set once
+        // per cited id. Trims the per-fact grounding cost from O(cited·episodes)
+        // to O(episodes). A grounding check is a read; it never mutates the store.
+        let wanted: Vec<&str> = node_ids
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if wanted.is_empty() {
+            return Ok(false);
+        }
+        Ok(self
+            .lock()?
+            .get_episodes(usize::MAX, true)
+            .iter()
+            .any(|e| wanted.iter().any(|w| e.node_id == *w)))
+    }
+
     fn list_undistilled_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
         // De-fork Phase 2b (issue #2307): episode distillation now runs against
         // this backend. The library returns this agent's not-yet-distilled

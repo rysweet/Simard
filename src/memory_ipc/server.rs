@@ -180,6 +180,12 @@ fn dispatch(memory: &dyn CognitiveMemoryOps, req: MemoryRequest) -> MemoryRespon
                 Err(e) => MemoryResponse::Error(e.to_string()),
             }
         }
+        // The ungated, trusted direct-write path. This is NOT the distillation
+        // boundary: it persists the caller's fact and confidence verbatim, so it
+        // is reserved for in-process / same-user callers that are already trusted
+        // (manual writes, imports, tests). Distiller agent writes MUST use
+        // `StoreFactGated` below, which re-grounds, re-scores, dedups, and
+        // quarantines server-side and never trusts the client's confidence.
         MemoryRequest::StoreFact {
             concept,
             content,
@@ -231,15 +237,37 @@ fn dispatch(memory: &dyn CognitiveMemoryOps, req: MemoryRequest) -> MemoryRespon
             prerequisites,
             source_episode_ids,
             pass_id: _,
-        } => match memory.store_procedure_with_provenance(
-            &name,
-            &steps,
-            &prerequisites,
-            &source_episode_ids,
-        ) {
-            Ok(id) => MemoryResponse::Id(id),
-            Err(e) => MemoryResponse::Error(e.to_string()),
-        },
+        } => {
+            // Grounding symmetry with the fact write-boundary gate (issue #2679):
+            // a procedure that CITES source episodes must have at least one that
+            // resolves to a real node here, else its provenance is fabricated and
+            // the `PROCEDURE_DERIVES_FROM` edges would dangle. Procedures carry no
+            // reliability score (unlike facts they are not confidence-graded), so
+            // this is a grounding-only guard — cited-but-unresolvable provenance is
+            // rejected fail-closed; a procedure that cites nothing is stored
+            // unchanged (there is no fabricated provenance to reject).
+            if !source_episode_ids.is_empty()
+                && !memory
+                    .any_episode_exists(&source_episode_ids)
+                    .unwrap_or(false)
+            {
+                MemoryResponse::Error(
+                    "procedure rejected: none of its cited source episodes resolve \
+                     (ungrounded provenance)"
+                        .to_string(),
+                )
+            } else {
+                match memory.store_procedure_with_provenance(
+                    &name,
+                    &steps,
+                    &prerequisites,
+                    &source_episode_ids,
+                ) {
+                    Ok(id) => MemoryResponse::Id(id),
+                    Err(e) => MemoryResponse::Error(e.to_string()),
+                }
+            }
+        }
         MemoryRequest::RecallProcedure { query, limit } => {
             match memory.recall_procedure(&query, limit) {
                 Ok(v) => MemoryResponse::Procedures(v),
@@ -381,12 +409,13 @@ fn gated_fact_write(
     }
 
     // (1) Grounding — the fact is grounded iff at least one cited episode id
-    // resolves to a real node in this store. A lookup error is treated as
-    // "does not resolve" (fail-closed), so a backend hiccup can never
-    // accidentally promote an ungrounded fact.
-    let grounded = source_episode_ids
-        .iter()
-        .any(|id| memory.episode_exists(id).unwrap_or(false));
+    // resolves to a real node in this store. The batch `any_episode_exists`
+    // materializes the episode set once for all cited ids (rather than once per
+    // id). A lookup error is treated as "does not resolve" (fail-closed), so a
+    // backend hiccup can never accidentally promote an ungrounded fact.
+    let grounded = memory
+        .any_episode_exists(source_episode_ids)
+        .unwrap_or(false);
 
     // (2–5) Score → threshold → dedup → persist through the single shared gate,
     // so this server seam and the in-process `DistillFactSink` decide every

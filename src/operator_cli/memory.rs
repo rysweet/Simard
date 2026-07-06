@@ -203,6 +203,30 @@ pub(crate) fn dispatch_memory_command(
 // `simard memory remember` — the distiller's per-fact WRITE tool (issue #2679)
 // ───────────────────────────────────────────────────────────────────────────
 
+// Process exit codes for the `remember` / `remember-procedure` write tools
+// (issue #2679). Named so a mis-invoking or blocked distiller agent is
+// diagnosable from the exit status alone, and so every `return` site reads its
+// intent instead of a bare integer.
+//
+// Note on the shared `EXIT_NO_DAEMON` (3): a failed daemon round-trip — whether
+// the socket was unreachable OR the gated write itself errored — is reported
+// with the *same* code on purpose. Both mean "the write never committed via the
+// daemon"; they are deliberately distinct from `EXIT_QUARANTINED` (4), which is
+// a *successful* round-trip whose gate disposition was "rejected". Collapsing
+// the two transport-failure cases keeps the documented, stable exit-code
+// contract (0/2/3/4) rather than proliferating codes for callers to branch on.
+
+/// The fact/procedure cleared the gate and was persisted.
+const EXIT_STORED: i32 = 0;
+/// A required flag was missing or malformed.
+const EXIT_USAGE: i32 = 2;
+/// The daemon write round-trip did not commit: no reachable daemon, or the
+/// gated write itself returned an error. There is no un-gated fallback.
+const EXIT_NO_DAEMON: i32 = 3;
+/// The gate completed a round-trip and blocked the fact
+/// (ungrounded / empty / below the reliability threshold).
+const EXIT_QUARANTINED: i32 = 4;
+
 const REMEMBER_HELP: &str = "\
 Simard memory remember — write ONE semantic fact into cognitive memory.
 
@@ -330,16 +354,16 @@ pub(crate) fn parse_remember_fact_args(args: Vec<String>) -> Result<RememberFact
     })
 }
 
-/// Run `simard memory remember`, returning the process exit code (0 stored,
-/// 2 usage error, 3 no reachable daemon, 4 quarantined). Routes ONLY through the
-/// daemon socket: a direct on-disk open would bypass the authoritative gate, so
-/// no daemon means no gated write path.
+/// Run `simard memory remember`, returning the process exit code
+/// ([`EXIT_STORED`] / [`EXIT_USAGE`] / [`EXIT_NO_DAEMON`] / [`EXIT_QUARANTINED`]).
+/// Routes ONLY through the daemon socket: a direct on-disk open would bypass the
+/// authoritative gate, so no daemon means no gated write path.
 pub(crate) fn run_remember_fact(args: Vec<String>) -> i32 {
     let parsed = match parse_remember_fact_args(args) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("[simard] memory remember: {e}");
-            return 2;
+            return EXIT_USAGE;
         }
     };
 
@@ -353,7 +377,7 @@ pub(crate) fn run_remember_fact(args: Vec<String>) -> i32 {
                  not writing un-gated",
                 sock.display()
             );
-            return 3;
+            return EXIT_NO_DAEMON;
         }
     };
 
@@ -387,18 +411,18 @@ pub(crate) fn run_remember_fact(args: Vec<String>) -> i32 {
                     .map(|id| format!(" node_id={id}"))
                     .unwrap_or_default()
             );
-            0
+            EXIT_STORED
         }
         Ok(outcome) => {
             eprintln!(
                 "[simard] memory remember: quarantined concept={} confidence={:.2} (below gate)",
                 parsed.concept, outcome.confidence
             );
-            4
+            EXIT_QUARANTINED
         }
         Err(e) => {
             eprintln!("[simard] memory remember: gated write failed: {e}");
-            3
+            EXIT_NO_DAEMON
         }
     }
 }
@@ -433,13 +457,13 @@ pub(crate) fn run_remember_procedure(args: Vec<String>) -> i32 {
             };
             if let Err(e) = res {
                 eprintln!("[simard] memory remember-procedure: {e}");
-                return 2;
+                return EXIT_USAGE;
             }
         } else if state_root.is_none() {
             state_root = Some(PathBuf::from(arg));
         } else {
             eprintln!("[simard] memory remember-procedure: unexpected extra argument '{arg}'");
-            return 2;
+            return EXIT_USAGE;
         }
     }
 
@@ -447,12 +471,12 @@ pub(crate) fn run_remember_procedure(args: Vec<String>) -> i32 {
         Some(n) => n,
         None => {
             eprintln!("[simard] memory remember-procedure: missing required --name");
-            return 2;
+            return EXIT_USAGE;
         }
     };
     if steps.is_empty() {
         eprintln!("[simard] memory remember-procedure: at least one --step is required");
-        return 2;
+        return EXIT_USAGE;
     }
 
     let state_root = resolve_state_root(state_root);
@@ -464,7 +488,7 @@ pub(crate) fn run_remember_procedure(args: Vec<String>) -> i32 {
                 "[simard] memory remember-procedure: no reachable memory daemon at {} ({e})",
                 sock.display()
             );
-            return 3;
+            return EXIT_NO_DAEMON;
         }
     };
     let pass_id = resolve_pass_id(pass_id.as_deref());
@@ -477,11 +501,11 @@ pub(crate) fn run_remember_procedure(args: Vec<String>) -> i32 {
     ) {
         Ok(id) => {
             println!("[simard] memory remember-procedure: stored name={name} node_id={id}");
-            0
+            EXIT_STORED
         }
         Err(e) => {
             eprintln!("[simard] memory remember-procedure: write failed: {e}");
-            3
+            EXIT_NO_DAEMON
         }
     }
 }
