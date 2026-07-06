@@ -334,3 +334,79 @@ fn fact_yield_benchmark_recovers_only_surface_variants_not_offspec() {
         );
     }
 }
+
+/// Deterministic **before/after parse-recovery benchmark** for issue #2658.
+///
+/// A single trailing comma in the distiller agent's JSON (the most common LLM
+/// JSON defect) made strict `serde_json` reject the WHOLE facts object, so the
+/// batch was deferred every cycle and `distill_parse_success_rate` collapsed
+/// toward 0 (the overseer's "residual 100% parse-failure"). Over a batch of
+/// trailing-comma documents reproducing that shape, the strict baseline fails
+/// EVERY one (parse-failure-rate = 1.000) while the shipped tolerant parser
+/// (`parse_facts_document`, the real production path) recovers EVERY one
+/// (parse-failure-rate = 0.000).
+///
+/// This is the deterministic, in-process analog of the live
+/// `distill_parse_success_rate` self-metric, which
+/// `record_parse_outcome("distill", parsed.is_ok())` drives from the same
+/// `parse_facts_document` return value on every real pass — so a production
+/// distill pass over trailing-comma output moves that metric off the floor by
+/// the exact mechanism proven here.
+#[test]
+fn distill_parse_failure_rate_benchmark_before_1000_after_0000() {
+    // A batch of realistic trailing-comma distill facts documents (bare and
+    // pretty-printed) that each carry one well-formed, grounded fact.
+    let doc = |ep: &str, pretty: bool| -> String {
+        if pretty {
+            format!(
+                "{{\n  \"facts\": [\n    {{\"concept\": \"lesson-learned\", \"content\": \"c\", \"source_episode_id\": \"{ep}\"}},\n  ],\n}}"
+            )
+        } else {
+            format!(
+                "{{\"facts\":[{{\"concept\":\"pr-pattern\",\"content\":\"c\",\"source_episode_id\":\"{ep}\"}},],}}"
+            )
+        }
+    };
+    let batch: Vec<String> = vec![
+        doc("epi_1", false),
+        doc("epi_2", true),
+        doc("epi_3", false),
+        doc("epi_4", true),
+        doc("epi_5", false),
+    ];
+    let n = batch.len() as f64;
+
+    // BEFORE — the strict baseline (what the pre-#2658 parser effectively did:
+    // reject the whole facts object on any trailing comma). Every one fails.
+    let before_failures = batch
+        .iter()
+        .filter(|raw| serde_json::from_str::<serde_json::Value>(raw).is_err())
+        .count();
+    let before_failure_rate = before_failures as f64 / n;
+
+    // AFTER — the shipped tolerant parser on the real production entry point.
+    let after_failures = batch
+        .iter()
+        .filter(|raw| {
+            parse_facts_document(raw)
+                .map(|o| o.facts.is_empty())
+                .unwrap_or(true)
+        })
+        .count();
+    let after_failure_rate = after_failures as f64 / n;
+
+    println!(
+        "[distill-parse-recovery-bench #2658] batch={} before_failure_rate={before_failure_rate:.3} \
+         after_failure_rate={after_failure_rate:.3}",
+        batch.len()
+    );
+
+    assert_eq!(
+        before_failure_rate, 1.000,
+        "baseline strict parse must fail EVERY trailing-comma document (the residual 100% shape)"
+    );
+    assert_eq!(
+        after_failure_rate, 0.000,
+        "the tolerant parser must recover EVERY trailing-comma document (fact-yield restored)"
+    );
+}

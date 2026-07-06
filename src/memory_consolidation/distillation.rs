@@ -1270,6 +1270,32 @@ pub(crate) fn parse_facts_document(document: &str) -> SimardResult<DistillOutput
     )))
 }
 
+/// Parse a bare `{ "facts": [...] }` object, tolerating a single **trailing
+/// comma** malformation as a last resort (issue #2658).
+///
+/// Strict `serde_json` is attempted first, so the clean path is byte-identical
+/// and unchanged. Only when that fails is a retry attempted on the
+/// [`strip_json_trailing_commas`](crate::recipe_output::strip_json_trailing_commas)
+/// view — a provable no-op on valid JSON — so one cosmetic trailing comma
+/// before a `}`/`]` (the single most common LLM-JSON defect) can no longer
+/// reject the whole facts object and silently drop the entire batch (the
+/// residual 100% distill parse-failure shape). A genuinely malformed object
+/// (not just a trailing comma) leaves the stripped view unchanged, so it still
+/// fails and precision is never weakened.
+fn parse_facts_envelope_lenient(text: &str) -> Option<RecipeEnvelope> {
+    if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(text) {
+        return Some(parsed);
+    }
+    // The stripper borrows the input unchanged when it holds no trailing comma,
+    // so a `Borrowed` result means the strict parse above already saw these
+    // exact bytes and failed — there is nothing new to try. Only an `Owned`
+    // (actually-stripped) view can parse where the strict attempt could not.
+    match crate::recipe_output::strip_json_trailing_commas(text) {
+        std::borrow::Cow::Owned(stripped) => serde_json::from_str::<RecipeEnvelope>(&stripped).ok(),
+        std::borrow::Cow::Borrowed(_) => None,
+    }
+}
+
 /// Scan an already noise-stripped `trimmed` string for a `{ "facts": [...] }`
 /// object, preferring (in order) the LAST balanced object candidate that carries
 /// a **grounded-capable** fact — one with a non-empty `source_episode_id` — then
@@ -1288,7 +1314,7 @@ pub(crate) fn parse_facts_document(document: &str) -> SimardResult<DistillOutput
 /// while still recovering a source-less answer when that is all the output holds.
 fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
     // Fast path — the text IS the JSON object.
-    if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
+    if let Some(parsed) = parse_facts_envelope_lenient(trimmed) {
         return Some(parsed.into_output());
     }
     // Slow path — among every balanced `{...}` substring (string-aware, so a
@@ -1309,7 +1335,7 @@ fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
         .into_iter()
         .rev()
     {
-        if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(span) {
+        if let Some(parsed) = parse_facts_envelope_lenient(span) {
             let output = parsed.into_output();
             if output
                 .facts
@@ -1674,6 +1700,93 @@ mod unit_tests {
     fn parse_recipe_output_errors_when_no_object() {
         let raw = "no json here at all";
         assert!(parse_facts(raw).is_err());
+    }
+
+    // ── issue #2658: trailing-comma tolerance (residual 100% parse-failure) ──
+    //
+    // A single trailing comma before a `}`/`]` is the most common real-world
+    // LLM JSON defect. Before this fix strict `serde_json` rejected the WHOLE
+    // facts object, the batch was deferred every cycle, and
+    // `distill_parse_success_rate` collapsed toward 0 (the overseer's "100%
+    // parse-failure"). These pin that one cosmetic comma no longer drops the
+    // batch, while never corrupting string content or repairing genuinely
+    // malformed JSON.
+
+    #[test]
+    fn parse_recovers_bare_trailing_comma_facts_object() {
+        // Trailing comma after the last fact object AND after the `facts` array.
+        let raw = r#"{"facts":[{"concept":"pr-pattern","content":"warm the cache before pin bumps","source_episode_id":"epi_1"},],}"#;
+        assert!(
+            serde_json::from_str::<serde_json::Value>(raw).is_err(),
+            "precondition: the trailing-comma object must be strict-invalid JSON"
+        );
+        let facts =
+            parse_facts(raw).expect("a trailing-comma facts object must recover >= 1 fact (#2658)");
+        assert_eq!(facts.len(), 1, "the single well-formed fact is salvaged");
+        assert_eq!(facts[0].concept, "pr-pattern");
+        assert_eq!(facts[0].source_episode_id, "epi_1");
+    }
+
+    #[test]
+    fn parse_recovers_trailing_comma_with_procedures() {
+        // The pretty-printed shape an agent emits into its facts file, with
+        // trailing commas after the fact, the facts array, a procedure step,
+        // and the top-level object.
+        let raw = "{\n  \"facts\": [\n    {\"concept\": \"lesson-learned\", \"content\": \"one bad token must not drop the batch\", \"source_episode_id\": \"epi_7\"},\n  ],\n  \"procedures\": [\n    {\"name\": \"ci-fix\", \"steps\": [\"re-run\",], \"source_episode_ids\": [\"epi_7\"]},\n  ],\n}";
+        let out = parse_facts_document(raw)
+            .expect("a trailing-comma facts+procedures document must recover (#2658)");
+        assert_eq!(out.facts.len(), 1);
+        assert_eq!(out.facts[0].source_episode_id, "epi_7");
+        assert_eq!(out.procedures.len(), 1);
+        assert_eq!(out.procedures[0].steps, vec!["re-run".to_string()]);
+    }
+
+    #[test]
+    fn parse_recovers_trailing_comma_object_wrapped_in_prose() {
+        // The slow (balanced-brace) path must also tolerate a trailing comma —
+        // a little leading/trailing prose around the malformed object.
+        let raw = r#"Sure, here it is:
+            {"facts":[{"concept":"bug-pattern","content":"z","source_episode_id":"epi_3"},]}
+            done."#;
+        let facts = parse_facts(raw)
+            .expect("a prose-wrapped trailing-comma object must recover via the slow path (#2658)");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "bug-pattern");
+    }
+
+    #[test]
+    fn parse_trailing_comma_recovery_never_corrupts_string_content() {
+        // `content` ends with "…, " and the object still has a real structural
+        // trailing comma before `]` — only the structural comma may be removed.
+        let raw = r#"{"facts":[{"concept":"pr-pattern","content":"rebase, squash, then merge,","source_episode_id":"epi_4"},]}"#;
+        let facts = parse_facts(raw)
+            .expect("structural trailing comma removed, string content preserved (#2658)");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(
+            facts[0].content, "rebase, squash, then merge,",
+            "the comma-laden content (incl. its trailing comma) must survive verbatim"
+        );
+    }
+
+    #[test]
+    fn parse_still_fails_on_genuinely_malformed_non_trailing_comma() {
+        // An ELIDED array element `,,` is not a lone trailing comma: leniency
+        // must never widen to accept broken JSON, so precision is unchanged.
+        let raw = r#"{"facts":[{"concept":"pr-pattern","content":"a","source_episode_id":"e1"},,{"concept":"bug-pattern","content":"b","source_episode_id":"e2"}]}"#;
+        assert!(
+            parse_facts(raw).is_err(),
+            "an elided array element is not a trailing comma and must still fail (#2658)"
+        );
+    }
+
+    #[test]
+    fn parse_wellformed_object_unaffected_by_trailing_comma_recovery() {
+        // Clean-path invariant: a well-formed object is parsed by the strict
+        // path; the trailing-comma retry is never reached.
+        let raw = r#"{"facts":[{"concept":"lesson-learned","content":"clean","source_episode_id":"epi_9"}]}"#;
+        let facts = parse_facts(raw).expect("well-formed object parses");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].source_episode_id, "epi_9");
     }
 
     // ── issue #2461: last-object-wins + string-aware extraction ──────────
