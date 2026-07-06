@@ -493,6 +493,7 @@ fn self_heal_and_escalate_fail_closed_without_a_distinct_identity() {
     let escalate = ov.act(&Intervention::EscalateBlockedGoal {
         goal_id: "feature-x".to_string(),
         reason: brain_failure_reason(3),
+        why: "brain-failure safeguard tripped 3×".to_string(),
     });
     assert!(
         matches!(escalate, Err(OverseerError::Recursion { .. })),
@@ -623,6 +624,7 @@ fn decide_routes_a_blocked_goal_by_shape() {
             needs_review: true,
             consecutive_no_action: 4,
         }],
+        why: None,
     });
     assert!(matches!(self_heal, Intervention::UnblockGoal { .. }));
 
@@ -639,6 +641,7 @@ fn decide_routes_a_blocked_goal_by_shape() {
             needs_review: true,
             consecutive_no_action: 3,
         }],
+        why: None,
     });
     assert!(matches!(escalate, Intervention::EscalateBlockedGoal { .. }));
 
@@ -655,6 +658,7 @@ fn decide_routes_a_blocked_goal_by_shape() {
             needs_review: false,
             consecutive_no_action: 0,
         }],
+        why: None,
     });
     assert!(matches!(report, Intervention::Report));
 }
@@ -669,6 +673,7 @@ fn goal_health_interventions_are_routine_and_admitted_by_default_gate() {
         Intervention::EscalateBlockedGoal {
             goal_id: "g".to_string(),
             reason: "r".to_string(),
+            why: "w".to_string(),
         },
     ] {
         assert_eq!(classify(&iv), RiskClass::Routine);
@@ -688,7 +693,8 @@ fn goal_health_interventions_are_routine_and_admitted_by_default_gate() {
     assert_eq!(
         Intervention::EscalateBlockedGoal {
             goal_id: "g".to_string(),
-            reason: "r".to_string()
+            reason: "r".to_string(),
+            why: "w".to_string()
         }
         .label(),
         "escalate_blocked_goal"

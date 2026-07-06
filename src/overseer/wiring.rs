@@ -132,6 +132,15 @@ pub struct OverseerTickReport {
     pub deploys: usize,
     /// Interventions handed off to the operator (escalations).
     pub escalations: usize,
+    /// Problems for which a structured root-cause WHY was produced this tick
+    /// (issue #2635) — the MANDATORY analysis count (every problem gets one).
+    pub root_cause_analyses: usize,
+    /// Symptom-only mitigations taken this tick whose ROOT CAUSE was left
+    /// unaddressed (issue #2635) — surfaced, never a silent patch.
+    pub symptom_mitigations: usize,
+    /// Interventions this tick that addressed the root cause — class `RootCause`
+    /// or `Acknowledged` (`remediation.root_cause_addressed == true`).
+    pub root_causes_addressed: usize,
     /// Interventions the gates held (autonomy/budget/conflict).
     pub held: usize,
     /// Advisory whispers delivered into Simard's OODA inbox this tick.
@@ -192,8 +201,23 @@ pub struct OverseerTickReport {
 /// This does NOT catch panics; wrap it in [`run_overseer_tick_isolated`] for
 /// the full fail-safe boundary the daemon uses.
 pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
+    overseer_tick_detailed(overseer).0
+}
+
+/// Like [`overseer_tick`] but also returns the per-problem [`ProblemEntry`] rows
+/// (issue #2635) — problem + WHY + action + root-cause/symptom — so the daemon
+/// can persist them into the durable activity feed. The scalar
+/// [`OverseerTickReport`] stays `Copy`; the rich per-problem detail rides
+/// alongside it here.
+pub fn overseer_tick_detailed(
+    overseer: &mut Overseer,
+) -> (
+    OverseerTickReport,
+    Vec<crate::overseer::activity::ProblemEntry>,
+) {
     let start = Instant::now();
     let mut report = OverseerTickReport::default();
+    let mut problem_entries = Vec::new();
 
     match overseer.run_cycle() {
         Ok(cycle) => {
@@ -211,9 +235,13 @@ pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
                 report.memory_errors += 1;
             }
 
+            // Every problem gets a WHY (the MANDATORY analysis, issue #2635),
+            // regardless of whether the chosen action is later admitted or succeeds.
+            report.root_cause_analyses = cycle.problems.iter().filter(|p| p.why.is_some()).count();
+
             report.observed_details = cap_details(observed_details_from(&cycle));
             let mut actions: Vec<String> = Vec::new();
-            for planned in &cycle.plan {
+            for (i, planned) in cycle.plan.iter().enumerate() {
                 if !planned.admitted {
                     report.held += 1;
                     actions.push(describe_hold(planned));
@@ -223,6 +251,33 @@ pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
                     Ok(outcome) => {
                         tally_outcome(&mut report, &outcome);
                         actions.push(describe_action(&planned.intervention, &outcome));
+                        // Root-cause honesty (issue #2635): tally the remediation
+                        // ONLY for an action that actually took effect (not a
+                        // dedup/rate-limit suppression), so the feed never claims
+                        // a cause was addressed / a symptom mitigated when the act
+                        // was a no-op. An errored act is counted under `errors`
+                        // below and contributes to neither tally.
+                        if outcome_takes_effect(&outcome) {
+                            if planned.remediation.class
+                                == crate::overseer::intervention::RemediationClass::SymptomMitigation
+                            {
+                                report.symptom_mitigations += 1;
+                            }
+                            if planned.remediation.root_cause_addressed {
+                                report.root_causes_addressed += 1;
+                            }
+                        }
+                        // Best-effort: record this occurrence's root-cause
+                        // signature + cause + action + outcome into cognitive
+                        // memory (amplihack-memory-lib, G2) so recall on a later
+                        // cycle raises `recurrence` — turning a one-off into a
+                        // detected recurring root cause. Only for effective
+                        // actions (never suppressed no-ops); never fatal.
+                        if outcome_records_occurrence(&outcome)
+                            && let Some(entry) = cycle.entries.get(i)
+                        {
+                            overseer.record_occurrence(entry, &outcome);
+                        }
                     }
                     Err(e) => {
                         report.errors += 1;
@@ -255,6 +310,9 @@ pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
                     );
                 }
             }
+
+            // Hand the per-problem feed rows back for durable surfacing (#2635).
+            problem_entries = cycle.entries;
         }
         Err(e) => {
             report.errors += 1;
@@ -276,6 +334,9 @@ pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
         prs_merged = report.prs_merged,
         deploys = report.deploys,
         escalations = report.escalations,
+        root_cause_analyses = report.root_cause_analyses,
+        symptom_mitigations = report.symptom_mitigations,
+        root_causes_addressed = report.root_causes_addressed,
         held = report.held,
         whispers = report.whispers,
         whispers_suppressed = report.whispers_suppressed,
@@ -291,7 +352,7 @@ pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
         duration_ms = report.duration_ms,
         "overseer tick complete"
     );
-    report
+    (report, problem_entries)
 }
 
 /// Panic-isolated wrapper around [`overseer_tick`]. A panic inside a capability
@@ -299,21 +360,38 @@ pub fn overseer_tick(overseer: &mut Overseer) -> OverseerTickReport {
 /// the daemon loop continues unaffected. This is the boundary that guarantees
 /// "a panicking overseer tick never crashes or stalls the daemon".
 pub fn run_overseer_tick_isolated(overseer: &mut Overseer) -> OverseerTickReport {
+    run_overseer_tick_isolated_detailed(overseer).0
+}
+
+/// Like [`run_overseer_tick_isolated`] but also returns the per-problem
+/// [`ProblemEntry`] rows (issue #2635) for durable feed surfacing. A panic
+/// yields a `panicked = true` report and an empty entry vector.
+pub fn run_overseer_tick_isolated_detailed(
+    overseer: &mut Overseer,
+) -> (
+    OverseerTickReport,
+    Vec<crate::overseer::activity::ProblemEntry>,
+) {
     let start = Instant::now();
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| overseer_tick(overseer))) {
-        Ok(report) => report,
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        overseer_tick_detailed(overseer)
+    })) {
+        Ok(result) => result,
         Err(_) => {
             tracing::error!(
                 target: "overseer::tick",
                 panicked = true,
                 "overseer tick panicked — isolated; daemon continues"
             );
-            OverseerTickReport {
-                panicked: true,
-                errors: 1,
-                duration_ms: start.elapsed().as_millis() as u64,
-                ..OverseerTickReport::default()
-            }
+            (
+                OverseerTickReport {
+                    panicked: true,
+                    errors: 1,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    ..OverseerTickReport::default()
+                },
+                Vec::new(),
+            )
         }
     }
 }
@@ -525,6 +603,40 @@ fn describe_act_error(iv: &Intervention, err: &OverseerError) -> String {
         "did: {} failed — {kind}: {detail} (isolated)",
         intervention_target(iv)
     ))
+}
+
+/// True when an act outcome represents a REAL intervention on a root cause (so
+/// its occurrence is worth recording for recurrence tracking) rather than a
+/// suppressed no-op (a dedup-window/rate-limit suppression records nothing —
+/// avoiding double-counting a cause the Overseer did not actually act on again).
+fn outcome_records_occurrence(outcome: &ActOutcome) -> bool {
+    matches!(
+        outcome,
+        ActOutcome::Launched(_)
+            | ActOutcome::Merged
+            | ActOutcome::Deployed(_)
+            | ActOutcome::IssueFiled(_)
+            | ActOutcome::Escalated
+            | ActOutcome::Whispered { .. }
+            | ActOutcome::GoalUnblocked { .. }
+            | ActOutcome::GoalEscalated { .. }
+            | ActOutcome::ConflictResolved
+            | ActOutcome::GoalTransferred
+            | ActOutcome::Audited
+    )
+}
+
+/// True when an act outcome actually TOOK EFFECT this tick — anything except a
+/// dedup/rate-limit suppression no-op. Used to tally the root-cause/symptom
+/// remediation honestly: an acknowledged `Reported` deliberate block took effect
+/// (it was surfaced), a suppressed self-heal/whisper did NOT (it was a no-op), so
+/// the feed never claims a cause was addressed / a symptom mitigated when nothing
+/// happened.
+fn outcome_takes_effect(outcome: &ActOutcome) -> bool {
+    !matches!(
+        outcome,
+        ActOutcome::WhisperSuppressed { .. } | ActOutcome::GoalHealthSuppressed { .. }
+    )
 }
 
 // ─────────────────────────── identity ──────────────────────────────────────
@@ -1044,37 +1156,47 @@ pub fn build_overseer(
     repo_root: std::path::PathBuf,
     state_root: std::path::PathBuf,
 ) -> Overseer {
-    Overseer::new(assemble_capabilities(mem, repo_root, state_root))
-        .with_verify_merge_autonomy(true)
-        .with_high_risk_autonomy(true)
-        .with_identity(overseer_identity())
-        // The Simard Whisperer: advisory steering notes onto the SAME
-        // meeting-handoff inbox the OODA observe step scans. Enabled by default
-        // (opt-out via SIMARD_OVERSEER_WHISPER), consistent with the acting
-        // Overseer's opt-out gate.
-        .with_whisper_enabled(whisper_enabled())
-        .with_whisper_sink(Box::new(
-            crate::overseer::whisper_ops::MeetingHandoffWhisperSink::new(
-                crate::meeting_facilitator::default_handoff_dir(),
-            ),
-        ))
-        // Goal-board health: self-heal false-parked perpetual goals and escalate
-        // genuine "needs human review" blocks to the operator on BOTH channels
-        // (email + Signal) via the SAME mandatory notifier the merge path uses.
-        // Enabled by default (opt-out via SIMARD_OVERSEER_GOAL_HEALTH).
-        .with_goal_health_enabled(goal_health_enabled())
-        .with_operator_notifier(Box::new(DualChannelNotifier::from_env()))
-        // Cognitive-memory recall (#2628): the Overseer reads Simard's memory
-        // graph in Observe/Orient and writes its observation back — over the
-        // SAME shared handle assembled above. Enabled by default (opt-out via
-        // SIMARD_OVERSEER_MEMORY_RECALL); a disabled Overseer forces it off.
-        .with_memory_recall_enabled(memory_recall_enabled())
-        // The recurring backlog-coverage gap-scan: each tick, survey the whole
-        // work picture and flag important work with no active workstream, notify
-        // the operator (email + Signal) + file a deduped issue. Enabled by default
-        // (opt-out via SIMARD_OVERSEER_GAP_SCAN); its every-N cadence is applied
-        // by the daemon tick loop.
-        .with_gap_scan_enabled(gap_scan_enabled())
+    Overseer::new(assemble_capabilities(
+        Arc::clone(&mem),
+        repo_root,
+        state_root,
+    ))
+    .with_verify_merge_autonomy(true)
+    .with_high_risk_autonomy(true)
+    .with_identity(overseer_identity())
+    // The Simard Whisperer: advisory steering notes onto the SAME
+    // meeting-handoff inbox the OODA observe step scans. Enabled by default
+    // (opt-out via SIMARD_OVERSEER_WHISPER), consistent with the acting
+    // Overseer's opt-out gate.
+    .with_whisper_enabled(whisper_enabled())
+    .with_whisper_sink(Box::new(
+        crate::overseer::whisper_ops::MeetingHandoffWhisperSink::new(
+            crate::meeting_facilitator::default_handoff_dir(),
+        ),
+    ))
+    // Goal-board health: self-heal false-parked perpetual goals and escalate
+    // genuine "needs human review" blocks to the operator on BOTH channels
+    // (email + Signal) via the SAME mandatory notifier the merge path uses.
+    // Enabled by default (opt-out via SIMARD_OVERSEER_GOAL_HEALTH).
+    .with_goal_health_enabled(goal_health_enabled())
+    .with_operator_notifier(Box::new(DualChannelNotifier::from_env()))
+    // Cognitive-memory recall (#2628): the Overseer reads Simard's memory
+    // graph in Observe/Orient and writes its observation back — over the
+    // SAME shared handle assembled above. Enabled by default (opt-out via
+    // SIMARD_OVERSEER_MEMORY_RECALL); a disabled Overseer forces it off.
+    .with_memory_recall_enabled(memory_recall_enabled())
+    // The recurring backlog-coverage gap-scan: each tick, survey the whole
+    // work picture and flag important work with no active workstream, notify
+    // the operator (email + Signal) + file a deduped issue. Enabled by default
+    // (opt-out via SIMARD_OVERSEER_GAP_SCAN); its every-N cadence is applied
+    // by the daemon tick loop.
+    .with_gap_scan_enabled(gap_scan_enabled())
+    // Root-cause recall/store (issue #2635, G2): the SAME cognitive-memory
+    // handle the goal board + recall seam read through, so the Overseer recalls
+    // prior occurrences of a problem's root cause and records new ones — turning
+    // a one-off false-park into a detected recurring root cause it escalates
+    // instead of re-patching.
+    .with_memory(mem)
 }
 
 /// Resolve the acting Overseer's tick cadence (seconds), clamped to the config
@@ -1572,6 +1694,7 @@ mod tests {
             },
             admitted: false,
             note: "verify-merge is opt-in; escalated to operator".to_string(),
+            remediation: crate::overseer::intervention::Remediation::root_cause(),
         });
         assert!(
             held.starts_with("held:"),

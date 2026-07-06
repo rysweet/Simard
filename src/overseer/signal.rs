@@ -2,6 +2,10 @@
 //! model. `Signal`s are cheap, additive indicators derived from one Observe pass;
 //! Orient folds a set of `Signal`s into ranked, deduplicated `Problem`s.
 
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+
 use crate::overseer::capabilities::ObservedState;
 
 /// A raw, low-level indicator derived from one Observe pass (StatusSnapshot +
@@ -155,6 +159,152 @@ pub enum ProblemKind {
     WorkstreamCoverage,
 }
 
+/// How likely a single candidate cause is, relative to the others in the same
+/// analysis. Ordered so `High` is the strongest; used to rank
+/// [`RootCause::candidates`] and pick the primary cause.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Likelihood {
+    Low,
+    Medium,
+    High,
+}
+
+impl Likelihood {
+    /// Short, stable label for logs/feeds.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+/// Overall confidence the analysis has in its primary cause. Distinct from a
+/// single candidate's [`Likelihood`]: it summarises the WHOLE `RootCause`
+/// (telemetry strength + memory corroboration).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Confidence {
+    Low,
+    Medium,
+    High,
+}
+
+impl Confidence {
+    /// Short, stable label for logs/feeds.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+/// Where the evidence behind a [`RootCause`] came from. A telemetry-only WHY is
+/// the graceful-degrade shape when cognitive memory is unavailable; `MemoryRecall`
+/// / `Both` mark a WHY corroborated by recall of prior same-signature occurrences.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CauseSource {
+    /// Derived purely from the current Observe pass (evidence signals + telemetry).
+    Telemetry,
+    /// Derived purely from recall of prior occurrences (rare; telemetry silent).
+    MemoryRecall,
+    /// Telemetry-derived AND corroborated by recall of a prior same-cause occurrence.
+    Both,
+}
+
+impl CauseSource {
+    /// Short, stable label for logs/feeds.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Telemetry => "telemetry",
+            Self::MemoryRecall => "memory-recall",
+            Self::Both => "telemetry+memory-recall",
+        }
+    }
+}
+
+/// One candidate cause of a [`Problem`], with its relative [`Likelihood`] and the
+/// human-readable evidence lines that support it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CauseCandidate {
+    /// A short, stable, kebab-case cause label (also used as the recall/dedup key
+    /// component in [`crate::overseer::root_cause::root_cause_signature`]).
+    pub label: String,
+    /// How likely this candidate is relative to the others in the analysis.
+    pub likelihood: Likelihood,
+    /// Human-readable evidence lines supporting this candidate (telemetry fields,
+    /// marker strings, recalled prior outcomes).
+    pub evidence: Vec<String>,
+}
+
+/// The structured, human-readable **WHY** behind a detected [`Problem`] — the
+/// output of [`crate::overseer::root_cause::analyze`] and the heart of the
+/// MANDATORY ROOT-CAUSE principle (issue #2635). Every problem the Overseer
+/// acts on carries one, so the Overseer models *why* a problem occurred before
+/// choosing an action rather than blindly patching the symptom.
+///
+/// `Display` renders the canonical one-line WHY (the `primary_rationale` plus
+/// its confidence/source/recurrence context) for feeds, logs, and operator
+/// notifications.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootCause {
+    /// Ranked candidate causes, strongest first. Always non-empty (the analyzer
+    /// falls back to a single low-confidence "unknown" candidate).
+    pub candidates: Vec<CauseCandidate>,
+    /// The human-readable primary rationale — the one-line WHY.
+    pub primary_rationale: String,
+    /// Overall confidence in the primary cause.
+    pub confidence: Confidence,
+    /// Where the analysis drew its evidence from.
+    pub source: CauseSource,
+    /// How many prior same-signature occurrences memory recall found for the
+    /// primary cause (0 when memory is unavailable or this is a first sighting).
+    /// Drives the escalate-the-root-cause-instead-of-re-patching decision.
+    pub recurrence: u32,
+}
+
+impl RootCause {
+    /// The primary (highest-likelihood) candidate cause, if any.
+    pub fn primary(&self) -> Option<&CauseCandidate> {
+        self.candidates.first()
+    }
+
+    /// A last-resort WHY used only when no analyzer branch and no evidence apply,
+    /// so a `RootCause` value always exists (the Overseer never faces a problem
+    /// with no WHY). Telemetry-sourced, low confidence, zero recurrence.
+    pub fn unknown() -> Self {
+        Self {
+            candidates: vec![CauseCandidate {
+                label: "unknown-cause".to_string(),
+                likelihood: Likelihood::Low,
+                evidence: vec!["no distinguishing telemetry or recall available".to_string()],
+            }],
+            primary_rationale: "cause not yet determined from available telemetry".to_string(),
+            confidence: Confidence::Low,
+            source: CauseSource::Telemetry,
+            recurrence: 0,
+        }
+    }
+}
+
+impl fmt::Display for RootCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} (confidence: {}, source: {}",
+            self.primary_rationale,
+            self.confidence.label(),
+            self.source.label()
+        )?;
+        if self.recurrence > 0 {
+            write!(f, ", seen {}× before", self.recurrence)?;
+        }
+        write!(f, ")")
+    }
+}
+
 /// A classified, deduplicated, prioritised problem — the output of Orient and the
 /// input to Decide. Carries the evidence `Signal`s plus a `dedup_key` used to
 /// avoid fighting Simard's in-flight work and to avoid duplicate interventions.
@@ -168,6 +318,11 @@ pub struct Problem {
     pub dedup_key: String,
     pub summary: String,
     pub evidence: Vec<Signal>,
+    /// The MANDATORY root-cause analysis (issue #2635). `None` immediately after
+    /// the pure Orient fold; populated by the Overseer's `run_cycle` enrichment
+    /// step (recall + [`crate::overseer::root_cause::analyze`]) before Decide, so
+    /// every problem the Overseer acts on carries a structured WHY.
+    pub why: Option<RootCause>,
 }
 
 // Thresholds are illustrative defaults for the sketch; real values would be

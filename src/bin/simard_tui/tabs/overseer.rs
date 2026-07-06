@@ -156,6 +156,7 @@ mod tests {
                 held,
                 ..OverseerTickReport::default()
             },
+            problem_entries: Vec::new(),
         }
     }
 
@@ -255,6 +256,7 @@ mod tests {
                 action_details,
                 ..OverseerTickReport::default()
             },
+            problem_entries: Vec::new(),
         }
     }
 
