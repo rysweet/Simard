@@ -5,6 +5,15 @@
 **Repo:** rysweet/Simard @ `92150406`
 **Anomaly signal:** `overseer-obs:anomaly:distill parse-fail rate 100%`
 
+> **⚠️ Read the Round-3 verification addendum first (bottom of this file).**
+> Round 1/2 were written on the investigation branch base `92150406`, which is
+> **92 commits behind `main` (946fe3ca)**. Several Round-1 claims were correct
+> *for that stale base* but are **wrong for the live system (`main`)**. The
+> addendum re-verifies every criterion against `main` with file:line evidence,
+> confirms the Track A root cause still holds, and **corrects** the coupling and
+> branch/telemetry claims. Where the addendum and the body disagree, **the
+> addendum wins.**
+
 ---
 
 ## Executive Summary
@@ -248,3 +257,149 @@ neither blocks the other.
   `quality:gym_skipped`), `src/overseer/sensor.rs` (`ObservedState` fields).
 - rysweet/agent-kgpacks-rs issues **#12** (CLOSED, decision recorded; parity opt-in in
   #32), **#16** (OPEN, WS1 CVE eval), **#17** (OPEN, WS2 int8/PQ gated on WS1).
+
+---
+
+# Round-3 Verification Addendum — Live-`main` Re-Verification & Corrections
+
+**Verifier:** primary investigator (Track A live parse-fail root cause + coupling verdict)
+**Authoritative branch:** `main` @ `946fe3ca` (the daemon runs `main`).
+**Investigation branch:** `investigation/distill-parsefail-kgpacks-parity-2658` @ `6cef8dbb`
+(parent `92150406`) — **92 commits behind `main`** (`git rev-list --count HEAD..main` = 92).
+Every Round-1/2 file:line that cites `src/…` from the investigation checkout must be
+re-read on `main`, where `distillation.rs` is **3222 lines** (vs 1039 on the stale
+branch) and `src/overseer/` **exists** (it does *not* exist in the investigation
+checkout).
+
+## What Round 1/2 got RIGHT (re-confirmed on `main`)
+
+- **Track A root cause holds on the live branch.** The 100% distill parse-fail is the
+  **#2658 residual: an LLM **trailing comma** makes strict `serde_json` reject the whole
+  `{ "facts": [...] }` object.** Confirmed still-live on `main`:
+  - Every parse site is **strict** `serde_json::from_str` / `from_value` (serde_json
+    **1.0.149**, stock registry crate — `Cargo.lock`; no lenient fork):
+    `distillation.rs:1219` (Tier-1a `RecipeRunnerEnvelope`), `:1382`/`:1392` (recovery
+    candidate views), `:1473`/`:1494` (`scan_cleaned_for_facts`).
+  - A trailing comma keeps braces balanced, so `recipe_output::balanced_objects` still
+    yields the span (`:1490`), but strict parse rejects it → `recover_distill_output`
+    returns `None` (`:1305-1340`) → `scan_for_facts_object` returns `None`
+    (`:1420-1452`) → Tier-3 `Err` (`:1250-1254`) → batch deferred **every cycle** →
+    `distill_parse_success_rate` → 0 → Overseer reports **100%**.
+  - **No trailing-comma / json5 / lenient-JSON tolerance anywhere in `main` `src/`**:
+    `git grep -in 'trailing_comma|json5|json_repair|jsonc|relaxed_json|sanitize_json'
+    main -- src/` → **empty**. Verified independently of Round-1's grep.
+  - `#2658` issue title (maintainer) literally: *"distill: residual 100% parse-failure —
+    agent JSON trailing comma drops the whole batch"* — triangulates the code trace.
+- **#2658 ≠ #2619 (causal distinction).** The banner/ANSI/pretty-envelope cause is
+  **fixed and closed** (`#2619` CLOSED 2026-07-06) and its fixes are present on `main`
+  (`recover_distill_output` + `strip_recipe_noise`/`strip_ansi` dual views + prefer-
+  last/grounded object: `distillation.rs:1223-1452`). Because those fixes landed, the
+  banner cause **cannot** be the live 100%; the residual **trailing comma** is.
+  Representative failing input class (both reject on serde_json 1.0.149; braces stay
+  balanced): `{"facts":[{"concept":"bug-pattern","content":"x","source_episode_id":"e1"},]}`
+  and `{"facts":[{...,"source_episode_id":"e1",}]}`.
+- **Track B classification holds** (issue-state verified via `gh`):
+  kgpacks-rs **#12 CLOSED** 2026-07-05 (parity decision, intentional divergence) →
+  goal `dbabd65f` board-block is **STALE**; **#16 OPEN** (WS1 CVE eval) = critical path
+  (`0c0ada69`); **#17 OPEN** (WS2 int8/PQ, gated on eval recall parity) = gated on #16
+  (`7f5afcca`); **#32 OPEN** (optional non-default semantic embeddings) = non-blocking;
+  umbrella `f29bb15c` blocked transitively on #16/#17, **not** on #12 or on distill.
+- **Recurrence = unremediated re-emission, NOT a dedup defect** (confirmed in code):
+  `signals_from(&ObservedState)` is **stateless/threshold-based**, regenerated fresh each
+  Observe pass (`src/overseer/signal.rs`); the only dedup is **within-pass** merge on
+  `dedup_key` in `orient()` (`src/overseer/mod.rs`) and an **intervention-level** 15-min
+  `WhisperGate` (`src/overseer/guardrails.rs`). There is **no inter-pass signal dedup**,
+  so a persistent condition (distill 100% + blocked goals) is re-emitted every pass. The
+  2× asymmetry (2nd pass **adds** `resource:engineer_spawn`, **drops** the issue-12
+  goal-block) is explained by **state evolution** between passes — `live_engineers`
+  crossed its threshold and kgpacks-rs **#12 closed 2026-07-05** clearing its
+  `goal:blocked` — which *confirms* re-emission and *rules out* an emit-duplicate defect.
+
+## What Round 1/2 got WRONG (corrected against `main`)
+
+1. **"Overseer signal taxonomy lives only in the #2619 worktree, not yet in `main`"
+   (Criterion 3 / P1) — FALSE.** The taxonomy **is on `main`**:
+   `src/overseer/mod.rs` emits `"process:distill_fail"` (`:714`), `"resource:engineer_spawn"`
+   (`:741`), `"quality:gym_skipped"` (`:753`), `format!("goal:blocked:{goal_id}")` (`:807`),
+   `format!("anomaly:{detail}")` (`:777`). The investigation *checkout* lacks `src/overseer/`
+   only because it is 92 commits stale. **P1 "promote the taxonomy to `main`" is MOOT —
+   already landed.**
+
+2. **Coupling story is OVER-STATED; the gym link is REFUTED.** Round-1 claimed the gym
+   self-eval is skipped *because* distill produces no fresh signal. **Code refutes this:**
+   `gym_skipped` is driven by the **manual env flag** `SIMARD_SKIP_GYM`
+   (`src/status/provider.rs:61`; also `src/overseer/sensor.rs:125-126`) — it has **zero**
+   dependence on distill. `git grep distill main -- src/gym/` → **empty** (gym never reads
+   distilled facts). Likewise `live_engineers` = live worktree-claim count
+   (`provider.rs:177`, `count_live_engineer_claims`, #2432) and `distill_fail_pct` =
+   `DISTILL_RUNS{result=parse_fail}/total` (`provider.rs:490-497`). **All three signals are
+   independent `ObservedState` fields from independent subsystems**, read in one Observe
+   pass → the coupling is **CORRELATIONAL at the code layer, with no causal chain.**
+
+3. **Coupling verdict (my primary deliverable): Track A and Track B are INDEPENDENT.**
+   `GoalBlocked` for the parity goals derives from the goal board's own `blocked_goals`
+   (`sensor.rs`), never from `distill_fail`. Distilled facts feed **cognitive memory**
+   (`src/cognitive_memory/*`, `memory_consolidation/mod.rs` "episodic→procedural learning
+   loop"), **not** the gym and **not** goal advancement — no code path makes a parity
+   `GoalBlocked` depend on distill output. **Verdict: fixing #2658 is neither necessary
+   nor sufficient to unblock #16/#17 — it is INDEPENDENT.** It is necessary-and-sufficient
+   only for the `process:distill_fail` signal itself (and the memory-staleness it causes).
+   The residual "systemic drag" hypothesis (stale semantic memory slows brain/engineers)
+   is *plausible but unproven* and must not be stated as causation.
+
+4. **"#2658 branches carry no diff vs `main`" — HALF WRONG.**
+   `feat/issue-2658-distill-tolerate-trailing-comma` **is at `main` tip `946fe3ca`** →
+   truly empty, no fix (Round-1 correct here). But
+   `feat/issue-2658-distillation-parse-failure-rate-100` (`db117b98`) is `main` **plus**
+   divergent work that **does** modify `distillation.rs` — however its approach is
+   **retry + JSON-format reinforcement** (`DISTILL_PARSE_RETRY_MAX`, `run_all_reinforced`,
+   #2468) and **facts-file capture** (#2622/#2619), **not** trailing-comma stripping. So
+   **no branch and no open PR adds trailing-comma tolerance.** Open PRs are docs-only:
+   **#2668** (this investigation) and **#2657** (stale-deploy runbook). The #2658 code fix
+   is genuinely **not yet implemented anywhere.**
+
+5. **`workstream-gap` is NOT a code-emitted token.** `git grep -in
+   'workstream.gap|workstream_gap|coverage' main -- src/overseer/` and `-- src/` →
+   **empty**. `provider.rs` anomaly assembly only emits `"distill parse-fail rate N%"`,
+   `"telemetry cardinality overflow (…)"`, `"daily LLM budget exceeded"`,
+   `"brain decide ladder exhausted (…)"` (`provider.rs:~510-537`). Round-1's attribution
+   of `workstream-gap` to an "Overseer M2+ in-flight-coverage observation" is **unverified
+   — no such emitter exists on `main`.** It most likely originates in the Overseer
+   brief/whisper narrative or the #2669 author's synthesis, not `signals_from`.
+
+## Telemetry recording semantics (Criterion / status audit)
+
+`distill_success_rate` and `distill_parse_success_rate` are recorded **per distill run**
+via `record_distill_success_metric` (`distillation.rs:888`, emits at `:908` and `:929`;
+failure path `:369`, success path `:573`); the Overseer's `distill_fail_pct` is then
+computed per Observe pass from the `DISTILL_RUNS{result=ok|parse_fail}` counters
+(`status/provider.rs:490-497`), with `parse_fix_holding = (pct == 0.0)` (`:540`).
+
+## Corrected bottom line
+
+- **Track A (live 100% parse-fail):** root cause = **#2658 trailing-comma → strict
+  serde_json rejection of the whole facts object**, still live on `main`; **no** lenient
+  recovery exists (serde_json 1.0.149 stock). Distinct from the already-fixed **#2619**
+  banner cause. **OPEN, no fix on any branch/PR.**
+- **Coupling verdict:** **correlational only** (independent Observe signals); the gym link
+  is **refuted** (env-flag driven). **Track A remediation does NOT unblock Track B — they
+  are independent tracks.**
+- **Track B:** unblock order `#12` (self-heal stale block / close goal `dbabd65f`) →
+  `#16` (WS1, critical path) → `#17` (WS2, gated on #16) → umbrella `f29bb15c`. Unaffected
+  by the distill fix.
+- **P1 "promote signal taxonomy to `main`" is obsolete** (already on `main`).
+
+## Evidence index (Round-3, all on `main` @ 946fe3ca unless noted)
+- `src/memory_consolidation/distillation.rs`: `parse_recipe_output_full` (1212-1255),
+  `recover_distill_output` (1305-1341), `scan_for_facts_object` (1420-1453),
+  `scan_cleaned_for_facts` (1471-…, strict parses at 1473/1494), `de_lenient_string`
+  (field-value coercion only, 1645-1661), telemetry (888/908/929/369/573).
+- `src/overseer/mod.rs` dedup keys: 714/741/753/777/807. `src/overseer/signal.rs`
+  `signals_from` (stateless per-pass). `src/overseer/guardrails.rs` `WhisperGate` (15-min).
+- `src/status/provider.rs`: `gym_skipped` env-flag (61), `distill_fail_pct` (490-497/540),
+  `live_engineers` (177). `src/gym/` — no distill reference (no code coupling).
+- `git grep` (main): trailing-comma/json5 tolerance → empty; `workstream-gap`/coverage →
+  empty. `Cargo.lock`: serde_json 1.0.149.
+- Issues (verified via `gh`): Simard **#2619 CLOSED**, **#2658 OPEN**, **#2669 OPEN**;
+  kgpacks-rs **#12 CLOSED**, **#16 OPEN**, **#17 OPEN**, **#32 OPEN**.
+- Open PRs (docs-only): Simard **#2668**, **#2657**. No code fix for #2658.
