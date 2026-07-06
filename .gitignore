@@ -21,6 +21,10 @@ gym-wave*-tmp/
 # never useful in version control.
 .simard-engineer-claim
 
+# Runtime gym-history SQLite database written into CWD by the OODA loop
+# (src/ooda_loop/observe.rs). Regenerated at runtime; never source.
+gym_history.db
+
 # Per-script audit output (issue #1990 / epic). Belt-and-suspenders with scripts/dashboard_audit/.gitignore.
 scripts/dashboard_audit/out/
 # Playwright self-understanding audit captures (issues #1170 / #1630 / #1992).

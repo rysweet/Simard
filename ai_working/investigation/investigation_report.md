@@ -5,17 +5,23 @@
 **Repo:** rysweet/Simard @ `92150406`
 **Anomaly signal:** `overseer-obs:anomaly:distill parse-fail rate 100%`
 
-> **⚠️ Read the "Consolidated Findings (Final)" section at the very bottom first.**
-> It reconciles all parallel deep dives (Track A parse-fail, Track B parity
-> goals, and the Overseer signal-emission/dedup model) into one self-contained,
-> live-`main`-verified answer. Where it disagrees with anything above, **the
-> Consolidated section wins.**
+> **⚠️ Read the "FINAL CONSOLIDATION — All Parallel Deep Dives Reconciled" section
+> at the very bottom first.** It folds the three parallel deep dives (PRIMARY /
+> SECONDARY / TERTIARY, all live-verified at `origin/main` @ `bb40c86b`) plus the
+> earlier SYNTHESIS into one self-contained answer to the investigation question.
+> Where it disagrees with anything above, **the FINAL CONSOLIDATION wins.**
 >
-> Round 1/2 were written on the investigation branch base `92150406`, which is
-> **92 commits behind `main` (946fe3ca)**. Several Round-1 claims were correct
-> *for that stale base* but are **wrong for the live system (`main`)**. The
-> Round-3 addendum re-verifies every criterion against `main` with file:line
-> evidence; the Consolidated section folds those corrections in.
+> **This report is an append-only stack of nine anchor-stratified layers** written
+> as the git base advanced `92150406 → 946fe3ca → ed63aa24 → bb40c86b`. Each layer is
+> truthful *for its own anchor*; the apparent contradiction a reader sees (#2658
+> "OPEN / land #2658 (P0)" vs. "CLOSED / fix landed") is **anchor drift, not error.**
+> Read **bottom-up**: the newest layer wins. The T1 supersession ledger (§T1) and the
+> FINAL CONSOLIDATION are canonical; treat every "#2658 OPEN" / "land #2658 (P0)"
+> statement in layers 1–5 (Round 1/2 body, Round-3 Addendum, Consolidated "(Final)",
+> Final Reconciliation) as **historical**. **Ground truth = layers 6–9, anchored to
+> live `bb40c86b`** (SYNTHESIS, PRIMARY, SECONDARY, TERTIARY + this FINAL
+> CONSOLIDATION). No post-`bb40c86b` drift exists — it is both the newest anchor and
+> the live tip.
 
 ---
 
@@ -722,3 +728,1025 @@ and *rules out* an emit-duplicate defect:**
 - **Live issues (`gh`):** Simard **#2619 CLOSED**, **#2658 OPEN**; kgpacks-rs
   **#12 CLOSED**, **#16 OPEN**, **#17 OPEN**, **#32 OPEN**. Open PRs docs-only:
   Simard #2668, #2657. **No code fix for #2658 anywhere.**
+
+---
+
+# Final Reconciliation — Re-Anchored to LIVE `origin/main` (`ed63aa24`)
+
+**Status: AUTHORITATIVE — supersedes the "Consolidated Findings (Final)" section above.**
+That section is correct in its verdicts but anchored to **`946fe3ca`**, which is
+now **21 commits stale** relative to deployed `origin/main` (`ed63aa24`). A final
+deep dive re-verified every load-bearing claim against live `origin/main` on
+2026-07-06. The **verdicts do not change**; the **parser architecture, line
+numbers, and one issue-state fact do**. Fold the corrections below into any
+downstream action — especially the P0 fix target.
+
+## 0. What changed since the prior consolidation
+
+| Anchor | Prior consolidation (`946fe3ca`, Gen 2) | Live `origin/main` (`ed63aa24`, Gen 3) — VERIFIED |
+|---|---|---|
+| `distillation.rs` size | 3222 lines | **2249 lines** (refactored smaller) |
+| Facts source | stdout scraping + ANSI-strip dual views | **dedicated agent-written facts FILE** (`harvest_facts_file`, `:1195`) |
+| Parse entry chain | `parse_recipe_output_full` (1212) → `recover_distill_output` (1305) → `scan_for_facts_object` (1420) → `scan_cleaned_for_facts` | **`harvest_facts_file` (:1195) → `parse_facts_document` (:1257) → `scan_cleaned_for_facts` (:1289)** |
+| `recover_distill_output` / `scan_for_facts_object` / `parse_recipe_output_full` | present | **REMOVED** (deleted by `9378fb9d` / PR #2651) |
+| Field tolerance | — | **`de_lenient_string` (:1364)** added (#2506) — coerces null/scalar *field values* only |
+| Landing commit | — | **`9378fb9d fix(distill): read facts from a dedicated agent-written file, not stdout (#2622/#2619) (#2651)`** |
+
+**Timeline of the three parser generations (all confirmed):**
+- **Gen 1** — merge-base `92150406` (the investigation *checkout* base, ~1039 lines): simple 3-tier strict parser. Explains why the local tree lacked the cited functions.
+- **Gen 2** — `946fe3ca` (3222 lines): `recover_distill_output` + ANSI-strip + prefer-last-facts. The #2619-era fix; the prior consolidation's basis.
+- **Gen 3** — `ed63aa24` **(LIVE, deployed)** (2249 lines): facts read from a **dedicated file**, not stdout; `de_lenient_string` field tolerance. Structural fix for **#2619 + #2622** (both **CLOSED 2026-07-06T06:17:43Z** by PR #2651).
+
+## 1. Track A root cause — RE-CONFIRMED LIVE, mechanism updated
+
+**#2658 (trailing comma) is still the live 100% cause on `ed63aa24`.** The Gen-3
+refactor changed *where* the JSON comes from (a dedicated file, eliminating the
+banner/ANSI/stdout-scraping failure class) but **not how it is parsed**:
+
+- Live parse path: `parse_facts_document` (`:1257`) → `scan_cleaned_for_facts`
+  (`:1289`). Both the fast path (`serde_json::from_str::<RecipeEnvelope>(trimmed)`,
+  `:1291`) and the slow path over `recipe_output::balanced_objects` spans
+  (`serde_json::from_str::<RecipeEnvelope>(span)`, `:1312`) use **stock strict
+  `serde_json` 1.0.149**. No comma/JSON-repair anywhere (`git grep -iE
+  'trailing_comma|json5|json_repair|jsonc|relaxed_json|sanitize_json|json_lenient'
+  origin/main -- src/` → empty; the only `de_lenient` hits are `de_lenient_string`).
+- **`de_lenient_string` does NOT fix #2658.** It is a `deserialize_with` hook that
+  coerces individual *field values* (null / bare scalar → string, #2506). A
+  **trailing comma is a JSON *syntax* error** rejected by the serde_json tokenizer
+  **before** any field deserializer runs. So a single trailing comma before `}`/`]`
+  still makes the whole `{ "facts": [...] }` object `Err` → `parse_facts_document`
+  returns the `"facts document did not contain a parseable ... object"` error →
+  batch deferred every cycle → `distill_parse_success_rate → 0` → **100%**.
+- Issue triangulation unchanged: **#2658 OPEN** — *"distill: residual 100%
+  parse-failure — agent JSON trailing comma drops the whole batch."* No code fix
+  on any branch or PR (open PRs remain docs-only).
+
+**Secondary "valid-parse-yields-zero-facts" path still distinct** (concept/reliability
+gates in `RecipeEnvelope::into_facts` / `assess_fact_reliability`) — do not conflate.
+
+## 2. Track A P0 remediation — RE-TARGETED to live-main functions
+
+The prior P0 named removed functions. The fix now targets **`scan_cleaned_for_facts`**
+(`distillation.rs:1289`):
+
+- After the strict `serde_json::from_str::<RecipeEnvelope>` fails on `trimmed`
+  (fast path, `:1291`) **and** on each `balanced_objects` span (slow path, `:1312`),
+  retry the parse against a **string-aware trailing-comma-stripped** view of the
+  same bytes (strip only `,` immediately preceding `}`/`]` *outside* JSON strings).
+  This is a provable no-op on well-formed JSON, so the clean path stays
+  byte-identical — no precision/΄semantic change, genuinely malformed input still
+  `Err`s. Prefer a shared `recipe_output` helper so OODA/brain reuse it.
+- Add regression fixtures: bare object **and** `--output-format json` envelope;
+  assert a comma *inside a string value* is untouched; assert truly malformed JSON
+  still fails. **Done when** `cargo test memory_consolidation::distillation` passes
+  and `distill_parse_success_rate` trends 0.0 → ~1.0.
+- Emit a distinct `"valid parse yielded zero facts"` log in the `into_facts` filter.
+
+## 3. Track B + Overseer emission/dedup — RE-VERIFIED on live main (semantics intact)
+
+The 21 commits **did** touch `signal.rs`, `overseer/mod.rs`, `sensor.rs`,
+`guardrails.rs`, `completion_gate.rs`, so each load-bearing claim was re-checked
+directly. **All hold on `ed63aa24`; only line numbers moved:**
+
+- **Stateless per-pass emission:** `signals_from(&ObservedState)` — `signal.rs:366`.
+- **Within-pass dedup + classify:** `classify_signal` — `mod.rs:1251`; dedup keys
+  `process:distill_fail` (`:1256`), `resource:engineer_spawn` (`:1283`),
+  `quality:gym_skipped` (`:1295`), `anomaly:{detail}` (`:1319`),
+  `goal:blocked:{goal_id}` (`:1349`).
+- **Intervention rate-limit (not emission dedup):** `WhisperGate::new(900, …)` —
+  `whisper_gate (900,5)` `mod.rs:284`, `blocked_goal_gate (900,20)` `:290`
+  (also `write_back_gate (900,5)` `:297`, `gap_gate (900,200)` `:302`). 15-min
+  windows confirmed. **No inter-pass emission dedup exists.**
+- **Blocked-goal projection (stateless, re-derived each pass):**
+  `blocked_goals_from_board` → `blocked_goal_of` — `sensor.rs:204/209`, one
+  `BlockedGoal` per `GoalProgress::Blocked` active goal.
+- **Deploy-aware done-gate (3 proofs):** `completion_gate.rs` — `pr_merged` (`:29`)
+  ∧ `issue_closed` (`:31`) ∧ `deployed` (`:36`); `Complete` only when all satisfied.
+
+**⇒ Track B verdicts are unchanged on live main:** `dbabd65f`/#12 **STALE/false-park**
+(CLOSED, self-heal via `UnblockGoal`); `0c0ada69`/#16 **genuinely OPEN, critical
+path**; `7f5afcca`/#17 **genuinely OPEN, hard-gated on #16**; `f29bb15c` umbrella
+**standing by design**. Coupling verdict unchanged: **Track A ⟂ Track B (independent
+`ObservedState` fields; nothing reads `distill_fail_pct` to gate goals; `gym_skipped`
+is the `SIMARD_SKIP_GYM` env flag).**
+
+## 4. WHY "seen 2×" — mechanism now pinpointed (not a defect)
+
+The "recurring signature seen 2×" is the Overseer's **occurrence recall**, not a
+duplicate-emission bug. `recall_occurrences(&problem.dedup_key)` (`mod.rs:454`)
+counts prior surfacings of the same `dedup_key` from cognitive memory, keyed by a
+**SHA-256 digest of the dedup_key** (`occurrence_concept`, `mod.rs:1160-1162`; the
+sorted-deduped-key signature machinery of #2628, `mod.rs:1078-1082`). Because
+emission is stateless and there is **no inter-pass suppression**, a persistent
+condition is **honestly re-emitted every Observe pass**, and the recall counter
+faithfully reports it as **2×**. The 2× asymmetry (Pass 2 **adds**
+`resource:engineer_spawn` when `live_engineers` crosses `≥ 8`; **drops**
+`goal:blocked:dbabd65f` after #12 closed) **proves** genuine re-emission and
+**rules out** an emit-duplicate defect. Expected behavior — optional inter-pass
+`WhisperGate`-style suppression only if the recall noise is undesirable.
+
+## 5. Corrected evidence index (LIVE `origin/main` @ `ed63aa24`)
+
+- **Parse chain (Gen 3):** `distillation.rs` `harvest_facts_file` (`:1195`),
+  `parse_facts_document` (`:1257`), `scan_cleaned_for_facts` (`:1289`; strict
+  `serde_json::from_str` fast `:1291` / slow `:1312`), `de_lenient_string`
+  (`:1364`, field-tolerance only). **Removed:** `recover_distill_output`,
+  `scan_for_facts_object`, `parse_recipe_output_full` (deleted by `9378fb9d`/#2651).
+- **Emission/dedup:** `signal.rs:366`; `mod.rs` `classify_signal` (`:1251`),
+  dedup keys (`:1256/1283/1295/1319/1349`), `recall_occurrences` (`:454`),
+  `occurrence_concept` (`:1160`), WhisperGates (`:284/290/297/302`).
+- **Independence/gate:** `sensor.rs` `blocked_goals_from_board` (`:204`);
+  `completion_gate.rs` `pr_merged/issue_closed/deployed` (`:29/31/36`).
+- **`git grep` (origin/main):** JSON-repair/trailing-comma tolerance → **empty**;
+  `workstream-gap` code token → **empty** (narrative/synthesis artifact only).
+  `Cargo.lock`: serde_json **1.0.149** (stock).
+- **Live issues (`gh`, 2026-07-06):** Simard **#2619 CLOSED**, **#2622 CLOSED**
+  (both by PR #2651, 06:17:43Z), **#2658 OPEN** (live 100% cause, no code fix
+  anywhere); kgpacks-rs **#12 CLOSED**, **#16 OPEN**, **#17 OPEN**, **#32 OPEN**.
+- **Version delta:** report basis `946fe3ca` is **21 commits** behind live
+  `origin/main` `ed63aa24`; investigation checkout base `92150406` is **113
+  commits** behind. All line numbers above are **live-main** (`ed63aa24`).
+
+## 6. Bottom line (final)
+
+The 2× signature = **two coincident, independent, honestly re-emitted conditions**:
+**(A)** a **live 100% distill parse-failure** from an **LLM trailing comma** that
+strict `serde_json` rejects — **survives the Gen-3 facts-file refactor** because
+parsing is still strict — tracked by **#2658 (OPEN, unfixed everywhere)**; and
+**(B)** a **correctly-blocked** parity cluster (#12 stale/self-heal; #16→#17
+genuinely stalled critical sub-chain; f29bb15c standing). No dedup defect; the 2×
+is faithful occurrence recall. **P0 = tolerate the trailing comma in
+`scan_cleaned_for_facts`** (byte-identical on clean input); **Track B proceeds on
+its own gates, unaffected by the distill fix.**
+
+---
+
+# SYNTHESIS — 5 Required Outputs (Live-Verified 2026-07-06T12:34Z, `origin/main` @ `bb40c86b`)
+
+> **Material live update since the Consolidated section above:** `origin/main`
+> advanced past `ed63aa24` to **`bb40c86b`**. **#2658 is now CLOSED (COMPLETED,
+> 12:27:40Z)** — fixed by **merged PR #2675** *"fix(distill): tolerate trailing
+> comma in agent JSON so one bad token no longer drops the whole batch (#2658)."*
+> The report's Track-A root cause was **correct**, and its **P0 remediation has
+> now landed exactly as recommended.** Statements above that say "#2658 OPEN /
+> unfixed everywhere" are **superseded** by this section.
+
+## 1. Executive Summary
+The recurring 2× signature is **two coincident-but-causally-independent conditions**
+honestly re-emitted by the stateless Overseer each Observe pass (no dedup defect):
+**(A)** a live **100% distill parse-failure** caused by an **LLM trailing comma**
+that stock `serde_json 1.0.149` rejects — now **RESOLVED on live `main`** by
+PR #2675 (string-aware `strip_json_trailing_commas` + `parse_facts_envelope_lenient`);
+and **(B)** a **correctly-blocked** kgpacks-rs parity cluster (umbrella `f29bb15c`
+standing; `dbabd65f`/#12 stale/self-heal; `0c0ada69`/#16 → `7f5afcca`/#17 a genuinely
+stalled critical sub-chain). Fixing (A) is **neither necessary nor sufficient** to
+unblock (B).
+
+## 2. Detailed Explanation (with evidence)
+**Track A — root cause & resolution.** LLM emits a trailing comma before `}`/`]`
+in `{ "facts": [...] }`; the comma keeps braces balanced so the span is found, but
+strict `serde_json` rejects the whole object → `recover_distill_output`/`scan_for_facts_object`
+return `None` → `parse_recipe_output_full` returns Tier-3 `Err` → batch deferred every
+cycle → `distill_parse_success_rate → 0` → Overseer emits `anomaly:distill parse-fail
+rate 100%` + `process:distill_fail`. Distinct from **#2619 (CLOSED)** (banner/ANSI/stdout,
+later hardened by #2622/#2651 "read facts from a dedicated agent-written file, not
+stdout"). **Fix (live `main` @ `bb40c86b`, PR #2675):** new `src/recipe_output/extract.rs`
+(`strip_json_trailing_commas`, +7 unit tests) and `distillation.rs:1285`
+`parse_facts_envelope_lenient` retrying both parse sites (1317/1338) via `de_lenient_string`
+(+6 tests incl. string-content preservation), plus `distillation_fact_yield_bench.rs`.
+The stripper is a **no-op on well-formed JSON** (clean path byte-identical; commas
+inside strings untouched), so no precision/behavior loss.
+
+**Track B — the four blocked goals.** Re-derived each pass by stateless
+`blocked_goals_from_board` (`sensor.rs:188-205`); deploy-aware `completion_gate`
+certifies `Complete` only on `pr_merged ∧ issue_closed ∧ deployed`. Per prior `gh`
+verification: `f29bb15c` umbrella = **standing by design**; `dbabd65f`/**#12 CLOSED**
+= **stale/false-park** (decision done, no merge artifact; opt-in BGE tracked in **#32**,
+non-default) → self-heal via `UnblockGoal`; `0c0ada69`/**#16 OPEN** = WS1 CVE eval
+harness (**critical path**); `7f5afcca`/**#17 OPEN** = WS2 int8/PQ, **hard-gated on #16**
+(adopt only if `delta_accuracy ≥ -0.02` + hit@k parity on the WS1 harness). Rest of
+board advancing (WS3/#18, WS4/#19, WS5/#20 merged; WS7/#22 PR #36 open) ⇒ #16→#17 is a
+genuinely stalled sub-chain, not merely "next in queue." *(NOTE: `rysweet/kgpacks-rs`
+is not resolvable via `gh` from this environment now — GraphQL "could not resolve" — so
+these live states are carried from the prior in-report `gh` verification, not re-checked
+at synthesis time.)*
+
+**Why 2×.** `signals_from(&ObservedState)` (`signal.rs:122`) regenerates every signal
+fresh per pass; the only dedup is **within-pass** (`orient`, `dedup_key`) and
+**action-level** `WhisperGate` (900 s). There is **no inter-pass signal dedup**, so a
+persistent condition is honestly re-emitted → the 2× is faithful occurrence recall,
+**not** a duplicate-emit bug. The 2× **asymmetry proves re-derivation**: pass 2 *adds*
+`resource:engineer_spawn` (`live_engineers` crossed ≥ 8) and *drops* `goal:blocked:dbabd65f`
+(#12 closed 2026-07-05). It is `goal:blocked` (not `goal:stale`) precisely because the
+set is recomputed from the live board each pass.
+
+**Coupling verdict: Track A ⟂ Track B (independent).** `distill_fail_pct`,
+`live_engineers`, `gym_skipped`, `blocked_goals` are independent `ObservedState` fields
+read in one pass; nothing reads `distill_fail_pct` to derive blocks. `quality:gym_skipped`
+is the manual **`SIMARD_SKIP_GYM`** env flag (`provider.rs:61`) with zero distill
+dependence — the gym↔distill link is **REFUTED**. Distilled facts feed `cognitive_memory`,
+**not** the gym and **not** goal advancement. So `process:distill_fail` does **not** cause
+`gym_skipped` or `goal:blocked`; they are **coincident co-emission** in one Observe pass.
+
+## 3. Visual Aids
+```mermaid
+flowchart TB
+  subgraph OP["ONE Overseer Observe pass (stateless signals_from)"]
+    direction LR
+    subgraph A["TRACK A — distill (NOW FIXED @ bb40c86b)"]
+      A1["LLM emits {facts:[...],}\n(trailing comma)"] --> A2["strict serde_json REJECTS whole object"]
+      A2 --> A3["Tier-3 Err → batch deferred every cycle"]
+      A3 --> A4["distill_parse_success_rate → 0"]
+      A4 --> A5["anomaly:distill parse-fail rate 100%\nprocess:distill_fail"]
+      A2 -. "PR #2675 fix" .-> AF["strip_json_trailing_commas +\nparse_facts_envelope_lenient\n(no-op on clean JSON)"]
+      AF -.-> AOK["success_rate 0.0 → ~1.0"]
+    end
+    subgraph B["TRACK B — parity goals (correctly blocked)"]
+      B0["f29bb15c umbrella (standing)"]
+      B1["dbabd65f/#12 CLOSED → stale/self-heal (UnblockGoal); BGE opt-in #32"]
+      B2["0c0ada69/#16 OPEN (WS1 CVE harness — critical path)"]
+      B3["7f5afcca/#17 OPEN (WS2 int8/PQ — gated on #16)"]
+      B1 --> B2 --> B3 --> B0
+    end
+    subgraph Q["quality:gym_skipped"]
+      Q1["SIMARD_SKIP_GYM env flag\n(zero distill dependence)"]
+    end
+  end
+  A5 --> SIG["Composite signature recorded in cognitive_memory"]
+  B0 --> SIG
+  B1 --> SIG
+  B2 --> SIG
+  B3 --> SIG
+  Q1 --> SIG
+  SIG --> R["Re-emitted every pass (no inter-pass dedup) ⇒ recurs 2×\nΔ pass2: +resource:engineer_spawn, −goal:blocked:dbabd65f"]
+  classDef fixed fill:#d6f5d6,stroke:#2e7d32;
+  classDef open fill:#fde2e1,stroke:#c62828;
+  class AF,AOK fixed; class B2,B3 open;
+```
+**Unblock order (Track B):** `#12` self-heal (`UnblockGoal`) → `#16` (WS1 harness) →
+`#17` (WS2, gated on #16 parity) → `f29bb15c` umbrella retires. `#32` is non-default,
+non-blocking.
+
+## 4. Key Insights
+- **The signature is honest telemetry, not a bug.** Two unrelated subsystems failing/parked
+  in the same pass, faithfully re-emitted — the "2×" is correct recall, not duplication.
+- **The 2× asymmetry is a feature, not noise:** the add/drop deltas *prove* stateless
+  per-pass re-derivation and *rule out* an emit-duplicate defect.
+- **Correlation ≠ causation held up in code:** the tempting "distill_fail → gym_skipped →
+  goals blocked" chain is **refuted** — `gym_skipped` is a manual env flag; blocks read only
+  goal status. The tracks are orthogonal.
+- **The investigation's Track-A root cause and P0 were validated by reality:** PR #2675
+  landed the *exact* recommended fix (shared `recipe_output::extract` helper, string-aware
+  no-op-on-clean stripping, regression fixtures) **during** this investigation.
+- **A stale checkout nearly produced wrong conclusions:** the investigation base was 113
+  commits behind; only re-anchoring to live `origin/main` revealed both the Gen-3 facts-file
+  refactor and, ultimately, the merged fix. **Always re-verify against live `origin/main`.**
+
+## 5. Remaining Unknowns
+- **Telemetry confirmation of the fix:** need runtime evidence that
+  `distill_parse_success_rate` actually trends **0.0 → ~1.0** over the next Observe cycles
+  post-#2675 (source proves the fix path; live logs would confirm the effect).
+- **Secondary "valid parse → zero facts" symptom:** the `into_facts` concept-label filter
+  can yield zero facts on a *valid* parse; a **distinct** "valid parse yielded zero facts"
+  log is **still absent** on `main` (only doc comments found). Keep as a P1 observability
+  follow-up so this mode isn't misread as parse-fail.
+- **Track B live states not re-verified at synthesis:** `rysweet/kgpacks-rs` was not
+  resolvable via `gh` from this environment (GraphQL could-not-resolve → access/name gap);
+  #12/#16/#17/#32 states are carried from the earlier in-report `gh` verification.
+- **Whether SIMARD_SKIP_GYM is actually set** in the failing environment vs gym skipped for
+  another reason — not observable from source alone.
+- **Optional signal hygiene (open choice, not a defect):** whether to add an inter-pass
+  suppression window for unchanged `dedup_key`s to quiet the 2× re-emission; current
+  behavior is correct-by-design.
+
+---
+
+# PRIMARY DEEP-DIVE — Final Live Re-Verification (2026-07-06T13:37Z, `origin/main` @ `bb40c86b`)
+
+**Status: AUTHORITATIVE / CURRENT — every load-bearing claim re-checked directly against
+live `origin/main` HEAD `bb40c86b` (no anchor drift: `bb40c86b` is both the report's newest
+SYNTHESIS anchor and the current tip). Confirms the SYNTHESIS section; corrects line-number
+drift; and — using the correct repo name — resolves the Track-B "not re-verified" unknown.**
+
+## 0. Headline — the investigation's premise flipped and the fix has LANDED
+The strategy tasked this primary with "pinpoint the OPEN #2658 trailing-comma gap … highest-
+leverage fix candidate (land #2658)." That premise is **stale**. On live `main`:
+- **Simard #2658 = CLOSED / COMPLETED `2026-07-06T12:27:40Z`** (`gh`), title *"distill:
+  residual 100% parse-failure — agent JSON trailing comma drops the whole batch."*
+- Fixed by **PR #2675 = MERGED `12:27:39Z`, merge commit `bb40c86b` (= live HEAD)**.
+- The recommended P0 landed **exactly** as the report specified. There is **no open
+  distill parse-fail fix to make.** The highest-leverage remediation is now **complete**;
+  remaining work is verification + a P1 observability follow-up (below).
+
+## 1. Track A — distill parse path, re-read on live `main` (file:line, verified)
+Parse chain now = `harvest_facts_file` → `parse_facts_document` (`distillation.rs:1257`) →
+`scan_cleaned_for_facts` (`:1315`) → `parse_facts_envelope_lenient` (`:1285`).
+
+Per-cause open/closed on live `bb40c86b`:
+| Parse-fail cause | Site (live) | Status |
+|---|---|---|
+| Banner/ANSI/stdout scraping | (removed — facts now read from dedicated file) | **CLOSED** — #2619/#2622 via PR #2651 (`9378fb9d`), both CLOSED 06:17:43Z |
+| Stray `{` in leading prose splitting the object | `balanced_objects` slow path `distillation.rs:1338` | **CLOSED** — #2508 (string-aware balanced scan, restarts after unmatched `{`) |
+| **Trailing comma before `}`/`]`** (the residual 100% shape) | `parse_facts_envelope_lenient` `distillation.rs:1285` → `recipe_output::strip_json_trailing_commas` `extract.rs:321` | **CLOSED** — #2658 via PR #2675 (`bb40c86b`) |
+| Field is null / bare scalar instead of string | `de_lenient_string` `distillation.rs:1390` | CLOSED earlier (#2506) — field tolerance |
+| Valid parse yields **zero** facts (concept/reliability gate) | `RecipeEnvelope::into_output` / `into_facts` filter | **DISTINCT, still latent** — not a parse-fail; no dedicated log yet (P1) |
+
+**Fix mechanism (verified byte-for-byte, `extract.rs:321`, `distillation.rs:1285`):**
+`parse_facts_envelope_lenient` tries **strict `serde_json` first** (clean path byte-identical),
+and only retries on `strip_json_trailing_commas` when that returns `Cow::Owned` — i.e. a comma
+was actually removed. `strip_json_trailing_commas` is **string- and escape-aware** (a comma
+inside a `content` value is never touched), borrows unchanged (zero-alloc) on clean input, and
+drops **only** `,` immediately before `}`/`]` outside strings. It is a **provable no-op on
+well-formed JSON** and leaves genuinely malformed input (`[1,,2]`, unquoted keys) still failing
+— leniency never widens to accept broken JSON. Retry is wired into **both** parse sites: fast
+path `distillation.rs:1317` (on `trimmed`) and slow path `:1338` (per `balanced_objects` span).
+Regression fixtures: 7 in `extract.rs:716-805` + 6 in `distillation.rs:1716-1783` (incl.
+string-content preservation, clean-object-unaffected, still-fails-on-genuine-malformed).
+`serde_json` remains stock **1.0.149** (`Cargo.lock:3727`). `git grep` for `json5|json_repair|
+jsonc|relaxed_json|sanitize_json|json_lenient` on `origin/main -- src/` → empty (the only
+`de_lenient` hit is the unrelated field hook). ⇒ **The residual 100% cause is resolved; the
+fix is the exact shape the report recommended.**
+
+**Prompt contract (`prompt_assets/simard/recipes/distill-episodes.yaml`, live):** the agent is
+told to **write** a single `{ "facts":[…], "procedures":[…] }` object to a dedicated file
+(`facts_output_path`, #2622/#2619 Gen-3), "and NOTHING else." `strict_json_instruction`
+(default empty) is a **retry-only** format-reinforcement sentence (#2468). The prompt already
+demanded strict JSON; the trailing comma was the LLM defect that survived the prompt guard —
+hence the code-side #2675 fix was necessary and sufficient for this failure class.
+
+## 2. Track B — kgpacks parity, NOW live-verified (`rysweet/agent-kgpacks-rs`)
+The report could not resolve `rysweet/kgpacks-rs`. **Correct repo = `rysweet/agent-kgpacks-rs`**
+(resolves via `gh`). Re-verified 2026-07-06T13:37Z:
+| Goal / issue | Live state (`gh`) | Blocking edge | Classification |
+|---|---|---|---|
+| `f29bb15c` umbrella (full parity) | (board umbrella) | waits on WS chain | **Standing by design** |
+| `dbabd65f` / **#12** | **CLOSED/COMPLETED 07-05T21:51:50Z** — "deterministic hash embeddings vs TS BGE (intentional)" | none (decision done, no merge artifact) | **Stale / false-park** → self-heal via `UnblockGoal` |
+| `0c0ada69` / **#16** WS1 CVE eval | **OPEN** | live work in progress | **Genuinely blocked — critical path** |
+| `7f5afcca` / **#17** WS2 int8/PQ | **OPEN** — title: *"…gated on eval recall parity"* | **hard-gated on #16** | **Genuinely blocked (downstream of #16)** |
+| **#32** optional BGE backend | **OPEN** — "non-default follow-up from #12" | none | **Non-blocking / opt-in** |
+
+**Board progress corroboration (all now CLOSED/COMPLETED):** WS3/#18 (10:33Z), WS4/#19
+(09:45Z), WS5/#20 (09:22Z), **WS7/#22 (12:07Z)** — the last **updates the report**, which had
+WS7 as "PR #36 open." ⇒ the rest of the board is advancing, so **#16→#17 is a genuinely
+stalled sub-chain**, not merely next-in-queue. **Unblock order:** #12 self-heal → #16 (WS1
+harness) → #17 (WS2, gated on #16 parity) → `f29bb15c` retires. #32 stays non-default.
+
+## 3. Overseer emission / dedup / "seen 2×" — re-verified (line numbers corrected)
+| Claim | Live site (`bb40c86b`) | Prior citation (drifted) |
+|---|---|---|
+| Stateless per-pass Observe→Signal | `signal.rs:366` `signals_from` | signal.rs:122 |
+| Recurrence threshold ≥2 = "recurring" | `signal.rs` `RECURRING_SIGNATURE_THRESHOLD = 2` (#2628) | — |
+| Occurrence recall (counts prior surfacings) | `mod.rs:985` `recall_occurrences(dedup_key)` | mod.rs:454 |
+| Signature key = SHA-256 digest of dedup_key | `mod.rs:1160` `occurrence_concept` (`sha2::Sha256`, first 8 bytes → `overseerocc…`) | mod.rs:1160-1162 |
+| Within-pass dedup keys | `mod.rs:1251` `classify_signal`: `process:distill_fail`, `resource:engineer_spawn`, `quality:gym_skipped`, `goal:blocked:{id}`, `anomaly:{detail}`, `goal:stale:{id}` | :1256/1283/1295/1319/1349 |
+| Intervention rate-limit (NOT emission dedup) | `mod.rs:284/290/297/302` WhisperGates (900s): whisper(900,5), blocked_goal(900,20), write_back(900,5), gap(900,200) | same |
+| Blocked-goal projection (stateless, re-derived) | `sensor.rs:204` `blocked_goals_from_board` | sensor.rs:204/188-205 |
+
+**Why "2×" (mechanism, not a defect):** `signals_from` regenerates every signal fresh each
+pass; the only dedup is **within-pass** (`classify_signal`) and **action-level** `WhisperGate`
+(900s). There is **no inter-pass emission suppression**, so a persistent condition is honestly
+re-emitted every Observe pass, and `recall_occurrences` (keyed on the SHA-256 digest of the
+dedup_key) faithfully reports it as 2× — crossing `RECURRING_SIGNATURE_THRESHOLD=2` raises
+`Signal::RecurringSignature` (#2628). The 2× **asymmetry proves re-derivation**: pass 2 *adds*
+`resource:engineer_spawn` (`live_engineers ≥ 8`) and *drops* `goal:blocked:dbabd65f` (#12
+closed). ⇒ **honest occurrence recall, not an emit-duplicate bug.**
+
+## 4. gym-skip trigger & (in)dependence — re-verified
+`quality:gym_skipped` originates from the **`SIMARD_SKIP_GYM=1` env flag**: `skip_gym()`
+(`gym_runner_client.rs:45-46`, `std::env::var("SIMARD_SKIP_GYM")=="1"`) short-circuits the
+engine (`:258-286`) and records a synthetic result; surfaced to the Overseer via
+`StatusSnapshot.gym.skip_gym` → `capabilities.rs:85 gym_skipped: bool` → `classify_signal`
+`quality:gym_skipped`. **Independent of distill** — no code reads `distill_fail_pct` to gate the
+gym; distilled facts feed `cognitive_memory`, not the gym or goal advancement. The tempting
+"distill_fail → gym_skipped → goals blocked" chain is **REFUTED**. (Which is stale: the report's
+`provider.rs:61` pointer — live trigger is `gym_runner_client.rs:45`.)
+
+## 5. Reconciliation of the report against live main
+- **SYNTHESIS section (anchor `bb40c86b`) = current ground truth.** `bb40c86b` is the live
+  HEAD; **no commits landed after it**, so there is **no post-synthesis drift** to re-verify.
+- **Superseded by live reality (do not action):** every "#2658 OPEN / unfixed everywhere"
+  statement in the *Final Reconciliation* (anchor `ed63aa24`) and earlier Round-1/2 sections —
+  #2658 is CLOSED, fix merged at HEAD.
+- **Corrected here:** overseer line numbers (`recall_occurrences` :454→:985; `signals_from`
+  :122→:366); gym trigger (`provider.rs:61`→`gym_runner_client.rs:45`); `completion_gate.rs`
+  three-string gate not present verbatim on live main (deploy proof now via
+  `overseer/deploy.rs:254 deployed_commit` + `pr_verify.rs`); WS7/#22 now CLOSED (was "PR #36
+  open").
+- **Newly resolved unknown:** Track-B live states, via the correct repo `agent-kgpacks-rs`
+  (§2) — the report's "not re-verified at synthesis" caveat is now closed.
+
+## 6. Bottom line (primary verdict)
+Two coincident, causally-independent, honestly-re-emitted conditions — **not** a dedup defect:
+- **Track A (distill):** live 100% parse-fail from an LLM trailing comma → **RESOLVED** on
+  `main` by #2675/`bb40c86b` (`strip_json_trailing_commas` + `parse_facts_envelope_lenient`,
+  no-op on clean JSON). The report's root-cause and P0 were validated by reality; **nothing
+  left to fix here.**
+- **Track B (parity):** correctly blocked — #12 stale/self-heal; **#16 (OPEN, critical path)**
+  → **#17 (OPEN, gated on #16)**; f29bb15c standing; #32 opt-in. **Track A ⟂ Track B.**
+
+**Highest-leverage action, updated:** the fix already landed. Remaining =
+**(P1, verify)** confirm `distill_parse_success_rate` trends 0.0→~1.0 over the next Observe
+cycles post-#2675; **(P1, observability)** add a distinct "valid parse yielded zero facts" log
+in the `into_facts` filter so the secondary zero-yield mode isn't misread as parse-fail;
+**(Track B)** proceed on its own gates (#16 then #17). Optional: an inter-pass suppression
+window for unchanged `dedup_key`s to quiet 2× recall — correct-by-design today, not a defect.
+
+---
+
+# SECONDARY DEEP-DIVE — Overseer Emission/Dedup/Fingerprint Model, Independently Re-Read (2026-07-06T13:42Z, `origin/main` @ `bb40c86b`)
+
+**Status: AUTHORITATIVE / CURRENT for the emission-model focus.** Every claim below was re-read
+directly from the live `origin/main` (`bb40c86b`) overseer source (`git show origin/main:src/overseer/*`;
+the files are absent from the stale investigation checkout). This section *confirms and hardens*
+the SYNTHESIS/PRIMARY verdicts on the "2×" question, adds the exact composite-signature proof,
+and closes the recurrence-loop linkage end-to-end.
+
+## S1. The signature in the anomaly IS `observation_signature` — proven structurally
+The investigation's `overseer-obs:…|…` string is produced verbatim by `observation_signature`
+(`mod.rs:1081-1086`): `format!("overseer-obs:{}", keys.join("|"))` over each problem's `dedup_key`,
+**sorted (`sort_unstable`) then deduped**. Proof the reported string is that function's output —
+its six keys are in exact ASCII-sorted order:
+`anomaly:…` < `goal:blocked:advance-…f29bb15c` < `goal:blocked:fix-…-16-…0c0ada69`
+< `goal:blocked:fix-…-17-…7f5afcca` < `process:distill_fail` < `quality:gym_skipped`
+(`a`<`g`<`p`<`q`; ties broken within `goal:blocked:` by `advance`<`fix-16`<`fix-17`). A hand-authored
+or merge-artifact string would not reproduce this canonical ordering. ⇒ the signature is a
+deterministic, collision-free fingerprint of *one pass's* problem set, not an accumulation.
+
+## S2. The 6-signal → ONE-`ObservedState` causal map (each hop verified file:line)
+All six keys are re-derived, in a single pass, from fields of one `ObservedState` built at the top of
+`run_cycle` (`mod.rs:382-436`). Chain per key: **capability → `ObservedState` field →
+`signals_from` (pure) → `classify_signal` → `dedup_key`**.
+
+| # | dedup_key | Signal | ObservedState field | Source capability | Track |
+|---|---|---|---|---|---|
+| 1 | `anomaly:distill parse-fail rate 100%` | `Anomaly{detail}` (`signal.rs:413`) | `anomalies[]` | `StatusSnapshot.telemetry.anomalies[]` (`capabilities.rs:86`) | **A (distill)** |
+| 2 | `process:distill_fail` | `DistillFailureRate{pct}` (`signal.rs:372`) | `distill_fail_pct` | `StatusSnapshot.telemetry.distill_fail_pct` (`capabilities.rs:70`) | **A (distill)** |
+| 3 | `goal:blocked:…f29bb15c` | `GoalBlocked` (`signal.rs:441`) | `blocked_goals[]` | `goals.observe_board()`→`blocked_goals_from_board` (`sensor.rs:204`) | **B (parity)** |
+| 4 | `goal:blocked:…0c0ada69` | `GoalBlocked` | `blocked_goals[]` | same board projection | **B (parity)** |
+| 5 | `goal:blocked:…7f5afcca` | `GoalBlocked` | `blocked_goals[]` | same board projection | **B (parity)** |
+| 6 | `quality:gym_skipped` | `GymSkipped` (`signal.rs:398`) | `gym_skipped` | `StatusSnapshot.gym.skip_gym` = `SIMARD_SKIP_GYM` (`capabilities.rs:84`) | **independent** |
+
+**Key structural insight (new):** keys **#1 and #2 are two projections of the SAME distill
+telemetry** — a free-form string (`telemetry.anomalies[]`) and a numeric-threshold signal
+(`telemetry.distill_fail_pct ≥ DISTILL_FAIL_PCT_THRESHOLD`). So the six-key signature actually spans
+**three roots**: Track-A distill (×2 keys), Track-B blocked goals (×3 keys), and one independent
+env-flag key. This *reinforces* the two-independent-problems framing while explaining why the
+composite "looks like" one big problem: it is a per-pass *union*, not a causal chain.
+
+## S3. Why "2×" is stateless HONEST re-emission — mechanism closed end-to-end
+`signals_from(&ObservedState)` (`signal.rs:366`) is **pure — "No I/O"** (doc `:364`); it holds **no
+inter-pass state** and regenerates every `Signal` from the current snapshot. The recurrence counter
+is a **separate read path**, not a suppressor. Full loop, each hop verified:
+
+1. **Write-back (record):** `write_back_observation` (`mod.rs:532`) persists ONE
+   `ObservationEpisode{ signature = observation_signature(problems) }` (`mod.rs:544-552`),
+   **gated by `write_back_gate = WhisperGate::new(900,5)`** (`mod.rs:297`) so a persistent condition
+   is stored **at most once per 900 s window** (`peek`→store→`commit`, slot consumed only after a
+   successful write, `mod.rs:546-554`).
+2. **Recall (read):** a later pass's `recall_pass`→`recall_episodic` returns
+   `RecalledEpisode{ failure_signature }` — "the LOAD-BEARING key Orient counts" (`capabilities.rs:611-614`);
+   `ObservationEpisode.signature` **is** that `failure_signature` (`capabilities.rs:636-641`).
+3. **Count → signal:** `signals_from` tallies episodes by `failure_signature`; when the count
+   **≥ `RECURRING_SIGNATURE_THRESHOLD = 2`** (`signal.rs:362`) it appends
+   `Signal::RecurringSignature{ signature, occurrences }` (`signal.rs:462-468`).
+4. **Render:** `classify_signal` emits the exact phrase
+   **`"recurring signature seen {occurrences}× in cognitive memory ({signature})"`** (`mod.rs:1373-1375`).
+
+⇒ **"seen 2×" = the identical composite signature was persisted on two distinct ≥900 s write-back
+windows** because the underlying `ObservedState` was unchanged across them; recall faithfully reports
+the floor count (2 = the minimum that first qualifies as "recurring"). **No emission path dedups
+across passes** — the only dedups are (a) *within-pass* merge in `orient` (same `dedup_key`,
+`mod.rs:1224`), (b) the *write-back* rate-limit above (memory-write, not emission), and (c) *action*
+`WhisperGate`s (`whisper 900/5`, `blocked_goal 900/20`, `write_back 900/5`, `gap 900/200`,
+`mod.rs:284-302`) that throttle interventions/notifications, never signal derivation.
+
+**Two distinct "2×" mechanisms — do not conflate** (both honest, neither a defect):
+- **Composite-signature recurrence** (S3 above) → the literal `overseer-obs:… seen 2×` string.
+- **Per-problem occurrence recall** for root-cause WHY: `recall_occurrences(dedup_key)` (`mod.rs:985`)
+  keyed by `occurrence_concept` = **SHA-256(dedup_key)[..8]** prefixed `overseerocc…` (`mod.rs:1160-1168`),
+  with a **content-side exact `signature == dedup_key` filter** (`mod.rs:996`) guarding against any
+  SHA/keyword collision. This counts each key's history independently (feeds escalate-root-cause).
+
+## S4. The "2× asymmetry" clarified (prevents a verification-phase trap)
+The add/drop deltas the SYNTHESIS cites (**+`resource:engineer_spawn`** once `live_engineers ≥
+ENGINEER_SPAWN_THRESHOLD`, `signal.rs:393-397`; **−`goal:blocked:dbabd65f`** after #12 closed and the
+stateless `blocked_goals_from_board` re-projection stops emitting it, `sensor.rs:204-221`) **change the
+key set**, hence produce a **different `observation_signature`**. That is precisely the point: the
+asymmetry is evidence across the *broader* signal stream that the set is **recomputed from live state
+every pass** (stateless re-derivation), which *rules out* a frozen duplicate-emit. It does **not**
+imply the two passes that recorded *this exact* 6-key signature differed — those two were byte-identical
+(that is why they collapsed to one recurring signature at count 2).
+
+## S5. Patterns, design rationale, concerns, verification questions
+**Patterns (good):** pure Observe→Signal projection (testable, no hidden state); dedup **layered by
+purpose** (within-pass merge vs. memory-write throttle vs. action rate-limit) instead of one global
+suppressor; **fingerprint stability** via SHA-256 (chosen over `DefaultHasher` explicitly for
+cross-toolchain stability, `mod.rs:1157-1159`) + exact-signature content filter (belt-and-suspenders
+against hash collision — mirrors the archived "SubIssue not hashable → dedup silently broken" lesson);
+fail-**surfaced** recall (`recall_error`, never silent-empty, `mod.rs:427-433`); `sanitize_recalled`
+at the multi-writer-graph admission boundary (`mod.rs:1372`, untrusted signature hardening).
+
+**Design rationale observed:** the write-back is deliberately **chatty-averse** — clean tick writes
+nothing; only a tick that *observed a problem* is recorded (`mod.rs:539-543`) — so recall counts are
+meaningful, and the 900 s gate keeps a persistent condition from inflating the count every tick. The
+threshold of exactly 2 encodes "one prior is not yet a pattern."
+
+**Integration points:** `caps.status.snapshot()` (telemetry/resources/gym), `caps.goals.observe_board()`
+(board → blocked_goals + in_flight in one read), `caps.memory.{record_observation,recall_episodic}`
+(cognitive-memory G2), and `failure_sink::drain_recent()` (#2640 step failures). Track A and Track B
+are **independent `ObservedState` fields** — nothing reads `distill_fail_pct` to derive a block; the
+coupling is pure per-pass co-observation.
+
+**Concerns / potential improvements (all low-severity, none a defect):**
+- The 900 s write-back window means the recall count is a **window count, not a tick count**; a reader
+  interpreting "2×" as "2 ticks" would be wrong. Worth a doc note.
+- Optional inter-pass suppression for unchanged `dedup_key`s (SYNTHESIS §5) would quiet the honest
+  2× recall but **fails the complexity-justification test** (benefit/complexity < 3.0; the 2× is a
+  feature) — keep ruthless simplicity; do not add.
+- The `Anomaly` free-form string (`telemetry.anomalies[]`) duplicating the numeric `distill_fail`
+  signal means one distill fault contributes **two** keys to every composite signature — cosmetically
+  inflates the "problem count" in `observation_content` ("observed N problem(s)"). Cheap dedup-by-root
+  is possible but unnecessary.
+
+**Questions for the verification phase:**
+1. Runtime telemetry: does the composite `overseer-obs:…` signature **stop recurring** (count stops
+   advancing) within ~2 windows after PR #2675 lands, confirming key #1/#2 drop out? (Sole open unknown.)
+2. Confirm the memory adapter maps `ObservationEpisode.signature` → `RecalledEpisode.failure_signature`
+   1:1 in the *production* store impl (verified at the trait/contract level `capabilities.rs:611/641`;
+   the concrete `amplihack-memory-lib` adapter was not read here).
+3. Is `SIMARD_SKIP_GYM` actually set in the failing environment (key #6), or is `gym.skip_gym` true for
+   another reason? Not observable from source.
+
+## S6. Secondary verdict
+The "recurring signature seen 2×" is a **faithful, stateless, per-pass occurrence recall of a
+deterministic sorted-key fingerprint** of one Observe pass's problem union — **confirmed, not a
+dedup/merge defect**. The six keys map to **three independent roots** (distill ×2, blocked-goals ×3,
+env-flag ×1) via one `ObservedState`; emission is pure and re-derived every pass; the only suppressors
+are within-pass merge, a 900 s memory-write throttle, and action-level `WhisperGate`s — **none** across
+signal emission. This corroborates the PRIMARY/SYNTHESIS conclusions on live `bb40c86b` with the
+composite-signature proof and the end-to-end recurrence linkage now explicit.
+
+---
+
+# TERTIARY DEEP-DIVE — Architect Reconciliation, Two-Workstream Framing & Remediation Ordering (2026-07-06T13:49Z, `origin/main` @ `bb40c86b`)
+
+**Status: AUTHORITATIVE / CURRENT for report-structure reconciliation and the
+workstream-decomposition framing.** This section does not re-derive Track-A/B
+mechanism (owned by PRIMARY/SECONDARY above); it **reconciles the eight stacked
+report layers against live main**, formalizes the **two-independent-workstream**
+architecture with component boundaries and the single coupling point, and states
+the **post-`#2675` prioritized remediation ordering**. Independently re-verified:
+`git rev-parse origin/main rysweet/main` → both `bb40c86b` (no commit after HEAD);
+`gh` → Simard **#2658 CLOSED 12:27:40Z**, kgpacks-rs **#12 CLOSED / #16 OPEN /
+#17 OPEN**.
+
+## T0. Headline — the report is internally correct but layer-stratified; newest layer holds
+The document is an **append-only stack of eight re-anchored layers** written as the
+git base advanced `92150406 → 946fe3ca → ed63aa24 → bb40c86b`. Each layer is
+truthful *for its anchor*; the contradiction a reader sees (#2658 "OPEN/unfixed"
+vs. "CLOSED/landed") is **anchor drift, not error**. Read order = **bottom-up**:
+the newest layer wins, older layers are historical. **No post-`bb40c86b` drift
+exists** — `bb40c86b` is simultaneously the newest anchor and the live tip.
+
+## T1. Authoritative supersession ledger (which layer is ground truth)
+| # | Section (line) | Anchor | On #2658 | Status **now** |
+|---|---|---|---|---|
+| 1 | Round 1/2 body (`:1`) | `92150406` (checkout, 113 behind) | residual OPEN | **HISTORICAL** — line numbers/functions absent on live main; verdicts survive |
+| 2 | Round-3 Verification Addendum (`:266`) | `946fe3ca` | OPEN | **HISTORICAL** — Gen-2 parser (stdout scraping) |
+| 3 | Tertiary (Track B) Addendum (`:412`) | `946fe3ca` | n/a | **VERDICTS HOLD** — Track-B classification unchanged on live main |
+| 4 | Consolidated Findings "(Final)" (`:544`) | `946fe3ca` | OPEN, "no fix anywhere" | **SUPERSEDED** by #6–#8 |
+| 5 | Final Reconciliation (`:728`) | `ed63aa24` | OPEN, "unfixed everywhere" | **SUPERSEDED** by #6–#8 (Gen-3 facts-file refactor correct; #2658 status stale) |
+| 6 | SYNTHESIS 5-Outputs (`:878`) | `bb40c86b` @ 12:34Z | **CLOSED / landed #2675** | **CURRENT** |
+| 7 | PRIMARY Deep-Dive (`:1018`) | `bb40c86b` @ 13:37Z | CLOSED (fix mechanism verified) | **CURRENT** |
+| 8 | SECONDARY Deep-Dive (`:1150`) | `bb40c86b` @ 13:42Z | (emission focus) | **CURRENT** |
+
+**Ground truth = layers 6–8 (all anchored to live `bb40c86b`).** Layers 4–5 carry
+two "AUTHORITATIVE" banners that are now **misleading** — they predate the merge of
+#2675 by minutes. Anyone actioning this report must ignore every "#2658 OPEN / land
+#2658 (P0)" statement in layers 1–5.
+
+### T1a. Delta list — stale claims (layers 1–5) vs. live main (`bb40c86b`)
+| Stale claim (layer) | Live-main correction (evidence) |
+|---|---|
+| "#2658 OPEN; no lenient-JSON path exists; `grep trailing_comma src/` → empty" (`:33,:83,:584,:764`) | **CLOSED.** `strip_json_trailing_commas` `recipe_output/extract.rs:321`, wired `distillation.rs:1293`; 13 new tests. Merged PR **#2675** = HEAD `bb40c86b` |
+| "Top remediation: land #2658 (P0)" (`:49,:676,:872`) | **DONE.** Landed 12:27:39Z, exactly the recommended shape (shared `recipe_output` helper, no-op on clean JSON, regression fixtures) |
+| Parse chain `parse_recipe_output_full`→`recover_distill_output`→`scan_for_facts_object` (`:69,:706`) | **REMOVED** by `9378fb9d`/#2651. Live chain = `harvest_facts_file`→`parse_facts_document(:1257)`→`scan_cleaned_for_facts(:1315)`→`parse_facts_envelope_lenient(:1285)` |
+| Facts read by scraping stdout (`:58`) | **Dedicated agent-written file** (`facts_output_path`, distill-episodes.yaml:58/135) — banner/ANSI class eliminated at source (#2622/#2619) |
+| `distillation.rs` 3222 lines (`:742`) | **2249 → ~2250 lines** post-Gen-3 refactor |
+| Overseer `recall_occurrences` `mod.rs:454`; `signals_from` `signal.rs:122` | Live: `mod.rs:985`; `signal.rs:366` (line drift only; semantics intact) |
+| `gym_skipped` trigger `provider.rs:61` | Live trigger `gym_runner_client.rs:45` (`SIMARD_SKIP_GYM=="1"`) → `capabilities.rs:84` |
+| `completion_gate.rs:347-393` three-string gate | Not verbatim on live main; deploy proof via `overseer/deploy.rs:254 deployed_commit` + `pr_verify.rs` |
+| WS7/#22 "PR #36 open" (`:616,:922`) | **CLOSED/COMPLETED 12:07Z** |
+| Track-B "not re-verifiable via `gh`" caveat (`:924,:1007`) | **Resolved** — repo is `rysweet/agent-kgpacks-rs`; states re-checked live |
+
+**Every Track-B *verdict* and every *coupling/recurrence* verdict is unchanged
+across all eight layers** — only Track-A's OPEN→CLOSED status and file:line
+coordinates drifted.
+
+## T2. Two-workstream decomposition — formalized (component boundaries)
+The six-token signature is a **per-pass union of two architecturally independent
+subsystems** plus one env-flag, joined at exactly one seam. Treat as two
+workstreams; **do not co-schedule**.
+
+```
+                 ┌─────────────────────── ONE Overseer Observe pass ───────────────────────┐
+                 │        run_cycle → ObservedState → signals_from → classify_signal        │
+                 │                       (the ONLY coupling seam)                           │
+                 └───────────────┬───────────────────────────────────┬──────────────────────┘
+                                 │ reads field                       │ reads field
+      ┌──────────────────────────▼─────────┐          ┌───────────────▼───────────────────────┐
+      │ WORKSTREAM 1 — PROCESS-HEALTH        │          │ WORKSTREAM 2 — GOAL-BOARD STATE        │
+      │ (cognitive-memory distillation)      │          │ (parity goal dependency cluster)       │
+      │ Owns: distill parse → fact yield     │   ⟂      │ Owns: goal block/unblock lifecycle     │
+      │ Modules:                             │  indep.  │ Modules:                               │
+      │  • memory_consolidation/distillation │          │  • goals/{store,cognitive_memory_store}│
+      │  • recipe_output/{extract,mod}       │          │  • overseer/sensor.rs                  │
+      │  • prompt_assets/…/distill-episodes  │          │    (blocked_goals_from_board :204)      │
+      │ Signals: anomaly:distill…, process:  │          │  • deploy.rs/pr_verify (done-gate)     │
+      │          distill_fail                │          │ Signals: goal:blocked:{f29bb15c,       │
+      │ State: #2658 CLOSED (bb40c86b) →      │          │          0c0ada69, 7f5afcca}           │
+      │        RESOLVED                       │          │ State: #12 stale-park; #16→#17 stalled  │
+      └──────────────────────────────────────┘          └────────────────────────────────────────┘
+        quality:gym_skipped = SIMARD_SKIP_GYM env flag (capabilities.rs:84) — a THIRD, independent root
+```
+
+**Component responsibilities & interfaces:**
+- **WS1 (process-health defect).** Boundary = the distill parse path. Contract:
+  agent writes `{facts,procedures}` to `facts_output_path`; `harvest_facts_file`
+  reads it; `parse_facts_envelope_lenient` deserializes (strict-first, then
+  trailing-comma-stripped retry). Emits *telemetry* (`distill_fail_pct`,
+  `anomalies[]`). **Failure was a code defect** → fixed by code (#2675).
+- **WS2 (goal-board state).** Boundary = the goal store + deploy-aware done-gate.
+  Contract: `blocked_goals_from_board` projects one `GoalBlocked` per
+  `GoalProgress::Blocked` active goal, **re-derived statelessly each pass**. Emits
+  *state*, not health. **"Failure" is correct blocking**, not a defect → advanced
+  by landing issues (#16→#17), not by a patch.
+- **The seam (integration point).** `overseer/mod.rs::run_cycle` reads both fields
+  into one `ObservedState`; `signals_from` (pure, `signal.rs:366`) projects each
+  independently; `observation_signature` (`mod.rs:1081`) sorts+dedups the
+  `dedup_key`s into the composite string. **This is the sole point of contact and
+  it is read-only co-observation** — `blocked_goals_from_board` never reads
+  `distill_fail_pct`; nothing in WS1 reads goal state. **WS1 ⟂ WS2.**
+
+**Architectural consequence:** the composite "looks like one big problem" only
+because it is a *set union at the Observe seam*. Fixing WS1 (done) has **zero**
+effect on WS2; advancing WS2 has **zero** effect on WS1's parse rate. The correct
+mental model is **two backlogs behind one telemetry pane**, not one incident.
+
+## T3. Systemic correlation — noted, deliberately kept OUT of the causal graph
+There is a **plausible systemic loop**: a starved distillation learning-loop
+(WS1 failing) yields fewer usable facts → cognitive memory is thinner → brain /
+engineers get weaker recall → goals advance slower (WS2) and engineer-spawn stays
+elevated (`resource:engineer_spawn`). This is **real as a *correlation* and a
+*motivation*** for prioritizing WS1, but it is **unproven as *causation*** and
+**must not** be drawn as an edge: no code path makes WS2's block set a function of
+WS1's parse rate (verified — `blocked_goals_from_board` reads only goal status;
+distilled facts feed `cognitive_memory/*`, not goal advancement or the gym). Keep
+it as a **prioritization rationale**, never as a dependency.
+
+## T4. Prioritized remediation ordering (post-`#2675`, updated)
+The report's original P0 is **complete**. Re-ordered against live main:
+
+- **~~P0 — land #2658 trailing-comma recovery~~ ✅ DONE** — merged PR #2675,
+  `bb40c86b`. *Highest-leverage fix already in production on main.* No action.
+- **P1 (WS1, verify) — telemetry confirmation.** Confirm
+  `distill_parse_success_rate` trends **0.0 → ~1.0** and the composite
+  `overseer-obs:…` signature **stops recurring** within ~2 write-back windows
+  (~30 min) after `bb40c86b` deploys. Sole open Track-A unknown (source proves the
+  path; only runtime confirms the effect).
+- **P1 (WS1, observability) — distinct zero-yield log.** Add a
+  `"valid parse yielded zero facts"` log in the `RecipeEnvelope::into_facts` /
+  `into_output` concept-label filter so the *secondary* (valid-parse, zero-fact)
+  mode is never misread as parse-fail. **Still absent on `main`** (only doc
+  comments). This is the one genuinely-open WS1 code task.
+- **P2 (WS1, optional in-flight polish) — DO NOT block on.** Follow-up PRs
+  **#2669 / #2672 / #2678** (buffer pre-reserve, string-aware/lazy-Cow refactors of
+  `strip_json_trailing_commas`) sit on the **pre-squash #2658 line** — verified
+  *neither ancestor nor descendant* of `bb40c86b` — i.e. they refine an already-
+  merged fix and need rebasing onto HEAD or closing. Non-blocking perf/style.
+- **P1 (WS2, its own gates — unaffected by WS1):**
+  1. `dbabd65f`/**#12** — **self-heal the stale park** (`UnblockGoal`/`simard goal
+     unblock dbabd65f`); decision recorded, issue CLOSED, no merge artifact for the
+     gate to certify. Opt-in BGE lives in **#32** (non-default). **Do not re-open
+     the embeddings decision.**
+  2. `0c0ada69`/**#16** (WS1 CVE eval harness) — **critical path**; ≥12 CVE
+     questions (≥6 real 2024/2025 + reference answers), committed
+     `eval-results.{md,json}`, CI offline via mock transport.
+  3. `7f5afcca`/**#17** (WS2 int8/PQ) — **hard-gated on #16**; adopt only if
+     `delta_accuracy ≥ -0.02` + hit@k parity on the #16 harness.
+  4. `f29bb15c` umbrella — **standing by design**; retires only once #16/#17 land.
+- **Signal hygiene (optional, NOT a defect):** an inter-pass suppression window for
+  unchanged `dedup_key`s would quiet the honest 2× recall but **fails the
+  complexity-justification test** — the 2× is correct occurrence recall. Keep
+  ruthless simplicity; do not add.
+
+**Single highest-leverage action, updated:** it already shipped (#2675). The next
+highest-leverage *open* items are the **WS1 zero-yield observability log** and
+**WS2 #12 self-heal → #16 → #17**, pursued on independent tracks.
+
+## T5. Structural concerns & architectural recommendations
+1. **Report layering is a maintenance hazard.** Eight append-only "authoritative"
+   layers with two contradictory "AUTHORITATIVE" banners (layers 4–5 vs 6–8) invite
+   a reader to action a stale P0. **Recommendation:** this T1 ledger is the
+   canonical read-order; future updates should *supersede in place* or carry a
+   single "CURRENT ANCHOR" marker, not append a ninth layer.
+2. **Telemetry double-count at the seam (cosmetic).** One distill fault emits **two**
+   keys — free-form `anomaly:distill parse-fail rate 100%` (`telemetry.anomalies[]`)
+   *and* numeric `process:distill_fail` (`distill_fail_pct ≥ threshold`) — inflating
+   `observed N problem(s)` and every composite signature. Optional dedup-by-root;
+   low value, low urgency (SECONDARY §S5).
+3. **"2×" is a window count, not a tick count** (900 s write-back gate). Worth a
+   doc note so verification-phase readers don't misinterpret the recurrence floor.
+4. **The one-seam design is a strength — preserve it.** Keeping WS1 and WS2 as
+   independent `ObservedState` fields joined only by pure `signals_from` projection
+   is what makes the system testable and the tracks separable. Resist any future
+   change that lets the block projection read health telemetry (would fuse the
+   workstreams and re-introduce the "one big incident" confusion).
+
+## T6. Tertiary verdict
+The recurring 2× signature = **two architecturally independent workstreams co-observed
+in one stateless Overseer pass**, honestly re-emitted — **not** a dedup/merge defect
+and **not** one incident. **WS1 (process-health distill defect) is RESOLVED on live
+`main`** (`bb40c86b`/#2675); the report's root-cause and P0 were validated by reality.
+**WS2 (goal-board parity cluster) is correctly blocked** and proceeds on its own gates
+(#12 self-heal → #16 → #17 → umbrella), fully unaffected by WS1. The eight report
+layers are internally consistent once read as anchor-stratified history: **layers 6–8
+(`bb40c86b`) are ground truth; layers 1–5's "#2658 OPEN / land #2658" must be treated
+as historical.** No post-HEAD drift. The systemic starved-learning-loop is a valid
+*prioritization rationale* but is deliberately excluded from the causal graph.
+
+### Tertiary evidence index (live `origin/main` @ `bb40c86b`, verified 13:49Z)
+- **Anchor/drift:** `git rev-parse origin/main rysweet/main` → `bb40c86b` (both);
+  `946fe3ca..bb40c86b` = 22 commits (incl. `9378fb9d` Gen-3 facts-file, `bb40c86b`
+  #2675 trailing-comma); `bb40c86b` has **no** descendants on any main ref.
+- **WS1 fix present:** `recipe_output/extract.rs:321` `strip_json_trailing_commas`,
+  `distillation.rs:1285/1293` `parse_facts_envelope_lenient`; 7+6 regression tests;
+  `serde_json` stock `1.0.149`; `git grep json5|json_repair|jsonc … origin/main --
+  src/` → empty (only unrelated `de_lenient_string`).
+- **Follow-ups off-main:** #2669 `7995f13b`, #2672 `554d44b3`, #2678 `30a5fbcf` —
+  each `merge-base --is-ancestor` vs `bb40c86b` → NO both directions (pre-squash
+  line; not merged).
+- **Live issues (`gh`, 13:49Z):** Simard **#2658 CLOSED 12:27:40Z**; agent-kgpacks-rs
+  **#12 CLOSED**, **#16 OPEN**, **#17 OPEN**.
+- **Seam:** `overseer/mod.rs::run_cycle` (ObservedState build), `signal.rs:366`
+  `signals_from` (pure), `mod.rs:1081` `observation_signature` (sorted+deduped
+  dedup_keys), `sensor.rs:204` `blocked_goals_from_board` (stateless projection).
+
+---
+
+# FINAL CONSOLIDATION — All Parallel Deep Dives Reconciled (2026-07-06T13:55Z, `origin/main` @ `bb40c86b`)
+
+**Status: CANONICAL / CURRENT — supersedes every prior layer.** This section folds
+the three parallel deep dives — **PRIMARY** (Track A distill + Track B parity,
+13:37Z), **SECONDARY** (Overseer emission/dedup/fingerprint model, 13:42Z), and
+**TERTIARY** (report reconciliation + two-workstream framing + remediation ordering,
+13:49Z) — plus the **SYNTHESIS** (12:34Z) into one self-contained answer to the
+investigation question. All four were independently re-verified against the **same
+live anchor** `origin/main` @ `bb40c86b`; they **agree on every load-bearing claim**
+with **zero contradictions** (only line-number precision differs, reconciled below).
+Re-verified live at consolidation time (13:55Z): `git rev-parse origin/main` =
+`bb40c86b` (no drift); `gh` → Simard **#2658 CLOSED/COMPLETED 12:27:40Z** via **PR
+#2675 MERGED 12:27:39Z (merge commit = `bb40c86b` = HEAD)**; agent-kgpacks-rs **#12
+CLOSED**, **#16 OPEN**, **#17 OPEN**.
+
+## FC0. One-line verdict
+The recurring `overseer-obs:… seen 2×` signature is **two architecturally
+independent problems co-observed in one stateless Overseer pass and honestly
+re-emitted** — **not** a dedup/merge defect and **not** one incident. **Track A
+(distill 100% parse-fail) is RESOLVED on live `main`** (#2675/`bb40c86b`); **Track B
+(kgpacks-rs parity cluster) is correctly blocked** and advances on its own gates.
+**Track A ⟂ Track B** — fixing A is neither necessary nor sufficient to unblock B.
+
+## FC1. The signature decoded — each token, live-verified
+The anomaly string is the verbatim output of `observation_signature`
+(`overseer/mod.rs:1081`): `format!("overseer-obs:{}", keys.join("|"))` over each
+problem's `dedup_key`, **`sort_unstable` + dedup**. Its six keys are in exact
+ASCII-sorted order — proof it is a deterministic per-pass fingerprint, not a
+hand-authored or accumulated string (SECONDARY §S1). Mapped to **three independent
+roots**:
+
+| # | Token | Root | Track | Live status |
+|---|---|---|---|---|
+| 1 | `anomaly:distill parse-fail rate 100%` | distill telemetry (`telemetry.anomalies[]`) | **A** | **RESOLVED** (#2675) |
+| 2 | `process:distill_fail` | distill telemetry (`distill_fail_pct ≥ threshold`) | **A** | **RESOLVED** (#2675) |
+| 3 | `goal:blocked:…f29bb15c` | goal board (umbrella) | **B** | Standing by design |
+| 4 | `goal:blocked:…0c0ada69` (#16 WS1) | goal board | **B** | **OPEN — critical path** |
+| 5 | `goal:blocked:…7f5afcca` (#17 WS2) | goal board | **B** | **OPEN — gated on #16** |
+| 6 | `quality:gym_skipped` | `SIMARD_SKIP_GYM` env flag | **independent** | Manual flag |
+
+Keys #1 and #2 are **two projections of the same distill fault** (free-form string +
+numeric threshold); keys #3–#5 are one `blocked_goals_from_board` projection; key #6
+is an unrelated env flag. The composite "looks like one big problem" only because it
+is a **set union at the Observe seam**, not a causal chain (TERTIARY §T2).
+
+## FC2. Track A — distill 100% parse-fail: ROOT CAUSE CONFIRMED, FIX LANDED
+**Root cause (all three deep dives concur):** the distiller agent emits a **trailing
+comma** before `}`/`]` in `{ "facts":[…], "procedures":[…] }`. The comma keeps braces
+balanced (span is found) but **stock `serde_json 1.0.149` rejects the whole object** →
+`parse_facts_envelope_lenient` had no recovery → Tier-3 `Err` → batch deferred **every
+cycle** → `distill_parse_success_rate → 0` → Overseer reports **100%** + emits
+`process:distill_fail`. Distinct from the already-CLOSED banner/ANSI class (#2619/#2622,
+eliminated at source by the Gen-3 facts-file refactor #2651/`9378fb9d`, which now has the
+agent **write** facts to a dedicated `facts_output_path` instead of scraping stdout).
+
+**The investigation's premise flipped mid-flight and the recommended P0 LANDED.**
+On live `main`:
+- **Simard #2658 = CLOSED/COMPLETED 12:27:40Z**, title *"distill: residual 100%
+  parse-failure — agent JSON trailing comma drops the whole batch."*
+- **PR #2675 = MERGED 12:27:39Z, merge commit `bb40c86b` (= live HEAD).**
+- **Fix (verified byte-for-byte):** new `src/recipe_output/extract.rs:321`
+  `strip_json_trailing_commas` (string/escape-aware; commas inside `content` values
+  untouched; borrows unchanged / zero-alloc on clean input; drops **only** `,` before
+  `}`/`]` outside strings) + `distillation.rs:1285` `parse_facts_envelope_lenient`
+  (strict `serde_json` **first** — clean path byte-identical — then retries only when
+  the stripper returns `Cow::Owned`), wired into **both** parse sites (fast
+  `:1317`/`:1293`, slow `:1338`). **Provable no-op on well-formed JSON**; genuinely
+  malformed input (`[1,,2]`, unquoted keys) **still fails** — leniency never widens to
+  accept broken JSON. Regression fixtures: **7** in `extract.rs` + **6** in
+  `distillation.rs` (incl. string-content preservation, clean-object-unaffected,
+  still-fails-on-genuine-malformed) + `distillation_fact_yield_bench.rs`. `serde_json`
+  remains stock `1.0.149`; `git grep 'json5|json_repair|jsonc|relaxed_json|sanitize_json'
+  origin/main -- src/` → **empty**.
+
+⇒ **The report's Track-A root cause and P0 were validated by reality — PR #2675 landed
+the exact recommended shape (shared `recipe_output` helper, no-op-on-clean stripping,
+regression fixtures). There is no open distill parse-fail fix to make.**
+
+## FC3. Track B — kgpacks-rs parity cluster: CORRECTLY BLOCKED
+The block set is **re-derived statelessly every pass** by `blocked_goals_from_board`
+(`overseer/sensor.rs:204`) — one `GoalBlocked` per `GoalProgress::Blocked` active goal.
+Live states re-verified via the **correct repo `rysweet/agent-kgpacks-rs`** (the
+report's `rysweet/kgpacks-rs` did not resolve; caveat now closed):
+
+| Goal / issue | Live state | Classification | Action |
+|---|---|---|---|
+| `f29bb15c` umbrella (full parity) | board umbrella | **Standing by design** | retires when #16/#17 land |
+| `dbabd65f` / **#12** parity decision | **CLOSED/COMPLETED** (hash vs BGE = intentional divergence) | **Stale / false-park** (decision done, no merge artifact for the done-gate to certify) | **self-heal via `UnblockGoal`**; do NOT re-open the embeddings decision |
+| `0c0ada69` / **#16** WS1 CVE eval harness | **OPEN** | **Genuinely blocked — critical path** | land: ≥12 CVE questions (≥6 real 2024/2025 + reference answers), committed `eval-results.{md,json}`, CI offline via mock transport |
+| `7f5afcca` / **#17** WS2 int8/PQ quant | **OPEN** (gated on eval recall parity) | **Genuinely blocked — downstream of #16** | adopt only if `delta_accuracy ≥ -0.02` + hit@k parity on the #16 harness |
+| **#32** optional BGE backend | OPEN, non-default | **Non-blocking / opt-in** | no action |
+
+**Board corroboration:** WS3/#18, WS4/#19, WS5/#20 CLOSED; **WS7/#22 CLOSED 12:07Z**
+(updates the report's "PR #36 open"). The rest of the board is advancing ⇒ **#16 → #17
+is a genuinely stalled sub-chain**, not merely next-in-queue.
+
+## FC4. Overseer emission / dedup / "why 2×" — the mechanism is honest, not a bug
+`signals_from(&ObservedState)` (`overseer/signal.rs:366`) is **pure ("No I/O")**, holds
+**no inter-pass state**, and regenerates every `Signal` from the current snapshot. The
+recurrence report is a **separate read path**, not a suppressor. End-to-end loop
+(SECONDARY §S3):
+1. **Write-back:** `write_back_observation` (`mod.rs:532`) persists ONE
+   `ObservationEpisode{ signature = observation_signature(problems) }`, **gated by
+   `write_back_gate = WhisperGate::new(900,5)`** → a persistent condition is stored **at
+   most once per 900 s window**.
+2. **Recall:** a later pass's `recall_episodic` returns `RecalledEpisode{
+   failure_signature }` (= the stored `signature`).
+3. **Count → signal:** when episodes with the same `failure_signature` reach
+   **`RECURRING_SIGNATURE_THRESHOLD = 2`** (`signal.rs`, #2628), `signals_from` appends
+   `Signal::RecurringSignature{ signature, occurrences }`.
+4. **Render:** `classify_signal` (`mod.rs:1373`) emits the exact phrase **`"recurring
+   signature seen {occurrences}× in cognitive memory ({signature})"`**.
+
+⇒ **"seen 2×" = the identical composite signature was persisted on two distinct ≥900 s
+write-back windows** because the underlying `ObservedState` was unchanged — **faithful
+occurrence recall, not a duplicate-emit defect.** The **only** dedups anywhere are (a)
+*within-pass* merge in `orient` (same `dedup_key`, `mod.rs:1224`), (b) the *write-back*
+900 s memory-write throttle, and (c) *action-level* `WhisperGate`s (`whisper 900/5`,
+`blocked_goal 900/20`, `write_back 900/5`, `gap 900/200`) that rate-limit
+interventions — **none across signal emission.**
+
+**The 2× asymmetry proves stateless re-derivation** (not a frozen emit): across the
+broader stream, pass 2 *adds* `resource:engineer_spawn` (`live_engineers ≥
+ENGINEER_SPAWN_THRESHOLD`) and *drops* `goal:blocked:dbabd65f` (after #12 closed and the
+stateless re-projection stops emitting it). It is `goal:blocked` (not `goal:stale`)
+precisely because the set is recomputed from the live board each pass. **Two distinct
+"2×" mechanisms, do not conflate** (both honest): composite-signature recurrence (above)
+vs. per-problem `recall_occurrences(dedup_key)` keyed by `occurrence_concept =
+SHA-256(dedup_key)[..8]` (`mod.rs:985/1160`), with an exact `signature == dedup_key`
+content filter guarding against hash collision.
+
+## FC5. Coupling verdict — Track A ⟂ Track B (INDEPENDENT), gym link REFUTED
+`distill_fail_pct`, `live_engineers`, `gym_skipped`, and `blocked_goals[]` are
+**independent `ObservedState` fields** read in one pass; **nothing reads
+`distill_fail_pct` to derive a block**, and `blocked_goals_from_board` reads only goal
+status. `quality:gym_skipped` is the manual **`SIMARD_SKIP_GYM=1`** env flag
+(`gym_runner_client.rs:45` → `capabilities.rs:84`) with **zero distill dependence** —
+the tempting "distill_fail → gym_skipped → goals blocked" chain is **REFUTED**.
+Distilled facts feed `cognitive_memory`, **not** the gym and **not** goal advancement.
+The single coupling seam is `overseer/mod.rs::run_cycle` building one `ObservedState`,
+then pure `signals_from` projecting each field independently — **read-only
+co-observation, not causation** (TERTIARY §T2). **Mental model: two backlogs behind one
+telemetry pane, not one incident.**
+
+*Systemic note (prioritization rationale, deliberately NOT a causal edge):* a starved
+distillation learning-loop (WS1 failing) plausibly thins cognitive memory → weaker
+recall → slower goal advance (WS2) + elevated engineer-spawn. This is a real
+*correlation and motivation* for prioritizing WS1, but **unproven as causation** and
+**must not** be drawn as a dependency (TERTIARY §T3).
+
+## FC6. Visual — two independent workstreams at one Observe seam
+```mermaid
+flowchart TB
+  subgraph OP["ONE Overseer Observe pass — run_cycle → ObservedState → signals_from (pure) → classify_signal"]
+    direction LR
+    subgraph A["WORKSTREAM 1 — process-health / distill (NOW FIXED @ bb40c86b)"]
+      A1["LLM emits {facts:[...],}<br/>trailing comma"] --> A2["stock serde_json REJECTS whole object"]
+      A2 --> A3["Tier-3 Err → batch deferred every cycle"]
+      A3 --> A4["distill_parse_success_rate → 0"]
+      A4 --> A5["anomaly:distill parse-fail 100% + process:distill_fail"]
+      A2 -. "PR #2675" .-> AF["strip_json_trailing_commas +<br/>parse_facts_envelope_lenient<br/>(no-op on clean JSON)"]
+      AF -.-> AOK["success_rate 0.0 → ~1.0 (verify at runtime)"]
+    end
+    subgraph B["WORKSTREAM 2 — goal-board parity (correctly blocked)"]
+      B0["f29bb15c umbrella (standing)"]
+      B1["#12 CLOSED → stale/self-heal (UnblockGoal); BGE opt-in #32"]
+      B2["#16 OPEN (WS1 CVE harness — critical path)"]
+      B3["#17 OPEN (WS2 int8/PQ — gated on #16)"]
+      B1 --> B2 --> B3 --> B0
+    end
+    Q1["quality:gym_skipped = SIMARD_SKIP_GYM env flag (independent 3rd root)"]
+  end
+  A5 --> SIG["observation_signature: sort+dedup dedup_keys → composite string"]
+  B0 --> SIG
+  B2 --> SIG
+  B3 --> SIG
+  Q1 --> SIG
+  SIG --> R["persisted per 900s window; recall count ≥2 ⇒ 'seen 2×'<br/>(no inter-pass emission dedup ⇒ honest recurrence)"]
+  classDef fixed fill:#d6f5d6,stroke:#2e7d32;
+  classDef open fill:#fde2e1,stroke:#c62828;
+  class AF,AOK fixed; class B2,B3 open;
+```
+
+## FC7. Prioritized remediation (final, post-#2675)
+- **~~P0 — land #2658 trailing-comma recovery~~ ✅ DONE** — merged PR #2675 at
+  `bb40c86b`. *Highest-leverage fix already in production.* **No action.**
+- **P1 (WS1, verify):** confirm `distill_parse_success_rate` trends **0.0 → ~1.0** and
+  the composite `overseer-obs:…` signature **stops recurring** within ~2 write-back
+  windows (~30 min) after `bb40c86b` deploys. *Sole open Track-A unknown* — source
+  proves the path; only runtime confirms the effect.
+- **P1 (WS1, observability):** add a distinct **`"valid parse yielded zero facts"`** log
+  in the `RecipeEnvelope::into_facts` / `into_output` concept-label filter so the
+  *secondary* (valid-parse, zero-fact) mode is never misread as parse-fail. **Still
+  absent on `main`** (only doc comments) — the one genuinely-open WS1 code task.
+- **P2 (WS1, optional, DO NOT block):** follow-up PRs **#2669 / #2672 / #2678** (buffer
+  pre-reserve, lazy-Cow refactors of the stripper) sit on the **pre-squash #2658 line**
+  — neither ancestor nor descendant of `bb40c86b` — so they refine an already-merged fix
+  and need rebasing onto HEAD or closing. Non-blocking perf/style.
+- **P1 (WS2, its own gates — unaffected by WS1):** #12 **self-heal the stale park**
+  (`UnblockGoal`) → **#16** (WS1 CVE eval harness, critical path) → **#17** (WS2 int8/PQ,
+  gated on #16 parity) → **`f29bb15c`** umbrella retires. **#32** stays non-default.
+- **Signal hygiene (optional, NOT a defect):** an inter-pass suppression window for
+  unchanged `dedup_key`s would quiet the honest 2× recall but **fails the
+  complexity-justification test** (the 2× is correct occurrence recall). Keep ruthless
+  simplicity; **do not add.**
+
+**Single highest-leverage action, updated:** it already shipped (#2675). The next
+highest-leverage *open* items are the **WS1 zero-yield observability log** and **WS2 #12
+self-heal → #16 → #17**, pursued on independent tracks.
+
+## FC8. Remaining unknowns (consolidated)
+1. **Runtime confirmation of the fix** — telemetry showing `distill_parse_success_rate`
+   0.0 → ~1.0 and the composite signature ceasing to recur post-`bb40c86b`. (Source
+   proves the fix; only live logs confirm the effect.)
+2. **Secondary "valid parse → zero facts" mode** — the `into_facts` concept-label filter
+   can yield zero facts on a *valid* parse; a distinct log is still absent on `main`
+   (P1 observability above).
+3. **Production memory-adapter 1:1 mapping** — `ObservationEpisode.signature` →
+   `RecalledEpisode.failure_signature` is verified at the trait/contract level
+   (`capabilities.rs:611/641`); the concrete `amplihack-memory-lib` adapter was not read.
+4. **Whether `SIMARD_SKIP_GYM` is actually set** in the failing environment (key #6), vs.
+   `gym.skip_gym` true for another reason — not observable from source.
+
+## FC9. Final verdict
+Answered. The `recurring signature seen 2×` is **honest, stateless, per-pass occurrence
+recall of a deterministic sorted-key fingerprint** of one Observe pass's problem union
+— **confirmed across all three parallel deep dives, not a dedup/merge defect.** It
+decomposes into **two architecturally independent workstreams** plus one env-flag:
+**WS1 (distill process-health) is RESOLVED on live `main`** (`bb40c86b`/#2675 — the
+report's root-cause and P0 validated by reality), and **WS2 (kgpacks-rs parity cluster)
+is correctly blocked** and advances on its own gates (#12 self-heal → #16 → #17 →
+umbrella), **fully unaffected by WS1.** No post-`bb40c86b` drift. Layers 6–9
+(`bb40c86b`) are ground truth; layers 1–5's "#2658 OPEN / land #2658 (P0)" are
+historical anchor-drift.
+
+### Consolidated evidence index (live `origin/main` @ `bb40c86b`, verified 13:55Z)
+- **Anchor:** `git rev-parse origin/main` → `bb40c86b` (no descendant on any main ref);
+  `946fe3ca..bb40c86b` = 22 commits (incl. `9378fb9d` Gen-3 facts-file, `bb40c86b` #2675).
+- **WS1 fix present:** `recipe_output/extract.rs:321` `strip_json_trailing_commas`;
+  `distillation.rs:1285/1293` `parse_facts_envelope_lenient` (both parse sites
+  1317/1338); 7 + 6 regression tests + `distillation_fact_yield_bench.rs`; `serde_json`
+  stock `1.0.149`; `git grep 'json5|json_repair|jsonc|relaxed_json|sanitize_json'
+  origin/main -- src/` → empty.
+- **Live issues (`gh`, 13:55Z):** Simard **#2658 CLOSED/COMPLETED 12:27:40Z**; PR **#2675
+  MERGED 12:27:39Z (merge commit `bb40c86b`)**; agent-kgpacks-rs **#12 CLOSED**, **#16
+  OPEN**, **#17 OPEN**; WS7/#22 CLOSED 12:07Z; #32 OPEN (non-default).
+- **Off-main follow-ups:** #2669 `7995f13b`, #2672 `554d44b3`, #2678 `30a5fbcf` — each
+  `merge-base --is-ancestor` vs `bb40c86b` → NO both directions (pre-squash line).
+- **Overseer emission model:** `signal.rs:366` `signals_from` (pure), `signal.rs`
+  `RECURRING_SIGNATURE_THRESHOLD=2`, `mod.rs:1081` `observation_signature` (sort+dedup),
+  `mod.rs:1373` recurrence render, `mod.rs:985/1160` `recall_occurrences`/
+  `occurrence_concept` (SHA-256[..8]), `mod.rs:284-302` WhisperGates,
+  `mod.rs:532/297` write-back + 900s gate, `sensor.rs:204` `blocked_goals_from_board`
+  (stateless projection).
+- **Coupling / gym:** `gym_runner_client.rs:45` (`SIMARD_SKIP_GYM=="1"`) →
+  `capabilities.rs:84`; no code reads `distill_fail_pct` to gate the gym or goals.
