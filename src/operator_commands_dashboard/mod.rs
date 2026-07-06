@@ -46,6 +46,8 @@ mod tests_goal_records_migration;
 #[cfg(test)]
 mod tests_goals_crud;
 #[cfg(test)]
+mod tests_ooda_cycles_history;
+#[cfg(test)]
 mod tests_routes_a;
 #[cfg(test)]
 mod tests_routes_b;

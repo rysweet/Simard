@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 
 use super::current_work::read_recent_cycle_reports;
 use super::routes::resolve_state_root;
+use super::thinking_collapse::{CollapseMode, collapse_reports_with};
 
 /// Maximum number of cycles to return (most recent first).
 const MAX_CYCLES: usize = 50;
@@ -22,7 +23,15 @@ pub(crate) async fn ooda_cycles() -> Json<Value> {
     let state_root = resolve_state_root();
     let raw_reports = read_recent_cycle_reports(&state_root, MAX_CYCLES);
 
-    let mut cycles: Vec<Value> = Vec::new();
+    // `total_cycles` reports the RAW (pre-collapse) count so "N cycles recorded"
+    // reflects real activity even after equivalent cycles collapse into one row.
+    let raw_count = raw_reports.len();
+
+    // Flatten each `{cycle_number, report:{…}}` entry into a single object that
+    // carries BOTH the fields the collapse pass needs (cycle_number, summary,
+    // outcomes, planned_actions → disposition + goal ids) and the Cycle History
+    // display fields (timestamp, duration_secs, phase, actions_taken).
+    let mut flat: Vec<Value> = Vec::new();
     let mut durations: Vec<f64> = Vec::new();
 
     for entry in &raw_reports {
@@ -63,27 +72,53 @@ pub(crate) async fn ooda_cycles() -> Json<Value> {
 
         let action_count = actions_taken.len();
 
+        // Collect the UNCOLLAPSED duration series before collapsing, so merging
+        // repeated rows never starves the duration-trend chart (issue #21).
         if let Some(d) = duration_secs {
             durations.push(d);
         }
 
-        cycles.push(json!({
+        // A row with no recorded duration carries an explicit null (the data
+        // precondition for the renderer hiding the duration chart).
+        let duration_value = match duration_secs {
+            Some(d) => json!(d),
+            None => Value::Null,
+        };
+
+        // Preserve the classification inputs from the underlying report so the
+        // relaxed collapse can classify disposition + goal ids correctly.
+        let outcomes = report
+            .and_then(|r| r.get("outcomes"))
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        let planned_actions = report
+            .and_then(|r| r.get("planned_actions"))
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+
+        flat.push(json!({
             "cycle_number": cycle_number,
             "phase": phase,
-            "duration_secs": duration_secs,
+            "duration_secs": duration_value,
             "actions_taken": actions_taken,
             "action_count": action_count,
             "summary": summary,
             "timestamp": timestamp,
+            "outcomes": outcomes,
+            "planned_actions": planned_actions,
         }));
     }
 
-    // Compute trend: average of first half vs second half of durations.
+    // Collapse runs of equivalent cycles into one row each (relaxed mode is the
+    // FIRST-half table behaviour; the PRESERVED second half keeps strict mode).
+    let cycles = collapse_reports_with(flat, CollapseMode::Relaxed);
+
+    // Compute the trend from the UNCOLLAPSED per-cycle duration series.
     let trend = compute_duration_trend(&durations);
 
     Json(json!({
         "cycles": cycles,
-        "total_cycles": cycles.len(),
+        "total_cycles": raw_count,
         "duration_trend": trend,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
