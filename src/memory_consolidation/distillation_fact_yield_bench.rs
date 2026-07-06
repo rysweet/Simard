@@ -9,7 +9,7 @@
 //! corpus**. It exercises the deterministic portion of a distillation pass,
 //! everything downstream of the (non-deterministic) LLM recipe call:
 //!
-//! 1. `parse_recipe_output_full` — parses the recipe's JSON envelope and applies
+//! 1. `parse_facts_document` — parses the recipe's JSON envelope and applies
 //!    the concept filter ([`RecipeEnvelope::into_facts`]).
 //! 2. the ISAO reliability gate — [`assess_fact_reliability`] against
 //!    [`DISTILL_RELIABILITY_THRESHOLD`].
@@ -47,7 +47,7 @@
 //!
 //! * **baseline** — an in-test oracle that replicates the *legacy exact-match*
 //!   concept filter (`concept == "pr-pattern" | "bug-pattern" | "lesson-learned"`).
-//! * **improved** — the REAL production path (`parse_recipe_output_full`), which
+//! * **improved** — the REAL production path (`parse_facts_document`), which
 //!   now canonicalizes surface-form concept variants before the filter.
 //!
 //! It asserts the improved path promotes strictly more facts than the baseline
@@ -59,7 +59,7 @@
 use crate::memory_cognitive::CognitiveEpisode;
 use crate::memory_consolidation::distillation::{
     DISTILL_RELIABILITY_THRESHOLD, DistilledFact, KNOWN_DISTILL_CONCEPTS, assess_fact_reliability,
-    parse_recipe_output_full,
+    parse_facts_document,
 };
 
 /// Number of episodes in the fixed consolidation-input batch.
@@ -183,10 +183,10 @@ fn baseline_promoted(episodes: &[CognitiveEpisode]) -> Vec<DistilledFact> {
     gate_survivors(&filtered, episodes)
 }
 
-/// Improved path: the REAL production parse+filter (`parse_recipe_output_full`,
+/// Improved path: the REAL production parse+filter (`parse_facts_document`,
 /// which now canonicalizes concepts), then the same gate.
 fn improved_promoted(episodes: &[CognitiveEpisode]) -> Vec<DistilledFact> {
-    let output = parse_recipe_output_full(CORPUS_RECIPE_JSON)
+    let output = parse_facts_document(CORPUS_RECIPE_JSON)
         .expect("benchmark corpus must parse into a facts object");
     gate_survivors(&output.facts, episodes)
 }

@@ -81,7 +81,7 @@ Batch of up to 50 episodes where distilled = 0
   ├─ if batch.len() < 20  →  skip pass, no LLM call, no markers
   │
   ▼
-Serialize as JSON, invoke recipe-runner-rs
+Serialize as JSON, invoke recipe-runner-rs (agent writes facts_output_path file)
   │
   ▼
 prompt_assets/simard/recipes/distill-episodes.yaml
@@ -91,7 +91,8 @@ prompt_assets/simard/recipes/distill-episodes.yaml
   │    - lesson-learned    (decisions, tradeoffs, things that surprised the engineer)
   │    - skip              (truly low-signal — startup logs, retries, etc.)
   ▼
-Recipe output: { "facts": [ { concept, content, source_episode_id }, ... ] }
+Read the dedicated facts file the agent WROTE (never stdout):
+  { "facts": [ { concept, content, source_episode_id }, ... ], "procedures": [ ... ] }
   │
   ▼
 For each fact:
@@ -167,32 +168,42 @@ recipe with a single LLM agent. It follows the same shape as
   recipe only needs ordering, not human-readable time, so no
   `chrono::DateTime` conversion is performed at the boundary.
 - **Prompt**: instructs the agent to classify each episode into one
-  of the three concept labels (or `skip`) and emit a JSON object
+  of the three concept labels (or `skip`) and **write** a JSON object
   `{ "facts": [ { "concept": "...", "content": "...",
-  "source_episode_id": "..." } ], "procedures": [ ... ] }`.
-- **Output**: the runner is invoked with `--output-format json`, so the
-  agent's JSON object arrives inside `recipe-runner-rs`'s structured
-  envelope at `step_results[].output`. The Rust caller extracts it with a
-  tolerant three-tier parser; non-conforming output or a failed run
-  causes the caller to return `Err` (which then triggers the "no markers
-  set" retry behaviour above). See
+  "source_episode_id": "..." } ], "procedures": [ ... ] }` to a
+  dedicated facts file.
+- **Output**: the agent WRITES its JSON envelope to a dedicated
+  per-invocation facts file whose absolute path is passed to the recipe
+  as `-c facts_output_path=<tmp>` and interpolated into the prompt as
+  `{{facts_output_path}}`. After the runner exits, the Rust caller reads
+  **that file** and deserializes it — stdout is never the result channel,
+  so the copilot launcher banner and log lines can no longer contaminate
+  the parse (issues [#2622](https://github.com/rysweet/Simard/issues/2622)
+  / [#2619](https://github.com/rysweet/Simard/issues/2619)). A missing,
+  empty, or unparseable facts file — or a failed run — causes the caller
+  to return `Err` (which then triggers the "no markers set" retry
+  behaviour above); there is **no** stdout fallback (a silent fallback is a
+  silent failure). See
   [Distill recipe output capture](../reference/distill-recipe-output-capture.md)
-  for the full envelope contract, the parser, and failure semantics.
+  for the file-channel contract, the parser, and failure semantics.
 
 The Rust-side invocation shells out to `recipe-runner-rs` with an
-argv-vector (no shell): the recipe path as a positional arg,
-`--output-format json`, and the episodes batch inlined as a single
-`-c episodes=<json>` context entry, with `AMPLIHACK_AGENT_BINARY` in the
-environment. `--output-format json` is **required** — in the default
-`text` mode the runner's stdout is only a human status banner and the
-agent's facts object never reaches the caller, which is exactly the
-latent bug that
-[#2401](https://github.com/rysweet/Simard/issues/2401) fixes. The same
-`Command::new("recipe-runner-rs")` argv construction — minus
-`--output-format json` — is used by
+argv-vector (no shell): the recipe path as a positional arg, the episodes
+batch inlined as a single `-c episodes=<json>` context entry, and the
+facts file path as `-c facts_output_path=<tmp>`, with
+`AMPLIHACK_AGENT_BINARY` in the environment. `--output-format json` is
+still passed so a runner-level failure surfaces a structured error on
+stdout for the terminal-failure message, but the distill **result** is
+read from the facts file, never stdout — the file channel is what closes
+the latent silent no-op that
+[#2401](https://github.com/rysweet/Simard/issues/2401) first fixed via
+stdout capture and that [#2622](https://github.com/rysweet/Simard/issues/2622)
+/ [#2619](https://github.com/rysweet/Simard/issues/2619) hardened against
+launcher-banner contamination. The sibling
 `stewardship::recipe_merge_judge::RecipeMergeJudge` and
-`goal_curation::recipe_progress_checker::RecipeProgressChecker`, which
-still parse the default text banner and are intentionally left unchanged.
+`goal_curation::recipe_progress_checker::RecipeProgressChecker` still parse
+the runner's text/stdout output and are intentionally left unchanged (they
+do not carry the distill agent's large structured payload).
 
 The recipe is loaded with the same resolution order Simard uses
 elsewhere:
@@ -434,10 +445,10 @@ end-to-end LLM yield. The numbers are a property of the fixed corpus
 labels), not a global production delta.
 
 `src/memory_consolidation/distillation_fact_yield_bench.rs` runs a fixed
-batch of 25 episodes and a fixed recipe-output envelope of 13 candidate
+batch of 25 episodes and a fixed facts document of 13 candidate
 facts (canonical, surface-form-variant, off-spec, ungrounded, and
 empty-content cases) through the real production path
-(`parse_recipe_output_full` + `assess_fact_reliability`). It embeds an
+(`parse_facts_document` + `assess_fact_reliability`). It embeds an
 exact-match baseline oracle so the before/after comparison is
 self-contained: reverting the concept canonicalization collapses
 `improved` to `baseline` and fails the strict-improvement assertion.
@@ -529,14 +540,12 @@ of passes that actually reached output parsing (`parse_attempted == true`), so
 its plain mean is exactly successes-vs-attempts — no post-hoc filtering of
 `distill_success_rate` events is needed (the older `parse_attempted` /
 `parse_success` context flags remain for back-compatible derivation). It
-isolates the "recipe exited 0 but its output was unparseable" mode
-(`failure_class = parse-failure`, t=7517 — including the #2512
-launch-banner-prefixed *envelope*) from the "recipe process exited non-zero"
-mode (`copilot-terminal-failure`, t=7411) and the "exited 0 but no step output"
-mode (`recipe-reported-failure`), which never reached parsing and emit **no**
-parse-rate event. This is the rate the launch-banner parse fixes (#2496/#2504/
-#2512) drive toward `1.0`, mirroring how #2504 was validated for the
-decide/orient brain. Because the data lives in `metrics.jsonl` (operator
+isolates the "recipe exited 0 but the agent's facts document was
+missing/empty/unparseable" mode (`failure_class = parse-failure`, issues
+#2622/#2619) from the "recipe process exited non-zero" mode
+(`copilot-terminal-failure`), which never reached parsing and emits **no**
+parse-rate event. This is the rate the file-channel fix (#2622/#2619) drives
+toward `1.0`. Because the data lives in `metrics.jsonl` (operator
 runtime state, queryable via `self_metrics::query_metrics`), the rates are
 computed over a rolling window — no point-in-time findings doc is committed.
 
@@ -587,8 +596,8 @@ distill: 8 episodes pulled, below min 20, skipped
 
 ### Example 3 — recipe error
 
-The runner exits non-zero, the envelope reports `success: false`, or the
-captured `step_results[].output` carries no parseable facts object:
+The runner exits non-zero, or the agent's dedicated facts file is
+missing, empty, or carries no parseable facts object:
 
 ```
 distill: 40 episodes pulled, recipe error: <message>, no markers set, retry next pass

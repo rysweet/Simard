@@ -7,13 +7,19 @@
 # Context vars (passed via -c):
 #   episodes — JSON array of objects with
 #     { id, source_label, temporal_index, content }
+#   facts_output_path — ABSOLUTE path to the file the agent MUST write its JSON
+#     envelope to (issues #2622/#2619). This is the ONLY channel Simard reads the
+#     result from; stdout is ignored, so the copilot launcher banner and log
+#     lines can never contaminate the parse.
 #   strict_json_instruction — format-reinforcement sentence appended to the
 #     prompt on an in-cycle retry after a transient parse miss (issue #2468).
-#     Empty on the first attempt; set to a "respond with ONLY the JSON object"
-#     reminder on retry. Interpolated via the pure `{{strict_json_instruction}}`
-#     substitution, so no conditional templating is required.
+#     Empty on the first attempt; set to a "write ONLY the JSON object to the
+#     facts file" reminder on retry. Interpolated via the pure
+#     `{{strict_json_instruction}}` substitution, so no conditional templating
+#     is required.
 #
-# Output: agent stdout containing a single JSON object of the form:
+# Output: the agent WRITES a single JSON object of the form below to the file at
+# `{{facts_output_path}}` (NOT to stdout):
 #   {
 #     "facts": [
 #       { "concept": "pr-pattern" | "bug-pattern" | "lesson-learned",
@@ -45,6 +51,11 @@ context:
   # transient parse miss (issue #2468). Declared so the `{{strict_json_instruction}}`
   # substitution always resolves, even when the recipe is run without the override.
   strict_json_instruction: ""
+  # Empty by default; the distill subprocess overrides this with the absolute
+  # path of the per-invocation facts file the agent must write (issues
+  # #2622/#2619). Declared so the `{{facts_output_path}}` substitution always
+  # resolves, even when the recipe is run without the override.
+  facts_output_path: ""
 
 steps:
   - id: "distill"
@@ -117,8 +128,17 @@ steps:
 
       ## Output
 
-      Return **only** the following JSON object — no surrounding prose,
-      no markdown fence, no commentary:
+      **Write** the following JSON object — and NOTHING else — to the file at
+      the absolute path:
+
+      ```
+      {{facts_output_path}}
+      ```
+
+      Use your file-writing tool to create/overwrite that exact file with a
+      single JSON object. Do NOT print the JSON to the terminal as your answer,
+      and do NOT wrap it in prose or a markdown fence inside the file — the file
+      must contain only the JSON object:
 
       ```json
       {
@@ -139,11 +159,12 @@ steps:
       }
       ```
 
-      If nothing in the batch is worth keeping, emit
-      `{"facts": [], "procedures": []}`.
+      This file is the ONLY channel that is read: anything you print to the
+      terminal is ignored. If nothing in the batch is worth keeping, still write
+      the file with `{"facts": [], "procedures": []}`.
 
-      Do not invent new concept labels. Do not invent episode ids. Do
-      not include the literal string `skip` in the `concept` field —
-      skipped episodes simply contribute no entry to the `facts` array.
+      Do not invent new concept labels. Do not invent episode ids. Do not
+      include the literal string `skip` in the `concept` field — skipped
+      episodes simply contribute no entry to the `facts` array.
 
       {{strict_json_instruction}}
