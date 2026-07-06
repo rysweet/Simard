@@ -76,7 +76,7 @@ pub const KNOWN_DISTILL_CONCEPTS: &[&str] = &["pr-pattern", "bug-pattern", "less
 /// JSON-format reinforcement threaded into the recipe (see
 /// [`DistillRecipeRunner::run_all_reinforced`]), recovers most of these within
 /// the same pass, turning a dropped batch into stored facts. Structural classes
-/// (`SpawnFailure`, `SerializeFailure`, `RecipeReportedFailure`) are NOT retried
+/// (`SpawnFailure`, `SerializeFailure`, and `Other`) are NOT retried
 /// — they escalate immediately. Kept at `1` so the recovery stays bounded and a
 /// genuinely broken recipe still surfaces promptly.
 pub const DISTILL_PARSE_RETRY_MAX: u32 = 1;
@@ -720,23 +720,22 @@ fn record_reliability_gate_metric(candidate_facts: u32, quarantined: u32, promot
 
 /// Machine-readable class of a distillation failure, derived from the stable
 /// leading prefix of the `SimardError::BridgeError` message emitted at each
-/// runner/parse site in this module. Covers every `Err` `run_all` can surface,
-/// including the **production** `--output-format json` envelope path (where a
-/// parse failure manifests as a *step-output* parse error, not the legacy
-/// bare-stdout one).
+/// runner/parse site in this module. Covers every `Err` `run_all` can surface.
+/// Post-#2622/#2619 the distill result is read from the agent's dedicated facts
+/// file, so a parse failure now manifests as a *missing / empty / unparseable
+/// facts document* rather than a stdout scan miss.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DistillFailureClass {
-    /// `recipe-runner-rs` could not be spawned (binary missing/structural).
+    /// `recipe-runner-rs` could not be spawned (binary missing/structural), or
+    /// the per-invocation facts output tempdir could not be created.
     SpawnFailure,
     /// The recipe **process** exited non-zero (#2461 t=7411 case).
     CopilotTerminalFailure,
-    /// The recipe process exited 0 but the run did not yield a usable
-    /// completed `distill` step (envelope `success=false`, or no completed
-    /// step). The recipe ran but produced no parseable agent output to parse.
-    RecipeReportedFailure,
-    /// The recipe process exited 0 and a step ran, but its output had no
-    /// parseable `{ "facts": [...] }` object (#2461 t=7517 case). This is the
-    /// only failure class that actually *reached* output parsing.
+    /// The recipe process exited 0 but the agent's facts document was missing,
+    /// empty, or not a parseable `{ "facts": [...] }` object (issues
+    /// #2622/#2619). This is the only failure class that actually *reached* the
+    /// agent output, so it is the denominator gate for
+    /// `distill_parse_success_rate`.
     ParseFailure,
     /// The episodes payload failed to serialize (structural; ~unreachable
     /// since the payload is built from infallible `json!` values).
@@ -751,7 +750,6 @@ impl DistillFailureClass {
         match self {
             Self::SpawnFailure => "spawn-failure",
             Self::CopilotTerminalFailure => "copilot-terminal-failure",
-            Self::RecipeReportedFailure => "recipe-reported-failure",
             Self::ParseFailure => "parse-failure",
             Self::SerializeFailure => "serialize-failure",
             Self::Other => "other",
@@ -761,23 +759,22 @@ impl DistillFailureClass {
     /// `true` when the recipe **process** exited 0. False for spawn/terminal
     /// (never started / non-zero exit) and serialize (never spawned).
     pub fn recipe_exited_ok(self) -> bool {
-        matches!(self, Self::ParseFailure | Self::RecipeReportedFailure)
+        matches!(self, Self::ParseFailure)
     }
 
-    /// `true` when the run actually *reached output parsing* (a step ran and
-    /// its output was parsed). This is the denominator gate for
-    /// `distill_parse_success_rate` — only `ParseFailure` qualifies among
-    /// failures (`RecipeReportedFailure` exited 0 but produced no step output
-    /// to parse).
+    /// `true` when the run actually *reached* the agent's facts document (the
+    /// process exited 0 and we tried to read + parse the file). This is the
+    /// denominator gate for `distill_parse_success_rate` — only `ParseFailure`
+    /// qualifies among failures.
     pub fn reached_parsing(self) -> bool {
         matches!(self, Self::ParseFailure)
     }
 
     /// `true` for failure classes worth a bounded in-cycle retry (issue #2468):
-    /// a parse miss (exited 0, output unparseable) or a non-zero recipe exit.
-    /// These are observed to recover on a second attempt — often with JSON
-    /// format reinforcement. Structural classes (spawn/serialize/recipe-reported
-    /// failure, and `Other`) are deterministic and escalate immediately instead.
+    /// a parse miss (exited 0, facts document missing/empty/unparseable) or a
+    /// non-zero recipe exit. These are observed to recover on a second attempt —
+    /// often with JSON format reinforcement. Structural classes
+    /// (spawn/serialize, and `Other`) are deterministic and escalate immediately.
     pub fn is_transient(self) -> bool {
         matches!(self, Self::ParseFailure | Self::CopilotTerminalFailure)
     }
@@ -789,31 +786,28 @@ impl DistillFailureClass {
 /// for each class (`SimardError::BridgeError(msg)` → `msg.starts_with(...)`),
 /// NOT on `contains`. Several messages embed foreign text (terminal failures
 /// carry up to 200 chars each of recipe stderr/stdout; parse failures carry the
-/// agent output excerpt), and that variable tail always trails the fixed prefix
-/// — so anchoring keeps a non-zero exit from being misread as a parse-failure
-/// and corrupting `distill_parse_success_rate`.
+/// facts-document excerpt), and that variable tail always trails the fixed
+/// prefix — so anchoring keeps a non-zero exit from being misread as a
+/// parse-failure and corrupting `distill_parse_success_rate`.
 ///
-/// The prefixes mirror the seven `BridgeError` sites in this file; the
-/// production `--output-format json` path's step-output parse error
-/// (`distill: \`distill\` step output did not contain a parseable …`) is the
-/// t=7517 manifestation and MUST map to `ParseFailure`, since production never
-/// reaches the legacy bare-stdout `did not yield a parseable` path.
+/// The prefixes mirror the `BridgeError` sites in this file. Post-#2622/#2619 a
+/// parse failure surfaces as a missing / empty / unparseable **facts document**
+/// (the agent's dedicated file), all of which map to `ParseFailure`.
 pub fn classify_distill_error(err: &SimardError) -> DistillFailureClass {
     let SimardError::BridgeError(msg) = err else {
         return DistillFailureClass::Other;
     };
-    if msg.starts_with("distill: recipe-runner-rs spawn failed") {
+    if msg.starts_with("distill: recipe-runner-rs spawn failed")
+        || msg.starts_with("distill: failed to create facts output tempdir")
+    {
         DistillFailureClass::SpawnFailure
     } else if msg.starts_with("distill: recipe exited with") {
         DistillFailureClass::CopilotTerminalFailure
     } else if msg.starts_with("distill: failed to serialize episodes payload") {
         DistillFailureClass::SerializeFailure
-    } else if msg.starts_with("distill: recipe-runner reported failure")
-        || msg.starts_with("distill: recipe envelope had no completed")
-    {
-        DistillFailureClass::RecipeReportedFailure
-    } else if msg.starts_with("distill: `distill` step output did not contain a parseable")
-        || msg.starts_with("distill: recipe run did not yield a parseable")
+    } else if msg.starts_with("distill: facts output file was not written")
+        || msg.starts_with("distill: facts document was empty")
+        || msg.starts_with("distill: facts document did not contain a parseable")
     {
         DistillFailureClass::ParseFailure
     } else {
@@ -966,9 +960,10 @@ const RECIPE_FILENAME: &str = "distill-episodes.yaml";
 /// Format-reinforcement sentence threaded into the distill recipe on a retry
 /// after a transient parse miss (issue #2468). Interpolated into the recipe via
 /// the `{{strict_json_instruction}}` substitution; empty on the first attempt.
-const STRICT_JSON_INSTRUCTION: &str = "Your previous reply was not parseable. Respond with ONLY the JSON object \
-     {\"facts\":[...]} (and \"procedures\" if any) — no prose, no markdown fence, \
-     no thinking, nothing before or after the object.";
+const STRICT_JSON_INSTRUCTION: &str = "Your previous attempt did not leave a parseable facts file. Write ONLY the JSON object \
+     {\"facts\":[...]} (and \"procedures\" if any) to the facts file whose path is given above — \
+     no prose, no markdown fence, no thinking, nothing before or after the object, and do \
+     not rely on printing to the terminal.";
 
 fn resolve_recipe_path(repo_root: &Path) -> Option<std::path::PathBuf> {
     if let Some(home) = dirs::home_dir() {
@@ -1028,15 +1023,15 @@ impl RecipeRunnerSubprocess {
 
 impl DistillRecipeRunner for RecipeRunnerSubprocess {
     fn run(&self, episodes: &[CognitiveEpisode]) -> SimardResult<Vec<DistilledFact>> {
-        let raw = self.invoke_recipe(episodes, false)?;
-        let parsed = parse_recipe_output(&raw);
+        let document = self.invoke_recipe(episodes, false)?;
+        let parsed = parse_facts(&document);
         crate::recipe_output::record_parse_outcome("distill", parsed.is_ok());
         parsed
     }
 
     fn run_all(&self, episodes: &[CognitiveEpisode]) -> SimardResult<DistillOutput> {
-        let raw = self.invoke_recipe(episodes, false)?;
-        let parsed = parse_recipe_output_full(&raw);
+        let document = self.invoke_recipe(episodes, false)?;
+        let parsed = parse_facts_document(&document);
         crate::recipe_output::record_parse_outcome("distill", parsed.is_ok());
         parsed
     }
@@ -1048,10 +1043,10 @@ impl DistillRecipeRunner for RecipeRunnerSubprocess {
     ) -> SimardResult<DistillOutput> {
         // Issue #2468: on a retry (`strict_json = true`) thread a non-empty
         // `strict_json_instruction` context var into the recipe so the agent
-        // reply is reinforced to be ONLY the `{ "facts": [...] }` object.
+        // writes ONLY the `{ "facts": [...] }` object to the facts file.
         //
         // Delegates to the capturing variant so the parse + metric logic lives in
-        // exactly one place; the harvested raw is simply dropped here.
+        // exactly one place; the harvested document is simply dropped here.
         self.run_all_reinforced_capturing(episodes, strict_json)
             .result
     }
@@ -1061,10 +1056,10 @@ impl DistillRecipeRunner for RecipeRunnerSubprocess {
         episodes: &[CognitiveEpisode],
         strict_json: bool,
     ) -> DistillAttemptOutcome {
-        // A spawn/terminal failure never produced parseable stdout, so there is
-        // nothing to harvest — surface the error with no raw.
-        let raw = match self.invoke_recipe(episodes, strict_json) {
-            Ok(raw) => raw,
+        // A spawn/terminal/missing-file failure produced no facts document, so
+        // there is nothing to harvest — surface the error with no raw.
+        let document = match self.invoke_recipe(episodes, strict_json) {
+            Ok(document) => document,
             Err(e) => {
                 return DistillAttemptOutcome {
                     result: Err(e),
@@ -1072,11 +1067,15 @@ impl DistillRecipeRunner for RecipeRunnerSubprocess {
                 };
             }
         };
-        let parsed = parse_recipe_output_full(&raw);
+        let parsed = parse_facts_document(&document);
         crate::recipe_output::record_parse_outcome("distill", parsed.is_ok());
-        // On a parse failure keep the exact bytes the extractor saw so Wave 1
-        // raw-capture can persist a real currently-failing sample.
-        let raw_on_failure = if parsed.is_err() { Some(raw) } else { None };
+        // On a parse failure keep the exact facts-file bytes the parser saw so
+        // Wave 1 raw-capture can persist a real currently-failing sample.
+        let raw_on_failure = if parsed.is_err() {
+            Some(document)
+        } else {
+            None
+        };
         DistillAttemptOutcome {
             result: parsed,
             raw_on_failure,
@@ -1090,11 +1089,21 @@ impl RecipeRunnerSubprocess {
     /// and [`run_all`](DistillRecipeRunner::run_all).
     ///
     /// `strict_json` (issue #2468) threads a `strict_json_instruction` context
-    /// var into the recipe: empty on the first attempt, and a "respond with ONLY
-    /// the `{ \"facts\": [...] }` object" reinforcement sentence on a retry after
-    /// a transient parse miss. The recipe interpolates it via the pure
-    /// `{{strict_json_instruction}}` substitution, so no conditional templating
-    /// engine is needed.
+    /// var into the recipe: empty on the first attempt, and a "write ONLY the
+    /// `{ \"facts\": [...] }` object to the facts file" reinforcement sentence on
+    /// a retry after a transient parse miss. The recipe interpolates it via the
+    /// pure `{{strict_json_instruction}}` substitution, so no conditional
+    /// templating engine is needed.
+    ///
+    /// Returns the **contents of the dedicated facts file** the distill agent was
+    /// instructed to write — NOT the recipe's stdout. This is the issues
+    /// #2622/#2619 fix: the copilot launcher banner (`… launching copilot
+    /// binary=… version="GitHub Copilot CLI …"`) and other log noise land on
+    /// stdout and were previously captured AS the distill step's `output`, so a
+    /// stdout scan for `{ "facts": [...] }` matched the banner and every pass
+    /// failed with `parse-failure`. Routing the agent's answer through a private
+    /// file (`-c facts_output_path=…`) makes that contamination structurally
+    /// impossible: stdout is never read for the result.
     fn invoke_recipe(
         &self,
         episodes: &[CognitiveEpisode],
@@ -1120,17 +1129,31 @@ impl RecipeRunnerSubprocess {
             ))
         })?;
 
-        // `--output-format json` is REQUIRED: in the default `text` mode the
-        // runner's stdout is only a human status banner and the distill agent's
-        // `{ "facts": [...] }` payload never reaches us, so every parse fails and
-        // the pass silently no-ops (issue #2401). In `json` mode stdout carries a
-        // structured envelope whose `step_results[].output` holds the agent's
-        // output, which `parse_recipe_output_full` mines. The agent binary is
-        // still selected via the proven `AMPLIHACK_AGENT_BINARY` env var.
-        //
+        // Dedicated, per-invocation facts file the distill agent writes its JSON
+        // envelope to (issues #2622/#2619). A fresh tempdir (mode 0700 via the
+        // `tempfile` crate) gives a unique absolute path with no cross-invocation
+        // races; the directory and its contents are removed when `facts_dir`
+        // drops at the end of this call, AFTER we have read the file. The agent
+        // is told this absolute path via `-c facts_output_path=…` and the recipe
+        // prompt instructs it to write ONLY the envelope there.
+        let facts_dir = tempfile::Builder::new()
+            .prefix("simard-distill-")
+            .tempdir()
+            .map_err(|e| {
+                SimardError::BridgeError(format!(
+                    "distill: failed to create facts output tempdir: {e}"
+                ))
+            })?;
+        let facts_path = facts_dir.path().join("facts.json");
+        let facts_path_arg = facts_path.to_string_lossy().into_owned();
+
         // `strict_json_instruction` (issue #2468) is always passed so the
         // recipe's `{{strict_json_instruction}}` substitution resolves: empty on
-        // the first attempt, and a format-reinforcement sentence on a retry.
+        // the first attempt, and a format-reinforcement sentence on a retry. The
+        // agent binary is still selected via the proven `AMPLIHACK_AGENT_BINARY`
+        // env var. `--output-format json` is retained only so a runner-level
+        // failure surfaces a structured error on stdout for the message below;
+        // the distill result itself is read from `facts_path`, never stdout.
         let strict_json_instruction = if strict_json {
             STRICT_JSON_INSTRUCTION
         } else {
@@ -1145,27 +1168,51 @@ impl RecipeRunnerSubprocess {
             .arg(format!("episodes={payload_json}"))
             .arg("-c")
             .arg(format!("strict_json_instruction={strict_json_instruction}"))
+            .arg("-c")
+            .arg(format!("facts_output_path={facts_path_arg}"))
             .output()
             .map_err(|e| {
                 SimardError::BridgeError(format!("distill: recipe-runner-rs spawn failed: {e}"))
             })?;
 
-        if !output.status.success() {
-            // On failure the runner exits non-zero AND emits the structured
-            // error inside the JSON envelope on stdout (stderr may be empty), so
-            // surface both — never a silent or context-free failure.
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            return Err(SimardError::BridgeError(format!(
-                "distill: recipe exited with {}: stderr={} stdout={}",
-                output.status,
-                truncate(stderr.trim(), 200),
-                truncate(stdout.trim(), 200)
-            )));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        harvest_facts_file(&output, &facts_path)
     }
+}
+
+/// Post-process a finished `recipe-runner-rs` invocation into the distill
+/// agent's facts document, reading it from the dedicated facts file — NEVER from
+/// stdout (issues #2622/#2619).
+///
+/// * A non-zero exit is surfaced as an explicit terminal error carrying both the
+///   truncated stderr and stdout, so a failed run is never silent.
+/// * On a clean (exit-0) run the agent's answer is read from `facts_path`. A
+///   missing file means the agent produced no output this attempt — an explicit,
+///   retry-eligible error. There is deliberately NO stdout fallback: scraping
+///   stdout is exactly the launcher-banner contamination this fix removes.
+///
+/// Split out of [`RecipeRunnerSubprocess::invoke_recipe`] so the "stdout noise is
+/// ignored" contract is hermetically testable without spawning a subprocess.
+fn harvest_facts_file(output: &std::process::Output, facts_path: &Path) -> SimardResult<String> {
+    if !output.status.success() {
+        // On failure the runner exits non-zero AND emits the structured error
+        // inside the JSON envelope on stdout (stderr may be empty), so surface
+        // both — never a silent or context-free failure.
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        return Err(SimardError::BridgeError(format!(
+            "distill: recipe exited with {}: stderr={} stdout={}",
+            output.status,
+            truncate(stderr.trim(), 200),
+            truncate(stdout.trim(), 200)
+        )));
+    }
+
+    std::fs::read_to_string(facts_path).map_err(|e| {
+        SimardError::BridgeError(format!(
+            "distill: facts output file was not written by the agent ({}): {e}",
+            facts_path.display()
+        ))
+    })
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -1177,279 +1224,50 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Parse the recipe's stdout into a list of [`DistilledFact`].
+/// Parse the distill agent's facts document into a list of [`DistilledFact`].
 ///
-/// Thin facts-only wrapper over [`parse_recipe_output_full`] retained for the
-/// legacy [`DistillRecipeRunner::run`] entry point and its unit tests.
-pub(crate) fn parse_recipe_output(raw: &str) -> SimardResult<Vec<DistilledFact>> {
-    parse_recipe_output_full(raw).map(|o| o.facts)
+/// Thin facts-only wrapper over [`parse_facts_document`] retained for the legacy
+/// [`DistillRecipeRunner::run`] entry point and its unit tests.
+pub(crate) fn parse_facts(document: &str) -> SimardResult<Vec<DistilledFact>> {
+    parse_facts_document(document).map(|o| o.facts)
 }
 
-/// Parse `recipe-runner-rs`'s stdout into a [`DistillOutput`] (facts AND
-/// procedures).
+/// Parse the distill agent's **facts document** into a [`DistillOutput`] (facts
+/// AND procedures).
 ///
-/// Three tolerant tiers, in order (issue #2401):
+/// `document` is the contents of the dedicated facts file the distill agent was
+/// instructed to write (`-c facts_output_path=…`), NOT recipe-runner stdout.
+/// Because the agent writes ONLY its JSON envelope to that private file, the
+/// copilot launcher banner and log lines that contaminate stdout can never reach
+/// here — this is the structural fix for the issues #2622/#2619 `parse-failure`
+/// mode where the launcher banner was captured as the distill step output and a
+/// stdout scan for `{ "facts": [...] }` matched the banner instead of the answer.
 ///
-/// 1. **Runner envelope (production path).** With `--output-format json` the
-///    runner emits `{ "recipe_name", "success", "step_results": [...], ... }`.
-///    We require `success == true`, select the `distill` step (or, if renamed,
-///    the last `completed` step), and mine the agent payload out of that
-///    step's `output` — which is itself a JSON *string* that may carry leading
-///    prose (e.g. a `NODE_OPTIONS` banner) before the `{ "facts": ... }`
-///    object, so we balanced-brace scan it. A future runner that emits `output`
-///    as a JSON object is handled too. The envelope itself is recovered even
-///    when the captured stdout **begins with** a Copilot CLI launch banner /
-///    ANSI / tracing-log preamble *before* the JSON (issues #2512, #2517) —
-///    see [`recover_distill_output`].
-/// 2. **Bare-object fallback.** If stdout is not a runner envelope, scan it
-///    directly for an embedded `{ "facts": ... }` object. Keeps the legacy
-///    fact-only mock/unit-test contract (and prose-wrapped agent output)
-///    working.
-/// 3. **Explicit failure.** If neither tier yields a facts object — including
-///    the `--output-format text` status banner and any `success == false`
-///    envelope — return `Err`. The caller treats `Err` as the retry-safe
-///    "no markers set" path; there is never a hollow `Ok`.
-pub(crate) fn parse_recipe_output_full(raw: &str) -> SimardResult<DistillOutput> {
-    let trimmed = raw.trim();
-
-    // Tier 1a — fast path: stdout IS the recipe-runner JSON envelope (clean
-    // production output). `RecipeRunnerEnvelope` requires both `success` and
-    // `step_results`, so a bare `{ "facts": ... }` object (which has neither)
-    // fails this parse and falls through to Tier 2.
-    if let Ok(envelope) = serde_json::from_str::<RecipeRunnerEnvelope>(trimmed) {
-        return envelope.into_distill_output();
+/// Parsing is deliberately simple, reflecting the clean channel:
+///
+/// 1. An empty document means the agent produced no output — an explicit,
+///    retry-eligible `Err` (never a hollow `Ok`; no silent stdout fallback).
+/// 2. Otherwise [`scan_cleaned_for_facts`] deserializes the
+///    `{ "facts": [...], "procedures": [...] }` envelope, tolerating a Markdown
+///    code fence or a little leading/trailing prose the agent may wrap around its
+///    own answer in the file (field/format leniency on a clean channel — NOT the
+///    launcher-banner stdout scraping this fix removed).
+/// 3. If no facts object is present, return `Err`; the caller treats `Err` as
+///    the retry-safe "no markers set" path.
+pub(crate) fn parse_facts_document(document: &str) -> SimardResult<DistillOutput> {
+    let trimmed = document.trim();
+    if trimmed.is_empty() {
+        return Err(SimardError::BridgeError(
+            "distill: facts document was empty; the agent produced no output".to_string(),
+        ));
     }
-
-    // Tier 1b — noise-tolerant envelope recovery (issues #2512 + #2517). The
-    // copilot subprocess prints its `NODE_OPTIONS` / `launching copilot binary`
-    // launch banner (and, intermittently, ANSI-coloured tracing lines) to the
-    // inherited stdout *before* recipe-runner-rs emits its JSON envelope, so the
-    // captured stdout begins with the banner instead of the `{`. The fast Tier-1a
-    // `serde_json::from_str` rejects that leading banner and the whole envelope —
-    // including its escaped `{ "facts": [...] }` payload — was otherwise lost,
-    // producing the recurring `distill failed (non-fatal): … did not yield a
-    // parseable { "facts": [...] } object` and silently deferring the batch. We
-    // recover the envelope through the SAME shared `recipe_output` chokepoint the
-    // inner step-output scan uses (the #2504 launch-banner fix), evaluating BOTH
-    // cleaned views and committing to the one that actually yields a populated
-    // `DistillOutput` — so the line-dropping view can no longer gut a
-    // pretty-printed envelope's escaped `output` line to `null` (#2517) and
-    // swallow the facts/procedures a line-preserving view would recover.
-    // Committing to a recovered `success == false` envelope preserves the
-    // `RecipeReportedFailure` contract for a banner-prefixed failed run.
-    if let Some(result) = recover_distill_output(trimmed) {
-        return result;
-    }
-
-    // Tier 2 — tolerant fallback: an embedded bare `{ "facts": ... }` object in
-    // arbitrary prose (legacy contract; also covers any non-envelope stdout).
-    if let Some(output) = scan_for_facts_object(trimmed) {
+    if let Some(output) = scan_cleaned_for_facts(trimmed) {
         return Ok(output);
     }
-
-    // Tier 3 — explicit, bounded failure.
     Err(SimardError::BridgeError(format!(
-        "distill: recipe run did not yield a parseable {{ \"facts\": [...] }} object: {}",
-        truncate(raw, 200)
+        "distill: facts document did not contain a parseable {{ \"facts\": [...] }} object: {}",
+        truncate(trimmed, 200)
     )))
-}
-
-/// Recover a [`DistillOutput`] from recipe-runner stdout whose JSON envelope is
-/// buried behind a Copilot CLI launch-banner / ANSI / tracing-log preamble
-/// (issues #2512, #2517).
-///
-/// In production the copilot agent subprocess prints its launch banner — the
-/// `ℹ … NODE_OPTIONS=… (saved preference)` marker, the `… launching copilot
-/// binary=… version="GitHub Copilot CLI …"` line, and the `Run 'copilot update'
-/// …` nag (Copilot CLI `1.0.66-2`) — to the inherited stdout *before* the
-/// recipe-runner emits its `{ "recipe_name", "success", "step_results": … }`
-/// envelope. The captured stdout therefore begins with the banner, so the fast
-/// `serde_json::from_str::<RecipeRunnerEnvelope>` in [`parse_recipe_output_full`]
-/// rejects it and the envelope (with its escaped facts payload) is lost. This is
-/// the *outer-envelope* analog of the inner step-output banner contamination
-/// that [`scan_for_facts_object`] already strips.
-///
-/// Recovery walks the SAME shared `recipe_output` chokepoint (the #2504
-/// `is_copilot_launcher_line` / `strip_recipe_noise` fix) via
-/// [`candidate_runner_envelopes`], then **commits to the candidate that actually
-/// yields a populated [`DistillOutput`]** rather than the first that merely
-/// deserializes. This is the #2517 fix: recipe-runner-rs `--output-format json`
-/// emits a **pretty-printed** envelope, and the distill agent's own launch
-/// banner lands *inside* the escaped `output` string. The line-dropping view
-/// ([`strip_recipe_noise`](crate::recipe_output::strip_recipe_noise)) then drops
-/// the whole `"output": "…launching copilot binary=…"` line, leaving a
-/// structurally-valid but **gutted** envelope whose `output` defaults to `null`
-/// — a first-match scan committed to it, `extract_step_output` returned `None`,
-/// and the facts/procedures were swallowed. The line-preserving view
-/// ([`strip_ansi`](crate::recipe_output::strip_ansi)) keeps that line, so its
-/// intact envelope recovers the payload; preferring the populated candidate
-/// stops the gutted view from shadowing it.
-///
-/// Post-#2570: the shared `is_copilot_launcher_line` guard now exempts any
-/// `{`/`"`/`[`-leading JSON line, so `strip_recipe_noise` no longer drops that
-/// `"output": …` member line — the line-dropping view recovers this pretty
-/// shape on its own. Candidate selection remains as defence-in-depth for shapes
-/// the line-dropping view can still gut (e.g. a compact envelope sharing a
-/// physical line with a leading banner token, which is dropped wholesale).
-///
-/// Selection precedence:
-/// 1. the first candidate whose `into_distill_output()` is `Ok` **and** carries
-///    facts or procedures — the intact, populated recovery;
-/// 2. otherwise a `success == false` candidate, surfaced as the
-///    `RecipeReportedFailure` `Err` (a failed run is authoritative and must
-///    never be silently dropped);
-/// 3. otherwise an empty `Ok` ("nothing worth distilling");
-/// 4. otherwise `None` — every candidate was a gutted parse error, so the caller
-///    falls through to the Tier-2 bare-object scan instead of committing to a
-///    hollow failure.
-fn recover_distill_output(trimmed: &str) -> Option<SimardResult<DistillOutput>> {
-    let mut reported_failure: Option<SimardResult<DistillOutput>> = None;
-    let mut empty_ok: Option<DistillOutput> = None;
-    for envelope in candidate_runner_envelopes(trimmed) {
-        // A `success == false` run is authoritative: record it as a
-        // RecipeReportedFailure and keep scanning, but never let a gutted
-        // `success == true` view override it (and never silently drop it).
-        if !envelope.success {
-            if reported_failure.is_none() {
-                reported_failure = Some(envelope.into_distill_output());
-            }
-            continue;
-        }
-        match envelope.into_distill_output() {
-            // A populated recovery wins immediately: the intact view that
-            // survived the launch-banner contamination (#2517).
-            Ok(out) if !out.facts.is_empty() || !out.procedures.is_empty() => {
-                return Some(Ok(out));
-            }
-            // A genuinely empty "nothing to distill" answer — kept only as a
-            // fallback behind any populated recovery.
-            Ok(out) => {
-                if empty_ok.is_none() {
-                    empty_ok = Some(out);
-                }
-            }
-            // A gutted / unparseable candidate (e.g. the line-dropping view that
-            // deleted the escaped `output` line, leaving `output: null`) — try
-            // the next view rather than committing to its parse failure.
-            Err(_) => {}
-        }
-    }
-    // No populated recovery: prefer a reported failure (preserve the
-    // `success == false` contract), then an empty Ok, else `None` so the caller
-    // falls through to the Tier-2 bare-object scan.
-    reported_failure.or_else(|| empty_ok.map(Ok))
-}
-
-/// Collect every [`RecipeRunnerEnvelope`] recoverable from `trimmed` across the
-/// two cleaned `recipe_output` views, in view order, so a caller can pick the
-/// one that yields a populated [`DistillOutput`] (see [`recover_distill_output`]).
-///
-/// Unlike a first-match scan, ALL candidates are returned: the line-dropping
-/// [`strip_recipe_noise`](crate::recipe_output::strip_recipe_noise) view could
-/// gut a pretty-printed envelope's escaped `output` line to `null` (#2517; since
-/// #2570's structural-token guard that specific `"`-leading member line is
-/// preserved), and it still drops a compact envelope that shares a physical line
-/// with a leading banner token — so the line-preserving
-/// [`strip_ansi`](crate::recipe_output::strip_ansi) view's intact envelope must
-/// remain available and must not be shadowed.
-///
-/// Two cleaned views are tried, mirroring [`scan_for_facts_object`]:
-///
-/// 1. [`strip_recipe_noise`](crate::recipe_output::strip_recipe_noise) — strips
-///    ANSI escapes AND drops whole launcher/log/banner lines (recovers an
-///    envelope sitting on its own line after the banner lines).
-/// 2. [`strip_ansi`](crate::recipe_output::strip_ansi) — line-preserving
-///    (recovers an envelope that shares a physical line with a leading banner
-///    token, which view 1 would drop wholesale, and a pretty-printed envelope
-///    whose escaped `output` line view 1 would drop).
-///
-/// Within each view the string-aware
-/// [`balanced_objects`](crate::recipe_output::balanced_objects) scan is walked
-/// from the END, taking the LAST span that deserializes as a runner envelope, so
-/// a leading non-envelope log record (e.g. a `{"level":"info",…}` line the agent
-/// emitted before the envelope) cannot shadow the real envelope that trails it. A
-/// bare `{ "facts": [...] }` object lacks both required envelope fields, so it
-/// never matches here and correctly falls through to the Tier-2 bare-object path.
-fn candidate_runner_envelopes(trimmed: &str) -> Vec<RecipeRunnerEnvelope> {
-    let mut candidates = Vec::new();
-    for cleaned in [
-        crate::recipe_output::strip_recipe_noise(trimmed),
-        crate::recipe_output::strip_ansi(trimmed),
-    ] {
-        let view = cleaned.trim();
-        // Fast path within the cleaned view — it IS the envelope (banner lines
-        // dropped, nothing trailing).
-        if let Ok(envelope) = serde_json::from_str::<RecipeRunnerEnvelope>(view) {
-            candidates.push(envelope);
-            continue;
-        }
-        // Slow path — among every balanced top-level object (string-aware),
-        // scanned from the end, take the last that parses as a runner envelope.
-        for span in crate::recipe_output::balanced_objects(view)
-            .into_iter()
-            .rev()
-        {
-            if let Ok(envelope) = serde_json::from_str::<RecipeRunnerEnvelope>(span) {
-                candidates.push(envelope);
-                break;
-            }
-        }
-    }
-    candidates
-}
-
-/// Scan `text` for a balanced `{...}` substring that deserializes as a
-/// [`RecipeEnvelope`] (a bare `{ "facts": [...], "procedures": [...] }` object),
-/// tolerating leading/trailing prose. Returns `None` if none is found.
-///
-/// When several balanced objects are present the **last non-empty** one that
-/// parses wins: a leading banner/status object (e.g. a `NODE_OPTIONS` notice,
-/// or a thinking trace the agent emitted before its answer) no longer shadows
-/// the real facts object that trails it — this is the t=7517 / #2461
-/// parse-failure mode where a first-object scan locked onto the banner and the
-/// whole pass silently no-opped. Preferring the last *non-empty* object (and
-/// only falling back to an empty `{"facts":[]}` when none carry
-/// facts/procedures) keeps a legitimate "nothing worth distilling" answer while
-/// preventing an accidental trailing empty object from discarding earlier facts.
-///
-/// The scan is iterative (no recursion) so pathologically deep brace nesting
-/// terminates without a stack overflow; serde's own recursion limit bounds the
-/// per-candidate parse. Brace scanning is string-aware (it ignores `{`/`}`
-/// inside JSON string literals, respecting `\"` escapes) so a brace inside a
-/// fact's `content` cannot corrupt depth accounting.
-fn scan_for_facts_object(text: &str) -> Option<DistillOutput> {
-    // Try two cleaned views of the noisy step output, mirroring the shared
-    // `recipe_output::extract_json_payload` dual pass (issue #2484):
-    //
-    // 1. `strip_recipe_noise` strips ANSI escapes AND drops whole tracing/log
-    //    and runner-banner lines — this removes the `\x1b[2m<RFC3339 timestamp>`
-    //    log prefix that made `serde_json` reject the span (the t=7919 / #2461 /
-    //    #2484 distill parse-failure) and recovers a payload whose pretty body
-    //    has an interleaved tracing line.
-    // 2. `strip_ansi` is line-preserving — it recovers a payload that sits on
-    //    the SAME physical line as a leading timestamp/log prefix, which view 1
-    //    would otherwise drop wholesale.
-    //
-    // Both views are clean-path zero-copy (`Cow::Borrowed`) when stdout carries
-    // no `ESC` byte and no droppable line, so adopting the shared helper does
-    // not change behaviour on clean output. A non-empty facts object from
-    // either view wins; an empty `{"facts":[]}` "nothing to distill" answer is
-    // kept only as a fallback when neither view yields a populated object.
-    let mut empty_fallback: Option<DistillOutput> = None;
-    for cleaned in [
-        crate::recipe_output::strip_recipe_noise(text),
-        crate::recipe_output::strip_ansi(text),
-    ] {
-        if let Some(output) = scan_cleaned_for_facts(cleaned.trim()) {
-            if !output.facts.is_empty() || !output.procedures.is_empty() {
-                return Some(output);
-            }
-            if empty_fallback.is_none() {
-                empty_fallback = Some(output);
-            }
-        }
-    }
-    empty_fallback
 }
 
 /// Scan an already noise-stripped `trimmed` string for a `{ "facts": [...] }`
@@ -1458,8 +1276,8 @@ fn scan_for_facts_object(text: &str) -> Option<DistillOutput> {
 /// the last otherwise-non-empty object, then the last parseable empty object.
 /// Candidates are the balanced `{...}` substrings returned by
 /// [`crate::recipe_output::balanced_objects`] (string-aware, and resilient to an
-/// unmatched `{` in leading prose). The ANSI/log/banner stripping that produces
-/// `trimmed` lives in [`scan_for_facts_object`].
+/// unmatched `{` in leading prose). The empty-document guard and the caller
+/// contract live in [`parse_facts_document`].
 ///
 /// The grounded-capable tier exists because field-level leniency
 /// ([`de_lenient_string`]) lets a *source-less* facts object now parse as
@@ -1512,105 +1330,6 @@ fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
     nonempty_fallback.or(empty_fallback)
 }
 
-/// The `recipe-runner-rs` 0.3.6 `--output-format json` envelope. Only the
-/// fields the parser needs are modelled; unknown fields (`recipe_name`,
-/// `duration`, `context`, …) are ignored. Both `success` and `step_results`
-/// are REQUIRED so this type does not accidentally match a bare facts object.
-#[derive(serde::Deserialize)]
-struct RecipeRunnerEnvelope {
-    success: bool,
-    step_results: Vec<RecipeRunnerStepResult>,
-}
-
-/// One entry of `step_results[]`. `output` is a [`serde_json::Value`] because
-/// the runner emits it as a JSON *string* today but a future version could emit
-/// it as an object — the parser handles both.
-#[derive(serde::Deserialize)]
-struct RecipeRunnerStepResult {
-    #[serde(default)]
-    step_id: String,
-    #[serde(default)]
-    status: String,
-    #[serde(default)]
-    output: serde_json::Value,
-    #[serde(default)]
-    error: String,
-}
-
-impl RecipeRunnerEnvelope {
-    /// Extract the distill agent's facts/procedures from the envelope.
-    ///
-    /// `success == false` short-circuits to `Err` BEFORE any step output is
-    /// read — a failed run is never trusted, even if it somehow carries a
-    /// well-formed payload.
-    fn into_distill_output(self) -> SimardResult<DistillOutput> {
-        if !self.success {
-            return Err(SimardError::BridgeError(format!(
-                "distill: recipe-runner reported failure (success=false): {}",
-                truncate(self.first_error().trim(), 200)
-            )));
-        }
-        let step = self.select_distill_step().ok_or_else(|| {
-            SimardError::BridgeError(
-                "distill: recipe envelope had no completed `distill` step".to_string(),
-            )
-        })?;
-        extract_step_output(&step.output).ok_or_else(|| {
-            SimardError::BridgeError(format!(
-                "distill: `distill` step output did not contain a parseable \
-                 {{ \"facts\": [...] }} object; output: {}",
-                truncate(step_output_excerpt(&step.output).trim(), 200)
-            ))
-        })
-    }
-
-    /// Select the step to read facts from: the one with `step_id == "distill"`,
-    /// or — tolerating a future step rename — the last `completed` step.
-    fn select_distill_step(&self) -> Option<&RecipeRunnerStepResult> {
-        self.step_results
-            .iter()
-            .find(|s| s.step_id == "distill")
-            .or_else(|| {
-                self.step_results
-                    .iter()
-                    .rev()
-                    .find(|s| s.status == "completed")
-            })
-    }
-
-    /// First non-empty step error, for failure messages.
-    fn first_error(&self) -> String {
-        self.step_results
-            .iter()
-            .map(|s| s.error.as_str())
-            .find(|e| !e.trim().is_empty())
-            .unwrap_or("<no step error reported>")
-            .to_string()
-    }
-}
-
-/// Mine a [`DistillOutput`] from a step's `output` value. A JSON *string* is
-/// balanced-brace scanned (it may carry leading prose); a JSON *object*
-/// carrying `facts` is deserialized directly.
-fn extract_step_output(output: &serde_json::Value) -> Option<DistillOutput> {
-    match output {
-        serde_json::Value::String(s) => scan_for_facts_object(s),
-        serde_json::Value::Object(_) => serde_json::from_value::<RecipeEnvelope>(output.clone())
-            .ok()
-            .map(|e| e.into_output()),
-        _ => None,
-    }
-}
-
-/// A bounded, human-readable excerpt of a step `output` value for error
-/// messages (avoids quoting/escaping a `Value::String` twice).
-fn step_output_excerpt(output: &serde_json::Value) -> String {
-    match output {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
-}
-
 #[derive(serde::Deserialize)]
 struct RecipeEnvelope {
     facts: Vec<RecipeFact>,
@@ -1626,9 +1345,9 @@ struct RecipeEnvelope {
 ///
 /// Without this, a single fact missing `source_episode_id` (or carrying a
 /// `null`/numeric value) made `serde` reject the **entire** `{ "facts": [...] }`
-/// envelope, so `scan_for_facts_object` found no parseable object and the whole
+/// envelope, so [`parse_facts_document`] found no parseable object and the whole
 /// batch was silently dropped with the recurring
-/// `` `distill` step output did not contain a parseable { "facts": [...] } `` error —
+/// `` facts document did not contain a parseable { "facts": [...] } `` error —
 /// burning an LLM call every cycle while the same batch deferred forever.
 ///
 /// Tolerating field-level noise lets the **well-formed** facts in a batch be
@@ -1854,7 +1573,7 @@ mod unit_tests {
     fn parse_recipe_output_accepts_plain_object() {
         let raw =
             r#"{"facts":[{"concept":"pr-pattern","content":"x","source_episode_id":"epi_1"}]}"#;
-        let facts = parse_recipe_output(raw).unwrap();
+        let facts = parse_facts(raw).unwrap();
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].concept, "pr-pattern");
     }
@@ -1864,7 +1583,7 @@ mod unit_tests {
         let raw = r#"Sure, here is the JSON:
             {"facts":[{"concept":"bug-pattern","content":"y","source_episode_id":"epi_2"}]}
             That's all."#;
-        let facts = parse_recipe_output(raw).unwrap();
+        let facts = parse_facts(raw).unwrap();
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].concept, "bug-pattern");
     }
@@ -1875,7 +1594,7 @@ mod unit_tests {
             {"concept":"made-up-label","content":"a","source_episode_id":"epi_1"},
             {"concept":"lesson-learned","content":"b","source_episode_id":"epi_2"}
         ]}"#;
-        let facts = parse_recipe_output(raw).unwrap();
+        let facts = parse_facts(raw).unwrap();
         assert_eq!(facts.len(), 1, "made-up-label must be filtered out");
         assert_eq!(facts[0].concept, "lesson-learned");
     }
@@ -1941,7 +1660,7 @@ mod unit_tests {
             {"concept":" bug_pattern ","content":"off by one","source_episode_id":"epi_2"},
             {"concept":"made-up-label","content":"nope","source_episode_id":"epi_3"}
         ]}"#;
-        let facts = parse_recipe_output(raw).unwrap();
+        let facts = parse_facts(raw).unwrap();
         assert_eq!(
             facts.len(),
             2,
@@ -1954,7 +1673,7 @@ mod unit_tests {
     #[test]
     fn parse_recipe_output_errors_when_no_object() {
         let raw = "no json here at all";
-        assert!(parse_recipe_output(raw).is_err());
+        assert!(parse_facts(raw).is_err());
     }
 
     // ── issue #2461: last-object-wins + string-aware extraction ──────────
@@ -1966,7 +1685,7 @@ mod unit_tests {
         // banner and the pass silently no-opped; "last object wins" recovers it.
         let raw = r#"{"recipe_name":"distill","status":"starting","note":"banner"}
             {"facts":[{"concept":"lesson-learned","content":"prefer last object","source_episode_id":"epi_3"}]}"#;
-        let facts = parse_recipe_output(raw).unwrap();
+        let facts = parse_facts(raw).unwrap();
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].concept, "lesson-learned");
         assert_eq!(facts[0].content, "prefer last object");
@@ -1977,7 +1696,7 @@ mod unit_tests {
         // A fact whose content contains literal braces must not corrupt the
         // string-aware brace scanner.
         let raw = r#"thinking... {"facts":[{"concept":"bug-pattern","content":"handler for {req} leaks }","source_episode_id":"epi_4"}]}"#;
-        let facts = parse_recipe_output(raw).unwrap();
+        let facts = parse_facts(raw).unwrap();
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].content, "handler for {req} leaks }");
     }
@@ -1987,7 +1706,7 @@ mod unit_tests {
         // A stray double-quote in prose BEFORE the JSON must not put the
         // scanner into string mode and swallow the object's `{` opener.
         let raw = "He said \"the answer is below:\n{\"facts\":[{\"concept\":\"pr-pattern\",\"content\":\"x\",\"source_episode_id\":\"epi_9\"}]}";
-        let facts = parse_recipe_output(raw).unwrap();
+        let facts = parse_facts(raw).unwrap();
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].concept, "pr-pattern");
     }
@@ -2012,7 +1731,7 @@ mod unit_tests {
             r#"{"facts":[{"concept":"bug-pattern","content":"missing guard in handler","#,
             r#""source_episode_id":"epi_9900"}]}"#,
         );
-        let facts = parse_recipe_output(raw).expect("answer after an unmatched `{` must parse");
+        let facts = parse_facts(raw).expect("answer after an unmatched `{` must parse");
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].concept, "bug-pattern");
         assert_eq!(facts[0].content, "missing guard in handler");
@@ -2031,10 +1750,10 @@ mod unit_tests {
             "\u{2139} NODE_OPTIONS=--max-old-space-size=8192 (saved preference)\n",
             "Run 'copilot update' to update\n",
         );
-        assert!(parse_recipe_output(raw).is_err());
+        assert!(parse_facts(raw).is_err());
         // And the empty / whitespace-only shapes likewise fail without panic.
-        assert!(parse_recipe_output("").is_err());
-        assert!(parse_recipe_output("   \n \t ").is_err());
+        assert!(parse_facts("").is_err());
+        assert!(parse_facts("   \n \t ").is_err());
     }
 
     // ── issue #2461: failure classification ─────────────────────────────
@@ -2048,28 +1767,26 @@ mod unit_tests {
                 SpawnFailure,
             ),
             (
+                "distill: failed to create facts output tempdir: permission denied",
+                SpawnFailure,
+            ),
+            (
                 "distill: recipe exited with exit status: 1: stderr= stdout=",
                 CopilotTerminalFailure,
             ),
-            // Production `--output-format json` parse failure (t=7517): the
-            // envelope parsed, the step ran, but its output was unparseable.
+            // Post-#2622/#2619 parse failures: the process exited 0 but the
+            // agent's facts document was missing, empty, or unparseable.
             (
-                "distill: `distill` step output did not contain a parseable { \"facts\": [...] } object; output: hi",
+                "distill: facts output file was not written by the agent (/tmp/x/facts.json): No such file or directory (os error 2)",
                 ParseFailure,
             ),
-            // Legacy bare-stdout parse failure (non-envelope `run()` / mocks).
             (
-                "distill: recipe run did not yield a parseable { \"facts\": [...] } object: hi",
+                "distill: facts document was empty; the agent produced no output",
                 ParseFailure,
             ),
-            // Envelope present but the run self-reported failure / no step.
             (
-                "distill: recipe-runner reported failure (success=false): boom",
-                RecipeReportedFailure,
-            ),
-            (
-                "distill: recipe envelope had no completed `distill` step",
-                RecipeReportedFailure,
+                "distill: facts document did not contain a parseable { \"facts\": [...] } object: hi",
+                ParseFailure,
             ),
             (
                 "distill: failed to serialize episodes payload: oops",
@@ -2135,15 +1852,13 @@ mod unit_tests {
     #[test]
     fn parse_failure_is_the_only_class_that_reached_parsing() {
         use DistillFailureClass::*;
-        // recipe_exited_ok: process exited 0 → parse-failure AND recipe-reported.
+        // recipe_exited_ok: process exited 0 → only parse-failure.
         assert!(ParseFailure.recipe_exited_ok());
-        assert!(RecipeReportedFailure.recipe_exited_ok());
         assert!(!CopilotTerminalFailure.recipe_exited_ok());
         assert!(!SpawnFailure.recipe_exited_ok());
         assert!(!SerializeFailure.recipe_exited_ok());
-        // reached_parsing: only parse-failure actually parsed step output.
+        // reached_parsing: only parse-failure actually reached the agent output.
         assert!(ParseFailure.reached_parsing());
-        assert!(!RecipeReportedFailure.reached_parsing());
         assert!(!CopilotTerminalFailure.reached_parsing());
     }
 
@@ -2198,37 +1913,14 @@ mod unit_tests {
     }
 
     #[test]
-    fn recipe_reported_failure_exited_ok_but_did_not_reach_parsing() {
-        // Envelope present (process exited 0) but the run self-reported failure
-        // or had no completed step: counts as a recipe attempt that exited 0,
-        // but it must NOT inflate the parse-rate denominator (no step output
-        // was parsed).
-        let payload = build_distill_success_context(
-            false,
-            Some(DistillFailureClass::RecipeReportedFailure),
-            40,
-            0,
-            1,
-            false,
-        );
-        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        assert_eq!(v["recipe_exited_ok"], true, "envelope present → exit 0");
-        assert_eq!(
-            v["parse_attempted"], false,
-            "no step output reached parsing"
-        );
-        assert_eq!(v["parse_success"], false);
-        assert_eq!(v["failure_class"], "recipe-reported-failure");
-    }
-
-    #[test]
-    fn production_envelope_step_output_parse_failure_is_counted_in_parse_rate() {
-        // Regression for the production t=7517 path: the `--output-format json`
-        // step-output parse error MUST classify as parse-failure so it lands in
-        // the distill_parse_success_rate denominator (parse_attempted = true).
+    fn missing_facts_document_parse_failure_is_counted_in_parse_rate() {
+        // Regression for the issues #2622/#2619 path: a missing/empty/unparseable
+        // facts document (process exited 0) MUST classify as parse-failure so it
+        // lands in the distill_parse_success_rate denominator (parse_attempted =
+        // true).
         let err = SimardError::BridgeError(
-            "distill: `distill` step output did not contain a parseable \
-             { \"facts\": [...] } object; output: NODE_OPTIONS banner..."
+            "distill: facts document did not contain a parseable \
+             { \"facts\": [...] } object: launcher banner..."
                 .to_string(),
         );
         assert_eq!(
@@ -2258,7 +1950,7 @@ mod unit_tests {
             "\n",
             r#"{"facts":[]}"#
         );
-        let facts = parse_recipe_output(raw).unwrap();
+        let facts = parse_facts(raw).unwrap();
         assert_eq!(
             facts.len(),
             1,
@@ -2271,726 +1963,36 @@ mod unit_tests {
     fn scan_accepts_bare_empty_facts_as_nothing_to_distill() {
         // A lone `{"facts":[]}` is a legitimate "nothing worth distilling"
         // answer and must parse to zero facts (not an error).
-        let facts = parse_recipe_output(r#"{"facts":[]}"#).unwrap();
+        let facts = parse_facts(r#"{"facts":[]}"#).unwrap();
         assert!(facts.is_empty());
     }
-
-    // ── t=7919 / #2484: ANSI-coded tracing-log + banner noise in step output ──
-
-    #[test]
-    fn parse_recipe_output_recovers_from_ansi_log_noise() {
-        // #2484 live-evidence shape: the distill step output begins with the
-        // dimmed `\x1b[2m<RFC3339 timestamp>` tracing prefix, then the agent's
-        // facts object on the next line. The raw span carries `ESC` bytes so it
-        // is invalid JSON; the shared `strip_recipe_noise` adoption drops the
-        // ANSI-coloured log line and recovers the buried payload.
-        let esc = '\u{1b}';
-        let raw = format!(
-            "{esc}[2m2026-06-28T08:08:58.151133Z{esc}[0m {esc}[36m INFO{esc}[0m simard::distill: run\n\
-             {{\"facts\":[{{\"concept\":\"lesson-learned\",\
-             \"content\":\"shared extractor recovered me\",\"source_episode_id\":\"epi_8451\"}}]}}"
-        );
-        // The raw, un-stripped span must NOT parse (the silent-drop failure).
-        assert!(
-            serde_json::from_str::<serde_json::Value>(&raw).is_err(),
-            "raw ANSI/log-noised span must be unparseable JSON"
-        );
-        let facts = parse_recipe_output(&raw).expect("shared extractor must recover facts");
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].concept, "lesson-learned");
-        assert_eq!(facts[0].content, "shared extractor recovered me");
-    }
-
-    #[test]
-    fn parse_recipe_output_recovers_from_runner_banner() {
-        // New capability over the former distill-private ANSI-only stripper:
-        // `strip_recipe_noise` ALSO drops the recipe-runner text-mode summary
-        // banner lines that can prefix the agent's payload, which the old
-        // ANSI-only path left in place (defeating the balanced-brace scan when
-        // a banner line itself carried stray braces).
-        let raw = "Recipe: distill-episodes SUCCESS (36.0s)\n\
-                   Steps: 1/1 completed\n\
-                   [completed] distill (36.0s)\n\
-                   {\"facts\":[{\"concept\":\"bug-pattern\",\
-                   \"content\":\"runner banner must be dropped\",\
-                   \"source_episode_id\":\"epi_9\"}]}";
-        let facts = parse_recipe_output(raw).expect("banner-prefixed payload must parse");
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].concept, "bug-pattern");
-        assert_eq!(facts[0].content, "runner banner must be dropped");
-    }
-
-    #[test]
-    fn parse_recipe_output_recovers_facts_from_ansi_log_noise() {
-        // The t=7919 cycle: the distill step output carried ANSI-coded tracing
-        // log lines (the failing excerpt began `\x1b[2m2026-06-28T06:38:25…`)
-        // with the agent's facts object colourised inline. The raw ESC bytes
-        // interleaved with the JSON made `serde_json` reject the span, so the
-        // whole batch silently deferred. ANSI stripping recovers it.
-        let esc = '\u{1b}';
-        let raw = format!(
-            "{esc}[2m2026-06-28T06:38:25.928376Z{esc}[0m {esc}[36m DEBUG{esc}[0m thinking…\n\
-             {{\"facts\":[{{\"concept\":\"{esc}[33mbug-pattern{esc}[0m\",\
-             \"content\":\"ansi noise must be stripped\",\"source_episode_id\":\"epi_7\"}}]}}"
-        );
-        let facts = parse_recipe_output(&raw).expect("must recover facts past ANSI noise");
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].concept, "bug-pattern");
-        assert_eq!(facts[0].content, "ansi noise must be stripped");
-    }
-
-    #[test]
-    fn parse_recipe_output_full_recovers_facts_from_ansi_coded_step_output() {
-        // Exact production t=7919 path: the `--output-format json` envelope's
-        // `distill` step `output` string is ANSI-coded tracing log noise
-        // (begins with the dimmed `\x1b[2m<timestamp>` prefix from the failing
-        // cycle) with the agent's facts object colourised inline. Before ANSI
-        // stripping this raised "step output did not contain a parseable
-        // { facts } object" and the 20-episode batch deferred for a full cycle;
-        // now the buried object is mined out of the step output and parsed.
-        let esc = '\u{1b}';
-        let step_output = format!(
-            "{esc}[2m2026-06-28T06:38:25.928376Z{esc}[0m {esc}[32m INFO{esc}[0m \
-             {esc}[2msimard::distill{esc}[0m: distilling 20 episodes\n\
-             {{{esc}[0m\"facts\":[{{\"concept\":\"{esc}[33mlesson-learned{esc}[0m\",\
-             \"content\":\"strip ansi before the facts scan\",\
-             \"source_episode_id\":\"epi_42\"}}]}}\n"
-        );
-        let envelope = serde_json::json!({
-            "recipe_name": "distill-episodes",
-            "success": true,
-            "step_results": [{
-                "step_id": "distill",
-                "status": "completed",
-                "output": step_output,
-                "error": ""
-            }]
-        })
-        .to_string();
-        let out = parse_recipe_output_full(&envelope).expect("ANSI-coded step output must parse");
-        assert_eq!(out.facts.len(), 1);
-        assert_eq!(out.facts[0].concept, "lesson-learned");
-        assert_eq!(out.facts[0].content, "strip ansi before the facts scan");
-        assert_eq!(out.facts[0].source_episode_id, "epi_42");
-    }
-
-    #[test]
-    fn parse_recipe_output_full_recovers_facts_from_copilot_launch_log_preamble() {
-        // Regression for issue #2496 (episode t=9271 live failure).
-        //
-        // The existing ANSI/banner tests above already cover dimmed
-        // `simard::distill` / `thinking` tracing prefixes and the
-        // recipe-runner text summary banner. This pins the distinct
-        // **Copilot CLI launch** noise shape the issue captured, which no
-        // other test exercises as a unit:
-        //
-        //   1. an ANSI-coloured `launching copilot binary=copilot` line,
-        //   2. an `\u{2139} NODE_OPTIONS=--max-old-space-size=…` line, and
-        //   3. a leading, ANSI-wrapped JSON *log record*
-        //      (`{"level":"info",…}`) — a complete brace-balanced object that
-        //      precedes the real facts object.
-        //
-        // Element 3 is the adversarial part: a first-object brace scan would
-        // lock onto the `{"level":…}` log record (which has no `facts` field
-        // and so fails the envelope parse) and never reach the trailing facts
-        // object. The current parser strips the ANSI/log noise and prefers the
-        // LAST non-empty facts object, so the buried payload is recovered.
-        // This is fed through the production Tier-1 `--output-format json`
-        // envelope path (`parse_recipe_output_full` -> `into_distill_output`
-        // -> `extract_step_output` -> `scan_for_facts_object`), which is where
-        // the `\`distill\` step output did not contain a parseable …` error in
-        // the issue originated.
-        let esc = '\u{1b}';
-        let step_output = format!(
-            "{esc}[2m2026-06-29T12:26:24.512Z{esc}[0m {esc}[32m INFO{esc}[0m launching copilot binary=copilot\n\
-             \u{2139} {esc}[2mNODE_OPTIONS=--max-old-space-size=8192{esc}[0m\n\
-             {esc}[36m{{\"level\":\"info\",\"msg\":\"session started\",\"cwd\":\"/repo\"}}{esc}[0m\n\
-             {{\"facts\":[{{\"concept\":\"bug-pattern\",\
-             \"content\":\"distill parser must tolerate ANSI + launch-log preamble\",\
-             \"source_episode_id\":\"epi_9271\"}}]}}\n"
-        );
-        // The raw step-output span carries ESC bytes and a leading non-facts
-        // object, so it must NOT parse as-is — the silent-drop failure mode.
-        assert!(
-            serde_json::from_str::<RecipeEnvelope>(step_output.trim()).is_err(),
-            "raw launch-log-noised step output must be unparseable as a facts envelope"
-        );
-        let envelope = serde_json::json!({
-            "recipe_name": "distill-episodes",
-            "success": true,
-            "step_results": [{
-                "step_id": "distill",
-                "status": "completed",
-                "output": step_output,
-                "error": ""
-            }]
-        })
-        .to_string();
-        let out = parse_recipe_output_full(&envelope)
-            .expect("issue #2496 launch-log-preamble payload must parse");
-        assert_eq!(out.facts.len(), 1, "exactly one fact recovered");
-        assert_eq!(out.facts[0].concept, "bug-pattern");
-        assert_eq!(
-            out.facts[0].content,
-            "distill parser must tolerate ANSI + launch-log preamble"
-        );
-        assert_eq!(out.facts[0].source_episode_id, "epi_9271");
-    }
 }
 
-/// Issue #2496: distill delegates launcher stripping to the **shared**
-/// `recipe_output` chokepoint (the same `is_noise_line` predicate the OODA
-/// brains use) and carries no parallel launcher cleaner. Complements the
-/// `parse_recipe_output_full_recovers_facts_from_copilot_launch_log_preamble`
-/// regression above (which uses an ISO-timestamped launcher line) by pinning the
-/// **bare**, non-timestamped launcher shapes that only the new
-/// `is_copilot_launcher_line` arm recognises.
-#[cfg(test)]
-mod issue_2496_distill_launcher_tests {
-    use super::*;
-
-    #[test]
-    fn distill_recovers_facts_behind_bare_launcher_preamble_via_shared_chokepoint() {
-        // A launcher preamble with NO ISO-8601 timestamp — the shape only the
-        // shared `is_copilot_launcher_line` arm drops. Distill recovers the
-        // trailing facts object through the same chokepoint the brains use.
-        let step_output = "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). \
-             To change: /home/azureuser/.amplihack/config\n\
-             INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot \
-             version=\"GitHub Copilot CLI 1.0.66-2.\"\n\
-             Run 'copilot update' to check for updates.\n\
-             {\"facts\":[{\"concept\":\"bug-pattern\",\
-             \"content\":\"shared chokepoint strips the launch preamble for distill too\",\
-             \"source_episode_id\":\"epi_2496\"}]}";
-        let envelope = serde_json::json!({
-            "recipe_name": "distill-episodes",
-            "success": true,
-            "step_results": [{
-                "step_id": "distill",
-                "status": "completed",
-                "output": step_output,
-                "error": ""
-            }]
-        })
-        .to_string();
-        let out = parse_recipe_output_full(&envelope)
-            .expect("issue #2496 bare-launcher-preamble payload must parse");
-        assert_eq!(out.facts.len(), 1, "exactly one fact recovered");
-        assert_eq!(out.facts[0].concept, "bug-pattern");
-        assert_eq!(out.facts[0].source_episode_id, "epi_2496");
-    }
-}
-
-/// Issue #2512: recover facts when the captured `recipe-runner-rs` stdout
-/// **begins with** the Copilot CLI launch banner *before* the JSON envelope.
-///
-/// The existing #2496 tests above pin the banner contaminating the **inner**
-/// `distill` step `output` string. This module pins the distinct, residual
-/// **outer-envelope** contamination: the copilot subprocess prints its launch
-/// preamble to the inherited stdout *before* recipe-runner-rs emits its
-/// `{ "recipe_name", "success", "step_results": … }` envelope, so the captured
-/// stdout starts with the banner and the fast Tier-1a `serde_json::from_str`
-/// rejects it. `recover_distill_output` (Tier 1b) recovers the envelope through
-/// the SAME shared `recipe_output` chokepoint the #2504 decide/orient fix uses.
-#[cfg(test)]
-mod issue_2512_outer_envelope_banner_tests {
-    use super::*;
-
-    /// The canonical production envelope, facts inlined.
-    fn envelope_with_facts() -> String {
-        serde_json::json!({
-            "recipe_name": "distill-episodes",
-            "success": true,
-            "step_results": [{
-                "step_id": "distill",
-                "status": "completed",
-                "output": r#"{"facts":[{"concept":"bug-pattern","content":"outer envelope banner must be stripped","source_episode_id":"epi_2512"}]}"#,
-                "error": ""
-            }]
-        })
-        .to_string()
-    }
-
-    #[test]
-    fn recovers_facts_when_bare_launch_banner_precedes_envelope() {
-        // The exact #2504 launch banner shapes (no ISO-8601 timestamp), prefixed
-        // to the captured stdout BEFORE the recipe-runner envelope `{`.
-        let raw = format!(
-            "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). \
-             To change: /home/azureuser/.amplihack/config\n\
-             INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot \
-             version=\"GitHub Copilot CLI 1.0.66-2.\"\n\
-             Run 'copilot update' to check for updates.\n\
-             {}",
-            envelope_with_facts()
-        );
-        // The raw stdout must NOT parse as an envelope directly (the silent-drop
-        // failure mode this issue fixes).
-        assert!(
-            serde_json::from_str::<RecipeRunnerEnvelope>(raw.trim()).is_err(),
-            "banner-prefixed stdout must be unparseable as a bare envelope"
-        );
-        let out = parse_recipe_output_full(&raw)
-            .expect("issue #2512 banner-prefixed envelope must parse");
-        assert_eq!(out.facts.len(), 1, "exactly one fact recovered");
-        assert_eq!(out.facts[0].concept, "bug-pattern");
-        assert_eq!(
-            out.facts[0].content,
-            "outer envelope banner must be stripped"
-        );
-        assert_eq!(out.facts[0].source_episode_id, "epi_2512");
-    }
-
-    #[test]
-    fn recovers_facts_when_ansi_log_line_precedes_envelope() {
-        // An ANSI-coloured tracing log line (dimmed `\x1b[2m<timestamp>` prefix)
-        // before the envelope — the line-dropping `strip_recipe_noise` view
-        // removes it and recovers the envelope on its own line.
-        let esc = '\u{1b}';
-        let raw = format!(
-            "{esc}[2m2026-06-30T18:00:00.000Z{esc}[0m {esc}[32m INFO{esc}[0m simard::distill: run\n{}",
-            envelope_with_facts()
-        );
-        let out = parse_recipe_output_full(&raw)
-            .expect("issue #2512 ANSI-log-prefixed envelope must parse");
-        assert_eq!(out.facts.len(), 1);
-        assert_eq!(out.facts[0].source_episode_id, "epi_2512");
-    }
-
-    #[test]
-    fn recovers_envelope_sharing_a_line_with_a_banner_token() {
-        // The banner token and the envelope share ONE physical line — the
-        // line-dropping view would discard the envelope wholesale, so the
-        // line-preserving `strip_ansi` view + balanced-object scan must recover
-        // it (the dual-view guarantee).
-        let raw = format!(
-            "INFO launching copilot binary=copilot {}",
-            envelope_with_facts()
-        );
-        let out = parse_recipe_output_full(&raw)
-            .expect("issue #2512 same-line banner+envelope must parse");
-        assert_eq!(out.facts.len(), 1);
-        assert_eq!(out.facts[0].source_episode_id, "epi_2512");
-    }
-
-    #[test]
-    fn leading_non_envelope_log_record_does_not_shadow_the_real_envelope() {
-        // A complete, brace-balanced `{"level":...}` log record precedes the
-        // envelope. It lacks `success`/`step_results`, so it must not be mistaken
-        // for the envelope; the end-first scan reaches the real envelope.
-        let raw = format!(
-            "{}\n{}",
-            r#"{"level":"info","msg":"session started","cwd":"/repo"}"#,
-            envelope_with_facts()
-        );
-        let out = parse_recipe_output_full(&raw)
-            .expect("issue #2512 leading log-record + envelope must parse");
-        assert_eq!(out.facts.len(), 1);
-        assert_eq!(out.facts[0].source_episode_id, "epi_2512");
-    }
-
-    #[test]
-    fn banner_prefixed_failed_envelope_reports_recipe_failure_not_silent_drop() {
-        // A banner-prefixed envelope with `success == false` must surface a
-        // RecipeReportedFailure (committed-to recovery), NOT silently fall
-        // through to a generic "did not yield a parseable" error.
-        let envelope = serde_json::json!({
-            "recipe_name": "distill-episodes",
-            "success": false,
-            "step_results": [{
-                "step_id": "distill",
-                "status": "failed",
-                "output": "",
-                "error": "agent timed out"
-            }]
-        })
-        .to_string();
-        let raw = format!(
-            "INFO launching copilot binary=copilot \
-             version=\"GitHub Copilot CLI 1.0.66-2.\"\n{envelope}"
-        );
-        let err = parse_recipe_output_full(&raw)
-            .expect_err("a success=false envelope must be an error, even banner-prefixed");
-        assert_eq!(
-            classify_distill_error(&err),
-            DistillFailureClass::RecipeReportedFailure,
-            "banner-prefixed failed run classifies as recipe-reported, not parse-failure"
-        );
-    }
-
-    #[test]
-    fn clean_envelope_with_no_banner_still_parses() {
-        // The fast Tier-1a path is unchanged for clean production stdout.
-        let out = parse_recipe_output_full(&envelope_with_facts())
-            .expect("clean envelope must still parse via the fast path");
-        assert_eq!(out.facts.len(), 1);
-        assert_eq!(out.facts[0].source_episode_id, "epi_2512");
-    }
-
-    #[test]
-    fn recovers_facts_from_compound_outer_and_inner_banner_contamination() {
-        // Worst case: the launch banner contaminates BOTH the outer stdout
-        // (before the envelope) AND the inner `distill` step output (before the
-        // facts). The inner banner is escaped inside the envelope's single-line
-        // `output`, so the whole compact envelope line itself *contains*
-        // `launching copilot binary=` — which makes the line-dropping
-        // `strip_recipe_noise` view discard the entire envelope. The
-        // line-preserving `strip_ansi` view must then recover the envelope
-        // (string-aware balanced scan), and the inner step-output scan strips the
-        // inner banner to reach the facts. This pins the dual-view interaction
-        // end-to-end.
-        let inner = "INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot \
-             version=\"GitHub Copilot CLI 1.0.66-2.\"\n\
-             {\"facts\":[{\"concept\":\"lesson-learned\",\
-             \"content\":\"dual-view recovers compound banner contamination\",\
-             \"source_episode_id\":\"epi_compound\"}]}";
-        let envelope = serde_json::json!({
-            "recipe_name": "distill-episodes",
-            "success": true,
-            "step_results": [{
-                "step_id": "distill",
-                "status": "completed",
-                "output": inner,
-                "error": ""
-            }]
-        })
-        .to_string();
-        let raw = format!(
-            "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: cfg\n\
-             Run 'copilot update' to check for updates.\n{envelope}"
-        );
-        let out = parse_recipe_output_full(&raw)
-            .expect("compound outer+inner banner contamination must still parse");
-        assert_eq!(out.facts.len(), 1);
-        assert_eq!(out.facts[0].concept, "lesson-learned");
-        assert_eq!(out.facts[0].source_episode_id, "epi_compound");
-    }
-}
-
-/// Issue #2517: recover facts AND procedures from the **full, high-fidelity**
-/// GitHub Copilot CLI `1.0.66-2` launch-banner capture — a multi-line banner
-/// wrapped in raw ANSI, prefixing a **pretty-printed** `recipe-runner-rs
-/// --output-format json` envelope whose `distill` step `output` string itself
-/// carries the agent subprocess's inner launch banner.
-///
-/// This pins the residual mis-route the #2512 tests missed. Those used a
-/// **compact** (single-line) envelope: when the inner banner contaminated the
-/// escaped `output`, the line-dropping [`strip_recipe_noise`] view dropped the
-/// ENTIRE one-line envelope, so recovery cleanly fell through to the
-/// line-preserving [`strip_ansi`] view. In production, however, recipe-runner-rs
-/// emits a **pretty-printed** envelope (see `REAL_RUNNER_ENVELOPE_VERBATIM`), so
-/// only the `"output": "…launching copilot binary=…"` line is dropped — leaving a
-/// structurally-valid but **gutted** envelope (`output` → `null`). The old
-/// first-match `recover_runner_envelope` committed to that gutted envelope,
-/// `extract_step_output` returned `None`, and the whole batch's facts AND
-/// procedures were silently swallowed with the recurring `` `distill` step output
-/// did not contain a parseable { "facts": [...] } `` error.
-///
-/// The fix ([`recover_distill_output`] + [`candidate_runner_envelopes`])
-/// evaluates BOTH cleaned views and commits to the candidate that actually
-/// yields a populated [`DistillOutput`], so the intact line-preserving view wins
-/// over the gutted line-dropping view.
-///
-/// Post-#2570: the structural-token guard now preserves that `"output": …` line,
-/// so the line-dropping view no longer guts THIS pretty shape on its own (see
-/// the renamed `line_dropping_view_preserves_pretty_envelope_output_after_2570_guard`);
-/// the two-view candidate selection stays as defence-in-depth for other shapes
-/// that view can still gut.
-#[cfg(test)]
-mod issue_2517_pretty_envelope_launch_banner_tests {
-    use super::*;
-
-    /// The distill agent's answer: two facts (allowed concepts, grounded) and
-    /// one fully-grounded procedure (non-empty name, >=1 steps, >=1 source ids).
-    const FACTS_AND_PROCEDURES_JSON: &str = r#"{"facts":[{"concept":"bug-pattern","content":"a pretty-printed runner envelope whose distill output line carries the launch banner is gutted by the line-dropping view","source_episode_id":"epi_2517"},{"concept":"lesson-learned","content":"evaluate both cleaned views and commit to the one that yields a populated DistillOutput","source_episode_id":"epi_2517"}],"procedures":[{"name":"distill-past-launch-banner","steps":["strip ansi","drop launcher lines","balanced-scan for the envelope"],"source_episode_ids":["epi_2517"]}]}"#;
-
-    /// The distill step `output` string exactly as recipe-runner captures it: the
-    /// agent subprocess prints its OWN `1.0.66-2` launch banner to stdout before
-    /// its JSON answer, so the banner prefixes the facts/procedures payload.
-    fn inner_step_output_with_banner() -> String {
-        format!(
-            "\u{2139}\u{fe0f} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). \
-             To change: /home/azureuser/.amplihack/config\n\
-             INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot \
-             version=\"GitHub Copilot CLI 1.0.66-2\"\n\
-             Run 'copilot update' to check for updates.\n\
-             {FACTS_AND_PROCEDURES_JSON}"
-        )
-    }
-
-    /// The full captured stdout: raw ANSI wrapping the multi-line outer launch
-    /// banner, then the PRETTY-printed runner envelope (mirroring the real
-    /// `--output-format json` shape) whose `distill` step `output` carries the
-    /// inner banner + facts + procedures.
-    fn raw_capture() -> String {
-        let esc = '\u{1b}';
-        let envelope = serde_json::to_string_pretty(&serde_json::json!({
-            "recipe_name": "distill-episodes",
-            "success": true,
-            "step_results": [{
-                "step_id": "distill",
-                "status": "completed",
-                "output": inner_step_output_with_banner(),
-                "error": "",
-                "duration": 12.34
-            }],
-            "duration": 12.5
-        }))
-        .expect("envelope must serialize");
-        format!(
-            "{esc}[2m{esc}[38;5;39m\u{2139}\u{fe0f} NODE_OPTIONS=--max-old-space-size=32768 \
-             (saved preference). To change: /home/azureuser/.amplihack/config{esc}[0m\n\
-             {esc}[2mINFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot \
-             version=\"GitHub Copilot CLI 1.0.66-2\"{esc}[0m\n\
-             {esc}[33mRun 'copilot update' to check for updates.{esc}[0m\n\
-             {envelope}"
-        )
-    }
-
-    /// HEADLINE REGRESSION: the full `1.0.66-2` launch banner (raw ANSI,
-    /// multi-line) preceding a pretty-printed envelope with an inner-banner
-    /// `output` must recover BOTH facts and procedures — not swallow them.
-    #[test]
-    fn full_1_0_66_2_launch_banner_with_ansi_and_envelope_recovers_facts_and_procedures() {
-        let raw = raw_capture();
-
-        // Precondition (proves the pre-fix drop path): the captured stdout does
-        // NOT parse as a bare recipe-runner envelope — the fast Tier-1a path
-        // fails, so Tier-1b recovery is the only route to the payload.
-        assert!(
-            serde_json::from_str::<RecipeRunnerEnvelope>(raw.trim()).is_err(),
-            "ANSI-banner-prefixed stdout must be unparseable as a bare envelope"
-        );
-
-        let out = parse_recipe_output_full(&raw)
-            .expect("issue #2517 pretty-envelope banner capture must parse into a DistillOutput");
-
-        assert!(
-            !out.facts.is_empty(),
-            "facts must be recovered, not swallowed by the gutted line-dropping view"
-        );
-        assert!(
-            !out.procedures.is_empty(),
-            "procedures must be recovered, not swallowed by the gutted line-dropping view"
-        );
-        assert_eq!(out.facts.len(), 2, "both allowed-concept facts recovered");
-        assert!(
-            out.facts.iter().all(|f| f.source_episode_id == "epi_2517"),
-            "fact provenance must survive the recovery"
-        );
-        assert_eq!(out.procedures.len(), 1, "the grounded procedure recovered");
-        assert_eq!(out.procedures[0].name, "distill-past-launch-banner");
-        assert_eq!(
-            out.procedures[0].source_episode_ids,
-            vec!["epi_2517".to_string()],
-            "procedure provenance must carry its source episode id"
-        );
-    }
-
-    /// The facts-only public wrapper must also recover the facts.
-    #[test]
-    fn facts_only_wrapper_recovers_facts_from_pretty_envelope() {
-        let facts = parse_recipe_output(&raw_capture())
-            .expect("issue #2517 facts-only wrapper must recover facts");
-        assert_eq!(facts.len(), 2, "parse_recipe_output must yield the facts");
-        assert!(facts.iter().any(|f| f.concept == "bug-pattern"));
-        assert!(facts.iter().any(|f| f.concept == "lesson-learned"));
-    }
-
-    /// Post-#2570 interaction pin (was `line_dropping_view_alone_guts_…`): the
-    /// line-dropping [`strip_recipe_noise`] view used to GUT this fixture — it
-    /// matched the pretty envelope's escaped `"output": …` line (which quotes
-    /// `launching copilot binary=`) as launcher noise and dropped it, leaving a
-    /// structurally valid envelope whose `output` was absent, so committing to
-    /// that view (the original #2517 bug) failed to yield facts. The #2570
-    /// structural-token guard now exempts that `"`-leading JSON payload line, so
-    /// the line-dropping view PRESERVES the `output` and recovers the facts on
-    /// its own. The #2517 "prefer the populated candidate" logic
-    /// ([`candidate_runner_envelopes`]) remains as defence-in-depth for a view
-    /// that could still be gutted (e.g. an envelope sharing a physical line with
-    /// a leading banner token); this test pins that #2570 has eliminated the
-    /// specific gutting trap for the real pretty-envelope shape.
-    #[test]
-    fn line_dropping_view_preserves_pretty_envelope_output_after_2570_guard() {
-        let raw = raw_capture();
-        let recovered_view = crate::recipe_output::strip_recipe_noise(raw.trim());
-        let envelope: RecipeRunnerEnvelope = serde_json::from_str(recovered_view.trim()).expect(
-            "the line-dropping view yields a structurally valid envelope; after the #2570 guard \
-             its escaped `output` JSON line is preserved rather than dropped",
-        );
-        let out = envelope.into_distill_output().expect(
-            "after the #2570 structural-token guard the line-dropping view preserves the \
-             `\"output\"` line, so the envelope yields facts on its own",
-        );
-        assert_eq!(
-            out.facts.len(),
-            2,
-            "both grounded facts are recovered by the line-dropping view post-#2570: {:?}",
-            out.facts
-        );
-        assert!(
-            out.facts.iter().all(|f| f.source_episode_id == "epi_2517"),
-            "fact provenance must survive the line-dropping recovery"
-        );
-    }
-
-    /// A pretty envelope WITHOUT the inner banner (clean `output`) is recovered
-    /// too — the line-dropping view keeps the clean `output` line, so it is not
-    /// gutted, and either view yields the payload.
-    #[test]
-    fn pretty_envelope_without_inner_banner_still_recovers() {
-        let esc = '\u{1b}';
-        let envelope = serde_json::to_string_pretty(&serde_json::json!({
-            "recipe_name": "distill-episodes",
-            "success": true,
-            "step_results": [{
-                "step_id": "distill",
-                "status": "completed",
-                "output": FACTS_AND_PROCEDURES_JSON,
-                "error": ""
-            }]
-        }))
-        .expect("envelope must serialize");
-        let raw = format!(
-            "{esc}[2m\u{2139}\u{fe0f} NODE_OPTIONS=x (saved preference).{esc}[0m\n{envelope}"
-        );
-        let out = parse_recipe_output_full(&raw)
-            .expect("clean-output pretty envelope behind a banner must recover");
-        assert_eq!(out.facts.len(), 2);
-        assert_eq!(out.procedures.len(), 1);
-    }
-
-    /// The `success == false` contract survives the pretty-envelope path: a
-    /// banner-prefixed failed run surfaces a `RecipeReportedFailure`, never a
-    /// silent drop and never a generic parse error.
-    #[test]
-    fn banner_prefixed_failed_pretty_envelope_reports_recipe_failure() {
-        let esc = '\u{1b}';
-        let envelope = serde_json::to_string_pretty(&serde_json::json!({
-            "recipe_name": "distill-episodes",
-            "success": false,
-            "step_results": [{
-                "step_id": "distill",
-                "status": "failed",
-                "output": "",
-                "error": "agent timed out"
-            }]
-        }))
-        .expect("envelope must serialize");
-        let raw = format!(
-            "{esc}[2m\u{2139}\u{fe0f} NODE_OPTIONS=--max-old-space-size=32768 (saved preference).\
-             {esc}[0m\n\
-             {esc}[2mINFO launching copilot binary=copilot version=\"GitHub Copilot CLI 1.0.66-2\"\
-             {esc}[0m\n{envelope}"
-        );
-        let err = parse_recipe_output_full(&raw)
-            .expect_err("a success=false pretty envelope must be an error, even banner-prefixed");
-        assert_eq!(
-            classify_distill_error(&err),
-            DistillFailureClass::RecipeReportedFailure,
-            "banner-prefixed failed run classifies as recipe-reported, not parse-failure"
-        );
-    }
-
-    /// A genuine "nothing worth distilling" answer (empty `facts`) behind BOTH an
-    /// inner and outer banner in a pretty envelope must be an empty `Ok`, never
-    /// an `Err` — so a legitimately empty pass does not burn a retry.
-    #[test]
-    fn banner_prefixed_pretty_envelope_with_nothing_to_distill_returns_empty_ok() {
-        let esc = '\u{1b}';
-        let inner = "INFO launching copilot binary=copilot version=\"GitHub Copilot CLI 1.0.66-2\"\n\
-                     {\"facts\":[]}";
-        let envelope = serde_json::to_string_pretty(&serde_json::json!({
-            "recipe_name": "distill-episodes",
-            "success": true,
-            "step_results": [{
-                "step_id": "distill",
-                "status": "completed",
-                "output": inner,
-                "error": ""
-            }]
-        }))
-        .expect("envelope must serialize");
-        let raw = format!(
-            "{esc}[2m\u{2139}\u{fe0f} NODE_OPTIONS=x (saved preference).{esc}[0m\n{envelope}"
-        );
-        let out = parse_recipe_output_full(&raw)
-            .expect("an empty 'nothing to distill' answer must be an empty Ok, not an Err");
-        assert!(
-            out.facts.is_empty() && out.procedures.is_empty(),
-            "the empty answer must yield an empty DistillOutput"
-        );
-    }
-}
-
-/// Episode t=9664 (live OODA consolidation, 2026-06-30, Copilot CLI 1.0.66-2):
-/// the distill bridge failed **recurrently** with the same
-/// `` `distill` step output did not contain a parseable { "facts": [...] } `` error
-/// (issue #2506) even though every ANSI/launch-log preamble shape was already stripped (the
-/// fix landed in #2479/#2484/#2490/#2504, and the deployed binary carried it).
-///
-/// The residual root cause was *field-level* strictness, not noise: the agent
-/// intermittently omits / nulls / scalar-types a single `facts[]` field
-/// (most often `source_episode_id`), which made `serde` reject the **whole**
-/// envelope so the entire batch was silently dropped and re-deferred every
-/// cycle. These tests pin the field-tolerant deserialization
-/// ([`de_lenient_string`]): one malformed fact no longer sinks its well-formed
-/// siblings, and an ungrounded recovered fact is still gated by
-/// [`assess_fact_reliability`] rather than promoted blindly.
+/// Episode t=9664 (live OODA consolidation): the distill agent intermittently
+/// omits / nulls / scalar-types a single `facts[]` field (most often
+/// `source_episode_id`), which made `serde` reject the **whole** envelope so the
+/// entire batch was silently dropped and re-deferred every cycle. These tests
+/// pin the field-tolerant deserialization ([`de_lenient_string`]) as it applies
+/// to the agent's **facts document** (issues #2622/#2619): one malformed fact no
+/// longer sinks its well-formed siblings, and an ungrounded recovered fact is
+/// still gated by [`assess_fact_reliability`] rather than promoted blindly.
 #[cfg(test)]
 mod issue_t9664_field_tolerance_tests {
     use super::*;
 
-    /// The exact production noise prefix captured for episode t=9664: an
-    /// ANSI-coloured ISO-timestamped `launching copilot binary=…` line followed
-    /// by the bare `\u{2139} NODE_OPTIONS=…` info marker, immediately preceding
-    /// the agent's real `{ "facts": [...] }` answer.
-    fn real_t9664_noise_prefix() -> String {
-        let e = '\u{1b}';
-        format!(
-            "{e}[2m2026-06-30T04:31:59.643823Z{e}[0m {e}[32m INFO{e}[0m launching copilot \
-             {e}[3mbinary{e}[0m{e}[2m={e}[0m/home/azureuser/.npm-global/bin/copilot \
-             {e}[3mversion{e}[0m{e}[2m={e}[0m\"GitHub Copilot CLI 1.0.66-2.\"\n\
-             \u{2139} NODE_OPTIONS=--max-old-space-size=8192\n"
-        )
-    }
-
-    fn distill_envelope(step_output: &str) -> String {
-        serde_json::json!({
-            "recipe_name": "distill-episodes",
-            "success": true,
-            "step_results": [{
-                "step_id": "distill",
-                "status": "completed",
-                "output": step_output,
-                "error": ""
-            }]
-        })
-        .to_string()
-    }
-
-    /// The headline regression: leading ANSI/launch-log noise ahead of a facts
-    /// payload in which one fact is **well-formed** and a sibling **omits
-    /// `source_episode_id`**. Before the fix the missing field made the whole
-    /// `{ "facts": [...] }` object unparseable and the entire batch was dropped;
-    /// now the payload parses and the well-formed fact is recovered.
+    /// The headline regression: a facts document in which one fact is
+    /// **well-formed** and a sibling **omits `source_episode_id`**. Before the
+    /// fix the missing field made the whole `{ "facts": [...] }` object
+    /// unparseable and the entire batch was dropped; now the document parses and
+    /// the well-formed fact is recovered.
     #[test]
     fn distill_recovers_wellformed_fact_when_sibling_omits_source_episode_id() {
-        let step_output = format!(
-            "{}{{\"facts\":[\
-               {{\"concept\":\"bug-pattern\",\"content\":\"distill parser must tolerate a fact missing source_episode_id\",\"source_episode_id\":\"epi_9664\"}},\
-               {{\"concept\":\"lesson-learned\",\"content\":\"a sibling fact omitted its source_episode_id\"}}\
-             ]}}",
-            real_t9664_noise_prefix()
-        );
-        // The raw step-output span carries ESC bytes and a field-incomplete
-        // fact, so it must NOT parse as-is — the silent-drop failure mode.
-        assert!(
-            serde_json::from_str::<RecipeEnvelope>(step_output.trim()).is_err(),
-            "raw noised + field-incomplete step output must be unparseable as-is"
-        );
-        let out = parse_recipe_output_full(&distill_envelope(&step_output))
-            .expect("t=9664 payload (noise + one field-incomplete fact) must parse");
+        let document = "{\"facts\":[\
+               {\"concept\":\"bug-pattern\",\"content\":\"distill parser must tolerate a fact missing source_episode_id\",\"source_episode_id\":\"epi_9664\"},\
+               {\"concept\":\"lesson-learned\",\"content\":\"a sibling fact omitted its source_episode_id\"}\
+             ]}";
+        let out = parse_facts_document(document)
+            .expect("t=9664 document (one field-incomplete fact) must parse");
         // Both facts are recovered by the parser (the reliability gate, applied
         // later in the pass, decides promotion vs. quarantine — see
         // `assess_fact_reliability`). The grounded one is intact.
@@ -3013,12 +2015,12 @@ mod issue_t9664_field_tolerance_tests {
     }
 
     /// A bare facts object whose only fact omits `source_episode_id` must parse
-    /// (Tier-2 path) instead of erroring — the minimal reproduction of the
-    /// schema-strictness gap, independent of any noise.
+    /// instead of erroring — the minimal reproduction of the schema-strictness
+    /// gap.
     #[test]
     fn parse_recipe_output_tolerates_fact_missing_source_episode_id() {
         let raw = r#"{"facts":[{"concept":"bug-pattern","content":"missing id field"}]}"#;
-        let facts = parse_recipe_output(raw).expect("a fact missing source_episode_id must parse");
+        let facts = parse_facts(raw).expect("a fact missing source_episode_id must parse");
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].concept, "bug-pattern");
         assert!(facts[0].source_episode_id.is_empty());
@@ -3030,13 +2032,12 @@ mod issue_t9664_field_tolerance_tests {
     #[test]
     fn parse_recipe_output_tolerates_null_and_scalar_fields() {
         let null_field = r#"{"facts":[{"concept":"lesson-learned","content":"id was null","source_episode_id":null}]}"#;
-        let facts = parse_recipe_output(null_field).expect("null source_episode_id must parse");
+        let facts = parse_facts(null_field).expect("null source_episode_id must parse");
         assert_eq!(facts.len(), 1);
         assert!(facts[0].source_episode_id.is_empty());
 
         let numeric_field = r#"{"facts":[{"concept":"pr-pattern","content":"id was numeric","source_episode_id":9664}]}"#;
-        let facts =
-            parse_recipe_output(numeric_field).expect("numeric source_episode_id must parse");
+        let facts = parse_facts(numeric_field).expect("numeric source_episode_id must parse");
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].source_episode_id, "9664");
     }
@@ -3069,8 +2070,7 @@ mod issue_t9664_field_tolerance_tests {
             "{\"facts\":[{\"concept\":\"bug-pattern\",\"content\":\"the attributed answer\",\"source_episode_id\":\"epi_1\"}]}\n",
             "{\"facts\":[{\"concept\":\"bug-pattern\",\"content\":\"a later source-less restatement\"}]}"
         );
-        let facts =
-            parse_recipe_output(step_output).expect("a grounded object must be recoverable");
+        let facts = parse_facts(step_output).expect("a grounded object must be recoverable");
         assert_eq!(
             facts.len(),
             1,
@@ -3087,7 +2087,7 @@ mod issue_t9664_field_tolerance_tests {
     #[test]
     fn non_scalar_field_values_collapse_to_empty() {
         let raw = r#"{"facts":[{"concept":"bug-pattern","content":["a","b"],"source_episode_id":{"x":1}}]}"#;
-        let facts = parse_recipe_output(raw).expect("non-scalar fields must not sink the envelope");
+        let facts = parse_facts(raw).expect("non-scalar fields must not sink the envelope");
         assert_eq!(facts.len(), 1);
         assert!(
             facts[0].content.is_empty(),
@@ -3105,118 +2105,145 @@ mod issue_t9664_field_tolerance_tests {
     }
 }
 
-/// Issue #2570: a **pretty-printed** inner facts JSON whose legitimate fact
-/// `"content"` line literally quotes the `launching copilot binary=` launcher
-/// substring must not have that line dropped by the shared
-/// `is_copilot_launcher_line` / `strip_recipe_noise` chokepoint.
+/// Issues #2622/#2619 — the distill result is read from a dedicated **facts
+/// file** the agent writes, never from recipe-runner stdout. These tests pin
+/// the two structural guarantees of that fix:
 ///
-/// Mechanism (pre-fix): `is_copilot_launcher_line` matched any physical line
-/// *containing* `launching copilot binary=`. When the distill agent emitted its
-/// `{ "facts": [...] }` object pretty-printed AND a fact's `content` value quoted
-/// that substring, the `strip_recipe_noise` view (tried first in
-/// [`scan_for_facts_object`]) dropped the whole `"content": …` line. The
-/// remaining object still parsed (`content` defaulted to `""` via
-/// [`de_lenient_string`]) and, because its `source_episode_id` was non-empty,
-/// [`scan_cleaned_for_facts`] returned it as a "grounded-capable" answer *before*
-/// the line-preserving `strip_ansi` view was tried — so the fact's real content
-/// was silently lost and the reliability hard gate then quarantined the
-/// now-empty fact. The fix guards `is_copilot_launcher_line` so a line beginning
-/// with a JSON structural token (`{`, `"`, `[`) is never classified as launcher
-/// noise, honouring the module's documented "a JSON payload line is never
-/// launcher noise" contract.
+/// 1. The copilot launcher banner / log lines on stdout can NEVER contaminate
+///    the parse — a valid facts file yields facts even when stdout is pure
+///    launcher noise (the exact live failure shape from daemon logs 02:45–02:47).
+/// 2. There is NO silent stdout fallback — a missing facts file is an explicit,
+///    retry-eligible parse failure even when stdout happens to carry a
+///    well-formed `{ "facts": [...] }` object.
 #[cfg(test)]
-mod issue_2570_pretty_fact_launcher_substring_tests {
+mod issue_2622_file_channel_tests {
     use super::*;
 
-    /// A single fact whose `content` quotes the launcher substring, emitted
-    /// pretty-printed inside the runner envelope's `distill` step `output`.
-    /// The content is >= 3 words and grounded, so if it survives it is a fully
-    /// promotable fact; if the `"content"` line is dropped it collapses to
-    /// empty and the reliability gate quarantines it.
-    fn pretty_inner_output() -> String {
-        // Hand-written pretty JSON so the `"content"` line begins (after
-        // indentation) with a `"` — the JSON structural token the fix guards on.
-        "{\n  \"facts\": [\n    {\n      \"concept\": \"lesson-learned\",\n      \
-         \"content\": \"the runner printed INFO launching copilot binary=/usr/bin/copilot \
-         before the answer\",\n      \"source_episode_id\": \"epi_2570\"\n    }\n  ]\n}"
-            .to_string()
+    /// The launcher banner captured live (daemon logs 02:45–02:47, Copilot CLI
+    /// 1.0.69-1) that was previously captured AS the distill step output and
+    /// scraped for facts — matching the banner, never the answer.
+    const LIVE_LAUNCHER_BANNER: &str = "2026-07-06T02:45:12.101010Z  INFO launching copilot \
+         binary=/home/azureuser/.npm-global/bin/copilot version=\"GitHub Copilot CLI 1.0.69-1.\"\n\
+         \u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference)\n\
+         Run 'copilot update' to update\n";
+
+    #[cfg(unix)]
+    fn output_with(stdout: &[u8], code: i32) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        }
     }
 
-    fn envelope(inner: &str) -> String {
-        serde_json::json!({
-            "recipe_name": "distill-episodes",
-            "success": true,
-            "step_results": [{
-                "step_id": "distill",
-                "status": "completed",
-                "output": inner,
-                "error": ""
-            }]
-        })
-        .to_string()
-    }
-
-    /// The headline regression: the pretty-printed fact's full `content`
-    /// (including the launcher substring it quotes) must be preserved, not
-    /// line-dropped to an empty string.
+    /// The headline regression: the runner's stdout is nothing but the copilot
+    /// launcher banner, yet the agent wrote a clean facts envelope to the
+    /// dedicated file — the pass MUST succeed and yield the facts (no
+    /// parse-failure). This is the exact contamination shape from issues
+    /// #2622/#2619.
+    #[cfg(unix)]
     #[test]
-    fn pretty_printed_fact_content_quoting_launcher_substring_is_preserved() {
-        let out = parse_recipe_output_full(&envelope(&pretty_inner_output()))
-            .expect("issue #2570 pretty inner facts object must parse");
-        assert_eq!(
-            out.facts.len(),
-            1,
-            "exactly one fact recovered: {:?}",
-            out.facts
-        );
-        let fact = &out.facts[0];
-        assert_eq!(fact.concept, "lesson-learned");
-        assert_eq!(fact.source_episode_id, "epi_2570");
-        assert_eq!(
-            fact.content,
-            "the runner printed INFO launching copilot binary=/usr/bin/copilot before the answer",
-            "the fact content quoting the launcher substring must survive intact, not be \
-             line-dropped to empty"
-        );
-    }
+    fn launcher_banner_on_stdout_does_not_cause_parse_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let facts_path = dir.path().join("facts.json");
+        std::fs::write(
+            &facts_path,
+            r#"{"facts":[{"concept":"pr-pattern","content":"warm the shared cache before lbug pin bumps","source_episode_id":"epi_1"}],"procedures":[]}"#,
+        )
+        .unwrap();
 
-    /// The preserved fact must clear the reliability gate — proving the fix
-    /// actually restores fact-yield (not merely non-empty text). Grounded
-    /// (source in batch) + >= 3 words + known concept clears 0.5.
-    #[test]
-    fn preserved_fact_clears_the_reliability_gate() {
-        let out = parse_recipe_output_full(&envelope(&pretty_inner_output()))
-            .expect("issue #2570 pretty inner facts object must parse");
-        let fact = &out.facts[0];
-        let episode = CognitiveEpisode {
-            node_id: "epi_2570".to_string(),
-            content: "the source episode".to_string(),
-            source_label: "distill-test".to_string(),
-            temporal_index: 1,
-            compressed: false,
-        };
-        let score = assess_fact_reliability(fact, std::slice::from_ref(&episode), &out.facts);
-        assert!(
-            score >= DISTILL_RELIABILITY_THRESHOLD,
-            "preserved grounded fact must clear the promotion threshold, got {score}"
-        );
-    }
-
-    /// Compact (single-line) inner JSON quoting the same substring already
-    /// worked via the line-preserving `strip_ansi` view; pin it so the fix does
-    /// not regress the pre-existing recovery path.
-    #[test]
-    fn compact_fact_content_quoting_launcher_substring_still_recovers() {
-        let inner = "{\"facts\":[{\"concept\":\"bug-pattern\",\
-             \"content\":\"agent logged INFO launching copilot binary=/usr/bin/copilot here\",\
-             \"source_episode_id\":\"epi_2570c\"}]}";
-        let out = parse_recipe_output_full(&envelope(inner))
-            .expect("compact inner facts object must parse");
+        let output = output_with(LIVE_LAUNCHER_BANNER.as_bytes(), 0);
+        let document = harvest_facts_file(&output, &facts_path)
+            .expect("a launcher banner on stdout must NOT block reading the facts file");
+        let out = parse_facts_document(&document).expect("the clean facts file must parse");
         assert_eq!(out.facts.len(), 1);
+        assert_eq!(out.facts[0].concept, "pr-pattern");
+        assert_eq!(out.facts[0].source_episode_id, "epi_1");
+    }
+
+    /// No silent fallback: a missing facts file is an explicit `ParseFailure`
+    /// even when stdout carries a perfectly well-formed facts object — proving
+    /// stdout is never scraped as a fallback result channel.
+    #[cfg(unix)]
+    #[test]
+    fn missing_facts_file_is_parse_failure_never_stdout_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let facts_path = dir.path().join("facts.json"); // deliberately never written
+
+        let tempting_stdout =
+            br#"{"facts":[{"concept":"pr-pattern","content":"must be ignored","source_episode_id":"epi_9"}]}"#;
+        let output = output_with(tempting_stdout, 0);
+        let err = harvest_facts_file(&output, &facts_path)
+            .expect_err("a missing facts file must be an explicit error, never a stdout fallback");
         assert_eq!(
-            out.facts[0].content,
-            "agent logged INFO launching copilot binary=/usr/bin/copilot here"
+            classify_distill_error(&err),
+            DistillFailureClass::ParseFailure
         );
-        assert_eq!(out.facts[0].source_episode_id, "epi_2570c");
+    }
+
+    /// A non-zero recipe exit is surfaced as an explicit terminal failure that
+    /// carries the stdout/stderr context — never a silent success.
+    #[cfg(unix)]
+    #[test]
+    fn nonzero_exit_is_terminal_failure_with_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let facts_path = dir.path().join("facts.json");
+        let output = output_with(b"boom on stdout", 3);
+        let err = harvest_facts_file(&output, &facts_path)
+            .expect_err("a non-zero exit must surface an explicit error");
+        assert_eq!(
+            classify_distill_error(&err),
+            DistillFailureClass::CopilotTerminalFailure
+        );
+    }
+
+    /// A clean, exit-0 run whose facts file carries a valid envelope is read
+    /// verbatim from the file.
+    #[cfg(unix)]
+    #[test]
+    fn clean_run_reads_facts_verbatim_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let facts_path = dir.path().join("facts.json");
+        std::fs::write(&facts_path, r#"{"facts":[],"procedures":[]}"#).unwrap();
+        let output = output_with(b"", 0);
+        let document = harvest_facts_file(&output, &facts_path).expect("clean run must read file");
+        let out = parse_facts_document(&document).expect("an empty envelope is a valid success");
+        assert!(out.facts.is_empty() && out.procedures.is_empty());
+    }
+
+    /// An empty facts document (the agent created the file but wrote nothing) is
+    /// an explicit parse failure — never a hollow `Ok`.
+    #[test]
+    fn empty_facts_document_is_parse_failure() {
+        let err = parse_facts_document("   \n\t ")
+            .expect_err("an empty facts document must be an explicit error");
+        assert_eq!(
+            classify_distill_error(&err),
+            DistillFailureClass::ParseFailure
+        );
+    }
+
+    /// A launcher banner written INTO the file (no JSON object at all) still
+    /// fails explicitly — `parse_facts_document` does not scrape a banner for a
+    /// `{ "facts": [...] }` object.
+    #[test]
+    fn banner_only_document_is_parse_failure() {
+        let err = parse_facts_document(LIVE_LAUNCHER_BANNER)
+            .expect_err("a banner-only document has no facts object and must error");
+        assert_eq!(
+            classify_distill_error(&err),
+            DistillFailureClass::ParseFailure
+        );
+    }
+
+    /// The agent may wrap its answer in a Markdown code fence inside the file;
+    /// the facts must still be recovered (clean-channel format leniency).
+    #[test]
+    fn fenced_facts_document_still_parses() {
+        let fenced = "```json\n{\"facts\":[{\"concept\":\"bug-pattern\",\"content\":\"off-by-one in the ring buffer\",\"source_episode_id\":\"epi_7\"}],\"procedures\":[]}\n```";
+        let out = parse_facts_document(fenced).expect("a fenced facts document must still parse");
+        assert_eq!(out.facts.len(), 1);
+        assert_eq!(out.facts[0].source_episode_id, "epi_7");
     }
 }
