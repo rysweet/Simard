@@ -668,14 +668,15 @@ pub fn run_ooda_daemon(
 
     // ── Daily journal thread (issue #2606) ─────────────────────────────
     // DEFAULT-ON, opt-out via SIMARD_JOURNAL_ENABLED=0. On its own slow cadence
-    // (default hourly) the daemon regenerates *today's* diary-like, layperson
-    // journal entry from episodic memory and the day's activity — including the
-    // day's real code-change proposals pulled from the `gh pr list` PR-readiness
-    // service — persisting it in cognitive memory (a `journal:YYYY-MM-DD` fact).
-    // Because it touches the network it runs on a background thread (never
-    // inline) AFTER the authoritative OODA cycle, panic-isolated and
-    // overlap-guarded, so it can never stall or crash the loop. The dashboard
-    // Journal tab and the TUI Journal pane read these entries back.
+    // (default hourly) the daemon regenerates *today's* narrative engineering &
+    // research report from episodic memory and the day's activity — including
+    // the day's real code-change proposals pulled from the `gh pr list`
+    // PR-readiness service — persisting it in cognitive memory (a
+    // `journal:YYYY-MM-DD` fact). Because it touches the network it runs on a
+    // background thread (never inline) AFTER the authoritative OODA cycle,
+    // panic-isolated and overlap-guarded, so it can never stall or crash the
+    // loop. The dashboard Journal tab and the TUI Journal pane read these
+    // entries back.
     let journal_thread_enabled = crate::journal::journal_enabled();
     let journal_interval_secs = crate::journal::journal_interval_secs();
     let mut last_journal: Option<Instant> = None;
@@ -1413,6 +1414,7 @@ pub fn run_ooda_daemon(
                 let running = Arc::clone(&journal_tick_running);
                 let mem_for_journal = Arc::clone(&shared_mem);
                 let state_root_for_journal = state_root.clone();
+                let repo_root_for_journal = bridges.repo_root.clone();
                 let spawn = std::thread::Builder::new()
                     .name("journal-tick".to_string())
                     .spawn(move || {
@@ -1434,10 +1436,11 @@ pub fn run_ooda_daemon(
                         let prs = crate::journal::GhPrListSource::new(&gh, repo, base_allowlist);
 
                         let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            crate::journal::run_journal_tick_with_prs(
+                            crate::journal::run_journal_tick_with_prs_in_repo(
                                 mem_for_journal.as_ref(),
                                 &crate::journal::SystemClock,
                                 &prs,
+                                &repo_root_for_journal,
                             )
                         }));
                         match tick {
