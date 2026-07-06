@@ -25,6 +25,11 @@ pub(crate) const PART_01: &str = r#"
         with <strong>Disconnect</strong>.
       </div>
       <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.75rem">
+        <label for="agent-terminal-select" style="color:#8b949e;font-size:.85rem">Agent</label>
+        <select id="agent-terminal-select" onchange="onAgentTerminalSelect()"
+                style="padding:.35rem .5rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:monospace;min-width:16rem">
+          <option value="" disabled selected>no agents available</option>
+        </select>
         <label for="agent-log-name" style="color:#8b949e;font-size:.85rem">Agent name</label>
         <input id="agent-log-name" type="text" placeholder="e.g. planner" maxlength="64"
                style="padding:.35rem .5rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:monospace;min-width:14rem">
@@ -636,6 +641,9 @@ pub(crate) const PART_01: &str = r#"
       return 'tmux attach -t '+s.session_name;
     }
     function renderSubagentSessions(){
+      // Keep the Agent Terminal picker (Workers tab) in sync with the live
+      // registry on every 5s poll (issue #2717).
+      populateAgentSelect();
       const el=document.getElementById('subagent-sessions-list');
       if(!el) return;
       const live=subagentSessionsCache.live||[];
@@ -662,6 +670,61 @@ pub(crate) const PART_01: &str = r#"
         const prev=btn.textContent;btn.textContent='Copied!';
         setTimeout(()=>{btn.textContent=prev;},900);
       },()=>{});
+    }
+    /* --- Agent Terminal available-agents picker (issue #2717) ---
+       populateAgentSelect() is a pure reader of the shared live registry
+       (subagentSessionsCache.live[]) — the SAME source the Workers tab uses to
+       list workers — so the dropdown always reflects reality. It rides the
+       existing 5s refresh via renderSubagentSessions(). Options carry the real
+       host + tmux session_name as data attributes so the attach target never
+       comes from the human-readable label. */
+    function populateAgentSelect(){
+      const sel=document.getElementById('agent-terminal-select');
+      if(!sel) return;
+      const live=subagentSessionsCache.live||[];
+      const prev=sel.value;
+      while(sel.firstChild) sel.removeChild(sel.firstChild);
+      if(!live.length){
+        const opt=document.createElement('option');
+        opt.value='';opt.disabled=true;opt.selected=true;
+        opt.textContent='no agents available';
+        sel.appendChild(opt);
+        sel.disabled=true;
+        return;
+      }
+      sel.disabled=false;
+      for(const s of live){
+        const opt=document.createElement('option');
+        opt.value=s.agent_id||'';
+        opt.dataset.host=s.host||'';
+        opt.dataset.session=s.session_name||'';
+        let label=s.agent_id||'(unknown)';
+        if(s.goal_id) label+=' — '+s.goal_id;
+        label+=' — live';
+        opt.textContent=label;
+        sel.appendChild(opt);
+      }
+      /* Preserve the operator's prior pick across the 5s rebuild without firing
+         an attach (a programmatic .value assignment never dispatches 'change').
+         Only fall back to the first agent when the prior pick has left live[]. */
+      const stillPresent=Array.prototype.some.call(sel.options,o=>o.value===prev&&prev!=='');
+      sel.value=stillPresent?prev:sel.options[0].value;
+    }
+    /* Fires only on a genuine user change (never the programmatic rebuild
+       above). Reads the chosen option's data-host/data-session and switches the
+       shared terminal to that session via the existing openTmuxAttach(). */
+    function onAgentTerminalSelect(){
+      const sel=document.getElementById('agent-terminal-select');
+      if(!sel) return;
+      const opt=sel.options[sel.selectedIndex];
+      if(!opt||opt.disabled) return;
+      const host=opt.dataset.host||'';
+      const session=opt.dataset.session||'';
+      if(!host||!session){
+        setAgentLogStatus('selected agent has no attachable session','#f85149');
+        return;
+      }
+      openTmuxAttach(host, session);
     }
     /* Shared renderer for Recent Actions outcome.detail strings.
        Detects agent='engineer-...' references and, when a matching tmux
