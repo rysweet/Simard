@@ -134,6 +134,18 @@ crossterm = "=0.28.1"
 headless_chrome = { version = "=1.0.21", optional = true, default-features = false }
 regex = { version = "=1.12.3", optional = true }
 url = { version = "=2.5.8", optional = true }
+# Issue #2631: the Overseer's authenticated STARTTLS + AUTH LOGIN email relay
+# (`StartTlsSmtpSender` in src/overseer/notify.rs) reaching e.g. office365. All
+# three are already in the locked dependency graph transitively; this promotes
+# them to direct deps at exact pins matching Cargo.lock. `rustls` enables the
+# `ring` crypto provider explicitly so the relay never relies on an ambiguous
+# process-default provider, and `--no-default-features` still builds. `base64`
+# encodes the AUTH LOGIN payload (inside TLS only). No secret is ever hardcoded —
+# SMTP credentials come solely from the environment.
+base64 = "=0.22.1"
+rustls = { version = "=0.23.38", features = ["ring"] }
+rustls-native-certs = "=0.8.3"
+webpki-roots = "=1.0.7"
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.185"

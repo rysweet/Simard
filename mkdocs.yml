@@ -190,6 +190,7 @@ nav:
     - Watch Overseer Activity: howto/watch-overseer-activity.md
     - Configure Overseer Goal-Board Health: howto/configure-overseer-goal-board-health.md
     - Configure Overseer Memory Recall: howto/configure-overseer-memory-recall.md
+    - Configure Overseer Email Notifications: howto/configure-overseer-email-notifications.md
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
     - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
@@ -203,6 +204,7 @@ nav:
     - Overseer Tick Details: reference/overseer-tick-details.md
     - Overseer Goal-Board Health API: reference/overseer-goal-board-health-api.md
     - Overseer Memory-Recall API: reference/overseer-memory-recall-api.md
+    - Overseer Operator Notifications: reference/overseer-operator-notifications.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
     - Journal API: reference/journal-api.md
