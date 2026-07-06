@@ -6,6 +6,7 @@ owner: simard
 doc_type: reference
 related:
   - ../architecture/episode-distillation.md
+  - ./distill-parse-failure-recovery.md
   - ./automatic-distillation-scheduler.md
   - ./cognitive-memory-provenance.md
   - ./text-parsing-wire-formats.md

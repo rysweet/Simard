@@ -1261,13 +1261,73 @@ pub(crate) fn parse_facts_document(document: &str) -> SimardResult<DistillOutput
             "distill: facts document was empty; the agent produced no output".to_string(),
         ));
     }
-    if let Some(output) = scan_cleaned_for_facts(trimmed) {
-        return Ok(output);
+    if let Some(resolved) = scan_cleaned_for_facts(trimmed) {
+        resolved.log_if_zero_facts();
+        return Ok(resolved.output);
     }
     Err(SimardError::RpcError(format!(
         "distill: facts document did not contain a parseable {{ \"facts\": [...] }} object: {}",
         truncate(trimmed, 200)
     )))
+}
+
+/// A `{ "facts": [...] }` envelope resolved to its stored [`DistillOutput`],
+/// carrying the WINNING envelope's pre-filter input counts so a valid parse
+/// that keeps zero facts can be logged exactly once — over the document that
+/// actually resolved, not per speculative candidate in the slow-path scan.
+struct ResolvedFacts {
+    output: DistillOutput,
+    /// Facts present in the winning envelope before the concept allow-list.
+    input_facts: usize,
+    /// Procedures present in the winning envelope before the source/steps gate.
+    input_procedures: usize,
+}
+
+impl ResolvedFacts {
+    /// Capture the envelope's pre-filter counts, then convert to output. The
+    /// counts are read before [`RecipeEnvelope::into_output`] consumes `env` so
+    /// they reflect what the agent emitted, not what survived filtering.
+    fn from_envelope(env: RecipeEnvelope) -> Self {
+        let input_facts = env.facts.len();
+        let input_procedures = env.procedures.len();
+        ResolvedFacts {
+            output: env.into_output(),
+            input_facts,
+            input_procedures,
+        }
+    }
+
+    /// Emit a single counts-only zero-facts telemetry event when a VALID parse
+    /// resolved to zero storable facts AND zero storable procedures (issue
+    /// #2679). This distinguishes a valid-but-empty answer (`empty-array` — the
+    /// agent had nothing to distill) from an off-spec one (`all-facts-off-spec`
+    /// — inputs were present but every fact/procedure was filtered out), so the
+    /// distill parse-success metric is never corrupted by counting a successful
+    /// empty parse as a failure.
+    ///
+    /// The event is counts-only: it never carries a fact's content/concept/
+    /// source episode or a procedure's name/steps (distilled memory may hold
+    /// PII), and `reason` is a fixed `&'static str` (no interpolated model text,
+    /// so it cannot be a log-injection vector).
+    fn log_if_zero_facts(&self) {
+        if !self.output.facts.is_empty() || !self.output.procedures.is_empty() {
+            return;
+        }
+        let reason = if self.input_facts == 0 && self.input_procedures == 0 {
+            "empty-array"
+        } else {
+            "all-facts-off-spec"
+        };
+        tracing::info!(
+            target: "simard::distill",
+            input_facts = self.input_facts,
+            input_procedures = self.input_procedures,
+            kept_facts = 0,
+            kept_procedures = 0,
+            reason,
+            "distill parse yielded zero storable facts"
+        );
+    }
 }
 
 /// Parse a bare `{ "facts": [...] }` object, tolerating a single **trailing
@@ -1312,10 +1372,10 @@ fn parse_facts_envelope_lenient(text: &str) -> Option<RecipeEnvelope> {
 /// fully-attributed answer and silently discard its promotable facts. Preferring
 /// the grounded-capable object keeps the agent's real, attributed answer winning
 /// while still recovering a source-less answer when that is all the output holds.
-fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
+fn scan_cleaned_for_facts(trimmed: &str) -> Option<ResolvedFacts> {
     // Fast path — the text IS the JSON object.
     if let Some(parsed) = parse_facts_envelope_lenient(trimmed) {
-        return Some(parsed.into_output());
+        return Some(ResolvedFacts::from_envelope(parsed));
     }
     // Slow path — among every balanced `{...}` substring (string-aware, so a
     // brace inside a JSON string cannot split an object), scanned from the END
@@ -1329,27 +1389,28 @@ fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
     //   1. last object with a grounded-capable fact (non-empty source_episode_id),
     //   2. last otherwise-non-empty object (facts/procedures present),
     //   3. last parseable empty `{"facts":[]}` ("nothing worth distilling").
-    let mut nonempty_fallback: Option<DistillOutput> = None;
-    let mut empty_fallback: Option<DistillOutput> = None;
+    let mut nonempty_fallback: Option<ResolvedFacts> = None;
+    let mut empty_fallback: Option<ResolvedFacts> = None;
     for span in crate::recipe_output::balanced_objects(trimmed)
         .into_iter()
         .rev()
     {
         if let Some(parsed) = parse_facts_envelope_lenient(span) {
-            let output = parsed.into_output();
-            if output
+            let resolved = ResolvedFacts::from_envelope(parsed);
+            if resolved
+                .output
                 .facts
                 .iter()
                 .any(|f| !f.source_episode_id.trim().is_empty())
             {
-                return Some(output);
+                return Some(resolved);
             }
-            if !output.facts.is_empty() || !output.procedures.is_empty() {
+            if !resolved.output.facts.is_empty() || !resolved.output.procedures.is_empty() {
                 if nonempty_fallback.is_none() {
-                    nonempty_fallback = Some(output);
+                    nonempty_fallback = Some(resolved);
                 }
             } else if empty_fallback.is_none() {
-                empty_fallback = Some(output);
+                empty_fallback = Some(resolved);
             }
         }
     }
@@ -2358,5 +2419,351 @@ mod issue_2622_file_channel_tests {
         let out = parse_facts_document(fenced).expect("a fenced facts document must still parse");
         assert_eq!(out.facts.len(), 1);
         assert_eq!(out.facts[0].source_episode_id, "epi_7");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // issue #2679 — zero-facts telemetry (Mechanism 2), written test-first.
+    //
+    // When a VALID parse resolves to zero storable facts AND zero storable
+    // procedures, `parse_facts_document` must emit exactly one counts-only
+    // `tracing::info!(target: "simard::distill")` event — over the WINNING
+    // envelope's pre-filter counts — distinguishing:
+    //   * `empty-array`        — the agent had nothing to distill (inputs == 0),
+    //   * `all-facts-off-spec` — inputs present but every one was filtered out.
+    // It must fire AT MOST ONCE per resolved document (never per speculative
+    // candidate in the slow-path reverse scan), never on success-with-facts,
+    // and never on an `Err`. The event is counts-only (no PII).
+    //
+    // These fail until the emission is wired: no such event is captured today.
+    // ─────────────────────────────────────────────────────────────────────
+
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    /// One captured `tracing` event, reduced to what the zero-facts contract
+    /// asserts on: target, level, message, and each field rendered to a string.
+    #[derive(Clone, Debug, Default)]
+    struct CapturedEvent {
+        target: String,
+        level: String,
+        message: String,
+        fields: std::collections::BTreeMap<String, String>,
+    }
+
+    impl CapturedEvent {
+        fn field(&self, name: &str) -> Option<&str> {
+            self.fields.get(name).map(String::as_str)
+        }
+    }
+
+    /// Renders every event field to a `String`. A `Debug`-recorded string is
+    /// wrapped in quotes, so one layer is stripped and `reason` compares cleanly
+    /// whether tracing routes a `&'static str` through `record_str` or
+    /// `record_debug`.
+    #[derive(Default)]
+    struct EventVisitor {
+        message: String,
+        fields: std::collections::BTreeMap<String, String>,
+    }
+
+    impl EventVisitor {
+        fn put(&mut self, field: &tracing::field::Field, value: String) {
+            if field.name() == "message" {
+                self.message = value;
+            } else {
+                self.fields.insert(field.name().to_string(), value);
+            }
+        }
+    }
+
+    impl tracing::field::Visit for EventVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            let rendered = format!("{value:?}");
+            let unquoted = rendered
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .map(str::to_string)
+                .unwrap_or(rendered);
+            self.put(field, unquoted);
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.put(field, value.to_string());
+        }
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.put(field, value.to_string());
+        }
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.put(field, value.to_string());
+        }
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.put(field, value.to_string());
+        }
+    }
+
+    /// A `tracing-subscriber` layer that records EVERY event into a shared buffer.
+    struct CapturingLayer {
+        events: std::sync::Arc<std::sync::Mutex<Vec<CapturedEvent>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CapturingLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = EventVisitor::default();
+            event.record(&mut visitor);
+            let meta = event.metadata();
+            self.events.lock().unwrap().push(CapturedEvent {
+                target: meta.target().to_string(),
+                level: meta.level().to_string(),
+                message: visitor.message,
+                fields: visitor.fields,
+            });
+        }
+    }
+
+    /// Run `f` with a thread-local capturing subscriber installed and return its
+    /// result alongside every event it emitted. `with_default` scopes the
+    /// subscriber to THIS thread, so parallel tests never cross-contaminate.
+    fn capture_distill_events<R>(f: impl FnOnce() -> R) -> (R, Vec<CapturedEvent>) {
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let layer = CapturingLayer {
+            events: std::sync::Arc::clone(&events),
+        };
+        let subscriber = tracing_subscriber::Registry::default().with(layer);
+        let result = tracing::subscriber::with_default(subscriber, f);
+        let captured = events.lock().unwrap().clone();
+        (result, captured)
+    }
+
+    /// The zero-facts telemetry events among all captured events — matched by the
+    /// documented target AND message so an unrelated log can never satisfy a test.
+    fn zero_facts_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+        events
+            .iter()
+            .filter(|e| {
+                e.target == "simard::distill"
+                    && e.message == "distill parse yielded zero storable facts"
+            })
+            .collect()
+    }
+
+    #[test]
+    fn zero_facts_offspec_document_is_ok_zero_and_logs_all_facts_off_spec() {
+        // Facts present but every concept is off the allow-list → the parse is a
+        // SUCCESS that keeps zero facts, and exactly one `all-facts-off-spec` log
+        // is emitted over the winning envelope's pre-filter counts.
+        let doc = r#"{"facts":[
+            {"concept":"random-thought","content":"noise a","source_episode_id":"epi_1"},
+            {"concept":"stray-note","content":"noise b","source_episode_id":"epi_2"}
+        ]}"#;
+        let (result, events) = capture_distill_events(|| parse_facts_document(doc));
+        let out = result.expect("off-spec facts must parse to Ok(zero), never Err");
+        assert!(
+            out.facts.is_empty() && out.procedures.is_empty(),
+            "every off-spec fact must be filtered out"
+        );
+        let logs = zero_facts_events(&events);
+        assert_eq!(
+            logs.len(),
+            1,
+            "exactly one zero-facts log per resolved document, got {}",
+            logs.len()
+        );
+        let ev = logs[0];
+        assert_eq!(
+            ev.level, "INFO",
+            "a valid-but-empty parse is expected operation"
+        );
+        assert_eq!(ev.field("reason"), Some("all-facts-off-spec"));
+        assert_eq!(ev.field("input_facts"), Some("2"));
+        assert_eq!(ev.field("input_procedures"), Some("0"));
+        assert_eq!(ev.field("kept_facts"), Some("0"));
+        assert_eq!(ev.field("kept_procedures"), Some("0"));
+    }
+
+    #[test]
+    fn zero_facts_procedures_only_all_gated_logs_all_facts_off_spec() {
+        // A procedures-only batch where every procedure is dropped by the gate
+        // (first: no source episode; second: no steps). input_procedures == 2,
+        // input_facts == 0, nothing kept → the umbrella `all-facts-off-spec`
+        // reason (NOT `empty-array` — inputs were present).
+        let doc = r#"{"facts":[],"procedures":[
+            {"name":"deploy","steps":["build","ship"],"source_episode_ids":[]},
+            {"name":"rollback","steps":[],"source_episode_ids":["epi_9"]}
+        ]}"#;
+        let (result, events) = capture_distill_events(|| parse_facts_document(doc));
+        let out = result.expect("all-gated procedures must parse to Ok(zero)");
+        assert!(out.facts.is_empty() && out.procedures.is_empty());
+        let logs = zero_facts_events(&events);
+        assert_eq!(logs.len(), 1);
+        let ev = logs[0];
+        assert_eq!(
+            ev.field("reason"),
+            Some("all-facts-off-spec"),
+            "inputs present but nothing kept → umbrella reason, not empty-array"
+        );
+        assert_eq!(ev.field("input_facts"), Some("0"));
+        assert_eq!(ev.field("input_procedures"), Some("2"));
+        assert_eq!(ev.field("kept_facts"), Some("0"));
+        assert_eq!(ev.field("kept_procedures"), Some("0"));
+    }
+
+    #[test]
+    fn zero_facts_empty_arrays_log_empty_array_reason() {
+        let doc = r#"{"facts":[],"procedures":[]}"#;
+        let (result, events) = capture_distill_events(|| parse_facts_document(doc));
+        let out = result.expect("a valid-but-empty envelope is a success, never Err");
+        assert!(out.facts.is_empty() && out.procedures.is_empty());
+        let logs = zero_facts_events(&events);
+        assert_eq!(logs.len(), 1, "one log for the valid-empty document");
+        let ev = logs[0];
+        assert_eq!(ev.field("reason"), Some("empty-array"));
+        assert_eq!(ev.field("input_facts"), Some("0"));
+        assert_eq!(ev.field("input_procedures"), Some("0"));
+        assert_eq!(ev.field("kept_facts"), Some("0"));
+        assert_eq!(ev.field("kept_procedures"), Some("0"));
+    }
+
+    #[test]
+    fn zero_facts_bare_empty_facts_array_logs_empty_array() {
+        // No `procedures` key at all — it defaults to empty, so inputs are zero
+        // and the reason is still `empty-array`.
+        let doc = r#"{"facts":[]}"#;
+        let (result, events) = capture_distill_events(|| parse_facts_document(doc));
+        result.expect("a bare empty facts array is a valid success");
+        let logs = zero_facts_events(&events);
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].field("reason"), Some("empty-array"));
+    }
+
+    #[test]
+    fn success_with_facts_emits_no_zero_facts_log() {
+        // The clean, common path: a resolved document that keeps facts must emit
+        // NO zero-facts log.
+        let doc = r#"{"facts":[{"concept":"pr-pattern","content":"squash fixups","source_episode_id":"epi_1"}]}"#;
+        let (result, events) = capture_distill_events(|| parse_facts_document(doc));
+        assert_eq!(result.expect("clean object parses").facts.len(), 1);
+        assert!(
+            zero_facts_events(&events).is_empty(),
+            "success-with-facts must not emit a zero-facts log"
+        );
+    }
+
+    #[test]
+    fn success_with_facts_emits_no_log_even_with_trailing_empty_candidate() {
+        // Example 4b: a stray empty object precedes the grounded answer in a
+        // prose-wrapped document. The slow-path scan may convert the empty
+        // candidate speculatively, but the log lives on the RESOLVED winner —
+        // which has facts — so NO zero-facts log may fire. (Logging inside
+        // `into_output` would emit a spurious `empty-array` here; forbid it.)
+        let doc = "…thinking… {\"facts\":[]}\n\
+            {\"facts\":[{\"concept\":\"bug-pattern\",\"content\":\"missing guard\",\"source_episode_id\":\"epi_4\"}]}";
+        let (result, events) = capture_distill_events(|| parse_facts_document(doc));
+        let out = result.expect("the grounded object must win and store its fact");
+        assert_eq!(out.facts.len(), 1);
+        assert_eq!(out.facts[0].concept, "bug-pattern");
+        assert!(
+            zero_facts_events(&events).is_empty(),
+            "a document resolving WITH facts must emit no zero-facts log"
+        );
+    }
+
+    #[test]
+    fn wrapped_document_resolving_to_empty_logs_exactly_once() {
+        // Two empty candidates in a prose-wrapped document. The reverse-loop scan
+        // converts more than one candidate, but emission is once PER RESOLVED
+        // DOCUMENT — so exactly one log fires (the naive `into_output` site would
+        // fire once per empty candidate). reason is `empty-array` (winner input 0).
+        let doc = "banner {\"facts\":[]}\nmore prose {\"facts\":[]}";
+        let (result, events) = capture_distill_events(|| parse_facts_document(doc));
+        let out = result.expect("a wrapped all-empty document still resolves to Ok(zero)");
+        assert!(out.facts.is_empty() && out.procedures.is_empty());
+        let logs = zero_facts_events(&events);
+        assert_eq!(
+            logs.len(),
+            1,
+            "exactly one log even when several empty candidates are scanned, got {}",
+            logs.len()
+        );
+        assert_eq!(logs[0].field("reason"), Some("empty-array"));
+    }
+
+    #[test]
+    fn zero_facts_event_carries_no_pii_fields_or_values() {
+        // Data-privacy guard: the counts-only event must never carry a fact's
+        // content / concept / source_episode_id (nor a procedure name/steps), and
+        // no field VALUE (nor the message) may leak the raw text either.
+        const SECRET_CONTENT: &str = "SENSITIVE-PII-do-not-log-7f3a";
+        const SECRET_EPISODE: &str = "epi_secret_9c1d";
+        let doc = format!(
+            r#"{{"facts":[{{"concept":"random-thought","content":"{SECRET_CONTENT}","source_episode_id":"{SECRET_EPISODE}"}}]}}"#
+        );
+        let (result, events) = capture_distill_events(|| parse_facts_document(&doc));
+        result.expect("an off-spec fact parses to Ok(zero)");
+        let logs = zero_facts_events(&events);
+        assert_eq!(logs.len(), 1, "off-spec input must emit one zero-facts log");
+        let ev = logs[0];
+        for banned in ["content", "concept", "source_episode_id", "name", "steps"] {
+            assert!(
+                ev.field(banned).is_none(),
+                "zero-facts event must not carry a `{banned}` field"
+            );
+        }
+        for (name, value) in &ev.fields {
+            assert!(
+                !value.contains(SECRET_CONTENT) && !value.contains(SECRET_EPISODE),
+                "field `{name}` leaked PII: {value}"
+            );
+        }
+        assert!(
+            !ev.message.contains(SECRET_CONTENT) && !ev.message.contains(SECRET_EPISODE),
+            "the event message must not leak PII"
+        );
+    }
+
+    #[test]
+    fn empty_document_errors_and_emits_no_zero_facts_log() {
+        // A hollow-Ok guard: an empty document is an explicit Err, never Ok(zero),
+        // and emits no zero-facts log.
+        let (result, events) = capture_distill_events(|| parse_facts_document("   \n\t "));
+        let err = result.expect_err("an empty document must be an explicit Err, never Ok(zero)");
+        assert!(
+            err.to_string().contains("facts document was empty"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            zero_facts_events(&events).is_empty(),
+            "a parse failure must NOT emit a zero-facts log"
+        );
+    }
+
+    #[test]
+    fn banner_only_document_errors_and_emits_no_zero_facts_log() {
+        // The other Err string: a non-empty document with no parseable envelope.
+        let (result, events) =
+            capture_distill_events(|| parse_facts_document(LIVE_LAUNCHER_BANNER));
+        let err = result.expect_err("a banner-only document has no facts object → Err");
+        assert!(
+            err.to_string().contains("did not contain a parseable"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            zero_facts_events(&events).is_empty(),
+            "a parse failure must NOT emit a zero-facts log"
+        );
+    }
+
+    #[test]
+    fn genuinely_malformed_document_errors_and_emits_no_zero_facts_log() {
+        // An elided array element `,,` is not a recoverable trailing comma, so the
+        // document still fails — and a failure emits no zero-facts log.
+        let doc = r#"{"facts":[{"concept":"pr-pattern","content":"a","source_episode_id":"e1"},,{"concept":"bug-pattern","content":"b","source_episode_id":"e2"}]}"#;
+        let (result, events) = capture_distill_events(|| parse_facts_document(doc));
+        assert!(result.is_err(), "genuinely malformed JSON must still fail");
+        assert!(
+            zero_facts_events(&events).is_empty(),
+            "a parse failure must NOT emit a zero-facts log"
+        );
     }
 }
