@@ -1,0 +1,54 @@
+name: "Git Guardrails Safety Contract"
+description: "Outside-in coverage for the autonomous-mode git guardrail (`check_git_safety`): globally-destructive operations (force push, reset --hard, branch -D main/release/master, clean -fdx, reflog expire, aggressive gc) are blocked, the protected-repo safe-list is enforced (and skipped for unprotected repos), the destructive-pattern check takes precedence over the safe-list, empty invocations are handled, and the SIMARD_GIT_GUARDRAILS disable toggle works — exercised through the hermetic unit suite for the guardrail module."
+version: "1.0.0"
+
+config:
+  timeout: 360000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 360000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Guardrail blocks destructive ops and enforces the protected-repo safe-list"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/git-guardrails-safety.sh"
+    timeout: 360000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "git-guardrails"
+    - "safety"
+    - "autonomous-mode"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"
