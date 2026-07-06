@@ -85,6 +85,12 @@ horizontal space. The transcript scrolls inside a flex-grown message area while
 the input row stays anchored at the bottom, and the panel grows with the browser
 window — no fixed small box.
 
+**Multi-line composer.** The message box is a multi-line text area: press
+**Enter** to send and **Shift+Enter** to add a newline. It starts at a single
+line, grows automatically as you type or paste additional lines (up to a capped
+height, then scrolls), and collapses back to one line after each message is
+sent. See [Dashboard Chat — multi-line message input](reference/dashboard-chat-multiline-input.md).
+
 **Streaming with graceful fallback.** Assistant replies appear **incrementally**,
 word-by-word, rather than all at once. A client that only understands the legacy
 single-message shape still works — it simply receives the reply as one complete

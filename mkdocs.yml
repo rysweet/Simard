@@ -296,6 +296,7 @@ nav:
     - Signal Continuous Conversation: reference/signal-continuous-conversation.md
     - LightweightChatSession: reference/lightweight-chat-session.md
     - Dashboard Chat: reference/dashboard-chat.md
+    - Dashboard Chat — Multi-line Input: reference/dashboard-chat-multiline-input.md
     - Dashboard Feedback Widget: reference/dashboard-feedback-widget.md
     - Copilot Meeting Mode: reference/copilot-meeting-mode.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md

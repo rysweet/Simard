@@ -75,8 +75,9 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     .typing-dots span:nth-child(3){animation-delay:.4s}
     @keyframes blink{0%,80%,100%{opacity:0}40%{opacity:1}}
     #chat-send:disabled{opacity:.5;cursor:not-allowed}
-    #chat-input-row{display:flex;gap:.5rem}
-    #chat-input{flex:1;padding:.5rem;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--fg);font-size:.9rem;resize:none;height:42px}
+    #chat-input-row{display:flex;gap:.5rem;align-items:flex-end}
+    /* max-height here is coupled to the JS auto-grow clamp in part_04.rs (150) */
+    #chat-input{flex:1;padding:.5rem;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--fg);font-size:.9rem;resize:none;min-height:42px;max-height:150px;overflow-y:auto;box-sizing:border-box;line-height:1.4}
     #chat-input:focus{outline:none;border-color:var(--accent)}
     #chat-send{padding:.5rem 1.2rem;border:none;border-radius:6px;background:var(--accent);color:#0d1117;font-weight:600;cursor:pointer}
     #chat-send:hover{opacity:.9}
