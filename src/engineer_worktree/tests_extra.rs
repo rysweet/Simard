@@ -351,3 +351,137 @@ fn sweep_removes_unregistered_dir_with_dead_engineer_claim() {
         report.removed_orphan_dirs
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #2621 — the Simard-managed claim sentinel must never surface as an
+// untracked change in the target repo, even when that repo does NOT gitignore
+// `.simard-engineer-claim`. `allocate` appends it to the worktree's
+// `.git/info/exclude`, so `git status` reports a clean tree and the engineer-
+// loop pre-mutation guard does not trip.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial_test::serial]
+fn allocate_excludes_claim_sentinel_from_git_status() {
+    let parent_dir = tempdir().unwrap();
+    let state_dir = tempdir().unwrap();
+    // NOTE: `init_parent_repo` deliberately does NOT gitignore the sentinel —
+    // this mirrors an external governed repo (e.g. agent-kgpacks-rs) that has
+    // no knowledge of Simard's private infra file.
+    let parent_repo = init_parent_repo(parent_dir.path());
+
+    let wt = EngineerWorktree::allocate(&parent_repo, state_dir.path(), "claim-exclude")
+        .expect("allocate");
+
+    // The sentinel MUST exist on disk (it's the liveness claim)...
+    let claim = wt.path().join(super::ENGINEER_CLAIM_FILE);
+    assert!(
+        claim.exists(),
+        "claim sentinel must be written to the worktree"
+    );
+
+    // ...but MUST NOT appear in `git status`, because allocate excluded it.
+    let status = git_output(
+        wt.path(),
+        &["status", "--porcelain", "--untracked-files=all"],
+    );
+    assert!(
+        !status.contains(super::ENGINEER_CLAIM_FILE),
+        "claim sentinel must be excluded from git status; got:\n{status}"
+    );
+    assert!(
+        status.trim().is_empty(),
+        "worktree containing only the claim sentinel must be clean; got:\n{status}"
+    );
+
+    // The exclude entry must be discoverable via git's own path resolution.
+    let exclude_rel = git_output(wt.path(), &["rev-parse", "--git-path", "info/exclude"]);
+    let exclude_rel = exclude_rel.trim();
+    let exclude_path = {
+        let p = Path::new(exclude_rel);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            wt.path().join(p)
+        }
+    };
+    let exclude_body = fs::read_to_string(&exclude_path).expect("exclude file present");
+    let anchored = format!("/{}", super::ENGINEER_CLAIM_FILE);
+    let sentinel_lines = exclude_body
+        .lines()
+        .filter(|l| l.trim() == anchored)
+        .count();
+    assert_eq!(
+        sentinel_lines, 1,
+        "exclude must contain the anchored sentinel exactly once (idempotent append); got:\n{exclude_body}"
+    );
+
+    wt.cleanup().expect("cleanup");
+}
+
+/// Issue #2621 (hardening): the exclude entry is root-anchored, so a genuine
+/// agent-created file that merely shares the sentinel's basename in a
+/// subdirectory is NOT silently hidden from `git status` (and therefore is
+/// still counted by `inspect_workspace` / `verify_agent_spawn_artifacts`).
+#[test]
+#[serial_test::serial]
+fn allocate_exclude_does_not_hide_subdir_same_basename() {
+    let parent_dir = tempdir().unwrap();
+    let state_dir = tempdir().unwrap();
+    let parent_repo = init_parent_repo(parent_dir.path());
+
+    let wt = EngineerWorktree::allocate(&parent_repo, state_dir.path(), "claim-subdir")
+        .expect("allocate");
+
+    // A real change nested under a subdir that happens to share the sentinel's
+    // basename. With an UNANCHORED exclude this would be swallowed; with the
+    // root-anchored pattern it must still surface as an untracked change.
+    let nested_dir = wt.path().join("subdir");
+    fs::create_dir_all(&nested_dir).unwrap();
+    fs::write(nested_dir.join(super::ENGINEER_CLAIM_FILE), "real\n").unwrap();
+
+    let status = git_output(
+        wt.path(),
+        &["status", "--porcelain", "--untracked-files=all"],
+    );
+    assert!(
+        status.contains("subdir/.simard-engineer-claim"),
+        "a same-basename file in a subdirectory must NOT be hidden by the anchored exclude; got:\n{status}"
+    );
+
+    wt.cleanup().expect("cleanup");
+}
+
+/// Issue #2621 (hardening): the exclude append must be idempotent AND must
+/// never clobber the parent repo's pre-existing `.git/info/exclude` entries,
+/// even across repeated allocations against the same repo. This is the
+/// single-threaded proof that the read-modify-write preserves content; the
+/// concurrent case is additionally serialized under `worktree_mutation_lock`
+/// at the `allocate` call site.
+#[test]
+#[serial_test::serial]
+fn exclude_engineer_claim_is_idempotent_and_preserves_existing_entries() {
+    let repo_dir = tempdir().unwrap();
+    let repo = init_parent_repo(repo_dir.path());
+
+    // Pre-seed a genuine user exclude pattern.
+    let exclude_path = repo.join(".git/info/exclude");
+    fs::create_dir_all(exclude_path.parent().unwrap()).unwrap();
+    fs::write(&exclude_path, "# user rules\n*.log\n").unwrap();
+
+    // Two appends mirror two allocations against the same parent repo.
+    super::exclude_engineer_claim(&repo).expect("first exclude append");
+    super::exclude_engineer_claim(&repo).expect("second exclude append (idempotent)");
+
+    let body = fs::read_to_string(&exclude_path).expect("exclude present");
+    assert!(
+        body.contains("*.log"),
+        "pre-existing user exclude entry must be preserved; got:\n{body}"
+    );
+    let anchored = format!("/{}", super::ENGINEER_CLAIM_FILE);
+    let sentinel_lines = body.lines().filter(|l| l.trim() == anchored).count();
+    assert_eq!(
+        sentinel_lines, 1,
+        "anchored sentinel must be appended exactly once across repeated calls; got:\n{body}"
+    );
+}
