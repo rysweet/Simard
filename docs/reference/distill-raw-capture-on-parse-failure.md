@@ -8,6 +8,7 @@ doc_type: reference
 status: implemented
 related:
   - ./distill-recipe-output-capture.md
+  - ./distill-parse-failure-rate-hardening.md
   - ../architecture/episode-distillation.md
   - ../concepts/copilot-launcher-preamble-stripping.md
   - ./text-parsing-wire-formats.md
@@ -240,7 +241,9 @@ raw agent output. Guaranteed metric context fields:
 | `parse_success` | bool | Parsing yielded a facts object. |
 | `failure_class` | string \| null | One of `spawn-failure`, `copilot-terminal-failure`, `recipe-reported-failure`, `parse-failure`, `serialize-failure`, `other`. |
 | `input_count` | u32 | Episodes fed to the pass. |
-| `fact_count` | u32 | Facts extracted (`0` on failure). |
+| `fact_count` | u32 | Facts **promoted** (`0` on failure or when all candidates were quarantined). |
+| `candidate_facts` | u32 | Facts **parsed** before the reliability gate. |
+| `zero_facts_reason` | string | Zero-facts disposition: `none` (facts promoted, or a failure), `true_empty` (valid `{ "facts": [] }` — nothing worth distilling), or `all_quarantined` (facts parsed but all blocked by the reliability gate). See [Distillation parse-failure-rate hardening](./distill-parse-failure-rate-hardening.md). |
 | `attempt` | u32 | 1-based runner invocation count for the pass. |
 | `recovered_after_retry` | bool | Success followed at least one transient retry. |
 

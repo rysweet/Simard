@@ -8,6 +8,7 @@ doc_type: howto
 related:
   - ../reference/distill-raw-capture-on-parse-failure.md
   - ../reference/distill-recipe-output-capture.md
+  - ../reference/distill-parse-failure-rate-hardening.md
   - ../concepts/copilot-launcher-preamble-stripping.md
   - ../howto/diagnose-decide-orient-parse-failures.md
   - ../architecture/episode-distillation.md

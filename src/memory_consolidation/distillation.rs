@@ -366,7 +366,7 @@ pub fn distill_recent_episodes_with_runner(
                 // the retry-safety invariant is unaffected. `attempt` lets the
                 // metric distinguish a first-attempt failure from an exhausted
                 // retry; a failed pass never "recovered".
-                record_distill_success_metric(false, Some(class), pulled, 0, attempt, false);
+                record_distill_success_metric(false, Some(class), pulled, 0, 0, attempt, false);
                 // Issue #2528: mirror the distill failure into the unified
                 // telemetry facade alongside the human log lines above, so the
                 // status snapshot's distill-fail rate is a structured signal
@@ -539,6 +539,29 @@ pub fn distill_recent_episodes_with_runner(
         "[simard] distill: {pulled} episodes → {stored} facts, {stored_procs} procedures, {marked} marked"
     );
 
+    // Issue #2431: a *successful* pass that stored zero facts is not a failure,
+    // but it previously looked identical to a productive pass in the logs. Emit
+    // a distinct diagnostic that names WHY it was empty — `true_empty` (the
+    // recipe parsed no candidates) vs `all_quarantined` (the reliability gate
+    // blocked every candidate) — so an operator can tell a quiet batch from a
+    // silently-degrading one without a cross-metric join. Episodes are still
+    // marked distilled above, so this stays an `Ok` success path.
+    if stored == 0 {
+        let reason = zero_facts_reason(stored, facts.len() as u32);
+        tracing::info!(
+            target: "simard::distill",
+            pulled,
+            candidate_facts = facts.len(),
+            quarantined,
+            zero_facts_reason = reason,
+            "distill: successful pass stored zero facts ({reason})"
+        );
+        eprintln!(
+            "[simard] distill: successful pass stored zero facts (reason={reason}, candidates={}, quarantined={quarantined})",
+            facts.len()
+        );
+    }
+
     // Issue #2528: mirror the distill outcome into the unified telemetry facade
     // (OTel counters + in-process registry) ALONGSIDE the human log line above,
     // so `simard status` reads structured signals instead of grepping journald.
@@ -570,7 +593,19 @@ pub fn distill_recent_episodes_with_runner(
     // out of this recipe-stage metric's scope — see record_distill_success_metric).
     // `attempt` / `recovered_after_retry` (#2468) let the metric distinguish a
     // first-attempt success from one recovered by an in-cycle retry.
-    record_distill_success_metric(true, None, pulled, stored, attempt, recovered_after_retry);
+    // `facts.len()` is the parsed-candidate count (pre-gate); `stored` is what
+    // survived the reliability gate — together they drive `zero_facts_reason`
+    // (#2431), which distinguishes a truly-empty parse from an all-quarantined
+    // batch on this same success event.
+    record_distill_success_metric(
+        true,
+        None,
+        pulled,
+        stored,
+        facts.len() as u32,
+        attempt,
+        recovered_after_retry,
+    );
 
     Ok(DistillReport {
         input_count: pulled,
@@ -815,8 +850,40 @@ pub fn classify_distill_error(err: &SimardError) -> DistillFailureClass {
     }
 }
 
+/// Classify why a *successful* distill pass stored zero facts, so a single
+/// `distill_success_rate` event distinguishes the two very different empty
+/// outcomes that `distill_success_rate` previously conflated (issue #2431):
+///
+/// * `"none"` — at least one fact was stored (not a zero-facts pass);
+/// * `"true_empty"` — the parse succeeded but produced no candidate facts at
+///   all (nothing worth distilling this batch);
+/// * `"all_quarantined"` — candidates *were* parsed, but the reliability gate
+///   (#2433) blocked every one of them.
+///
+/// Both zero-facts dispositions remain a genuine SUCCESS (episodes are still
+/// marked distilled, and re-running an all-quarantined batch is pointless), so
+/// this is a diagnostic axis — NOT a failure signal. It is computed purely from
+/// the count of stored facts and the count of parsed candidates so it can be
+/// unit-tested in isolation and folded into the existing success context.
+fn zero_facts_reason(stored: u32, candidate_facts: u32) -> &'static str {
+    if stored > 0 {
+        "none"
+    } else if candidate_facts == 0 {
+        "true_empty"
+    } else {
+        "all_quarantined"
+    }
+}
+
 /// Build the `distill_success_rate` metric context for one pass that ran the
 /// recipe. `class` is `None` on success, `Some(_)` on failure.
+///
+/// `fact_count` is the number of facts actually *stored* this pass, while
+/// `candidate_facts` is the number the recipe *parsed* before the reliability
+/// gate (#2433). Together they drive the `zero_facts_reason` disposition
+/// (#2431) so an operator can tell a truly-empty parse from an all-quarantined
+/// batch from ONE event — the field is GATED on `success`, so a parse/recipe
+/// failure is never mislabelled as an empty *success*.
 ///
 /// `attempt` (1-based) is the number of runner invocations this pass made, and
 /// `recovered_after_retry` is `true` only when a success followed at least one
@@ -827,6 +894,7 @@ fn build_distill_success_context(
     class: Option<DistillFailureClass>,
     input_count: u32,
     fact_count: u32,
+    candidate_facts: u32,
     attempt: u32,
     recovered_after_retry: bool,
 ) -> String {
@@ -835,6 +903,15 @@ fn build_distill_success_context(
     // success and for a parse-failure, but NOT for a recipe-reported failure
     // that exited 0 without producing step output.
     let parse_attempted = success || class.is_some_and(|c| c.reached_parsing());
+    // The zero-facts disposition is a SUCCESS-only axis (#2431): a parse/recipe
+    // failure is never an empty *success*, so gate it on `success` and leave the
+    // neutral `"none"` on failure — then `zero_facts_reason != "none"`
+    // unambiguously means "a successful pass that stored nothing".
+    let zero_facts = if success {
+        zero_facts_reason(fact_count, candidate_facts)
+    } else {
+        "none"
+    };
     serde_json::json!({
         "outcome": if success { "success" } else { "failure" },
         "recipe_exited_ok": recipe_exited_ok,
@@ -843,6 +920,8 @@ fn build_distill_success_context(
         "failure_class": class.map(|c| c.as_str()),
         "input_count": input_count,
         "fact_count": fact_count,
+        "candidate_facts": candidate_facts,
+        "zero_facts_reason": zero_facts,
         "attempt": attempt,
         "recovered_after_retry": recovered_after_retry,
     })
@@ -884,6 +963,7 @@ fn record_distill_success_metric(
     class: Option<DistillFailureClass>,
     input_count: u32,
     fact_count: u32,
+    candidate_facts: u32,
     attempt: u32,
     recovered_after_retry: bool,
 ) {
@@ -896,6 +976,7 @@ fn record_distill_success_metric(
         class,
         input_count,
         fact_count,
+        candidate_facts,
         attempt,
         recovered_after_retry,
     );
@@ -1948,14 +2029,14 @@ mod unit_tests {
     #[test]
     fn distill_success_context_carries_attempt_and_recovery() {
         // First-attempt success.
-        let first = build_distill_success_context(true, None, 20, 3, 1, false);
+        let first = build_distill_success_context(true, None, 20, 3, 3, 1, false);
         let v: serde_json::Value = serde_json::from_str(&first).unwrap();
         assert_eq!(v["attempt"], 1);
         assert_eq!(v["recovered_after_retry"], false);
         assert_eq!(v["parse_success"], true);
 
         // Recovered on the second attempt after a transient miss.
-        let recovered = build_distill_success_context(true, None, 20, 3, 2, true);
+        let recovered = build_distill_success_context(true, None, 20, 3, 3, 2, true);
         let v2: serde_json::Value = serde_json::from_str(&recovered).unwrap();
         assert_eq!(v2["attempt"], 2);
         assert_eq!(v2["recovered_after_retry"], true);
@@ -1979,7 +2060,7 @@ mod unit_tests {
 
     #[test]
     fn success_metric_context_marks_parse_attempted_and_parse_success() {
-        let payload = build_distill_success_context(true, None, 25, 3, 1, false);
+        let payload = build_distill_success_context(true, None, 25, 3, 3, 1, false);
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["outcome"], "success");
         assert_eq!(v["recipe_exited_ok"], true);
@@ -1996,6 +2077,7 @@ mod unit_tests {
             false,
             Some(DistillFailureClass::ParseFailure),
             40,
+            0,
             0,
             1,
             false,
@@ -2014,6 +2096,7 @@ mod unit_tests {
             false,
             Some(DistillFailureClass::CopilotTerminalFailure),
             40,
+            0,
             0,
             1,
             false,
@@ -2045,6 +2128,7 @@ mod unit_tests {
             Some(classify_distill_error(&err)),
             40,
             0,
+            0,
             1,
             false,
         );
@@ -2052,6 +2136,135 @@ mod unit_tests {
         assert_eq!(v["parse_attempted"], true);
         assert_eq!(v["parse_success"], false);
         assert_eq!(v["failure_class"], "parse-failure");
+    }
+
+    // ── issue #2431 (R1): zero-facts disposition on a *successful* pass ───────
+    //
+    // A successful distill pass can legitimately store ZERO facts for two very
+    // different reasons that `distill_success_rate` previously conflated:
+    //   * true_empty      — the parse succeeded but the recipe produced no
+    //                       candidate facts at all (nothing worth distilling);
+    //   * all_quarantined — candidates WERE parsed, but the reliability gate
+    //                       (#2433) blocked every one of them.
+    // Both remain a genuine SUCCESS (episodes are still marked distilled, and
+    // re-running an all-quarantined batch is pointless), so R1 does NOT turn
+    // them into failures. It adds a single `zero_facts_reason` field to the
+    // existing `distill_success_rate` context so an operator can tell the two
+    // apart from ONE event, without a manual cross-metric join. The disposition
+    // is computed from the count of stored facts (`fact_count`) and the count of
+    // parsed candidates (`candidate_facts` = `facts.len()` at the call site).
+    //
+    // These tests specify the R1 contract and FAIL until:
+    //   1. a pure `zero_facts_reason(stored, candidate_facts) -> &'static str`
+    //      classifier exists, and
+    //   2. `build_distill_success_context` takes a new `candidate_facts` param
+    //      (threaded in after `fact_count`) and emits both `candidate_facts` and
+    //      `zero_facts_reason` in its JSON — the latter GATED on `success` so a
+    //      parse/recipe failure is never mislabelled as an empty success.
+
+    #[test]
+    fn zero_facts_reason_is_none_when_any_fact_was_stored() {
+        // stored > 0 ⇒ this is not a zero-facts pass, regardless of how many
+        // candidates were parsed or subsequently quarantined.
+        assert_eq!(zero_facts_reason(3, 3), "none");
+        assert_eq!(
+            zero_facts_reason(1, 5),
+            "none",
+            "≥1 stored is 'none' even when the gate quarantined the other candidates"
+        );
+    }
+
+    #[test]
+    fn zero_facts_reason_true_empty_when_no_candidates_were_parsed() {
+        // stored == 0 AND candidate_facts == 0 ⇒ the recipe produced nothing.
+        assert_eq!(zero_facts_reason(0, 0), "true_empty");
+    }
+
+    #[test]
+    fn zero_facts_reason_all_quarantined_when_gate_blocked_every_candidate() {
+        // stored == 0 AND candidate_facts > 0 ⇒ the reliability gate blocked all.
+        assert_eq!(zero_facts_reason(0, 4), "all_quarantined");
+        assert_eq!(
+            zero_facts_reason(0, 1),
+            "all_quarantined",
+            "a single blocked candidate is still 'all_quarantined', not 'true_empty'"
+        );
+    }
+
+    #[test]
+    fn success_context_carries_candidate_facts_and_none_disposition_when_facts_stored() {
+        // stored = 3 candidate = 3: a normal, productive pass.
+        let payload = build_distill_success_context(true, None, 25, 3, 3, 1, false);
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["outcome"], "success");
+        assert_eq!(v["parse_success"], true);
+        assert_eq!(v["fact_count"], 3);
+        assert_eq!(
+            v["candidate_facts"], 3,
+            "the parsed-candidate count is threaded into the payload"
+        );
+        assert_eq!(v["zero_facts_reason"], "none");
+    }
+
+    #[test]
+    fn success_context_true_empty_zero_facts_is_still_a_success() {
+        // A parse that yielded no candidate facts: stored = 0, candidate = 0.
+        // This is a genuine success (episodes are still marked distilled), so
+        // `outcome`/`parse_success`/`parse_attempted` MUST remain success — only
+        // the *reason* is recorded so it is distinguishable from all-quarantined.
+        let payload = build_distill_success_context(true, None, 12, 0, 0, 1, false);
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["outcome"], "success", "true-empty is NOT a failure");
+        assert_eq!(v["parse_success"], true);
+        assert_eq!(v["parse_attempted"], true);
+        assert_eq!(v["fact_count"], 0);
+        assert_eq!(v["candidate_facts"], 0);
+        assert_eq!(v["zero_facts_reason"], "true_empty");
+    }
+
+    #[test]
+    fn success_context_all_quarantined_zero_facts_is_distinct_from_true_empty() {
+        // The reliability gate blocked every parsed candidate: stored = 0 but
+        // candidate_facts = 4. A distinct signal from `true_empty`, still success.
+        let payload = build_distill_success_context(true, None, 12, 0, 4, 1, false);
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            v["outcome"], "success",
+            "all-quarantined is NOT a failure (re-running the same batch is pointless)"
+        );
+        assert_eq!(v["parse_success"], true);
+        assert_eq!(v["fact_count"], 0);
+        assert_eq!(v["candidate_facts"], 4);
+        assert_eq!(v["zero_facts_reason"], "all_quarantined");
+        assert_ne!(
+            v["zero_facts_reason"], "true_empty",
+            "all-quarantined must be distinguishable from a truly-empty parse"
+        );
+    }
+
+    #[test]
+    fn failure_context_never_reports_a_zero_facts_success_disposition() {
+        // The zero-facts disposition is a SUCCESS-only axis. A parse failure with
+        // stored = 0 / candidate = 0 must NOT be labelled `true_empty` — the
+        // field is gated on `success` and stays the neutral `"none"` so that
+        // `zero_facts_reason != "none"` unambiguously means "a successful pass
+        // that stored nothing".
+        let payload = build_distill_success_context(
+            false,
+            Some(DistillFailureClass::ParseFailure),
+            40,
+            0,
+            0,
+            1,
+            false,
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["outcome"], "failure");
+        assert_eq!(v["parse_success"], false);
+        assert_eq!(
+            v["zero_facts_reason"], "none",
+            "a failure is not an empty *success*; disposition must be gated on success"
+        );
     }
 
     #[test]
