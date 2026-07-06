@@ -263,6 +263,11 @@ pub enum SimardError {
     StewardshipInvalidRunSummary {
         field: &'static str,
     },
+    /// CI-health sweep: a `gh` subprocess invocation failed (non-zero exit,
+    /// missing binary, malformed JSON) or a report could not be serialized.
+    CiHealthGhCommandFailed {
+        reason: String,
+    },
     /// Merge authority: a `gh pr` subprocess invocation failed.
     MergeAuthorityGhCommandFailed {
         reason: String,

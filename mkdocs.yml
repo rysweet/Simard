@@ -277,6 +277,7 @@ nav:
     - Goal Coverage Allocation: reference/goal-coverage-allocation.md
     - spawn_agent_for_goal API: reference/spawn-agent-for-goal.md
     - Stewardship API: reference/stewardship-api.md
+    - CI-Health Sweep: reference/ci-health-sweep.md
     - Simard Whisperer API: reference/simard-whisperer-api.md
     - Maximum Safe Parallelism: reference/maximum-safe-parallelism.md
     - Concurrent Engineer Dispatch: reference/concurrent-engineer-dispatch.md

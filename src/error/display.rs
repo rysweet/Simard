@@ -299,6 +299,9 @@ impl Display for SimardError {
                     "stewardship: orchestrator run summary missing required field '{field}'"
                 )
             }
+            Self::CiHealthGhCommandFailed { reason } => {
+                write!(f, "ci-health: gh command failed: {reason}")
+            }
             Self::MergeAuthorityGhCommandFailed { reason } => {
                 write!(f, "merge-authority: gh command failed: {reason}")
             }
