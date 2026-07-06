@@ -314,10 +314,12 @@ fn build_repo_snapshot_joins_and_marks_missing_runs() {
         RawWorkflowRow {
             name: "CI".to_string(),
             state: "active".to_string(),
+            id: 100,
         },
         RawWorkflowRow {
             name: "Nightly".to_string(),
             state: "active".to_string(),
+            id: 200,
         },
     ];
     let runs = vec![run_row(
@@ -345,6 +347,7 @@ fn parse_run_rows_maps_empty_conclusion_to_none() {
         &[RawWorkflowRow {
             name: "CI".to_string(),
             state: "active".to_string(),
+            id: 100,
         }],
         &rows,
     );
@@ -370,10 +373,12 @@ impl GhWorkflowClient for FakeGh {
             RawWorkflowRow {
                 name: "CI".to_string(),
                 state: "active".to_string(),
+                id: 100,
             },
             RawWorkflowRow {
                 name: "Old".to_string(),
                 state: "disabled_manually".to_string(),
+                id: 200,
             },
         ])
     }
@@ -382,6 +387,14 @@ impl GhWorkflowClient for FakeGh {
             run_row("CI", "2026-07-01T00:00:00Z", "completed", "success", 10),
             run_row("Old", "2026-01-01T00:00:00Z", "completed", "failure", 11),
         ])
+    }
+    fn latest_run(
+        &self,
+        _repo: &str,
+        _branch: &str,
+        _workflow_id: u64,
+    ) -> SimardResult<Option<RawRunRow>> {
+        Ok(None)
     }
 }
 
@@ -392,6 +405,94 @@ fn collect_fleet_builds_green_snapshot_from_fake() {
     let report = build_report(&snap);
     assert!(report.green);
     assert_eq!(report.workflows_checked, 4);
+}
+
+// ── collect_fleet fallback: a workflow whose latest run fell outside the
+//    branch-wide window must not be silently reported as NoRun/green ─────────
+
+struct WindowGapGh {
+    queried: std::cell::RefCell<Vec<u64>>,
+}
+
+impl GhWorkflowClient for WindowGapGh {
+    fn default_branch(&self, _repo: &str) -> SimardResult<String> {
+        Ok("main".to_string())
+    }
+    fn list_workflows(&self, _repo: &str) -> SimardResult<Vec<RawWorkflowRow>> {
+        Ok(vec![
+            RawWorkflowRow {
+                name: "CI".to_string(),
+                state: "active".to_string(),
+                id: 100,
+            },
+            // An infrequently-triggered active workflow whose last (failing)
+            // run was pushed out of the branch-wide window by CI's volume.
+            RawWorkflowRow {
+                name: "Nightly".to_string(),
+                state: "active".to_string(),
+                id: 200,
+            },
+            // A disabled workflow also absent from the window; must NOT be
+            // queried and must stay ignored.
+            RawWorkflowRow {
+                name: "OldDisabled".to_string(),
+                state: "disabled_manually".to_string(),
+                id: 300,
+            },
+        ])
+    }
+    fn list_runs(&self, _repo: &str, _branch: &str) -> SimardResult<Vec<RawRunRow>> {
+        // Only CI appears in the window; Nightly and OldDisabled are absent.
+        Ok(vec![run_row(
+            "CI",
+            "2026-07-06T00:00:00Z",
+            "completed",
+            "success",
+            10,
+        )])
+    }
+    fn latest_run(
+        &self,
+        _repo: &str,
+        _branch: &str,
+        workflow_id: u64,
+    ) -> SimardResult<Option<RawRunRow>> {
+        self.queried.borrow_mut().push(workflow_id);
+        Ok(if workflow_id == 200 {
+            Some(run_row(
+                "Nightly",
+                "2026-06-01T00:00:00Z",
+                "completed",
+                "failure",
+                20,
+            ))
+        } else {
+            None
+        })
+    }
+}
+
+#[test]
+fn collect_fleet_falls_back_for_active_workflow_missing_from_window() {
+    let gh = WindowGapGh {
+        queried: std::cell::RefCell::new(Vec::new()),
+    };
+    let snap = collect_fleet(&gh, &["rysweet/x"]).unwrap();
+    let report = build_report(&snap);
+
+    // The out-of-window active failure must surface as actionable, not be
+    // silently ignored as NoRun (which would falsely report the fleet green).
+    assert!(!report.green);
+    assert_eq!(report.actionable_failures.len(), 1);
+    assert_eq!(report.actionable_failures[0].workflow, "Nightly");
+
+    let queried = gh.queried.borrow();
+    // Nightly (absent from window) was queried directly...
+    assert!(queried.contains(&200));
+    // ...CI (present in window) was not re-queried...
+    assert!(!queried.contains(&100));
+    // ...and the disabled workflow was skipped entirely.
+    assert!(!queried.contains(&300));
 }
 
 // ── fixture path (drives the gadugi scenario) ───────────────────────────────

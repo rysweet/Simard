@@ -17,11 +17,14 @@ use super::types::{
     FleetSnapshot, RepoSnapshot, RunConclusion, WorkflowRun, WorkflowSnapshot, WorkflowState,
 };
 
-/// One row of `gh workflow list -R <repo> --all --json name,state`.
+/// One row of `gh workflow list -R <repo> --all --json name,state,id`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct RawWorkflowRow {
     pub name: String,
     pub state: String,
+    /// Workflow id, used to fetch a specific workflow's latest run directly
+    /// (`gh run list --workflow <id>`).
+    pub id: u64,
 }
 
 /// One row of `gh run list -R <repo> --branch <b> --json
@@ -77,7 +80,7 @@ struct RawFixtureFleet {
     repos: Vec<RawFixtureRepo>,
 }
 
-/// Parse the JSON array from `gh workflow list ... --json name,state`.
+/// Parse the JSON array from `gh workflow list ... --json name,state,id`.
 pub fn parse_workflow_rows(json: &[u8]) -> SimardResult<Vec<RawWorkflowRow>> {
     serde_json::from_slice(json).map_err(|e| SimardError::CiHealthGhCommandFailed {
         reason: format!("failed to parse `gh workflow list` JSON: {e}"),
@@ -183,23 +186,50 @@ pub fn snapshot_from_fixture(json: &[u8]) -> SimardResult<FleetSnapshot> {
     Ok(FleetSnapshot { repos })
 }
 
-/// Abstract the three `gh` reads the sweep needs, so [`collect_fleet`] is
-/// testable with a fake client.
+/// Abstract the `gh` reads the sweep needs, so [`collect_fleet`] is testable
+/// with a fake client.
 pub trait GhWorkflowClient {
     fn default_branch(&self, repo: &str) -> SimardResult<String>;
     fn list_workflows(&self, repo: &str) -> SimardResult<Vec<RawWorkflowRow>>;
     fn list_runs(&self, repo: &str, branch: &str) -> SimardResult<Vec<RawRunRow>>;
+    /// The single latest run of one workflow (by id) on `branch`, or `None`
+    /// when it has never run there. Used as a fallback for workflows whose
+    /// latest run fell outside the branch-wide window fetched by [`list_runs`].
+    fn latest_run(
+        &self,
+        repo: &str,
+        branch: &str,
+        workflow_id: u64,
+    ) -> SimardResult<Option<RawRunRow>>;
 }
 
 /// Collect a live snapshot of every governed repo. Fail-loud: any `gh` error
 /// aborts the sweep rather than silently reporting a partial fleet as green.
+///
+/// `list_runs` fetches a branch-wide window (the N most-recent runs across all
+/// workflows). If a workflow appears in that window at all, the newest row for
+/// it is necessarily its true latest run. The only gap is an **active**
+/// workflow with *zero* rows in the window (its runs are all older than the
+/// window) — that would otherwise look like `NoRun` and be silently ignored,
+/// hiding a stale failing run. For exactly those workflows we query the latest
+/// run directly so a truncated window can never be reported as green.
 pub fn collect_fleet(gh: &dyn GhWorkflowClient, repos: &[&str]) -> SimardResult<FleetSnapshot> {
     let mut out = Vec::with_capacity(repos.len());
     for &repo in repos {
         let branch = gh.default_branch(repo)?;
         let workflows = gh.list_workflows(repo)?;
         let runs = gh.list_runs(repo, &branch)?;
-        out.push(build_repo_snapshot(repo, &branch, &workflows, &runs));
+        let mut snapshot = build_repo_snapshot(repo, &branch, &workflows, &runs);
+        for (row, wf) in workflows.iter().zip(snapshot.workflows.iter_mut()) {
+            let disabled = WorkflowState::parse(&row.state).is_disabled();
+            if !disabled
+                && wf.latest_run.is_none()
+                && let Some(run) = gh.latest_run(repo, &branch, row.id)?
+            {
+                wf.latest_run = Some(run_from_row(&run));
+            }
+        }
+        out.push(snapshot);
     }
     Ok(FleetSnapshot { repos: out })
 }
@@ -262,7 +292,7 @@ impl GhWorkflowClient for RealGhWorkflowClient {
             repo,
             "--all",
             "--json",
-            "name,state",
+            "name,state,id",
         ])?;
         parse_workflow_rows(&out)
     }
@@ -281,5 +311,29 @@ impl GhWorkflowClient for RealGhWorkflowClient {
             "workflowName,status,conclusion,event,createdAt,databaseId",
         ])?;
         parse_run_rows(&out)
+    }
+
+    fn latest_run(
+        &self,
+        repo: &str,
+        branch: &str,
+        workflow_id: u64,
+    ) -> SimardResult<Option<RawRunRow>> {
+        let id = workflow_id.to_string();
+        let out = Self::run_gh(&[
+            "run",
+            "list",
+            "-R",
+            repo,
+            "--branch",
+            branch,
+            "--workflow",
+            &id,
+            "--limit",
+            "1",
+            "--json",
+            "workflowName,status,conclusion,event,createdAt,databaseId",
+        ])?;
+        Ok(parse_run_rows(&out)?.into_iter().next())
     }
 }

@@ -87,9 +87,13 @@ simard ci-health [--json] [--from-json <path>]
 
 - Without `--from-json`, the sweep reads live GitHub state via `gh` for every
   slug in [`ci_health::GOVERNED_REPOS`]: the repo's default branch
-  (`gh repo view`), workflow states (`gh workflow list --json name,state`), and
+  (`gh repo view`), workflow states + ids (`gh workflow list --json name,state,id`), and
   the latest default-branch run per workflow
   (`gh run list --branch <default> --json workflowName,status,conclusion,event,createdAt,databaseId`).
+  Because that branch-wide run list is windowed, any **active** workflow with no
+  run inside the window is queried directly (`gh run list --workflow <id> --limit 1`)
+  so a stale failing run of an infrequently-triggered workflow can never be
+  silently dropped and reported as green.
 - **Exit code** follows the verdict: `0` when the fleet is green, non-zero when
   any actionable failure exists (mirrors `simard self-health`).
 
