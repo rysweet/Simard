@@ -124,6 +124,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <a href="https://github.com/rysweet/Simard" target="_blank" style="color:#8b949e;text-decoration:none;font-size:.85rem;padding:.2rem .4rem" title="Source on GitHub">⟨/⟩ Source</a>
       <a href="https://github.com/rysweet/Simard/releases/latest" target="_blank" style="color:#3fb950;text-decoration:none;font-size:.85rem;border:1px solid #3fb950;padding:.2rem .6rem;border-radius:4px">📦 Releases</a>
       <button class="glossary-toggle" onclick="toggleGlossary()" title="Show glossary of Simard terms">📖 Glossary</button>
+      {{FEEDBACK_WIDGET_BUTTON}}
       <span id="clock" style="color:#8b949e;font-size:.85rem"></span>
     </div>
   </header>

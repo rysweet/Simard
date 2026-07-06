@@ -1,3 +1,4 @@
+mod feedback_widget;
 mod part_00;
 mod part_01;
 mod part_02;
@@ -30,6 +31,10 @@ use part_05::PART_05;
 ///   ledes are forbidden from containing (#2358).
 /// * `{{DEFAULT_TITLE}}` — the `<title>` for the initial render, matching
 ///   the default-active tab.
+/// * `{{FEEDBACK_WIDGET_BUTTON}}` — the shared "Report bug / Request feature"
+///   control, anchored in the `<header>` so it renders on every tab (#2629).
+///   The matching modal/styles/script ([`feedback_widget::FEEDBACK_WIDGET_BODY`])
+///   are injected just before `</body>`.
 ///
 /// All per-tab `<h1>` / `<p class="page-lede">` blocks are inlined
 /// directly in the parts so they survive a `grep` audit; the
@@ -41,7 +46,15 @@ pub(crate) fn index_html_string() -> String {
         .replace("{{TAB_NAV}}", &tab_meta::tab_nav_html())
         .replace("{{TAB_META_JS}}", &tab_meta::tab_meta_js())
         .replace("{{BANNED_JARGON_JS}}", &tab_meta::banned_jargon_js())
-        .replace("{{DEFAULT_TITLE}}", tab_meta::default_title());
+        .replace(
+            "{{FEEDBACK_WIDGET_BUTTON}}",
+            feedback_widget::FEEDBACK_WIDGET_BUTTON,
+        )
+        .replace("{{DEFAULT_TITLE}}", tab_meta::default_title())
+        .replace(
+            "</body>",
+            &format!("{}\n</body>", feedback_widget::FEEDBACK_WIDGET_BODY),
+        );
     debug_assert!(
         !rendered.contains("{{"),
         "unresolved template marker remains in dashboard HTML"

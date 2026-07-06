@@ -230,9 +230,37 @@ holding thousands of facts told operators that memory was empty when it was
 rich. The panel now hides empty legacy tiles so the displayed numbers always
 match Simard's actual remembered state.
 
+## Feedback widget: report a bug / request a feature (#2629)
+
+Every tab carries a **Report bug / Request feature** control in the shared
+header (top-right, next to **Glossary** and **Releases**). It lets an operator
+file a defect or a change request **from the page they are looking at**. On
+submit, the widget:
+
+1. captures the **current page context** — the active tab, the state/JSON that
+   page renders, a timestamp, and page identifiers;
+2. bundles it with the operator's report (`type` = bug \| feature, title,
+   description); and
+3. starts a **new `dev-orchestrator` workstream** — the same
+   `smart-orchestrator` → `default-workflow` recipe run engineers and the
+   Overseer use, launched through the shipped
+   [`RecipeLauncher`](reference/dashboard-feedback-widget.md#launcher-reuse)
+   plumbing (no ad-hoc shell-out).
+
+The modal then shows the workstream id and polls until the resulting **PR**
+appears, surfacing a link to it. Both endpoints (`POST /api/feedback` and
+`GET /api/feedback/status/{id}`) sit **behind the same access-code gate** as the
+rest of the dashboard, accept JSON only, sanitize and size-cap all inputs, and
+compose the workstream's `task_description` as plain data (never interpolated
+into a shell). See
+[Dashboard Feedback Widget](reference/dashboard-feedback-widget.md) for the full
+API reference and
+[How to report a bug or request a feature](howto/report-a-bug-or-request-a-feature.md)
+for the walkthrough.
+
 ## Read-only
 
-The dashboard does not let operators force shell commands or edit code through the browser. Goal promotion, status changes, and refresh are the only state-changing operations. All other panels are observational.
+The dashboard is observational: it does not let operators force shell commands or edit code through the browser. Goal promotion, status changes, refresh, and the [feedback widget](#feedback-widget-report-a-bug-request-a-feature-2629) (which starts a governed workstream, not a shell command) are the only state-changing operations. All other panels are observational. A feedback-launched workstream runs the standard `default-workflow` with CI required green and a human merge — it cannot merge or run arbitrary commands on its own.
 
 ## Tab identity contract
 
@@ -371,3 +399,5 @@ The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (def
 - [Run the OODA daemon](howto/run-ooda-daemon.md)
 - [Dashboard E2E tests](reference/dashboard-e2e-tests.md)
 - [Overview action-detail humanization](reference/dashboard-action-detail-humanization.md)
+- [Dashboard Feedback Widget](reference/dashboard-feedback-widget.md)
+- [How to report a bug or request a feature from the dashboard](howto/report-a-bug-or-request-a-feature.md)

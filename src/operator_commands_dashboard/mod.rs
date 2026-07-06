@@ -7,6 +7,7 @@ mod chat_store;
 mod current_work;
 mod cycle_source;
 mod distributed;
+mod feedback;
 mod goals;
 mod goals_status;
 mod hosts;
@@ -38,6 +39,8 @@ mod tests_attach;
 mod tests_chat_routes;
 #[cfg(test)]
 mod tests_chat_store;
+#[cfg(test)]
+mod tests_feedback;
 #[cfg(test)]
 mod tests_goal_records_migration;
 #[cfg(test)]

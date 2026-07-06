@@ -674,3 +674,87 @@ fn rendered_html_workboard_recent_actions_humanized_with_raw_tooltip() {
         "Workboard must not pre-escape before renderActionDetail() (double-escape)"
     );
 }
+
+// ─────────────────────────── Feedback widget (#2629) ────────────────────────
+//
+// The "Report bug / Request feature" widget must be a SINGLE control anchored
+// in the shared <header> so it appears on every dashboard tab with consistent
+// placement, and its client JS must POST the report + captured page context to
+// the auth-gated `/api/feedback` endpoint, rendering results safely.
+
+#[test]
+fn feedback_widget_button_lives_in_shared_header() {
+    let html = INDEX_HTML.as_str();
+    let header_start = html
+        .find("<header>")
+        .expect("dashboard must have a <header>");
+    let header_end = html
+        .find("</header>")
+        .expect("dashboard must close its <header>");
+    let button = html
+        .find("id=\"feedback-widget-button\"")
+        .expect("a #feedback-widget-button control must exist");
+
+    assert!(
+        header_start < button && button < header_end,
+        "the feedback button must live inside <header> so it renders on every tab"
+    );
+    assert_eq!(
+        html.matches("id=\"feedback-widget-button\"").count(),
+        1,
+        "there must be exactly ONE shared feedback widget, not one per tab"
+    );
+}
+
+#[test]
+fn feedback_widget_control_is_labeled_for_bug_and_feature() {
+    let html = INDEX_HTML.as_str();
+    assert!(
+        html.contains("Report bug") && html.contains("Request feature"),
+        "the widget must offer both 'Report bug' and 'Request feature'"
+    );
+}
+
+#[test]
+fn feedback_widget_modal_and_form_fields_present() {
+    let html = INDEX_HTML.as_str();
+    for hook in [
+        "id=\"feedback-modal\"",
+        "id=\"feedback-form\"",
+        "id=\"feedback-type\"",
+        "id=\"feedback-title\"",
+        "id=\"feedback-description\"",
+    ] {
+        assert!(html.contains(hook), "feedback widget markup missing {hook}");
+    }
+    // The type selector must offer exactly bug|feature.
+    assert!(
+        html.contains("value=\"bug\"") && html.contains("value=\"feature\""),
+        "feedback type selector must offer value=\"bug\" and value=\"feature\""
+    );
+}
+
+#[test]
+fn feedback_widget_posts_report_and_context_to_authed_endpoint() {
+    let html = INDEX_HTML.as_str();
+    assert!(
+        html.contains("/api/feedback"),
+        "widget JS must POST to /api/feedback"
+    );
+    assert!(
+        html.contains("/api/feedback/status/"),
+        "widget JS must poll /api/feedback/status/<id> for the workstream result"
+    );
+    // Cookie-based auth: the fetch must send the session cookie.
+    assert!(
+        html.contains("same-origin"),
+        "widget fetch must use credentials:'same-origin' so the auth cookie is sent"
+    );
+    // The captured page context fields must be gathered client-side.
+    for key in ["page", "state", "timestamp", "identifiers"] {
+        assert!(
+            html.contains(key),
+            "widget JS must capture the '{key}' context field"
+        );
+    }
+}
