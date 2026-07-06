@@ -28,7 +28,7 @@ order:
 
 | Tab | Sub-sections | Shows |
 |-----|--------------|-------|
-| **Overview** | Summary · Health · Stats | Daemon status (OODA loop active / stopped), current cycle number, top-priority goal, last cycle's actions, and the recent-actions stream (**Summary**); system status — version, daemon state, active process count, disk usage — open PRs, open issues, and the **Machines & Memory Sharing** card, i.e. whether Simard runs on one machine or a group and how they share what they've learned (**Health**); and aggregate run counters and rollups (**Stats**). |
+| **Overview** | Summary · Health · Stats | Daemon status (OODA loop active / stopped), current cycle number, top-priority goal, last cycle's actions, and the recent-actions stream (**Summary**); system status — version, daemon state, active process count, disk usage — per-PR **Merge Readiness** (the single Overview PR surface — the duplicative "Open PRs" card was removed, see [Overview → Health: Open PRs card removed](#overview-tab-health-open-prs-card-removed-26)), open issues, and the **Machines & Memory Sharing** card, i.e. whether Simard runs on one machine or a group and how they share what they've learned (**Health**); and aggregate run counters and rollups (**Stats**). |
 | **Goals** | Goals · Work Board | The full goal register — active top-N goals with priority, status, and current activity, plus the proposed backlog with promote/dismiss controls (**Goals**) — and the shared scratch canvas with Task Memory and Recent Actions (**Work Board**). |
 | **Activity** | Logs · Traces · Thinking · Failures | The **Background Service Log** (live activity from Simard's always-on background process), the cost ledger, and the **Cycle Reports** card — recent OODA cycles with their live cycle number, real per-cycle tree status, and Observe/Orient/Decide/Act detail, collapsed with a `×N` repeat-count and refreshed live, see [Activity: Cycle Reports](#activity-tab-logs-cycle-reports-26) — with a severity menu (All / Errors / Warnings / Info) and free-text search (**Logs**); recent agent traces from the cost ledger, journald, and in-process spans, plus OTEL status, each row read as plain language — **when**, **what**, **who** (**Traces**); the **Thinking** panel's two halves — a **Cycle History** table (collapsed per-cycle timeline with real timestamps, a `×N` repeat-count for runs of equivalent cycles, difference-carrying summaries, and a self-hiding duration-trend chart) and the **Agent Internal Reasoning** OODA Observe/Orient/Decide/Act breakdown, see [Thinking: Cycle History](#thinking-tab-cycle-history-21) (**Thinking**); and brain-fallback and decision failures (**Failures**). |
 | **Workers** | Processes · Engineers · Terminal | The live process tree under the daemon — engineer subprocesses, LLM sessions, tmux sessions, and their resource usage (**Processes** / **Engineers**) — and a browser-attached PTY into the daemon host (**Terminal**). |
@@ -144,6 +144,21 @@ boilerplate, and applies the shared `BANNED_JARGON` strip — while preserving a
 works. The transform is render-layer only: the canonical `brain` / `ooda_brain`
 strings, logs, and API responses are unchanged. See
 [Overview action-detail humanization](reference/dashboard-action-detail-humanization.md).
+
+### Overview tab → Health: Open PRs card removed (#26)
+
+The **Health** sub-section previously carried two overlapping PR cards: a plain
+**Open PRs** list and the richer **Merge Readiness** card. Everything the Open
+PRs card showed (PR number, title, link) is a strict subset of Merge Readiness,
+which additionally reports whether each PR can merge (CI rollup, base-branch
+allow-list, objective merge-gate verdict, blocker reason, and the active
+merge-judge kind). The duplicate **Open PRs** card has been **removed
+completely** — its markup, its client renderer, and its `/api/activity` →
+`open_prs` data producer (one fewer `gh pr list` subprocess per Overview
+refresh). **Merge Readiness** is now the single Overview PR surface; the
+**Pull Requests → Readiness** tab (`/api/prs`) is a separate view and is
+unaffected. Full before/after and the `/api/activity` contract change are in the
+[Open PRs card removal & live memory-consolidation reference](reference/dashboard-overview-health-and-live-memory.md).
 
 ### Overview tab → Health: plain-English "Machines & Memory Sharing" card
 
@@ -334,6 +349,20 @@ Store. Rendering them as permanent "0 records / 0 B" tiles next to a store
 holding thousands of facts told operators that memory was empty when it was
 rich. The panel now hides empty legacy tiles so the displayed numbers always
 match Simard's actual remembered state.
+
+The **Last Memory Compaction** statistic in the same card now reflects **live**
+consolidation state (#26). It previously derived from the modification time of
+the retired JSON snapshot files, so it stayed frozen even while consolidation
+ran (~30 `consolidate-memory` actions per 30 min; episodic memory growing
+through the day). It now reads the most recent live consolidation signal — the
+newest `consolidate-memory` OODA action timestamp — and shows `Not tracked yet`
+when no such signal exists yet: it fails closed to `null` rather than fabricating
+a value, with no legacy-file or directory-mtime fallback. `/api/memory` gains a
+`recent_consolidation_activity` `{count, last}` summary, so the statistic visibly
+advances as memory grows. This
+is the same live-read reconciliation as the Activity and Goals tabs (#2697 /
+#2695). See the
+[Open PRs card removal & live memory-consolidation reference](reference/dashboard-overview-health-and-live-memory.md).
 
 ## Feedback widget: report a bug / request a feature (#2629)
 
@@ -634,4 +663,5 @@ The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (def
 - [How to report a bug or request a feature from the dashboard](howto/report-a-bug-or-request-a-feature.md)
 - [Thinking tab — Cycle History (timestamps, collapse, duration trend)](reference/dashboard-thinking-cycle-history.md)
 - [Activity tab — Cycle Reports (live cycle number, accurate tree status, shared detail)](reference/dashboard-activity-cycle-reports.md)
+- [Overview Health & live memory-consolidation (Open PRs card removal, live Last Memory Compaction)](reference/dashboard-overview-health-and-live-memory.md)
 - [Background tab prefetch and refresh (instant tab switches)](reference/dashboard-background-tab-prefetch.md)

@@ -99,7 +99,9 @@ test.describe('Dashboard Overview @structural', () => {
   });
 });
 
-// --- Issue #948: live activity surfaces (agent-live-status, recent-actions, open-prs) ---
+// --- Issue #948: live activity surfaces (agent-live-status, recent-actions) ---
+// Note: the Overview "Open PRs" card was removed as a duplicate of Merge
+// Readiness (#26); the open-prs surface assertion below now checks its ABSENCE.
 
 const MOCK_ACTIVITY = {
   daemon: {
@@ -129,15 +131,6 @@ const MOCK_ACTIVITY = {
           { goal_id: 'g1', reason: 'top-priority', urgency: 0.8 },
         ],
       },
-    },
-  ],
-  open_prs: [
-    {
-      number: 100,
-      title: 'Test PR title',
-      url: 'https://example.com/pr/100',
-      createdAt: new Date(Date.now() - 60_000).toISOString(),
-      headRefName: 'fix/test',
     },
   ],
   assigned_issues: [],
@@ -218,19 +211,15 @@ test.describe('Dashboard Overview - live activity surfaces @structural', () => {
     expect(text).toContain('#42');
   });
 
-  test('open-prs-list renders open pull requests', async ({ authenticatedPage }) => {
-    await expect(overview.openPrsCard).toBeVisible();
-    await authenticatedPage.waitForFunction(
-      () => {
-        const el = document.getElementById('open-prs-list');
-        return !!el && !el.querySelector('.loading');
-      },
-      { timeout: 10_000 },
-    );
-    await expect(overview.openPrsList).toBeVisible();
-    const text = await overview.openPrsList.textContent();
-    expect(text).toContain('#100');
-    expect(text).toContain('Test PR title');
+  test('duplicative Open PRs card is removed; Merge Readiness is the single PR surface', async () => {
+    // #26: the Overview "Open PRs" card duplicated the richer Merge Readiness
+    // card (its data was a strict subset), so it was removed — markup, render
+    // target, and its /api/activity -> open_prs producer. Neither the card
+    // container nor its render target may exist anywhere on the Overview tab.
+    await expect(overview.openPrsCard).toHaveCount(0);
+    await expect(overview.openPrsList).toHaveCount(0);
+    // Merge Readiness — the retained single Overview PR surface — must remain.
+    await expect(overview.mergeReadinessCard).toBeVisible();
   });
 });
 

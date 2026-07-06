@@ -869,21 +869,6 @@ pub(crate) const PART_01: &str = r#"
                 </div>`).join('')}
             </div>`:'<div style="color:#8b949e">No recent actions recorded.</div>'}`;
 
-        // Open PRs
-        const prs=d.open_prs||[];
-        const prEl=document.getElementById('open-prs-list');
-        if(prs.length){
-          prEl.innerHTML=prs.slice(0,8).map(pr=>`
-            <div style="padding:.3rem 0;border-bottom:1px solid var(--border);font-size:.85rem;display:flex;gap:.5rem;align-items:baseline">
-              <a href="${esc(pr.url)}" target="_blank" style="color:var(--accent);text-decoration:none;min-width:3rem">#${pr.number}</a>
-              <span style="flex:1">${esc(pr.title)}</span>
-              <span style="color:#8b949e;font-size:.75rem">${timeAgo(pr.createdAt)}</span>
-            </div>`).join('')+
-            (prs.length>8?`<div style="color:#8b949e;font-size:.8rem;margin-top:.3rem">+ ${prs.length-8} more</div>`:'');
-        }else{
-          prEl.innerHTML='<span style="color:#8b949e">No open PRs</span>';
-        }
-
         // Recent actions from cycle outcomes
         const actEl=document.getElementById('recent-actions-list');
         let allActions=[];

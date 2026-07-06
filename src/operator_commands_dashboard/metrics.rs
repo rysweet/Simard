@@ -49,15 +49,17 @@ pub(crate) async fn memory_metrics() -> Json<Value> {
     let native_error = native_result.as_ref().err().map(|e| e.to_string());
     let native_stats = native_result.ok();
 
-    let last_consolidation = [&memory_path, &evidence_path]
-        .iter()
-        .filter_map(|p| std::fs::metadata(p).ok())
-        .filter_map(|m| m.modified().ok())
-        .max()
-        .map(|t| {
-            let dt: chrono::DateTime<chrono::Utc> = t.into();
-            dt.to_rfc3339()
-        });
+    // Last consolidation + recent consolidation activity now come from the LIVE
+    // `consolidate-memory` OODA action stream (#26), not the modification time
+    // of the retired JSON snapshot files. Those files are no longer written, so
+    // their mtime stayed frozen while consolidation kept running (~30
+    // consolidate-memory actions / 30 min), which is exactly why the operator
+    // saw a static "Last Memory Compaction". This is the same live-read source
+    // the Activity and Goals tabs migrated to (#2697 / #2695). It fails closed
+    // to `null` (→ "Not tracked yet") when no consolidate-memory action has run
+    // yet — no fabricated value, no legacy-file or directory-mtime fallback.
+    let (consolidation_count, last_consolidation) = recent_consolidation_activity(&state_root);
+    let recent_last = last_consolidation.clone();
 
     // Use LadybugDB counts when available; JSON file counts are the legacy source.
     let total = native_stats
@@ -106,8 +108,57 @@ pub(crate) async fn memory_metrics() -> Json<Value> {
         "native_memory_db_exists": db_path.exists(),
         "total_facts": total,
         "last_consolidation": last_consolidation,
+        "recent_consolidation_activity": {
+            "count": consolidation_count,
+            "last": recent_last,
+        },
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
+}
+
+/// Scan the most recent persisted cycle reports for live `consolidate-memory`
+/// OODA actions and report how many ran and when the newest one occurred.
+///
+/// This is the LIVE consolidation signal the Memory card renders (#26). The
+/// retired JSON-snapshot mtimes stayed frozen while consolidation kept running,
+/// so the operator saw a static value; the OODA action stream is the same live
+/// source the Activity and Goals tabs migrated to (#2697 / #2695). Returns
+/// `(count, last_rfc3339)`, where `last` is `None` — surfaced as "Not tracked
+/// yet" — when no consolidate-memory action has been recorded yet. It fails
+/// closed to `null` rather than fabricating a value.
+fn recent_consolidation_activity(state_root: &Path) -> (u64, Option<String>) {
+    // Bound the scan so the unbounded `cycle_reports/` directory never turns a
+    // hot dashboard poll into an O(all-cycles) read; the newest reports carry
+    // the live signal the card needs.
+    const SCAN_CYCLES: usize = 200;
+    let reports = super::current_work::read_recent_cycle_reports(state_root, SCAN_CYCLES);
+
+    let mut count: u64 = 0;
+    let mut last: Option<chrono::DateTime<chrono::FixedOffset>> = None;
+
+    for entry in &reports {
+        // `read_recent_cycle_reports` nests the parsed cycle JSON under `report`
+        // (or exposes plain-text `summary` with no outcomes to scan).
+        let rpt = entry.get("report").unwrap_or(entry);
+        let Some(outcomes) = rpt.get("outcomes").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        let ts = rpt.get("timestamp").and_then(|t| t.as_str());
+        for o in outcomes {
+            if o.get("action_kind").and_then(|v| v.as_str()) != Some("consolidate-memory") {
+                continue;
+            }
+            count += 1;
+            if let Some(parsed) = ts.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) {
+                last = Some(match last {
+                    Some(prev) if prev >= parsed => prev,
+                    _ => parsed,
+                });
+            }
+        }
+    }
+
+    (count, last.map(|dt| dt.to_rfc3339()))
 }
 
 pub(crate) async fn ooda_thinking() -> Json<Value> {

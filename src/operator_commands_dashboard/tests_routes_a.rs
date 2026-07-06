@@ -1239,4 +1239,64 @@ mod tests {
         let max_len: String = std::iter::repeat_n('x', 64).collect();
         assert_eq!(sanitize_agent_name(&max_len), Some(max_len.clone()));
     }
+
+    // ---------------------------------------------------------------------
+    // Issue #26 FIX 1 — the duplicative Overview "Open PRs" card is removed,
+    // while the Merge Readiness card (its non-duplicative superset) is kept.
+    // ---------------------------------------------------------------------
+
+    /// The Overview "Open PRs" card duplicated the Merge Readiness card, so it
+    /// was removed. Neither its heading nor its render target `open-prs-list`
+    /// (used by both the markup `<div>` and the JS `getElementById`) may
+    /// survive anywhere in the rendered dashboard.
+    #[test]
+    fn index_html_open_prs_card_removed() {
+        assert!(
+            !INDEX_HTML.contains("<h2>Open PRs</h2>"),
+            "the duplicative Overview 'Open PRs' card heading must be removed (#26)"
+        );
+        assert!(
+            !INDEX_HTML.contains("open-prs-list"),
+            "the 'open-prs-list' element (card markup + its JS render block) must \
+             be removed with the duplicative Open PRs card (#26)"
+        );
+    }
+
+    /// Removing the Open PRs card must NOT touch the Merge Readiness card,
+    /// which is the retained single source of open-PR state. Its container,
+    /// refresh hook, and its OWN `d.open_prs` (from /api/merge-readiness — a
+    /// different object than the removed /api/activity key) must all remain.
+    #[test]
+    fn index_html_merge_readiness_card_retained() {
+        assert!(
+            INDEX_HTML.contains(r#"data-testid="merge-readiness-card""#),
+            "the Merge Readiness card must be retained after the Open PRs removal (#26)"
+        );
+        assert!(
+            INDEX_HTML.contains("merge-readiness-panel"),
+            "the Merge Readiness panel target must be retained (#26)"
+        );
+        assert!(
+            INDEX_HTML.contains("fetchMergeReadiness"),
+            "the Merge Readiness fetch/refresh hook must be retained (#26)"
+        );
+        assert!(
+            INDEX_HTML.contains("Array.isArray(d.open_prs)"),
+            "Merge Readiness reads its OWN open_prs from /api/merge-readiness — \
+             that separate usage must survive the Overview-card removal (#26)"
+        );
+    }
+
+    /// Issue #26 FIX 2 — the Memory tab must surface *live* consolidation
+    /// activity, not just a single (previously stale) timestamp. The card
+    /// renders the `recent_consolidation_activity` datum produced by
+    /// `memory_metrics()` so it visibly changes as consolidation runs.
+    #[test]
+    fn index_html_memory_card_renders_live_consolidation_activity() {
+        assert!(
+            INDEX_HTML.contains("recent_consolidation_activity"),
+            "the Memory tab must render the live 'recent_consolidation_activity' \
+             datum so the operator sees consolidation actively running (#26)"
+        );
+    }
 }
