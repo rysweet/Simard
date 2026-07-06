@@ -187,6 +187,12 @@ mod tests {
         ];
         let config = OodaConfig {
             max_concurrent_actions: 2,
+            // Hermetic: pin the scaler off. On OODA hosts `SIMARD_SCALING=auto`
+            // is set in the ambient env, so `..Default::default()` would inject
+            // an AIMD scaler whose `adjust()` overrides `max_concurrent_actions`
+            // — making this cap assertion fail (left: 4, right: 2). Mirrors
+            // `decide_ignores_scaler_when_none`.
+            scaler: None,
             ..Default::default()
         };
         let actions = decide(&priorities, &config).unwrap();
