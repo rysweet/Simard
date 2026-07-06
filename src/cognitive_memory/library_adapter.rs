@@ -1166,6 +1166,25 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         Ok(())
     }
 
+    fn episode_exists(&self, node_id: &str) -> SimardResult<bool> {
+        // Issue #2679: grounding primitive for the distillation write-boundary
+        // gate. The library has no direct "does this episode id exist" lookup,
+        // so we scan the same unfiltered enumeration `list_all_episodes` uses
+        // (`get_episodes(_, true)`, newest-first, INCLUDING compressed episodes)
+        // and short-circuit on the first id match. Compressed episodes are
+        // included so a fact citing a consolidated source still grounds. A
+        // grounding check is a read; it never mutates the store.
+        let node_id = node_id.trim();
+        if node_id.is_empty() {
+            return Ok(false);
+        }
+        Ok(self
+            .lock()?
+            .get_episodes(usize::MAX, true)
+            .iter()
+            .any(|e| e.node_id == node_id))
+    }
+
     fn list_undistilled_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
         // De-fork Phase 2b (issue #2307): episode distillation now runs against
         // this backend. The library returns this agent's not-yet-distilled

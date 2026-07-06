@@ -56,8 +56,14 @@ pub mod disk_pressure;
 pub mod engineer_loop;
 pub mod engineer_worktree;
 pub mod error;
+// Issue #2679: the shared per-fact reliability scorer, homed here so both
+// write-boundary seams (the IPC `StoreFactGated` handler and the in-process
+// distill sink) apply the identical store/quarantine decision.
 pub mod eval_watchdog;
 pub mod evidence;
+pub mod fact_reliability;
+#[cfg(test)]
+mod fact_reliability_tests;
 pub mod git_guardrails;
 pub mod goal_board_store;
 pub mod goal_curation;

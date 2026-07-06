@@ -74,6 +74,7 @@ nav:
     - Cognitive Memory — Library Adapter: architecture/cognitive-memory-library-adapter.md
     - Episode Ingestion Policy & Promotion: architecture/episode-ingestion-policy.md
     - Episode Distillation: architecture/episode-distillation.md
+    - Distillation Semantic Handoff: architecture/distillation-semantic-handoff.md
     - Gym Eval Engine — Library Adapter: architecture/gym-eval-library-adapter.md
     - Unified Meeting Backend: architecture/unified-meeting-backend.md
     - Conversation Channels: architecture/conversation-channel.md
@@ -190,6 +191,7 @@ nav:
     - View Agent Terminal Logs: howto/view-agent-terminal-logs.md
     - Run Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
     - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
+    - Verify the Distillation Semantic Handoff: howto/verify-the-distillation-semantic-handoff.md
     - Measure Recall Precision (Hybrid): howto/measure-recall-precision-hybrid.md
     - Read Simard Status: howto/simard-status.md
     - Watch Overseer Activity: howto/watch-overseer-activity.md
@@ -250,6 +252,8 @@ nav:
     - Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
     - Base-Type Adapters: reference/base-type-adapters.md
     - Memory Introspection CLI: reference/simard-memory-cli.md
+    - Memory Write CLI (remember): reference/simard-memory-remember-cli.md
+    - Distill Write-Boundary Gate: reference/distill-write-boundary-gate.md
     - Cognitive-Memory Provenance (DERIVES_FROM): reference/cognitive-memory-provenance.md
     - Cognitive-Memory Bootstrap Procedures: reference/cognitive-memory-bootstrap-procedures.md
     - Cognitive-Memory Client Helpers: reference/cognitive-memory-client-helpers.md

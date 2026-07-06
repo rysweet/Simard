@@ -461,6 +461,23 @@ pub trait CognitiveMemoryOps: Send + Sync {
         Ok(())
     }
 
+    /// Report whether an episode with `node_id` exists in this store (issue
+    /// #2679).
+    ///
+    /// This is the **grounding** primitive for the distillation write-boundary
+    /// gate: when the distiller agent commits a fact through the memory IPC
+    /// socket, the server holds no in-memory batch, so it grounds the fact by an
+    /// existence lookup — the fact is grounded iff at least one of its cited
+    /// `source_episode_ids` resolves to a real episode node here.
+    ///
+    /// Default impl returns `false` (fail-closed: an unresolvable id is treated
+    /// as ungrounded) so non-graph backends (legacy Python bridge, IPC client,
+    /// test stubs) keep compiling; only [`LibraryCognitiveMemory`] overrides it
+    /// to look the episode up in the store.
+    fn episode_exists(&self, _node_id: &str) -> SimardResult<bool> {
+        Ok(false)
+    }
+
     /// Return up to `limit` undistilled episodes, newest first.
     ///
     /// Default impl returns empty, which makes the distillation pass a

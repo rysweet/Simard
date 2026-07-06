@@ -5,6 +5,9 @@ last_updated: 2026-06-14
 owner: simard
 doc_type: concept
 related:
+  - ./distillation-semantic-handoff.md
+  - ../reference/simard-memory-remember-cli.md
+  - ../reference/distill-write-boundary-gate.md
   - ./cognitive-memory.md
   - ./episode-ingestion-policy.md
   - ../reference/cognitive-memory-preparation-filters.md
@@ -22,6 +25,22 @@ related:
 > Shipped in issue [#2281](https://github.com/rysweet/Simard/issues/2281)
 > as PR-B (episode distillation). Builds on PR-A (preparation filters)
 > and feeds PR-C (episodic recall) with a higher-quality semantic store.
+
+> **Superseded result path (#2679).** Everything below about *how distilled
+> facts reach memory* — the agent writing a `{ "facts": [...] }` envelope to a
+> `facts_output_path` file, Simard reading that file and deserializing it with
+> `serde_json`, the `ParseFailure` / `parse_fail` class, and the
+> raw-capture-on-parse-failure diagnostic — has been **replaced** by a semantic
+> agent-to-agent handoff. The distiller now writes each fact **directly** into
+> cognitive memory via [`simard memory remember`](../reference/simard-memory-remember-cli.md);
+> there is no returned document and **no parse**, so a trailing comma or a noisy
+> launcher banner can no longer discard a batch. The batch selection, concept
+> labels, threshold gate, and mark-everything rule described below are
+> unchanged. See
+> [Distillation semantic handoff](./distillation-semantic-handoff.md) for the
+> current result path and
+> [Distill write-boundary gate](../reference/distill-write-boundary-gate.md) for
+> where the reliability/quarantine/dedup gate now lives.
 
 Episode distillation is the periodic process that scans recent
 **episodic** memory and extracts **semantic facts** from it using a

@@ -1,69 +1,58 @@
-# distill-episodes.yaml — Recipe for PR-B episode distillation (issue #2281).
+# distill-episodes.yaml — Recipe for episode distillation (issue #2281; semantic
+# handoff #2679).
 #
-# Periodic many-to-few extraction: given a batch of up to 50 recent
-# episodes, classify each into one of three concept labels (or `skip`)
-# and emit a single JSON envelope of derived facts.
+# Periodic many-to-few extraction: given a batch of up to 50 recent episodes,
+# classify each into one of three concept labels (or `skip`) and commit the
+# derived facts DIRECTLY into cognitive memory.
+#
+# ## What changed in #2679
+#
+# The distiller no longer PRINTS or WRITES a `{ "facts": [...] }` envelope for
+# Simard to scrape back out of recipe stdout and hand-deserialize. That
+# deserialize was the single failure surface — one trailing comma, one stray log
+# line, one ANSI escape from the launcher banner made the strict parse fail and
+# discarded the ENTIRE batch (the #2658/#2679 parse-fail mode). Instead the
+# distiller is now a TRUE agentic step whose WRITES are its output: it calls the
+# `simard memory remember` tool once per fact. Those writes land in the same
+# store Simard reads from, through the daemon's authoritative write-boundary gate
+# (grounding + reliability scoring + quarantine + dedup are all server-side).
+# There is no return document for anyone to parse, so a malformed token can no
+# longer discard anything.
 #
 # Context vars (passed via -c):
 #   episodes_path — ABSOLUTE path to a file containing the JSON array of episode
 #     objects, each { id, source_label, temporal_index, content } (issues
 #     #2640/#2692). A batch of up to 50 full-text episodes is unbounded, so it is
-#     delivered via a file and never inlined into argv — it can never overflow
-#     ARG_MAX and fail the spawn with E2BIG. The agent READS this file.
-#   facts_output_path — ABSOLUTE path to the file the agent MUST write its JSON
-#     envelope to (issues #2622/#2619). This is the ONLY channel Simard reads the
-#     result from; stdout is ignored, so the copilot launcher banner and log
-#     lines can never contaminate the parse.
-#   strict_json_instruction — format-reinforcement sentence appended to the
-#     prompt on an in-cycle retry after a transient parse miss (issue #2468).
-#     Empty on the first attempt; set to a "write ONLY the JSON object to the
-#     facts file" reminder on retry. Interpolated via the pure
-#     `{{strict_json_instruction}}` substitution, so no conditional templating
-#     is required.
+#     delivered via a file and never inlined into argv. The agent READS this file.
+#   memory_socket — ABSOLUTE path to the OODA daemon's memory IPC socket. The
+#     `simard memory remember` tool also reads this from the SIMARD_MEMORY_SOCKET
+#     environment variable, which the distill subprocess exports, so a bare
+#     `simard memory remember ...` reaches the right daemon. This var is provided
+#     for reference / explicit `--` state-root use.
 #
-# Output: the agent WRITES a single JSON object of the form below to the file at
-# `{{facts_output_path}}` (NOT to stdout):
-#   {
-#     "facts": [
-#       { "concept": "pr-pattern" | "bug-pattern" | "lesson-learned",
-#         "content": "<short, declarative summary>",
-#         "source_episode_id": "<id of the episode this fact derives from>" }
-#     ],
-#     "procedures": [
-#       { "name": "<short procedure name>",
-#         "steps": ["<step 1>", "<step 2>", ...],
-#         "source_episode_ids": ["<id>", "<id>", ...] }
-#     ]
-#   }
+# Output: NONE on stdout. The agent's fact/procedure WRITES (via the tool) are
+# the entire output. Whatever the agent prints to the terminal is ignored —
+# Simard interprets this recipe by its EXIT STATUS alone.
 #
-# `procedures` is optional (issue #2327): emit it only when the batch reveals
-# a RECURRING action sequence worth promoting into a reusable procedure.
-#
-# See docs/architecture/episode-distillation.md for the full contract,
-# concept-label semantics, and retry-safety invariants.
+# See docs/architecture/distillation-semantic-handoff.md for the full contract,
+# concept-label semantics, retry-safety invariants, and the write-boundary gate.
 
 name: "distill-episodes"
-description: "Distill a batch of recent episodes into semantic facts"
-version: "1.0.0"
+description: "Distill a batch of recent episodes into semantic facts, committed directly to memory"
+version: "2.0.0"
 author: "Simard"
 tags: ["simard", "memory", "distillation"]
 
 context:
-  # Empty by default; the distill subprocess overrides this with a format
-  # reinforcement sentence (-c strict_json_instruction=...) on a retry after a
-  # transient parse miss (issue #2468). Declared so the `{{strict_json_instruction}}`
-  # substitution always resolves, even when the recipe is run without the override.
-  strict_json_instruction: ""
-  # Empty by default; the distill subprocess overrides this with the absolute
-  # path of the per-invocation facts file the agent must write (issues
-  # #2622/#2619). Declared so the `{{facts_output_path}}` substitution always
-  # resolves, even when the recipe is run without the override.
-  facts_output_path: ""
   # Empty by default; the distill subprocess overrides this with the absolute
   # path of the per-invocation episodes file the agent must read (issues
   # #2640/#2692). Declared so the `{{episodes_path}}` substitution always
   # resolves, even when the recipe is run without the override.
   episodes_path: ""
+  # Empty by default; the distill subprocess overrides this with the absolute
+  # path of the daemon's memory IPC socket (issue #2679). Declared so the
+  # `{{memory_socket}}` substitution always resolves.
+  memory_socket: ""
 
 steps:
   - id: "distill"
@@ -73,15 +62,15 @@ steps:
       You are the **semantic distiller** for Simard's cognitive memory.
       You are given a batch of recent **episodes** (events that happened
       during prior OODA cycles) and you produce a small number of
-      durable **semantic facts** that will be stored alongside the
-      episodes for future retrieval.
+      durable **semantic facts** that you WRITE DIRECTLY into cognitive
+      memory using the `simard memory remember` command-line tool.
 
       ## Input
 
       The batch of episodes is a JSON array. Each entry has:
 
       - `id` — opaque episode identifier you must echo back as
-        `source_episode_id` when you derive a fact from it.
+        `--source-episode-id` when you derive a fact from it.
       - `source_label` — short tag describing where the episode came
         from (e.g. `goal-curator`, `consolidation-persistence`).
       - `temporal_index` — monotonic ordering key (NOT a wall-clock
@@ -99,24 +88,35 @@ steps:
       ## Your job
 
       Walk the episodes and decide which are worth distilling. For each
-      episode you keep, emit **exactly one** fact with:
+      episode you keep, WRITE **exactly one** fact into memory by running
+      the `simard memory remember` tool with these scalar flags:
 
-      - `concept` — one of:
+      - `--concept` — one of:
         - `pr-pattern` — pull-request shaped events: merge sequences,
           CI patterns, review patterns, scope-creep observations.
         - `bug-pattern` — bug reproductions, root causes, recurring
           failure modes, environmental fragility.
         - `lesson-learned` — decisions made, tradeoffs encountered,
           things that surprised the engineer, retrospective insights.
-      - `content` — a **short, declarative** sentence capturing the
+      - `--content` — a **short, declarative** sentence capturing the
         durable lesson (≤ 200 chars is ideal). NOT a transcript; NOT a
-        timestamp; just the takeaway.
-      - `source_episode_id` — the `id` from the source episode,
-        verbatim.
+        timestamp; just the takeaway. Quote it so spaces are preserved.
+      - `--source-episode-id` — the `id` from the source episode,
+        verbatim. This is what grounds the fact; a fact whose id is not in
+        the batch is quarantined by the server, so ALWAYS pass a real id.
+
+      Run ONE command per fact. For example:
+
+      ```
+      simard memory remember \
+        --concept=bug-pattern \
+        --content="empty outcome list panics the cycle loop" \
+        --source-episode-id=<id-from-input>
+      ```
 
       Episodes that are pure noise (startup logs, simple retries,
       progress chatter, exact duplicates of earlier episodes) should be
-      **skipped** — do NOT emit a fact for them. The system records
+      **skipped** — do NOT run `remember` for them. The system records
       that you saw them via a separate mechanism, so dropping low-value
       episodes is the correct call.
 
@@ -124,59 +124,36 @@ steps:
 
       If — and only if — the batch reveals a **recurring action
       sequence** (the same multi-step workflow appearing across two or
-      more episodes), ALSO emit a `procedure` capturing it as a reusable
-      playbook:
+      more episodes), ALSO write a procedure with the companion tool:
 
-      - `name` — a short, stable handle (e.g. `ci-fix:auto`,
+      ```
+      simard memory remember-procedure \
+        --name=ci-fix:auto \
+        --step="read the failing job log" \
+        --step="reproduce locally" \
+        --step="apply the minimal fix" \
+        --source-episode-id=<id> --source-episode-id=<id>
+      ```
+
+      - `--name` — a short, stable handle (e.g. `ci-fix:auto`,
         `pr:merge-flow`). Reuse the same name across batches for the same
         workflow so the store reinforces rather than duplicates it.
-      - `steps` — the ordered steps of the workflow, each a short
-        imperative sentence.
-      - `source_episode_ids` — the `id`s of the episodes the procedure
-        was distilled from (≥ 1).
+      - `--step` — one per step, in order (repeat the flag).
+      - `--source-episode-id` — the `id`s of the episodes the procedure
+        was distilled from (≥ 1; repeat the flag).
 
       Do NOT invent procedures for one-off events. A batch with no
-      recurring workflow emits an empty `procedures` array.
+      recurring workflow writes no procedure.
 
       ## Output
 
-      **Write** the following JSON object — and NOTHING else — to the file at
-      the absolute path:
-
-      ```
-      {{facts_output_path}}
-      ```
-
-      Use your file-writing tool to create/overwrite that exact file with a
-      single JSON object. Do NOT print the JSON to the terminal as your answer,
-      and do NOT wrap it in prose or a markdown fence inside the file — the file
-      must contain only the JSON object:
-
-      ```json
-      {
-        "facts": [
-          {
-            "concept": "pr-pattern" | "bug-pattern" | "lesson-learned",
-            "content": "<short declarative sentence>",
-            "source_episode_id": "<id from input>"
-          }
-        ],
-        "procedures": [
-          {
-            "name": "<short procedure name>",
-            "steps": ["<step 1>", "<step 2>"],
-            "source_episode_ids": ["<id from input>"]
-          }
-        ]
-      }
-      ```
-
-      This file is the ONLY channel that is read: anything you print to the
-      terminal is ignored. If nothing in the batch is worth keeping, still write
-      the file with `{"facts": [], "procedures": []}`.
+      There is **no output file and no JSON to print**. Your `simard memory
+      remember` / `remember-procedure` invocations ARE the output. The server
+      grounds, scores, and either stores or quarantines each fact and prints its
+      disposition; you do not need to parse or report that. If nothing in the
+      batch is worth keeping, simply run no `remember` commands and finish
+      successfully.
 
       Do not invent new concept labels. Do not invent episode ids. Do not
-      include the literal string `skip` in the `concept` field — skipped
-      episodes simply contribute no entry to the `facts` array.
-
-      {{strict_json_instruction}}
+      pass the literal string `skip` as a concept — a skipped episode simply
+      gets no `remember` call.
