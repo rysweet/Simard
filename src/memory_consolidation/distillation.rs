@@ -1332,7 +1332,7 @@ pub(crate) fn parse_facts(document: &str) -> SimardResult<Vec<DistilledFact>> {
 /// mode where the launcher banner was captured as the distill step output and a
 /// stdout scan for `{ "facts": [...] }` matched the banner instead of the answer.
 ///
-/// Parsing is deliberately simple, reflecting the clean channel:
+/// Parsing stays close to the clean channel, with one string-aware repair tier:
 ///
 /// 1. An empty document means the agent produced no output — an explicit,
 ///    retry-eligible `Err` (never a hollow `Ok`; no silent stdout fallback).
@@ -1341,8 +1341,11 @@ pub(crate) fn parse_facts(document: &str) -> SimardResult<Vec<DistilledFact>> {
 ///    code fence or a little leading/trailing prose the agent may wrap around its
 ///    own answer in the file (field/format leniency on a clean channel — NOT the
 ///    launcher-banner stdout scraping this fix removed).
-/// 3. If no facts object is present, return `Err`; the caller treats `Err` as
-///    the retry-safe "no markers set" path.
+/// 3. On a strict miss, a string-aware trailing-comma repair pass is applied and
+///    the scan retried (issue #2669) — see [`parse_facts_document_with_recovery`],
+///    to which this thin wrapper delegates (discarding the [`ParseRecovery`] tier).
+/// 4. If still no facts object is present, return `Err`; the caller treats `Err`
+///    as the retry-safe "no markers set" path.
 pub(crate) fn parse_facts_document(document: &str) -> SimardResult<DistillOutput> {
     parse_facts_document_with_recovery(document).map(|(output, _)| output)
 }
