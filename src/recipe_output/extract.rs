@@ -294,15 +294,20 @@ pub fn strip_json_trailing_commas(s: &str) -> Cow<'_, str> {
     }
 }
 
-/// Is the first non-ASCII-whitespace byte at or after `i` a closing `}`/`]`?
+/// Is the first non-JSON-whitespace byte at or after `i` a closing `}`/`]`?
 ///
-/// Only JSON insignificant whitespace (space, tab, LF, CR, form-feed) is
-/// skipped; any other byte (including `"` opening the next key/element) means
-/// the comma is a legitimate separator and must be kept.
+/// Only the four RFC 8259 insignificant-whitespace bytes — space, tab, LF, CR
+/// — are skipped; any other byte means the comma is a legitimate separator (or
+/// the payload is not strict JSON) and is kept. This deliberately excludes
+/// form-feed `0x0c`, which is *not* JSON whitespace: serde rejects it, so
+/// keeping the stripper's whitespace set identical to serde's means a comma is
+/// only ever treated as trailing when the retry parse could actually accept
+/// the stripped result — the leniency stays exactly as wide as, and no wider
+/// than, strict JSON (fail-closed).
 fn next_nonspace_is_close(bytes: &[u8], mut i: usize) -> bool {
     while i < bytes.len() {
         match bytes[i] {
-            b' ' | b'\t' | b'\n' | b'\r' | 0x0c => i += 1,
+            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
             b'}' | b']' => return true,
             _ => return false,
         }
@@ -1101,6 +1106,28 @@ mod issue_2678_trailing_comma_tests {
         assert!(
             serde_json::from_str::<serde_json::Value>(out.as_ref()).is_err(),
             "an adjacent double comma must remain unparseable (fail closed)"
+        );
+    }
+
+    #[test]
+    fn form_feed_is_not_json_whitespace_so_a_preceding_comma_is_kept() {
+        // Form-feed (0x0c) is NOT one of RFC 8259's four insignificant-
+        // whitespace bytes, and serde rejects it as whitespace. Skipping it
+        // would strip the comma in `{"a":1,\x0c}`, yet the retry parse would
+        // still fail on the stray form-feed — so treating it as whitespace can
+        // never turn a malformed doc into a success. Keeping the stripper's
+        // whitespace set identical to serde's means the comma is left in place
+        // (borrowed, unchanged) and the input stays unparseable (fail closed).
+        let input = "{\"a\":1,\u{000c}}";
+        let out = strip_json_trailing_commas(input);
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "form-feed is not JSON whitespace ⇒ comma is not trailing ⇒ borrowed"
+        );
+        assert_eq!(out, input);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(out.as_ref()).is_err(),
+            "a form-feed before the closer keeps the doc unparseable (fail closed)"
         );
     }
 
