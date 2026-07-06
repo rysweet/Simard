@@ -468,24 +468,31 @@ pub(crate) const PART_04: &str = r#"            let fmt;
         const histEl=document.getElementById('ooda-cycle-history');
         const cycles=d.cycles||[];
         const trend=d.duration_trend||{};
-        // Render trend summary
-        const trendColors={improving:'var(--green)',degrading:'var(--red)',stable:'var(--yellow)',insufficient_data:'#8b949e'};
-        const trendLabels={improving:'↓ Improving',degrading:'↑ Degrading',stable:'→ Stable',insufficient_data:'— Not enough data'};
         const dir=trend.direction||'insufficient_data';
-        const trendColor=trendColors[dir]||'#8b949e';
-        let trendHtml=`<div style="display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap">
-          <div><strong style="color:${trendColor}">${trendLabels[dir]||dir}</strong></div>
-          <div style="color:#8b949e;font-size:.85rem">${d.total_cycles||0} cycles recorded</div>`;
-        if(trend.recent_avg_secs!=null){
-          trendHtml+=`<div style="font-size:.85rem">Recent avg: <strong>${trend.recent_avg_secs}s</strong></div>
-            <div style="font-size:.85rem">Older avg: <strong>${trend.older_avg_secs}s</strong></div>
-            <div style="font-size:.85rem">Change: <strong style="color:${trendColor}">${trend.change_pct>0?'+':''}${trend.change_pct}%</strong></div>`;
+        // Issue #21: when there is not enough per-cycle duration data to compute
+        // a trend, render only an honest cycle count — never a permanently
+        // broken "not enough data" chart/placeholder.
+        if(dir==='insufficient_data'){
+          trendEl.innerHTML=`<div style="color:#8b949e;font-size:.85rem">${d.total_cycles||0} cycles recorded</div>`;
+        }else{
+          const trendColors={improving:'var(--green)',degrading:'var(--red)',stable:'var(--yellow)'};
+          const trendLabels={improving:'↓ Improving',degrading:'↑ Degrading',stable:'→ Stable'};
+          const trendColor=trendColors[dir]||'#8b949e';
+          let trendHtml=`<div style="display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap">
+            <div><strong style="color:${trendColor}">${trendLabels[dir]||dir}</strong></div>
+            <div style="color:#8b949e;font-size:.85rem">${d.total_cycles||0} cycles recorded</div>`;
+          if(trend.recent_avg_secs!=null){
+            trendHtml+=`<div style="font-size:.85rem">Recent avg: <strong>${trend.recent_avg_secs}s</strong></div>
+              <div style="font-size:.85rem">Older avg: <strong>${trend.older_avg_secs}s</strong></div>
+              <div style="font-size:.85rem">Change: <strong style="color:${trendColor}">${trend.change_pct>0?'+':''}${trend.change_pct}%</strong></div>`;
+          }
+          trendHtml+='</div>';
+          trendEl.innerHTML=trendHtml;
         }
-        if(trend.detail){trendHtml+=`<div style="color:#8b949e;font-size:.8rem">${esc(trend.detail)}</div>`;}
-        trendHtml+='</div>';
-        trendEl.innerHTML=trendHtml;
-        // Duration trend line chart (inline SVG) — #2223
-        if(cycles.length){
+        // Duration trend line chart (inline SVG) — #2223. Hidden entirely while
+        // there is not enough duration data (issue #21), so the tab never shows
+        // a permanently-flat "not enough data" chart.
+        if(dir!=='insufficient_data' && cycles.length){
           const durations=cycles.map(c=>c.duration_secs||0).reverse();
           const nums=cycles.map(c=>c.cycle_number).reverse();
           const maxD=Math.max(...durations,1);
@@ -525,10 +532,20 @@ pub(crate) const PART_04: &str = r#"            let fmt;
             const phaseColors={act:'var(--green)',decide:'#a371f7',orient:'var(--yellow)',observe:'var(--accent)',unknown:'#8b949e'};
             const pColor=phaseColors[c.phase]||'#8b949e';
             const dur=c.duration_secs!=null?c.duration_secs+'s':'—';
-            const summary=humanizeCycleSummary(c.summary||'');
+            /* Issue #21: prefer the server's difference-carrying collapsed_summary
+               (the decided action / deferral / decision text) over the raw
+               count-boilerplate, so forward progress stands out from a stuck loop. */
+            const summary=c.collapsed_summary||humanizeCycleSummary(c.summary||'');
             const shortSummary=summary.length>120?summary.substring(0,120)+'…':summary;
+            /* A collapsed run renders as one row labelled with a repeat count
+               and cycle range (A=oldest, B=newest); a single cycle keeps its
+               plain number. */
+            const rc=c.repeat_count||1;
+            const cFirst=c.cycle_number_first||c.cycle_number;
+            const cLast=c.cycle_number_last||c.cycle_number;
+            const cycleLabel=(rc>1)?('×'+rc+' (cycles #'+cLast+'–#'+cFirst+')'):('#'+c.cycle_number);
             return `<tr>
-              <td style="font-weight:600;color:var(--accent)">${c.cycle_number}</td>
+              <td style="font-weight:600;color:var(--accent);white-space:nowrap">${esc(cycleLabel)}</td>
               <td><span style="color:${pColor}">${esc(c.phase)}</span></td>
               <td>${dur}</td>
               <td>${c.action_count||0}</td>

@@ -30,7 +30,7 @@ order:
 |-----|--------------|-------|
 | **Overview** | Summary · Health · Stats | Daemon status (OODA loop active / stopped), current cycle number, top-priority goal, last cycle's actions, and the recent-actions stream (**Summary**); system status — version, daemon state, active process count, disk usage — open PRs, open issues, and the **Machines & Memory Sharing** card, i.e. whether Simard runs on one machine or a group and how they share what they've learned (**Health**); and aggregate run counters and rollups (**Stats**). |
 | **Goals** | Goals · Work Board | The full goal register — active top-N goals with priority, status, and current activity, plus the proposed backlog with promote/dismiss controls (**Goals**) — and the shared scratch canvas with Task Memory and Recent Actions (**Work Board**). |
-| **Activity** | Logs · Traces · Thinking · Failures | The **Background Service Log** (live activity from Simard's always-on background process), the cost ledger, and per-cycle reports, with a severity menu (All / Errors / Warnings / Info) and free-text search (**Logs**); recent agent traces from the cost ledger, journald, and in-process spans, plus OTEL status, each row read as plain language — **when**, **what**, **who** (**Traces**); the live thinking-cycle stream, i.e. planner output before action dispatch (**Thinking**); and brain-fallback and decision failures (**Failures**). |
+| **Activity** | Logs · Traces · Thinking · Failures | The **Background Service Log** (live activity from Simard's always-on background process), the cost ledger, and per-cycle reports, with a severity menu (All / Errors / Warnings / Info) and free-text search (**Logs**); recent agent traces from the cost ledger, journald, and in-process spans, plus OTEL status, each row read as plain language — **when**, **what**, **who** (**Traces**); the **Thinking** panel's two halves — a **Cycle History** table (collapsed per-cycle timeline with real timestamps, a `×N` repeat-count for runs of equivalent cycles, difference-carrying summaries, and a self-hiding duration-trend chart) and the **Agent Internal Reasoning** OODA Observe/Orient/Decide/Act breakdown, see [Thinking: Cycle History](#thinking-tab-cycle-history-21) (**Thinking**); and brain-fallback and decision failures (**Failures**). |
 | **Workers** | Processes · Engineers · Terminal | The live process tree under the daemon — engineer subprocesses, LLM sessions, tmux sessions, and their resource usage (**Processes** / **Engineers**) — and a browser-attached PTY into the daemon host (**Terminal**). |
 | **Pull Requests** | Merge Decisions · Readiness | Automated merge decisions and the rationale behind each (**Merge Decisions**), and per-PR readiness checks covering CI, review, and mergeability (**Readiness**). |
 | **Resources** | Memory · Costs | The cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters, full-text search, the live **Memory Store** counts, and the **Memory Files** panel (**Memory**); and per-provider, per-model token spend across the active session (**Costs**). See [Memory architecture](memory.md). |
@@ -205,6 +205,38 @@ Recent Actions — before (raw brain enum) and after (plain English):
 | Before | After |
 |--------|-------|
 | ![Recent Actions before](assets/dashboard-workboard-recent-actions-before.png) | ![Recent Actions after](assets/dashboard-workboard-recent-actions-after.png) |
+
+### Thinking tab: Cycle History (#21)
+
+The **Thinking** tab has two halves.
+
+The **second half** is the **Agent Internal Reasoning** breakdown: for each
+cycle it renders the OODA **Observe / Orient / Decide / Act** phases with their
+per-phase detail (goals observed, prioritised, the decided actions, and the
+outcomes including the launched-sub-agent block). This half is unchanged.
+
+The **first half** is the **Cycle History** — a compact timeline of recent
+cycles plus a duration-trend chart. It answers three questions honestly:
+
+- **When did each cycle run?** Every row shows a real timestamp; `—` appears
+  only for legacy cycles that genuinely predate timestamp recording.
+- **Progress or loop?** Consecutive *equivalent* cycles collapse into a single
+  row with a `×N` repeat-count and the cycle range `#A–#B`, and each row's
+  summary describes *what actually happened* (the decided action,
+  `no-action: deferring to active engineer on <goal>`, or the meaningful
+  decision clause) instead of the old count-boilerplate. A repeated *reasoning*
+  decision (never a deferral) is flagged **⚠ possible loop**, so a genuine stuck
+  loop stands out while healthy deferrals collapse quietly with just their `×N`.
+- **Faster or slower?** A duration-trend chart renders once enough per-cycle
+  duration data exists (≥4 timed cycles), and is **hidden entirely** until then
+  — the old permanent "Not enough data" placeholder is gone.
+
+Collapse runs at the display layer only (`thinking_collapse.rs`, relaxed mode
+for the first half; strict mode is preserved for the second half). Timestamps
+and durations come from producer-side telemetry persisted in each
+`cycle_reports/cycle_<N>.json`. Full contract, collapse semantics, and the
+`/api/ooda-cycles` schema are documented in the
+[Thinking tab — Cycle History reference](reference/dashboard-thinking-cycle-history.md).
 
 ## Screenshots
 
@@ -519,3 +551,4 @@ The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (def
 - [Overview action-detail humanization](reference/dashboard-action-detail-humanization.md)
 - [Dashboard Feedback Widget](reference/dashboard-feedback-widget.md)
 - [How to report a bug or request a feature from the dashboard](howto/report-a-bug-or-request-a-feature.md)
+- [Thinking tab — Cycle History (timestamps, collapse, duration trend)](reference/dashboard-thinking-cycle-history.md)

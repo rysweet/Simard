@@ -14,7 +14,9 @@ use crate::ooda_loop::{
 use crate::runtime_config::RuntimeConfig;
 use crate::session_builder::{LlmProvider, SessionBuilder};
 
-use crate::operator_commands_ooda::persistence::{persist_cycle_report, persist_cycle_to_memory};
+use crate::operator_commands_ooda::persistence::{
+    persist_cycle_report_timed, persist_cycle_to_memory,
+};
 
 mod helpers;
 pub use helpers::*;
@@ -1097,7 +1099,9 @@ pub fn run_ooda_daemon(
                 }
 
                 // Persist the cycle report to filesystem for auditability.
-                persist_cycle_report(&state_root, &report);
+                // Record the wall-clock cycle duration so the Cycle History
+                // duration-trend chart has real data to render (issue #21).
+                persist_cycle_report_timed(&state_root, &report, Some(cycle_elapsed));
                 // Persist the cycle summary to cognitive memory as an episode.
                 persist_cycle_to_memory(&bridges, &report);
                 // Write daemon health file for dashboard
