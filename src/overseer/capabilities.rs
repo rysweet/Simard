@@ -11,6 +11,7 @@
 
 use std::fmt;
 
+use crate::overseer::diagnosis::FailureDiagnosis;
 use crate::overseer::signal::{GapItem, Problem, Signal};
 
 /// Small, cheap error type shared by every capability. Kept intentionally tiny
@@ -128,6 +129,14 @@ pub struct ObservedState {
     ///
     /// [`sensor::detect_workstream_gaps`]: crate::overseer::sensor::detect_workstream_gaps
     pub workstream_gaps: Vec<GapItem>,
+    /// Structured diagnoses of decision-cycle / engineer / terminal-shell steps
+    /// that failed since the last Observe pass (issue #2640, PART 2). The acting
+    /// Overseer drains these from the process-global failure sink
+    /// ([`crate::overseer::failure_sink::drain_recent`]) each cycle;
+    /// `signals_from` lifts each into a corrective `Signal::StepFailureDiagnosed`
+    /// so a caught failure drives a fix instead of a silent log. Empty when no
+    /// step failed this window.
+    pub recent_step_failures: Vec<FailureDiagnosis>,
 }
 
 /// A `(repo, pr)` pair. `repo` is an `owner/name` slug.
@@ -563,6 +572,9 @@ fn signal_keyword(s: &Signal) -> Option<String> {
         Signal::RecurringSignature { signature, .. } => signature.clone(),
         // A consolidated batch of gaps carries no single recall key on its own.
         Signal::WorkstreamGap { .. } => String::new(),
+        // Recurring step failures are keyed on their root cause, so a repeated
+        // failure mode (e.g. arg-list-too-long) recalls prior diagnoses.
+        Signal::StepFailureDiagnosed { cause, .. } => format!("step-failure:{}", cause.as_str()),
     };
     if kw.is_empty() { None } else { Some(kw) }
 }

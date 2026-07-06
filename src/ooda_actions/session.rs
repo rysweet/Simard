@@ -8,6 +8,9 @@
 //! `RustyClawd` returns an explicit "not implemented" error rather
 //! than silently degrading to amplihack.
 
+use std::path::Path;
+
+use crate::error::{SimardError, SimardResult};
 use crate::ooda_loop::{ActionOutcome, PlannedAction};
 use crate::session_builder::LlmProvider;
 
@@ -16,7 +19,7 @@ use super::make_outcome;
 /// Launch a bounded terminal session to work on a specific task.
 ///
 /// Routes through the configured base type:
-/// - `LlmProvider::Copilot` → `amplihack copilot -p` via PTY (current behaviour)
+/// - `LlmProvider::Copilot` → `amplihack copilot` via PTY, prompt piped on stdin
 /// - `LlmProvider::RustyClawd` → explicit unsupported error (fail loud, no fallback)
 ///
 /// If `LlmProvider::resolve()` itself fails (env var unset *and* config
@@ -47,13 +50,65 @@ pub(super) fn dispatch_launch_session(action: &PlannedAction) -> ActionOutcome {
     }
 }
 
-/// Copilot base-type implementation: shell out to `amplihack copilot -p`
-/// via a PTY-wrapped bash session and capture the transcript.
+/// Copilot base-type implementation: shell out to `amplihack copilot` via a
+/// PTY-wrapped bash session and capture the transcript.
+///
+/// The task prompt is written to a temp file in Rust and piped into copilot on
+/// STDIN (`cat 'PATH' | amplihack copilot …`); it is never passed as an argv
+/// token. The old `-p "$(cat "$F")"` form inlined the whole prompt into `argv`,
+/// which for large goals exceeded `ARG_MAX` and made `exec` fail with `E2BIG`
+/// ("Argument list too long", exit 126), breaking Simard's OODA loop (#2640).
 fn dispatch_launch_session_copilot(action: &PlannedAction) -> ActionOutcome {
+    use std::io::Write;
+
     use crate::terminal_session::PtyTerminalSession;
 
     let task = &action.description;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    // Write the task prompt to a temp file out-of-band (Rust-owned), so only the
+    // path — never the prompt body — appears on the command line. The guard is
+    // held until after `session.finish()`, then Drop unlinks the file.
+    let mut prompt_file = match tempfile::Builder::new()
+        .prefix("simard-ooda-prompt-")
+        .tempfile()
+    {
+        Ok(file) => file,
+        Err(e) => {
+            return make_outcome(
+                action,
+                false,
+                format!("failed to create OODA launch prompt temp file: {e}"),
+            );
+        }
+    };
+    if let Err(e) = prompt_file.write_all(task.as_bytes()) {
+        return make_outcome(
+            action,
+            false,
+            format!("failed to write OODA launch prompt temp file: {e}"),
+        );
+    }
+    if let Err(e) = prompt_file.flush() {
+        return make_outcome(
+            action,
+            false,
+            format!("failed to flush OODA launch prompt temp file: {e}"),
+        );
+    }
+
+    // Build the argv-free launch command (prompt piped on stdin). Fail loud if
+    // the temp path is unexpectedly unsafe — no silent fallback.
+    let command = match build_ooda_launch_command("amplihack copilot", prompt_file.path()) {
+        Ok(command) => command,
+        Err(e) => {
+            return make_outcome(
+                action,
+                false,
+                format!("failed to build OODA launch command: {e}"),
+            );
+        }
+    };
 
     // Launch bash in a PTY — we'll send the copilot command ourselves.
     #[cfg(target_os = "macos")]
@@ -71,16 +126,6 @@ fn dispatch_launch_session_copilot(action: &PlannedAction) -> ActionOutcome {
         }
     };
 
-    // Build a single command that writes the prompt to a temp file, invokes
-    // copilot with -p, cleans up, and exits. No sentinels, no timeouts.
-    let escaped = task.replace('\\', "\\\\").replace('\'', "'\\''");
-    let command = format!(
-        "SIMARD_PROMPT_FILE=$(mktemp /tmp/simard-ooda-prompt.XXXXXX) && \
-         printf '%s' '{escaped}' > \"$SIMARD_PROMPT_FILE\" && \
-         amplihack copilot -p \"$(cat \"$SIMARD_PROMPT_FILE\")\" ; \
-         rm -f \"$SIMARD_PROMPT_FILE\" ; exit\n"
-    );
-
     if let Err(e) = session.send_input(&command) {
         let _ = session.finish();
         return make_outcome(
@@ -90,10 +135,10 @@ fn dispatch_launch_session_copilot(action: &PlannedAction) -> ActionOutcome {
         );
     }
 
-    // Wait for natural process exit — copilot runs to completion, then
-    // bash exits via the chained `; exit`. finish() waits indefinitely for
-    // transcript activity; if idle for 5 min, sends SIGTERM to hung wrapper.
-    match session.finish() {
+    // Wait for natural process exit — copilot runs to completion, then bash
+    // exits via the chained `; exit`. finish() waits indefinitely for transcript
+    // activity; if idle for 5 min, sends SIGTERM to hung wrapper.
+    let outcome = match session.finish() {
         Ok(capture) => {
             let preview = crate::terminal_session::transcript_preview(&capture.transcript);
             let success = capture.exit_status.success();
@@ -112,7 +157,36 @@ fn dispatch_launch_session_copilot(action: &PlannedAction) -> ActionOutcome {
             false,
             format!("terminal session capture failed: {e}"),
         ),
+    };
+
+    // Keep the prompt file alive until copilot has finished reading it, then
+    // unlink it explicitly (also happens on Drop).
+    drop(prompt_file);
+    outcome
+}
+
+/// Build the OODA launch-session shell command: pipe the prompt file into
+/// copilot on STDIN (`cat 'PATH' | <program> --subprocess-safe --allow-all-tools
+/// ; exit`) so the prompt is never an argv token — immune to the E2BIG /
+/// "Argument list too long" failure that broke Simard's OODA loop (issue #2640).
+///
+/// Fails closed if `prompt_path` contains a single quote, which would break out
+/// of the single-quoted `cat 'PATH'` context and allow shell injection: the
+/// builder refuses rather than emitting an injectable command (no silent
+/// fallback). `NamedTempFile` paths are safe ASCII, so this never fires in
+/// production — it is a defense-in-depth guard on the contract.
+pub fn build_ooda_launch_command(program: &str, prompt_path: &Path) -> SimardResult<String> {
+    let path_str = prompt_path.to_string_lossy();
+    if path_str.contains('\'') {
+        return Err(SimardError::InvalidConfigValue {
+            key: "ooda_launch_prompt_path".to_string(),
+            value: path_str.to_string(),
+            help: "the OODA launch prompt file path must not contain a single quote".to_string(),
+        });
     }
+    Ok(format!(
+        "cat '{path_str}' | {program} --subprocess-safe --allow-all-tools ; exit"
+    ))
 }
 
 #[cfg(test)]

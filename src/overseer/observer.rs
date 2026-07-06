@@ -129,6 +129,7 @@ pub fn decide_read_only(problem: &Problem) -> Intervention {
         ProblemKind::ProcessHealth
         | ProblemKind::QualityRegression
         | ProblemKind::GoalHygiene
+        | ProblemKind::StepFailure
         | ProblemKind::CrossCutting => Intervention::FileIssue {
             run: problem_to_run_brief(problem),
         },
@@ -190,6 +191,7 @@ fn kind_step_label(kind: ProblemKind) -> &'static str {
         ProblemKind::LoopDetected => "loop_detected",
         ProblemKind::DriftCorrection => "drift_correction",
         ProblemKind::WorkstreamCoverage => "workstream_coverage",
+        ProblemKind::StepFailure => "step_failure",
     }
 }
 
@@ -241,6 +243,7 @@ fn signal_kind_label(s: &Signal) -> &'static str {
         Signal::GoalBlocked { .. } => "GoalBlocked",
         Signal::RecurringSignature { .. } => "RecurringSignature",
         Signal::WorkstreamGap { .. } => "WorkstreamGap",
+        Signal::StepFailureDiagnosed { .. } => "StepFailureDiagnosed",
     }
 }
 

@@ -7,6 +7,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::overseer::capabilities::ObservedState;
+use crate::overseer::diagnosis::FailureCause;
 
 /// A raw, low-level indicator derived from one Observe pass (StatusSnapshot +
 /// logs + PR/CI/goal state). Non-authoritative on its own; Orient turns a set of
@@ -76,6 +77,19 @@ pub enum Signal {
     /// why it matters. Orient folds this into a single
     /// [`ProblemKind::WorkstreamCoverage`] problem.
     WorkstreamGap { gaps: Vec<GapItem> },
+    /// A caught decision-cycle / engineer / terminal-shell STEP FAILURE that has
+    /// been DIAGNOSED (issue #2640, PART 2) — not merely logged. Carries the
+    /// structured root [`FailureCause`], the exit code, and a bounded evidence
+    /// excerpt so Orient/Decide can drive a CORRECTIVE workstream that targets the
+    /// real WHY (e.g. arg-list-too-long → the E2BIG fix). Derived from
+    /// [`ObservedState::recent_step_failures`], which the acting Overseer drains
+    /// from the process-global failure sink each Observe pass. One signal per
+    /// recorded diagnosis; Orient dedups same-cause failures into one problem.
+    StepFailureDiagnosed {
+        cause: FailureCause,
+        exit_code: Option<i32>,
+        evidence: String,
+    },
 }
 
 /// Which backlog source a [`GapItem`] came from — so the renderer can label the
@@ -157,6 +171,10 @@ pub enum ProblemKind {
     /// issue, or live anomaly with no active workstream. The recurring gap-scan's
     /// problem family; driven by the deduped notify + file-issue act path.
     WorkstreamCoverage,
+    /// A diagnosed decision-cycle / engineer / terminal-shell step failure
+    /// (issue #2640, PART 2). Routed to a CORRECTIVE workstream that diagnoses
+    /// the WHY and applies the remedy — never a silent log.
+    StepFailure,
 }
 
 /// How likely a single candidate cause is, relative to the others in the same
@@ -460,6 +478,18 @@ pub fn signals_from(state: &ObservedState) -> Vec<Signal> {
         });
     }
 
+    // Diagnosed step failures (issue #2640, PART 2): each recorded diagnosis
+    // becomes a corrective signal so a caught decision-cycle / engineer /
+    // terminal-shell failure drives a fix instead of a silent log line. Orient
+    // dedups same-cause failures into one problem.
+    for diagnosis in &state.recent_step_failures {
+        out.push(Signal::StepFailureDiagnosed {
+            cause: diagnosis.cause,
+            exit_code: diagnosis.exit_code,
+            evidence: diagnosis.evidence.clone(),
+        });
+    }
+
     out
 }
 
@@ -626,6 +656,19 @@ impl Signal {
                     "{} uncovered workstream(s): {}{more}",
                     gaps.len(),
                     refs.join(", ")
+                )
+            }
+            Signal::StepFailureDiagnosed {
+                cause,
+                exit_code,
+                evidence,
+            } => {
+                let code = exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string());
+                format!(
+                    "diagnosed step failure: {} (exit {code}) — {evidence}",
+                    cause.as_str()
                 )
             }
         };

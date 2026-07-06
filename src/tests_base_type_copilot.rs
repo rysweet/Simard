@@ -90,12 +90,13 @@ fn build_copilot_objective_includes_command_and_exit() {
     };
     let prompt_file = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(prompt_file.path(), "Do the thing.").unwrap();
+    let path = prompt_file.path().to_str().unwrap();
     let objective = build_copilot_terminal_objective(&config, prompt_file.path());
     assert!(objective.contains("my-copilot run"));
     assert!(objective.contains("working-directory: /tmp/work"));
-    // Issue #1871: the prompt body is now read from the temp file, not inlined.
+    // Issue #1871: the prompt body is read from the temp file, not inlined.
     assert!(
-        objective.contains(prompt_file.path().to_str().unwrap()),
+        objective.contains(path),
         "objective should reference the prompt file path"
     );
     assert!(
@@ -106,13 +107,35 @@ fn build_copilot_objective_includes_command_and_exit() {
         objective.contains("; exit"),
         "objective must chain exit to end the shell naturally"
     );
+    // Issue #2640 (E2BIG): the prompt must be piped in on STDIN via
+    // `cat 'PATH' | <cmd> ...`, NOT passed as an argv token. Passing the
+    // `$(cat ...)` expansion as `-p` argument makes the argv exceed ARG_MAX
+    // for large prompts and exec fails with E2BIG (exit 126).
     assert!(
-        objective.contains("-p"),
-        "must use -p flag for non-interactive copilot execution"
+        objective.contains(&format!("cat '{path}' |")),
+        "objective must pipe the prompt file into the copilot on stdin \
+         (`cat 'PATH' | ...`), not inline it as an argv token: {objective:?}"
+    );
+    assert!(
+        objective.contains("| my-copilot run"),
+        "the copilot command must be the sink of the `cat` pipe: {objective:?}"
+    );
+    assert!(
+        !objective.contains("$(cat"),
+        "issue #2640: prompt must NOT be delivered via `$(cat ...)` argv \
+         expansion (that is the E2BIG antipattern): {objective:?}"
+    );
+    assert!(
+        !objective.contains(" -p "),
+        "issue #2640: prompt must NOT be passed via the `-p` argv flag: {objective:?}"
     );
     assert!(
         objective.contains("--allow-all-tools"),
         "must include --allow-all-tools for non-interactive mode"
+    );
+    assert!(
+        objective.contains("--subprocess-safe"),
+        "must include --subprocess-safe for non-interactive mode"
     );
     assert!(
         !objective.contains("wait-for:"),
@@ -133,6 +156,52 @@ fn build_copilot_objective_without_working_directory() {
     assert!(!objective.contains("working-directory:"));
     assert!(objective.contains("; exit"));
     assert!(objective.contains("amplihack copilot"));
+}
+
+/// Issue #2640 (E2BIG root cause): the shared terminal-objective builder — used
+/// by the engineering/decision-cycle path — must deliver the prompt to the
+/// copilot subprocess via a STDIN pipe (`cat 'PATH' | amplihack copilot ...`),
+/// never as a command-line argument. The old `-p "$(cat 'PATH')"` form inlined
+/// the full (possibly >256 KB) prompt into argv; for goals with large
+/// accumulated context the argv exceeded ARG_MAX and `exec` failed with E2BIG
+/// ("Argument list too long", exit 126), repeatedly breaking Simard's OODA
+/// loop. This test pins the argv-free stdin contract regardless of prompt size.
+#[test]
+fn build_copilot_objective_delivers_prompt_via_stdin_not_argv() {
+    let config = CopilotAdapterConfig::default();
+
+    // A prompt comfortably larger than a typical ARG_MAX contribution.
+    let big_prompt = "X".repeat(300 * 1024);
+    let temp_file = write_prompt_to_tempfile(&big_prompt).expect("write tempfile");
+    let path = temp_file.path().to_str().unwrap();
+    let objective = build_copilot_terminal_objective(&config, temp_file.path());
+
+    // Positive: the prompt is streamed on stdin via a `cat 'PATH' |` pipe whose
+    // sink is `amplihack copilot`.
+    assert!(
+        objective.contains(&format!("cat '{path}' | amplihack copilot")),
+        "prompt must be piped to `amplihack copilot` on stdin: {objective:?}"
+    );
+    // Negative: none of the E2BIG antipatterns may appear.
+    assert!(
+        !objective.contains("$(cat"),
+        "no `$(cat ...)` argv expansion (E2BIG antipattern): {objective:?}"
+    );
+    assert!(
+        !objective.contains(" -p "),
+        "no `-p` argv flag carrying the prompt: {objective:?}"
+    );
+    // The huge prompt body must never appear on the command line, and the
+    // command line itself must stay tiny (bounded by path + flags).
+    assert!(
+        !objective.contains(&big_prompt),
+        "prompt body must not be inlined into the shell command"
+    );
+    assert!(
+        objective.len() < 1024,
+        "objective length {} suggests the prompt leaked into argv",
+        objective.len()
+    );
 }
 
 /// Regression for issue #1871: prompts containing both single and double
@@ -213,10 +282,23 @@ fn build_copilot_objective_handles_prompts_over_128kb() {
     assert_eq!(written.len(), prompt.len(), "tempfile size mismatch");
     assert_eq!(written, prompt, "tempfile content mismatch");
 
-    // The command must reference the file via `cat 'PATH'`, not inline it.
+    // The command must reference the file via a `cat 'PATH' | ...` pipe that
+    // delivers the prompt on STDIN — NOT `-p "$(cat 'PATH')"`, whose argv
+    // expansion is exactly what blew past ARG_MAX and triggered E2BIG
+    // (exit 126) for large accumulated-context goals (issue #2640).
+    let path = temp_file.path().to_str().unwrap();
     assert!(
-        objective.contains("$(cat '"),
-        "objective must read prompt via $(cat 'PATH'): {objective:?}"
+        objective.contains(&format!("cat '{path}' |")),
+        "objective must read the prompt via a `cat 'PATH' |` stdin pipe: {objective:?}"
+    );
+    assert!(
+        !objective.contains("$(cat"),
+        "issue #2640: prompt must NOT be delivered via `$(cat ...)` argv \
+         expansion: {objective:?}"
+    );
+    assert!(
+        !objective.contains(" -p "),
+        "issue #2640: large prompt must NOT reach argv via the `-p` flag: {objective:?}"
     );
 
     // Sanity: no fragment of the inlined prompt body leaked through.
