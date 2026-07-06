@@ -83,7 +83,7 @@ fn write_amplihack_observation_shim(dir: &Path) -> PathBuf {
     let log_path_str = log_path.to_string_lossy();
     let script = format!(
         r#"#!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 LOG="{log}"
 {{
     echo "BEGIN_ARGV"
@@ -95,6 +95,13 @@ LOG="{log}"
     # Whitelisted sibling env keys so a future regression that drops the
     # parent-env passthrough is also caught.
     echo "ENV: PATH_SET=${{PATH:+yes}}"
+    # Capture the prompt delivered on STDIN (issue #2640): the copilot engineer
+    # subprocess reads its prompt from stdin, never argv. `cat` drains the pipe
+    # until the feeder closes it (EOF).
+    echo "STDIN_BEGIN"
+    cat
+    echo ""
+    echo "STDIN_END"
     echo "DONE"
 }} >> "$LOG"
 exit 0
@@ -140,18 +147,25 @@ fn copilot_argv_contract_includes_both_permission_flags_in_order() {
         .iter()
         .position(|a| a == "--allow-all-paths")
         .expect("--allow-all-paths must be present");
-    let p_pos = argv
-        .iter()
-        .position(|a| a == "-p")
-        .expect("-p must be present");
 
     assert!(
         tools_pos < paths_pos,
         "--allow-all-tools must precede --allow-all-paths: {argv:?}"
     );
+
+    // Issue #2640: the prompt rides on stdin, so `--subprocess-safe` must be
+    // present (headless stdin read) and NO `-p`/prompt may appear in argv.
     assert!(
-        paths_pos < p_pos,
-        "permission flags must precede -p: {argv:?}"
+        argv.iter().any(|a| a == "--subprocess-safe"),
+        "copilot argv must include --subprocess-safe for stdin delivery: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a == "-p"),
+        "copilot argv must NOT pass the prompt via -p (issue #2640): {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a == "objective"),
+        "the prompt body must never appear in copilot argv (issue #2640): {argv:?}"
     );
 
     // Forbidden tokens — Copilot CLI does not accept these and will reject
@@ -171,11 +185,12 @@ fn copilot_argv_contract_includes_both_permission_flags_in_order() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2 — observed argv reaches the spawned subprocess
+// Test 2 — observed argv reaches the spawned subprocess; prompt on stdin
 //
 // Spawn the helper with the env-redirected `amplihack` pointing at the
-// observation shim. Read back the log and assert both permission flags
-// landed in the spawned process's argv.
+// observation shim. Read back the log and assert both permission flags landed
+// in the spawned process's argv, that the prompt is NOT in argv (issue #2640),
+// and that the prompt body was delivered on the subprocess's STDIN.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -203,31 +218,64 @@ fn spawned_copilot_subprocess_receives_allow_all_tools_in_argv() {
          observations:\n{log}"
     );
     assert!(
+        log.contains("ARG: --subprocess-safe"),
+        "spawned subprocess argv must include --subprocess-safe for stdin \
+         delivery (issue #2640); observations:\n{log}"
+    );
+    assert!(
         log.contains("ARG: copilot"),
         "spawned subprocess argv must start with the `copilot` subcommand; \
          observations:\n{log}"
     );
+
+    // THE FIX (issue #2640): the prompt rides on stdin, never argv.
     assert!(
-        log.contains("ARG: -p"),
-        "spawned subprocess argv must include -p; observations:\n{log}"
+        !log.contains("ARG: -p"),
+        "spawned subprocess argv must NOT include -p; the prompt is on stdin; \
+         observations:\n{log}"
+    );
+    let (argv_section, stdin_section) = split_argv_stdin(&log);
+    assert!(
+        !argv_section.contains("engineer prompt body"),
+        "the prompt body must NOT appear in argv (issue #2640); \
+         observations:\n{log}"
     );
     assert!(
-        log.contains("ARG: engineer prompt body"),
-        "spawned subprocess argv must include the literal prompt; \
+        stdin_section.contains("engineer prompt body"),
+        "the prompt body must be delivered on the subprocess STDIN (issue #2640); \
          observations:\n{log}"
     );
 
-    // Anti-regression: --allow-all-tools must come BEFORE -p in the captured
-    // log line ordering. We check this by looking up byte positions.
+    // Anti-regression (#1717): --allow-all-tools must still precede
+    // --allow-all-paths in the captured argv ordering.
     let tools_idx = log
         .find("ARG: --allow-all-tools")
         .expect("flag presence already asserted");
-    let p_idx = log.find("ARG: -p").expect("flag presence already asserted");
+    let paths_idx = log
+        .find("ARG: --allow-all-paths")
+        .expect("flag presence already asserted");
     assert!(
-        tools_idx < p_idx,
-        "--allow-all-tools must precede -p in the spawned argv ordering; \
-         observations:\n{log}"
+        tools_idx < paths_idx,
+        "--allow-all-tools must precede --allow-all-paths in the spawned argv \
+         ordering; observations:\n{log}"
     );
+}
+
+/// Split the observation log into its `BEGIN_ARGV..END_ARGV` argv section and
+/// its `STDIN_BEGIN..STDIN_END` stdin section, so a test can assert the prompt
+/// landed on stdin and NOT in argv.
+fn split_argv_stdin(log: &str) -> (String, String) {
+    let argv = log
+        .split_once("BEGIN_ARGV")
+        .and_then(|(_, rest)| rest.split_once("END_ARGV"))
+        .map(|(argv, _)| argv.to_string())
+        .unwrap_or_default();
+    let stdin = log
+        .split_once("STDIN_BEGIN")
+        .and_then(|(_, rest)| rest.split_once("STDIN_END"))
+        .map(|(stdin, _)| stdin.to_string())
+        .unwrap_or_default();
+    (argv, stdin)
 }
 
 // ---------------------------------------------------------------------------
@@ -316,9 +364,16 @@ fn engineer_dispatch_with_write_commit_pr_prompt_returns_ok_with_full_grant() {
         "write/commit/PR engineer dispatch missing COPILOT_ALLOW_ALL=1; \
          observations:\n{log}"
     );
+    // Issue #2640: the literal prompt reaches the subprocess on STDIN, not argv.
+    let (argv_section, stdin_section) = split_argv_stdin(&log);
     assert!(
-        log.contains(prompt),
-        "the literal engineer prompt must reach the subprocess argv; \
+        !argv_section.contains(prompt),
+        "the engineer prompt must NOT appear in argv (issue #2640); \
          observations:\n{log}"
+    );
+    assert!(
+        stdin_section.contains(prompt),
+        "the literal engineer prompt must reach the subprocess on STDIN \
+         (issue #2640); observations:\n{log}"
     );
 }

@@ -176,6 +176,7 @@ pub(crate) const PART_02: &str = r#"          if(d.ooda_transcripts?.length){
         let overviewHtml=`
           <div class="stat"><span class="label">Total Facts</span><span class="value">${d.total_facts}</span></div>
           <div class="stat"><span class="label">Last Memory Compaction</span><span class="value">${d.last_consolidation?timeAgo(d.last_consolidation)+' ('+formatTime(d.last_consolidation)+')':'Not tracked yet'}</span></div>
+          <div class="stat"><span class="label">Recent Consolidations</span><span class="value">${(d.recent_consolidation_activity&&d.recent_consolidation_activity.count)?d.recent_consolidation_activity.count+(d.recent_consolidation_activity.last?' (last '+timeAgo(d.recent_consolidation_activity.last)+')':''):'None yet'}</span></div>
           <div class="stat"><span class="label">State Root</span><span class="value" style="font-size:.8rem;word-break:break-all">${esc(d.state_root)}</span></div>`;
         if(d.native_memory){
           const nm=d.native_memory;

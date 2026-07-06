@@ -41,6 +41,7 @@ fn seed_active_only(state_root: &std::path::Path, n: usize) -> GoalBoard {
     for i in 0..n {
         board.active.push(ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: format!("engineer-mig-active-goal-{i:02}"),
             description: format!("Engineer migration active goal #{i:02}"),

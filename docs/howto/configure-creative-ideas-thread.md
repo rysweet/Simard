@@ -65,6 +65,78 @@ If instead you want to add an unrelated scheduled process, see
 *engineer* concurrency, that is the AIMD action-slot scaler
 (`SIMARD_MAX_CONCURRENT_ACTIONS`), not this thread.
 
+## Daemon wiring & startup (how the operator sees it run)
+
+The thread is **wired into the running OODA daemon** — it is not something you
+start separately. At startup the daemon builds the cognitive-thread runtime,
+registers the Creative Ideas thread through
+`register_creative_ideas_if_enabled(&mut mind, &cfg)`, and then ticks it on its
+configured cadence alongside the Overseer and Journal threads.
+
+### It runs even when the rest of the cognitive-thread scheduler is off
+
+The generic cognitive-thread scheduler master switch
+(`SIMARD_COGNITIVE_THREADS_ENABLED`, which turns on the maintenance and
+engineer-log threads) is **default-OFF**. Creative Ideas is **not** gated behind
+it. The daemon builds the `Mind` runtime whenever *either* the generic scheduler
+**or** Creative Ideas is enabled:
+
+```text
+runtime built  ⇔  SIMARD_COGNITIVE_THREADS_ENABLED is truthy
+                  OR  CreativeIdeasConfig::from_env().enabled()   (default true)
+```
+
+So on a stock deployment — with `SIMARD_COGNITIVE_THREADS_ENABLED` unset — the
+maintenance/engineer-log threads stay off, but the Creative Ideas thread is
+still registered and runs. Set `SIMARD_CREATIVE_IDEAS_ENABLED=0` to opt the
+Creative Ideas thread (and, if nothing else needs the runtime, the runtime
+itself) out.
+
+### Startup log line
+
+The daemon emits one dedicated line at startup, mirroring the Overseer and
+Journal threads, so you can confirm the wiring at a glance:
+
+```text
+[simard] OODA daemon: creative-ideas thread ENABLED (default) (interval = 86400s; SIMARD_CREATIVE_IDEAS_ENABLED opt-out)
+```
+
+When opted out you instead see:
+
+```text
+[simard] OODA daemon: creative-ideas thread DISABLED (SIMARD_CREATIVE_IDEAS_ENABLED opt-out)
+```
+
+Confirm it under systemd with:
+
+```bash
+journalctl -u simard-ooda --no-pager | grep 'creative-ideas thread'
+```
+
+### Per-tick log line
+
+Every time the thread actually runs (it is *due* on the first cycle after
+startup, then every `SIMARD_CREATIVE_IDEAS_INTERVAL_SECS`), the scheduler
+surfaces its summary through the shared cognitive-thread log prefix:
+
+```text
+[simard] cognitive-thread: creative_ideas: generated 10 idea(s), 8 survived dedup, 8 persisted, 8 reviewed (2 → goal, 1 → issue), 0 review error(s)
+```
+
+A dry-run tick reads `generated (dry-run) …` and writes nothing external. Follow
+the activity live with:
+
+```bash
+journalctl -u simard-ooda -f | grep -E 'creative[-_]ideas'
+```
+
+The same per-tick summary and the thread's heartbeat (`last_run` / `next_run` /
+consecutive-error count) also flow into the Overseer activity feed and the
+dashboard/journal, so a healthy Creative Ideas thread is visible without reading
+raw logs. Because generation + review touch the network, the tick runs on a
+background thread with an overlap guard and panic isolation — a slow or failing
+tick can never stall or crash the authoritative OODA loop.
+
 ## Turn it off (opt out)
 
 The subsystem is **default-ON**. `CreativeIdeasConfig::from_env()` is the single
@@ -95,6 +167,26 @@ export SIMARD_DAILY_BUDGET_USD=5.00                # reused budget ceiling (exis
 
 The truthiness check mirrors `overseer_acting_enabled()` — `1`, `true`, `yes`,
 etc. count as on; unset or `0` is off.
+
+### Opting out under systemd
+
+The deployed daemon runs from the `simard-ooda` systemd unit
+(`scripts/simard-ooda.service`), where the subsystem is on by default. To opt a
+deployment out, add a drop-in (or edit the unit) so the master switch is falsey,
+then reload and restart:
+
+```bash
+sudo systemctl edit simard-ooda    # creates a drop-in override
+# In the editor add:
+#   [Service]
+#   Environment=SIMARD_CREATIVE_IDEAS_ENABLED=0
+sudo systemctl daemon-reload
+sudo systemctl restart simard-ooda
+journalctl -u simard-ooda --no-pager | grep 'creative-ideas thread'   # now DISABLED
+```
+
+The unit itself documents this opt-out (and the least-privilege `gh`/`GITHUB_TOKEN`
+scope the routing step needs) in a comment block near the other feature switches.
 
 ## What one generation tick does
 
@@ -271,8 +363,10 @@ impl Reviewer for SecuritySmellReviewer {
 ```
 
 Production reviewer adapters invoke an amplihack skill/agent through the
-`invoke_agent(prompt) -> String` seam; the prompt bodies are marked `// FUTURE:`
-until the real reviewers are wired (M3).
+`AgentInvoker::invoke(prompt) -> String` seam (the same blessed session path the
+OODA brain uses). The three vetting reviewers ship with real prompt assets
+(`prompt_assets/simard/creative_ideas_review_*.md`); tests inject a deterministic
+fake invoker so no network is touched.
 
 ## Test it (no network, all fakes)
 

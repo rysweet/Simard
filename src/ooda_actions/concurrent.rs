@@ -399,6 +399,7 @@ pub(super) fn is_concurrent_advance_candidate(action: &PlannedAction, state: &Oo
 fn active_goal_for_test(id: &str) -> crate::goal_curation::ActiveGoal {
     crate::goal_curation::ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: id.to_string(),
         description: format!("goal {id}"),

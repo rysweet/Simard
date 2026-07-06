@@ -8,9 +8,9 @@ pub mod engineer_log_analysis;
 pub mod maintenance;
 pub mod ooda;
 
-// Issue #2419 (design spike): the Creative Ideas generator thread — reuses
-// `ThreadKind::BackgroundThought`, gated OFF by default, not registered with
-// the `Mind` during the spike.
+// Issue #2419 (design spike) / #2647 (wiring): the Creative Ideas generator
+// thread — reuses `ThreadKind::BackgroundThought`, default-ON opt-out, and
+// registered with the `Mind` by the OODA daemon at startup.
 pub mod creative_ideas;
 
 pub use creative_ideas::CreativeIdeasThread;

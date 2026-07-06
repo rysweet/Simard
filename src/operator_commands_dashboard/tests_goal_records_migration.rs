@@ -30,6 +30,7 @@ fn seeded_board() -> GoalBoard {
     for i in 0..5 {
         board.active.push(ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: format!("dashboard-mig-active-goal-{i:02}"),
             description: format!("Dashboard migration active goal #{i:02}"),
@@ -96,6 +97,7 @@ fn writer_persists_through_cognitive_memory_without_legacy_file() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: "dashboard-writer-mig-target".to_string(),
         description: "Persisted via dashboard writer helper, not std::fs::write".to_string(),

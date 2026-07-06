@@ -362,6 +362,7 @@ fn handle_add(
             }
             board.active.push(crate::goal_curation::ActiveGoal {
                 parent_goal_id: None,
+                priority_explicit: false,
                 id,
                 description: stored_description,
                 priority,
@@ -455,6 +456,10 @@ fn handle_set_priority(goal_id: &str, priority_str: &str) -> Result<(), Box<dyn 
             })?;
         let old = goal.priority;
         goal.priority = priority;
+        // Issue #2695 follow-up: an operator explicitly setting a priority is the
+        // one path that marks it operator-set provenance, so the prioritization
+        // pass leaves this exact value intact instead of differentiating it away.
+        goal.priority_explicit = true;
         Ok(old)
     })?;
     eprintln!("[simard] goal set-priority: '{goal_id}' changed from p{old} to p{priority}");

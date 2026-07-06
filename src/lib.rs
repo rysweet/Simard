@@ -16,6 +16,7 @@ pub mod base_types;
 pub mod bootstrap;
 pub mod build_lock;
 pub mod cargo_jobs;
+pub mod ci_health;
 pub mod cmd_cleanup;
 pub mod cmd_ensure_deps;
 pub mod cmd_install;
@@ -45,10 +46,12 @@ mod copilot_task_submit;
 // `MeetingBackend`; `SignalConversation` (feature-gated below) is a third.
 pub mod conversation_channel;
 pub mod cost_tracking;
-// Issue #2419 (design spike): the Creative Ideas subsystem — an idea-generation
-// cognitive thread + four-reviewer pipeline that primes a pool of candidate
-// self-improvement ideas. Typed foundation + tests only; gated OFF by default
-// (`SIMARD_CREATIVE_IDEAS_ENABLED`) and not wired into the daemon. See
+// Issue #2419 (design spike) / #2647 (wiring): the Creative Ideas subsystem — an
+// idea-generation cognitive thread + four-reviewer pipeline that primes a pool
+// of candidate self-improvement ideas. Wired into the OODA daemon and
+// **default-ON, opt-out** via `SIMARD_CREATIVE_IDEAS_ENABLED` (consistent with
+// the Overseer/Journal threads, independent of the generic
+// `SIMARD_COGNITIVE_THREADS_ENABLED` switch). See
 // `docs/design/creative-ideas-thread.md`.
 pub mod creative_ideas;
 pub mod disk_health;
@@ -160,6 +163,12 @@ pub mod session_id;
 #[cfg(feature = "signal")]
 pub mod signal_conversation;
 pub mod skill_builder;
+// Issue #2640: the single large-payload spawn facade. One policy-enforcing
+// chokepoint every agent/recipe launch routes a (possibly large) prompt or
+// context value through, so a payload >= ARGV_PAYLOAD_MAX_BYTES is always
+// delivered out-of-band (copilot prompts on stdin, recipe context on a file)
+// and never touches argv/envp — closing the recurring E2BIG class for good.
+pub mod spawn_payload;
 pub mod state_root;
 pub mod stewardship;
 pub mod subagent_sessions;

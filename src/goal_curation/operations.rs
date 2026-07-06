@@ -868,6 +868,7 @@ pub fn promote_to_active(
     let item = board.backlog.remove(position);
     board.active.push(ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: item.id,
         description: item.description,
@@ -1339,6 +1340,7 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
         let id = crate::goals::goal_slug(id_source);
         board.active.push(ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             id,
             description: description.to_string(),
             priority,

@@ -81,7 +81,9 @@ pub(crate) async fn traces() -> Json<Value> {
 }
 
 /// Live activity view: current OODA state, in-flight actions, recent cycle
-/// outcomes, open PRs, and assigned issues.
+/// outcomes, and assigned issues. Open-PR state is served separately by the
+/// Overview Merge Readiness card (`/api/merge-readiness`), so this endpoint no
+/// longer duplicates it (#26).
 pub(crate) async fn activity() -> Json<Value> {
     // --- 1. Daemon health (current cycle & phase) ---
     let health_path = dirs::data_local_dir()
@@ -127,29 +129,22 @@ pub(crate) async fn activity() -> Json<Value> {
     let state_root = resolve_state_root();
     let recent_cycles = read_recent_cycle_reports(&state_root, 10);
 
-    // --- 3. Open PRs & assigned issues (concurrent) ---
-    let (open_prs, assigned_issues) = tokio::join!(
-        run_gh_json(&[
-            "pr",
-            "list",
-            "--author",
-            "@me",
-            "--state",
-            "open",
-            "--json",
-            "number,title,url,createdAt,headRefName",
-        ]),
-        run_gh_json(&[
-            "issue",
-            "list",
-            "--assignee",
-            "@me",
-            "--state",
-            "open",
-            "--json",
-            "number,title,url,labels",
-        ])
-    );
+    // --- 3. Assigned issues ---
+    // Open-PR state is served by the Overview Merge Readiness card
+    // (`/api/merge-readiness`); this endpoint no longer fetches open PRs so it
+    // does not duplicate that surface or spawn a redundant `gh pr list` per
+    // Overview refresh (#26).
+    let assigned_issues = run_gh_json(&[
+        "issue",
+        "list",
+        "--assignee",
+        "@me",
+        "--state",
+        "open",
+        "--json",
+        "number,title,url,labels",
+    ])
+    .await;
 
     Json(json!({
         "daemon": {
@@ -159,7 +154,6 @@ pub(crate) async fn activity() -> Json<Value> {
             "actions_taken": actions_taken,
         },
         "recent_cycles": recent_cycles,
-        "open_prs": open_prs,
         "assigned_issues": assigned_issues,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))

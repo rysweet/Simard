@@ -1,10 +1,11 @@
 //! Journal data types (issue #2606).
 //!
-//! A [`JournalEntry`] is Simard's diary-like narrative for a single day: a
-//! layperson-readable, jargon-free story of what Simard (and its steward, the
-//! Overseer) did, plus a plain-language table of the day's code-change
-//! proposals. Entries are built largely from **episodic** memories and are
-//! persisted in cognitive memory (see [`crate::journal::store`]).
+//! A [`JournalEntry`] is Simard's professional narrative engineering & research
+//! report for a single day: a layperson-readable, jargon-free account — in
+//! factual, third-person prose, never a personal diary — of what Simard (and its
+//! steward, the Overseer) did, plus a plain-language table of the day's
+//! code-change proposals. Entries are built largely from **episodic** memories
+//! and are persisted in cognitive memory (see [`crate::journal::store`]).
 //!
 //! The transient [`DayContext`] is the assembled, injectable input to
 //! generation — episodics are the primary/required source, augmented by the

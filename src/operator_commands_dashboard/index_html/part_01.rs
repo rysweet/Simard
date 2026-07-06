@@ -25,6 +25,11 @@ pub(crate) const PART_01: &str = r#"
         with <strong>Disconnect</strong>.
       </div>
       <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.75rem">
+        <label for="agent-terminal-select" style="color:#8b949e;font-size:.85rem">Agent</label>
+        <select id="agent-terminal-select" onchange="onAgentTerminalSelect()"
+                style="padding:.35rem .5rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:monospace;min-width:16rem">
+          <option value="" disabled selected>no agents available</option>
+        </select>
         <label for="agent-log-name" style="color:#8b949e;font-size:.85rem">Agent name</label>
         <input id="agent-log-name" type="text" placeholder="e.g. planner" maxlength="64"
                style="padding:.35rem .5rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:monospace;min-width:14rem">
@@ -106,7 +111,7 @@ pub(crate) const PART_01: &str = r#"
         <div class="ws-status disconnected" id="ws-status">● Disconnected <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button></div>
         <div id="chat-messages"></div>
         <div id="chat-input-row">
-          <textarea id="chat-input" placeholder="Type a message… (/close to end session)"></textarea>
+          <textarea id="chat-input" rows="1" placeholder="Type a message… (/close to end session)"></textarea>
           <button id="chat-send" onclick="sendChat()">Send</button>
         </div>
       </div>
@@ -583,6 +588,116 @@ pub(crate) const PART_01: &str = r#"
        (issue #20). Completed=green, in-progress=accent, not-started/proposed=
        grey, paused=muted. */
     const GOAL_STATUS_COLORS={'not-started':'#8b949e','proposed':'#8b949e','in-progress':'var(--accent)','blocked':'#d29922','paused':'#6e7681','completed':'#2ea043'};
+    /* Issue #2695 follow-up: classify a NUMERIC goal priority to a canonical
+       tier KEY by its value (never by parsing free-form text). The key indexes
+       the hardcoded GOAL_PRIORITY_COLORS allowlist below so priority data is
+       never interpolated into a style= attribute. Lower number = higher
+       priority: <=1 critical, 2 high, 3 medium, 4 low, >=5 minimal. */
+    function priorityTierKey(priority){
+      const p=Number(priority);
+      if(!Number.isFinite(p))return'medium';
+      if(p<=1)return'critical';
+      if(p===2)return'high';
+      if(p===3)return'medium';
+      if(p===4)return'low';
+      return'minimal';
+    }
+    /* Plain-English priority TIER LABEL (e.g. "Critical"). Returns PLAIN TEXT —
+       callers esc() the RESULT last and append the raw "(pN)" number; this runs
+       on the RAW priority, never on already-escaped text (escape-last). */
+    function humanizePriority(priority){
+      const p=Number(priority);
+      if(!Number.isFinite(p))return'\u2014';
+      return{critical:'Critical',high:'High',medium:'Medium',low:'Low',minimal:'Minimal'}[priorityTierKey(p)];
+    }
+    /* Hardcoded allowlist: one colour per priority tier key, a hotter=more-urgent
+       heat gradient. Goal-supplied priority is classified to a key first, so only
+       these colours ever reach the DOM. The Critical red and Medium amber match
+       hues used in other columns (Current Activity / Status) but live in the
+       distinct Priority column with their own labels, so they stay unambiguous. */
+    const GOAL_PRIORITY_COLORS={critical:'#f85149',high:'#db6d28',medium:'#d29922',low:'#388bfd',minimal:'#8b949e'};
+    /* Issue #2695 follow-up: order goals by priority ASCENDING (lower number =
+       higher priority = first) with a stable id tiebreak. Applied at BOTH the
+       top level and within each parent's children so priority-first ordering
+       holds at every level of the tree. Returns a NEW array (non-mutating). */
+    function sortGoalsByPriority(goals){
+      return (goals||[]).slice().sort((a,b)=>{
+        const pa=Number(a&&a.priority), pb=Number(b&&b.priority);
+        const na=Number.isFinite(pa)?pa:Infinity, nb=Number.isFinite(pb)?pb:Infinity;
+        if(na!==nb)return na-nb;
+        return String((a&&a.id)||'').localeCompare(String((b&&b.id)||''));
+      });
+    }
+    /* Issue #2695 follow-up: group decomposed sub-goals under their parent using
+       the structured parent_goal_id edge (G3 — never parse the description), and
+       order the resulting tree by priority at every level. Returns priority-
+       ordered top-level ENTRIES, each either:
+         {kind:'goal',  goal, children[], rep}      standalone/active-parent goal
+         {kind:'umbrella', header, children[], rep} demoted decompose-parent group
+       Nesting rules:
+         * parent_goal_id null / self / resolves to neither set -> the goal roots
+           the tree (orphans + completed/tombstoned-parent children at root);
+         * parent_goal_id matches an ACTIVE, top-level goal -> nest under it;
+         * parent_goal_id matches a demoted `decompose-parent` node in `backlog`
+           (the normal post-decompose case, where the umbrella left the active
+           board) -> nest under a header synthesised from that backlog node.
+       Depth is capped at a single grouping level (decomposition is one level) and
+       a parent that is itself nested is not a nesting target, so a cyclic/deep
+       parent chain can never loop or indent unboundedly — such nodes fall to the
+       root. `rep` is the entry's representative priority for top-level ordering:
+       an active parent's own priority, or a demoted group's min child priority. */
+    function groupGoalsByParent(active,backlog){
+      const list=active||[];
+      const activeById={};
+      for(const g of list){ if(g&&g.id!=null) activeById[String(g.id)]=g; }
+      const backlogById={};
+      for(const b of (backlog||[])){ if(b&&b.id!=null) backlogById[String(b.id)]=b; }
+      const parentKey=g=>{
+        const pid=(g&&g.parent_goal_id!=null)?String(g.parent_goal_id):null;
+        return (pid!==null&&pid!==String(g&&g.id))?pid:null;
+      };
+      const resolves=pid=>pid!==null&&(Object.prototype.hasOwnProperty.call(activeById,pid)||Object.prototype.hasOwnProperty.call(backlogById,pid));
+      // An active goal can HOST children only when it is itself top-level (its
+      // own parent does not resolve) — this caps depth at one level and breaks
+      // any parent-chain cycle by refusing to nest under a nested node.
+      const isTopLevelActive=g=>!resolves(parentKey(g));
+      const childrenOf={};
+      const demotedHeaders={};
+      const roots=[];
+      for(const g of list){
+        const pid=parentKey(g);
+        if(pid!==null&&Object.prototype.hasOwnProperty.call(activeById,pid)&&isTopLevelActive(activeById[pid])){
+          (childrenOf[pid]=childrenOf[pid]||[]).push(g);
+        }else if(pid!==null&&Object.prototype.hasOwnProperty.call(backlogById,pid)){
+          (childrenOf[pid]=childrenOf[pid]||[]).push(g);
+          demotedHeaders[pid]=backlogById[pid];
+        }else{
+          roots.push(g); // null / self / unresolved / non-top-level parent
+        }
+      }
+      const entries=[];
+      for(const g of roots){
+        entries.push({
+          kind:'goal',
+          goal:g,
+          children:sortGoalsByPriority(childrenOf[String(g&&g.id)]||[]),
+          rep:Number(g&&g.priority)
+        });
+      }
+      for(const pid in demotedHeaders){
+        if(!Object.prototype.hasOwnProperty.call(demotedHeaders,pid))continue;
+        const kids=sortGoalsByPriority(childrenOf[pid]||[]);
+        const rep=kids.reduce((m,c)=>{const p=Number(c&&c.priority);return Number.isFinite(p)?Math.min(m,p):m;},Infinity);
+        entries.push({kind:'umbrella',header:demotedHeaders[pid],children:kids,rep:rep});
+      }
+      return entries.sort((a,b)=>{
+        const na=Number.isFinite(a.rep)?a.rep:Infinity, nb=Number.isFinite(b.rep)?b.rep:Infinity;
+        if(na!==nb)return na-nb;
+        const ia=a.kind==='goal'?String((a.goal&&a.goal.id)||''):String((a.header&&a.header.id)||'');
+        const ib=b.kind==='goal'?String((b.goal&&b.goal.id)||''):String((b.header&&b.header.id)||'');
+        return ia.localeCompare(ib);
+      });
+    }
     function humanizeTaskMemory(content){
       const raw=(content==null)?'':String(content);
       const trimmed=raw.trim();
@@ -636,6 +751,9 @@ pub(crate) const PART_01: &str = r#"
       return 'tmux attach -t '+s.session_name;
     }
     function renderSubagentSessions(){
+      // Keep the Agent Terminal picker (Workers tab) in sync with the live
+      // registry on every 5s poll (issue #2717).
+      populateAgentSelect();
       const el=document.getElementById('subagent-sessions-list');
       if(!el) return;
       const live=subagentSessionsCache.live||[];
@@ -662,6 +780,80 @@ pub(crate) const PART_01: &str = r#"
         const prev=btn.textContent;btn.textContent='Copied!';
         setTimeout(()=>{btn.textContent=prev;},900);
       },()=>{});
+    }
+    /* Memoized fingerprint of the last-rendered live roster so
+       populateAgentSelect() can no-op when the attachable set is unchanged
+       (avoids per-poll DOM churn and never disrupts an open dropdown). */
+    let agentSelectSig=null;
+    /* --- Agent Terminal available-agents picker (issue #2717) ---
+       populateAgentSelect() is a pure reader of the shared live registry
+       (subagentSessionsCache.live[]) — the SAME source the Workers tab uses to
+       list workers — so the dropdown always reflects reality. It rides the
+       existing 5s refresh via renderSubagentSessions(). Options carry the real
+       host + tmux session_name as data attributes so the attach target never
+       comes from the human-readable label. */
+    function populateAgentSelect(){
+      const sel=document.getElementById('agent-terminal-select');
+      if(!sel) return;
+      const live=subagentSessionsCache.live||[];
+      // Fingerprint the attach-relevant fields; when the live roster is
+      // unchanged, skip the full option rebuild so a stable set costs nothing
+      // each 5s poll and an open dropdown is never disrupted.
+      const sig=live.map(s=>[s.agent_id,s.host,s.session_name,s.goal_id].join('\x1f')).join('\x1e');
+      if(sig===agentSelectSig) return;
+      agentSelectSig=sig;
+      const prev=sel.value;
+      sel.replaceChildren();
+      if(!live.length){
+        const opt=document.createElement('option');
+        opt.value='';opt.disabled=true;opt.selected=true;
+        opt.textContent='no agents available';
+        sel.appendChild(opt);
+        sel.disabled=true;
+        return;
+      }
+      sel.disabled=false;
+      /* Neutral prompt kept as options[0] so a stale (or not-yet-made) pick never
+         silently repoints the dropdown at an unrelated live agent — which would
+         leave the label naming a different agent than the terminal is attached to.
+         It is disabled, so onAgentTerminalSelect() never treats it as a target. */
+      const prompt=document.createElement('option');
+      prompt.value='';prompt.disabled=true;prompt.textContent='select an agent';
+      sel.appendChild(prompt);
+      for(const s of live){
+        const opt=document.createElement('option');
+        opt.value=s.agent_id||'';
+        opt.dataset.host=s.host||'';
+        opt.dataset.session=s.session_name||'';
+        let label=s.agent_id||'(unknown)';
+        if(s.goal_id) label+=' — '+s.goal_id;
+        label+=' — live';
+        opt.textContent=label;
+        sel.appendChild(opt);
+      }
+      /* Restore the operator's prior pick across the 5s rebuild only when it is
+         still live (a programmatic .value assignment never dispatches 'change',
+         so this never fires an attach). When the prior pick has left live[], keep
+         the neutral prompt selected rather than jumping the label to a different
+         agent than the terminal is attached to (matches the empty-state intent). */
+      const stillPresent=prev!==''&&Array.prototype.some.call(sel.options,o=>o.value===prev);
+      if(stillPresent) sel.value=prev; else prompt.selected=true;
+    }
+    /* Fires only on a genuine user change (never the programmatic rebuild
+       above). Reads the chosen option's data-host/data-session and switches the
+       shared terminal to that session via the existing openTmuxAttach(). */
+    function onAgentTerminalSelect(){
+      const sel=document.getElementById('agent-terminal-select');
+      if(!sel) return;
+      const opt=sel.options[sel.selectedIndex];
+      if(!opt||opt.disabled) return;
+      const host=opt.dataset.host||'';
+      const session=opt.dataset.session||'';
+      if(!host||!session){
+        setAgentLogStatus('selected agent has no attachable session','#f85149');
+        return;
+      }
+      openTmuxAttach(host, session);
     }
     /* Shared renderer for Recent Actions outcome.detail strings.
        Detects agent='engineer-...' references and, when a matching tmux
@@ -868,21 +1060,6 @@ pub(crate) const PART_01: &str = r#"
                   ${o.detail?'<span style="color:#8b949e;font-size:.8rem;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block">'+esc(humanizeActionDetail(o.detail).substring(0,120))+'</span>':''}
                 </div>`).join('')}
             </div>`:'<div style="color:#8b949e">No recent actions recorded.</div>'}`;
-
-        // Open PRs
-        const prs=d.open_prs||[];
-        const prEl=document.getElementById('open-prs-list');
-        if(prs.length){
-          prEl.innerHTML=prs.slice(0,8).map(pr=>`
-            <div style="padding:.3rem 0;border-bottom:1px solid var(--border);font-size:.85rem;display:flex;gap:.5rem;align-items:baseline">
-              <a href="${esc(pr.url)}" target="_blank" style="color:var(--accent);text-decoration:none;min-width:3rem">#${pr.number}</a>
-              <span style="flex:1">${esc(pr.title)}</span>
-              <span style="color:#8b949e;font-size:.75rem">${timeAgo(pr.createdAt)}</span>
-            </div>`).join('')+
-            (prs.length>8?`<div style="color:#8b949e;font-size:.8rem;margin-top:.3rem">+ ${prs.length-8} more</div>`:'');
-        }else{
-          prEl.innerHTML='<span style="color:#8b949e">No open PRs</span>';
-        }
 
         // Recent actions from cycle outcomes
         const actEl=document.getElementById('recent-actions-list');

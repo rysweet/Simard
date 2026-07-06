@@ -16,6 +16,7 @@ mod types;
 
 mod decompose;
 mod edges;
+mod prioritize;
 
 // Re-export all public items so `crate::goal_curation::X` still works.
 pub use operations::CarryoverVerification;
@@ -38,6 +39,7 @@ pub use decompose::{
     RecipeGoalDecomposer, SubGoalProposal, decompose_goal, parse_subgoals_json,
 };
 pub use edges::{children_of, edges_of_type, node_of, parse_goal_edge, write_edge, write_node};
+pub use prioritize::{PrioritizationSignals, prioritize};
 
 pub use completion_gate::{
     COMPLETION_VERIFICATION_METRIC, CompletionEvidence, CompletionEvidenceGate, CompletionVerdict,
@@ -79,3 +81,10 @@ mod tests_snapshot_dedup;
 mod tests_decompose;
 #[cfg(test)]
 mod tests_edges;
+
+// Issue #2695 follow-up: the goal prioritization pass differentiates
+// undifferentiated (flat) priorities while preserving operator-set ones. These
+// tests pin the `priority_explicit` provenance flag and the pure `prioritize`
+// pass. The `prioritize` module is added by the implementation step.
+#[cfg(test)]
+mod tests_prioritize;

@@ -28,10 +28,10 @@ order:
 
 | Tab | Sub-sections | Shows |
 |-----|--------------|-------|
-| **Overview** | Summary · Health · Stats | Daemon status (OODA loop active / stopped), current cycle number, top-priority goal, last cycle's actions, and the recent-actions stream (**Summary**); system status — version, daemon state, active process count, disk usage — open PRs, open issues, and the **Machines & Memory Sharing** card, i.e. whether Simard runs on one machine or a group and how they share what they've learned (**Health**); and aggregate run counters and rollups (**Stats**). |
+| **Overview** | Summary · Health · Stats | Daemon status (OODA loop active / stopped), current cycle number, top-priority goal, last cycle's actions, and the recent-actions stream (**Summary**); system status — version, daemon state, active process count, disk usage — per-PR **Merge Readiness** (the single Overview PR surface — the duplicative "Open PRs" card was removed, see [Overview → Health: Open PRs card removed](#overview-tab-health-open-prs-card-removed-26)), open issues, and the **Machines & Memory Sharing** card, i.e. whether Simard runs on one machine or a group and how they share what they've learned (**Health**); and aggregate run counters and rollups (**Stats**). |
 | **Goals** | Goals · Work Board | The full goal register — active top-N goals with priority, status, and current activity, plus the proposed backlog with promote/dismiss controls (**Goals**) — and the shared scratch canvas with Task Memory and Recent Actions (**Work Board**). |
 | **Activity** | Logs · Traces · Thinking · Failures | The **Background Service Log** (live activity from Simard's always-on background process), the cost ledger, and the **Cycle Reports** card — recent OODA cycles with their live cycle number, real per-cycle tree status, and Observe/Orient/Decide/Act detail, collapsed with a `×N` repeat-count and refreshed live, see [Activity: Cycle Reports](#activity-tab-logs-cycle-reports-26) — with a severity menu (All / Errors / Warnings / Info) and free-text search (**Logs**); recent agent traces from the cost ledger, journald, and in-process spans, plus OTEL status, each row read as plain language — **when**, **what**, **who** (**Traces**); the **Thinking** panel's two halves — a **Cycle History** table (collapsed per-cycle timeline with real timestamps, a `×N` repeat-count for runs of equivalent cycles, difference-carrying summaries, and a self-hiding duration-trend chart) and the **Agent Internal Reasoning** OODA Observe/Orient/Decide/Act breakdown, see [Thinking: Cycle History](#thinking-tab-cycle-history-21) (**Thinking**); and brain-fallback and decision failures (**Failures**). |
-| **Workers** | Processes · Engineers · Terminal | The live process tree under the daemon — engineer subprocesses, LLM sessions, tmux sessions, and their resource usage (**Processes** / **Engineers**) — and a browser-attached PTY into the daemon host (**Terminal**). |
+| **Workers** | Processes · Engineers · Terminal | The live process tree under the daemon — engineer subprocesses, LLM sessions, tmux sessions, and their resource usage (**Processes** / **Engineers**) — and a browser-attached PTY into the daemon host, with an [agent picker](operator-dashboard/agent-terminal-agent-picker.md) drop-down for choosing which live agent to attach to (**Terminal**). |
 | **Pull Requests** | Merge Decisions · Readiness | Automated merge decisions and the rationale behind each (**Merge Decisions**), and per-PR readiness checks covering CI, review, and mergeability (**Readiness**). |
 | **Resources** | Memory · Costs | The cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters, full-text search, the live **Memory Store** counts, and the **Memory Files** panel (**Memory**); and per-provider, per-model token spend across the active session (**Costs**). See [Memory architecture](memory.md). |
 | **Chat** | — | Direct chat with Simard. Conversations are saved as durable, resumable **sessions**: a sidebar lists every saved chat, the panel fills the page, and assistant replies stream in incrementally. See [Chat: durable, resumable sessions](#chat-tab-durable-resumable-sessions). |
@@ -108,6 +108,12 @@ horizontal space. The transcript scrolls inside a flex-grown message area while
 the input row stays anchored at the bottom, and the panel grows with the browser
 window — no fixed small box.
 
+**Multi-line composer.** The message box is a multi-line text area: press
+**Enter** to send and **Shift+Enter** to add a newline. It starts at a single
+line, grows automatically as you type or paste additional lines (up to a capped
+height, then scrolls), and collapses back to one line after each message is
+sent. See [Dashboard Chat — multi-line message input](reference/dashboard-chat-multiline-input.md).
+
 **Streaming with graceful fallback.** Assistant replies appear **incrementally**,
 word-by-word, rather than all at once. A client that only understands the legacy
 single-message shape still works — it simply receives the reply as one complete
@@ -144,6 +150,21 @@ boilerplate, and applies the shared `BANNED_JARGON` strip — while preserving a
 works. The transform is render-layer only: the canonical `brain` / `ooda_brain`
 strings, logs, and API responses are unchanged. See
 [Overview action-detail humanization](reference/dashboard-action-detail-humanization.md).
+
+### Overview tab → Health: Open PRs card removed (#26)
+
+The **Health** sub-section previously carried two overlapping PR cards: a plain
+**Open PRs** list and the richer **Merge Readiness** card. Everything the Open
+PRs card showed (PR number, title, link) is a strict subset of Merge Readiness,
+which additionally reports whether each PR can merge (CI rollup, base-branch
+allow-list, objective merge-gate verdict, blocker reason, and the active
+merge-judge kind). The duplicate **Open PRs** card has been **removed
+completely** — its markup, its client renderer, and its `/api/activity` →
+`open_prs` data producer (one fewer `gh pr list` subprocess per Overview
+refresh). **Merge Readiness** is now the single Overview PR surface; the
+**Pull Requests → Readiness** tab (`/api/prs`) is a separate view and is
+unaffected. Full before/after and the `/api/activity` contract change are in the
+[Open PRs card removal & live memory-consolidation reference](reference/dashboard-overview-health-and-live-memory.md).
 
 ### Overview tab → Health: plain-English "Machines & Memory Sharing" card
 
@@ -215,6 +236,38 @@ classified by enum key via `goalLifecycleKey` and coloured from the hard-coded
 reloads the goal board on every request, so it reconciles with `simard goal
 list` by construction. See
 [Goals tab lifecycle-status badges](reference/dashboard-goal-lifecycle-status.md)
+for the full reference.
+
+### Goals tab: hierarchy nesting & differentiated priorities
+
+The **Goals** tab's active-goals table renders as a **priority-ordered tree**
+rather than a flat list. Two coupled improvements sit on top of the
+lifecycle-status badges above:
+
+- **Hierarchy.** Sub-goals produced by
+  [`simard goal decompose`](reference/goal-decomposition.md) render **nested
+  and indented under their parent** umbrella goal, grouped by the structured
+  `parent_goal_id` back-reference (not by parsing text). Orphans and children
+  whose parent has left the active set render at the root, and the tree walk is
+  cycle-/depth-safe.
+- **Differentiated priorities — display + substance.** The tab **orders goals
+  by priority (highest first)** at every level and shows each goal's priority
+  as a coloured **tier pill** — **Critical** (`≤1`, red `#f85149`), **High**
+  (`2`, orange `#db6d28`), **Medium** (`3`, amber `#d29922`), **Low** (`4`,
+  blue `#388bfd`), **Minimal** (`≥5`, grey `#8b949e`) — via `humanizePriority`
+  / `priorityTierKey` / the hard-coded `GOAL_PRIORITY_COLORS` allowlist,
+  escaped last. Underneath, a deterministic goal-curation **prioritization
+  pass** spreads the priorities of undifferentiated goals (the wall of `p3`,
+  including decomposition children that inherit the parent's value) across
+  `p1…p5` using structured signals (blocking `depends_on` edges, in-flight
+  `wip_refs`, lifecycle status, standing/perpetual, staleness). Priorities the
+  operator set with `simard goal set-priority` are marked
+  `priority_explicit = true` and are **never** reshuffled.
+
+Both hierarchy (`parent_goal_id`) and provenance (`priority_explicit`) are
+additive fields on `/api/goals`, and the `active` array is returned sorted by
+priority ascending. See
+[Goals tab hierarchy & differentiated priorities](reference/dashboard-goal-hierarchy-priority.md)
 for the full reference.
 
 ### Goals tab → Work Board: plain-English Task Memory & Recent Actions
@@ -334,6 +387,20 @@ Store. Rendering them as permanent "0 records / 0 B" tiles next to a store
 holding thousands of facts told operators that memory was empty when it was
 rich. The panel now hides empty legacy tiles so the displayed numbers always
 match Simard's actual remembered state.
+
+The **Last Memory Compaction** statistic in the same card now reflects **live**
+consolidation state (#26). It previously derived from the modification time of
+the retired JSON snapshot files, so it stayed frozen even while consolidation
+ran (~30 `consolidate-memory` actions per 30 min; episodic memory growing
+through the day). It now reads the most recent live consolidation signal — the
+newest `consolidate-memory` OODA action timestamp — and shows `Not tracked yet`
+when no such signal exists yet: it fails closed to `null` rather than fabricating
+a value, with no legacy-file or directory-mtime fallback. `/api/memory` gains a
+`recent_consolidation_activity` `{count, last}` summary, so the statistic visibly
+advances as memory grows. This
+is the same live-read reconciliation as the Activity and Goals tabs (#2697 /
+#2695). See the
+[Open PRs card removal & live memory-consolidation reference](reference/dashboard-overview-health-and-live-memory.md).
 
 ## Feedback widget: report a bug / request a feature (#2629)
 
@@ -634,4 +701,5 @@ The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (def
 - [How to report a bug or request a feature from the dashboard](howto/report-a-bug-or-request-a-feature.md)
 - [Thinking tab — Cycle History (timestamps, collapse, duration trend)](reference/dashboard-thinking-cycle-history.md)
 - [Activity tab — Cycle Reports (live cycle number, accurate tree status, shared detail)](reference/dashboard-activity-cycle-reports.md)
+- [Overview Health & live memory-consolidation (Open PRs card removal, live Last Memory Compaction)](reference/dashboard-overview-health-and-live-memory.md)
 - [Background tab prefetch and refresh (instant tab switches)](reference/dashboard-background-tab-prefetch.md)

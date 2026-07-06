@@ -147,6 +147,7 @@ fn orient_priorities_sorted_by_urgency_descending() {
     let goals = vec![
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: "low".to_string(),
             description: "Low".to_string(),
@@ -159,6 +160,7 @@ fn orient_priorities_sorted_by_urgency_descending() {
         },
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: "high".to_string(),
             description: "High".to_string(),
@@ -171,6 +173,7 @@ fn orient_priorities_sorted_by_urgency_descending() {
         },
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: "mid".to_string(),
             description: "Mid".to_string(),
@@ -194,6 +197,7 @@ fn orient_priorities_sorted_by_urgency_descending() {
 fn orient_failure_cooldown_demotes_urgency() {
     let goals = vec![ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: "broken-goal".to_string(),
         description: "always fails".to_string(),
@@ -225,6 +229,7 @@ fn orient_failure_cooldown_demotes_urgency() {
 fn orient_failure_cooldown_clamps_to_zero() {
     let goals = vec![ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: "really-broken".to_string(),
         description: "many failures".to_string(),
@@ -249,6 +254,7 @@ fn orient_failure_cooldown_clamps_to_zero() {
 fn orient_no_demotion_when_failure_count_zero() {
     let goals = vec![ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: "healthy-goal".to_string(),
         description: "OK".to_string(),

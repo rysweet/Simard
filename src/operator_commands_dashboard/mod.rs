@@ -6,7 +6,7 @@ mod chat;
 mod chat_store;
 mod creative_ideas;
 mod current_work;
-mod cycle_source;
+pub(crate) mod cycle_source;
 mod distributed;
 mod feedback;
 mod goals;

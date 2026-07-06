@@ -286,6 +286,7 @@ mod inline_tests_1979 {
         let mut board = GoalBoard::default();
         board.active.push(ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: id.to_string(),
             description: "test".to_string(),

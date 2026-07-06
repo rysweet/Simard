@@ -9,12 +9,13 @@ description: >
   SynthesisOutcome, SuccessMetric), the routing functions (route_idea_to_goal,
   route_idea_to_issue, mark_idea_pr) with the IdeaGhClient seam, the two new
   SimardError variants, configuration (SIMARD_CREATIVE_IDEAS_*), telemetry, and
-  the test fakes. Subsystem is gated OFF by default.
-last_updated: 2026-07-05
+  the test fakes. Subsystem is wired into the running daemon — default-ON, opt-out
+  via SIMARD_CREATIVE_IDEAS_ENABLED.
+last_updated: 2026-07-06
 review_schedule: as-needed
 owner: simard
 doc_type: reference
-status: spike — typed foundation + tests (OFF by default)
+status: implemented — wired into the daemon (default-ON, opt-out)
 related:
   - ../design/creative-ideas-thread.md
   - ../howto/configure-creative-ideas-thread.md
@@ -86,26 +87,35 @@ asserted in tests.
 ## Configuration
 
 `CreativeIdeasConfig::from_env()` is the single source of truth for gating and
-cadence. A default-constructed config is **disabled**.
+cadence. A default-constructed config is **enabled** (default-ON, opt-out),
+consistent with the Overseer and Journal threads.
 
 | Env var | Default | Effect |
 |---------|---------|--------|
-| `SIMARD_CREATIVE_IDEAS_ENABLED` | `false` | Master switch. When false the thread never ticks and nothing is generated or routed. |
+| `SIMARD_CREATIVE_IDEAS_ENABLED` | `true` | Master switch (default-ON). Only an explicit falsey value (`0`/`false`/`no`/`off`) opts out ⇒ the thread never ticks and nothing is generated or routed. |
 | `SIMARD_CREATIVE_IDEAS_INTERVAL_SECS` | `86400` | Generator cadence — a large (≥ 24 h) observation window. |
 | `SIMARD_CREATIVE_IDEAS_BATCH` | `10` | Ideas targeted per run (the design's fixed batch of ten). |
 | `SIMARD_DAILY_BUDGET_USD` | *(existing)* | Reused for budget-awareness before an expensive tick. |
 
 ```rust
 pub struct CreativeIdeasConfig {
-    pub enabled: bool,        // SIMARD_CREATIVE_IDEAS_ENABLED (default false)
+    pub enabled: bool,        // SIMARD_CREATIVE_IDEAS_ENABLED (default true; opt-out)
     pub interval_secs: u64,   // SIMARD_CREATIVE_IDEAS_INTERVAL_SECS (default 86_400)
     pub batch: usize,         // SIMARD_CREATIVE_IDEAS_BATCH (default 10)
 }
 
+impl Default for CreativeIdeasConfig {
+    /// A default config is ENABLED (default-ON, opt-out).
+    fn default() -> Self;
+}
+
 impl CreativeIdeasConfig {
-    /// Parse from the environment. Truthy check mirrors overseer_acting_enabled().
+    /// Parse from the environment. Gate mirrors overseer_acting_enabled():
+    /// unset/empty ⇒ enabled; only an explicit falsey value opts out.
     pub fn from_env() -> Self;
-    /// True only when the master switch is truthy.
+    /// Parse from an arbitrary env resolver (test seam).
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self;
+    /// True unless the master switch was explicitly set to a falsey value.
     pub fn enabled(&self) -> bool;
 }
 ```
@@ -288,14 +298,41 @@ payload fidelity (`links`, `context`, `success_metric`).
 | `kind()` | `ThreadKind::BackgroundThought` | Reuses the reserved variant; no enum change. |
 | `policy()` | `SchedulePolicy::Interval(Duration::from_secs(interval_secs))` | Default 24 h; reserved to become `Adaptive` later. |
 | `priority()` | `Priority::Low` | Never competes with OODA. |
-| `enabled()` | `config.enabled()` → **`false` by default** | A disabled thread never ticks (scheduler contract), so the subsystem is inert unless explicitly turned on. |
+| `enabled()` | `config.enabled()` → **`true` by default** | Default-ON, opt-out. A disabled thread never ticks (scheduler contract), so an opted-out subsystem is inert. |
 | `tick(&mut ThreadContext)` | `ThreadOutcome` | **Never returns `Err`** — internal errors are folded into `ThreadOutcome::failed(reason, elapsed)`. Uses `ctx.now_epoch` (injected clock) and may `block_on` `ctx.runtime`. Honors `ctx.shutdown` (returns promptly between stages) and `ctx.dry_run` (performs no goal/issue/PR side-effect). |
 
 ```rust
-/// Register the thread with the Mind scheduler. NOT called from the live
-/// daemon during the spike; the call site is a marked `// FUTURE:` seam.
+/// Register the Creative Ideas thread with the Mind scheduler, using the
+/// production idea source + review/route pipeline. Called from the daemon's
+/// cognitive-thread setup behind SIMARD_CREATIVE_IDEAS_ENABLED (default-ON).
 pub fn register(mind: &mut Mind, config: CreativeIdeasConfig);
+
+/// Register only when `cfg.enabled()`; returns whether it registered. The daemon
+/// calls this so "disabled ⇒ not registered" is directly unit-testable.
+pub fn register_creative_ideas_if_enabled(mind: &mut Mind, cfg: &CreativeIdeasConfig) -> bool;
 ```
+
+### Daemon registration
+
+The thread is registered from the OODA daemon's cognitive-thread setup
+(`src/operator_commands_ooda/daemon/mod.rs`), next to the Overseer and Journal
+threads. Two facts make it observable and testable:
+
+- **Runtime gate.** The daemon builds the `Mind` runtime when *either* the
+  generic scheduler master switch (`SIMARD_COGNITIVE_THREADS_ENABLED`,
+  default-OFF, which owns the maintenance/engineer-log threads) **or** Creative
+  Ideas is enabled — so the default-ON Creative Ideas thread runs even on a stock
+  deployment where the generic scheduler is off. Registration goes through
+  `register_creative_ideas_if_enabled`, so an opted-out config leaves the thread
+  unregistered (asserted by a test via `mind.health()` / `mind.len()`).
+- **Startup + per-tick logs.** At startup the daemon emits one dedicated line
+  mirroring the Journal thread:
+  `[simard] OODA daemon: creative-ideas thread ENABLED (default) (interval = {n}s; SIMARD_CREATIVE_IDEAS_ENABLED opt-out)`
+  (or `… DISABLED (SIMARD_CREATIVE_IDEAS_ENABLED opt-out)`). Each run surfaces its
+  summary through the shared scheduler prefix:
+  `[simard] cognitive-thread: creative_ideas: generated N idea(s), …`.
+  The tick executes on a background thread with an overlap guard and panic
+  isolation, so it cannot stall or crash the authoritative OODA loop.
 
 ### Thread inputs (the observation window)
 
@@ -324,13 +361,17 @@ pub trait IdeaSource {
 }
 ```
 
-- **Available now:** `FakeIdeaSource` (deterministic; used by tests).
-- **`// FUTURE:`** `LlmIdeaSource` (the production generator).
+- **Production:** `AgenticIdeaSource` (`src/creative_ideas/source.rs`) — renders
+  the generation prompt asset, runs one agentic turn through the shared
+  `AgentInvoker` seam (idle-liveness, no wall-clock cap), and parses the JSON
+  envelope into `RawIdea`s. Fail-closed: a response with no JSON envelope is a
+  hard error, never a silent empty batch. Built by `register`/`from_env`.
+- **Tests:** `FakeIdeaSource` (deterministic; `with_ideas` / `failing`).
 
 The thread targets **ten** ideas per run, applies dedup + portfolio filtering
-(below), then persists each survivor as `CreativeIdea { status: New, links,
-context }` via `CreativeIdeaStore` and (in the wired future) enqueues it for
-review.
+(below), persists each survivor as `CreativeIdea { status: New, links,
+context }` via `CreativeIdeaStore`, then drives it through the review-and-route
+pipeline.
 
 ## Reviewer pipeline
 
@@ -375,9 +416,11 @@ The four reviewers and their stable ids:
 | 3 | `measurability` | agent adapter (NEW) | Emits a concrete `SuccessMetric`, tied where relevant to existing self-metrics (`recall_precision_at_k`, distill fact-yield, reasoner-reliability). This metric is the only thing that can later move the idea to `ImplementationCompleted`. |
 | 4 | `idea_feedback_synthesis` | synthesis step | Reads **all** reviews + context, summarizes next steps, and **sets the status** per the state machine. |
 
-Production adapters shape an amplihack skill/agent invocation via the
-`invoke_agent(prompt) -> String` seam (the prompt bodies are marked `// FUTURE:`
-stubs); all tests inject deterministic fakes.
+Production adapters shape an amplihack skill/agent invocation via the shared
+`AgentInvoker::invoke(prompt) -> String` seam (the same blessed session path the
+OODA brain uses); the three vetting reviewers ship with real prompt assets
+(`prompt_assets/simard/creative_ideas_review_*.md`). All tests inject
+deterministic fake invokers.
 
 ### Synthesis
 
@@ -575,7 +618,7 @@ With no wire protocol, three externally-observable contracts must remain stable:
 | Node-type sentinel (`trigger_condition = "creative-idea"`) | Never renamed — it is the retrieval key for stored rows | Literal `const CREATIVE_IDEA_TRIGGER`; a rename is a breaking migration |
 | Operator / automation surface (`SIMARD_CREATIVE_IDEAS_*`, labels, assignee) | Stable identifiers | Centralized `const`s in `CreativeIdeasConfig` |
 
-- **Trait/type API** — during the spike the Rust surface is
+- **Trait/type API** — the Rust surface is
   `#![allow(dead_code)]` and carries no semver promise. `Reviewer`,
   `FeedbackSynthesizer`, `IdeaSource`, and `IdeaGhClient` are the long-term
   extension seams: extend via new impls or new trait methods with defaults,

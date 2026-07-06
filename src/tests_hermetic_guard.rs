@@ -100,6 +100,7 @@ fn sample_board() -> GoalBoard {
         &mut b,
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: "tdd-guard".into(),
             description: "tdd-guard sample".into(),

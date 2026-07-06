@@ -7,6 +7,7 @@ owner: simard
 doc_type: reference
 related:
   - ./lightweight-chat-session.md
+  - ./dashboard-chat-multiline-input.md
   - ./meeting-backend-api.md
   - ./conversation-channel-api.md
   - ./agent-log-websocket.md
@@ -493,12 +494,26 @@ list (title + relative time). Clicking an item:
 
 A **New chat** control opens `GET /ws/chat` with no `session_id`.
 
+### Input & keyboard (multi-line composer)
+
+The composer is a **multi-line `<textarea>`** (`#chat-input`), not a single-line
+`<input>`. It starts at a single-line height, **auto-grows** as you add lines up
+to a capped maximum (then scrolls internally), and **resets to one line after a
+message is sent**. `Enter` sends; **`Shift+Enter` inserts a newline** for
+deliberate multi-line composition and pasted snippets. The whitespace-only
+guard, the streaming busy-disable, and the safe DOM sinks are all preserved.
+
+Full behavior, the CSS/JS sizing contract, and test coverage are documented in
+[Dashboard Chat — multi-line message input](./dashboard-chat-multiline-input.md).
+
 ### XSS safety
 
 All message content — streamed `chunk`s, replayed `restore` history, and
 sidebar titles — is rendered with `textContent` / `document.createTextNode`
 (or the shared `esc` helper), never `innerHTML`. Stored conversation text and
-model output are treated as untrusted and can never inject markup.
+model output are treated as untrusted and can never inject markup. This holds
+for **multi-line and pasted** input too: a message such as
+`<img src=x onerror=alert(1)>` renders as literal text.
 
 ---
 

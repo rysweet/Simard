@@ -258,6 +258,15 @@ shared reader. Both approaches trust the persisted filename as the source of
 truth, so the per-report numbers in the card are always consistent with the
 single authoritative counter shown elsewhere.
 
+> **Now durable at the source.** The `health_cycle_number` input to that `max()`
+> is itself the **brain-relative** durable counter — `daemon_health.json`'s
+> `cycle_number` is written from the persisted `PersistentGoalState.cycle_count`,
+> which continues across daemon restarts instead of resetting to `1`. So the two
+> inputs to `authoritative_cycle_number` now **agree** rather than one
+> contradicting the other; the `max()` remains as a defensive safety net. See the
+> [Durable OODA cycle counter API reference](./durable-ooda-cycle-counter.md) and
+> [Brain-relative OODA cycle counter](../concepts/brain-relative-ooda-cycle-counter.md).
+
 ## API: `GET /api/logs` → `cycle_reports`
 
 The Logs endpoint returns the recent cycle reports under the `cycle_reports`

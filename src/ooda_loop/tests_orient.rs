@@ -25,6 +25,7 @@ fn orient_blocked_goals_have_highest_urgency() {
     let goals = vec![
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: "blocked".to_string(),
             description: "Blocked".to_string(),
@@ -37,6 +38,7 @@ fn orient_blocked_goals_have_highest_urgency() {
         },
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: "not-started".to_string(),
             description: "Not started".to_string(),
@@ -59,6 +61,7 @@ fn orient_blocked_goals_have_highest_urgency() {
 fn orient_completed_goals_have_zero_urgency() {
     let goals = vec![ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: "done".to_string(),
         description: "Done".to_string(),
@@ -83,6 +86,7 @@ fn orient_not_started_higher_urgency_than_in_progress() {
     let goals = vec![
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: "new".to_string(),
             description: "New".to_string(),
@@ -95,6 +99,7 @@ fn orient_not_started_higher_urgency_than_in_progress() {
         },
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: "wip".to_string(),
             description: "WIP".to_string(),
@@ -119,6 +124,7 @@ fn orient_in_progress_urgency_decreases_with_percent() {
     let goals = vec![
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: "early".to_string(),
             description: "Early".to_string(),
@@ -131,6 +137,7 @@ fn orient_in_progress_urgency_decreases_with_percent() {
         },
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: "late".to_string(),
             description: "Late".to_string(),
@@ -154,6 +161,7 @@ fn orient_in_progress_urgency_decreases_with_percent() {
 fn orient_boosts_urgency_when_goal_mentioned_in_issues() {
     let goals = vec![ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: "auth".to_string(),
         description: "Auth system".to_string(),
@@ -192,6 +200,7 @@ fn orient_boosts_urgency_when_goal_mentioned_in_issues() {
 fn orient_boosts_in_progress_when_dirty_tree() {
     let goals = vec![ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: "wip".to_string(),
         description: "WIP".to_string(),
@@ -229,6 +238,7 @@ fn orient_boosts_in_progress_when_dirty_tree() {
 fn orient_adds_memory_consolidation_when_episodic_exceeds_100() {
     let goals = vec![ActiveGoal {
         parent_goal_id: None,
+        priority_explicit: false,
         repo: None,
         id: "g1".to_string(),
         description: "Goal".to_string(),

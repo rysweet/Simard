@@ -311,6 +311,7 @@ mod wire_in_tests {
         let mut board = GoalBoard::default();
         board.active.push(ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: "ship-v1".to_string(),
             description: "ship v1".to_string(),
@@ -381,6 +382,7 @@ mod wire_in_tests {
         let mut board = GoalBoard::default();
         board.active.push(ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: goal_id.to_string(),
             description: "test".to_string(),
@@ -456,6 +458,7 @@ mod hallucination_filter_tests {
     fn active(id: &str) -> ActiveGoal {
         ActiveGoal {
             parent_goal_id: None,
+            priority_explicit: false,
             repo: None,
             id: id.to_string(),
             description: format!("desc {id}"),

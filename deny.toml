@@ -49,6 +49,13 @@ ignore = [
     # exemption in .cargo/audit.toml. Tracked:
     # https://github.com/RustCrypto/RSA/issues/19
     { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing side-channel; no upstream fix; transitive JWT-verify only (rustyclawd-tools->octocrab->jsonwebtoken). Tracked: https://github.com/RustCrypto/RSA/issues/19" },
+    # crossbeam-epoch — invalid pointer dereference in the `fmt::Display` impl
+    # for `Atomic`/`Shared` when the pointer is null. Issued 2026-07-06 with NO
+    # fixed upstream release, so it fails by default and must be exempted here.
+    # Transitive: simard -> rustyclawd-tools -> moka -> crossbeam-epoch. Only
+    # reachable by `Display`-formatting a null crossbeam `Atomic`/`Shared`, which
+    # Simard never does, so the dereference is unreachable in our usage.
+    { id = "RUSTSEC-2026-0204", reason = "crossbeam-epoch fmt::Display null-pointer deref; no upstream fix (issued 2026-07-06); transitive via simard->rustyclawd-tools->moka; unreachable (Simard never Display-formats crossbeam Atomic/Shared). Tracked: https://rustsec.org/advisories/RUSTSEC-2026-0204" },
 ]
 
 # ── Licenses ─────────────────────────────────────────────────────────────────

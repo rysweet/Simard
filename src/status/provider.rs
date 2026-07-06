@@ -706,3 +706,215 @@ mod live_engineers_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod pure_helper_tests {
+    use super::*;
+    use crate::status::{Availability, Freshness, SCHEMA_VERSION};
+
+    #[test]
+    fn parse_kb_reads_leading_number_as_kib() {
+        assert_eq!(parse_kb("2048 kB"), Some(2048 * 1024));
+        assert_eq!(parse_kb("15"), Some(15 * 1024));
+        assert_eq!(parse_kb("MemFree: junk"), None);
+        assert_eq!(parse_kb(""), None);
+    }
+
+    #[test]
+    fn clamp_u64_floors_negatives_at_zero() {
+        assert_eq!(clamp_u64(-1), 0);
+        assert_eq!(clamp_u64(i64::MIN), 0);
+        assert_eq!(clamp_u64(0), 0);
+        assert_eq!(clamp_u64(123), 123);
+    }
+
+    #[test]
+    fn add_window_accumulates_cost_and_tokens() {
+        let mut w = LedgerWindow::default();
+        add_window(&mut w, 1.5, 10, 5);
+        add_window(&mut w, 2.5, 20, 7);
+        assert_eq!(w.tokens_in, 30);
+        assert_eq!(w.tokens_out, 12);
+        assert!((w.cost_usd - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn llm_over_budget_compares_spend_to_budget() {
+        let over = SectionEnvelope::live(
+            LlmUsage {
+                daily_budget_usd: Some(100.0),
+                ledger_today: Some(LedgerWindow {
+                    cost_usd: 150.0,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(llm_over_budget(&over), Some(true));
+
+        let under = SectionEnvelope::live(
+            LlmUsage {
+                daily_budget_usd: Some(100.0),
+                ledger_today: Some(LedgerWindow {
+                    cost_usd: 50.0,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(llm_over_budget(&under), Some(false));
+
+        let no_budget = SectionEnvelope::live(
+            LlmUsage {
+                daily_budget_usd: None,
+                ledger_today: Some(LedgerWindow::default()),
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(llm_over_budget(&no_budget), None);
+
+        assert_eq!(
+            llm_over_budget(&SectionEnvelope::<LlmUsage>::absent("no ledger")),
+            None
+        );
+    }
+
+    #[test]
+    fn assemble_gym_reports_skip_flag_as_live_section() {
+        let on = assemble_gym(true);
+        assert!(on.is_present());
+        let g = on.data.as_ref().unwrap();
+        assert!(g.skip_gym);
+        assert_eq!(g.self_eval_state, "idle");
+
+        let off = assemble_gym(false);
+        assert!(!off.data.unwrap().skip_gym);
+    }
+
+    #[test]
+    fn snapshot_is_stale_uses_freshness_window() {
+        assert!(!snapshot_is_stale(&snapshot::now_rfc3339()));
+        let old = (chrono::Utc::now() - chrono::Duration::seconds(SNAPSHOT_FRESHNESS_SECS + 60))
+            .to_rfc3339();
+        assert!(snapshot_is_stale(&old));
+        // Tolerant: an unparseable timestamp is treated as fresh, not stale.
+        assert!(!snapshot_is_stale("not-a-timestamp"));
+    }
+
+    #[test]
+    fn feed_is_stale_uses_double_cadence_window() {
+        let cadence = 900u64;
+        assert!(!feed_is_stale(&snapshot::now_rfc3339(), cadence));
+        let old =
+            (chrono::Utc::now() - chrono::Duration::seconds(2 * cadence as i64 + 60)).to_rfc3339();
+        assert!(feed_is_stale(&old, cadence));
+        assert!(!feed_is_stale("bogus", cadence));
+    }
+
+    #[test]
+    fn snapshot_section_picks_live_when_fresh_and_stale_when_old() {
+        let fresh = snapshot::now_rfc3339();
+        let live = snapshot_section(Gym::default(), &fresh);
+        assert_eq!(live.availability, Availability::Ok);
+        assert_eq!(live.freshness, Freshness::Live);
+        assert_eq!(live.as_of.as_deref(), Some(fresh.as_str()));
+
+        let old = (chrono::Utc::now() - chrono::Duration::seconds(SNAPSHOT_FRESHNESS_SECS + 60))
+            .to_rfc3339();
+        let stale = snapshot_section(Gym::default(), &old);
+        assert_eq!(stale.freshness, Freshness::Stale);
+    }
+
+    #[test]
+    fn assemble_memory_is_absent_without_metrics_or_gauges() {
+        let root = std::path::Path::new("/nonexistent-simard-state");
+        assert!(!assemble_memory(None, root).is_present());
+
+        let empty = snapshot::MetricsSnapshot::empty();
+        let env = assemble_memory(Some(&empty), root);
+        assert!(!env.is_present());
+        assert_eq!(env.note.as_deref(), Some("memory gauges: not in snapshot"));
+    }
+
+    #[test]
+    fn assemble_memory_present_sums_node_gauges() {
+        let mut m = snapshot::MetricsSnapshot::empty();
+        for (ty, value) in [("episodic", 10), ("semantic", 20)] {
+            m.gauges.push(snapshot::GaugeSeries {
+                name: names::MEMORY_NODES.to_string(),
+                attrs: vec![(names::ATTR_TYPE.to_string(), ty.to_string())],
+                value,
+            });
+        }
+        let env = assemble_memory(Some(&m), std::path::Path::new("/nonexistent-simard-state"));
+        assert!(env.is_present());
+        let data = env.data.as_ref().unwrap();
+        assert_eq!(data.nodes.episodic, Some(10));
+        assert_eq!(data.nodes.semantic, Some(20));
+        assert_eq!(data.nodes_total, Some(30));
+        assert_eq!(data.backend, "amplihack-memory-lib");
+    }
+
+    #[test]
+    fn assemble_telemetry_absent_without_metrics() {
+        assert!(!assemble_telemetry(None, false, None, None).is_present());
+    }
+
+    #[test]
+    fn assemble_telemetry_derives_flags_and_anomalies() {
+        let mut m = snapshot::MetricsSnapshot::empty();
+        m.counters.push(snapshot::CounterSeries {
+            name: names::DISTILL_RUNS.to_string(),
+            attrs: vec![(names::ATTR_RESULT.to_string(), "ok".to_string())],
+            value: 9,
+        });
+        m.counters.push(snapshot::CounterSeries {
+            name: names::DISTILL_RUNS.to_string(),
+            attrs: vec![(names::ATTR_RESULT.to_string(), "parse_fail".to_string())],
+            value: 1,
+        });
+        let env = assemble_telemetry(Some(&m), true, Some(3), Some(true));
+        assert!(env.is_present());
+        let t = env.data.as_ref().unwrap();
+        assert_eq!(t.budget_flag, "over");
+        assert_eq!(t.restart_churn, Some(3));
+        assert!(t.gym_skipped);
+        assert_eq!(t.parse_fix_holding, Some(false));
+        assert!(t.distill_fail_pct.is_some());
+        assert!(
+            t.anomalies
+                .iter()
+                .any(|a| a.contains("daily LLM budget exceeded"))
+        );
+        assert!(t.anomalies.iter().any(|a| a.contains("distill parse-fail")));
+    }
+
+    #[test]
+    fn assemble_is_total_and_degrades_unwired_sources_to_absent() {
+        let dir =
+            std::env::temp_dir().join(format!("simard-status-assemble-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let opts = AssembleOptions::with_state_root(dir.clone());
+        let snap = assemble(&opts);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(snap.schema_version, SCHEMA_VERSION);
+        assert!(!snap.generated_at.is_empty());
+        // Sources not wired in this process context degrade to absent, never panic.
+        assert!(!snap.goals.is_present());
+        assert!(!snap.completed.is_present());
+        assert!(!snap.self_improvement.is_present());
+    }
+
+    #[test]
+    fn assemble_options_with_state_root_overrides_only_the_root() {
+        let root = std::path::PathBuf::from("/tmp/simard-status-opts");
+        let opts = AssembleOptions::with_state_root(root.clone());
+        assert_eq!(opts.state_root, root);
+        assert_eq!(opts.service_unit, "simard.service");
+        assert!(opts.sections.is_none());
+    }
+}

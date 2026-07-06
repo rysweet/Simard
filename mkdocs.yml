@@ -86,6 +86,8 @@ nav:
     - "Overseer — operator/observer co-process (spike)": design/overseer.md
     - "Creative Ideas background thread (spike)": design/creative-ideas-thread.md
     - "Eliminate deterministic fallbacks": design/eliminate-deterministic-fallbacks.md
+  - Research:
+    - "COIN benchmark & skwaq gym study": research/coin-benchmark-and-skwaq-study.md
   - Concepts:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
@@ -108,6 +110,7 @@ nav:
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
     - Self-Diagnose on Step Error (ask WHY): concepts/self-diagnose-on-step-error.md
     - Journal E2BIG Recipe-Spawn (file the context): concepts/journal-recipe-spawn-e2big.md
+    - Comprehensive E2BIG Elimination (one facade): concepts/e2big-elimination.md
     - Unified Telemetry and Status: concepts/unified-telemetry-and-status.md
     - Goal-Board Persistence: concepts/goal-board-persistence.md
     - Keeping the OODA Daemon Steerable: concepts/steerable-ooda-daemon.md
@@ -115,6 +118,7 @@ nav:
     - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
     - Overseer Root-Cause (WHY) Principle: concepts/overseer-root-cause-why.md
     - Authoritative Goal-Board Store: concepts/authoritative-goal-board-store.md
+    - Brain-Relative OODA Cycle Counter: concepts/brain-relative-ooda-cycle-counter.md
     - Goal-Board Corruption Guards: concepts/goal-board-corruption-guards.md
     - File-Backed Goal-Store Simplification: concepts/file-backed-goal-store-simplification.md
     - Goal-Fact Dedup in Preparation: concepts/goal-fact-dedup-in-preparation.md
@@ -125,6 +129,7 @@ nav:
     - Update-Check Design: concepts/update-check-design.md
     - The amplihack Freshness Gate: concepts/amplihack-freshness-gate.md
     - The Simard Journal: concepts/simard-journal.md
+    - Journal Report Tone Contract: concepts/journal-report-tone-contract.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
@@ -146,6 +151,7 @@ nav:
     - Diagnose Decide/Orient Parse Failures: howto/diagnose-decide-orient-parse-failures.md
     - Diagnose and Recover OODA Step Failures: howto/diagnose-and-recover-ooda-step-failures.md
     - Diagnose Journal E2BIG Spawn Failures: howto/diagnose-journal-e2big-spawn-failures.md
+    - Add a Safe Agent/Recipe Spawn Site: howto/add-a-safe-agent-spawn-site.md
     - Interpret Brain Confidence and Verify Completion: howto/interpret-brain-confidence-and-verify-completion.md
     - Configure Brain Introspection: howto/configure-brain-introspection.md
     - Start a Meeting: howto/start-a-meeting.md
@@ -159,6 +165,7 @@ nav:
     - Set Up the Signal Channel: howto/set-up-the-signal-channel.md
     - Diagnose Handoff Accumulation: howto/diagnose-handoff-accumulation.md
     - Inspect the Durable Goal Register: howto/inspect-durable-goal-register.md
+    - Inspect and Verify the OODA Cycle Counter: howto/inspect-the-ooda-cycle-counter.md
     - Decompose a Large Goal: howto/decompose-a-large-goal.md
     - Route a Goal to its Target Repo: howto/route-a-goal-to-its-target-repo.md
     - Diagnose a Rejected Goal Completion: howto/diagnose-a-rejected-goal-completion.md
@@ -233,6 +240,7 @@ nav:
     - Argv-Free Copilot/OODA Invocation: reference/argv-free-copilot-invocation.md
     - Terminal Failure Diagnosis API: reference/terminal-failure-diagnosis-api.md
     - Recipe Context-File Transport: reference/recipe-context-file-transport.md
+    - Large-Payload Spawn API: reference/large-payload-spawn-api.md
     - Text-Parsing Wire Formats: reference/text-parsing-wire-formats.md
     - Recipe Context-Var Sanitization: reference/recipe-context-var-sanitization.md
     - Engineer-Loop argv Sanitization: reference/engineer-loop-argv-sanitization.md
@@ -279,6 +287,7 @@ nav:
     - Goal Coverage Allocation: reference/goal-coverage-allocation.md
     - spawn_agent_for_goal API: reference/spawn-agent-for-goal.md
     - Stewardship API: reference/stewardship-api.md
+    - CI-Health Sweep: reference/ci-health-sweep.md
     - Simard Whisperer API: reference/simard-whisperer-api.md
     - Maximum Safe Parallelism: reference/maximum-safe-parallelism.md
     - Concurrent Engineer Dispatch: reference/concurrent-engineer-dispatch.md
@@ -294,6 +303,7 @@ nav:
     - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md
     - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
     - No-Progress Breaker API: reference/no-progress-breaker-api.md
+    - Durable OODA Cycle Counter API: reference/durable-ooda-cycle-counter.md
     - Progress-Evidence API: reference/progress-evidence-api.md
     - Trustworthy-Confidence API: reference/trustworthy-confidence-api.md
     - External-Signal Completion Gate: reference/external-signal-completion-gate.md
@@ -303,6 +313,7 @@ nav:
     - Signal Continuous Conversation: reference/signal-continuous-conversation.md
     - LightweightChatSession: reference/lightweight-chat-session.md
     - Dashboard Chat: reference/dashboard-chat.md
+    - Dashboard Chat — Multi-line Input: reference/dashboard-chat-multiline-input.md
     - Dashboard Feedback Widget: reference/dashboard-feedback-widget.md
     - Copilot Meeting Mode: reference/copilot-meeting-mode.md
     - Meeting Close Lifecycle: reference/meeting-close-lifecycle.md
@@ -316,9 +327,11 @@ nav:
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
     - Dashboard Action-Detail Humanization: reference/dashboard-action-detail-humanization.md
     - Dashboard Goal Lifecycle-Status Badges: reference/dashboard-goal-lifecycle-status.md
+    - Dashboard Goal Hierarchy & Priorities: reference/dashboard-goal-hierarchy-priority.md
     - Dashboard Thinking Cycle History: reference/dashboard-thinking-cycle-history.md
     - Dashboard Activity Cycle Reports: reference/dashboard-activity-cycle-reports.md
     - Dashboard Background Tab Prefetch: reference/dashboard-background-tab-prefetch.md
+    - Dashboard Overview Health & Live Memory: reference/dashboard-overview-health-and-live-memory.md
     - Azlin Hosts Self-Membership: reference/azlin-hosts-self-membership.md
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     - Supply-Chain Audit & Guardrails: reference/supply-chain-audit.md
@@ -340,6 +353,7 @@ nav:
   - Operator Dashboard:
     - Azlin Tmux Sessions Panel: operator-dashboard/azlin-tmux-sessions.md
     - Event-Bus Stats in Cluster Topology: operator-dashboard/event-bus-stats.md
+    - Agent Terminal Agent Picker: operator-dashboard/agent-terminal-agent-picker.md
     - Hive Event Bus: hive_event_bus/README.md
   - Testing:
     - Test-Coverage Baseline: testing/COVERAGE_BASELINE.md
