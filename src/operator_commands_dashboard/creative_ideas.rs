@@ -2,7 +2,7 @@
 //!
 //! Two read-only endpoints back the Creative Ideas tab, reading the durable
 //! creative-idea prospective memories out of the *same* cognitive-memory store
-//! the rest of the dashboard reads (via [`open_reader_bridge`]) — no parallel
+//! the rest of the dashboard reads (via [`open_reader_client`]) — no parallel
 //! datastore:
 //!
 //! * `GET  /api/creative-ideas`        — the current idea pool (latest revision
@@ -23,7 +23,7 @@ use crate::cognitive_memory::creative_idea::{
     CreativeIdea, CreativeIdeaStore, IdeaStatus, ProspectiveCreativeIdeaStore, parse_idea_status,
 };
 use crate::error::SimardResult;
-use crate::memory_ipc::open_reader_bridge;
+use crate::memory_ipc::open_reader_client;
 
 /// Read window for the idea pool (bounded; the pool stays modest).
 const IDEA_LIST_LIMIT: u32 = 512;
@@ -84,7 +84,7 @@ pub(crate) async fn creative_ideas_search(Json(body): Json<Value>) -> Json<Value
 
 /// Load the current idea pool (latest revision per idea, newest first).
 fn load_ideas(state_root: &Path) -> SimardResult<Vec<CreativeIdea>> {
-    let reader = open_reader_bridge(state_root)?;
+    let reader = open_reader_client(state_root)?;
     let store = ProspectiveCreativeIdeaStore::new(reader.ops());
     store.list(IDEA_LIST_LIMIT)
 }
