@@ -1,11 +1,11 @@
 ---
 title: Distillation parse-failure-rate hardening
-description: The consolidated reference for the distillation parse-resilience contract that drove the ~85% parse-failure rate back toward zero — the banner-immune facts-file channel, field-tolerant deserialization, the single-trailing-comma repair, strict rejection of genuinely malformed output, the first-class distill_parse_success_rate metric, and the planned (R1) zero_facts_reason disposition (none / true_empty / all_quarantined) that will distinguish "nothing worth distilling" from "the reliability gate blocked everything" without a cross-metric join.
+description: The consolidated reference for the distillation parse-resilience contract that drove the ~85% parse-failure rate back toward zero — the banner-immune facts-file channel, field-tolerant deserialization, the single-trailing-comma repair, strict rejection of genuinely malformed output, the first-class distill_parse_success_rate metric, and the zero_facts_reason disposition (none / true_empty / all_quarantined) that distinguishes "nothing worth distilling" from "the reliability gate blocked everything" without a cross-metric join.
 last_updated: 2026-07-06
 review_schedule: as-needed
 owner: simard
 doc_type: reference
-status: partially implemented
+status: implemented
 related:
   - ./distill-recipe-output-capture.md
   - ./distill-raw-capture-on-parse-failure.md
@@ -21,19 +21,19 @@ related:
 
 # Distillation parse-failure-rate hardening
 
-> **Status — partially implemented.** This page is the authoritative, consolidated
+> **Status — implemented.** This page is the authoritative, consolidated
 > reference for the distillation *parse-resilience* contract: the set of fixes
 > that took the distill pass's `parse-failure` rate from a live spike of
 > **~85–100%** back toward **~0% for recoverable output**, and the metrics that
 > let an operator *measure* that rate before and after. Present tense below
-> describes shipped behavior, with **one exception**: the `zero_facts_reason`
-> disposition (and the `candidate_facts` context field that feeds it) is the sole
-> not-yet-shipped element — it is the R1 residual this page also *specifies* for
-> implementation, and is called out inline where it appears. Locations:
+> describes shipped behavior — including the `zero_facts_reason` disposition
+> (and the `candidate_facts` context field that feeds it), which landed with the
+> R1 change on this branch and is now emitted at HEAD. Locations:
 > parser + metrics `src/memory_consolidation/distillation.rs`;
 > trailing-comma repair `src/recipe_output/extract.rs`;
 > metric envelope `src/self_metrics/mod.rs`;
-> tests `src/memory_consolidation/distillation_tests.rs` and the hermetic
+> tests `src/memory_consolidation/distillation_tests.rs`, the zero-facts unit
+> tests in `distillation.rs`, and the hermetic
 > `issue_2622_file_channel_tests` in `distillation.rs`.
 
 The episode-distillation pass turns batches of episodic memory into semantic
@@ -54,8 +54,8 @@ This page describes the finished state of the hardening as one contract:
    precision: empty output, genuinely malformed JSON, and non-zero recipe exits
    stay explicit failures, never hollow successes.
 3. **How the rate is measured** — the `distill_parse_success_rate` metric and its
-   context payload, including the planned `zero_facts_reason` disposition that will
-   separate a *true-empty* success from an *all-quarantined* success.
+   context payload, including the `zero_facts_reason` disposition that separates
+   a *true-empty* success from an *all-quarantined* success.
 
 For the underlying file-channel capture mechanism this contract builds on, see
 [Distill recipe output capture](./distill-recipe-output-capture.md). For the
@@ -149,12 +149,11 @@ watching only `distill_success_rate` could not tell them apart without manually
 joining to `distill_reliability_gate`. The finished state makes the reason a
 **first-class field** on the success metric's context.
 
-> **Implementation status (R1 — pending).** Unlike the recovery tiers, strict
-> rejection, and metrics above (all shipped), `zero_facts_reason` and its
-> `candidate_facts` input are **not yet in the code** at this branch's HEAD.
-> `build_distill_success_context` currently takes six parameters and emits no
-> `zero_facts_reason`. This section is the authoritative spec for that additive
-> change; treat it as *target* behavior until the R1 change lands.
+> **Implementation status — shipped.** Like the recovery tiers, strict
+> rejection, and metrics above, `zero_facts_reason` and its `candidate_facts`
+> input are now in the code at this branch's HEAD.
+> `build_distill_success_context` takes `candidate_facts` (threaded after
+> `fact_count`) and emits `zero_facts_reason` on the success context.
 
 `build_distill_success_context` emits a `zero_facts_reason` computed from data
 already in scope at the call site — the count of **candidate** facts (parsed,
@@ -216,8 +215,8 @@ shared with `distill_parse_success_rate`:
 | `failure_class` | string \| null | One of `spawn-failure`, `copilot-terminal-failure`, `recipe-reported-failure`, `parse-failure`, `serialize-failure`, `other`. |
 | `input_count` | u32 | Episodes fed to the pass. |
 | `fact_count` | u32 | Facts **promoted** (`0` on failure or all-quarantined). |
-| `candidate_facts` | u32 | Facts **parsed** before the reliability gate. *(R1 — pending)* |
-| `zero_facts_reason` | `"none"` \| `"true_empty"` \| `"all_quarantined"` | The zero-facts disposition (see [above](#zero-facts-disposition)). *(R1 — pending)* |
+| `candidate_facts` | u32 | Facts **parsed** before the reliability gate. |
+| `zero_facts_reason` | `"none"` \| `"true_empty"` \| `"all_quarantined"` | The zero-facts disposition (see [above](#zero-facts-disposition)). |
 | `attempt` | u32 | 1-based runner invocation count for the pass. |
 | `recovered_after_retry` | bool | Success followed at least one in-cycle retry. |
 
@@ -285,8 +284,8 @@ pub fn strip_json_trailing_commas(s: &str) -> std::borrow::Cow<'_, str>;
 pub fn balanced_objects(s: &str) -> Vec<&str>;
 ```
 
-The success-metric context builder gains the disposition inputs (R1 — pending;
-the current signature takes six parameters and omits `candidate_facts`):
+The success-metric context builder takes the disposition inputs (`candidate_facts`
+is threaded after `fact_count`):
 
 ```rust
 // src/memory_consolidation/distillation.rs
@@ -319,13 +318,10 @@ closing `]`:
 ```
 
 Strict `serde` rejects it; the `strip_json_trailing_commas` retry removes the
-lone comma and the parse succeeds — one fact promoted. (Under R1 this pass would
-carry `zero_facts_reason=none`.)
+lone comma and the parse succeeds — one fact promoted. (This pass carries
+`zero_facts_reason=none`.)
 
 ### Nothing worth distilling (`true_empty`)
-
-> *Illustrates R1 target behavior — `zero_facts_reason` is not yet emitted at
-> HEAD (see [Zero-facts disposition](#zero-facts-disposition)).*
 
 The agent returns a valid empty envelope:
 
@@ -338,9 +334,6 @@ This is a **success** with zero promoted facts and zero candidates, so
 needed.
 
 ### The reliability gate blocked everything (`all_quarantined`)
-
-> *Illustrates R1 target behavior — `zero_facts_reason` is not yet emitted at
-> HEAD (see [Zero-facts disposition](#zero-facts-disposition)).*
 
 The agent returns three facts, all with an out-of-batch `source_episode_id`
 (hallucinated provenance). Each parses but is quarantined by the reliability
@@ -389,7 +382,7 @@ confirm the hardening worked without re-running a live pass.
      | awk '{ s += $1; n += 1 } END { if (n) printf "parse-success rate = %.3f over %d passes\n", s/n, n }'
    ```
 
-3. **Split zero-fact successes** *(R1 — pending; requires `zero_facts_reason`).*
+3. **Split zero-fact successes** *(via `zero_facts_reason`).*
    When the rate is `1.0` but memory is not growing, read the disposition to tell
    *nothing to learn* from *everything blocked*:
 
@@ -408,8 +401,9 @@ confirm the hardening worked without re-running a live pass.
 
 ## Testing
 
-The contract is pinned by `distillation_tests.rs` and the hermetic
-`issue_2622_file_channel_tests`. Representative cases:
+The contract is pinned by `distillation_tests.rs`, the zero-facts unit tests in
+`distillation.rs`, and the hermetic `issue_2622_file_channel_tests`.
+Representative cases:
 
 | Test | Asserts |
 | --- | --- |
@@ -422,7 +416,7 @@ The contract is pinned by `distillation_tests.rs` and the hermetic
 | `document_drops_unknown_concepts` | The concept allow-list still applies to recovered facts. |
 | `document_error_does_not_leak_full_payload` (50 KB) / `document_tolerates_deeply_nested_input_without_panic` | Bounded, panic-free error output. |
 | `document_handles_large_valid_input` (1 000 facts) | A large valid document extracts every fact; repair stays O(n). |
-| `build_distill_success_context_*` (R1 — pending) | `zero_facts_reason` is `none` / `true_empty` / `all_quarantined` for the three input shapes. |
+| `zero_facts_reason_*` / `success_context_*` zero-facts tests | `zero_facts_reason` is `none` / `true_empty` / `all_quarantined` for the three input shapes, gated on `success`. |
 | `strip_trailing_commas_valid_json_is_borrowed_zero_copy` / `strip_trailing_commas_never_corrupts_comma_in_string_content` | The repair borrows valid JSON unchanged and never touches an in-string comma. |
 
 Run the suite:
@@ -440,7 +434,7 @@ cargo test --lib memory_consolidation::distillation
 - **No reclassification of `all_quarantined` as a failure** — it is a correct,
   retry-pointless success.
 - **No rename or removal** of `distill_success_rate`, `distill_parse_success_rate`,
-  or `distill_reliability_gate` — the planned `zero_facts_reason` field is purely
+  or `distill_reliability_gate` — the `zero_facts_reason` field is purely
   additive.
 
 ## Related
