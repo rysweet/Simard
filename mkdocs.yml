@@ -108,6 +108,7 @@ nav:
     - Goal-Board Persistence: concepts/goal-board-persistence.md
     - Keeping the OODA Daemon Steerable: concepts/steerable-ooda-daemon.md
     - Perpetual Goals Exempt from No-Progress Hard-Block: concepts/perpetual-goal-no-progress-exemption.md
+    - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
     - Authoritative Goal-Board Store: concepts/authoritative-goal-board-store.md
     - Goal-Board Corruption Guards: concepts/goal-board-corruption-guards.md
     - File-Backed Goal-Store Simplification: concepts/file-backed-goal-store-simplification.md
@@ -184,6 +185,7 @@ nav:
     - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
     - Read Simard Status: howto/simard-status.md
     - Watch Overseer Activity: howto/watch-overseer-activity.md
+    - Configure Overseer Goal-Board Health: howto/configure-overseer-goal-board-health.md
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
     - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
@@ -192,6 +194,7 @@ nav:
     - Telemetry Metrics: reference/telemetry-metrics.md
     - StatusSnapshot API: reference/status-snapshot-api.md
     - Overseer Activity Feed: reference/overseer-activity-feed.md
+    - Overseer Goal-Board Health API: reference/overseer-goal-board-health-api.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
     - Journal API: reference/journal-api.md

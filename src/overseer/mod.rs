@@ -281,15 +281,19 @@ impl Overseer {
     pub fn run_cycle(&mut self) -> Result<CycleReport, OverseerError> {
         // Observe.
         let mut observed = self.caps.status.snapshot()?;
-        // Enrich with goal-board health: the goals currently BLOCKED on Simard's
-        // board (false-parks + genuine "needs human review" blocks). Read-only;
-        // a board-read failure degrades to "no blocked goals", never aborts.
-        observed.blocked_goals = self.caps.goals.blocked_goals().unwrap_or_default();
+        // Enrich with goal-board health AND the in-flight dedup set from a
+        // SINGLE board read: the goals currently BLOCKED on Simard's board
+        // (false-parks + genuine "needs human review" blocks) plus Simard's
+        // in-flight work. Read-only; a board-read failure degrades both to
+        // empty (never aborts the cycle), and reading them together avoids
+        // deserializing the same snapshot twice this tick.
+        let (blocked_goals, in_flight) = self.caps.goals.observe_board().unwrap_or_default();
+        observed.blocked_goals = blocked_goals;
         let signals = signals_from(&observed);
 
-        // Orient (dedup against Simard's in-flight work; failure to read the
-        // board degrades to "no dedup", never aborts the cycle).
-        let in_flight = self.caps.goals.in_flight().unwrap_or_default();
+        // Orient (dedup against Simard's in-flight work; a board read failure
+        // above already degraded `in_flight` to empty, i.e. "no dedup", never
+        // aborting the cycle).
         let problems = orient(&signals, &in_flight);
 
         // Decide + gate.
@@ -560,30 +564,7 @@ impl Overseer {
                     goal_id: goal_id.to_string(),
                 })
             }
-            WhisperDecision::SuppressDuplicate => {
-                tracing::debug!(
-                    target: "overseer::goal_health",
-                    goal_id,
-                    action = "unblock",
-                    reason = "duplicate",
-                    "overseer suppressed a duplicate self-heal within the dedup window"
-                );
-                Ok(ActOutcome::GoalHealthSuppressed {
-                    reason: "duplicate",
-                })
-            }
-            WhisperDecision::SuppressCapReached => {
-                tracing::debug!(
-                    target: "overseer::goal_health",
-                    goal_id,
-                    action = "unblock",
-                    reason = "cap_reached",
-                    "overseer suppressed a self-heal: per-hour cap reached"
-                );
-                Ok(ActOutcome::GoalHealthSuppressed {
-                    reason: "cap_reached",
-                })
-            }
+            other => Ok(Self::goal_health_suppressed("unblock", goal_id, other)),
         }
     }
 
@@ -629,31 +610,33 @@ impl Overseer {
                     goal_id: goal_id.to_string(),
                 })
             }
-            WhisperDecision::SuppressDuplicate => {
-                tracing::debug!(
-                    target: "overseer::goal_health",
-                    goal_id,
-                    action = "escalate",
-                    reason = "duplicate",
-                    "overseer suppressed a duplicate escalation within the dedup window"
-                );
-                Ok(ActOutcome::GoalHealthSuppressed {
-                    reason: "duplicate",
-                })
-            }
-            WhisperDecision::SuppressCapReached => {
-                tracing::debug!(
-                    target: "overseer::goal_health",
-                    goal_id,
-                    action = "escalate",
-                    reason = "cap_reached",
-                    "overseer suppressed an escalation: per-hour cap reached"
-                );
-                Ok(ActOutcome::GoalHealthSuppressed {
-                    reason: "cap_reached",
-                })
-            }
+            other => Ok(Self::goal_health_suppressed("escalate", goal_id, other)),
         }
+    }
+
+    /// Map a non-`Deliver` dedup-gate decision for a goal-board health action
+    /// (self-heal or escalate) to its suppressed [`ActOutcome`], logging why.
+    /// The caller handles [`WhisperDecision::Deliver`] inline and only routes
+    /// the two suppression variants here, so this stays a single shared tail for
+    /// both act paths (deduped within the window, or the per-hour cap reached).
+    fn goal_health_suppressed(
+        action: &'static str,
+        goal_id: &str,
+        decision: WhisperDecision,
+    ) -> ActOutcome {
+        // `Deliver` is handled inline by the caller and never reaches here.
+        let reason = match decision {
+            WhisperDecision::SuppressCapReached => "cap_reached",
+            _ => "duplicate",
+        };
+        tracing::debug!(
+            target: "overseer::goal_health",
+            goal_id,
+            action,
+            reason,
+            "overseer suppressed a goal-board health action (dedup window / per-hour cap)"
+        );
+        ActOutcome::GoalHealthSuppressed { reason }
     }
 
     /// Best-effort advisory whisper steering Simard to carve ONE bounded,

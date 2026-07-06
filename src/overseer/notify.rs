@@ -415,11 +415,72 @@ impl EmailSender for TcpSmtpSender {
     }
 }
 
+/// Neutralize email header / SMTP command injection (CWE-93) for any value that
+/// is written into a DATA header line or the `MAIL FROM` / `RCPT TO` envelope.
+/// CR, LF and every other control character are replaced with a space (so an
+/// injected `\r\n` can no longer terminate the current line and smuggle a header
+/// or SMTP verb), and the result is length-bounded (by **bytes**, on a UTF-8
+/// char boundary) well under the RFC 5322 998-octet line limit. Some fields are
+/// board-derived (e.g. a `goal_id` carried into the Subject), so sanitizing at
+/// this single transport choke point covers every caller regardless of how the
+/// field was constructed.
+fn sanitize_header_value(value: &str) -> String {
+    // Bound the *byte* length: a char cap would let multi-byte UTF-8 blow past
+    // the 998-octet line limit this claims to stay under. Accumulate whole
+    // chars so we never split a codepoint, stopping before the next char would
+    // exceed the budget.
+    const MAX_HEADER_BYTES: usize = 512;
+    let mut out = String::with_capacity(value.len().min(MAX_HEADER_BYTES));
+    for c in value.chars() {
+        let c = if c.is_control() { ' ' } else { c };
+        if out.len() + c.len_utf8() > MAX_HEADER_BYTES {
+            break;
+        }
+        out.push(c);
+    }
+    out.trim().to_string()
+}
+
+/// SMTP transparency / "dot-stuffing" (RFC 5321 §4.5.2). The DATA section is
+/// terminated by a line containing a single `.`; any body line that itself
+/// begins with `.` must be escaped with an extra leading `.` so it cannot be
+/// mistaken for that terminator. Without this, board-derived content carried
+/// into the body (e.g. a goal id or a free-form block `reason`) that contains a
+/// lone `.` line would prematurely close DATA and let the server interpret the
+/// following bytes as SMTP commands — the same CWE-93 injection the header
+/// sanitizer defends against, but via the body vector. Line endings are
+/// normalized to CRLF (multi-line bodies are legitimate); the receiving MTA
+/// strips the added dot, so benign content — including lines that really start
+/// with `.` — round-trips unchanged.
+fn dot_stuff_body(body: &str) -> String {
+    let normalized = body.replace("\r\n", "\n");
+    let mut out = String::with_capacity(normalized.len() + 8);
+    for (i, line) in normalized.split('\n').enumerate() {
+        if i > 0 {
+            out.push_str("\r\n");
+        }
+        if line.starts_with('.') {
+            out.push('.');
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 /// Minimal plaintext SMTP conversation. Kept small and defensive.
 fn smtp_send_plaintext(host: &str, port: u16, msg: &EmailMessage) -> Result<(), String> {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpStream;
     use std::time::Duration;
+
+    // Defense-in-depth: strip CRLF from every header- and envelope-bound field
+    // before it touches the wire so untrusted content (e.g. a goal id in the
+    // Subject) cannot inject SMTP headers or commands. The body is CRLF
+    // normalized *and* dot-stuffed separately below (multi-line bodies are
+    // legitimate, but a lone "." line must not be able to close DATA early).
+    let from = sanitize_header_value(&msg.from);
+    let recipients: Vec<String> = msg.to.iter().map(|r| sanitize_header_value(r)).collect();
+    let subject = sanitize_header_value(&msg.subject);
 
     let addr = format!("{host}:{port}");
     let stream = TcpStream::connect(&addr).map_err(|e| format!("connect {addr} failed: {e}"))?;
@@ -447,9 +508,9 @@ fn smtp_send_plaintext(host: &str, port: u16, msg: &EmailMessage) -> Result<(), 
     expect(&mut reader, 2)?; // greeting 220
     writeln!(writer, "EHLO simard-overseer").map_err(|e| e.to_string())?;
     expect(&mut reader, 2)?;
-    writeln!(writer, "MAIL FROM:<{}>", msg.from).map_err(|e| e.to_string())?;
+    writeln!(writer, "MAIL FROM:<{from}>").map_err(|e| e.to_string())?;
     expect(&mut reader, 2)?;
-    for rcpt in &msg.to {
+    for rcpt in &recipients {
         writeln!(writer, "RCPT TO:<{rcpt}>").map_err(|e| e.to_string())?;
         expect(&mut reader, 2)?;
     }
@@ -458,10 +519,10 @@ fn smtp_send_plaintext(host: &str, port: u16, msg: &EmailMessage) -> Result<(), 
     write!(
         writer,
         "From: {}\r\nTo: {}\r\nSubject: {}\r\n\r\n{}\r\n.\r\n",
-        msg.from,
-        msg.to.join(", "),
-        msg.subject,
-        msg.body.replace("\r\n", "\n").replace('\n', "\r\n"),
+        from,
+        recipients.join(", "),
+        subject,
+        dot_stuff_body(&msg.body),
     )
     .map_err(|e| e.to_string())?;
     expect(&mut reader, 2)?; // 250 accepted
@@ -600,6 +661,90 @@ mod tests {
         assert!(body.contains("abcdef1234567890"));
         assert!(body.contains("0011223344556677"));
         assert!(body.contains("canary green"));
+    }
+
+    // ── security: email header / SMTP command injection (CWE-93) ─────────────
+
+    #[test]
+    fn sanitize_header_value_strips_crlf_injection() {
+        // A board-derived goal id carrying CRLF must not be able to terminate the
+        // Subject line and smuggle extra headers or an injected message body.
+        let malicious = "goal-42\r\nBcc: attacker@evil.test\r\n\r\nInjected body";
+        let cleaned = sanitize_header_value(malicious);
+        assert!(!cleaned.contains('\r'), "CR must be stripped: {cleaned:?}");
+        assert!(!cleaned.contains('\n'), "LF must be stripped: {cleaned:?}");
+        // The legitimate leading token survives (just space-normalized).
+        assert!(cleaned.starts_with("goal-42"));
+    }
+
+    #[test]
+    fn sanitize_header_value_neutralizes_smtp_command_injection() {
+        // A from/recipient value carrying CRLF must not inject an SMTP verb into
+        // the MAIL FROM / RCPT TO envelope conversation.
+        let malicious = "ops@simard.test\r\nDATA\r\nSpoofed";
+        let cleaned = sanitize_header_value(malicious);
+        assert!(!cleaned.contains('\r') && !cleaned.contains('\n'));
+    }
+
+    #[test]
+    fn sanitize_header_value_is_length_bounded() {
+        let cleaned = sanitize_header_value(&"a".repeat(10_000));
+        assert!(cleaned.len() <= 512, "header value must be bounded");
+    }
+
+    #[test]
+    fn sanitize_header_value_preserves_benign_input() {
+        let s = "[Overseer] goal-blocked: goal abc123 needs human review";
+        assert_eq!(sanitize_header_value(s), s);
+    }
+
+    #[test]
+    fn sanitize_header_value_bounds_bytes_not_chars() {
+        // Multi-byte UTF-8 must be bounded by *bytes* (to stay under the RFC 5322
+        // 998-octet line limit) and never split a codepoint mid-char.
+        let cleaned = sanitize_header_value(&"é".repeat(10_000));
+        assert!(
+            cleaned.len() <= 512,
+            "byte length must be bounded, got {}",
+            cleaned.len()
+        );
+        // Still valid UTF-8 with no partial char: every retained char is intact.
+        assert!(cleaned.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn dot_stuff_body_escapes_lone_dot_line_that_would_close_data() {
+        // A board-derived block reason embedding a lone "." line must not be able
+        // to terminate the DATA section early and inject SMTP commands (CWE-93).
+        let body = "Reason: parked\n.\nMAIL FROM:<spoof@evil.test>\nspoofed";
+        let stuffed = dot_stuff_body(body);
+        assert!(
+            !stuffed.split("\r\n").any(|line| line == "."),
+            "no bare dot line may survive: {stuffed:?}"
+        );
+        assert!(
+            stuffed.contains("\r\n..\r\n"),
+            "the lone dot line must be dot-stuffed to \"..\": {stuffed:?}"
+        );
+    }
+
+    #[test]
+    fn dot_stuff_body_escapes_every_leading_dot_line() {
+        let stuffed = dot_stuff_body(".hidden\nnormal\n..double");
+        assert!(stuffed.starts_with("..hidden"), "{stuffed:?}");
+        assert!(stuffed.contains("\r\n...double"), "{stuffed:?}");
+        assert!(stuffed.contains("\r\nnormal\r\n"), "{stuffed:?}");
+    }
+
+    #[test]
+    fn dot_stuff_body_preserves_benign_multiline_and_normalizes_crlf() {
+        // Legitimate multi-line content round-trips (CRLF-normalized) untouched.
+        assert_eq!(
+            dot_stuff_body("line one\nline two\nline three"),
+            "line one\r\nline two\r\nline three"
+        );
+        // Mixed CRLF input is normalized, and only leading-dot lines are escaped.
+        assert_eq!(dot_stuff_body("a\r\n.b\r\nc"), "a\r\n..b\r\nc");
     }
 
     // ── fakes ────────────────────────────────────────────────────────────────
