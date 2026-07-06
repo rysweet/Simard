@@ -12,8 +12,9 @@
 //! | `action_on_trigger` | JSON payload (versioned) with status/context/links/reviews/metric |
 //! | `priority` | derived from portfolio/risk |
 //!
-//! The subsystem is a **spike**: this file is real, tested typed foundation but
-//! nothing here is wired into the daemon and the generator is gated OFF (see
+//! The subsystem is **live**: this file is the real, tested typed foundation
+//! for ideas the daemon's wired Creative Ideas thread generates, reviews, and
+//! routes (default-ON, opt-out via `SIMARD_CREATIVE_IDEAS_ENABLED`; see
 //! [`crate::creative_ideas`]). `status` changes **only** through
 //! [`CreativeIdea::try_transition`], which validates every edge.
 #![allow(dead_code)]

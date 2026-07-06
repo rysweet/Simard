@@ -26,6 +26,18 @@ Environment=RUST_LOG=info
 Environment=SIMARD_GIT_GUARDRAILS=enabled
 Environment=SIMARD_GIT_PROTECTED_REPOS=/home/azureuser/src
 
+# Creative Ideas background thread (issue #2647) — an idea-generation cognitive
+# thread wired into this daemon. It is DEFAULT-ON (opt-out); leave it unset to
+# run it. To disable it on this deployment, uncomment the line below:
+#   Environment=SIMARD_CREATIVE_IDEAS_ENABLED=0
+# Its routing step files a goal, or (for human-review ideas) a labeled + owner-
+# tagged GitHub issue via `gh`, and gates idea-derived PRs (draft + blocking
+# label + owner review — never --admin/--no-verify). That needs a least-privilege
+# token: issues:write + pull_requests:write on the single target repo only.
+# Optional tuning (defaults shown):
+#   Environment=SIMARD_CREATIVE_IDEAS_INTERVAL_SECS=86400
+#   Environment=SIMARD_CREATIVE_IDEAS_BATCH=10
+
 # Resource limits
 LimitNOFILE=65536
 MemoryMax=4G
