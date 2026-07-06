@@ -739,9 +739,10 @@ mod tests {
         );
     }
 
-    /// #2419 — the Overseer tab must be wired end-to-end in the SPA: a
+    /// #2419 / #2649 — the Overseer tab must be wired end-to-end in the SPA: a
     /// nav entry, a content panel, a fetch function that hits the auth-gated
-    /// `/api/overseer` endpoint, and an auto-refresh dispatch on activation.
+    /// `/api/overseer` endpoint, and a background loader registered in the
+    /// `TAB_LOADERS` registry so it is prefetched and refreshed automatically.
     #[test]
     fn index_html_wires_overseer_tab() {
         assert!(
@@ -760,9 +761,14 @@ mod tests {
             INDEX_HTML.contains("function fetchOverseer()"),
             "fetchOverseer() must be defined"
         );
+        // #2649: the on-activate `runTabFetches` slug-branch chain was retired in
+        // favour of the TAB_LOADERS background-prefetch registry, so the Overseer
+        // tab is now wired by a registered loader entry rather than a
+        // `slug==='overseer'` activation branch.
         assert!(
-            INDEX_HTML.contains("slug==='overseer'"),
-            "Overseer tab must be wired into the activation dispatch (runTabFetches)"
+            INDEX_HTML.contains("'overseer':[{fn:fetchOverseer"),
+            "Overseer tab must register fetchOverseer in the TAB_LOADERS \
+             background-prefetch registry"
         );
     }
 
