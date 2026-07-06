@@ -1270,6 +1270,34 @@ pub(crate) fn parse_facts_document(document: &str) -> SimardResult<DistillOutput
     )))
 }
 
+/// Parse one candidate span as a [`RecipeEnvelope`], strict first, tolerating a
+/// single JSON **trailing comma** as a last-resort recovery (issues #2658/#2678).
+///
+/// Strict `serde_json::from_str::<RecipeEnvelope>` runs first and is never
+/// weakened, so the clean path is byte-identical and unchanged. **Only** on
+/// `Err` is the span retried against its trailing-comma-stripped
+/// [`strip_json_trailing_commas`](crate::recipe_output::strip_json_trailing_commas)
+/// view — a provable no-op on valid JSON — so one cosmetic trailing comma
+/// before a `}`/`]` (the single most common LLM-JSON defect) can no longer
+/// reject the whole facts object and silently drop the entire batch (the
+/// residual 100% distill parse-failure shape). Returns `None` when both the
+/// strict parse and the comma-stripped retry fail, preserving the fail-closed
+/// deferral contract — a genuinely malformed span yields `None`, the batch is
+/// deferred, and nothing hollow is persisted (no hollow `Ok`).
+fn parse_recipe_envelope(candidate: &str) -> Option<RecipeEnvelope> {
+    if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(candidate) {
+        return Some(parsed);
+    }
+    // The stripper borrows the input unchanged when it holds no trailing comma,
+    // so a `Borrowed` result means the strict parse above already saw these
+    // exact bytes and failed — there is nothing new to try. Only an `Owned`
+    // (actually-stripped) view can parse where the strict attempt could not.
+    match crate::recipe_output::strip_json_trailing_commas(candidate) {
+        std::borrow::Cow::Owned(stripped) => serde_json::from_str::<RecipeEnvelope>(&stripped).ok(),
+        std::borrow::Cow::Borrowed(_) => None,
+    }
+}
+
 /// Scan an already noise-stripped `trimmed` string for a `{ "facts": [...] }`
 /// object, preferring (in order) the LAST balanced object candidate that carries
 /// a **grounded-capable** fact — one with a non-empty `source_episode_id` — then
@@ -1288,7 +1316,7 @@ pub(crate) fn parse_facts_document(document: &str) -> SimardResult<DistillOutput
 /// while still recovering a source-less answer when that is all the output holds.
 fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
     // Fast path — the text IS the JSON object.
-    if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
+    if let Some(parsed) = parse_recipe_envelope(trimmed) {
         return Some(parsed.into_output());
     }
     // Slow path — among every balanced `{...}` substring (string-aware, so a
@@ -1309,7 +1337,7 @@ fn scan_cleaned_for_facts(trimmed: &str) -> Option<DistillOutput> {
         .into_iter()
         .rev()
     {
-        if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(span) {
+        if let Some(parsed) = parse_recipe_envelope(span) {
             let output = parsed.into_output();
             if output
                 .facts
@@ -2245,5 +2273,122 @@ mod issue_2622_file_channel_tests {
         let out = parse_facts_document(fenced).expect("a fenced facts document must still parse");
         assert_eq!(out.facts.len(), 1);
         assert_eq!(out.facts[0].source_episode_id, "epi_7");
+    }
+}
+
+/// Issue #2678 — recurring `overseer-obs:anomaly:distill parse-fail rate 100%`.
+///
+/// Root cause: the distiller intermittently writes an otherwise well-formed
+/// `{ "facts": [...] }` envelope that carries a JSON **trailing comma** (a `,`
+/// immediately before a `}` or `]`). Strict `serde_json` rejects the entire
+/// object, so [`scan_cleaned_for_facts`] finds no parseable object,
+/// [`parse_facts_document`] returns `Err`, the batch is deferred every cycle,
+/// `distill_parse_success_rate` pins at 0, and the Overseer emits the recurring
+/// 100%-fail anomaly that also stalls the blocked kgpacks-rs parity goals and
+/// leaves the quality gym gate skipped.
+///
+/// The fix routes the strict parse through a comma-stripping **fallback retry**
+/// (`serde_json::from_str` first, and only on `Err` a retry against the
+/// [`crate::recipe_output::strip_json_trailing_commas`] view). These tests are
+/// the executable contract, written first (red until wired):
+///
+/// * A trailing-comma envelope now **recovers** its fact(s) via the public
+///   `parse_facts` / `parse_facts_document` contract (100%→0% on this input).
+/// * A comma **inside fact content** is never touched.
+/// * The grounded-capable preference tier still wins after the retry.
+/// * Genuinely malformed input (unterminated object, *adjacent* double comma)
+///   still fails **closed** as an explicit `ParseFailure` — never a hollow `Ok`.
+/// * Well-formed input is unaffected (no regression / clean-path no-op).
+#[cfg(test)]
+mod issue_2678_trailing_comma_tests {
+    use super::*;
+
+    /// The exact reproducing shape: a trailing comma after the last `facts[]`
+    /// element AND after the last top-level member. Today this returns `Err`
+    /// (parse-fail rate 100%); after the fix it must recover the fact.
+    #[test]
+    fn trailing_comma_envelope_recovers_fact() {
+        let raw = r#"{"facts":[{"concept":"lesson-learned","content":"warm the cache first","source_episode_id":"epi_1"},],}"#;
+        let facts = parse_facts(raw).expect("a trailing-comma envelope must recover its fact");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "lesson-learned");
+        assert_eq!(facts[0].content, "warm the cache first");
+        assert_eq!(facts[0].source_episode_id, "epi_1");
+    }
+
+    /// A trailing comma after only the last array element (no top-level trailing
+    /// comma) must likewise recover.
+    #[test]
+    fn trailing_comma_after_last_array_element_recovers() {
+        let raw = r#"{"facts":[{"concept":"bug-pattern","content":"off-by-one in ring buffer","source_episode_id":"epi_2"},]}"#;
+        let facts = parse_facts(raw).expect("a trailing array comma must recover its fact");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "bug-pattern");
+    }
+
+    /// The retry must run in the per-span slow path too, and it must not disturb
+    /// tier ordering: a trailing-comma *grounded* object still wins over a
+    /// trailing leading empty object.
+    #[test]
+    fn trailing_comma_grounded_object_wins_grounded_tier() {
+        let raw = concat!(
+            "{\"facts\":[]}\n",
+            r#"{"facts":[{"concept":"pr-pattern","content":"squash fixups","source_episode_id":"epi_9"},],}"#,
+        );
+        let facts = parse_facts(raw).expect("the grounded trailing-comma object must win");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].source_episode_id, "epi_9");
+        assert_eq!(facts[0].content, "squash fixups");
+    }
+
+    /// Safety: a comma inside fact *content* must never be stripped, even when
+    /// the surrounding object also carries a structural trailing comma.
+    #[test]
+    fn comma_inside_fact_content_is_never_stripped() {
+        let raw = r#"{"facts":[{"concept":"bug-pattern","content":"a, b, and c fail","source_episode_id":"epi_3"},]}"#;
+        let facts = parse_facts(raw).expect("trailing comma removed, content commas preserved");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(
+            facts[0].content, "a, b, and c fail",
+            "commas inside the string literal must be preserved verbatim"
+        );
+    }
+
+    /// Fail-closed: genuinely malformed input (an unterminated object) is NOT
+    /// laundered into a hollow success — it stays an explicit `ParseFailure`,
+    /// preserving the retry-safe deferral contract.
+    #[test]
+    fn unterminated_object_is_still_parse_failure() {
+        let raw = r#"{"facts":[{"concept":"bug-pattern","content":"x""#;
+        let err = parse_facts_document(raw)
+            .expect_err("genuinely malformed input must fail closed, never a hollow Ok");
+        assert_eq!(
+            classify_distill_error(&err),
+            DistillFailureClass::ParseFailure
+        );
+    }
+
+    /// Fail-closed: an *adjacent* double comma cannot be repaired by the
+    /// structural-only, single-pass stripper, so the batch still defers rather
+    /// than admitting corrupted structure.
+    #[test]
+    fn adjacent_double_comma_is_still_parse_failure() {
+        let raw =
+            r#"{"facts":[{"concept":"bug-pattern","content":"x","source_episode_id":"epi_4"},,]}"#;
+        assert!(
+            parse_facts(raw).is_err(),
+            "an adjacent double comma is genuinely malformed and must fail closed"
+        );
+    }
+
+    /// Regression guard: a clean, well-formed envelope is unaffected by the new
+    /// fallback path (the strict parse succeeds first; the retry never runs).
+    #[test]
+    fn clean_envelope_is_unaffected() {
+        let raw = r#"{"facts":[{"concept":"pr-pattern","content":"warm the cache","source_episode_id":"epi_5"}]}"#;
+        let facts = parse_facts(raw).expect("a clean envelope must parse exactly as before");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].concept, "pr-pattern");
+        assert_eq!(facts[0].source_episode_id, "epi_5");
     }
 }
