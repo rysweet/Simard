@@ -7,6 +7,13 @@
 //! **same** meeting engine and handoff/goal-carryover chain as the CLI and
 //! dashboard channels.
 //!
+//! Each operator's conversation is also wired into the **same OODA-loop context
+//! and graph cognitive memory as the CLI meeting** (issue #2527): its system
+//! prompt starts with live OODA state (recent meetings, decisions, active goals,
+//! operator identity, known projects) and each per-operator backend carries its
+//! own cognitive-memory store, so a `/close` consolidates the conversation back
+//! into graph memory (episodes, summary facts) — not just the flat handoff bundle.
+//!
 //! The three remote-command guardrails from the task live here and are enforced
 //! before anything reaches the shared driver:
 //! - **(a) sender allowlist** — [`Allowlist::authorize`] is applied in
@@ -24,9 +31,12 @@
 //!
 //! # Naming
 //!
-//! Nothing here is named `bridge`/`Bridge`. `SignalConversation` is a first-class
-//! conversation channel and does not implement the cognitive-memory
-//! `BridgeTransport`.
+//! No symbol *defined here* is named `bridge`/`Bridge`. `SignalConversation` is a
+//! first-class conversation channel and does not implement the cognitive-memory
+//! `BridgeTransport`. The per-operator OODA/graph-memory wiring (issue #2527) does
+//! call the pre-existing external helper `memory_ipc::launch_writer_bridge` to
+//! obtain a cognitive-memory handle, but that handle is bound locally as `memory`
+//! — never `bridge` — so the guardrail holds for every symbol this module names.
 
 use std::collections::VecDeque;
 use std::time::Instant;

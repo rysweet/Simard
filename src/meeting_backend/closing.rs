@@ -518,9 +518,14 @@ impl MeetingBackend {
             }
         }
 
-        // ── Memory consolidation ── (no-op in current production; bridge
-        // is always `None`. Kept for forward compatibility; bounded with
-        // the agent-close budget if a future caller wires a bridge in.)
+        // ── Memory consolidation ── Runs whenever the backend was opened
+        // with a cognitive-memory store (`Some`). The Signal conversation
+        // channel wires a per-operator store in (issue #2527), so a Signal
+        // `/close` consolidates the meeting back into graph cognitive memory
+        // (episodes, summary facts) — not just the flat handoff bundle.
+        // Callers that pass `None` — the CLI meeting REPL and the dashboard
+        // chat, which recall live context into the prompt but do not write
+        // back here — skip it. Bounded with the agent-close budget.
         if let Some(ref bridge) = self.bridge {
             persist::store_enriched_cognitive_memory(
                 &**bridge,

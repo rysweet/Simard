@@ -1,7 +1,7 @@
 ---
 title: Signal continuous conversation — per-operator durable sessions
 description: Reference for the continuous, multi-turn Signal conversation. One long-lived meeting session per operator identity (keyed by Signal number) is reused across successive inbound messages, appended turn-by-turn, persisted to a durable session store that survives daemon restarts, and controlled by the operator with /new (reset), the existing /help, and the existing /close. Reuses the dashboard-chat session-file envelope and crash-durable persistence pipeline (adding a new per-operator index); preserves the allowlist, identity binding, high-risk gating, and Note-to-Self loop prevention.
-last_updated: 2026-07-05
+last_updated: 2026-07-06
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -42,9 +42,22 @@ The operator controls the conversation lifecycle over Signal: `/new` (alias
 > continuous conversation replaces that single global backend with a
 > **per-operator registry** backed by a **durable session store**.
 
-> **Naming.** This feature adds no `bridge`/`Bridge` symbol. Continuity is
-> expressed in one-Brain / reasoner terms: one meeting **session** per operator,
-> driven by the shared meeting backend.
+> **Also new (issue #2527).** Each per-operator backend is now wired into the
+> **same OODA-loop context and graph cognitive memory as the CLI meeting**. On
+> first touch the operator's system prompt is enriched with live OODA state
+> (recent meetings, decisions, active goals, operator identity, known projects)
+> via the shared `build_enriched_meeting_system_prompt`, and the backend carries
+> its **own** cognitive-memory store, so a `/close` **consolidates** the
+> conversation back into graph memory (episodes, summary facts) — not just the
+> flat handoff bundle. Recall is reached only through `operator_commands_meeting`;
+> the channel never calls `build_live_meeting_context` directly.
+
+> **Naming.** These features add no `bridge`/`Bridge` symbol of their own. The
+> #2527 OODA wiring does call the pre-existing external helper
+> `memory_ipc::launch_writer_bridge`, but binds the returned cognitive-memory
+> handle locally as `memory`. Continuity is expressed in one-Brain / reasoner
+> terms: one meeting **session** per operator, driven by the shared meeting
+> backend.
 
 This reference documents the concepts, the on-disk store, the lifecycle
 commands, the public API, the tracing contract, configuration, and worked
@@ -64,6 +77,8 @@ examples. For channel setup, guardrails, and the wire protocol, see the
 | **Operator index** | The single `operators.json` file mapping each operator identity to its **active** `session_id`. This is how an E.164 (which is not a valid filename) points at a session file. |
 | **Rehydration / resume** | On the first message after a restart, the operator's persisted history is replayed into a fresh `MeetingBackend` (via `restore`) so the agent regains full prior context — not just the transcript. |
 | **Registry** | The in-process `HashMap<operator, MeetingBackend>` the run loop keeps so back-to-back messages reuse the same live backend without touching disk on every turn. |
+| **OODA context** | The live OODA-loop state — recent meetings, decisions, active goals, operator identity, known projects, research topics, improvements — injected into each operator's system prompt on first touch via the shared `build_enriched_meeting_system_prompt` (issue #2527). Makes Simard start a Signal chat already knowing her own state, identical to the CLI meeting. |
+| **Cognitive-memory store** | The per-operator graph-memory handle (`memory_ipc::launch_writer_bridge`, bound as `memory`) each backend carries. It supplies the OODA recall **in** and, on `/close`, consolidates the conversation back **into** graph memory (episodes, summary facts) — bidirectional, not read-only. |
 
 Every Signal turn is routed through the **same** `MeetingBackend`
 (`OperatingMode::Meeting`) used by the CLI meeting REPL and the dashboard chat —
@@ -222,7 +237,7 @@ and `/close` are recognized by the run-loop pre-check on the accepted inbound te
 |-------------------------------------|------|--------|
 | `/new` (alias `/reset`) | **new** | Start a **fresh** conversation for this operator: mint a new `session_id`, point `operators.json` at it, and drop the operator's in-memory backend. The prior session file is left on disk (history is detached, not deleted). The next message begins a brand-new session. Handled entirely in the run loop. |
 | `/help` | pre-existing word | The pre-check intercepts `/help` and replies with a **Signal-specific banner** that also advertises `/new`. Because the interception happens in the run loop, this deliberately **supersedes** the generic meeting `/help` banner **on the Signal channel** — a conscious, documented replacement, not a silent shadow. Never persisted as a turn; never resets. |
-| `/close` | pre-existing word | The pre-check closes the operator's live backend via `MeetingBackend::close` — writing the handoff bundle and carrying decisions onto the goal board exactly as on every channel — replies with the closing summary, and rotates the operator onto a fresh `session_id` so the **next** message begins a new conversation. |
+| `/close` | pre-existing word | The pre-check closes the operator's live backend via `MeetingBackend::close` — writing the handoff bundle, **consolidating the conversation into graph cognitive memory** (episodes, summary facts), and carrying decisions onto the goal board exactly as on every channel — replies with the closing summary, and rotates the operator onto a fresh `session_id` so the **next** message begins a new conversation. |
 
 So the run-loop pre-check owns exactly three words — `/new` (`/reset`), `/help`, and
 `/close`; everything else (the lightweight commands and ordinary turns) continues
