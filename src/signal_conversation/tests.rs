@@ -360,3 +360,33 @@ own_device_id = 4
         );
     }
 }
+
+// ── Turn-lifecycle parity: Signal inherits idle-liveness (no wall-clock cap) ──
+
+/// Regression guard for issues #2604 and #2607.
+///
+/// The Signal channel must open its agent session in
+/// [`crate::identity::OperatingMode::Meeting`] so every turn runs through the
+/// [`crate::meeting_backend::agent_proxy::PersistentAgentProxy`] idle-liveness
+/// lifecycle — reap the child only after a generous window of *no output*
+/// (every streamed chunk resets the clock), never on elapsed wall-clock time.
+/// That is the cross-transport parity #2604 requires and the "no wall-clock
+/// turn timeout" #2607 mandates; the hours-scale idle default that governs it
+/// is PR #2608.
+///
+/// If [`super::channel::signal_agent_mode`] is ever flipped to a non-Meeting
+/// mode, Signal falls back onto the per-turn adapter and the wall-clock turn
+/// timeout that kills long-but-productive turns returns silently. This test
+/// fails loudly in that case and points back to the parity requirement.
+#[test]
+fn signal_opens_agent_in_meeting_mode_for_idle_liveness_parity() {
+    use crate::identity::OperatingMode;
+
+    assert_eq!(
+        super::channel::signal_agent_mode(),
+        OperatingMode::Meeting,
+        "Signal must open its agent in Meeting mode so turns inherit \
+         PersistentAgentProxy idle-liveness (no wall-clock per-turn cap); \
+         see issues #2604 and #2607",
+    );
+}
