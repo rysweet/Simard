@@ -363,6 +363,27 @@ API reference and
 [How to report a bug or request a feature](howto/report-a-bug-or-request-a-feature.md)
 for the walkthrough.
 
+## Instant tab switches: background prefetch and refresh
+
+Every tab's data is **prefetched on page load** and kept on its **own persistent
+background refresh**, whether or not that tab is currently visible. Switching to
+a tab renders immediately from the already-fetched, continuously-refreshed data
+instead of blocking on a slow on-activate fetch. A subtle per-tab
+`Updated <relative>` indicator (`[data-testid="{slug}-updated"]`) shows how fresh
+each panel is, so there is no silent staleness, and every manual **Refresh**
+button still works.
+
+To stay kind to the local daemon, the scheduler bounds concurrency, staggers the
+initial wave, jitters the per-tab intervals, de-duplicates concurrent GETs for
+the same endpoint, and **suspends all refreshes while the browser tab is hidden**
+(resuming — and immediately refreshing the active tab — when it becomes visible
+again). Interactive surfaces (Workers → Terminal, Chat live attach) are never
+auto-opened in the background.
+
+See [Background tab prefetch and refresh](reference/dashboard-background-tab-prefetch.md)
+for the full behaviour, the per-tab refresh schedule, the tuning constants, and
+the test coverage.
+
 ## Read-only
 
 The dashboard is observational: it does not let operators force shell commands or edit code through the browser. Goal promotion, status changes, refresh, and the [feedback widget](#feedback-widget-report-a-bug-request-a-feature-2629) (which starts a governed workstream, not a shell command) are the only state-changing operations. All other panels are observational. A feedback-launched workstream runs the standard `default-workflow` with CI required green and a human merge — it cannot merge or run arbitrary commands on its own.
@@ -613,3 +634,4 @@ The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (def
 - [How to report a bug or request a feature from the dashboard](howto/report-a-bug-or-request-a-feature.md)
 - [Thinking tab — Cycle History (timestamps, collapse, duration trend)](reference/dashboard-thinking-cycle-history.md)
 - [Activity tab — Cycle Reports (live cycle number, accurate tree status, shared detail)](reference/dashboard-activity-cycle-reports.md)
+- [Background tab prefetch and refresh (instant tab switches)](reference/dashboard-background-tab-prefetch.md)
