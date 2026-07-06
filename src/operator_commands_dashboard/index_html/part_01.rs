@@ -531,6 +531,30 @@ pub(crate) const PART_01: &str = r#"
       }
       return'';
     }
+    /* Issue #20: classify a serialized `GoalProgress` enum to a canonical
+       lifecycle KEY by VARIANT — never by parsing the free-form Display/reason
+       string (G3, agentic-over-brittle). The key indexes the GOAL_STATUS_COLORS
+       allowlist below so goal-supplied text is never interpolated into a style=
+       attribute. Accepts both the string variants ("NotStarted", "Completed",
+       …) and the struct/tuple variants ({"InProgress":{…}}, {"Blocked":"…"}). */
+    function goalLifecycleKey(status){
+      const M={Proposed:'proposed',NotStarted:'not-started',InProgress:'in-progress',Blocked:'blocked',Paused:'paused',Completed:'completed',Done:'completed'};
+      if(status==null)return'not-started';
+      if(typeof status==='string')return M[status]||'not-started';
+      if(typeof status==='object'){
+        if(Object.prototype.hasOwnProperty.call(status,'Blocked'))return'blocked';
+        if(Object.prototype.hasOwnProperty.call(status,'InProgress'))return'in-progress';
+        const k=Object.keys(status)[0];
+        if(k)return M[k]||'not-started';
+      }
+      return'not-started';
+    }
+    /* Hardcoded allowlist: one colour per lifecycle key. Blocked uses amber
+       (#d29922), DELIBERATELY different from the activity-Failed red (#f85149)
+       so a lifecycle-blocked goal is never mistaken for an activity failure
+       (issue #20). Completed=green, in-progress=accent, not-started/proposed=
+       grey, paused=muted. */
+    const GOAL_STATUS_COLORS={'not-started':'#8b949e','proposed':'#8b949e','in-progress':'var(--accent)','blocked':'#d29922','paused':'#6e7681','completed':'#2ea043'};
     function humanizeTaskMemory(content){
       const raw=(content==null)?'':String(content);
       const trimmed=raw.trim();

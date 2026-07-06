@@ -1,0 +1,52 @@
+name: "Dashboard Goals Tab Lifecycle Status (issue #20)"
+description: "Outside-in operator check that the Goals tab renders each goal's REAL lifecycle status instead of a uniform failed/blocked. `simard goal list` (ground truth) showed the 20 active goals in MIXED states — several `blocked` (with an OODA-safeguard 'needs human review' reason), many `not-started`, and several `completed` — but the tab dumped the raw status string which, paired with the red activity chip, read as 'failed' for every row. Boots the real dashboard binary, authenticates with the dashkey, and asserts the served HTML now renders a distinctly-colored lifecycle badge via humanizeGoalProgress(g.status_progress) keyed off a goalLifecycleKey() variant classifier and a hardcoded GOAL_STATUS_COLORS allowlist, that Blocked uses amber #d29922 (distinct from the activity-Failed red #f85149) and surfaces its reason ('Blocked — <reason>'), and that the old raw status dump is gone."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Goals tab renders each goal's real lifecycle status"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/dashboard-goals-lifecycle.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "dashboard"
+    - "usability"
+    - "goals"
+    - "self-serve-dashboard-improvement"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

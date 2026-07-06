@@ -753,10 +753,12 @@ at `src/operator_commands_meeting/improvement_curation.rs:123`.
 
 | Variant | Fields | Meaning |
 |---------|--------|---------|
+| `Proposed` | — | Proposed but not yet accepted onto the active board |
 | `NotStarted` | — | Goal is queued; no engineer spawned yet |
 | `InProgress` | `percent: u32` | Engineer session is active; 0–100 |
-| `Completed` | — | Goal is done; will be archived at end of cycle |
 | `Blocked` | `reason: String` | Cannot proceed; requires operator attention |
+| `Paused` | — | Temporarily on hold — deliberately paused, not blocked |
+| `Completed` | — | Goal is done; will be archived at end of cycle |
 
 ---
 

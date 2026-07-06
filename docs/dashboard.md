@@ -161,6 +161,39 @@ Before (machine jargon) and after (plain English):
 |--------|-------|
 | ![Cluster card before](assets/dashboard-cluster-card-before.png) | ![Machines & Memory Sharing card after](assets/dashboard-cluster-card-after.png) |
 
+### Goals tab: lifecycle-status badges (#20)
+
+The **Goals** tab's active-goals table has a **Status** column that renders each
+goal's *real, live* lifecycle status as a distinctly-coloured **badge** —
+**Not started**, **In progress — N%**, **Blocked — &lt;reason&gt;**,
+**Completed**, **Proposed**, or **Paused**. Previously the tab printed the raw
+`status` string while the prominent coloured signal was the **Current Activity**
+chip (whose red `Failed` state made a mixed board of not-started / in-progress /
+blocked / completed goals all *look* failed). The two axes are now separated:
+the **Status** column is the authoritative lifecycle indicator, and the
+**Current Activity** column keeps its activity chip unchanged.
+
+| Lifecycle | Badge | Colour |
+|-----------|-------|--------|
+| `NotStarted` / `Proposed` | **Not started** / **Proposed** | grey `#8b949e` |
+| `InProgress { percent }` | **In progress — 42%** | accent `var(--accent)` |
+| `Blocked(reason)` | **Blocked — &lt;reason&gt;** | amber `#d29922` |
+| `Paused` | **Paused** | muted `#6e7681` |
+| `Completed` | **Completed** | green `#2ea043` |
+
+Blocked is amber `#d29922`, deliberately different from the activity chip's
+`Failed` red `#f85149`, so a lifecycle *block* (e.g. the OODA-safeguard
+`🔒 … needs human review` hold) is never mistaken for an activity *failure* —
+and the block reason is shown inline. The badge is driven by the additive
+`status_progress` field on `/api/goals` (the serialized `GoalProgress` enum),
+classified by enum key via `goalLifecycleKey` and coloured from the hard-coded
+`GOAL_STATUS_COLORS` allowlist, with the label produced by
+`humanizeGoalProgress` and escaped last. The view is **live** — `/api/goals`
+reloads the goal board on every request, so it reconciles with `simard goal
+list` by construction. See
+[Goals tab lifecycle-status badges](reference/dashboard-goal-lifecycle-status.md)
+for the full reference.
+
 ### Goals tab → Work Board: plain-English Task Memory & Recent Actions
 
 A live Playwright audit of the **Work Board** sub-section (in the **Goals** tab)
@@ -551,6 +584,7 @@ The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (def
 - [Memory architecture](memory.md)
 - [Run the OODA daemon](howto/run-ooda-daemon.md)
 - [Dashboard E2E tests](reference/dashboard-e2e-tests.md)
+- [Goals tab lifecycle-status badges](reference/dashboard-goal-lifecycle-status.md)
 - [Overview action-detail humanization](reference/dashboard-action-detail-humanization.md)
 - [Dashboard Feedback Widget](reference/dashboard-feedback-widget.md)
 - [How to report a bug or request a feature from the dashboard](howto/report-a-bug-or-request-a-feature.md)

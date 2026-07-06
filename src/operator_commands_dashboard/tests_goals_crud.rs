@@ -1011,3 +1011,246 @@ async fn full_goal_lifecycle_crud_via_at_is_env_independent() {
         "no CRUD step may touch the ambient (decoy) SIMARD_STATE_ROOT"
     );
 }
+
+// ===========================================================================
+// Lifecycle status projection (issue #20)
+//
+// BUG: the dashboard "Goals" tab rendered EVERY active goal as failed/blocked
+// even though `simard goal list` (ground truth) shows the goals in MIXED
+// states — several `blocked` (with an OODA-safeguard "needs human review"
+// reason), many `not-started`, and several `completed`.
+//
+// FIX (backend half): `/api/goals` additively exposes a `status_progress`
+// field on each active goal — the *serialized `GoalProgress` enum* — so the
+// client can render a distinct, correctly-labeled lifecycle badge (and surface
+// the block reason) instead of dumping the free-form `status` string that,
+// paired with the red activity chip, read as "failed" for every goal. The
+// existing `status`, `status_chip`, `detail`, and `detail_full` fields are
+// UNCHANGED (additive-only).
+//
+// These are the Rust/backend half of the contract; the frontend rendering
+// half lives in `index_html/tests_tab_meta.rs`.
+// ===========================================================================
+
+/// The exact OODA-safeguard block reason from the confirmed diagnosis, used to
+/// prove a genuinely-blocked goal surfaces its reason (not a blanket "failed").
+const OODA_BLOCK_REASON: &str =
+    "🔒 [OODA-SAFEGUARD] agent-kgpacks-rs: 3 consecutive no-action cycles; needs human review";
+
+/// Build an active goal in an explicit lifecycle `status` with no
+/// `current_activity` (so the lifecycle status — not the activity chip — is the
+/// signal under test).
+fn goal_in_status(id: &str, status: GoalProgress) -> crate::goal_curation::ActiveGoal {
+    crate::goal_curation::ActiveGoal {
+        parent_goal_id: None,
+        repo: None,
+        id: id.to_string(),
+        description: format!("Goal {id}"),
+        priority: 2,
+        status,
+        assigned_to: Some("simard".to_string()),
+        current_activity: None,
+        wip_refs: vec![],
+        last_progress_update_at: None,
+    }
+}
+
+/// Seed a board whose active goals span the four distinct lifecycle states the
+/// Goals tab must render differently: not-started, in-progress, blocked (with a
+/// reason), and completed. Returns the `SharedMemoryGuard` (bind it).
+#[must_use]
+fn init_board_with_mixed_statuses(state: &HermeticState) -> SharedMemoryGuard {
+    let guard = SharedMemoryGuard::register(state);
+    save_goal_board(&GoalBoard::new(), guard.ops()).expect("init empty board");
+
+    let mut board = GoalBoard::new();
+    board
+        .active
+        .push(goal_in_status("goal-not-started", GoalProgress::NotStarted));
+    board.active.push(goal_in_status(
+        "goal-in-progress",
+        GoalProgress::InProgress { percent: 37 },
+    ));
+    board.active.push(goal_in_status(
+        "goal-blocked",
+        GoalProgress::Blocked(OODA_BLOCK_REASON.to_string()),
+    ));
+    board
+        .active
+        .push(goal_in_status("goal-completed", GoalProgress::Completed));
+
+    dashboard_save_goal_board(state.state_root(), &board).expect("seed mixed-status board");
+    guard
+}
+
+/// Find the active-goal JSON object with the given `id` in a `/api/goals`
+/// response, panicking with context if absent.
+fn active_by_id<'a>(active: &'a [serde_json::Value], id: &str) -> &'a serde_json::Value {
+    active
+        .iter()
+        .find(|g| g["id"] == id)
+        .unwrap_or_else(|| panic!("active goal {id:?} missing from /api/goals response"))
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn goals_exposes_distinct_status_progress_per_lifecycle_state() {
+    let state = HermeticState::new();
+    let _mem = init_board_with_mixed_statuses(&state);
+
+    let result = goals_at(state.state_root()).await;
+    let active = result.0["active"].as_array().expect("active array");
+    assert_eq!(active.len(), 4, "all four seeded goals must be returned");
+
+    // Each goal exposes an additive `status_progress` = the SERIALIZED
+    // `GoalProgress` enum, distinctly per lifecycle state.
+    assert_eq!(
+        active_by_id(active, "goal-not-started")["status_progress"],
+        json!("NotStarted"),
+        "not-started goal must expose status_progress==\"NotStarted\", not a blocked/failed value"
+    );
+    assert_eq!(
+        active_by_id(active, "goal-in-progress")["status_progress"],
+        json!({ "InProgress": { "percent": 37 } }),
+        "in-progress goal must expose the InProgress percent variant"
+    );
+    assert_eq!(
+        active_by_id(active, "goal-blocked")["status_progress"],
+        json!({ "Blocked": OODA_BLOCK_REASON }),
+        "blocked goal must expose the Blocked variant carrying its reason"
+    );
+    assert_eq!(
+        active_by_id(active, "goal-completed")["status_progress"],
+        json!("Completed"),
+        "completed goal must expose status_progress==\"Completed\", not a blocked/failed value"
+    );
+
+    // The four values must be DISTINCT — the bug rendered everything the same
+    // (failed/blocked). Distinctness proves each real status is preserved.
+    let mut seen = std::collections::HashSet::new();
+    for g in active {
+        let sp = g["status_progress"].to_string();
+        assert!(
+            seen.insert(sp.clone()),
+            "status_progress values must be DISTINCT per lifecycle state; duplicate: {sp}"
+        );
+    }
+    assert_eq!(
+        seen.len(),
+        4,
+        "expected four distinct status_progress values, got {seen:?}"
+    );
+
+    // Direct regression guard: goals that are NOT blocked must not serialize as
+    // a Blocked variant (the exact symptom of the bug).
+    for id in ["goal-not-started", "goal-in-progress", "goal-completed"] {
+        assert!(
+            active_by_id(active, id)["status_progress"]
+                .get("Blocked")
+                .is_none(),
+            "non-blocked goal {id:?} must never carry a Blocked status_progress"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn goals_blocked_status_progress_carries_reason() {
+    let state = HermeticState::new();
+    let _mem = init_board_with_mixed_statuses(&state);
+
+    let result = goals_at(state.state_root()).await;
+    let active = result.0["active"].as_array().expect("active array");
+    let blocked = active_by_id(active, "goal-blocked");
+
+    assert_eq!(
+        blocked["status_progress"]["Blocked"], OODA_BLOCK_REASON,
+        "a genuinely-blocked goal must surface its block REASON via status_progress"
+    );
+    // The reason text ("needs human review") must be present so the operator
+    // can act on it — not swallowed into a generic "failed/blocked".
+    assert!(
+        blocked["status_progress"]["Blocked"]
+            .as_str()
+            .unwrap_or("")
+            .contains("needs human review"),
+        "the block reason must retain the OODA-safeguard 'needs human review' text, got: {}",
+        blocked["status_progress"]
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn goals_status_progress_is_additive_not_replacing_existing_fields() {
+    let state = HermeticState::new();
+    let _mem = init_board_with_mixed_statuses(&state);
+
+    let result = goals_at(state.state_root()).await;
+    let active = result.0["active"].as_array().expect("active array");
+
+    // The change is additive: the pre-existing free-form `status` string and
+    // the `status_chip`/`detail_full` fields must still be present alongside
+    // the new `status_progress`.
+    for g in active {
+        assert!(
+            g["status"].as_str().is_some(),
+            "existing free-form `status` string must remain (additive change), goal: {}",
+            g["id"]
+        );
+        assert!(
+            g["status_chip"].as_str().is_some(),
+            "existing `status_chip` must remain (additive change), goal: {}",
+            g["id"]
+        );
+        assert!(
+            !g["status_progress"].is_null(),
+            "new `status_progress` must be populated, goal: {}",
+            g["id"]
+        );
+    }
+
+    // The blocked goal's legacy `status` Display string is unchanged
+    // ("blocked: <reason>"), proving we ADDED status_progress rather than
+    // rewriting the existing field.
+    let blocked = active_by_id(active, "goal-blocked");
+    assert!(
+        blocked["status"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("blocked"),
+        "legacy `status` string must stay the GoalProgress Display form, got: {}",
+        blocked["status"]
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn goals_status_progress_matches_live_goal_store() {
+    // R8 reconciliation: the dashboard's rendered lifecycle status for each
+    // goal must equal the goal store's actual `GoalProgress` (dashboard ⇄
+    // `simard goal list` agreement), read LIVE from the store.
+    let state = HermeticState::new();
+    let _mem = init_board_with_mixed_statuses(&state);
+
+    // Ground truth: re-read the persisted board (the same source of truth the
+    // CLI's `goal list` reports).
+    let store = dashboard_goal_board_snapshot(state.state_root()).expect("read back board");
+
+    let result = goals_at(state.state_root()).await;
+    let active = result.0["active"].as_array().expect("active array");
+    assert_eq!(
+        active.len(),
+        store.active.len(),
+        "dashboard active-goal count must match the goal store"
+    );
+
+    for stored in &store.active {
+        let rendered = active_by_id(active, &stored.id);
+        let expected = serde_json::to_value(&stored.status).expect("serialize GoalProgress");
+        assert_eq!(
+            rendered["status_progress"], expected,
+            "goal {:?}: dashboard status_progress must equal the store's live GoalProgress",
+            stored.id
+        );
+    }
+}
