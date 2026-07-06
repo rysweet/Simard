@@ -79,7 +79,12 @@ pub fn extract_pr_ref(output: &str) -> Option<(String, u32)> {
 
 /// Spawns and probes a recipe workstream. Injectable so the launch→PR flow is
 /// testable with a fake; production uses [`AmplihackRecipeRunner`].
-pub trait RecipeRunner {
+///
+/// `Send + Sync` so a [`SmartOrchestratorLauncher`] can be held in a shared,
+/// process-wide handle across an async server's worker threads (e.g. the
+/// dashboard feedback endpoint's `OnceLock<SmartOrchestratorLauncher>`). Every
+/// implementation is already thread-safe (its state lives behind a `Mutex`).
+pub trait RecipeRunner: Send + Sync {
     fn spawn(&self, brief: &RecipeBrief) -> Result<WorkstreamHandle, OverseerError>;
     fn probe(&self, handle: &WorkstreamHandle) -> Result<WorkstreamStatus, OverseerError>;
 }

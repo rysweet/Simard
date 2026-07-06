@@ -12,6 +12,7 @@ use super::chat::ws_chat_handler;
 use super::chat_store::{chat_session_by_id, chat_sessions};
 use super::current_work::current_work;
 use super::distributed::{distributed, vacate_vm};
+use super::feedback::{feedback_status, feedback_submit};
 use super::goals::{
     add_goal, demote_goal, goals, promote_backlog_item, remove_goal, seed_goals, update_goal_status,
 };
@@ -87,6 +88,8 @@ pub fn build_router() -> Router {
         .route("/api/journal/entry/{date}", get(journal_entry))
         .route("/api/journal/render/{date}", get(journal_render))
         .route("/api/status/snapshot", get(status_snapshot))
+        .route("/api/feedback", post(feedback_submit))
+        .route("/api/feedback/status/{id}", get(feedback_status))
         .route("/api/subagent-sessions", get(subagent_sessions))
         .route("/api/chat/sessions", get(chat_sessions))
         .route("/api/chat/sessions/{id}", get(chat_session_by_id))
