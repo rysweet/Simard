@@ -355,9 +355,13 @@ fn assemble_llm(opts: &AssembleOptions) -> SectionEnvelope<LlmUsage> {
         });
     }
 
-    let daily_budget = std::env::var("SIMARD_DAILY_BUDGET_USD")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok());
+    // Single-source the ceiling through the canonical resolver (bug #6): the
+    // daily budget is always guarded (default `DEFAULT_DAILY_BUDGET_USD`), so
+    // the display must reflect the *enforced* ceiling — the same value the
+    // Overseer's `BudgetGate` reads — rather than parsing the raw env and
+    // falsely reporting "unset (no guard)" when the reading process lacks the
+    // var. Always `Some(resolved)`.
+    let daily_budget = Some(crate::overseer::config::daily_budget_usd());
 
     let usage = LlmUsage {
         copilot_turn: last_turn,

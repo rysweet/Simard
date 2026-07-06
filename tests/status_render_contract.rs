@@ -291,3 +291,62 @@ fn stale_section_is_marked_stale() {
         "a stale section must carry a stale marker:\n{out}"
     );
 }
+
+// ── daily budget label (issue #6) ────────────────────────────────────────────
+
+/// The rendered "daily budget" line, isolated so assertions don't false-match
+/// other sections.
+fn daily_budget_line(out: &str) -> String {
+    out.lines()
+        .find(|l| l.contains("daily budget"))
+        .unwrap_or_else(|| panic!("no 'daily budget' line rendered:\n{out}"))
+        .to_string()
+}
+
+#[test]
+fn daily_budget_some_renders_spent_over_ceiling() {
+    // populated(): ledger_today cost 1.87, daily_budget 25.0.
+    let out = render::to_terminal(&populated());
+    let line = daily_budget_line(&out);
+    assert!(
+        line.contains("$1.87 / $25.00"),
+        "daily budget must render as `$spent / $ceiling`: {line}"
+    );
+    assert!(
+        !line.contains("unset (no guard)"),
+        "a resolved ceiling must never render the false 'unset (no guard)': {line}"
+    );
+}
+
+#[test]
+fn daily_budget_none_renders_neutral_marker_not_false_no_guard() {
+    // The provider now always resolves a ceiling, so the None arm is effectively
+    // unreachable in production; if ever hit it must show a neutral marker, never
+    // the misleading "unset (no guard)" — the budget is always guarded (bug #6).
+    let mut snap = StatusSnapshot::empty();
+    snap.llm = SectionEnvelope::live(
+        LlmUsage {
+            copilot_turn: None,
+            ledger_today: Some(LedgerWindow {
+                cost_usd: 0.0,
+                tokens_in: 0,
+                tokens_out: 0,
+            }),
+            ledger_7d: None,
+            ledger_all_time: None,
+            daily_budget_usd: None,
+            reconciliation: None,
+        },
+        None,
+    );
+    let out = render::to_terminal(&snap);
+    let line = daily_budget_line(&out);
+    assert!(
+        !line.contains("unset (no guard)"),
+        "the None arm must not claim 'no guard' — the budget is always guarded: {line}"
+    );
+    assert!(
+        line.contains("n/a"),
+        "the None arm must render a neutral 'n/a' marker: {line}"
+    );
+}

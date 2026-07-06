@@ -73,7 +73,7 @@ LLM USAGE
   ledger today      $1.87    in 412,000  out 88,000
   ledger 7d         $11.42   in 2,740,000  out 610,000
   ledger all-time   $208.91  in 51,300,000  out 9,900,000
-  daily budget      $1.87 / $25.00  (OK — 7% used)
+  daily budget      $1.87 / $25.00
   reconciliation    ledger $1.87  vs  credits 940   ·  OK (within tolerance)
 
 MEMORY / BRAIN
@@ -152,7 +152,12 @@ memory, free disk on `/home` and `/tmp`, and the live engineer count. From
 
 The most recent Copilot per-turn tokens (in / cached / out) and AI-credits; the
 cost **ledger** for today / 7d / all-time (cost + in/out tokens); and the daily
-budget guard versus `SIMARD_DAILY_BUDGET_USD`. The **reconciliation** line shows
+budget guard as `$<spent> / $<ceiling>`. The ceiling is resolved through the
+canonical `overseer::config` resolver — the same value the Overseer's
+`BudgetGate` enforces — so it always shows the real ceiling (default `$500.00`)
+even when `SIMARD_DAILY_BUDGET_USD` is unset; it never prints "unset (no
+guard)". See the
+[daily-budget display guard](../reference/daily-budget-display-guard.md). The **reconciliation** line shows
 the **two books** — dollar ledger and Copilot AI-credits — side by side with a
 delta; it flags `under-count`/`over-count` if they diverge beyond tolerance.
 See the [two-books design](../concepts/unified-telemetry-and-status.md#two-books-of-cost-told-honestly).
@@ -260,7 +265,7 @@ unknown" are different facts, and `simard status` keeps them different.
 | Variable | Effect |
 |---|---|
 | `SIMARD_STATE_ROOT` | State root to read (`telemetry/metrics_snapshot.json`, cost ledger, memory). Defaults to `$HOME/.simard`. |
-| `SIMARD_DAILY_BUDGET_USD` | Sets the daily budget the LLM-usage section compares spend against. |
+| `SIMARD_DAILY_BUDGET_USD` | Sets the daily budget the LLM-usage section compares spend against. Resolved through `overseer::config` (default `500`, always guarded), so the displayed ceiling matches the enforced one even when unset. |
 | `SIMARD_SKIP_GYM` | Reflected in the GYM section. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Enables OTLP export of metrics **and** traces; unrelated to reading `simard status`, which is always local. Off by default. |
 
