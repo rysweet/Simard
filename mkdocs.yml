@@ -272,6 +272,7 @@ nav:
     - Engineer Claim-Sentinel Exclusion: reference/engineer-claim-sentinel-exclusion.md
     - Subagent Tmux Tracking: reference/subagent-tmux-tracking.md
     - Terminal Session Idle Detection: reference/terminal-session-idle-detection.md
+    - RustyClawd Bash-Tool Idle-Liveness: reference/rustyclawd-bash-tool-idle-liveness.md
     - Agent-Log WebSocket API: reference/agent-log-websocket.md
     - PR-Finalization Review Pipeline: reference/pr-finalization-pipeline.md
     - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md

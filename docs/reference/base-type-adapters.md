@@ -134,6 +134,14 @@ The RustyClawd session backend. Supports both single-process and multi-process t
 > (mirroring the Copilot wiring from #1664), so live RustyClawd turns recall
 > real memory + knowledge. See [Production wiring](#production-wiring-1664-2383).
 
+**Bash-tool idle-liveness (#2607):** The RustyClawd Bash tool has no wall-clock
+cap — a long-but-productive command runs unbounded as long as it keeps producing
+output. Only a command silent for the whole idle window (default 120 s,
+configurable via `SIMARD_RUSTYCLAWD_IDLE_LIVENESS_SECS`; `0` = fully unbounded)
+is reaped, killing the whole process group so no orphan survives. See the
+reference:
+[RustyClawd Bash-tool idle-liveness](./rustyclawd-bash-tool-idle-liveness.md).
+
 ### `copilot-sdk` — `CopilotSdkAdapter`
 
 **Module:** `src/base_type_copilot/` (`CopilotSdkAdapter` in `mod.rs`)
