@@ -170,7 +170,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
         appendMsg('system','Not connected. Click Reconnect to establish a session.');
         return;
       }
-      appendMsg('user',txt); ws.send(txt); inp.value='';
+      appendMsg('user',txt); ws.send(txt); inp.value=''; inp.style.height='';
       showTypingIndicator(); setChatBusy(true);
     }
 
@@ -184,6 +184,7 @@ pub(crate) const PART_04: &str = r#"            let fmt;
         roleSpan.textContent='assistant:';
         div.appendChild(roleSpan);
         streamSpan=document.createElement('span');
+        streamSpan.className='content';
         div.appendChild(streamSpan);
         el.appendChild(div);
         streamText='';
@@ -233,12 +234,21 @@ pub(crate) const PART_04: &str = r#"            let fmt;
       const roleSpan=document.createElement('span');
       roleSpan.className='role '+role;
       roleSpan.textContent=role+':';
+      const contentSpan=document.createElement('span');
+      contentSpan.className='content';
+      contentSpan.textContent=content;
       div.appendChild(roleSpan);
-      div.appendChild(document.createTextNode(' '+content));
+      div.appendChild(contentSpan);
       el.appendChild(div);
       el.scrollTop=el.scrollHeight;
     }
-    document.getElementById('chat-input').addEventListener('keydown',e=>{
+    const chatInputEl=document.getElementById('chat-input');
+    function autoGrowChatInput(){
+      chatInputEl.style.height='auto';
+      chatInputEl.style.height=Math.min(chatInputEl.scrollHeight,220)+'px';
+    }
+    chatInputEl.addEventListener('input',autoGrowChatInput);
+    chatInputEl.addEventListener('keydown',e=>{
       if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}
     });
 

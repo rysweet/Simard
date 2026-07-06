@@ -51,6 +51,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     #chat-messages{background:#010409;border:1px solid var(--border);border-radius:6px;padding:.6rem;flex:1;min-height:0;overflow-y:auto;font-size:.9rem;margin-bottom:.5rem}
     .chat-msg{margin-bottom:.5rem} .chat-msg .role{font-weight:700;margin-right:.5rem}
     .chat-msg .role.user{color:var(--accent)} .chat-msg .role.system{color:var(--yellow)} .chat-msg .role.assistant{color:var(--green)}
+    .chat-msg .content{white-space:pre-wrap;word-break:break-word}
     .chat-typing{padding:.25rem 0;color:#8b949e}
     #tab-chat.active{display:flex;flex-direction:column;height:calc(100vh - 106px);padding:.4rem 1.25rem .6rem}
     #tab-chat .page-h1{margin-bottom:.1rem}
@@ -75,8 +76,8 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
     .typing-dots span:nth-child(3){animation-delay:.4s}
     @keyframes blink{0%,80%,100%{opacity:0}40%{opacity:1}}
     #chat-send:disabled{opacity:.5;cursor:not-allowed}
-    #chat-input-row{display:flex;gap:.5rem}
-    #chat-input{flex:1;padding:.5rem;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--fg);font-size:.9rem;resize:none;height:42px}
+    #chat-input-row{display:flex;gap:.5rem;align-items:flex-end}
+    #chat-input{flex:1;padding:.5rem;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--fg);font-size:.9rem;font-family:inherit;line-height:1.4;resize:vertical;min-height:66px;max-height:220px;overflow-y:auto}
     #chat-input:focus{outline:none;border-color:var(--accent)}
     #chat-send{padding:.5rem 1.2rem;border:none;border-radius:6px;background:var(--accent);color:#0d1117;font-weight:600;cursor:pointer}
     #chat-send:hover{opacity:.9}
