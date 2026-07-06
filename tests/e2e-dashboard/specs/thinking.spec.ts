@@ -27,8 +27,8 @@ test.describe('Thinking Tab @structural', () => {
     authenticatedPage.on('pageerror', (err) => errors.push(err.message));
 
     await authenticatedPage.goto('/');
-    await authenticatedPage.locator('.tab[data-tab="thinking"]').click();
-    await expect(authenticatedPage.locator('#tab-thinking')).toBeVisible();
+    await authenticatedPage.locator('.tab[data-tab="activity"]').click();
+    await expect(authenticatedPage.locator('#tab-activity')).toBeVisible();
 
     expect(errors).toEqual([]);
   });
@@ -45,8 +45,8 @@ test.describe('Thinking Tab @structural', () => {
     );
 
     await authenticatedPage.goto('/');
-    await authenticatedPage.locator('.tab[data-tab="thinking"]').click();
-    await expect(authenticatedPage.locator('#tab-thinking')).toBeVisible();
+    await authenticatedPage.locator('.tab[data-tab="activity"]').click();
+    await expect(authenticatedPage.locator('#tab-activity')).toBeVisible();
   });
 });
 
@@ -58,14 +58,14 @@ test.describe('Thinking Tab Live @smoke', () => {
     authenticatedPage.on('pageerror', (err) => errors.push(err.message));
 
     await authenticatedPage.goto('/');
-    await authenticatedPage.locator('.tab[data-tab="thinking"]').click();
+    await authenticatedPage.locator('.tab[data-tab="activity"]').click();
 
     await authenticatedPage.waitForResponse(
       (resp) => resp.url().includes('/api/ooda-thinking') && resp.status() === 200,
       { timeout: 10_000 },
     );
 
-    await expect(authenticatedPage.locator('#tab-thinking')).toBeVisible();
+    await expect(authenticatedPage.locator('#tab-activity')).toBeVisible();
     expect(errors).toEqual([]);
   });
 });

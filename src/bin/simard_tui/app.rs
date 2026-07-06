@@ -14,28 +14,32 @@ use crate::system::{self, CpuSample, DaemonInfo};
 use crate::types::GoalBoard;
 
 /// The tabs in the TUI.
+///
+/// This is the terminal half of the #2627 consolidated tab taxonomy. The TUI
+/// mirrors the dashboard's shared names and order but renders only the seven
+/// tabs whose data exists in the terminal surface — it omits the web-only
+/// Pull Requests and Resources tabs (adding them would be new feature work,
+/// not consolidation). Merged views appear as panels inside their parent tab:
+/// Overview stacks Summary/Health/Stats (absorbing the old Status and Stats
+/// tabs), and Workers is the former Engineers process view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Overview,
     Goals,
-    Engineers,
     Activity,
-    Meeting,
-    Stats,
-    Status,
+    Workers,
+    Chat,
     Overseer,
     Journal,
 }
 
 /// All tabs in display order.
-pub const ALL_TABS: [Tab; 9] = [
+pub const ALL_TABS: [Tab; 7] = [
     Tab::Overview,
     Tab::Goals,
-    Tab::Engineers,
     Tab::Activity,
-    Tab::Meeting,
-    Tab::Stats,
-    Tab::Status,
+    Tab::Workers,
+    Tab::Chat,
     Tab::Overseer,
     Tab::Journal,
 ];
@@ -46,18 +50,17 @@ impl Tab {
         match self {
             Self::Overview => "Overview",
             Self::Goals => "Goals",
-            Self::Engineers => "Engineers",
             Self::Activity => "Activity",
-            Self::Meeting => "Meeting",
-            Self::Stats => "Stats",
-            Self::Status => "Status",
+            Self::Workers => "Workers",
+            Self::Chat => "Chat",
             Self::Overseer => "Overseer",
             Self::Journal => "Journal",
         }
     }
 
     /// Map an Alt+digit or Ctrl+digit key event to a tab.
-    /// Bare digits (without ALT/CTRL) are ignored to avoid stealing input on the Meeting tab.
+    /// Bare digits (without ALT/CTRL) are ignored to avoid stealing input on the Chat tab.
+    /// Only digits 1–7 are in range; 8/9/0 return `None` so a key can never index past `ALL_TABS`.
     pub fn from_key(key: &KeyEvent) -> Option<Tab> {
         if !key
             .modifiers
@@ -68,13 +71,11 @@ impl Tab {
         match key.code {
             KeyCode::Char('1') => Some(Tab::Overview),
             KeyCode::Char('2') => Some(Tab::Goals),
-            KeyCode::Char('3') => Some(Tab::Engineers),
-            KeyCode::Char('4') => Some(Tab::Activity),
-            KeyCode::Char('5') => Some(Tab::Meeting),
-            KeyCode::Char('6') => Some(Tab::Stats),
-            KeyCode::Char('7') => Some(Tab::Status),
-            KeyCode::Char('8') => Some(Tab::Overseer),
-            KeyCode::Char('9') => Some(Tab::Journal),
+            KeyCode::Char('3') => Some(Tab::Activity),
+            KeyCode::Char('4') => Some(Tab::Workers),
+            KeyCode::Char('5') => Some(Tab::Chat),
+            KeyCode::Char('6') => Some(Tab::Overseer),
+            KeyCode::Char('7') => Some(Tab::Journal),
             _ => None,
         }
     }
@@ -84,13 +85,11 @@ impl Tab {
         match self {
             Self::Overview => 1,
             Self::Goals => 2,
-            Self::Engineers => 3,
-            Self::Activity => 4,
-            Self::Meeting => 5,
-            Self::Stats => 6,
-            Self::Status => 7,
-            Self::Overseer => 8,
-            Self::Journal => 9,
+            Self::Activity => 3,
+            Self::Workers => 4,
+            Self::Chat => 5,
+            Self::Overseer => 6,
+            Self::Journal => 7,
         }
     }
 }
@@ -217,12 +216,12 @@ impl App {
 
     /// Handle a key press event.
     ///
-    /// - `Alt+1`–`Alt+8` / `Ctrl+1`–`Ctrl+8`: switch tabs (always)
+    /// - `Alt+1`–`Alt+7` / `Ctrl+1`–`Ctrl+7`: switch tabs (always)
     /// - `Tab`/`Shift+Tab`: cycle tabs forward/backward (always)
-    /// - On Meeting tab with Running: chars → input, Enter → send,
-    ///   Backspace → delete, Left/Right → cursor, Esc → stop meeting
-    /// - `←`/`→`: cycle tabs with wrapping (when not in active meeting)
-    /// - `q`/`Q`: quit (unless meeting is Running on Meeting tab)
+    /// - On Chat tab with Running: chars → input, Enter → send,
+    ///   Backspace → delete, Left/Right → cursor, Esc → stop chat
+    /// - `←`/`→`: cycle tabs with wrapping (when not in active chat)
+    /// - `q`/`Q`: quit (unless chat is Running on Chat tab)
     pub fn handle_key(&mut self, key: KeyEvent) {
         let code = key.code;
 
@@ -250,8 +249,8 @@ impl App {
             _ => {}
         }
 
-        // Meeting-specific input routing (before arrow tab cycling)
-        if self.active_tab == Tab::Meeting && self.meeting_status == MeetingStatus::Running {
+        // Chat-specific input routing (before arrow tab cycling)
+        if self.active_tab == Tab::Chat && self.meeting_status == MeetingStatus::Running {
             match code {
                 KeyCode::Enter => self.send_meeting_input(),
                 KeyCode::Backspace if self.cursor_position > 0 => {
@@ -890,8 +889,8 @@ impl App {
             self.journal_loaded = false;
         }
 
-        // Meeting tab: auto-spawn + drain output
-        if self.active_tab == Tab::Meeting
+        // Chat tab: auto-spawn + drain output
+        if self.active_tab == Tab::Chat
             && self.meeting_status == MeetingStatus::NotStarted
             && self.meeting_child.is_none()
         {
@@ -1062,7 +1061,7 @@ mod tests {
 
     #[test]
     fn all_tabs_count() {
-        assert_eq!(ALL_TABS.len(), 9);
+        assert_eq!(ALL_TABS.len(), 7);
     }
 
     #[test]
@@ -1074,41 +1073,48 @@ mod tests {
 
     #[test]
     fn tab_labels_correct() {
+        // #2627: the TUI mirrors the dashboard's 7-tab subset (it omits the
+        // web-only Pull Requests and Resources tabs). Shared tabs use the
+        // identical canonical names: Engineers→Workers, Meeting→Chat, and the
+        // old Stats/Status tabs are folded into Overview.
         assert_eq!(Tab::Overview.label(), "Overview");
         assert_eq!(Tab::Goals.label(), "Goals");
-        assert_eq!(Tab::Engineers.label(), "Engineers");
         assert_eq!(Tab::Activity.label(), "Activity");
-        assert_eq!(Tab::Meeting.label(), "Meeting");
-        assert_eq!(Tab::Stats.label(), "Stats");
-        assert_eq!(Tab::Status.label(), "Status");
+        assert_eq!(Tab::Workers.label(), "Workers");
+        assert_eq!(Tab::Chat.label(), "Chat");
         assert_eq!(Tab::Overseer.label(), "Overseer");
         assert_eq!(Tab::Journal.label(), "Journal");
     }
 
     #[test]
     fn tab_from_key_valid() {
-        // BUG1: from_key now takes &KeyEvent and requires ALT modifier
+        // from_key takes &KeyEvent and requires the ALT (or CTRL) modifier.
+        // Digits 1–7 map to the seven canonical tabs in order.
         assert_eq!(Tab::from_key(&alt_key('1')), Some(Tab::Overview));
         assert_eq!(Tab::from_key(&alt_key('2')), Some(Tab::Goals));
-        assert_eq!(Tab::from_key(&alt_key('3')), Some(Tab::Engineers));
-        assert_eq!(Tab::from_key(&alt_key('4')), Some(Tab::Activity));
-        assert_eq!(Tab::from_key(&alt_key('5')), Some(Tab::Meeting));
-        assert_eq!(Tab::from_key(&alt_key('6')), Some(Tab::Stats));
-        assert_eq!(Tab::from_key(&alt_key('7')), Some(Tab::Status));
-        assert_eq!(Tab::from_key(&alt_key('8')), Some(Tab::Overseer));
+        assert_eq!(Tab::from_key(&alt_key('3')), Some(Tab::Activity));
+        assert_eq!(Tab::from_key(&alt_key('4')), Some(Tab::Workers));
+        assert_eq!(Tab::from_key(&alt_key('5')), Some(Tab::Chat));
+        assert_eq!(Tab::from_key(&alt_key('6')), Some(Tab::Overseer));
+        assert_eq!(Tab::from_key(&alt_key('7')), Some(Tab::Journal));
     }
 
     #[test]
     fn tab_from_key_invalid() {
-        // BUG1: bare digits without ALT should NOT match
+        // Bare digits without ALT should NOT match.
         assert_eq!(Tab::from_key(&key('0')), None);
         assert_eq!(Tab::from_key(&key('7')), None);
         assert_eq!(Tab::from_key(&key('q')), None);
         assert_eq!(Tab::from_key(&key('a')), None);
-        // Bare digits (no ALT) are also invalid now
+        // Bare digits (no ALT) are also invalid.
         assert_eq!(Tab::from_key(&key('1')), None);
         assert_eq!(Tab::from_key(&key('2')), None);
         assert_eq!(Tab::from_key(&key('6')), None);
+        // #2627: with only seven tabs, Alt+8 / Alt+9 / Alt+0 are out of range
+        // and must return None so a key can never index past ALL_TABS.
+        assert_eq!(Tab::from_key(&alt_key('8')), None);
+        assert_eq!(Tab::from_key(&alt_key('9')), None);
+        assert_eq!(Tab::from_key(&alt_key('0')), None);
     }
 
     #[test]
@@ -1209,7 +1215,7 @@ mod tests {
         assert_eq!(app.active_tab, Tab::Goals);
 
         app.handle_key(alt_key('5'));
-        assert_eq!(app.active_tab, Tab::Meeting);
+        assert_eq!(app.active_tab, Tab::Chat);
 
         app.handle_key(alt_key('1'));
         assert_eq!(app.active_tab, Tab::Overview);
@@ -1266,7 +1272,7 @@ mod tests {
     #[test]
     fn meeting_char_appends_to_input() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.handle_key(key('h'));
         app.handle_key(key('i'));
@@ -1276,7 +1282,7 @@ mod tests {
     #[test]
     fn meeting_backspace_removes_last_char() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
         app.cursor_position = app.meeting_input.len();
@@ -1287,7 +1293,7 @@ mod tests {
     #[test]
     fn meeting_backspace_on_empty_is_noop() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.handle_key(key_code(KeyCode::Backspace));
         assert!(app.meeting_input.is_empty());
@@ -1296,7 +1302,7 @@ mod tests {
     #[test]
     fn meeting_enter_clears_input() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello world".to_string();
         app.cursor_position = app.meeting_input.len();
@@ -1307,7 +1313,7 @@ mod tests {
     #[test]
     fn meeting_enter_echoes_to_output() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "test input".to_string();
         app.cursor_position = app.meeting_input.len();
@@ -1320,7 +1326,7 @@ mod tests {
     #[test]
     fn meeting_escape_stops_meeting() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.handle_key(key_code(KeyCode::Esc));
         assert!(!matches!(app.meeting_status, MeetingStatus::Running));
@@ -1330,7 +1336,7 @@ mod tests {
     fn meeting_tab_switch_always_works() {
         // BUG1: Alt+digit switches tabs even when meeting is running
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.handle_key(alt_key('1'));
         assert_eq!(app.active_tab, Tab::Overview);
@@ -1340,7 +1346,7 @@ mod tests {
     fn meeting_q_goes_to_input_when_running() {
         // 'q' should NOT quit when meeting is active — it's meeting input
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.handle_key(key('q'));
         assert!(!app.should_quit);
@@ -1350,7 +1356,7 @@ mod tests {
     #[test]
     fn meeting_q_quits_when_not_running() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         // meeting_status defaults to NotStarted
         app.handle_key(key('q'));
         assert!(app.should_quit);
@@ -1359,7 +1365,7 @@ mod tests {
     #[test]
     fn meeting_input_capped_at_4096_bytes() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "x".repeat(4096);
         app.cursor_position = app.meeting_input.len();
@@ -1371,7 +1377,7 @@ mod tests {
     fn meeting_output_capped_at_1000_lines() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
         app.meeting_output = (0..1000).map(|i| format!("line {i}")).collect();
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "overflow".to_string();
         app.cursor_position = app.meeting_input.len();
@@ -1742,13 +1748,13 @@ mod tests {
         assert_eq!(app.active_tab, Tab::Goals); // index 1
 
         app.handle_key(key_code(KeyCode::Right));
-        assert_eq!(app.active_tab, Tab::Engineers); // index 2
+        assert_eq!(app.active_tab, Tab::Activity); // index 2
     }
 
     #[test]
     fn handle_key_left_arrow_cycles_backward() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Engineers; // index 2
+        app.active_tab = Tab::Activity; // index 2
 
         app.handle_key(key_code(KeyCode::Left));
         assert_eq!(app.active_tab, Tab::Goals); // index 1
@@ -1760,7 +1766,7 @@ mod tests {
     #[test]
     fn handle_key_right_arrow_wraps_at_end() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Journal; // index 8 (last)
+        app.active_tab = Tab::Journal; // index 6 (last)
 
         app.handle_key(key_code(KeyCode::Right));
         assert_eq!(app.active_tab, Tab::Overview); // wraps to index 0
@@ -1772,7 +1778,7 @@ mod tests {
         assert_eq!(app.active_tab, Tab::Overview); // index 0
 
         app.handle_key(key_code(KeyCode::Left));
-        assert_eq!(app.active_tab, Tab::Journal); // wraps to index 8 (last)
+        assert_eq!(app.active_tab, Tab::Journal); // wraps to index 6 (last)
     }
 
     #[test]
@@ -1791,15 +1797,11 @@ mod tests {
     fn handle_key_arrows_work_during_meeting_running() {
         // Arrow keys should move cursor in input, NOT cycle tabs, when meeting is running
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting; // index 4
+        app.active_tab = Tab::Chat; // index 4
         app.meeting_status = MeetingStatus::Running;
 
         app.handle_key(key_code(KeyCode::Right));
-        assert_eq!(
-            app.active_tab,
-            Tab::Meeting,
-            "arrow should stay on Meeting tab"
-        );
+        assert_eq!(app.active_tab, Tab::Chat, "arrow should stay on Chat tab");
     }
 
     // ── BUG1: Bare digit regression ────────────────────────────────
@@ -1808,13 +1810,13 @@ mod tests {
     fn meeting_bare_digit_goes_to_input_when_running() {
         // BUG1 regression: bare '1' in meeting mode should go to input, NOT switch tabs
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
 
         app.handle_key(key('1'));
         assert_eq!(
             app.active_tab,
-            Tab::Meeting,
+            Tab::Chat,
             "bare digit should NOT switch tabs"
         );
         assert_eq!(app.meeting_input, "1", "bare digit should go to input");
@@ -1841,7 +1843,7 @@ mod tests {
     #[test]
     fn meeting_cursor_left_right_movement() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         // Type "abc"
         app.handle_key(key('a'));
@@ -1868,7 +1870,7 @@ mod tests {
     #[test]
     fn meeting_cursor_left_at_start_is_noop() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         assert_eq!(app.cursor_position, 0);
         app.handle_key(key_code(KeyCode::Left));
@@ -1878,7 +1880,7 @@ mod tests {
     #[test]
     fn meeting_cursor_right_at_end_is_noop() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.handle_key(key('a'));
         assert_eq!(app.cursor_position, 1);
@@ -1889,7 +1891,7 @@ mod tests {
     #[test]
     fn meeting_backspace_at_cursor_middle() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "abcd".to_string();
         app.cursor_position = 2; // after 'b'
@@ -1901,7 +1903,7 @@ mod tests {
     #[test]
     fn meeting_home_moves_cursor_to_start() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
         app.cursor_position = 3;
@@ -1912,7 +1914,7 @@ mod tests {
     #[test]
     fn meeting_end_moves_cursor_to_end() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
         app.cursor_position = 1;
@@ -1932,12 +1934,13 @@ mod tests {
 
     #[test]
     fn tab_key_works_during_meeting_running() {
-        // Tab key should still cycle tabs even when meeting is active
+        // Tab key should still cycle tabs even when the chat/meeting is active.
+        // Chat is index 4; forward cycle lands on Overseer (index 5).
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.handle_key(key_code(KeyCode::Tab));
-        assert_eq!(app.active_tab, Tab::Stats);
+        assert_eq!(app.active_tab, Tab::Overseer);
     }
 
     // ── Ctrl+digit tab switch ──────────────────────────────────────
@@ -1948,7 +1951,7 @@ mod tests {
         assert_eq!(app.active_tab, Tab::Overview);
         let ctrl_3 = KeyEvent::new(KeyCode::Char('3'), KeyModifiers::CONTROL);
         app.handle_key(ctrl_3);
-        assert_eq!(app.active_tab, Tab::Engineers);
+        assert_eq!(app.active_tab, Tab::Activity);
     }
 
     // ── Arrows still cycle tabs when meeting is NOT running ────────
@@ -1956,12 +1959,12 @@ mod tests {
     #[test]
     fn arrows_cycle_tabs_when_meeting_not_running() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         // meeting_status defaults to NotStarted
         app.handle_key(key_code(KeyCode::Right));
         assert_eq!(
             app.active_tab,
-            Tab::Stats,
+            Tab::Overseer,
             "arrows should cycle tabs when meeting is not running"
         );
     }
@@ -2319,35 +2322,35 @@ mod tests {
     #[test]
     fn arrow_right_moves_cursor_in_meeting() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
         app.cursor_position = 2;
 
         app.handle_key(key_code(KeyCode::Right));
 
-        assert_eq!(app.active_tab, Tab::Meeting, "tab should not change");
+        assert_eq!(app.active_tab, Tab::Chat, "tab should not change");
         assert_eq!(app.cursor_position, 3, "cursor should move right");
     }
 
     #[test]
     fn arrow_left_moves_cursor_in_meeting() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
         app.cursor_position = 3;
 
         app.handle_key(key_code(KeyCode::Left));
 
-        assert_eq!(app.active_tab, Tab::Meeting, "tab should not change");
+        assert_eq!(app.active_tab, Tab::Chat, "tab should not change");
         assert_eq!(app.cursor_position, 2, "cursor should move left");
     }
 
     #[test]
     fn cursor_left_at_zero_stays() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hi".to_string();
         app.cursor_position = 0;
@@ -2355,13 +2358,13 @@ mod tests {
         app.handle_key(key_code(KeyCode::Left));
 
         assert_eq!(app.cursor_position, 0, "cursor should not underflow");
-        assert_eq!(app.active_tab, Tab::Meeting);
+        assert_eq!(app.active_tab, Tab::Chat);
     }
 
     #[test]
     fn cursor_right_at_end_stays() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hi".to_string();
         app.cursor_position = 2;
@@ -2379,7 +2382,7 @@ mod tests {
     #[test]
     fn cursor_insert_at_position() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hllo".to_string();
         app.cursor_position = 1;
@@ -2396,7 +2399,7 @@ mod tests {
     #[test]
     fn cursor_backspace_at_position() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
         app.cursor_position = 3;
@@ -2416,7 +2419,7 @@ mod tests {
     #[test]
     fn cursor_insert_unicode_char() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hllo".to_string();
         app.cursor_position = 1;
@@ -2438,7 +2441,7 @@ mod tests {
     #[test]
     fn cursor_resets_on_send() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "test".to_string();
         app.cursor_position = 3;
@@ -2452,7 +2455,7 @@ mod tests {
     #[test]
     fn cursor_resets_on_stop() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.cursor_position = 5;
 
@@ -2469,7 +2472,7 @@ mod tests {
     #[test]
     fn home_end_move_cursor() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
         app.meeting_input = "hello".to_string();
         app.cursor_position = 3;
@@ -2512,13 +2515,13 @@ mod tests {
     #[test]
     fn tab_key_cycles_during_meeting_running() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Meeting;
+        app.active_tab = Tab::Chat;
         app.meeting_status = MeetingStatus::Running;
 
         app.handle_key(key_code(KeyCode::Tab));
         assert_eq!(
             app.active_tab,
-            Tab::Stats,
+            Tab::Overseer,
             "Tab should cycle forward even when meeting is running"
         );
     }
@@ -2534,13 +2537,13 @@ mod tests {
         );
         assert_eq!(
             Tab::from_key(&ctrl_key('5')),
-            Some(Tab::Meeting),
-            "Ctrl+5 should switch to Meeting"
+            Some(Tab::Chat),
+            "Ctrl+5 should switch to Chat"
         );
         assert_eq!(
             Tab::from_key(&ctrl_key('7')),
-            Some(Tab::Status),
-            "Ctrl+7 should switch to Status"
+            Some(Tab::Journal),
+            "Ctrl+7 should switch to Journal"
         );
     }
 }

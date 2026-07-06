@@ -31,8 +31,8 @@ test.describe('Workboard Tab @structural', () => {
     authenticatedPage.on('pageerror', (err) => errors.push(err.message));
 
     await authenticatedPage.goto('/');
-    await authenticatedPage.locator('.tab[data-tab="workboard"]').click();
-    await expect(authenticatedPage.locator('#tab-workboard')).toBeVisible();
+    await authenticatedPage.locator('.tab[data-tab="goals"]').click();
+    await expect(authenticatedPage.locator('#tab-goals')).toBeVisible();
 
     expect(errors).toEqual([]);
   });
@@ -62,10 +62,10 @@ test.describe('Workboard Tab @structural', () => {
     );
 
     await authenticatedPage.goto('/');
-    await authenticatedPage.locator('.tab[data-tab="workboard"]').click();
+    await authenticatedPage.locator('.tab[data-tab="goals"]').click();
 
     // Should show cycle information
-    await expect(authenticatedPage.locator('#tab-workboard')).toContainText('10');
+    await expect(authenticatedPage.locator('#tab-goals')).toContainText('10');
   });
 });
 
@@ -75,14 +75,14 @@ test.describe('Workboard Tab Live @smoke', () => {
     authenticatedPage.on('pageerror', (err) => errors.push(err.message));
 
     await authenticatedPage.goto('/');
-    await authenticatedPage.locator('.tab[data-tab="workboard"]').click();
+    await authenticatedPage.locator('.tab[data-tab="goals"]').click();
 
     await authenticatedPage.waitForResponse(
       (resp) => resp.url().includes('/api/workboard') && resp.status() === 200,
       { timeout: 10_000 },
     );
 
-    await expect(authenticatedPage.locator('#tab-workboard')).toBeVisible();
+    await expect(authenticatedPage.locator('#tab-goals')).toBeVisible();
     expect(errors).toEqual([]);
   });
 });

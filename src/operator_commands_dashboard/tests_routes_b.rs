@@ -60,14 +60,19 @@ mod tests_b {
 
     #[test]
     fn index_html_contains_terminal_tab_and_xterm() {
-        // Tab button + pane.
+        // #2627: the Terminal view is now the Terminal sub-section of the
+        // consolidated Workers tab (it no longer has its own top-level pane).
         assert!(
             INDEX_HTML.contains("Terminal"),
-            "Index HTML should include a Terminal tab label"
+            "Index HTML should include a Terminal sub-section label"
         );
         assert!(
-            INDEX_HTML.contains("tab-terminal"),
-            "Index HTML should include a tab-terminal pane id"
+            INDEX_HTML.contains(r#"<h2 class="subsection">Terminal</h2>"#),
+            "Index HTML should render Terminal as a sub-section of the Workers tab"
+        );
+        assert!(
+            INDEX_HTML.contains("tab-workers"),
+            "Index HTML should include the tab-workers pane that now hosts Terminal"
         );
         assert!(
             INDEX_HTML.contains("xterm-host"),

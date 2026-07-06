@@ -1,4 +1,9 @@
-//! Engineers tab: child processes of the daemon with CPU, memory, runtime.
+//! Workers tab: child processes of the daemon with CPU, memory, runtime.
+//!
+//! The terminal half of the #2627 consolidated **Workers** tab. On the web
+//! dashboard Workers groups Processes / Engineers / Terminal sub-sections; the
+//! TUI shows the process/engineer tree (the data that exists in the terminal
+//! surface).
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
@@ -7,7 +12,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
 
 use crate::app::App;
 
-/// Render the Engineers tab content within the given area.
+/// Render the Workers tab content within the given area.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     if app.child_processes.is_empty() {
         let msg = if app.daemon_info.pid.is_some() {
@@ -16,7 +21,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             "Daemon is not running."
         };
         let paragraph =
-            Paragraph::new(msg).block(Block::default().borders(Borders::ALL).title("Engineers"));
+            Paragraph::new(msg).block(Block::default().borders(Borders::ALL).title("Workers"));
         f.render_widget(paragraph, area);
         return;
     }
@@ -56,7 +61,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(16),
     ];
 
-    let title = format!("Engineers ({} processes)", app.child_processes.len());
+    let title = format!("Workers ({} processes)", app.child_processes.len());
     let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(title));

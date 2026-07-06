@@ -1,71 +1,22 @@
-pub(crate) const PART_01: &str = r#"      </div>
-    </div>
-
-    <div class="card" style="margin-bottom:1.25rem">
-      <h2 style="cursor:pointer" onclick="document.getElementById('wb-facts-body').style.display=document.getElementById('wb-facts-body').style.display==='none'?'block':'none'">Task Memory <span style="font-weight:normal;color:#8b949e;font-size:.8rem" id="wb-facts-count">0 facts</span> <span style="font-size:.75rem;color:#8b949e">▾</span></h2>
-      <div id="wb-facts-body">
-        <div id="wb-facts-list" style="font-size:.85rem;color:#8b949e">No facts loaded</div>
-      </div>
-    </div>
-
+pub(crate) const PART_01: &str = r#"
+  <div class="tab-content" id="tab-workers">
+    <h1 class="page-h1">Workers</h1>
+    <p class="page-lede">The background processes and engineer subprocesses Simard is running on this host, with a tree view for spotting stuck workers and a live attach to any agent's terminal.</p>
+    <span class="section-anchor" id="section-processes"></span>
+    <h2 class="subsection">Processes</h2>
     <div class="card">
-      <h2>Cognitive Statistics</h2>
-      <div id="wb-cog-stats" style="font-size:.85rem;color:#8b949e">Loading…</div>
+      <h2>Active Simard Processes <button class="btn" onclick="fetchProcesses()">Refresh</button> <span id="proc-auto-refresh" style="font-size:.75rem;color:#8b949e;font-weight:normal;margin-left:.5rem">⟳ auto-refreshing</span></h2>
+      <div id="proc-count" style="margin-bottom:.5rem;color:#8b949e;font-size:.85rem"></div>
+      <div id="proc-table"><span class="loading">Loading…</span></div>
     </div>
-  </div>
-
-  <div class="tab-content" id="tab-merge-decisions">
-    <h1 class="page-h1">Merge Decisions</h1>
-    <p class="page-lede">A record of every pull request the merge judge has evaluated — which PRs were approved, rejected, or deferred, along with the reasoning and timestamp for each decision.</p>
-    <div class="card" style="max-width:980px;margin-bottom:1rem">
-      <h2>Decision Trend</h2>
-      <div id="merge-judge-trend"><span style="color:#8b949e;font-size:.85rem">Trend chart will appear once decision data is available.</span></div>
+    <h2 class="subsection">Engineers</h2>
+    <div class="card" style="margin-top:1rem">
+      <h2>Process Tree <button class="btn" onclick="fetchProcessTree()">Refresh</button></h2>
+      <div id="proc-tree-summary" style="margin-bottom:.5rem;color:#8b949e;font-size:.85rem"></div>
+      <div id="proc-tree-container"><span class="loading">Loading…</span></div>
     </div>
-    <div class="card" style="max-width:980px">
-      <h2>Decision History <button class="btn" onclick="fetchMergeJudge()" style="font-size:.75rem">Refresh</button></h2>
-      <div id="merge-judge-panel"><span class="loading">Loading…</span></div>
-    </div>
-  </div>
-
-  <div class="tab-content" id="tab-pr-readiness">
-    <h1 class="page-h1">PR Readiness</h1>
-    <p class="page-lede">Every open pull request under management with its CI status, review state, and remaining blockers — so you can see what is ready to merge without leaving the dashboard.</p>
-    <div class="card" style="max-width:1100px">
-      <h2>Open Pull Requests <button class="btn" onclick="fetchPrReadiness()" style="font-size:.75rem">Refresh</button></h2>
-      <div id="pr-readiness-summary" style="margin-bottom:.75rem"><span class="loading">Loading…</span></div>
-      <div id="pr-readiness-panel"><span class="loading">Loading…</span></div>
-    </div>
-  </div>
-
-  <div class="tab-content" id="tab-overseer">
-    <h1 class="page-h1">Overseer</h1>
-    <p class="page-lede">What Simard's steward has been doing on its own — what it noticed across the system, what it changed, and, when it chose to wait, why it held back. Refreshes automatically.</p>
-    <div class="card" style="max-width:1100px;margin-bottom:1rem">
-      <h2>Steward Status <button class="btn" onclick="fetchOverseer()" style="font-size:.75rem">Refresh</button></h2>
-      <div id="overseer-status"><span class="loading">Loading…</span></div>
-    </div>
-    <div class="card" style="max-width:1100px;margin-bottom:1rem">
-      <h2>Operator Threads</h2>
-      <div id="overseer-threads"><span class="loading">Loading…</span></div>
-    </div>
-    <div class="card" style="max-width:1100px">
-      <h2>Recent Activity</h2>
-      <div id="overseer-recent"><span class="loading">Loading…</span></div>
-    </div>
-  </div>
-
-  <div class="tab-content" id="tab-status">
-    <h1 class="page-h1">Status</h1>
-    <p class="page-lede">One consolidated operational report — the daemon, system resources, model spending, memory and brain health, gym, goals, active work, merged pull requests, and unexpected telemetry signals, all on a single page.</p>
-    <div class="card" style="max-width:1100px">
-      <h2>Operational Status <button class="btn" onclick="fetchStatusSnapshot()" style="font-size:.75rem">Refresh</button></h2>
-      <div id="status-snapshot-panel"><span class="loading">Loading…</span></div>
-    </div>
-  </div>
-
-  <div class="tab-content" id="tab-terminal">
-    <h1 class="page-h1">Terminal</h1>
-    <p class="page-lede">Attach to the live terminal of a running Simard sub-agent and watch its standard output and standard error stream in real time.</p>
+    <span class="section-anchor" id="section-terminal"></span>
+    <h2 class="subsection">Terminal</h2>
     <div class="card" style="max-width:980px">
       <h2>Agent Terminal</h2>
       <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.6rem;margin-bottom:.75rem;font-size:.8rem;color:#8b949e">
@@ -114,6 +65,69 @@ pub(crate) const PART_01: &str = r#"      </div>
         <div style="color:#8b949e;font-size:.85rem">Loading…</div>
       </div>
     </section>
+  </div>
+
+  <div class="tab-content" id="tab-pull-requests">
+    <h1 class="page-h1">Pull Requests</h1>
+    <p class="page-lede">Every pull request Simard is managing — the merge judge's approve, reject, and defer decisions plus the CI, review, and blocker status that shows what is ready to merge.</p>
+    <span class="section-anchor" id="section-merge-decisions"></span>
+    <h2 class="subsection">Merge Decisions</h2>
+    <div class="card" style="max-width:980px;margin-bottom:1rem">
+      <h2>Decision Trend</h2>
+      <div id="merge-judge-trend"><span style="color:#8b949e;font-size:.85rem">Trend chart will appear once decision data is available.</span></div>
+    </div>
+    <div class="card" style="max-width:980px">
+      <h2>Decision History <button class="btn" onclick="fetchMergeJudge()" style="font-size:.75rem">Refresh</button></h2>
+      <div id="merge-judge-panel"><span class="loading">Loading…</span></div>
+    </div>
+    <span class="section-anchor" id="section-pr-readiness"></span>
+    <h2 class="subsection">Readiness</h2>
+    <div class="card" style="max-width:1100px">
+      <h2>Open Pull Requests <button class="btn" onclick="fetchPrReadiness()" style="font-size:.75rem">Refresh</button></h2>
+      <div id="pr-readiness-summary" style="margin-bottom:.75rem"><span class="loading">Loading…</span></div>
+      <div id="pr-readiness-panel"><span class="loading">Loading…</span></div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-chat">
+    <h1 class="page-h1">Chat</h1>
+    <p class="page-lede">Talk to the running Simard agent in real time — anything you say here can become a new goal, and slash-commands like /close, /goals, and /status are available.</p>
+    <div class="chat-layout">
+      <div id="chat-sidebar">
+        <button id="chat-new" onclick="newChat()">+ New chat</button>
+        <div id="chat-sessions"></div>
+      </div>
+      <div class="card" id="chat-panel">
+        <h2>Chat</h2>
+        <div style="background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:.5rem .75rem;margin-bottom:.5rem;font-size:.8rem;color:#8b949e">
+          <strong style="color:var(--accent)">💡</strong>
+          Talk directly with Simard — ask about your goals, check system status, or start a conversation. Commands: <code>/close</code> end session, <code>/goals</code> review goals, <code>/status</code> system status.
+        </div>
+        <div class="ws-status disconnected" id="ws-status">● Disconnected <button class="btn" onclick="initChat()" style="font-size:.75rem;padding:.1rem .4rem;margin-left:.5rem">Reconnect</button></div>
+        <div id="chat-messages"></div>
+        <div id="chat-input-row">
+          <textarea id="chat-input" placeholder="Type a message… (/close to end session)"></textarea>
+          <button id="chat-send" onclick="sendChat()">Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-overseer">
+    <h1 class="page-h1">Overseer</h1>
+    <p class="page-lede">What Simard's steward has been doing on its own — what it noticed across the system, what it changed, and, when it chose to wait, why it held back. Refreshes automatically.</p>
+    <div class="card" style="max-width:1100px;margin-bottom:1rem">
+      <h2>Steward Status <button class="btn" onclick="fetchOverseer()" style="font-size:.75rem">Refresh</button></h2>
+      <div id="overseer-status"><span class="loading">Loading…</span></div>
+    </div>
+    <div class="card" style="max-width:1100px;margin-bottom:1rem">
+      <h2>Operator Threads</h2>
+      <div id="overseer-threads"><span class="loading">Loading…</span></div>
+    </div>
+    <div class="card" style="max-width:1100px">
+      <h2>Recent Activity</h2>
+      <div id="overseer-recent"><span class="loading">Loading…</span></div>
+    </div>
   </div>
 
   <div class="tab-content" id="tab-journal">
@@ -536,33 +550,65 @@ pub(crate) const PART_01: &str = r#"      </div>
       var meta=(window.__TAB_META||{})[slug];
       if(meta && meta.title) document.title=meta.title;
     }
-    document.querySelectorAll('.tab').forEach(tab=>{
-      tab.addEventListener('click',()=>{
-        document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-        document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
-        tab.classList.add('active');
-        document.getElementById('tab-'+tab.dataset.tab).classList.add('active');
-        activeTab=tab.dataset.tab;
-        updateDocumentTitleForTab(activeTab);
-        clearTabTimers();
-        if(tab.dataset.tab==='logs') {fetchLogs();tabRefreshTimers.logs=setInterval(fetchLogs,15000);}
-        if(tab.dataset.tab==='processes') {fetchProcessTree();tabRefreshTimers.proc=setInterval(fetchProcessTree,15000);}
-        if(tab.dataset.tab==='memory') {fetchRecentMemories();fetchMemoryHistory();fetchMemoryGraph();fetchMemory();}
 
-        if(tab.dataset.tab==='goals') fetchGoals();
-        if(tab.dataset.tab==='costs') fetchCosts();
-        if(tab.dataset.tab==='traces') fetchTraces();
-        if(tab.dataset.tab==='chat') loadChatSessions();
-        if(tab.dataset.tab==='workboard') {fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
-        if(tab.dataset.tab==='thinking') {fetchThinking();fetchOodaCycles();tabRefreshTimers.thinking=setInterval(fetchThinking,30000);tabRefreshTimers.oodaCycles=setInterval(fetchOodaCycles,30000);}
-        if(tab.dataset.tab==='brain-failures') {fetchBrainFailures();tabRefreshTimers.brainFailures=setInterval(fetchBrainFailures,30000);}
-        if(tab.dataset.tab==='merge-decisions') {fetchMergeJudge();tabRefreshTimers.mergeJudge=setInterval(fetchMergeJudge,30000);}
-        if(tab.dataset.tab==='pr-readiness') {fetchPrReadiness();tabRefreshTimers.prReadiness=setInterval(fetchPrReadiness,30000);}
-        if(tab.dataset.tab==='overseer') {fetchOverseer();tabRefreshTimers.overseer=setInterval(fetchOverseer,30000);}
-        if(tab.dataset.tab==='status') {fetchStatusSnapshot();tabRefreshTimers.status=setInterval(fetchStatusSnapshot,30000);}
-        if(tab.dataset.tab==='terminal') {initAgentLogTerminal();fetchSubagentSessions();tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);fetchTmuxSessions();tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
-      });
+    /* #2627 consolidation: the nine canonical tabs, plus TAB_ALIASES mapping
+       every retired 17-tab slug to the parent tab that now hosts it as a
+       sub-section. TAB_ALIASES is a fixed allowlist; a #hash deep link is
+       validated against ^[a-z-]+$, matched against the allowlist, and falls
+       back to 'overview' on any miss. The hash is never concatenated into a
+       DOM selector, so a crafted hash cannot inject markup. */
+    const CANONICAL_TABS=['overview','goals','activity','workers','pull-requests','resources','chat','overseer','journal'];
+    const TAB_ALIASES={"status":"overview","workboard":"goals","logs":"activity","traces":"activity","thinking":"activity","brain-failures":"activity","processes":"workers","terminal":"workers","merge-decisions":"pull-requests","pr-readiness":"pull-requests","memory":"resources","costs":"resources"};
+
+    /* Kick off the data fetches for every sub-section a consolidated tab now
+       hosts, so no view lost its refresh when its old tab was absorbed. */
+    function runTabFetches(slug){
+      clearTabTimers();
+      if(slug==='overview'){fetchStatusSnapshot();tabRefreshTimers.status=setInterval(fetchStatusSnapshot,30000);}
+      if(slug==='goals'){fetchGoals();fetchWorkboard();tabRefreshTimers.wb=setInterval(fetchWorkboard,30000);}
+      if(slug==='activity'){fetchLogs();fetchTraces();fetchThinking();fetchOodaCycles();fetchBrainFailures();tabRefreshTimers.logs=setInterval(fetchLogs,15000);tabRefreshTimers.thinking=setInterval(fetchThinking,30000);tabRefreshTimers.oodaCycles=setInterval(fetchOodaCycles,30000);tabRefreshTimers.brainFailures=setInterval(fetchBrainFailures,30000);}
+      if(slug==='workers'){fetchProcessTree();initAgentLogTerminal();fetchSubagentSessions();fetchTmuxSessions();tabRefreshTimers.proc=setInterval(fetchProcessTree,15000);tabRefreshTimers.subagent=setInterval(fetchSubagentSessions,5000);tabRefreshTimers.tmux=setInterval(fetchTmuxSessions,10000);}
+      if(slug==='pull-requests'){fetchMergeJudge();fetchPrReadiness();tabRefreshTimers.mergeJudge=setInterval(fetchMergeJudge,30000);tabRefreshTimers.prReadiness=setInterval(fetchPrReadiness,30000);}
+      if(slug==='resources'){fetchRecentMemories();fetchMemoryHistory();fetchMemoryGraph();fetchMemory();fetchCosts();}
+      if(slug==='chat'){loadChatSessions();}
+      if(slug==='overseer'){fetchOverseer();tabRefreshTimers.overseer=setInterval(fetchOverseer,30000);}
+      if(slug==='journal'&&typeof loadJournal==='function'){loadJournal();}
+    }
+
+    /* Activate a canonical tab by slug. `slug` is always one of CANONICAL_TABS
+       (callers pass a validated value); `section`, when given, is a retired
+       slug whose scroll anchor we jump to inside the parent tab. */
+    function activateTab(slug,section){
+      if(CANONICAL_TABS.indexOf(slug)<0) slug='overview';
+      const panel=document.getElementById('tab-'+slug);
+      if(!panel) return;
+      document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+      const navBtn=document.querySelector('.tab[data-tab="'+slug+'"]');
+      if(navBtn) navBtn.classList.add('active');
+      panel.classList.add('active');
+      activeTab=slug;
+      updateDocumentTitleForTab(slug);
+      runTabFetches(slug);
+      if(section){const el=document.getElementById('section-'+section);if(el&&el.scrollIntoView)el.scrollIntoView({block:'start'});}
+    }
+
+    /* Resolve an untrusted location.hash to a {tab,section}. Unknown or
+       malformed hashes fall back to Overview; the raw value is validated
+       before use and never becomes part of a selector. */
+    function resolveHashTab(){
+      const raw=(location.hash||'').replace(/^#/,'');
+      if(!/^[a-z-]+$/.test(raw)) return {tab:'overview',section:null};
+      if(CANONICAL_TABS.indexOf(raw)>=0) return {tab:raw,section:null};
+      if(Object.prototype.hasOwnProperty.call(TAB_ALIASES,raw)) return {tab:TAB_ALIASES[raw],section:raw};
+      return {tab:'overview',section:null};
+    }
+
+    document.querySelectorAll('.tab').forEach(tab=>{
+      tab.addEventListener('click',()=>{activateTab(tab.dataset.tab);});
     });
+    window.addEventListener('hashchange',()=>{const r=resolveHashTab();activateTab(r.tab,r.section);});
+    if(location.hash){const r=resolveHashTab();activateTab(r.tab,r.section);}
     setInterval(()=>{document.getElementById('clock').textContent=formatTime(Date.now())},1000);
 
     /* --- Status --- */

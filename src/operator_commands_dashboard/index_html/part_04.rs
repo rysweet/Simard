@@ -612,15 +612,15 @@ pub(crate) const PART_04: &str = r#"            let fmt;
     /* --- Agent log terminal (issue #947) --- */
     let agentLogTerm = null;
     let agentLogWS = null;
-    /* Issue #946: jump from a Thinking-tab spawn_engineer outcome straight to
-       the agent terminal viewer. Switches tabs, populates the agent-name
-       input, and clicks Connect. */
+    /* Issue #946 / #2627: jump from an engineer-spawn outcome straight to the
+       agent terminal viewer. The Terminal view is now the Terminal sub-section
+       of the consolidated Workers tab, so activate Workers and scroll to it. */
     function openAgentLog(name){
-      const tab = document.querySelector('.tab[data-tab="terminal"]');
-      if(tab) tab.click();
+      if(typeof activateTab==='function'){ activateTab('workers','terminal'); }
+      else { const tab=document.querySelector('.tab[data-tab="workers"]'); if(tab) tab.click(); }
       const input = document.getElementById('agent-log-name');
       if(input) input.value = name || '';
-      // initAgentLogTerminal is invoked by the tab click handler; defer
+      // initAgentLogTerminal is invoked by the tab activation; defer
       // connect a tick so xterm has been mounted.
       setTimeout(()=>{ try{ connectAgentLog(); }catch(e){} }, 50);
     }

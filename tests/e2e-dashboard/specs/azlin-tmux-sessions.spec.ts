@@ -5,7 +5,7 @@ import { test, expect } from '../fixtures/simard-dashboard';
 // These tests EXPECT TO FAIL until Step 8 ships:
 //   - GET  /api/azlin/tmux-sessions   (snapshot route)
 //   - WS   /ws/tmux_attach/{host}/{session}
-//   - <section id="azlin-sessions-panel"> rendered inside #tab-terminal
+//   - <section id="azlin-sessions-panel"> rendered inside #tab-workers
 //   - data-testid hooks: tmux-table-{host}, tmux-open-{host}-{session},
 //     tmux-last-refreshed
 //
@@ -69,7 +69,7 @@ test.describe('Azlin Tmux Sessions Panel @structural', () => {
   }) => {
     await authenticatedPage.goto('/');
     await authenticatedPage
-      .locator('[data-tab="terminal"], button:has-text("Terminal")')
+      .locator('[data-tab="workers"]')
       .first()
       .click();
 
@@ -120,7 +120,7 @@ test.describe('Azlin Tmux Sessions Panel @structural', () => {
 
     await authenticatedPage.goto('/');
     await authenticatedPage
-      .locator('[data-tab="terminal"], button:has-text("Terminal")')
+      .locator('[data-tab="workers"]')
       .first()
       .click();
 

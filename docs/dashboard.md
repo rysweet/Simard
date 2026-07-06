@@ -1,7 +1,7 @@
 ---
 title: Dashboard
-description: Read-only web dashboard for inspecting the autonomous OODA daemon, goal register, memory layers, processes, costs, and live traces.
-last_updated: 2026-05-22
+description: Read-only web dashboard for inspecting the autonomous OODA daemon across nine consolidated tabs — Overview, Goals, Activity, Workers, Pull Requests, Resources, Chat, Overseer, and Journal — mirrored by a consistent terminal UI (TUI).
+last_updated: 2026-07-06
 owner: simard
 doc_type: howto
 ---
@@ -20,25 +20,36 @@ A login code is generated on first start and printed to stdout. It is also persi
 
 ## Tabs
 
-The dashboard is a single-page app with the following tabs:
+The dashboard is a single-page app with **nine** top-level tabs. Views that answer
+the same operator question are grouped into **sub-sections** (panels) inside one
+tab, so every datum the dashboard has ever shown is still one or two clicks away —
+consolidation regroups data, it never removes it. Tabs render in the nav in this
+order:
 
-| Tab | Shows |
-|-----|-------|
-| **Overview** | Daemon status (OODA loop active / stopped), current cycle number, top-priority goal, last cycle's actions, recent actions stream, system status (version, OODA daemon state, active processes, disk usage), open PRs, open issues, and a **Machines & Memory Sharing** card (whether Simard runs on one machine or a group, and how they share what they've learned). |
-| **Goals** | The full goal register: active top-N goals with priority, status, and current activity; the proposed backlog with promote/dismiss controls. |
-| **Traces** | Recent agent traces collected from the cost ledger, journald, and in-process spans, plus OTEL status. Each cost row reads as plain language: **when** (relative time, absolute on hover), **what** (call type, model, estimated tokens, and dollar cost), and **who** (call context and session id) — so an operator can see which calls were most expensive without decoding raw `[cost]` lines. |
-| **Logs** | The **Background Service Log** (live activity from Simard's always-on background process), the cost ledger, and per-cycle reports. The level menu (All / Errors / Warnings / Info) filters the log to a single severity, and a free-text box searches within it. |
-| **Processes** | Live process tree under the daemon — engineer subprocesses, LLM sessions, and their resource usage. |
-| **Memory** | Cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters; full-text memory search; a **Memory Overview** with the live **Memory Store** counts; and a **Memory Files** panel showing the goals snapshot plus any non-empty legacy snapshot files. See [Memory architecture](memory.md). |
-| **Costs** | Per-provider, per-model token spend across the active session. |
-| **Chat** | Direct chat with Simard. Conversations are saved as durable, resumable **sessions**: a sidebar lists every saved chat, the panel fills the page, and assistant replies stream in incrementally. See [Chat tab: durable, resumable sessions](#chat-tab-durable-resumable-sessions). |
-| **Workboard** | Shared scratch canvas. (Renamed from "Whiteboard" — see [Tab identity contract](#tab-identity-contract).) |
-| **Thinking** | Live thinking-cycle stream (planner output before action dispatch). |
-| **Terminal** | Browser-attached PTY into the daemon host. |
+| Tab | Sub-sections | Shows |
+|-----|--------------|-------|
+| **Overview** | Summary · Health · Stats | Daemon status (OODA loop active / stopped), current cycle number, top-priority goal, last cycle's actions, and the recent-actions stream (**Summary**); system status — version, daemon state, active process count, disk usage — open PRs, open issues, and the **Machines & Memory Sharing** card, i.e. whether Simard runs on one machine or a group and how they share what they've learned (**Health**); and aggregate run counters and rollups (**Stats**). |
+| **Goals** | Goals · Work Board | The full goal register — active top-N goals with priority, status, and current activity, plus the proposed backlog with promote/dismiss controls (**Goals**) — and the shared scratch canvas with Task Memory and Recent Actions (**Work Board**). |
+| **Activity** | Logs · Traces · Thinking · Failures | The **Background Service Log** (live activity from Simard's always-on background process), the cost ledger, and per-cycle reports, with a severity menu (All / Errors / Warnings / Info) and free-text search (**Logs**); recent agent traces from the cost ledger, journald, and in-process spans, plus OTEL status, each row read as plain language — **when**, **what**, **who** (**Traces**); the live thinking-cycle stream, i.e. planner output before action dispatch (**Thinking**); and brain-fallback and decision failures (**Failures**). |
+| **Workers** | Processes · Engineers · Terminal | The live process tree under the daemon — engineer subprocesses, LLM sessions, tmux sessions, and their resource usage (**Processes** / **Engineers**) — and a browser-attached PTY into the daemon host (**Terminal**). |
+| **Pull Requests** | Merge Decisions · Readiness | Automated merge decisions and the rationale behind each (**Merge Decisions**), and per-PR readiness checks covering CI, review, and mergeability (**Readiness**). |
+| **Resources** | Memory · Costs | The cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters, full-text search, the live **Memory Store** counts, and the **Memory Files** panel (**Memory**); and per-provider, per-model token spend across the active session (**Costs**). See [Memory architecture](memory.md). |
+| **Chat** | — | Direct chat with Simard. Conversations are saved as durable, resumable **sessions**: a sidebar lists every saved chat, the panel fills the page, and assistant replies stream in incrementally. See [Chat: durable, resumable sessions](#chat-tab-durable-resumable-sessions). |
+| **Overseer** | — | The overseer goal-board health view: per-goal health, staleness, and the intervention signals that decide when a stalled goal needs attention. |
+| **Journal** | — | The daemon's narrative journal — a human-readable, chronological record of what Simard decided and why, newest entries first. |
 
-### Logs tab: filtering by severity (#1687)
+**Overseer** and **Journal** are standalone tabs with no sub-sections; they are
+owned by separate features and are kept intact by the consolidation.
 
-The **Background Service Log** panel classifies every line into a severity —
+Every former standalone tab now lives as a sub-section and keeps its old deep
+link — see [Deep links and tab aliases](#deep-links-and-tab-aliases). The same
+nine-tab taxonomy is mirrored in the terminal UI — see
+[Terminal UI (TUI)](#terminal-ui-tui).
+
+### Activity tab → Logs: filtering by severity (#1687)
+
+The **Background Service Log** panel (the **Logs** sub-section of the **Activity**
+tab) classifies every line into a severity —
 **error**, **warning**, or **info** — and the **level menu** filters the view to
 just that severity. Picking **Errors** surfaces failures (parse failures, brain
 fallbacks, "did not emit a recognised action") and hides routine info lines;
@@ -95,7 +106,8 @@ non-streaming fallback frame) are documented in the
 
 ### Overview tab: plain-English action details (#2358)
 
-The Overview tab's **Last Cycle Actions** and **Recent actions** lists show the
+The Overview tab's **Summary** sub-section shows **Last Cycle Actions** and
+**Recent actions** lists containing the
 daemon's raw `outcome.detail` strings, which are written for machines
 (`brain: continue_skipping (brain-error fallback: no decision keyword found…)`).
 Both lists now route those strings through the client-side
@@ -108,9 +120,10 @@ works. The transform is render-layer only: the canonical `brain` / `ooda_brain`
 strings, logs, and API responses are unchanged. See
 [Overview action-detail humanization](reference/dashboard-action-detail-humanization.md).
 
-### Overview tab: plain-English "Machines & Memory Sharing" card
+### Overview tab → Health: plain-English "Machines & Memory Sharing" card
 
-The Overview card that reports whether Simard is running on one machine or a
+The **Health** sub-section's card that reports whether Simard is running on one
+machine or a
 cluster (formerly headed **Cluster Topology**) used to render machine-internal
 vocabulary directly: `Topology`, `Memory Sync: DHT+bloom gossip (peer-to-peer)`,
 `Hive Status: standalone`, an `Event Bus` panel with `Subscribers` / `Events/min`
@@ -146,10 +159,11 @@ Before (machine jargon) and after (plain English):
 |--------|-------|
 | ![Cluster card before](assets/dashboard-cluster-card-before.png) | ![Machines & Memory Sharing card after](assets/dashboard-cluster-card-after.png) |
 
-### Workboard tab: plain-English Task Memory & Recent Actions
+### Goals tab → Work Board: plain-English Task Memory & Recent Actions
 
-A live Playwright audit of the **Workboard** tab flagged two machine-jargon
-offenders that leaked raw internal representations onto the page:
+A live Playwright audit of the **Work Board** sub-section (in the **Goals** tab)
+flagged two machine-jargon offenders that leaked raw internal representations onto
+the page:
 
 - **Task Memory** rendered raw goal-board **JSON blobs** directly — e.g.
   `{"active":[{"id":…,"status":{"InProgress":{"percent":8}}}]}` — exposing the
@@ -202,13 +216,14 @@ Goals — active priorities and backlog:
 
 ![Goals tab](assets/dashboard-goals.png)
 
-Memory — six cognitive memory types with filters and search:
+Resources → Memory — six cognitive memory types with filters and search:
 
-![Memory tab](assets/dashboard-memory.png)
+![Resources → Memory tab](assets/dashboard-memory.png)
 
-### Memory tab: live store vs. legacy snapshots
+### Resources tab → Memory: live store vs. legacy snapshots
 
-The **Memory Overview** card is the source of truth. Its **Memory Store**
+The **Memory Overview** card (in the **Memory** sub-section of the **Resources**
+tab) is the source of truth. Its **Memory Store**
 section reports the live cognitive-memory counts straight from the native
 graph store: recent observations, what Simard is currently thinking about,
 events remembered, facts learned, known procedures, and planned actions.
@@ -262,16 +277,65 @@ for the walkthrough.
 
 The dashboard is observational: it does not let operators force shell commands or edit code through the browser. Goal promotion, status changes, refresh, and the [feedback widget](#feedback-widget-report-a-bug-request-a-feature-2629) (which starts a governed workstream, not a shell command) are the only state-changing operations. All other panels are observational. A feedback-launched workstream runs the standard `default-workflow` with CI required green and a human merge — it cannot merge or run arbitrary commands on its own.
 
+## Terminal UI (TUI)
+
+The terminal UI (`simard tui`) presents the **same tab taxonomy** as the web
+dashboard so an operator moving between the two never has to relearn the layout.
+Tab names, relative order, and grouping match the dashboard exactly.
+
+The TUI renders a **seven-tab subset** of the nine dashboard tabs. It omits
+**Pull Requests** and **Resources**, whose data pipelines exist only in the web
+surface; adding them to the TUI would be new feature work, not consolidation, and
+is deliberately out of scope. The TUI never invents a tab the dashboard does not
+have, and never shows a name the dashboard does not use.
+
+| # | TUI tab | Key | Matches dashboard tab | Sub-views |
+|---|---------|-----|-----------------------|-----------|
+| 1 | **Overview** | `1` | Overview | Summary · Health · Stats |
+| 2 | **Goals** | `2` | Goals | Goals · Work Board |
+| 3 | **Activity** | `3` | Activity | Logs · Traces · Thinking · Failures |
+| 4 | **Workers** | `4` | Workers | Processes · Engineers · Terminal |
+| 5 | **Chat** | `5` | Chat | — |
+| 6 | **Overseer** | `6` | Overseer | — |
+| 7 | **Journal** | `7` | Journal | — |
+
+Number keys `1`–`7` (with the platform tab modifier) jump straight to a tab;
+`Tab` / `Shift+Tab` cycle forward and backward. Merged views appear as
+**panels** (ratatui sub-views) within their parent tab — e.g. the **Activity**
+tab stacks Logs, Traces, Thinking, and Failures panels — so the terminal keeps
+the same information density as before the consolidation. The **Chat** tab in the
+TUI is the same conversational surface the CLI meeting REPL uses (internally the
+`MeetingBackend`); it is labelled **Chat** to match the dashboard.
+
 ## Tab identity contract
 
-Every tab in the dashboard satisfies four invariants. They exist so an operator who lands on any single page (deep link, browser-history entry, screenshot in a bug report) can immediately answer *"what page am I on?"* and *"what is this page for?"* without learning Simard's internal vocabulary.
+Every tab in the dashboard satisfies five invariants. They exist so an operator who lands on any single page (deep link, browser-history entry, screenshot in a bug report) can immediately answer *"what page am I on?"* and *"what is this page for?"* without learning Simard's internal vocabulary.
 
-The four invariants:
+The five invariants:
 
 1. **Unique, non-empty browser `<title>`.** Each tab sets `document.title` to `"{PageName} · Simard"` — including Overview, which uses `"Overview · Simard"`. The format is mechanical and uniform; there are no per-tab exceptions. No two tabs share a title.
 2. **Unique, non-empty visible `<h1>`.** Each tab panel renders exactly one `<h1 class="page-h1">` immediately under the global brand bar. No two tabs share an H1.
 3. **Non-empty plain-English lede.** Each tab panel renders exactly one `<p class="page-lede">` immediately under its H1. The lede is a single sentence that explains what the page is for in language a non-expert can understand.
-4. **No banned jargon in any lede.** The strings `OODA`, `Observe-Orient-Decide-Act`, `synergize`, `leverage`, and `ideate` are forbidden anywhere in lede text — the goal is to ban consultant-speak that an operator without Simard context cannot decode. The blocklist is enforced at build time by a unit test and again at runtime by the Playwright smoke test. Simard-internal domain vocabulary (`facilitator`, `consolidation`, `episodic`, …) is *allowed* — those are legitimate terms a memory or goals page may need to use; the bar is "no corporate jargon", not "no jargon at all".
+4. **No banned jargon in any lede.** The eight strings in the `BANNED_JARGON` constant — `OODA`, `Observe-Orient-Decide-Act`, `spawn_engineer`, `LadybugDB`, `cognitive memory`, `synergize`, `leverage`, and `ideate` — are forbidden anywhere in lede text; the constant is the single source of truth and this doc's own prose is not bound by it. The goal is to ban consultant-speak and insider acronyms that an operator without Simard context cannot decode. The blocklist is enforced at build time by a unit test and again at runtime by the Playwright smoke test. Simard-internal domain vocabulary (`facilitator`, `consolidation`, `episodic`, …) is *allowed* — those are legitimate terms a memory or goals page may need to use; the bar is "no corporate jargon", not "no jargon at all".
+5. **Consolidation preserves data.** Grouping related views into sub-sections never drops a datum. Every panel a former standalone tab rendered survives as a labelled sub-section inside its parent tab, and every retired top-level slug still resolves as a deep-link alias to its new home (see [Deep links and tab aliases](#deep-links-and-tab-aliases)). Sub-section headers render as `<h2>`/`<h3>` (never a second `page-h1`), so invariant 2 continues to hold — each tab still has exactly one page `<h1>` when active.
+
+### Canonical tab taxonomy
+
+There are exactly **nine** dashboard tabs and **seven** TUI tabs, drawn from a single shared taxonomy. Tab names, relative order, and grouping are identical across both surfaces; the TUI omits only the two tabs (Pull Requests, Resources) whose data lives solely in the web dashboard. This table is the durable definition of the tab set — new work extends a tab's sub-sections rather than adding a top-level tab, unless a genuinely new operator question demands one.
+
+| # | Tab | Dashboard slug | Sub-sections | In TUI? |
+|---|-----|----------------|--------------|---------|
+| 1 | **Overview** | `overview` | Summary · Health · Stats | yes (`1`) |
+| 2 | **Goals** | `goals` | Goals · Work Board | yes (`2`) |
+| 3 | **Activity** | `activity` | Logs · Traces · Thinking · Failures | yes (`3`) |
+| 4 | **Workers** | `workers` | Processes · Engineers · Terminal | yes (`4`) |
+| 5 | **Pull Requests** | `pull-requests` | Merge Decisions · Readiness | no (web-only) |
+| 6 | **Resources** | `resources` | Memory · Costs | no (web-only) |
+| 7 | **Chat** | `chat` | — | yes (`5`) |
+| 8 | **Overseer** | `overseer` | — | yes (`6`) |
+| 9 | **Journal** | `journal` | — | yes (`7`) |
+
+Tab names never use the word "Bridge". **Overseer** and **Journal** are owned by separate features and are carried through the consolidation unchanged.
 
 The global header (`🌲 Simard Dashboard`) is intentionally demoted from `<h1>` to `<div class="brand">` so that every page has exactly one semantic `<h1>` — the page-specific one — when active.
 
@@ -285,10 +349,10 @@ src/operator_commands_dashboard/index_html/tab_meta.rs
 
 ```rust
 pub struct TabMeta {
-    pub slug: &'static str,     // e.g. "workboard"
-    pub label: &'static str,    // nav button text, e.g. "Workboard"
+    pub slug: &'static str,     // e.g. "activity"
+    pub label: &'static str,    // nav button text, e.g. "Activity"
     pub title: &'static str,    // browser <title>, always "{Label} · Simard"
-    pub h1: &'static str,       // page <h1>, e.g. "Workboard"
+    pub h1: &'static str,       // page <h1>, e.g. "Activity"
     pub lede: &'static str,     // plain-English sentence shown under the H1
     pub tooltip: &'static str,  // rendered as the nav button's HTML `title=`
                                 // attribute (browser-native hover tooltip)
@@ -304,8 +368,9 @@ The HTML template is rendered by substituting markers from `TAB_METADATA` in `in
 | `{{DEFAULT_TITLE}}` | Initial `<title>` of the page (matches the default-active tab).             |
 | `{{TAB_NAV}}`       | Full `<div class="tabs">…</div>` nav, one button per tab (label + tooltip + `data-tab`). |
 | `{{TAB_META_JS}}`   | `<script>window.__TAB_META = { … };</script>` map of `slug → {title, h1, label}`. |
+| `{{BANNED_JARGON_JS}}` | `<script>`-embedded JSON array of the `BANNED_JARGON` constant, so the client-side `humanizeCycleSummary` strips the same jargon the ledes forbid — one source of truth for both the static ledes and the dynamically rendered summary text (#2358). |
 
-The per-tab `<h1 class="page-h1">` and `<p class="page-lede">` blocks are inlined directly in each `<div class="tab-content">` in `part_00.rs` / `part_01.rs` rather than via a marker — so an editor can `grep` for a heading and find it in the markup. The cross-check tests in `tests_tab_meta.rs` (`rendered_html_contains_every_h1`, `rendered_html_contains_every_lede`, `rendered_html_contains_every_tooltip_from_sot`) enforce that every value in `TAB_METADATA` appears verbatim in the rendered HTML, so a typo or a forgotten panel header fails CI rather than shipping a tab with the wrong text.
+The per-tab `<h1 class="page-h1">` and `<p class="page-lede">` blocks are inlined directly in each `<div class="tab-content">` in `part_00.rs` / `part_01.rs` rather than via a marker — so an editor can `grep` for a heading and find it in the markup. The cross-check tests in `tests_tab_meta.rs` (`rendered_html_contains_every_label`, `rendered_html_contains_every_lede`, `rendered_html_contains_every_tooltip_from_sot`) enforce that every value in `TAB_METADATA` appears verbatim in the rendered HTML, so a typo or a forgotten panel header fails CI rather than shipping a tab with the wrong text.
 
 The `__TAB_META` JS object is serialized with `serde_json::to_string` and then `<` is replaced with `\u003c` so that a future lede or title containing `</script>` cannot terminate the inline `<script>` tag. A `debug_assert!` at the end of `index_html_string()` rejects any unresolved `{{MARKER}}` left in the rendered output.
 
@@ -315,40 +380,91 @@ On the client, the existing tab-click handler in `part_01.rs` sets `document.tit
 
 Adding a tab is a single-file edit followed by writing the panel content:
 
-1. Append a new `TabMeta { … }` entry to `TAB_METADATA` in `tab_meta.rs`. Pick a `slug` matching `^[a-z][a-z0-9_]*$`, a one-word `label`, a `title` of the form `"{H1} · Simard"`, an `h1` (usually equal to `label`), a `lede` that passes the jargon blocklist, and a `tooltip`.
-2. Add the panel to the appropriate `part_NN.rs`: a `<div class="tab-content" id="tab-{slug}">` whose first two children are `<h1 class="page-h1">{h1}</h1>` and `<p class="page-lede">{lede}</p>` with text matching the SoT entry exactly.
-3. Run `cargo test` — the unit tests in `tests_tab_meta.rs` verify uniqueness of `slug`, `label`, `title`, `h1`, non-emptiness of `lede`, absence of banned jargon, and that the rendered HTML contains every label / H1 / lede / tooltip from the SoT. The smoke test will pick the new tab up automatically (it discovers tabs from the rendered DOM, not from a hardcoded list).
+1. Append a new `TabMeta { … }` entry to `TAB_METADATA` in `tab_meta.rs`. Pick a `slug` matching `^[a-z][a-z0-9-]*$`, a short `label` (one or two words, e.g. `Pull Requests`), a `title` of the form `"{H1} · Simard"`, an `h1` (usually equal to `label`), a `lede` that passes the jargon blocklist, and a `tooltip`. **Prefer adding a sub-section to an existing tab** — the nine-tab taxonomy is deliberately small; only add a top-level tab when a genuinely new operator question needs one.
+2. Add the panel to the appropriate `part_NN.rs`: a `<div class="tab-content" id="tab-{slug}">` whose first two children are `<h1 class="page-h1">{h1}</h1>` and `<p class="page-lede">{lede}</p>` with text matching the SoT entry exactly. Sub-sections within the panel use `<h2>`/`<h3>`, never a second `page-h1`.
+3. If the tab is shared with the TUI, add a matching arm to `enum Tab` / `ALL_TABS` in `src/bin/simard_tui/app.rs` using the same label and relative order, so the two surfaces stay consistent.
+4. Run `cargo test` — the unit tests in `tests_tab_meta.rs` verify uniqueness of `slug`, `label`, `title`, `h1`, non-emptiness of `lede`, absence of banned jargon, and that the rendered HTML contains every label / H1 / lede / tooltip from the SoT. The smoke test picks the new tab up automatically (it discovers tabs from the rendered DOM, not from a hardcoded list).
 
-No other file needs to change. There is no second place to update a string.
+No other file needs to change for the strings. There is no second place to update a label.
 
-### The Whiteboard → Workboard rename (#1993 / #1994 / #1995)
+### Deep links and tab aliases
 
-Historically the rightmost-but-one tab carried the visible label `"Whiteboard"`, while the underlying route, API endpoint (`/api/workboard`), and Playwright spec (`workboard.spec.ts`) all used `workboard`. The Tab Identity Contract requires one label per route, so the visible label was renamed to match the existing route: **`Whiteboard` → `Workboard`**. No URL, API, or storage path changed; only the user-facing string. Bookmarks to the `#workboard` deep link continue to work.
+Each tab is deep-linkable by its slug (`#overview`, `#goals`, `#activity`, `#workers`, `#pull-requests`, `#resources`, `#chat`, `#overseer`, `#journal`). Because several former standalone tabs are now **sub-sections**, the client keeps a small **alias allowlist** that maps every retired slug to its new parent tab (and, where useful, scrolls to the sub-section). Old bookmarks, browser history, and links in bug reports keep working:
+
+| Legacy deep link | Resolves to |
+|------------------|-------------|
+| `#status` | `#overview` → Stats |
+| `#workboard` (formerly `#whiteboard`) | `#goals` → Work Board |
+| `#logs` | `#activity` → Logs |
+| `#traces` | `#activity` → Traces |
+| `#thinking` | `#activity` → Thinking |
+| `#brain-failures` | `#activity` → Failures |
+| `#processes` | `#workers` → Processes / Engineers |
+| `#terminal` | `#workers` → Terminal |
+| `#merge-decisions` | `#pull-requests` → Merge Decisions |
+| `#pr-readiness` | `#pull-requests` → Readiness |
+| `#memory` | `#resources` → Memory |
+| `#costs` | `#resources` → Costs |
+
+The resolver treats `location.hash` as untrusted input: it strips the leading `#`, matches the value against the allowlist (and the canonical slug set, validated against `^[a-z-]+$`), and **falls back to the default `overview` tab on any unknown or malformed hash**. It never concatenates the hash into a DOM selector or element id. API endpoints are decoupled from slugs and unchanged — for example `/api/workboard` still backs the **Work Board** sub-section even though `#workboard` now lands on the **Goals** tab. (The label lineage is `Whiteboard → Workboard → Work Board`; only the user-facing string ever changed, never the route or storage path.)
+
+The table above covers only the twelve slugs that were real top-level tabs before consolidation (the 17-tab set minus the five that stay top-level: `overview`, `goals`, `chat`, `overseer`, `journal`). Sub-sections that consolidation *introduces* and that were never standalone tabs — **Stats** (under Overview) and **Engineers** (the process-tree view under Workers) — have no legacy slug and therefore no alias entry; they are reached through their parent tab. Do not add `#stats` / `#engineers` aliases: there are no old bookmarks to preserve.
 
 ## Tests
 
-Two complementary test layers enforce the Tab Identity Contract:
+Three complementary test layers enforce the Tab Identity Contract and the consolidated tab set:
 
 ### Rust unit tests
 
-`src/operator_commands_dashboard/index_html/tests_tab_meta.rs` covers:
+`src/operator_commands_dashboard/index_html/tests_tab_meta.rs` covers (these are the real test names in the file today):
 
-- `tab_meta_slugs_unique`
+**Source-of-truth table invariants (iterating `TAB_METADATA`):**
+
+- `tab_meta_slugs_unique` — slugs are unique **and** `assert_eq!(TAB_METADATA.len(), 17, "expected 17 tabs")`. **This literal is the tab-count guard: consolidation changes this single `17` to `9`.** It is the only hard-coded tab count in the suite — every other test derives its expectation from `TAB_METADATA.len()`, so no separate "nine canonical tabs" test exists or is needed.
 - `tab_meta_labels_unique`
-- `tab_meta_titles_unique`
-- `tab_meta_h1s_unique`
-- `tab_meta_titles_follow_label_dot_simard_format` (every `title` equals `"{label} · Simard"`)
-- `tab_meta_ledes_non_empty`
-- `tab_meta_ledes_no_banned_jargon` (rejects `OODA`, `Observe-Orient-Decide-Act`, `synergize`, `leverage`, `ideate`)
-- `tab_meta_every_slug_has_header_marker` (template contains `{{HEADER:slug}}` for every entry in `TAB_METADATA`)
-- `html_escape_handles_metachars` (`<`, `>`, `&`, `"`, `'`)
-- `tab_meta_js_resists_script_breakout` (e.g. `</script><script>alert(1)</script>` payload cannot escape the inline `<script>` block)
-- `all_markers_resolved_in_rendered_html`
+- `tab_meta_titles_unique_and_non_empty`
+- `tab_meta_titles_follow_label_dot_simard_format` — every `title` equals `"{label} · Simard"`.
+- `tab_meta_h1s_unique_and_non_empty`
+- `tab_meta_ledes_non_empty_and_single_sentence_ish` — non-empty and `len() >= 40` (guards against a one-word placeholder lede).
+- `tab_meta_ledes_no_banned_jargon` — rejects every one of the eight `BANNED_JARGON` terms (`OODA`, `Observe-Orient-Decide-Act`, `spawn_engineer`, `LadybugDB`, `cognitive memory`, `synergize`, `leverage`, `ideate`).
+- `tab_meta_tooltips_substantive` — every `tooltip` is `>= 18` chars.
+
+**Marker rendering & injection safety:**
+
+- `tab_meta_js_is_valid_json_assignment` — the `{{TAB_META_JS}}` payload round-trips as JSON and `obj.len() == TAB_METADATA.len()` (the count guard again, expressed derivatively — nothing to update here on consolidation).
+- `tab_meta_js_resists_script_breakout` — a value containing `</script>` cannot terminate the inline `<script>` (the payload has no literal `</`).
+- `banned_jargon_js_is_valid_json_array` — the `{{BANNED_JARGON_JS}}` marker is a JSON array; the `BANNED_JARGON` constant remains the single source of truth for the client-side humanizer.
+- `default_title_is_first_tab_title` — `default_title()` equals `TAB_METADATA[0].title`.
+
+**Rendered-HTML cross-checks (SoT ↔ `INDEX_HTML`):**
+
+- `rendered_html_contains_every_label`, `rendered_html_contains_every_lede`, `rendered_html_contains_every_tooltip_from_sot` — every SoT string appears verbatim in the rendered markup. (Per-tab `<h1>`/`<p class="page-lede">` blocks are inlined in `part_00.rs` / `part_01.rs`; there is **no** `{{HEADER:slug}}` marker and no `tab_meta_every_slug_has_header_marker` test.)
+- `rendered_html_default_title_matches_sot`, `rendered_html_contains_tab_meta_js_block`.
+- `rendered_html_has_no_unresolved_template_markers` — no `{{…}}` survives rendering.
+- `rendered_html_demotes_brand_h1_to_div` — the header brand renders as `<div class="brand">`, so the active panel owns the page's only `<h1>` (invariant 2).
+- `rendered_html_workboard_label_replaces_whiteboard` — the nav label reads **Workboard**, never **Whiteboard**.
+- `tab_nav_html_marks_first_tab_active_and_rest_inactive`.
+
+> Note for the implementer: the stale doc-comment on `default_title()` in `tab_meta.rs` ("exactly 13 entries") predates both the current 17-tab table and the 9-tab target; correct it to match the consolidated count when you flip `tab_meta_slugs_unique`.
 
 Run with:
 
 ```bash
 cargo test -p simard operator_commands_dashboard
+```
+
+### TUI unit tests
+
+`src/bin/simard_tui/app.rs` covers the terminal UI's copy of the taxonomy so the two surfaces cannot drift:
+
+- `ALL_TABS.len() == 7` and each tab's `number()` round-trips (`1`–`7`).
+- `label()` returns the shared names (`Overview`, `Goals`, `Activity`, `Workers`, `Chat`, `Overseer`, `Journal`).
+- `from_key()` maps digits `1`–`7` (with the tab modifier) to the matching tab and returns `None` for `8`, `9`, `0`, unmodified digits, and non-digit keys — so an out-of-range key can never index past `ALL_TABS`.
+
+Run with:
+
+```bash
+cargo test -p simard --bin simard_tui
 ```
 
 ### Python Playwright smoke test
@@ -359,8 +475,10 @@ cargo test -p simard operator_commands_dashboard
 2. Discovers every nav button by querying `data-tab` attributes — no hardcoded tab list.
 3. Clicks each button in turn and uses Playwright's `expect(locator).to_be_visible()` on `.tab-panel[data-tab="{slug}"]`. This avoids hard-coding a `.active` class name and lets the contract survive future tab-handler refactors.
 4. Captures `document.title`, the visible `.page-h1` text, and the visible `.page-lede` text.
-5. Asserts: all titles unique and non-empty; all H1s unique and non-empty; every lede non-empty and free of banned jargon.
+5. Asserts: at least the nine canonical tabs are present; all titles unique and non-empty; all H1s unique and non-empty; every lede non-empty and free of banned jargon.
 6. Prints a markdown table `slug | title | h1 | lede` to stdout. CI uploads this as build evidence and the PR template links it into the description.
+
+`test_tab_clarity.py` additionally asserts the canonical slug set is present and that each retired-slug deep link (`#status`, `#workboard`, `#logs`, `#traces`, `#thinking`, `#brain-failures`, `#processes`, `#terminal`, `#merge-decisions`, `#pr-readiness`, `#memory`, `#costs`) resolves to its parent tab rather than 404-ing, and that an unknown `#hash` falls back to `overview` with no DOM injection.
 
 The `BANNED_JARGON` constant lives in both `tab_meta.rs` and `test_tab_clarity.py`. They are intentionally duplicated (no shared format file) and contributors are responsible for keeping them in step — both files are referenced from the same line in the "Adding a new tab" checklist, and the two-line list is short enough that drift is unlikely.
 
