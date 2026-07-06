@@ -284,10 +284,7 @@ fn sibling_dependency_signals(
             depends_on.insert(child_id.clone(), blockers);
         }
     }
-    PrioritizationSignals {
-        depends_on,
-        ..Default::default()
-    }
+    PrioritizationSignals { depends_on }
 }
 
 // ---------------------------------------------------------------------------

@@ -86,10 +86,7 @@ fn flat_board_with_distinct_signals() -> (Vec<ActiveGoal>, PrioritizationSignals
     );
     depends_on.insert("leaf-b".to_string(), vec!["midtier".to_string()]);
 
-    let signals = PrioritizationSignals {
-        depends_on,
-        ..Default::default()
-    };
+    let signals = PrioritizationSignals { depends_on };
     (goals, signals)
 }
 
@@ -238,10 +235,7 @@ fn prioritize_leaves_explicitly_set_priorities_intact() {
     depends_on.insert("a".to_string(), vec!["pinned".to_string()]);
     depends_on.insert("b".to_string(), vec!["pinned".to_string()]);
     depends_on.insert("c".to_string(), vec!["pinned".to_string()]);
-    let signals = PrioritizationSignals {
-        depends_on,
-        ..Default::default()
-    };
+    let signals = PrioritizationSignals { depends_on };
 
     let out = prioritize(&goals, &signals, fixed_now());
 
@@ -294,10 +288,7 @@ fn prioritize_ranks_a_blocker_above_a_non_blocker() {
 
     let mut depends_on: HashMap<String, Vec<String>> = HashMap::new();
     depends_on.insert("leaf".to_string(), vec!["blocker".to_string()]);
-    let signals = PrioritizationSignals {
-        depends_on,
-        ..Default::default()
-    };
+    let signals = PrioritizationSignals { depends_on };
 
     let out = prioritize(&goals, &signals, fixed_now());
     assert!(
