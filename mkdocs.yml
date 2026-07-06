@@ -321,6 +321,7 @@ nav:
     - Cognitive-Memory WAL Recovery Runbook: operations/cognitive-memory-wal-recovery-runbook.md
     - Meeting REPL & Handoff Ingestion: operations/meeting-handoffs.md
     - Progress-Evidence Kill Switch: operations/progress-evidence-kill-switch.md
+    - Stale-Deploy Incident Runbook: operations/stale-deploy-distill-and-blocked-goals-runbook.md
     - Safe Self-Update: safe-self-update.md
     - Pre-Commit Setup: operations/pre-commit-setup.md
   - Operator Dashboard:
