@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::Json;
 use axum::extract::Path;
 use serde_json::{Value, json};
@@ -158,6 +160,18 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
     // Pull meeting-captured actions and decisions from cognitive memory (#415)
     // (#1686: filter out raw memory IDs and debug strings, provide clean labels)
     if let Ok(reader) = open_reader_client(state_root) {
+        // Build an O(1) id index once so the per-fact dedup below is O(facts)
+        // instead of re-scanning the whole active+backlog list (with a serde
+        // map lookup per element) for every fact — this endpoint is polled on
+        // every dashboard refresh. Ids of newly-listed facts are inserted as we
+        // go, so later facts still dedup against earlier ones (unchanged
+        // behavior, just without the quadratic scan).
+        let mut seen_ids: HashSet<String> = active
+            .iter()
+            .chain(backlog.iter())
+            .filter_map(|g| g.get("id").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect();
         let mem = reader.ops();
         for tag in &["goal", "action", "decision"] {
             if let Ok(facts) = mem.search_facts(tag, 20, 0.0) {
@@ -177,23 +191,21 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
                     if looks_like_debug_string(trimmed) {
                         continue;
                     }
-                    let already_listed = active
-                        .iter()
-                        .chain(backlog.iter())
-                        .any(|g| g.get("id").and_then(|v| v.as_str()) == Some(&fact.node_id));
-                    if !already_listed {
-                        // (#1686) Derive a human-readable title from the content
-                        // instead of exposing the raw `sem_019e18ac…` node ID.
-                        let display_id = human_backlog_id(&fact.content, &fact.concept);
-                        let source_label = human_source_label(&fact.concept);
-                        backlog.push(json!({
-                            "id": fact.node_id,
-                            "display_id": display_id,
-                            "description": fact.content,
-                            "source": source_label,
-                            "score": fact.confidence,
-                        }));
+                    if seen_ids.contains(fact.node_id.as_str()) {
+                        continue;
                     }
+                    // (#1686) Derive a human-readable title from the content
+                    // instead of exposing the raw `sem_019e18ac…` node ID.
+                    let display_id = human_backlog_id(&fact.content, &fact.concept);
+                    let source_label = human_source_label(&fact.concept);
+                    seen_ids.insert(fact.node_id.clone());
+                    backlog.push(json!({
+                        "id": fact.node_id,
+                        "display_id": display_id,
+                        "description": fact.content,
+                        "source": source_label,
+                        "score": fact.confidence,
+                    }));
                 }
             }
         }

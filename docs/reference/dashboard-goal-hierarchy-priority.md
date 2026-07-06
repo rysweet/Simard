@@ -290,7 +290,7 @@ pub struct ActiveGoal {
     /// reshuffled. `#[serde(default)]` keeps pre-existing snapshots loading
     /// (as `false`); `skip_serializing_if` keeps them byte-identical when the
     /// flag is unset.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub priority_explicit: bool,
 }
 ```
@@ -353,7 +353,6 @@ is mapped into the `p1…p5` band so priorities **spread** rather than collapse:
 | Goal has **in-flight work** (`wip_refs` non-empty: open PR / branch / session) | **Higher** | `ActiveGoal.wip_refs` |
 | Lifecycle `status` is `Blocked` or `InProgress` | **Higher** | `ActiveGoal.status` (`GoalProgress`) |
 | Goal is **standing/perpetual** (`is_perpetual()`) | **Slightly lower** (steady background work, not a spike) | `ActiveGoal` standing marker |
-| Goal has **direct user-facing impact** | **Higher** | `PrioritizationSignals.user_facing` (structured, caller-supplied) |
 | **Stale** — `last_progress_update_at` is old (or absent) relative to `now` | **Higher** (needs attention) | `ActiveGoal.last_progress_update_at` + injected `now` |
 
 The weighted score produces a **rank**, and ranks are distributed across the

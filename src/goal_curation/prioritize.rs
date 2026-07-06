@@ -23,7 +23,7 @@
 //!     data (`depends_on`) and the goal's own lifecycle fields, never brittle
 //!     description parsing (G3).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 
@@ -52,12 +52,6 @@ pub struct PrioritizationSignals {
     /// as a *blocker* for many dependents is a bottleneck and is prioritized up;
     /// a leaf that nothing depends on gets no bottleneck boost.
     pub depends_on: HashMap<String, Vec<String>>,
-    /// Ids of goals with direct **user-facing impact** (an A7 signal). A goal in
-    /// this set earns a small urgency bonus so user-facing work out-ranks
-    /// otherwise-equivalent internal maintenance. Structured/external — supplied
-    /// by the caller, not derivable from the goal record alone — which is why it
-    /// lives here rather than on [`ActiveGoal`].
-    pub user_facing: HashSet<String>,
 }
 
 /// Re-score the priorities of the `priority_explicit == false` goals in `goals`
@@ -90,9 +84,7 @@ pub fn prioritize(
             }
             let count = dependents.get(goal.id.as_str()).copied().unwrap_or(0);
             let has_unmet_deps = signals.depends_on.contains_key(goal.id.as_str());
-            let user_facing = signals.user_facing.contains(goal.id.as_str());
-            out.priority =
-                score_to_priority(signal_score(goal, count, has_unmet_deps, user_facing, now));
+            out.priority = score_to_priority(signal_score(goal, count, has_unmet_deps, now));
             out
         })
         .collect()
@@ -105,7 +97,6 @@ fn signal_score(
     goal: &ActiveGoal,
     dependents: u32,
     has_unmet_deps: bool,
-    user_facing: bool,
     now: DateTime<Utc>,
 ) -> i64 {
     let mut score: i64 = 0;
@@ -123,11 +114,6 @@ fn signal_score(
     // In-flight work (an open PR / branch / engineer session) means the goal is
     // actively moving and worth keeping near the top.
     if !goal.wip_refs.is_empty() {
-        score += 1;
-    }
-
-    // Direct user-facing impact edges the goal up over internal maintenance.
-    if user_facing {
         score += 1;
     }
 
