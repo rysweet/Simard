@@ -135,16 +135,16 @@ pub struct DistillAttemptOutcome {
     /// for stub runners with no stdout and for spawn/terminal failures (which
     /// never yielded a parseable step output to harvest).
     pub raw_on_failure: Option<String>,
-    /// How this pass's facts document parsed (issue #2669, Decision D-1) — the
-    /// per-pass discriminator threaded into the `distill_success_rate` metric
-    /// context so a strict parse, a trailing-comma recovery, an all-filtered
-    /// zero-facts success, and a hard parse-fail deferral are each visible in
+    /// How this pass's facts document parsed (issue #2669) — the per-pass
+    /// discriminator threaded into the `distill_success_rate` metric context so
+    /// a strict parse, a trailing-comma recovery, an all-filtered zero-facts
+    /// success, and a hard parse-fail deferral are each visible in
     /// `metrics.jsonl` rather than collapsed into one success/fail bit.
     pub parse_recovery: ParseRecovery,
 }
 
 /// Per-pass discriminator for HOW the distill facts document parsed, recorded
-/// in the `distill_success_rate` metric context (issue #2669, Decision D-1).
+/// in the `distill_success_rate` metric context (issue #2669).
 ///
 /// Orthogonal to `recovered_after_retry` (issue #2468): `recovered_after_retry`
 /// tracks a whole-runner *re-invocation* across attempts, whereas
@@ -925,8 +925,8 @@ fn build_distill_success_context(
         "fact_count": fact_count,
         "attempt": attempt,
         "recovered_after_retry": recovered_after_retry,
-        // Append-only per-pass parse discriminator (issue #2669, Decision D-1):
-        // orthogonal to `recovered_after_retry`; every key above is unchanged.
+        // Append-only per-pass parse discriminator (issue #2669): orthogonal to
+        // `recovered_after_retry`; every key above is unchanged.
         "parse_recovery": parse_recovery.as_str(),
     })
     .to_string()
@@ -1348,9 +1348,9 @@ pub(crate) fn parse_facts_document(document: &str) -> SimardResult<DistillOutput
 }
 
 /// Like [`parse_facts_document`] but also returns the [`ParseRecovery`] tier —
-/// the per-pass discriminator (issue #2669, Decision D-1) the caller threads
-/// into the `distill_success_rate` metric so a strict parse, a trailing-comma
-/// recovery, and an all-filtered zero-facts success are each distinguishable in
+/// the per-pass discriminator (issue #2669) the caller threads into the
+/// `distill_success_rate` metric so a strict parse, a trailing-comma recovery,
+/// and an all-filtered zero-facts success are each distinguishable in
 /// `metrics.jsonl` (a hard parse-fail is `Deferred`, attached by the caller on
 /// the returned `Err`).
 ///
@@ -1407,9 +1407,9 @@ pub(crate) fn parse_facts_document_with_recovery(
 /// Finalize a parsed envelope: detect the "parsed OK but every fact was dropped
 /// by the category filter" case (raw facts present, none survived) and surface
 /// it as a distinct [`ParseRecovery::ZeroFacts`] with a warn on `simard::distill`
-/// (issue #2669, Brick C), so a zero-yield success is never conflated with a
-/// parse failure. A legitimately empty batch (`{"facts":[]}` — zero raw facts)
-/// is a normal success and does NOT warn.
+/// (issue #2669), so a zero-yield success is never conflated with a parse
+/// failure. A legitimately empty batch (`{"facts":[]}` — zero raw facts) is a
+/// normal success and does NOT warn.
 fn finish_parse(
     output: DistillOutput,
     raw_fact_count: usize,
@@ -1448,7 +1448,7 @@ fn finish_parse(
 /// Returns the recovered [`DistillOutput`] **and the raw fact count** of the
 /// winning envelope (facts present in the JSON *before* the category filter), so
 /// the caller can distinguish a legitimately empty batch from an envelope whose
-/// facts were all category-filtered away (issue #2669, Brick C zero-facts warn).
+/// facts were all category-filtered away (issue #2669 zero-facts warn).
 fn scan_cleaned_for_facts(trimmed: &str) -> Option<(DistillOutput, usize)> {
     // Fast path — the text IS the JSON object.
     if let Ok(parsed) = serde_json::from_str::<RecipeEnvelope>(trimmed) {
@@ -2420,33 +2420,28 @@ mod issue_2622_file_channel_tests {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Issue #2669: distill parse-fail recovery + observability — TDD (RED)
+// Issue #2669: distill parse-fail recovery + observability
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// These tests pin the in-repo P0 contract (Bricks B/C/D) and are written BEFORE
-// the implementation. They FAIL TO COMPILE (missing `ParseRecovery`, new
-// `build_distill_success_context` arg) and/or FAIL at runtime (no recovery, no
-// zero-facts warn) until the fix lands — the intended TDD red signal.
-//
-//   Brick B — scan_cleaned_for_facts strict-then-repair recovery tier
-//   Brick C — distinct "parsed OK but all facts category-filtered" warn
-//   Brick D — ParseRecovery per-pass discriminator in the metrics context
+// These tests pin the in-repo P0 contract:
+//   - scan_cleaned_for_facts strict-then-repair recovery tier
+//   - distinct "parsed OK but all facts category-filtered" warn
+//   - ParseRecovery per-pass discriminator in the metrics context
 #[cfg(test)]
 mod issue_2669_parse_recovery_tests {
     use super::*;
     use std::io;
     use std::sync::{Arc, Mutex};
 
-    // ── Brick B: strict-then-repair recovery via the production parser ──────
+    // ── strict-then-repair recovery via the production parser ───────────────
 
-    /// C1 (headline): a bare `{ "facts": [...] }` document with a trailing comma
-    /// after the last array element — previously 100% parse-fail — now recovers
-    /// at least one fact instead of deferring forever.
+    /// A bare `{ "facts": [...] }` document with a trailing comma after the last
+    /// array element — previously 100% parse-fail — now recovers at least one
+    /// fact instead of deferring forever.
     #[test]
     fn bare_trailing_comma_recovers_fact() {
         let doc = r#"{"facts":[{"concept":"pr-pattern","content":"x","source_episode_id":"e1"},]}"#;
-        let out = parse_facts_document(doc)
-            .expect("a trailing-comma facts document must recover (Brick B)");
+        let out = parse_facts_document(doc).expect("a trailing-comma facts document must recover");
         assert_eq!(out.facts.len(), 1);
         assert_eq!(out.facts[0].concept, "pr-pattern");
         assert_eq!(out.facts[0].source_episode_id, "e1");
@@ -2462,9 +2457,9 @@ mod issue_2669_parse_recovery_tests {
         assert!(out.procedures.is_empty());
     }
 
-    /// S2 / R1 (string-safety end-to-end): a fact whose CONTENT contains `,}`
-    /// plus a genuine trailing comma. Recovery must remove only the real trailing
-    /// comma and preserve the string content verbatim.
+    /// A fact whose CONTENT contains `,}` plus a genuine trailing comma.
+    /// Recovery must remove only the real trailing comma and preserve the string
+    /// content verbatim.
     #[test]
     fn recovery_preserves_comma_inside_fact_content() {
         let doc = r#"{"facts":[{"concept":"bug-pattern","content":"regex ,} bug","source_episode_id":"e3"},]}"#;
@@ -2476,9 +2471,9 @@ mod issue_2669_parse_recovery_tests {
         );
     }
 
-    /// S1 / R2 (never a hollow Ok): genuinely malformed input (not merely a
-    /// trailing comma) must still be an explicit `Err`, so the batch defers and
-    /// retries — recovery must not mask broken agent output.
+    /// Never a hollow Ok: genuinely malformed input (not merely a trailing
+    /// comma) must still be an explicit `Err`, so the batch defers and retries —
+    /// recovery must not mask broken agent output.
     #[test]
     fn genuinely_malformed_still_errs() {
         for bad in [
@@ -2503,7 +2498,7 @@ mod issue_2669_parse_recovery_tests {
         assert_eq!(out.facts.len(), 1);
     }
 
-    // ── Brick D: ParseRecovery discriminator + metrics context schema ──────
+    // ── ParseRecovery discriminator + metrics context schema ───────────────
 
     /// The four frozen labels are a public vocabulary for `metrics.jsonl`
     /// readers and must never be renamed.
@@ -2516,7 +2511,7 @@ mod issue_2669_parse_recovery_tests {
     }
 
     /// The `distill_success_rate` context gains an append-only `parse_recovery`
-    /// key (Decision D-1); every existing key is unchanged.
+    /// key; every existing key is unchanged.
     #[test]
     fn context_carries_parse_recovery_key_appendonly() {
         let ctx = build_distill_success_context(
@@ -2560,7 +2555,7 @@ mod issue_2669_parse_recovery_tests {
         assert_eq!(v["parse_recovery"], "strict-ok");
     }
 
-    // ── Brick C: distinct zero-facts-after-filter warning ──────────────────
+    // ── distinct zero-facts-after-filter warning ───────────────────────────
 
     /// A minimal in-memory `tracing` subscriber so a test can assert on emitted
     /// warnings without any extra dependency.
@@ -2593,8 +2588,8 @@ mod issue_2669_parse_recovery_tests {
         String::from_utf8(sink.0.lock().unwrap().clone()).unwrap()
     }
 
-    /// Brick C: an envelope that parsed successfully but had EVERY fact dropped
-    /// by the category filter emits a distinct warning on `simard::distill`, so
+    /// An envelope that parsed successfully but had EVERY fact dropped by the
+    /// category filter emits a distinct warning on `simard::distill`, so
     /// "parsed OK, 0 facts survived" is never conflated with a parse failure.
     #[test]
     fn all_facts_filtered_emits_distinct_zero_facts_warn() {
@@ -2620,8 +2615,8 @@ mod issue_2669_parse_recovery_tests {
         );
     }
 
-    /// R4: a legitimately empty `{"facts":[]}` envelope (nothing worth
-    /// distilling) must NOT emit the zero-facts warn — it is a normal success.
+    /// A legitimately empty `{"facts":[]}` envelope (nothing worth distilling)
+    /// must NOT emit the zero-facts warn — it is a normal success.
     #[test]
     fn empty_envelope_does_not_warn() {
         let logs = capture_logs(|| {

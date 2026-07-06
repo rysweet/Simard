@@ -302,7 +302,7 @@ pub fn last_balanced_object(s: &str) -> Option<&str> {
 /// `}` or `]` — from `s`, honouring string literals so a comma inside `"…"` is
 /// never touched. Returns [`Cow::Borrowed`] unchanged (zero-alloc) when there is
 /// nothing to repair, and [`Cow::Owned`] only when a real trailing comma was
-/// dropped (issue #2669, Interface Contract §1).
+/// dropped (issue #2669).
 ///
 /// This joins [`balanced_objects`] et al. as a shared, string-aware recovery
 /// primitive. It is applied by the distiller ONLY after a strict `serde_json`
@@ -312,17 +312,17 @@ pub fn last_balanced_object(s: &str) -> Option<&str> {
 /// parse-fail for that shape that previously deferred the batch forever. The
 /// repair is deliberately minimal and string-literal aware:
 ///
-/// * **I1/IV-3 string safety** — a `,`, `}`, or `]` inside a JSON string is
-///   interior data and is preserved byte-for-byte; escape sequences (`\"`,
-///   `\\`) are tracked so a quote closing detection is never fooled.
-/// * **I2 minimality** — only a comma *immediately* preceding a closer (past
+/// * **String safety** — a `,`, `}`, or `]` inside a JSON string is interior
+///   data and is preserved byte-for-byte; escape sequences (`\"`, `\\`) are
+///   tracked so quote-close detection is never fooled.
+/// * **Minimality** — only a comma *immediately* preceding a closer (past
 ///   insignificant whitespace) is removed; the whitespace itself and every
 ///   between-element comma survive. A trailing comma with NO following closer
 ///   (`{"a":1,`) is left intact, so genuinely malformed input still fails the
 ///   downstream re-parse (never a hollow recovery).
-/// * **IV-2 UTF-8 safety** — the scan branches only on ASCII bytes and copies
+/// * **UTF-8 safety** — the scan branches only on ASCII bytes and copies
 ///   multibyte sequences verbatim, so non-ASCII/emoji content is byte-preserved.
-/// * **I4 idempotence** — `f(f(x)) == f(x)`: a repaired document has no trailing
+/// * **Idempotence** — `f(f(x)) == f(x)`: a repaired document has no trailing
 ///   commas left to remove.
 pub fn strip_json_trailing_commas(s: &str) -> Cow<'_, str> {
     let bytes = s.as_bytes();
@@ -940,18 +940,14 @@ mod issue_2570_structural_token_guard_tests {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Issue #2669 (Brick A): string-aware trailing-comma recovery — TDD (RED)
+// Issue #2669: string-aware trailing-comma recovery
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// These tests pin the contract of the NEW shared helper
-// `recipe_output::strip_json_trailing_commas` (Interface Contract §1). They are
-// written BEFORE the implementation and will FAIL TO COMPILE (unresolved name)
-// until Brick A lands — the intended TDD red signal.
-//
-// Contract under test (interface_contracts.md §1):
+// These tests pin the contract of the shared helper
+// `recipe_output::strip_json_trailing_commas`:
 //   pub fn strip_json_trailing_commas(s: &str) -> std::borrow::Cow<'_, str>
-//   I1 string-safety · I2 minimality · I3 purity/zero-alloc-clean · I4 idempotence
-//   IV-1 totality/no-panic · IV-2 UTF-8 boundary safety · IV-3 string-literal aware
+// string-safety · minimality · purity/zero-alloc-clean · idempotence ·
+// totality/no-panic · UTF-8 boundary safety · string-literal aware.
 #[cfg(test)]
 mod issue_2669_trailing_comma_tests {
     use super::*;
@@ -968,7 +964,7 @@ mod issue_2669_trailing_comma_tests {
         })
     }
 
-    // ── I3: purity / zero allocation on the clean path ──────────────────────
+    // ── purity / zero allocation on the clean path ──────────────────────────
 
     #[test]
     fn clean_input_is_borrowed_and_byte_identical() {
@@ -991,7 +987,7 @@ mod issue_2669_trailing_comma_tests {
         }
     }
 
-    // ── I2: removes ONLY a `,` whose next non-ws byte is `}` or `]` ──────────
+    // ── removes ONLY a `,` whose next non-ws byte is `}` or `]` ─────────────
 
     #[test]
     fn removes_trailing_comma_before_close_brace() {
@@ -1058,7 +1054,7 @@ mod issue_2669_trailing_comma_tests {
         }
     }
 
-    // ── I1 / IV-3 / S2: string-literal awareness (the high-risk invariant) ──
+    // ── string-literal awareness (the high-risk invariant) ──────────────────
 
     #[test]
     fn comma_and_closer_inside_string_are_never_touched() {
@@ -1110,7 +1106,7 @@ mod issue_2669_trailing_comma_tests {
         assert_eq!(v["c"], "a\\");
     }
 
-    // ── IV-2: UTF-8 / multibyte safety ──────────────────────────────────────
+    // ── UTF-8 / multibyte safety ────────────────────────────────────────────
 
     #[test]
     fn multibyte_and_emoji_content_preserved() {
@@ -1122,7 +1118,7 @@ mod issue_2669_trailing_comma_tests {
         );
     }
 
-    // ── I4: idempotence ─────────────────────────────────────────────────────
+    // ── idempotence ─────────────────────────────────────────────────────────
 
     #[test]
     fn idempotent() {
@@ -1138,7 +1134,7 @@ mod issue_2669_trailing_comma_tests {
         }
     }
 
-    // ── IV-1: totality — never panics on adversarial / degenerate input ─────
+    // ── totality — never panics on adversarial / degenerate input ───────────
 
     #[test]
     fn total_over_degenerate_and_adversarial_inputs() {
@@ -1171,7 +1167,7 @@ mod issue_2669_trailing_comma_tests {
 
     #[test]
     fn is_reexported_from_recipe_output() {
-        // Interface Contract §1: the helper joins `balanced_objects` et al. and is
+        // The helper joins `balanced_objects` et al. and is
         // reachable as `crate::recipe_output::strip_json_trailing_commas`.
         let out = crate::recipe_output::strip_json_trailing_commas(r#"[1,2,]"#);
         assert_eq!(out.as_ref(), r#"[1,2]"#);

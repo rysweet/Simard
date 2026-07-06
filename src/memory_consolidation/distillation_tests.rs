@@ -1644,7 +1644,7 @@ fn full_pass_promotes_canonicalized_surface_variants_through_dedup() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Issue #2669: trailing-comma parse-fail recovery — regression (TDD RED)
+// Issue #2669: trailing-comma parse-fail recovery — regression
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // The recurring cognitive-memory signature was `distill parse-fail rate 100%`:
@@ -1653,13 +1653,13 @@ fn full_pass_promotes_canonicalized_surface_variants_through_dedup() {
 // deferred forever, and each cycle burned an LLM call for nothing.
 //
 // These public-boundary regression tests pin the acceptance criterion
-// C1 (100% → 0% parse-fail on trailing-comma inputs) and the guardrails
-// S1 (never a hollow Ok) / S2 (string interiors untouched). They exercise the
-// same `parse_facts_document` / `parse_facts` entry points already imported
-// above (issues #2622/#2619 section). Expected to FAIL until Brick A+B land.
+// (100% → 0% parse-fail on trailing-comma inputs) and the guardrails
+// (never a hollow Ok; string interiors untouched). They exercise the same
+// `parse_facts_document` / `parse_facts` entry points already imported above
+// (issues #2622/#2619 section).
 
-/// C1: the exact previously-100%-failing shape — a well-formed facts object
-/// whose only defect is a trailing comma — now parses and yields its fact.
+/// The exact previously-100%-failing shape — a well-formed facts object whose
+/// only defect is a trailing comma — now parses and yields its fact.
 #[test]
 fn trailing_comma_document_recovers_instead_of_deferring() {
     let doc = r#"{"facts":[{"concept":"pr-pattern","content":"squash fixups before merge","source_episode_id":"e7"},]}"#;
@@ -1670,8 +1670,8 @@ fn trailing_comma_document_recovers_instead_of_deferring() {
     assert_eq!(out.facts[0].source_episode_id, "e7");
 }
 
-/// C1 (batch framing): a multi-fact batch that would formerly fail 100% because
-/// of one trailing comma recovers EVERY well-formed fact — 0% parse-fail.
+/// A multi-fact batch that would formerly fail 100% because of one trailing
+/// comma recovers EVERY well-formed fact — 0% parse-fail.
 #[test]
 fn trailing_comma_batch_recovers_all_facts() {
     let doc = r#"{"facts":[
@@ -1705,7 +1705,7 @@ fn facts_only_wrapper_recovers_trailing_comma() {
     assert_eq!(facts[0].concept, "lesson-learned");
 }
 
-/// S2: a comma-inside-string plus a genuine trailing comma — content must be
+/// A comma-inside-string plus a genuine trailing comma — content must be
 /// preserved byte-for-byte while only the real trailing comma is removed.
 #[test]
 fn recovery_does_not_corrupt_comma_inside_content() {
@@ -1718,7 +1718,7 @@ fn recovery_does_not_corrupt_comma_inside_content() {
     );
 }
 
-/// S1 / never-a-hollow-Ok: genuinely malformed documents (beyond a trailing
+/// Never-a-hollow-Ok: genuinely malformed documents (beyond a trailing
 /// comma) must still error, so the batch defers and retries — recovery must not
 /// silently swallow broken agent output as an empty success.
 #[test]
