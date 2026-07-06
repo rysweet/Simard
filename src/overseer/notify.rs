@@ -260,7 +260,7 @@ impl DualChannelNotifier {
     /// merge/deploy paths make; its `NotifyReport` proves the notification fired
     /// on both channels.
     pub fn notify(&self, notification: &OperatorNotification) -> NotifyReport {
-        let per_channel = self
+        let per_channel: Vec<(String, ChannelDelivery)> = self
             .channels
             .iter()
             .map(|c| {
@@ -272,7 +272,31 @@ impl DualChannelNotifier {
                 (c.name().to_string(), outcome)
             })
             .collect();
-        NotifyReport { per_channel }
+        let report = NotifyReport { per_channel };
+
+        // One structured, secret-safe summary per notification so the
+        // dispatched-but-not-all_sent state (e.g. Signal Sent + email Queued) is
+        // plainly observable. Each channel field carries only the bare
+        // ChannelDelivery variant name — never the `reason` string — so no
+        // credential-adjacent text can land in the summary. The paired
+        // `log_degraded` warning above still carries the full `?outcome` for
+        // diagnosis.
+        let channels = report
+            .per_channel
+            .iter()
+            .map(|(name, d)| format!("{name}={}", delivery_variant(d)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        tracing::info!(
+            target: "overseer::notify",
+            dispatched = report.dispatched(),
+            all_sent = report.all_sent(),
+            kind = notification.kind,
+            channels = %channels,
+            "operator notification dispatched"
+        );
+
+        report
     }
 }
 
@@ -332,6 +356,14 @@ impl EmailConfig {
     pub fn is_configured(&self) -> bool {
         self.host.is_some() && self.from.is_some() && !self.to.is_empty()
     }
+
+    /// Whether an AUTHENTICATED STARTTLS relay should be used: true iff BOTH
+    /// `SMTP_USER` and `SMTP_PASS` are set. This is the sole selector
+    /// [`EmailNotifyChannel::from_env`] uses to pick [`StartTlsSmtpSender`] over
+    /// the plaintext [`TcpSmtpSender`]; it does not depend on the port.
+    pub fn use_authenticated(&self) -> bool {
+        self.user.is_some() && self.pass.is_some()
+    }
 }
 
 /// A minimal email message handed to an [`EmailSender`].
@@ -362,9 +394,18 @@ impl EmailNotifyChannel {
         Self { config, sender }
     }
 
-    /// Production channel: env config + a plaintext-SMTP transport.
+    /// Production channel: env config selects the SMTP transport. When `SMTP_USER`
+    /// and `SMTP_PASS` are both set ([`EmailConfig::use_authenticated`]) it uses
+    /// the STARTTLS + AUTH LOGIN [`StartTlsSmtpSender`] (e.g. office365); otherwise
+    /// it falls back to the minimal plaintext [`TcpSmtpSender`] for a local relay.
     pub fn from_env() -> Self {
-        Self::new(EmailConfig::from_env(), Box::new(TcpSmtpSender))
+        let config = EmailConfig::from_env();
+        let sender: Box<dyn EmailSender> = if config.use_authenticated() {
+            Box::new(StartTlsSmtpSender)
+        } else {
+            Box::new(TcpSmtpSender)
+        };
+        Self::new(config, sender)
     }
 }
 
@@ -530,6 +571,279 @@ fn smtp_send_plaintext(host: &str, port: u16, msg: &EmailMessage) -> Result<(), 
     Ok(())
 }
 
+// ─────────────── authenticated STARTTLS SMTP relay (issue #2631) ────────────
+//
+// Delivering to a microsoft.com recipient needs an AUTHENTICATED relay
+// (office365 / internal). When `SMTP_USER` + `SMTP_PASS` are set,
+// [`EmailNotifyChannel::from_env`] selects [`StartTlsSmtpSender`], which performs
+// a real STARTTLS + AUTH LOGIN submission. The wire protocol is split from the
+// TLS seam as [`smtp_converse`] so it is unit-testable without a network. See
+// docs/reference/overseer-operator-notifications.md (Part B).
+
+/// SMTP AUTH credentials, sourced from `SMTP_USER` / `SMTP_PASS` (never
+/// hardcoded). Intentionally derives NO `Debug`, so the password cannot leak via
+/// a `?`-formatted log line.
+pub struct SmtpAuth {
+    pub user: String,
+    pub pass: String,
+}
+
+/// Send one SMTP command line, CRLF-terminated (RFC 5321 requires CRLF — bare LF
+/// is rejected by strict relays such as office365). Kept as a `write_all` of an
+/// explicit `\r\n` so the fixed line endings are unambiguous.
+fn smtp_send_line<S: std::io::Write>(stream: &mut S, line: &str) -> Result<(), String> {
+    stream
+        .write_all(line.as_bytes())
+        .map_err(|e| e.to_string())?;
+    stream.write_all(b"\r\n").map_err(|e| e.to_string())
+}
+
+/// Read one CRLF-terminated line, byte-at-a-time so we never over-read past the
+/// terminator. This matters during the plaintext STARTTLS prelude: any byte
+/// consumed after the `220` would be stolen from the subsequent TLS handshake.
+/// The trailing CR/LF is stripped. An empty result signals end-of-stream.
+fn smtp_read_line<S: std::io::Read>(stream: &mut S) -> Result<String, String> {
+    let mut buf = Vec::with_capacity(128);
+    let mut byte = [0u8; 1];
+    loop {
+        let n = stream
+            .read(&mut byte)
+            .map_err(|e| format!("smtp read: {e}"))?;
+        if n == 0 || byte[0] == b'\n' {
+            break;
+        }
+        if byte[0] != b'\r' {
+            buf.push(byte[0]);
+        }
+        if buf.len() > 8192 {
+            return Err("smtp: reply line too long".to_string());
+        }
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Read a (possibly multi-line) SMTP reply, returning its 3-digit status code and
+/// the aggregated text of every continuation line. Continuation lines are
+/// `NNN-…`; the final line is `NNN …` (a space in the 4th column).
+fn smtp_read_reply<S: std::io::Read>(stream: &mut S) -> Result<(u16, String), String> {
+    let mut code = 0u16;
+    let mut text = String::new();
+    loop {
+        let line = smtp_read_line(stream)?;
+        if line.is_empty() {
+            return Err("smtp: unexpected end of stream while reading reply".to_string());
+        }
+        code = line
+            .get(..3)
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(code);
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&line);
+        // A '-' in the 4th column means more lines follow; anything else ends it.
+        if line.as_bytes().get(3) != Some(&b'-') {
+            break;
+        }
+    }
+    Ok((code, text))
+}
+
+/// Read a reply and require an exact status code. `step` names the phase for the
+/// error; the error carries only server-sent reply text — never a credential.
+fn smtp_expect<S: std::io::Read>(stream: &mut S, want: u16, step: &str) -> Result<String, String> {
+    let (code, text) = smtp_read_reply(stream)?;
+    if code == want {
+        Ok(text)
+    } else {
+        Err(format!(
+            "smtp {step}: expected {want}, got {code}: {}",
+            text.replace('\n', " ")
+        ))
+    }
+}
+
+/// The plaintext STARTTLS prelude, shared by the hermetic [`smtp_converse`] and
+/// the live [`StartTlsSmtpSender`]. Reads the greeting, sends EHLO, REQUIRES the
+/// server to advertise STARTTLS (fail-closed — we never authenticate in the
+/// clear), issues STARTTLS and consumes its `220`. On return the caller performs
+/// the real TLS handshake (production) or simply continues on the same in-memory
+/// stream (tests).
+fn smtp_starttls_prelude<S: std::io::Read + std::io::Write>(stream: &mut S) -> Result<(), String> {
+    smtp_expect(stream, 220, "greeting")?;
+    smtp_send_line(stream, "EHLO simard-overseer")?;
+    let caps = smtp_expect(stream, 250, "EHLO")?;
+    if !caps.to_ascii_uppercase().contains("STARTTLS") {
+        return Err(
+            "smtp: server does not advertise STARTTLS; refusing to authenticate in the clear"
+                .to_string(),
+        );
+    }
+    smtp_send_line(stream, "STARTTLS")?;
+    smtp_expect(stream, 220, "STARTTLS")?;
+    Ok(())
+}
+
+/// The authenticated submission that runs AFTER STARTTLS — over the TLS stream in
+/// production, over the same in-memory duplex in tests. Re-issues EHLO inside the
+/// secured session, performs AUTH LOGIN (positional base64 of user then pass),
+/// then MAIL / RCPT / DATA / QUIT. Header/envelope fields are sanitized and the
+/// body dot-stuffed to block CWE-93 injection.
+fn smtp_submit_authenticated<S: std::io::Read + std::io::Write>(
+    stream: &mut S,
+    msg: &EmailMessage,
+    auth: &SmtpAuth,
+) -> Result<(), String> {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    let from = sanitize_header_value(&msg.from);
+    let recipients: Vec<String> = msg.to.iter().map(|r| sanitize_header_value(r)).collect();
+    let subject = sanitize_header_value(&msg.subject);
+
+    // EHLO again inside the secured channel.
+    smtp_send_line(stream, "EHLO simard-overseer")?;
+    smtp_expect(stream, 250, "EHLO(tls)")?;
+
+    // AUTH LOGIN: the server prompts (base64 "Username:"/"Password:"); we answer
+    // positionally with base64(user) then base64(pass). base64 is an ENCODING,
+    // not encryption — safe only because we are now inside TLS.
+    smtp_send_line(stream, "AUTH LOGIN")?;
+    smtp_expect(stream, 334, "AUTH LOGIN")?;
+    smtp_send_line(stream, &b64.encode(auth.user.as_bytes()))?;
+    smtp_expect(stream, 334, "AUTH user")?;
+    smtp_send_line(stream, &b64.encode(auth.pass.as_bytes()))?;
+    smtp_expect(stream, 235, "AUTH pass")?;
+
+    smtp_send_line(stream, &format!("MAIL FROM:<{from}>"))?;
+    smtp_expect(stream, 250, "MAIL FROM")?;
+    for rcpt in &recipients {
+        smtp_send_line(stream, &format!("RCPT TO:<{rcpt}>"))?;
+        smtp_expect(stream, 250, "RCPT TO")?;
+    }
+    smtp_send_line(stream, "DATA")?;
+    smtp_expect(stream, 354, "DATA")?;
+    let data = format!(
+        "From: {}\r\nTo: {}\r\nSubject: {}\r\n\r\n{}\r\n.\r\n",
+        from,
+        recipients.join(", "),
+        subject,
+        dot_stuff_body(&msg.body),
+    );
+    stream
+        .write_all(data.as_bytes())
+        .map_err(|e| e.to_string())?;
+    smtp_expect(stream, 250, "end-of-DATA")?;
+    smtp_send_line(stream, "QUIT")?;
+    // A courteous QUIT; the server's 221 is best-effort (it may close first).
+    let _ = smtp_read_reply(stream);
+    Ok(())
+}
+
+/// The pure SMTP client state machine for an authenticated submission, driven
+/// over any duplex stream so it is hermetically testable. It requests STARTTLS
+/// and — only once TLS is in effect — performs AUTH LOGIN (positional base64 of
+/// user then pass) followed by MAIL / RCPT / DATA. It fails closed, NEVER
+/// emitting `AUTH` in the clear, if the server does not offer STARTTLS.
+///
+/// In tests the STARTTLS step is a plain protocol step over an in-memory duplex
+/// (no real handshake); production reuses the same [`smtp_starttls_prelude`] +
+/// [`smtp_submit_authenticated`] helpers with a genuine TLS upgrade spliced
+/// between them (see [`StartTlsSmtpSender::send`]).
+pub fn smtp_converse<S: std::io::Read + std::io::Write>(
+    stream: &mut S,
+    msg: &EmailMessage,
+    auth: &SmtpAuth,
+) -> Result<(), String> {
+    smtp_starttls_prelude(stream)?;
+    smtp_submit_authenticated(stream, msg, auth)
+}
+
+/// Build the rustls client config for the relay TLS upgrade: the stock verifier
+/// with the OS trust store (`rustls-native-certs`), falling back to the compiled
+/// `webpki-roots` bundle if the OS store yields nothing. Uses the `ring` crypto
+/// provider explicitly so we never depend on an ambiguous process-default
+/// provider. No `dangerous_configuration`; the peer name is validated by the
+/// caller against `SMTP_HOST`.
+fn tls_client_config() -> Result<rustls::ClientConfig, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    for cert in native.certs {
+        // A partial store is fine; skip any individually-unparsable cert.
+        let _ = roots.add(cert);
+    }
+    if roots.is_empty() {
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    }
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("tls versions: {e}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(config)
+}
+
+/// A real STARTTLS + AUTH LOGIN relay sender (e.g. `smtp.office365.com:587`).
+/// Selected by [`EmailNotifyChannel::from_env`] when `SMTP_USER` + `SMTP_PASS`
+/// are set. Connection params and credentials are read from the environment
+/// (`SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS`) so the sender carries
+/// no config of its own and no secret is ever hardcoded. The TLS handshake is the
+/// only seam not exercised by the pure [`smtp_converse`] tests.
+#[derive(Clone, Debug, Default)]
+pub struct StartTlsSmtpSender;
+
+impl EmailSender for StartTlsSmtpSender {
+    fn send(&self, msg: &EmailMessage) -> Result<(), String> {
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let host = std::env::var("SMTP_HOST").map_err(|_| "SMTP_HOST unset".to_string())?;
+        let port = std::env::var("SMTP_PORT")
+            .ok()
+            .and_then(|s| s.trim().parse::<u16>().ok())
+            .unwrap_or(587);
+        let auth = SmtpAuth {
+            user: std::env::var("SMTP_USER").map_err(|_| "SMTP_USER unset".to_string())?,
+            pass: std::env::var("SMTP_PASS").map_err(|_| "SMTP_PASS unset".to_string())?,
+        };
+
+        let addr = format!("{host}:{port}");
+        let mut tcp =
+            TcpStream::connect(&addr).map_err(|e| format!("connect {addr} failed: {e}"))?;
+        tcp.set_read_timeout(Some(Duration::from_secs(30)))
+            .map_err(|e| e.to_string())?;
+        tcp.set_write_timeout(Some(Duration::from_secs(30)))
+            .map_err(|e| e.to_string())?;
+
+        // Plaintext prelude: greeting → EHLO → require STARTTLS → STARTTLS → 220.
+        smtp_starttls_prelude(&mut tcp)?;
+
+        // Upgrade the SAME socket to TLS, verifying the relay certificate against
+        // SMTP_HOST with the standard verifier.
+        let config = tls_client_config()?;
+        let server_name = rustls::pki_types::ServerName::try_from(host.clone())
+            .map_err(|e| format!("invalid SMTP_HOST '{host}': {e}"))?;
+        let conn = rustls::ClientConnection::new(std::sync::Arc::new(config), server_name)
+            .map_err(|e| format!("tls setup: {e}"))?;
+        let mut tls = rustls::StreamOwned::new(conn, tcp);
+
+        // Authenticated submission INSIDE TLS.
+        smtp_submit_authenticated(&mut tls, msg, &auth)
+    }
+}
+
+/// The [`ChannelDelivery`] variant name (`"Sent"` | `"Queued"` | `"Failed"`) with
+/// NO `reason` string — safe for a one-line structured summary that must never
+/// carry a secret-adjacent reason.
+pub fn delivery_variant(d: &ChannelDelivery) -> &'static str {
+    match d {
+        ChannelDelivery::Sent => "Sent",
+        ChannelDelivery::Queued { .. } => "Queued",
+        ChannelDelivery::Failed { .. } => "Failed",
+    }
+}
+
 // ─────────────────────────── Signal channel ────────────────────────────────
 
 /// The wire transport for Signal. Object-safe + `Send + Sync` so it can be
@@ -604,12 +918,32 @@ impl NotifyChannel for SignalNotifyChannel {
                 reason: "Signal channel not wired (configure the ConversationChannel transport)"
                     .to_string(),
             },
-            Some(sender) => match sender.send_text(&n.plain_text()) {
+            Some(sender) => match sender.send_text(&signal_wire_body(n)) {
                 Ok(()) => ChannelDelivery::Sent,
                 Err(e) => ChannelDelivery::Failed { reason: e },
             },
         }
     }
+}
+
+/// The exact text a Signal operator-notification puts on the wire. It wraps the
+/// plain body in the reserved anti-self-ingest marker so the INBOUND Signal
+/// processor deterministically skips Simard's own notification when it is synced
+/// back to a linked device (independent of the fragile echo window).
+///
+/// The marker constant lives in `signal_conversation::gating`, which is compiled
+/// only under the `signal` feature, so this wrap is feature-gated. With `signal`
+/// off there is no inbound Signal processor to self-ingest and
+/// `SignalNotifyChannel::from_env` wires no sender (always `Queued`), so the
+/// unwrapped branch is never reached in production.
+#[cfg(feature = "signal")]
+fn signal_wire_body(n: &OperatorNotification) -> String {
+    crate::signal_conversation::gating::wrap_operator_notification(&n.plain_text())
+}
+
+#[cfg(not(feature = "signal"))]
+fn signal_wire_body(n: &OperatorNotification) -> String {
+    n.plain_text()
 }
 
 #[cfg(test)]
@@ -906,5 +1240,358 @@ mod tests {
             ch.deliver(&sample()),
             ChannelDelivery::Queued { .. }
         ));
+    }
+
+    // ── Part A: Signal notifications carry the anti-self-ingest marker (#2631) ─
+
+    #[cfg(feature = "signal")]
+    #[test]
+    fn signal_channel_wraps_body_with_operator_marker() {
+        use crate::signal_conversation::gating::OPERATOR_NOTIFY_MARKER;
+        use std::sync::Arc;
+
+        // A recording SignalSender captures exactly what the channel would put on
+        // the wire, so we can assert the outbound notification is wrapped.
+        #[derive(Default)]
+        struct RecordingSignal {
+            sent: Mutex<Vec<String>>,
+        }
+        impl SignalSender for Arc<RecordingSignal> {
+            fn send_text(&self, text: &str) -> Result<(), String> {
+                self.sent.lock().unwrap().push(text.to_string());
+                Ok(())
+            }
+        }
+
+        let rec = Arc::new(RecordingSignal::default());
+        let ch = SignalNotifyChannel::new(Some(Box::new(Arc::clone(&rec))));
+
+        let out = ch.deliver(&sample());
+        assert_eq!(out, ChannelDelivery::Sent);
+
+        let sent = rec.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1, "exactly one Signal message");
+        assert!(
+            sent[0].contains(OPERATOR_NOTIFY_MARKER),
+            "a Signal notification MUST carry the anti-self-ingest marker so the \
+             inbound processor skips its own echo: {:?}",
+            sent[0]
+        );
+        // The operator-readable problem text is still present.
+        assert!(
+            sent[0].contains("distillation parse-failure"),
+            "the human-readable body must be preserved: {:?}",
+            sent[0]
+        );
+    }
+
+    // ── Part B: authenticated STARTTLS + AUTH LOGIN SMTP (#2631) ──────────────
+
+    /// A scripted in-memory duplex: serves pre-canned server reply bytes on `read`
+    /// (SMTP is lock-step, so ordered replies suffice) and captures every client
+    /// byte on `write`. Lets [`smtp_converse`] be exercised with no network.
+    struct ScriptedDuplex {
+        to_client: std::io::Cursor<Vec<u8>>,
+        from_client: Vec<u8>,
+    }
+    impl ScriptedDuplex {
+        fn new(server_replies: &[&str]) -> Self {
+            Self {
+                to_client: std::io::Cursor::new(server_replies.concat().into_bytes()),
+                from_client: Vec::new(),
+            }
+        }
+        fn written(&self) -> String {
+            String::from_utf8_lossy(&self.from_client).into_owned()
+        }
+    }
+    impl std::io::Read for ScriptedDuplex {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.to_client.read(buf)
+        }
+    }
+    impl std::io::Write for ScriptedDuplex {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.from_client.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn office365_message() -> EmailMessage {
+        EmailMessage {
+            from: "overseer@contoso.onmicrosoft.com".to_string(),
+            to: vec!["rysweet@microsoft.com".to_string()],
+            subject: "[Overseer] goal-blocked: g-1 needs human review".to_string(),
+            body: "Goal `g-1` is blocked and needs human review.".to_string(),
+        }
+    }
+
+    #[test]
+    fn smtp_converse_negotiates_starttls_then_auth_login_and_sends() {
+        // Happy path: greeting → EHLO(STARTTLS) → STARTTLS → EHLO(AUTH) →
+        // AUTH LOGIN → base64(user) → base64(pass) → MAIL/RCPT/DATA → QUIT.
+        let server = [
+            "220 smtp.example.test ESMTP\r\n",
+            "250-smtp.example.test\r\n250-STARTTLS\r\n250 AUTH LOGIN\r\n",
+            "220 ready to start TLS\r\n",
+            "250-smtp.example.test\r\n250 AUTH LOGIN\r\n",
+            "334 VXNlcm5hbWU6\r\n", // base64("Username:")
+            "334 UGFzc3dvcmQ6\r\n", // base64("Password:")
+            "235 2.7.0 Authentication successful\r\n",
+            "250 2.1.0 Sender OK\r\n",
+            "250 2.1.5 Recipient OK\r\n",
+            "354 End data with <CR><LF>.<CR><LF>\r\n",
+            "250 2.0.0 OK queued\r\n",
+            "221 2.0.0 Service closing\r\n",
+        ];
+        let mut duplex = ScriptedDuplex::new(&server);
+        let msg = office365_message();
+        // Single-character credentials so the expected base64 is trivial and no
+        // real secret appears: base64("u") = "dQ==", base64("p") = "cA==".
+        let auth = SmtpAuth {
+            user: "u".to_string(),
+            pass: "p".to_string(),
+        };
+
+        let res = smtp_converse(&mut duplex, &msg, &auth);
+        assert!(
+            res.is_ok(),
+            "authenticated submission should succeed: {res:?}"
+        );
+
+        let wire = duplex.written();
+        assert!(
+            wire.contains("STARTTLS\r\n"),
+            "must request STARTTLS: {wire:?}"
+        );
+        assert!(wire.contains("AUTH LOGIN\r\n"), "must AUTH LOGIN: {wire:?}");
+        assert!(
+            wire.contains("dQ=="),
+            "must send base64(user) positionally after the first 334: {wire:?}"
+        );
+        assert!(
+            wire.contains("cA=="),
+            "must send base64(pass) positionally after the second 334: {wire:?}"
+        );
+        assert!(
+            wire.contains("MAIL FROM:<overseer@contoso.onmicrosoft.com>"),
+            "envelope sender: {wire:?}"
+        );
+        assert!(
+            wire.contains("RCPT TO:<rysweet@microsoft.com>"),
+            "envelope recipient: {wire:?}"
+        );
+        assert!(wire.contains("QUIT"), "must close with QUIT: {wire:?}");
+    }
+
+    #[test]
+    fn smtp_converse_fails_closed_and_leaks_no_auth_without_starttls() {
+        // The server does NOT advertise STARTTLS. With credentials configured the
+        // sender MUST fail rather than authenticate in the clear, and MUST NOT
+        // write any AUTH bytes (base64 is encoding, not encryption).
+        let server = [
+            "220 smtp.example.test ESMTP\r\n",
+            "250-smtp.example.test\r\n250 AUTH LOGIN\r\n", // EHLO reply, NO STARTTLS
+        ];
+        let mut duplex = ScriptedDuplex::new(&server);
+        let msg = office365_message();
+        let auth = SmtpAuth {
+            user: "u".to_string(),
+            pass: "p".to_string(),
+        };
+
+        let res = smtp_converse(&mut duplex, &msg, &auth);
+        assert!(
+            res.is_err(),
+            "must fail closed when STARTTLS is unavailable, not send credentials in clear"
+        );
+
+        let wire = duplex.written();
+        assert!(
+            !wire.contains("AUTH"),
+            "must NOT emit AUTH without TLS: {wire:?}"
+        );
+        assert!(
+            !wire.contains("dQ=="),
+            "must NOT emit the base64 username in clear: {wire:?}"
+        );
+        assert!(
+            !wire.contains("cA=="),
+            "must NOT emit the base64 password in clear: {wire:?}"
+        );
+    }
+
+    #[test]
+    fn email_config_use_authenticated_requires_both_user_and_pass() {
+        // office365 worked example: full auth config selects the STARTTLS sender.
+        let both = EmailConfig::from_lookup(|k| match k {
+            "SIMARD_OVERSEER_EMAIL_TO" => Some("rysweet@microsoft.com".to_string()),
+            "SIMARD_OVERSEER_EMAIL_FROM" => Some("overseer@contoso.onmicrosoft.com".to_string()),
+            "SMTP_HOST" => Some("smtp.office365.com".to_string()),
+            "SMTP_PORT" => Some("587".to_string()),
+            "SMTP_USER" => Some("overseer@contoso.onmicrosoft.com".to_string()),
+            "SMTP_PASS" => Some("<app-password-placeholder>".to_string()),
+            _ => None,
+        });
+        assert!(both.is_configured());
+        assert_eq!(both.port, 587);
+        assert!(
+            both.use_authenticated(),
+            "SMTP_USER + SMTP_PASS ⇒ authenticated STARTTLS sender"
+        );
+
+        // Missing the password ⇒ plaintext sender selection.
+        let no_pass = EmailConfig::from_lookup(|k| match k {
+            "SIMARD_OVERSEER_EMAIL_TO" => Some("ops@example.test".to_string()),
+            "SIMARD_OVERSEER_EMAIL_FROM" => Some("o@example.test".to_string()),
+            "SMTP_HOST" => Some("localhost".to_string()),
+            "SMTP_USER" => Some("u".to_string()),
+            _ => None,
+        });
+        assert!(
+            !no_pass.use_authenticated(),
+            "without SMTP_PASS the authenticated relay must not be selected"
+        );
+    }
+
+    #[test]
+    fn start_tls_sender_is_an_email_sender() {
+        // Compile-time contract: the authenticated relay implements the injectable
+        // EmailSender seam (the live TLS send itself is the untested seam).
+        let _sender: Box<dyn EmailSender> = Box::new(StartTlsSmtpSender);
+    }
+
+    #[test]
+    fn smtp_converse_sanitizes_header_and_body_injection_in_auth_path() {
+        // A CRLF-injected subject and a lone-dot body line must be neutralized in
+        // the authenticated submission too: the STARTTLS path reuses the shared
+        // sanitize_header_value + dot_stuff_body hardening (CWE-93).
+        let server = [
+            "220 smtp.example.test ESMTP\r\n",
+            "250-smtp.example.test\r\n250-STARTTLS\r\n250 AUTH LOGIN\r\n",
+            "220 ready to start TLS\r\n",
+            "250-smtp.example.test\r\n250 AUTH LOGIN\r\n",
+            "334 VXNlcm5hbWU6\r\n",
+            "334 UGFzc3dvcmQ6\r\n",
+            "235 2.7.0 Authentication successful\r\n",
+            "250 2.1.0 Sender OK\r\n",
+            "250 2.1.5 Recipient OK\r\n",
+            "354 End data\r\n",
+            "250 2.0.0 OK queued\r\n",
+            "221 2.0.0 bye\r\n",
+        ];
+        let mut duplex = ScriptedDuplex::new(&server);
+        let msg = EmailMessage {
+            from: "overseer@contoso.onmicrosoft.com".to_string(),
+            to: vec!["rysweet@microsoft.com".to_string()],
+            subject: "goal-blocked\r\nBcc: attacker@evil.test".to_string(),
+            body: "Goal blocked.\n.\nMAIL FROM:<spoof@evil.test>".to_string(),
+        };
+        let auth = SmtpAuth {
+            user: "u".to_string(),
+            pass: "p".to_string(),
+        };
+        assert!(smtp_converse(&mut duplex, &msg, &auth).is_ok());
+        let wire = duplex.written();
+        // The injected header cannot begin its own line in the DATA section.
+        assert!(
+            !wire.contains("\r\nBcc: attacker@evil.test"),
+            "header injection neutralized: {wire:?}"
+        );
+        // The lone-dot body line is dot-stuffed so it cannot close DATA early and
+        // smuggle the spoofed MAIL FROM as an SMTP command.
+        assert!(
+            !wire.contains("\r\n.\r\nMAIL FROM:<spoof@evil.test>"),
+            "body dot-stuffed: {wire:?}"
+        );
+    }
+
+    // ── Part C: all_sent vs dispatched, observably distinguishable (#2631) ────
+
+    #[test]
+    fn delivery_variant_names_omit_the_reason_string() {
+        assert_eq!(delivery_variant(&ChannelDelivery::Sent), "Sent");
+        assert_eq!(
+            delivery_variant(&ChannelDelivery::Queued {
+                reason: "SMTP not configured".to_string()
+            }),
+            "Queued"
+        );
+        assert_eq!(
+            delivery_variant(&ChannelDelivery::Failed {
+                reason: "smtp boom".to_string()
+            }),
+            "Failed"
+        );
+        // The bare variant name must never carry the (secret-adjacent) reason.
+        assert!(
+            !delivery_variant(&ChannelDelivery::Failed {
+                reason: "topsecret".to_string()
+            })
+            .contains("topsecret")
+        );
+    }
+
+    #[test]
+    fn dispatched_but_not_all_sent_when_signal_delivers_and_email_queues() {
+        // The crux of Part C: Signal (the wired primary path) reaches the operator,
+        // so the escalation is DISPATCHED even though email is not yet configured —
+        // it is never considered "lost". `all_sent()` honestly reports the gap.
+        let notifier = DualChannelNotifier::new(vec![
+            Box::new(RecordingChannel {
+                name: "signal".to_string(),
+                outcome: Some(ChannelDelivery::Sent),
+                ..Default::default()
+            }),
+            Box::new(RecordingChannel {
+                name: "email".to_string(),
+                outcome: Some(ChannelDelivery::Queued {
+                    reason: "SMTP not configured".to_string(),
+                }),
+                ..Default::default()
+            }),
+        ]);
+        let report = notifier.notify(&sample());
+        assert!(report.dispatched(), "reached the operator via Signal");
+        assert!(!report.all_sent(), "email did not deliver");
+
+        let by = |name: &str| {
+            report
+                .per_channel
+                .iter()
+                .find(|(c, _)| c == name)
+                .map(|(_, d)| d.clone())
+                .unwrap()
+        };
+        assert_eq!(by("signal"), ChannelDelivery::Sent);
+        assert!(
+            matches!(by("email"), ChannelDelivery::Queued { reason } if reason.contains("SMTP")),
+            "the queued email must identify the channel AND the reason"
+        );
+    }
+
+    #[test]
+    fn all_sent_true_only_when_both_channels_deliver() {
+        let notifier = DualChannelNotifier::new(vec![
+            Box::new(RecordingChannel {
+                name: "signal".to_string(),
+                outcome: Some(ChannelDelivery::Sent),
+                ..Default::default()
+            }),
+            Box::new(RecordingChannel {
+                name: "email".to_string(),
+                outcome: Some(ChannelDelivery::Sent),
+                ..Default::default()
+            }),
+        ]);
+        let report = notifier.notify(&sample());
+        assert!(report.dispatched());
+        assert!(
+            report.all_sent(),
+            "all_sent is true only when every channel delivered"
+        );
     }
 }

@@ -3898,6 +3898,7 @@ dependencies = [
  "amplihack-memory",
  "assert_cmd",
  "axum 0.8.9",
+ "base64",
  "chrono",
  "crc32fast",
  "crossterm",
@@ -3915,6 +3916,8 @@ dependencies = [
  "ratatui",
  "regex",
  "rusqlite",
+ "rustls",
+ "rustls-native-certs",
  "rustyclawd-core",
  "rustyclawd-tools",
  "semver",
@@ -3933,6 +3936,7 @@ dependencies = [
  "ureq",
  "url",
  "uuid",
+ "webpki-roots",
 ]
 
 [[package]]

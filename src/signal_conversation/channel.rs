@@ -246,6 +246,21 @@ impl<T: SignalTransport + Send, H: SignalCommandHandler> ConversationChannel
                 continue; // JSON-RPC responses, receipts, unparseable lines.
             };
 
+            // Anti-self-ingest (#2631): a message carrying the reserved
+            // operator-notification marker is one of Simard's OWN notifications
+            // synced back to a linked device — never an operator command. Drop it
+            // DETERMINISTICALLY here, before the sync-sent gate, echo suppression,
+            // allowlist, or command parsing, so the marker alone suffices even if
+            // the synced echo arrives late, altered, or quoted (it does not rely
+            // on the exact-body `matches_recent_outbound` echo window).
+            if super::gating::is_operator_notification(&parsed.body) {
+                tracing::debug!(
+                    target: "signal",
+                    "ignoring inbound message bearing the operator-notification marker (self-notification)"
+                );
+                continue;
+            }
+
             // Loop prevention for sync-sent (Note-to-Self) messages, issue #2575.
             // A linked device receives sync-sent transcripts of BOTH the operator's
             // Note-to-Self commands AND Simard's own replies; only the former (from
@@ -1115,5 +1130,91 @@ mod tests {
         let (mut ch, _state) = note_channel(vec![receipt, "not json".to_string()], None);
         assert!(block_on(ch.recv()).unwrap().is_none());
         assert!(ch.transport.sent.is_empty());
+    }
+
+    // ── operator-notification marker: anti-self-ingest inbound gate (#2631) ──
+    //
+    // Outbound Overseer→operator notifications carry a reserved marker
+    // (`gating::OPERATOR_NOTIFY_MARKER`) so the inbound processor DETERMINISTICALLY
+    // skips Simard's OWN notifications synced back to a linked device — NEVER
+    // parsing them as an operator command or a meeting turn — independent of the
+    // exact-body/time-window echo suppression.
+
+    use crate::signal_conversation::gating::OPERATOR_NOTIFY_MARKER;
+
+    /// A marked notification body as it would arrive back on the inbound path. The
+    /// literal marker constant is used (not the wrap helper) so the test input is
+    /// independent of the formatter under test.
+    fn marked(body: &str) -> String {
+        format!("{OPERATOR_NOTIFY_MARKER} {body}")
+    }
+
+    #[test]
+    fn marked_direct_message_is_dropped_never_processed() {
+        // A marked message delivered as a normal dataMessage (e.g. synced back on a
+        // multi-device account) is dropped before allowlist/command parsing: recv
+        // reaches EOF with no reply and nothing executed — not even a meeting turn.
+        let (mut ch, state) = channel(vec![receive_line(OPERATOR, &marked("status"))], false);
+        assert!(
+            block_on(ch.recv()).unwrap().is_none(),
+            "a marked self-notification must never yield an inbound turn"
+        );
+        assert!(
+            ch.transport.sent.is_empty(),
+            "Simard must not reply to her own notification"
+        );
+        assert!(state.lock().unwrap().executed.is_empty());
+    }
+
+    #[test]
+    fn marked_message_is_dropped_even_with_altered_prefix_outside_echo_window() {
+        // The marker alone suffices — even if the synced echo is altered/quoted with
+        // a leading transcript prefix, and even though NO matching outbound was ever
+        // recorded (so it is outside any echo-suppression window). This proves the
+        // gate does not rely on `matches_recent_outbound`.
+        let echoed = format!("You sent: {}", marked("merge #42"));
+        let (mut ch, state) = channel(vec![receive_line(OPERATOR, &echoed)], false);
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        assert!(
+            ch.transport.sent.is_empty(),
+            "a self-notification must not trigger a HIGH-RISK sign-off prompt"
+        );
+        assert!(
+            state.lock().unwrap().executed.is_empty(),
+            "a self-notification must never execute a command"
+        );
+    }
+
+    #[test]
+    fn marked_sync_sent_note_to_self_is_dropped_from_primary_phone() {
+        // Even a marked message arriving via the genuine Note-to-Self (device 1)
+        // path — which clears `should_accept_sync_sent` — is dropped by the marker
+        // gate, because the gate precedes the sync-sent branch.
+        let (mut ch, _state) = note_channel(
+            vec![sync_sent_line(1, ACCOUNT, &marked("let's plan"))],
+            None,
+        );
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        assert!(ch.transport.sent.is_empty());
+    }
+
+    #[test]
+    fn unmarked_operator_conversation_is_unaffected_by_the_gate() {
+        // Regression: a normal operator turn without the marker still flows through
+        // and is bound to the authorized sender.
+        let (mut ch, _state) = channel(vec![receive_line(OPERATOR, "let's chat")], false);
+        let inbound = block_on(ch.recv()).unwrap().expect("a conversation turn");
+        assert_eq!(inbound.text, "let's chat");
+        assert!(inbound.from.authorized);
+    }
+
+    #[test]
+    fn unmarked_operator_command_still_executes() {
+        // Regression: a normal `status` command (no marker) still replies.
+        let (mut ch, _state) = channel(vec![receive_line(OPERATOR, "status")], false);
+        assert!(block_on(ch.recv()).unwrap().is_none());
+        assert_eq!(ch.transport.sent.len(), 1);
+        let (_to, msg) = sent(&ch.transport.sent[0]);
+        assert!(msg.contains("STATUS"), "got {msg}");
     }
 }

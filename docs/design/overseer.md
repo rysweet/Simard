@@ -15,6 +15,8 @@ doc_type: design
 status: draft
 related:
   - ../concepts/operational-autonomy-model.md
+  - ../reference/overseer-operator-notifications.md
+  - ../howto/configure-overseer-email-notifications.md
   - ../concepts/simard-whisperer.md
   - ../reference/simard-whisperer-api.md
   - ../howto/configure-the-simard-whisperer.md
@@ -515,3 +517,7 @@ built, these must be resolved — they are hard gates, not advice.
 - [Self-Deploy API](../reference/self-deploy-api.md) and
   [Cross-repo merge authority](../reference/cross-repo-merge-authority.md) — the
   guarded deploy and merge actions.
+- [Overseer operator-notification reliability](../reference/overseer-operator-notifications.md)
+  and [Configure Overseer email notifications](../howto/configure-overseer-email-notifications.md)
+  — the reliable, safe two-channel (Signal + email) operator-notification path, including
+  the anti-self-ingest Signal marker and the authenticated SMTP relay.
