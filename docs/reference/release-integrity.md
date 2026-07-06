@@ -1,7 +1,7 @@
 ---
 title: Release integrity — SBOM, signing, and reproducibility
 description: "Reference for the CycloneDX SBOM, cosign keyless signing, and build-reproducibility guarantees attached to every Simard release, plus end-to-end verification steps."
-last_updated: 2026-06-28
+last_updated: 2026-07-06
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -42,7 +42,7 @@ Each GitHub Release publishes the following, for every platform target:
 | `simard-<version>.cdx.json.pem` | `cosign sign-blob` | The SBOM signing **certificate** (same Fulcio identity as the tarball). |
 
 `<platform>` follows the existing naming convention (`linux-x86_64`, etc.;
-see [the update-check platform table](./update-check.md#platform-asset-detection)).
+see [the multi-binary self-update platform suffixes](./multi-binary-self-update.md)).
 `<version>` is the `Cargo.toml` version (e.g. `0.22.0`).
 
 ## Software Bill of Materials (SBOM)

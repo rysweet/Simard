@@ -3917,6 +3917,7 @@ dependencies = [
  "rusqlite",
  "rustyclawd-core",
  "rustyclawd-tools",
+ "semver",
  "serde",
  "serde_json",
  "serial_test",
@@ -3929,6 +3930,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "ureq",
  "url",
  "uuid",
 ]

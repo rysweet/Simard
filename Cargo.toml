@@ -98,6 +98,12 @@ lbug = "=0.17.1"
 rusqlite = { version = "=0.31.0", features = ["bundled"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
+# Issue #2250: the launch-time update check compares semver versions with the
+# `semver` crate and fetches the latest GitHub release in-process via `ureq`
+# (rustls TLS). Both were already in the locked dependency graph transitively;
+# these entries promote them to pinned direct deps.
+semver = "=1.0.28"
+ureq = "=3.3.0"
 toml = "=1.1.2"
 tokio = { version = "=1.52.1", features = ["rt", "rt-multi-thread", "process", "io-util", "time", "net", "macros", "sync"] }
 axum = { version = "=0.8.9", features = ["ws"] }
