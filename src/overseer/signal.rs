@@ -239,3 +239,333 @@ pub fn signals_from(state: &ObservedState) -> Vec<Signal> {
 
     out
 }
+
+// ─────────────────────── informative detail rendering (issue #21) ───────────
+//
+// The Overseer activity log must say WHAT was observed and WHAT was done with
+// CONCRETE values, not bare counts ("saw 3 problems"). These primitives turn the
+// typed `Signal`/`Problem`/action vocabulary into short, human-readable strings
+// (guideline G3: structured data → templated rendering, never string parsing).
+// Every rendered string is persisted to the durable feed and shown to operators,
+// so `sanitize_detail` neutralises terminal-control bytes and token-shaped
+// secrets and bounds each line before it ever reaches disk or a screen.
+
+/// Per-line character cap for one rendered detail string. Long capability
+/// output (error bodies, goal reasons) is truncated with an ellipsis so a single
+/// pathological line can never blow up the feed, the TUI wrap, or the SPA row.
+pub(crate) const DETAIL_STR_CAP: usize = 512;
+
+/// Maximum number of detail lines retained per list (observed / actions) on one
+/// tick. Overflow is summarised with a `(+N more)` sentinel so the feed stays
+/// bounded and deterministic (the render surfaces cap again for their viewport).
+pub(crate) const DETAIL_CAP: usize = 24;
+
+/// Make one free-form string safe to persist and render as an Overseer detail:
+/// strip ANSI escapes, collapse control/whitespace runs to single spaces, redact
+/// token-shaped secrets, and bound the length. Idempotent for already-clean
+/// input.
+///
+/// Reuse: ANSI stripping delegates to the single shared hardened stripper
+/// [`crate::recipe_output::strip_ansi`] (issue #2484) rather than a private copy.
+pub(crate) fn sanitize_detail(s: &str) -> String {
+    // 1. Strip ANSI/CSI/OSC escape sequences (shared, hardened implementation).
+    let stripped = crate::recipe_output::strip_ansi(s);
+    // 2. Map every control byte (newline, tab, ESC remnants, …) to a space so a
+    //    detail is always a single clean line, then tokenise + redact secrets.
+    let spaced: String = stripped
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let redacted = spaced
+        .split_whitespace()
+        .map(redact_secret_token)
+        .collect::<Vec<_>>()
+        .join(" ");
+    // 3. Bound the line length with a visible truncation marker.
+    if redacted.chars().count() > DETAIL_STR_CAP {
+        let head: String = redacted.chars().take(DETAIL_STR_CAP).collect();
+        format!("{head}…")
+    } else {
+        redacted
+    }
+}
+
+/// Placeholder written in place of a redacted secret.
+const REDACTED: &str = "<redacted-secret>";
+
+/// Redact a single whitespace-delimited token if it is shaped like a secret:
+/// a GitHub token (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_` prefix) or a
+/// long, high-entropy alphanumeric blob (a bearer token / opaque credential).
+/// Ordinary words, repo slugs (`owner/name#42`), ids (`g-9`, `ws-77`), and URLs
+/// (whose alnum runs are broken by `/` and `.`) are left untouched.
+fn redact_secret_token(word: &str) -> String {
+    const GH_PREFIXES: [&str; 6] = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"];
+    for p in GH_PREFIXES {
+        if let Some(rest) = word.strip_prefix(p)
+            && rest.len() >= 8
+            && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return REDACTED.to_string();
+        }
+    }
+    // Generic high-entropy blob: a long contiguous alphanumeric run carrying
+    // BOTH letters and digits (never a plain word, path, or number).
+    if word.len() >= 32
+        && word.chars().all(|c| c.is_ascii_alphanumeric())
+        && word.chars().any(|c| c.is_ascii_digit())
+        && word.chars().any(|c| c.is_ascii_alphabetic())
+    {
+        return REDACTED.to_string();
+    }
+    word.to_string()
+}
+
+impl Signal {
+    /// Render one observed `Signal` as a short, human-readable evidence line that
+    /// carries the SPECIFIC observed value(s) — the operator-facing answer to
+    /// "what did the Overseer actually see?". Routed through [`sanitize_detail`]
+    /// because free-form fields (anomaly text, goal reasons) are attacker-
+    /// influenceable and end up persisted and rendered.
+    pub fn describe(&self) -> String {
+        let raw = match self {
+            Signal::DistillFailureRate { pct } => {
+                format!("distillation parse-failure rate {pct:.0}%")
+            }
+            Signal::RestartChurn { restarts } => {
+                format!("daemon restart churn: {restarts} restarts in window")
+            }
+            Signal::LadderExhausted { count } => {
+                format!("reasoner decide-ladder exhausted ×{count}")
+            }
+            Signal::BudgetPressure {
+                spent_usd,
+                budget_usd,
+            } => format!("LLM budget pressure: ${spent_usd:.2} of ${budget_usd:.2}"),
+            Signal::EngineerSpawnRate { live } => {
+                format!("elevated engineer spawn: {live} live")
+            }
+            Signal::MemoryGrowth { nodes_total } => {
+                format!("cognitive-memory growth: {nodes_total} nodes")
+            }
+            Signal::GymSkipped => "gym self-eval skipped".to_string(),
+            Signal::CiFailureCluster { repo, failing } => {
+                format!("CI-failure cluster in {repo}: {failing} failing")
+            }
+            Signal::PrReadyToMerge { repo, pr } => {
+                format!("PR {repo}#{pr} green and merge-ready")
+            }
+            Signal::StaleGoal { goal_id } => {
+                format!("goal {goal_id} re-litigated / stale-complete")
+            }
+            Signal::Anomaly { detail } => format!("telemetry anomaly: {detail}"),
+            Signal::LoopDetected {
+                goal_id,
+                consecutive_no_action,
+            } => format!("goal {goal_id} looping — no progress for {consecutive_no_action} cycles"),
+            Signal::DriftCorrection { goal_id, detail } => {
+                format!("goal {goal_id} drifting from intent: {detail}")
+            }
+            Signal::GoalBlocked {
+                goal_id,
+                reason,
+                perpetual,
+                needs_review,
+                consecutive_no_action,
+            } => {
+                let mut tags: Vec<&str> = Vec::new();
+                if *perpetual {
+                    tags.push("perpetual");
+                }
+                if *needs_review {
+                    tags.push("needs human review");
+                }
+                let tag = if tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", tags.join(", "))
+                };
+                format!(
+                    "blocked goal {goal_id}: {reason}{tag} ({consecutive_no_action} no-action cycle(s))"
+                )
+            }
+            Signal::RecurringSignature {
+                signature,
+                occurrences,
+            } => format!("recurring failure signature '{signature}' seen {occurrences} time(s)"),
+        };
+        sanitize_detail(&raw)
+    }
+}
+
+#[cfg(test)]
+mod describe_tests {
+    //! Contract for `Signal::describe` (issue #21): each variant must render a
+    //! human-readable evidence line that carries the SPECIFIC observed values —
+    //! never a bare "saw N problems". These tests fail until `Signal::describe`
+    //! exists and enumerates the concrete fields.
+    use super::*;
+
+    /// Case-insensitive substring assertion with a helpful failure message.
+    fn has(hay: &str, needle: &str) {
+        assert!(
+            hay.to_lowercase().contains(&needle.to_lowercase()),
+            "describe() output {hay:?} must mention {needle:?} — operators need \
+             the concrete observed value, not a bare count"
+        );
+    }
+
+    #[test]
+    fn distill_failure_rate_names_the_percentage() {
+        let d = Signal::DistillFailureRate { pct: 34.0 }.describe();
+        has(&d, "distill");
+        has(&d, "34");
+    }
+
+    #[test]
+    fn restart_churn_names_the_restart_count() {
+        let d = Signal::RestartChurn { restarts: 5 }.describe();
+        has(&d, "restart");
+        has(&d, "5");
+    }
+
+    #[test]
+    fn ladder_exhausted_names_the_count() {
+        let d = Signal::LadderExhausted { count: 3 }.describe();
+        has(&d, "ladder");
+        has(&d, "3");
+    }
+
+    #[test]
+    fn budget_pressure_names_spend_and_ceiling() {
+        let d = Signal::BudgetPressure {
+            spent_usd: 8.0,
+            budget_usd: 10.0,
+        }
+        .describe();
+        has(&d, "budget");
+        has(&d, "8");
+        has(&d, "10");
+    }
+
+    #[test]
+    fn engineer_spawn_rate_names_the_live_count() {
+        let d = Signal::EngineerSpawnRate { live: 12 }.describe();
+        has(&d, "engineer");
+        has(&d, "12");
+    }
+
+    #[test]
+    fn memory_growth_names_the_node_total() {
+        let d = Signal::MemoryGrowth { nodes_total: 99 }.describe();
+        has(&d, "memory");
+        has(&d, "99");
+    }
+
+    #[test]
+    fn gym_skipped_says_gym() {
+        let d = Signal::GymSkipped.describe();
+        has(&d, "gym");
+    }
+
+    #[test]
+    fn ci_failure_cluster_names_repo_and_failing_count() {
+        let d = Signal::CiFailureCluster {
+            repo: "rysweet/Simard".to_string(),
+            failing: 3,
+        }
+        .describe();
+        has(&d, "rysweet/Simard");
+        has(&d, "3");
+    }
+
+    #[test]
+    fn pr_ready_names_repo_and_number() {
+        let d = Signal::PrReadyToMerge {
+            repo: "rysweet/Simard".to_string(),
+            pr: 42,
+        }
+        .describe();
+        has(&d, "rysweet/Simard");
+        has(&d, "42");
+    }
+
+    #[test]
+    fn stale_goal_names_the_goal_id() {
+        let d = Signal::StaleGoal {
+            goal_id: "g-100".to_string(),
+        }
+        .describe();
+        has(&d, "g-100");
+    }
+
+    #[test]
+    fn anomaly_carries_its_detail() {
+        let d = Signal::Anomaly {
+            detail: "disk 92% full".to_string(),
+        }
+        .describe();
+        has(&d, "disk 92% full");
+    }
+
+    #[test]
+    fn loop_detected_names_goal_and_no_action_count() {
+        let d = Signal::LoopDetected {
+            goal_id: "g-7".to_string(),
+            consecutive_no_action: 4,
+        }
+        .describe();
+        has(&d, "g-7");
+        has(&d, "4");
+    }
+
+    #[test]
+    fn drift_correction_names_goal_and_detail() {
+        let d = Signal::DriftCorrection {
+            goal_id: "g-8".to_string(),
+            detail: "scope creep into unrelated repo".to_string(),
+        }
+        .describe();
+        has(&d, "g-8");
+        has(&d, "scope creep");
+    }
+
+    #[test]
+    fn goal_blocked_names_goal_id_and_reason() {
+        let d = Signal::GoalBlocked {
+            goal_id: "g-42".to_string(),
+            reason: "needs human review".to_string(),
+            perpetual: false,
+            needs_review: true,
+            consecutive_no_action: 6,
+        }
+        .describe();
+        has(&d, "g-42");
+        has(&d, "needs human review");
+    }
+
+    /// A hostile signal payload (terminal escape + secret-shaped token) must be
+    /// neutralised by `describe()` routing through `sanitize_detail`: no raw
+    /// ESC byte survives and the token is redacted, since these strings are
+    /// persisted and rendered to operators.
+    #[test]
+    fn describe_neutralises_control_sequences_and_secrets() {
+        let d = Signal::Anomaly {
+            detail: "\u{1b}[31mALERT\u{1b}[0m token ghp_EXAMPLE_FAKE_TOKEN_do_not_use_00"
+                .to_string(),
+        }
+        .describe();
+        assert!(
+            !d.contains('\u{1b}'),
+            "a raw ESC byte must never survive into a persisted/rendered detail: {d:?}"
+        );
+        assert!(
+            !d.contains("ghp_EXAMPLE_FAKE_TOKEN_do_not_use_00"),
+            "a token-shaped secret must be redacted from the detail line: {d:?}"
+        );
+        // The benign words survive.
+        assert!(
+            d.to_lowercase().contains("alert"),
+            "lost benign text: {d:?}"
+        );
+    }
+}

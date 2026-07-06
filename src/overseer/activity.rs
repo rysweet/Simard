@@ -446,6 +446,28 @@ pub fn humanize_tick(r: &OverseerTickReport) -> String {
     format!("{saw}  ·  {action}")
 }
 
+/// The per-tick DETAIL lines (issue #21) rendered beneath the [`humanize_tick`]
+/// one-liner: WHAT the Overseer observed (concrete problem + evidence values)
+/// and WHAT it did (each action/hold and its outcome). Observed lines are
+/// prefixed `observed:`; action lines already self-prefix (`did:` / `held:`).
+///
+/// Additive companion to [`humanize_tick`], which stays a byte-identical
+/// summary. Returns empty when the report carries no structured details (older
+/// records, or a tick that observed nothing), so the summary one-liner stands
+/// alone. Shared by the terminal `simard status` render, the TUI Overseer pane,
+/// and mirrored in the dashboard SPA.
+pub fn humanize_tick_details(r: &OverseerTickReport) -> Vec<String> {
+    let mut out: Vec<String> =
+        Vec::with_capacity(r.observed_details.len() + r.action_details.len());
+    for o in &r.observed_details {
+        out.push(format!("observed: {o}"));
+    }
+    for a in &r.action_details {
+        out.push(a.clone());
+    }
+    out
+}
+
 /// Humanize a cadence in seconds to "15 min" / "2 h" / "45 s". Shared across the
 /// status render and the TUI pane.
 pub fn human_cadence(secs: u64) -> String {
@@ -546,5 +568,129 @@ mod tests {
         let bad = OverseerThreadStatus::overseer_meta(900, false);
         assert_eq!(bad.health, "erroring");
         assert_eq!(bad.consecutive_errors, 1);
+    }
+}
+
+#[cfg(test)]
+mod detail_tests {
+    //! Contract for the issue-#21 informative detail lines: the durable feed
+    //! must carry structured, human-readable `observed_details` / `action_details`
+    //! and expose them via `humanize_tick_details`, while the one-liner
+    //! `humanize_tick` stays byte-identical (so existing needle tests hold) and
+    //! the on-disk schema stays backward-compatible.
+    use super::*;
+
+    fn report_with_details() -> OverseerTickReport {
+        OverseerTickReport {
+            problems: 2,
+            issues_filed: 1,
+            observed_details: vec![
+                "distillation parse-failure rate 34%".to_string(),
+                "PR rysweet/Simard#42 is green and merge-ready".to_string(),
+            ],
+            action_details: vec![
+                "did: filed issue https://github.com/rysweet/Simard/issues/9".to_string(),
+                "held: verify-and-merge rysweet/Simard#42 — opt-in".to_string(),
+            ],
+            ..OverseerTickReport::default()
+        }
+    }
+
+    #[test]
+    fn humanize_tick_details_surfaces_observed_and_action_lines() {
+        let lines = humanize_tick_details(&report_with_details());
+        let joined = lines.join("\n");
+        // Observed lines are prefixed with an "observed:" marker.
+        assert!(
+            joined.contains("observed:"),
+            "observed detail lines must be marked 'observed:': {joined:?}"
+        );
+        assert!(
+            joined.contains("34%"),
+            "observed details must carry concrete values: {joined:?}"
+        );
+        // Action lines are already self-prefixed ("did:" / "held:").
+        assert!(
+            joined.contains("did: filed issue https://github.com/rysweet/Simard/issues/9"),
+            "action details must surface the concrete action + outcome: {joined:?}"
+        );
+        assert!(
+            joined.contains("held: verify-and-merge rysweet/Simard#42 — opt-in"),
+            "a held action must explain itself in the details: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn humanize_tick_details_is_empty_when_there_are_no_details() {
+        let bare = OverseerTickReport {
+            problems: 1,
+            ..OverseerTickReport::default()
+        };
+        assert!(
+            humanize_tick_details(&bare).is_empty(),
+            "no structured details → no detail lines (the summary one-liner stands alone)"
+        );
+    }
+
+    #[test]
+    fn humanize_tick_one_liner_stays_byte_identical() {
+        // The detail work is strictly ADDITIVE: the existing summary one-liner
+        // (asserted by dashboard/status/TUI needle tests) must not drift.
+        let r = OverseerTickReport {
+            problems: 3,
+            ..OverseerTickReport::default()
+        };
+        assert_eq!(
+            humanize_tick(&r),
+            "saw 3 problems  ·  observing, no action needed"
+        );
+    }
+
+    #[test]
+    fn report_details_round_trip_through_serde() {
+        let r = report_with_details();
+        let json = serde_json::to_string(&r).expect("serialize report");
+        let back: OverseerTickReport = serde_json::from_str(&json).expect("deserialize report");
+        assert_eq!(
+            back, r,
+            "the detail vecs must survive a serde round-trip verbatim"
+        );
+        // And the concrete strings are actually present in the wire form.
+        assert!(json.contains("observed_details"));
+        assert!(json.contains("action_details"));
+        assert!(json.contains("34%"));
+    }
+
+    #[test]
+    fn legacy_report_json_without_detail_fields_deserializes_to_empty_vecs() {
+        // A record written by the CURRENT production build (deploy #21) has no
+        // observed_details / action_details keys. It must still parse, with the
+        // new fields defaulting to empty — never a hard reject on rolling deploy.
+        let legacy = r#"{
+            "problems": 3, "issues_filed": 1, "recipes_launched": 0,
+            "prs_merged": 0, "deploys": 0, "escalations": 0, "held": 1,
+            "whispers": 0, "whispers_suppressed": 0, "goals_unblocked": 0,
+            "goals_escalated": 0, "goals_health_suppressed": 0, "errors": 0,
+            "panicked": false, "duration_ms": 42
+        }"#;
+        let r: OverseerTickReport =
+            serde_json::from_str(legacy).expect("legacy report must remain parseable");
+        assert_eq!(r.problems, 3);
+        assert_eq!(r.held, 1);
+        assert!(
+            r.observed_details.is_empty(),
+            "missing observed_details must default to empty"
+        );
+        assert!(
+            r.action_details.is_empty(),
+            "missing action_details must default to empty"
+        );
+    }
+
+    #[test]
+    fn schema_version_stays_one_for_a_backward_compatible_additive_change() {
+        // Additive `#[serde(default)]` fields do NOT bump the schema version —
+        // bumping it would make older readers reject the newer feed.
+        assert_eq!(SCHEMA_VERSION, 1);
     }
 }
