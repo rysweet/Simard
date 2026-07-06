@@ -349,6 +349,12 @@ impl CognitiveMemoryOps for SharedMemory {
     fn resolve_prospective(&self, node_id: &str) -> SimardResult<()> {
         self.0.resolve_prospective(node_id)
     }
+    fn list_all_prospective(&self, limit: u32) -> SimardResult<Vec<CognitiveProspective>> {
+        self.0.list_all_prospective(limit)
+    }
+    fn list_all_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+        self.0.list_all_episodes(limit)
+    }
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
         self.0.get_statistics()
     }

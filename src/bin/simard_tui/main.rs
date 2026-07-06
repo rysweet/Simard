@@ -4,6 +4,7 @@
 //! Tabs switch with Alt+1–7 / ←→ arrow keys, auto-refreshes every 2s, quit with q.
 
 mod app;
+mod creative_ideas;
 mod goals;
 mod journal;
 mod system;

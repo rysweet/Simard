@@ -591,6 +591,7 @@ mod tests {
             review_decision: "APPROVED".to_string(),
             checks,
             base_ref_name: "main".to_string(),
+            labels: Vec::new(),
         }
     }
 

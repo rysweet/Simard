@@ -4,6 +4,7 @@ mod auth;
 mod brain_failures;
 mod chat;
 mod chat_store;
+mod creative_ideas;
 mod current_work;
 mod cycle_source;
 mod distributed;

@@ -220,6 +220,96 @@ pub(crate) const PART_01: &str = r#"
     })();
   </script>
 
+  <div class="tab-content" id="tab-creative-ideas">
+    <h1 class="page-h1">Creative Ideas</h1>
+    <p class="page-lede">A pool of candidate improvements Simard dreams up for herself, each reviewed for feasibility, worth, and how to measure success. Browse and search by their review status, from brand-new to accepted or parked.</p>
+    <div class="card" style="max-width:1100px">
+      <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.75rem;flex-wrap:wrap">
+        <input id="ci-search-input" placeholder="Search ideas…" style="flex:1;min-width:200px;padding:6px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px">
+        <select id="ci-status-filter" style="padding:6px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px">
+          <option value="">All statuses</option>
+          <option value="New">New</option>
+          <option value="NeedsRevision">Needs revision</option>
+          <option value="NeedsHumanReview">Needs human review</option>
+          <option value="AcceptedForImplementation">Accepted</option>
+          <option value="ImplementationStarted">Implementation started</option>
+          <option value="ImplementationCompleted">Completed</option>
+          <option value="Deferred">Deferred</option>
+          <option value="Rejected">Rejected</option>
+        </select>
+        <button class="btn" onclick="searchCreativeIdeas()">Search</button>
+        <button class="btn" onclick="loadCreativeIdeas()">Refresh</button>
+      </div>
+      <div id="ci-counts" data-testid="ci-counts" style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.75rem"></div>
+      <div id="ci-list" data-testid="ci-list" style="min-height:220px"><span class="loading">Loading…</span></div>
+    </div>
+  </div>
+  <script>
+    /* --- Creative Ideas tab --- */
+    (function(){
+      let ciLoaded=false;
+      function statusColor(s){
+        return ({
+          New:'#58a6ff', NeedsRevision:'#d29922', NeedsHumanReview:'#f0883e',
+          AcceptedForImplementation:'#3fb950', ImplementationStarted:'#2ea043',
+          ImplementationCompleted:'#238636', Deferred:'#8b949e', Rejected:'#f85149'
+        })[s]||'#8b949e';
+      }
+      function renderCounts(counts){
+        const box=document.getElementById('ci-counts');
+        if(!counts){box.innerHTML='';return;}
+        box.innerHTML=Object.keys(counts).map(k=>
+          '<span style="font-size:.72rem;padding:.15rem .45rem;border-radius:10px;border:1px solid '+statusColor(k)+';color:'+statusColor(k)+'">'+esc(k)+': '+esc(String(counts[k]))+'</span>'
+        ).join('');
+      }
+      function renderIdeas(items){
+        const box=document.getElementById('ci-list');
+        if(!items||!items.length){box.innerHTML='<span style="color:#8b949e">No ideas match. Simard fills this pool as the Creative Ideas thread runs.</span>';return;}
+        box.innerHTML=items.map(it=>{
+          const c=statusColor(it.status);
+          const metric=it.has_metric?'<span style="color:#3fb950;font-size:.7rem"> · metric: '+esc(it.metric||'yes')+'</span>':'';
+          return '<div style="padding:.5rem .6rem;border:1px solid #21262d;border-radius:6px;margin-bottom:.5rem">'
+            +'<div style="display:flex;justify-content:space-between;gap:.5rem;align-items:center">'
+            +'<strong>'+esc(it.idea)+'</strong>'
+            +'<span style="font-size:.7rem;padding:.1rem .4rem;border-radius:10px;background:'+c+'22;color:'+c+';border:1px solid '+c+'">'+esc(it.status)+'</span>'
+            +'</div>'
+            +'<div style="color:#8b949e;font-size:.78rem;margin-top:.25rem">'+esc(it.rationale||'')+'</div>'
+            +'<div style="color:#6e7681;font-size:.7rem;margin-top:.25rem">'+esc(String(it.reviews))+' review(s) · '+esc(String(it.links))+' link(s)'+metric+'</div>'
+            +'</div>';
+        }).join('');
+      }
+      async function loadCreativeIdeas(){
+        const box=document.getElementById('ci-list');
+        box.innerHTML='<span class="loading">Loading…</span>';
+        try{
+          const d=await apiFetch('/api/creative-ideas');
+          renderCounts(d.counts);
+          renderIdeas(d.ideas||[]);
+          ciLoaded=true;
+        }catch(e){box.innerHTML='<span class="err">Could not load ideas — check /api/creative-ideas</span>';}
+      }
+      async function searchCreativeIdeas(){
+        const q=(document.getElementById('ci-search-input').value||'').trim();
+        const status=document.getElementById('ci-status-filter').value||'';
+        const box=document.getElementById('ci-list');
+        box.innerHTML='<span class="loading">Searching…</span>';
+        try{
+          const d=await apiFetch('/api/creative-ideas/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,status:status})});
+          if(d.error){box.innerHTML='<span class="err">'+esc(d.error)+'</span>';return;}
+          renderIdeas(d.results||[]);
+        }catch(e){box.innerHTML='<span class="err">Search failed — check /api/creative-ideas/search</span>';}
+      }
+      window.loadCreativeIdeas=loadCreativeIdeas;
+      window.searchCreativeIdeas=searchCreativeIdeas;
+      const ct=document.querySelector('.tab[data-tab="creative-ideas"]');
+      if(ct) ct.addEventListener('click',()=>{ if(!ciLoaded) loadCreativeIdeas(); });
+      const cs=document.getElementById('ci-search-input');
+      if(cs) cs.addEventListener('keypress',e=>{if(e.key==='Enter')searchCreativeIdeas();});
+      const cf=document.getElementById('ci-status-filter');
+      if(cf) cf.addEventListener('change',()=>searchCreativeIdeas());
+    })();
+  </script>
+
   {{TAB_META_JS}}
   <script>
     /* --- Helpers --- */
@@ -551,13 +641,13 @@ pub(crate) const PART_01: &str = r#"
       if(meta && meta.title) document.title=meta.title;
     }
 
-    /* #2627 consolidation: the nine canonical tabs, plus TAB_ALIASES mapping
-       every retired 17-tab slug to the parent tab that now hosts it as a
-       sub-section. TAB_ALIASES is a fixed allowlist; a #hash deep link is
+    /* #2627 consolidation: the canonical tabs (nine consolidated tabs plus the
+       standalone Creative Ideas tab), plus TAB_ALIASES mapping every retired
+       17-tab slug to the parent tab that now hosts it as a sub-section. TAB_ALIASES is a fixed allowlist; a #hash deep link is
        validated against ^[a-z-]+$, matched against the allowlist, and falls
        back to 'overview' on any miss. The hash is never concatenated into a
        DOM selector, so a crafted hash cannot inject markup. */
-    const CANONICAL_TABS=['overview','goals','activity','workers','pull-requests','resources','chat','overseer','journal'];
+    const CANONICAL_TABS=['overview','goals','activity','workers','pull-requests','resources','chat','overseer','journal','creative-ideas'];
     const TAB_ALIASES={"status":"overview","workboard":"goals","logs":"activity","traces":"activity","thinking":"activity","brain-failures":"activity","processes":"workers","terminal":"workers","merge-decisions":"pull-requests","pr-readiness":"pull-requests","memory":"resources","costs":"resources"};
 
     /* Kick off the data fetches for every sub-section a consolidated tab now
@@ -573,6 +663,7 @@ pub(crate) const PART_01: &str = r#"
       if(slug==='chat'){loadChatSessions();}
       if(slug==='overseer'){fetchOverseer();tabRefreshTimers.overseer=setInterval(fetchOverseer,30000);}
       if(slug==='journal'&&typeof loadJournal==='function'){loadJournal();}
+      if(slug==='creative-ideas'&&typeof loadCreativeIdeas==='function'){loadCreativeIdeas();}
     }
 
     /* Activate a canonical tab by slug. `slug` is always one of CANONICAL_TABS

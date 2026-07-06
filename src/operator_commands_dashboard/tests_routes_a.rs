@@ -729,13 +729,13 @@ mod tests {
     fn index_html_has_exactly_eleven_page_intros() {
         let count = INDEX_HTML.matches(r#"class="page-lede""#).count();
         assert_eq!(
-            count, 9,
-            "expected exactly 9 page-lede paragraphs (one per top-level tab), got {count}"
+            count, 10,
+            "expected exactly 10 page-lede paragraphs (one per top-level tab), got {count}"
         );
         let h1_count = INDEX_HTML.matches(r#"class="page-h1""#).count();
         assert_eq!(
-            h1_count, 9,
-            "expected exactly 9 page-h1 headings (one per top-level tab), got {h1_count}"
+            h1_count, 10,
+            "expected exactly 10 page-h1 headings (one per top-level tab), got {h1_count}"
         );
     }
 

@@ -145,6 +145,14 @@ pub const TAB_METADATA: &[TabMeta] = &[
         lede: "A plain-language daily diary of what Simard and its steward the Overseer did each day, with a simple table of the code changes proposed. Browse by date and search the full history.",
         tooltip: "A plain-language daily diary of what Simard did, browseable by date",
     },
+    TabMeta {
+        slug: "creative-ideas",
+        label: "Creative Ideas",
+        title: "Creative Ideas · Simard",
+        h1: "Creative Ideas",
+        lede: "A pool of candidate improvements Simard dreams up for herself, each reviewed for feasibility, worth, and how to measure success. Browse and search by their review status, from brand-new to accepted or parked.",
+        tooltip: "Simard's pool of self-improvement ideas, searchable by review status",
+    },
 ];
 
 /// Browser title shown on first page load. The client-side tab handler

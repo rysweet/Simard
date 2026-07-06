@@ -51,7 +51,7 @@ pub enum MergeOutcome {
     Refused { pr_number: u32, reason: String },
 }
 
-/// Snapshot of `gh pr view --json body,statusCheckRollup,mergeable,reviewDecision,baseRefName`.
+/// Snapshot of `gh pr view --json body,statusCheckRollup,mergeable,reviewDecision,baseRefName,labels`.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PrSnapshot {
     pub body: String,
@@ -62,6 +62,10 @@ pub struct PrSnapshot {
     /// Compared against [`base_allowlist_from_env`] by the first gate so PRs
     /// targeting stale or wrong base branches are refused early.
     pub base_ref_name: String,
+    /// `labels` (names) from `gh pr view`. Drives the creative-idea
+    /// human-review gate: a PR carrying
+    /// [`crate::creative_ideas::CREATIVE_IDEA_PR_LABEL`] is never auto-merged.
+    pub labels: Vec<String>,
 }
 
 /// One row from `statusCheckRollup`. Both check runs and statuses get
@@ -105,6 +109,7 @@ impl OpenPrSummary {
             review_decision: String::new(),
             checks: self.checks.clone(),
             base_ref_name: self.base_ref_name.clone(),
+            labels: Vec::new(),
         }
     }
 }
@@ -259,7 +264,7 @@ impl PrGhClient for RealPrGhClient {
                     "--repo",
                     repo,
                     "--json",
-                    "body,statusCheckRollup,mergeable,reviewDecision,baseRefName",
+                    "body,statusCheckRollup,mergeable,reviewDecision,baseRefName,labels",
                 ],
             )?;
             parse_pr_view_json(&stdout)
@@ -327,6 +332,13 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
         status_check_rollup: Vec<RawCheck>,
         #[serde(default, rename = "baseRefName")]
         base_ref_name: String,
+        #[serde(default)]
+        labels: Vec<RawLabel>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawLabel {
+        #[serde(default)]
+        name: String,
     }
     #[derive(serde::Deserialize)]
     struct RawCheck {
@@ -374,6 +386,12 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
         review_decision: raw.review_decision,
         checks,
         base_ref_name: raw.base_ref_name,
+        labels: raw
+            .labels
+            .into_iter()
+            .map(|l| l.name)
+            .filter(|n| !n.is_empty())
+            .collect(),
     })
 }
 
@@ -601,6 +619,24 @@ pub fn merge_pr_if_merge_ready_with_judge(
     judge: &dyn MergeJudge,
 ) -> SimardResult<MergeOutcome> {
     let snapshot = gh.view_pr(repo, pr_number)?;
+    // Creative-idea human-review gate: never auto-merge a PR that carries the
+    // block-until-human-review label. The idea-derived PR stays gated (draft +
+    // label + owner review requested) until @rysweet approves and clears it.
+    // Enforced WITHOUT `--admin`/`--no-verify` — we simply skip the merge.
+    if snapshot
+        .labels
+        .iter()
+        .any(|l| l == crate::creative_ideas::CREATIVE_IDEA_PR_LABEL)
+    {
+        return Ok(MergeOutcome::Refused {
+            pr_number,
+            reason: format!(
+                "PR carries the merge-blocking label `{}` — a creative-idea PR awaiting human review (@{}); skipped.",
+                crate::creative_ideas::CREATIVE_IDEA_PR_LABEL,
+                crate::creative_ideas::CREATIVE_IDEA_OWNER,
+            ),
+        });
+    }
     if let Err(reason) = evaluate_objective_gates(&snapshot, base_allowlist) {
         return Ok(MergeOutcome::Refused { pr_number, reason });
     }
@@ -679,6 +715,7 @@ mod tests {
                 },
             ],
             base_ref_name: "main".to_string(),
+            labels: Vec::new(),
         }
     }
 
@@ -845,7 +882,70 @@ mod tests {
         assert_eq!(judge.call_count(), 1, "judge must be called exactly once");
     }
 
-    // ─── Cross-repo: the same gated authority merges PRs in any governed repo ─
+    // ─── Creative-idea gate: a block-until-human-review PR is never merged ─
+
+    #[test]
+    fn refuses_to_merge_a_creative_idea_pr_awaiting_human_review() {
+        // A PR carrying the block-until-human-review label must be SKIPPED by
+        // the autonomous merge driver even when every other gate (and the judge)
+        // would pass — and without ever invoking the merge command or the judge.
+        let gh = FakePrGhClient::new();
+        let mut snap = good_snapshot();
+        snap.labels = vec![crate::creative_ideas::CREATIVE_IDEA_PR_LABEL.to_string()];
+        gh.seed_view(Ok(snap));
+        gh.seed_merge(Ok(()));
+        let judge = FakeMergeJudge::ready();
+
+        let outcome = run(4242, "rysweet/Simard", &gh, &default_allowlist(), &judge).unwrap();
+
+        match outcome {
+            MergeOutcome::Refused { pr_number, reason } => {
+                assert_eq!(pr_number, 4242);
+                assert!(
+                    reason.contains(crate::creative_ideas::CREATIVE_IDEA_PR_LABEL),
+                    "refusal must name the blocking label: {reason}"
+                );
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+        assert_eq!(
+            gh.merge_call_count(),
+            0,
+            "a creative-idea PR must never be squash-merged autonomously"
+        );
+        assert_eq!(
+            judge.call_count(),
+            0,
+            "the label guard short-circuits before the judge is even consulted"
+        );
+    }
+
+    #[test]
+    fn creative_idea_gate_argv_never_uses_admin_or_no_verify() {
+        // The whole creative-idea merge posture forbids privilege bypass: the
+        // driver skips the PR (above) and the routing seam's gh argv never carry
+        // --admin/--no-verify.
+        use crate::creative_ideas::routing::{
+            gh_pr_add_label_argv, gh_pr_add_reviewer_argv, gh_pr_draft_argv,
+        };
+        let argvs = [
+            gh_pr_draft_argv("rysweet/Simard", 7),
+            gh_pr_add_label_argv(
+                "rysweet/Simard",
+                7,
+                crate::creative_ideas::CREATIVE_IDEA_PR_LABEL,
+            ),
+            gh_pr_add_reviewer_argv(
+                "rysweet/Simard",
+                7,
+                crate::creative_ideas::CREATIVE_IDEA_OWNER,
+            ),
+        ];
+        for argv in &argvs {
+            assert!(!argv.iter().any(|a| a == "--admin"));
+            assert!(!argv.iter().any(|a| a == "--no-verify"));
+        }
+    }
 
     #[test]
     fn merges_cross_repo_pr_through_the_same_gated_authority() {

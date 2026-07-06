@@ -31,10 +31,11 @@ pub enum Tab {
     Chat,
     Overseer,
     Journal,
+    CreativeIdeas,
 }
 
 /// All tabs in display order.
-pub const ALL_TABS: [Tab; 7] = [
+pub const ALL_TABS: [Tab; 8] = [
     Tab::Overview,
     Tab::Goals,
     Tab::Activity,
@@ -42,6 +43,7 @@ pub const ALL_TABS: [Tab; 7] = [
     Tab::Chat,
     Tab::Overseer,
     Tab::Journal,
+    Tab::CreativeIdeas,
 ];
 
 impl Tab {
@@ -55,12 +57,13 @@ impl Tab {
             Self::Chat => "Chat",
             Self::Overseer => "Overseer",
             Self::Journal => "Journal",
+            Self::CreativeIdeas => "Creative Ideas",
         }
     }
 
     /// Map an Alt+digit or Ctrl+digit key event to a tab.
     /// Bare digits (without ALT/CTRL) are ignored to avoid stealing input on the Chat tab.
-    /// Only digits 1–7 are in range; 8/9/0 return `None` so a key can never index past `ALL_TABS`.
+    /// Only digits 1–8 are in range; 9/0 return `None` so a key can never index past `ALL_TABS`.
     pub fn from_key(key: &KeyEvent) -> Option<Tab> {
         if !key
             .modifiers
@@ -76,6 +79,7 @@ impl Tab {
             KeyCode::Char('5') => Some(Tab::Chat),
             KeyCode::Char('6') => Some(Tab::Overseer),
             KeyCode::Char('7') => Some(Tab::Journal),
+            KeyCode::Char('8') => Some(Tab::CreativeIdeas),
             _ => None,
         }
     }
@@ -90,6 +94,7 @@ impl Tab {
             Self::Chat => 5,
             Self::Overseer => 6,
             Self::Journal => 7,
+            Self::CreativeIdeas => 8,
         }
     }
 }
@@ -160,6 +165,17 @@ pub struct App {
     pub journal_search_mode: bool,
     /// Whether the journal has been loaded for the current Journal-tab visit.
     pub journal_loaded: bool,
+    // Creative Ideas tab
+    /// The current idea pool, newest first (read from cognitive memory).
+    pub creative_ideas_entries: Vec<simard::cognitive_memory::creative_idea::CreativeIdea>,
+    /// Index into the *filtered* idea list of the currently selected idea.
+    pub creative_ideas_selected: usize,
+    /// Current free-text/status search over the pool (empty = browse all).
+    pub creative_ideas_search: String,
+    /// When true, keystrokes edit [`Self::creative_ideas_search`] instead of browsing.
+    pub creative_ideas_search_mode: bool,
+    /// Whether the pool has been loaded for the current Creative-Ideas-tab visit.
+    pub creative_ideas_loaded: bool,
     // Update notice (polled from background check)
     update_rx: Option<mpsc::Receiver<String>>,
     pub update_notice: Option<String>,
@@ -207,6 +223,11 @@ impl App {
             journal_search: String::new(),
             journal_search_mode: false,
             journal_loaded: false,
+            creative_ideas_entries: Vec::new(),
+            creative_ideas_selected: 0,
+            creative_ideas_search: String::new(),
+            creative_ideas_search_mode: false,
+            creative_ideas_loaded: false,
             update_rx,
             update_notice: None,
             waiting_for_response: false,
@@ -342,6 +363,53 @@ impl App {
             }
         }
 
+        // Creative Ideas tab: browse the pool + search by text/status. Same key
+        // scheme as the Journal tab (Up/Down or j/k, `/` search, `r` reload).
+        if self.active_tab == Tab::CreativeIdeas {
+            if self.creative_ideas_search_mode {
+                match code {
+                    KeyCode::Enter => {
+                        self.creative_ideas_search_mode = false;
+                        self.creative_ideas_selected = 0;
+                    }
+                    KeyCode::Esc => {
+                        self.creative_ideas_search.clear();
+                        self.creative_ideas_search_mode = false;
+                        self.creative_ideas_selected = 0;
+                    }
+                    KeyCode::Backspace => {
+                        self.creative_ideas_search.pop();
+                        self.creative_ideas_selected = 0;
+                    }
+                    KeyCode::Char(c) if self.creative_ideas_search.len() < 128 => {
+                        self.creative_ideas_search.push(c);
+                        self.creative_ideas_selected = 0;
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            match code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.creative_ideas_select_prev();
+                    return;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.creative_ideas_select_next();
+                    return;
+                }
+                KeyCode::Char('/') => {
+                    self.creative_ideas_search_mode = true;
+                    return;
+                }
+                KeyCode::Char('r') => {
+                    self.reload_creative_ideas();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // Left/Right arrow tab cycling (outside active meeting)
         match code {
             KeyCode::Right => {
@@ -406,6 +474,53 @@ impl App {
         let len = self.journal_filtered().len();
         if len > 0 && self.journal_selected + 1 < len {
             self.journal_selected += 1;
+        }
+    }
+
+    /// The ideas matching the current search, newest first. Empty search returns
+    /// every idea; a status name or free text filters by [`idea_matches`].
+    pub fn creative_ideas_filtered(
+        &self,
+    ) -> Vec<&simard::cognitive_memory::creative_idea::CreativeIdea> {
+        let query = self.creative_ideas_search.trim();
+        self.creative_ideas_entries
+            .iter()
+            .filter(|i| crate::creative_ideas::idea_matches(i, query))
+            .collect()
+    }
+
+    /// The currently selected idea (clamped into the filtered list), if any.
+    pub fn creative_ideas_selected_entry(
+        &self,
+    ) -> Option<&simard::cognitive_memory::creative_idea::CreativeIdea> {
+        let filtered = self.creative_ideas_filtered();
+        if filtered.is_empty() {
+            return None;
+        }
+        let idx = self.creative_ideas_selected.min(filtered.len() - 1);
+        Some(filtered[idx])
+    }
+
+    /// Reload the idea pool from cognitive memory and clamp the selection.
+    fn reload_creative_ideas(&mut self) {
+        self.creative_ideas_entries = crate::creative_ideas::read_creative_ideas(&self.state_root);
+        let len = self.creative_ideas_filtered().len();
+        if len == 0 {
+            self.creative_ideas_selected = 0;
+        } else if self.creative_ideas_selected >= len {
+            self.creative_ideas_selected = len - 1;
+        }
+        self.creative_ideas_loaded = true;
+    }
+
+    fn creative_ideas_select_prev(&mut self) {
+        self.creative_ideas_selected = self.creative_ideas_selected.saturating_sub(1);
+    }
+
+    fn creative_ideas_select_next(&mut self) {
+        let len = self.creative_ideas_filtered().len();
+        if len > 0 && self.creative_ideas_selected + 1 < len {
+            self.creative_ideas_selected += 1;
         }
     }
 
@@ -889,6 +1004,15 @@ impl App {
             self.journal_loaded = false;
         }
 
+        // Creative Ideas tab: same lazy-load-on-visit pattern as the Journal tab.
+        if self.active_tab == Tab::CreativeIdeas {
+            if !self.creative_ideas_loaded {
+                self.reload_creative_ideas();
+            }
+        } else {
+            self.creative_ideas_loaded = false;
+        }
+
         // Chat tab: auto-spawn + drain output
         if self.active_tab == Tab::Chat
             && self.meeting_status == MeetingStatus::NotStarted
@@ -1061,7 +1185,7 @@ mod tests {
 
     #[test]
     fn all_tabs_count() {
-        assert_eq!(ALL_TABS.len(), 7);
+        assert_eq!(ALL_TABS.len(), 8);
     }
 
     #[test]
@@ -1084,6 +1208,7 @@ mod tests {
         assert_eq!(Tab::Chat.label(), "Chat");
         assert_eq!(Tab::Overseer.label(), "Overseer");
         assert_eq!(Tab::Journal.label(), "Journal");
+        assert_eq!(Tab::CreativeIdeas.label(), "Creative Ideas");
     }
 
     #[test]
@@ -1110,9 +1235,9 @@ mod tests {
         assert_eq!(Tab::from_key(&key('1')), None);
         assert_eq!(Tab::from_key(&key('2')), None);
         assert_eq!(Tab::from_key(&key('6')), None);
-        // #2627: with only seven tabs, Alt+8 / Alt+9 / Alt+0 are out of range
-        // and must return None so a key can never index past ALL_TABS.
-        assert_eq!(Tab::from_key(&alt_key('8')), None);
+        // With eight tabs, Alt+8 selects the last (Creative Ideas); Alt+9 / Alt+0
+        // are out of range and must return None so a key can never index past ALL_TABS.
+        assert_eq!(Tab::from_key(&alt_key('8')), Some(Tab::CreativeIdeas));
         assert_eq!(Tab::from_key(&alt_key('9')), None);
         assert_eq!(Tab::from_key(&alt_key('0')), None);
     }
@@ -1127,7 +1252,7 @@ mod tests {
     #[test]
     fn tab_from_key_roundtrips_with_number() {
         for tab in &ALL_TABS {
-            let c = char::from(b'0' + tab.number());
+            let c = digit_key_for_number(tab.number());
             assert_eq!(Tab::from_key(&alt_key(c)), Some(*tab));
         }
     }
@@ -1223,15 +1348,25 @@ mod tests {
 
     #[test]
     fn handle_key_all_tabs_reachable() {
-        // BUG1: All tabs reachable via Alt+digit
+        // All tabs reachable via Alt+digit (tabs 1-9 use '1'-'9'; tab 10 uses '0').
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        for (i, expected) in ALL_TABS.iter().enumerate() {
-            let c = char::from(b'1' + i as u8);
+        for expected in ALL_TABS.iter() {
+            let c = digit_key_for_number(expected.number());
             app.handle_key(alt_key(c));
             assert_eq!(
                 app.active_tab, *expected,
                 "Alt+'{c}' should reach {expected:?}"
             );
+        }
+    }
+
+    /// The Alt+digit key char that selects the tab with 1-based `number`:
+    /// numbers 1-9 map to '1'-'9'; number 10 maps to '0'.
+    fn digit_key_for_number(number: u8) -> char {
+        if number == 10 {
+            '0'
+        } else {
+            char::from(b'0' + number)
         }
     }
 
@@ -1766,7 +1901,7 @@ mod tests {
     #[test]
     fn handle_key_right_arrow_wraps_at_end() {
         let mut app = App::new("simard-ooda.service".to_string(), None);
-        app.active_tab = Tab::Journal; // index 6 (last)
+        app.active_tab = Tab::CreativeIdeas; // index 7 (last)
 
         app.handle_key(key_code(KeyCode::Right));
         assert_eq!(app.active_tab, Tab::Overview); // wraps to index 0
@@ -1778,7 +1913,7 @@ mod tests {
         assert_eq!(app.active_tab, Tab::Overview); // index 0
 
         app.handle_key(key_code(KeyCode::Left));
-        assert_eq!(app.active_tab, Tab::Journal); // wraps to index 6 (last)
+        assert_eq!(app.active_tab, Tab::CreativeIdeas); // wraps to index 7 (last)
     }
 
     #[test]

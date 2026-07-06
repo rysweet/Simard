@@ -21,7 +21,7 @@ fn tab_meta_slugs_unique() {
             t.slug
         );
     }
-    assert_eq!(TAB_METADATA.len(), 9, "expected 9 tabs");
+    assert_eq!(TAB_METADATA.len(), 10, "expected 10 tabs");
 }
 
 #[test]
@@ -780,6 +780,7 @@ const CANONICAL_TABS: &[(&str, &str)] = &[
     ("chat", "Chat"),
     ("overseer", "Overseer"),
     ("journal", "Journal"),
+    ("creative-ideas", "Creative Ideas"),
 ];
 
 /// Slugs that were real top-level tabs in the 17-tab set and must NOT survive
@@ -851,14 +852,39 @@ fn tab_meta_uses_no_bridge_names() {
 }
 
 #[test]
-fn rendered_html_has_exactly_nine_page_h1s() {
-    // Invariant 2 across the consolidated set: each tab panel owns exactly one
-    // `<h1 class="page-h1">`, so the rendered HTML has exactly nine of them.
-    // Sub-sections must use `<h2>`, never a second page-h1.
+fn js_canonical_tabs_allowlist_includes_every_tab() {
+    // Regression guard: the client-side `activateTab`/`resolveHashTab` allowlist
+    // (`const CANONICAL_TABS=[...]` in the rendered JS) MUST list every top-level
+    // tab. A slug present in `TAB_METADATA` but missing from the JS allowlist
+    // renders a nav button whose panel never becomes visible (activateTab falls
+    // back to Overview) — exactly the e2e tab-identity failure this catches at
+    // the unit level.
+    let start = INDEX_HTML
+        .find("const CANONICAL_TABS=[")
+        .expect("rendered HTML has the CANONICAL_TABS JS allowlist");
+    let tail = &INDEX_HTML[start..];
+    let end = tail.find("];").expect("CANONICAL_TABS array is closed");
+    let array = &tail[..end];
+    for t in TAB_METADATA {
+        let needle = format!("'{}'", t.slug);
+        assert!(
+            array.contains(&needle),
+            "JS CANONICAL_TABS allowlist is missing tab slug {:?}; its panel would \
+             never activate. Array was: {array}",
+            t.slug
+        );
+    }
+}
+
+#[test]
+fn rendered_html_has_exactly_ten_page_h1s() {
+    // Invariant 2 across the consolidated set plus the Creative Ideas tab: each
+    // tab panel owns exactly one `<h1 class="page-h1">`, so the rendered HTML has
+    // exactly ten of them. Sub-sections must use `<h2>`, never a second page-h1.
     let count = INDEX_HTML.matches(r#"<h1 class="page-h1">"#).count();
     assert_eq!(
-        count, 9,
-        "expected exactly 9 page-h1 headings (one per consolidated tab), found {count}; \
+        count, 10,
+        "expected exactly 10 page-h1 headings (one per tab), found {count}; \
          a stray page-h1 usually means an absorbed panel kept its old <h1> instead of \
          being demoted to an <h2 class=\"subsection\">"
     );

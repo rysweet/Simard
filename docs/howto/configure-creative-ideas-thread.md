@@ -9,7 +9,7 @@ description: >
   blocking label + owner review, never --admin/--no-verify), tracing an idea
   through goal ↔ issue ↔ PR, monitoring the telemetry, extending it with a
   custom IdeaSource or Reviewer, and testing with the built-in fakes. The
-  subsystem is OFF by default.
+  subsystem is default-ON, opt-out.
 last_updated: 2026-07-05
 review_schedule: as-needed
 owner: simard
@@ -24,16 +24,15 @@ related:
 
 # Configure and operate the Creative Ideas thread
 
-!!! note "Status — typed foundation + tests, OFF by default (#2419)"
-    The Creative Ideas subsystem ships as **tested scaffolding**, gated OFF
-    behind `SIMARD_CREATIVE_IDEAS_ENABLED` and **not yet registered** with the
-    `Mind` scheduler. Its reviewer and `gh` adapters run through **fakes** in
-    tests; the production idea-source, real skill/agent reviewers, and the real
-    `gh` PR/issue wiring are marked `// FUTURE:` and land across milestones
-    M2–M6 (see the
-    [design roadmap](../design/creative-ideas-thread.md#phased-roadmap-future-milestones)).
-    This guide documents the surface as built so you can enable, tune, extend,
-    and test it. For the exact Rust API, see the
+!!! note "Status — implemented; default-ON, opt-out"
+    The Creative Ideas subsystem is **wired and live**: the `CreativeIdeasThread`
+    is registered with the `Mind` scheduler and runs on its cadence, gated
+    **default-ON** behind `SIMARD_CREATIVE_IDEAS_ENABLED` (opt out with a falsey
+    value). Its idea source, four reviewers, and `gh` routing all run for real;
+    tests drive them through deterministic fakes. The creative-idea memory type
+    (status lifecycle + typed links) lives upstream in `amplihack-memory-lib`
+    (guideline G2). This guide documents the surface as built so you can tune,
+    opt out, extend, and test it. For the exact Rust API, see the
     [Creative Ideas API reference](../reference/creative-ideas-api.md).
 
 ## What the Creative Ideas thread is
@@ -66,21 +65,20 @@ If instead you want to add an unrelated scheduled process, see
 *engineer* concurrency, that is the AIMD action-slot scaler
 (`SIMARD_MAX_CONCURRENT_ACTIONS`), not this thread.
 
-## Turn it on
+## Turn it off (opt out)
 
-The subsystem is OFF by default. `CreativeIdeasConfig::from_env()` is the single
-gate; a default config is disabled and the thread's `enabled()` returns `false`,
-so it never ticks.
+The subsystem is **default-ON**. `CreativeIdeasConfig::from_env()` is the single
+gate; a default config is enabled, and only an explicit falsey value opts out.
+The thread's `enabled()` then returns `false` and it never ticks.
 
-!!! warning "Do not enable on the live daemon or against `~/.simard`"
-    This is a spike. Enable it only in a disposable checkout with an isolated
-    state root. The thread is also not registered with the `Mind` yet, so on the
-    current build turning the flag on has no runtime effect until the M2 wiring
-    milestone lands.
+!!! note "Budget and cadence"
+    The thread runs on a long cadence (≥ 24 h) at `Priority::Low`, so it never
+    competes with OODA, and it honors `SIMARD_DAILY_BUDGET_USD`. To disable it
+    entirely on a given deployment, set the master switch to a falsey value.
 
 ```bash
-# Master switch (default: false)
-export SIMARD_CREATIVE_IDEAS_ENABLED=1
+# Master switch (default: true — set a falsey value to opt out)
+export SIMARD_CREATIVE_IDEAS_ENABLED=0
 
 # Optional tuning (defaults shown)
 export SIMARD_CREATIVE_IDEAS_INTERVAL_SECS=86400   # cadence: >= 24h observation window
@@ -90,7 +88,7 @@ export SIMARD_DAILY_BUDGET_USD=5.00                # reused budget ceiling (exis
 
 | Env var | Default | Effect |
 |---------|---------|--------|
-| `SIMARD_CREATIVE_IDEAS_ENABLED` | `false` | Master switch. False ⇒ no generation, no routing, no side effects. |
+| `SIMARD_CREATIVE_IDEAS_ENABLED` | `true` | Master switch (default-ON). A falsey value (`0`/`false`/`no`/`off`) opts out ⇒ no generation, no routing, no side effects. |
 | `SIMARD_CREATIVE_IDEAS_INTERVAL_SECS` | `86400` | Generator cadence. Keep it large — this is a reflective pass, not a hot loop. |
 | `SIMARD_CREATIVE_IDEAS_BATCH` | `10` | Ideas targeted per run before dedup/portfolio filtering. |
 | `SIMARD_DAILY_BUDGET_USD` | *(existing)* | Reused: the thread skips an expensive tick when over budget. |
@@ -210,7 +208,7 @@ Output is structured `tracing` only — no `println!`/`eprintln!` beyond the
 | Rate-limit / budget | `budget::within_budget(now, cfg)` + `SIMARD_DAILY_BUDGET_USD` | Skips an expensive tick when over budget. |
 | High-risk → human | synthesis policy + `try_transition` | High-risk/irreversible ideas can never auto-become a goal. |
 | Outcome feedback | `route::mark_completed(idea, metric_met)` | Refuses `ImplementationCompleted` unless the success metric is met. |
-| OFF by default | `SIMARD_CREATIVE_IDEAS_ENABLED` | Whole subsystem inert unless explicitly enabled. |
+| Default-ON, opt-out | `SIMARD_CREATIVE_IDEAS_ENABLED` | Runs by default; a falsey value opts the whole subsystem out (inert). |
 | Dry-run | `ThreadContext.dry_run` | When set, `tick` still generates/reviews/logs but performs **no** destructive side-effect (no goal, issue, or PR writes). |
 | Cooperative shutdown | `ThreadContext.shutdown` | `tick` observes the scheduler's cancellation flag and returns promptly between pipeline stages, so a daemon stop is never blocked mid-generation. |
 
@@ -304,13 +302,13 @@ assert!(gh.recorded_args().iter().all(|a| a != "--admin" && a != "--no-verify"))
 The design's [test plan](../design/creative-ideas-thread.md#test-plan-no-network-all-fakes)
 covers the full set: valid/invalid `try_transition` edges, persist+retrieve with
 links, the four-reviewer pipeline + synthesis, all three routing paths, dedup
-rejection, off-by-default, the two error contracts, and a total `tick`.
+rejection, the default-ON/opt-out gate, the two error contracts, and a total `tick`.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| Thread never runs | `SIMARD_CREATIVE_IDEAS_ENABLED` unset/`0`, or (current build) not registered with the `Mind` | Set the flag in a disposable checkout; runtime wiring lands in M2. |
+| Thread never runs | `SIMARD_CREATIVE_IDEAS_ENABLED` set to a falsey value | Unset it (default-ON) or set a truthy value. |
 | No ideas generated but tick ran | Over budget or not yet due | Check `SIMARD_DAILY_BUDGET_USD` and `SIMARD_CREATIVE_IDEAS_INTERVAL_SECS`; a skipped tick has no side effects. |
 | An idea stuck in `NeedsRevision` | Measurability reviewer produced no success metric | Ensure the idea admits a concrete metric; unmeasurable ideas are intentionally not accepted. |
 | `InvalidIdeaTransition` in logs | Synthesis proposed an illegal `next_status` | Expected hard error — the runner rejects illegal edges rather than corrupting status. |

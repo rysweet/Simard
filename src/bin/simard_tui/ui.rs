@@ -51,6 +51,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::Chat => tabs::chat::draw(f, app, chunks[1]),
         Tab::Overseer => tabs::overseer::draw(f, app, chunks[1]),
         Tab::Journal => tabs::journal::draw(f, app, chunks[1]),
+        Tab::CreativeIdeas => tabs::creative_ideas::draw(f, app, chunks[1]),
     }
 
     // If an update notice is available, show it in the footer area
@@ -127,8 +128,8 @@ mod tests {
     /// consolidated view becomes unreachable. Verified purely from the
     /// in-memory buffer — no PTY required.
     #[test]
-    fn tab_bar_lists_all_seven_tabs_without_pty() {
-        const W: u16 = 100;
+    fn tab_bar_lists_all_tabs_without_pty() {
+        const W: u16 = 140;
         const H: u16 = 40;
 
         let app = App::new("simard-ooda.service".to_string(), None);

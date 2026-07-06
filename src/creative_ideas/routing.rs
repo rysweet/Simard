@@ -262,23 +262,41 @@ pub fn gh_pr_add_reviewer_argv(repo: &str, pr: u64, reviewer: &str) -> Vec<Strin
     ]
 }
 
-/// Production [`IdeaGhClient`] — a marked `// FUTURE:` stub for the spike.
-///
-/// FUTURE (M4): run the real `gh` subprocess (reusing the
-/// [`RealGhClient`](crate::stewardship::gh_client::RealGhClient) pattern) using
-/// the pure argv builders above. It must **never** emit `--admin`/`--no-verify`.
-/// During the spike every method builds its argv and returns
-/// [`SimardError::ActionExecutionFailed`] (not-wired) so nothing touches the
-/// network; tests exercise [`super::routing`] through a fake instead.
+/// Production [`IdeaGhClient`] that shells out to the `gh` binary using the pure
+/// argv builders above. It **never** emits `--admin`/`--no-verify` (asserted by
+/// a unit test over the argv builders); the human-review gate is enforced only
+/// by standard GitHub mechanisms (draft + label + requested review).
 #[derive(Default)]
 pub struct RealIdeaGhClient;
 
 impl RealIdeaGhClient {
-    /// Construct the not-yet-wired production client.
+    /// Construct the production client.
     #[must_use]
     pub fn new() -> Self {
         Self
     }
+}
+
+/// Run `gh` with `argv`, returning its output or an [`SimardError`].
+fn run_gh(action: &str, argv: &[String]) -> SimardResult<std::process::Output> {
+    let output = std::process::Command::new("gh")
+        .args(argv)
+        .output()
+        .map_err(|e| SimardError::ActionExecutionFailed {
+            action: action.to_string(),
+            reason: format!("failed to spawn `{action}`: {e}"),
+        })?;
+    if !output.status.success() {
+        return Err(SimardError::ActionExecutionFailed {
+            action: action.to_string(),
+            reason: format!(
+                "`{action}` exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    Ok(output)
 }
 
 impl IdeaGhClient for RealIdeaGhClient {
@@ -290,29 +308,56 @@ impl IdeaGhClient for RealIdeaGhClient {
         labels: &[&str],
         assignees: &[&str],
     ) -> SimardResult<GhIssue> {
-        let _argv = gh_issue_create_argv(repo, title, body, labels, assignees);
-        Err(not_wired("gh issue create"))
+        let argv = gh_issue_create_argv(repo, title, body, labels, assignees);
+        let output = run_gh("gh issue create", &argv)?;
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let number: u64 = url
+            .rsplit('/')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| SimardError::ActionExecutionFailed {
+                action: "gh issue create".to_string(),
+                reason: format!("`gh issue create` returned non-URL output: {url:?}"),
+            })?;
+        Ok(GhIssue {
+            number,
+            url,
+            title: title.to_string(),
+            body: body.to_string(),
+        })
     }
 
-    fn set_pr_draft(&self, repo: &str, pr: u64, _draft: bool) -> SimardResult<()> {
-        let _argv = gh_pr_draft_argv(repo, pr);
-        Err(not_wired("gh pr ready --undo"))
+    fn set_pr_draft(&self, repo: &str, pr: u64, draft: bool) -> SimardResult<()> {
+        // `draft = true` marks the PR back to draft (`gh pr ready --undo`);
+        // `draft = false` marks it ready. Our gate only ever drafts.
+        if draft {
+            run_gh("gh pr ready --undo", &gh_pr_draft_argv(repo, pr))?;
+        } else {
+            let argv = vec![
+                "pr".to_string(),
+                "ready".to_string(),
+                pr.to_string(),
+                "-R".to_string(),
+                repo.to_string(),
+            ];
+            run_gh("gh pr ready", &argv)?;
+        }
+        Ok(())
     }
 
     fn add_pr_label(&self, repo: &str, pr: u64, label: &str) -> SimardResult<()> {
-        let _argv = gh_pr_add_label_argv(repo, pr, label);
-        Err(not_wired("gh pr edit --add-label"))
+        run_gh(
+            "gh pr edit --add-label",
+            &gh_pr_add_label_argv(repo, pr, label),
+        )?;
+        Ok(())
     }
 
     fn request_pr_review(&self, repo: &str, pr: u64, reviewer: &str) -> SimardResult<()> {
-        let _argv = gh_pr_add_reviewer_argv(repo, pr, reviewer);
-        Err(not_wired("gh pr edit --add-reviewer"))
-    }
-}
-
-fn not_wired(action: &str) -> SimardError {
-    SimardError::ActionExecutionFailed {
-        action: action.to_string(),
-        reason: "creative-idea gh routing is not wired during the spike (M4)".to_string(),
+        run_gh(
+            "gh pr edit --add-reviewer",
+            &gh_pr_add_reviewer_argv(repo, pr, reviewer),
+        )?;
+        Ok(())
     }
 }

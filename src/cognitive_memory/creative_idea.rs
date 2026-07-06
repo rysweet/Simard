@@ -26,156 +26,27 @@ use crate::creative_ideas::synthesis::SuccessMetric;
 use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::CognitiveProspective;
 
-/// Prospective node-type sentinel written to `trigger_condition`. This is the
-/// retrieval key for every stored creative-idea row, so it is a **stable
-/// identifier** — renaming it is a breaking migration, not an edit.
-pub const CREATIVE_IDEA_TRIGGER: &str = "creative-idea";
+// The creative-idea *memory-model* types — the lifecycle state machine and the
+// typed memory-link taxonomy — are owned upstream by `amplihack-memory-lib`
+// (engineering guideline G2: memory-architecture work belongs in the library,
+// not forked into Simard). Simard re-exports them and orchestrates around them:
+// it persists the idea payload through the existing prospective primitive, runs
+// the reviewer pipeline, and routes accepted ideas — all Simard-domain concerns.
+pub use amplihack_memory::creative_idea::{
+    CREATIVE_IDEA_PAYLOAD_VERSION, CREATIVE_IDEA_TRIGGER, CreativeIdeaStatus as IdeaStatus,
+    MemoryLink, MemoryLinkKind,
+};
 
-/// On-disk payload schema version. A row whose `payload_version` is **newer**
-/// than the reader understands is a hard [`SimardError::InvalidCreativeIdeaRecord`]
-/// (fail-closed), never a silent default. Starts at `1`; a future native-links
-/// migration bumps it to `2`.
-pub const CREATIVE_IDEA_PAYLOAD_VERSION: u16 = 1;
-
-/// The lifecycle status of a creative idea.
+/// Parse a persisted idea-status string into an [`IdeaStatus`], mapping the
+/// library's fail-closed parse error into [`SimardError::InvalidCreativeIdeaRecord`].
 ///
-/// `status` changes only through [`CreativeIdea::try_transition`]; see
-/// [`IdeaStatus::can_transition_to`] for the allowed edges.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum IdeaStatus {
-    /// Freshly generated, not yet reviewed.
-    New,
-    /// Synthesis asked for a rewrite before acceptance.
-    NeedsRevision,
-    /// High-risk / flagged: a human must decide.
-    NeedsHumanReview,
-    /// Reviewed and accepted; may be promoted to a goal.
-    AcceptedForImplementation,
-    /// Terminal: rejected.
-    Rejected,
-    /// Parked; may be reconsidered later.
-    Deferred,
-    /// A goal/PR is in flight.
-    ImplementationStarted,
-    /// Terminal: completed — reachable ONLY when the success metric is met.
-    ImplementationCompleted,
-}
-
-impl IdeaStatus {
-    /// Stable string form (matches the serde variant names) used both in the
-    /// mirrored prospective `status` field and in the JSON payload.
-    #[must_use]
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::New => "New",
-            Self::NeedsRevision => "NeedsRevision",
-            Self::NeedsHumanReview => "NeedsHumanReview",
-            Self::AcceptedForImplementation => "AcceptedForImplementation",
-            Self::Rejected => "Rejected",
-            Self::Deferred => "Deferred",
-            Self::ImplementationStarted => "ImplementationStarted",
-            Self::ImplementationCompleted => "ImplementationCompleted",
-        }
-    }
-
-    /// Terminal states have no outgoing transitions.
-    #[must_use]
-    pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Rejected | Self::ImplementationCompleted)
-    }
-
-    /// Whether `self -> to` is an allowed edge of the state machine.
-    ///
-    /// The full table (anything not listed is rejected):
-    ///
-    /// | From | To |
-    /// |------|----|
-    /// | `New` | `AcceptedForImplementation`, `Rejected`, `Deferred`, `NeedsRevision`, `NeedsHumanReview` |
-    /// | `NeedsRevision` | `New`, `Rejected`, `Deferred` |
-    /// | `NeedsHumanReview` | `AcceptedForImplementation`, `Rejected`, `Deferred` |
-    /// | `Deferred` | `New`, `Rejected` |
-    /// | `AcceptedForImplementation` | `ImplementationStarted`, `Deferred`, `Rejected` |
-    /// | `ImplementationStarted` | `ImplementationCompleted`, `NeedsRevision`, `Rejected` |
-    /// | `Rejected` / `ImplementationCompleted` | *(terminal)* |
-    #[must_use]
-    pub fn can_transition_to(&self, to: Self) -> bool {
-        use IdeaStatus::{
-            AcceptedForImplementation, Deferred, ImplementationCompleted, ImplementationStarted,
-            NeedsHumanReview, NeedsRevision, New, Rejected,
-        };
-        matches!(
-            (self, to),
-            (New, AcceptedForImplementation)
-                | (New, Rejected)
-                | (New, Deferred)
-                | (New, NeedsRevision)
-                | (New, NeedsHumanReview)
-                | (NeedsRevision, New)
-                | (NeedsRevision, Rejected)
-                | (NeedsRevision, Deferred)
-                | (NeedsHumanReview, AcceptedForImplementation)
-                | (NeedsHumanReview, Rejected)
-                | (NeedsHumanReview, Deferred)
-                | (Deferred, New)
-                | (Deferred, Rejected)
-                | (AcceptedForImplementation, ImplementationStarted)
-                | (AcceptedForImplementation, Deferred)
-                | (AcceptedForImplementation, Rejected)
-                | (ImplementationStarted, ImplementationCompleted)
-                | (ImplementationStarted, NeedsRevision)
-                | (ImplementationStarted, Rejected)
-        )
-    }
-}
-
-impl std::str::FromStr for IdeaStatus {
-    type Err = SimardError;
-
-    /// Parse a status string. **Fail-closed**: an unknown value yields
-    /// [`SimardError::InvalidCreativeIdeaRecord`] rather than a silent default.
-    fn from_str(s: &str) -> SimardResult<Self> {
-        match s {
-            "New" => Ok(Self::New),
-            "NeedsRevision" => Ok(Self::NeedsRevision),
-            "NeedsHumanReview" => Ok(Self::NeedsHumanReview),
-            "AcceptedForImplementation" => Ok(Self::AcceptedForImplementation),
-            "Rejected" => Ok(Self::Rejected),
-            "Deferred" => Ok(Self::Deferred),
-            "ImplementationStarted" => Ok(Self::ImplementationStarted),
-            "ImplementationCompleted" => Ok(Self::ImplementationCompleted),
-            other => Err(SimardError::InvalidCreativeIdeaRecord {
-                field: "status".to_string(),
-                reason: format!("unknown idea status '{other}'"),
-            }),
-        }
-    }
-}
-
-impl std::fmt::Display for IdeaStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// The kind of memory node a [`MemoryLink`] points at.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum MemoryLinkKind {
-    /// A distilled semantic fact.
-    Semantic,
-    /// An autobiographical episode.
-    Episodic,
-    /// A reusable procedure.
-    Procedural,
-}
-
-/// A typed edge from a [`CreativeIdea`] to another memory node that
-/// supports/resources it.
-///
-/// FUTURE: promote links to native prospective edges (payload_version 2).
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct MemoryLink {
-    pub kind: MemoryLinkKind,
-    pub node_id: String,
+/// **Fail-closed**: an unknown value is a hard error, never a silent default.
+pub fn parse_idea_status(s: &str) -> SimardResult<IdeaStatus> {
+    s.parse::<IdeaStatus>()
+        .map_err(|e| SimardError::InvalidCreativeIdeaRecord {
+            field: "status".to_string(),
+            reason: e.to_string(),
+        })
 }
 
 /// Provenance + situational context captured at generation time.
@@ -194,7 +65,15 @@ pub struct IdeaContext {
 /// A candidate self-improvement idea, stored as a prospective-memory node.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CreativeIdea {
-    /// Prospective `node_id` (`""` until stored).
+    /// Stable identity that survives status updates. Prospective memory is
+    /// append-only (no in-place UPDATE), so an update appends a new node with
+    /// the **same** `idea_id`; [`CreativeIdeaStore::list`] then keeps the latest
+    /// node per `idea_id`. Mirrors the goal-store append+dedupe pattern.
+    pub idea_id: String,
+    /// Monotonic revision, bumped by [`CreativeIdeaStore::update`]. Makes
+    /// "keep the latest revision" robust independent of node-id ordering.
+    pub revision: u64,
+    /// Prospective `node_id` of the most-recent revision (`""` until stored).
     pub node_id: String,
     /// The idea text (-> prospective `description`).
     pub idea: String,
@@ -202,7 +81,7 @@ pub struct CreativeIdea {
     pub status: IdeaStatus,
     /// Provenance/situational context (-> payload).
     pub context: IdeaContext,
-    /// Supporting semantic/episodic/procedural nodes (-> payload).
+    /// Supporting semantic/episodic/procedural/goal nodes (-> payload).
     pub links: Vec<MemoryLink>,
     /// Accumulated reviewer output (-> payload).
     pub reviews: Vec<Review>,
@@ -214,10 +93,13 @@ pub struct CreativeIdea {
 }
 
 impl CreativeIdea {
-    /// Build a fresh `New` idea with no reviews/metric yet.
+    /// Build a fresh `New` idea with no reviews/metric yet and a freshly-minted
+    /// stable [`Self::idea_id`].
     #[must_use]
     pub fn new(idea: impl Into<String>, context: IdeaContext, created_epoch: u64) -> Self {
         Self {
+            idea_id: uuid::Uuid::new_v4().to_string(),
+            revision: 0,
             node_id: String::new(),
             idea: idea.into(),
             status: IdeaStatus::New,
@@ -259,6 +141,8 @@ impl CreativeIdea {
     pub fn to_action_payload(&self) -> SimardResult<String> {
         let payload = StoredPayload {
             payload_version: CREATIVE_IDEA_PAYLOAD_VERSION,
+            idea_id: self.idea_id.clone(),
+            revision: self.revision,
             status: self.status,
             context: self.context.clone(),
             links: self.links.clone(),
@@ -312,7 +196,16 @@ impl CreativeIdea {
             .into_iter()
             .map(PersistedReview::into_review)
             .collect::<SimardResult<Vec<_>>>()?;
+        // Legacy rows written before `idea_id` existed fall back to the node_id
+        // as a stable-enough identity (each such row is its own idea).
+        let idea_id = if payload.idea_id.is_empty() {
+            node.node_id.clone()
+        } else {
+            payload.idea_id
+        };
         Ok(Self {
+            idea_id,
+            revision: payload.revision,
             node_id: node.node_id.clone(),
             idea: node.description.clone(),
             status: payload.status,
@@ -329,6 +222,10 @@ impl CreativeIdea {
 #[derive(Serialize, Deserialize)]
 struct StoredPayload {
     payload_version: u16,
+    #[serde(default)]
+    idea_id: String,
+    #[serde(default)]
+    revision: u64,
     status: IdeaStatus,
     context: IdeaContext,
     links: Vec<MemoryLink>,
@@ -382,15 +279,54 @@ impl PersistedReview {
 ///
 /// The production adapter is [`ProspectiveCreativeIdeaStore`]; tests use an
 /// in-memory fake. No new storage backend is introduced.
+///
+/// Prospective memory is append-only, so [`Self::update`] appends a new node
+/// carrying the same [`CreativeIdea::idea_id`]; [`Self::list`] then collapses
+/// each `idea_id` to its most-recent node so an idea appears **once** at its
+/// current status.
 pub trait CreativeIdeaStore {
     /// Persist a new idea; returns its prospective `node_id`.
     fn store(&self, idea: &CreativeIdea) -> SimardResult<String>;
-    /// Re-serialize an existing idea's payload/status.
+    /// Append an updated revision of an existing idea (same `idea_id`).
     fn update(&self, idea: &CreativeIdea) -> SimardResult<()>;
-    /// List up to `limit` stored creative ideas (filtered by the sentinel).
+    /// List up to `limit` current creative ideas (latest revision per `idea_id`).
     fn list(&self, limit: u32) -> SimardResult<Vec<CreativeIdea>>;
-    /// Fetch one idea by `node_id`.
+    /// Fetch one idea by its current `node_id`.
     fn get(&self, node_id: &str) -> SimardResult<Option<CreativeIdea>>;
+    /// List current ideas whose status equals `status` (enumerable-by-status).
+    fn list_by_status(&self, status: IdeaStatus, limit: u32) -> SimardResult<Vec<CreativeIdea>> {
+        Ok(self
+            .list(limit)?
+            .into_iter()
+            .filter(|idea| idea.status == status)
+            .collect())
+    }
+}
+
+/// Collapse an append-only stream of creative-idea revisions to the current
+/// state: for each `idea_id`, keep the row with the greatest `(revision,
+/// node_id)`. The monotonic `revision` (bumped by [`CreativeIdeaStore::update`])
+/// makes this robust independent of `node_id` ordering. Public so read-only
+/// consumers (the dashboard, the TUI) collapse revisions identically.
+#[must_use]
+pub fn latest_revision_per_idea(mut ideas: Vec<CreativeIdea>) -> Vec<CreativeIdea> {
+    use std::collections::HashMap;
+    fn rank(i: &CreativeIdea) -> (u64, &str) {
+        (i.revision, i.node_id.as_str())
+    }
+    let mut latest: HashMap<String, CreativeIdea> = HashMap::new();
+    for idea in ideas.drain(..) {
+        match latest.get(&idea.idea_id) {
+            Some(existing) if rank(existing) >= rank(&idea) => {}
+            _ => {
+                latest.insert(idea.idea_id.clone(), idea);
+            }
+        }
+    }
+    let mut out: Vec<CreativeIdea> = latest.into_values().collect();
+    // Deterministic order: highest revision (newest) first.
+    out.sort_by(|a, b| rank(b).cmp(&rank(a)));
+    out
 }
 
 /// Production [`CreativeIdeaStore`] over [`CognitiveMemoryOps`] — thin, no new
@@ -405,6 +341,17 @@ impl<'a> ProspectiveCreativeIdeaStore<'a> {
     pub fn new(mem: &'a dyn CognitiveMemoryOps) -> Self {
         Self { mem }
     }
+
+    /// Every stored revision (no dedupe) filtered by the sentinel — the raw
+    /// append-only stream. Used internally by [`Self::list`] and by tests.
+    fn all_revisions(&self, limit: u32) -> SimardResult<Vec<CreativeIdea>> {
+        let nodes = self.mem.list_all_prospective(limit)?;
+        nodes
+            .iter()
+            .filter(|n| n.trigger_condition == CREATIVE_IDEA_TRIGGER)
+            .map(CreativeIdea::from_prospective)
+            .collect()
+    }
 }
 
 impl CreativeIdeaStore for ProspectiveCreativeIdeaStore<'_> {
@@ -415,22 +362,26 @@ impl CreativeIdeaStore for ProspectiveCreativeIdeaStore<'_> {
     }
 
     fn update(&self, idea: &CreativeIdea) -> SimardResult<()> {
-        // FUTURE (M2): a real upsert-by-node_id in the memory layer. During the
-        // spike `store_prospective` is the only write seam, so `update`
-        // re-persists the payload; callers treat ideas as append-only for now.
-        let action = idea.to_action_payload()?;
+        // Append-only backend: re-persist under the same `idea_id` at the next
+        // revision. Computing the revision from the current max makes "latest
+        // wins" robust without any caller bookkeeping.
+        let next_revision = self
+            .all_revisions(u32::MAX)?
+            .iter()
+            .filter(|i| i.idea_id == idea.idea_id)
+            .map(|i| i.revision)
+            .max()
+            .map_or(1, |m| m.saturating_add(1));
+        let mut to_store = idea.clone();
+        to_store.revision = next_revision;
+        let action = to_store.to_action_payload()?;
         self.mem
             .store_prospective(&idea.idea, CREATIVE_IDEA_TRIGGER, &action, idea.priority())?;
         Ok(())
     }
 
     fn list(&self, limit: u32) -> SimardResult<Vec<CreativeIdea>> {
-        let nodes = self.mem.list_all_prospective(limit)?;
-        nodes
-            .iter()
-            .filter(|n| n.trigger_condition == CREATIVE_IDEA_TRIGGER)
-            .map(CreativeIdea::from_prospective)
-            .collect()
+        Ok(latest_revision_per_idea(self.all_revisions(limit)?))
     }
 
     fn get(&self, node_id: &str) -> SimardResult<Option<CreativeIdea>> {

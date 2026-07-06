@@ -28,18 +28,18 @@ related:
 
 # Creative Ideas background thread — an idea-generation subsystem (design spike)
 
-!!! note "Status — design + typed foundation + tests only (#2419), gated OFF"
-    This is a **design spike**. It ships this design document plus additive,
-    tested Rust **scaffolding** (`src/creative_ideas/`, `src/cognitive_memory/creative_idea.rs`,
-    `src/cognitive_threads/threads/creative_ideas.rs`) that is `#![allow(dead_code)]`
-    and **not wired into `main`** or the daemon loop. Nothing constructs or schedules
-    the thread, and the subsystem is **OFF by default** behind
-    `SIMARD_CREATIVE_IDEAS_ENABLED`. The generator does not act autonomously: reviewer
-    adapters and the real gh/PR wiring are **fakes/stubs** with clearly-marked
-    `// FUTURE:` seams. The goal is to fix the data model, the state machine, the
-    reviewer/routing contracts, and the safety guardrails so a later milestone can
-    wire them behind the flag without redesigning. **The operator redeploys after
-    merge.**
+!!! note "Status — implemented; default-ON, opt-out"
+    This subsystem is **wired and live**. The `CreativeIdeasThread` is registered
+    with the `Mind` scheduler and runs on its configured cadence, gated
+    **default-ON** behind `SIMARD_CREATIVE_IDEAS_ENABLED` (opt out with a falsey
+    value), consistent with the Overseer and Journal threads. The generator uses
+    a real agent-backed idea source; the four reviewers run as real
+    skill/agent adapters; routing files real goals and human-review issues via
+    `gh`; and idea-derived PRs are gated (draft + merge-blocking label + owner
+    review) — the autonomous merge driver refuses any PR carrying that label.
+    The creative-idea memory type (status lifecycle + typed links) lives upstream
+    in `amplihack-memory-lib` (guideline G2); Simard orchestrates around it. All
+    behaviour below is enforced in code and covered by hermetic tests.
 
 ## Problem statement
 
@@ -587,7 +587,7 @@ remain stable are three; each has an explicit version discipline:
 | **High-risk → human** | Any idea flagged high-risk/irreversible **always** routes to `NeedsHumanReview` (synthesis policy above); it can never auto-become a goal. | Enforced in `FeedbackSynthesizer` + `try_transition`. |
 | **Cross-pollination** | Feed the Overseer's observations and the daily Journal into `GenerationInputs` (read-only). | `overseer_observations`, `recent_activity` fields. |
 | **Outcome feedback** | Measured outcomes update idea status; `ImplementationCompleted` only when the idea's own `success_metric` is met. | `route::mark_completed(idea, metric_met)` refuses if `!metric_met`. |
-| **OFF by default** | Whole subsystem gated behind `SIMARD_CREATIVE_IDEAS_ENABLED` (default false); thread `enabled()` returns false. | Config flag + test asserting default-off. |
+| **Default-ON, opt-out** | Whole subsystem gated behind `SIMARD_CREATIVE_IDEAS_ENABLED` (default true); a falsey value opts out and the thread never ticks. | Config flag + test asserting the default-ON/opt-out gate. |
 | **Dry-run honored** | The global `ThreadContext.dry_run` switch suppresses every destructive side-effect (goal/issue/PR writes); a dry-run tick still generates, reviews, and logs but writes nothing external. | `tick` checks `ctx.dry_run` before routing; routing seams are skipped. |
 | **Cooperative shutdown** | The thread observes `ThreadContext.shutdown` (the scheduler's cancellation flag) and returns promptly between pipeline stages instead of blocking a daemon stop. | `tick` polls `ctx.shutdown` between generate → review → route. |
 
@@ -595,13 +595,14 @@ remain stable are three; each has an explicit version discipline:
 
 | Env var | Default | Effect |
 |---------|---------|--------|
-| `SIMARD_CREATIVE_IDEAS_ENABLED` | `false` | Master switch; when false the thread never ticks and nothing is generated/routed. |
+| `SIMARD_CREATIVE_IDEAS_ENABLED` | `true` | Master switch; **default-ON, opt-out** — set a falsey value (`0`/`false`/`no`/`off`) to disable. When disabled the thread never ticks. |
 | `SIMARD_CREATIVE_IDEAS_INTERVAL_SECS` | `86400` | Generator cadence (large observation window ≥ 24h). |
 | `SIMARD_CREATIVE_IDEAS_BATCH` | `10` | Ideas targeted per run. |
 | `SIMARD_DAILY_BUDGET_USD` | *(existing)* | Reused for budget-awareness. |
 
 `CreativeIdeasConfig::from_env()` centralizes parsing and is the single source of truth
-for gating; a test asserts a default-constructed config is **disabled**.
+for gating; a test asserts a default-constructed config is **enabled** (default-ON) and
+that only an explicit falsey value opts out.
 
 ## Observability
 
@@ -631,17 +632,27 @@ src/error/mod.rs                           # + InvalidIdeaTransition { from, to 
                                            #   InvalidCreativeIdeaRecord { field, reason }
 ```
 
-**Scaffolded (real, tested this spike):** the types, the `IdeaStatus` state-machine +
+**Implemented (real, tested):** the types, the `IdeaStatus` state-machine +
 `try_transition`, the two new `SimardError` variants (`InvalidIdeaTransition`,
 `InvalidCreativeIdeaRecord`), the `CreativeIdeaStore` prospective round-trip (with
-`payload_version`), the thread skeleton +
-`enabled()` gating, the `Reviewer`/`FeedbackSynthesizer`/routing **traits** with fakes,
-dedup/portfolio/budget helpers, and all the tests below.
+`payload_version` + append-only revisioning collapsed by `latest_revision_per_idea`),
+the generator thread (registered with the `Mind` scheduler, default-ON) with a real
+agent-backed `AgenticIdeaSource`, the four real reviewer/synthesis adapters
+(`crusty-old-engineer` skill / `philosophy-guardian` agent / `measurability` agent /
+deterministic fail-closed synthesis) driven through the shared session `AgentInvoker`
+seam (idle-liveness, no wall-clock turn cap), the review-and-route `AgenticIdeaPipeline`
+(accepted → goal, human-review → labeled+owner-tagged issue), the real `IdeaGhClient`
+`gh` subprocess impl, the merge-driver block-until-human-review guard, dedup/portfolio/
+budget helpers, the dashboard + TUI surfacing, and the hermetic tests below.
 
-**Marked `// FUTURE:` (stubs, not wired):** the `LlmIdeaSource`; real
-`crusty-old-engineer`/`philosophy-guardian` skill/agent execution; the real
-`IdeaGhClient` `gh` subprocess impl; registering `CreativeIdeasThread` with the `Mind`
-scheduler in `main`; native prospective "links" edges.
+**Owned upstream (guideline G2):** the creative-idea memory type — the
+`CreativeIdeaStatus` lifecycle state machine and the typed `MemoryLink`/`MemoryLinkKind`
+(incl. `Goal`) taxonomy — lives in `amplihack-memory-lib`; Simard re-exports and
+orchestrates around it.
+
+**Deferred (`// FUTURE:` in the design only):** native prospective "links" edges
+(payload_version 2 migration) and the M6 tuning items (adaptive cadence, richer
+portfolio/novelty scoring).
 
 ## Test plan (no network; all fakes)
 
@@ -671,22 +682,28 @@ scheduler in `main`; native prospective "links" edges.
 10. **Tick is total** — a `tick` whose idea source/reviewer returns `Err` yields
    `ThreadOutcome::failed` (not a panic, not `Err`), leaving the daemon unaffected.
 
-## Phased roadmap (future milestones)
+## Phased roadmap
 
-- **M1 — this spike:** design + typed foundation + tests, gated OFF, nothing wired.
-- **M2 — wire the store + thread (still OFF):** register `CreativeIdeasThread` with the
-  `Mind` scheduler behind `SIMARD_CREATIVE_IDEAS_ENABLED`; real `IdeaSource` producing
-  ideas into prospective memory; no routing side-effects yet (dry-run).
-- **M3 — real reviewers:** connect the four adapters to the real
+Milestones **M1–M5 are delivered** (design + typed foundation, thread wiring,
+real reviewers, routing side-effects, and the PR gate + outcome loop). The
+subsystem is registered with the `Mind` scheduler and default-ON, opt-out.
+
+- **M1 — foundation:** design + typed foundation + tests. *(delivered)*
+- **M2 — store + thread:** `CreativeIdeasThread` registered with the `Mind`
+  scheduler behind `SIMARD_CREATIVE_IDEAS_ENABLED`; a real agent-backed
+  `IdeaSource` producing ideas into prospective memory; `ctx.dry_run` suppresses
+  all writes/routing. *(delivered)*
+- **M3 — real reviewers:** the four adapters run the real
   `crusty-old-engineer` skill / `philosophy-guardian` agent / measurability agent /
-  synthesis; persist reviews on the idea.
-- **M4 — routing side-effects:** enable idea→goal and idea→issue (labeled + owner-tagged)
-  behind the flag; land the real `IdeaGhClient` `gh` impl (no `--admin`/`--no-verify`).
-- **M5 — PR gate + outcome loop:** enforce the draft + blocking-label + owner-review
-  gate on creative-idea PRs; feed measured outcomes back so `ImplementationCompleted`
-  fires only on a met `success_metric`.
-- **M6 — tuning:** adaptive cadence, richer portfolio balancing, novelty scoring,
-  cross-pollination weighting from the Overseer/Journal.
-
-Each milestone is independently shippable and keeps the subsystem inert until the
-operator explicitly turns it on and redeploys.
+  synthesis through the shared session `AgentInvoker`; reviews persist on the idea.
+  *(delivered)*
+- **M4 — routing side-effects:** idea→goal and idea→issue (labeled + owner-tagged)
+  via the real `IdeaGhClient` `gh` impl (never `--admin`/`--no-verify`).
+  *(delivered)*
+- **M5 — PR gate + outcome loop:** the draft + blocking-label + owner-review gate
+  on creative-idea PRs, enforced by the merge driver's skip guard; measured
+  outcomes move an idea to `ImplementationCompleted` only on a met `success_metric`.
+  *(delivered)*
+- **M6 — tuning (future):** adaptive cadence, richer portfolio balancing, novelty
+  scoring, cross-pollination weighting from the Overseer/Journal; native
+  prospective "links" edges (payload_version 2).
