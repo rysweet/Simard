@@ -309,6 +309,7 @@ nav:
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
     - Dashboard Action-Detail Humanization: reference/dashboard-action-detail-humanization.md
     - Dashboard Thinking Cycle History: reference/dashboard-thinking-cycle-history.md
+    - Dashboard Activity Cycle Reports: reference/dashboard-activity-cycle-reports.md
     - Azlin Hosts Self-Membership: reference/azlin-hosts-self-membership.md
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     - Supply-Chain Audit & Guardrails: reference/supply-chain-audit.md
