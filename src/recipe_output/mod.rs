@@ -11,7 +11,7 @@ pub mod extract;
 
 pub use extract::{
     VerdictMatch, balanced_objects, extract_json_payload, extract_verdict, last_balanced_object,
-    strip_ansi, strip_recipe_noise,
+    strip_ansi, strip_json_trailing_commas, strip_recipe_noise,
 };
 
 /// Record the outcome of a recipe-output parse for one phase.

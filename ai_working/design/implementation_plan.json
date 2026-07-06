@@ -1,0 +1,128 @@
+{
+  "issue": "rysweet/Simard#2669",
+  "signature": "overseer-obs:anomaly:distill parse-fail rate 100% + blocked-goal + process:distill_fail + quality:gym_skipped + resource:engineer_spawn + workstream-gap (seen 2x)",
+  "root_cause": "scan_cleaned_for_facts (distillation.rs:1289) uses strict serde_json::from_str::<RecipeEnvelope> (L1291 fast path / L1312 per-span). A trailing comma keeps braces balanced (passes recipe_output::balanced_objects) but strict serde rejects it -> every span Err -> None -> parse_facts_document Err -> deferred forever = 100% parse-fail. No lenient recovery exists.",
+  "tracks": {
+    "P0": "In-repo code fix: string-aware trailing-comma recovery + observability. Blocks everything; gates acceptance C1.",
+    "P1": "Telemetry/orchestration hand-off (overseer self-heal verify, stale-goal expiry, gym-gate, kgpacks #16/#17). Minimal in-repo code; tracks kept independent (coupling is correlational, not causal)."
+  },
+  "database_design": "N/A. Verified no relational/graph schema, migration, index, or constraint is touched. Persistence at all change sites is flat-file: in-memory JSON strings (parse), append-only ~/.simard/metrics/metrics.jsonl (metric), status::json / OpenOptions files (overseer). rusqlite is used ONLY in gym_history + native_knowledge (neither a P0 site); P1.3 reuses gym_history schema unchanged via CREATE TABLE/INDEX IF NOT EXISTS.",
+  "components": [
+    {
+      "name": "Brick A - strip_json_trailing_commas",
+      "action": "create",
+      "purpose": "New shared, string-aware, total fn in recipe_output::extract that removes JSON-illegal trailing commas (a ',' whose next non-ws byte is '}' or ']'), honoring string literals and '\\\"'/'\\\\' escapes. Returns Cow (Borrowed on clean path = zero alloc). Mirrors scan_balanced's in_string/escaped byte machine. Iterative O(n), no recursion, no panic."
+    },
+    {
+      "name": "Brick B - scan_cleaned_for_facts recovery tier",
+      "action": "modify",
+      "purpose": "In distillation.rs:1289, for the fast path (L1291) and each balanced span (L1312): try strict serde first; ONLY on Err, retry strict serde on strip_json_trailing_commas(candidate).as_ref(). Preserves 3 preference tiers, END-first span order, and never-a-hollow-Ok (malformed still -> None -> Err -> retry-safe defer)."
+    },
+    {
+      "name": "Brick C - zero-facts-after-filter warn",
+      "action": "modify",
+      "purpose": "In RecipeEnvelope::into_output (distillation.rs:1497), emit a distinct tracing::warn!(target:\"simard::distill\", input_facts, kept_facts=0, ...) IFF pre_filter_len > 0 && kept == 0, so 'parsed OK, all facts category-filtered' is never conflated with a parse failure. Count-only, no content. Legitimately empty {\"facts\":[]} does NOT warn."
+    },
+    {
+      "name": "Brick D - ParseRecovery per-pass metric discriminator",
+      "action": "modify",
+      "purpose": "New pub enum ParseRecovery {StrictOk, Recovered, Deferred, ZeroFacts} with frozen as_str() labels (strict-ok|recovered|deferred|zero-facts). Thread as one appended arg into build_distill_success_context (distillation.rs:825) -> append-only 'parse_recovery' key in metrics.jsonl context. Decision D-1: reuse existing distill_success_rate/distill_parse_success_rate channel (no new metric name, unchanged denominators). Best-effort, test-silent. Distinct from existing recovered_after_retry (whole-runner re-invocation, #2468)."
+    },
+    {
+      "name": "Brick E - regression + unit tests",
+      "action": "create",
+      "purpose": "Unit tests for Brick A (extract.rs #[cfg(test)]) incl. adversarial inputs; regression tests for Bricks B/C (distillation.rs in-module + distillation_tests.rs) mapped to acceptance C1-C5 and security S1/S2."
+    },
+    {
+      "name": "P1 - overseer self-heal verification",
+      "action": "modify",
+      "purpose": "Overseer taxonomy already in base (src/overseer/*). No landing. Add/confirm a test asserting distill_fail_pct below threshold => no Signal::Anomaly / process:distill_fail (C2 assertable now)."
+    },
+    {
+      "name": "P1 - gym/quality gate",
+      "action": "modify",
+      "purpose": "Determine if quality:gym_skipped in ooda_actions::simple_actions::dispatch_run_gym_eval is a regression (restore gate) or intended skip (document). Code change ONLY if regression. gym_history schema unchanged."
+    },
+    {
+      "name": "P1 - goal-store stale-block self-heal + kgpacks hand-off",
+      "action": "modify",
+      "purpose": "Expire stale blocks (#12 closed) / re-evaluate f29bb15c/0c0ada69/7f5afcca; self-heal MUST be idempotent + audit-logged (AA-3). kgpacks #16 (WS1)/#17 (WS2) = cross-repo issue assignment, NO code in this repo."
+    }
+  ],
+  "files_to_change": [
+    "src/recipe_output/extract.rs",
+    "src/memory_consolidation/distillation.rs",
+    "src/memory_consolidation/distillation_tests.rs",
+    "src/ooda_actions/simple_actions.rs"
+  ],
+  "new_files": [],
+  "test_files": [
+    "src/recipe_output/extract.rs (#[cfg(test)] module: Brick A unit tests)",
+    "src/memory_consolidation/distillation.rs (#[cfg(test)] in-module: Brick B/C/D tests)",
+    "src/memory_consolidation/distillation_tests.rs (integration-style parse_facts_document regression tests)"
+  ],
+  "implementation_order": [
+    "1. Brick A: add strip_json_trailing_commas to recipe_output/extract.rs + its unit tests; verify standalone (cargo test -p <crate> recipe_output). String-aware invariant is highest-risk -> test first, in isolation.",
+    "2. Brick B: wire recovery tier (strict-first, repair-on-Err-only) into scan_cleaned_for_facts fast path (L1291) and per-span loop (L1312). Keep preference tiers + span order unchanged.",
+    "3. Brick D (enum first): add ParseRecovery enum + as_str; extend build_distill_success_context signature with the appended parse_recovery arg and thread values from the parse outcome.",
+    "4. Brick C: add distinct zero-facts warn in into_output (guarded pre_filter_len>0 && kept==0).",
+    "5. Brick E: regression + adversarial tests mapped to C1-C5 / S1 / S2. Run full cargo test + cargo clippy + cargo fmt.",
+    "6. P1 verify: overseer self-heal test (0% parse-fail => no Anomaly).",
+    "7. P1: classify gym-gate skip -> restore or document; stale-goal expiry (idempotent + audit-logged); kgpacks #16/#17 cross-repo assignment (no code here).",
+    "8. Rebase on origin/main (already absorbed #2622/#2619); open PR."
+  ],
+  "risks": [
+    "R1/S2 (High): string-aware stripper corrupts a comma INSIDE a string literal preceding }/] (e.g. {\"c\":\"a,}\"}) -> content corruption. Mitigation: mirror scan_balanced in_string/escaped machine exactly; dedicated tests (comma-in-string, escaped-quote-then-comma, emoji/multi-byte).",
+    "R2/S1 (High): over-tolerance masks genuinely broken agent output / lets hostile structure in. Mitigation: trailing-comma-only + repair-on-Err-only + never-hollow-Ok; malformed still Err (retry-safe); test genuinely_malformed_still_err.",
+    "R3 (Med): recovery hides a real recurring agent bug behind auto-repair. Mitigation: ParseRecovery::Recovered is telemetered distinctly from StrictOk -> high recovery share is queryable and drives a prompt fix.",
+    "R4 (Low): zero-facts warn floods logs on legitimately empty batches. Mitigation: warn only when pre_filter_len>0 && kept==0.",
+    "R5 (Med): branch sprawl (#2495/#2619/#2622/#2658 touch same parse path) -> merge conflict. Mitigation: base already absorbed #2622/#2619; build fix fresh (#2658 empty); rebase before PR.",
+    "R6 (Med): P1 goal/gym/workstream state is largely operational/out-of-repo -> over-scoping into code = hollow work. Mitigation: P1 code strictly limited to a verified gym regression; goal-expiry + kgpacks are telemetry/hand-off.",
+    "R7 (Med): correlational coupling misread as causal (expecting P0 to clear blocked-goal signals). Mitigation: tracks kept independent; C1/C2 gate on distill, C3-C5 gate on their own steps.",
+    "S3 (Med): unbounded facts-file read (harvest_facts_file, read_to_string, no cap) -> OOM, worsened 2x by Owned repair copy. Mitigation: SHOULD cap read to a few MiB; oversize -> retry-safe ParseFailure.",
+    "S4 (Med): pathological deep-nesting -> stack/CPU DoS or panic. Mitigation: iterative O(n) repair (no recursion); rely on serde 128-depth bound (do not raise); totality guarantee.",
+    "S8 (Med): silent stale-block self-heal clears a LEGITIMATE block. Mitigation: idempotent + audit-logged self-heal."
+  ],
+  "security_considerations": [
+    "No new authn/authz surface, network listener, or IPC endpoint (AA-1). Subprocess keeps parent's existing local privilege (AA-2).",
+    "IV-1 Totality/no-panic: strip_json_trailing_commas total over any &str (unterminated string, lone backslash at EOF, no closer, all-commas, empty, whitespace-only) -> Cow, never panics.",
+    "IV-2 UTF-8 boundary safety: scan bytes but branch only on ASCII (, } ] \\\" \\\\ and ASCII ws); owned rebuild reuses original byte spans; multi-byte/emoji content preserved.",
+    "IV-3 String-literal awareness: commas/braces/brackets inside \"...\" untouched, honoring \\\" and \\\\; adversarial tests required.",
+    "IV-4 Minimality: remove ONLY a ',' whose next non-ws byte is '}' or ']'; no json5/comments/quote-fixing.",
+    "IV-5 Strict-first, repair-on-Err-only: serde_json stays the single validity arbiter at both L1291 and L1312.",
+    "IV-6 Never a hollow Ok: input parsing under neither view -> None -> Err -> defer (anti-injection invariant; no unvalidated data enters DistillOutput).",
+    "IV-7 No new field leniency: do not widen de_lenient_string or RecipeEnvelope shape.",
+    "IV-8 Downstream content gates remain mandatory: grounded-capable tier, assess_fact_reliability quarantine, empty-concept drop, canonical_distill_concept/KNOWN_DISTILL_CONCEPTS. Prevents prompt-injected episode content (T0) riding the repair path into stored memory.",
+    "DP-1/2/3 Log hygiene: metrics context + zero-facts warn are counts + frozen-enum labels ONLY (no fact concept/content/source_episode_id/excerpt). ParseRecovery::as_str = four fixed ASCII strings (frozen vocabulary).",
+    "DP-4 Preserve tempfile 0700 unique-per-invocation dir + drop cleanup; no predictable /tmp path.",
+    "DP-6 Concurrent-append integrity: keep metrics.jsonl record < PIPE_BUF (4096B) so single write_all stays atomic; do not balloon context.",
+    "RD-1 (SHOULD) cap harvest_facts_file read; oversize -> ParseFailure (repair doubles peak memory).",
+    "RD-2/3/4 iterative O(n) repair, serde 128-depth bound intact, idempotent (single strict->repair->strict, no repair loop).",
+    "DP-5 (SHOULD) sanitize the 200-char error excerpt in truncate (control/newline/ANSI) to prevent log-forging.",
+    "P1 security: overseer/goal files persist structural data only (no secrets); gh issue bodies (#16/#17) carry no credentials/sensitive episode content; gym-gate restore closes a disabled control; self-heal idempotent + audit-logged.",
+    "Net effect: fix narrows the silent-drop failure WITHOUT widening the attack surface; parse_recovery=recovered doubles as the detection control for repair abuse/regression (S1)."
+  ],
+  "acceptance_criteria_mapping": {
+    "C1 (100%->0% parse-fail on trailing-comma inputs)": "Brick A+B strict-then-repair; Brick E tests assert parse_facts_document returns Ok with >=1 fact; metric shows Recovered.",
+    "C2 (no 3rd recurrence)": "Overseer taxonomy already in base; test asserts distill_fail_pct below threshold => no Signal::Anomaly / process:distill_fail.",
+    "C3 (blocked goals advanced/unblocked/expired or documented)": "#12 expired (closed); f29bb15c/0c0ada69/7f5afcca re-evaluated with documented remediation (idempotent + audit-logged).",
+    "C4 (gym/quality gate executed or documented skip)": "Restore dispatch_run_gym_eval if regression, else record justification.",
+    "C5 (WS1/WS2 owners, no resource gap)": "Cross-repo hand-off issues kgpacks #16/#17 assigned; workstream-gap / engineer_spawn clears."
+  },
+  "guardrails_preserved": [
+    "Never a hollow Ok (malformed still Err, retry-safe)",
+    "Recovery strictly after strict parse (serde single arbiter)",
+    "String-interior commas untouched",
+    "Metrics best-effort & test-silent",
+    "Append-only metrics context (unchanged denominators; existing readers unaffected)",
+    "Frozen label vocabulary (ParseRecovery + DistillFailureClass)"
+  ],
+  "out_of_scope": [
+    "Any code in rysweet/agent-kgpacks-rs (WS1/WS2 crate fixes) - hand-off only",
+    "Redesigning overseer anomaly detection (already in base; verify self-heal only)",
+    "Re-opening closed #12 (tracked in #32)",
+    "json5/comment/quote leniency beyond trailing-comma removal",
+    "New network/RPC/GraphQL surface (none exists for this path)",
+    "Schema/migration/index changes (no DB touched)"
+  ]
+}

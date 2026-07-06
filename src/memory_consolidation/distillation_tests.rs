@@ -1642,3 +1642,95 @@ fn full_pass_promotes_canonicalized_surface_variants_through_dedup() {
         );
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #2669: trailing-comma parse-fail recovery — regression (TDD RED)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The recurring cognitive-memory signature was `distill parse-fail rate 100%`:
+// a trailing comma keeps braces balanced (so `balanced_objects` finds the span)
+// but strict `serde_json` rejects it, so EVERY span errored, the whole batch
+// deferred forever, and each cycle burned an LLM call for nothing.
+//
+// These public-boundary regression tests pin the acceptance criterion
+// C1 (100% → 0% parse-fail on trailing-comma inputs) and the guardrails
+// S1 (never a hollow Ok) / S2 (string interiors untouched). They exercise the
+// same `parse_facts_document` / `parse_facts` entry points already imported
+// above (issues #2622/#2619 section). Expected to FAIL until Brick A+B land.
+
+/// C1: the exact previously-100%-failing shape — a well-formed facts object
+/// whose only defect is a trailing comma — now parses and yields its fact.
+#[test]
+fn trailing_comma_document_recovers_instead_of_deferring() {
+    let doc = r#"{"facts":[{"concept":"pr-pattern","content":"squash fixups before merge","source_episode_id":"e7"},]}"#;
+    let out = parse_facts_document(doc)
+        .expect("issue #2669: a trailing-comma facts document must recover, not defer");
+    assert_eq!(out.facts.len(), 1);
+    assert_eq!(out.facts[0].concept, "pr-pattern");
+    assert_eq!(out.facts[0].source_episode_id, "e7");
+}
+
+/// C1 (batch framing): a multi-fact batch that would formerly fail 100% because
+/// of one trailing comma recovers EVERY well-formed fact — 0% parse-fail.
+#[test]
+fn trailing_comma_batch_recovers_all_facts() {
+    let doc = r#"{"facts":[
+        {"concept":"pr-pattern","content":"a","source_episode_id":"e1"},
+        {"concept":"bug-pattern","content":"b","source_episode_id":"e2"},
+        {"concept":"lesson-learned","content":"c","source_episode_id":"e3"},
+    ]}"#;
+    let out = parse_facts_document(doc).expect("trailing-comma batch must recover");
+    assert_eq!(out.facts.len(), 3, "every well-formed fact must survive");
+}
+
+/// Trailing comma inside the `procedures` array is recovered too (the envelope
+/// carries both facts and procedures).
+#[test]
+fn trailing_comma_in_procedures_recovers() {
+    let doc = r#"{"facts":[{"concept":"pr-pattern","content":"x","source_episode_id":"e1"}],"procedures":[{"name":"ci-fix:auto","steps":["re-run","re-push"],"source_episode_ids":["e1"]},]}"#;
+    let out = parse_facts_document(doc).expect("trailing comma in procedures must recover");
+    assert_eq!(out.facts.len(), 1);
+    assert_eq!(out.procedures.len(), 1);
+    assert_eq!(out.procedures[0].name, "ci-fix:auto");
+}
+
+/// The `parse_facts` wrapper recovers through the same path.
+#[test]
+fn facts_only_wrapper_recovers_trailing_comma() {
+    let facts = parse_facts(
+        r#"{"facts":[{"concept":"lesson-learned","content":"z","source_episode_id":"e9"},]}"#,
+    )
+    .expect("facts-only wrapper must recover a trailing comma");
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].concept, "lesson-learned");
+}
+
+/// S2: a comma-inside-string plus a genuine trailing comma — content must be
+/// preserved byte-for-byte while only the real trailing comma is removed.
+#[test]
+fn recovery_does_not_corrupt_comma_inside_content() {
+    let doc = r#"{"facts":[{"concept":"bug-pattern","content":"json literal {\"k\":1,} in text","source_episode_id":"e4"},]}"#;
+    let out = parse_facts_document(doc).expect("must recover without corrupting string content");
+    assert_eq!(out.facts.len(), 1);
+    assert_eq!(
+        out.facts[0].content, r#"json literal {"k":1,} in text"#,
+        "the comma inside the fact content must survive the repair"
+    );
+}
+
+/// S1 / never-a-hollow-Ok: genuinely malformed documents (beyond a trailing
+/// comma) must still error, so the batch defers and retries — recovery must not
+/// silently swallow broken agent output as an empty success.
+#[test]
+fn genuinely_malformed_document_still_errors() {
+    for bad in [
+        r#"{"facts":[{"concept":"pr-pattern","content":"x","source_episode_id":"e1""#, // unterminated
+        r#"{"facts":[{"concept":}]}"#, // missing value
+        r#"{"facts""#,                 // truncated key
+    ] {
+        assert!(
+            parse_facts_document(bad).is_err(),
+            "issue #2669: only trailing commas are tolerated; {bad:?} must stay Err"
+        );
+    }
+}

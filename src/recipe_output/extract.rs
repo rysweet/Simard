@@ -298,6 +298,92 @@ pub fn last_balanced_object(s: &str) -> Option<&str> {
     balanced_objects(s).pop()
 }
 
+/// Remove JSON **trailing commas** — a `,` whose next non-whitespace byte is a
+/// `}` or `]` — from `s`, honouring string literals so a comma inside `"…"` is
+/// never touched. Returns [`Cow::Borrowed`] unchanged (zero-alloc) when there is
+/// nothing to repair, and [`Cow::Owned`] only when a real trailing comma was
+/// dropped (issue #2669, Interface Contract §1).
+///
+/// This joins [`balanced_objects`] et al. as a shared, string-aware recovery
+/// primitive. It is applied by the distiller ONLY after a strict `serde_json`
+/// parse fails: the LLM intermittently emits an otherwise well-formed
+/// `{ "facts": [...] }` envelope with a trailing comma after the last array
+/// element or object member, which `serde_json` (correctly) rejects — a 100%
+/// parse-fail for that shape that previously deferred the batch forever. The
+/// repair is deliberately minimal and string-literal aware:
+///
+/// * **I1/IV-3 string safety** — a `,`, `}`, or `]` inside a JSON string is
+///   interior data and is preserved byte-for-byte; escape sequences (`\"`,
+///   `\\`) are tracked so a quote closing detection is never fooled.
+/// * **I2 minimality** — only a comma *immediately* preceding a closer (past
+///   insignificant whitespace) is removed; the whitespace itself and every
+///   between-element comma survive. A trailing comma with NO following closer
+///   (`{"a":1,`) is left intact, so genuinely malformed input still fails the
+///   downstream re-parse (never a hollow recovery).
+/// * **IV-2 UTF-8 safety** — the scan branches only on ASCII bytes and copies
+///   multibyte sequences verbatim, so non-ASCII/emoji content is byte-preserved.
+/// * **I4 idempotence** — `f(f(x)) == f(x)`: a repaired document has no trailing
+///   commas left to remove.
+pub fn strip_json_trailing_commas(s: &str) -> Cow<'_, str> {
+    let bytes = s.as_bytes();
+    let mut in_string = false;
+    let mut escaped = false;
+    // Stay on the borrowed (zero-alloc) path until the first trailing comma is
+    // found; only then materialise an owned buffer seeded with the bytes seen so
+    // far. `None` at the end ⇒ the input was already clean.
+    let mut out: Option<Vec<u8>> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if let Some(o) = out.as_mut() {
+                o.push(c);
+            }
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'"' {
+            in_string = true;
+            if let Some(o) = out.as_mut() {
+                o.push(c);
+            }
+            i += 1;
+            continue;
+        }
+        if c == b',' {
+            // Look ahead past insignificant whitespace for a closer.
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && (bytes[j] == b'}' || bytes[j] == b']') {
+                // Trailing comma: on the first hit, seed the owned buffer with
+                // everything before it; then drop this comma by not pushing it.
+                out.get_or_insert_with(|| Vec::from(&bytes[..i]));
+                i += 1;
+                continue;
+            }
+        }
+        if let Some(o) = out.as_mut() {
+            o.push(c);
+        }
+        i += 1;
+    }
+    match out {
+        None => Cow::Borrowed(s),
+        // Safe: `s` was valid UTF-8 and only whole ASCII `,` bytes were removed,
+        // so no multibyte sequence was split; fall back to the input on the
+        // impossible invalid-UTF-8 branch rather than panicking.
+        Some(buf) => Cow::Owned(String::from_utf8(buf).unwrap_or_else(|_| s.to_string())),
+    }
+}
 /// Extract a JSON object from noisy recipe stdout as an owned `String`.
 ///
 /// Tries two cleaned views and returns the last balanced `{…}` from the first
@@ -850,5 +936,244 @@ mod issue_2570_structural_token_guard_tests {
         );
         serde_json::from_str::<serde_json::Value>(cleaned.as_ref())
             .expect("the cleaned view must still be valid JSON");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Issue #2669 (Brick A): string-aware trailing-comma recovery — TDD (RED)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// These tests pin the contract of the NEW shared helper
+// `recipe_output::strip_json_trailing_commas` (Interface Contract §1). They are
+// written BEFORE the implementation and will FAIL TO COMPILE (unresolved name)
+// until Brick A lands — the intended TDD red signal.
+//
+// Contract under test (interface_contracts.md §1):
+//   pub fn strip_json_trailing_commas(s: &str) -> std::borrow::Cow<'_, str>
+//   I1 string-safety · I2 minimality · I3 purity/zero-alloc-clean · I4 idempotence
+//   IV-1 totality/no-panic · IV-2 UTF-8 boundary safety · IV-3 string-literal aware
+#[cfg(test)]
+mod issue_2669_trailing_comma_tests {
+    use super::*;
+    use std::borrow::Cow;
+
+    /// Helper: assert the stripped view is valid JSON and returns the parsed value.
+    fn must_parse(s: &str) -> serde_json::Value {
+        let cleaned = strip_json_trailing_commas(s);
+        serde_json::from_str(cleaned.as_ref()).unwrap_or_else(|e| {
+            panic!(
+                "stripped view must be valid JSON: {e}\n  in: {s:?}\n  out: {:?}",
+                cleaned.as_ref()
+            )
+        })
+    }
+
+    // ── I3: purity / zero allocation on the clean path ──────────────────────
+
+    #[test]
+    fn clean_input_is_borrowed_and_byte_identical() {
+        // A value with no trailing comma must be returned untouched and WITHOUT
+        // allocating (Cow::Borrowed) — the common (clean) parse path is free.
+        for clean in [
+            r#"{"a":1,"b":2}"#,
+            r#"[1,2,3]"#,
+            r#"{"facts":[{"concept":"pr-pattern","content":"x","source_episode_id":"e1"}]}"#,
+            r#"{}"#,
+            r#"[]"#,
+            r#""just a string, with a comma""#,
+        ] {
+            let out = strip_json_trailing_commas(clean);
+            assert!(
+                matches!(out, Cow::Borrowed(_)),
+                "clean input must be borrowed (zero-alloc): {clean:?}"
+            );
+            assert_eq!(out.as_ref(), clean, "clean input must be byte-identical");
+        }
+    }
+
+    // ── I2: removes ONLY a `,` whose next non-ws byte is `}` or `]` ──────────
+
+    #[test]
+    fn removes_trailing_comma_before_close_brace() {
+        let out = strip_json_trailing_commas(r#"{"a":1,}"#);
+        assert!(matches!(out, Cow::Owned(_)), "a repair must allocate");
+        assert_eq!(out.as_ref(), r#"{"a":1}"#);
+        assert_eq!(must_parse(r#"{"a":1,}"#)["a"], 1);
+    }
+
+    #[test]
+    fn removes_trailing_comma_before_close_bracket() {
+        assert_eq!(strip_json_trailing_commas(r#"[1,2,]"#).as_ref(), r#"[1,2]"#);
+        let v = must_parse(r#"[1,2,]"#);
+        assert_eq!(v.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn removes_trailing_comma_with_whitespace_before_closer() {
+        // I2: only the comma is removed; the interior whitespace between the
+        // comma and the closer is NOT a target and must survive.
+        let out = strip_json_trailing_commas("{\"a\":1,\n  }");
+        assert_eq!(out.as_ref(), "{\"a\":1\n  }");
+        // CRLF / tab whitespace between the comma and the closer is also handled.
+        assert_eq!(must_parse("[1, 2,\r\n\t]").as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn removes_multiple_and_nested_trailing_commas() {
+        let dirty = r#"{"a":[1,2,],"b":{"c":3,},}"#;
+        let v = must_parse(dirty);
+        assert_eq!(v["a"].as_array().unwrap().len(), 2);
+        assert_eq!(v["b"]["c"], 3);
+    }
+
+    #[test]
+    fn does_not_remove_comma_between_elements() {
+        // A `,` whose next non-ws byte is NOT a closer must be preserved.
+        for clean in [r#"{"a":1,"b":2}"#, r#"[1, 2, 3]"#] {
+            let out = strip_json_trailing_commas(clean);
+            assert!(
+                matches!(out, Cow::Borrowed(_)),
+                "no repair expected: {clean:?}"
+            );
+            assert_eq!(out.as_ref(), clean);
+        }
+    }
+
+    #[test]
+    fn trailing_comma_before_eof_left_as_is() {
+        // I2: a trailing comma with NO following closer is left untouched — it is
+        // still invalid, so strict serde downstream still rejects it (never a
+        // hollow recovery).
+        for still_bad in [r#"{"a":1,"#, r#"[1,2,"#, r#"{"a":1,   "#] {
+            let out = strip_json_trailing_commas(still_bad);
+            assert_eq!(
+                out.as_ref(),
+                still_bad,
+                "no closer ⇒ no removal: {still_bad:?}"
+            );
+            assert!(
+                serde_json::from_str::<serde_json::Value>(out.as_ref()).is_err(),
+                "must remain invalid: {still_bad:?}"
+            );
+        }
+    }
+
+    // ── I1 / IV-3 / S2: string-literal awareness (the high-risk invariant) ──
+
+    #[test]
+    fn comma_and_closer_inside_string_are_never_touched() {
+        // {"c":"a,}"} is already valid JSON: the `,}` live INSIDE the string and
+        // must be preserved. A naive stripper would corrupt the content.
+        for already_valid in [
+            r#"{"c":"a,}"}"#,
+            r#"{"c":"a,]"}"#,
+            r#"{"c":"trailing, "}"#,
+            r#"["x,]","y,}"]"#,
+        ] {
+            let out = strip_json_trailing_commas(already_valid);
+            assert!(
+                matches!(out, Cow::Borrowed(_)),
+                "string-interior commas must not trigger a repair: {already_valid:?}"
+            );
+            assert_eq!(out.as_ref(), already_valid);
+        }
+    }
+
+    #[test]
+    fn string_interior_preserved_while_real_trailing_comma_removed() {
+        // The killer S2 case: a comma-before-brace INSIDE a string PLUS a genuine
+        // trailing comma outside it. Only the outside comma may be removed; the
+        // string content `a,}` must survive verbatim.
+        let dirty = r#"{"c":"a,}","d":1,}"#;
+        let v = must_parse(dirty);
+        assert_eq!(v["c"], "a,}", "string interior must be preserved exactly");
+        assert_eq!(v["d"], 1);
+    }
+
+    #[test]
+    fn honors_escaped_quote_inside_string() {
+        // `\"` does NOT close the string, so the following `,}` are still interior
+        // and must be left alone (value already valid → Borrowed).
+        let already_valid = r#"{"c":"a\",}"}"#;
+        let out = strip_json_trailing_commas(already_valid);
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out.as_ref(), already_valid);
+        assert_eq!(must_parse(already_valid)["c"], "a\",}");
+    }
+
+    #[test]
+    fn escaped_backslash_then_quote_closes_string_and_trailing_comma_is_removed() {
+        // `\\` is an escaped backslash INSIDE the string; the next `"` then really
+        // closes it, so the following `,}` is a genuine trailing comma to remove.
+        let dirty = r#"{"c":"a\\",}"#;
+        let v = must_parse(dirty);
+        assert_eq!(v["c"], "a\\");
+    }
+
+    // ── IV-2: UTF-8 / multibyte safety ──────────────────────────────────────
+
+    #[test]
+    fn multibyte_and_emoji_content_preserved() {
+        let dirty = r#"{"c":"café, 🎉,}",}"#; // interior comma+emoji, one real trailing comma
+        let v = must_parse(dirty);
+        assert_eq!(
+            v["c"], "café, 🎉,}",
+            "multi-byte content must be byte-preserved"
+        );
+    }
+
+    // ── I4: idempotence ─────────────────────────────────────────────────────
+
+    #[test]
+    fn idempotent() {
+        for s in [
+            r#"{"a":[1,2,],"b":{"c":3,},}"#,
+            r#"{"a":1}"#,
+            r#"{"c":"a,}","d":1,}"#,
+            "",
+        ] {
+            let once = strip_json_trailing_commas(s).into_owned();
+            let twice = strip_json_trailing_commas(&once).into_owned();
+            assert_eq!(once, twice, "f(f(x)) must equal f(x) for {s:?}");
+        }
+    }
+
+    // ── IV-1: totality — never panics on adversarial / degenerate input ─────
+
+    #[test]
+    fn total_over_degenerate_and_adversarial_inputs() {
+        // None of these may panic; each returns some Cow. Correctness of the
+        // *result* is only asserted where well-defined above — here we only pin
+        // no-panic totality (unterminated string, lone trailing backslash, no
+        // closer, all-commas, empty, whitespace-only, bare closers).
+        for s in [
+            "",
+            "   ",
+            "\n\t\r ",
+            "{",
+            "}",
+            "]",
+            ",",
+            ",,,,",
+            ",]",
+            ",}",
+            r#"{"c":"unterminated"#,
+            r#"{"c":"has a , then eof"#,
+            "{\"c\":\"lone backslash at eof\\",
+            "😀,}",
+            r#"{"c":"a,}"#, // interior comma, string never closes
+        ] {
+            let _ = strip_json_trailing_commas(s); // must not panic
+        }
+    }
+
+    // ── Contract surface: the helper is re-exported from `recipe_output` ─────
+
+    #[test]
+    fn is_reexported_from_recipe_output() {
+        // Interface Contract §1: the helper joins `balanced_objects` et al. and is
+        // reachable as `crate::recipe_output::strip_json_trailing_commas`.
+        let out = crate::recipe_output::strip_json_trailing_commas(r#"[1,2,]"#);
+        assert_eq!(out.as_ref(), r#"[1,2]"#);
     }
 }

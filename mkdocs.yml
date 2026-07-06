@@ -188,6 +188,7 @@ nav:
     - View Agent Terminal Logs: howto/view-agent-terminal-logs.md
     - Run Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
     - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
+    - Observe Distill Trailing-Comma Recovery: howto/observe-distill-trailing-comma-recovery.md
     - Measure Recall Precision (Hybrid): howto/measure-recall-precision-hybrid.md
     - Read Simard Status: howto/simard-status.md
     - Watch Overseer Activity: howto/watch-overseer-activity.md
@@ -245,6 +246,7 @@ nav:
     - Recipe-Brain Verdict/Decision Parsing: reference/recipe-brain-verdict-parsing.md
     - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
     - Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
+    - Distill Trailing-Comma Recovery: reference/distill-trailing-comma-recovery.md
     - Base-Type Adapters: reference/base-type-adapters.md
     - Memory Introspection CLI: reference/simard-memory-cli.md
     - Cognitive-Memory Provenance (DERIVES_FROM): reference/cognitive-memory-provenance.md
