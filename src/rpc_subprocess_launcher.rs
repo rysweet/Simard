@@ -98,7 +98,7 @@ pub fn launch_knowledge_client_native() -> SimardResult<KnowledgeClient> {
     let wrapped = wrap_native(transport);
     if !check_health("knowledge-native", wrapped.as_ref()) {
         return Err(crate::error::SimardError::RpcSpawnFailed {
-            bridge: "knowledge-native".to_string(),
+            endpoint: "knowledge-native".to_string(),
             reason: "native bridge unhealthy after init".to_string(),
         });
     }
@@ -112,7 +112,7 @@ pub fn launch_gym_client_native() -> SimardResult<GymClient> {
     let wrapped = wrap_native(transport);
     if !check_health("gym-native", wrapped.as_ref()) {
         return Err(crate::error::SimardError::RpcSpawnFailed {
-            bridge: "gym-native".to_string(),
+            endpoint: "gym-native".to_string(),
             reason: "native bridge unhealthy after init".to_string(),
         });
     }

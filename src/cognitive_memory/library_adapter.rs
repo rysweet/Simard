@@ -295,7 +295,7 @@ impl LibraryCognitiveMemory {
 /// preserving the upstream message.
 fn map_op_err(method: &str, err: MemoryError) -> SimardError {
     SimardError::RpcCallFailed {
-        bridge: STORE_NAME.to_string(),
+        endpoint: STORE_NAME.to_string(),
         method: method.to_string(),
         reason: err.to_string(),
     }

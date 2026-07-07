@@ -350,7 +350,7 @@ pub fn launch_writer_client(state_root: &Path) -> SimardResult<WriterClient> {
         // legitimate tier-2 path below.
         let client =
             RemoteCognitiveMemory::connect(&sock).map_err(|e| SimardError::RpcSpawnFailed {
-                bridge: "memory-ipc".into(),
+                endpoint: "memory-ipc".into(),
                 reason: format!(
                     "writer: socket {} present but unconnectable ({e}); refusing to fall \
                      through to a divergent direct open (bug #2896)",
@@ -411,7 +411,7 @@ pub fn open_reader_client(state_root: &Path) -> SimardResult<ReaderClient> {
         // takes the legitimate tier-2 path below.
         let client =
             RemoteCognitiveMemory::connect(&sock).map_err(|e| SimardError::RpcSpawnFailed {
-                bridge: "memory-ipc".into(),
+                endpoint: "memory-ipc".into(),
                 reason: format!(
                     "reader: socket {} present but unconnectable ({e}); refusing to fall \
                      through to a divergent direct open (bug #2896)",

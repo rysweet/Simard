@@ -118,7 +118,7 @@ impl<T: RpcTransport> RpcTransport for CircuitBreakerTransport<T> {
                 })?;
             if !self.should_allow_call(&mut state) {
                 return Err(SimardError::RpcCircuitOpen {
-                    bridge: self.inner.descriptor().identity.clone(),
+                    endpoint: self.inner.descriptor().identity.clone(),
                 });
             }
         }

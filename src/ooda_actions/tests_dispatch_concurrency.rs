@@ -59,7 +59,7 @@ impl BaseTypeSession for FakeSession {
             && input.objective.contains(sub.as_str())
         {
             return Err(SimardError::RpcTransportError {
-                bridge: "fake-session".to_string(),
+                endpoint: "fake-session".to_string(),
                 reason: format!("injected failure for objective containing '{sub}'"),
             });
         }

@@ -67,7 +67,7 @@ impl BaseTypeSession for MockSession {
         match &self.response {
             Ok(outcome) => Ok(outcome.clone()),
             Err(msg) => Err(SimardError::RpcTransportError {
-                bridge: "mock-session".to_string(),
+                endpoint: "mock-session".to_string(),
                 reason: msg.clone(),
             }),
         }

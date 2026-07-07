@@ -130,7 +130,7 @@ struct AlwaysErrBackend;
 impl AlwaysErrBackend {
     fn boom(op: &str) -> SimardError {
         SimardError::RpcCallFailed {
-            bridge: "memory-ipc".to_string(),
+            endpoint: "memory-ipc".to_string(),
             method: op.to_string(),
             reason: "write-len: Broken pipe (os error 32)".to_string(),
         }

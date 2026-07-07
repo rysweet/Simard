@@ -310,7 +310,7 @@ impl crate::ooda_loop::OrchestratorSessionFactory for ProviderSessionFactory {
             .adapter_tag(&self.adapter_tag)
             .open()
             .map_err(|e| crate::error::SimardError::RpcTransportError {
-                bridge: "ooda-session-factory".to_string(),
+                endpoint: "ooda-session-factory".to_string(),
                 reason: e,
             })
     }

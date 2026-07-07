@@ -53,7 +53,7 @@ pub fn report_progress(
 ) -> SimardResult<()> {
     let content =
         serde_json::to_string(progress).map_err(|e| crate::error::SimardError::RpcCallFailed {
-            bridge: "cognitive-memory".to_string(),
+            endpoint: "cognitive-memory".to_string(),
             method: "store_fact".to_string(),
             reason: format!("failed to serialize progress: {e}"),
         })?;

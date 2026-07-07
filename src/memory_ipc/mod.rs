@@ -337,7 +337,7 @@ pub struct FactWriteOutcome {
 
 pub(crate) fn ipc_err(ctx: &str, e: impl std::fmt::Display) -> SimardError {
     SimardError::RpcTransportError {
-        bridge: "memory-ipc".to_string(),
+        endpoint: "memory-ipc".to_string(),
         reason: format!("{ctx}: {e}"),
     }
 }
@@ -353,7 +353,7 @@ pub(crate) const MAX_FRAME: usize = 8 * 1024 * 1024;
 
 pub(crate) fn write_frame<W: Write>(w: &mut W, payload: &[u8]) -> SimardResult<()> {
     let len = u32::try_from(payload.len()).map_err(|_| SimardError::RpcTransportError {
-        bridge: "memory-ipc".into(),
+        endpoint: "memory-ipc".into(),
         reason: format!("message too large: {} bytes", payload.len()),
     })?;
     w.write_all(&len.to_be_bytes())
@@ -372,7 +372,7 @@ pub(crate) fn read_frame<R: Read>(r: &mut R) -> SimardResult<Vec<u8>> {
     // (issue #2679 socket hardening).
     if len > MAX_FRAME {
         return Err(SimardError::RpcTransportError {
-            bridge: "memory-ipc".into(),
+            endpoint: "memory-ipc".into(),
             reason: format!("frame length {len} exceeds MAX_FRAME {MAX_FRAME}"),
         });
     }

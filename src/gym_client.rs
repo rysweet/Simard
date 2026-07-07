@@ -107,7 +107,7 @@ impl GymClient {
             .transport
             .call(request)
             .map_err(|e| SimardError::RpcCallFailed {
-                bridge: CLIENT_NAME.to_string(),
+                endpoint: CLIENT_NAME.to_string(),
                 method: "gym.list_scenarios".to_string(),
                 reason: format!("transport error: {e}"),
             })?;
@@ -125,7 +125,7 @@ impl GymClient {
             .transport
             .call(request)
             .map_err(|e| SimardError::RpcCallFailed {
-                bridge: CLIENT_NAME.to_string(),
+                endpoint: CLIENT_NAME.to_string(),
                 method: "gym.run_scenario".to_string(),
                 reason: format!("transport error: {e}"),
             })?;
@@ -143,7 +143,7 @@ impl GymClient {
             .transport
             .call(request)
             .map_err(|e| SimardError::RpcCallFailed {
-                bridge: CLIENT_NAME.to_string(),
+                endpoint: CLIENT_NAME.to_string(),
                 method: "gym.run_suite".to_string(),
                 reason: format!("transport error: {e}"),
             })?;

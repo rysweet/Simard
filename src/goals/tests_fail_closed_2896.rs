@@ -49,7 +49,7 @@ impl FaultyMemory {
         // Same shape the real IPC client surfaces so the assertion reflects the
         // production error, not a bespoke test-only variant.
         SimardError::RpcCallFailed {
-            bridge: "memory-ipc".to_string(),
+            endpoint: "memory-ipc".to_string(),
             method: op.to_string(),
             reason: "write-len: Broken pipe (os error 32)".to_string(),
         }

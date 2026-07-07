@@ -82,7 +82,7 @@ pub trait RpcTransport: Send + Sync {
         match response.result {
             Some(value) => {
                 serde_json::from_value(value).map_err(|error| SimardError::RpcProtocolError {
-                    bridge: "health".to_string(),
+                    endpoint: "health".to_string(),
                     reason: format!("malformed health response: {error}"),
                 })
             }
@@ -92,7 +92,7 @@ pub trait RpcTransport: Send + Sync {
                     .map(|e| e.message)
                     .unwrap_or_else(|| "no result in health response".to_string());
                 Err(SimardError::RpcCallFailed {
-                    bridge: "health".to_string(),
+                    endpoint: "health".to_string(),
                     method: "bridge.health".to_string(),
                     reason: message,
                 })
@@ -109,7 +109,7 @@ pub fn unpack_rpc_response<T: serde::de::DeserializeOwned>(
 ) -> SimardResult<T> {
     if let Some(error) = response.error {
         return Err(SimardError::RpcCallFailed {
-            bridge: bridge_name.to_string(),
+            endpoint: bridge_name.to_string(),
             method: method.to_string(),
             reason: error.message,
         });
@@ -117,11 +117,11 @@ pub fn unpack_rpc_response<T: serde::de::DeserializeOwned>(
     let value = response
         .result
         .ok_or_else(|| SimardError::RpcProtocolError {
-            bridge: bridge_name.to_string(),
+            endpoint: bridge_name.to_string(),
             reason: format!("response to '{method}' has neither result nor error"),
         })?;
     serde_json::from_value(value).map_err(|error| SimardError::RpcProtocolError {
-        bridge: bridge_name.to_string(),
+        endpoint: bridge_name.to_string(),
         reason: format!("cannot deserialize '{method}' result: {error}"),
     })
 }

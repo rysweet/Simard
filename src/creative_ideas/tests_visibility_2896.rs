@@ -156,7 +156,7 @@ struct WriteOkReadFaultMemory;
 impl WriteOkReadFaultMemory {
     fn read_err() -> SimardError {
         SimardError::RpcCallFailed {
-            bridge: "memory-ipc".to_string(),
+            endpoint: "memory-ipc".to_string(),
             method: "search_facts".to_string(),
             reason: "write-len: Broken pipe (os error 32)".to_string(),
         }

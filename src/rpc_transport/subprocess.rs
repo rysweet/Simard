@@ -70,7 +70,7 @@ impl SubprocessRpcTransport {
         let mut child = command
             .spawn()
             .map_err(|error| SimardError::RpcSpawnFailed {
-                bridge: self.bridge_name.clone(),
+                endpoint: self.bridge_name.clone(),
                 reason: format!(
                     "failed to spawn python3 {}: {error}",
                     self.python_script.display()
@@ -80,14 +80,14 @@ impl SubprocessRpcTransport {
             .stdin
             .take()
             .ok_or_else(|| SimardError::RpcSpawnFailed {
-                bridge: self.bridge_name.clone(),
+                endpoint: self.bridge_name.clone(),
                 reason: "child stdin is not available".to_string(),
             })?;
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| SimardError::RpcSpawnFailed {
-                bridge: self.bridge_name.clone(),
+                endpoint: self.bridge_name.clone(),
                 reason: "child stdout is not available".to_string(),
             })?;
         Ok(ManagedChild {
@@ -109,7 +109,7 @@ impl SubprocessRpcTransport {
             .child
             .as_mut()
             .ok_or_else(|| SimardError::RpcTransportError {
-                bridge: "subprocess".into(),
+                endpoint: "subprocess".into(),
                 reason: "child process unexpectedly missing after spawn".into(),
             })
     }
@@ -117,7 +117,7 @@ impl SubprocessRpcTransport {
     fn send_request(child: &mut ManagedChild, request: &RpcRequest) -> SimardResult<()> {
         let mut line =
             serde_json::to_string(request).map_err(|error| SimardError::RpcProtocolError {
-                bridge: "subprocess".to_string(),
+                endpoint: "subprocess".to_string(),
                 reason: format!("failed to serialize request: {error}"),
             })?;
         line.push('\n');
@@ -125,14 +125,14 @@ impl SubprocessRpcTransport {
             .stdin
             .write_all(line.as_bytes())
             .map_err(|error| SimardError::RpcTransportError {
-                bridge: "subprocess".to_string(),
+                endpoint: "subprocess".to_string(),
                 reason: format!("failed to write to child stdin: {error}"),
             })?;
         child
             .stdin
             .flush()
             .map_err(|error| SimardError::RpcTransportError {
-                bridge: "subprocess".to_string(),
+                endpoint: "subprocess".to_string(),
                 reason: format!("failed to flush child stdin: {error}"),
             })?;
         Ok(())
@@ -165,7 +165,7 @@ impl SubprocessRpcTransport {
             match read_result {
                 Ok(0) => {
                     return Err(SimardError::RpcTransportError {
-                        bridge: bridge_name.to_string(),
+                        endpoint: bridge_name.to_string(),
                         reason: "child process closed stdout (process exited?)".to_string(),
                     });
                 }
@@ -176,7 +176,7 @@ impl SubprocessRpcTransport {
                     }
                     let response: RpcResponse = serde_json::from_str(trimmed).map_err(|error| {
                         SimardError::RpcProtocolError {
-                            bridge: bridge_name.to_string(),
+                            endpoint: bridge_name.to_string(),
                             reason: format!("malformed response line: {error}"),
                         }
                     })?;
@@ -192,7 +192,7 @@ impl SubprocessRpcTransport {
                 }
                 Err(error) => {
                     return Err(SimardError::RpcTransportError {
-                        bridge: bridge_name.to_string(),
+                        endpoint: bridge_name.to_string(),
                         reason: format!("failed to read from child stdout: {error}"),
                     });
                 }

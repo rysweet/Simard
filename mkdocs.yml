@@ -141,11 +141,13 @@ nav:
     - The amplihack Freshness Gate: concepts/amplihack-freshness-gate.md
     - The Simard Journal: concepts/simard-journal.md
     - Journal Report Tone Contract: concepts/journal-report-tone-contract.md
+    - Eliminating "bridge" Terminology: concepts/bridge-terminology-elimination.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
     - Read Simard's Daily Journal: tutorials/read-simards-daily-journal.md
   - How-To Guides:
+    - Fix a No-`bridge` Naming Guard Failure: howto/fix-a-no-bridge-naming-guard-failure.md
     - Run the LOCAL COIN Gym Harness: howto/run-the-coin-gym-harness.md
     - Terminal to Engineer: howto/move-from-terminal-recipes-into-engineer-runs.md
     - Use the Agent-Orchestration Engineer Loop: howto/use-agent-orchestration-engineer-loop.md
@@ -266,6 +268,7 @@ nav:
     - Runtime Contracts: reference/runtime-contracts.md
     - Subprocess Prompt Delivery: prompt-delivery.md
     - RPC Wire Protocol: reference/rpc-wire-protocol.md
+    - No-`bridge` Naming Guard: reference/no-bridge-naming-guard.md
     - Argv-Free Copilot/OODA Invocation: reference/argv-free-copilot-invocation.md
     - Argv-Free Meeting/Signal Agent Proxy: reference/argv-free-meeting-agent-proxy.md
     - Terminal Failure Diagnosis API: reference/terminal-failure-diagnosis-api.md

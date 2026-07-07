@@ -148,7 +148,7 @@ fn display_clock_before_unix_epoch() {
 #[test]
 fn display_bridge_spawn_failed() {
     let err = SimardError::RpcSpawnFailed {
-        bridge: "memory".to_string(),
+        endpoint: "memory".to_string(),
         reason: "python not found".to_string(),
     };
     let msg = err.to_string();
@@ -159,7 +159,7 @@ fn display_bridge_spawn_failed() {
 #[test]
 fn display_bridge_transport_error() {
     let err = SimardError::RpcTransportError {
-        bridge: "knowledge".to_string(),
+        endpoint: "knowledge".to_string(),
         reason: "connection refused".to_string(),
     };
     let msg = err.to_string();
@@ -170,7 +170,7 @@ fn display_bridge_transport_error() {
 #[test]
 fn display_bridge_protocol_error() {
     let err = SimardError::RpcProtocolError {
-        bridge: "gym".to_string(),
+        endpoint: "gym".to_string(),
         reason: "invalid json".to_string(),
     };
     let msg = err.to_string();
@@ -181,7 +181,7 @@ fn display_bridge_protocol_error() {
 #[test]
 fn display_bridge_call_failed() {
     let err = SimardError::RpcCallFailed {
-        bridge: "memory".to_string(),
+        endpoint: "memory".to_string(),
         method: "store_episode".to_string(),
         reason: "timeout".to_string(),
     };
@@ -194,7 +194,7 @@ fn display_bridge_call_failed() {
 #[test]
 fn display_rpc_circuit_breaker_open() {
     let err = SimardError::RpcCircuitOpen {
-        bridge: "memory".to_string(),
+        endpoint: "memory".to_string(),
     };
     let msg = err.to_string();
     assert!(msg.contains("memory"), "{msg}");
