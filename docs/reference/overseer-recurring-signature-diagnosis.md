@@ -83,7 +83,15 @@ description: >
   **P1b** as canonical, corrected §7r/§7s's "un-deduplicated by design" framing to §7t's
   "present-but-broken dedup," and flagged **diagnostic saturation** (eighth identical board read;
   further verification rounds add no value — route P1/P6/P2 to execution). No finding overturned,
-  confidence High.
+  confidence High. Round-17 (§7x, HEAD `4f40190f`) re-executed the per-hypothesis practical tests on
+  request despite the §7w saturation call — H1 via the module (36/0) + four hypothesis tests (4/0) +
+  sensor (9/0) and verbatim anchors; H2 via live #16/#18/#21/#22 CLOSED + the terminal-park path; H3
+  via the #17 timestamp-staleness proof — all three re-confirmed at zero `src/` drift (ninth identical
+  diagnostic read). The one net-new datum sharpens rather than softens saturation: the broken-dedup
+  escalation flood was caught **firing in real time**, grown 82→**85** (#2903 @ 15:10:38Z, filed within
+  the pass) while the deduped verbatim tail holds at 10 and the malformed query re-reproduced 0-vs-25
+  rows — confirming remediation (P6/P1/P2), not verification, is the residual work. No finding
+  overturned, confidence High.
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -2146,11 +2154,68 @@ for the fix to *stick*; **P3** clears the auto-filed backlog (≈10 verbatim + ~
 paired with P2+P6; **P4** conditional (#17 disposition + `gym_skipped` down-rank); **P5** optional. No
 new remediation is introduced beyond the now-canonical P6/P1b.
 
+### 7x. Round-17 addendum — per-hypothesis practical tests re-executed at HEAD `4f40190f` (the live flood is STILL firing)
+
+Round 17 (this update) **re-executed the practical verification test for each hypothesis** at HEAD
+`4f40190f` (2026-07-07 ~15:10 UTC). HEAD advanced from round-16's `6ca9f779` by two docs-only commits
+(`6ca9f779` §7v, `4f40190f` §7w) — `git diff --name-only 6ca9f779..HEAD` returns only this file, and
+`git diff --name-only 85245e87..HEAD -- src/` is **empty** (seventh consecutive round of zero source
+drift), so every §7b/§7s/§7u/§7v/§7w anchor re-resolves verbatim. §7w explicitly recommended **not**
+scheduling this pass; it was run anyway on request, and its one net-new datum **strengthens** that
+recommendation (below).
+
+**H1 — self-amplifying self-recall loop (method: executable test + trace_code). CONFIRMED.**
+
+- `cargo test --lib overseer::tests_memory_recall` → **36 passed, 0 failed**. The four hypothesis
+  tests re-run in isolation (`…::tests_memory_recall::h`) → **4 passed, 0 failed**
+  (`h1_confirm_self_recall_reemits_recurring_signature_from_own_writebacks`,
+  `h1_refute_by_fix_provenance_filter_collapses_the_loop`,
+  `h2_confirm_observation_signature_stacks_prefix_each_generation`,
+  `h2_refute_by_fix_idempotent_signature_is_a_fixed_point` — CONFIRM + REFUTE-by-fix all green). The
+  `overseer::sensor` suite → **9 passed, 0 failed**.
+- Canonical anchors re-resolved verbatim: recall drops `source_label` via
+  `.map(|e| RecalledEpisode { failure_signature, id, summary, score })` (`wiring.rs:1024-1030`, the
+  proven **P1** seam); re-wrap `format!("overseer-obs:{}", keys.join("|"))` (`mod.rs:1085`);
+  `RECURRING_SIGNATURE_THRESHOLD = 2` (`signal.rs:362`); `NO_PROGRESS_BREAKER_THRESHOLD = 3`
+  (`no_progress_breaker.rs:58`).
+
+**H2 — stale safeguard-parks for #16/#18/#21/#22 (method: verify_config + live GitHub). CONFIRMED.**
+
+- Live `rysweet/agent-kgpacks-rs`: **#16 CLOSED** 2026-07-06T20:16:25Z, **#18 CLOSED** 10:33:04Z,
+  **#21 CLOSED** 13:29:03Z, **#22 CLOSED** 12:07:33Z — four delivered, every timestamp matching
+  §1/§7s/§7w to the second. **4 of the 6 kgpacks blockers reference already-CLOSED issues**; the
+  terminal-park / no-close-reconciliation path (`no_progress_breaker.rs:58/69/74`, `sensor.rs:204/209`)
+  is unchanged, so `blocked_goals_from_board` keeps re-emitting the four stale rows.
+
+**H3 — #17 stale-premise dep-block (method: verify_config + live board + timestamp proof). CONFIRMED.**
+
+- **#17 OPEN**, `updatedAt` **2026-07-02T23:22:49Z** — its "#16 still OPEN" premise precedes
+  `closedAt_16` (07-06T20:16:25Z) by ≈3.8 days with no event since; the staleness proof re-confirmed
+  from live values.
+
+**Net-new datum — the escalation channel is STILL firing, in real time.** The WhisperGate-deduped
+verbatim tail is **exactly 10 open** (#2669…#2875 newest @ 11:31:36Z — still **no 11th**, dedup cap
+holding). The **broken-dedup** `recurring_goal_reblock` escalation flood has **grown 82→85 open**
+(#2688 … **#2903**, newest **2026-07-07T15:10:38Z** — filed **within the minute this pass ran**);
+**three new escalation issues since round-16 ~30 min earlier**. The malformed-query root cause (§7t/§7w)
+re-reproduced live at `src/stewardship/gh_client.rs:37`: production form
+`stewardship-signature:c5109c2fbe04b255 in:body` → **0 rows**; bare token `c5109c2fbe04b255 in:body` →
+**25 rows** (ground truth, up 24→25, corroborating the +3 flood growth). `rysweet/amplihack-xpia-defender`
+re-confirmed a live public repo (`{"isPrivate":false,"name":"amplihack-xpia-defender"}`).
+
+Net: all three hypotheses **re-confirmed** (H1 36/36 module + 4/4 hypothesis + 9/9 sensor green with
+verbatim anchors; H2 live CLOSED states + terminal-park path; H3 live-timestamp staleness proof) at
+**zero source drift**. This is the **ninth consecutive identical board read** (rounds 8→17) for the
+diagnostic facts — but unlike prior rounds the flood was caught **actively advancing at the current
+minute** (#2903 @ 15:10:38Z). That is the sharpest possible confirmation of §7w's verdict:
+**verification is saturated and the live harm is ongoing; the residual value is entirely in execution
+(P6 → P1 → P2), not further investigation.** No finding overturned, confidence remains **High**.
+
 ---
 
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–14). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–17). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
@@ -2319,6 +2384,20 @@ consolidation to identical verdict; six rounds of zero source drift) and recomme
 investigation and routing P6/P1/P2 to execution rather than scheduling a round-17 verification pass** —
 no finding overturned, no remediation-weighting change beyond canonicalizing P6/P1b, confidence remains
 High.
+Round-17 (§7x, HEAD `4f40190f`) re-executed the per-hypothesis practical tests on request — H1 via
+`tests_memory_recall` (36 passed, 0 failed) + the four hypothesis tests in isolation (4 passed, 0
+failed) + the `sensor` suite (9 passed, 0 failed) with verbatim anchors (`wiring.rs:1024-1030`,
+`mod.rs:1085`, `signal.rs:362`, `no_progress_breaker.rs:58`); H2 via live kgpacks-rs #16/#18/#21/#22
+CLOSED + the terminal-park/no-reconciliation path (`no_progress_breaker.rs:58/69/74`,
+`sensor.rs:204/209`); and H3 via #17 OPEN with a live-timestamp staleness proof (`updatedAt`
+07-02T23:22:49Z < #16 `closedAt` 07-06T20:16:25Z) — all three re-confirmed at zero `src/` drift since
+`85245e87` (ninth consecutive identical diagnostic read, rounds 8→17). Its net-new datum reinforces the
+§7w saturation call: the broken-dedup `recurring_goal_reblock` escalation flood was caught **firing in
+real time**, grown 82→**85 open** (#2688…#2903, newest #2903 @ 2026-07-07T15:10:38Z, filed within the
+verification pass) while the WhisperGate-deduped verbatim tail holds at exactly 10 (newest #2875, no
+11th), the malformed query re-reproduced live 0-vs-25 rows at `gh_client.rs:37`, and
+`rysweet/amplihack-xpia-defender` re-confirmed a live public repo — remediation (P6/P1/P2), not further
+verification, is the residual work; no finding overturned, confidence remains High.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
