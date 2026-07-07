@@ -240,6 +240,19 @@ impl CreativeIdeasThread {
         Ok(report)
     }
 
+    /// Manual, on-demand generation entrypoint for the operator dashboard's
+    /// **Run now** control.
+    ///
+    /// Runs ONE generation pass unconditionally — **bypassing the default-ON/opt-out
+    /// `enabled()` gate and the 24h schedule** — and RETURNS the outcome (unlike
+    /// the total [`Self::tick`], which folds errors into a `failed` outcome). Side
+    /// effects are identical to a scheduled tick: it persists via `ctx.memory` and
+    /// may route accepted ideas to goals/issues. Surfaces failures loudly as `Err`
+    /// (never a silent no-op); honors `ctx.shutdown` and `ctx.dry_run`.
+    pub fn run_now(&mut self, ctx: &mut ThreadContext<'_>) -> SimardResult<GenerationReport> {
+        self.run_tick(ctx)
+    }
+
     /// Assemble the (read-only) observation window from the goal board, recent
     /// journal/OODA activity, episodic memory, the Overseer's observations,
     /// conversation insights, and previously-generated ideas.
@@ -379,15 +392,29 @@ impl CreativeIdeasThread {
 }
 
 /// Structured result of one successful generation tick.
-struct GenerationReport {
-    generated: usize,
-    surviving: usize,
-    persisted: usize,
-    reviewed: usize,
-    routed_goal: usize,
-    routed_issue: usize,
-    review_errors: usize,
-    dry_run: bool,
+///
+/// Public so the operator dashboard's manual "Run now" control
+/// ([`CreativeIdeasThread::run_now`]) can report what a run produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct GenerationReport {
+    /// Raw ideas the source produced this run.
+    pub generated: usize,
+    /// Ideas surviving dedup/novelty selection.
+    pub surviving: usize,
+    /// Ideas persisted to the store as `New` (0 under dry-run).
+    pub persisted: usize,
+    /// Ideas that completed review (regardless of routing target).
+    pub reviewed: usize,
+    /// Accepted ideas routed to a new goal.
+    pub routed_goal: usize,
+    /// Human-review-flagged ideas routed to an issue.
+    pub routed_issue: usize,
+    /// Per-idea review/route failures (logged, non-fatal).
+    pub review_errors: usize,
+    /// Whether the run was a dry-run (nothing persisted/routed). Internal-only;
+    /// the dashboard "Run now" report never dry-runs, so it is not serialized.
+    #[serde(skip)]
+    pub dry_run: bool,
 }
 
 impl CognitiveThread for CreativeIdeasThread {
