@@ -131,6 +131,8 @@ nav:
     - The amplihack Freshness Gate: concepts/amplihack-freshness-gate.md
     - The Simard Journal: concepts/simard-journal.md
     - Journal Report Tone Contract: concepts/journal-report-tone-contract.md
+  - Investigations:
+    - "Recurring-Signature Systemic Signals & Phantom Workstreams": investigations/2672-recurring-signature-systemic-signals.md
   - Tutorials:
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
