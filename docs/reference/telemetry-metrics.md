@@ -1,7 +1,7 @@
 ---
 title: Telemetry metrics reference
 description: The unified Simard telemetry facade and OpenTelemetry metrics pipeline — the counter_add/gauge_set/histogram_record facade, the simard.<area>.<name> metric catalog with attributes and types, the in-process registry and metrics_snapshot.json flush, SdkMeterProvider init and endpoint-gated OTLP export, cardinality bounding, and the configuration knobs.
-last_updated: 2026-07-03
+last_updated: 2026-07-06
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -11,6 +11,8 @@ related:
   - ../howto/simard-status.md
   - ./runtime-contracts.md
   - ./daily-budget-display-guard.md
+  - ../architecture/distillation-semantic-handoff.md
+  - ./distill-write-boundary-gate.md
 ---
 
 # Telemetry metrics reference
@@ -84,7 +86,7 @@ fact from a more authoritative place:
 
 | Metric | Emitted today | Notes |
 |---|---|---|
-| `simard.distill.*` | ✅ `distillation.rs` | ok + parse_fail + facts/procedures/episodes_marked |
+| `simard.distill.*` | ✅ `distillation.rs` | ok + facts/procedures/episodes_marked (the `parse_fail` result was **removed** in #2679 — there is no parse) |
 | `simard.brain.decision` / `.escalations` | ✅ `judgment_record::push` | every decision, phase + parse outcome |
 | `simard.brain.ladder_exhausted` | ✅ `recipe_brain::run_brain_ladder` | decide/orient ladder fully exhausted |
 | `simard.engineer.spawned` / `.exited` / `.active` | ✅ `agent_spawn.rs` | brackets the in-process session |
@@ -105,10 +107,16 @@ enumerated sets shown; anything outside the set is coerced to `other`.
 
 | Metric | Type | Attributes | Meaning |
 |---|---|---|---|
-| `simard.distill.runs` | counter | `result` = `ok` \| `parse_fail` | one distillation run completed; `parse_fail` is the "recipe output did not contain a parseable …" failure |
-| `simard.distill.facts` | counter | — | facts produced by a run |
-| `simard.distill.procedures` | counter | — | procedures produced by a run |
+| `simard.distill.runs` | counter | `result` = `ok` | one distillation run whose agentic commit completed. The former `parse_fail` value was **removed** in [#2679](https://github.com/rysweet/Simard/issues/2679): the distiller now writes facts directly into memory via [`simard memory remember`](./simard-memory-remember-cli.md), so there is no scraped document to parse and no parse to fail. |
+| `simard.distill.facts` | counter | — | facts **accepted by the write-boundary gate** for a run, sourced from the per-`pass_id` write ledger (not a parsed array length). |
+| `simard.distill.procedures` | counter | — | procedures written by a run |
 | `simard.distill.episodes_marked` | counter | — | episodes marked processed by a run |
+
+> **Removed in #2679:** the `simard.distill.runs{result="parse_fail"}` series and
+> the derived `distill_parse_success_rate`. Dashboards/alerts keyed on either
+> will read empty; track `result="ok"` and `simard.distill.facts` instead. See
+> [Distillation semantic handoff](../architecture/distillation-semantic-handoff.md)
+> and [Distill write-boundary gate](./distill-write-boundary-gate.md).
 
 Migrated from the human line
 `[simard] distill: N episodes -> F facts, P procedures, M marked`, which is

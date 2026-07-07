@@ -1,0 +1,134 @@
+name: distill-semantic-handoff
+app_type: cli
+description: |
+  Outside-in proof that episode->fact distillation no longer relies on parsing
+  (issue #2679, root cause shared with #2658). The distiller is now a true
+  agentic step whose WRITES are its output: it commits each fact through the
+  cognitive-memory write boundary (`simard memory remember` -> IPC
+  `StoreFactGated`), so there is NO `{ "facts": [...] }` document scraped back out
+  of noisy recipe stdout and hand-deserialized. The trailing-comma / launcher-
+  banner / ANSI parse-failure mode that discarded whole batches is therefore
+  STRUCTURALLY IMPOSSIBLE — there is nothing left to parse.
+
+  This scenario replaces the retired `distill-parser-*` / `distill-fact-yield` /
+  `distill-trailing-comma-parse` scenarios (which validated the removed parse).
+  It drives the hermetic in-process unit tests that pin the new contract: the
+  result path is an exit-status check that ignores stdout (noisy/trailing-comma
+  stdout can no longer fail the pipeline), the shared per-fact reliability scorer,
+  the server-side write-boundary gate (ground/score/quarantine/dedup), and the
+  agent-facing `simard memory remember` write tool. No network, no live host
+  mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # Headline (#2679/#2658): a finished recipe run is interpreted by EXIT STATUS
+  # alone — noisy / trailing-comma / banner-polluted stdout is never parsed, so
+  # it can no longer fail the pipeline. Plus the agentic pass commits grounded
+  # facts and quarantines ungrounded/empty ones through the in-process sink.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::distillation_semantic_handoff_tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # The shared per-fact reliability scorer both write-boundary seams use.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # The authoritative server-side write-boundary gate (StoreFactGated dispatch):
+  # ground -> score -> quarantine -> dedup -> persist, plus the gated-write IPC
+  # protocol + hardened frame reader + `simard memory remember` write tool.
+  - action: run
+    params:
+      command: "cargo test --locked --lib server_gate_tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  - action: run
+    params:
+      command: "cargo test --locked --lib tests_gated_write_2679"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  - action: run
+    params:
+      command: "cargo test --locked --lib operator_cli::memory::remember_tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # The distillation pass contract still holds end-to-end: threshold skip,
+  # store + mark-everything, retry-safety on recipe error, quarantine gate,
+  # identity dedup, computed confidence.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::distillation_tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Process-boundary capstone (the true outside-in proof): the REAL `simard`
+  # binary — the exact process the distiller agent spawns — reaches a LIVE
+  # memory IPC socket and drives the write-boundary gate. A grounded fact
+  # stores (exit 0) and is retrievable, an ungrounded fact is quarantined
+  # (exit 4), a missing daemon exits 3 (no un-gated fallback), a malformed
+  # invocation exits 2, and `remember-procedure` stores. No JSON document is
+  # ever parsed on this path.
+  - action: run
+    params:
+      command: "cargo test --locked --test bin_simard_memory_remember_cli"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
