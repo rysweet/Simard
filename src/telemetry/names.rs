@@ -89,13 +89,13 @@ pub const GOAL_PROGRESS: &str = "simard.goal.progress";
 // ── Enrichment observability — simard.enrichment.* (#2942) ──────────────────
 
 /// One instrumented enrichment decision. Attribute `attached` = `true` | `false`
-/// (the memory bridge resolved to `Some` vs degraded to `None`). The
+/// (the memory reader resolved to `Some` vs degraded to `None`). The
 /// `attached` split is the attach-rate numerator/denominator
 /// (`attach_rate = decisions{attached=true} / decisions{*}`), recorded only for
 /// the *expected* population (turns where enrichment was configured).
 pub const ENRICHMENT_DECISIONS: &str = "simard.enrichment.decisions";
-/// One bridge-launch degrade. Attribute `reason` = `memory_ipc` |
-/// `knowledge_launch` — the concrete cause so an operator sees which bridge is
+/// One reader-launch degrade. Attribute `reason` = `memory_ipc` |
+/// `knowledge_launch` — the concrete cause so an operator sees which reader is
 /// down.
 pub const ENRICHMENT_DEGRADED: &str = "simard.enrichment.degraded";
 /// Rendered enrichment-block size injected per decision (histogram: count+sum →
@@ -137,7 +137,7 @@ pub const ATTR_TYPE: &str = "type";
 pub const ATTR_DIR: &str = "dir";
 /// Attribute key: token cache status.
 pub const ATTR_CACHED: &str = "cached";
-/// Attribute key: enrichment memory-bridge attach state (`true` | `false`).
+/// Attribute key: enrichment memory-reader attach state (`true` | `false`).
 pub const ATTR_ATTACHED: &str = "attached";
 /// Attribute key: disk-reclaim run source (`daemon` \| `cli`).
 pub const ATTR_SOURCE: &str = "source";

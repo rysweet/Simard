@@ -157,7 +157,7 @@ pub(crate) fn dashboard_save_goal_board_with_removals(
 /// Proposed goal, a meeting goal, an unblocked goal, …) appears immediately
 /// instead of lagging up to a ~5-min snapshot cycle.
 ///
-/// Two live sources — both read off a SINGLE shared reader bridge (issue #2922
+/// Two live sources — both read off a SINGLE shared reader (issue #2922
 /// perf) and deduped by slug with the **base winning**:
 /// - **Base** — [`load_goal_board`], the operator read-your-writes snapshot
 ///   board (identical to [`dashboard_goal_board_snapshot`]) carrying the
@@ -175,7 +175,7 @@ pub(crate) fn dashboard_save_goal_board_with_removals(
 /// empty board; the caller surfaces the error rather than serving silently-stale
 /// or partial data.
 pub(crate) fn dashboard_live_goal_board(state_root: &Path) -> SimardResult<GoalBoard> {
-    // Issue #2922 perf: open the reader bridge ONCE and serve BOTH live legs
+    // Issue #2922 perf: open the reader ONCE and serve BOTH live legs
     // (the snapshot base and the goal-store overlay) from the same handle. Both
     // legs already resolve to the same `state_root` reader, so a single open is
     // behaviorally identical — but in the standalone-dashboard tier each open is

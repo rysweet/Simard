@@ -78,7 +78,7 @@ impl Drop for SharedMem {
 }
 
 /// A cognitive-memory backend that simulates a memory-ipc transport failure on
-/// the read path, mirroring the real "bridge 'memory-ipc' transport error" the
+/// the read path, mirroring the real "reader 'memory-ipc' transport error" the
 /// #2896 bug reports. Non-faulted operations return benign values.
 struct FaultyMemory {
     fail_reads: bool,
@@ -87,7 +87,7 @@ struct FaultyMemory {
 impl FaultyMemory {
     fn transport_err(op: &str) -> SimardError {
         SimardError::RpcCallFailed {
-            bridge: "memory-ipc".to_string(),
+            endpoint: "memory-ipc".to_string(),
             method: op.to_string(),
             reason: "write-len: Broken pipe (os error 32)".to_string(),
         }

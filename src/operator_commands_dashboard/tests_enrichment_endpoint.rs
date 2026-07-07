@@ -161,7 +161,7 @@ mod tests {
         );
         assert_eq!(
             body["degraded"]["memory_ipc"], 2,
-            "the memory-ipc degrade count is surfaced (operator's cue a bridge is down)"
+            "the memory-ipc degrade count is surfaced (operator's cue a reader is down)"
         );
         assert_eq!(body["degraded"]["knowledge_launch"], 0);
         assert_eq!(body["avg_facts_injected"], 6.3);

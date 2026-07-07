@@ -313,7 +313,7 @@ impl EnrichmentSource {
 /// [`crate::rpc_subprocess_launcher::launch_knowledge_client_native`].
 ///
 /// Mirrors the honest-degradation contract of
-/// [`crate::rpc_subprocess_launcher::launch_all_bridges`]: a launch failure is logged
+/// [`crate::rpc_subprocess_launcher::launch_all_clients`]: a launch failure is logged
 /// and yields `None` for that reader so turn dispatch proceeds without that
 /// enrichment rather than aborting. Neither failure path panics.
 ///
@@ -594,7 +594,7 @@ CONFIDENCE: 0.85";
     // ── enrich_turn_input / EnrichmentClients ───────────────────────
 
     #[test]
-    fn enrich_turn_input_without_bridges_returns_input_unchanged() {
+    fn enrich_turn_input_without_readers_returns_input_unchanged() {
         let input = BaseTypeTurnInput::objective_only("implement the widget");
         let enriched = enrich_turn_input(&input, None, None, false).unwrap();
         // No readers => objective + preamble unchanged, no memory block.
@@ -659,7 +659,7 @@ CONFIDENCE: 0.85";
     }
 
     #[test]
-    fn enrichment_bridges_default_is_unconfigured() {
+    fn enrichment_clients_default_is_unconfigured() {
         let readers = EnrichmentClients::new();
         assert!(!readers.is_configured());
         // enrich() with no readers returns the input unchanged.
@@ -674,7 +674,7 @@ CONFIDENCE: 0.85";
     }
 
     #[test]
-    fn enrichment_bridges_debug_hides_bridge_internals() {
+    fn enrichment_clients_debug_hides_client_internals() {
         let readers = EnrichmentClients::new();
         let debug = format!("{readers:?}");
         assert!(debug.contains("EnrichmentClients"));
@@ -698,7 +698,7 @@ CONFIDENCE: 0.85";
     /// RustyClawd (#2383); lives with the launcher it exercises.
     #[test]
     #[serial_test::serial(cognitive_memory)]
-    fn launch_enrichment_clients_wires_real_bridges_for_valid_state_root() {
+    fn launch_enrichment_clients_wires_real_readers_for_valid_state_root() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
         let state_root = tmp.path().join("state");
@@ -719,7 +719,7 @@ CONFIDENCE: 0.85";
     /// writable state root — the policy seam shared by every production adapter.
     #[test]
     #[serial_test::serial(cognitive_memory)]
-    fn enrichment_source_native_resolves_configured_bridges() {
+    fn enrichment_source_native_resolves_configured_readers() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
         let state_root = tmp.path().join("state");
