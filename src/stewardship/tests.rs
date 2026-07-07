@@ -149,12 +149,26 @@ fn route_simard_keywords() {
 }
 
 #[test]
-fn route_ambiguous_errors() {
-    let err = route_failure("unknown_subsystem").unwrap_err();
-    assert!(matches!(
-        err,
-        SimardError::StewardshipRoutingAmbiguous { .. }
-    ));
+fn route_unmatched_falls_back_to_default() {
+    // The Overseer's gap-scan brief files with the bare source-module
+    // "overseer", which matches no keyword. Rather than erroring — the old
+    // `StewardshipRoutingAmbiguous` behavior that broke `flag_workstream_gaps`
+    // every tick — the router now falls back to the configured DEFAULT repo
+    // (rysweet/Simard) and logs the fallback. Routing must NEVER silently drop
+    // a source: an unmatched source always resolves to the default repo.
+    for src in &[
+        "overseer",
+        "unknown_subsystem",
+        "totally_unmapped_subsystem",
+    ] {
+        let target = route_failure(src)
+            .unwrap_or_else(|e| panic!("{src}: unmatched source must fall back, got {e:?}"));
+        assert!(
+            matches!(target, TargetRepo::Simard),
+            "{src} should route to the default repo (rysweet/Simard)"
+        );
+        assert_eq!(target.slug(), "rysweet/Simard", "{src}");
+    }
 }
 
 #[test]

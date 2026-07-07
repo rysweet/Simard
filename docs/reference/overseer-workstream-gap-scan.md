@@ -291,7 +291,14 @@ machinery — the same paths `goal_health` and M1 use — with no new bypass:
    silently dropped; an unconfigured channel is `Queued` and logged.
 3. **FileIssue.** File a **deduped** stewardship issue per gap signature through
    the same `IssueFiler` path M1 uses
-   (`stewardship::process_orchestrator_run` + `find_existing`).
+   (`stewardship::process_orchestrator_run` + `find_existing`). The gap briefs
+   carry `source_module = "overseer"`, which matches no routing keyword; the
+   stewardship router's **default-repo fallback** therefore routes them to
+   `rysweet/Simard` (the `DEFAULT_TARGET_REPO` constant) and logs the fallback
+   with `tracing::warn!`. This is what lets the gap-scan actually file/upsert one
+   rolling tracking issue per gap signature every tick, rather than failing with
+   `overseer intervention failed … flag_workstream_gaps … cannot route
+   source-module 'overseer'`.
 
 Both the notify and the file happen as **side effects of this one act** — exactly
 as `goal_health`'s escalate notifies both channels from a single intervention.

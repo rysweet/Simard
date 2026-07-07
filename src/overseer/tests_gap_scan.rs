@@ -666,6 +666,51 @@ fn flags_gaps_notifies_both_channels_files_once_then_dedupes_on_repeat() {
 }
 
 #[test]
+fn flagged_gap_brief_source_module_routes_to_default_repo() {
+    use crate::stewardship::{TargetRepo, route_failure};
+
+    // Regression for issue #2934: `act_flag_workstream_gaps` files each gap with
+    // the bare source_module "overseer", which matches NO stewardship routing
+    // keyword. Before the default-repo fallback, the real `StewardshipIssueFiler`
+    // rejected this with `StewardshipRoutingAmbiguous`, so `flag_workstream_gaps`
+    // failed every tick ("overseer intervention failed ...
+    // intervention=flag_workstream_gaps error=... cannot route source-module
+    // 'overseer'"). This test pins that the brief the gap path actually produces
+    // routes to a real repo — the configured default (rysweet/Simard) — so the
+    // issue gets filed instead of erroring.
+    let gaps = vec![sample_goal_gap()];
+    let filed = Arc::new(Mutex::new(Vec::new()));
+    let (notifier, _email_log, _signal_log) = dual_recording_notifier();
+
+    let mut ov = Overseer::new(caps_for_gaps(gaps, filed.clone()))
+        .with_identity(overseer_identity())
+        .with_gap_scan_enabled(true)
+        .with_operator_notifier(Box::new(notifier));
+
+    let report = overseer_tick(&mut ov);
+    assert_eq!(
+        report.workstream_gaps_detected, 1,
+        "the genuine gap is flagged"
+    );
+    assert_eq!(report.errors, 0, "the gap intervention must not error");
+    assert!(!report.panicked);
+
+    let briefs = filed.lock().unwrap();
+    assert_eq!(briefs.len(), 1, "one deduped issue filed for the gap");
+    let src = &briefs[0].source_module;
+
+    // The exact value the gap path emits must resolve — never ambiguous.
+    let target = route_failure(src).unwrap_or_else(|e| {
+        panic!("gap brief source_module {src:?} must route to a real repo, got {e:?}")
+    });
+    assert!(
+        matches!(target, TargetRepo::Simard),
+        "an overseer gap brief routes to the default repo (rysweet/Simard): {src:?}"
+    );
+    assert_eq!(target.slug(), "rysweet/Simard");
+}
+
+#[test]
 fn disabled_gap_scan_holds_the_whole_action() {
     let gaps = vec![sample_goal_gap()];
     let filed = Arc::new(Mutex::new(Vec::new()));
