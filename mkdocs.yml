@@ -181,6 +181,7 @@ nav:
     - Check for Updates: howto/check-for-updates.md
     - Configure the amplihack Freshness Gate: howto/configure-amplihack-freshness-gate.md
     - Self-Maintain Dependency Pins: howto/self-maintain-dependency-pins.md
+    - Respond to a Proactive Advisory Remediation: howto/respond-to-a-proactive-advisory-remediation.md
     - Configure Adaptive Scaling: howto/configure-adaptive-scaling.md
     - Configure Pluggable Identity: howto/configure-pluggable-identity.md
     - Configure Episode Hygiene and Promotion: howto/configure-episode-hygiene-and-promotion.md
@@ -339,6 +340,7 @@ nav:
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     - Supply-Chain Audit & Guardrails: reference/supply-chain-audit.md
     - Dependency Trust Policy: reference/dependency-trust-policy.md
+    - Supply-Chain Advisory Stewardship: reference/supply-chain-advisory-stewardship.md
     - amplihack Pin Bump to Upstream main (#2626): reference/amplihack-pin-bump-2626.md
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md

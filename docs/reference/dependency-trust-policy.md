@@ -8,6 +8,7 @@ doc_type: reference
 status: active
 related:
   - ./supply-chain-audit.md
+  - ./supply-chain-advisory-stewardship.md
   - ./release-integrity.md
   - ../howto/self-maintain-dependency-pins.md
 ---
@@ -188,6 +189,13 @@ A *vulnerability* with no in-scope mitigation is resolved by the following
 decision order (transitive unmaintained/unsound advisories take the scope path
 above instead):
 
+> **Automated by the advisory reasoner (#2741).** This exact decision order is
+> what `src/supply_chain_steward` executes non-interactively on the daily
+> scheduled scan: a patched version → a minimal `cargo update --precise` bump PR;
+> no fix → a justified, tracked `ignore` in **both** files; a fix that is not
+> applicable here → an escalation issue (never an ignore). See
+> [Supply-chain advisory stewardship](./supply-chain-advisory-stewardship.md).
+
 ```mermaid
 flowchart TD
     A([advisory reported]) --> B{fixed version<br/>available?}
@@ -311,6 +319,9 @@ the justification, and a tracking link, exactly like any `deny.toml` ignore.
 - [Supply-chain audit and guardrails](./supply-chain-audit.md) — `deny.toml`,
   the build-script / proc-macro inventory, and how all three guardrail jobs are
   wired into CI.
+- [Supply-chain advisory stewardship](./supply-chain-advisory-stewardship.md) —
+  the proactive automation of this advisory-resolution order (#2741): pinned
+  PR-time gate, daily scheduled scan, and the bump-or-justified-ignore reasoner.
 - [Release integrity](./release-integrity.md) — SBOM + signing, the
   release-side complement to dependency trust.
 - [Keep Simard's dependency pins up to date](../howto/self-maintain-dependency-pins.md) —

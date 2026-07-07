@@ -347,6 +347,21 @@ impl Display for SimardError {
                     prompt_root.display()
                 )
             }
+            Self::SupplyChainAuditParseFailed { reason } => {
+                write!(
+                    f,
+                    "supply-chain: failed to parse cargo-audit JSON: {reason}"
+                )
+            }
+            Self::SupplyChainRemediationFailed { reason } => {
+                write!(f, "supply-chain: advisory remediation failed: {reason}")
+            }
+            Self::SupplyChainSuppressionWithoutTracker { advisory_id } => {
+                write!(
+                    f,
+                    "supply-chain: refused to ignore advisory '{advisory_id}' with no tracking-issue URL (hard rail)"
+                )
+            }
         }
     }
 }

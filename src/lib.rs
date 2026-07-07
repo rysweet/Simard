@@ -172,6 +172,12 @@ pub mod spawn_payload;
 pub mod state_root;
 pub mod stewardship;
 pub mod subagent_sessions;
+// Issue #2741: proactive RUSTSEC/cargo-deny advisory stewardship. The pure
+// remediation-decision reasoner (bump-or-justified-ignore behind a
+// deterministic rail) lives here; it reuses `stewardship::dedup` and
+// `stewardship::merge_authority`. See
+// docs/reference/supply-chain-advisory-stewardship.md.
+pub mod supply_chain_steward;
 // Issue #2528: unified telemetry facade + one `simard status` snapshot. The
 // `telemetry` module is the OpenTelemetry-backed metric facade + in-process
 // registry; `status` is the single typed StatusSnapshot the CLI, dashboard, and
