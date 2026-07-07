@@ -94,6 +94,34 @@ impl RealSupplyChainGh {
         }
         Ok(output)
     }
+
+    /// Run `gh <args>` and interpret its stdout as the URL of a freshly created
+    /// issue or PR, returning `(url, trailing-number)`. `gh issue/pr create`
+    /// prints the resource URL; its final path segment is the issue/PR number.
+    fn gh_url_and_number<T>(args: &[String], step: &str) -> SimardResult<(String, T)>
+    where
+        T: std::str::FromStr,
+    {
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = Self::run("gh", &arg_refs, step)?;
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let number = url
+            .rsplit('/')
+            .next()
+            .and_then(|n| n.parse::<T>().ok())
+            .ok_or_else(|| SimardError::SupplyChainRemediationFailed {
+                reason: format!("{step}: `gh` returned no trailing numeric id: {url:?}"),
+            })?;
+        Ok((url, number))
+    }
+}
+
+/// Append `--label <l>` for each label to an already-built `gh` argument list.
+fn push_labels(args: &mut Vec<String>, labels: &[String]) {
+    for label in labels {
+        args.push("--label".to_string());
+        args.push(label.clone());
+    }
 }
 
 impl SupplyChainGh for RealSupplyChainGh {
@@ -149,20 +177,8 @@ impl SupplyChainGh for RealSupplyChainGh {
             "--body".to_string(),
             body.to_string(),
         ];
-        for label in labels {
-            args.push("--label".to_string());
-            args.push(label.clone());
-        }
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let output = Self::run("gh", &arg_refs, "create_issue")?;
-        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let number: u64 = url
-            .rsplit('/')
-            .next()
-            .and_then(|n| n.parse().ok())
-            .ok_or_else(|| SimardError::SupplyChainRemediationFailed {
-                reason: format!("create_issue: `gh issue create` returned non-URL output: {url:?}"),
-            })?;
+        push_labels(&mut args, labels);
+        let (url, number) = Self::gh_url_and_number::<u64>(&args, "create_issue")?;
         Ok(GhIssue {
             number,
             url,
@@ -214,20 +230,8 @@ impl SupplyChainGh for RealSupplyChainGh {
             "--body".to_string(),
             spec.body.clone(),
         ];
-        for label in &spec.labels {
-            args.push("--label".to_string());
-            args.push(label.clone());
-        }
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let output = Self::run("gh", &arg_refs, "open_pr:create")?;
-        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let number: u32 = url
-            .rsplit('/')
-            .next()
-            .and_then(|n| n.parse().ok())
-            .ok_or_else(|| SimardError::SupplyChainRemediationFailed {
-                reason: format!("open_pr: `gh pr create` returned non-URL output: {url:?}"),
-            })?;
+        push_labels(&mut args, &spec.labels);
+        let (url, number) = Self::gh_url_and_number::<u32>(&args, "open_pr:create")?;
         Ok(OpenedPr {
             number,
             url,
