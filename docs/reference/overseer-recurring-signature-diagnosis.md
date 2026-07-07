@@ -2418,9 +2418,202 @@ is saturated and the residual value is in executing P6 → P1 → P2. Confidence
 
 ---
 
+### 7aa. Round-19 primary-investigator deep dive — the SELECTION-side closure: recall *positively self-selects* the Overseer's own write-backs (substring gate + a third composite re-entry channel) (HEAD `21873a78`, source-anchored at `bcc64dc3`)
+
+This pass owns the assigned focus verbatim — **trace the full signature emission path AND prove the
+*unfiltered* self-recall loop** — and contributes the one half of the loop that eighteen prior rounds
+*cited but never proved*: the **retrieval selection**. Prior rounds proved the loop is unfiltered on
+two of its three sides — the **counting** side (`recall_episodic` drops `source_label`, so a
+self-authored episode is tallied as foreign — §7v/§7z/H1) and the **emission** side (the composite is
+re-wrapped `overseer-obs:` every generation and never shrinks — §7u/H2). Both presuppose the missing
+third fact: that the recall *query actually retrieves the Overseer's own write-back in the first
+place*. Every prior round cited `keys.query()` (`wiring.rs:1020`) and stopped there. This dive proves
+the retrieval is not merely *unfiltered by provenance* but **positively self-selecting** — the query
+is built from the very tokens the write embeds — and pins a **third** composite re-entry channel that
+no prior round mapped. `git diff --name-only 85245e87..HEAD -- src/` is **empty** (zero source drift;
+every anchor below re-resolved verbatim by reading the files at this HEAD); `cargo test --lib
+overseer::tests_memory_recall` **36/0**, `…::h` **4/0**, `overseer::sensor` **9/0**,
+`cognitive_memory::tests_ranked_episodic` **5/0**. Strictly additive; no prior finding overturned.
+
+**A. The retrieval gate is case-insensitive SUBSTRING containment (net-new anchor — the load-bearing
+fact).** The production backend is `LibraryCognitiveMemory::recall_episodes_ranked`
+(`library_adapter.rs:1266`; the default trait impl at `cognitive_memory/mod.rs:516-522` is a `vec![]`
+stub — only the library override actually matches). It splits the query on whitespace into lowercased
+`needles` (`:1286-1290`) and admits an episode iff its content contains **any** needle as a substring:
+
+```rust
+let matches_kw = |content: &str| {
+    let c = content.to_lowercase();
+    needles.iter().any(|kw| c.contains(kw))      // library_adapter.rs:1294-1296
+};
+```
+
+This gate is applied on **both** recall paths — the ranked pass (`:1314`) and the
+compressed-consolidation UNION backfill (`:1322-1323`) — so there is **no** retrieval path that can
+bypass it. Relevance is therefore purely lexical substring overlap.
+
+**B. The write embeds the exact tokens the query later searches for — so the write-back self-matches
+by construction.** The write side (§7z W1–W4) stores episode content = `observation_content(problems)`
+**plus** the in-band marker `[sig:{signature}]` (`wiring.rs:1084`), where `signature =
+observation_signature(problems) = "overseer-obs:" + sorted-deduped dedup_keys joined by '|'`
+(`mod.rs:1081-1085`). So the stored content contains, verbatim, every problem `dedup_key` —
+`quality:gym_skipped` (`mod.rs:1295`), `workstream-gap` (`:1384`), `goal:blocked:{id}` (`:1349`) —
+inside the `[sig:…]` marker. The **next tick's** query is `RecallKeys::query()`
+(`capabilities.rs:547-551`), whose `signatures` terms are exactly those same problem `dedup_key`s
+(`from_signals`, `:533`). Since `matches_kw` is `any`-over-needles by `contains`, a single short
+dedup-key needle (`quality:gym_skipped`) is already a literal substring of
+`[sig:overseer-obs:…|quality:gym_skipped|…]` → **the Overseer's own write-back always satisfies its
+own recall gate.** The retrieval is not incidentally-unfiltered; it is *guaranteed to select self*.
+This closes the loop on the selection side, and it is proven end-to-end by
+`h1_confirm_self_recall_reemits_recurring_signature_from_own_writebacks` (`tests_memory_recall.rs:1109`),
+which drives recall through the **real** `MemoryRecallOps` adapter and asserts both self-authored
+episodes are recovered (`:1129-1133`) with their composite parsed back out of the `[sig:…]` marker by
+`parse_failure_signature` (`wiring.rs:976-986`; assertion `:1137`).
+
+**C. NET-NEW — a THIRD composite re-entry channel: the RecurringSignature's OWN recall keyword IS the
+whole composite (`capabilities.rs:572`).** Prior rounds mapped two re-entry channels for the composite:
+the emission wrapper (`mod.rs:1085`) and the recall-driven problem `dedup_key`
+(`mod.rs:1372`, `sanitize_recalled(signature)`). There is a **third**, in the recall-query builder
+itself:
+
+```rust
+Signal::RecurringSignature { signature, .. } => signature.clone(),   // capabilities.rs:572
+```
+
+`signal_keyword` maps a fired `RecurringSignature` to a recall **keyword equal to the entire
+composite**. So once the signal fires, the whole `overseer-obs:…` string is injected into the *next*
+query's needles (via `keywords`, `capabilities.rs:529`) — a self-selection **amplifier** distinct from
+§7u/§7z's two channels. §7u-E only addressed the `engineer_spawn`/`gym_skipped` stems
+(`capabilities.rs:562/564`) as sitting *outside* the composite; it never reached line 572. Effect: the
+self-match strengthens **monotonically** — as the composite grows (H2), the grown composite is itself
+a needle that `contains`-matches the grown `[sig:…]`, so recall can never "drift off" its own trail.
+
+**D. NET-NEW — this rules out the "just narrow the query" escape and proves P1 (provenance filter) is
+the *uniquely correct* cut.** A reader might hope to break the loop by making recall more specific. §B/§C
+prove that is impossible in principle: the query is **constructed from the same tokens the write
+embeds**, so *any* query specific enough to recall a genuine external recurrence will also
+substring-match the Overseer's self-authored copy of it. "Recall real recurrences" and "recall my own
+write-backs" are **lexically identical** at the query layer and cannot be separated there. The
+separation exists only at the **provenance** layer, and provenance is live exactly once:
+`recall_episodes_ranked` returns `Vec<CognitiveEpisode>` (`cognitive_memory/mod.rs:542-547`) and
+`CognitiveEpisode` carries `pub source_label: String` (`memory_cognitive.rs:50`), which the projection
+to the field-less `RecalledEpisode` (`capabilities.rs:607-616`) discards one line later
+(`wiring.rs:1024-1030`). Hence **§7v/§7z's P1** — `.filter(|e| e.source_label != OVERSEER_SOURCE_LABEL)`
+inserted between `.into_iter()` (`wiring.rs:1023`) and `.map` (`:1024`) — is not merely *sufficient*, it
+is the **uniquely correct** seam: it cuts on the one axis (author) that the write records and the query
+cannot, and it runs *before* the substring-gated results are flattened. **Corollary sharpening for the
+belt P1b** (strip `overseer-obs:` in `observation_signature`, `mod.rs:1081`): P1b bounds the composite
+*length* but does **not** stop self-selection — the short dedup-key needles (`quality:gym_skipped`,
+`workstream-gap`) stay permanent substrings of the content regardless of prefix depth, so they keep
+matching. **P1b alone cannot break the loop; P1 is load-bearing, P1b is length-hygiene only.** This is
+a genuine refinement of §7v, which framed P1b as co-equal "belt-and-suspenders": for the *selection*
+defect P1b is strictly weaker than P1 and cannot substitute for it.
+
+**E. The summary the loop emits is verbatim the reported signature (closing the identity).** The
+`RecurringSignature` arm of `classify_signal` renders the problem summary as `format!("recurring
+signature seen {occurrences}× in cognitive memory ({signature})")` (`mod.rs:1373-1374`) with
+`occurrences = RECURRING_SIGNATURE_THRESHOLD = 2` (`signal.rs:362`; the `2×` quantization, §7v). That
+template — `"recurring signature seen 2× in cognitive memory (overseer-obs:goal:blocked:…)"` — is
+byte-for-byte the string under investigation. The reported signature is therefore not an artifact
+*about* the loop; it **is** the loop's own recall-composite, rendered by its own classifier
+(`mod.rs:1372-1374`), tallied by its own gate (`signal.rs:456-468`), and re-fed to its own query
+(`capabilities.rs:572`) — self-authored and proven on all three sides (select §A/§B, count §7v/§7z,
+emit §7u/H2).
+
+**Verification footer.** HEAD `21873a78` (source-anchored at `bcc64dc3`; intervening commits
+docs-only); `git diff --name-only 85245e87..HEAD -- src/` **empty** — every §A–§E anchor
+(`library_adapter.rs:1266/1286-1290/1294-1296/1314/1322-1323`,
+`capabilities.rs:529/533/547-551/562/564/572/607-616`,
+`wiring.rs:976-986/1020/1023/1024-1030/1084/1088`,
+`mod.rs:1081-1085/1295/1349/1372-1374/1384`, `memory_cognitive.rs:50`,
+`cognitive_memory/mod.rs:516-522/542-547`, `signal.rs:362/456-468`) re-resolved verbatim by reading
+the files at this HEAD; `cargo test --lib overseer::tests_memory_recall` **36/0**, `…::h` **4/0**
+(`h1_confirm`/`h1_refute_by_fix`/`h2_confirm`/`h2_refute_by_fix`), `overseer::sensor` **9/0**,
+`cognitive_memory::tests_ranked_episodic` **5/0** (both `matches_kw` paths exercised). **No prior
+finding overturned**; §7aa is additive — it promotes the **selection** half of the loop from *cited*
+to *proven-as-positively-self-selecting* (§A/§B), pins the third composite re-entry channel
+`capabilities.rs:572` (§C), and proves P1 is the *uniquely correct* cut while P1b is strictly weaker
+for the selection defect (§D). It **endorses** §7y/§7z's close-and-execute verdict (P6 → P1 → P2).
+Confidence **High** (the substring gate and the token-identity between write-content and recall-query
+are direct code facts, backed by the real-adapter H1 test and the ranked-episodic suite).
+
+---
+
+### 7ab. Round-19 addendum — per-hypothesis practical tests re-executed at HEAD `21873a78` (a MID-WINDOW read that tests §7y's burst prediction — it holds)
+
+Round 19 (this update) **re-executed the practical verification test for each hypothesis**, run on
+request at ~15:27 UTC (2026-07-07), in parallel with the §7aa primary-investigator deep dive (the
+SELECTION-side closure). HEAD advanced from §7z's `ad3c0215` by one docs-only commit to
+`21873a78`; `git diff --name-only 85245e87..HEAD -- src/` is **empty** (**ninth consecutive round of
+zero source drift**), so every §7b/§7s/§7u/§7v/§7w/§7x/§7z/§7aa anchor re-resolves verbatim by reading
+the files at this HEAD. §7y/§7z both explicitly recommended **not** scheduling this pass; it was run
+anyway on request, and — like §7x before it — its one net-new datum **strengthens** that recommendation
+(below).
+
+**H1 — self-amplifying self-recall loop (method: executable test + trace_code). CONFIRMED.**
+
+- `cargo test --lib -- overseer::tests_memory_recall overseer::sensor` → **45 passed, 0 failed**
+  (`overseer::tests_memory_recall` **36/0** re-counted in isolation + `overseer::sensor` **9/0**). The
+  four hypothesis tests are green in the run —
+  `h1_confirm_self_recall_reemits_recurring_signature_from_own_writebacks`,
+  `h1_refute_by_fix_provenance_filter_collapses_the_loop`,
+  `h2_confirm_observation_signature_stacks_prefix_each_generation`,
+  `h2_refute_by_fix_idempotent_signature_is_a_fixed_point` (CONFIRM + REFUTE-by-fix), alongside the
+  write-back round-trip tests `adapter_write_back_uses_fixed_overseer_source_label`,
+  `write_back_is_deduplicated_within_window`, `write_back_persists_again_for_a_distinct_signature`.
+- Canonical anchors re-resolved verbatim: recall drops `source_label` via `.map(|e| RecalledEpisode {
+  … })` (`wiring.rs:1024`, the proven **P1** seam); re-wrap `format!("overseer-obs:{}", keys.join("|"))`
+  (`mod.rs:1085`); `RECURRING_SIGNATURE_THRESHOLD: u32 = 2` (`signal.rs:362`);
+  `NO_PROGRESS_BREAKER_THRESHOLD: u32 = 3` (`no_progress_breaker.rs:58`).
+
+**H2 — stale safeguard-parks for #16/#18/#21/#22 (method: verify_config + live GitHub). CONFIRMED.**
+
+- Live `rysweet/agent-kgpacks-rs`: **#16 CLOSED** 2026-07-06T20:16:25Z, **#18 CLOSED** 10:33:04Z,
+  **#21 CLOSED** 13:29:03Z, **#22 CLOSED** 12:07:33Z — four delivered, every timestamp matching
+  §1/§7s/§7w/§7x/§7y to the second. The terminal-park / no-close-reconciliation path
+  (`no_progress_breaker.rs:58/69/74`, `sensor.rs:204/209`) is unchanged, so `blocked_goals_from_board`
+  keeps re-emitting the four stale rows.
+
+**H3 — #17 stale-premise dep-block (method: verify_config + live board + timestamp proof). CONFIRMED.**
+
+- **#17 OPEN**, `updatedAt` **2026-07-02T23:22:49Z** — its "#16 still OPEN" premise precedes
+  `closedAt_16` (07-06T20:16:25Z) by ≈3.8 days with no event since; the staleness proof re-confirmed
+  from live values.
+
+**Net-new datum — a MID-WINDOW read that tests §7y's falsifiable burst prediction (it is holding).**
+§7y/§7z read the broken-dedup `recurring_goal_reblock` flood at **85 open** (#2903 newest @
+2026-07-07T15:10:38Z, ~15:17 UTC) and predicted: absent P6, the next burst (#2904–#2906) is due ~15:40Z,
+stepping 85 → 88. This pass ran at **~15:27 UTC — squarely inside that predicted inter-burst gap**
+(~10 min after §7z's read, ~13 min before the predicted burst) — and reads the flood **still at exactly
+85** (#2688…**#2903**, #2903 still newest @ **15:10:38Z**, **no #2904 yet**): the prediction is
+**holding** on a fresh independent read, and the burst-of-3 cadence re-confirms directly in the tail
+(14:37:16–19Z → #2897/#2898/#2899, 15:10:35–38Z → #2901/#2902/#2903). The WhisperGate-deduped verbatim
+tail holds at **exactly 10** (#2669…#2875, newest @ 11:31:36Z — still **no 11th**, dedup cap holding).
+The malformed-query root cause (§7t/§7w) re-reproduced live at `src/stewardship/gh_client.rs:37`:
+production form `stewardship-signature:c5109c2fbe04b255 in:body` → **0 rows**; bare token
+`c5109c2fbe04b255 in:body` → **25 rows** (byte-identical to §7x/§7y) — the colon-form
+(`gh_client.rs:37`, no space) never matches the space-separated body needle
+(`format!("stewardship-signature: {signature}")`, `dedup.rs:79`). `rysweet/amplihack-xpia-defender`
+re-confirmed a live public repo (`{"isPrivate":false,"name":"amplihack-xpia-defender"}`).
+
+Net: all three hypotheses **re-confirmed** (H1 36/36 module + 9/9 sensor + the CONFIRM/REFUTE + write-back
+tests green with verbatim anchors; H2 live CLOSED states + terminal-park path; H3 live-timestamp
+staleness proof) at **zero source drift** — the **eleventh consecutive identical diagnostic board read**
+(rounds 8→19). Unlike §7x (which caught a burst firing at the current minute), this pass lands in the
+*trough* between bursts and so **falsifiably tests** §7y's burst-quantized model: the plateau at 85 is
+exactly what the model predicts for a read at 15:27Z, so the prediction is **corroborated, not
+contradicted**. That is, again, the sharpest possible confirmation of §7y/§7z's verdict: **verification
+is saturated; the diagnosed one-line defect (`gh_client.rs:37`) remains unfixed and continues to step
+the flood in bursts of 3; the residual value is entirely in execution (P6 → P1 → P2), not further
+investigation.** No finding overturned, confidence remains **High**. (This addendum is itself the
+predicted next verification duplicate — the investigation continues to exhibit the exact
+recurring-signature pathology it documents; round-20 should not be scheduled.)
+
+---
+
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–18). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–19). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
@@ -2625,6 +2818,24 @@ out-of-band `source_label` is written (`:1088`) then structurally discarded on r
 round-trip tests onto the four hops (all green, 36/0) and refined §7y's P1 from the range
 `wiring.rs:1022-1030` to the single correct insertion point (after `:1023`, upstream of the `.map`
 erasure). No finding overturned; endorses §7y's close-and-execute verdict.
+Round-19 ran two parallel passes at HEAD `21873a78` (docs-only advance; ninth consecutive round of zero
+source drift since `85245e87`). The primary-investigator deep dive (§7aa) proved the **retrieval-selection**
+half of the loop — recall *positively self-selects* the Overseer's own write-backs because the query is
+built from the very tokens the write embeds (case-insensitive substring gate), and mapped a **third**
+composite re-entry channel — closing the last cited-but-unproven side of the loop (36/0 module + 4/0
+hypothesis + 9/0 sensor + 5/0 ranked-episodic, zero drift). The per-hypothesis practical addendum (§7ab)
+re-executed all three tests at ~15:27 UTC: H1 `overseer::tests_memory_recall` (36 passed, 0 failed) +
+`overseer::sensor` (9 passed, 0 failed) with verbatim anchors (`wiring.rs:1024`, `mod.rs:1085`,
+`signal.rs:362`, `no_progress_breaker.rs:58`); H2 kgpacks-rs #16/#18/#21/#22 CLOSED (timestamps to the
+second); H3 #17 OPEN stale (`updatedAt` 07-02T23:22:49Z ≺ `closedAt_16` by ≈3.8 d); the malformed reblock
+query re-reproduced live at `gh_client.rs:37` (prod form → 0 rows, bare token → 25 rows); the
+WhisperGate-deduped tail steady at exactly 10 (#2875 newest, no 11th) and the broken-dedup reblock flood
+holding at 85 (#2688…#2903, #2903 still newest @ 15:10:38Z). Crucially §7ab is a **mid-window** read
+inside §7y's predicted inter-burst gap (predicted next burst #2904–#2906 ~15:40Z → 88): the plateau at 85
+is exactly the burst-quantized model's prediction, so it **corroborates** rather than contradicts —
+eleventh consecutive identical board read (rounds 8→19). No finding overturned; both passes endorse the
+close-and-execute verdict (residual value is execution of P6 → P1 → P2, not verification; round-20 should
+not be scheduled).
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
