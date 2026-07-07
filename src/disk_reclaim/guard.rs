@@ -76,6 +76,11 @@ pub enum Verdict {
 #[derive(Debug, Clone, Default)]
 pub struct ProtectedDenySet {
     paths: Vec<PathBuf>,
+    /// Canonicalized form of each entry in `paths` (index-aligned), computed
+    /// once at construction so `contains` does not re-`canonicalize` the whole
+    /// deny-set for every candidate. `None` where a path does not (yet) resolve
+    /// — `contains` then falls back to a literal prefix check, exactly as before.
+    canonical: Vec<Option<PathBuf>>,
 }
 
 impl ProtectedDenySet {
@@ -94,14 +99,13 @@ impl ProtectedDenySet {
                 set.insert(PathBuf::from(p));
             }
         }
-        Self {
-            paths: set.into_iter().collect(),
-        }
+        Self::from_paths(set.into_iter().collect())
     }
 
     /// Build directly from an explicit path list (test seam).
     pub fn from_paths(paths: Vec<PathBuf>) -> Self {
-        Self { paths }
+        let canonical = paths.iter().map(|p| p.canonicalize().ok()).collect();
+        Self { paths, canonical }
     }
 
     /// The raw protected paths, for handing to `is_safe_to_delete`.
@@ -116,10 +120,13 @@ impl ProtectedDenySet {
         let canon = candidate.canonicalize().ok();
         self.paths
             .iter()
-            .any(|deny| match (canon.as_ref(), deny.canonicalize().ok()) {
-                (Some(c), Some(d)) => *c == d || c.starts_with(&d),
-                _ => candidate == deny || candidate.starts_with(deny),
-            })
+            .zip(&self.canonical)
+            .any(
+                |(deny, deny_canon)| match (canon.as_ref(), deny_canon.as_ref()) {
+                    (Some(c), Some(d)) => c == d || c.starts_with(d),
+                    _ => candidate == deny || candidate.starts_with(deny),
+                },
+            )
     }
 }
 
@@ -163,6 +170,39 @@ impl SizeMeasurer for DuSizeMeasurer {
                     .ok()
             })
             .unwrap_or(0)
+    }
+}
+
+/// A run-scoped memoizing wrapper over any [`SizeMeasurer`]. Within a single
+/// reclamation run a candidate's on-disk size is effectively constant, yet each
+/// path is otherwise measured twice — once to order candidates largest-first and
+/// again in the guard's `Allow` arm. Because `du -sb` walks the whole directory
+/// tree, caching coalesces those into **one** measurement per unique path. It
+/// still performs a real measurement (never the agent's `est_bytes`); it only
+/// avoids repeating an identical one in the same run.
+pub struct CachingSizeMeasurer<'a> {
+    inner: &'a dyn SizeMeasurer,
+    cache: std::sync::Mutex<std::collections::HashMap<PathBuf, u64>>,
+}
+
+impl<'a> CachingSizeMeasurer<'a> {
+    /// Wrap `inner`, caching each measured path for the lifetime of this value.
+    pub fn new(inner: &'a dyn SizeMeasurer) -> Self {
+        Self {
+            inner,
+            cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl SizeMeasurer for CachingSizeMeasurer<'_> {
+    fn measure(&self, path: &Path) -> u64 {
+        if let Some(&bytes) = self.cache.lock().unwrap().get(path) {
+            return bytes;
+        }
+        let bytes = self.inner.measure(path);
+        self.cache.lock().unwrap().insert(path.to_path_buf(), bytes);
+        bytes
     }
 }
 
@@ -559,6 +599,31 @@ mod tests {
             Verdict::Reject {
                 reason: RejectReason::ProtectedPath
             }
+        );
+    }
+
+    #[test]
+    fn caching_measurer_measures_each_path_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingMeasurer(AtomicUsize);
+        impl SizeMeasurer for CountingMeasurer {
+            fn measure(&self, _path: &Path) -> u64 {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                42
+            }
+        }
+
+        let inner = CountingMeasurer(AtomicUsize::new(0));
+        let caching = CachingSizeMeasurer::new(&inner);
+        let p = Path::new("/some/path");
+        assert_eq!(caching.measure(p), 42);
+        assert_eq!(caching.measure(p), 42, "second call returns cached value");
+        assert_eq!(caching.measure(Path::new("/other")), 42);
+        assert_eq!(
+            inner.0.load(Ordering::SeqCst),
+            2,
+            "a repeated path must hit the cache; only distinct paths measure",
         );
     }
 

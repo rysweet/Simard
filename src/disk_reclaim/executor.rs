@@ -183,7 +183,10 @@ pub fn exec_reclaim(
     let used_before = read_used_pct(disk, disk_path);
 
     // Largest-first by fresh measurement — reclaim the biggest wins first.
-    candidates.sort_by_key(|c| std::cmp::Reverse(ctx.measurer.measure(&c.path)));
+    // `sort_by_cached_key` evaluates the (expensive `du`) key exactly once per
+    // candidate — O(n) subprocess spawns — instead of `sort_by_key`'s
+    // O(n·log n) re-evaluations. The ordering is identical.
+    candidates.sort_by_cached_key(|c| std::cmp::Reverse(ctx.measurer.measure(&c.path)));
 
     let mut report = ReclaimReport {
         mode,

@@ -36,8 +36,8 @@ pub use executor::{
     exec_reclaim,
 };
 pub use guard::{
-    DuSizeMeasurer, GuardContext, ProtectedDenySet, ReclaimPrimitive, RejectReason, SizeMeasurer,
-    TrackedWorktreeProbe, Verdict, WorktreeVerdict, vet_candidate,
+    CachingSizeMeasurer, DuSizeMeasurer, GuardContext, ProtectedDenySet, ReclaimPrimitive,
+    RejectReason, SizeMeasurer, TrackedWorktreeProbe, Verdict, WorktreeVerdict, vet_candidate,
 };
 pub use prod::{DerivingPathRemover, RealTrackedWorktreeProbe, main_worktree_of};
 pub use recipe::{RecipeInvoker, RecipeRunnerInvoker, resolve_recipe_path, run_reclaim_recipe};
@@ -167,7 +167,10 @@ pub fn reclaim_candidates(
     let protected = ProtectedDenySet::resolve(Path::new("/proc"));
     let live = crate::worktree_gc::ProcfsLiveProcessProbe::new();
     let wt = RealTrackedWorktreeProbe;
-    let measurer = DuSizeMeasurer;
+    // Cache `du` results for this run so the largest-first sort and the guard's
+    // fresh-measure step don't each spawn `du` for the same path.
+    let du = DuSizeMeasurer;
+    let measurer = CachingSizeMeasurer::new(&du);
     let ctx = GuardContext {
         allow_roots: &allow,
         protected: &protected,
