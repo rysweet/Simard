@@ -86,6 +86,7 @@ nav:
     - "Creative Ideas background thread (spike)": design/creative-ideas-thread.md
     - "Eliminate deterministic fallbacks": design/eliminate-deterministic-fallbacks.md
   - Research:
+    - "COIN benchmark — Phase 1 primer": research/coin-benchmark.md
     - "COIN benchmark & skwaq gym study": research/coin-benchmark-and-skwaq-study.md
   - Concepts:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
