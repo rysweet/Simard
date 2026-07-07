@@ -99,6 +99,7 @@ fn sample_board() -> GoalBoard {
     add_active_goal(
         &mut b,
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,

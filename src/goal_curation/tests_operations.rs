@@ -3,6 +3,7 @@ use super::types::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_
 
 fn make_goal(id: &str, priority: u32) -> ActiveGoal {
     ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -348,6 +349,7 @@ fn load_goal_board_reads_from_cognitive_memory() {
     let root = tmp_state_root("mem-read");
     let mut mem_board = GoalBoard::new();
     mem_board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -406,6 +408,7 @@ fn load_goal_board_migrates_legacy_disk_file_into_memory_then_deletes_it() {
     let root = tmp_state_root("migrate");
     let mut legacy = GoalBoard::new();
     legacy.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -484,6 +487,7 @@ fn load_goal_board_runs_migration_only_once_in_practice() {
     let root = tmp_state_root("migrate-once");
     let mut legacy = GoalBoard::new();
     legacy.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -520,6 +524,7 @@ fn save_goal_board_persists_only_to_memory_and_writes_no_disk_file() {
     let root = tmp_state_root("save-mem-only");
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -556,6 +561,7 @@ fn save_goal_board_rejects_suspect_board_without_persisting() {
     let root = tmp_state_root("save-suspect");
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -595,6 +601,7 @@ fn save_goal_board_accepts_a_well_formed_board() {
     let root = tmp_state_root("save-ok");
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -636,6 +643,7 @@ fn is_placeholder_description_rejects_long_or_substantive_descriptions() {
 fn board_integrity_suspect_flags_short_ids_and_placeholder_descriptions() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -655,6 +663,7 @@ fn board_integrity_suspect_flags_short_ids_and_placeholder_descriptions() {
 fn board_integrity_suspect_passes_well_formed_board() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -676,6 +685,7 @@ fn board_integrity_suspect_passes_well_formed_board() {
 fn clear_goal_assignment_resets_status_and_clears_assigned_to() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -735,6 +745,7 @@ use super::operations::{merge_boards, read_latest_snapshot};
 /// All other fields default to `None` / `vec![]`.
 fn goal_with(id: &str, priority: u32, status: GoalProgress, desc: &str) -> ActiveGoal {
     ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

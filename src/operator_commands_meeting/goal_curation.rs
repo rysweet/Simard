@@ -222,6 +222,7 @@ mod tests {
         let mut board = crate::goal_curation::GoalBoard::new();
         for i in 1..=n {
             board.active.push(crate::goal_curation::ActiveGoal {
+                labels: Vec::new(),
                 parent_goal_id: None,
                 priority_explicit: false,
                 repo: None,

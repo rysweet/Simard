@@ -193,6 +193,7 @@ fn ooda_cycle_runs_with_consolidation_wired_in() {
 
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -353,6 +354,7 @@ fn multiple_ooda_cycles_accumulate_consolidation() {
 
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

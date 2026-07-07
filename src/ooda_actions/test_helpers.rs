@@ -163,6 +163,7 @@ pub(crate) fn board_with_goal(
     add_active_goal(
         &mut board,
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -184,6 +185,7 @@ pub(crate) fn board_with_goal(
 /// assemble multi-goal boards.
 pub(crate) fn active_goal(id: &str) -> ActiveGoal {
     ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

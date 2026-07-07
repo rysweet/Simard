@@ -919,6 +919,7 @@ mod tests {
 
         let mut board = GoalBoard::new();
         board.active.push(ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -980,6 +981,7 @@ mod tests {
 
         let mut board = GoalBoard::new();
         board.active.push(ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,

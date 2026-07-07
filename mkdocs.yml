@@ -87,6 +87,7 @@ nav:
     - "Creative Ideas background thread (spike)": design/creative-ideas-thread.md
     - "Eliminate deterministic fallbacks": design/eliminate-deterministic-fallbacks.md
   - Research:
+    - "COIN benchmark — Phase 1 primer": research/coin-benchmark.md
     - "COIN benchmark & skwaq gym study": research/coin-benchmark-and-skwaq-study.md
   - Concepts:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
@@ -168,6 +169,7 @@ nav:
     - Inspect the Durable Goal Register: howto/inspect-durable-goal-register.md
     - Inspect and Verify the OODA Cycle Counter: howto/inspect-the-ooda-cycle-counter.md
     - Decompose a Large Goal: howto/decompose-a-large-goal.md
+    - Label and Filter Goals: howto/label-and-filter-goals.md
     - Route a Goal to its Target Repo: howto/route-a-goal-to-its-target-repo.md
     - Diagnose a Rejected Goal Completion: howto/diagnose-a-rejected-goal-completion.md
     - Diagnose a Re-Opened Goal (live outcome): howto/diagnose-a-reopened-goal.md
@@ -182,6 +184,7 @@ nav:
     - Check for Updates: howto/check-for-updates.md
     - Configure the amplihack Freshness Gate: howto/configure-amplihack-freshness-gate.md
     - Self-Maintain Dependency Pins: howto/self-maintain-dependency-pins.md
+    - Respond to a Proactive Advisory Remediation: howto/respond-to-a-proactive-advisory-remediation.md
     - Configure Adaptive Scaling: howto/configure-adaptive-scaling.md
     - Configure Pluggable Identity: howto/configure-pluggable-identity.md
     - Configure Episode Hygiene and Promotion: howto/configure-episode-hygiene-and-promotion.md
@@ -285,6 +288,8 @@ nav:
     - Goal-Board API: reference/goal-board-api.md
     - Goal-Board Corruption-Guard API: reference/goal-board-corruption-guard-api.md
     - Goal Decomposition & Goal Graph: reference/goal-decomposition.md
+    - Goal Labels & Tags: reference/goal-labels.md
+    - Goal-Decompose Result Channel: reference/goal-decompose-result-channel.md
     - Goal Target-Repo Routing: reference/goal-target-repo-routing.md
     - Goal Coverage Allocation: reference/goal-coverage-allocation.md
     - spawn_agent_for_goal API: reference/spawn-agent-for-goal.md
@@ -340,6 +345,7 @@ nav:
     - Azure DevOps ACL Self-Escalation Guard: reference/ado-acl-self-escalation-guard.md
     - Supply-Chain Audit & Guardrails: reference/supply-chain-audit.md
     - Dependency Trust Policy: reference/dependency-trust-policy.md
+    - Supply-Chain Advisory Stewardship: reference/supply-chain-advisory-stewardship.md
     - amplihack Pin Bump to Upstream main (#2626): reference/amplihack-pin-bump-2626.md
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md

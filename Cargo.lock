@@ -58,7 +58,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "amplihack-agent-eval"
 version = "0.11.1"
-source = "git+https://github.com/rysweet/amplihack-rs.git?rev=2a93441d1837f9f853d5dddc56cc1088353a8872#2a93441d1837f9f853d5dddc56cc1088353a8872"
+source = "git+https://github.com/rysweet/amplihack-rs.git?rev=14dc30b10e87764120c6f2bae7f3630522c29e5d#14dc30b10e87764120c6f2bae7f3630522c29e5d"
 dependencies = [
  "chrono",
  "serde",

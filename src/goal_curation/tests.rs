@@ -18,6 +18,7 @@ fn mock_bridge() -> CognitiveMemoryClient {
 
 fn sample_goal(id: &str, priority: u32) -> ActiveGoal {
     ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -104,6 +105,7 @@ fn rejects_zero_priority() {
     let err = add_active_goal(
         &mut board,
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -187,6 +189,7 @@ fn rejects_empty_goal_id() {
     let err = add_active_goal(
         &mut board,
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
