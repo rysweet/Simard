@@ -14,7 +14,9 @@ description: >
   H1/H2 test results; round-4 re-anchored the AIMD `engineer_spawn` path to HEAD
   20fb7539 and refuted the amplifier/contributor reading at the code level
   (engineer_spawn is a passenger health signal, not a park driver — §3 upgraded to
-  High confidence, P5 downgraded to optional).
+  High confidence, P5 downgraded to optional). Round-5 re-executed the H1/H2 tests
+  (36 passed, 0 failed) and re-verified every source anchor and live GitHub/board
+  claim at HEAD db02dd7b — the diagnosis holds unchanged (§7e).
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -480,18 +482,84 @@ segment — its placement matches a passenger, not a driver. Net: §3 → **High
 round-3 runtime known-unknown (does `current_max` contract below `live_engineers`?)
 is now **immaterial**; **P5 → optional**.
 
+### 7e. Round-5 addendum — practical verification re-executed at HEAD `db02dd7b`
+
+Round 5 (this update) **re-ran the executable hypothesis tests and re-checked every
+source anchor and live-state claim** against the current working tree at HEAD
+`db02dd7b` (2026-07-07 ~12:25 UTC). HEAD moved from the round-4 anchor `20fb7539`
+by exactly one commit (`db02dd7b`, docs-only), so no source line drifted; every
+mechanism resolves at the §7b/§3b anchors (±1–3 lines, within the noted tolerance).
+The diagnosis holds unchanged.
+
+**Executable proof — full module green.** `cargo test --lib
+overseer::tests_memory_recall` → **36 passed, 0 failed**, including the four
+hypothesis tests re-run in isolation (`…::h` → **4 passed, 0 failed**):
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| H1 CONFIRM | `h1_confirm_self_recall_reemits_recurring_signature_from_own_writebacks` | **ok** |
+| H1 REFUTE-by-fix | `h1_refute_by_fix_provenance_filter_collapses_the_loop` | **ok** |
+| H2 CONFIRM | `h2_confirm_observation_signature_stacks_prefix_each_generation` | **ok** |
+| H2 REFUTE-by-fix | `h2_refute_by_fix_idempotent_signature_is_a_fixed_point` | **ok** |
+
+The surrounding dedup tests (`write_back_is_deduplicated_within_window`,
+`write_back_persists_again_for_a_distinct_signature`, `tick_writes_observation_back_once`)
+also passed, independently corroborating the §4 write-back → recall → re-signal
+mechanics.
+
+**Source anchors re-resolved (spot-checked at HEAD `db02dd7b`).** All present and
+semantically unchanged: §1 `sensor.rs:204` `blocked_goals_from_board`, `:209`
+`blocked_goal_of`, `no_progress_breaker.rs:58` `NO_PROGRESS_BREAKER_THRESHOLD = 3`,
+`:69` `NO_PROGRESS_BLOCKED_PREFIX`, `completion_gate.rs:31` `issue_closed`, `:380`
+`if !issue_closed`; §2a `provider.rs:61` `env_flag("SIMARD_SKIP_GYM")`,
+`sensor.rs:125` `skip_gym || …gym_skipped`, `signal.rs:399` `Signal::GymSkipped`,
+`mod.rs:1295` `quality:gym_skipped`; §2b `sensor.rs:300`
+`matches!(g.status, GoalProgress::Blocked(_)) { continue; }` (hard disjointness
+guard), `sensor.rs:288` `detect_workstream_gaps`, `mod.rs:1384` `workstream-gap`;
+§3b `advance.rs:432` `outcome_made_no_progress` requiring `outcome.success` (`:433`)
++ `detail.starts_with("no-action:")` (`:435`), `no_progress.rs:171/175` breaker gate
++ `success` check → `:260` `GoalProgress::Blocked`, `cycle.rs:316–322/359–362`
+`coverage_cap = current_max` + `goal_failure_counts` demotion, `coverage.rs:156`
+`combined.truncate(cap)`, `context.rs:111` `count_live_engineer_claims`,
+`adaptive_scaling.rs:21` `DECREASE_FACTOR = 0.5`; §7b `mod.rs:297` `write_back_gate`,
+`:544` `observation_signature(problems)`, `:1081` `fn observation_signature`, `:1283`
+`resource:engineer_spawn`, `:1349` `goal:blocked:{id}`, `signal.rs:351`
+`ENGINEER_SPAWN_THRESHOLD = 8`, `:362` `RECURRING_SIGNATURE_THRESHOLD = 2`, `:463`
+`occurrences >= threshold`.
+
+**Live state re-confirmed (2026-07-07 ~12:25 UTC).** Unchanged from §1:
+
+- `rysweet/agent-kgpacks-rs`: **#16 CLOSED** 2026-07-06T20:16:25Z, **#18 CLOSED**
+  10:33:04Z, **#21 CLOSED** 13:29:03Z, **#22 CLOSED** 12:07:33Z (all four
+  delivered → stale parks); **#17 OPEN** ("int8/PQ … gated on parity" — intentional
+  gate). Every timestamp matches §1 to the second.
+- `rysweet/Simard`: all **9 duplicate issues still OPEN** (#2669, #2672, #2678,
+  #2691, #2744, #2750, #2757, #2768, #2841), each titled "recurring signature seen
+  2× in cognitive memory". **Smoking gun intact:** #2768 (created 2026-07-07T02:02:16Z,
+  ≈6 h after #16 closed) and #2841 (08:21:50Z, ≈12 h after) both report a
+  `goal:blocked:…issue-16…` blocker that no longer existed at file time.
+
+Net: the four executable hypotheses (H1/H2 CONFIRM + REFUTE-by-fix) **pass**, and the
+source-anchored semantic hypotheses (§1 stale-park root cause, §2a ambient
+`gym_skipped`, §2b `workstream-gap` disjointness, §3 `engineer_spawn` passenger) are
+each **re-verified** by resolvable code anchors and live GitHub/board state. No finding
+changed; overall confidence remains **High**.
+
 ---
 
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–4). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–5). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
 deep dives, reconciled all line anchors to HEAD `0180b75c`, and executed the H1/H2
-CONFIRM/REFUTE tests (4 passed, 0 failed); **round-4 (this update) re-anchored the
+CONFIRM/REFUTE tests (4 passed, 0 failed); **round-4 re-anchored the
 AIMD `engineer_spawn` path to HEAD `20fb7539` and refuted the §3 amplifier/contributor
-mechanism at the code level, upgrading §3 to High and making P5 optional (§3b, §7d).**
+mechanism at the code level, upgrading §3 to High and making P5 optional (§3b, §7d);
+round-5 (this update) re-executed the full `tests_memory_recall` module (36 passed,
+0 failed) and re-verified every source anchor and live GitHub/board claim at HEAD
+`db02dd7b` — the diagnosis holds unchanged (§7e).**
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
