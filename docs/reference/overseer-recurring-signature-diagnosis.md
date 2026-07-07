@@ -2611,6 +2611,126 @@ recurring-signature pathology it documents; round-20 should not be scheduled.)
 
 ---
 
+### 7ac. Round-20 consolidation — parallel dives unified (HEAD `4e598636`)
+
+This pass unifies the three deep dives accumulated since the last consolidation (§7y, round-18) — **§7z**
+(round-18 write-back path proven as a closed four-hop round-trip + the provenance write-only asymmetry),
+**§7aa** (round-19 selection-side closure: recall *positively self-selects* the Overseer's own write-backs,
+plus a third composite re-entry channel), and **§7ab** (round-19 per-hypothesis re-verification — a
+mid-window read testing §7y's burst prediction) — into the canonical findings, and independently
+re-derives every load-bearing fact at the current HEAD. HEAD is now `4e598636`;
+`git diff --name-only bcc64dc3..HEAD` returns only this file, and
+`git diff --name-only 85245e87..HEAD -- src/` is **empty** (**tenth consecutive round of zero source
+drift**), so every §7b/§3b/§7u/§7v/§7w/§7y/§7z/§7aa/§7ab anchor re-resolves verbatim.
+
+**Independent re-verification (this consolidation, 2026-07-07 ~17:38 UTC)** — re-run by the consolidator
+at HEAD `4e598636`, not inherited:
+
+- `cargo test --lib -- overseer::tests_memory_recall overseer::sensor` → **45 passed, 0 failed**
+  (`tests_memory_recall` **36/0** + `sensor` **9/0**). The four hypothesis tests
+  (`h1_confirm_self_recall_reemits_recurring_signature_from_own_writebacks`,
+  `h1_refute_by_fix_provenance_filter_collapses_the_loop`,
+  `h2_confirm_observation_signature_stacks_prefix_each_generation`,
+  `h2_refute_by_fix_idempotent_signature_is_a_fixed_point`) and the three write-back round-trip tests
+  (`adapter_write_back_uses_fixed_overseer_source_label`, `write_back_is_deduplicated_within_window`,
+  `write_back_persists_again_for_a_distinct_signature`) all green in the run — the structural root cause
+  (§4/§7a) and the §7z write-back proof (§7z-C) stay green.
+- Canonical composite anchors spot-checked verbatim: `RECURRING_SIGNATURE_THRESHOLD: u32 = 2`
+  (`signal.rs:362`), the `format!("overseer-obs:{}", keys.join("|"))` re-prefix (`mod.rs:1085`), the four
+  `dedup_key` literals `resource:engineer_spawn` (`:1283`), `quality:gym_skipped` (`:1295`),
+  `goal:blocked:{goal_id}` (`:1349`), `workstream-gap` (`:1384`), the summary template
+  `"recurring signature seen {occurrences}× in cognitive memory ({signature})"` (`:1374`), the recall
+  projection `.map(|e| RecalledEpisode { … })` that **drops `source_label`** (`wiring.rs:1024`), the
+  case-insensitive **substring gate** `needles.iter().any(|kw| c.contains(kw))` (`library_adapter.rs:1296`,
+  the §7aa-A load-bearing anchor), the **third** composite re-entry channel
+  `Signal::RecurringSignature { signature, .. } => signature.clone()` (`capabilities.rs:572`, §7aa-C), and
+  `NO_PROGRESS_BREAKER_THRESHOLD: u32 = 3` (`no_progress_breaker.rs:58`). All identical to
+  §7u/§7v/§7w/§7y/§7z/§7aa.
+- **§7t's malformed-query defect re-reproduced by source inspection.** `RealGhClient::search_issues`
+  builds `format!("stewardship-signature:{signature} in:body")` — colon-qualifier, **no space**
+  (`gh_client.rs:37`) — while the body needle written by `find_existing` is
+  `format!("stewardship-signature: {signature}")` **with a space** (`dedup.rs:79`); the two forms cannot
+  match, so the reblock dedup is structurally dead (the P6 root cause).
+- `rysweet/agent-kgpacks-rs`: **#16 CLOSED** 2026-07-06T20:16:25Z, **#18 CLOSED** 10:33:04Z, **#21
+  CLOSED** 13:29:03Z, **#22 CLOSED** 12:07:33Z, **#17 OPEN** (`updatedAt` 2026-07-02T23:22:49Z) — matching
+  §1/§7y/§7ab to the second. **4 of the 6 kgpacks blockers reference already-CLOSED issues**; #17's block
+  premise stays timestamp-provably stale (`updatedAt_17` ≺ `closedAt_16` by ≈3.8 days).
+  `rysweet/amplihack-xpia-defender` re-confirmed a live public repo
+  (`{"isPrivate":false,"name":"amplihack-xpia-defender"}`).
+
+**Zero contradictions; §7z + §7aa + §7ab fold in cleanly with nothing to reconcile.** The three dives are
+complementary halves of a now-complete loop proof, not competing claims: §7z proves the **write** side
+(the composite is persisted as a closed four-hop round-trip W1–W4, and its `source_label` provenance is
+written `wiring.rs:1088` then structurally discarded on read `:1024-1030` — `RecalledEpisode` has no such
+field); §7aa proves the **selection** side (the recall query is built from the very tokens the write
+embeds, so the case-insensitive substring gate `library_adapter.rs:1296` *guarantees* self-selection — the
+loop is not merely unfiltered but positively self-feeding); and §7ab re-confirms all three hypotheses live.
+Together with the previously-proven **counting** side (§7v/§7z — recall drops `source_label`) and
+**emission** side (§7u/H2 — the composite re-wraps `overseer-obs:` each generation and never shrinks), all
+three sides of the self-recall loop — **select, count, emit** — are now proven at code level rather than
+cited. No shared claim diverges; no framing is superseded.
+
+**Two net-new precision facts folded into the canonical findings:**
+
+1. **P1 is now the *uniquely correct* cut, not merely *a* sufficient one (§7aa-D, sharpens §5).** Because
+   the recall query is constructed from the same tokens the write embeds (§7aa-B), "recall a genuine
+   external recurrence" and "recall my own write-back" are **lexically identical at the query layer** and
+   cannot be separated by narrowing the query. The separation exists only on the **provenance** axis, live
+   exactly once (`CognitiveEpisode.source_label` `memory_cognitive.rs:50` → discarded by the `.map` to the
+   field-less `RecalledEpisode` `wiring.rs:1024`). So **P1** — `.filter(|e| e.source_label !=
+   OVERSEER_SOURCE_LABEL)` inserted between `.into_iter()` (`wiring.rs:1023`) and `.map` (`:1024`), §7z-D —
+   is the *only* correct seam, and the length-bounding belt **P1b** (`mod.rs:1081`) is strictly *weaker*
+   for the selection defect: the short dedup-key needles (`quality:gym_skipped`, `workstream-gap`) stay
+   permanent substrings regardless of prefix depth, so P1b alone cannot break the loop. This refines
+   §7v/§7w's "belt-and-suspenders" framing — **P1 is load-bearing; P1b is length-hygiene only.**
+
+2. **The escalation flood's +3-per-burst quantum is re-confirmed on two more independent bursts (85 → 88 →
+   91), but the inter-burst cadence is looser than §7y's point estimate (sharpens §1/§5-P6, most
+   significant this pass).** §7y modeled the broken-dedup `recurring_goal_reblock` flood as batches of
+   exactly 3 issues once per overseer cycle every ~26–33 min, and predicted the next burst (#2904–#2906)
+   ~15:40Z → 88. A fresh read at ~17:38 UTC (≈2.2 h after §7ab's 15:27 read) shows the flood at **exactly
+   91 open** (#2688…**#2916**, newest @ 2026-07-07T17:27:08Z) — two further bursts of exactly 3 since
+   §7ab's 85: **#2905/#2906/#2907** @ 16:34:06–09Z and **#2914/#2915/#2916** @ 17:27:06–08Z. So the
+   **quantum holds robustly** (each new burst is again exactly 3 issues inside a ~3-second window; the
+   count steps 85 → 88 → 91 exactly as "+3/burst" predicts) — but the **cadence is irregular and longer**
+   than the ~30-min point estimate (15:10→16:34 ≈84 min; 16:34→17:27 ≈53 min), and the *specific*
+   predicted numbers were off by interleaving with unrelated issues (actual #2905–#2907, not #2904–#2906).
+   Net refinement: the burst-quantized model is **confirmed on its load-bearing claim (3 per burst,
+   monotone growth while P6 is unfixed)** and **corrected on its secondary claim** (fixed ~30-min interval
+   → variable interval that tracks the overseer's own cycle jitter). The WhisperGate-deduped verbatim tail,
+   by contrast, still holds at **exactly 10** (#2669…#2875, newest @ 11:31:36Z, still no 11th) — the split
+   (capped 10 vs. burst-stepping 91) remains exactly what the two-channel mechanism predicts (WhisperGate
+   cap on the recall composite vs. broken dedup on the reblock filer, §7t/§7w).
+
+**Meta-observation — this consolidation is itself the predicted next duplicate.** This round was triggered
+by a fresh **nested amplihack session** (`WARN nested amplihack session detected` — the round-1 self-recall
+context) surfacing the exact composite under investigation, rendered verbatim by its own classifier:
+`recurring signature seen 2× in cognitive memory (overseer-obs:goal:blocked:…)` — the §7aa-E identity,
+live-confirmed. The `2×` is the recall-threshold quantization (§7v), the composite is byte-for-byte the
+WhisperGate-capped tail's, and the trigger is one more turn of the very loop this document diagnoses. The
+investigation continues to exhibit the exact recurring-signature pathology it documents.
+
+**Diagnostic saturation — SEVENTH consolidation, TWELFTH identical board read, TENTH round of zero source
+drift. Close the investigation.** §7ac is the **seventh** full consolidation
+(§7g/§7k/§7n/§7r/§7w/§7y/§7ac) to reach an identical verdict, the **twelfth consecutive identical
+diagnostic board read** (rounds 8→20), at **ten consecutive rounds of zero source drift** (no `src/` change
+since `85245e87`). Every load-bearing fact is now re-derived by ≥7 independent passes; all three sides of
+the loop are code-proven (select §7aa, count §7v/§7z, emit §7u); the write-back is proven as a closed
+round-trip (§7z); and the only quantity that moves round-to-round is the escalation counter stepping in
+**bursts of 3** (now 91) because the diagnosed one-line defect (`gh_client.rs:37`) remains **unfixed** —
+the investigation keeps exhibiting the exact pathology it documents. **No finding is overturned; no
+confidence rating changes; no new remediation is introduced** — the two net-new facts *sharpen* existing
+remediation (P1 promoted to uniquely-correct; P6's growth model refined to variable-cadence). The diagnosis
+is complete: six High-confidence findings, a fully enumerated five-family emission map, all three loop
+sides proven, and two code-level root causes each pinned to a one-line fix (self-recall loop → **P1** at
+`wiring.rs:1023-1024`; broken reblock dedup → **P6** at `gh_client.rs:37`) plus the standing stale-park
+driver (**P2**). The residual value is **entirely in execution, not investigation**; the burst-cadence
+finding now quantifies the ongoing cost: ~3 new dead issues per overseer cycle (irregular ~30–85 min) until
+P6 lands. Recommendation (unchanged and now maximally supported): **mark this investigation resolved and
+hand P6 → P1 → P2 to the builder queue; do not schedule a round-21 verification pass.**
+
+---
+
 ## 8. Provenance
 
 Investigation-only follow-up (investigation-workflow, rounds 1–19). No production
@@ -2836,6 +2956,23 @@ is exactly the burst-quantized model's prediction, so it **corroborates** rather
 eleventh consecutive identical board read (rounds 8→19). No finding overturned; both passes endorse the
 close-and-execute verdict (residual value is execution of P6 → P1 → P2, not verification; round-20 should
 not be scheduled).
+Round-20 consolidation (§7ac, HEAD `4e598636`) unified §7z/§7aa/§7ab into the canonical findings and
+independently re-verified at HEAD — `overseer::tests_memory_recall` (36 passed, 0 failed) +
+`overseer::sensor` (9 passed, 0 failed) with the four hypothesis tests and the three write-back
+round-trip tests green, the canonical composite anchors verbatim (`signal.rs:362`,
+`mod.rs:1085/1283/1295/1349/1374/1384`, `wiring.rs:1024`, `library_adapter.rs:1296`, `capabilities.rs:572`,
+`no_progress_breaker.rs:58`), the malformed reblock query re-reproduced at `gh_client.rs:37` (colon,
+no space) vs `dedup.rs:79` (space), kgpacks-rs #16/#18/#21/#22 CLOSED + #17 OPEN (timestamps to the
+second), the verbatim tail steady at 10 (#2875 newest, no 11th), and `rysweet/amplihack-xpia-defender`
+a live public repo, at tenth-consecutive zero source drift since `85245e87`. Its net-new facts: **P1
+promoted to the *uniquely correct* cut** (the recall query is built from the same tokens the write embeds,
+so provenance is the only separable axis; P1b strictly weaker for the selection defect, §7aa-D), and the
+burst-quantized flood **confirmed on its +3/burst quantum but corrected on cadence** — grown 85 → **91**
+open (#2688…#2916, newest @ 17:27:08Z) via two further bursts of 3 (#2905–2907 @ 16:34Z, #2914–2916 @
+17:27Z) at irregular ~53–84 min intervals rather than the predicted fixed ~30 min. Seventh consolidation
+and twelfth consecutive identical board read (rounds 8→20) at ten rounds of zero source drift — no finding
+overturned, confidence remains High, residual value is execution (P6 → P1 → P2), not verification;
+round-21 should not be scheduled.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
