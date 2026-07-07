@@ -307,11 +307,15 @@ async fn index() -> axum::response::Html<String> {
     axum::response::Html(super::index_html::index_html_string())
 }
 
+/// Resolve the durable state root the dashboard reads from.
+///
+/// Must match the resolver the OODA daemon registers its in-process writer
+/// under ([`crate::state_root::simard_state_root`], via
+/// [`crate::memory_ipc::default_state_root`]). A former divergent private copy
+/// took `SIMARD_STATE_ROOT` verbatim, so reader tier-0
+/// (`lookup_in_process_writer`) missed the daemon's key and the "Creative
+/// Ideas" tab was permanently empty even while the thread logged "10 persisted"
+/// (#2798, D1).
 pub(crate) fn resolve_state_root() -> std::path::PathBuf {
-    std::env::var("SIMARD_STATE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
-            std::path::PathBuf::from(home).join(".simard")
-        })
+    crate::state_root::simard_state_root()
 }

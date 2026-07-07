@@ -20,6 +20,7 @@ status: implemented — wired into the daemon (default-ON, opt-out)
 related:
   - ../design/creative-ideas-thread.md
   - ../howto/configure-creative-ideas-thread.md
+  - ./creative-ideas-durable-read-after-write.md
   - ./cognitive-thread-scheduling.md
   - ./goal-board-api.md
   - ./stewardship-api.md
@@ -727,6 +728,7 @@ for the full list of assertions.
 - [Creative Ideas tab — live view and operator controls](../operator-dashboard/creative-ideas-operator-controls.md)
 - [Creative Ideas background thread — design](../design/creative-ideas-thread.md)
 - [Configure and operate the Creative Ideas thread](../howto/configure-creative-ideas-thread.md)
+- [Creative Ideas durable read-after-write](./creative-ideas-durable-read-after-write.md) — the persistence/read seam that keeps the dashboard tab non-empty and durable across restart (#2798)
 - [Cognitive-thread scheduling](./cognitive-thread-scheduling.md)
 - [Add a new cognitive thread](../howto/add-a-new-cognitive-thread.md)
 - [Goal board API](./goal-board-api.md) · [Stewardship API](./stewardship-api.md)

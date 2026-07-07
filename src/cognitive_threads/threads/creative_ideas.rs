@@ -237,6 +237,12 @@ impl CreativeIdeasThread {
             }
         }
 
+        // Durability (issue #2798): no explicit checkpoint is needed here — the
+        // pinned amplihack-memory engine's WAL is write-through and replayed on
+        // open, so ideas persisted above survive a non-graceful daemon exit and
+        // are recovered on reopen. Pinned by the durability regression tests; the
+        // always-empty tab was the state-root resolver divergence, not a
+        // durability defect (fixed in `routes::resolve_state_root`, D1).
         Ok(report)
     }
 

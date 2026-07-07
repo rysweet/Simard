@@ -356,6 +356,7 @@ nav:
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md
     - Cognitive-Thread Scheduling: reference/cognitive-thread-scheduling.md
     - Creative Ideas Subsystem API: reference/creative-ideas-api.md
+    - Creative Ideas Durable Read-After-Write: reference/creative-ideas-durable-read-after-write.md
   - Operations:
     - Overview: operations/index.md
     - Verified Backups of the Live Store: operations/verified-backups.md
