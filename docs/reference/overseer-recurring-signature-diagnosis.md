@@ -2292,6 +2292,132 @@ not schedule a round-19 verification pass.**
 
 ---
 
+### 7z. Round-18 primary-investigator deep dive (parallel to the §7y consolidation) — the WRITE-BACK path proven end-to-end as a closed round-trip + the provenance write-only asymmetry (HEAD `bcc64dc3`, re-verified current at docs-only `ad3c0215`)
+
+This pass owns the assigned focus verbatim — **re-anchor all signature-token emission points to
+`file:line` AND prove the write-back path** — and runs **parallel to the §7y consolidation** (the two
+were authored concurrently against the same tree; HEAD advanced `bcc64dc3` → `ad3c0215` during this
+dive, but `ad3c0215` is **docs-only** — `git diff --name-only bcc64dc3..ad3c0215` touches only this
+file — so every source anchor below is unchanged). Prior rounds and the §7y consolidation exhaustively
+proved the **read/recall** half of the loop (§7t/§7u emission map; H1 self-recall tests; §7y re-derives
+the recall projection that drops `source_label` at `wiring.rs:1022-1030`) and *cite* the write half
+(`wiring.rs:952/1088`, `mod.rs:544`) — but **no pass lays out the write-back as a first-class, closed
+four-hop round-trip**, nor isolates *why* provenance is recoverable in principle yet lost in practice.
+This dive does exactly that: it (i) re-anchors the six emission literals (§A), (ii) proves the
+write-back path W1–W4 end-to-end and pins the **provenance write-only asymmetry** that closes the loop
+(§B), (iii) maps the **seven** write-back/round-trip tests onto W1–W4 (§C), and (iv) refines §7y's P1
+statement to the **exact insertion line** with a type-level safety proof (§D). `git diff --name-only
+85245e87..HEAD -- src/` is **empty** (eighth consecutive round of zero source drift), so every anchor
+re-resolved **verbatim** by reading the files at HEAD; `cargo test --lib
+overseer::tests_memory_recall` → **36 passed, 0 failed**. Strictly additive; no prior finding
+overturned; fully consistent with §7y (including its "close the investigation, execute P6 → P1 → P2"
+recommendation — this dive hardens the P1 leg of that hand-off, it does not reopen anything).
+
+**A. Emission points re-anchored at `bcc64dc3` (assigned focus #1) — six literals, zero drift.**
+Re-resolved by reading `src/overseer/mod.rs` at this HEAD (verbatim identical to §7u's canonical
+anchors):
+
+| Token family | Authoritative emission literal | `file:line` @ `bcc64dc3` |
+|---|---|---|
+| `overseer-obs:` (composite wrapper) | `format!("overseer-obs:{}", keys.join("\|"))` | `mod.rs:1085` (fn `observation_signature` `1081`–`1086`) |
+| `goal:blocked:{id}` (×7 slugs, one line) | `format!("goal:blocked:{goal_id}")` | `mod.rs:1349` |
+| `resource:engineer_spawn` | `"resource:engineer_spawn".to_string()` | `mod.rs:1283` |
+| `quality:gym_skipped` | `"quality:gym_skipped".to_string()` | `mod.rs:1295` |
+| `workstream-gap` (bare problem key) | `"workstream-gap".to_string()` | `mod.rs:1384` |
+| recalled composite (the `2×` re-entry) | `sanitize_recalled(signature)` (`RecurringSignature` arm) | `mod.rs:1372` |
+
+All six confirmed at their §7u lines by direct `grep -n` at this HEAD. The disambiguations of §7u-D/E
+(the Act-phase `workstream-gap:{sig}` whisper key at `mod.rs:904/945`, and the `signal_keyword` recall
+stems `engineer_spawn`/`gym_skipped` at `capabilities.rs:562/564`) re-resolve unchanged and remain
+**outside** the composite. Nothing new to correct on the emission side.
+
+**B. The write-back path, proven end-to-end (assigned focus #2 — NET-NEW as a closed round-trip).**
+The composite is not merely *emitted*; it is deliberately **persisted** and later **re-ingested**.
+Four hops, every one re-resolved at `bcc64dc3`:
+
+| Hop | Role | Anchor (verbatim @ `bcc64dc3`) |
+|---|---|---|
+| W1. **Gate** | `write_back_observation` writes only a non-empty tick (`:541`), computes the composite (`:544`), and dedups on the **whole** signature via `write_back_gate.peek`/`commit` | `mod.rs:532` (fn), `:541` (empty-skip), `:544` (`observation_signature`), `:546`/`:554` (peek/commit) |
+| W2. **Compose** | payload `ObservationEpisode { content: observation_content(problems), signature }` — `signature` is the sorted+deduped+prefixed composite | `mod.rs:548-551`; signature built `mod.rs:1081-1085`; type `capabilities.rs:636-642` |
+| W3. **Persist + stamp provenance** | `record_observation` embeds the signature **in-band** as `[sig:{signature}]` in the content, then `store_episode(&content, OVERSEER_SOURCE_LABEL, metadata)` — provenance is FIXED (`"overseer"`, never caller-chosen) | `wiring.rs:1076` (fn), `:1084` (`[sig:…]` embed), `:1088` (store), `:950-952` (`OVERSEER_SOURCE_LABEL`) |
+| W4. **Re-ingest** | `recall_episodic` recovers the signature by **re-parsing** the in-band `[sig:…]` marker, and projects to `RecalledEpisode` | `wiring.rs:1013` (fn), `:1025` (`parse_failure_signature`), `:976-986` (parser), projection `:1024-1030` |
+
+**The crux — provenance is WRITE-ONLY (the asymmetry that closes the loop).** The write side stamps
+**two** provenance channels: the signature *in-band* (`[sig:…]` text, `wiring.rs:1084`) and the author
+*out-of-band* (`source_label = "overseer"`, `wiring.rs:1088`). On re-ingest the two channels are
+treated **asymmetrically**:
+
+- the **in-band signature survives** the write→read round-trip — `parse_failure_signature`
+  (`wiring.rs:1025`) reads the very `[sig:…]` string the write embedded, so `failure_signature`
+  comes back populated (this is exactly what the `RecurringSignature` tally at `signal.rs:456-464`
+  counts);
+- the **out-of-band author is discarded** — the `.map` projection (`wiring.rs:1024-1030`) never reads
+  `source_label`, and `RecalledEpisode` (`capabilities.rs:607-616`) **has no `source_label` field** at
+  all. The provenance faithfully written at `:1088` is structurally unrecoverable one function later.
+
+So the Overseer perfectly records *that it authored the episode* and then, on the read that decides
+recurrence, **cannot tell its own write-back from an external episode.** That single asymmetry — not a
+missing write, not a missing dedup — is what makes the recall loop self-feeding. (Write-side dedup does
+*not* save it either: `write_back_gate` keys on the whole composite `signature` `mod.rs:546`, but §7t/H2
+prove the composite **grows every generation**, so each generation is a distinct gate key that
+peek/commit never suppresses — the write-side mirror of the WhisperGate observation in §1/round-1.)
+
+**C. Executable proof at this HEAD (the write half now has the same test rigor as the read half).**
+Seven named tests exercise W1–W4 through the **real** `MemoryRecallOps` adapter; all green at
+`bcc64dc3`:
+
+| Test | What it pins | Hop |
+|---|---|---|
+| `adapter_write_back_uses_fixed_overseer_source_label` (`tests_memory_recall.rs:972`) | `store_episode` receives `source_label == "overseer"` + typed metadata (asserts `rows[0].1 == "overseer"`, `:988`) | W3 stamp |
+| `write_back_is_deduplicated_within_window` (`:797`) | identical signature within the window persists **once** (gate holds for *stable* keys) | W1 gate |
+| `write_back_persists_again_for_a_distinct_signature` (`:820`) | a **distinct** signature persists **again** — the exact property the growing composite exploits | W1 gate |
+| `h1_confirm_self_recall_reemits_recurring_signature_from_own_writebacks` (`:1109`) | recall recovers the OWN `[sig:…]` marker (`:1137`) yet still re-emits `RecurringSignature{occurrences:2}` (`:1147`) — because there is no `source_label` to filter on | W4 + crux |
+| `h1_refute_by_fix_provenance_filter_collapses_the_loop` (`:1157`) | a `source_label != "overseer"` filter **at the `CognitiveEpisode` layer** drops every self-authored episode → recurrence falls below threshold | fix seam |
+| `h2_confirm_observation_signature_stacks_prefix_each_generation` (`:1199`) | each generation adds another `overseer-obs:` prefix (composite grows) | W1/W2 |
+| `h2_refute_by_fix_idempotent_signature_is_a_fixed_point` (`:1223`) | an idempotent signature is a fixed point (growth stops) | W2 |
+
+`cargo test --lib overseer::tests_memory_recall` → **36 passed, 0 failed** (the 7 above named
+explicitly in the run). The `adapter_…source_label` test proves the write stamps provenance; the
+`h1_confirm` test proves the read discards it — together they **execute the exact asymmetry of §B**.
+
+**D. The §5-P1 fix, refined from §7y's range to one exact insertion line + a type-level safety proof
+(net-new precision).** The §7y consolidation and §7v already establish that P1 is a single
+`.filter(|e| e.source_label != OVERSEER_SOURCE_LABEL)` and that it is feasible because
+`CognitiveEpisode` carries `pub source_label: String` all the way to the discarding projection
+(`wiring.rs:1022-1030`). This dive sharpens *where* it goes and *why it cannot be defeated*. Because
+`recall_episodes_ranked` returns `Vec<CognitiveEpisode>` (`cognitive_memory/mod.rs:542-547`) and that
+`source_label` field (`memory_cognitive.rs:50`) is still bound to `e` at the iterator stage
+(`wiring.rs:1023`) but **erased by the `.map` to the flattened `RecalledEpisode` on the very next
+line** (`:1024`, target type `capabilities.rs:607-616` has no such field), the guard must be inserted
+**between `.into_iter()` (`:1023`) and `.map(…)` (`:1024`)** — i.e. strictly *upstream* of the erasure:
+
+```rust
+.into_iter()
+.filter(|e| e.source_label != OVERSEER_SOURCE_LABEL) // drop the Overseer's OWN write-backs
+.map(|e| RecalledEpisode { … })
+```
+
+Placed there it (a) is adapter-local and needs **no new memory-library API** (the constant already
+exists, `wiring.rs:952`), and (b) **cannot be defeated by the flattening**, since it reads the
+provenance while it is still live. This is *exactly* the guard
+`h1_refute_by_fix_provenance_filter_collapses_the_loop` exercises at the `CognitiveEpisode` layer
+(`tests_memory_recall.rs:1167`). The refinement over §7y: from the range "`wiring.rs:1022-1030`" to the
+single **insertion point after line 1023**, with the erasure-boundary argument for why that placement
+is the only correct one.
+
+**Verification footer.** HEAD `ad3c0215` (source-anchored at `bcc64dc3`; the intervening commit is
+docs-only); `git diff --name-only 85245e87..HEAD -- src/` **empty** (eighth consecutive round of zero
+source drift — every §A emission literal + the §B W1–W4 write-back anchors + the §D fix-seam types
+re-resolved verbatim by reading the files at HEAD); `cargo test --lib overseer::tests_memory_recall`
+**36/0**, with the seven W1–W4 tests named in §C all **ok**. **No prior finding overturned**; §7z is
+additive and fully consistent with the parallel §7y consolidation — it promotes the write-back half of
+the loop from *cited* to *proven-as-a-closed-round-trip* (§B W1–W4), isolates the write-only provenance
+asymmetry (§B crux), maps the seven write-back tests onto the four hops (§C), and refines §7y's P1 from
+a line-range to the single correct insertion point (§D). It **endorses** §7y's verdict: the diagnosis
+is saturated and the residual value is in executing P6 → P1 → P2. Confidence **High**.
+
+---
+
 ## 8. Provenance
 
 Investigation-only follow-up (investigation-workflow, rounds 1–18). No production
@@ -2489,6 +2615,16 @@ of exactly 3 issues per overseer cycle (~every 26–33 min: 13:39/14:05/14:37/15
 growth model (next burst #2904–#2906 due ~15:40Z → 88) that sharpens §1/§5-P6; sixth consolidation and
 tenth consecutive identical board read (rounds 8→18) — no finding overturned, confidence remains High,
 residual value is execution (P6/P1/P2), not verification.
+Round-18 primary-investigator deep dive (§7z, HEAD `bcc64dc3`, re-verified at docs-only `ad3c0215`),
+authored in parallel with the §7y consolidation, proved the **write-back path end-to-end as a closed
+four-hop round-trip** (gate `mod.rs:532/541/544/546/554` → compose `mod.rs:548-551` → persist+stamp
+provenance `wiring.rs:1076/1084/1088/952` → re-ingest `wiring.rs:1013/1025/976-986`), isolating the
+**provenance write-only asymmetry** — the in-band `[sig:…]` marker survives the round-trip while the
+out-of-band `source_label` is written (`:1088`) then structurally discarded on read (`:1024-1030`;
+`RecalledEpisode` has no such field, `capabilities.rs:607-616`). It mapped the seven write-back/
+round-trip tests onto the four hops (all green, 36/0) and refined §7y's P1 from the range
+`wiring.rs:1022-1030` to the single correct insertion point (after `:1023`, upstream of the `.map`
+erasure). No finding overturned; endorses §7y's close-and-execute verdict.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
