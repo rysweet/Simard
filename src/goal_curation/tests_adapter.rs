@@ -26,6 +26,7 @@ use crate::goals::GoalStatus;
 
 fn active(id: &str, description: &str, priority: u32) -> ActiveGoal {
     ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -94,6 +95,7 @@ fn one_active_goal_maps_basic_fields() {
 fn current_activity_is_used_as_rationale_when_present() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -129,6 +131,7 @@ fn missing_current_activity_yields_empty_rationale() {
 fn assigned_to_some_becomes_owner_identity() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

@@ -56,6 +56,7 @@ impl EvidenceSource for FakeEvidence {
 
 fn simard_goal(id: &str, status: GoalProgress) -> ActiveGoal {
     ActiveGoal {
+        labels: Vec::new(),
         id: id.to_string(),
         description: "improve the daemon".to_string(),
         priority: 1,

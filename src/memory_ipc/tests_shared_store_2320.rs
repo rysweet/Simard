@@ -34,6 +34,7 @@ fn seeded_board() -> GoalBoard {
     let mut board = GoalBoard::new();
     for (i, d) in descs.iter().enumerate() {
         board.active.push(ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -116,6 +117,7 @@ fn tier2_writer_and_reader_share_one_store() {
     // Add a fourth active goal through a fresh writer bridge.
     let mut board = seeded_board();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

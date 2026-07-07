@@ -456,6 +456,38 @@ fn route_accepted_idea_produces_proposed_goal() {
 }
 
 #[test]
+fn route_accepted_idea_stamps_source_creative_ideas_provenance() {
+    // Issue #2743 headline case: a goal promoted from a creative idea is
+    // stamped `source:creative-ideas` at creation, so "which goals came from
+    // creative ideas?" is answerable by an exact-tag filter.
+    let goals = InMemoryGoalStore::try_default().expect("goal store");
+    let mut idea = CreativeIdea::new("ship the live tag filter", sample_context(), 7);
+    idea.node_id = "pro_idea_prov".to_string();
+    idea.status = IdeaStatus::AcceptedForImplementation;
+
+    let record = route_idea_to_goal(&idea, &goals, 1_700_000_777).expect("route to goal");
+    assert_eq!(
+        record.labels,
+        vec![crate::goal_curation::labels::SOURCE_CREATIVE_IDEAS.to_string()],
+        "creative-idea goal must carry exactly source:creative-ideas at birth",
+    );
+
+    // The provenance survives persistence into the store.
+    let stored = goals.list().expect("list goals");
+    let persisted = stored
+        .iter()
+        .find(|g| g.slug == record.slug)
+        .expect("goal persisted");
+    assert!(
+        persisted
+            .labels
+            .iter()
+            .any(|l| l == crate::goal_curation::labels::SOURCE_CREATIVE_IDEAS),
+        "persisted creative-idea goal must remain queryable by source:creative-ideas",
+    );
+}
+
+#[test]
 fn route_non_accepted_idea_to_goal_is_rejected() {
     let goals = InMemoryGoalStore::try_default().expect("goal store");
     let mut idea = CreativeIdea::new("premature idea", sample_context(), 5);

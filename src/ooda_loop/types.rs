@@ -479,6 +479,21 @@ pub struct OodaClients {
     /// non-daemon callers. Bounded by the AIMD `cap` (`scaler.current_max()`)
     /// so concurrency stays resource-aware.
     pub session_factory: Option<std::sync::Arc<dyn OrchestratorSessionFactory>>,
+    /// Optional structured-reasoning brain for closed-loop live outcome
+    /// verification (issue #2751). When `Some` (paired with [`Self::live_signals`]),
+    /// a completion-candidate goal is verified LIVE at the curate seam before it
+    /// can archive — the goal is "achieved" only once a verified live signal
+    /// corroborates its real success criteria, not merely because a PR landed.
+    /// When `None` the legacy curate path is unchanged. Production boot wires
+    /// the recipe brain unless `SIMARD_OUTCOME_VERIFY=off`; tests inject a stub.
+    pub outcome_verify_brain: Option<std::sync::Arc<dyn crate::ooda_brain::OodaBrain>>,
+    /// Optional live-signal source paired with [`Self::outcome_verify_brain`].
+    /// Composes the thin adapters over telemetry / journald / deploy-reconcile
+    /// state the daemon already emits; tests inject a hermetic double. `None`
+    /// leaves the legacy curate path in place (both fields must be `Some` for
+    /// verification to run).
+    pub live_signals:
+        Option<std::sync::Arc<dyn crate::goal_curation::live_signal::LiveSignalSource>>,
 }
 
 // ---------------------------------------------------------------------------

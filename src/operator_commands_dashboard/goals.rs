@@ -110,7 +110,7 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
             // is kept as-is (alias) so existing consumers do not break.
             let (chip, detail, detail_full) =
                 render_status_and_detail(g.current_activity.as_deref());
-            json!({
+            let mut obj = json!({
                 "id": g.id,
                 "description": g.description,
                 "priority": g.priority,
@@ -140,7 +140,15 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
                 "detail": detail,
                 "detail_full": detail_full,
                 "wip_refs": g.wip_refs,
-            })
+            });
+            // Issue #2743: additively expose the goal's labels (tags) so the
+            // Goals tab can render label chips and filter by tag. Omitted when
+            // empty (mirrors the serde `skip_serializing_if` contract), so
+            // existing `/api/goals` consumers are unaffected.
+            if !g.labels.is_empty() {
+                obj["labels"] = json!(g.labels);
+            }
+            obj
         })
         .collect();
 
@@ -248,6 +256,7 @@ pub(crate) async fn seed_goals_at(state_root: &std::path::Path) -> Json<Value> {
         current_activity: Some(format!("Goal seeded via dashboard at {now}")),
         wip_refs: vec![],
         last_progress_update_at: None,
+        labels: vec![crate::goal_curation::labels::SOURCE_SEED.to_string()],
     });
     board.active.push(ActiveGoal {
         parent_goal_id: None,
@@ -263,6 +272,7 @@ pub(crate) async fn seed_goals_at(state_root: &std::path::Path) -> Json<Value> {
         current_activity: Some(format!("Goal seeded via dashboard at {now}")),
         wip_refs: vec![],
         last_progress_update_at: None,
+        labels: vec![crate::goal_curation::labels::SOURCE_SEED.to_string()],
     });
     board.active.push(ActiveGoal {
         parent_goal_id: None,
@@ -276,6 +286,7 @@ pub(crate) async fn seed_goals_at(state_root: &std::path::Path) -> Json<Value> {
         current_activity: Some(format!("Goal seeded via dashboard at {now}")),
         wip_refs: vec![],
         last_progress_update_at: None,
+        labels: vec![crate::goal_curation::labels::SOURCE_SEED.to_string()],
     });
     board.backlog.push(BacklogItem {
         id: "distributed-sync".to_string(),
@@ -382,6 +393,7 @@ pub(crate) async fn add_goal_at(
             current_activity: None,
             wip_refs: vec![],
             last_progress_update_at: None,
+            labels: vec![crate::goal_curation::labels::SOURCE_OPERATOR.to_string()],
         });
     }
 
@@ -505,6 +517,7 @@ pub(crate) async fn promote_backlog_item_at(
         Some(i) => board.backlog.remove(i),
         None => return Json(json!({"error": "backlog item not found"})),
     };
+    let promoted_source = crate::goal_curation::labels::source_for_backlog(&item.source);
 
     board.active.push(ActiveGoal {
         parent_goal_id: None,
@@ -518,6 +531,7 @@ pub(crate) async fn promote_backlog_item_at(
         current_activity: None,
         wip_refs: vec![],
         last_progress_update_at: None,
+        labels: vec![promoted_source.to_string()],
     });
 
     match dashboard_save_goal_board(state_root, &board) {

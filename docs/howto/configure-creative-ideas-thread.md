@@ -10,11 +10,12 @@ description: >
   through goal ↔ issue ↔ PR, monitoring the telemetry, extending it with a
   custom IdeaSource or Reviewer, and testing with the built-in fakes. The
   subsystem is default-ON, opt-out.
-last_updated: 2026-07-05
+last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
 doc_type: howto
 related:
+  - ../operator-dashboard/creative-ideas-operator-controls.md
   - ../reference/creative-ideas-api.md
   - ../design/creative-ideas-thread.md
   - ./add-a-new-cognitive-thread.md
@@ -275,6 +276,25 @@ through the whole system:
 4. **PR** — its body carries `originating-idea: <node_id>`, and it stays a
    labelled draft with an owner review requested until approved.
 
+## Generate on demand and act on ideas from the dashboard
+
+The background thread ticks on its own schedule (default every 24 h), but an
+operator does not have to wait for it. The operator dashboard's **Creative
+Ideas** tab renders the live idea pool and adds three controls:
+
+- **Run now** — trigger one generation pass immediately, bypassing the
+  `enabled()`/interval gate (a daemon restart resets the 24 h timer, so this is
+  often the fastest way to get a fresh batch). It runs against the live daemon
+  store, is guarded against concurrent runs, and surfaces any failure loudly.
+- **Promote** — accept an idea (`AcceptedForImplementation`) and, by default,
+  route it onto the goal board.
+- **Prune** — reject an idea (`Rejected`).
+
+Promote/Prune go strictly through the `IdeaStatus` state machine; only valid
+transitions are offered and the server re-validates each write. For the HTTP
+endpoints, JSON contracts, gating rules, and examples see
+[Creative Ideas tab — live view and operator controls](../operator-dashboard/creative-ideas-operator-controls.md).
+
 ## Monitor it
 
 Everything emits through the existing cognitive-thread telemetry facade
@@ -411,6 +431,7 @@ rejection, the default-ON/opt-out gate, the two error contracts, and a total `ti
 
 ## See also
 
+- [Creative Ideas tab — live view and operator controls](../operator-dashboard/creative-ideas-operator-controls.md)
 - [Creative Ideas subsystem API reference](../reference/creative-ideas-api.md)
 - [Creative Ideas background thread — design](../design/creative-ideas-thread.md)
 - [Configure and monitor cognitive-thread scheduling](./configure-cognitive-thread-scheduling.md)

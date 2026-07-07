@@ -35,6 +35,8 @@ mod tests_gated_write_2679;
 mod tests_shared_store_2320;
 #[cfg(test)]
 mod tests_socket_path;
+#[cfg(test)]
+mod tests_transport_roundtrip;
 
 use serde::{Deserialize, Serialize};
 

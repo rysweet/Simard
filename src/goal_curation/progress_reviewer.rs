@@ -332,6 +332,7 @@ mod tests {
 
     fn goal_with_activity(activity: Option<&str>) -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,

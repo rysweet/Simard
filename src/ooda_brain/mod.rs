@@ -169,6 +169,93 @@ pub enum EngineerLifecycleDecision {
 }
 
 // ---------------------------------------------------------------------------
+// Closed-loop outcome verification (issue #2751)
+// ---------------------------------------------------------------------------
+
+/// The structured context handed to the brain for live outcome verification.
+/// Assembled by the gather step in
+/// [`outcome_verify`](crate::goal_curation::outcome_verify) from the artifact
+/// evidence (an INPUT, not the decider) and the freshly-gathered live signals.
+///
+/// `Clone` so hermetic test doubles can capture the exact ctx they were handed
+/// and assert the gather→ctx wiring.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GoalOutcomeCtx {
+    /// Goal identity.
+    pub goal_id: String,
+    pub goal_title: String,
+    /// The goal's REAL success criteria — what "achieved" actually means.
+    pub success_criteria: String,
+    /// Artifact-level signals from the completion-evidence gate (merged PR,
+    /// closed issue, deployed). Fed as INPUT so the brain can weigh
+    /// artifact-vs-outcome; it is NOT the decider.
+    pub artifact_signals: crate::goal_curation::completion_gate::CompletionEvidence,
+    /// Live signals gathered this cycle. The Rail-3 override checks
+    /// `.iter().any(|s| s.verified)` — a compromised prompt cannot forge these.
+    pub live_signals: Vec<crate::goal_curation::live_signal::LiveSignal>,
+    /// How many times this goal has already been re-verified (bumped on each
+    /// `reopen` / `replan`). Lets the brain notice a goal that keeps landing
+    /// artifacts without ever producing the live effect.
+    pub reverify_count: u32,
+}
+
+/// What the brain decided about a goal's LIVE outcome. Tagged on `choice`
+/// (snake_case), matching [`EngineerLifecycleDecision`]. Only `MarkAchieved`
+/// that survives the outcome-verify Rail-3 permits archival.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "choice", rename_all = "snake_case")]
+pub enum GoalOutcomeDecision {
+    /// Real success criteria observed live. Archive ONLY if ≥1 verified signal
+    /// (Rail-3); otherwise the rail overrides this to `KeepOpenAndReport`.
+    MarkAchieved { rationale: String },
+    /// Artifact landed, live effect absent — keep the goal active.
+    Reopen { rationale: String },
+    /// Live effect absent AND the current plan won't produce it — re-scope.
+    Replan {
+        rationale: String,
+        #[serde(default)]
+        replan_hint: String,
+    },
+    /// Ambiguous / absent / unverifiable — no archive, surface a report. The
+    /// fail-closed default (also what [`Default`] returns).
+    KeepOpenAndReport { rationale: String },
+}
+
+impl Default for GoalOutcomeDecision {
+    /// Fail-closed: the absence of a positive verified outcome is never an
+    /// achievement. An un-migrated brain, a parse gap, or a rail override all
+    /// resolve here — never to `MarkAchieved`.
+    fn default() -> Self {
+        GoalOutcomeDecision::KeepOpenAndReport {
+            rationale: String::new(),
+        }
+    }
+}
+
+impl GoalOutcomeDecision {
+    /// Stable snake_case label — identical to the serde `choice` tag. Shared by
+    /// the judgment record, the metric context, and the curate-seam log line.
+    pub fn variant_label(&self) -> &'static str {
+        match self {
+            Self::MarkAchieved { .. } => "mark_achieved",
+            Self::Reopen { .. } => "reopen",
+            Self::Replan { .. } => "replan",
+            Self::KeepOpenAndReport { .. } => "keep_open_and_report",
+        }
+    }
+
+    /// The rationale the brain carried on the chosen variant.
+    pub fn rationale(&self) -> &str {
+        match self {
+            Self::MarkAchieved { rationale }
+            | Self::Reopen { rationale }
+            | Self::Replan { rationale, .. }
+            | Self::KeepOpenAndReport { rationale } => rationale,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The trait
 // ---------------------------------------------------------------------------
 
@@ -180,6 +267,24 @@ pub trait OodaBrain: Send + Sync {
         &self,
         ctx: &EngineerLifecycleCtx,
     ) -> SimardResult<EngineerLifecycleDecision>;
+
+    /// Reason about whether the goal's real success criteria are met LIVE in
+    /// production (issue #2751). Called each curate cycle for
+    /// completion-candidate goals — repeated structured evaluation of "is this
+    /// goal *actually* achieved, live?".
+    ///
+    /// Defaulted to the conservative, fail-closed [`GoalOutcomeDecision::KeepOpenAndReport`]
+    /// so every existing `OodaBrain` impl and test double compiles unchanged and
+    /// an un-migrated brain can NEVER accidentally complete a goal. The
+    /// production [`RecipeBrain`] overrides this to run the reasoning recipe.
+    fn decide_goal_outcome_verification(
+        &self,
+        _ctx: &GoalOutcomeCtx,
+    ) -> SimardResult<GoalOutcomeDecision> {
+        Ok(GoalOutcomeDecision::KeepOpenAndReport {
+            rationale: "outcome-verification not implemented by this brain".into(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +390,7 @@ mod inline_tests_1979 {
     fn state_with_active_goal(id: &str) -> OodaState {
         let mut board = GoalBoard::default();
         board.active.push(ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
