@@ -93,41 +93,64 @@ pub(crate) async fn creative_ideas_search(Json(body): Json<Value>) -> Json<Value
 /// cannot launch overlapping generation ticks.
 static RUN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
+/// RAII lease over [`RUN_IN_PROGRESS`]. Acquired via [`RunGuard::try_acquire`]
+/// and released on `Drop`, so the flag is cleared even if the acquiring scope
+/// unwinds (panic) — never a permanently-stuck "already running" lock.
+struct RunGuard;
+
+impl RunGuard {
+    /// Take the run lease, or `None` if a run is already in flight.
+    fn try_acquire() -> Option<Self> {
+        RUN_IN_PROGRESS
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+            .then_some(Self)
+    }
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        RUN_IN_PROGRESS.store(false, Ordering::SeqCst);
+    }
+}
+
 /// `POST /api/creative-ideas/run` — manually trigger one creative-ideas
 /// generation tick against the live daemon store, persisting any new ideas and
 /// returning a report. Useful because the thread otherwise only ticks on a 24h
 /// schedule (which every daemon restart pushes 24h out). Guarded against
 /// overlapping runs; any failure is surfaced loudly (never a silent no-op).
 pub(crate) async fn creative_ideas_run() -> Json<Value> {
-    // Re-entrancy guard: refuse clearly if a run is already in flight.
-    if RUN_IN_PROGRESS
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Json(json!({
-            "error": "a creative-ideas generation run is already in progress",
-            "running": true,
-        }));
-    }
-
     let state_root = resolve_state_root();
     let runtime = tokio::runtime::Handle::current();
     // Generation may invoke agents and block, so run it off the async executor.
-    let outcome = tokio::task::spawn_blocking(move || {
+    // The re-entrancy lease is taken *inside* the blocking task so its lifetime
+    // is bound to the actual work, not this handler future: a client disconnect
+    // that cancels the handler cannot leak the lock (the blocking task still
+    // runs to completion and drops the guard), and the lock stays held for the
+    // full run so no overlapping tick can start. `None` => a run is already in
+    // flight.
+    let outcome = tokio::task::spawn_blocking(move || -> Option<SimardResult<GenerationReport>> {
+        let _guard = RunGuard::try_acquire()?;
         let mut thread = CreativeIdeasThread::from_env();
-        run_generation_tick(&state_root, &mut thread, now_epoch(), runtime)
+        Some(run_generation_tick(
+            &state_root,
+            &mut thread,
+            now_epoch(),
+            runtime,
+        ))
     })
     .await;
 
-    // Always release the guard, even if the run task panicked.
-    RUN_IN_PROGRESS.store(false, Ordering::SeqCst);
-
     match outcome {
-        Ok(Ok(report)) => Json(json!({
+        Ok(Some(Ok(report))) => Json(json!({
             "ok": true,
             "report": serde_json::to_value(report).unwrap_or(Value::Null),
         })),
-        Ok(Err(e)) => Json(error_json(e)),
+        Ok(Some(Err(e))) => Json(error_json(e)),
+        Ok(None) => Json(json!({
+            "error": "a creative-ideas generation run is already in progress",
+            "running": true,
+        })),
         Err(join_err) => Json(error_json(format!("generation run failed: {join_err}"))),
     }
 }
@@ -576,6 +599,29 @@ mod tests {
                 .is_some_and(|e| e.contains("already in progress")),
             "re-entrant run must surface a clear error, got {v:?}"
         );
+    }
+
+    /// The run lease is RAII: it releases on drop (even on panic/cancellation),
+    /// so it can never leave the feature stuck in a permanent "already running"
+    /// state — a second acquire after the first drops succeeds.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn run_guard_releases_on_drop() {
+        assert!(!RUN_IN_PROGRESS.load(Ordering::SeqCst), "starts free");
+        {
+            let _lease = RunGuard::try_acquire().expect("first acquire");
+            assert!(RUN_IN_PROGRESS.load(Ordering::SeqCst), "held while leased");
+            assert!(
+                RunGuard::try_acquire().is_none(),
+                "second acquire is refused while the first is held"
+            );
+        }
+        assert!(
+            !RUN_IN_PROGRESS.load(Ordering::SeqCst),
+            "released once the lease drops"
+        );
+        drop(RunGuard::try_acquire().expect("re-acquire after release"));
+        assert!(!RUN_IN_PROGRESS.load(Ordering::SeqCst), "free again");
     }
 
     // -----------------------------------------------------------------------
