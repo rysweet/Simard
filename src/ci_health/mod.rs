@@ -20,6 +20,7 @@
 //!
 //! See `docs/reference/ci-health-sweep.md`.
 
+pub mod cache;
 pub mod classify;
 pub mod gh;
 pub mod report;
@@ -28,8 +29,10 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
+pub use cache::GreenShaCache;
 pub use classify::{
     ActionableFailure, FleetReport, WorkflowVerdict, build_report, classify_workflow,
+    repo_cacheable, update_cache_from_report,
 };
 pub use gh::{
     GhWorkflowClient, RealGhWorkflowClient, build_repo_snapshot, collect_fleet,
@@ -41,6 +44,7 @@ pub use types::{
 };
 
 use crate::error::{SimardError, SimardResult};
+use tracing::warn;
 
 /// The amplihack ecosystem fleet: Simard plus its governed sibling repos, by
 /// GitHub `owner/repo` slug. Source of truth: the ecosystem table in
@@ -59,10 +63,53 @@ pub const GOVERNED_REPOS: &[&str] = &[
     "rysweet/gadugi-agentic-test",
 ];
 
-/// Run a live sweep of [`GOVERNED_REPOS`] and classify it into a report.
+/// Run a live sweep of [`GOVERNED_REPOS`], using and updating the persistent
+/// last-known-green head-SHA cache so an unchanged-green fleet is a cheap no-op.
+///
+/// The cache is loaded from [`GreenShaCache::default_path`], consulted by
+/// [`collect_fleet`] to skip unchanged-green repos, reconciled against the fresh
+/// report by [`update_cache_from_report`], and saved back. A save failure is
+/// non-fatal (the verdict is already computed) and only warns.
 pub fn sweep_live(gh: &dyn GhWorkflowClient) -> SimardResult<FleetReport> {
-    let snapshot = collect_fleet(gh, GOVERNED_REPOS)?;
-    Ok(build_report(&snapshot))
+    sweep_live_with_options(gh, true)
+}
+
+/// Like [`sweep_live`] but `use_cache = false` forces a full re-collection of
+/// every repo (no skips) while still refreshing the persisted cache from the
+/// fresh report — the `--no-cache` / `--refresh` path.
+pub fn sweep_live_with_options(
+    gh: &dyn GhWorkflowClient,
+    use_cache: bool,
+) -> SimardResult<FleetReport> {
+    let path = GreenShaCache::default_path();
+    let mut cache = if use_cache {
+        GreenShaCache::load(&path)
+    } else {
+        GreenShaCache::empty()
+    };
+    let report = run_sweep(gh, GOVERNED_REPOS, &mut cache)?;
+    if let Err(e) = cache.save(&path) {
+        warn!(
+            path = %path.display(),
+            error = %e,
+            "failed to persist ci-health green-SHA cache; next sweep will re-audit"
+        );
+    }
+    Ok(report)
+}
+
+/// Collect → classify → reconcile-cache, without any disk I/O. This is the
+/// testable core shared by the live paths: it skips cached-green repos, builds
+/// the report, and updates `cache` in place.
+pub fn run_sweep(
+    gh: &dyn GhWorkflowClient,
+    repos: &[&str],
+    cache: &mut GreenShaCache,
+) -> SimardResult<FleetReport> {
+    let snapshot = collect_fleet(gh, repos, cache)?;
+    let report = build_report(&snapshot);
+    update_cache_from_report(cache, &snapshot, &report);
+    Ok(report)
 }
 
 /// Classify an offline fixture snapshot into a report (`--from-json`).

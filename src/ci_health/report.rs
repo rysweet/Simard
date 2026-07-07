@@ -15,8 +15,9 @@ pub fn render_human(report: &FleetReport) -> String {
     out.push_str(banner);
     out.push('\n');
     out.push_str(&format!(
-        "repos checked: {}   workflows checked: {}   actionable failures: {}\n",
+        "repos checked: {}   from green cache: {}   workflows checked: {}   actionable failures: {}\n",
         report.repos_checked,
+        report.repos_from_cache,
         report.workflows_checked,
         report.actionable_failures.len()
     ));
@@ -44,6 +45,12 @@ pub fn render_human(report: &FleetReport) -> String {
     out.push_str("\nPer-repo detail:\n");
     for repo in &report.repos {
         out.push_str(&format!("  {} [{}]\n", repo.slug, repo.default_branch));
+        if repo.green_from_cache {
+            out.push_str(
+                "    [cache] green by cache — head SHA unchanged since last green sweep\n",
+            );
+            continue;
+        }
         for wf in &repo.workflows {
             let marker = match wf.verdict.as_str() {
                 "green" => "ok  ",

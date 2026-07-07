@@ -130,7 +130,7 @@ Product modes:
   update
   self-test
   self-health            — post-deploy probes (version/memory/board/brains/quarantine)
-  ci-health [--json]     — sweep active default-branch CI across the governed fleet
+  ci-health [--json] [--no-cache]  — sweep active default-branch CI across the governed fleet (green-SHA cached)
   self-deploy [--check]  — close the merged-but-not-running gap (operator-only)
   safe-update            — drain → snapshot → pre-test → swap → exec
   rollback               — restore the latest backup over the install path
