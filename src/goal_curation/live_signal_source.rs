@@ -156,7 +156,10 @@ fn read_tail(path: &std::path::Path, max_bytes: u64) -> Option<String> {
     let len = file.metadata().ok()?.len();
     let start = len.saturating_sub(max_bytes);
     file.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf = Vec::new();
+    // The read size is known and bounded by `max_bytes`; pre-size the buffer so
+    // `read_to_end` fills it in one shot instead of repeatedly reallocating as it
+    // grows toward the 64 KiB tail on every cycle.
+    let mut buf = Vec::with_capacity((len - start) as usize);
     file.read_to_end(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
@@ -233,5 +236,26 @@ mod tests {
     #[test]
     fn read_tail_missing_file_is_none() {
         assert!(read_tail(std::path::Path::new("/no/such/ooda.log"), 1024).is_none());
+    }
+
+    #[test]
+    fn read_tail_returns_whole_file_when_smaller_than_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ooda.log");
+        std::fs::write(&path, b"cycle 1\ncycle 2\n").unwrap();
+        assert_eq!(read_tail(&path, 64 * 1024).unwrap(), "cycle 1\ncycle 2\n");
+    }
+
+    #[test]
+    fn read_tail_returns_only_last_max_bytes() {
+        // A body larger than the cap must return exactly the trailing `max_bytes`
+        // — the pre-sized read buffer must not change the tail semantics.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ooda.log");
+        let body: String = (0..2000).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+        std::fs::write(&path, body.as_bytes()).unwrap();
+        let tail = read_tail(&path, 100).unwrap();
+        assert_eq!(tail.len(), 100);
+        assert_eq!(tail, &body[body.len() - 100..]);
     }
 }
