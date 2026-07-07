@@ -1199,4 +1199,18 @@ fn rendered_html_goals_render_label_chips_and_tag_filter() {
         INDEX_HTML.contains("groupGoalsByParent(activeFiltered"),
         "the render must group/render the tag-filtered goal list"
     );
+    // Review hardening (#2743): a tag is user-influenced text emitted into the
+    // `value="…"` attribute of each <option>. It must be attribute-escaped with
+    // escAttr() (which also neutralises the `\"` that closes the attribute), not
+    // plain esc() — otherwise a tag containing a double-quote could break out of
+    // the attribute and inject markup.
+    assert!(
+        INDEX_HTML.contains("'<option value=\"'+escAttr(t)+'\"'"),
+        "the tag-filter <option> value must be attribute-hardened with escAttr(t)"
+    );
+    assert!(
+        !INDEX_HTML.contains("'<option value=\"'+esc(t)+'\"'"),
+        "the tag-filter <option> value must not use plain esc(t) in the \
+         attribute context (attribute-injection risk)"
+    );
 }

@@ -26,7 +26,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
           if(!tags.length){ el.innerHTML=''; return; }
           const cur=window.goalsTagFilter;
           const opts='<option value="">All tags ('+tags.length+')</option>'+
-            tags.map(function(t){ return '<option value="'+esc(t)+'"'+(t===cur?' selected':'')+'>'+esc(t)+'</option>'; }).join('');
+            tags.map(function(t){ return '<option value="'+escAttr(t)+'"'+(t===cur?' selected':'')+'>'+esc(t)+'</option>'; }).join('');
           el.innerHTML='<label style="margin-right:6px">Filter by tag:</label>'+
             '<select id="goals-tag-select" onchange="setGoalTagFilter(this.value)" style="padding:.25rem;background:var(--card);color:var(--fg);border:1px solid var(--border);border-radius:4px">'+opts+'</select>'+
             (cur?' <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:6px" onclick="setGoalTagFilter(\'\')">Clear</button>':'');
