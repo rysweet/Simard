@@ -242,6 +242,7 @@ nav:
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
     - Dashboard Memory Tab: reference/dashboard-memory-tab.md
+    - Dashboard Memory Graph Fail-Loud: reference/dashboard-memory-graph-fail-loud.md
     - Dashboard Memory Last-Hour Count: reference/dashboard-memory-recent-last-hour-count.md
     - Journal API: reference/journal-api.md
     - Journal Narrative Result Channel: reference/journal-narrative-result-channel.md

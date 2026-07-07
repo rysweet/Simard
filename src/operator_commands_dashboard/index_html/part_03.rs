@@ -448,6 +448,10 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
     let mgNodes=[],mgEdges=[],mgFiltered=[],mgFilteredEdges=[];
     let mgDrag=null,mgPinned=null;
     let mgOffX=0,mgOffY=0,mgScale=1,mgPanX=0,mgPanY=0;
+    // Fail-LOUD state (issue #2627): non-empty => a data-load failure the single
+    // paint path (mgRender) must surface on the #mem-graph-error overlay, never a
+    // silent blank canvas. Empty string => no error.
+    let mgError='';
     const mgColors={WorkingMemory:'#f0883e',SemanticFact:'#58a6ff',EpisodicMemory:'#3fb950',ProceduralMemory:'#a371f7',ProspectiveMemory:'#d29922',SensoryBuffer:'#8b949e'};
 
     function mgApplyFilters(){
@@ -468,13 +472,40 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
     async function fetchMemoryGraph(){
       try{
         const d=await apiFetch('/api/memory/graph');
-        if(d.error){document.getElementById('mem-graph-stats').textContent='Error: '+d.error;return;}
         const s=d.stats||{};
-        document.getElementById('mem-graph-stats').textContent=
-          'Thinking:'+(s.working||0)+' Facts:'+(s.semantic||0)+' Events:'+(s.episodic||0)+' Procedures:'+(s.procedural||0)+' Planned:'+(s.prospective||0)+' Observed:'+(s.sensory||0);
+        // Fail-LOUD: a server-side error (reader unreachable, a per-type read
+        // failure, or a stats-vs-nodes discrepancy) is surfaced on the visible
+        // #mem-graph-error overlay via mgError — NOT hidden in the stats line.
         mgNodes=(d.nodes||[]);mgEdges=(d.edges||[]);
+        // Defence in depth: mirror the backend stats-vs-nodes discrepancy guard.
+        // If stats claim an enumerable type holds content but no item node of
+        // that type came back, treat it as a load failure rather than drawing a
+        // misleadingly hub-only graph.
+        const mgEnumTypes={semantic:'SemanticFact',episodic:'EpisodicMemory',procedural:'ProceduralMemory',prospective:'ProspectiveMemory'};
+        let mgDisc='';
+        for(const k in mgEnumTypes){
+          if((s[k]||0)>0 && !mgNodes.some(n=>!n.hub&&n.type===mgEnumTypes[k])){
+            mgDisc='Memory statistics report '+(s[k])+' '+k+' item(s) but none were returned (stats-vs-nodes discrepancy).';
+            break;
+          }
+        }
+        if(d.error||mgDisc){
+          mgError=d.error||mgDisc;
+          document.getElementById('mem-graph-stats').textContent='';
+        }else{
+          mgError='';
+          document.getElementById('mem-graph-stats').textContent=
+            'Thinking:'+(s.working||0)+' Facts:'+(s.semantic||0)+' Events:'+(s.episodic||0)+' Procedures:'+(s.procedural||0)+' Planned:'+(s.prospective||0)+' Observed:'+(s.sensory||0);
+        }
         mgInitLayout();mgApplyFilters();mgSimulate();
-      }catch(e){document.getElementById('mem-graph-stats').textContent='Load failed';}
+      }catch(e){
+        // A fetch throw must also fail loud on the overlay, not vanish into a
+        // blank canvas.
+        mgError='Failed to load memory graph: '+(e&&e.message?e.message:e);
+        mgNodes=[];mgEdges=[];
+        document.getElementById('mem-graph-stats').textContent='';
+        mgApplyFilters();mgRender();
+      }
     }
 
     function mgInitLayout(){
@@ -531,12 +562,32 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
     function mgRender(){
       const canvas=document.getElementById('mem-graph-canvas');
       if(!canvas)return;
+      // Single paint path owns the fail-loud overlay: show #mem-graph-error
+      // whenever mgError is set (a load failure is NEVER a silent blank), hide
+      // it otherwise.
+      const errEl=document.getElementById('mem-graph-error');
+      if(errEl){
+        if(mgError){
+          errEl.innerHTML='<div style="max-width:520px"><div style="color:#f85149;font-weight:600;margin-bottom:.35rem">Memory graph failed to load</div><div style="color:#c9d1d9;font-size:.85rem;white-space:pre-wrap">'+esc(mgError)+'</div></div>';
+          errEl.style.display='flex';
+        }else{
+          errEl.textContent='';errEl.style.display='none';
+        }
+      }
       canvas.width=canvas.clientWidth*(window.devicePixelRatio||1);
       canvas.height=canvas.clientHeight*(window.devicePixelRatio||1);
       const ctx=canvas.getContext('2d');
       const dpr=window.devicePixelRatio||1;
       ctx.scale(dpr,dpr);
       ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
+      // Neutral empty state (distinct from the error overlay): a genuinely-empty
+      // store renders only the six type hubs and no item nodes — tell the
+      // operator so, rather than presenting an ambiguous near-blank canvas.
+      const hasItems=mgNodes.some(n=>!n.hub);
+      if(!mgError && !hasItems){
+        ctx.fillStyle='#8b949e';ctx.font='14px sans-serif';ctx.textAlign='center';
+        ctx.fillText('Memory graph is empty — nothing remembered yet',canvas.clientWidth/2,24);
+      }
       ctx.save();ctx.translate(mgPanX,mgPanY);ctx.scale(mgScale,mgScale);
       const nodeMap={};mgFiltered.forEach(n=>{nodeMap[n.id]=n;});
       mgFilteredEdges.forEach(e=>{
