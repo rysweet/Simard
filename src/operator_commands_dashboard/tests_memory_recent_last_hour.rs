@@ -1,0 +1,376 @@
+//! File: src/operator_commands_dashboard/tests_memory_recent_last_hour.rs
+//!
+//! TDD regression pins for issue #2679 — the Memory dashboard reporting
+//! "Simard has remembered 0 items in the last hour" while long-term memory is
+//! actively growing.
+//!
+//! Root cause (confirmed in `memory.rs`): `memory_recent()` returns a hardcoded
+//! literal `"last_hour_count": 0` (line 251) that never queries the trailing
+//! hour. These tests pin the CORRECT behaviour so the placeholder cannot
+//! silently return:
+//!
+//!   1. `memory_recent_at(state_root)` — an env-free, testable core (mirroring
+//!      the `goals()` -> `goals_at()` split) — must compute
+//!      `last_hour_count = max(0, live_long_term_total − baseline_long_term_total)`
+//!      from the LIVE shared reader, not a literal.
+//!   2. `select_last_hour_baseline(history, now_secs)` — a pure helper — must
+//!      pin the trailing-hour window edge (`epoch_secs <= now − 3600`,
+//!      at-or-before), the most-recent-such selection, and the earliest-snapshot
+//!      fallback, so an off-by-one window boundary (cause d) cannot regress.
+//!
+//! These tests reference `memory_recent_at` and `select_last_hour_baseline`,
+//! which do NOT exist yet — the file is expected to FAIL TO COMPILE until the
+//! implementation lands. That compile failure IS the initial RED state.
+//!
+//! Contract note for the implementation: `select_last_hour_baseline` MUST be at
+//! least `pub(crate)` so this sibling test module can drive it directly (the
+//! surrounding ring-buffer helpers — `load_history`, `save_history`,
+//! `compute_deltas` — are already `pub(crate)`, so this is consistent).
+
+use std::sync::Arc;
+
+use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+use crate::memory_ipc::{
+    clear_in_process_writer, clear_tier2_store_cache, register_in_process_writer, socket_path_for,
+};
+use crate::operator_commands_dashboard::memory::{
+    MemorySnapshot, memory_recent_at, save_history, select_last_hour_baseline,
+};
+use crate::test_support::HermeticState;
+
+/// Number of long-term memory items written inside the trailing hour by the
+/// integration tests. The dashboard MUST report exactly this many — never the
+/// old hardcoded `0`.
+const N_IN_WINDOW: u64 = 5;
+
+/// The trailing-hour window, in seconds. Duplicated locally (not imported) so
+/// the test asserts the intended 3600 s contract independently of the
+/// production constant — if someone silently changes the window, these tests
+/// still describe what "last hour" is supposed to mean.
+const ONE_HOUR_SECS: f64 = 3600.0;
+
+// ---------------------------------------------------------------------------
+// Shared tier-0 writer guard (mirrors tests_goals_crud::SharedMemoryGuard)
+// ---------------------------------------------------------------------------
+
+/// Registers ONE shared `LibraryCognitiveMemory` handle as the tier-0
+/// in-process writer for the life of a test and clears the global registration
+/// on drop (panic-safe).
+///
+/// Production wires the dashboard against a single shared cognitive-memory
+/// handle registered via [`register_in_process_writer`]; `open_reader_client`
+/// (which `memory_recent_at` uses) consults that tier-0 registry FIRST, so
+/// reads issued by the handler observe writes made through `ops()` on the very
+/// same handle. Registering here keeps the test on the production read path.
+struct SharedMemoryGuard {
+    writer: Arc<dyn CognitiveMemoryOps>,
+}
+
+impl SharedMemoryGuard {
+    fn register(state: &HermeticState) -> Self {
+        let writer: Arc<dyn CognitiveMemoryOps> = Arc::new(
+            LibraryCognitiveMemory::open(state.state_root()).expect("open shared cognitive memory"),
+        );
+        register_in_process_writer(state.state_root().to_path_buf(), Arc::clone(&writer));
+        Self { writer }
+    }
+
+    fn ops(&self) -> &dyn CognitiveMemoryOps {
+        self.writer.as_ref()
+    }
+}
+
+impl Drop for SharedMemoryGuard {
+    fn drop(&mut self) {
+        clear_in_process_writer();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Live long-term total = episodic + semantic + procedural + prospective,
+/// exactly what "remembered" (consolidated long-term memory) means and what
+/// `MemorySnapshot::from_stats` records as `long_term_total`.
+fn live_long_term_total(ops: &dyn CognitiveMemoryOps) -> u64 {
+    let s = ops.get_statistics().expect("get_statistics");
+    s.episodic_count + s.semantic_count + s.procedural_count + s.prospective_count
+}
+
+/// Build a `MemorySnapshot` at `epoch_secs` carrying `long_term_total`. Only
+/// the timestamp/epoch and the long-term total matter for baseline selection.
+fn snapshot(epoch_secs: f64, long_term_total: u64) -> MemorySnapshot {
+    MemorySnapshot {
+        timestamp: String::new(),
+        epoch_secs,
+        sensory: 0,
+        working: 0,
+        episodic: 0,
+        semantic: 0,
+        procedural: 0,
+        prospective: 0,
+        total: long_term_total,
+        long_term_total,
+    }
+}
+
+/// Write `long_term_total` into a freshly-seeded `memory_history.json` baseline
+/// dated `age_secs` before now, so the handler's trailing-hour delta has a
+/// deterministic reference point.
+fn seed_history_baseline(state: &HermeticState, age_secs: f64, long_term_total: u64) {
+    let now = chrono::Utc::now().timestamp() as f64;
+    let baseline = snapshot(now - age_secs, long_term_total);
+    save_history(&state.state_root().join("memory_history.json"), &[baseline]);
+}
+
+// ---------------------------------------------------------------------------
+// Integration: the headline regression pin
+// ---------------------------------------------------------------------------
+
+/// GIVEN N long-term items written within the trailing hour, the dashboard MUST
+/// report `last_hour_count == N` — NOT the old hardcoded `0`. This is the core
+/// #2679 pin: it fails against the placeholder implementation and passes once
+/// `memory_recent_at` computes the live delta.
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn memory_recent_reports_n_items_remembered_in_last_hour() {
+    let state = HermeticState::new();
+    let guard = SharedMemoryGuard::register(&state);
+
+    // Baseline long-term total BEFORE the in-window writes.
+    let t0 = live_long_term_total(guard.ops());
+
+    // Seed a baseline snapshot comfortably OLDER than the window edge
+    // (61 min ago) recording that pre-write total, so the trailing-hour
+    // baseline is unambiguously `t0` regardless of ms-level clock drift.
+    seed_history_baseline(&state, ONE_HOUR_SECS + 60.0, t0);
+
+    // Write N distinct long-term items inside the trailing hour.
+    for i in 0..N_IN_WINDOW {
+        guard
+            .ops()
+            .store_fact(
+                &format!("last-hour-concept-{i}"),
+                &format!("in-window fact {i}"),
+                1.0,
+                &[] as &[String],
+                "tdd-2679",
+            )
+            .expect("store_fact must persist a new semantic (long-term) node");
+    }
+
+    // Precondition: the live long-term total actually grew by exactly N.
+    assert_eq!(
+        live_long_term_total(guard.ops()),
+        t0 + N_IN_WINDOW,
+        "precondition: {N_IN_WINDOW} distinct store_fact calls must raise the \
+         live long-term total by {N_IN_WINDOW}",
+    );
+
+    // Exercise the handler core against the live shared reader.
+    let resp = memory_recent_at(state.state_root()).await;
+    let val = &resp.0;
+
+    assert_eq!(
+        val["last_hour_count"],
+        serde_json::json!(N_IN_WINDOW),
+        "dashboard MUST report {N_IN_WINDOW} items remembered in the last hour \
+         (net long-term growth), not the old hardcoded 0: {val}",
+    );
+    assert!(
+        val.get("error").is_none(),
+        "a healthy live read must NOT fail closed: {val}",
+    );
+
+    // Back-compat: existing response fields are preserved.
+    assert_eq!(
+        val["total"],
+        serde_json::json!(t0 + N_IN_WINDOW),
+        "`total` must stay the live aggregate stored count: {val}",
+    );
+    assert_eq!(
+        val["available"],
+        serde_json::json!(false),
+        "per-item listing stays unavailable on the library backend (#2307): {val}",
+    );
+    assert!(val["note"].is_string(), "`note` must be preserved: {val}");
+    assert!(
+        val["server_time"].is_string(),
+        "`server_time` must be preserved: {val}",
+    );
+}
+
+/// A pruning-dominated interval (live long-term total ends BELOW the one-hour
+/// baseline) MUST clamp to `0` — you cannot "remember a negative count" — and
+/// MUST NOT underflow a `u64` into a huge number. Pins resolution A4.
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn memory_recent_clamps_net_negative_interval_to_zero() {
+    let state = HermeticState::new();
+    let guard = SharedMemoryGuard::register(&state);
+
+    let live_lt = live_long_term_total(guard.ops());
+
+    // Seed a baseline whose long-term total is HIGHER than the current live
+    // total, simulating an hour where pruning/consolidation removed more than
+    // it added. The naive delta is negative.
+    seed_history_baseline(&state, ONE_HOUR_SECS + 60.0, live_lt + 1_000);
+
+    let resp = memory_recent_at(state.state_root()).await;
+    let val = &resp.0;
+
+    assert_eq!(
+        val["last_hour_count"],
+        serde_json::json!(0),
+        "a net-negative (pruning-dominated) interval must clamp to 0, never \
+         underflow into a huge count: {val}",
+    );
+}
+
+/// With NO snapshot history at all (cold start / sub-hour uptime) and no items
+/// yet, the baseline falls back to the live total, so the delta is `0` — an
+/// HONEST zero, not the hardcoded placeholder. The endpoint must still return a
+/// well-formed, back-compatible payload with a numeric `last_hour_count`.
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn memory_recent_cold_start_reports_honest_zero_not_placeholder() {
+    let state = HermeticState::new();
+    let _guard = SharedMemoryGuard::register(&state);
+    // Intentionally seed NO memory_history.json.
+
+    let resp = memory_recent_at(state.state_root()).await;
+    let val = &resp.0;
+
+    assert!(
+        val["last_hour_count"].is_u64(),
+        "cold start must still return a numeric last_hour_count: {val}",
+    );
+    assert_eq!(
+        val["last_hour_count"],
+        serde_json::json!(0),
+        "cold start with no writes must read an honest 0 (live − live): {val}",
+    );
+    assert!(
+        val.get("error").is_none(),
+        "cold start is not an error condition: {val}",
+    );
+    assert!(val["total"].is_u64(), "`total` must be present: {val}");
+}
+
+/// Fail-closed contract (resolution A7 / acceptance #2): when the live read
+/// cannot be served — here, a present-but-unconnectable memory socket, exactly
+/// the #2896 divergent-reader hazard — the endpoint MUST surface an `error` and
+/// MUST NOT emit a misleading `0`. It reports `last_hour_count: null` so the
+/// frontend renders `—` rather than implying memory is idle.
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn memory_recent_fails_closed_on_unreadable_store() {
+    // No tier-0 writer: force the read down the socket path.
+    clear_in_process_writer();
+    let state = HermeticState::new();
+
+    // Place a regular file where the daemon socket would live: present but
+    // unconnectable, so `open_reader_client` fails closed (bug #2896) instead
+    // of silently opening a divergent, empty tier-2 store.
+    let sock = socket_path_for(state.state_root());
+    if let Some(parent) = sock.parent() {
+        std::fs::create_dir_all(parent).expect("create socket parent dir");
+    }
+    std::fs::write(&sock, b"not a socket").expect("write placeholder at socket path");
+
+    let resp = memory_recent_at(state.state_root()).await;
+    clear_tier2_store_cache();
+    let val = &resp.0;
+
+    assert!(
+        val.get("error").is_some(),
+        "an unreadable store MUST surface an error, not a silent 0: {val}",
+    );
+    assert!(
+        val["last_hour_count"].is_null(),
+        "on read failure last_hour_count MUST be null (frontend shows '—'), \
+         never a misleading 0: {val}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Unit: pure window-boundary semantics for select_last_hour_baseline
+// ---------------------------------------------------------------------------
+
+/// A snapshot EXACTLY at the window edge (`now − 3600`) is "at-or-before" and
+/// MUST be selected as the baseline. Locks the `<= cutoff` boundary so an
+/// off-by-one (cause d) cannot slip in.
+#[test]
+fn baseline_selects_snapshot_exactly_at_window_edge() {
+    let now = 1_000_000.0;
+    let history = vec![snapshot(now - ONE_HOUR_SECS, 42)];
+    assert_eq!(
+        select_last_hour_baseline(&history, now),
+        Some(42),
+        "snapshot at exactly now-3600 must be counted as the one-hour baseline",
+    );
+}
+
+/// A snapshot one second INSIDE the window (`now − 3599`) is NOT a valid
+/// "one hour ago" baseline; with an older snapshot present, that older one
+/// (`now − 7200`) must be chosen instead.
+#[test]
+fn baseline_excludes_snapshot_just_inside_the_window() {
+    let now = 1_000_000.0;
+    let history = vec![
+        snapshot(now - 7200.0, 10), // 2h ago — the only valid baseline
+        snapshot(now - 3599.0, 99), // inside the window — must be ignored
+    ];
+    assert_eq!(
+        select_last_hour_baseline(&history, now),
+        Some(10),
+        "a snapshot at now-3599 is inside the last hour and must not be the baseline",
+    );
+}
+
+/// Among multiple at-or-before-edge snapshots, the MOST RECENT one wins so the
+/// baseline is the tightest available approximation of "one hour ago".
+#[test]
+fn baseline_picks_most_recent_at_or_before_edge() {
+    let now = 1_000_000.0;
+    let history = vec![
+        snapshot(now - 10_800.0, 5),       // 3h ago
+        snapshot(now - 7_200.0, 20),       // 2h ago
+        snapshot(now - ONE_HOUR_SECS, 40), // exactly 1h ago — most recent <= cutoff
+        snapshot(now - 60.0, 99),          // in-window
+    ];
+    assert_eq!(
+        select_last_hour_baseline(&history, now),
+        Some(40),
+        "the most-recent snapshot at-or-before now-3600 must be the baseline",
+    );
+}
+
+/// When ALL snapshots are inside the hour (sub-hour uptime), fall back to the
+/// EARLIEST snapshot — an honest partial-window under-count rather than a
+/// placeholder.
+#[test]
+fn baseline_falls_back_to_earliest_when_all_within_hour() {
+    let now = 1_000_000.0;
+    let history = vec![
+        snapshot(now - 600.0, 100), // 10 min ago — earliest
+        snapshot(now - 120.0, 130), // 2 min ago
+    ];
+    assert_eq!(
+        select_last_hour_baseline(&history, now),
+        Some(100),
+        "with only sub-hour history, fall back to the earliest snapshot",
+    );
+}
+
+/// Empty history has no baseline. The handler treats `None` as "use the live
+/// total" (delta 0); the helper itself must simply report absence.
+#[test]
+fn baseline_is_none_for_empty_history() {
+    assert_eq!(
+        select_last_hour_baseline(&[], 1_000_000.0),
+        None,
+        "empty history has no baseline snapshot",
+    );
+}

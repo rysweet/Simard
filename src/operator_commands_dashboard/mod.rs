@@ -46,6 +46,13 @@ mod tests_feedback;
 mod tests_goal_records_migration;
 #[cfg(test)]
 mod tests_goals_crud;
+// Issue #2679: the Memory dashboard reported "remembered 0 items in the last
+// hour" from a hardcoded placeholder in `memory_recent`. These tests pin the
+// corrected trailing-hour delta (`memory_recent_at`) and the pure window-edge
+// baseline selection (`select_last_hour_baseline`) so the placeholder cannot
+// silently return.
+#[cfg(test)]
+mod tests_memory_recent_last_hour;
 #[cfg(test)]
 mod tests_ooda_cycles_history;
 // Issue #26: the Logs tab's "Cycle Reports" card (#cycle-reports) must show the
