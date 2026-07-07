@@ -190,6 +190,12 @@ jobs:
           retention-days: 7
 
   cargo-audit:
+    # Advisory gate, pinned + offline (issue #2741). `cargo audit` normally
+    # fetches the LATEST RUSTSEC DB at CI time, so a brand-new upstream advisory
+    # would retroactively fail this required check on every open PR. Instead the
+    # DB is checked out at the revision recorded in .github/advisory-db.sha and
+    # run with `--no-fetch`, so the pin — not upstream HEAD — is authoritative.
+    # The daily advisory-scan.yml job tracks DB HEAD and advances the pin.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -199,18 +205,50 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@754bf4dbae00ad1b16b244717154b96ba27d2416 # cargo-audit
+      - name: Read pinned advisory-db SHA
+        id: pin
+        # First non-comment, non-blank line of the pin file is the full SHA.
+        run: echo "sha=$(grep -vE '^\s*(#|$)' .github/advisory-db.sha | head -n1)" >> "$GITHUB_OUTPUT"
 
-      - name: Run cargo audit
-        run: cargo audit
+      - name: Check out pinned advisory database
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: rustsec/advisory-db
+          ref: ${{ steps.pin.outputs.sha }}
+          path: .advisory-db
+
+      - name: Install cargo-audit
+        # Pin the reachable `v2` release SHA of taiki-e/install-action and select
+        # the tool via the `tool:` input. The former per-tool `cargo-audit` tag
+        # commit lived on a lineage diverged from the action's default branch, so
+        # Dependabot's github_actions updater could not resolve it ("no such
+        # commit") and the whole update job failed. The `v2` release SHA is
+        # reachable from main, keeping the pin SHA-hardened *and* Dependabot-updatable.
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
+        with:
+          tool: cargo-audit
+
+      - name: Run cargo audit (offline, against the pinned DB)
+        # `--no-fetch` disables the network fetch; `--db` points at the pinned
+        # checkout. A vulnerability present *in the pinned DB* still fails the
+        # PR — only the timing coupling to upstream publication is removed.
+        run: cargo audit --no-fetch --db .advisory-db
 
   cargo-deny:
-    # Supply-chain policy gate (issue #2260): advisories + licenses + bans +
-    # sources, enforced by the repo-root deny.toml. Lockfile-only — it reads
+    # Supply-chain policy gate (issue #2260): licenses + bans + sources,
+    # enforced by the repo-root deny.toml. Lockfile-only — it reads
     # Cargo.lock + deny.toml and never compiles the crate, so it is a separate
     # job (not folded into the memory-sensitive pre-commit build) and never
     # writes the shared rust-cache.
+    #
+    # ADVISORIES are deliberately NOT checked here (issue #2741). `cargo deny`
+    # cannot pin the advisory DB to a revision — it always fetches upstream HEAD
+    # — so a brand-new advisory would retroactively fail this required check on
+    # every open PR. The authoritative advisory gate is the `cargo-audit` job
+    # above, which runs OFFLINE against the SHA pinned in .github/advisory-db.sha
+    # and so is immune to upstream DB churn. The daily advisory-scan.yml job
+    # tracks DB HEAD and files proactive fixes. licenses/bans/sources are
+    # advisory-DB-independent and stay a hard, deterministic, network-free gate.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -221,18 +259,21 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install cargo-deny
-        # SHA pins the per-tool `cargo-deny` tag of taiki-e/install-action
-        # (same pattern as the cargo-audit job above). The `tool:` input also
-        # pins the cargo-deny VERSION: deny.toml uses the 0.19.x advisories
-        # schema, so an unpinned bump could reinterpret the policy.
-        uses: taiki-e/install-action@4e4e4d1450e58bef95d6f394ac20d46ad7d24ebf # cargo-deny
+        # SHA-pins the reachable `v2` release of taiki-e/install-action (same
+        # pattern as the cargo-audit job above; a diverged per-tool tag commit
+        # breaks Dependabot). The `tool:` input pins the cargo-deny VERSION:
+        # deny.toml uses the 0.19.x advisories schema, so an unpinned bump could
+        # reinterpret the policy.
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
         with:
           tool: cargo-deny@0.19.9
 
-      - name: Run cargo deny check
+      - name: Run cargo deny check (licenses + bans + sources)
         # `--locked` is a top-level flag (before the subcommand): it fails on a
         # dirty Cargo.lock so the check always reflects the committed graph.
-        run: cargo deny --locked check
+        # advisories is intentionally omitted — see the job comment above; the
+        # pinned, offline cargo-audit job is the authoritative advisory gate.
+        run: cargo deny --locked check licenses bans sources
 
   cargo-vet:
     # Transitive-dependency trust gate (issue #2262): every third-party crate
@@ -249,8 +290,9 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install cargo-vet
-        # SHA pins the per-tool `cargo-vet` tag of taiki-e/install-action.
-        uses: taiki-e/install-action@7b51dc7487ebab790625f16f2c5f541029a3b0ab # cargo-vet
+        # SHA-pins the reachable `v2` release of taiki-e/install-action and
+        # selects the tool via the `tool:` input (Dependabot-resolvable).
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
         with:
           tool: cargo-vet
 

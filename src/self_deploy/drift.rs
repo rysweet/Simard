@@ -75,22 +75,21 @@ impl<S: DeploySource> ReconcileDetector<S> {
         Self { source }
     }
 
-    /// Returns [`DeployDrift`]. Never panics; on a source error returns a
-    /// `needs_deploy: false` drift (fail-safe: a transient git failure must not
-    /// spuriously trigger a deploy).
-    pub fn detect(&self) -> DeployDrift {
-        let behind = match self.source.behind_count() {
-            Ok(n) => n,
-            Err(_) => return DeployDrift::current(),
-        };
-        let merged = match self.source.merged_pins() {
-            Ok(m) => m,
-            Err(_) => return DeployDrift::current(),
-        };
-        let running = match self.source.running_pins() {
-            Ok(m) => m,
-            Err(_) => return DeployDrift::current(),
-        };
+    /// Returns [`DeployDrift`], or the underlying source error. Unlike
+    /// [`detect`](Self::detect), this does **not** fail safe: a git/source error
+    /// surfaces as `Err` so callers that must distinguish "positively no drift"
+    /// from "could not determine the deploy state" never mistake an unknown
+    /// state for a confirmed one.
+    ///
+    /// This is the fail-*closed* variant the closed-loop outcome-verification
+    /// step (issue #2751) requires: it stakes Rail-3 on a `verified` live signal
+    /// meaning *authenticated positive corroboration*, so a git probe error must
+    /// become an explicit "unknown" rather than a spurious `needs_deploy: false`
+    /// (which the caller would otherwise read as "confirmed running").
+    pub fn try_detect(&self) -> SimardResult<DeployDrift> {
+        let behind = self.source.behind_count()?;
+        let merged = self.source.merged_pins()?;
+        let running = self.source.running_pins()?;
 
         // A pin has drifted when its merged rev differs from the running rev
         // (including a pin present in the merged tree but absent from the
@@ -102,7 +101,16 @@ impl<S: DeploySource> ReconcileDetector<S> {
             .collect();
         drifted.sort();
 
-        DeployDrift::from_parts(behind, drifted)
+        Ok(DeployDrift::from_parts(behind, drifted))
+    }
+
+    /// Returns [`DeployDrift`]. Never panics; on a source error returns a
+    /// `needs_deploy: false` drift (fail-safe: a transient git failure must not
+    /// spuriously trigger a deploy). Callers that must tell "no drift" apart
+    /// from "unknown" (e.g. the outcome-verify Rail-3, #2751) use
+    /// [`try_detect`](Self::try_detect) instead.
+    pub fn detect(&self) -> DeployDrift {
+        self.try_detect().unwrap_or_else(|_| DeployDrift::current())
     }
 }
 

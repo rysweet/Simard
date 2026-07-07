@@ -10,7 +10,10 @@ use super::auth::{login, login_page, require_auth};
 use super::brain_failures::brain_failures;
 use super::chat::ws_chat_handler;
 use super::chat_store::{chat_session_by_id, chat_sessions};
-use super::creative_ideas::{creative_ideas, creative_ideas_search};
+use super::creative_ideas::{
+    creative_ideas, creative_ideas_promote, creative_ideas_prune, creative_ideas_run,
+    creative_ideas_search,
+};
 use super::current_work::current_work;
 use super::distributed::{distributed, vacate_vm};
 use super::feedback::{feedback_status, feedback_submit};
@@ -94,6 +97,12 @@ pub fn build_router() -> Router {
         .route("/api/journal/render/{date}", get(journal_render))
         .route("/api/creative-ideas", get(creative_ideas))
         .route("/api/creative-ideas/search", post(creative_ideas_search))
+        .route("/api/creative-ideas/run", post(creative_ideas_run))
+        .route(
+            "/api/creative-ideas/{id}/promote",
+            post(creative_ideas_promote),
+        )
+        .route("/api/creative-ideas/{id}/prune", post(creative_ideas_prune))
         .route("/api/status/snapshot", get(status_snapshot))
         .route("/api/feedback", post(feedback_submit))
         .route("/api/feedback/status/{id}", get(feedback_status))
@@ -111,6 +120,45 @@ pub fn build_router() -> Router {
         .route("/login", get(login_page))
         .route("/", get(index))
         .layer(middleware::from_fn(require_auth))
+}
+
+/// The UTC build/deploy instant baked into the binary at compile time by
+/// `build.rs` (issue #2727), parsed from the `SIMARD_BUILD_TIMESTAMP` env.
+/// Returns `None` on unusual toolchains where the env was not emitted, so the
+/// `deployed` field degrades to being omitted (back-compatible).
+pub(crate) fn deployed_timestamp_utc() -> Option<chrono::DateTime<chrono::Utc>> {
+    let raw = option_env!("SIMARD_BUILD_TIMESTAMP")?;
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+/// Format a UTC instant as the header-ready deployment datetime in US Pacific
+/// time (`America/Los_Angeles`), e.g. `2026-07-06 11:03 PDT`. Owns ALL timezone
+/// and daylight-saving logic: the `%Z` token renders whatever the tz database
+/// selects for that instant — `PST` (UTC-8) in standard time, `PDT` (UTC-7) in
+/// daylight time — so the correct abbreviation and offset are chosen
+/// automatically. Nothing is hardcoded to a fixed offset or literal `PST`/`PDT`.
+pub(crate) fn format_deployed_pt(dt: chrono::DateTime<chrono::Utc>) -> String {
+    dt.with_timezone(&chrono_tz::America::Los_Angeles)
+        .format("%Y-%m-%d %H:%M %Z")
+        .to_string()
+}
+
+/// The composed, header-ready deployment datetime string (issue #2727): the
+/// compile-time build timestamp rendered in US Pacific time. `None` when no
+/// build timestamp is baked in, so callers omit the field. This is the exact
+/// value surfaced as the additive `/api/status` `deployed` field.
+///
+/// Cached via `LazyLock`: the build timestamp is a compile-time constant, so
+/// the RFC3339 parse + timezone/DST conversion + string render run once for
+/// the process lifetime instead of on every `/api/status` request. Returning
+/// the cached `&'static str` also avoids a per-request heap allocation. This
+/// mirrors the parse-once `SENTINEL_SESSION_ID` pattern in `goal_curation`.
+pub(crate) fn deployed_pt() -> Option<&'static str> {
+    static DEPLOYED_PT: std::sync::LazyLock<Option<String>> =
+        std::sync::LazyLock::new(|| deployed_timestamp_utc().map(format_deployed_pt));
+    DEPLOYED_PT.as_deref()
 }
 
 async fn status() -> Json<Value> {
@@ -185,6 +233,13 @@ async fn status() -> Json<Value> {
         status_json["daemon_health"] = h;
     }
 
+    // Issue #2727: additive `deployed` field — the deployment datetime in US
+    // Pacific time (PST/PDT), sourced from the compile-time build timestamp.
+    // Omitted (not faked/empty) when no build timestamp is baked in.
+    if let Some(deployed) = deployed_pt() {
+        status_json["deployed"] = json!(deployed);
+    }
+
     Json(status_json)
 }
 
@@ -252,11 +307,15 @@ async fn index() -> axum::response::Html<String> {
     axum::response::Html(super::index_html::index_html_string())
 }
 
+/// Resolve the durable state root the dashboard reads from.
+///
+/// Must match the resolver the OODA daemon registers its in-process writer
+/// under ([`crate::state_root::simard_state_root`], via
+/// [`crate::memory_ipc::default_state_root`]). A former divergent private copy
+/// took `SIMARD_STATE_ROOT` verbatim, so reader tier-0
+/// (`lookup_in_process_writer`) missed the daemon's key and the "Creative
+/// Ideas" tab was permanently empty even while the thread logged "10 persisted"
+/// (#2798, D1).
 pub(crate) fn resolve_state_root() -> std::path::PathBuf {
-    std::env::var("SIMARD_STATE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
-            std::path::PathBuf::from(home).join(".simard")
-        })
+    crate::state_root::simard_state_root()
 }

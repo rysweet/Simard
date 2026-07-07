@@ -1,12 +1,16 @@
 [package]
 name = "simard"
-version = "0.27.0"
+version = "0.30.0"
 edition = "2024"
 default-run = "simard"
 
 [[bin]]
 name = "simard-gym"
 path = "src/bin/simard_gym.rs"
+
+[[bin]]
+name = "coin-gym"
+path = "src/bin/coin_gym.rs"
 
 [[bin]]
 name = "simard-rust-gym"
@@ -45,6 +49,12 @@ required-features = ["dashboard-audit"]
 [[bin]]
 name = "simard-tui"
 path = "src/bin/simard_tui/main.rs"
+
+# Issue #2741: scheduled supply-chain advisory remediation driver. Thin wrapper
+# over `simard::supply_chain_steward`; run daily by .github/workflows/advisory-scan.yml.
+[[bin]]
+name = "supply-chain-steward"
+path = "src/bin/supply_chain_steward.rs"
 
 [dependencies]
 # De-fork phase 2b (issue #2307): the amplihack-memory-lib `CognitiveMemory`
@@ -89,7 +99,16 @@ path = "src/bin/simard_tui/main.rs"
 # with no lbug/engine change, so the store format stays v41. The pin points at an
 # upstream-`main` commit (not a feature branch), so the build can never be frozen
 # against an unmerged, GC-able ref.
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "e005a5963b38bc02610fa5b0bef7e52625dcd092", features = ["persistent"] }
+#
+# Bumped again (issue #122) to the squash-merge commit of amplihack-memory-lib
+# PR #125 on `main` (2 commits ahead of the #120 pin, no regression), which adds
+# `get_prospective_by_trigger(trigger, limit)` — a trigger-scoped, priority-
+# ordered prospective query whose LIMIT bounds only matching nodes — and makes
+# `get_all_prospective` sort-then-truncate. Simard consumes the new primitive to
+# fix the creative-ideas dashboard read path (ideas fell outside the unscoped
+# 512-row window in a large store). Still an upstream-`main` commit; store format
+# stays v41 (no lbug/engine change).
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "901f63ad79eb0c2d87cd8263d26025877af43cc5", features = ["persistent"] }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
 # De-fork (issue #2323): the gym/eval RUNNER is now the upstream
@@ -102,7 +121,7 @@ rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "d
 # `git ls-remote`); the delta is workflow/recipe/CI-tooling fixes only, with the
 # `amplihack-agent-eval` crate surface (GymRunner/GymConfig/GymScenarioResult)
 # and the reverted workspace version 0.11.1 unchanged.
-amplihack-agent-eval = { git = "https://github.com/rysweet/amplihack-rs.git", rev = "2a93441d1837f9f853d5dddc56cc1088353a8872" }
+amplihack-agent-eval = { git = "https://github.com/rysweet/amplihack-rs.git", rev = "14dc30b10e87764120c6f2bae7f3630522c29e5d" }
 # De-fork phase 2b (issue #2307): the native cognitive-memory fork is gone, but
 # `lbug` is still a direct dependency of the standalone `simard-tui` binary
 # (`src/bin/simard_tui/goals.rs`), which opens a LadybugDB read-only to render
@@ -126,6 +145,13 @@ axum = { version = "=0.8.9", features = ["ws"] }
 tower-http = { version = "=0.6.8", features = ["cors", "auth"] }
 uuid = { version = "=1.23.1", features = ["v4", "v7"] }
 chrono = "=0.4.44"
+# Issue #2727: the dashboard header renders the deployment/build timestamp in
+# US Pacific time with the date-correct PST/PDT abbreviation. chrono-tz is the
+# idiomatic tz-database crate for the runtime UTC->America/Los_Angeles
+# conversion (chrono alone has no DST-aware named zones). `=`-pinned to match
+# the repo convention (e.g. `chrono = "=0.4.44"`); the pin is what makes the
+# %Z abbreviation reproducible and lets the PST/PDT unit tests act as a guard.
+chrono-tz = "=0.10.4"
 dirs = "=6.0.0"
 crc32fast = "=1.5.0"
 sha2 = "=0.10.9"
@@ -158,6 +184,12 @@ webpki-roots = "=1.0.7"
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.185"
+
+# Issue #2727: build.rs formats the baked deployment instant
+# (SIMARD_BUILD_TIMESTAMP) as an RFC3339 UTC string and parses SOURCE_DATE_EPOCH
+# for reproducible builds. `=`-pinned to the same chrono as [dependencies].
+[build-dependencies]
+chrono = "=0.4.44"
 
 [features]
 # Issue #2576: every FUNCTIONAL/runtime capability ships in a plain `cargo build`

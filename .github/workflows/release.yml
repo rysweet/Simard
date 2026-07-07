@@ -127,8 +127,9 @@ jobs:
       # ---- SBOM (CycloneDX) — issue #2261 -------------------------------------
       - name: Install cargo-cyclonedx
         if: steps.tag_check.outputs.exists == 'false'
-        # SHA pins the per-tool `cargo-cyclonedx` tag of taiki-e/install-action.
-        uses: taiki-e/install-action@8cb326bacc2c357f28b43e3d7b25996496e729c1 # cargo-cyclonedx
+        # SHA-pins the reachable `v2` release of taiki-e/install-action and
+        # selects the tool via the `tool:` input (Dependabot-resolvable).
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
         with:
           tool: cargo-cyclonedx
 

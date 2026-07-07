@@ -17,6 +17,16 @@ pub(crate) mod spawn;
 // validator is reusable by the operator CLI and dashboard ingress points;
 // consumed by `spawn::dispatch_spawn_engineer` and exercised by inline tests.
 pub(crate) mod repo_resolver;
+// Issue #2690: dependency/overlap-aware engineer admission.
+//   - `overlap` supplies the file-footprint FACTS (changed_files / overlap).
+//   - `admission` is the gather→reason→apply seam + its two rails; `pub(crate)`
+//     so `spawn::dispatch_spawn_engineer` can invoke the gate.
+pub(crate) mod admission;
+mod overlap;
+// Issue #2706: resource-aware engineer admission. `resource_admission` is the
+// gather→reason→apply seam plus the deterministic disk-ceiling rail; `pub(crate)`
+// so `spawn::dispatch_spawn_engineer` can invoke the gate.
+pub(crate) mod resource_admission;
 mod subordinate;
 use spawn::{dispatch_spawn_engineer, is_brain_failure_marker};
 // Dispatch-dedup helper introduced by PR #1228; intentionally re-exported so
@@ -154,6 +164,7 @@ pub(super) fn dispatch_advance_goal(
     let OodaClients {
         ref mut session,
         ref memory,
+        ref repo_root,
         ..
     } = *bridges;
 
@@ -181,7 +192,14 @@ pub(super) fn dispatch_advance_goal(
         }) = result.action
         {
             let state_mx = std::sync::Mutex::new(&mut *state);
-            return dispatch_spawn_engineer(action, &state_mx, &goal_id, &task, brain.as_ref());
+            return dispatch_spawn_engineer(
+                action,
+                &state_mx,
+                &goal_id,
+                &task,
+                brain.as_ref(),
+                repo_root,
+            );
         }
 
         return result.outcome;

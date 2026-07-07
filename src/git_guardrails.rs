@@ -130,7 +130,15 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_env();
         let result = check_git_safety(&PathBuf::from("/tmp/repo"), &["reset", "--hard", "HEAD~1"]);
-        assert!(result.is_err());
+        let err = result.expect_err("reset --hard must be blocked");
+        assert!(
+            err.contains("GUARDRAIL BLOCKED"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("reset --hard"),
+            "message must name the matched pattern: {err}"
+        );
     }
 
     #[serial_test::serial(cognitive_memory)]
@@ -174,6 +182,305 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_env();
         let result = check_git_safety(&PathBuf::from("/tmp/repo"), &["branch", "-D", "main"]);
-        assert!(result.is_err());
+        let err = result.expect_err("branch -D main must be blocked");
+        assert!(
+            err.contains("GUARDRAIL BLOCKED"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("branch -D main"),
+            "message must name the matched pattern: {err}"
+        );
+    }
+
+    // --- Additional blocked-pattern coverage (each destructive pattern) ---
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn blocks_force_push_short_flag() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        let err = check_git_safety(
+            &PathBuf::from("/tmp/repo"),
+            &["push", "-f", "origin", "main"],
+        )
+        .expect_err("push -f must be blocked");
+        assert!(
+            err.contains("GUARDRAIL BLOCKED") && err.contains("push -f"),
+            "{err}"
+        );
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn blocks_clean_fdx() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        let err = check_git_safety(&PathBuf::from("/tmp/repo"), &["clean", "-fdx"])
+            .expect_err("clean -fdx must be blocked");
+        assert!(err.contains("clean -fdx"), "{err}");
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn blocks_reflog_expire() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        let err = check_git_safety(
+            &PathBuf::from("/tmp/repo"),
+            &["reflog", "expire", "--all", "--expire=now"],
+        )
+        .expect_err("reflog expire must be blocked");
+        assert!(err.contains("reflog expire"), "{err}");
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn blocks_gc_prune_aggressive() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        let err = check_git_safety(
+            &PathBuf::from("/tmp/repo"),
+            &["gc", "--prune=now", "--aggressive"],
+        )
+        .expect_err("gc --prune=now --aggressive must be blocked");
+        assert!(err.contains("gc --prune=now --aggressive"), "{err}");
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn blocks_delete_release_branch() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        let err = check_git_safety(&PathBuf::from("/tmp/repo"), &["branch", "-D", "release"])
+            .expect_err("branch -D release must be blocked");
+        assert!(err.contains("branch -D release"), "{err}");
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn blocks_delete_master_branch() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        let err = check_git_safety(&PathBuf::from("/tmp/repo"), &["branch", "-D", "master"])
+            .expect_err("branch -D master must be blocked");
+        assert!(err.contains("branch -D master"), "{err}");
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn allows_delete_feature_branch() {
+        // Only main/release/master deletions are globally blocked; a normal
+        // feature-branch deletion must pass when the repo is not protected.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        let result = check_git_safety(&PathBuf::from("/tmp/repo"), &["branch", "-D", "feature-x"]);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // --- guardrails_enabled() toggle variants ---
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn flag_zero_disables_guardrails() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        unsafe { std::env::set_var("SIMARD_GIT_GUARDRAILS", "0") };
+        let result = check_git_safety(&PathBuf::from("/tmp/repo"), &["push", "--force"]);
+        assert!(result.is_ok(), "0 must disable guardrails: {result:?}");
+        reset_env();
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn flag_false_disables_guardrails() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        unsafe { std::env::set_var("SIMARD_GIT_GUARDRAILS", "false") };
+        let result = check_git_safety(&PathBuf::from("/tmp/repo"), &["reset", "--hard"]);
+        assert!(result.is_ok(), "false must disable guardrails: {result:?}");
+        reset_env();
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn flag_unrecognized_value_keeps_guardrails_enabled() {
+        // Any value other than 0/false/disabled leaves guardrails ON.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        unsafe { std::env::set_var("SIMARD_GIT_GUARDRAILS", "1") };
+        let result = check_git_safety(&PathBuf::from("/tmp/repo"), &["push", "--force"]);
+        assert!(
+            result.is_err(),
+            "an unrecognized flag value must NOT disable guardrails: {result:?}"
+        );
+        reset_env();
+    }
+
+    // --- Protected-repo enforcement (the previously untested branch) ---
+
+    const PROT_ROOT: &str = "/srv/simard-protected";
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn protected_repo_blocks_command_outside_safe_list() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        unsafe { std::env::set_var("SIMARD_GIT_PROTECTED_REPOS", PROT_ROOT) };
+        let ws = PathBuf::from(format!("{PROT_ROOT}/checkout"));
+        let err = check_git_safety(&ws, &["rebase", "-i", "HEAD~3"])
+            .expect_err("rebase in a protected repo must be blocked");
+        assert!(err.contains("GUARDRAIL BLOCKED"), "{err}");
+        assert!(
+            err.contains("rebase") && err.contains("safe command list"),
+            "message must name the rejected command + safe-list context: {err}"
+        );
+        reset_env();
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn protected_repo_allows_each_safe_command() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        unsafe { std::env::set_var("SIMARD_GIT_PROTECTED_REPOS", PROT_ROOT) };
+        let ws = PathBuf::from(format!("{PROT_ROOT}/checkout"));
+        // A representative sample across the safe list, including the boundary
+        // entries (`add` first, `rev-parse` last).
+        for args in [
+            &["add", "."][..],
+            &["commit", "-m", "msg"][..],
+            &["checkout", "-b", "feature"][..],
+            &["status"][..],
+            &["rev-parse", "HEAD"][..],
+        ] {
+            let result = check_git_safety(&ws, args);
+            assert!(
+                result.is_ok(),
+                "safe command {args:?} must be allowed in a protected repo: {result:?}"
+            );
+        }
+        reset_env();
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn unprotected_repo_allows_command_outside_safe_list() {
+        // The safe-list restriction applies ONLY to protected roots. A workspace
+        // outside every protected root may run any (non-globally-destructive) cmd.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        unsafe { std::env::set_var("SIMARD_GIT_PROTECTED_REPOS", PROT_ROOT) };
+        let ws = PathBuf::from("/home/user/some-other-repo");
+        let result = check_git_safety(&ws, &["rebase", "-i", "HEAD~3"]);
+        assert!(
+            result.is_ok(),
+            "rebase outside protected roots must be allowed: {result:?}"
+        );
+        reset_env();
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn protected_repos_matches_any_of_multiple_colon_separated_roots() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        unsafe {
+            std::env::set_var(
+                "SIMARD_GIT_PROTECTED_REPOS",
+                "/opt/first-root:/srv/second-root",
+            )
+        };
+        // Workspace lives under the SECOND configured root.
+        let ws = PathBuf::from("/srv/second-root/repo");
+        let err = check_git_safety(&ws, &["merge", "other"])
+            .expect_err("merge under a protected root must be blocked");
+        assert!(
+            err.contains("GUARDRAIL BLOCKED") && err.contains("merge"),
+            "{err}"
+        );
+        reset_env();
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn protected_repos_ignores_empty_colon_entries() {
+        // Leading/trailing/duplicate colons must be filtered, not treated as a
+        // root that matches every path.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        unsafe { std::env::set_var("SIMARD_GIT_PROTECTED_REPOS", format!("::{PROT_ROOT}::")) };
+        // A path that does NOT start with the real root must be treated as
+        // unprotected (an empty "" root would otherwise prefix-match everything).
+        let outside = PathBuf::from("/home/user/repo");
+        assert!(
+            check_git_safety(&outside, &["rebase"]).is_ok(),
+            "empty entries must not make every path protected"
+        );
+        // The real root still matches.
+        let inside = PathBuf::from(format!("{PROT_ROOT}/x"));
+        assert!(
+            check_git_safety(&inside, &["rebase"]).is_err(),
+            "the non-empty root must still protect its subtree"
+        );
+        reset_env();
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn empty_protected_repos_env_protects_nothing() {
+        // Empty env => protected_roots() is empty => no repo is protected.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        unsafe { std::env::set_var("SIMARD_GIT_PROTECTED_REPOS", "") };
+        let result = check_git_safety(&PathBuf::from("/anything/at/all"), &["rebase"]);
+        assert!(result.is_ok(), "{result:?}");
+        reset_env();
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn global_destructive_pattern_beats_protected_safe_list() {
+        // A globally-destructive pattern is rejected by the pattern check BEFORE
+        // the protected-repo safe-list check, so the reported reason is the
+        // destructive-pattern message even inside a protected repo.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        unsafe { std::env::set_var("SIMARD_GIT_PROTECTED_REPOS", PROT_ROOT) };
+        let ws = PathBuf::from(format!("{PROT_ROOT}/checkout"));
+        let err = check_git_safety(&ws, &["push", "--force", "origin", "main"])
+            .expect_err("force push must be blocked");
+        assert!(
+            err.contains("destructive pattern"),
+            "the global-pattern reason must win: {err}"
+        );
+        reset_env();
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn empty_args_in_protected_repo_are_blocked() {
+        // `args.first()` is None => first_arg == "" which is not in the safe
+        // list => blocked. Exercises the empty-args fallthrough.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        unsafe { std::env::set_var("SIMARD_GIT_PROTECTED_REPOS", PROT_ROOT) };
+        let ws = PathBuf::from(format!("{PROT_ROOT}/checkout"));
+        let result = check_git_safety(&ws, &[]);
+        assert!(
+            result.is_err(),
+            "an empty git invocation in a protected repo must be blocked: {result:?}"
+        );
+        reset_env();
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn empty_args_in_unprotected_repo_are_allowed() {
+        // No protected root + no destructive pattern => empty args are Ok.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        let result = check_git_safety(&PathBuf::from("/tmp/repo"), &[]);
+        assert!(result.is_ok(), "{result:?}");
     }
 }

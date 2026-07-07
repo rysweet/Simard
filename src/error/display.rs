@@ -299,6 +299,9 @@ impl Display for SimardError {
                     "stewardship: orchestrator run summary missing required field '{field}'"
                 )
             }
+            Self::CiHealthGhCommandFailed { reason } => {
+                write!(f, "ci-health: gh command failed: {reason}")
+            }
             Self::MergeAuthorityGhCommandFailed { reason } => {
                 write!(f, "merge-authority: gh command failed: {reason}")
             }
@@ -342,6 +345,21 @@ impl Display for SimardError {
                     "identity path '{}' is not under prompt root '{}'",
                     identity_path.display(),
                     prompt_root.display()
+                )
+            }
+            Self::SupplyChainAuditParseFailed { reason } => {
+                write!(
+                    f,
+                    "supply-chain: failed to parse cargo-audit JSON: {reason}"
+                )
+            }
+            Self::SupplyChainRemediationFailed { reason } => {
+                write!(f, "supply-chain: advisory remediation failed: {reason}")
+            }
+            Self::SupplyChainSuppressionWithoutTracker { advisory_id } => {
+                write!(
+                    f,
+                    "supply-chain: refused to ignore advisory '{advisory_id}' with no tracking-issue URL (hard rail)"
                 )
             }
         }

@@ -1,4 +1,6 @@
 mod args;
+mod ci_health;
+mod creative_ideas;
 mod curation;
 mod dashboard;
 mod decisions;
@@ -96,6 +98,7 @@ Product modes:
                            inspect a probe-isolated sandbox instead
   improvement-curation run <base-type> <topology> <objective> [state-root]
   improvement-curation read <base-type> <topology> <state-root>
+  creative-ideas consolidate [--apply]  — cluster + merge semantically-duplicate ideas (#2925)
   gym list
   gym run <scenario-id>
   gym compare <scenario-id>
@@ -129,6 +132,7 @@ Product modes:
   update
   self-test
   self-health            — post-deploy probes (version/memory/board/brains/quarantine)
+  ci-health [--json] [--no-cache]  — sweep active default-branch CI across the governed fleet (green-SHA cached)
   self-deploy [--check]  — close the merged-but-not-running gap (operator-only)
   safe-update            — drain → snapshot → pre-test → swap → exec
   rollback               — restore the latest backup over the install path
@@ -240,6 +244,7 @@ where
         "goal" => goal::dispatch_goal_command(args),
         "goal-curation" => curation::dispatch_goal_curation_command(args),
         "improvement-curation" => curation::dispatch_improvement_curation_command(args),
+        "creative-ideas" => creative_ideas::dispatch_creative_ideas_command(args),
         "review" => review::dispatch_review_command(args),
         "gym" => gym::dispatch_gym_command(args),
         "ooda" => ooda::dispatch_ooda_command(args),
@@ -286,6 +291,14 @@ where
                 return Ok(());
             }
             self_health::dispatch_self_health_command(args)
+        }
+        "ci-health" => {
+            let mut args = args.peekable();
+            if let Some(help) = check_help_flag(&mut args, ci_health::CI_HEALTH_HELP) {
+                print!("{help}");
+                return Ok(());
+            }
+            ci_health::dispatch_ci_health_command(args)
         }
         "self-deploy" => {
             let mut args = args.peekable();

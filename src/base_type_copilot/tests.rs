@@ -475,7 +475,9 @@ fn assert_metachar_rejected(command: &str, expected_char: char) {
 // struct directly (not the trait object) since the struct is crate-private
 // but accessible within the same crate's test module.
 
-use crate::base_types::{BaseTypeFactory, BaseTypeSessionRequest, BaseTypeTurnInput};
+use crate::base_types::{
+    BaseTypeFactory, BaseTypeOutcome, BaseTypeSessionRequest, BaseTypeTurnInput,
+};
 use crate::identity::OperatingMode;
 use crate::runtime::{RuntimeAddress, RuntimeNodeId, RuntimeTopology};
 use crate::session::SessionId;
@@ -492,14 +494,84 @@ fn make_request(mode: OperatingMode) -> BaseTypeSessionRequest {
     }
 }
 
-/// Helper: check if the `copilot` binary is available on PATH.
-fn copilot_on_path() -> bool {
-    std::process::Command::new("copilot")
-        .arg("--help")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
+/// Write a fake `copilot` executable into a fresh temp dir and return the dir
+/// (which the caller MUST keep alive for the duration of the turn) plus the
+/// absolute binary path.
+///
+/// The fake drains its stdin — the streamed prompt (issue #2640) — to avoid a
+/// broken pipe on the feeder thread, then emits a deterministic response read
+/// from a sibling `response.txt` (so the response may contain any bytes without
+/// shell-quoting hazards). This lets meeting-turn tests exercise the *real* turn
+/// orchestration (`run_meeting_turn`) without spawning the real `copilot`
+/// binary — no PATH, auth, network, or clock dependency (issue #2732).
+#[cfg(unix)]
+fn fake_copilot(response: &str) -> (tempfile::TempDir, String) {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let response_path = dir.path().join("response.txt");
+    std::fs::write(&response_path, response).unwrap();
+
+    let bin_path = dir.path().join("copilot");
+    // `$0` is the absolute program path (Command::new was given an absolute
+    // path), so `dirname "$0"` resolves the temp dir regardless of cwd.
+    let script = "#!/bin/sh\n# hermetic fake copilot (issue #2732)\ncat >/dev/null\ncat \"$(dirname \"$0\")/response.txt\"\n";
+    let mut file = std::fs::File::create(&bin_path).unwrap();
+    file.write_all(script.as_bytes()).unwrap();
+    file.flush().unwrap();
+    // Close the write handle BEFORE making the file executable / exec'ing it so
+    // our process holds no write fd to the binary (shrinks the ETXTBSY window;
+    // see `run_fake_meeting_turn`).
+    drop(file);
+    let mut perms = std::fs::metadata(&bin_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&bin_path, perms).unwrap();
+
+    (dir, bin_path.to_string_lossy().into_owned())
+}
+
+/// Build a meeting-capable adapter whose meeting-mode binary is overridden with
+/// `meeting_binary` (an absolute path to a fake `copilot`), keeping every other
+/// production code path intact (issue #2732).
+#[cfg(unix)]
+fn meeting_adapter(id: &str, meeting_binary: &str) -> CopilotSdkAdapter {
+    CopilotSdkAdapter::registered(id)
+        .unwrap()
+        .with_meeting_binary_override(meeting_binary)
+}
+
+/// Open a meeting session against the fake `copilot` at `binary` and run one
+/// turn with `objective`, returning the outcome.
+///
+/// Retries ONLY the transient `ETXTBSY` ("Text file busy") spawn race that can
+/// occur when another parallel test thread `fork()`s while this test's
+/// just-written fake binary is momentarily open for writing — a pure artifact
+/// of exec'ing a freshly-created file inside the multithreaded test harness,
+/// not a product defect (production meeting turns exec the long-lived, external
+/// `copilot` binary). Any other error fails the test immediately, so real
+/// regressions are never masked.
+#[cfg(unix)]
+fn run_fake_meeting_turn(id: &str, binary: &str, objective: &str) -> BaseTypeOutcome {
+    let mut last_reason = String::new();
+    for attempt in 0..8 {
+        let adapter = meeting_adapter(id, binary);
+        let mut session = adapter
+            .open_session(make_request(OperatingMode::Meeting))
+            .unwrap();
+        session.open().unwrap();
+        match session.run_turn(BaseTypeTurnInput::objective_only(objective)) {
+            Ok(outcome) => return outcome,
+            Err(SimardError::AdapterInvocationFailed { reason, .. })
+                if reason.contains("Text file busy") =>
+            {
+                last_reason = reason;
+                std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+            }
+            Err(other) => panic!("meeting turn failed unexpectedly: {other:?}"),
+        }
+    }
+    panic!("meeting turn kept hitting a transient ETXTBSY race: {last_reason}");
 }
 
 // ---------------------------------------------------------------------------
@@ -706,23 +778,27 @@ fn is_meeting_mode_returns_false_for_orchestrator() {
 // Meeting-mode turn dispatch (behavioral, via run_turn)
 // ---------------------------------------------------------------------------
 //
-// These tests require the `copilot` binary on PATH. They skip gracefully
-// if it isn't available (CI environments).
+// Hermetic (issue #2732): each test injects a fake `copilot` binary via
+// `meeting_binary_override` (see `fake_copilot` / `meeting_adapter`) so the
+// real `run_meeting_turn` path runs end-to-end — prompt streamed on stdin,
+// subprocess spawned, stdout captured, plan/evidence assembled — WITHOUT
+// depending on a real `copilot` binary, its auth state, the network, or PATH.
+// `#[cfg(unix)]` because the fake is a `/bin/sh` script; CI runs on Linux.
 
-/// Meeting-mode plan should mention "meeting", not "amplihack copilot".
+/// A meeting turn captures the copilot subprocess stdout verbatim and records a
+/// meeting-mode dispatch in the plan (real behavior, not a plan-substring tautology).
+#[cfg(unix)]
 #[test]
-fn meeting_turn_plan_mentions_meeting_mode() {
-    if !copilot_on_path() {
-        eprintln!("SKIP: copilot binary not on PATH");
-        return;
-    }
-    let adapter = CopilotSdkAdapter::registered("copilot-meeting-turn").unwrap();
-    let mut session = adapter
-        .open_session(make_request(OperatingMode::Meeting))
-        .unwrap();
-    session.open().unwrap();
-    let input = BaseTypeTurnInput::objective_only("Hello from meeting test");
-    let outcome = session.run_turn(input).unwrap();
+fn meeting_turn_captures_copilot_output_and_records_meeting_dispatch() {
+    let (_dir, bin) = fake_copilot("FAKE-COPILOT-OK: meeting reply body");
+    let outcome = run_fake_meeting_turn("copilot-meeting-turn", &bin, "Hello from meeting test");
+    // Real behavior: the turn returned exactly what the (fake) copilot emitted.
+    assert_eq!(
+        outcome.execution_summary.trim(),
+        "FAKE-COPILOT-OK: meeting reply body",
+        "meeting turn should return the copilot subprocess stdout verbatim"
+    );
+    // And the plan records a meeting-mode dispatch (not the PTY/amplihack path).
     assert!(
         outcome.plan.to_lowercase().contains("meeting"),
         "meeting-mode plan should mention 'meeting', got: {}",
@@ -731,19 +807,11 @@ fn meeting_turn_plan_mentions_meeting_mode() {
 }
 
 /// Meeting-mode evidence should include copilot-meeting-session-id.
+#[cfg(unix)]
 #[test]
 fn meeting_turn_evidence_includes_session_id() {
-    if !copilot_on_path() {
-        eprintln!("SKIP: copilot binary not on PATH");
-        return;
-    }
-    let adapter = CopilotSdkAdapter::registered("copilot-meeting-evidence").unwrap();
-    let mut session = adapter
-        .open_session(make_request(OperatingMode::Meeting))
-        .unwrap();
-    session.open().unwrap();
-    let input = BaseTypeTurnInput::objective_only("Evidence test");
-    let outcome = session.run_turn(input).unwrap();
+    let (_dir, bin) = fake_copilot("ok");
+    let outcome = run_fake_meeting_turn("copilot-meeting-evidence", &bin, "Evidence test");
     let has_session_id = outcome
         .evidence
         .iter()
@@ -756,19 +824,11 @@ fn meeting_turn_evidence_includes_session_id() {
 }
 
 /// Meeting-mode evidence should NOT contain PTY artifacts.
+#[cfg(unix)]
 #[test]
 fn meeting_turn_evidence_has_no_pty_artifacts() {
-    if !copilot_on_path() {
-        eprintln!("SKIP: copilot binary not on PATH");
-        return;
-    }
-    let adapter = CopilotSdkAdapter::registered("copilot-meeting-no-pty").unwrap();
-    let mut session = adapter
-        .open_session(make_request(OperatingMode::Meeting))
-        .unwrap();
-    session.open().unwrap();
-    let input = BaseTypeTurnInput::objective_only("No PTY test");
-    let outcome = session.run_turn(input).unwrap();
+    let (_dir, bin) = fake_copilot("ok");
+    let outcome = run_fake_meeting_turn("copilot-meeting-no-pty", &bin, "No PTY test");
     let has_transcript = outcome
         .evidence
         .iter()
@@ -788,19 +848,11 @@ fn meeting_turn_evidence_has_no_pty_artifacts() {
 }
 
 /// Meeting-mode evidence should show `copilot` (direct), not `amplihack copilot`.
+#[cfg(unix)]
 #[test]
 fn meeting_turn_evidence_shows_direct_copilot_command() {
-    if !copilot_on_path() {
-        eprintln!("SKIP: copilot binary not on PATH");
-        return;
-    }
-    let adapter = CopilotSdkAdapter::registered("copilot-meeting-cmd").unwrap();
-    let mut session = adapter
-        .open_session(make_request(OperatingMode::Meeting))
-        .unwrap();
-    session.open().unwrap();
-    let input = BaseTypeTurnInput::objective_only("Command check");
-    let outcome = session.run_turn(input).unwrap();
+    let (_dir, bin) = fake_copilot("ok");
+    let outcome = run_fake_meeting_turn("copilot-meeting-cmd", &bin, "Command check");
     let cmd_evidence = outcome
         .evidence
         .iter()
@@ -824,14 +876,15 @@ fn meeting_turn_evidence_shows_direct_copilot_command() {
 // Error handling for meeting-mode subprocess
 // ---------------------------------------------------------------------------
 
-/// Missing copilot binary → `AdapterInvocationFailed`, not panic.
+/// Missing copilot binary → `AdapterInvocationFailed`, not panic. Hermetic:
+/// the meeting binary is overridden to a path that provably does not exist, so
+/// the assertion no longer depends on whether a real `copilot` is on PATH.
+#[cfg(unix)]
 #[test]
 fn meeting_turn_with_missing_binary_returns_adapter_error() {
-    if copilot_on_path() {
-        eprintln!("SKIP: copilot binary IS on PATH; can't test missing-binary error");
-        return;
-    }
-    let adapter = CopilotSdkAdapter::registered("copilot-meeting-missing").unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    let missing = dir.path().join("definitely-not-copilot-2732");
+    let adapter = meeting_adapter("copilot-meeting-missing", &missing.to_string_lossy());
     let mut session = adapter
         .open_session(make_request(OperatingMode::Meeting))
         .unwrap();
@@ -845,9 +898,10 @@ fn meeting_turn_with_missing_binary_returns_adapter_error() {
     match result.unwrap_err() {
         SimardError::AdapterInvocationFailed { base_type, reason } => {
             assert!(
-                reason.to_lowercase().contains("copilot")
+                reason.to_lowercase().contains("spawn")
+                    || reason.to_lowercase().contains("copilot")
                     || reason.to_lowercase().contains("failed"),
-                "error reason should mention copilot failure, got: {reason}"
+                "error reason should mention copilot spawn failure, got: {reason}"
             );
             assert!(!base_type.is_empty());
         }

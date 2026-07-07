@@ -274,9 +274,11 @@ The library owns its own durability (WAL + CHECKPOINT). The old native store at 
 
 Inspect with `simard memory stats` / `simard memory dump` (see
 [Memory introspection CLI](reference/simard-memory-cli.md)), or with the
-dashboard's **Memory** tab ([Dashboard](dashboard.md)) — the graph view
-supports per-type filters and full-text search across the persistent
-layers.
+dashboard's dedicated **Memory** tab
+([Memory tab — cognitive-memory graph](reference/dashboard-memory-tab.md)) —
+an interactive, force-directed graph of the persistent layers, rendered **live**
+from the cognitive store, with per-type filters, live counts, and node
+inspection.
 
 ![Memory tab](assets/dashboard-memory.png)
 
@@ -312,4 +314,5 @@ For multi-host coordination see [Distributed operations](distributed-operations.
 - [Phase-weighted ranked fact recall & snapshot retention](reference/cognitive-memory-ranked-recall.md) — multi-signal ranked recall with per-OODA-phase weights, plus CallerKey dedup/SUPERSEDES and pruning for snapshot/goal records (#2329)
 - [Ranked episodic recall & memory reinforcement](reference/cognitive-memory-ranked-episodic-recall.md) — extends ranked recall to episodes (with a UNION backfill that keeps compressed consolidation sources recallable) and adds a usage/recency reinforcement seam plus `CognitiveFact` observability, recording accesses at the point recalled memories are surfaced into a cycle (per-action attribution is a future refinement) (#2395)
 - [Dashboard](dashboard.md) — Memory tab
+- [Dashboard Memory tab — dedicated cognitive-memory graph](reference/dashboard-memory-tab.md) — the live `GET /api/memory/graph` visualization (nodes/edges, per-type filters, node inspection)
 - [Daemon mode](daemon-mode.md) — when consolidation runs

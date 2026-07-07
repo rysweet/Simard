@@ -45,6 +45,7 @@ fn ooda_state_new_defaults() {
 fn ooda_state_new_with_goals() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -66,6 +67,7 @@ fn ooda_state_new_with_goals() {
 fn populated_state() -> OodaState {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -166,6 +168,7 @@ fn snapshot_into_state_constructs_fresh_state() {
 #[test]
 fn goal_snapshot_from_active_goal() {
     let goal = ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -190,6 +193,7 @@ fn goal_snapshot_from_active_goal() {
 #[test]
 fn goal_snapshot_from_blocked_goal() {
     let goal = ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -243,7 +247,10 @@ fn action_kind_equality() {
 #[test]
 fn ooda_config_default_values() {
     let config = OodaConfig::default();
-    assert_eq!(config.max_concurrent_actions, 5);
+    // Issue #2935: the per-OODA-cycle goal-coverage parallelism ceiling was
+    // raised from the arbitrary low default of 5 to 24 (env-configurable via
+    // SIMARD_OODA_MAX_CONCURRENT).
+    assert_eq!(config.max_concurrent_actions, 24);
     assert!((config.improvement_threshold - 0.02).abs() < f64::EPSILON);
     assert_eq!(config.gym_suite_id, "progressive");
 }
@@ -282,6 +289,7 @@ fn action_outcome_construction() {
 fn prune_stale_failure_counts_removes_absent_goals() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -315,6 +323,7 @@ fn prune_stale_failure_counts_removes_absent_goals() {
 fn prune_stale_failure_counts_noop_when_all_present() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

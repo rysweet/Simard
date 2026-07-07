@@ -25,6 +25,11 @@ pub(crate) const PART_01: &str = r#"
         with <strong>Disconnect</strong>.
       </div>
       <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.75rem">
+        <label for="agent-terminal-select" style="color:#8b949e;font-size:.85rem">Agent</label>
+        <select id="agent-terminal-select" onchange="onAgentTerminalSelect()"
+                style="padding:.35rem .5rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:monospace;min-width:16rem">
+          <option value="" disabled selected>no agents available</option>
+        </select>
         <label for="agent-log-name" style="color:#8b949e;font-size:.85rem">Agent name</label>
         <input id="agent-log-name" type="text" placeholder="e.g. planner" maxlength="64"
                style="padding:.35rem .5rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:monospace;min-width:14rem">
@@ -239,7 +244,9 @@ pub(crate) const PART_01: &str = r#"
         </select>
         <button class="btn" onclick="searchCreativeIdeas()">Search</button>
         <button class="btn" onclick="loadCreativeIdeas()">Refresh</button>
+        <button class="btn" id="ci-run-btn" onclick="runCreativeIdeas()" title="Generate ideas now instead of waiting for the daily scheduled run">Run now</button>
       </div>
+      <div id="ci-run-status" data-testid="ci-run-status" style="min-height:1.1rem;font-size:.78rem;margin-bottom:.5rem"></div>
       <div id="ci-counts" data-testid="ci-counts" style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.75rem"></div>
       <div id="ci-list" data-testid="ci-list" style="min-height:220px"><span class="loading">Loading…</span></div>
     </div>
@@ -255,6 +262,10 @@ pub(crate) const PART_01: &str = r#"
           ImplementationCompleted:'#238636', Deferred:'#8b949e', Rejected:'#f85149'
         })[s]||'#8b949e';
       }
+      /* Mirror the server-side state machine: Promote = →AcceptedForImplementation,
+         Prune = →Rejected. Only offer edges the store will actually allow. */
+      function canPromote(s){ return s==='New'||s==='NeedsHumanReview'; }
+      function canPrune(s){ return s!=='Rejected'&&s!=='ImplementationCompleted'; }
       function renderCounts(counts){
         const box=document.getElementById('ci-counts');
         if(!counts){box.innerHTML='';return;}
@@ -268,13 +279,19 @@ pub(crate) const PART_01: &str = r#"
         box.innerHTML=items.map(it=>{
           const c=statusColor(it.status);
           const metric=it.has_metric?'<span style="color:#3fb950;font-size:.7rem"> · metric: '+esc(it.metric||'yes')+'</span>':'';
+          const when=it.created_epoch?'<span style="color:#6e7681;font-size:.7rem"> · '+esc(formatTime(it.created_epoch))+'</span>':'';
+          let actions='';
+          if(canPromote(it.status)) actions+='<button class="btn ci-act" data-act="promote" data-id="'+escAttr(it.idea_id)+'" style="font-size:.7rem;padding:.15rem .5rem">Promote</button>';
+          if(canPrune(it.status)) actions+='<button class="btn ci-act" data-act="prune" data-id="'+escAttr(it.idea_id)+'" style="font-size:.7rem;padding:.15rem .5rem;margin-left:.35rem">Prune</button>';
+          const actionRow=actions?'<div style="margin-top:.4rem;display:flex;gap:.25rem">'+actions+'</div>':'';
           return '<div style="padding:.5rem .6rem;border:1px solid #21262d;border-radius:6px;margin-bottom:.5rem">'
             +'<div style="display:flex;justify-content:space-between;gap:.5rem;align-items:center">'
             +'<strong>'+esc(it.idea)+'</strong>'
             +'<span style="font-size:.7rem;padding:.1rem .4rem;border-radius:10px;background:'+c+'22;color:'+c+';border:1px solid '+c+'">'+esc(it.status)+'</span>'
             +'</div>'
             +'<div style="color:#8b949e;font-size:.78rem;margin-top:.25rem">'+esc(it.rationale||'')+'</div>'
-            +'<div style="color:#6e7681;font-size:.7rem;margin-top:.25rem">'+esc(String(it.reviews))+' review(s) · '+esc(String(it.links))+' link(s)'+metric+'</div>'
+            +'<div style="color:#6e7681;font-size:.7rem;margin-top:.25rem">'+esc(String(it.reviews))+' review(s) · '+esc(String(it.links))+' link(s)'+metric+when+'</div>'
+            +actionRow
             +'</div>';
         }).join('');
       }
@@ -299,14 +316,61 @@ pub(crate) const PART_01: &str = r#"
           renderIdeas(d.results||[]);
         }catch(e){box.innerHTML='<span class="err">Search failed — check /api/creative-ideas/search</span>';}
       }
+      function setRunStatus(msg,cls){
+        const el=document.getElementById('ci-run-status');
+        if(el) el.innerHTML=msg?'<span class="'+(cls||'')+'">'+esc(msg)+'</span>':'';
+      }
+      async function runCreativeIdeas(){
+        const btn=document.getElementById('ci-run-btn');
+        if(btn) btn.disabled=true;
+        setRunStatus('Generating ideas…','loading');
+        try{
+          const d=await apiFetch('/api/creative-ideas/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+          if(d&&d.error){ setRunStatus('Run failed: '+d.error,'err'); }
+          else{
+            const r=(d&&d.report)||{};
+            setRunStatus('Run complete — '+(r.persisted||0)+' new idea(s) persisted, '+(r.reviewed||0)+' reviewed.','ok');
+            await loadCreativeIdeas();
+          }
+        }catch(e){ setRunStatus('Run failed — check /api/creative-ideas/run','err'); }
+        finally{ if(btn) btn.disabled=false; }
+      }
+      async function transitionIdea(action,ideaId,btn){
+        /* Disable the clicked control while in flight (same pattern as Run now)
+           so a rapid double-click can't fire a duplicate transition — the second
+           would hit an already-applied edge and surface a spurious error. */
+        if(btn) btn.disabled=true;
+        setRunStatus((action==='promote'?'Promoting':'Pruning')+' idea…','loading');
+        try{
+          const d=await apiFetch('/api/creative-ideas/'+encodeURIComponent(ideaId)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+          if(d&&d.error){ setRunStatus((action==='promote'?'Promote':'Prune')+' failed: '+d.error,'err'); }
+          else{
+            const st=(d&&d.idea&&d.idea.status)||'';
+            let msg='Idea '+(action==='promote'?'promoted':'pruned')+' → '+st;
+            if(d&&d.goal_error) msg+=' (accepted, but goal routing failed: '+d.goal_error+')';
+            setRunStatus(msg, d&&d.goal_error?'err':'ok');
+            await loadCreativeIdeas();
+          }
+        }catch(e){ setRunStatus(action+' failed — check /api/creative-ideas','err'); }
+        finally{ if(btn) btn.disabled=false; }
+      }
       window.loadCreativeIdeas=loadCreativeIdeas;
       window.searchCreativeIdeas=searchCreativeIdeas;
+      window.runCreativeIdeas=runCreativeIdeas;
       const ct=document.querySelector('.tab[data-tab="creative-ideas"]');
       if(ct) ct.addEventListener('click',()=>{ if(!ciLoaded) loadCreativeIdeas(); });
       const cs=document.getElementById('ci-search-input');
       if(cs) cs.addEventListener('keypress',e=>{if(e.key==='Enter')searchCreativeIdeas();});
       const cf=document.getElementById('ci-status-filter');
       if(cf) cf.addEventListener('change',()=>searchCreativeIdeas());
+      /* Delegated Promote/Prune clicks so per-idea buttons survive re-render. */
+      const cl=document.getElementById('ci-list');
+      if(cl) cl.addEventListener('click',e=>{
+        const b=e.target.closest('.ci-act');
+        if(!b) return;
+        const act=b.getAttribute('data-act'), id=b.getAttribute('data-id');
+        if(act&&id) transitionIdea(act,id,b);
+      });
     })();
   </script>
 
@@ -746,6 +810,9 @@ pub(crate) const PART_01: &str = r#"
       return 'tmux attach -t '+s.session_name;
     }
     function renderSubagentSessions(){
+      // Keep the Agent Terminal picker (Workers tab) in sync with the live
+      // registry on every 5s poll (issue #2717).
+      populateAgentSelect();
       const el=document.getElementById('subagent-sessions-list');
       if(!el) return;
       const live=subagentSessionsCache.live||[];
@@ -772,6 +839,80 @@ pub(crate) const PART_01: &str = r#"
         const prev=btn.textContent;btn.textContent='Copied!';
         setTimeout(()=>{btn.textContent=prev;},900);
       },()=>{});
+    }
+    /* Memoized fingerprint of the last-rendered live roster so
+       populateAgentSelect() can no-op when the attachable set is unchanged
+       (avoids per-poll DOM churn and never disrupts an open dropdown). */
+    let agentSelectSig=null;
+    /* --- Agent Terminal available-agents picker (issue #2717) ---
+       populateAgentSelect() is a pure reader of the shared live registry
+       (subagentSessionsCache.live[]) — the SAME source the Workers tab uses to
+       list workers — so the dropdown always reflects reality. It rides the
+       existing 5s refresh via renderSubagentSessions(). Options carry the real
+       host + tmux session_name as data attributes so the attach target never
+       comes from the human-readable label. */
+    function populateAgentSelect(){
+      const sel=document.getElementById('agent-terminal-select');
+      if(!sel) return;
+      const live=subagentSessionsCache.live||[];
+      // Fingerprint the attach-relevant fields; when the live roster is
+      // unchanged, skip the full option rebuild so a stable set costs nothing
+      // each 5s poll and an open dropdown is never disrupted.
+      const sig=live.map(s=>[s.agent_id,s.host,s.session_name,s.goal_id].join('\x1f')).join('\x1e');
+      if(sig===agentSelectSig) return;
+      agentSelectSig=sig;
+      const prev=sel.value;
+      sel.replaceChildren();
+      if(!live.length){
+        const opt=document.createElement('option');
+        opt.value='';opt.disabled=true;opt.selected=true;
+        opt.textContent='no agents available';
+        sel.appendChild(opt);
+        sel.disabled=true;
+        return;
+      }
+      sel.disabled=false;
+      /* Neutral prompt kept as options[0] so a stale (or not-yet-made) pick never
+         silently repoints the dropdown at an unrelated live agent — which would
+         leave the label naming a different agent than the terminal is attached to.
+         It is disabled, so onAgentTerminalSelect() never treats it as a target. */
+      const prompt=document.createElement('option');
+      prompt.value='';prompt.disabled=true;prompt.textContent='select an agent';
+      sel.appendChild(prompt);
+      for(const s of live){
+        const opt=document.createElement('option');
+        opt.value=s.agent_id||'';
+        opt.dataset.host=s.host||'';
+        opt.dataset.session=s.session_name||'';
+        let label=s.agent_id||'(unknown)';
+        if(s.goal_id) label+=' — '+s.goal_id;
+        label+=' — live';
+        opt.textContent=label;
+        sel.appendChild(opt);
+      }
+      /* Restore the operator's prior pick across the 5s rebuild only when it is
+         still live (a programmatic .value assignment never dispatches 'change',
+         so this never fires an attach). When the prior pick has left live[], keep
+         the neutral prompt selected rather than jumping the label to a different
+         agent than the terminal is attached to (matches the empty-state intent). */
+      const stillPresent=prev!==''&&Array.prototype.some.call(sel.options,o=>o.value===prev);
+      if(stillPresent) sel.value=prev; else prompt.selected=true;
+    }
+    /* Fires only on a genuine user change (never the programmatic rebuild
+       above). Reads the chosen option's data-host/data-session and switches the
+       shared terminal to that session via the existing openTmuxAttach(). */
+    function onAgentTerminalSelect(){
+      const sel=document.getElementById('agent-terminal-select');
+      if(!sel) return;
+      const opt=sel.options[sel.selectedIndex];
+      if(!opt||opt.disabled) return;
+      const host=opt.dataset.host||'';
+      const session=opt.dataset.session||'';
+      if(!host||!session){
+        setAgentLogStatus('selected agent has no attachable session','#f85149');
+        return;
+      }
+      openTmuxAttach(host, session);
     }
     /* Shared renderer for Recent Actions outcome.detail strings.
        Detects agent='engineer-...' references and, when a matching tmux
@@ -814,8 +955,8 @@ pub(crate) const PART_01: &str = r#"
        validated against ^[a-z-]+$, matched against the allowlist, and falls
        back to 'overview' on any miss. The hash is never concatenated into a
        DOM selector, so a crafted hash cannot inject markup. */
-    const CANONICAL_TABS=['overview','goals','activity','workers','pull-requests','resources','chat','overseer','journal','creative-ideas'];
-    const TAB_ALIASES={"status":"overview","workboard":"goals","logs":"activity","traces":"activity","thinking":"activity","brain-failures":"activity","processes":"workers","terminal":"workers","merge-decisions":"pull-requests","pr-readiness":"pull-requests","memory":"resources","costs":"resources"};
+    const CANONICAL_TABS=['overview','goals','activity','workers','pull-requests','memory','resources','chat','overseer','journal','creative-ideas'];
+    const TAB_ALIASES={"status":"overview","workboard":"goals","logs":"activity","traces":"activity","thinking":"activity","brain-failures":"activity","processes":"workers","terminal":"workers","merge-decisions":"pull-requests","pr-readiness":"pull-requests","costs":"resources"};
 
     /* #2649: the per-tab fetch/refresh chain that used to live here
        (runTabFetches / clearTabTimers) is retired. Background prefetch and
@@ -886,7 +1027,7 @@ pub(crate) const PART_01: &str = r#"
           <div class="stat"><span class="label">Active Processes</span><span class="value">${d.active_processes??0}</span></div>
           <div class="stat"><span class="label">Disk Usage</span><span class="value ${dc}">${d.disk_usage_pct??'?'}%</span></div>
           <div class="stat"><span class="label">Updated</span><span class="value">${timeAgo(d.timestamp)}</span></div>`;
-        document.getElementById('header-version').textContent='v'+d.version+' ('+shortHash+')';
+        document.getElementById('header-version').textContent='v'+d.version+' ('+shortHash+')'+(d.deployed?' · deployed '+d.deployed:'');
       }catch(e){document.getElementById('status').innerHTML='<span class="err">Failed to reach /api/status — is the dashboard server running?</span>';}
     }
 

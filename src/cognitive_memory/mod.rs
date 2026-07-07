@@ -461,6 +461,39 @@ pub trait CognitiveMemoryOps: Send + Sync {
         Ok(())
     }
 
+    /// Report whether an episode with `node_id` exists in this store (issue
+    /// #2679).
+    ///
+    /// This is the **grounding** primitive for the distillation write-boundary
+    /// gate: when the distiller agent commits a fact through the memory IPC
+    /// socket, the server holds no in-memory batch, so it grounds the fact by an
+    /// existence lookup — the fact is grounded iff at least one of its cited
+    /// `source_episode_ids` resolves to a real episode node here.
+    ///
+    /// Default impl returns `false` (fail-closed: an unresolvable id is treated
+    /// as ungrounded) so non-graph backends (legacy Python bridge, IPC client,
+    /// test stubs) keep compiling; only [`LibraryCognitiveMemory`] overrides it
+    /// to look the episode up in the store.
+    fn episode_exists(&self, _node_id: &str) -> SimardResult<bool> {
+        Ok(false)
+    }
+
+    /// Batch grounding check: report whether *any* of `node_ids` resolves to a
+    /// real episode node in this store (issue #2679).
+    ///
+    /// This is the batch form of [`episode_exists`](Self::episode_exists) the
+    /// distillation write-boundary gate uses to ground a fact against *all* of
+    /// its cited `source_episode_ids` at once. The default impl simply probes
+    /// each id via [`episode_exists`](Self::episode_exists) (fail-closed per id),
+    /// so every backend keeps working unchanged; [`LibraryCognitiveMemory`]
+    /// overrides it to materialize the episode set ONCE per call instead of once
+    /// per cited id, avoiding an O(cited·episodes) re-scan on the write hot path.
+    fn any_episode_exists(&self, node_ids: &[String]) -> SimardResult<bool> {
+        Ok(node_ids
+            .iter()
+            .any(|id| self.episode_exists(id).unwrap_or(false)))
+    }
+
     /// Return up to `limit` undistilled episodes, newest first.
     ///
     /// Default impl returns empty, which makes the distillation pass a
@@ -560,6 +593,36 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// backup needs so a restore round-trips prospective triggers — the memory
     /// type the incident lost with no way back.
     fn list_all_prospective(&self, _limit: u32) -> SimardResult<Vec<CognitiveProspective>> {
+        Ok(vec![])
+    }
+
+    /// Return up to `limit` prospective memories whose `trigger_condition`
+    /// **equals** `trigger`, priority-ordered (highest first), across every
+    /// status (issue #122).
+    ///
+    /// The trigger-scoped counterpart of
+    /// [`list_all_prospective`](Self::list_all_prospective): the `limit` bounds
+    /// only *matching* nodes because the equality filter is pushed into the
+    /// backend query **before** the row cap, not applied in Rust afterwards.
+    /// This is the read the creative-ideas dashboard needs: a store holding
+    /// thousands of unrelated prospective facts must still surface every idea
+    /// under the [`crate::cognitive_memory::creative_idea::CREATIVE_IDEA_TRIGGER`]
+    /// sentinel, which the old "take `limit` rows across all triggers, then
+    /// filter" path truncated out of the window (`GET /api/creative-ideas`
+    /// returned 0 even though ideas were persisted).
+    ///
+    /// A pure read: like `list_all_prospective` it neither filters by content
+    /// nor mutates status the way [`check_triggers`](Self::check_triggers)
+    /// does. The default returns empty so non-library backends degrade
+    /// gracefully; [`LibraryCognitiveMemory`] overrides it via the library's
+    /// `get_prospective_by_trigger`, and the IPC client / `SharedMemory`
+    /// forward it so both tier-0 (in-process) and tier-1 (socket) dashboard
+    /// readers reach the trigger-scoped query.
+    fn list_prospective_by_trigger(
+        &self,
+        _trigger: &str,
+        _limit: u32,
+    ) -> SimardResult<Vec<CognitiveProspective>> {
         Ok(vec![])
     }
 

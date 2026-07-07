@@ -13,25 +13,38 @@ For the broader Goal Stewardship Mode, see `Specs/ProductArchitecture.md`
 
 ```
 src/stewardship/
-├── mod.rs           public entrypoint and re-exports (the only public surface)
-├── types.rs         OrchestratorRunSummary, StewardshipOutcome, TargetRepo
-├── routing.rs       route_failure
-├── dedup.rs         normalize, failure_signature, find_existing
-├── gh_client.rs     trait GhClient, GhIssue, RealGhClient, FakeGhClient (cfg(test))
-└── tests.rs         unit and end-to-end tests
+├── mod.rs                 public entrypoint (process_orchestrator_run) and re-exports
+├── types.rs               OrchestratorRunSummary, StewardshipOutcome, TargetRepo
+├── routing.rs             route_failure (total; DEFAULT_TARGET_REPO fallback)
+├── dedup.rs               normalize, failure_signature, find_existing
+├── gh_client.rs           trait GhClient, GhIssue, RealGhClient, FakeGhClient (test-utils)
+├── merge_authority.rs     gated squash-merge authority (merge-readiness path)
+├── merge_judge.rs         MergeJudge trait, LLM judge, objective-gate verdicts
+├── recipe_merge_judge.rs  recipe-runner-backed MergeJudge implementation
+├── tests.rs               unit and end-to-end tests (cfg(test))
+└── tests_extra.rs         TDD contract tests incl. routing-fallback coverage (cfg(test))
 ```
 
-`mod.rs` re-exports the public API:
+The routing-fallback behaviour documented on this page is exercised by
+`tests_extra.rs`. The `merge_authority` / `merge_judge` / `recipe_merge_judge`
+modules are a separate merge-readiness path unrelated to the orchestrator-failure
+loop described here.
+
+`mod.rs` re-exports the failure-filing API — the focus of this page:
 
 ```rust
+pub use dedup::{failure_signature, find_existing, normalize};
 pub use gh_client::{GhClient, GhIssue, RealGhClient};
 pub use routing::route_failure;
 pub use types::{OrchestratorRunSummary, StewardshipOutcome, TargetRepo};
 
-// Test-only helpers re-exported for downstream test consumers.
+// Test-only helper re-exported for downstream test consumers.
 #[cfg(any(test, feature = "test-utils"))]
 pub use gh_client::FakeGhClient;
 ```
+
+It additionally re-exports the merge-readiness surface (`merge_authority::*`,
+`merge_judge::*`, `recipe_merge_judge::RecipeMergeJudge`).
 
 `stewardship` depends on `goal_curation` (one direction only). It does **not**
 depend on `engineer_loop`, `base_type_*`, or `self_improve`.
@@ -55,10 +68,13 @@ resulting issue handle into the curation `board`.
 | Variant                          | When                                                       |
 |----------------------------------|------------------------------------------------------------|
 | `StewardshipInvalidRunSummary`   | A required field on `OrchestratorRunSummary` is empty.     |
-| `StewardshipRoutingAmbiguous`    | `source_module` matches no routing keyword set.            |
 | `StewardshipGhCommandFailed`     | `gh` is missing, exited non-zero, or returned malformed JSON. |
 
 No success branch is taken on any of these errors; `board` is left untouched.
+
+Routing no longer contributes an error variant: `route_failure` is total (see
+[Routing](#routing)). An unmatched `source_module` falls back to the default
+repo rather than aborting `process_orchestrator_run`.
 
 ## Types
 
@@ -109,11 +125,28 @@ In both cases, `enqueue_stewardship_issue` was called with the issue handle.
 
 ```rust
 pub fn route_failure(source_module: &str) -> SimardResult<TargetRepo>;
+
+// The one named source of truth for the default target repo.
+const DEFAULT_TARGET_REPO: TargetRepo = TargetRepo::Simard; // rysweet/Simard
 ```
 
-Pure, total over the routing matrix; performs zero I/O. See the
+Pure, **total**, and performs zero I/O. See the
 [routing matrix](../concepts/stewardship-mode.md#routing-matrix) for the
-keyword sets.
+keyword sets. Keyword checks run first (amplihack before Simard); if **no**
+keyword matches, `route_failure` returns `Ok(DEFAULT_TARGET_REPO)` and emits a
+single `tracing::warn!` carrying the unmatched `source_module` and the default
+slug:
+
+```text
+WARN stewardship routing: no keyword match, routing to default repo
+     source_module="overseer" default="rysweet/Simard"
+```
+
+The signature returns `SimardResult<TargetRepo>` for API stability, but the
+`Err` arm is now unreachable — every input resolves to a `TargetRepo`. This is
+what unblocks the Overseer's workstream-gap-scan, whose briefs carry
+`source_module = "overseer"` (no keyword match): they now route to
+`rysweet/Simard` and file/upsert a deduped tracking issue instead of failing.
 
 ## Deduplication
 
@@ -223,11 +256,14 @@ Repeated `MatchedExisting` outcomes therefore do not grow the backlog.
 // src/error/mod.rs
 pub enum SimardError {
     // ...existing variants...
-    StewardshipRoutingAmbiguous { source: String },
+    StewardshipRoutingAmbiguous { source: String }, // retained for API stability; no longer produced by route_failure
     StewardshipGhCommandFailed  { reason: String },
     StewardshipInvalidRunSummary{ field: &'static str },
 }
 ```
 
 Each variant has a `Display` arm and an associated unit test alongside
-existing error-variant tests.
+existing error-variant tests. `StewardshipRoutingAmbiguous` is **retained** so
+its `Display` contract stays stable and downstream matches keep compiling, but
+`route_failure` no longer emits it — an unmatched source now falls back to
+`DEFAULT_TARGET_REPO` (see [Routing](#routing)).

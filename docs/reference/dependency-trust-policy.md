@@ -1,13 +1,14 @@
 ---
 title: Dependency trust policy
 description: "Reference for cargo-vet transitive-dependency trust certification, the supply-chain/ baseline, trusted-crate and exemption criteria, and the advisory-resolution workflow."
-last_updated: 2026-06-28
+last_updated: 2026-07-06
 review_schedule: as-needed
 owner: simard
 doc_type: reference
 status: active
 related:
   - ./supply-chain-audit.md
+  - ./supply-chain-advisory-stewardship.md
   - ./release-integrity.md
   - ../howto/self-maintain-dependency-pins.md
 ---
@@ -82,7 +83,7 @@ cargo-vet:
     - name: Check out repository
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     - name: Install cargo-vet
-      uses: taiki-e/install-action@7b51dc7487ebab790625f16f2c5f541029a3b0ab # cargo-vet
+      uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
       with:
         tool: cargo-vet
     - name: Run cargo vet
@@ -94,9 +95,12 @@ Properties, identical to the other guardrail jobs:
 - **Lockfile-only** — no crate compilation, not in `pre-commit`, never writes
   the shared `simard-ci-v2` cache.
 - **`contents: read`** only — no token write scope.
-- **SHA-pinned** `taiki-e/install-action` with an explicit `tool: cargo-vet`
-  input (each tool has its own tag/commit, so a SHA pin alone selects the tool
-  baked into that commit — always pass `tool:`).
+- **SHA-pinned** `taiki-e/install-action` — pinned to its **`v2` release**
+  commit (`# v2.82.10`, reachable from the action's default branch so
+  Dependabot's `github_actions` updater can resolve and bump it) with an
+  explicit `tool: cargo-vet` input that selects the tool. Do **not** pin
+  `taiki-e`'s per-tool convenience tags (`# cargo-vet`): their commits are
+  diverged from the default branch and break Dependabot (`no such commit …`).
 - **`--locked`** — fails on a dirty `Cargo.lock`.
 
 `cargo vet --locked` passes when every third-party crate in the locked graph is
@@ -188,6 +192,13 @@ A *vulnerability* with no in-scope mitigation is resolved by the following
 decision order (transitive unmaintained/unsound advisories take the scope path
 above instead):
 
+> **Automated by the advisory reasoner (#2741).** This exact decision order is
+> what `src/supply_chain_steward` executes non-interactively on the daily
+> scheduled scan: a patched version → a minimal `cargo update --precise` bump PR;
+> no fix → a justified, tracked `ignore` in **both** files; a fix that is not
+> applicable here → an escalation issue (never an ignore). See
+> [Supply-chain advisory stewardship](./supply-chain-advisory-stewardship.md).
+
 ```mermaid
 flowchart TD
     A([advisory reported]) --> B{fixed version<br/>available?}
@@ -216,7 +227,7 @@ flowchart TD
 
 ### The `rsa` exemption (RUSTSEC-2023-0071)
 
-The one standing exemption is `rsa` / **RUSTSEC-2023-0071** (the "Marvin"
+One standing exemption is `rsa` / **RUSTSEC-2023-0071** (the "Marvin"
 timing side-channel):
 
 - **No fixed release exists** upstream.
@@ -230,6 +241,26 @@ timing side-channel):
 It is exempted **once per tool**, with identical justification, in
 `.cargo/audit.toml` (existing) and `deny.toml` (added for #2260), and is
 re-checked whenever a fixed `rsa` release ships.
+
+### The `crossbeam-epoch` exemption (RUSTSEC-2026-0204)
+
+The second standing exemption is `crossbeam-epoch` / **RUSTSEC-2026-0204**
+(invalid pointer dereference in the `fmt::Display` impl for `Atomic`/`Shared`):
+
+- **No fixed release exists** upstream (issued 2026-07-06 with empty
+  *Patched*/*Unaffected* fields), so it fails `cargo deny check advisories`
+  and `cargo audit` by default and must be exempted explicitly.
+- It reaches the graph **transitively**:
+  `rustyclawd-tools → moka → crossbeam-epoch`.
+- The dereference only occurs when `Display`-formatting a **null** crossbeam
+  `Atomic`/`Shared`; Simard never formats crossbeam pointers, so the faulty
+  path is unreachable in Simard's usage.
+- Tracked upstream: <https://rustsec.org/advisories/RUSTSEC-2026-0204>.
+
+Like `rsa`, it is exempted **once per tool** with identical justification in
+`.cargo/audit.toml` and `deny.toml`, and is re-checked whenever a fixed
+`crossbeam-epoch` release (or a `moka`/`rustyclawd-tools` bump that drops it)
+ships.
 
 ### Transitive unmaintained / unsound advisories
 
@@ -259,9 +290,9 @@ start failing — a *new* unmaintained advisory landing on a *direct* dependency
 or one of these being re-classified as a vulnerability or pulled in directly —
 the `workspace` scope forces an explicit decision: carry a *temporary* justified
 `ignore` (ID + "via `<upstream>`, no upgrade yet" + tracking link) in `deny.toml`
-and `.cargo/audit.toml` until the bump lands. The only **permanent** `ignore` in
-the policy remains `rsa` (RUSTSEC-2023-0071), the one advisory with no upstream
-fix.
+and `.cargo/audit.toml` until the bump lands. The **permanent** `ignore`s in
+the policy are `rsa` (RUSTSEC-2023-0071) and `crossbeam-epoch`
+(RUSTSEC-2026-0204), the two advisories with no upstream fix.
 
 ## Workflow: vetting a crate or resolving an advisory
 
@@ -291,6 +322,9 @@ the justification, and a tracking link, exactly like any `deny.toml` ignore.
 - [Supply-chain audit and guardrails](./supply-chain-audit.md) — `deny.toml`,
   the build-script / proc-macro inventory, and how all three guardrail jobs are
   wired into CI.
+- [Supply-chain advisory stewardship](./supply-chain-advisory-stewardship.md) —
+  the proactive automation of this advisory-resolution order (#2741): pinned
+  PR-time gate, daily scheduled scan, and the bump-or-justified-ignore reasoner.
 - [Release integrity](./release-integrity.md) — SBOM + signing, the
   release-side complement to dependency trust.
 - [Keep Simard's dependency pins up to date](../howto/self-maintain-dependency-pins.md) —

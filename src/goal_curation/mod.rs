@@ -7,8 +7,13 @@
 //! ([`decompose`]) that breaks one large goal into bounded sub-goals.
 
 pub mod completion_gate;
+pub mod labels;
+pub mod live_signal;
+pub mod live_signal_source;
 pub mod no_progress_breaker;
+pub mod no_progress_why;
 mod operations;
+pub mod outcome_verify;
 pub mod progress_evidence;
 pub mod progress_reviewer;
 pub mod recipe_progress_checker;
@@ -43,17 +48,28 @@ pub use prioritize::{PrioritizationSignals, prioritize};
 
 pub use completion_gate::{
     COMPLETION_VERIFICATION_METRIC, CompletionEvidence, CompletionEvidenceGate, CompletionVerdict,
-    EvidenceSource, FALSE_COMPLETION_RATE_METRIC, GhCliEvidenceSource, MissingEvidence,
-    VerificationOutcome, archive_completed_evidence_aware, archive_completed_with_evidence,
-    classify_from_missing, classify_outcome, completion_evidence_enabled, error_class_from_missing,
-    false_completion_rate, has_derivable_signal, is_self_affecting, record_completion_verification,
+    DependencyState, EvidenceSource, FALSE_COMPLETION_RATE_METRIC, GhCliEvidenceSource,
+    MissingEvidence, VerificationOutcome, archive_completed_evidence_aware,
+    archive_completed_with_evidence, classify_from_missing, classify_outcome,
+    completion_evidence_enabled, error_class_from_missing, false_completion_rate,
+    has_derivable_signal, is_self_affecting, record_completion_verification,
     record_false_completion_rate,
 };
 
 pub use no_progress_breaker::{
     NO_PROGRESS_BLOCKED_PREFIX, NO_PROGRESS_BLOCKED_SUFFIX, NO_PROGRESS_BREAKER_THRESHOLD,
     NoProgressResolution, NoProgressTracker, StuckGoalDisposition, is_no_progress_marker,
-    no_progress_blocked_reason, obsolescence_reason, resolve_no_progress, verify_stuck_goal,
+    no_progress_blocked_reason, no_progress_blocked_reason_with_why, obsolescence_reason,
+    resolution_for_why, resolve_no_progress, verify_stuck_goal,
+};
+
+pub use no_progress_why::{Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner};
+
+pub use live_signal::{LiveSignal, LiveSignalSource};
+pub use live_signal_source::DaemonLiveSignals;
+pub use outcome_verify::{
+    GOAL_LIVE_OUTCOME_VERIFICATION_METRIC, OutcomeVerificationReport, outcome_verify_enabled,
+    record_outcome_verification, verify_completion_candidates, verify_goal_outcome,
 };
 
 #[cfg(test)]
@@ -63,7 +79,14 @@ mod tests_adapter;
 #[cfg(test)]
 mod tests_carryover;
 #[cfg(test)]
+mod tests_labels;
+#[cfg(test)]
 mod tests_no_progress_breaker;
+// Issue #16 (TDD): pure-policy tests for the agentic root-cause upgrade of the
+// no-progress breaker (classification tokens, WHY/evidence value types, the
+// WHY-aware block-reason renderer, and the class -> resolution map).
+#[cfg(test)]
+mod tests_no_progress_why;
 #[cfg(test)]
 mod tests_operations;
 #[cfg(test)]

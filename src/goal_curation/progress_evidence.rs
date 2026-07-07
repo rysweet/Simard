@@ -98,6 +98,7 @@ mod tests {
     #[test]
     fn noop_checker_always_accepts() {
         let g = ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,

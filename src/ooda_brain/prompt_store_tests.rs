@@ -1756,3 +1756,118 @@ fn goal_decomposition_prompt_pins_output_contract() {
         "each sub-goal must carry a description"
     );
 }
+
+// Issue #2690 — the engineer-admission prompt is embedded, loads in pure
+// embedded mode, and pins the overlap-reasoning + output contract the shim
+// depends on.
+#[test]
+fn engineer_admission_prompt_is_embedded_and_pins_overlap_contract() {
+    // Registered in the embedded-fallback table.
+    let prompt = embedded_fallback("ooda_engineer_admission.md")
+        .expect("ooda_engineer_admission.md embedded prompt");
+
+    // Loads non-empty in pure embedded mode (no disk dir).
+    let store = PromptStore::new(None);
+    assert_eq!(
+        store.load("ooda_engineer_admission.md"),
+        prompt,
+        "embedded mode must return the embedded admission prompt"
+    );
+
+    let lower = prompt.to_lowercase();
+    // Reasoning intent: file-footprint overlap between the candidate and the
+    // in-flight engineers.
+    assert!(
+        lower.contains("overlap"),
+        "prompt must reason about overlap"
+    );
+    assert!(
+        lower.contains("collide") || lower.contains("collision"),
+        "prompt must name the merge-collision problem"
+    );
+    // The three decision variants the parser (admission_decision_from_variant)
+    // depends on.
+    assert!(prompt.contains("admit"), "must document the admit variant");
+    assert!(prompt.contains("defer"), "must document the defer variant");
+    assert!(
+        prompt.contains("serialize_after"),
+        "must document the serialize_after variant"
+    );
+    // The load-bearing envelope fields the shim reads explicitly.
+    assert!(prompt.contains("blocked_by"), "defer carries blocked_by");
+    assert!(
+        prompt.contains("after_goal_id") && prompt.contains("overlap_files"),
+        "serialize_after carries after_goal_id + overlap_files"
+    );
+    // Fail-OPEN polarity is pinned so a future edit cannot silently flip it.
+    assert!(
+        lower.contains("fail") && lower.contains("open"),
+        "prompt must pin the fail-open contract"
+    );
+    // The canonical collisions this gate exists to catch are anchored in the
+    // few-shot examples.
+    assert!(
+        prompt.contains("goals_status.rs"),
+        "few-shot must anchor on the goals_status.rs collision"
+    );
+    assert!(
+        lower.contains("adapter"),
+        "few-shot must anchor on the Adapter-rename incident"
+    );
+}
+
+// Issue #2706 — the resource-admission prompt is embedded, loads in pure
+// embedded mode, and pins the resource-reasoning + output contract the shim
+// depends on (disk/build-cache/load → admit | defer | reclaim_first).
+#[test]
+fn resource_admission_prompt_is_embedded_and_pins_resource_contract() {
+    // Registered in the embedded-fallback table.
+    let prompt = embedded_fallback("ooda_resource_admission.md")
+        .expect("ooda_resource_admission.md embedded prompt");
+
+    // Loads non-empty in pure embedded mode (no disk dir).
+    let store = PromptStore::new(None);
+    assert_eq!(
+        store.load("ooda_resource_admission.md"),
+        prompt,
+        "embedded mode must return the embedded resource-admission prompt"
+    );
+
+    let lower = prompt.to_lowercase();
+    // Reasoning intent: host resource affordability, not file overlap.
+    assert!(lower.contains("disk"), "prompt must reason about disk");
+    assert!(
+        lower.contains("build") && lower.contains("cache"),
+        "prompt must reason about build caches"
+    );
+    assert!(
+        lower.contains("load average") || lower.contains("load_avg"),
+        "prompt must reason about system load"
+    );
+    // The hard-rail / ENOSPC framing must be pinned so an edit cannot imply the
+    // prompt owns the out-of-space guarantee (it is enforced in Rust).
+    assert!(
+        lower.contains("ceiling"),
+        "prompt must reference the disk ceiling"
+    );
+    assert!(
+        lower.contains("enospc")
+            || lower.contains("out-of-space")
+            || lower.contains("out of space"),
+        "prompt must name the ENOSPC hazard"
+    );
+    // The three decision variants the parser
+    // (resource_admission_decision_from_variant) depends on.
+    assert!(prompt.contains("admit"), "must document the admit variant");
+    assert!(prompt.contains("defer"), "must document the defer variant");
+    assert!(
+        prompt.contains("reclaim_first"),
+        "must document the reclaim_first variant"
+    );
+    // Fail-CLOSED polarity is pinned so a future edit cannot silently flip it —
+    // a resource-gate brain error must DEFER, not admit.
+    assert!(
+        lower.contains("fail") && (lower.contains("closed") || lower.contains("defer")),
+        "prompt must pin the fail-closed contract"
+    );
+}

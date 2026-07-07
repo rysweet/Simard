@@ -26,6 +26,7 @@
 //! [`super::dispatch_actions_bounded`]; their behavior is unchanged.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::{Condvar, Mutex};
 
 use crate::base_types::BaseTypeSession;
@@ -107,6 +108,9 @@ struct AdvanceCtx<'a> {
     state: &'a Mutex<&'a mut OodaState>,
     claims: &'a Mutex<HashSet<String>>,
     sem: &'a Semaphore,
+    /// The daemon's own repository root (for the resource-admission gate's
+    /// `reclaim_first` disk-health recipe lookup — issue #2706).
+    repo_root: &'a Path,
 }
 
 /// Dispatch the spawn-path `AdvanceGoal` actions at `indices` concurrently,
@@ -131,6 +135,8 @@ pub(super) fn dispatch_advance_concurrent(
     let brain: &dyn OodaBrain = &*bridges.brain;
     let session_factory: Option<&dyn OrchestratorSessionFactory> =
         bridges.session_factory.as_deref();
+    // Daemon repo root for the resource-admission reclaim path (issue #2706).
+    let repo_root: &Path = &bridges.repo_root;
 
     // Take ownership of the shared fallback session for the duration of the
     // round so the per-thread context can lend it out by `Box` (avoids tying a
@@ -151,6 +157,7 @@ pub(super) fn dispatch_advance_concurrent(
         state: &state_mx,
         claims: &claims,
         sem: &sem,
+        repo_root,
     };
     let ctx_ref = &ctx;
 
@@ -373,7 +380,14 @@ fn dispatch_advance_goal_concurrent(action: &PlannedAction, ctx: &AdvanceCtx) ->
     // ── Engineer spawn — short state critical sections only (the git
     //    worktree allocation + detached subprocess run with NO lock held). ──
     if let Some(GoalAction::SpawnEngineer { task, .. }) = result.action {
-        return dispatch_spawn_engineer(action, ctx.state, &goal_id, &task, ctx.brain);
+        return dispatch_spawn_engineer(
+            action,
+            ctx.state,
+            &goal_id,
+            &task,
+            ctx.brain,
+            ctx.repo_root,
+        );
     }
 
     result.outcome
@@ -398,6 +412,7 @@ pub(super) fn is_concurrent_advance_candidate(action: &PlannedAction, state: &Oo
 #[cfg(test)]
 fn active_goal_for_test(id: &str) -> crate::goal_curation::ActiveGoal {
     crate::goal_curation::ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

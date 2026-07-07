@@ -342,6 +342,135 @@ fn generated_idea_persists_as_prospective_node_and_round_trips() {
     assert_eq!(by_id.node_id, got.node_id);
 }
 
+/// Regression for the dashboard read path (#122): persisted creative ideas must
+/// appear even when the store already holds far more than the read window's
+/// worth of *unrelated* prospective memories.
+///
+/// The daemon persists ~10 ideas per Creative-Ideas run, but the live OODA
+/// store accumulates thousands of other prospective facts. The dashboard read
+/// path (`store.list(IDEA_LIST_LIMIT)`) used to fetch the first
+/// `IDEA_LIST_LIMIT` prospective nodes *across every trigger* and only then
+/// filter for the creative-idea sentinel — so once the store held more than
+/// `IDEA_LIST_LIMIT` non-creative prospectives the creative nodes fell outside
+/// the window and `GET /api/creative-ideas` returned 0 across all statuses
+/// ("I'm still not seeing any of the creative ideas work in the dashboard").
+///
+/// The fix scopes the `LIMIT` to the creative-idea trigger *in the query*
+/// (`list_prospective_by_trigger`), so every persisted idea survives regardless
+/// of how many unrelated prospectives exist. This test therefore FAILS before
+/// the fix (creative nodes truncated out of the window) and PASSES after it.
+#[test]
+fn creative_ideas_survive_beyond_the_prospective_read_window() {
+    // Mirror of the dashboard's module-private `IDEA_LIST_LIMIT`
+    // (`src/operator_commands_dashboard/creative_ideas.rs`).
+    const IDEA_LIST_LIMIT: u32 = 512;
+    // Flood the store far past the window (8x) so a naive "take LIMIT rows then
+    // filter" read reliably drops the creative nodes: the creative sentinel is a
+    // vanishing fraction of the prospective set, exactly the production shape.
+    const NON_CREATIVE_FLOOD: u32 = IDEA_LIST_LIMIT * 8;
+    const CREATIVE_IDEA_COUNT: usize = 10;
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory store");
+
+    // Thousands of *non-creative* prospective memories under a distinct trigger
+    // — the noise the live OODA store accumulates around the ideas.
+    for i in 0..NON_CREATIVE_FLOOD {
+        mem.store_prospective(
+            &format!("unrelated prospective memory {i}"),
+            "some-unrelated-trigger",
+            "{}",
+            1,
+        )
+        .expect("store non-creative prospective");
+    }
+
+    // A handful of real creative ideas persisted through the store — the ~10/run
+    // the daemon logs as "10 persisted".
+    let store = ProspectiveCreativeIdeaStore::new(&mem);
+    let mut expected_ids = Vec::with_capacity(CREATIVE_IDEA_COUNT);
+    for i in 0..CREATIVE_IDEA_COUNT {
+        let idea = CreativeIdea::new(
+            format!("creative idea number {i}"),
+            sample_context(),
+            1_700_000_000 + i as u64,
+        );
+        expected_ids.push(store.store(&idea).expect("store creative idea"));
+    }
+
+    // The exact dashboard read path.
+    let listed = store.list(IDEA_LIST_LIMIT).expect("dashboard list");
+
+    // Every persisted idea must be visible — this is the user-facing bug.
+    for id in &expected_ids {
+        assert!(
+            listed.iter().any(|idea| &idea.node_id == id),
+            "persisted creative idea {id} is missing from the dashboard read: it \
+             was truncated out of the {IDEA_LIST_LIMIT}-row prospective window by \
+             the unrelated flood (the #122 read-path bug)"
+        );
+    }
+    assert_eq!(
+        listed.len(),
+        expected_ids.len(),
+        "the dashboard must list exactly the {} persisted creative ideas, not a \
+         limit-truncated subset (got {})",
+        expected_ids.len(),
+        listed.len(),
+    );
+}
+
+/// Contract for the new trigger-scoped prospective primitive
+/// ([`CognitiveMemoryOps::list_prospective_by_trigger`]) that backs the #122
+/// fix: the `limit` must bound only nodes matching the requested trigger, so a
+/// creative-idea read stays complete no matter how large the non-creative
+/// prospective population grows. Distinct from the store-level regression above,
+/// this pins the primitive directly on the library adapter.
+#[test]
+fn list_prospective_by_trigger_scopes_the_limit_to_matching_nodes() {
+    const LIMIT: u32 = 512;
+    const FLOOD: u32 = LIMIT * 8;
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory store");
+
+    // A large non-creative prospective population under a different trigger.
+    for i in 0..FLOOD {
+        mem.store_prospective(&format!("noise {i}"), "unrelated-trigger", "{}", 1)
+            .expect("store noise prospective");
+    }
+    // A handful of creative-idea nodes (raw, under the sentinel trigger).
+    let mut creative_ids = Vec::new();
+    for i in 0..10i64 {
+        creative_ids.push(
+            mem.store_prospective(&format!("idea {i}"), CREATIVE_IDEA_TRIGGER, "{}", i)
+                .expect("store creative prospective"),
+        );
+    }
+
+    // Every creative node must come back even though `LIMIT` << `FLOOD`: the
+    // query filters by trigger BEFORE applying the limit (fail-closed — no
+    // fallback to an unfiltered `list_all_prospective`).
+    let got: Vec<CognitiveProspective> = mem
+        .list_prospective_by_trigger(CREATIVE_IDEA_TRIGGER, LIMIT)
+        .expect("list_prospective_by_trigger");
+
+    assert!(
+        got.iter()
+            .all(|p| p.trigger_condition == CREATIVE_IDEA_TRIGGER),
+        "the primitive must return only nodes matching the requested trigger"
+    );
+    for id in &creative_ids {
+        assert!(
+            got.iter().any(|p| &p.node_id == id),
+            "creative node {id} must survive the trigger-scoped read despite the flood"
+        );
+    }
+    assert_eq!(
+        got.len(),
+        creative_ids.len(),
+        "exactly the creative-trigger nodes are returned, none of the {FLOOD} flood"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 3. Pipeline — all four reviewers + synthesis sets a legal status
 // ---------------------------------------------------------------------------
@@ -452,6 +581,38 @@ fn route_accepted_idea_produces_proposed_goal() {
         stored
             .iter()
             .any(|g| g.slug == record.slug && g.status == GoalStatus::Proposed)
+    );
+}
+
+#[test]
+fn route_accepted_idea_stamps_source_creative_ideas_provenance() {
+    // Issue #2743 headline case: a goal promoted from a creative idea is
+    // stamped `source:creative-ideas` at creation, so "which goals came from
+    // creative ideas?" is answerable by an exact-tag filter.
+    let goals = InMemoryGoalStore::try_default().expect("goal store");
+    let mut idea = CreativeIdea::new("ship the live tag filter", sample_context(), 7);
+    idea.node_id = "pro_idea_prov".to_string();
+    idea.status = IdeaStatus::AcceptedForImplementation;
+
+    let record = route_idea_to_goal(&idea, &goals, 1_700_000_777).expect("route to goal");
+    assert_eq!(
+        record.labels,
+        vec![crate::goal_curation::labels::SOURCE_CREATIVE_IDEAS.to_string()],
+        "creative-idea goal must carry exactly source:creative-ideas at birth",
+    );
+
+    // The provenance survives persistence into the store.
+    let stored = goals.list().expect("list goals");
+    let persisted = stored
+        .iter()
+        .find(|g| g.slug == record.slug)
+        .expect("goal persisted");
+    assert!(
+        persisted
+            .labels
+            .iter()
+            .any(|l| l == crate::goal_curation::labels::SOURCE_CREATIVE_IDEAS),
+        "persisted creative-idea goal must remain queryable by source:creative-ideas",
     );
 }
 
@@ -907,7 +1068,11 @@ impl GoalStore for SharedGoalStore {
 struct SharedGoalStoreFactory(std::sync::Arc<InMemoryGoalStore>);
 
 impl GoalStoreFactory for SharedGoalStoreFactory {
-    fn open(&self, _state_root: &std::path::Path) -> SimardResult<Box<dyn GoalStore>> {
+    fn open<'a>(
+        &self,
+        _memory: &'a dyn crate::cognitive_memory::CognitiveMemoryOps,
+        _state_root: &std::path::Path,
+    ) -> SimardResult<Box<dyn GoalStore + 'a>> {
         Ok(Box::new(SharedGoalStore(std::sync::Arc::clone(&self.0))))
     }
 }
@@ -1181,4 +1346,377 @@ fn wired_thread_tick_generates_reviews_and_routes() {
     for idea in &started {
         assert_eq!(idea.reviews.len(), 3);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 13. Durability — persisted ideas survive a non-graceful restart (#2798)
+// ---------------------------------------------------------------------------
+
+/// **Durability regression (#2798).** Disproves the "creative-idea prospective
+/// writes are buffer-only, lost on SIGKILL unless the thread checkpoints each
+/// batch" hypothesis: a real `CreativeIdeasThread::tick` batch survives a
+/// non-graceful restart with no explicit checkpoint, because the pinned engine's
+/// WAL is write-through and replayed on open. It drives the tick against an
+/// on-disk store, `std::mem::forget`s the handle to skip the graceful-`Drop`
+/// checkpoint, cold-reopens from disk, and asserts the ideas are still listable.
+/// A RED here means engine WAL replay regressed — an `amplihack-memory-lib` fix
+/// (G2), not a Simard-side checkpoint.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn tick_persisted_ideas_survive_nongraceful_restart_via_engine_wal() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build current-thread runtime");
+    let shutdown = AtomicBool::new(false);
+
+    let raws: Vec<RawIdea> = (0..3)
+        .map(|i| RawIdea {
+            idea: format!("durable self-improvement idea {i}"),
+            links: vec![MemoryLink {
+                kind: MemoryLinkKind::Goal,
+                node_id: format!("g{i}"),
+            }],
+            rationale: format!("grounded rationale {i}"),
+        })
+        .collect();
+    let expected = raws.len();
+
+    {
+        let mem = LibraryCognitiveMemory::open(&root).expect("open on-disk store");
+        let cfg = CreativeIdeasConfig {
+            enabled: true,
+            batch: expected,
+            ..CreativeIdeasConfig::default()
+        };
+        let mut thread = CreativeIdeasThread::with_pipeline(
+            cfg,
+            Box::new(FakeIdeaSource::with_ideas(raws)),
+            Box::new(NoopPipeline),
+        );
+        let mut ctx = ThreadContext {
+            state_root: &root,
+            repo_root: &root,
+            memory: &mem as &dyn CognitiveMemoryOps,
+            runtime: rt.handle().clone(),
+            shutdown: &shutdown,
+            now_epoch: 1_000,
+            dry_run: false,
+        };
+        let outcome = thread.tick(&mut ctx);
+        assert!(
+            outcome.ran && outcome.success,
+            "tick must persist the batch: {}",
+            outcome.summary
+        );
+
+        // Simulate a SIGKILL-during-deploy: skip the graceful `Drop` (and its
+        // implicit checkpoint) entirely. Durability must come from the engine's
+        // write-through WAL, NOT from any checkpoint.
+        std::mem::forget(mem);
+    }
+
+    // Force a genuine cold reopen from disk (drop any shared cached handle and
+    // reap the stale open-lock left by the forgotten writer).
+    crate::memory_ipc::clear_tier2_store_cache();
+    let _ = crate::memory_ipc::reap_stale_open_lock(&root);
+
+    let reopened = LibraryCognitiveMemory::open(&root).expect("cold reopen after restart");
+    let ideas = ProspectiveCreativeIdeaStore::new(&reopened)
+        .list(u32::MAX)
+        .expect("list creative ideas after restart");
+    assert_eq!(
+        ideas.len(),
+        expected,
+        "every persisted creative idea must survive a non-graceful daemon restart \
+         through the engine's write-through WAL (no explicit checkpoint): persist \
+         -> SIGKILL -> reopen -> list is non-empty (#2798); got {}",
+        ideas.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 13. Semantic dedup + enhance gate wiring in the tick (issue #2925)
+// ---------------------------------------------------------------------------
+
+use crate::ooda_brain::{
+    EngineerLifecycleCtx, EngineerLifecycleDecision, IdeaDedupCtx, IdeaDedupDecision, OodaBrain,
+};
+
+/// A stub dedup reasoner that returns scripted decisions (or errors) in order,
+/// so the tick's plan-and-apply seam can be driven hermetically.
+struct ScriptedDedupBrain {
+    decisions: std::sync::Mutex<std::collections::VecDeque<SimardResult<IdeaDedupDecision>>>,
+}
+
+impl ScriptedDedupBrain {
+    fn new(decisions: Vec<SimardResult<IdeaDedupDecision>>) -> Self {
+        Self {
+            decisions: std::sync::Mutex::new(decisions.into()),
+        }
+    }
+}
+
+impl OodaBrain for ScriptedDedupBrain {
+    fn decide_engineer_lifecycle(
+        &self,
+        _ctx: &EngineerLifecycleCtx,
+    ) -> SimardResult<EngineerLifecycleDecision> {
+        Ok(EngineerLifecycleDecision::ContinueSkipping {
+            rationale: "unused".into(),
+        })
+    }
+
+    fn decide_idea_dedup(&self, _ctx: &IdeaDedupCtx) -> SimardResult<IdeaDedupDecision> {
+        self.decisions
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| {
+                Ok(IdeaDedupDecision::CreateNew {
+                    rationale: "default".into(),
+                })
+            })
+    }
+}
+
+/// Seed one `New` idea into `mem` and return it (with its persisted `node_id`).
+fn seed_idea(mem: &LibraryCognitiveMemory, idea: &str, rationale: &str) -> CreativeIdea {
+    let store = ProspectiveCreativeIdeaStore::new(mem);
+    let mut ci = CreativeIdea::new(
+        idea,
+        IdeaContext {
+            source: "seed".into(),
+            rationale: rationale.into(),
+            ..Default::default()
+        },
+        100,
+    );
+    ci.node_id = store.store(&ci).expect("store seed");
+    store
+        .get(&ci.node_id)
+        .expect("get seed")
+        .expect("seed present after store")
+}
+
+fn cand(idea: &str, rationale: &str) -> RawIdea {
+    RawIdea {
+        idea: idea.to_string(),
+        links: Vec::new(),
+        rationale: rationale.to_string(),
+    }
+}
+
+fn dedup_thread(
+    env: &TickEnv,
+    candidates: Vec<RawIdea>,
+    decisions: Vec<SimardResult<IdeaDedupDecision>>,
+) -> CreativeIdeasThread {
+    let cfg = CreativeIdeasConfig {
+        enabled: true,
+        batch: candidates.len().max(1),
+        ..CreativeIdeasConfig::default()
+    };
+    let _ = env;
+    CreativeIdeasThread::with_pipeline_and_brain(
+        cfg,
+        Box::new(FakeIdeaSource::with_ideas(candidates)),
+        Box::new(NoopPipeline),
+        Box::new(ScriptedDedupBrain::new(decisions)),
+        /* semantic_enabled */ true,
+    )
+}
+
+#[test]
+fn tick_gate_skip_drops_candidate_no_new_node() {
+    let env = TickEnv::new();
+    let _seed = seed_idea(
+        &env.mem,
+        "cache the goal board reads each cycle",
+        "seed rationale",
+    );
+
+    let mut thread = dedup_thread(
+        &env,
+        vec![cand("goal board reads are cached each cycle", "dup")],
+        vec![Ok(IdeaDedupDecision::Skip {
+            rationale: "true duplicate".into(),
+        })],
+    );
+    let mut ctx = env.ctx(1_000, /* dry_run */ false);
+    let report = thread.run_now(&mut ctx).expect("run_now");
+
+    assert_eq!(report.generated, 1);
+    assert_eq!(report.skipped, 1, "a SKIP decision drops the candidate");
+    assert_eq!(report.persisted, 0, "SKIP persists nothing");
+
+    let ideas = ProspectiveCreativeIdeaStore::new(&env.mem)
+        .list(u32::MAX)
+        .expect("list");
+    assert_eq!(
+        ideas.len(),
+        1,
+        "SKIP creates no new node (only the seed remains)"
+    );
+}
+
+#[test]
+fn tick_gate_enhance_updates_match_zero_new_nodes() {
+    let env = TickEnv::new();
+    let seed = seed_idea(
+        &env.mem,
+        "cache the goal board reads each cycle",
+        "original rationale",
+    );
+
+    let mut thread = dedup_thread(
+        &env,
+        vec![cand(
+            "goal board reads should be cached once",
+            "candidate adds a benchmark angle",
+        )],
+        vec![Ok(IdeaDedupDecision::EnhanceExisting {
+            target_node_id: seed.node_id.clone(),
+            rationale: "same idea, adds a benchmark".into(),
+        })],
+    );
+    let mut ctx = env.ctx(1_000, /* dry_run */ false);
+    let report = thread.run_now(&mut ctx).expect("run_now");
+
+    assert_eq!(
+        report.enhanced, 1,
+        "an ENHANCE decision strengthens the match"
+    );
+    assert_eq!(report.persisted, 0, "ENHANCE creates no new idea");
+
+    let ideas = ProspectiveCreativeIdeaStore::new(&env.mem)
+        .list(u32::MAX)
+        .expect("list");
+    assert_eq!(ideas.len(), 1, "ENHANCE creates 0 new nodes (same idea_id)");
+    let merged = &ideas[0];
+    assert_eq!(merged.idea_id, seed.idea_id, "same stable idea_id");
+    assert_eq!(merged.status, IdeaStatus::New, "status preserved");
+    assert!(
+        merged.context.rationale.contains("original rationale")
+            && merged.context.rationale.contains("benchmark"),
+        "the matched idea's rationale is strengthened: {}",
+        merged.context.rationale
+    );
+}
+
+#[test]
+fn tick_gate_create_persists_new_idea() {
+    let env = TickEnv::new();
+    let _seed = seed_idea(&env.mem, "cache the goal board reads each cycle", "seed");
+
+    let mut thread = dedup_thread(
+        &env,
+        vec![cand(
+            "goal metrics dashboard redesign",
+            "genuinely different",
+        )],
+        vec![Ok(IdeaDedupDecision::CreateNew {
+            rationale: "novel".into(),
+        })],
+    );
+    let mut ctx = env.ctx(1_000, /* dry_run */ false);
+    let report = thread.run_now(&mut ctx).expect("run_now");
+
+    assert_eq!(
+        report.persisted, 1,
+        "a CREATE decision persists the new idea"
+    );
+    assert_eq!(report.skipped, 0);
+    assert_eq!(report.enhanced, 0);
+
+    let ideas = ProspectiveCreativeIdeaStore::new(&env.mem)
+        .list(u32::MAX)
+        .expect("list");
+    assert_eq!(ideas.len(), 2, "seed + one newly-created idea");
+}
+
+#[test]
+fn tick_gate_reasoner_error_is_fail_closed_no_silent_duplicate() {
+    let env = TickEnv::new();
+    let _seed = seed_idea(&env.mem, "cache the goal board reads each cycle", "seed");
+
+    let mut thread = dedup_thread(
+        &env,
+        vec![cand("goal board reads cached each cycle", "would be a dup")],
+        vec![Err(SimardError::ReviewUnavailable {
+            reason: "reasoner offline".into(),
+        })],
+    );
+    let mut ctx = env.ctx(1_000, /* dry_run */ false);
+    let report = thread
+        .run_now(&mut ctx)
+        .expect("run_now is total even on a fail-closed drop");
+
+    assert_eq!(
+        report.dedup_errors, 1,
+        "a reasoner error is counted (surfaced)"
+    );
+    assert_eq!(
+        report.persisted, 0,
+        "fail-closed: the candidate is NOT persisted"
+    );
+    assert_eq!(report.skipped, 0);
+    assert_eq!(report.enhanced, 0);
+
+    let ideas = ProspectiveCreativeIdeaStore::new(&env.mem)
+        .list(u32::MAX)
+        .expect("list");
+    assert_eq!(
+        ideas.len(),
+        1,
+        "fail-closed must create NO duplicate — only the seed remains"
+    );
+}
+
+#[test]
+fn tick_gate_telemetry_counts_mixed_batch() {
+    let env = TickEnv::new();
+    let seed = seed_idea(&env.mem, "cache the goal board reads each cycle", "seed");
+
+    let candidates = vec![
+        cand("goal board caching is redundant", "r1"),
+        cand("goal board reads should be cached once", "r2 adds evidence"),
+        cand("goal indexing a brand new approach", "r3"),
+    ];
+    let decisions = vec![
+        Ok(IdeaDedupDecision::Skip {
+            rationale: "dup".into(),
+        }),
+        Ok(IdeaDedupDecision::EnhanceExisting {
+            target_node_id: seed.node_id.clone(),
+            rationale: "adds evidence".into(),
+        }),
+        Ok(IdeaDedupDecision::CreateNew {
+            rationale: "novel".into(),
+        }),
+    ];
+
+    let mut thread = dedup_thread(&env, candidates, decisions);
+    let mut ctx = env.ctx(1_000, /* dry_run */ false);
+    let report = thread.run_now(&mut ctx).expect("run_now");
+
+    // The four counts backing the `[simard] creative_ideas dedup: generated=…
+    // skipped=… enhanced=… created=…` telemetry line.
+    assert_eq!(report.generated, 3, "generated");
+    assert_eq!(report.skipped, 1, "skipped");
+    assert_eq!(report.enhanced, 1, "enhanced");
+    assert_eq!(report.persisted, 1, "created");
+    assert_eq!(report.dedup_errors, 0);
+
+    let ideas = ProspectiveCreativeIdeaStore::new(&env.mem)
+        .list(u32::MAX)
+        .expect("list");
+    assert_eq!(
+        ideas.len(),
+        2,
+        "seed (enhanced in place) + one created idea = 2 nodes"
+    );
 }

@@ -12,7 +12,7 @@ use crate::memory_cognitive::{
     CognitiveWorkingSlot,
 };
 
-use super::{MemoryRequest, MemoryResponse, ipc_err, read_frame, write_frame};
+use super::{FactWriteOutcome, MemoryRequest, MemoryResponse, ipc_err, read_frame, write_frame};
 
 // ============================================================================
 // Client
@@ -86,6 +86,74 @@ impl RemoteCognitiveMemory {
                 method: name.into(),
                 reason: format!("unexpected response variant: {other:?}"),
             },
+        }
+    }
+
+    /// Commit ONE distilled fact through the daemon's authoritative
+    /// write-boundary gate (issue #2679). The server grounds, scores,
+    /// quarantines, dedups, and persists the fact; the returned
+    /// [`FactWriteOutcome`] reports the server's disposition and the confidence
+    /// it computed (never the `confidence` hint passed here). This is the wire
+    /// the distiller agentic step uses via `simard memory remember` — there is
+    /// no return document for anyone to deserialize.
+    #[allow(clippy::too_many_arguments)]
+    pub fn remember_fact_gated(
+        &self,
+        concept: &str,
+        content: &str,
+        confidence: f64,
+        tags: &[String],
+        source_id: &str,
+        source_episode_ids: &[String],
+        pass_id: &str,
+    ) -> SimardResult<FactWriteOutcome> {
+        match self.call(MemoryRequest::StoreFactGated {
+            concept: concept.into(),
+            content: content.into(),
+            confidence,
+            tags: tags.to_vec(),
+            source_id: source_id.into(),
+            source_episode_ids: source_episode_ids.to_vec(),
+            pass_id: pass_id.into(),
+        })? {
+            MemoryResponse::FactWrite(o) => Ok(o),
+            other => Err(Self::unexpected("remember_fact_gated", other)),
+        }
+    }
+
+    /// Commit ONE distilled procedure with its source-episode provenance (issue
+    /// #2679), returning the new node id. The companion of
+    /// [`remember_fact_gated`](Self::remember_fact_gated) for the distiller's
+    /// procedure output.
+    pub fn remember_procedure_provenance(
+        &self,
+        name: &str,
+        steps: &[String],
+        prerequisites: &[String],
+        source_episode_ids: &[String],
+        pass_id: &str,
+    ) -> SimardResult<String> {
+        match self.call(MemoryRequest::StoreProcedureProvenance {
+            name: name.into(),
+            steps: steps.to_vec(),
+            prerequisites: prerequisites.to_vec(),
+            source_episode_ids: source_episode_ids.to_vec(),
+            pass_id: pass_id.into(),
+        })? {
+            MemoryResponse::Id(id) => Ok(id),
+            other => Err(Self::unexpected("remember_procedure_provenance", other)),
+        }
+    }
+
+    /// Drain and return the count of facts the write-boundary gate ACCEPTED for
+    /// `pass_id` (issue #2679). Used by the distiller subprocess to report a
+    /// pass's committed-fact count when there is no returned document to count.
+    pub fn drain_pass_ledger(&self, pass_id: &str) -> SimardResult<usize> {
+        match self.call(MemoryRequest::DrainPassLedger {
+            pass_id: pass_id.into(),
+        })? {
+            MemoryResponse::Count(n) => Ok(n),
+            other => Err(Self::unexpected("drain_pass_ledger", other)),
         }
     }
 }
@@ -235,6 +303,27 @@ impl CognitiveMemoryOps for RemoteCognitiveMemory {
         }
     }
 
+    fn list_all_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+        // Additive socket forward (issue #2627): mirror the library override so a
+        // reader on the daemon-socket tier enumerates live episodes instead of the
+        // empty `list_all_episodes` trait default — the dashboard Memory-tab graph
+        // relies on this to render per-item episode nodes over the wire.
+        match self.call(MemoryRequest::ListAllEpisodes { limit })? {
+            MemoryResponse::Episodes(v) => Ok(v),
+            other => Err(Self::unexpected("list_all_episodes", other)),
+        }
+    }
+
+    fn list_all_prospective(&self, limit: u32) -> SimardResult<Vec<CognitiveProspective>> {
+        // Additive socket forward (issue #2627): companion of `list_all_episodes`
+        // so prospective memories enumerate over the wire for the Memory-tab
+        // graph instead of collapsing to the empty trait default.
+        match self.call(MemoryRequest::ListAllProspective { limit })? {
+            MemoryResponse::Prospectives(v) => Ok(v),
+            other => Err(Self::unexpected("list_all_prospective", other)),
+        }
+    }
+
     fn store_prospective(
         &self,
         description: &str,
@@ -268,6 +357,20 @@ impl CognitiveMemoryOps for RemoteCognitiveMemory {
         })? {
             MemoryResponse::Ack => Ok(()),
             other => Err(Self::unexpected("resolve_prospective", other)),
+        }
+    }
+
+    fn list_prospective_by_trigger(
+        &self,
+        trigger: &str,
+        limit: u32,
+    ) -> SimardResult<Vec<CognitiveProspective>> {
+        match self.call(MemoryRequest::ListProspectiveByTrigger {
+            trigger: trigger.into(),
+            limit,
+        })? {
+            MemoryResponse::Prospectives(v) => Ok(v),
+            other => Err(Self::unexpected("list_prospective_by_trigger", other)),
         }
     }
 

@@ -557,23 +557,141 @@ fn run_ooda_cycle_inner(
     // corruption guard treats them as a legitimate departure (not a "vanished"
     // goal) and the persist step force-removes them from the snapshot.
     let breaker_dropped: Vec<String> = if let Some(source) = &bridges.completion_evidence {
-        let report = crate::ooda_loop::no_progress::apply_no_progress_breaker(
-            state,
-            &outcomes,
-            source.as_ref(),
-            &crate::ooda_loop::no_progress::GhIssueFiler,
-        );
-        if report.fired() {
-            tracing::info!(
-                target: "simard::ooda",
-                summary = %report.log_line(),
-                "OODA no-progress breaker fired",
+        if crate::ooda_loop::no_progress::no_progress_investigation_enabled() {
+            // Root-cause investigation (issue #16): before authoring any block,
+            // the breaker classifies WHY a stalled goal made no shippable
+            // progress and routes it down the self-resolving ladder —
+            // auto-complete, heal a missing precondition, defer behind an
+            // upstream, or spawn ONE guided engineer — escalating to a human
+            // (WITH the concrete WHY + evidence) only as a last resort. Routing
+            // is deterministic (evidence-driven): the brain is failing on this
+            // goal, so it must not decide its own recovery.
+            let source_ref = source.as_ref();
+            let reasoner =
+                crate::ooda_loop::no_progress::DeterministicNoProgressReasoner::new(source_ref);
+            let healer = crate::ooda_loop::no_progress::CloneRepoHealer::new("rysweet");
+            let dispatcher = crate::ooda_loop::no_progress::QueueingEngineerDispatcher::new();
+
+            let report = crate::ooda_loop::no_progress::apply_no_progress_breaker_investigated(
+                state,
+                &outcomes,
+                source_ref,
+                &reasoner,
+                &healer,
+                &dispatcher,
+                &crate::ooda_loop::no_progress::GhIssueFiler,
+                crate::ooda_loop::no_progress::INVESTIGATED_BREAKER_THRESHOLD,
             );
+            if report.fired() || !report.auto_cleared.is_empty() {
+                tracing::info!(
+                    target: "simard::ooda",
+                    summary = %report.log_line(),
+                    "OODA no-progress breaker (root-cause) ran",
+                );
+            }
+            let dropped = report.dropped.clone();
+
+            // Drain the guided-engineer spawn requests and dispatch each through
+            // the SAME `dispatch_spawn_engineer` the Act phase uses (the state
+            // borrow is free now that the breaker pass has returned). Reuses the
+            // existing capability rather than building a parallel spawner.
+            let requests = dispatcher.into_requests();
+            if !requests.is_empty() {
+                let brain = bridges.brain.clone();
+                let repo_root = bridges.repo_root.clone();
+                let guarded = std::sync::Mutex::new(&mut *state);
+                for (goal_id, task) in requests {
+                    let action = PlannedAction {
+                        kind: ActionKind::AdvanceGoal,
+                        goal_id: Some(goal_id.clone()),
+                        description: task.clone(),
+                    };
+                    let outcome = crate::ooda_actions::advance_goal::spawn::dispatch_spawn_engineer(
+                        &action,
+                        &guarded,
+                        &goal_id,
+                        &task,
+                        brain.as_ref(),
+                        &repo_root,
+                    );
+                    tracing::info!(
+                        target: "simard::ooda",
+                        goal = %goal_id,
+                        success = outcome.success,
+                        detail = %outcome.detail,
+                        "no-progress breaker: dispatched guided engineer via shared spawn",
+                    );
+                }
+            }
+            dropped
+        } else {
+            // Kill-switch: fall back to the base verify-once ladder.
+            let report = crate::ooda_loop::no_progress::apply_no_progress_breaker(
+                state,
+                &outcomes,
+                source.as_ref(),
+                &crate::ooda_loop::no_progress::GhIssueFiler,
+            );
+            if report.fired() {
+                tracing::info!(
+                    target: "simard::ooda",
+                    summary = %report.log_line(),
+                    "OODA no-progress breaker fired",
+                );
+            }
+            report.dropped
         }
-        report.dropped
     } else {
         Vec::new()
     };
+
+    // --- Outcome verification: gate archival on a verified LIVE effect (#2751) ---
+    // When the outcome-verify bridge pair is wired (production daemon,
+    // `SIMARD_OUTCOME_VERIFY` on), every completion-candidate goal is verified
+    // LIVE before the archive step below can complete it. The framing invariant:
+    // an ARTIFACT (a merged PR / a deploy) is NOT an OUTCOME — a goal is
+    // "achieved" only once a verified live signal corroborates its real success
+    // criteria (the kgpacks E2BIG regression: artifact present, effect absent).
+    // Non-achieved / errored goals are re-opened in place; only rail-passed
+    // `mark_achieved` goals stay `Completed` and thus archivable by the step
+    // below. Absent the pair (tests / non-daemon callers), this is a no-op.
+    if let (Some(ov_brain), Some(signals)) = (
+        bridges.outcome_verify_brain.clone(),
+        bridges.live_signals.clone(),
+    ) {
+        let reports = crate::goal_curation::verify_completion_candidates(
+            &mut state.active_goals,
+            ov_brain.as_ref(),
+            signals.as_ref(),
+            bridges.completion_evidence.as_deref(),
+        );
+        for r in &reports {
+            match &r.error {
+                Some(err) => {
+                    // NO-FALLBACK: a signal-source or brain error is a visible
+                    // cycle failure. The goal is kept open, never archived.
+                    tracing::error!(
+                        target: "simard::ooda",
+                        goal = %r.goal_id,
+                        error = %err,
+                        "OODA outcome-verify FAILED (no-fallback) — goal kept open",
+                    );
+                    eprintln!(
+                        "[simard] OODA outcome-verify: FAILED for goal '{}' — {} (kept open, not archived)",
+                        r.goal_id, err
+                    );
+                }
+                None => {
+                    eprintln!(
+                        "[simard] OODA outcome-verify: goal '{}' -> {} ({} verified live signal(s))",
+                        r.goal_id,
+                        r.decision.variant_label(),
+                        r.verified_signal_count,
+                    );
+                }
+            }
+        }
+    }
 
     // --- Curate: archive completed goals, promote from backlog ---
     // With a deploy-aware done-gate installed (production daemon, issue #2419),
@@ -1153,6 +1271,7 @@ mod tests_refuted_lessons {
     /// signal), not `UnverifiedNoSignal`. `id` is the per-occurrence dedup key.
     fn refuted_goal(id: &str, desc: &str) -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -1286,6 +1405,7 @@ mod tests_sweep {
 
     fn make_goal(id: &str, session: Option<&str>) -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -1424,6 +1544,7 @@ mod tests_board_integrity {
 
     fn make_goal(id: &str, desc: &str) -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -1708,6 +1829,7 @@ mod tests_objective_probe {
 
     fn active_goal(id: &str, description: &str) -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,

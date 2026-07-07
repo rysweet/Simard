@@ -46,6 +46,13 @@ mod tests_feedback;
 mod tests_goal_records_migration;
 #[cfg(test)]
 mod tests_goals_crud;
+// Issue #2679: the Memory dashboard reported "remembered 0 items in the last
+// hour" from a hardcoded placeholder in `memory_recent`. These tests pin the
+// corrected trailing-hour delta (`memory_recent_at`) and the pure window-edge
+// baseline selection (`select_last_hour_baseline`) so the placeholder cannot
+// silently return.
+#[cfg(test)]
+mod tests_memory_recent_last_hour;
 #[cfg(test)]
 mod tests_ooda_cycles_history;
 // Issue #26: the Logs tab's "Cycle Reports" card (#cycle-reports) must show the
@@ -66,6 +73,14 @@ mod tests_routes_b;
 // clamped params, verdict truth table, and fail-closed auth/leak contract.
 #[cfg(test)]
 mod tests_recall_precision_correlation;
+
+// Issue #2798 — Layer B: pins that the dashboard resolver (`resolve_state_root`)
+// equals the daemon resolver (`simard_state_root` / `default_state_root`) for
+// every `SIMARD_STATE_ROOT` input class, so reader tier-0 shares the daemon's
+// live writer. The empty/relative env cases fail RED on the pre-fix divergent
+// resolver.
+#[cfg(test)]
+mod tests_state_root_parity;
 
 use std::net::SocketAddr;
 use std::path::Path;

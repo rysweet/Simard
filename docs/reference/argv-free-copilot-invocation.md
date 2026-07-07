@@ -43,6 +43,7 @@ related:
   - [Site A — meeting turn](#site-a-meeting-turn)
   - [Site B — builder PTY turn](#site-b-builder-pty-turn)
   - [Site C — OODA decision-cycle launch](#site-c-ooda-decision-cycle-launch)
+  - [Related — meeting/Signal agent proxy (documented separately)](#related-meetingsignal-agent-proxy-documented-separately)
 - [Preserved flags and behaviour](#preserved-flags-and-behaviour)
 - [Temp-file lifetime and permissions](#temp-file-lifetime-and-permissions)
 - [No silent fallback](#no-silent-fallback)
@@ -139,6 +140,19 @@ string that could itself grow unbounded from the inlined `printf '%s' '{task}'`.
 Both are removed: the task text is written to disk by Rust (never interpolated into
 the command string), and only the generated temp-file path appears in the PTY
 command.
+
+### Related — meeting/Signal agent proxy (documented separately)
+
+The meeting backend's `PersistentAgentProxy`
+(`src/meeting_backend/agent_proxy.rs`) is a **fourth, distinct** copilot launch
+site — the one the **Signal channel** reaches through a meeting session. It is
+not a variant of Sites A–C (it shares no code with `base_type_copilot` or
+`ooda_actions`), so it had its own argv-inlining `E2BIG` and its own fix, covered
+in the
+[argv-free meeting/Signal agent-proxy reference](./argv-free-meeting-agent-proxy.md).
+Like Site A it delivers the prompt on **stdin** (via
+`spawn_payload::attach_prompt_std`) rather than the PTY `cat '…' |` grammar, and
+it observes the same argv-free invariant.
 
 ## Preserved flags and behaviour
 

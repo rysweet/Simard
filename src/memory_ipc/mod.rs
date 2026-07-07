@@ -26,9 +26,19 @@ mod tests_default_state_root_1967;
 #[cfg(test)]
 mod tests_launcher;
 #[cfg(test)]
+mod tests_launcher_fail_closed_2896;
+// TDD (RED) for issue #2679: additive gated-write protocol (StoreFactGated /
+// StoreProcedureProvenance / FactWriteOutcome), the MAX_FRAME cap, and the
+// RemoteCognitiveMemory remember_* client wrappers. Symbols are added in the
+// implementation step; until then the unresolved paths are the red signal.
+#[cfg(test)]
+mod tests_gated_write_2679;
+#[cfg(test)]
 mod tests_shared_store_2320;
 #[cfg(test)]
 mod tests_socket_path;
+#[cfg(test)]
+mod tests_transport_roundtrip;
 
 use serde::{Deserialize, Serialize};
 
@@ -97,6 +107,22 @@ pub fn socket_path_for(state_root: &Path) -> PathBuf {
 /// daemon at a known path.
 pub const MEMORY_SOCKET_ENV: &str = "SIMARD_MEMORY_SOCKET";
 
+/// Environment variable that carries the distillation pass id to every
+/// `simard memory remember` subprocess the distiller agent spawns (issue
+/// #2679).
+///
+/// The distill runner exports this so a fact write tags the daemon's per-pass
+/// write ledger even though the agent invokes the CLI with only the scalar
+/// content flags (`--concept` / `--content` / `--source-episode-id`) and NO
+/// explicit `--pass-id`. The `remember` CLI reads it as a fallback when
+/// `--pass-id` is absent; that fallback is what lets `drain_pass_ledger`
+/// report a real accepted-fact count on the production
+/// distill path. Without it the pass id resolved empty, the server's ledger
+/// no-op'd the write, and every pass reported `fact_count = 0` /
+/// `reduction_pct = 100%` while facts were in fact stored (the silent
+/// metrics-degradation regression fixed in the #2679 follow-up).
+pub const DISTILL_PASS_ID_ENV: &str = "SIMARD_DISTILL_PASS_ID";
+
 /// Environment variable that opts a test out of the hermetic-state-root
 /// guard. Read by the cfg(test)-only assertion sites
 /// (`save_goal_board` / `save_goal_board_with_removals`, the cognitive-memory
@@ -164,6 +190,25 @@ pub enum MemoryRequest {
         tags: Vec<String>,
         source_id: String,
     },
+    /// Gated per-fact write (issue #2679). Carries one distilled fact from the
+    /// distiller agentic step (via `simard memory remember`) to the daemon's
+    /// authoritative write-boundary gate. The server — NOT the client — grounds
+    /// the fact against the store, scores it with the shared
+    /// [`crate::fact_reliability`] scorer, quarantines anything below threshold,
+    /// dedups against an equal-or-stronger prior, and persists survivors with the
+    /// *server-computed* confidence and provenance edges. The client-supplied
+    /// `confidence` is only a hint the server ignores; `source_episode_ids` is
+    /// the provenance the server verifies. There is no return document to parse —
+    /// the disposition flows back as [`MemoryResponse::FactWrite`].
+    StoreFactGated {
+        concept: String,
+        content: String,
+        confidence: f64,
+        tags: Vec<String>,
+        source_id: String,
+        source_episode_ids: Vec<String>,
+        pass_id: String,
+    },
     SearchFacts {
         query: String,
         limit: u32,
@@ -173,6 +218,17 @@ pub enum MemoryRequest {
         name: String,
         steps: Vec<String>,
         prerequisites: Vec<String>,
+    },
+    /// Procedure write carrying its source-episode provenance (issue #2679), so
+    /// the daemon draws a `PROCEDURE_DERIVES_FROM` edge to each source episode.
+    /// The companion of [`StoreFactGated`](MemoryRequest::StoreFactGated) for the
+    /// distiller's procedure output. Returns [`MemoryResponse::Id`].
+    StoreProcedureProvenance {
+        name: String,
+        steps: Vec<String>,
+        prerequisites: Vec<String>,
+        source_episode_ids: Vec<String>,
+        pass_id: String,
     },
     RecallProcedure {
         query: String,
@@ -190,10 +246,49 @@ pub enum MemoryRequest {
     ResolveProspective {
         node_id: String,
     },
+    /// Trigger-scoped prospective enumeration (issue #122). Carries the exact
+    /// `trigger_condition` to match plus the row cap; the server applies the
+    /// filter *in the backend query* so the cap bounds only matching nodes.
+    /// The creative-ideas dashboard reads through the IPC client (tier-1), so
+    /// this must round-trip end-to-end rather than fall back to the empty trait
+    /// default. Returns [`MemoryResponse::Prospectives`].
+    ListProspectiveByTrigger {
+        trigger: String,
+        limit: u32,
+    },
     /// PR-C (issue #2281, problem 4): keyword-overlap episodic search
     /// for `preparation_memory_operations`.
     SearchEpisodesByKeywords {
         keywords: Vec<String>,
+        limit: u32,
+    },
+    /// Drain and return the count of facts the write-boundary gate ACCEPTED for
+    /// a given distillation `pass_id` (issue #2679). The distiller subprocess
+    /// tags each `StoreFactGated` write with its `pass_id`; after the recipe run
+    /// it drains the ledger to report how many facts the gate accepted — the only
+    /// way to count facts on a path with no returned document. Returns
+    /// [`MemoryResponse::Count`].
+    DrainPassLedger {
+        pass_id: String,
+    },
+    /// Enumerate up to `limit` episodes (newest-first, including
+    /// compressed/consolidated ones) across the socket, so a reader on the
+    /// daemon-socket tier gets the same live enumeration as an in-process reader.
+    /// Additive (issue #2627): the dashboard Memory-tab graph reads live per-item
+    /// episode nodes through this; without it the socket client would fall back
+    /// to the empty `list_all_episodes` trait default and the graph would
+    /// silently collapse episodes to their type hub. Returns
+    /// [`MemoryResponse::Episodes`].
+    ListAllEpisodes {
+        limit: u32,
+    },
+    /// Enumerate up to `limit` prospective (trigger → action) memories in every
+    /// status, priority-ordered, across the socket. Additive companion of
+    /// [`ListAllEpisodes`](MemoryRequest::ListAllEpisodes) for the Memory-tab
+    /// graph (issue #2627) — without it a socket-tier reader collapses
+    /// prospective memories to their type hub. Returns
+    /// [`MemoryResponse::Prospectives`].
+    ListAllProspective {
         limit: u32,
     },
     GetStatistics,
@@ -215,8 +310,29 @@ pub enum MemoryResponse {
     /// [`MemoryRequest::SearchEpisodesByKeywords`].
     Episodes(Vec<CognitiveEpisode>),
     Statistics(CognitiveStatistics),
+    /// Server-side disposition of a [`MemoryRequest::StoreFactGated`] write
+    /// (issue #2679): whether the fact was stored or quarantined and the
+    /// confidence the server *computed* (never the client's hint). Reported so a
+    /// caller — and the `simard memory remember` CLI — can surface the result
+    /// WITHOUT any document to deserialize.
+    FactWrite(FactWriteOutcome),
     Ack,
     Error(String),
+}
+
+/// The server's decision for one gated fact write (issue #2679).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FactWriteOutcome {
+    /// The fact cleared the gate and was persisted.
+    pub stored: bool,
+    /// The fact was blocked by the gate (ungrounded, empty content, below
+    /// threshold, or an equal-or-stronger prior already exists) and NOT stored.
+    pub quarantined: bool,
+    /// The confidence the server computed from the shared reliability scorer
+    /// (NOT the client-supplied hint).
+    pub confidence: f64,
+    /// The `node_id` of the persisted fact, present only when `stored`.
+    pub node_id: Option<String>,
 }
 
 pub(crate) fn ipc_err(ctx: &str, e: impl std::fmt::Display) -> SimardError {
@@ -225,6 +341,15 @@ pub(crate) fn ipc_err(ctx: &str, e: impl std::fmt::Display) -> SimardError {
         reason: format!("{ctx}: {e}"),
     }
 }
+
+/// Maximum accepted framed-message body size (issue #2679 socket hardening).
+///
+/// A hostile or corrupt client can send a 4-byte length prefix claiming a
+/// multi-gigabyte body; the frame reader rejects any length exceeding this cap
+/// BEFORE allocating or reading the body, so a bad prefix can never trigger a
+/// giant allocation. 8 MiB is far larger than any legitimate per-fact write (a
+/// single fact is a few hundred bytes) yet small enough to bound abuse.
+pub(crate) const MAX_FRAME: usize = 8 * 1024 * 1024;
 
 pub(crate) fn write_frame<W: Write>(w: &mut W, payload: &[u8]) -> SimardResult<()> {
     let len = u32::try_from(payload.len()).map_err(|_| SimardError::RpcTransportError {
@@ -242,6 +367,15 @@ pub(crate) fn read_frame<R: Read>(r: &mut R) -> SimardResult<Vec<u8>> {
     r.read_exact(&mut len_buf)
         .map_err(|e| ipc_err("read-len", e))?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    // Reject an oversized length BEFORE allocating or reading the body, so a
+    // corrupt/hostile prefix cannot force a huge `vec![0u8; len]` allocation
+    // (issue #2679 socket hardening).
+    if len > MAX_FRAME {
+        return Err(SimardError::RpcTransportError {
+            bridge: "memory-ipc".into(),
+            reason: format!("frame length {len} exceeds MAX_FRAME {MAX_FRAME}"),
+        });
+    }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)
         .map_err(|e| ipc_err("read-body", e))?;
@@ -259,7 +393,6 @@ pub use launcher::{
     register_in_process_writer,
 };
 pub use server::{ServerHandle, spawn_server};
-
 // ============================================================================
 // Shared-memory adapter: Arc → Box<dyn CognitiveMemoryOps>
 // ============================================================================
@@ -352,6 +485,13 @@ impl CognitiveMemoryOps for SharedMemory {
     fn list_all_prospective(&self, limit: u32) -> SimardResult<Vec<CognitiveProspective>> {
         self.0.list_all_prospective(limit)
     }
+    fn list_prospective_by_trigger(
+        &self,
+        trigger: &str,
+        limit: u32,
+    ) -> SimardResult<Vec<CognitiveProspective>> {
+        self.0.list_prospective_by_trigger(trigger, limit)
+    }
     fn list_all_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
         self.0.list_all_episodes(limit)
     }
@@ -366,6 +506,12 @@ impl CognitiveMemoryOps for SharedMemory {
     }
     fn mark_episode_distilled(&self, node_id: &str) -> SimardResult<()> {
         self.0.mark_episode_distilled(node_id)
+    }
+    fn episode_exists(&self, node_id: &str) -> SimardResult<bool> {
+        self.0.episode_exists(node_id)
+    }
+    fn any_episode_exists(&self, node_ids: &[String]) -> SimardResult<bool> {
+        self.0.any_episode_exists(node_ids)
     }
     fn list_undistilled_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
         self.0.list_undistilled_episodes(limit)

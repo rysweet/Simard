@@ -169,6 +169,444 @@ pub enum EngineerLifecycleDecision {
 }
 
 // ---------------------------------------------------------------------------
+// Closed-loop outcome verification (issue #2751)
+// ---------------------------------------------------------------------------
+
+/// The structured context handed to the brain for live outcome verification.
+/// Assembled by the gather step in
+/// [`outcome_verify`](crate::goal_curation::outcome_verify) from the artifact
+/// evidence (an INPUT, not the decider) and the freshly-gathered live signals.
+///
+/// `Clone` so hermetic test doubles can capture the exact ctx they were handed
+/// and assert the gather→ctx wiring.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GoalOutcomeCtx {
+    /// Goal identity.
+    pub goal_id: String,
+    pub goal_title: String,
+    /// The goal's REAL success criteria — what "achieved" actually means.
+    pub success_criteria: String,
+    /// Artifact-level signals from the completion-evidence gate (merged PR,
+    /// closed issue, deployed). Fed as INPUT so the brain can weigh
+    /// artifact-vs-outcome; it is NOT the decider.
+    pub artifact_signals: crate::goal_curation::completion_gate::CompletionEvidence,
+    /// Live signals gathered this cycle. The Rail-3 override checks
+    /// `.iter().any(|s| s.verified)` — a compromised prompt cannot forge these.
+    pub live_signals: Vec<crate::goal_curation::live_signal::LiveSignal>,
+    /// How many times this goal has already been re-verified (bumped on each
+    /// `reopen` / `replan`). Lets the brain notice a goal that keeps landing
+    /// artifacts without ever producing the live effect.
+    pub reverify_count: u32,
+}
+
+/// What the brain decided about a goal's LIVE outcome. Tagged on `choice`
+/// (snake_case), matching [`EngineerLifecycleDecision`]. Only `MarkAchieved`
+/// that survives the outcome-verify Rail-3 permits archival.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "choice", rename_all = "snake_case")]
+pub enum GoalOutcomeDecision {
+    /// Real success criteria observed live. Archive ONLY if ≥1 verified signal
+    /// (Rail-3); otherwise the rail overrides this to `KeepOpenAndReport`.
+    MarkAchieved { rationale: String },
+    /// Artifact landed, live effect absent — keep the goal active.
+    Reopen { rationale: String },
+    /// Live effect absent AND the current plan won't produce it — re-scope.
+    Replan {
+        rationale: String,
+        #[serde(default)]
+        replan_hint: String,
+    },
+    /// Ambiguous / absent / unverifiable — no archive, surface a report. The
+    /// fail-closed default (also what [`Default`] returns).
+    KeepOpenAndReport { rationale: String },
+}
+
+impl Default for GoalOutcomeDecision {
+    /// Fail-closed: the absence of a positive verified outcome is never an
+    /// achievement. An un-migrated brain, a parse gap, or a rail override all
+    /// resolve here — never to `MarkAchieved`.
+    fn default() -> Self {
+        GoalOutcomeDecision::KeepOpenAndReport {
+            rationale: String::new(),
+        }
+    }
+}
+
+impl GoalOutcomeDecision {
+    /// Stable snake_case label — identical to the serde `choice` tag. Shared by
+    /// the judgment record, the metric context, and the curate-seam log line.
+    pub fn variant_label(&self) -> &'static str {
+        match self {
+            Self::MarkAchieved { .. } => "mark_achieved",
+            Self::Reopen { .. } => "reopen",
+            Self::Replan { .. } => "replan",
+            Self::KeepOpenAndReport { .. } => "keep_open_and_report",
+        }
+    }
+
+    /// The rationale the brain carried on the chosen variant.
+    pub fn rationale(&self) -> &str {
+        match self {
+            Self::MarkAchieved { rationale }
+            | Self::Reopen { rationale }
+            | Self::Replan { rationale, .. }
+            | Self::KeepOpenAndReport { rationale } => rationale,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dependency/overlap-aware engineer admission (issue #2690)
+// ---------------------------------------------------------------------------
+
+/// The goal Simard is about to spawn an engineer for, plus its **predicted file
+/// footprint**. Assembled best-effort by the admission gather step.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct CandidateGoal {
+    /// Goal id.
+    pub id: String,
+    /// Goal title / task text — the work order the engineer would receive.
+    pub title: String,
+    /// Predicted target paths (repo-relative POSIX), derived best-effort from
+    /// the goal's `wip_refs` then prior-PR file lists. EMPTY when unknown — an
+    /// empty scope means "no overlap knowable" ⇒ admit (fail-open), and the
+    /// exact-path rail is inert.
+    #[serde(default)]
+    pub predicted_scope: Vec<String>,
+}
+
+/// One in-flight engineer, with the facts the brain weighs to judge overlap.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct LiveEngineerSignal {
+    /// Goal id the live engineer is pursuing (recovered from its worktree dir).
+    pub goal_id: String,
+    /// PID recorded in the worktree claim sentinel.
+    #[serde(default)]
+    pub pid: i32,
+    /// The engineer's worktree path (used only to compute `changed_files`).
+    #[serde(default)]
+    pub worktree_path: String,
+    /// Files this engineer is touching: `git diff --name-only <merge-base>` ∪
+    /// working-tree diff, repo-relative POSIX. Empty on any git error
+    /// (absent-tolerant ⇒ no overlap ⇒ fail-open).
+    #[serde(default)]
+    pub changed_files: Vec<String>,
+    /// Intersection of `changed_files` with the candidate's `predicted_scope`.
+    /// Non-empty ⇒ an overlap signal.
+    #[serde(default)]
+    pub overlap_with_candidate: Vec<String>,
+    /// `true` when the candidate goal's `wip_refs` reference this engineer's
+    /// goal_id / PR (an explicit dependency, not just an incidental overlap).
+    #[serde(default)]
+    pub depended_on: bool,
+}
+
+/// The structured context handed to the brain for the admission decision.
+/// Assembled by `gather_engineer_admission_ctx` — a **pure, best-effort**
+/// function. Every `gh` / `git` call is made **off the state lock**, is
+/// absent-tolerant, and degrades to a default (empty) value; the gather step
+/// never panics and never blocks.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct EngineerAdmissionCtx {
+    /// The goal about to be spawned, with its predicted file footprint.
+    pub candidate: CandidateGoal,
+    /// Every OTHER live engineer (the candidate's own goal is excluded — the
+    /// same-goal case is already handled upstream by the lifecycle branch).
+    #[serde(default)]
+    pub live_engineers: Vec<LiveEngineerSignal>,
+    /// Resolved target repo root (used for merge-base resolution + rendering).
+    #[serde(default)]
+    pub repo_root: String,
+}
+
+/// What the brain decided about admitting a NEW engineer for a candidate goal
+/// given the live engineer set (issue #2690). Tagged on `choice` (snake_case),
+/// matching [`EngineerLifecycleDecision`] and [`GoalOutcomeDecision`].
+///
+/// Fail-**open** polarity: an un-migrated brain or a broken brain resolves to
+/// `Admit` (scheduling is an optimization — wrongly stalling a spawn is cheaper
+/// to recover from than wrongly blocking the fleet). The one control that
+/// survives a broken/compromised brain is the deterministic exact-path rail in
+/// the seam.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "choice", rename_all = "snake_case")]
+pub enum EngineerAdmissionDecision {
+    /// No blocking overlap — spawn now (the existing path, unchanged).
+    Admit { rationale: String },
+    /// A live engineer is touching files this goal needs — do NOT spawn this
+    /// cycle. Retried naturally next OODA round. `blocked_by` names the goal(s)
+    /// in the way; `retry_after_secs` is an optional advisory hint.
+    Defer {
+        #[serde(default)]
+        blocked_by: Vec<String>,
+        rationale: String,
+        #[serde(default)]
+        retry_after_secs: Option<u64>,
+    },
+    /// Spawn now, but instruct the engineer to rebase onto `after_goal_id`'s
+    /// work before editing `overlap_files`. Advisory hint threaded into the
+    /// engineer `task` string — no new machinery.
+    SerializeAfter {
+        after_goal_id: String,
+        #[serde(default)]
+        overlap_files: Vec<String>,
+        rationale: String,
+    },
+}
+
+impl Default for EngineerAdmissionDecision {
+    /// Fail-open: the absence of a positive block is always an admit. An
+    /// un-migrated brain, a parse gap, or the seam's Rail-2 fallback all resolve
+    /// here — never to a spawn-stalling `Defer`.
+    fn default() -> Self {
+        EngineerAdmissionDecision::Admit {
+            rationale: String::new(),
+        }
+    }
+}
+
+impl EngineerAdmissionDecision {
+    /// Stable snake_case label — identical to the serde `choice` tag. Shared by
+    /// the judgment record, the metric context, and the admission seam log line.
+    pub fn variant_label(&self) -> &'static str {
+        match self {
+            Self::Admit { .. } => "admit",
+            Self::Defer { .. } => "defer",
+            Self::SerializeAfter { .. } => "serialize_after",
+        }
+    }
+
+    /// The rationale the brain carried on the chosen variant.
+    pub fn rationale(&self) -> &str {
+        match self {
+            Self::Admit { rationale }
+            | Self::Defer { rationale, .. }
+            | Self::SerializeAfter { rationale, .. } => rationale,
+        }
+    }
+
+    /// The goal ids this decision names as blocking / serialized-after, for the
+    /// judgment + metric context. Empty for `Admit`.
+    pub fn blocking_goals(&self) -> Vec<String> {
+        match self {
+            Self::Admit { .. } => Vec::new(),
+            Self::Defer { blocked_by, .. } => blocked_by.clone(),
+            Self::SerializeAfter { after_goal_id, .. } => vec![after_goal_id.clone()],
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Resource-aware engineer admission (issue #2706)
+// ---------------------------------------------------------------------------
+
+/// The structured RESOURCE picture handed to the brain before admitting another
+/// engineer (issue #2706). Assembled best-effort, off the state lock, by
+/// `gather_resource_admission_ctx`: every field that comes from a probe is an
+/// `Option` and degrades to `None` on any error, so a failing probe never fails
+/// the gate. This is the complement to the dependency/overlap
+/// [`EngineerAdmissionCtx`]: that one asks "will this engineer *collide* with an
+/// in-flight one?"; this one asks "can the HOST *afford* another engineer right
+/// now (disk / build-cache / load)?".
+///
+/// The AIMD controller upstream bounds engineer COUNT; it is blind to the disk
+/// and build-cache that parallel `cargo` builds consume. This ctx is the
+/// evidence the brain reasons over each admission cycle to add resource-aware
+/// admission on top of count control.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ResourceAdmissionCtx {
+    /// Goal id the candidate engineer would pursue (untrusted — sanitised before
+    /// templating into the prompt).
+    pub goal_id: String,
+
+    /// Filesystem used-percent on the engineer-worktree state-root filesystem,
+    /// `(1 - free/total) * 100`. `None` if the stat failed — an unknown disk
+    /// makes the deterministic ceiling rail INERT (fail-open), so the brain still
+    /// reasons over the remaining signals.
+    #[serde(default)]
+    pub disk_used_pct: Option<f64>,
+    /// Free / total space on that filesystem, in GiB (rounded), for the prompt.
+    #[serde(default)]
+    pub disk_free_gb: Option<f64>,
+    #[serde(default)]
+    pub disk_total_gb: Option<f64>,
+
+    /// Aggregate bytes under the engineer-worktree root + shared build cache
+    /// (best-effort; `None` if not computed this cycle — the walk is costly, so
+    /// `disk_used_pct` is the dominant, always-cheap signal).
+    #[serde(default)]
+    pub build_cache_bytes: Option<u64>,
+    /// Number of engineer worktrees currently on disk under the state root.
+    #[serde(default)]
+    pub worktree_count: Option<u32>,
+
+    /// System load average over 1 / 5 / 15 minutes (`/proc/loadavg` on Linux;
+    /// `None` off-Linux or on read failure).
+    #[serde(default)]
+    pub load_avg_1: Option<f64>,
+    #[serde(default)]
+    pub load_avg_5: Option<f64>,
+    #[serde(default)]
+    pub load_avg_15: Option<f64>,
+    /// Logical CPU count (`available_parallelism`), for interpreting load.
+    #[serde(default)]
+    pub cpu_count: Option<u32>,
+
+    /// Live-claimed engineers right now (in-flight builds), from
+    /// `count_live_engineer_claims`. Typed `u32`; `0` when none — a zero count is
+    /// a real, knowable fact, not an unknown.
+    #[serde(default)]
+    pub in_flight_engineers: u32,
+
+    /// Current AIMD concurrency cap so the brain reasons about count and
+    /// resources together. `None` when adaptive scaling is not active/available.
+    #[serde(default)]
+    pub aimd_current_max: Option<u32>,
+
+    /// The resolved hard ceiling this cycle (echoed so the prompt knows the
+    /// deterministic limit it is reasoning below). The ceiling is ENFORCED in
+    /// Rust, never by the prompt.
+    pub admission_ceiling_pct: f64,
+}
+
+/// What the brain decided about admitting another engineer given the current
+/// RESOURCE picture (issue #2706). Internally serde-tagged on `choice`
+/// (snake_case), so an **unknown tag fails to parse** (the seam then fails
+/// closed) rather than silently defaulting.
+///
+/// The enum has **no `Default`**: the fail-closed decision on a brain error is
+/// made in the seam, not by defaulting the enum. Every variant carries a
+/// `rationale` recorded verbatim (scrubbed) in the judgment record and metric.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "choice", rename_all = "snake_case")]
+pub enum ResourceAdmissionDecision {
+    /// The host has resource headroom — proceed (subject to the hard rail).
+    Admit { rationale: String },
+    /// Resources are tight — skip this cycle, retry next round (benign).
+    Defer { rationale: String },
+    /// Reclaim disk first (invoke the disk-health capability), then skip and
+    /// retry next round against the freed space (benign).
+    ReclaimFirst { rationale: String },
+}
+
+impl ResourceAdmissionDecision {
+    /// Stable snake_case label — identical to the serde `choice` tag. Shared by
+    /// the judgment record, the metric context, and the seam log line.
+    pub fn variant_label(&self) -> &'static str {
+        match self {
+            Self::Admit { .. } => "admit",
+            Self::Defer { .. } => "defer",
+            Self::ReclaimFirst { .. } => "reclaim_first",
+        }
+    }
+
+    /// The rationale the brain carried on the chosen variant.
+    pub fn rationale(&self) -> &str {
+        match self {
+            Self::Admit { rationale }
+            | Self::Defer { rationale }
+            | Self::ReclaimFirst { rationale } => rationale,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Creative-ideas semantic dedup + enhance (issue #2925)
+// ---------------------------------------------------------------------------
+
+/// One existing idea, rendered as advisory context for the dedup brain. The
+/// `node_id` is the ENHANCE target handle. Every string field is sanitised and
+/// length-capped by the seam before it becomes a recipe `-c` variable — pool
+/// content is **untrusted**.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExistingIdeaView {
+    /// The memory node id — the handle an ENHANCE decision names.
+    pub node_id: String,
+    /// The stable idea id (revisions share it).
+    pub idea_id: String,
+    /// The idea text (sanitised before templating).
+    pub idea: String,
+    /// The idea's stored rationale (sanitised, capped).
+    pub rationale: String,
+}
+
+/// The structured context the brain reasons over for **one** candidate idea.
+/// `existing_shortlist` is the bounded set of nearest existing ideas produced by
+/// the coarse pre-filter, so the prompt stays small regardless of pool size.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct IdeaDedupCtx {
+    /// The candidate idea's text.
+    pub candidate_idea: String,
+    /// The candidate idea's rationale/context.
+    pub candidate_rationale: String,
+    /// The nearest existing ideas (coarse pre-filtered, bounded to K).
+    pub existing_shortlist: Vec<ExistingIdeaView>,
+}
+
+/// What the brain decided for one candidate. serde-tagged on `choice`
+/// (snake_case) so an **unknown tag fails to parse** → the seam fails closed.
+/// There is **no `Default`**: the fail-closed path is chosen explicitly by the
+/// seam, never by defaulting a decision on the brain's behalf.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "choice", rename_all = "snake_case")]
+pub enum IdeaDedupDecision {
+    /// Genuinely novel — persist as a new `New` idea (today's default path).
+    CreateNew { rationale: String },
+    /// True duplicate that adds nothing — drop the candidate.
+    Skip { rationale: String },
+    /// Merge into the existing idea identified by `target_node_id`.
+    EnhanceExisting {
+        target_node_id: String,
+        rationale: String,
+    },
+}
+
+impl IdeaDedupDecision {
+    /// Stable snake_case label — identical to the serde `choice` tag.
+    pub fn variant_label(&self) -> &'static str {
+        match self {
+            Self::CreateNew { .. } => "create_new",
+            Self::Skip { .. } => "skip",
+            Self::EnhanceExisting { .. } => "enhance_existing",
+        }
+    }
+
+    /// The rationale the brain carried on the chosen variant.
+    pub fn rationale(&self) -> &str {
+        match self {
+            Self::CreateNew { rationale }
+            | Self::Skip { rationale }
+            | Self::EnhanceExisting { rationale, .. } => rationale,
+        }
+    }
+}
+
+/// The whole existing pool, fed to the consolidation brain to cluster by
+/// semantic duplication (the one-time cleanup of the pre-existing ~104 ideas).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct IdeaConsolidationCtx {
+    /// The current idea pool (latest revision per idea), rendered as views.
+    pub pool: Vec<ExistingIdeaView>,
+}
+
+/// One semantic-duplication cluster the consolidation brain identified: a
+/// canonical idea to keep + the redundant ideas to fold into it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IdeaCluster {
+    /// `node_id` of the idea to keep and strengthen.
+    pub canonical_id: String,
+    /// `node_id`s of the redundant ideas to transition to `Rejected`.
+    #[serde(default)]
+    pub redundant_ids: Vec<String>,
+    /// Rationale to append to the canonical idea when merging the cluster.
+    #[serde(default)]
+    pub merged_rationale: String,
+    /// Optional supporting evidence text/links appended to the canonical.
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // The trait
 // ---------------------------------------------------------------------------
 
@@ -180,6 +618,97 @@ pub trait OodaBrain: Send + Sync {
         &self,
         ctx: &EngineerLifecycleCtx,
     ) -> SimardResult<EngineerLifecycleDecision>;
+
+    /// Decide whether to admit a NEW engineer for `ctx.candidate` right now,
+    /// given the live engineer set and file-overlap signals (issue #2690).
+    /// Called at the spawn/admission decision point for a genuinely NEW
+    /// engineer on a DIFFERENT goal — repeated structured evaluation of "will
+    /// this new engineer collide with an in-flight one?".
+    ///
+    /// Scheduling optimization only — MUST fail **open**. Defaulted to the
+    /// fail-open [`EngineerAdmissionDecision::Admit`] so every existing
+    /// `OodaBrain` impl and test double compiles unchanged and an un-migrated
+    /// brain can NEVER accidentally stall a spawn. The production [`RecipeBrain`]
+    /// overrides this to run the reasoning recipe.
+    fn decide_engineer_admission(
+        &self,
+        _ctx: &EngineerAdmissionCtx,
+    ) -> SimardResult<EngineerAdmissionDecision> {
+        Ok(EngineerAdmissionDecision::Admit {
+            rationale: "admission-scheduling not implemented by this brain".into(),
+        })
+    }
+
+    /// Decide whether the HOST can afford another engineer right now, given the
+    /// current resource picture (disk %, build-cache/worktree sizes, load
+    /// average, in-flight engineers) — issue #2706. Called at the spawn/admission
+    /// decision point each relevant cycle (repeated structured evaluation of
+    /// "can we afford one more?"), augmenting the AIMD count control with
+    /// resource-aware admission.
+    ///
+    /// Resource admission is an optimisation only — MUST fail **open**. Defaulted
+    /// to the fail-open [`ResourceAdmissionDecision::Admit`] so every existing
+    /// `OodaBrain` impl and test double compiles unchanged and an un-migrated
+    /// brain can NEVER accidentally stall a spawn. The production [`RecipeBrain`]
+    /// overrides this to run the reasoning recipe. The one guarantee that
+    /// survives a broken brain is the deterministic disk-ceiling rail in the
+    /// seam (it can only be MORE conservative, never less).
+    fn decide_resource_admission(
+        &self,
+        _ctx: &ResourceAdmissionCtx,
+    ) -> SimardResult<ResourceAdmissionDecision> {
+        Ok(ResourceAdmissionDecision::Admit {
+            rationale: "resource-admission not implemented by this brain".into(),
+        })
+    }
+
+    /// Reason about whether the goal's real success criteria are met LIVE in
+    /// production (issue #2751). Called each curate cycle for
+    /// completion-candidate goals — repeated structured evaluation of "is this
+    /// goal *actually* achieved, live?".
+    ///
+    /// Defaulted to the conservative, fail-closed [`GoalOutcomeDecision::KeepOpenAndReport`]
+    /// so every existing `OodaBrain` impl and test double compiles unchanged and
+    /// an un-migrated brain can NEVER accidentally complete a goal. The
+    /// production [`RecipeBrain`] overrides this to run the reasoning recipe.
+    fn decide_goal_outcome_verification(
+        &self,
+        _ctx: &GoalOutcomeCtx,
+    ) -> SimardResult<GoalOutcomeDecision> {
+        Ok(GoalOutcomeDecision::KeepOpenAndReport {
+            rationale: "outcome-verification not implemented by this brain".into(),
+        })
+    }
+
+    /// Decide SKIP / ENHANCE-EXISTING / CREATE-NEW for one candidate creative
+    /// idea, given the nearest existing ideas (issue #2925). Called per candidate
+    /// in the generation tick, before it is persisted — repeated structured
+    /// evaluation of "is this the same underlying idea?".
+    ///
+    /// Defaulted to the no-op-preserving [`IdeaDedupDecision::CreateNew`] so
+    /// every existing `OodaBrain` impl and test double compiles unchanged and an
+    /// un-migrated brain can NEVER silently *drop* an idea; novelty then falls to
+    /// the seam's deterministic Jaccard rail (identical to today). The production
+    /// [`RecipeBrain`] overrides this to run the reasoning recipe.
+    fn decide_idea_dedup(&self, _ctx: &IdeaDedupCtx) -> SimardResult<IdeaDedupDecision> {
+        Ok(IdeaDedupDecision::CreateNew {
+            rationale: "semantic idea-dedup not implemented by this brain".into(),
+        })
+    }
+
+    /// Cluster the existing idea pool by semantic duplication for the one-time
+    /// consolidation maintenance pass (issue #2925). Returns the clusters to
+    /// merge; an empty result means "nothing to consolidate".
+    ///
+    /// Defaulted to `Ok(vec![])` (a safe no-op) so every existing `OodaBrain`
+    /// impl and test double compiles unchanged. The production [`RecipeBrain`]
+    /// overrides this to run the consolidation recipe.
+    fn decide_idea_consolidation(
+        &self,
+        _ctx: &IdeaConsolidationCtx,
+    ) -> SimardResult<Vec<IdeaCluster>> {
+        Ok(Vec::new())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +814,7 @@ mod inline_tests_1979 {
     fn state_with_active_goal(id: &str) -> OodaState {
         let mut board = GoalBoard::default();
         board.active.push(ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,

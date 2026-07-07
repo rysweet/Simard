@@ -1155,6 +1155,29 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
             .collect())
     }
 
+    fn list_prospective_by_trigger(
+        &self,
+        trigger: &str,
+        limit: u32,
+    ) -> SimardResult<Vec<CognitiveProspective>> {
+        // Issue #122: trigger-scoped enumeration of prospective memories, all
+        // statuses, priority-ordered. Routes through the library's
+        // `get_prospective_by_trigger`, which pushes the `trigger_condition`
+        // equality filter into the node query so the `limit` bounds only
+        // matching nodes — unlike `get_all_prospective`, whose window is
+        // applied across every trigger. This is what keeps the creative-ideas
+        // dashboard complete in a large store. **Fail-closed**: the library
+        // returns a `Result`, so a genuine backend read error is propagated
+        // (mapped onto `RpcCallFailed`), never masked as an empty `Ok`.
+        Ok(self
+            .lock()?
+            .get_prospective_by_trigger(trigger, limit as usize)
+            .map_err(|e| map_op_err("list_prospective_by_trigger", e))?
+            .into_iter()
+            .map(to_prospective)
+            .collect())
+    }
+
     fn mark_episode_distilled(&self, node_id: &str) -> SimardResult<()> {
         // De-fork Phase 2b (issue #2307): the library now exposes a persistent,
         // one-way distilled latch. Delegate to it. The library returns `false`
@@ -1164,6 +1187,47 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
         self.lock_write("mark_episode_distilled")?
             .mark_episode_distilled(node_id);
         Ok(())
+    }
+
+    fn episode_exists(&self, node_id: &str) -> SimardResult<bool> {
+        // Issue #2679: grounding primitive for the distillation write-boundary
+        // gate. The library has no direct "does this episode id exist" lookup,
+        // so we scan the same unfiltered enumeration `list_all_episodes` uses
+        // (`get_episodes(_, true)`, newest-first, INCLUDING compressed episodes)
+        // and short-circuit on the first id match. Compressed episodes are
+        // included so a fact citing a consolidated source still grounds. A
+        // grounding check is a read; it never mutates the store.
+        let node_id = node_id.trim();
+        if node_id.is_empty() {
+            return Ok(false);
+        }
+        Ok(self
+            .lock()?
+            .get_episodes(usize::MAX, true)
+            .iter()
+            .any(|e| e.node_id == node_id))
+    }
+
+    fn any_episode_exists(&self, node_ids: &[String]) -> SimardResult<bool> {
+        // Batch grounding for the write-boundary gate (issue #2679): materialize
+        // the episode enumeration ONCE (the same unfiltered, compressed-inclusive
+        // `get_episodes(_, true)` scan `episode_exists` uses) and test every
+        // candidate id against it, instead of re-materializing the full set once
+        // per cited id. Trims the per-fact grounding cost from O(cited·episodes)
+        // to O(episodes). A grounding check is a read; it never mutates the store.
+        let wanted: Vec<&str> = node_ids
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if wanted.is_empty() {
+            return Ok(false);
+        }
+        Ok(self
+            .lock()?
+            .get_episodes(usize::MAX, true)
+            .iter()
+            .any(|e| wanted.iter().any(|w| e.node_id == *w)))
     }
 
     fn list_undistilled_episodes(&self, limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {

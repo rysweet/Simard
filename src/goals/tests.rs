@@ -35,6 +35,39 @@ fn make_record(title: &str, status: GoalStatus, priority: u8) -> GoalRecord {
 // ===========================================================================
 
 #[test]
+fn goal_record_labels_default_empty_and_serde_back_compatible() {
+    // Issue #2743: `labels` is additive + serde-back-compatible on GoalRecord.
+    // from_update yields an empty label set...
+    let record = make_record("Ship it", GoalStatus::Active, 1);
+    assert!(
+        record.labels.is_empty(),
+        "from_update records start unlabelled"
+    );
+
+    // ...and an unlabelled record serializes WITHOUT a `labels` key, so
+    // pre-#2743 goal-store snapshots stay byte-identical.
+    let json = serde_json::to_string(&record).expect("serialize");
+    assert!(
+        !json.contains("\"labels\""),
+        "empty labels must be omitted (skip_serializing_if): {json}",
+    );
+
+    // A legacy JSON blob (no `labels` key) deserializes to an empty Vec.
+    let back: GoalRecord = serde_json::from_str(&json).expect("deserialize legacy");
+    assert!(
+        back.labels.is_empty(),
+        "missing labels key -> empty via serde(default)"
+    );
+
+    // A labelled record round-trips exactly.
+    let mut labelled = make_record("Tag me", GoalStatus::Active, 2);
+    labelled.labels = vec!["source:creative-ideas".to_string(), "area:x".to_string()];
+    let round: GoalRecord =
+        serde_json::from_str(&serde_json::to_string(&labelled).expect("ser")).expect("de");
+    assert_eq!(round.labels, labelled.labels);
+}
+
+#[test]
 fn goal_update_rejects_empty_title() {
     let err = GoalUpdate::new("", "rationale", GoalStatus::Active, 1).unwrap_err();
     assert!(

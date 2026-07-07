@@ -9,10 +9,12 @@
 //! `main` and run the new code. The pins are advanced as upstream lands work:
 //!
 //!   * `amplihack-agent-eval`  59548a96… → **2a93441d…** (amplihack-rs main)
-//!   * `amplihack-memory`       f8003708… → **e005a596…** (memory-lib main —
-//!     the squash-merge of PR #120, which lands the first-class `creative_idea`
-//!     prospective memory type on top of PR #121's `measurement::precision_at_k`
-//!     recall-quality primitive, so the single pin carries both)
+//!   * `amplihack-memory`       e005a596… → **901f63ad…** (memory-lib main —
+//!     the squash-merge of PR #125, which adds the trigger-scoped, priority-
+//!     ordered `get_prospective_by_trigger(trigger, limit)` recall — whose LIMIT
+//!     bounds only matching nodes — and makes `get_all_prospective` sort-then-
+//!     truncate; Simard consumes it to fix the creative-ideas dashboard read
+//!     path, issue #122)
 //!
 //! These are the exact 40-char SHAs verified against `git ls-remote … main`
 //! at authoring time.
@@ -41,18 +43,19 @@ use std::path::PathBuf;
 // ── Target / stale pin constants (verified against upstream `main`) ──────────
 
 /// amplihack-rs `main` HEAD carrying the `amplihack-agent-eval` crate to adopt.
-const AGENT_EVAL_TARGET_REV: &str = "2a93441d1837f9f853d5dddc56cc1088353a8872";
+const AGENT_EVAL_TARGET_REV: &str = "14dc30b10e87764120c6f2bae7f3630522c29e5d";
 /// amplihack-memory-lib `main` commit carrying the `amplihack-memory` crate:
-/// PR #120's squash-merge (the first-class `creative_idea` prospective memory
-/// type — CreativeIdeaStatus lifecycle + typed MemoryLink/MemoryLinkKind — which
-/// Simard's Creative Ideas thread re-exports), which lands directly on top of
-/// PR #121's `measurement::precision_at_k` primitive, so this single rev carries
-/// BOTH upstream additions.
-const MEMORY_TARGET_REV: &str = "e005a5963b38bc02610fa5b0bef7e52625dcd092";
+/// PR #125's squash-merge — the trigger-scoped, priority-ordered
+/// `get_prospective_by_trigger(trigger, limit)` prospective recall (whose LIMIT
+/// bounds only nodes matching the trigger) plus a sort-then-truncate
+/// `get_all_prospective`. Simard consumes it to fix the creative-ideas
+/// dashboard read path (issue #122). Two commits ahead of the prior #120 pin,
+/// no regression.
+const MEMORY_TARGET_REV: &str = "901f63ad79eb0c2d87cd8263d26025877af43cc5";
 
 /// The stale revs the bump must move *off of* (anti-regression sentinels).
 const AGENT_EVAL_STALE_REV: &str = "59548a96049ab8d558110bcaf9c82a4316f1bbf0";
-const MEMORY_STALE_REV: &str = "f80037089a735bd0d394e3eec5cea9fcae1895ea";
+const MEMORY_STALE_REV: &str = "e005a5963b38bc02610fa5b0bef7e52625dcd092";
 
 /// The only git remotes these two crates may resolve from. A bump must never
 /// introduce a *new* git source (typosquat / allowlist-bypass guard, R1).

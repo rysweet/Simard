@@ -223,3 +223,81 @@ fn real_provider_smoke_test_against_tempdir() {
     assert!(report.free_bytes > 0);
     assert_eq!(report.threshold_bytes, 1024 * 1024 * 1024);
 }
+
+// ------------------------------------------------------------------
+// Admission ceiling rail (issue #2706) — pure over (used_pct, ceiling)
+// ------------------------------------------------------------------
+
+#[test]
+fn used_pct_computes_from_free_and_total() {
+    // 20% free of 100 ⇒ 80% used.
+    let s = DiskStat {
+        free_bytes: 20,
+        total_bytes: 100,
+    };
+    assert_eq!(used_pct(&s), Some(80.0));
+    // Full disk.
+    assert_eq!(
+        used_pct(&DiskStat {
+            free_bytes: 0,
+            total_bytes: 100
+        }),
+        Some(100.0)
+    );
+    // Empty disk.
+    assert_eq!(
+        used_pct(&DiskStat {
+            free_bytes: 100,
+            total_bytes: 100
+        }),
+        Some(0.0)
+    );
+}
+
+#[test]
+fn used_pct_none_when_total_zero() {
+    assert_eq!(
+        used_pct(&DiskStat {
+            free_bytes: 0,
+            total_bytes: 0
+        }),
+        None,
+        "unknown disk ⇒ None ⇒ rail inert"
+    );
+}
+
+#[test]
+fn exceeds_admission_ceiling_is_inclusive() {
+    assert!(
+        exceeds_admission_ceiling(90.0, 90.0),
+        "at ceiling refuses (>=)"
+    );
+    assert!(exceeds_admission_ceiling(95.0, 90.0));
+    assert!(exceeds_admission_ceiling(100.0, 90.0));
+    assert!(!exceeds_admission_ceiling(89.999, 90.0));
+    assert!(!exceeds_admission_ceiling(0.0, 90.0));
+}
+
+#[test]
+fn admission_ceiling_env_parse_and_clamp() {
+    assert_eq!(admission_ceiling_from(Some("95")), 95.0);
+    assert_eq!(admission_ceiling_from(Some(" 85.5 ")), 85.5);
+    assert_eq!(admission_ceiling_from(Some("100")), 99.0, "clamped to 99");
+    assert_eq!(admission_ceiling_from(Some("150")), 99.0, "clamped to 99");
+    assert_eq!(admission_ceiling_from(Some("0")), 1.0, "clamped to 1");
+    assert_eq!(admission_ceiling_from(Some("-5")), 1.0, "clamped to 1");
+    assert_eq!(
+        admission_ceiling_from(Some("abc")),
+        DEFAULT_ADMISSION_CEILING_PCT
+    );
+    assert_eq!(
+        admission_ceiling_from(Some("")),
+        DEFAULT_ADMISSION_CEILING_PCT
+    );
+    assert_eq!(admission_ceiling_from(None), DEFAULT_ADMISSION_CEILING_PCT);
+    assert_eq!(
+        admission_ceiling_from(Some("inf")),
+        DEFAULT_ADMISSION_CEILING_PCT,
+        "non-finite ⇒ default"
+    );
+}

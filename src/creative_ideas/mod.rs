@@ -17,6 +17,7 @@
 #![allow(dead_code)]
 
 pub mod dedup;
+pub mod dedup_gate;
 pub mod pipeline;
 pub mod prompt;
 pub mod reviewers;
@@ -26,6 +27,8 @@ pub mod synthesis;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_visibility_2896;
 
 /// Master switch env var. When falsey/unset the thread never ticks and nothing
 /// is generated or routed.

@@ -58,6 +58,7 @@ fn marker_reason(consecutive: u32) -> String {
 
 fn active_goal(id: &str, status: GoalProgress) -> ActiveGoal {
     ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -625,5 +626,137 @@ fn simard_goal_complete_still_removes_and_tombstones_normal_goal() {
     assert!(
         tombstones.contains("one-shot"),
         "a normal completed goal must be tombstoned"
+    );
+}
+
+// ─── #2743 — `simard goal label <id> add|remove|list` round-trips ───────────
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn simard_goal_label_add_remove_round_trips_on_persisted_board() {
+    let (_tmp, root) = isolated_state_root();
+    seed_board(&root, vec![active_goal("tag-me", GoalProgress::NotStarted)]);
+
+    // add lands and persists.
+    let r = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "label".to_string(),
+        "tag-me".to_string(),
+        "add".to_string(),
+        "area:dashboard".to_string(),
+    ]);
+    assert!(
+        r.is_ok(),
+        "label add must exit 0: {:?}",
+        r.err().map(|e| e.to_string())
+    );
+    let board = load_board(&root);
+    let goal = board.active.iter().find(|g| g.id == "tag-me").unwrap();
+    assert_eq!(goal.labels, vec!["area:dashboard"], "tag persisted");
+
+    // add is idempotent (still exit 0, no duplicate).
+    let r = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "label".to_string(),
+        "tag-me".to_string(),
+        "add".to_string(),
+        "area:dashboard".to_string(),
+    ]);
+    assert!(r.is_ok(), "idempotent re-add must exit 0");
+    let board = load_board(&root);
+    assert_eq!(
+        board
+            .active
+            .iter()
+            .find(|g| g.id == "tag-me")
+            .unwrap()
+            .labels,
+        vec!["area:dashboard"],
+        "re-adding an existing tag does not duplicate it",
+    );
+
+    // remove lands.
+    let r = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "label".to_string(),
+        "tag-me".to_string(),
+        "remove".to_string(),
+        "area:dashboard".to_string(),
+    ]);
+    assert!(r.is_ok(), "label remove must exit 0");
+    let board = load_board(&root);
+    assert!(
+        board
+            .active
+            .iter()
+            .find(|g| g.id == "tag-me")
+            .unwrap()
+            .labels
+            .is_empty(),
+        "tag removed",
+    );
+
+    // remove of an absent tag is a no-op that still exits 0.
+    let r = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "label".to_string(),
+        "tag-me".to_string(),
+        "remove".to_string(),
+        "area:dashboard".to_string(),
+    ]);
+    assert!(r.is_ok(), "removing an absent tag is a no-op that exits 0");
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn simard_goal_label_add_rejects_empty_tag_and_unknown_goal() {
+    let (_tmp, root) = isolated_state_root();
+    seed_board(
+        &root,
+        vec![active_goal("present", GoalProgress::NotStarted)],
+    );
+
+    // Whitespace-only tag is rejected (non-zero exit).
+    let r = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "label".to_string(),
+        "present".to_string(),
+        "add".to_string(),
+        "   ".to_string(),
+    ]);
+    assert!(r.is_err(), "an empty-after-trim tag must be rejected");
+
+    // Unknown goal id is a non-zero exit.
+    let r = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "label".to_string(),
+        "ghost".to_string(),
+        "add".to_string(),
+        "area:x".to_string(),
+    ]);
+    assert!(r.is_err(), "labelling an unknown goal must exit non-zero");
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn simard_goal_list_with_tag_filter_exits_zero() {
+    let (_tmp, root) = isolated_state_root();
+    let mut g = active_goal("filtered", GoalProgress::NotStarted);
+    g.labels = vec!["source:creative-ideas".to_string()];
+    seed_board(
+        &root,
+        vec![g, active_goal("other", GoalProgress::NotStarted)],
+    );
+
+    let r = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "list".to_string(),
+        "--tag".to_string(),
+        "source:creative-ideas".to_string(),
+    ]);
+    assert!(
+        r.is_ok(),
+        "goal list --tag must exit 0: {:?}",
+        r.err().map(|e| e.to_string())
     );
 }
