@@ -16,7 +16,10 @@ description: >
   (engineer_spawn is a passenger health signal, not a park driver — §3 upgraded to
   High confidence, P5 downgraded to optional). Round-5 re-executed the H1/H2 tests
   (36 passed, 0 failed) and re-verified every source anchor and live GitHub/board
-  claim at HEAD db02dd7b — the diagnosis holds unchanged (§7e).
+  claim at HEAD db02dd7b; the primary-investigator extension mapped every signature
+  token to its authoritative emission file:line, read the six live block reasons
+  directly, and found the loop still active (tenth duplicate #2875) — the diagnosis
+  holds unchanged (§7e, §7f).
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -545,6 +548,93 @@ source-anchored semantic hypotheses (§1 stale-park root cause, §2a ambient
 each **re-verified** by resolvable code anchors and live GitHub/board state. No finding
 changed; overall confidence remains **High**.
 
+### 7f. Round-5 primary-investigator extension — token→source map + live-board read (HEAD `db02dd7b`)
+
+This pass (parallel to §7e) adds the explicit **per-token emission map** the
+investigation asked for and three live-state facts that post-date or refine §7e: a
+**tenth** duplicate issue, a **direct goal-board read** of the actual block reasons,
+and the **stewardship escalation** that explains why symptom-level unblocks don't stick.
+
+**Signature token → authoritative emission (file:line), HEAD `db02dd7b`.** Every
+composite-signature token maps to exactly one authoritative emission site. `observer.rs`
+is listed in the investigation scope but **emits no token** — it is the Decide-phase
+*consumer* (`decide_read_only`, `observer.rs:126`; reads `problem.dedup_key` at
+`:161/:209`), not a source.
+
+| Token (occurrences in key) | Fires when | Signal (`signal.rs`) | Dedup key (`mod.rs`) | Ultimate provenance | Conf. |
+|---|---|---|---|---|---|
+| `overseer-obs:` prefix | composite key assembled each Observe tick | — | `observation_signature` → `format!("overseer-obs:{}")` `:1085`; called `:544` | self write-back re-wrap (§4) | **High** |
+| `goal:blocked:{id}` (×6: parity umbrella + #16/#17/#18/#21/#22) | goal status is `GoalProgress::Blocked` | `GoalBlocked` `signal.rs:441` (fed by `ObservedState.blocked_goals`, `capabilities.rs`; populated by `blocked_goals_from_board` `sensor.rs:204`→`blocked_goal_of` `:209`) | `goal:blocked:{goal_id}` `:1349` | no-progress breaker park (`no_progress_breaker.rs:69`) for 5 of 6; #17 = engineer `record_blocker` dep-block (see below) | **High** |
+| `quality:gym_skipped` (×2) | `ObservedState.gym_skipped == true` | `GymSkipped` `signal.rs:398` | `quality:gym_skipped` `:1295` | single `env_flag("SIMARD_SKIP_GYM")` `provider.rs:61`, fanned to `assemble_gym` (`:78`) **and** `assemble_telemetry` (`:83`), rejoined by availability-tolerant OR-fold `sensor.rs:125-126` | **High** |
+| `workstream-gap` (×2) | `!ObservedState.workstream_gaps.is_empty()` | `WorkstreamGap` `signal.rs:475` | `workstream-gap` `:1384` | `detect_workstream_gaps` `sensor.rs:288`; blocked goals **excluded** by hard guard `:300` (disjoint from `goal:blocked`) | **High** (mechanism); **Medium** (identity of the uncovered item) |
+| `resource:engineer_spawn` (×1) | `live_engineers >= ENGINEER_SPAWN_THRESHOLD (8)` | `EngineerSpawnRate` `signal.rs:393-396` (threshold `:351`) | `resource:engineer_spawn` `:1283` | `StatusSnapshot.resources.live_engineers` → `ObservedState.live_engineers` `capabilities.rs:81` (running-worktree census `context.rs:111`) | **High** |
+| token **doubling / block nesting** (the `×2` counts; `overseer-obs:goal:blocked:…` repeated ~6×) | ≥2 recalled episodes share a `failure_signature` | `RecurringSignature` `signal.rs:463-467` (count `:459-463`) | dedup key = the recalled composite string itself, `sanitize_recalled(signature)` `:1372` | unfiltered self-recall `recall_episodic` `wiring.rs:1024-1030` (no `source_label` drop) over own write-backs `record_observation` `:1088` (`source_label="overseer"`); the giant recalled key survives `keys.dedup()` `:1084` next to the short fresh tokens → same token appears twice / block nests | **High** (test-proven, §7a) |
+
+The last row is the mechanistic linchpin behind the "seen **2×**" and the visible
+doubling: the `2×` is the recall `occurrences` count (`signal.rs:459-463`), and because
+`RecurringSignature`'s dedup key is the *entire prior composite string* (`mod.rs:1372`),
+`observation_signature`'s sort+`dedup()` (`:1084`) cannot collapse it against the short
+fresh `quality:gym_skipped` / `workstream-gap` / `resource:engineer_spawn` tokens — so
+each recalled generation nests intact beside a fresh copy. Not two upstream events; one
+recalled + one fresh.
+
+**Live goal-board read (`simard goal list`, 2026-07-07 ~12:30 UTC) — actual block
+reasons.** This directly reads the six blocked rows (previously inferred):
+
+| Goal | Live board status | Classification |
+|---|---|---|
+| `advance-…-full-parity-f29bb15c` (umbrella) | `🔒 [OODA-SAFEGUARD] … needs human review` | **stale safeguard-park** |
+| `…issue-16-ws1-full-pack-cve` | `🔒 [OODA-SAFEGUARD] … needs human review` | **stale park** (#16 CLOSED 20:16Z) |
+| `…issue-17-ws2-int8-pq-embed` | `Cycle 6 … engineer healthy … "WS2 #17's done-criterion is gated on eval recall parity, which depends on WS1 #16's eval baseline. #16 is still OPEN … no landed baseline … genuine hard upstream dependency"` | **genuine dep-block on a STALE premise** — see below |
+| `…issue-18-ws3-versioned-rel` | `🔒 [OODA-SAFEGUARD] … needs human review` | **stale park** (#18 CLOSED) |
+| `…issue-21-ws6-resumable-pip` | `🔒 [OODA-SAFEGUARD] … needs human review` | **stale park** (#21 CLOSED) |
+| `…issue-22-ws7-sign-the-rele` | `🔒 [OODA-SAFEGUARD] … needs human review` | **stale park** (#22 CLOSED) |
+
+The `[OODA-SAFEGUARD] … needs human review` text matches `NO_PROGRESS_BLOCKED_PREFIX`
+(`no_progress_breaker.rs:69`) + `…_SUFFIX` (`:74`) verbatim, confirming §1's park path
+from the live board (not just inference).
+
+**Refinement to §1 for #17.** #17 is *not* a safeguard-park — its live block is an
+engineer-authored `record_blocker` naming a real upstream dependency (WS1 #16's eval
+baseline). But its premise is **now stale**: the reason asserts "#16 is still OPEN … no
+landed baseline," whereas **#16 CLOSED 2026-07-06T20:16:25Z**. So #17 is blocked-on-a-
+stale-dependency-premise that nothing re-evaluated after #16 closed — the *same* missing
+done-gate/block reconciliation defect as §1, now demonstrated for a **non-safeguard**
+block too. (#17 remains legitimately deferrable as the flag-gated spike; the point is the
+block *reason* is unreconciled, not that #17 must ship.)
+
+**Loop still live — tail is now 10, not 9.** A **tenth** near-duplicate,
+**#2875** (created 2026-07-07T11:31:36Z), was filed ≈3 h after #2841 and carries the
+identical composite key from the investigation prompt. Full parity-signature tail (all
+OPEN): #2669, #2672, #2678, #2691, #2744, #2750, #2757, #2768, #2841, **#2875**. The
+recurrence is ongoing at investigation time, not historical.
+
+**Stewardship escalation explains the persistence — #2707.** `rysweet/Simard` **#2707**
+(`[stewardship] recurring_goal_reblock in simard::overseer`) records that the parity
+umbrella goal `is repeatedly re-parked despite symptom-level unblocks`, with systemic
+root cause `standing-goal-not-tagged-perpetual` and failed-step
+`goal-unblock:advance-…-full-parity-f29bb15c`. This corroborates P2/P3: operator
+`unblock` has already been tried and does **not** stick, because the umbrella is a
+standing goal that can never satisfy a terminal done-gate (`completion_gate.rs` requires
+`pr_merged` `:28` ∧ `issue_closed` `:31` ∧ `deployed` `:34`) and is not tagged perpetual,
+so it re-parks every breaker cycle. The durable fix is tagging/archival + done-gate
+reconciliation (P2), not another symptom unblock (P3 alone is insufficient here).
+
+**Repo routing confirmed intact (not a `repo=None` mis-route).** The kgpacks-rs goals
+park with SAFEGUARD/dependency reasons — **none** shows a repo-resolution error. By
+contrast, an unrelated board goal (`fix-rustsec-…-amplihack-xpia-defender`) *does* park
+with `NOT_A_REPO: '…/amplihack-xpia-defender' is not inside a valid git worktree`
+(emitted at `error/display.rs:158`). That contrast proves the resolver is live and that
+routing to `rysweet/agent-kgpacks-rs` resolves cleanly; the recurrence is a
+stale-sentinel + missing done-gate re-run problem, **not** a routing failure.
+
+Net: the token map resolves every signature segment to a single High-confidence emission
+site; the live board read upgrades §1's #16/#18/#21/#22 parks and the #17 dep-block from
+inference to direct observation; #2707 + the growing tail (→#2875) confirm the loop is
+active and that symptom unblocks don't hold. No prior finding changed; §1's #17 reading
+is *refined* (stale-premise dep-block, still optional to ship). Overall confidence
+remains **High**.
+
 ---
 
 ## 8. Provenance
@@ -559,7 +649,9 @@ AIMD `engineer_spawn` path to HEAD `20fb7539` and refuted the §3 amplifier/cont
 mechanism at the code level, upgrading §3 to High and making P5 optional (§3b, §7d);
 round-5 (this update) re-executed the full `tests_memory_recall` module (36 passed,
 0 failed) and re-verified every source anchor and live GitHub/board claim at HEAD
-`db02dd7b` — the diagnosis holds unchanged (§7e).**
+`db02dd7b` — the diagnosis holds unchanged (§7e); the primary-investigator extension
+(§7f) added the explicit token→emission map, a direct `simard goal list` read of the
+six block reasons, the stewardship escalation #2707, and the tenth duplicate #2875.**
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
