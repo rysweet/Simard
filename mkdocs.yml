@@ -111,6 +111,7 @@ nav:
     - Closed-Loop Outcome Verification (live-verified done): concepts/closed-loop-outcome-verification.md
     - Dependency/Overlap-Aware Engineer Scheduling: concepts/dependency-overlap-aware-scheduling.md
     - Resource-Aware Engineer Admission: concepts/resource-aware-engineer-admission.md
+    - Semantic Dedup + Enhance for Creative Ideas: concepts/semantic-creative-ideas-dedup.md
     - Rust Domain-Expertise Gym (first experiment): concepts/rust-expertise-gym.md
     - Hybrid Cognition Measurement (benchmark + live): concepts/hybrid-cognition-measurement.md
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
@@ -226,6 +227,7 @@ nav:
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
     - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
+    - Configure Creative-Ideas Semantic Dedup: howto/configure-creative-ideas-semantic-dedup.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
     - Telemetry Metrics: reference/telemetry-metrics.md
@@ -372,6 +374,8 @@ nav:
     - Creative Ideas Durable Read-After-Write: reference/creative-ideas-durable-read-after-write.md
     - Creative-Ideas Goal Routing — Fail-Closed Persistence: reference/creative-ideas-goal-routing-fail-closed.md
     - Creative Ideas Trigger-Scoped Read: reference/creative-ideas-trigger-scoped-read.md
+    - Creative-Ideas Semantic Dedup-Gate API: reference/creative-ideas-dedup-gate-api.md
+    - Creative-Idea Dedup Recipe & Prompt Schema: reference/creative-idea-dedup-recipe.md
   - Operations:
     - Overview: operations/index.md
     - Verified Backups of the Live Store: operations/verified-backups.md
@@ -382,6 +386,7 @@ nav:
     - Outcome-Verification Kill Switch: operations/outcome-verification-kill-switch.md
     - Engineer-Admission Kill Switch: operations/engineer-admission-kill-switch.md
     - Resource-Admission Kill Switch: operations/resource-admission-kill-switch.md
+    - Creative-Ideas Semantic-Dedup Kill Switch: operations/creative-ideas-semantic-dedup-kill-switch.md
     - Safe Self-Update: safe-self-update.md
     - Pre-Commit Setup: operations/pre-commit-setup.md
   - Operator Dashboard:

@@ -17,6 +17,7 @@
 #![allow(dead_code)]
 
 pub mod dedup;
+pub mod dedup_gate;
 pub mod pipeline;
 pub mod prompt;
 pub mod reviewers;
