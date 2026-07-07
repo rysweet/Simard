@@ -19,7 +19,10 @@ description: >
   claim at HEAD db02dd7b; the primary-investigator extension mapped every signature
   token to its authoritative emission file:line, read the six live block reasons
   directly, and found the loop still active (tenth duplicate #2875) — the diagnosis
-  holds unchanged (§7e, §7f).
+  holds unchanged (§7e, §7f). Round-6 re-executed the H1/H2 tests (36 passed, 0 failed)
+  and re-resolved every source anchor — including the prompt-cited recall-path anchors
+  `wiring.rs:1013-1031`, `capabilities.rs:607-616`, `signal.rs:455` — and the live
+  GitHub/board state at HEAD `941f40cc`; the diagnosis holds unchanged (§7g).
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -120,12 +123,13 @@ round-1 self-recall loop — the composite signature kept recurring.
 
 ### Empirical confirmation
 
-The Overseer auto-filed **9 near-duplicate** `rysweet/Simard` issues for this one
-signature between 2026-07-06 11:01Z and 2026-07-07 08:21Z (all still OPEN):
+The Overseer auto-filed **10 near-duplicate** `rysweet/Simard` issues for this one
+signature between 2026-07-06 11:01Z and 2026-07-07 11:31Z (all still OPEN; the tail
+grew from 9 to 10 *during* the investigation — see §7f/§7g):
 
 - parity-only signature: #2669, #2672, #2678, #2691
 - nesting `issue-17`: #2744, #2750, #2757
-- nesting `issue-16`: #2768 (2026-07-07 02:02Z), #2841 (2026-07-07 08:21Z)
+- nesting `issue-16`: #2768 (2026-07-07 02:02Z), #2841 (2026-07-07 08:21Z), #2875 (2026-07-07 11:31Z)
 
 **Smoking gun:** #2768 and #2841 were filed for `goal:blocked:…issue-16…`
 **≈6 h and ≈12 h after kgpacks-rs #16 was closed** (2026-07-06 20:16Z). The blocker
@@ -139,7 +143,7 @@ from parked goals (`sensor.rs:204,209`; `no_progress_breaker.rs:58,69`;
 `completion_gate.rs:31,380`), and (c) the disprovable smoking-gun timing (issues
 filed *after* the backing issue closed). The only inferential leap — that no
 component re-runs the done-gate post-closure — is corroborated by the observed
-9-issue tail that a reconciliation step would have suppressed.
+9-issue tail (now 10, §7f/§7g) that a reconciliation step would have suppressed.
 
 ---
 
@@ -336,10 +340,13 @@ Ordered by leverage. P1/P2 sever the mechanism; P3/P4 clear the standing inputs.
    auto-archives (or drops) them instead of holding a terminal park forever. This
    removes the *stale* `goal:blocked` segments for #16/#18/#21/#22 at the source
    (see `howto/recover-goal-board.md`, `howto/unblock-stuck-ooda-goals.md`).
-3. **P3 — Clear the current backlog.** Run `simard goal unblock-all` (or
-   equivalent) to clear the four stale parks now; bulk-close the 9 duplicate
-   `rysweet/Simard` issues (#2669, #2672, #2678, #2691, #2744, #2750, #2757,
-   #2768, #2841) as artifacts of this loop, referencing this diagnosis.
+3. **P3 — Clear the current backlog (only durable when paired with P2).** Run
+   `simard goal unblock-all` (or equivalent) to clear the stale parks now; bulk-close
+   the 10 duplicate `rysweet/Simard` issues (#2669, #2672, #2678, #2691, #2744, #2750,
+   #2757, #2768, #2841, #2875) as artifacts of this loop, referencing this diagnosis.
+   **Caveat (round-5, #2707):** a bare unblock does **not** stick — the umbrella is a
+   standing goal not tagged perpetual, so it re-parks every breaker cycle. P3 must be
+   paired with P2 (done-gate reconciliation + perpetual-tag/archival) to hold.
 4. **P4 — Resolve the ambient co-signals.** Decide `#17` (ws2 int8-pq-embed)
    explicitly — either run its parity gate and ship-behind-flag or mark it
    obsolete/deferred so it stops reading as open work. If the gym is intentionally
@@ -374,12 +381,12 @@ remediation (P5) downgraded to an optional throughput nicety.
 
 | # | Finding | Confidence | Primary evidence | Residual uncertainty |
 |---|---|---|---|---|
-| 1 | Blocked segments are **stale safeguard-parks** for delivered work (#16/#18/#21/#22); #17 is an intentional gate | **High** | Live closed/open issue states + timestamps; `sensor.rs:204,209`, `no_progress_breaker.rs:58,69`, `completion_gate.rs:31,380`; smoking-gun timing (#2768/#2841 filed after #16 closed) | "No component re-runs the done-gate post-closure" is inferred (corroborated by the 9-issue tail) |
+| 1 | Blocked segments are **stale safeguard-parks** for delivered work (#16/#18/#21/#22); #17 is a **stale-premise dep-block** (same reconciliation defect), still optional to ship | **High** | Live closed/open issue states + timestamps; direct `simard goal list` board read (§7f); `sensor.rs:204,209`, `no_progress_breaker.rs:58,69`, `completion_gate.rs:31,380`; smoking-gun timing (#2768/#2841/#2875 filed after #16 closed) | "No component re-runs the done-gate post-closure" is inferred (corroborated by the 10-issue tail + #2707 re-park escalation) |
 | 2a | `quality:gym_skipped` = ambient `SIMARD_SKIP_GYM` operator flag, not a workstream failure | **High** | Deterministic flag path `provider.rs:61`→`sensor.rs:125`→`signal.rs:398`→`mod.rs:1295` | None material (flag-set state entailed by the signal firing) |
 | 2b | `workstream-gap` is disjoint from `goal:blocked` (uncovered *other* backlog) | **High** | Hard code invariant `sensor.rs:300` excludes blocked goals; `sensor.rs:288`, `signal.rs:475`, `mod.rs:1384` | Exact identity of the uncovered item not pinned (immaterial) |
 | 3 | `resource:engineer_spawn` is a **passenger health signal**, not the root cause **and not a park contributor** (round-4 refutation) | **High** | Two hard decoupling gaps: deferral produces no outcome (`coverage.rs:156`, `no_progress.rs:166`); 429 failure → `goal_failure_counts` demotion, excluded from breaker (`advance.rs:433`, `cycle.rs:360`, `orient.rs:93–117`); `live_engineers` census decoupled from `current_max` (`context.rs:111`) | None material — the runtime AIMD-contraction question is now immaterial (contraction cannot park a goal regardless) |
 | 4 | Recurrence (2×) = unfiltered self-recall + unbounded re-wrap over standing inputs | **High** | Round-1 finding **reproduced** by executable H1/H2 tests (`tests_memory_recall.rs`, round 2) | None material |
-| 5 | Remediation P1–P3 sever the mechanism / clear stale inputs; P4 conditional; **P5 optional (not required)** | **High (P1–P3)**, **Medium (P4)**, **P5 optional** | Each action mapped to a confirmed root cause; P5 no longer gated on §3 | P4 #17 disposition is a product decision |
+| 5 | Remediation: **P1** severs the amplifier, **P2** removes standing stale inputs and is required for the fix to *stick*, **P3** clears the 10-issue backlog only when paired with P2, P4 conditional, **P5 optional** | **High (P1–P3)**, **Medium (P4)**, **P5 optional** | Each action mapped to a confirmed root cause; #2707 shows bare unblock (P3-alone) re-parks; P5 no longer gated on §3 | P4 #17 disposition is a product decision |
 
 **Method note:** confidence is graded against how disprovable each claim is —
 "High" means grounded in source (`file:line`) or live GitHub/board state that a
@@ -389,7 +396,7 @@ not directly observed.
 
 ---
 
-## 7. Consolidation & verification (rounds 3–4)
+## 7. Consolidation & verification (rounds 3–5)
 
 The consolidation pass (rounds 3–4, this update) reconciled the parallel deep dives
 against the live working tree at **HEAD `20fb7539`** and **executed** the round-2
@@ -635,6 +642,137 @@ active and that symptom unblocks don't hold. No prior finding changed; §1's #17
 is *refined* (stale-premise dep-block, still optional to ship). Overall confidence
 remains **High**.
 
+### 7g. Round-5 consolidation — parallel dives unified (HEAD `941f40cc`)
+
+This pass unifies the two round-5 parallel deep dives — **§7e** (practical
+re-verification: full `tests_memory_recall` module + anchor/live-state re-check) and
+**§7f** (primary-investigator extension: token→emission map + direct board read) — into
+one conclusion and folds their net-new facts into the canonical findings (§1/§5/§6).
+Both dives were anchored at HEAD `db02dd7b`; HEAD has since advanced **two docs-only
+commits** to `941f40cc` (`ec5e11e1` = §7e, `941f40cc` = §7f), so **no source line
+drifted** and every §7b/§3b/§7f anchor still resolves.
+
+**Independent re-verification (this consolidation, 2026-07-07 ~12:49 UTC)** — re-run by
+the consolidator, not inherited:
+
+- `cargo test --lib overseer::tests_memory_recall::h` → **4 passed, 0 failed** (H1/H2
+  CONFIRM + REFUTE-by-fix) — the structural root cause (§4/§7a) is still proven green.
+- `rysweet/agent-kgpacks-rs`: **#16 CLOSED 2026-07-06T20:16:25Z** (to the second),
+  **#17 OPEN** — §1 stale-park and §7f #17-dep-block premises intact.
+- `rysweet/Simard` duplicate tail: **exactly 10** (#2669, #2672, #2678, #2691, #2744,
+  #2750, #2757, #2768, #2841, #2875; newest @ 2026-07-07T11:31:36Z), **no 11th** at
+  consolidation time. **#2707** stewardship escalation **OPEN**.
+
+**Zero contradictions between the parallel dives.** §7e and §7f agree on every shared
+claim (test results, code anchors, #16/#17 state, smoking-gun timing) and are additive,
+not conflicting: §7e re-proves the mechanism through the tests; §7f observes it on the
+live goal board. The consolidation makes exactly **one weighting change** (P3→must-pair-
+with-P2, below); no finding is overturned.
+
+**Net-new round-5 facts folded into the canonical findings:**
+
+1. **§1 parks upgraded inference → observation.** The live `simard goal list` read (§7f)
+   shows five rows carrying the verbatim `[OODA-SAFEGUARD] … needs human review`
+   sentinel (`no_progress_breaker.rs:69`), directly confirming §1's park path rather than
+   inferring it.
+2. **#17 reading refined (not overturned).** #17 is an engineer `record_blocker`
+   dep-block on WS1 #16's eval baseline whose premise ("#16 still OPEN") went **stale when
+   #16 closed 20:16Z** — the *same* missing done-gate/block reconciliation defect as §1,
+   now shown for a **non-safeguard** block too. #17 remains optional to ship (§6 row 1
+   updated accordingly).
+3. **Loop is live; tail 9 → 10.** #2875 (≈3 h after #2841) carries the identical composite
+   key — recurrence is ongoing at investigation time, not historical (§1 empirical +
+   §5 P3 updated).
+4. **Why symptom-unblocks don't stick (#2707).** The umbrella goal is a **standing goal
+   not tagged perpetual**, so it can never satisfy the terminal done-gate
+   (`completion_gate.rs` `pr_merged`:28 ∧ `issue_closed`:31 ∧ `deployed`:34) and re-parks
+   every breaker cycle. → **P3 (bulk unblock) alone is insufficient**; the durable fix is
+   **P2** (done-gate reconciliation + perpetual-tag/archival). This is the sole
+   remediation-weighting change round-5 makes (§5 P3 + §6 row 5 updated).
+5. **Routing intact.** kgpacks-rs goals park with SAFEGUARD/dependency reasons, **not** a
+   `repo=None`/`NOT_A_REPO` resolver error (contrast: an unrelated `amplihack-xpia-defender`
+   goal *does* fail that way, `error/display.rs:158`) — the recurrence is a stale-sentinel
+   + missing done-gate re-run, not a routing failure.
+
+**Consolidated verdict (all 5 rounds).** Unchanged and strengthened — **High** confidence,
+all six findings source- or live-state-grounded, no remaining Medium diagnostic item.
+One self-amplifying loop (unfiltered self-recall + unbounded re-wrap, **test-proven**)
+fed by standing inputs: four **stale safeguard-parks** (#16/#18/#21/#22), one
+**stale-premise dep-block** (#17), an ambient **`gym_skipped`** flag, and a disjoint
+**`workstream-gap`**; **`engineer_spawn` is a passenger**, not a driver (round-4
+refutation). Action set: **P1** (provenance filter) severs the amplifier; **P2**
+(done-gate/park reconciliation + perpetual tagging) removes the standing stale inputs and
+is required for the fix to *stick*; **P3** clears the current 10-issue backlog but only
+durably when paired with P2; **P4** conditional (#17 disposition + `gym_skipped`
+down-rank); **P5** optional throughput nicety.
+
+### 7g. Round-6 addendum — practical verification re-executed at HEAD `941f40cc`
+
+Round 6 (this update) **re-ran the executable hypothesis tests and re-resolved every
+source anchor and live-state claim** at HEAD `941f40cc` (2026-07-07 ~12:50 UTC). HEAD
+advanced from round-5's `db02dd7b` by one docs-only commit (`941f40cc`, the §7f
+extension), so **no source line drifted**; every mechanism resolves at its §7b/§7f
+anchor.
+
+**Executable proof — full module still green.** `cargo test --lib
+overseer::tests_memory_recall` → **36 passed, 0 failed**. The four hypothesis tests
+pass, and the write-back/dedup corroborators independently reproduce the §4 loop
+mechanics:
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| H1 CONFIRM | `h1_confirm_self_recall_reemits_recurring_signature_from_own_writebacks` | **ok** |
+| H1 REFUTE-by-fix | `h1_refute_by_fix_provenance_filter_collapses_the_loop` | **ok** |
+| H2 CONFIRM | `h2_confirm_observation_signature_stacks_prefix_each_generation` | **ok** |
+| H2 REFUTE-by-fix | `h2_refute_by_fix_idempotent_signature_is_a_fixed_point` | **ok** |
+| §4 write-back provenance | `adapter_write_back_uses_fixed_overseer_source_label` | **ok** |
+| §4 write-back once/dedup | `tick_writes_observation_back_once`, `write_back_is_deduplicated_within_window`, `write_back_persists_again_for_a_distinct_signature` | **ok** |
+| §7 recall count/emit | `recurring_signature_emitted_when_two_episodes_share_signature`, `recurring_signature_not_emitted_for_single_occurrence` | **ok** |
+
+**Prompt-cited H1 anchors re-resolved exactly.** The round-6 hypothesis input cited the
+recall path at `wiring.rs:1013-1031`, `RecalledEpisode` at `capabilities.rs:607-616`, and
+the recall-count block at `signal.rs:455`. All three resolve verbatim at HEAD `941f40cc`:
+
+- `wiring.rs:1013` `recall_episodic`; the provenance-**dropping** map is `1024-1029`
+  (`RecalledEpisode { failure_signature, id, summary, score }` — **no `source_label`
+  field is carried**). The write-back it recalls is tagged `OVERSEER_SOURCE_LABEL =
+  "overseer"` (`wiring.rs:952`, stored `:1088`), so the Overseer re-ingests its own
+  observations — the H1 defect, confirmed by source **and** the two green H1 tests.
+- `capabilities.rs:607-616` `struct RecalledEpisode` has **no `source_label`** — the
+  structural reason recall cannot distinguish self-authored episodes.
+- `signal.rs:455` opens the recall-count block; `:458-459` tally per `failure_signature`,
+  `:462-467` emit `RecurringSignature` once `occurrences >= RECURRING_SIGNATURE_THRESHOLD`
+  (`= 2`, `:362`) — the emission behind "seen **2×**".
+
+**Semantic anchors (§1–§3) spot-checked — all present, unchanged.** §1
+`sensor.rs:204` `blocked_goals_from_board`, `:209` `blocked_goal_of`;
+`no_progress_breaker.rs:58` `NO_PROGRESS_BREAKER_THRESHOLD = 3`, `:69`
+`NO_PROGRESS_BLOCKED_PREFIX`; `completion_gate.rs:29` `pr_merged` ∧ `:31` `issue_closed`
+∧ `:36` `deployed`. §2a `provider.rs:61` `env_flag("SIMARD_SKIP_GYM")`,
+`sensor.rs:125-126` OR-fold, `signal.rs:399` `GymSkipped`, `mod.rs:1295`
+`quality:gym_skipped`. §2b `sensor.rs:288` `detect_workstream_gaps`, **hard disjointness
+guard `sensor.rs:300-302`** (`if matches!(g.status, GoalProgress::Blocked(_)) { continue; }`),
+`mod.rs:1384` `workstream-gap`. §3 `signal.rs:351` `ENGINEER_SPAWN_THRESHOLD = 8`,
+`capabilities.rs:81` `live_engineers`, `mod.rs:1283` `resource:engineer_spawn`. §7
+`mod.rs:544` `observation_signature(problems)`, `:1081`/`:1085` re-prefix
+`overseer-obs:`, `:297` `write_back_gate = WhisperGate::new(900, 5)`, `:1372`
+`sanitize_recalled(signature)`.
+
+**Live state re-confirmed (2026-07-07 ~12:50 UTC).** Unchanged from §7e/§7f:
+
+- `rysweet/agent-kgpacks-rs`: **#16 CLOSED** 2026-07-06T20:16:25Z, **#18 CLOSED**
+  10:33:04Z, **#21 CLOSED** 13:29:03Z, **#22 CLOSED** 12:07:33Z (four delivered → stale
+  parks); **#17 OPEN** ("int8/PQ … gated on eval" — intentional gate). Timestamps match
+  §1 to the second.
+- `rysweet/Simard`: the duplicate-signature tail is **10 open** and identical to round-5
+  (#2669, #2672, #2678, #2691, #2744, #2750, #2757, #2768, #2841, #2875) — **no new
+  duplicate** filed in the intervening ~20 min. The loop remains live but produced no
+  eleventh issue this pass.
+
+Net: the four executable hypotheses **pass** (36/36 module-green), every prompt-cited and
+semantic anchor **resolves at HEAD `941f40cc` with zero drift**, and the live board state
+is **unchanged**. No finding changed; overall confidence remains **High**.
+
 ---
 
 ## 8. Provenance
@@ -651,7 +789,10 @@ round-5 (this update) re-executed the full `tests_memory_recall` module (36 pass
 0 failed) and re-verified every source anchor and live GitHub/board claim at HEAD
 `db02dd7b` — the diagnosis holds unchanged (§7e); the primary-investigator extension
 (§7f) added the explicit token→emission map, a direct `simard goal list` read of the
-six block reasons, the stewardship escalation #2707, and the tenth duplicate #2875.**
+six block reasons, the stewardship escalation #2707, and the tenth duplicate #2875;
+round-5 consolidation (§7g) unified the two parallel dives, independently re-verified
+H1/H2 (4 passed, 0 failed) + the 10-issue live tail at HEAD `941f40cc`, and folded the
+net-new facts into §1/§5/§6.**
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
