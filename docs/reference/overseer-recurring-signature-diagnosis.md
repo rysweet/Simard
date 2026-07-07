@@ -120,6 +120,11 @@ description: >
   instance resolved, yet the no-reconciliation thesis predicts the `issue-17` token keeps emitting from the
   stale park (`mod.rs:1349`); verbatim tail still exactly 10 (no 11th yet), reblock flood steady at 101. No
   finding overturned, confidence High.
+  Round-25 (§7ai) contributed the net-new count-side bound completing §7ag's length bound: the emitted
+  occurrence count `N` in "seen N×" is hard-capped `2 ≤ N ≤ 5` (ceiling `RecallBudget.episodic = 5`, floor
+  `RECURRING_SIGNATURE_THRESHOLD = 2`), test-backed and scoped to magnitude (P1 stays the load-bearing cut);
+  tests 36/0 + 9/0 + 5/0 at zero drift, the kgpacks board stays wholly CLOSED, the verbatim tail holds at 10
+  (no 11th), and the `recurring_goal_reblock` flood grew 101 → 110 (still firing).
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -513,7 +518,7 @@ not directly observed.
 
 ---
 
-## 7. Consolidation & verification (rounds 3–24)
+## 7. Consolidation & verification (rounds 3–25)
 
 The consolidation pass (rounds 3–4, this update) reconciled the parallel deep dives
 against the live working tree at **HEAD `20fb7539`** and **executed** the round-2
@@ -3183,9 +3188,118 @@ turn of the loop it documents.
 
 ---
 
+### 7ai. Round-25 primary-investigator deep dive (parallel focus to §7af/§7ag) — the emitted composite is DOUBLY bounded: §7ag capped its LENGTH (≤ 8192 B); this pass proves its occurrence COUNT is hard-capped too (`2 ≤ N ≤ 5`) by the episodic recall budget, closing the dimension §7ag left open (HEAD `0b2dc823`)
+
+This pass owns the assigned focus verbatim — **signature-token emission mapping (Area 1) AND the
+self-amplifying recall/write-back loop** — re-executed on a fresh request ~2 h 20 m after the §7ag/§7ah
+reads (~21:41Z, 2026-07-07). Anchored at HEAD `0b2dc823` (the commit that landed §7ag);
+`git diff --name-only 85245e87..HEAD -- src/` is **empty** (fourteenth consecutive round of zero source
+drift — §7af/§7ag/§7ah advanced docs only), so every anchor below re-resolved **verbatim** by reading the
+source at this HEAD, not inheriting §7u/§7af. Practical evidence: `overseer::tests_memory_recall`
+**36 passed / 0 failed**, `overseer::sensor` **9 passed / 0 failed**, `cognitive_memory::tests_ranked_episodic`
+**5 passed / 0 failed**. Strictly additive; no prior finding overturned.
+
+**A. The loop + emission map re-anchored on all three sides at `0b2dc823` (verbatim; §7v/§7z/§7aa/§7af
+proved the mechanism/map).** (1) **Select** — `LibraryCognitiveMemory::recall_episodes_ranked`
+(`library_adapter.rs:1266`) admits an episode iff its lowercased content `contains` **any** whitespace-split
+query needle (`matches_kw`, `:1294-1296`), on both the ranked path (`:1314`) and the compressed-consolidation
+backfill (`:1322-1323`), deduped by `node_id` (`:1311/1314/1325`); the query is `RecallKeys::query()`
+(`capabilities.rs:547-551`) built from the same problem `dedup_key`s the write embeds (`:533`) — plus, for a
+fired `RecurringSignature`, the whole composite as its own recall keyword (`:572`) — so the Overseer's
+write-back self-selects by construction (§7aa). (2) **Count** — `signals_from` tallies recalled episodes by
+`failure_signature` into a `BTreeMap` (`signal.rs:456-460`) and pushes `Signal::RecurringSignature` when a
+bucket reaches `RECURRING_SIGNATURE_THRESHOLD` (`signal.rs:362` = 2, gate `:463`, push `:464`); the tally is
+provenance-blind because `recall_episodic`'s projection (`wiring.rs:1022-1030`) **drops `source_label`** —
+`RecalledEpisode` (`capabilities.rs:607-616`) has no such field though `CognitiveEpisode` carries it
+(`memory_cognitive.rs:50`), and the write-back is stored under `OVERSEER_SOURCE_LABEL` (`wiring.rs:952`,
+`store_episode` `:1088`) with an in-band `[sig:…]` marker (`:1084`) that `parse_failure_signature`
+(`:976-986`) recovers. (3) **Emit** — `observation_signature` sorts+dedups the problem `dedup_key`s and
+re-wraps `overseer-obs:` (`mod.rs:1081-1085`); the fired signal's own re-entry `dedup_key` is
+`sanitize_recalled(signature)` — the whole recalled composite (`mod.rs:1372`) — and its summary is
+`sanitize_recalled(&format!("recurring signature seen {occurrences}× in cognitive memory ({signature})"))`
+(`mod.rs:1373-1375`), so it folds back into the next generation. Every anchor verbatim; zero drift. (The two
+out-of-loop look-alikes — the Act-phase whisper key and the `capabilities.rs:562/564` keyword stems — remain
+outside the composite, §7u/§7af.)
+
+**B. NET-NEW — the emitted occurrence COUNT is hard-bounded `2 ≤ N ≤ 5`, closing the dimension §7ag left
+open.** §7ag proved the re-entry token's *length* is capped (≤ 8192 B) and **explicitly scoped that cap OUT
+of the count** ("the cap governs token LENGTH, not occurrence COUNT … tallied off the un-capped in-band
+`[sig:…]` marker"). That left the "seen N×" magnitude looking unbounded. It is not — a **different**
+mechanism bounds it: the **episodic recall budget**. The tally in `signals_from` (`signal.rs:456-460`) counts
+only the episodes present in `state.recall.episodes`, and that set is `recall_pass`'s
+`recall_episodic(keys, budget.episodic)` result (`mod.rs:499`) with `budget = RecallBudget::default()`
+(`mod.rs:497`). `RecallBudget::default().episodic = 5` (`capabilities.rs:501`) — a **hard constant,
+deliberately not an env knob** (`:484-485`), docstring "Recall up to `limit`" (`:674`) — and the adapter
+forwards it (`wiring.rs:1020`) to `recall_episodes_ranked`, which `out.truncate(limit)` at
+`library_adapter.rs:1330` **after** the keyword gate and the compressed backfill. Because the recalled set is
+≤ 5 **distinct** episodes (deduped by `node_id`), any single `failure_signature` bucket is ≤ 5, so the
+rendered `occurrences` satisfies **`N ≤ 5`** regardless of how many episodes in the multi-writer graph carry
+that signature. The gate supplies the floor: emission requires `N ≥ 2` (`signal.rs:463`). Therefore the
+amplifier's summary integer is **structurally pinned to `[2, 5]`**.
+
+- **Test-backed.** `recall_budget_default_is_5_5_3_5` (`tests_memory_recall.rs:421`) pins `episodic == 5`
+  (the ceiling); `h1_refute_by_fix_provenance_filter_collapses_the_loop` (`:1156`, assertion `:1188-1194`)
+  shows dropping a bucket below the threshold (2) stops emission (the floor); the
+  `recall_episodes_ranked_*` cases (`tests_ranked_episodic`, 5/0) exercise the gated-then-truncated read path.
+- **Uniquely load-bearing ceiling.** `RecallBudget::default()` is the **only** budget feeding the Overseer
+  recall path (`mod.rs:497`; the other `episodic:` fields in `src/status/*` and
+  `src/operator_commands_dashboard/memory.rs` are unrelated dashboard structs, not `RecallBudget`), and
+  `recall_pass` is the **sole** builder of `ObservedState.recall` (`mod.rs:425-426`) — so nothing overrides
+  the `5`.
+- **Scope precision — the count bound is NOT what pins the observed `N = 2`, and does NOT sever the loop.**
+  The ceiling (5) is *slack*: the observed `N` sits at the **floor (2)** because the write-back is
+  window-deduped (`write_back_observation` via `WhisperGate`) and each generation supersedes at
+  threshold-crossing (§7v chain-not-climb), so only ~2 self-authored episodes ever share a live composite
+  before it retires. The budget bound is instead a **hard guarantee** that `N` can never exceed 5 even if
+  those dynamics changed — pure magnitude-hygiene, exactly the class §7ag assigned the length cap to. Neither
+  bound (length ≤ 8192 B, count ≤ 5) breaks the loop: a self-authored episode still self-selects (§7aa) and
+  is still counted as foreign (`source_label` dropped, §A-2). **P1 (the provenance filter at
+  `wiring.rs:1024`) remains the uniquely load-bearing cut** (§7aa-D). This completes §7ag: the emitted
+  artifact `"recurring signature seen N× … (COMPOSITE)"` is now proven **doubly bounded** — a
+  bounded-magnitude integer (`N ∈ [2, 5]`) over a bounded-length blob (≤ 8192 B).
+
+**C. Live corroboration — the composite re-measured at 4895 bytes / 12 in-composite generations, and every
+tail title renders `N = 2` (the §B floor, 3 short of the §B ceiling).** Independent re-read of
+`rysweet/Simard` #2875 at this HEAD: the parenthetical `overseer-obs:…` composite is **4895 bytes**
+(byte-exact match to §7ag §C) across **12** nested `overseer-obs:` prefixes and 89 `|`-segments (~60% of the
+8192 cap; ~9 generations of headroom). *Refinement:* §7ag's "13 generations" was the **whole-body**
+`overseer-obs:` count (13, one of which is the issue-header echo); the **re-entry composite itself** nests
+**12** — a 1-count prose refinement in the spirit of §7af's `:1372`/`:1374` correction, not a source change.
+And all **10** verbatim-tail titles render "seen **2×**" — direct live confirmation of §B: `N` is pinned at
+the floor, never approaching the ceiling of 5.
+
+**D. Live board state — kgpacks board still wholly CLOSED; the reblock flood grew 101 → 110 (still firing);
+verbatim tail still 10 (no 11th).** All of kgpacks-rs #16/#17/#18/#21/#22 remain **CLOSED** (#16
+07-06T20:16:25Z, #17 07-07T19:19:47Z, #18 07-06T10:33:04Z, #21 07-06T13:29:03Z, #22 07-06T12:07:33Z —
+unchanged from §7ag/§7ah). The broken-dedup `recurring_goal_reblock` escalation flood (`in:title`) has grown
+**101 → 110** open since the §7ag/§7ah reads (~2 h 20 m; +9) — a fresh independent catch of the still-firing
+malformed-query channel (§7t/§7w, root cause `gh_client.rs:37`). The WhisperGate-deduped verbatim tail is
+**still exactly 10** (#2669…#2875, newest #2875 @ 11:31:36Z) — **no 11th** filed after #17's 19:19:47Z
+closure, so §7ag/§7ah's falsifiable follow-on (an 11th `issue-17`-token issue confirming no-reconciliation)
+remains **pending, not yet triggered** — consistent with §7ae's irregular ~27–51 min burst cadence on the
+deduped tail (last new tail entry ~10 h ago; the dedup cap holds while only the broken-dedup flood grows).
+
+**Verification footer.** HEAD `0b2dc823`; `git diff --name-only 85245e87..HEAD -- src/` **empty** (fourteenth
+consecutive round of zero source drift — every §A loop/emission anchor + the §B budget chain
+(`mod.rs:497/499` → `capabilities.rs:501/484-485/674` → `wiring.rs:1020` → `library_adapter.rs:1330` →
+`signal.rs:456-464`) re-resolved verbatim). `overseer::tests_memory_recall` **36/0** (incl.
+`recall_budget_default_is_5_5_3_5` and `sanitize_recalled_caps_length` — the §B and §7ag backings),
+`overseer::sensor` **9/0**, `cognitive_memory::tests_ranked_episodic` **5/0**. Live reads (`rysweet/Simard`,
+`rysweet/agent-kgpacks-rs`, 2026-07-07 ~21:41Z): verbatim tail 10 (all "2×"), reblock flood **110** (up from
+101), #2875 composite 4895 B / 12 in-composite generations, whole kgpacks board CLOSED. **No prior finding
+overturned.** Net-new: (§B) the emitted occurrence count is hard-bounded `2 ≤ N ≤ 5` by
+`RecallBudget.episodic = 5` (floor = threshold 2) — the count-side dual of §7ag's length cap, test-backed and
+scoped to magnitude (not loop-severance; P1 stays load-bearing); (§C) the live composite re-measured 4895 B
+and the tail `N` live-confirmed at the floor of 2; (§D) reblock flood 101 → 110 (still firing), board wholly
+CLOSED, no 11th tail issue yet. Complements §7af (emission map) and §7ag (length bound); endorses the
+close-and-execute verdict — residual value is execution of **P1 → P2 → P6**, not verification. Confidence
+**High**.
+
+---
+
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–24). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–25). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
@@ -3482,6 +3596,20 @@ holds at exactly 10 (#2669…#2875, newest #2875 @ 11:31:36Z, no 11th yet) and t
 `recurring_goal_reblock` escalation flood steady at 101 open. No finding overturned; both passes endorse
 the close-and-execute verdict (residual value is execution of P1 → P2 → P6, not verification). Confidence
 remains High.
+Round-25 ran a fresh primary-investigator deep dive (§7ai) on the emission-map + loop focus at HEAD
+`0b2dc823` (fourteenth consecutive round of zero source drift since `85245e87`), re-anchoring all three loop
+sides verbatim and contributing the **net-new** finding that the amplifier's emitted occurrence COUNT is
+**hard-bounded `2 ≤ N ≤ 5`** — the count-side dual of §7ag's 8192-byte length cap — with the ceiling set by
+`RecallBudget::default().episodic = 5` (`capabilities.rs:501`, forwarded `mod.rs:499` → truncated
+`library_adapter.rs:1330`) and the floor by `RECURRING_SIGNATURE_THRESHOLD = 2` (`signal.rs:362/463`);
+test-backed by `recall_budget_default_is_5_5_3_5`, scoped to magnitude (not loop-severance: **P1** stays the
+load-bearing cut), and live-confirmed by all 10 tail titles rendering "seen 2×" (the floor).
+`overseer::tests_memory_recall` 36/0 + `overseer::sensor` 9/0 + `cognitive_memory::tests_ranked_episodic` 5/0
+at zero drift. Live board (2026-07-07 ~21:41Z): the whole kgpacks-rs board stays CLOSED (#16/#17/#18/#21/#22),
+the verbatim tail holds at exactly 10 (#2669…#2875, no 11th after #17's 19:19:47Z closure — §7ag/§7ah's
+falsifiable follow-on still pending), and the broken-dedup `recurring_goal_reblock` flood grew **101 → 110**
+open (a fresh catch of the still-firing malformed-query channel, `gh_client.rs:37`). No finding overturned;
+endorses the close-and-execute verdict (residual value is execution of P1 → P2 → P6). Confidence remains High.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
