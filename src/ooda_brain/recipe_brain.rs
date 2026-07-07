@@ -30,6 +30,7 @@ use super::sanitize::sanitize_context_var;
 use super::{
     BrainPhase, EngineerAdmissionCtx, EngineerAdmissionDecision, EngineerLifecycleCtx,
     EngineerLifecycleDecision, GoalOutcomeCtx, GoalOutcomeDecision, OodaBrain,
+    ResourceAdmissionCtx, ResourceAdmissionDecision,
 };
 use crate::error::{SimardError, SimardResult};
 
@@ -45,6 +46,11 @@ const ADMISSION_ADAPTER_TAG: &str = "recipe-engineer-admission-brain";
 /// Recipe filename for the admission reasoning step (issue #2690). Resolved as a
 /// sibling of the lifecycle recipe the act-phase [`RecipeBrain`] already holds.
 const ADMISSION_RECIPE_FILENAME: &str = "ooda-engineer-admission.yaml";
+/// Adapter tag for the resource-aware admission recipe (issue #2706).
+const RESOURCE_ADMISSION_ADAPTER_TAG: &str = "recipe-resource-admission-brain";
+/// Recipe filename for the resource-aware admission reasoning step (issue #2706).
+/// Resolved as a sibling of the lifecycle recipe, like the overlap recipe.
+const RESOURCE_ADMISSION_RECIPE_FILENAME: &str = "ooda-resource-admission.yaml";
 
 /// Cap on raw response text embedded in error messages and rationale fields.
 const MAX_RATIONALE_CHARS: usize = 500;
@@ -1231,6 +1237,36 @@ impl OodaBrain for RecipeBrain {
             ),
         })
     }
+
+    /// Resource-aware engineer admission (issue #2706). Resolves the resource
+    /// recipe as a sibling of this act-phase brain's recipe, renders the resource
+    /// picture, runs the recipe, and parses the `{"decision", "rationale"}`
+    /// envelope into a [`ResourceAdmissionDecision`].
+    ///
+    /// FAIL-**CLOSED** polarity (unlike the overlap gate, which fails open): an
+    /// invocation failure OR an unparseable decision surfaces as an `Err`, which
+    /// the spawn seam turns into a benign `Defer` (skip this cycle, retried next
+    /// round) — never an `Admit`. On a resource gate the conservative failure is
+    /// to NOT add disk load when the reasoning that was supposed to run broke.
+    /// The one hard guarantee that survives regardless is the seam's
+    /// deterministic disk-ceiling rail (the ENOSPC guard); the kill-switch
+    /// (`SIMARD_RESOURCE_ADMISSION=off`) is the escape hatch if the recipe is
+    /// persistently broken.
+    fn decide_resource_admission(
+        &self,
+        ctx: &ResourceAdmissionCtx,
+    ) -> SimardResult<ResourceAdmissionDecision> {
+        let raw = self.invoke_resource_admission_raw(ctx)?;
+        parse_resource_admission_decision(&raw).ok_or_else(|| {
+            SimardError::AdapterInvocationFailed {
+                base_type: RESOURCE_ADMISSION_ADAPTER_TAG.to_string(),
+                reason: format!(
+                    "resource-admission recipe output had no parseable decision envelope: {}",
+                    truncate(&raw, MAX_RATIONALE_CHARS)
+                ),
+            }
+        })
+    }
 }
 
 impl RecipeBrain {
@@ -1385,6 +1421,120 @@ impl RecipeBrain {
 
         extract_recipe_decision_output(&output.stdout, ADMISSION_ADAPTER_TAG)
     }
+
+    /// Invoke the resource-admission recipe once and return the raw decision
+    /// text (issue #2706). The recipe is resolved as a **sibling** of this
+    /// brain's own recipe, like the overlap recipe. Every ctx field is rendered
+    /// to a bounded, sanitized `-c` arg; any unmeasured `Option` renders as the
+    /// literal `unknown`. Errors surface as `Err` (the seam fails CLOSED).
+    fn invoke_resource_admission_raw(&self, ctx: &ResourceAdmissionCtx) -> SimardResult<String> {
+        let recipe = self
+            .recipe_path
+            .parent()
+            .map(|d| d.join(RESOURCE_ADMISSION_RECIPE_FILENAME))
+            .filter(|p| p.is_file())
+            .ok_or_else(|| SimardError::AdapterInvocationFailed {
+                base_type: RESOURCE_ADMISSION_ADAPTER_TAG.to_string(),
+                reason: format!(
+                    "resource-admission recipe '{RESOURCE_ADMISSION_RECIPE_FILENAME}' not found beside {}",
+                    self.recipe_path.display()
+                ),
+            })?;
+
+        let opt = |v: Option<String>| v.unwrap_or_else(|| "unknown".to_string());
+        let disk_used = opt(ctx.disk_used_pct.map(|p| format!("{p:.0}")));
+        let disk_free = opt(ctx.disk_free_gb.map(|g| format!("{g:.1}")));
+        let disk_total = opt(ctx.disk_total_gb.map(|g| format!("{g:.1}")));
+        let build_cache = opt(ctx.build_cache_bytes.map(|b| b.to_string()));
+        let worktrees = opt(ctx.worktree_count.map(|c| c.to_string()));
+        // Render the three load figures as one "1m/5m/15m" var (or "unknown").
+        let load = match (ctx.load_avg_1, ctx.load_avg_5, ctx.load_avg_15) {
+            (Some(a), Some(b), Some(c)) => format!("{a:.2}/{b:.2}/{c:.2}"),
+            _ => "unknown".to_string(),
+        };
+        let cpus = opt(ctx.cpu_count.map(|c| c.to_string()));
+        let aimd = opt(ctx.aimd_current_max.map(|m| m.to_string()));
+
+        let output = Command::new("recipe-runner-rs")
+            .arg(recipe.as_os_str())
+            .arg("--output-format")
+            .arg("json")
+            .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            .arg("-c")
+            .arg(format!(
+                "goal_id={}",
+                sanitize_context_var(&ctx.goal_id, 500)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "disk_used_pct={}",
+                sanitize_context_var(&disk_used, 100)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "disk_free_gb={}",
+                sanitize_context_var(&disk_free, 100)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "disk_total_gb={}",
+                sanitize_context_var(&disk_total, 100)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "admission_ceiling_pct={}",
+                sanitize_context_var(&format!("{:.0}", ctx.admission_ceiling_pct), 100)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "build_cache_bytes={}",
+                sanitize_context_var(&build_cache, 100)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "worktree_count={}",
+                sanitize_context_var(&worktrees, 100)
+            ))
+            .arg("-c")
+            .arg(format!("load_avg={}", sanitize_context_var(&load, 100)))
+            .arg("-c")
+            .arg(format!("cpu_count={}", sanitize_context_var(&cpus, 100)))
+            .arg("-c")
+            .arg(format!(
+                "in_flight_engineers={}",
+                sanitize_context_var(&ctx.in_flight_engineers.to_string(), 100)
+            ))
+            .arg("-c")
+            .arg(format!(
+                "aimd_current_max={}",
+                sanitize_context_var(&aimd, 100)
+            ))
+            .output();
+
+        let output = match output {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: RESOURCE_ADMISSION_ADAPTER_TAG.to_string(),
+                    reason: format!("recipe-runner-rs spawn failed: {e}"),
+                });
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: RESOURCE_ADMISSION_ADAPTER_TAG.to_string(),
+                reason: format!(
+                    "recipe exited with {}: {}",
+                    output.status,
+                    truncate(&stderr, MAX_RATIONALE_CHARS)
+                ),
+            });
+        }
+
+        extract_recipe_decision_output(&output.stdout, RESOURCE_ADMISSION_ADAPTER_TAG)
+    }
 }
 
 /// Render the live engineer set for the admission recipe's `live_engineers`
@@ -1493,6 +1643,57 @@ fn admission_decision_from_variant(
             overlap_files: env.overlap_files.clone(),
             rationale,
         })
+    } else {
+        None
+    }
+}
+
+/// A structured resource-admission decision envelope (issue #2706). Reads the
+/// `decision` token + `rationale`. There is intentionally no `retry_after_secs`:
+/// a resource `Defer` is retried on the natural next OODA round.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ResourceAdmissionEnvelope {
+    decision: String,
+    #[serde(default)]
+    rationale: String,
+}
+
+/// Parse the resource-admission recipe output into a
+/// [`ResourceAdmissionDecision`], or `None` when no balanced JSON object with a
+/// known `decision` variant is present (the caller surfaces that as an `Err`,
+/// which the seam fails CLOSED to a benign `Defer`). Routes through the shared
+/// sanitizing chokepoint so a banner-polluted envelope still parses.
+fn parse_resource_admission_decision(text: &str) -> Option<ResourceAdmissionDecision> {
+    let payload = crate::recipe_output::extract_json_payload(text)?;
+    let env: ResourceAdmissionEnvelope = serde_json::from_str(&payload).ok()?;
+    if env.decision.trim().is_empty() {
+        return None;
+    }
+    let rationale = {
+        let r = env.rationale.trim();
+        if r.is_empty() {
+            truncate(env.decision.trim(), MAX_RATIONALE_CHARS)
+        } else {
+            truncate(r, MAX_RATIONALE_CHARS)
+        }
+    };
+    resource_admission_decision_from_variant(&env, rationale)
+}
+
+/// Map a resource-admission decision variant token (case-insensitive) to a
+/// [`ResourceAdmissionDecision`]; `None` for an unknown token so the seam fails
+/// CLOSED (to a benign `Defer`) rather than defaulting on the brain's behalf.
+fn resource_admission_decision_from_variant(
+    env: &ResourceAdmissionEnvelope,
+    rationale: String,
+) -> Option<ResourceAdmissionDecision> {
+    let w = env.decision.trim();
+    if w.eq_ignore_ascii_case("admit") {
+        Some(ResourceAdmissionDecision::Admit { rationale })
+    } else if w.eq_ignore_ascii_case("defer") {
+        Some(ResourceAdmissionDecision::Defer { rationale })
+    } else if w.eq_ignore_ascii_case("reclaim_first") {
+        Some(ResourceAdmissionDecision::ReclaimFirst { rationale })
     } else {
         None
     }
@@ -2624,6 +2825,75 @@ mod tests {
         assert!(
             msg.contains("recipe-engineer-admission-brain"),
             "error should contain the admission adapter tag; got: {msg}"
+        );
+    }
+
+    // ── Resource-admission parsing (issue #2706) ───────────────────────────
+
+    #[test]
+    fn parse_resource_admission_admit_envelope() {
+        let d = parse_resource_admission_decision(
+            r#"{"decision": "admit", "rationale": "plenty of headroom"}"#,
+        )
+        .expect("parses");
+        assert!(matches!(d, ResourceAdmissionDecision::Admit { .. }));
+        assert_eq!(d.rationale(), "plenty of headroom");
+    }
+
+    #[test]
+    fn parse_resource_admission_defer_envelope() {
+        let d = parse_resource_admission_decision(
+            r#"{"decision": "defer", "rationale": "box saturated"}"#,
+        )
+        .expect("parses");
+        assert!(matches!(d, ResourceAdmissionDecision::Defer { .. }));
+        assert_eq!(d.rationale(), "box saturated");
+    }
+
+    #[test]
+    fn parse_resource_admission_reclaim_first() {
+        let d = parse_resource_admission_decision(
+            r#"{"decision": "reclaim_first", "rationale": "16 stale caches"}"#,
+        )
+        .expect("parses");
+        assert!(matches!(d, ResourceAdmissionDecision::ReclaimFirst { .. }));
+        assert_eq!(d.rationale(), "16 stale caches");
+    }
+
+    #[test]
+    fn parse_resource_admission_strips_banner_prose() {
+        // A banner-polluted envelope (leading prose + fenced block) still parses
+        // through the shared sanitizing chokepoint.
+        let d = parse_resource_admission_decision(
+            "some banner\n```json\n{\"decision\": \"admit\", \"rationale\": \"ok\"}\n```\n",
+        )
+        .expect("parses through banner");
+        assert!(matches!(d, ResourceAdmissionDecision::Admit { .. }));
+    }
+
+    #[test]
+    fn parse_resource_admission_unknown_variant_is_none() {
+        assert!(parse_resource_admission_decision(r#"{"decision": "serialize_after"}"#).is_none());
+        assert!(parse_resource_admission_decision(r#"{"decision": "nope"}"#).is_none());
+        assert!(parse_resource_admission_decision("not json at all").is_none());
+        assert!(parse_resource_admission_decision(r#"{"decision": ""}"#).is_none());
+    }
+
+    #[test]
+    fn decide_resource_admission_error_includes_adapter_tag() {
+        // No sibling resource recipe ⇒ resolve fails; the error carries the
+        // resource-admission adapter tag (the seam then fails CLOSED to Defer).
+        let brain = RecipeBrain {
+            recipe_path: PathBuf::from("/nonexistent/recipes/ooda-engineer-lifecycle.yaml"),
+            agent_binary: "copilot",
+            adapter_tag: "recipe-engineer-lifecycle-brain",
+        };
+        let ctx = crate::ooda_brain::ResourceAdmissionCtx::default();
+        let err = brain.decide_resource_admission(&ctx).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("recipe-resource-admission-brain"),
+            "error should contain the resource-admission adapter tag; got: {msg}"
         );
     }
 

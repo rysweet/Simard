@@ -22,7 +22,7 @@ use std::cell::RefCell;
 
 use super::{
     DecideJudgment, EngineerAdmissionDecision, EngineerLifecycleDecision, GoalOutcomeDecision,
-    OrientJudgment, ParseFailureRecord,
+    OrientJudgment, ParseFailureRecord, ResourceAdmissionDecision,
 };
 
 /// Which recipe-backed brain phase produced the judgment. Serialised as
@@ -50,6 +50,10 @@ pub enum BrainPhase {
     /// Dependency/overlap-aware engineer admission at the spawn decision point
     /// (issue #2690). Serialises as `"engineer_admission"`.
     EngineerAdmission,
+    /// Resource-aware engineer admission at the spawn decision point (issue
+    /// #2706): can the host afford another engineer (disk/build-cache/load)?
+    /// Serialises as `"resource_admission"`.
+    ResourceAdmission,
 }
 
 impl BrainPhase {
@@ -65,6 +69,7 @@ impl BrainPhase {
             BrainPhase::MergeJudge => "merge_judge",
             BrainPhase::OutcomeVerify => "outcome_verify",
             BrainPhase::EngineerAdmission => "engineer_admission",
+            BrainPhase::ResourceAdmission => "resource_admission",
         }
     }
 }
@@ -299,6 +304,38 @@ impl BrainJudgmentRecord {
             context_summary: truncate(&format!(
                 "engineer-admission goal_id={goal_id} vs=[{}]",
                 blocking.join(",")
+            )),
+            decision: decision.variant_label().to_string(),
+            rationale: decision.rationale().to_string(),
+            confidence: if fallback { 0.5 } else { 1.0 },
+            fallback,
+            prompt_version: prompt_version.into(),
+            parse_failure: None,
+        }
+    }
+
+    /// Build a ResourceAdmission-phase record (issue #2706). The
+    /// `context_summary` carries the resource picture the brain weighed (disk %
+    /// vs ceiling, in-flight engineers) so the cycle report explains *why* an
+    /// admission was deferred/reclaimed. `fallback` is `true` for the fail-closed
+    /// brain-error defer AND the deterministic disk-ceiling Rail override.
+    pub fn from_resource_admission(
+        goal_id: &str,
+        decision: &ResourceAdmissionDecision,
+        disk_used_pct: Option<f64>,
+        ceiling_pct: f64,
+        in_flight_engineers: u32,
+        fallback: bool,
+        prompt_version: impl Into<String>,
+    ) -> Self {
+        let disk = disk_used_pct
+            .map(|p| format!("{p:.0}"))
+            .unwrap_or_else(|| "unknown".to_string());
+        Self {
+            phase: BrainPhase::ResourceAdmission,
+            context_summary: truncate(&format!(
+                "resource-admission goal_id={goal_id} disk={disk}%/ceiling={ceiling_pct:.0}% \
+                 in_flight={in_flight_engineers}"
             )),
             decision: decision.variant_label().to_string(),
             rationale: decision.rationale().to_string(),
