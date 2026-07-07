@@ -943,11 +943,97 @@ alone halts the growth in C.
 empirically (`g < o < q < r < w`). No prior finding changed; the decode and loop trace are
 additive. Confidence **High**.
 
+### 7k. Round-7 consolidation — parallel dives unified (HEAD `ca20e29b`)
+
+This pass unifies the three deep dives accumulated since the last consolidation (§7g,
+round-5) — **§7h** (round-6 practical re-verification: full `tests_memory_recall` module +
+all §1–§3 semantic anchors at `941f40cc`), **§7i** (round-7 per-hypothesis practical
+verification at `1190abb5`), and **§7j** (round-7 primary-investigator deep dive at
+`c868d6bd`: literal token decode, deterministic-sort proof, cross-goal contamination,
+whisper rule-out) — into one conclusion and folds their net-new facts into the canonical
+findings (§1/§5/§6). HEAD has since advanced to `ca20e29b`; **every commit since `941f40cc`
+is docs-only**, so no source line drifted and every §7b/§3b/§7f/§7j anchor still resolves.
+
+**Independent re-verification (this consolidation, 2026-07-07 ~13:17 UTC)** — re-run by the
+consolidator at HEAD `ca20e29b`, not inherited:
+
+- `cargo test --lib overseer::tests_memory_recall` → **36 passed, 0 failed**; the four
+  hypothesis tests re-run in isolation (`…::h`) → **4 passed, 0 failed** (H1/H2 CONFIRM +
+  REFUTE-by-fix). The structural root cause (§4/§7a) remains proven green.
+- `rysweet/agent-kgpacks-rs`: **#16 CLOSED 2026-07-06T20:16:25Z**, **#18 CLOSED
+  10:33:04Z**, **#21 CLOSED 13:29:03Z**, **#22 CLOSED 12:07:33Z**, **#17 OPEN** — matching
+  §1/§7f/§7h to the second. §1 stale-parks and the §7f/§7j #17 stale-premise dep-block
+  hold intact.
+- `rysweet/Simard` duplicate tail: **exactly 10 open** (#2669, #2672, #2678, #2691, #2744,
+  #2750, #2757, #2768, #2841, #2875; newest @ 2026-07-07T11:31:36Z), **no 11th** at
+  consolidation time. **#2707** stewardship escalation **OPEN**.
+
+**Zero contradictions across the three dives.** §7h, §7i and §7j agree on every shared
+claim — test results (36/36; 4/4 hypothesis), the H1 recall-path anchors
+(`wiring.rs:1013-1031` no-`source_label` map; `capabilities.rs:607-616` no field;
+`signal.rs:455-470` count/emit; threshold `= 2` `signal.rs:362`), the terminal-park /
+no-close-reconciliation code path (`no_progress_breaker.rs:58/69/74`, gate-disposition
+`:194`), and the live #16/#18/#21/#22-CLOSED + #17-OPEN board. They are strictly additive:
+§7h/§7i re-prove the mechanism through the tests and re-resolve the anchors; §7j decodes
+the literal key and traces the closed loop across the four focus files. This consolidation
+overturns **no** finding and makes **no** remediation-weighting change (P1–P5 stand exactly
+as consolidated in §7g).
+
+**Net-new facts folded into the canonical findings:**
+
+1. **Literal token decode + deterministic sort order (§7j-A/B) confirmed.** The composite is
+   ten distinct tokens, each mapped to one authoritative emission; their left-to-right layout
+   is a *provable consequence* of `observation_signature`'s `keys.sort_unstable()`
+   (`mod.rs:1083`) under byte order (`g < o < q < r < w`). The `2×` is the recall
+   `occurrences` count rendered verbatim by `mod.rs:1373-1375`, not a retry counter (§1
+   empirical + §4 reinforced; no change to the verdict).
+2. **Seventh cross-goal contamination token (§7j-C).** The newest generation carries a
+   `goal:blocked:fix-rustsec-2026-0204-in-amplihack-xpia-defende-…` token — an **unrelated**
+   goal parking with a `NOT_A_REPO` resolver error (`error/display.rs:158`), absent from the
+   inner generations. This is disprovable evidence that the signature **grows per generation**
+   and **cross-contaminates across unrelated goals**: any goal `Blocked` on the board at
+   recall time is swept into the same self-amplifying key. Reinforces §1's stale-input thesis
+   and §7f's "routing intact" contrast (kgpacks parks are stale sentinels, not resolver
+   errors; the xpia-defender goal is the one true resolver failure).
+3. **`whisper_ops.rs` ruled OUT as an amplifier (§7j-E), new negative finding.** The whisper
+   channel writes `MeetingHandoff`s (`whisper_ops.rs:94-105`), never `store_episode`, carries
+   empty `decisions`/`action_items` (`:119-121`), and is drained by `drain_overseer_whispers`
+   (`curate.rs:384-385`) — so it can neither manufacture a `goal:blocked` token nor re-enter
+   `recall_episodic`. The episodic write-back path is the **sole** amplifier; "whispers feed
+   the signature" is eliminated as a candidate mechanism.
+4. **Ambient lead-token drift across the tail (new, this consolidation).** The four **oldest**
+   duplicates (#2669/#2672/#2678/#2691, all 2026-07-06) lead with
+   `overseer-obs:anomaly:distill parse-fail rate 100%|goal:blocked:advance-…`, whereas the six
+   **newer** ones (#2744→#2875) lead with `overseer-obs:goal:blocked:advance-…`. The
+   `anomaly:distill parse-fail` co-signal cleared, so its token dropped out of later
+   generations. This independently **corroborates §7j-B**: while that anomaly was a live
+   problem it byte-sorted ahead of `goal:blocked:` (`a < g`) and therefore led the key —
+   exactly the deterministic ordering §7j predicts — and it reconfirms that the composite's
+   ambient inputs are **standing but time-varying**, driving the per-generation growth in
+   §7j-C rather than a fixed payload.
+
+**Consolidated verdict (rounds 1–7).** Unchanged and further strengthened — **High**
+confidence, all six findings source- or live-state-grounded, no remaining Medium diagnostic
+item. One self-amplifying loop — unfiltered self-recall (`recall_episodic` drops
+`source_label`) + unbounded re-wrap (`observation_signature` re-prefixes `overseer-obs:`),
+**test-proven** (H1/H2 green, 36/36 module) and now **fully decoded and loop-traced** (§7j) —
+fed by standing, time-varying inputs: four **stale safeguard-parks** (#16/#18/#21/#22), one
+**stale-premise dep-block** (#17), an ambient **`gym_skipped`** flag, and a disjoint
+**`workstream-gap`**; **`engineer_spawn` is a passenger**, not a driver (round-4 refutation);
+**`whisper_ops.rs` is a non-amplifying sibling** (round-7 rule-out). The loop is **live** (10
+open duplicates, #2875 the newest; a seventh cross-goal token now nesting) and symptom-level
+unblocks **do not stick** (#2707: umbrella is a standing goal not tagged perpetual). Action
+set unchanged: **P1** (provenance filter) severs the amplifier; **P2** (done-gate/park
+reconciliation + perpetual tagging) removes the standing stale inputs and is required for the
+fix to *stick*; **P3** clears the 10-issue backlog only when paired with P2; **P4**
+conditional (#17 disposition + `gym_skipped` down-rank); **P5** optional throughput nicety.
+No new remediation is introduced.
+
 ---
 
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–5). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–7). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
@@ -976,7 +1062,15 @@ HEAD `c868d6bd`) added the literal 10-token decode + deterministic sort-ordering
 (`g<o<q<r<w`), identified a seventh cross-goal contamination token
 (`fix-rustsec-…-amplihack-xpia-defende`, `NOT_A_REPO` park), traced the closed amplification
 loop across `signal.rs`/`mod.rs`/`wiring.rs`, and ruled `whisper_ops.rs` OUT as a
-non-amplifying sibling channel (36/36 tests green).**
+non-amplifying sibling channel (36/36 tests green); round-7 consolidation (§7k, HEAD
+`ca20e29b`) unified the round-6/round-7 dives (§7h/§7i/§7j), independently re-verified the
+full module (36 passed, 0 failed) + the four hypothesis tests in isolation (4 passed,
+0 failed), re-confirmed kgpacks-rs #16/#18/#21/#22 CLOSED + #17 OPEN and the 10-issue Simard
+tail (#2707 open), folded the §7j token decode / deterministic-sort / cross-goal
+contamination / whisper rule-out into §1/§4, and added the ambient lead-token drift across
+the tail (oldest four lead with `anomaly:distill parse-fail`, newer six with `goal:blocked:`)
+as fresh corroboration of the deterministic-sort and generational-growth findings — no
+finding overturned, no remediation-weighting change, confidence remains High.**
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
