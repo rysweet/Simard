@@ -26,7 +26,11 @@ description: >
   re-executed the per-hypothesis practical tests at HEAD `1190abb5` (H1: `tests_memory_recall`
   36 passed/0 failed + verbatim source anchors; H2/H3: live GitHub state + the
   terminal-park/no-reconciliation code path) — all three hypotheses re-confirmed with zero
-  drift; the diagnosis holds unchanged (§7i).
+  drift; the diagnosis holds unchanged (§7i). Round-9 re-executed the per-hypothesis practical
+  tests at HEAD `0196c4f6` (H1: `tests_memory_recall` 36 passed/0 failed + the four hypothesis
+  tests 4/4 in isolation + verbatim source anchors; H2: live #16/#18/#21/#22 CLOSED +
+  terminal-park/no-reconciliation path; H3: #17 OPEN with a live-timestamp staleness proof) —
+  all three re-confirmed, 10-issue Simard tail unchanged, zero drift (§7m).
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -1108,11 +1112,71 @@ confirmed to exist. No prior finding overturned — §7l is strictly additive: H
 push-line anchors, a timestamp proof for #17, and the local-vs-remote refinement of the
 contamination token. Confidence **High**.
 
+### 7m. Round-9 addendum — per-hypothesis practical tests re-executed at HEAD `0196c4f6`
+
+Round 9 (this update) **re-executed the practical verification test for each hypothesis** at
+HEAD `0196c4f6` (2026-07-07 ~13:24 UTC). HEAD advanced from round-8's `ca20e29b` by one
+docs-only commit (`0196c4f6`, the §7k consolidation), so **no source line drifted**; every
+anchor re-resolves verbatim at its §7b/§7f/§7j/§7l line.
+
+**H1 — self-amplifying self-recall loop (method: executable test + trace_code). CONFIRMED.**
+
+- `cargo test --lib overseer::tests_memory_recall` → **36 passed, 0 failed**. Re-running the
+  four hypothesis tests in isolation (`…::tests_memory_recall::h`) → **4 passed, 0 failed**:
+  `h1_confirm_self_recall_reemits_recurring_signature_from_own_writebacks`,
+  `h1_refute_by_fix_provenance_filter_collapses_the_loop`,
+  `h2_confirm_observation_signature_stacks_prefix_each_generation`,
+  `h2_refute_by_fix_idempotent_signature_is_a_fixed_point` — CONFIRM + REFUTE-by-fix all green.
+- **Recall carries no provenance filter (re-resolved verbatim).** `recall_episodic`
+  (`wiring.rs:1013`) maps each ranked episode via `.map(|e| RecalledEpisode { failure_signature,
+  id, summary, score })` (`:1024-1029`) — the map **drops `source_label`**; `struct
+  RecalledEpisode` (`capabilities.rs:607-616`) has fields `id`/`summary`/`failure_signature`/
+  `score` and **no `source_label`**, so recall cannot exclude self-authored episodes. The
+  write-back it re-ingests is tagged `OVERSEER_SOURCE_LABEL = "overseer"` (`wiring.rs:952`).
+- **Re-wrap + escape-dedup + count all re-resolve.** `observation_signature` re-prefixes
+  `format!("overseer-obs:{}", keys.join("|"))` after `keys.sort_unstable()`/`keys.dedup()`
+  (`mod.rs:1081-1085`); the `RecurringSignature` dedup_key = `sanitize_recalled(signature)` — the
+  whole prior composite — and the summary is the prompt's verbatim line
+  `"recurring signature seen {occurrences}× in cognitive memory ({signature})"`
+  (`mod.rs:1372-1375`); the tally emits `Signal::RecurringSignature` once `occurrences >=
+  RECURRING_SIGNATURE_THRESHOLD` (`= 2`, `signal.rs:362`; loop `:455-470`) — the `2×` is the
+  recalled-episode count, not a retry counter.
+
+**H2 — stale safeguard-parks for #16/#18/#21/#22 (method: verify_config + live GitHub). CONFIRMED.**
+
+- `gh issue view` at HEAD: **#16 CLOSED** 2026-07-06T20:16:25Z, **#18 CLOSED** 10:33:04Z,
+  **#21 CLOSED** 13:29:03Z, **#22 CLOSED** 12:07:33Z — four delivered, matching §1/§7l to the
+  second.
+- **Terminal-park / no-close-reconciliation code path re-resolves.**
+  `NO_PROGRESS_BREAKER_THRESHOLD = 3` (`no_progress_breaker.rs:58`) → the done-gate runs once and
+  sets the `NO_PROGRESS_BLOCKED_PREFIX`/`_SUFFIX` sentinel (`:69/:74`); no branch clears a park
+  when its backing issue later closes, so `blocked_goals_from_board` (`sensor.rs:204`) →
+  `blocked_goal_of` (`:209`) keeps re-emitting the four stale `goal:blocked` rows every tick.
+
+**H3 — #17 stale-premise dep-block (method: verify_config + live board + timestamp proof). CONFIRMED.**
+
+- **#17 OPEN**, `updatedAt` **2026-07-02T23:22:49Z**. Its block premise ("#16 still OPEN") is
+  provably stale: `updatedAt_17` (07-02T23:22:49Z) **precedes** `closedAt_16`
+  (07-06T20:16:25Z) by ≈3.8 days with no event since — the §7l timestamp proof re-confirmed
+  from the live values. Same missing done-gate/block-reconciliation defect as §1; #17 remains
+  legitimately deferrable as the flag-gated spike.
+
+**Loop still live — tail unchanged at 10.** `rysweet/Simard` duplicate-signature tail is
+**exactly 10 open** (#2669, #2672, #2678, #2691, #2744, #2750, #2757, #2768, #2841, #2875;
+newest @ 2026-07-07T11:31:36Z) — **no 11th** at round-9 time. Stewardship escalation **#2707
+OPEN**.
+
+Net: all three hypotheses **re-confirmed** — H1 by 36/36 module + 4/4 hypothesis tests green
+and verbatim source anchors, H2 by live CLOSED states + the terminal-park/no-reconciliation
+path, H3 by the live-timestamp staleness proof. Every anchor resolves at HEAD `0196c4f6` with
+**zero drift**; live state is **unchanged**. No finding changed; overall confidence remains
+**High**.
+
 ---
 
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–8). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–9). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
@@ -1161,6 +1225,15 @@ added a **timestamp proof** that #17's block premise is stale (`updatedAt` 07-02
 contamination token from "missing repo" to a **local-worktree park** (`rysweet/amplihack-xpia-defender`
 verified to exist as a public GitHub repo; the `NOT_A_REPO` park is a local checkout not
 hydrated into a git worktree) — additive only, no finding overturned, confidence remains High.**
+Round-9 (§7m, HEAD `0196c4f6`) re-executed the per-hypothesis practical tests — H1 via
+`tests_memory_recall` (36 passed, 0 failed) plus the four hypothesis tests re-run in isolation
+(4 passed, 0 failed) and verbatim re-resolution of the H1 recall-path anchors
+(`wiring.rs:952/1013-1031`, `capabilities.rs:607-616`, `signal.rs:362/455-470`,
+`mod.rs:1081-1085/1372-1375`); H2 via live kgpacks-rs #16/#18/#21/#22 CLOSED + the
+terminal-park/no-reconciliation path (`no_progress_breaker.rs:58/69/74`, `sensor.rs:204/209`);
+and H3 via #17 OPEN with a live-timestamp staleness proof (`updatedAt` 07-02T23:22:49Z < #16
+`closedAt` 07-06T20:16:25Z) — all three re-confirmed, 10-issue Simard tail unchanged
+(#2707 open), zero drift, confidence remains High.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
