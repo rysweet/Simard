@@ -186,6 +186,7 @@ nav:
     - Reconcile Goal–Prospective Drift: howto/reconcile-goal-prospective-drift.md
     - Recover the Goal Board: howto/recover-goal-board.md
     - Troubleshoot Goal Store: howto/troubleshoot-goal-store.md
+    - Diagnose and Recover Lost Creative-Ideas Goals: howto/diagnose-lost-creative-ideas-goals.md
     - Clean Fixture Leaks: howto/clean-fixture-leaks.md
     - Verify and Roll Back a Self-Deploy: howto/verify-and-roll-back-a-self-deploy.md
     - Run Self-Deploy from Any Directory: howto/run-self-deploy-from-any-directory.md
@@ -368,6 +369,7 @@ nav:
     - Cognitive-Thread Scheduling: reference/cognitive-thread-scheduling.md
     - Creative Ideas Subsystem API: reference/creative-ideas-api.md
     - Creative Ideas Durable Read-After-Write: reference/creative-ideas-durable-read-after-write.md
+    - Creative-Ideas Goal Routing — Fail-Closed Persistence: reference/creative-ideas-goal-routing-fail-closed.md
   - Operations:
     - Overview: operations/index.md
     - Verified Backups of the Live Store: operations/verified-backups.md

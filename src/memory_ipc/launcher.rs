@@ -341,18 +341,23 @@ pub fn launch_writer_client(state_root: &Path) -> SimardResult<WriterClient> {
     // mount probe.
     let sock = socket_path_for(state_root);
     if sock.exists() {
-        match RemoteCognitiveMemory::connect(&sock) {
-            Ok(client) => {
-                return Ok(WriterClient::checked_new(Box::new(client)));
-            }
-            Err(e) => {
-                eprintln!(
-                    "[simard] launch_writer_client: socket {} present but connect failed \
-                     ({e}); falling back to direct open",
+        // Fail closed (bug #2896): a socket present at this state_root means a
+        // daemon *should* own the store. If the connect fails we MUST surface
+        // the error, never fall through to a direct tier-2 open — that would
+        // write to a DIFFERENT store than the live daemon reads, so the write
+        // "succeeds" yet is invisible (the silent-failure fallback #2896
+        // forbids). A genuinely absent socket (no daemon) still takes the
+        // legitimate tier-2 path below.
+        let client =
+            RemoteCognitiveMemory::connect(&sock).map_err(|e| SimardError::RpcSpawnFailed {
+                bridge: "memory-ipc".into(),
+                reason: format!(
+                    "writer: socket {} present but unconnectable ({e}); refusing to fall \
+                     through to a divergent direct open (bug #2896)",
                     sock.display()
-                );
-            }
-        }
+                ),
+            })?;
+        return Ok(WriterClient::checked_new(Box::new(client)));
     }
 
     // (2) No daemon — reap any stale lock and open the shared tier-2 store.
@@ -399,20 +404,23 @@ pub fn open_reader_client(state_root: &Path) -> SimardResult<ReaderClient> {
     // daemon is up on `~/.simard/state/memory.sock`.
     let sock = socket_path_for(state_root);
     if sock.exists() {
-        match RemoteCognitiveMemory::connect(&sock) {
-            Ok(client) => {
-                return Ok(ReaderClient {
-                    inner: Box::new(client),
-                });
-            }
-            Err(e) => {
-                eprintln!(
-                    "[simard] open_reader_client: socket {} present but connect failed ({e}); \
-                     falling back to direct open",
+        // Fail closed (bug #2896): mirror the writer path. A present-but-
+        // unconnectable socket must NOT fall through to a divergent tier-2
+        // reader — that is how a goal the daemon persisted becomes invisible
+        // here. Surface the connect error; a genuinely absent socket still
+        // takes the legitimate tier-2 path below.
+        let client =
+            RemoteCognitiveMemory::connect(&sock).map_err(|e| SimardError::RpcSpawnFailed {
+                bridge: "memory-ipc".into(),
+                reason: format!(
+                    "reader: socket {} present but unconnectable ({e}); refusing to fall \
+                     through to a divergent direct open (bug #2896)",
                     sock.display()
-                );
-            }
-        }
+                ),
+            })?;
+        return Ok(ReaderClient {
+            inner: Box::new(client),
+        });
     }
 
     // (2) De-fork Phase 2b (issue #2307): direct open of the library-backed

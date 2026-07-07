@@ -939,7 +939,11 @@ impl GoalStore for SharedGoalStore {
 struct SharedGoalStoreFactory(std::sync::Arc<InMemoryGoalStore>);
 
 impl GoalStoreFactory for SharedGoalStoreFactory {
-    fn open(&self, _state_root: &std::path::Path) -> SimardResult<Box<dyn GoalStore>> {
+    fn open<'a>(
+        &self,
+        _memory: &'a dyn crate::cognitive_memory::CognitiveMemoryOps,
+        _state_root: &std::path::Path,
+    ) -> SimardResult<Box<dyn GoalStore + 'a>> {
         Ok(Box::new(SharedGoalStore(std::sync::Arc::clone(&self.0))))
     }
 }
