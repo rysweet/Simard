@@ -157,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn service_file_working_directory_is_protected() {
         let proc = tempdir().expect("proc");
         let service = tempfile::NamedTempFile::new().expect("service file");

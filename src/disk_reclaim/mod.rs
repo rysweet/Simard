@@ -320,14 +320,14 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn reclaim_pct_defaults_to_85() {
         clear();
         assert_eq!(reclaim_pct_from_env(), 85);
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn reclaim_pct_reads_env() {
         clear();
         unsafe { std::env::set_var(RECLAIM_PCT_ENV, "70") };
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn reclaim_pct_clamps_out_of_range() {
         clear();
         unsafe { std::env::set_var(RECLAIM_PCT_ENV, "0") };
@@ -348,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn reclaim_pct_ignores_garbage_and_uses_default() {
         clear();
         unsafe { std::env::set_var(RECLAIM_PCT_ENV, "not-a-number") };
@@ -357,14 +357,14 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn daemon_apply_defaults_to_dry_run() {
         clear();
         assert_eq!(daemon_apply_from_env(), ReclaimMode::DryRun);
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn daemon_apply_only_on_explicit_true() {
         clear();
         for v in ["1", "true", "TRUE", "yes", "on"] {
