@@ -22,7 +22,7 @@ description: >
   holds unchanged (§7e, §7f). Round-6 re-executed the H1/H2 tests (36 passed, 0 failed)
   and re-resolved every source anchor — including the prompt-cited recall-path anchors
   `wiring.rs:1013-1031`, `capabilities.rs:607-616`, `signal.rs:455` — and the live
-  GitHub/board state at HEAD `941f40cc`; the diagnosis holds unchanged (§7g).
+  GitHub/board state at HEAD `941f40cc`; the diagnosis holds unchanged (§7h).
 last_updated: 2026-07-07
 review_schedule: as-needed
 owner: simard
@@ -396,7 +396,7 @@ not directly observed.
 
 ---
 
-## 7. Consolidation & verification (rounds 3–5)
+## 7. Consolidation & verification (rounds 3–6)
 
 The consolidation pass (rounds 3–4, this update) reconciled the parallel deep dives
 against the live working tree at **HEAD `20fb7539`** and **executed** the round-2
@@ -706,7 +706,7 @@ is required for the fix to *stick*; **P3** clears the current 10-issue backlog b
 durably when paired with P2; **P4** conditional (#17 disposition + `gym_skipped`
 down-rank); **P5** optional throughput nicety.
 
-### 7g. Round-6 addendum — practical verification re-executed at HEAD `941f40cc`
+### 7h. Round-6 addendum — practical verification re-executed at HEAD `941f40cc`
 
 Round 6 (this update) **re-ran the executable hypothesis tests and re-resolved every
 source anchor and live-state claim** at HEAD `941f40cc` (2026-07-07 ~12:50 UTC). HEAD
@@ -792,7 +792,11 @@ round-5 (this update) re-executed the full `tests_memory_recall` module (36 pass
 six block reasons, the stewardship escalation #2707, and the tenth duplicate #2875;
 round-5 consolidation (§7g) unified the two parallel dives, independently re-verified
 H1/H2 (4 passed, 0 failed) + the 10-issue live tail at HEAD `941f40cc`, and folded the
-net-new facts into §1/§5/§6.**
+net-new facts into §1/§5/§6; round-6 (§7h) re-executed the full `tests_memory_recall`
+module (36 passed, 0 failed), re-resolved the prompt-cited H1 anchors
+(`wiring.rs:1013-1031`, `capabilities.rs:607-616`, `signal.rs:455`) and all §1–§3 semantic
+anchors at HEAD `941f40cc` with zero drift, and re-confirmed the unchanged live board
+(kgpacks-rs #16/#18/#21/#22 CLOSED, #17 OPEN; 10-issue Simard tail).**
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
