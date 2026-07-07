@@ -34,7 +34,7 @@ mod tests;
 
 pub use check::{
     DEFAULT_MIN_FREE_GB, DiskStat, DiskStatProvider, RealDiskStatProvider, check_disk_pressure,
-    check_disk_pressure_with,
+    check_disk_pressure_with, exceeds_admission_ceiling, used_pct,
 };
 
 /// Result of a single `check_disk_pressure` call.
@@ -155,6 +155,44 @@ pub fn configured_min_free_gb() -> u64 {
             }
         },
         Err(_) => DEFAULT_MIN_FREE_GB,
+    }
+}
+
+/// Default admission-ceiling percent (issue #2706) when
+/// `SIMARD_DISK_ADMISSION_CEILING_PCT` is unset or invalid. Set one point below
+/// the 91% ENOSPC-incident level.
+pub const DEFAULT_ADMISSION_CEILING_PCT: f64 = 90.0;
+
+/// Resolve the deterministic admission ceiling (percent used) from
+/// `SIMARD_DISK_ADMISSION_CEILING_PCT`, clamped to `[1.0, 99.0]`. Unparseable
+/// values fall back to [`DEFAULT_ADMISSION_CEILING_PCT`] with a WARN so a typo is
+/// visible. The clamp guarantees the ceiling can never be `0` (refuse all
+/// admission) or `100` (neutralise the guard) by accident (issue #2706).
+pub fn configured_admission_ceiling_pct() -> f64 {
+    admission_ceiling_from(
+        std::env::var("SIMARD_DISK_ADMISSION_CEILING_PCT")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure ceiling parser (testable without env). See
+/// [`configured_admission_ceiling_pct`].
+pub(crate) fn admission_ceiling_from(raw: Option<&str>) -> f64 {
+    match raw.map(str::trim) {
+        Some(s) if !s.is_empty() => match s.parse::<f64>() {
+            Ok(n) if n.is_finite() => n.clamp(1.0, 99.0),
+            _ => {
+                tracing::warn!(
+                    target: "simard::disk_pressure",
+                    raw = %s,
+                    "SIMARD_DISK_ADMISSION_CEILING_PCT unparseable; using default {}",
+                    DEFAULT_ADMISSION_CEILING_PCT,
+                );
+                DEFAULT_ADMISSION_CEILING_PCT
+            }
+        },
+        _ => DEFAULT_ADMISSION_CEILING_PCT,
     }
 }
 

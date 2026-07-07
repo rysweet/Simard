@@ -1,5 +1,6 @@
 //! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,6 +16,7 @@ use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
 use crate::ooda_actions::make_outcome;
 
 use super::admission;
+use super::resource_admission;
 
 // ── Issue #1911: brain-failure auto-recovery marker ────────────────────────
 //
@@ -86,12 +88,17 @@ pub(crate) fn lock_state<'g, 'a>(
 ///
 /// Honours `SIMARD_SUBORDINATE_DEPTH` vs. `SIMARD_MAX_SUBORDINATE_DEPTH`
 /// so a recursing supervisor does not spawn forever.
+///
+/// `repo_root` is the DAEMON's own repository root (from `OodaClients`), used by
+/// the resource-admission gate's `reclaim_first` path to locate the disk-health
+/// recipe (issue #2706) — distinct from the goal's resolved target repo.
 pub fn dispatch_spawn_engineer(
     action: &PlannedAction,
     state: &Mutex<&mut OodaState>,
     goal_id: &str,
     task: &str,
     brain: &dyn OodaBrain,
+    repo_root: &Path,
 ) -> ActionOutcome {
     // Re-check assignment under a short exclusive state lock to prevent a
     // double-spawn race (two cycles/threads parsing spawn_engineer for the
@@ -385,6 +392,58 @@ pub fn dispatch_spawn_engineer(
         }
     };
     let task = engineer_task_base.as_str();
+
+    // Issue #2706: resource-aware engineer ADMISSION gate. AFTER the overlap gate
+    // and BEFORE worktree allocation. Spawning another engineer allocates a git
+    // worktree and runs parallel `cargo` builds; this gate weighs the HOST
+    // resource picture (disk %, build-cache / worktree count, load average,
+    // in-flight engineers) and decides Admit / Defer / ReclaimFirst. It augments
+    // the upstream AIMD COUNT control with resource ADMISSION: count-control is
+    // blind to the disk that piled-up parallel builds consume (the 91% ENOSPC
+    // incident). A THIN deterministic disk-ceiling rail BLOCKS a spawn past a
+    // configurable ceiling regardless of the brain (the ENOSPC guard); a brain
+    // error fails CLOSED (defers). The gate runs OFF the state lock.
+    //
+    // `Defer`/`ReclaimFirst` reuse the benign spawn-skip outcome (`success=true`,
+    // no worktree, `goal_failure_counts` untouched) — retried naturally next
+    // cycle. `ReclaimFirst` runs the disk-reclaim capability HERE (in the caller,
+    // which owns the daemon `repo_root` the reclaim recipe needs — the reclaim
+    // recipe belongs to Simard, not the goal's resolved target repo), then defers.
+    {
+        let state_root_resource = engineer_worktree_state_root();
+        match resource_admission::run_resource_admission_gate(
+            &state_root_resource,
+            goal_id,
+            brain,
+            &crate::disk_pressure::RealDiskStatProvider,
+        ) {
+            resource_admission::ResourceAdmissionOutcome::Admit => {}
+            resource_admission::ResourceAdmissionOutcome::Defer { detail } => {
+                eprintln!(
+                    "[simard] spawn_engineer resource-deferred for goal '{goal_id}': {detail}"
+                );
+                return make_outcome(action, true, detail);
+            }
+            resource_admission::ResourceAdmissionOutcome::ReclaimFirst { detail } => {
+                // Best-effort reclaim; a reclaim error is warn-logged, never a
+                // cycle failure (issue #2706). `repo_root` is the DAEMON's repo
+                // (locates the disk-health recipe's in-tree fallback), not the
+                // goal's resolved target repo.
+                if let Err(e) =
+                    crate::disk_health::run_disk_health_check(repo_root, &state_root_resource, None)
+                {
+                    tracing::warn!(
+                        target: "simard::ooda_brain",
+                        goal = %goal_id,
+                        error = %e,
+                        "resource-admission reclaim_first: disk-health reclaim failed; deferring anyway",
+                    );
+                }
+                eprintln!("[simard] spawn_engineer reclaim-first for goal '{goal_id}': {detail}");
+                return make_outcome(action, true, detail);
+            }
+        }
+    }
 
     // Allocate a per-engineer git worktree (issue #1197) so concurrent
     // engineers never share the same checkout. The worktree lives under
