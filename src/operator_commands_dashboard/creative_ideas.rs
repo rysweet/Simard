@@ -815,4 +815,254 @@ mod tests {
         let Json(p) = creative_ideas_prune(AxumPath("does-not-exist".to_string())).await;
         assert_eq!(p["error"], "idea not found", "{p:?}");
     }
+
+    // -----------------------------------------------------------------------
+    // Outside-in end-to-end (Step 13): drive the REAL dashboard router over
+    // raw HTTP/1.1 on an ephemeral loopback port, exactly as the browser tab
+    // does. Unlike the handler-fn tests above, this exercises the full consumer
+    // path — route registration, method + `{id}` path-param extraction, the
+    // `require_auth` layer, JSON (de)serialization, the live in-process store,
+    // and the idea state machine. Auth uses the deterministic
+    // `SIMARD_DASHBOARD_TOKEN` bearer (independent of the process `LOGIN_CODE`).
+    // -----------------------------------------------------------------------
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const ITEST_TOKEN: &str = "itest-creative-ideas";
+
+    /// One-shot HTTP/1.1 request over a raw socket → `(status_code, body)`.
+    /// `Connection: close` lets the server delimit the body by EOF so
+    /// `read_to_end` completes with no HTTP-client dependency. A `Some(body)` is
+    /// sent as an `application/json` payload with a matching `Content-Length`.
+    async fn http_request(
+        addr: SocketAddr,
+        method: &str,
+        path: &str,
+        bearer: Option<&str>,
+        body: Option<&str>,
+    ) -> (u16, String) {
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to ephemeral dashboard server");
+        let mut req =
+            format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
+        if let Some(b) = bearer {
+            req.push_str(&format!("Authorization: Bearer {b}\r\n"));
+        }
+        if let Some(payload) = body {
+            req.push_str("Content-Type: application/json\r\n");
+            req.push_str(&format!("Content-Length: {}\r\n", payload.len()));
+        }
+        req.push_str("\r\n");
+        if let Some(payload) = body {
+            req.push_str(payload);
+        }
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .expect("write request");
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.expect("read response");
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let code = text
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|c| c.parse::<u16>().ok())
+            .unwrap_or(0);
+        let resp_body = text
+            .split_once("\r\n\r\n")
+            .map(|(_, b)| b.to_string())
+            .unwrap_or_default();
+        (code, resp_body)
+    }
+
+    /// Same as [`http_request`] but wrapped in a 30s timeout so a wiring bug can
+    /// never hang the suite.
+    async fn http(
+        addr: SocketAddr,
+        method: &str,
+        path: &str,
+        bearer: Option<&str>,
+        body: Option<&str>,
+    ) -> (u16, String) {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            http_request(addr, method, path, bearer, body),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{method} {path} timed out"))
+    }
+
+    /// Boot the real [`build_router`](super::super::routes::build_router) on an
+    /// ephemeral loopback port (auth initialized) and return its address.
+    async fn spawn_dashboard() -> SocketAddr {
+        super::super::auth::init_login_code();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, super::super::routes::build_router()).await;
+        });
+        addr
+    }
+
+    // SAFETY (both fns): env mutation is serialised by
+    // `#[serial_test::serial(cognitive_memory)]`; the token is set before any
+    // request that reads it and cleared only after all responses are received.
+    fn set_dashboard_token() {
+        unsafe { std::env::set_var("SIMARD_DASHBOARD_TOKEN", ITEST_TOKEN) };
+    }
+    fn clear_dashboard_token() {
+        unsafe { std::env::remove_var("SIMARD_DASHBOARD_TOKEN") };
+    }
+
+    /// Scenario 1 (simple, display) — the empty-tab fix, verified as the browser
+    /// consumes it: over the REAL router, `GET /api/creative-ideas` renders every
+    /// persisted idea with its status + metadata, and the endpoint is auth-gated
+    /// (unauthenticated ⇒ 401, so idea data never leaks past the auth layer).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial(cognitive_memory)]
+    async fn http_tab_renders_persisted_ideas_with_status() {
+        let state = HermeticState::new();
+        let mem = MemGuard::register(&state);
+        seed(mem.ops(), "improve recall ranking", IdeaStatus::New);
+        seed(
+            mem.ops(),
+            "auto-delete stale worktrees",
+            IdeaStatus::NeedsHumanReview,
+        );
+        seed(mem.ops(), "cache distilled facts", IdeaStatus::Deferred);
+
+        let addr = spawn_dashboard().await;
+
+        // Auth-gated: no bearer ⇒ 401.
+        let (unauth, _) = http(addr, "GET", "/api/creative-ideas", None, None).await;
+        assert_eq!(unauth, 401, "the tab data endpoint must sit behind auth");
+
+        set_dashboard_token();
+        let (code, body) = http(addr, "GET", "/api/creative-ideas", Some(ITEST_TOKEN), None).await;
+        clear_dashboard_token();
+
+        assert_eq!(
+            code, 200,
+            "authenticated tab load must succeed; body={body:?}"
+        );
+        let v: Value = serde_json::from_str(&body).expect("tab returns a JSON object");
+        let ideas = v["ideas"].as_array().expect("ideas array");
+        assert_eq!(ideas.len(), 3, "N persisted ideas -> N rendered over HTTP");
+        for idea in ideas {
+            let s = idea["status"].as_str().expect("status string");
+            assert!(parse_idea_status(s).is_ok(), "rendered status valid: {s:?}");
+            assert!(idea["created_epoch"].is_number(), "created time present");
+        }
+        let statuses: Vec<&str> = ideas.iter().filter_map(|i| i["status"].as_str()).collect();
+        assert!(statuses.contains(&"New"));
+        assert!(statuses.contains(&"NeedsHumanReview"));
+        assert!(statuses.contains(&"Deferred"));
+        assert_eq!(v["counts"]["New"], 1, "per-status counts surfaced: {v:?}");
+    }
+
+    /// Scenario 2 (complex, controls) — the operator write controls over the
+    /// REAL router: Promote drives `New → AcceptedForImplementation`; Prune drives
+    /// `New → Rejected` and persists; a repeat Prune of the now-terminal idea
+    /// surfaces an **invalid-transition error** (never a silent no-op); Run-now is
+    /// auth-gated and its re-entrancy guard returns a clear "already in progress"
+    /// instead of double-generating. Persisted state is re-read to confirm the
+    /// transitions stuck.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial(cognitive_memory)]
+    async fn http_promote_prune_run_over_real_router() {
+        let state = HermeticState::new();
+        let mem = MemGuard::register(&state);
+        let promote_id = seed(mem.ops(), "promote me over http", IdeaStatus::New);
+        let prune_id = seed(mem.ops(), "prune me over http", IdeaStatus::New);
+
+        let addr = spawn_dashboard().await;
+        set_dashboard_token();
+
+        // Promote: New -> AcceptedForImplementation. route_to_goal=false keeps the
+        // outcome deterministic (no live goal board needed).
+        let (pc, pb) = http(
+            addr,
+            "POST",
+            &format!("/api/creative-ideas/{promote_id}/promote"),
+            Some(ITEST_TOKEN),
+            Some("{\"route_to_goal\":false}"),
+        )
+        .await;
+        assert_eq!(pc, 200, "promote HTTP status; body={pb:?}");
+        let pv: Value = serde_json::from_str(&pb).expect("promote JSON");
+        assert_eq!(pv["ok"], true, "{pv:?}");
+        assert_eq!(pv["idea"]["status"], "AcceptedForImplementation");
+
+        // Prune: New -> Rejected.
+        let prune_path = format!("/api/creative-ideas/{prune_id}/prune");
+        let (rc, rb) = http(addr, "POST", &prune_path, Some(ITEST_TOKEN), Some("{}")).await;
+        assert_eq!(rc, 200, "prune HTTP status; body={rb:?}");
+        let rv: Value = serde_json::from_str(&rb).expect("prune JSON");
+        assert_eq!(rv["idea"]["status"], "Rejected", "{rv:?}");
+
+        // Invalid transition: Prune the now-terminal Rejected idea again. The
+        // state machine rejects the edge; the endpoint surfaces it loudly in the
+        // JSON body (never a silent success/no-op).
+        let (ic, ib) = http(addr, "POST", &prune_path, Some(ITEST_TOKEN), Some("{}")).await;
+        assert_eq!(ic, 200, "invalid-edge HTTP status; body={ib:?}");
+        let iv: Value = serde_json::from_str(&ib).expect("invalid-edge JSON");
+        assert!(
+            iv.get("ok").is_none(),
+            "invalid edge must not succeed: {iv:?}"
+        );
+        assert!(
+            iv["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("invalid creative-idea transition")),
+            "invalid edge must surface a clear error: {iv:?}"
+        );
+
+        // Run-now: hold the re-entrancy guard so the POST hits the guarded branch
+        // (a clear "already in progress" response) instead of launching a real
+        // agent-backed generation. Proves the endpoint is wired + guarded.
+        RUN_IN_PROGRESS.store(true, Ordering::SeqCst);
+        let (runc, runb) = http(
+            addr,
+            "POST",
+            "/api/creative-ideas/run",
+            Some(ITEST_TOKEN),
+            None,
+        )
+        .await;
+        RUN_IN_PROGRESS.store(false, Ordering::SeqCst);
+        assert_eq!(runc, 200, "run HTTP status; body={runb:?}");
+        let runv: Value = serde_json::from_str(&runb).expect("run JSON");
+        assert_eq!(runv["running"], true, "{runv:?}");
+        assert!(
+            runv["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("already in progress")),
+            "guarded run must surface a clear error: {runv:?}"
+        );
+
+        // Run-now is auth-gated too (rejected before the handler — no generation).
+        clear_dashboard_token();
+        let (run_unauth, _) = http(addr, "POST", "/api/creative-ideas/run", None, None).await;
+        assert_eq!(run_unauth, 401, "run endpoint must sit behind auth");
+
+        // The transitions are durably persisted in the live store.
+        let store = ProspectiveCreativeIdeaStore::new(mem.ops());
+        let all = store.list(u32::MAX).expect("list");
+        let promoted = all
+            .iter()
+            .find(|i| i.idea_id == promote_id)
+            .expect("promoted idea present");
+        assert_eq!(promoted.status, IdeaStatus::AcceptedForImplementation);
+        let pruned = all
+            .iter()
+            .find(|i| i.idea_id == prune_id)
+            .expect("pruned idea present");
+        assert_eq!(pruned.status, IdeaStatus::Rejected);
+    }
 }
