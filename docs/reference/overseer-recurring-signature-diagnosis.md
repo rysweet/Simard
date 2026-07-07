@@ -404,7 +404,7 @@ not directly observed.
 
 ---
 
-## 7. Consolidation & verification (rounds 3–8)
+## 7. Consolidation & verification (rounds 3–10)
 
 The consolidation pass (rounds 3–4, this update) reconciled the parallel deep dives
 against the live working tree at **HEAD `20fb7539`** and **executed** the round-2
@@ -1172,11 +1172,101 @@ path, H3 by the live-timestamp staleness proof. Every anchor resolves at HEAD `0
 **zero drift**; live state is **unchanged**. No finding changed; overall confidence remains
 **High**.
 
+### 7n. Round-10 consolidation — parallel dives unified (HEAD `85245e87`)
+
+This pass unifies the two deep dives accumulated since the last consolidation (§7k,
+round-7) — **§7l** (round-8 primary-investigator deep dive at `ca20e29b`: HEAD-anchored
+token→signal-variant→provenance table with push-line precision, the #17 temporal-staleness
+timestamp proof, and the xpia-defender local-worktree refinement) and **§7m** (round-9
+per-hypothesis practical re-verification at `0196c4f6`: H1 via the full module + four
+hypothesis tests, H2 via live CLOSED states + the terminal-park path, H3 via the
+live-timestamp staleness proof) — into one conclusion and folds their net-new facts into the
+canonical findings (§1/§5/§6). HEAD has since advanced to `85245e87`; **every commit since
+`ca20e29b` is docs-only** (verified: `git diff --name-only ca20e29b..HEAD` returns only this
+file), so **no source line drifted** and every §7b/§3b/§7f/§7j/§7l anchor still resolves
+verbatim.
+
+**Independent re-verification (this consolidation, 2026-07-07 ~13:39 UTC)** — re-run by the
+consolidator at HEAD `85245e87`, not inherited:
+
+- `cargo test --lib overseer::tests_memory_recall` → **36 passed, 0 failed**; the four
+  hypothesis tests re-run in isolation (`…::tests_memory_recall::h`) → **4 passed, 0 failed**
+  (H1/H2 CONFIRM + REFUTE-by-fix). The structural root cause (§4/§7a) remains proven green.
+- `rysweet/agent-kgpacks-rs`: **#16 CLOSED 2026-07-06T20:16:25Z**, **#18 CLOSED 10:33:04Z**,
+  **#21 CLOSED 13:29:03Z**, **#22 CLOSED 12:07:33Z**, **#17 OPEN** (`updatedAt`
+  2026-07-02T23:22:49Z) — matching §1/§7l/§7m to the second. **4 of the 6 kgpacks blockers
+  reference already-CLOSED issues.**
+- `rysweet/Simard` duplicate tail: **exactly 10 open** (#2669, #2672, #2678, #2691, #2744,
+  #2750, #2757, #2768, #2841, #2875; newest @ 2026-07-07T11:31:36Z), **no 11th** at
+  consolidation time. **#2707** stewardship escalation (`[stewardship] recurring_goal_reblock
+  in simard::overseer`) **OPEN**.
+- `rysweet/amplihack-xpia-defender` confirmed to **exist as a live public GitHub repo**
+  (`gh repo view` → `{"name":"amplihack-xpia-defender","isPrivate":false}`), re-confirming the
+  §7l-D local-worktree refinement.
+
+**Zero contradictions across the two dives.** §7l and §7m agree on every shared claim — test
+results (36/36 module; 4/4 hypothesis), the H1 recall-path anchors (`wiring.rs:952/1013-1031`
+no-`source_label` map; `capabilities.rs:607-616` no field; `signal.rs:362/455-470`
+count/emit/threshold `= 2`; `mod.rs:1081-1085/1372-1375` re-wrap/summary), the
+terminal-park / no-close-reconciliation path (`no_progress_breaker.rs:58/69/74`,
+`sensor.rs:204/209`), and the live #16/#18/#21/#22-CLOSED + #17-OPEN board with the 10-issue
+Simard tail. They are strictly additive: §7l re-resolves the full token→variant→provenance map
+at HEAD with push-line precision and adds two new proofs (the #17 timestamp proof, the xpia
+local-worktree refinement); §7m re-executes the practical per-hypothesis tests and re-confirms
+all three at the same HEAD-line anchors. This consolidation overturns **no** finding and makes
+**no** remediation-weighting change (P1–P5 stand exactly as consolidated in §7g/§7k).
+
+**Net-new facts folded into the canonical findings:**
+
+1. **HEAD-precise emission anchors (§7l-A) adopted as canonical.** The
+   token→signal-variant→provenance table now cites the exact `out.push(…)` / `format!(…)`
+   **emission** lines (`signal.rs:396/399/441/464/476`; `mod.rs:1085/1283/1295/1349/1372/1384`;
+   `wiring.rs:952/1013/1025/1088`; `capabilities.rs:81/607-615`;
+   `sensor.rs:125-126/204/288/300`) rather than the arm/gate *starts* cited by §7f/§7j —
+   substance unchanged, byte-anchor sharpened. Every one re-resolves verbatim at HEAD
+   `85245e87` (zero source drift since `ca20e29b`).
+2. **#17 staleness upgraded prose → timestamp proof (§7l-C, §7m-H3).** The block premise
+   ("#16 still OPEN") is provably stale from the live timestamps alone: `updatedAt_17`
+   (2026-07-02T23:22:49Z) **precedes** `closedAt_16` (2026-07-06T20:16:25Z) by ≈3.8 days with
+   **no event since** — the same missing done-gate / block-reconciliation defect as §1, now
+   demonstrated on a **non-safeguard** block by timestamp rather than by reading the sentence.
+   (#17 remains legitimately deferrable as the flag-gated spike; only its block *premise* is
+   unreconciled.)
+3. **xpia-defender contamination token reclassified missing-repo → local-worktree park
+   (§7l-D).** `rysweet/amplihack-xpia-defender` is a live public GitHub repo (re-confirmed this
+   pass), so the `NOT_A_REPO` park (`error/display.rs:158`) is a **local checkout never
+   hydrated into a git worktree**, not a missing remote. The contamination *mechanism* (§7j-C:
+   any board-`Blocked` goal is swept into the self-amplifying key) is unchanged; the token's
+   **own** root cause is a local-worktree hydration gap, orthogonal to the kgpacks recurrence.
+4. **Live state stable across rounds 8→10 (new corroboration).** Four consecutive independent
+   reads (§7l, §7m, and this consolidation) return the **identical** board — #16/#18/#21/#22
+   CLOSED, #17 OPEN, the 10-issue Simard tail (newest #2875 @ 2026-07-07T11:31:36Z), #2707
+   open. The loop is **live** but the tail has **not grown since #2875**, and symptom-level
+   unblocks still **do not stick** (§7g-4/§7k: the umbrella goal is a standing goal not tagged
+   perpetual, so it re-parks every breaker cycle).
+
+**Consolidated verdict (rounds 1–10).** Unchanged and further strengthened — **High**
+confidence, all six findings source- or live-state-grounded, no remaining Medium diagnostic
+item. One self-amplifying loop — unfiltered self-recall (`recall_episodic` drops
+`source_label`) + unbounded re-wrap (`observation_signature` re-prefixes `overseer-obs:`),
+**test-proven** (H1/H2 green, 36/36 module; 4/4 hypothesis), **fully decoded and loop-traced**
+(§7j), and **HEAD-line-anchored** (§7l) — fed by standing, time-varying inputs: four **stale
+safeguard-parks** (#16/#18/#21/#22), one **stale-premise dep-block** (#17, timestamp-proven),
+an ambient **`gym_skipped`** flag, and a disjoint **`workstream-gap`**; **`engineer_spawn` is a
+passenger**, not a driver (round-4 refutation); **`whisper_ops.rs` is a non-amplifying
+sibling** (round-7 rule-out). The loop is **live** (10 open duplicates, #2875 the newest; a
+seventh cross-goal xpia-defender token nesting as a local-worktree park) and symptom-level
+unblocks **do not stick** (#2707 open). Action set unchanged: **P1** (provenance filter) severs
+the amplifier; **P2** (done-gate/park reconciliation + perpetual tagging) removes the standing
+stale inputs and is required for the fix to *stick*; **P3** clears the 10-issue backlog only
+when paired with P2; **P4** conditional (#17 disposition + `gym_skipped` down-rank); **P5**
+optional throughput nicety. No new remediation is introduced.
+
 ---
 
 ## 8. Provenance
 
-Investigation-only follow-up (investigation-workflow, rounds 1–9). No production
+Investigation-only follow-up (investigation-workflow, rounds 1–10). No production
 behavior was changed by this document. Round-1 established the structural cause
 ([`overseer-memory-recall-api`](./overseer-memory-recall-api.md)); round-2 added the
 semantic diagnosis and the executable H1/H2 tests; round-3 consolidated the parallel
@@ -1234,6 +1324,15 @@ terminal-park/no-reconciliation path (`no_progress_breaker.rs:58/69/74`, `sensor
 and H3 via #17 OPEN with a live-timestamp staleness proof (`updatedAt` 07-02T23:22:49Z < #16
 `closedAt` 07-06T20:16:25Z) — all three re-confirmed, 10-issue Simard tail unchanged
 (#2707 open), zero drift, confidence remains High.
+Round-10 consolidation (§7n, HEAD `85245e87`) unified the round-8/round-9 dives (§7l/§7m),
+independently re-verified the full module (36 passed, 0 failed) + the four hypothesis tests in
+isolation (4 passed, 0 failed), re-confirmed kgpacks-rs #16/#18/#21/#22 CLOSED + #17 OPEN and
+the 10-issue Simard tail (#2707 open, no 11th) with `rysweet/amplihack-xpia-defender` re-verified
+as a live public repo, confirmed **every commit since `ca20e29b` is docs-only** (zero source
+drift), and folded §7l's net-new facts (HEAD-precise `out.push`/`format!` emission anchors, the
+#17 `updatedAt < closedAt_16` timestamp-staleness proof, and the xpia-defender missing-repo →
+local-worktree-park reclassification) into the canonical findings — no finding overturned, no
+remediation-weighting change, confidence remains High.
 Source references were verified against the working tree at commit-time; GitHub
 states were read from `rysweet/agent-kgpacks-rs` and `rysweet/Simard` on 2026-07-07.
 The P1/P2 code changes are recommendations for follow-up development tasks; P5 is an
