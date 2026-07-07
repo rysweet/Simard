@@ -147,7 +147,7 @@ tracing-subscriber = { version = "=0.3.23", features = ["json", "env-filter"] }
 ctrlc = { version = "=3.5.2", features = ["termination"] }
 nix = { version = "=0.29.0", features = ["signal", "fs"] }
 opentelemetry = "=0.27.1"
-opentelemetry-otlp = "=0.27.0"
+opentelemetry-otlp = "=0.32.0"
 tracing-opentelemetry = "=0.28.0"
 opentelemetry_sdk = { version = "=0.27.1", features = ["rt-tokio"] }
 tempfile = "=3.27.0"
