@@ -142,10 +142,23 @@ pub(crate) async fn creative_ideas_run() -> Json<Value> {
     .await;
 
     match outcome {
-        Ok(Some(Ok(report))) => Json(json!({
-            "ok": true,
-            "report": serde_json::to_value(report).unwrap_or(Value::Null),
-        })),
+        Ok(Some(Ok(report))) => {
+            // Audit trail (F2/R2.1): the shared login code makes sessions
+            // anonymous, so this `tracing` line is the only forensic record that
+            // an operator-triggered run spent generation budget.
+            tracing::info!(
+                target: "dashboard.creative_ideas",
+                action = "run",
+                persisted = report.persisted,
+                reviewed = report.reviewed,
+                routed_goal = report.routed_goal,
+                "operator triggered a creative-ideas generation run"
+            );
+            Json(json!({
+                "ok": true,
+                "report": serde_json::to_value(report).unwrap_or(Value::Null),
+            }))
+        }
         Ok(Some(Err(e))) => Json(error_json(e)),
         Ok(None) => Json(json!({
             "error": "a creative-ideas generation run is already in progress",
@@ -257,6 +270,16 @@ fn promote_idea(state_root: &Path, idea_id: &str, route_to_goal: bool) -> Value 
             Ok(i) => i,
             Err(e) => return e,
         };
+    // Audit trail (F2/R2.1): anonymous shared-code session — this `tracing` line
+    // is the only forensic record of the acceptance. It cannot attribute the
+    // action to a specific human (single shared operator credential).
+    tracing::info!(
+        target: "dashboard.creative_ideas",
+        action = "promote",
+        idea_id = %idea_id,
+        status = %idea.status.as_str(),
+        "operator accepted creative idea"
+    );
 
     if !route_to_goal {
         return json!({ "ok": true, "idea": idea_summary(&idea) });
@@ -265,8 +288,31 @@ fn promote_idea(state_root: &Path, idea_id: &str, route_to_goal: bool) -> Value 
     // Best-effort route to a goal. Failure surfaces `goal_error` WITHOUT rolling
     // back the (already-persisted) acceptance.
     match route_accepted_idea_to_goal(state_root, &store, &mut idea) {
-        Ok(goal) => json!({ "ok": true, "idea": idea_summary(&idea), "goal": goal }),
-        Err(e) => json!({ "ok": true, "idea": idea_summary(&idea), "goal_error": e.to_string() }),
+        Ok(goal) => {
+            // Audit the goal injection into the autonomous executor (F4/R4.3),
+            // recording the resulting goal_id. Resolve it before the macro so the
+            // `serde_json::Value` path isn't shadowed by `tracing::Value`.
+            let goal_id = goal.get("id").and_then(Value::as_str).unwrap_or_default();
+            tracing::info!(
+                target: "dashboard.creative_ideas",
+                action = "promote_route",
+                idea_id = %idea_id,
+                status = %idea.status.as_str(),
+                goal_id = goal_id,
+                "operator-accepted idea routed to goal"
+            );
+            json!({ "ok": true, "idea": idea_summary(&idea), "goal": goal })
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "dashboard.creative_ideas",
+                action = "promote_route",
+                idea_id = %idea_id,
+                error = %e,
+                "operator-accepted idea persisted but goal routing failed"
+            );
+            json!({ "ok": true, "idea": idea_summary(&idea), "goal_error": e.to_string() })
+        }
     }
 }
 
@@ -279,7 +325,17 @@ fn prune_idea(state_root: &Path, idea_id: &str) -> Value {
     };
     let store = ProspectiveCreativeIdeaStore::new(writer.ops());
     match transition_and_persist(&store, idea_id, IdeaStatus::Rejected) {
-        Ok(idea) => json!({ "ok": true, "idea": idea_summary(&idea) }),
+        Ok(idea) => {
+            // Audit trail (F2/R2.1): anonymous shared-code session — sole record.
+            tracing::info!(
+                target: "dashboard.creative_ideas",
+                action = "prune",
+                idea_id = %idea_id,
+                status = %idea.status.as_str(),
+                "operator rejected creative idea"
+            );
+            json!({ "ok": true, "idea": idea_summary(&idea) })
+        }
         Err(e) => e,
     }
 }

@@ -281,8 +281,8 @@ pub(crate) const PART_01: &str = r#"
           const metric=it.has_metric?'<span style="color:#3fb950;font-size:.7rem"> · metric: '+esc(it.metric||'yes')+'</span>':'';
           const when=it.created_epoch?'<span style="color:#6e7681;font-size:.7rem"> · '+esc(formatTime(it.created_epoch))+'</span>':'';
           let actions='';
-          if(canPromote(it.status)) actions+='<button class="btn ci-act" data-act="promote" data-id="'+esc(it.idea_id)+'" style="font-size:.7rem;padding:.15rem .5rem">Promote</button>';
-          if(canPrune(it.status)) actions+='<button class="btn ci-act" data-act="prune" data-id="'+esc(it.idea_id)+'" style="font-size:.7rem;padding:.15rem .5rem;margin-left:.35rem">Prune</button>';
+          if(canPromote(it.status)) actions+='<button class="btn ci-act" data-act="promote" data-id="'+escAttr(it.idea_id)+'" style="font-size:.7rem;padding:.15rem .5rem">Promote</button>';
+          if(canPrune(it.status)) actions+='<button class="btn ci-act" data-act="prune" data-id="'+escAttr(it.idea_id)+'" style="font-size:.7rem;padding:.15rem .5rem;margin-left:.35rem">Prune</button>';
           const actionRow=actions?'<div style="margin-top:.4rem;display:flex;gap:.25rem">'+actions+'</div>':'';
           return '<div style="padding:.5rem .6rem;border:1px solid #21262d;border-radius:6px;margin-bottom:.5rem">'
             +'<div style="display:flex;justify-content:space-between;gap:.5rem;align-items:center">'
