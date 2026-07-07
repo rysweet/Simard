@@ -252,19 +252,32 @@ pub fn vet_candidate(candidate: &ReclaimCandidate, ctx: &GuardContext<'_>) -> Ve
         };
     }
 
-    // Rail 4 — per-kind vetting.
-    match candidate.kind {
-        CandidateKind::TrackedWorktree => match ctx.wt_probe.assess(path) {
+    // Rail 4 — per-kind vetting. The agent-supplied `kind` is advisory and may
+    // only ever *deepen* the vetting, never shorten it. A path that is actually
+    // a git worktree/repo (a `.git` entry at its root) is ALWAYS routed through
+    // the tracked-worktree vetoes — uncommitted/unpushed + merged/closed-PR —
+    // even when the agent labelled it `orphan_dir`/`stale_build_cache`. This
+    // closes the bypass where a mislabelled `kind` would skip the dirty-tree
+    // veto and `rm -rf` committed-but-unpushed work. The check is fail-closed:
+    // `symlink_metadata` treats any `.git` entry (file, dir, or even a broken
+    // symlink) as a worktree, so it cannot be evaded. Rail 2 has already proven
+    // `path` itself is a real (non-symlink) directory under an allow-root.
+    let is_git_worktree = matches!(candidate.kind, CandidateKind::TrackedWorktree)
+        || path.join(".git").symlink_metadata().is_ok();
+
+    if is_git_worktree {
+        match ctx.wt_probe.assess(path) {
             WorktreeVerdict::Reclaimable => Verdict::Allow {
                 primitive: ReclaimPrimitive::GitWorktreeRemoveForce,
                 bytes: ctx.measurer.measure(path),
             },
             WorktreeVerdict::Reject(reason) => Verdict::Reject { reason },
-        },
-        CandidateKind::OrphanDir | CandidateKind::StaleBuildCache => Verdict::Allow {
+        }
+    } else {
+        Verdict::Allow {
             primitive: ReclaimPrimitive::RemoveDir,
             bytes: ctx.measurer.measure(path),
-        },
+        }
     }
 }
 
@@ -389,6 +402,60 @@ mod tests {
                 primitive: ReclaimPrimitive::GitWorktreeRemoveForce,
                 bytes: 12_000_000_000,
             },
+        );
+    }
+
+    #[test]
+    fn mislabelled_orphan_that_is_a_git_worktree_is_still_veto_checked() {
+        // THE BYPASS THIS FIX CLOSES: an agent labels a real engineer worktree
+        // holding committed-but-unpushed work as `orphan_dir`. The `.git` entry
+        // forces the full tracked-worktree vetoes to run anyway, so the
+        // uncommitted/unpushed veto still fires and the path is NOT `rm -rf`ed.
+        let h = Harness::new("wt-mislabelled-as-orphan");
+        std::fs::write(h.child.join(".git"), b"gitdir: /repo/.git/worktrees/x\n")
+            .expect("write .git file");
+        let protected = ProtectedDenySet::from_paths(vec![]);
+        let live = FakeLiveProcessProbe::default();
+        let wt = FixedWtProbe(WorktreeVerdict::Reject(RejectReason::UncommittedOrUnpushed));
+        let measurer = MapMeasurer::default();
+        measurer.set(&h.child, 4096);
+
+        let c = cand(&h.child, CandidateKind::OrphanDir);
+        let v = vet(&c, &h.allow_roots, &protected, &live, &wt, &measurer);
+        assert_eq!(
+            v,
+            Verdict::Reject {
+                reason: RejectReason::UncommittedOrUnpushed,
+            },
+            "a real worktree mislabelled `orphan_dir` must still hit the \
+             uncommitted/unpushed veto — the agent's `kind` cannot shorten vetting",
+        );
+    }
+
+    #[test]
+    fn git_worktree_labelled_orphan_rederives_the_worktree_primitive() {
+        // When the path is actually a worktree the guard re-derives the correct
+        // primitive (`git worktree remove --force`), never a bare `rm -rf`,
+        // regardless of the advisory `kind`.
+        let h = Harness::new("wt-labelled-orphan-clean");
+        std::fs::write(h.child.join(".git"), b"gitdir: /repo/.git/worktrees/y\n")
+            .expect("write .git file");
+        let protected = ProtectedDenySet::from_paths(vec![]);
+        let live = FakeLiveProcessProbe::default();
+        let wt = FixedWtProbe(WorktreeVerdict::Reclaimable);
+        let measurer = MapMeasurer::default();
+        measurer.set(&h.child, 8192);
+
+        let c = cand(&h.child, CandidateKind::StaleBuildCache);
+        let v = vet(&c, &h.allow_roots, &protected, &live, &wt, &measurer);
+        assert_eq!(
+            v,
+            Verdict::Allow {
+                primitive: ReclaimPrimitive::GitWorktreeRemoveForce,
+                bytes: 8192,
+            },
+            "a worktree mislabelled as a cache must be removed via the \
+             worktree primitive, not a raw rm -rf",
         );
     }
 

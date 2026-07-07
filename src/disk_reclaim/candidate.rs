@@ -29,8 +29,13 @@ pub struct ReclaimCandidate {
     pub est_bytes: Option<u64>,
 }
 
-/// The reclamation primitive class the agent proposes for a candidate. The
-/// guard re-derives the actual primitive; this is advisory.
+/// The reclamation primitive class the agent proposes for a candidate. This is
+/// **advisory only**: the guard re-derives the real primitive at vet time and
+/// the agent's `kind` may only ever *deepen* vetting, never shorten it. A path
+/// that is actually a git worktree (a `.git` entry at its root) is always run
+/// through the uncommitted/unpushed + merged/closed-PR vetoes even if labelled
+/// `orphan_dir`/`stale_build_cache`, so a mislabelled `kind` cannot cause a
+/// dirty worktree to be `rm -rf`ed.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CandidateKind {
